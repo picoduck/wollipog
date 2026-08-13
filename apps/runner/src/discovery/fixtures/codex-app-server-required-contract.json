@@ -1,0 +1,145 @@
+{
+  "contractFingerprint": "codex-app-server-v2-steer-required-2026-08-05",
+  "generatedWith": "codex-cli 0.144.1",
+  "minimumVerifiedVersion": "0.144.1",
+  "files": {
+    "v1/InitializeParams.json": {
+      "required": ["clientInfo"],
+      "properties": ["capabilities", "clientInfo"]
+    },
+    "v2/ThreadStartParams.json": {
+      "properties": ["cwd", "model", "approvalPolicy", "sandbox"]
+    },
+    "v2/ThreadStartResponse.json": {
+      "required": ["thread"],
+      "properties": ["thread"]
+    },
+    "v2/ThreadResumeParams.json": {
+      "required": ["threadId"],
+      "properties": ["threadId"]
+    },
+    "v2/ThreadResumeResponse.json": {
+      "required": ["thread"],
+      "properties": ["thread"]
+    },
+    "v2/ThreadReadParams.json": {
+      "required": ["threadId"],
+      "properties": ["threadId", "includeTurns"]
+    },
+    "v2/ThreadReadResponse.json": {
+      "required": ["thread"],
+      "properties": ["thread"],
+      "definitions": {
+        "Thread": {
+          "required": ["id", "status", "turns"],
+          "properties": ["id", "status", "turns"]
+        },
+        "ThreadStatus": {
+          "requiredInEveryVariant": ["type"],
+          "propertyEnumValues": {
+            "type": ["notLoaded", "idle", "systemError", "active"]
+          }
+        }
+      }
+    },
+    "v2/TurnStartParams.json": {
+      "required": ["threadId", "input"],
+      "properties": ["threadId", "input", "approvalPolicy", "approvalsReviewer", "cwd", "effort", "model", "sandboxPolicy"],
+      "definitions": {
+        "UserInput": {
+          "propertyEnumValues": {
+            "type": ["localImage"]
+          },
+          "variantRequiredProperties": {
+            "LocalImageUserInput": ["type", "path"]
+          }
+        }
+      }
+    },
+    "v2/TurnSteerParams.json": {
+      "required": ["threadId", "input", "expectedTurnId"],
+      "properties": ["threadId", "input", "expectedTurnId", "clientUserMessageId"],
+      "definitions": {
+        "UserInput": {
+          "propertyEnumValues": {
+            "type": ["localImage"]
+          },
+          "variantRequiredProperties": {
+            "LocalImageUserInput": ["type", "path"]
+          }
+        }
+      }
+    },
+    "v2/TurnSteerResponse.json": {
+      "required": ["turnId"],
+      "properties": ["turnId"]
+    },
+    "v2/ModelListParams.json": {
+      "properties": ["cursor", "includeHidden", "limit"]
+    },
+    "v2/ModelListResponse.json": {
+      "required": ["data"],
+      "properties": ["data", "nextCursor"],
+      "definitions": {
+        "Model": {
+          "required": ["defaultReasoningEffort", "description", "displayName", "hidden", "id", "isDefault", "model", "supportedReasoningEfforts"],
+          "properties": ["defaultReasoningEffort", "description", "displayName", "hidden", "id", "inputModalities", "isDefault", "model", "supportedReasoningEfforts"]
+        },
+        "ReasoningEffortOption": {
+          "required": ["description", "reasoningEffort"],
+          "properties": ["description", "reasoningEffort"]
+        },
+        "InputModality": {
+          "enumValuesInVariants": ["text", "image"]
+        }
+      }
+    },
+    "v2/AgentMessageDeltaNotification.json": {
+      "required": ["delta", "itemId", "threadId", "turnId"],
+      "properties": ["delta", "itemId", "threadId", "turnId"]
+    },
+    "v2/TurnCompletedNotification.json": {
+      "required": ["threadId", "turn"],
+      "properties": ["threadId", "turn"],
+      "definitions": {
+        "Turn": {
+          "required": ["id", "items", "status"],
+          "properties": ["error", "id", "items", "status"]
+        },
+        "TurnStatus": {
+          "enumValues": ["completed", "interrupted", "failed", "inProgress"]
+        },
+        "TurnError": {
+          "required": ["message"],
+          "properties": ["additionalDetails", "codexErrorInfo", "message"]
+        }
+      }
+    },
+    "v2/ThreadTokenUsageUpdatedNotification.json": {
+      "required": ["threadId", "tokenUsage", "turnId"],
+      "properties": ["threadId", "tokenUsage", "turnId"],
+      "definitions": {
+        "ThreadTokenUsage": {
+          "required": ["last", "total"],
+          "properties": ["last", "modelContextWindow", "total"]
+        },
+        "TokenUsageBreakdown": {
+          "required": ["cachedInputTokens", "inputTokens", "outputTokens", "reasoningOutputTokens", "totalTokens"],
+          "properties": ["cachedInputTokens", "inputTokens", "outputTokens", "reasoningOutputTokens", "totalTokens"]
+        }
+      }
+    },
+    "CommandExecutionRequestApprovalParams.json": {
+      "required": ["itemId", "threadId", "turnId"],
+      "properties": ["approvalId", "command", "itemId", "reason", "threadId", "turnId"]
+    },
+    "FileChangeRequestApprovalParams.json": {
+      "required": ["itemId", "threadId", "turnId"],
+      "properties": ["itemId", "reason", "threadId", "turnId"]
+    },
+    "PermissionsRequestApprovalParams.json": {
+      "required": ["itemId", "permissions", "threadId", "turnId"],
+      "properties": ["itemId", "permissions", "reason", "threadId", "turnId"]
+    }
+  }
+}

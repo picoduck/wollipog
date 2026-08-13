@@ -1,0 +1,124 @@
+{
+  "runnerId": "local-dev",
+  "controlPlaneUrl": "ws://127.0.0.1:4317/runner",
+  "maxConcurrentSessions": 4,
+  "admission": {
+    "agentLimits": {},
+    "agentWeights": {}
+  },
+  "executionIsolation": {
+    "mode": "provider",
+    "network": "inherit",
+    "providerStateRetentionDays": 7,
+    "providerStateMaxBytes": 5368709120
+  },
+  "containerTargets": [],
+  "cloudTargets": [],
+  "features": {
+    "acpAdditionalDirectories": false,
+    "acpRegistry": false,
+    "acpRemoteTransports": false
+  },
+  "acpRegistryAgents": ["opencode", "cursor", "gemini"],
+  "mcpServers": [
+    {
+      "type": "http",
+      "name": "company-docs",
+      "url": "https://mcp.example.com/rpc",
+      "headers": {
+        "Authorization": { "fromEnv": "COMPANY_MCP_AUTH" }
+      }
+    }
+  ],
+  "workspaces": [
+    {
+      "id": "wollipog",
+      "name": "Wollipog",
+      "path": ".",
+      "additionalDirectoryGrants": []
+    }
+  ],
+  "agents": [
+    {
+      "id": "claude-native",
+      "name": "Claude Code (native)",
+      "command": "claude",
+      "args": [],
+      "env": {},
+      "driver": "claude-code"
+    },
+    {
+      "id": "claude-wsl",
+      "name": "Claude Code (WSL)",
+      "command": "/home/you/.local/bin/claude",
+      "args": [],
+      "env": {},
+      "driver": "claude-code",
+      "context": { "kind": "wsl", "distro": "Ubuntu-24.04" }
+    },
+    {
+      "id": "conductor",
+      "name": "Conductor (Wollipog)",
+      "command": "claude",
+      "args": [],
+      "env": {},
+      "driver": "claude-code"
+    },
+    {
+      "id": "claude-code",
+      "name": "Claude Code (ACP)",
+      "command": "npx",
+      "args": ["-y", "@agentclientprotocol/claude-agent-acp"],
+      "env": {}
+    },
+    {
+      "id": "codex",
+      "name": "Codex",
+      "command": "npx",
+      "args": ["-y", "@agentclientprotocol/codex-acp"],
+      "env": {}
+    },
+    {
+      "id": "codex-native",
+      "name": "Codex (native, sandbox modes)",
+      "command": "codex",
+      "args": [],
+      "env": {},
+      "driver": "codex"
+    },
+    {
+      "id": "codex-app",
+      "name": "Codex (App Server)",
+      "command": "codex",
+      "args": [],
+      "env": {},
+      "driver": "codex-app-server"
+    },
+    {
+      "id": "gemini-cli",
+      "name": "Gemini CLI",
+      "command": "gemini",
+      "args": ["--acp"],
+      "env": {},
+      "mcpServers": []
+    },
+    {
+      "id": "openclaw",
+      "name": "OpenClaw",
+      "command": "openclaw",
+      "args": ["acp"],
+      "env": {
+        "OPENCLAW_GATEWAY_TOKEN": ""
+      }
+    },
+    {
+      "id": "hermes",
+      "name": "Hermes",
+      "command": "hermes",
+      "args": ["acp"],
+      "env": {
+        "ANTHROPIC_API_KEY": ""
+      }
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+# esbuild's postinstall links the platform-native binary used by tsx and vite.
+# pnpm blocks dependency build scripts by default; this environment gates them
+# through the allowBuilds field.
+allowBuilds:
+  esbuild: true
+  # node-pty 1.1 publishes signed-package prebuilds for supported platforms. The runner loads the
+  # exact prebuild as a SEA asset, so its install scripts are unnecessary and stay disabled.
+  node-pty: false

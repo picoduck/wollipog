@@ -1,0 +1,266 @@
+name: Release
+
+# Builds the per-platform control-plane SEA sidecar + Tauri desktop bundles on native
+# runners (the sidecar embeds the host Node runtime, so it CANNOT be cross-compiled —
+# every arch is built on a matching native runner) and uploads them to a draft GitHub
+# release. See apps/desktop/scripts/build-sidecar.mjs and apps/desktop/src-tauri/tauri.conf.json.
+
+on:
+  push:
+    tags:
+      - "v*"
+  # Manual runs are throwaway test builds: pick the branch/tag to build from the "Run
+  # workflow" ref dropdown. A branch run is labeled with a unique v0.0.0-test.<run> tag
+  # (see the preflight job); a tag run is treated like a real release of that tag.
+  workflow_dispatch: {}
+
+permissions:
+  contents: write # tauri-action creates the GitHub release + uploads assets
+
+# A re-pushed tag (or re-dispatch from the same ref) supersedes an in-flight run.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Resolve the release tag once, and for real (tag-triggered) releases fail fast unless
+  # the tag matches the packaged version everywhere. This keeps mislabeled installers and
+  # colliding throwaway "test" releases from ever reaching the (expensive) matrix build.
+  preflight:
+    name: Resolve tag & check version
+    runs-on: ubuntu-22.04
+    outputs:
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+      prerelease: ${{ steps.resolve.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve release tag
+        id: resolve
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          if [ "$REF_TYPE" = tag ]; then
+            tag="$REF_NAME"                 # real release: build & label the pushed tag
+          else
+            tag="v0.0.0-test.$RUN_NUMBER"   # branch dispatch: unique throwaway draft
+          fi
+          echo "release_tag=$tag" >>"$GITHUB_OUTPUT"
+          # Pre-release when the tag carries a suffix (covers -rc.N and -test.N throwaways).
+          case "$tag" in *-*) echo "prerelease=true" ;; *) echo "prerelease=false" ;; esac >>"$GITHUB_OUTPUT"
+          echo "Release tag: $tag"
+
+      # All packaged-app and runner version fields must agree with the release tag. The control
+      # plane uses this identity to select the matching remote-runner artifact at runtime.
+      - name: Verify tag matches the packaged version
+        if: github.ref_type == 'tag'
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          ver="${REF_NAME#v}"
+          tauri=$(jq -r .version apps/desktop/src-tauri/tauri.conf.json)
+          deskpkg=$(jq -r .version apps/desktop/package.json)
+          rootpkg=$(jq -r .version package.json)
+          cargo=$(sed -nE 's/^version = "(.*)"/\1/p' apps/desktop/src-tauri/Cargo.toml | head -1 | tr -d '\r')
+          controlplane=$(sed -nE 's/^export const APP_RELEASE_VERSION = "(.*)";/\1/p' apps/control-plane/src/release-version.ts | tr -d '\r')
+          runner=$(sed -nE 's/^export const VERSION = "(.*)";/\1/p' apps/runner/src/version.ts | tr -d '\r')
+          fail=0
+          for pair in "tauri.conf.json=$tauri" "apps/desktop/package.json=$deskpkg" "package.json=$rootpkg" "Cargo.toml=$cargo" "control-plane release=$controlplane" "runner VERSION=$runner"; do
+            name="${pair%%=*}"; val="${pair#*=}"
+            if [ "$val" != "$ver" ]; then
+              echo "::error::$name is '$val' but tag $REF_NAME expects '$ver'"; fail=1
+            fi
+          done
+          if [ "$fail" != 0 ]; then
+            echo "Bump all release version fields to $ver before tagging — see docs/RELEASING.md"
+            exit 1
+          fi
+          echo "All release version fields match $ver"
+
+  build:
+    name: ${{ matrix.label }}
+    needs: preflight
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false # one platform failing must not cancel the others
+      matrix:
+        include:
+          - label: macOS (Apple Silicon)
+            os: macos-14
+            target: aarch64-apple-darwin
+          - label: macOS (Intel)
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+          - label: Windows x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - label: Windows ARM64
+            os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+          - label: Linux x64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - label: Linux ARM64
+            os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tauri v2 Linux build/runtime deps (webkit2gtk 4.1, tray, AppImage tooling).
+      - name: Install Linux build deps
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            build-essential \
+            libssl-dev \
+            file
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0 # matches the repo's dev toolchain; no packageManager field to read
+
+      # Node 24 is mandatory: the SEA targets node24 and the control plane uses node:sqlite.
+      # On windows-11-arm this provides the native win-arm64 Node the SEA must embed.
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+          key: ${{ matrix.target }}
+
+      # Must precede the Tauri build: tauri.conf.json beforeBuildCommand runs
+      # sidecar:build + web build, which need node_modules. allowBuilds:esbuild in
+      # pnpm-workspace.yaml lets esbuild's postinstall run under pnpm's build-script gate.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build & publish desktop bundles
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WOLLIPOG_RUNNER_RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+          # --- Code signing is intentionally unconfigured (unsigned first cut). -----------
+          # To sign later, add these secrets and uncomment. macOS (Developer ID + notarize):
+          #   APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          #   APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          #   APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          #   APPLE_ID: ${{ secrets.APPLE_ID }}
+          #   APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}   # app-specific password
+          #   APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Windows Authenticode is configured via tauri.conf.json bundle.windows + a cert secret.
+          # -------------------------------------------------------------------------------
+        with:
+          projectPath: apps/desktop
+          tauriScript: pnpm tauri # use the repo's pinned @tauri-apps/cli, not a global install
+          # Passing --target sets TAURI_ENV_TARGET_TRIPLE, which build-sidecar.mjs reads to
+          # name the sidecar AND to pass its same-arch guard (arch == host on a native runner).
+          args: --target ${{ matrix.target }}
+          # Tag/label resolved by preflight: the pushed tag for a real release, or a unique
+          # v0.0.0-test.<run> for a branch dispatch. All matrix jobs share one draft release.
+          tagName: ${{ needs.preflight.outputs.release_tag }}
+          releaseName: Wollipog ${{ needs.preflight.outputs.release_tag }}
+          releaseBody: |
+            Desktop bundles for Wollipog. Each installer embeds a per-platform
+            control-plane sidecar, so the app is self-contained (no separate `pnpm dev`).
+
+            > **Unsigned build** — on first launch your OS may warn about an unidentified
+            > developer. macOS: right-click → Open. Windows: More info → Run anyway.
+          releaseDraft: true
+          prerelease: ${{ needs.preflight.outputs.prerelease }}
+
+      # Tauri's beforeBuildCommand already built one canonical runner SEA and its byte-identical
+      # legacy alias through build-sidecar.mjs. Verify and upload those exact artifacts instead of
+      # rebuilding, so the desktop-bundled and standalone runner originate from the same build.
+      - name: Verify & upload runner binaries
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_TRIPLE: ${{ matrix.target }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+        run: |
+          case "$TARGET_TRIPLE" in
+            *-pc-windows-msvc) executable=.exe ;;
+            *) executable= ;;
+          esac
+          canonical="apps/runner/dist-bin/wollipog-runner-${TARGET_TRIPLE}${executable}"
+          legacy="apps/runner/dist-bin/agent-manager-runner-${TARGET_TRIPLE}${executable}"
+          sh scripts/verify-runner-release-version.sh \
+            apps/runner/src/version.ts \
+            "$canonical" \
+            "$legacy"
+          cmp -s "$canonical" "$legacy"
+          echo "uploading $canonical and $legacy -> $RELEASE_TAG"
+          gh release upload "$RELEASE_TAG" "$canonical" "$legacy" --repo "$GITHUB_REPOSITORY" --clobber
+          for bin in "$canonical" "$legacy"; do
+            asset_name=$(basename "$bin")
+            local_sha=$(node -e 'const {createHash}=require("node:crypto");const {readFileSync}=require("node:fs");console.log(createHash("sha256").update(readFileSync(process.argv[1])).digest("hex"))' "$bin")
+            remote_digest=$(sh scripts/resolve-draft-release-asset-digest.sh "$GITHUB_REPOSITORY" "$RELEASE_TAG" "$asset_name")
+            if ! printf '%s' "$remote_digest" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+              echo "::error::$asset_name has no valid GitHub publisher digest"
+              exit 1
+            fi
+            if [ "${remote_digest#sha256:}" != "$local_sha" ]; then
+              echo "::error::$asset_name publisher digest does not match uploaded bytes"
+              exit 1
+            fi
+            echo "Verified publisher digest for $asset_name"
+          done
+
+  # The six native jobs must finish before checksums are generated. Downloading the published
+  # bytes also detects upload corruption or a stale asset that a local-only digest would miss.
+  verify-runner-release:
+    name: Verify runner release assets
+    needs: [preflight, build]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Verify runner pairs & publish checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+        run: |
+          mkdir runner-assets
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern 'wollipog-runner-*' \
+            --pattern 'agent-manager-runner-*' \
+            --dir runner-assets
+          node scripts/verify-runner-release-assets.mjs local \
+            --assets-dir runner-assets \
+            --manifest SHA256SUMS
+          gh release upload "$RELEASE_TAG" SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
+
+      - name: Gate exact hosted release inventory & digests
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+        run: |
+          bash scripts/verify-draft-runner-release.sh \
+            "$GITHUB_REPOSITORY" \
+            "$RELEASE_TAG" \
+            SHA256SUMS

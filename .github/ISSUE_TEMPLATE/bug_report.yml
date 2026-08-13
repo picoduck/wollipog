@@ -1,0 +1,55 @@
+name: Bug Report
+description: Report a reproducible problem in Wollipog
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Wollipog. Do not include credentials, private transcripts, proprietary code, or vulnerability details. Report security issues through SECURITY.md.
+  - type: textarea
+    id: description
+    attributes:
+      label: Problem
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction Steps
+      description: Provide the smallest reliable sequence that reproduces the problem.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Wollipog Version
+      placeholder: v0.18.0 or commit SHA
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, architecture, browser or desktop app, and runner context.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized Logs
+      description: Remove tokens, paths, hostnames, personal data, prompts, and private repository content.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission Checks
+      options:
+        - label: I searched for an existing issue.
+          required: true
+        - label: I removed credentials and private information.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

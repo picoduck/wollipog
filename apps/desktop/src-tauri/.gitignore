@@ -1,0 +1,5 @@
+# Rust build output + Tauri-generated files
+/target
+/gen/schemas
+# Bundled control-plane sidecar binaries (built by scripts/build-sidecar.mjs)
+/binaries

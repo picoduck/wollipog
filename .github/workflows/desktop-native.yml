@@ -1,0 +1,84 @@
+name: Desktop Native
+
+# Routine native changes get representative Linux and Windows checks. The release
+# workflow remains the source of truth for builds on all six supported targets.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "apps/desktop/src-tauri/**"
+      - ".github/workflows/desktop-native.yml"
+  workflow_dispatch:
+
+concurrency:
+  # A draft synchronize event can be delivered after ready_for_review. Keep stale
+  # draft events in a separate lane so they cannot evict the runnable ready event.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.event.action != 'ready_for_review' && 'draft' || 'active' }}
+  cancel-in-progress: true
+
+jobs:
+  desktop-native:
+    if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false
+    name: Desktop Native (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Linux x64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            executable_suffix: ""
+          - label: Windows x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            executable_suffix: ".exe"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux Build Dependencies
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust Build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+          key: native-${{ matrix.target }}
+
+      # tauri-build requires the configured sidecars and frontend directory to exist.
+      # Rust tests do not execute or package them, so tiny placeholders avoid the much
+      # more expensive Node SEA and frontend production builds in routine native CI.
+      - name: Stub Tauri Build Inputs
+        shell: pwsh
+        run: |
+          $binaryDirectory = "apps/desktop/src-tauri/binaries"
+          $frontendDirectory = "apps/web/dist"
+          New-Item -ItemType Directory -Force -Path $binaryDirectory, $frontendDirectory
+          New-Item -ItemType File -Force -Path `
+            "$binaryDirectory/control-plane-${{ matrix.target }}${{ matrix.executable_suffix }}", `
+            "$binaryDirectory/runner-${{ matrix.target }}${{ matrix.executable_suffix }}"
+
+      - name: Check Rust Formatting
+        if: startsWith(matrix.os, 'ubuntu')
+        run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
+
+      - name: Test Native Desktop
+        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --target ${{ matrix.target }}
+
+      - name: Lint Native Desktop
+        run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --target ${{ matrix.target }} -- -D warnings

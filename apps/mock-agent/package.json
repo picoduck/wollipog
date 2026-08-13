@@ -1,0 +1,11 @@
+{
+  "name": "@wollipog/mock-agent",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "description": "A fake ACP agent (agent side of the protocol) for testing the pipeline without real agent binaries.",
+  "bin": {
+    "wollipog-mock-agent": "index.mjs"
+  }
+}

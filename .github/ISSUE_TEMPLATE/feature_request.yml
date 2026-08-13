@@ -1,0 +1,39 @@
+name: Feature Request
+description: Propose an improvement to Wollipog
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user or operator problem should Wollipog solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Behavior
+      description: Describe the desired outcome without relying on competitor comparisons.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Describe product-neutral alternatives and tradeoffs.
+  - type: textarea
+    id: security
+    attributes:
+      label: Security and Compatibility
+      description: Note effects on credentials, shells, filesystems, networks, Git, providers, or stored data.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission Checks
+      options:
+        - label: I searched for an existing issue or discussion.
+          required: true
+        - label: This request contains no private or proprietary information.
+          required: true

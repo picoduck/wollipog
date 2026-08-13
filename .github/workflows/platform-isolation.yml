@@ -1,0 +1,47 @@
+name: Platform Isolation
+
+# These tests exercise OS-specific process isolation and spawning behavior. Run them
+# only when the runner changes, or explicitly from the Actions page.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "apps/runner/**"
+      - ".github/workflows/platform-isolation.yml"
+  workflow_dispatch:
+
+concurrency:
+  # A draft synchronize event can be delivered after ready_for_review. Keep stale
+  # draft events in a separate lane so they cannot evict the runnable ready event.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.event.action != 'ready_for_review' && 'draft' || 'active' }}
+  cancel-in-progress: true
+
+jobs:
+  platform-isolation:
+    if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false
+    name: Platform Isolation (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify Native Isolation Adapter
+        run: node --import tsx --test apps/runner/src/execution-isolation.test.ts apps/runner/src/spawn.test.ts

@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- viewport-fit=cover lets the app paint under notches; safe-area insets pad it back.
+         interactive-widget=resizes-content makes the software keyboard shrink the LAYOUT viewport.
+         Without it the keyboard only shrinks the visual viewport, so 100dvh still measures the
+         full screen and the fixed bottom rail sits behind the keyboard — every destination
+         unreachable until you dismiss it. Browsers that do not support the key ignore it, which is
+         why .app also tracks visualViewport (see mobile-viewport.ts). -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="theme-color" content="#0b1118" />
+    <script>
+      // Apply the persisted/system palette before CSS or React can paint. Keep this tiny and
+      // dependency-free: it is the no-flash counterpart of src/theme.ts.
+      (() => {
+        // New-first copy-forward runs before CSS or React, so an upgraded install never flashes
+        // the default appearance. The old value remains untouched as compatibility input.
+        const storedAppearance = (name) => {
+          const currentKey = `wollipog.${name}`;
+          const legacyKey = `mam.${name}`;
+          const current = localStorage.getItem(currentKey);
+          if (current !== null) return current;
+          const legacy = localStorage.getItem(legacyKey);
+          if (legacy !== null) {
+            try { localStorage.setItem(currentKey, legacy); } catch {}
+          }
+          return legacy;
+        };
+        let preference = "system";
+        try {
+          const stored = storedAppearance("theme");
+          if (stored === "light" || stored === "dark" || stored === "system") preference = stored;
+        } catch {}
+        let systemDark = true;
+        try {
+          systemDark = matchMedia("(prefers-color-scheme: dark)").matches;
+        } catch {}
+        const theme = preference === "system" ? (systemDark ? "dark" : "light") : preference;
+        document.documentElement.dataset.theme = theme;
+        document.documentElement.style.colorScheme = theme;
+        // Set from the STYLESHEET a moment later, once the scheme attribute is on and the CSS has
+        // parsed: a literal here would be Wollipog's ground under every scheme. This value is the
+        // pre-paint placeholder for the default, and the real one is read below.
+        document.querySelector('meta[name="theme-color"]').content = theme === "dark" ? "#0b1118" : "#f6f8fa";
+        // The SCHEME is the same no-flash problem on a second axis: applied after paint, a Dracula
+        // user watches Wollipog's teal for a frame on every load. Wollipog is the absence of the
+        // attribute, so the default costs nothing here.
+        try {
+          const scheme = storedAppearance("scheme");
+          if (scheme && scheme !== "wollipog" && /^[a-z-]+$/.test(scheme)) {
+            document.documentElement.dataset.scheme = scheme;
+          }
+        } catch {}
+        try {
+          // Density is the third axis and has the same no-flash problem: applied after paint, a
+          // Comfortable user watches every row jump a few pixels on load.
+          const density = storedAppearance("density");
+          if (density === "comfortable") document.documentElement.dataset.density = density;
+        } catch {}
+        // The chrome follows the palette. Deferred to the first frame because the stylesheet has
+        // not been parsed while this inline script runs, so --bg reads empty here.
+        requestAnimationFrame(() => {
+          const bg = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim();
+          if (bg) document.querySelector('meta[name="theme-color"]').content = bg;
+        });
+      })();
+    </script>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <!-- iOS ignores manifest icons; it takes this (full-bleed — iOS composites transparency onto black). -->
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <link rel="icon" type="image/png" href="/icons/icon-192.png" />
+    <title>Wollipog</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

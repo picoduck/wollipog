@@ -1,0 +1,41 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+*.tsbuildinfo
+
+# Playwright end-to-end artifacts
+test-results/
+playwright-report/
+blob-report/
+
+# runner standalone-binary build (Node SEA) — apps/runner/scripts/build-binary.mjs
+.bin-build/
+dist-bin/
+
+# control-plane local database (SQLite + WAL sidecars)
+data/
+
+# per-session git worktrees created by the runner
+.agent-worktrees/
+
+# mock-agent test artifact
+MOCK_NOTES.md
+
+# local runner config may contain tokens — keep only the example committed
+runner.config.json
+
+# logs / env / os cruft
+*.log
+.env
+.env.*
+scratchpad/*results*.json
+.DS_Store
+Thumbs.db
+
+# Claude Code local project settings
+.claude/
+
+dist-desktop-check/
+dist-web-check/

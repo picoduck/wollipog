@@ -1,0 +1,5 @@
+{"timestamp":"2026-05-22T02:55:56.602Z","type":"session_meta","payload":{"id":"00000000-0000-7000-8000-000000000001","timestamp":"2026-05-22T02:55:56.602Z","cwd":"\\\\wsl.localhost\\Fixture-Distro\\home\\fixture\\dev\\sample","originator":"External Client","cli_version":"0.131.0","source":"editor","thread_source":"user"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for \\\\wsl.localhost\\Fixture-Distro\\home\\fixture\\dev\\sample\n\n<INSTRUCTIONS>\n# Agent Instructions\n\nUse fixture-only guidance.\n</INSTRUCTIONS>"},{"type":"input_text","text":"<environment_context>\n  <cwd>\\\\wsl.localhost\\Fixture-Distro\\home\\fixture\\dev\\sample</cwd>\n  <shell>powershell</shell>\n</environment_context>"}]}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Fix the sample parser regression."}]}}
+{"type":"event_msg","payload":{"type":"user_message","message":"Fix the sample parser regression."}}
+{"type":"event_msg","payload":{"type":"agent_message","message":"I will fix the sample parser regression."}}

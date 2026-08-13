@@ -1,0 +1,42 @@
+{
+  "name": "wollipog",
+  "version": "0.18.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/picoduck/wollipog.git"
+  },
+  "homepage": "https://github.com/picoduck/wollipog#readme",
+  "bugs": {
+    "url": "https://github.com/picoduck/wollipog/issues"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "concurrently -k -n cp,web -c blue,green \"pnpm --filter @wollipog/control-plane dev\" \"pnpm --filter @wollipog/web dev\"",
+    "dev:all": "concurrently -k -n cp,runner,web -c blue,magenta,green \"pnpm --filter @wollipog/control-plane dev\" \"node scripts/dev-runner-bootstrap.mjs\" \"pnpm --filter @wollipog/web dev\"",
+    "dev:control-plane": "pnpm --filter @wollipog/control-plane dev",
+    "dev:web": "pnpm --filter @wollipog/web dev",
+    "runner": "tsx apps/runner/src/cli.ts",
+    "runner:dev": "tsx watch apps/runner/src/cli.ts --config runner.config.json",
+    "desktop": "pnpm --filter @wollipog/desktop dev",
+    "desktop:build": "pnpm --filter @wollipog/desktop bundle",
+    "desktop:smoke:build": "pnpm --filter @wollipog/desktop tauri build --debug --no-bundle --config src-tauri/tauri.e2e.conf.json",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "node --import tsx --test \"apps/**/src/**/*.test.ts\" \"apps/**/src/**/*.test.tsx\" \"apps/**/scripts/**/*.test.mjs\" \"packages/**/src/**/*.test.ts\" \"packages/**/src/**/*.test.tsx\" \"scripts/**/*.test.mjs\"",
+    "test:e2e": "playwright test",
+    "test:watch": "node --import tsx --test --watch \"apps/**/src/**/*.test.ts\" \"apps/**/src/**/*.test.tsx\"",
+    "check:codex-schema": "node scripts/check-codex-app-server-schema.mjs",
+    "check:rust": "cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check && cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets -- -D warnings && cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.1",
+    "concurrently": "^9.1.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "source": "https://github.com/agentclientprotocol/registry/blob/main/.protocol-matrix/latest.json",
+  "generatedAt": "2026-07-12T07:37:30+00:00",
+  "agents": [
+    {
+      "id": "cursor",
+      "version": "2026.07.09",
+      "distribution": "binary",
+      "initialize": "success",
+      "protocolVersion": 1,
+      "authMethods": ["agent"],
+      "capabilities": ["loadSession", "sessionList"],
+      "sessionNew": "auth_required"
+    },
+    {
+      "id": "gemini",
+      "version": "0.50.0",
+      "distribution": "npx",
+      "initialize": "success",
+      "protocolVersion": 1,
+      "authMethods": ["agent"],
+      "capabilities": ["loadSession"],
+      "sessionNew": "auth_required"
+    },
+    {
+      "id": "opencode",
+      "version": "1.17.18",
+      "distribution": "binary",
+      "initialize": "success",
+      "protocolVersion": 1,
+      "authMethods": ["terminal"],
+      "capabilities": ["loadSession", "sessionList", "sessionFork", "sessionResume"],
+      "sessionNew": "success"
+    }
+  ]
+}

@@ -1,0 +1,814 @@
+import { type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { SessionView, SourceLocation } from "@wollipog/protocol";
+import {
+  INBOX_REORDER_SETTLE_MS,
+  approvalOptionForIntent,
+  buildInboxSplits,
+  inboxProjectName,
+  migrateInboxProjectPins,
+  newSessionPresetForInboxSplit,
+  inboxSelectionAfterMove,
+  inboxSelectionAfterArchive,
+  isInboxRunning,
+  inboxSplitByKey,
+  nextInboxSplitKey,
+  repairInboxSelectionAfterSnapshot,
+  settledInboxOrder,
+  shouldRestoreInboxScroll,
+  type InboxApprovalIntent,
+} from "../inbox.js";
+import { scrollBehavior } from "../motion.js";
+import { loadKeySet, saveKeySet, SESSION_PIN_KEY } from "../pins.js";
+import { loadSeen, markSeen, markUnread, saveSeen } from "../sessions-seen.js";
+import { useStoreActions, useStoreSelector } from "../store.js";
+import { useInstanceScope } from "../instance-scope.js";
+import { encodeResourceId } from "../navigation.js";
+import { useApi } from "../api-context.js";
+import { useFeedback } from "./FeedbackProvider.js";
+import { InboxList, type InboxListEntry } from "./InboxList.js";
+import { InboxShortcutRail } from "./InboxShortcutRail.js";
+import { CreateProjectDialog } from "./CreateProjectDialog.js";
+import { ProjectSplitMenu } from "./ProjectSplitMenu.js";
+import { SessionDetail } from "./SessionDetail.js";
+import type { RightPanelState } from "./RightPanel.js";
+import { useIsMobile } from "./useIsMobile.js";
+import { useInboxKeys, type InboxKeyActions } from "../useInboxKeys.js";
+import type { NewSessionPreset } from "./NewSessionDialog.js";
+import { isHeartbeatBusy } from "../activity.js";
+import { PlusIcon, SearchIcon } from "./Icons.js";
+import { sessionAgentLabel } from "./agent-options.js";
+import { dispatchVirtualViewportIntent } from "../viewport-intent.js";
+import type { PreviewNavigationControls } from "./usePreviewNavigationRegistration.js";
+
+const PROJECT_PIN_KEY = "wollipog.projects.pinned";
+const SEEN_DWELL_MS = 1_500;
+const inboxScrollPositions = new Map<string, number>();
+
+export function inboxSessionMatchesQuery(
+  session: SessionView,
+  normalizedQuery: string,
+  projectName: string,
+): boolean {
+  if (!normalizedQuery) return true;
+  return [
+    session.title,
+    session.preview,
+    sessionAgentLabel(session.agentName, session.driver, session.agentId),
+    session.agentName,
+    projectName,
+  ].some((value) => value?.toLocaleLowerCase().includes(normalizedQuery));
+}
+
+export function pageInboxPreview(
+  scroll: Pick<HTMLElement, "clientHeight" | "scrollHeight" | "scrollTop" | "scrollBy"> &
+    Partial<Pick<HTMLElement, "dispatchEvent">> | null | undefined,
+  direction: "next" | "previous",
+  beginProgrammaticScroll: ((direction: "next" | "previous") => void) | null | undefined,
+): void {
+  if (!scroll) return;
+  const canMove = direction === "next"
+    ? scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight > 0.5
+    : scroll.scrollTop > 0.5;
+  if (!canMove) return;
+  dispatchVirtualViewportIntent(scroll);
+  beginProgrammaticScroll?.(direction);
+  scroll.scrollBy({
+    top: (direction === "next" ? 1 : -1) * scroll.clientHeight,
+    behavior: scrollBehavior(),
+  });
+}
+
+export interface InboxViewProps {
+  expandedSessionId?: string | null;
+  sourceLocation?: SourceLocation;
+  /** App-shell control cluster forwarded into the expanded session's unified bar on desktop. */
+  topbarControls?: ReactNode;
+  rightPanel: RightPanelState;
+  onOpenTerminal: () => void;
+  pinnedOpen: boolean;
+  focusComposerSessionId?: string | null;
+  onComposerFocusConsumed?: () => void;
+  onExpand?: (sessionId: string, focusComposer: boolean) => void;
+  onCollapse?: () => void;
+  onNewSession?: (preset?: NewSessionPreset) => void;
+  onShortcutNewSessionPresetChange?: (preset?: NewSessionPreset) => void;
+}
+
+export function InboxView({
+  expandedSessionId = null,
+  sourceLocation,
+  topbarControls,
+  rightPanel,
+  onOpenTerminal,
+  pinnedOpen,
+  focusComposerSessionId = null,
+  onComposerFocusConsumed,
+  onExpand,
+  onCollapse,
+  onNewSession,
+  onShortcutNewSessionPresetChange,
+}: InboxViewProps) {
+  const api = useApi();
+  const { showToast, showUndo } = useFeedback();
+  const sessions = useStoreSelector((state) => state.sessions);
+  const projects = useStoreSelector((state) => state.projects);
+  const projectsSupported = useStoreSelector((state) => state.projectsSupported);
+  const stalledIndex = useStoreSelector((state) => state.stalledSessionIds);
+  const stalledRevision = useStoreSelector((state) => state.stalledRevision);
+  const runners = useStoreSelector((state) => state.runners);
+  const snapshotLoaded = useStoreSelector((state) => state.snapshotLoaded);
+  const inbox = useStoreSelector((state) => state.inbox);
+  const {
+    navigate,
+    loadSession,
+    setInboxPersistenceEnabled,
+    setInboxSelection,
+    setInboxSplit,
+    setInboxRatio,
+  } = useStoreActions();
+  const instanceScope = useInstanceScope();
+  const isMobile = useIsMobile();
+  const [seen, setSeen] = useState(() => loadSeen(instanceScope));
+  const [pinnedProjects, setPinnedProjects] = useState(() => loadKeySet(PROJECT_PIN_KEY, instanceScope));
+  const [pinnedSessions, setPinnedSessions] = useState(() => loadKeySet(SESSION_PIN_KEY, instanceScope));
+  const [query, setQuery] = useState("");
+  // The INPUT stays on `query` so typing is never dropped a frame; the filtering reads the deferred
+  // value, so a keystroke in a 200-session inbox does not block on re-filtering and re-rendering
+  // the list before the character appears.
+  const deferredQuery = useDeferredValue(query);
+  const [creatingProject, setCreatingProject] = useState(false);
+  const [dragRatio, setDragRatio] = useState<number | null>(null);
+  const [heldOrder, setHeldOrder] = useState<string[] | null>(null);
+  const [busySessionIds, setBusySessionIds] = useState<Set<string>>(() => new Set());
+  const busySessionIdsRef = useRef(new Set<string>());
+  const viewRef = useRef<HTMLDivElement>(null);
+  const previewNavigationRef = useRef<PreviewNavigationControls | null>(null);
+  const registerPreviewNavigation = useCallback((controls: PreviewNavigationControls | null) => {
+    previewNavigationRef.current = controls;
+  }, []);
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const dragPointerRef = useRef<number | null>(null);
+  const dragRatioRef = useRef<number | null>(null);
+  const seenTimerRef = useRef<number | null>(null);
+  const settleTimerRef = useRef<number | null>(null);
+  const tabRefs = useRef(new Map<string, HTMLButtonElement>());
+  const lastNavigationAtRef = useRef<number | null>(null);
+  const previousSurfaceRef = useRef<{ expanded: boolean; sessionId: string | null } | null>(null);
+  const expandedSessionIdRef = useRef(expandedSessionId);
+  expandedSessionIdRef.current = expandedSessionId;
+  const mountedRef = useRef(true);
+  const selectedSessionIdRef = useRef(inbox.selectedSessionId);
+  selectedSessionIdRef.current = inbox.selectedSessionId;
+
+  const beginBusy = useCallback((sessionId: string) => {
+    if (busySessionIdsRef.current.has(sessionId)) return false;
+    busySessionIdsRef.current.add(sessionId);
+    setBusySessionIds(new Set(busySessionIdsRef.current));
+    return true;
+  }, []);
+  const endBusy = useCallback((sessionId: string) => {
+    busySessionIdsRef.current.delete(sessionId);
+    setBusySessionIds(new Set(busySessionIdsRef.current));
+  }, []);
+
+  const selectSession = useCallback((sessionId: string | null, splitKey: string | null) => {
+    setInboxSelection(sessionId, splitKey, !isMobile);
+  }, [isMobile, setInboxSelection]);
+  const selectSplit = useCallback((splitKey: string | null) => {
+    setInboxSplit(splitKey, !isMobile);
+  }, [isMobile, setInboxSplit]);
+
+  useLayoutEffect(() => {
+    setInboxPersistenceEnabled(!isMobile);
+  }, [isMobile, setInboxPersistenceEnabled]);
+
+  const captureListRef = useCallback((node: HTMLDivElement | null) => {
+    listRef.current = node;
+    if (node) node.scrollTop = inboxScrollPositions.get(instanceScope) ?? 0;
+  }, [instanceScope]);
+
+
+  // Escape's focus handoff has to wait for the DEFERRED query to catch up, not just the immediate
+  // one. Clearing `query` re-renders urgently with the OLD deferredQuery, so the zero state is
+  // still mounted a frame later — the handoff focused `.inbox-zero`, and the deferred commit then
+  // replaced that node with `.inbox-list`, dropping focus to <body>. Before deferral, clearing the
+  // query remounted the list before the frame ran, which is why this is new.
+  // STATE, not a ref. A ref mutation schedules nothing: pressing Escape in an ALREADY-empty search
+  // box left `setQuery("")` a no-op, no dependency changed, and the effect never ran — so focus
+  // stayed in the input, the typing context stayed active, and every Inbox shortcut stayed disabled.
+  // The request has to be something React can see change.
+  const [exitPending, setExitPending] = useState(false);
+  useEffect(() => {
+    if (!exitPending || query !== "" || deferredQuery !== "") return;
+    setExitPending(false);
+    (listRef.current ?? viewRef.current?.querySelector<HTMLElement>(".inbox-zero"))?.focus();
+  }, [exitPending, query, deferredQuery]);
+
+  const exitSearch = useCallback(() => {
+    setQuery("");
+    setExitPending(true);
+  }, []);
+
+  // Typing CANCELS a pending handoff. Escape on a nonempty query, then a new search before the
+  // deferred value converged, used to leave the request armed: clearing the second search with
+  // Backspace fired the stale handoff and stole focus out of the box the user was still typing in.
+  const changeQuery = useCallback((next: string) => {
+    setQuery(next);
+    setExitPending(false);
+  }, []);
+
+  useEffect(() => {
+    window.addEventListener("wollipog:clear-inbox-query", exitSearch);
+    return () => window.removeEventListener("wollipog:clear-inbox-query", exitSearch);
+  }, [exitSearch]);
+
+  useEffect(() => {
+    setSeen(loadSeen(instanceScope));
+    setPinnedProjects(loadKeySet(PROJECT_PIN_KEY, instanceScope));
+    setPinnedSessions(loadKeySet(SESSION_PIN_KEY, instanceScope));
+  }, [instanceScope]);
+
+  useEffect(() => {
+    if (!projectsSupported) return;
+    const stored = loadKeySet(PROJECT_PIN_KEY, instanceScope);
+    const migrated = migrateInboxProjectPins(stored, projects.values());
+    if (stored.size === migrated.size && [...stored].every((key) => migrated.has(key))) return;
+    saveKeySet(PROJECT_PIN_KEY, migrated, instanceScope);
+    setPinnedProjects(migrated);
+  }, [instanceScope, projects, projectsSupported]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (seenTimerRef.current !== null) window.clearTimeout(seenTimerRef.current);
+      if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
+    };
+  }, []);
+
+  // The store mutates its bounded stall index in place for O(1) event updates. Snapshot it only
+  // when membership changes; ordinary heartbeat pulses never rebuild Inbox splits or rows.
+  const stalledSessionIds = useMemo(() => new Set(stalledIndex), [stalledIndex, stalledRevision]);
+
+  const splits = useMemo(() => buildInboxSplits(
+    sessions.values(),
+    pinnedProjects,
+    pinnedSessions,
+    stalledSessionIds,
+    projects.values(),
+    projectsSupported,
+  ), [pinnedProjects, pinnedSessions, projects, projectsSupported, sessions, stalledSessionIds]);
+  const activeSplit = inboxSplitByKey(splits, inbox.splitKey);
+  const activeNewSessionPreset = useMemo<NewSessionPreset | undefined>(
+    () => newSessionPresetForInboxSplit(activeSplit),
+    [activeSplit],
+  );
+  useEffect(() => {
+    onShortcutNewSessionPresetChange?.(activeNewSessionPreset);
+    return () => onShortcutNewSessionPresetChange?.(undefined);
+  }, [activeNewSessionPreset, onShortcutNewSessionPresetChange]);
+  const repairedSelection = repairInboxSelectionAfterSnapshot(snapshotLoaded, activeSplit, inbox.selectedSessionId);
+
+  useEffect(() => {
+    if (!snapshotLoaded) return;
+    if (expandedSessionId && sessions.has(expandedSessionId)) {
+      const activeContainsExpanded = activeSplit?.sessions.some((session) => session.id === expandedSessionId) === true;
+      const destinationSplit = activeContainsExpanded ? activeSplit?.key ?? null : null;
+      if (!activeContainsExpanded && inbox.splitKey !== null) {
+        selectSplit(null);
+        return;
+      }
+      if (inbox.selectedSessionId !== expandedSessionId) {
+        selectSession(expandedSessionId, destinationSplit);
+      }
+      return;
+    }
+    if (activeSplit?.key !== inbox.splitKey) {
+      const shouldRestoreTabFocus = document.activeElement === document.body;
+      selectSession(repairedSelection, activeSplit?.key ?? null);
+      if (shouldRestoreTabFocus) {
+        window.requestAnimationFrame(() => tabRefs.current.get(activeSplit?.key ?? "all")?.focus());
+      }
+      return;
+    }
+    if (repairedSelection !== inbox.selectedSessionId) {
+      selectSession(repairedSelection, activeSplit?.key ?? null);
+    }
+  }, [activeSplit, expandedSessionId, inbox.selectedSessionId, inbox.splitKey, repairedSelection, selectSession, selectSplit, sessions, snapshotLoaded]);
+
+  const selectedSession = repairedSelection ? sessions.get(repairedSelection) ?? null : null;
+
+  useEffect(() => {
+    if (seenTimerRef.current !== null) window.clearTimeout(seenTimerRef.current);
+    seenTimerRef.current = null;
+    if (!selectedSession) return;
+    const sessionId = selectedSession.id;
+    const seenAt = selectedSession.lastEventAt ?? selectedSession.updatedAt;
+    seenTimerRef.current = window.setTimeout(() => {
+      const next = markSeen(loadSeen(instanceScope), sessionId, seenAt);
+      saveSeen(next, instanceScope);
+      setSeen(next);
+      seenTimerRef.current = null;
+    }, SEEN_DWELL_MS);
+    return () => {
+      if (seenTimerRef.current !== null) window.clearTimeout(seenTimerRef.current);
+      seenTimerRef.current = null;
+    };
+  }, [instanceScope, selectedSession?.id, selectedSession?.lastEventAt, selectedSession?.updatedAt]);
+
+  const normalizedQuery = deferredQuery.trim().toLocaleLowerCase();
+  const liveEntries = useMemo<InboxListEntry[]>(() => (activeSplit?.sessions ?? [])
+    .filter((session) => inboxSessionMatchesQuery(
+      session,
+      normalizedQuery,
+      inboxProjectName(session, projectsSupported ? projects : undefined),
+    ))
+    .map((session) => ({
+      session,
+      projectName: inboxProjectName(session, projectsSupported ? projects : undefined),
+      unread: seen[session.id] != null && session.lastEventAt != null && session.lastEventAt > seen[session.id]!,
+    })), [activeSplit?.sessions, normalizedQuery, projects, projectsSupported, seen]);
+  const liveEntryById = useMemo(() => new Map(liveEntries.map((entry) => [entry.session.id, entry])), [liveEntries]);
+  const entries = useMemo(() => {
+    if (!heldOrder) return liveEntries;
+    const ids = settledInboxOrder(
+      heldOrder,
+      liveEntries.map((entry) => entry.session.id),
+      lastNavigationAtRef.current,
+      Date.now(),
+    );
+    return ids.map((id) => liveEntryById.get(id)).filter((entry): entry is InboxListEntry => entry !== undefined);
+  }, [heldOrder, liveEntries, liveEntryById]);
+  const displayedIds = useMemo(() => entries.map((entry) => entry.session.id), [entries]);
+  const displayedSelection = repairedSelection && displayedIds.includes(repairedSelection) ? repairedSelection : null;
+  const displayedSelectedSession = displayedSelection ? sessions.get(displayedSelection) ?? null : null;
+  const expanded = expandedSessionId !== null;
+  const surfaceSessionId = expandedSessionId ?? selectedSession?.id ?? null;
+
+  useLayoutEffect(() => {
+    const previous = previousSurfaceRef.current;
+    if (previous?.expanded === expanded && previous.sessionId === surfaceSessionId) return;
+    const frame = window.requestAnimationFrame(() => {
+      previousSurfaceRef.current = { expanded, sessionId: surfaceSessionId };
+      if (expanded) {
+        if (focusComposerSessionId !== surfaceSessionId) {
+          viewRef.current?.querySelector<HTMLElement>(".detail-scroll")?.focus();
+        }
+      } else if (shouldRestoreInboxScroll(previous, expanded)) {
+        // See shouldRestoreInboxScroll: restoring on every selection change overwrote the scroll
+        // that moveSelection() had just performed, one animation frame earlier.
+        if (listRef.current) listRef.current.scrollTop = inboxScrollPositions.get(instanceScope) ?? 0;
+        listRef.current?.focus();
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [expanded, focusComposerSessionId, instanceScope, surfaceSessionId]);
+
+  const holdOrderAfterNavigation = useCallback(() => {
+    const now = Date.now();
+    lastNavigationAtRef.current = now;
+    setHeldOrder(displayedIds);
+    if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
+    settleTimerRef.current = window.setTimeout(() => {
+      lastNavigationAtRef.current = null;
+      setHeldOrder(null);
+      settleTimerRef.current = null;
+    }, INBOX_REORDER_SETTLE_MS);
+  }, [displayedIds]);
+
+  const moveSelection = useCallback((direction: "next" | "previous") => {
+    if (!activeSplit) return;
+    holdOrderAfterNavigation();
+    const next = inboxSelectionAfterMove(displayedIds, displayedSelection, direction);
+    if (!next) return;
+    selectSession(next, activeSplit.key);
+    listRef.current?.focus();
+    window.requestAnimationFrame(() => {
+      document.getElementById(`inbox-session-${encodeResourceId(next)}`)?.scrollIntoView({ block: "nearest" });
+    });
+  }, [activeSplit, displayedIds, displayedSelection, holdOrderAfterNavigation, selectSession]);
+
+  const expand = useCallback((sessionId: string, focusComposer = false) => {
+    selectSession(sessionId, activeSplit?.key ?? null);
+    if (onExpand) onExpand(sessionId, focusComposer);
+    else navigate({ name: "session", id: sessionId });
+  }, [activeSplit?.key, navigate, onExpand, selectSession]);
+
+  const handleSelect = useCallback((sessionId: string) => {
+    if (isMobile) {
+      expand(sessionId);
+      return;
+    }
+    selectSession(sessionId, activeSplit?.key ?? null);
+    listRef.current?.focus();
+  }, [isMobile, expand, selectSession, activeSplit?.key]);
+
+  const togglePin = useCallback((sessionId: string) => {
+    const next = loadKeySet(SESSION_PIN_KEY, instanceScope);
+    if (next.has(sessionId)) next.delete(sessionId);
+    else next.add(sessionId);
+    saveKeySet(SESSION_PIN_KEY, next, instanceScope);
+    setPinnedSessions(next);
+  }, [instanceScope]);
+
+  const setProjectPinned = useCallback((split: NonNullable<typeof activeSplit>, enabled: boolean) => {
+    // Reload before writing so another tab or surface cannot be overwritten by stale React state.
+    const next = loadKeySet(PROJECT_PIN_KEY, instanceScope);
+    const keys = [split.key, ...(split.project?.kind === "durable" ? split.project.legacyKeys : [])]
+      .filter((key): key is string => key !== null);
+    for (const key of keys) next.delete(key);
+    if (enabled && split.key !== null) next.add(split.key);
+    saveKeySet(PROJECT_PIN_KEY, next, instanceScope);
+    setPinnedProjects(next);
+  }, [instanceScope]);
+
+  const focusSplit = useCallback((splitKey: string | null) => {
+    selectSplit(splitKey);
+    window.requestAnimationFrame(() => tabRefs.current.get(splitKey ?? "all")?.focus());
+  }, [selectSplit]);
+
+  const onTabKeyDown = useCallback((event: ReactKeyboardEvent<HTMLButtonElement>, splitKey: string | null) => {
+    const keys = splits.map((split) => split.key);
+    let next: string | null | undefined;
+    if (event.key === "ArrowRight") next = nextInboxSplitKey(keys, splitKey, "next");
+    else if (event.key === "ArrowLeft") next = nextInboxSplitKey(keys, splitKey, "previous");
+    else if (event.key === "Home") next = keys[0];
+    else if (event.key === "End") next = keys.at(-1);
+    else return;
+    event.preventDefault();
+    if (next !== undefined) focusSplit(next);
+  }, [focusSplit, splits]);
+
+  const setUnread = useCallback((sessionId: string) => {
+    const session = sessions.get(sessionId);
+    if (!session) return;
+    if (seenTimerRef.current !== null) window.clearTimeout(seenTimerRef.current);
+    seenTimerRef.current = null;
+    const next = markUnread(loadSeen(instanceScope), sessionId, session.lastEventAt);
+    saveSeen(next, instanceScope);
+    setSeen(next);
+  }, [instanceScope, sessions]);
+
+  const archive = useCallback(async (sessionId: string) => {
+    if (!beginBusy(sessionId)) return;
+    const selectionAtRequest = selectedSessionIdRef.current;
+    try {
+      const updated = await api.setArchived(sessionId, true);
+      loadSession(updated);
+      const archiveSelection = inboxSelectionAfterArchive(
+        displayedIds,
+        sessionId,
+        selectionAtRequest,
+        selectedSessionIdRef.current,
+      );
+      if (archiveSelection.apply) {
+        selectSession(archiveSelection.sessionId, activeSplit?.key ?? null);
+        if (mountedRef.current && expandedSessionIdRef.current === sessionId) {
+          if (archiveSelection.sessionId) onExpand?.(archiveSelection.sessionId, false);
+          else onCollapse?.();
+        }
+      }
+      showUndo("Session archived.", async () => {
+        const restored = await api.setArchived(sessionId, false);
+        loadSession(restored);
+      });
+    } catch (cause) {
+      showToast(`Could not archive session: ${(cause as Error).message}`, { tone: "error" });
+    } finally {
+      endBusy(sessionId);
+    }
+  }, [activeSplit?.key, api, beginBusy, displayedIds, endBusy, loadSession, onCollapse, onExpand, selectSession, showToast, showUndo]);
+
+  const decide = useCallback(async (sessionId: string, intent: InboxApprovalIntent) => {
+    const targetSession = sessions.get(sessionId);
+    if (!targetSession?.pendingApproval) return;
+    if (!beginBusy(targetSession.id)) return;
+    const approval = targetSession.pendingApproval;
+    try {
+      if (approval.kind === "question") {
+        if (intent === "approve") {
+          showToast("Choose answers in the preview before submitting this request.");
+          return;
+        }
+        const updated = await api.answerQuestion(targetSession.id, { requestId: approval.requestId, answers: {} });
+        loadSession(updated);
+        return;
+      }
+      const option = approvalOptionForIntent(approval, intent);
+      if (!option) {
+        showToast(`No safe one-key ${intent === "approve" ? "approval" : "denial"} is available for this request.`);
+        return;
+      }
+      const updated = await api.approve(targetSession.id, { requestId: approval.requestId, optionId: option.optionId });
+      loadSession(updated);
+    } finally {
+      endBusy(targetSession.id);
+    }
+  }, [api, beginBusy, endBusy, loadSession, sessions, showToast]);
+
+  const hopExpanded = useCallback((direction: "next" | "previous") => {
+    if (!expandedSessionId) return;
+    holdOrderAfterNavigation();
+    const next = inboxSelectionAfterMove(displayedIds, expandedSessionId, direction);
+    if (!next || next === expandedSessionId) return;
+    selectSession(next, activeSplit?.key ?? null);
+    onExpand?.(next, false);
+  }, [activeSplit?.key, displayedIds, expandedSessionId, holdOrderAfterNavigation, onExpand, selectSession]);
+
+  const keyActions = useMemo<InboxKeyActions>(() => ({
+    next: () => moveSelection("next"),
+    previous: () => moveSelection("previous"),
+    expand: () => { if (displayedSelection) expand(displayedSelection); },
+    nextSplit: () => selectSplit(nextInboxSplitKey(splits.map((split) => split.key), activeSplit?.key ?? null, "next")),
+    previousSplit: () => selectSplit(nextInboxSplitKey(splits.map((split) => split.key), activeSplit?.key ?? null, "previous")),
+    approve: () => { if (displayedSelection) void decide(displayedSelection, "approve").catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" })); },
+    deny: () => { if (displayedSelection) void decide(displayedSelection, "deny").catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" })); },
+    archive: () => { if (displayedSelection) void archive(displayedSelection); },
+    pin: () => { if (displayedSelection) togglePin(displayedSelection); },
+    unread: () => { if (displayedSelection) setUnread(displayedSelection); },
+    reply: () => { if (displayedSelection) expand(displayedSelection, true); },
+    resumeFollow: () => {
+      const controls = previewNavigationRef.current;
+      if (!controls) return false;
+      controls.follow();
+      return true;
+    },
+    // An explicit behavior overrides CSS scroll-behavior, so the stylesheet's reduced-motion
+    // guard cannot reach these — scrollBehavior() resolves it per call instead.
+    pageDown: () => {
+      const scroll = viewRef.current?.querySelector<HTMLElement>(".detail-scroll");
+      pageInboxPreview(scroll, "next", previewNavigationRef.current?.beginProgrammaticScroll);
+    },
+    pageUp: () => {
+      const scroll = viewRef.current?.querySelector<HTMLElement>(".detail-scroll");
+      pageInboxPreview(scroll, "previous", previewNavigationRef.current?.beginProgrammaticScroll);
+    },
+  }), [activeSplit?.key, archive, decide, displayedSelection, expand, moveSelection, selectSplit, setUnread, showToast, splits, togglePin]);
+  useInboxKeys(!isMobile && !expanded, keyActions);
+
+  const ratio = dragRatio ?? inbox.splitRatio;
+  const activeProjectId = activeSplit?.project?.kind === "durable" ? activeSplit.project.project.id : undefined;
+  const activeDurableProject = activeSplit?.project?.kind === "durable" ? activeSplit.project.project : null;
+  const activeAvailableLocations = activeDurableProject?.locations.filter((location) => location.availability === "available") ?? [];
+  const updateDragRatio = (clientY: number) => {
+    const rect = viewRef.current?.getBoundingClientRect();
+    if (!rect || rect.height <= 0) return;
+    const next = Math.min(0.75, Math.max(0.25, (clientY - rect.top) / rect.height));
+    dragRatioRef.current = next;
+    setDragRatio(next);
+  };
+  const onSplitterPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (isMobile || event.button !== 0) return;
+    dragPointerRef.current = event.pointerId;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    updateDragRatio(event.clientY);
+  };
+  const finishSplitterDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (dragPointerRef.current !== event.pointerId) return;
+    dragPointerRef.current = null;
+    if (dragRatioRef.current !== null) setInboxRatio(dragRatioRef.current);
+    dragRatioRef.current = null;
+    setDragRatio(null);
+  };
+
+  return (
+    <div className={`inbox-view${expanded ? " expanded" : ""}`} ref={viewRef} data-focus-zone={expanded ? "detail" : "list"}>
+      <section
+        className="inbox-list-pane"
+        style={{ height: isMobile ? "100%" : `${ratio * 100}%` }}
+        aria-label="Command Inbox"
+        aria-hidden={expanded || undefined}
+        {...((expanded ? { inert: "" } : {}) as Record<string, unknown>)}
+      >
+        <div className="inbox-toolbar">
+          <div className="inbox-tabs" role="tablist" aria-label="Inbox Groups">
+            {splits.map((split) => {
+              const active = split.key === activeSplit?.key;
+              const hasMenu = split.project !== null;
+              const durableProjectId = split.project?.kind === "durable" ? split.project.project.id : undefined;
+              const pinned = split.key !== null && (pinnedProjects.has(split.key) ||
+                (split.project?.kind === "durable" && split.project.legacyKeys.some((key) => pinnedProjects.has(key))));
+              return (
+                <div className={`inbox-tab-group${hasMenu ? " has-menu" : ""}`} role="presentation" key={split.key ?? "all"}>
+                  <button
+                    type="button"
+                    ref={(node) => {
+                      const refKey = split.key ?? "all";
+                      if (node) tabRefs.current.set(refKey, node);
+                      else tabRefs.current.delete(refKey);
+                    }}
+                    role="tab"
+                    aria-selected={active}
+                    tabIndex={active ? 0 : -1}
+                    className={`inbox-tab${active ? " active" : ""}`}
+                    onClick={() => selectSplit(split.key)}
+                    onKeyDown={(event) => onTabKeyDown(event, split.key)}
+                    title="Switch Inbox Group (Tab / Shift+Tab)"
+                  >
+                    {split.name}
+                    <span className="inbox-tab-count">{split.count}</span>
+                    {split.blockedCount > 0 && (
+                      <span className="inbox-tab-count blocked" aria-label={`${split.blockedCount} Blocked`}>
+                        {split.blockedCount} ⚠
+                      </span>
+                    )}
+                    {split.stalledCount > 0 && (
+                      <span className="inbox-tab-count stalled" aria-label={`${split.stalledCount} Stalled`}>
+                        {split.stalledCount} Stalled
+                      </span>
+                    )}
+                  </button>
+                  {hasMenu && (
+                    <ProjectSplitMenu
+                      split={split}
+                      active={active}
+                      runner={runners.get(
+                        split.project?.kind === "durable"
+                          ? split.project.primaryLocation?.runnerId ?? ""
+                          : split.project?.runnerId ?? "",
+                      )}
+                      pinned={pinned}
+                      onPinnedChange={(enabled) => setProjectPinned(split, enabled)}
+                      onNewSession={(preset) => onNewSession?.(preset)}
+                      onManageProject={durableProjectId ? () => navigate({ name: "projects", id: durableProjectId }) : undefined}
+                    />
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          <div className="inbox-toolbar-actions">
+            {projectsSupported && (
+              <button
+                type="button"
+                className="inbox-create-project"
+                onClick={() => setCreatingProject(true)}
+                aria-label="Create Project"
+                title="Create Project"
+              >
+                <PlusIcon size={16} />
+              </button>
+            )}
+            <label className={`inbox-search${query ? " has-query" : ""}`}>
+              <span className="sr-only">Search Sessions</span>
+              <SearchIcon size={15} />
+              <input
+                value={query}
+                onChange={(event) => changeQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key !== "Escape") return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  exitSearch();
+                }}
+                placeholder="Search sessions"
+              />
+              <span className="inbox-search-key" aria-hidden="true">/</span>
+            </label>
+          </div>
+        </div>
+        <InboxList
+          ref={captureListRef}
+          entries={entries}
+          selectedSessionId={displayedSelection}
+          pinnedSessionIds={pinnedSessions}
+          stalledSessionIds={stalledSessionIds}
+          runningCount={(activeSplit?.sessions ?? []).filter(isInboxRunning).length}
+          filtered={normalizedQuery.length > 0}
+          emptyState={activeSplit?.kind === "project"
+            ? activeDurableProject && activeDurableProject.locations.length === 0
+              ? {
+                title: "No Project Locations",
+                description: "Add a Location to this Project before starting a session.",
+                showNewSession: false,
+                actionLabel: "Add Location",
+                onAction: () => navigate({ name: "projects", id: activeProjectId }),
+              }
+              : activeDurableProject && activeAvailableLocations.length === 0
+                ? {
+                  title: "No Available Locations",
+                  description: "Bring a linked machine online or update this Project’s Locations.",
+                  showNewSession: false,
+                  actionLabel: "Manage Locations",
+                  onAction: () => navigate({ name: "projects", id: activeProjectId }),
+                }
+                : activeSplit.count > 0
+                  ? {
+                    title: "Loading Sessions",
+                    description: `${activeSplit.count} ${activeSplit.count === 1 ? "session is" : "sessions are"} still syncing.`,
+                    showNewSession: false,
+                  }
+                  : {
+                    title: "No Sessions Yet",
+                    description: `Start a session in ${activeSplit.name}.`,
+                    showNewSession: true,
+                  }
+            : activeSplit?.kind === "no_project"
+              ? {
+                title: "No Sessions Without a Project",
+                description: "Sessions not assigned to a Project appear here.",
+                showNewSession: false,
+              }
+              : undefined}
+          onNewSession={() => onNewSession?.(activeNewSessionPreset)}
+          onSelect={handleSelect}
+          onExpand={expand}
+          onScrollPosition={(scrollTop) => inboxScrollPositions.set(instanceScope, scrollTop)}
+        />
+        <footer className="inbox-activity-footer" aria-label="Inbox Status and Shortcuts">
+          <div className="inbox-activity-summary" aria-label="Inbox Activity Summary">
+            <span>{(activeSplit?.sessions ?? []).filter((session) => isHeartbeatBusy(session.status)).length} Active</span>
+            <span className="blocked">{activeSplit?.blockedCount ?? 0} Blocked</span>
+            <span className="stalled" aria-live="polite">{activeSplit?.stalledCount ?? 0} Stalled</span>
+          </div>
+          <InboxShortcutRail
+            session={displayedSelectedSession}
+            pinned={displayedSelection ? pinnedSessions.has(displayedSelection) : false}
+            busy={displayedSelection ? busySessionIds.has(displayedSelection) : false}
+            onApprove={() => {
+              if (displayedSelection) void decide(displayedSelection, "approve")
+                .catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" }));
+            }}
+            onDeny={() => {
+              if (displayedSelection) void decide(displayedSelection, "deny")
+                .catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" }));
+            }}
+            onReply={() => { if (displayedSelection) expand(displayedSelection, true); }}
+            onExpand={() => { if (displayedSelection) expand(displayedSelection); }}
+            onTogglePin={() => { if (displayedSelection) togglePin(displayedSelection); }}
+            onMarkUnread={() => { if (displayedSelection) setUnread(displayedSelection); }}
+            onArchive={() => { if (displayedSelection) void archive(displayedSelection); }}
+          />
+        </footer>
+      </section>
+
+      {(!isMobile || expanded) && (
+        <>
+          <div
+            className="inbox-splitter"
+            role="separator"
+            aria-label="Resize Inbox Preview"
+            aria-orientation="horizontal"
+            aria-valuemin={25}
+            aria-valuemax={75}
+            aria-valuenow={Math.round(ratio * 100)}
+            tabIndex={0}
+            onPointerDown={onSplitterPointerDown}
+            onPointerMove={(event) => {
+              if (dragPointerRef.current === event.pointerId) updateDragRatio(event.clientY);
+            }}
+            onPointerUp={finishSplitterDrag}
+            onLostPointerCapture={finishSplitterDrag}
+            onDoubleClick={() => setInboxRatio(0.4)}
+            onKeyDown={(event) => {
+              if (event.key === "ArrowUp") setInboxRatio(ratio - 0.05);
+              else if (event.key === "ArrowDown") setInboxRatio(ratio + 0.05);
+              else if (event.key === "Home") setInboxRatio(0.25);
+              else if (event.key === "End") setInboxRatio(0.75);
+              else return;
+              event.preventDefault();
+            }}
+          />
+          <div className="inbox-preview-pane" style={{ height: expanded ? "100%" : `${(1 - ratio) * 100}%` }} data-focus-zone="detail">
+            {surfaceSessionId ? (
+              <SessionDetail
+                key={surfaceSessionId}
+                sessionId={surfaceSessionId}
+                mode={expanded ? "expanded" : "preview"}
+                sourceLocation={expanded ? sourceLocation : undefined}
+                topbarControls={expanded ? topbarControls : undefined}
+                rightPanel={rightPanel}
+                onOpenTerminal={onOpenTerminal}
+                pinnedOpen={pinnedOpen}
+                focusComposer={focusComposerSessionId === surfaceSessionId}
+                onComposerFocusConsumed={onComposerFocusConsumed}
+                onBack={onCollapse}
+                onExpand={() => expand(surfaceSessionId)}
+                onNextSession={() => hopExpanded("next")}
+                onPreviousSession={() => hopExpanded("previous")}
+                onApprove={() => { void decide(surfaceSessionId, "approve").catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" })); }}
+                onDeny={() => { void decide(surfaceSessionId, "deny").catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" })); }}
+                onArchive={() => { void archive(surfaceSessionId); }}
+                onPreviewNavigationReady={expanded ? undefined : registerPreviewNavigation}
+              />
+            ) : (
+              <div className="inbox-preview-empty" tabIndex={-1}>
+                <strong>Select a Session</strong>
+                <span>Choose a card to preview live activity.</span>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+      {creatingProject && (
+        <CreateProjectDialog
+          onClose={() => setCreatingProject(false)}
+          onCreated={(project) => {
+            setCreatingProject(false);
+            showToast(`Created ${project.name}.`);
+          }}
+        />
+      )}
+    </div>
+  );
+}
