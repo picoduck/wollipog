@@ -207,10 +207,15 @@ export function codexAgentDefinitions(
 
 /** An explicit agent-config `OPENAI_API_KEY` is a deliberate API-billing Codex setup: the drivers
  * honor it (they scrub only the daemon-inherited key), so a missing `~/.codex/auth.json` must not
- * gate that entry. Mirrors the Claude config-auth carve-out applied in the same merge. */
+ * gate that entry. Mirrors the Claude config-auth carve-out applied in the same merge.
+ *
+ * The key itself is not visible here in production — the runner redacts config env before the
+ * merge — so the trigger is the config row's non-secret auth assertion (set where the env is
+ * redacted). For an already-authenticated discovered row the recompute is a no-op, because the
+ * availability formula below equals the discovery gate with a confirmed login. */
 export function applyCodexAgentEnvironment(agent: AgentDefinition, preserveAvailability = false): AgentDefinition {
   if (agent.driver !== "codex" && agent.driver !== "codex-app-server") return agent;
-  if (!agent.env?.OPENAI_API_KEY) return agent;
+  if (!agent.env?.OPENAI_API_KEY && agent.authStatus !== "authenticated") return agent;
   return {
     ...agent,
     authStatus: "authenticated",
@@ -297,8 +302,16 @@ async function wslProbe(
   ]);
   return {
     version: v.code === 0 ? parseVersion(v.stdout || v.stderr) : undefined,
-    authStatus: a.code === 0 ? "authenticated" : "unauthenticated",
+    authStatus: probedAuthFileStatus(a),
   };
+}
+
+/** Only a completed probe may claim the auth file is absent: "unauthenticated" gates selection,
+ * and a timed-out or failed wsl.exe invocation has confirmed nothing. Exported pure so the
+ * gate-feeding interpretation stays regression-tested. */
+export function probedAuthFileStatus(a: { code: number | null; timedOut?: boolean; errorCode?: string }): AuthStatus {
+  if (a.timedOut || a.errorCode) return "unknown";
+  return a.code === 0 ? "authenticated" : "unauthenticated";
 }
 
 /** Probe the native host + every WSL distro for known agent CLIs. */

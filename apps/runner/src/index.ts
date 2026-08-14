@@ -202,6 +202,13 @@ const configuredAgentDefinitions = config.agents.map((a) => {
     command: a.command,
     args: a.args ?? [],
     env: {},
+    // env is redacted above, so the discovery merge cannot see a configured OPENAI_API_KEY.
+    // Carry the non-secret fact that auth is configured (literal or fromEnv) as an auth
+    // assertion, or the auth gate would disable a deliberately API-keyed Codex whose
+    // ~/.codex/auth.json is absent.
+    ...((driver === "codex" || driver === "codex-app-server") && a.env && "OPENAI_API_KEY" in a.env
+      ? { authStatus: "authenticated" as const }
+      : {}),
     driver,
     ...(driver === "acp" ? { acpTransport: "stdio" as const } : {}),
     context: a.context ?? { kind: "native" as const },

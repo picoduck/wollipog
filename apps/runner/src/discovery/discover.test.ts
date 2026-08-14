@@ -6,6 +6,7 @@ import {
   commandDirectoriesForDriver,
   codexAgentDefinitions,
   mergeAgents,
+  probedAuthFileStatus,
   parseVersion,
   unavailableCodexAgentDefinition,
   unavailableClaudeAgentDefinition,
@@ -75,23 +76,35 @@ test("a signed-out Codex is discovered but not ready, and signing in restores bo
   assert.deepEqual(signedIn.map((agent) => agent.available), [true, true]);
 });
 
-test("an explicit config OPENAI_API_KEY keeps Codex available despite a missing auth file", () => {
+test("a config-declared OPENAI_API_KEY keeps Codex available despite a missing auth file", () => {
   const discovered = codexAgentDefinitions(
     cfg({ id: "codex", name: "Codex", driver: "codex", command: "/usr/bin/codex", source: "discovered", authStatus: "unauthenticated" }),
     SUPPORTED_APP_SERVER,
     [],
   );
+  // Production shape: the runner redacts config env to {} and carries the declared key only as
+  // a non-secret auth assertion, so the merge must honor the assertion, not the key value.
   const apiKeyed = mergeAgents(
-    [cfg({ id: "codex", command: "/usr/bin/codex", driver: "codex-app-server", env: { OPENAI_API_KEY: "secret" } })],
+    [cfg({ id: "codex", command: "/usr/bin/codex", driver: "codex-app-server", env: {}, authStatus: "authenticated" })],
     discovered,
   )[0]!;
   assert.equal(apiKeyed.available, true, "deliberate API-billing config stays selectable");
   assert.equal(apiKeyed.authStatus, "authenticated");
   const disabled = mergeAgents(
-    [cfg({ id: "codex", command: "/usr/bin/codex", driver: "codex-app-server", env: { OPENAI_API_KEY: "secret" }, available: false })],
+    [cfg({ id: "codex", command: "/usr/bin/codex", driver: "codex-app-server", env: {}, authStatus: "authenticated", available: false })],
     discovered,
   )[0]!;
-  assert.equal(disabled.available, false, "explicit config availability wins over the key");
+  assert.equal(disabled.available, false, "explicit config availability wins over the assertion");
+  // A key-less config row must not resurrect a gated discovery result.
+  const plain = mergeAgents([cfg({ id: "codex", command: "/usr/bin/codex", driver: "codex-app-server" })], discovered)[0]!;
+  assert.equal(plain.available, false);
+});
+
+test("a failed or timed-out auth-file probe reports unknown, not signed-out", () => {
+  assert.equal(probedAuthFileStatus({ code: 0 }), "authenticated");
+  assert.equal(probedAuthFileStatus({ code: 1 }), "unauthenticated");
+  assert.equal(probedAuthFileStatus({ code: null, timedOut: true }), "unknown");
+  assert.equal(probedAuthFileStatus({ code: 1, errorCode: "ENOENT" }), "unknown");
 });
 
 test("unsupported Codex keeps a disabled primary and an enabled exec row carrying the fallback reason", () => {
