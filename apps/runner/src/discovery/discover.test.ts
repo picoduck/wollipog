@@ -6,6 +6,7 @@ import {
   commandDirectoriesForDriver,
   codexAgentDefinitions,
   mergeAgents,
+  localAuthFileStatus,
   probedAuthFileStatus,
   parseVersion,
   unavailableCodexAgentDefinition,
@@ -105,6 +106,18 @@ test("a failed or timed-out auth-file probe reports unknown, not signed-out", ()
   assert.equal(probedAuthFileStatus({ code: 1 }), "unauthenticated");
   assert.equal(probedAuthFileStatus({ code: null, timedOut: true }), "unknown");
   assert.equal(probedAuthFileStatus({ code: 1, errorCode: "ENOENT" }), "unknown");
+  // Only `test -f` itself exits 1; 127/126 mean the probe could not run at all.
+  assert.equal(probedAuthFileStatus({ code: 127 }), "unknown");
+  assert.equal(probedAuthFileStatus({ code: 126 }), "unknown");
+});
+
+test("a native stat error that is not confirmed absence reports unknown", () => {
+  const err = (code: string) => () => { throw Object.assign(new Error(code), { code }); };
+  assert.equal(localAuthFileStatus("/p", (() => ({})) as never), "authenticated");
+  assert.equal(localAuthFileStatus("/p", err("ENOENT") as never), "unauthenticated");
+  assert.equal(localAuthFileStatus("/p", err("ENOTDIR") as never), "unauthenticated");
+  assert.equal(localAuthFileStatus("/p", err("EACCES") as never), "unknown");
+  assert.equal(localAuthFileStatus("/p", err("EIO") as never), "unknown");
 });
 
 test("unsupported Codex keeps a disabled primary and an enabled exec row carrying the fallback reason", () => {

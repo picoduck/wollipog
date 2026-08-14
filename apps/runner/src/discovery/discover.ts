@@ -5,7 +5,7 @@
  * so user overrides (custom args/env/tokens) are preserved.
  */
 
-import { existsSync, readdirSync } from "node:fs";
+import { readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -287,7 +287,7 @@ type AuthStatus = "authenticated" | "unauthenticated" | "unknown";
 async function nativeProbe(k: KnownAgent, launch: ResolvedLaunch): Promise<{ version?: string; authStatus: AuthStatus }> {
   const v = await run(launch.command, [...launch.args, "--version"], { timeoutMs: 5000 });
   const version = v.code === 0 ? parseVersion(v.stdout || v.stderr) : undefined;
-  const authStatus: AuthStatus = existsSync(join(homedir(), k.authFile)) ? "authenticated" : "unauthenticated";
+  const authStatus = localAuthFileStatus(join(homedir(), k.authFile));
   return { version, authStatus };
 }
 
@@ -307,11 +307,25 @@ async function wslProbe(
 }
 
 /** Only a completed probe may claim the auth file is absent: "unauthenticated" gates selection,
- * and a timed-out or failed wsl.exe invocation has confirmed nothing. Exported pure so the
- * gate-feeding interpretation stays regression-tested. */
+ * and a probe that could not run has confirmed nothing. `test -f` itself exits 0 or 1; any other
+ * code (127 no shell, 126 not executable, wsl.exe failures) is the probe failing, not a missing
+ * file. Exported pure so the gate-feeding interpretation stays regression-tested. */
 export function probedAuthFileStatus(a: { code: number | null; timedOut?: boolean; errorCode?: string }): AuthStatus {
   if (a.timedOut || a.errorCode) return "unknown";
-  return a.code === 0 ? "authenticated" : "unauthenticated";
+  if (a.code === 0) return "authenticated";
+  return a.code === 1 ? "unauthenticated" : "unknown";
+}
+
+/** Same confirmed-absence rule for the native stat: only ENOENT/ENOTDIR prove the file is
+ * missing; EACCES or I/O errors leave auth undetermined and must not gate selection. */
+export function localAuthFileStatus(path: string, stat: typeof statSync = statSync): AuthStatus {
+  try {
+    stat(path);
+    return "authenticated";
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "ENOTDIR" ? "unauthenticated" : "unknown";
+  }
 }
 
 /** Probe the native host + every WSL distro for known agent CLIs. */
