@@ -269,13 +269,21 @@ function readConfigFile(
   }
 }
 
+/**
+ * Admission capacity for a runner that has not been configured explicitly. An idle resident
+ * provider process holds a unit until it exits, so this is the number of sessions a developer
+ * can leave open, not the number they can run at once.
+ */
+export const DEFAULT_MAX_CONCURRENT_SESSIONS = 16;
+
 /** Merge config sources (precedence: overrides > file > defaults), validate, resolve paths. */
 export function resolveConfig(file: Partial<RunnerConfig>, overrides: Partial<RunnerConfig> = {}): RunnerConfig {
   const runnerId = overrides.runnerId ?? file.runnerId;
   const controlPlaneUrl = overrides.controlPlaneUrl ?? file.controlPlaneUrl;
   if (!runnerId) throw new Error("runner config: 'runnerId' is required (set --runner-id, RUNNER_ID, or runnerId in the config)");
   if (!controlPlaneUrl) throw new Error("runner config: 'controlPlaneUrl' is required (set --control-plane-url, CONTROL_PLANE_URL, or controlPlaneUrl in the config)");
-  const maxConcurrentSessions = overrides.maxConcurrentSessions ?? file.maxConcurrentSessions ?? 4;
+  const maxConcurrentSessions =
+    overrides.maxConcurrentSessions ?? file.maxConcurrentSessions ?? DEFAULT_MAX_CONCURRENT_SESSIONS;
   if (!Number.isInteger(maxConcurrentSessions) || maxConcurrentSessions < 1 || maxConcurrentSessions > 256) {
     throw new Error("runner config: 'maxConcurrentSessions' must be an integer from 1 to 256");
   }
