@@ -46,6 +46,7 @@ import type { DriverBackgroundWorkUpdate, DriverSteerResult, StopReason } from "
 import { CodexAppServerResumeError } from "./drivers/codex-app-server.js";
 import { BoxAdmission, type AdmissionRequest } from "./box-admission.js";
 import { discoverIncompleteClaudeTasks, discoverIncompleteClaudeTasksInContext } from "./claude-background-work.js";
+import { DEFAULT_MAX_CONCURRENT_SESSIONS } from "./config.js";
 import type { RunnerAdmissionPolicy, RunnerExecutionIsolation } from "./config.js";
 import { executionTargetLaunchError } from "./execution-target.js";
 import type { ContainerTargetRegistry } from "./container-target.js";
@@ -573,7 +574,7 @@ export class SessionManager {
     private readonly resolveLaunch?: LaunchResolver,
     private readonly createDriver: typeof makeDriver = makeDriver,
     private readonly dataDir?: string,
-    private readonly maxConcurrentSessions = 4,
+    private readonly maxConcurrentSessions = DEFAULT_MAX_CONCURRENT_SESSIONS,
     private readonly onAgentAuthUpdate?: (
       agentId: string,
       update: { status?: "authenticated" | "unauthenticated"; capabilities?: AcpRuntimeCapabilities },

@@ -4,6 +4,7 @@ import { isAbsolute } from "node:path";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
+  DEFAULT_MAX_CONCURRENT_SESSIONS,
   conductorEnabled,
   loadConfig,
   parseArgs,
@@ -228,7 +229,8 @@ test("resolveConfig throws when runnerId or controlPlaneUrl is missing", () => {
 
 test("resolveConfig defaults and validates the box process ceiling", () => {
   const cfg = resolveConfig({}, { runnerId: "x", controlPlaneUrl: "ws://x" });
-  assert.equal(cfg.maxConcurrentSessions, 4);
+  assert.equal(cfg.maxConcurrentSessions, DEFAULT_MAX_CONCURRENT_SESSIONS);
+  assert.equal(DEFAULT_MAX_CONCURRENT_SESSIONS, 16);
   assert.ok(isAbsolute(cfg.dataDir));
   assert.equal(cfg.features.acpRegistry, false);
   assert.deepEqual(cfg.acpRegistryAgents, []);
@@ -240,6 +242,18 @@ test("resolveConfig defaults and validates the box process ceiling", () => {
   assert.throws(
     () => resolveConfig({ runnerId: "x", controlPlaneUrl: "ws://x", maxConcurrentSessions: 0 }, {}),
     /maxConcurrentSessions/,
+  );
+});
+
+test("resolveConfig keeps an explicit capacity when the default changes", () => {
+  const base = { runnerId: "x", controlPlaneUrl: "ws://x" };
+  // An operator who pinned the old default must keep it after an upgrade.
+  assert.equal(resolveConfig({ ...base, maxConcurrentSessions: 4 }, {}).maxConcurrentSessions, 4);
+  assert.equal(resolveConfig({ ...base }, { maxConcurrentSessions: 1 }).maxConcurrentSessions, 1);
+  // Overrides still win over an explicit file value.
+  assert.equal(
+    resolveConfig({ ...base, maxConcurrentSessions: 4 }, { maxConcurrentSessions: 32 }).maxConcurrentSessions,
+    32,
   );
 });
 

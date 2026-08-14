@@ -1,7 +1,7 @@
 {
   "runnerId": "local-dev",
   "controlPlaneUrl": "ws://127.0.0.1:4317/runner",
-  "maxConcurrentSessions": 4,
+  "maxConcurrentSessions": 16,
   "admission": {
     "agentLimits": {},
     "agentWeights": {}
