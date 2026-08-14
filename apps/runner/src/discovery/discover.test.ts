@@ -6,6 +6,8 @@ import {
   commandDirectoriesForDriver,
   codexAgentDefinitions,
   mergeAgents,
+  localAuthFileStatus,
+  probedAuthFileStatus,
   parseVersion,
   unavailableCodexAgentDefinition,
   unavailableClaudeAgentDefinition,
@@ -59,6 +61,63 @@ test("supported Codex discovery emits app-server primary then stable exec compat
     [],
   );
   assert.deepEqual(wsl.map((agent) => agent.id), ["codex-wsl-Ubuntu", "codex-exec-wsl-Ubuntu"]);
+});
+
+test("a signed-out Codex is discovered but not ready, and signing in restores both rows", () => {
+  const base = cfg({ id: "codex", name: "Codex", driver: "codex", source: "discovered" });
+  const signedOut = codexAgentDefinitions({ ...base, authStatus: "unauthenticated" }, SUPPORTED_APP_SERVER, []);
+  assert.deepEqual(signedOut.map((agent) => [agent.id, agent.available, agent.authStatus]), [
+    ["codex", false, "unauthenticated"],
+    ["codex-exec", false, "unauthenticated"],
+  ]);
+  // Only a confirmed missing login gates; unknown auth must not disable a working install.
+  const unknown = codexAgentDefinitions({ ...base, authStatus: "unknown" }, SUPPORTED_APP_SERVER, []);
+  assert.deepEqual(unknown.map((agent) => agent.available), [true, true]);
+  const signedIn = codexAgentDefinitions({ ...base, authStatus: "authenticated" }, SUPPORTED_APP_SERVER, []);
+  assert.deepEqual(signedIn.map((agent) => agent.available), [true, true]);
+});
+
+test("a config-declared OPENAI_API_KEY keeps Codex available despite a missing auth file", () => {
+  const discovered = codexAgentDefinitions(
+    cfg({ id: "codex", name: "Codex", driver: "codex", command: "/usr/bin/codex", source: "discovered", authStatus: "unauthenticated" }),
+    SUPPORTED_APP_SERVER,
+    [],
+  );
+  // Production shape: the runner redacts config env to {} and carries the declared key only as
+  // a non-secret auth assertion, so the merge must honor the assertion, not the key value.
+  const apiKeyed = mergeAgents(
+    [cfg({ id: "codex", command: "/usr/bin/codex", driver: "codex-app-server", env: {}, authStatus: "authenticated" })],
+    discovered,
+  )[0]!;
+  assert.equal(apiKeyed.available, true, "deliberate API-billing config stays selectable");
+  assert.equal(apiKeyed.authStatus, "authenticated");
+  const disabled = mergeAgents(
+    [cfg({ id: "codex", command: "/usr/bin/codex", driver: "codex-app-server", env: {}, authStatus: "authenticated", available: false })],
+    discovered,
+  )[0]!;
+  assert.equal(disabled.available, false, "explicit config availability wins over the assertion");
+  // A key-less config row must not resurrect a gated discovery result.
+  const plain = mergeAgents([cfg({ id: "codex", command: "/usr/bin/codex", driver: "codex-app-server" })], discovered)[0]!;
+  assert.equal(plain.available, false);
+});
+
+test("a failed or timed-out auth-file probe reports unknown, not signed-out", () => {
+  assert.equal(probedAuthFileStatus({ code: 0 }), "authenticated");
+  assert.equal(probedAuthFileStatus({ code: 1 }), "unauthenticated");
+  assert.equal(probedAuthFileStatus({ code: null, timedOut: true }), "unknown");
+  assert.equal(probedAuthFileStatus({ code: 1, errorCode: "ENOENT" }), "unknown");
+  // Only `test -f` itself exits 1; 127/126 mean the probe could not run at all.
+  assert.equal(probedAuthFileStatus({ code: 127 }), "unknown");
+  assert.equal(probedAuthFileStatus({ code: 126 }), "unknown");
+});
+
+test("a native stat error that is not confirmed absence reports unknown", () => {
+  const err = (code: string) => () => { throw Object.assign(new Error(code), { code }); };
+  assert.equal(localAuthFileStatus("/p", (() => ({})) as never), "authenticated");
+  assert.equal(localAuthFileStatus("/p", err("ENOENT") as never), "unauthenticated");
+  assert.equal(localAuthFileStatus("/p", err("ENOTDIR") as never), "unauthenticated");
+  assert.equal(localAuthFileStatus("/p", err("EACCES") as never), "unknown");
+  assert.equal(localAuthFileStatus("/p", err("EIO") as never), "unknown");
 });
 
 test("unsupported Codex keeps a disabled primary and an enabled exec row carrying the fallback reason", () => {

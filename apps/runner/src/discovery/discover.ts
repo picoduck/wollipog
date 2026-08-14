@@ -5,7 +5,7 @@
  * so user overrides (custom args/env/tokens) are preserved.
  */
 
-import { existsSync, readdirSync } from "node:fs";
+import { readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -182,10 +182,14 @@ export function codexAgentDefinitions(
   slashCommands: AgentSlashCommand[],
 ): AgentDefinition[] {
   const supported = compatibility.status === "supported";
+  // An installed-but-signed-out Codex accepts a session and then fails every turn with an
+  // OpenAI 401 behind a reconnect loop, so it is not ready — mirror Claude, whose readiness
+  // already folds auth in. "unknown" stays selectable: only a confirmed missing login gates.
+  const signedIn = base.authStatus !== "unauthenticated";
   const primary: AgentDefinition = {
     ...base,
     driver: "codex-app-server",
-    available: supported,
+    available: supported && signedIn,
     capabilities: verifiedCodexAppServerCapabilities(slashCommands, compatibility),
     codexAppServer: compatibility,
   };
@@ -194,11 +198,33 @@ export function codexAgentDefinitions(
     id: codexExecId(base.id),
     name: `${base.name} (Non-Interactive)`,
     driver: "codex",
-    available: true,
+    available: signedIn,
     capabilities: withSlashCommands("codex", slashCommands),
     codexAppServer: compatibility,
   };
   return [primary, exec];
+}
+
+/** An explicit agent-config `OPENAI_API_KEY` is a deliberate API-billing Codex setup: the drivers
+ * honor it (they scrub only the daemon-inherited key), so a missing `~/.codex/auth.json` must not
+ * gate that entry. Mirrors the Claude config-auth carve-out applied in the same merge.
+ *
+ * The key itself is not visible here in production — the runner redacts config env before the
+ * merge — so the trigger is the config row's non-secret auth assertion (set where the env is
+ * redacted). For an already-authenticated discovered row the recompute is a no-op, because the
+ * availability formula below equals the discovery gate with a confirmed login. */
+export function applyCodexAgentEnvironment(agent: AgentDefinition, preserveAvailability = false): AgentDefinition {
+  if (agent.driver !== "codex" && agent.driver !== "codex-app-server") return agent;
+  if (!agent.env?.OPENAI_API_KEY && agent.authStatus !== "authenticated") return agent;
+  return {
+    ...agent,
+    authStatus: "authenticated",
+    available: preserveAvailability
+      ? agent.available
+      : agent.driver === "codex-app-server"
+        ? agent.codexAppServer?.status === "supported"
+        : true,
+  };
 }
 
 /** Keep Codex absence explicit per context without advertising a non-existent exec fallback. */
@@ -261,7 +287,7 @@ type AuthStatus = "authenticated" | "unauthenticated" | "unknown";
 async function nativeProbe(k: KnownAgent, launch: ResolvedLaunch): Promise<{ version?: string; authStatus: AuthStatus }> {
   const v = await run(launch.command, [...launch.args, "--version"], { timeoutMs: 5000 });
   const version = v.code === 0 ? parseVersion(v.stdout || v.stderr) : undefined;
-  const authStatus: AuthStatus = existsSync(join(homedir(), k.authFile)) ? "authenticated" : "unauthenticated";
+  const authStatus = localAuthFileStatus(join(homedir(), k.authFile));
   return { version, authStatus };
 }
 
@@ -276,8 +302,30 @@ async function wslProbe(
   ]);
   return {
     version: v.code === 0 ? parseVersion(v.stdout || v.stderr) : undefined,
-    authStatus: a.code === 0 ? "authenticated" : "unauthenticated",
+    authStatus: probedAuthFileStatus(a),
   };
+}
+
+/** Only a completed probe may claim the auth file is absent: "unauthenticated" gates selection,
+ * and a probe that could not run has confirmed nothing. `test -f` itself exits 0 or 1; any other
+ * code (127 no shell, 126 not executable, wsl.exe failures) is the probe failing, not a missing
+ * file. Exported pure so the gate-feeding interpretation stays regression-tested. */
+export function probedAuthFileStatus(a: { code: number | null; timedOut?: boolean; errorCode?: string }): AuthStatus {
+  if (a.timedOut || a.errorCode) return "unknown";
+  if (a.code === 0) return "authenticated";
+  return a.code === 1 ? "unauthenticated" : "unknown";
+}
+
+/** Same confirmed-absence rule for the native stat: only ENOENT/ENOTDIR prove the file is
+ * missing; EACCES or I/O errors leave auth undetermined and must not gate selection. */
+export function localAuthFileStatus(path: string, stat: typeof statSync = statSync): AuthStatus {
+  try {
+    stat(path);
+    return "authenticated";
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "ENOTDIR" ? "unauthenticated" : "unknown";
+  }
 }
 
 /** Probe the native host + every WSL distro for known agent CLIs. */
@@ -454,7 +502,7 @@ export function mergeAgents(configAgents: AgentDefinition[], discovered: AgentDe
     // enriched entry can actually spawn; a config entry with a path or custom args keeps its
     // own launch (genuine user override).
     const adoptLaunch = !/[\\/]/.test(c.command) && (c.args?.length ?? 0) === 0 && /[\\/]/.test(d.command);
-    return applyClaudeAgentEnvironment({
+    return applyCodexAgentEnvironment(applyClaudeAgentEnvironment({
       ...c,
       ...(adoptLaunch ? { command: d.command, args: [...(d.args ?? [])] } : {}),
       version: c.version ?? d.version,
@@ -490,7 +538,7 @@ export function mergeAgents(configAgents: AgentDefinition[], discovered: AgentDe
               }
             : { ...c.capabilities, slashCommands: d.capabilities?.slashCommands ?? c.capabilities.slashCommands }
         : d.capabilities,
-    }, c.available !== undefined);
+    }, c.available !== undefined), c.available !== undefined);
   });
   // A discovered agent that shares a launch target with a config agent has already
   // enriched it (above). Append the rest — but if a discovered agent's id collides

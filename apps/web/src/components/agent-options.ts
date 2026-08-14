@@ -193,7 +193,18 @@ export function defaultRunAgentIds(agents: AgentDefinition[]): string[] {
 /** One-line context shown under the dropdown: where it runs, version, and auth state. */
 export function agentMeta(a: AgentDefinition): string {
   const where = a.context?.kind === "wsl" ? `WSL · ${a.context.distro}` : "native host";
-  const bits = a.driver === "codex-app-server" && a.available === false
+  const codexFamily = a.driver === "codex-app-server" || a.driver === "codex";
+  const bits = codexFamily && a.authStatus === "unauthenticated"
+    // Signed-out is a setup problem, not an installation problem: name the fix, and don't let
+    // the generic "Interactive target unavailable" branch below mislabel it.
+    ? [
+        "Not signed in",
+        // Auth is probed per context: a WSL row reads that distro's ~/.codex/auth.json, so a
+        // login on the Windows host would not enable it.
+        `run \`codex login\` ${a.context?.kind === "wsl" ? `inside ${a.context.distro}` : "on the runner host"}, then rediscover`,
+        `runs on ${where}`,
+      ]
+    : a.driver === "codex-app-server" && a.available === false
     ? ["Interactive target unavailable", `runs on ${where}`]
     : a.driver === "codex-app-server"
       ? [
@@ -210,7 +221,7 @@ export function agentMeta(a: AgentDefinition): string {
       ? ["Non-interactive via codex exec", "approval settings are fixed before each turn", `runs on ${where}`]
       : [`Runs on ${where}`];
   if (a.version) bits.push(/^\d/.test(a.version) ? `v${a.version}` : a.version);
-  if (a.authStatus === "unauthenticated") bits.push("not signed in");
+  if (a.authStatus === "unauthenticated" && !codexFamily) bits.push("not signed in");
   if (!a.registry && a.acpTransport) bits.push(`ACP ${a.acpTransport}`);
   if (a.registry) {
     bits.push(`ACP ${a.registry.transport}`);
@@ -220,7 +231,7 @@ export function agentMeta(a: AgentDefinition): string {
     if (a.registry.installStatus === "manual-only") bits.push("manual install only");
     if (a.registry.installStatus === "unsupported-platform") bits.push("no compatible registry distribution");
   }
-  if (a.codexAppServer?.status === "supported") {
+  if (a.codexAppServer?.status === "supported" && a.authStatus !== "unauthenticated") {
     bits.push(a.driver === "codex" ? "non-interactive fallback ready" : "interactive target ready");
   }
   if (a.codexAppServer?.status === "unsupported") {
