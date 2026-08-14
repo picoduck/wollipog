@@ -273,6 +273,10 @@ function readConfigFile(
  * Admission capacity for a runner that has not been configured explicitly. An idle resident
  * provider process holds a unit until it exits, so this is the number of sessions a developer
  * can leave open, not the number they can run at once.
+ *
+ * Capacity also sets the ceiling on concurrent worktree preparation and the maximum accepted
+ * `agentWeights` value, so raising it widens those alongside admission. Operators on constrained
+ * machines should set an explicit lower value rather than relying on this default.
  */
 export const DEFAULT_MAX_CONCURRENT_SESSIONS = 16;
 
