@@ -197,7 +197,13 @@ export function agentMeta(a: AgentDefinition): string {
   const bits = codexFamily && a.authStatus === "unauthenticated"
     // Signed-out is a setup problem, not an installation problem: name the fix, and don't let
     // the generic "Interactive target unavailable" branch below mislabel it.
-    ? ["Not signed in", "run `codex login` on the runner host, then rediscover", `runs on ${where}`]
+    ? [
+        "Not signed in",
+        // Auth is probed per context: a WSL row reads that distro's ~/.codex/auth.json, so a
+        // login on the Windows host would not enable it.
+        `run \`codex login\` ${a.context?.kind === "wsl" ? `inside ${a.context.distro}` : "on the runner host"}, then rediscover`,
+        `runs on ${where}`,
+      ]
     : a.driver === "codex-app-server" && a.available === false
     ? ["Interactive target unavailable", `runs on ${where}`]
     : a.driver === "codex-app-server"

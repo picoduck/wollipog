@@ -228,8 +228,11 @@ function AgentRow({
         {a.registry && <span className="atag">{a.registry.transport}</span>}
         {!a.registry && a.acpTransport && <span className="atag">{a.acpTransport}</span>}
         {a.registry && <span className="atag">Adapter v{a.registry.adapterVersion}</span>}
-        {a.codexAppServer?.status === "supported" && (
+        {a.codexAppServer?.status === "supported" && a.authStatus !== "unauthenticated" && (
           <span className="atag">{driver === "codex" ? "Fallback Ready" : "Interactive Ready"}</span>
+        )}
+        {(driver === "codex" || driver === "codex-app-server") && a.authStatus === "unauthenticated" && (
+          <span className="atag broken" title="Run `codex login`, then rediscover.">Not Signed In</span>
         )}
         {a.codexAppServer?.status === "unsupported" && (
           <span className="atag broken" title={a.codexAppServer.failure?.message}>

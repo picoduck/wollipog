@@ -229,6 +229,17 @@ test("agentMeta names the login fix for signed-out Codex instead of a generic un
   assert.doesNotMatch(meta, /interactive target ready/);
   // A signed-out non-codex ACP agent keeps the generic note.
   assert.match(agentMeta(agent({ id: "g", name: "Gemini", driver: "acp", authStatus: "unauthenticated" })), /not signed in/);
+  // A WSL row's auth lives inside the distro, so the fix must point there, not at the host.
+  const wsl = agentMeta(agent({
+    id: "codex-wsl-Ubuntu",
+    name: "Codex",
+    driver: "codex-app-server",
+    available: false,
+    authStatus: "unauthenticated",
+    context: { kind: "wsl", distro: "Ubuntu" },
+  }));
+  assert.match(wsl, /codex login` inside Ubuntu/);
+  assert.doesNotMatch(wsl, /on the runner host/);
 });
 
 test("agentMeta exposes Registry transport, adapter version, and approval state", () => {

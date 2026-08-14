@@ -205,6 +205,23 @@ export function codexAgentDefinitions(
   return [primary, exec];
 }
 
+/** An explicit agent-config `OPENAI_API_KEY` is a deliberate API-billing Codex setup: the drivers
+ * honor it (they scrub only the daemon-inherited key), so a missing `~/.codex/auth.json` must not
+ * gate that entry. Mirrors the Claude config-auth carve-out applied in the same merge. */
+export function applyCodexAgentEnvironment(agent: AgentDefinition, preserveAvailability = false): AgentDefinition {
+  if (agent.driver !== "codex" && agent.driver !== "codex-app-server") return agent;
+  if (!agent.env?.OPENAI_API_KEY) return agent;
+  return {
+    ...agent,
+    authStatus: "authenticated",
+    available: preserveAvailability
+      ? agent.available
+      : agent.driver === "codex-app-server"
+        ? agent.codexAppServer?.status === "supported"
+        : true,
+  };
+}
+
 /** Keep Codex absence explicit per context without advertising a non-existent exec fallback. */
 export function unavailableCodexAgentDefinition(
   id: string,
@@ -458,7 +475,7 @@ export function mergeAgents(configAgents: AgentDefinition[], discovered: AgentDe
     // enriched entry can actually spawn; a config entry with a path or custom args keeps its
     // own launch (genuine user override).
     const adoptLaunch = !/[\\/]/.test(c.command) && (c.args?.length ?? 0) === 0 && /[\\/]/.test(d.command);
-    return applyClaudeAgentEnvironment({
+    return applyCodexAgentEnvironment(applyClaudeAgentEnvironment({
       ...c,
       ...(adoptLaunch ? { command: d.command, args: [...(d.args ?? [])] } : {}),
       version: c.version ?? d.version,
@@ -494,7 +511,7 @@ export function mergeAgents(configAgents: AgentDefinition[], discovered: AgentDe
               }
             : { ...c.capabilities, slashCommands: d.capabilities?.slashCommands ?? c.capabilities.slashCommands }
         : d.capabilities,
-    }, c.available !== undefined);
+    }, c.available !== undefined), c.available !== undefined);
   });
   // A discovered agent that shares a launch target with a config agent has already
   // enriched it (above). Append the rest — but if a discovered agent's id collides

@@ -75,6 +75,25 @@ test("a signed-out Codex is discovered but not ready, and signing in restores bo
   assert.deepEqual(signedIn.map((agent) => agent.available), [true, true]);
 });
 
+test("an explicit config OPENAI_API_KEY keeps Codex available despite a missing auth file", () => {
+  const discovered = codexAgentDefinitions(
+    cfg({ id: "codex", name: "Codex", driver: "codex", command: "/usr/bin/codex", source: "discovered", authStatus: "unauthenticated" }),
+    SUPPORTED_APP_SERVER,
+    [],
+  );
+  const apiKeyed = mergeAgents(
+    [cfg({ id: "codex", command: "/usr/bin/codex", driver: "codex-app-server", env: { OPENAI_API_KEY: "secret" } })],
+    discovered,
+  )[0]!;
+  assert.equal(apiKeyed.available, true, "deliberate API-billing config stays selectable");
+  assert.equal(apiKeyed.authStatus, "authenticated");
+  const disabled = mergeAgents(
+    [cfg({ id: "codex", command: "/usr/bin/codex", driver: "codex-app-server", env: { OPENAI_API_KEY: "secret" }, available: false })],
+    discovered,
+  )[0]!;
+  assert.equal(disabled.available, false, "explicit config availability wins over the key");
+});
+
 test("unsupported Codex keeps a disabled primary and an enabled exec row carrying the fallback reason", () => {
   const compatibility = {
     status: "unsupported" as const,
