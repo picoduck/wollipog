@@ -61,6 +61,20 @@ test("supported Codex discovery emits app-server primary then stable exec compat
   assert.deepEqual(wsl.map((agent) => agent.id), ["codex-wsl-Ubuntu", "codex-exec-wsl-Ubuntu"]);
 });
 
+test("a signed-out Codex is discovered but not ready, and signing in restores both rows", () => {
+  const base = cfg({ id: "codex", name: "Codex", driver: "codex", source: "discovered" });
+  const signedOut = codexAgentDefinitions({ ...base, authStatus: "unauthenticated" }, SUPPORTED_APP_SERVER, []);
+  assert.deepEqual(signedOut.map((agent) => [agent.id, agent.available, agent.authStatus]), [
+    ["codex", false, "unauthenticated"],
+    ["codex-exec", false, "unauthenticated"],
+  ]);
+  // Only a confirmed missing login gates; unknown auth must not disable a working install.
+  const unknown = codexAgentDefinitions({ ...base, authStatus: "unknown" }, SUPPORTED_APP_SERVER, []);
+  assert.deepEqual(unknown.map((agent) => agent.available), [true, true]);
+  const signedIn = codexAgentDefinitions({ ...base, authStatus: "authenticated" }, SUPPORTED_APP_SERVER, []);
+  assert.deepEqual(signedIn.map((agent) => agent.available), [true, true]);
+});
+
 test("unsupported Codex keeps a disabled primary and an enabled exec row carrying the fallback reason", () => {
   const compatibility = {
     status: "unsupported" as const,

@@ -182,10 +182,14 @@ export function codexAgentDefinitions(
   slashCommands: AgentSlashCommand[],
 ): AgentDefinition[] {
   const supported = compatibility.status === "supported";
+  // An installed-but-signed-out Codex accepts a session and then fails every turn with an
+  // OpenAI 401 behind a reconnect loop, so it is not ready — mirror Claude, whose readiness
+  // already folds auth in. "unknown" stays selectable: only a confirmed missing login gates.
+  const signedIn = base.authStatus !== "unauthenticated";
   const primary: AgentDefinition = {
     ...base,
     driver: "codex-app-server",
-    available: supported,
+    available: supported && signedIn,
     capabilities: verifiedCodexAppServerCapabilities(slashCommands, compatibility),
     codexAppServer: compatibility,
   };
@@ -194,7 +198,7 @@ export function codexAgentDefinitions(
     id: codexExecId(base.id),
     name: `${base.name} (Non-Interactive)`,
     driver: "codex",
-    available: true,
+    available: signedIn,
     capabilities: withSlashCommands("codex", slashCommands),
     codexAppServer: compatibility,
   };

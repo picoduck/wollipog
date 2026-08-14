@@ -211,8 +211,24 @@ test("agentMeta describes where it runs, version, and auth", () => {
   );
   assert.equal(
     agentMeta(agent({ id: "b", name: "B", driver: "codex", authStatus: "unauthenticated" })),
-    "Non-interactive via codex exec · approval settings are fixed before each turn · runs on native host · not signed in",
+    "Not signed in · run `codex login` on the runner host, then rediscover · runs on native host",
   );
+});
+
+test("agentMeta names the login fix for signed-out Codex instead of a generic unavailable label", () => {
+  const meta = agentMeta(agent({
+    id: "codex",
+    name: "Codex",
+    driver: "codex-app-server",
+    available: false,
+    authStatus: "unauthenticated",
+    codexAppServer: { status: "supported", appServerAvailable: true, transport: "stdio" },
+  }));
+  assert.match(meta, /codex login/);
+  assert.doesNotMatch(meta, /Interactive target unavailable/);
+  assert.doesNotMatch(meta, /interactive target ready/);
+  // A signed-out non-codex ACP agent keeps the generic note.
+  assert.match(agentMeta(agent({ id: "g", name: "Gemini", driver: "acp", authStatus: "unauthenticated" })), /not signed in/);
 });
 
 test("agentMeta exposes Registry transport, adapter version, and approval state", () => {
