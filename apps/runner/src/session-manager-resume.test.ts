@@ -650,6 +650,11 @@ test("stopping an admission-queued session terminalizes every retained prompt", 
       "C:COMMAND_CANCELLED:session stopped before runner admission",
     ]);
     assert.equal(internals.preLaunchQueues.has("resume-session"), false);
+    assert.deepEqual(
+      h.sent.filter((message) => message.type === "session_queue").at(-1)?.queue,
+      [],
+      "stopping clears the formerly live pre-admission queue projection",
+    );
   } finally {
     internals.releaseAdmission("capacity-blocker");
     h.manager.shutdownAll();
@@ -691,6 +696,11 @@ test("a failed initial launch terminalizes every admission-retained prompt", asy
       "C:COMMAND_CANCELLED:session launch failed before runner admission",
     ]);
     assert.equal(internals.preLaunchQueues.has("resume-session"), false);
+    assert.deepEqual(
+      h.sent.filter((message) => message.type === "session_queue").at(-1)?.queue,
+      [],
+      "launch failure clears the formerly live pre-admission queue projection",
+    );
   } finally {
     internals.releaseAdmission("capacity-blocker");
     h.manager.shutdownAll();

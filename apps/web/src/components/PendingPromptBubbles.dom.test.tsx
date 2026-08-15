@@ -4,7 +4,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { PendingPromptView } from "@wollipog/protocol";
-import { PendingPromptBubbles } from "./PendingPromptBubbles.js";
+import { PendingPromptBubbles, shouldShowOptimisticPrompt } from "./PendingPromptBubbles.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 for (const [name, value] of Object.entries({
@@ -25,6 +25,15 @@ const pending = (overrides: Partial<PendingPromptView>): PendingPromptView => ({
   createdAt: 10,
   updatedAt: 10,
   ...overrides,
+});
+
+test("queued and active-turn prompts never create a legacy optimistic transcript bubble", () => {
+  assert.equal(shouldShowOptimisticPrompt("idle", false), true);
+  assert.equal(shouldShowOptimisticPrompt("queued", false), false);
+  assert.equal(shouldShowOptimisticPrompt("starting", false), false);
+  assert.equal(shouldShowOptimisticPrompt("running", false), false);
+  assert.equal(shouldShowOptimisticPrompt("input_required", false), false);
+  assert.equal(shouldShowOptimisticPrompt("idle", true), false);
 });
 
 test("pending prompts render as stable transcript bubbles and reconcile by command id", async () => {
@@ -59,6 +68,11 @@ test("pending prompts render as stable transcript bubbles and reconcile by comma
       ["Pending", "Queued", "Cancelled"],
     );
     const buttons = [...container.querySelectorAll("button")];
+    assert.deepEqual(buttons.map((button) => button.getAttribute("aria-describedby")), [
+      "pending-prompt-details-cancel-local",
+      "pending-prompt-details-cancel-live",
+      "pending-prompt-details-failed",
+    ]);
     await act(async () => { for (const button of buttons) button.click(); });
     assert.deepEqual(actions, ["pending:cancel-local", "live:cancel-live", "dismiss:failed"]);
     assert.match(container.textContent ?? "", /prompt cancelled before runner delivery/);

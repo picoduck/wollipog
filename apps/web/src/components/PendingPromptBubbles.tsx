@@ -1,4 +1,4 @@
-import type { PendingPromptState, PendingPromptView } from "@wollipog/protocol";
+import type { PendingPromptState, PendingPromptView, SessionStatus } from "@wollipog/protocol";
 
 const LABELS: Record<PendingPromptState, string> = {
   pending: "Pending",
@@ -14,6 +14,14 @@ export function pendingPromptLabel(prompt: PendingPromptView): string {
   return prompt.state === "failed" && prompt.errorCode === "COMMAND_CANCELLED"
     ? "Cancelled"
     : LABELS[prompt.state];
+}
+
+export function shouldShowOptimisticPrompt(
+  status: SessionStatus,
+  durableProviderInvocation: boolean,
+): boolean {
+  return !durableProviderInvocation &&
+    !["queued", "running", "starting", "input_required"].includes(status);
 }
 
 export function PendingPromptBubbles({
@@ -40,6 +48,7 @@ export function PendingPromptBubbles({
     const cancelPending = prompt.canCancel === true;
     const cancelLive = !cancelPending && !prompt.canDismiss && canCancelLive &&
       liveQueueIds.has(prompt.commandId);
+    const detailsId = `pending-prompt-details-${prompt.commandId}`;
     return (
       <div
         className="tl-row user"
@@ -53,9 +62,11 @@ export function PendingPromptBubbles({
               {prompt.attemptCount > 1 ? `${prompt.attemptCount} Attempts` : "Awaiting Delivery"}
             </span>
           </div>
-          {prompt.hasImages && <div className="pending-prompt-attachment">Image Attachment</div>}
-          {prompt.text && <div className="bubble-text">{prompt.text}</div>}
-          {prompt.error && <div className="pending-prompt-error">{prompt.error}</div>}
+          <div id={detailsId}>
+            {prompt.hasImages && <div className="pending-prompt-attachment">Image Attachment</div>}
+            {prompt.text && <div className="bubble-text">{prompt.text}</div>}
+            {prompt.error && <div className="pending-prompt-error">{prompt.error}</div>}
+          </div>
           {(cancelPending || cancelLive || prompt.canDismiss) && (
             <div className="pending-prompt-actions">
               {(cancelPending || cancelLive) && (
@@ -64,6 +75,7 @@ export function PendingPromptBubbles({
                   className="btn ghost sm"
                   disabled={busy}
                   aria-label="Cancel Pending Message"
+                  aria-describedby={detailsId}
                   onClick={() => cancelPending
                     ? onCancelPending(prompt.commandId)
                     : onCancelLive(prompt.commandId)}
@@ -77,6 +89,7 @@ export function PendingPromptBubbles({
                   className="btn ghost sm"
                   disabled={busy}
                   aria-label="Dismiss Pending Message"
+                  aria-describedby={detailsId}
                   onClick={() => onDismiss(prompt.commandId)}
                 >
                   {busy ? "Dismissing…" : "Dismiss"}

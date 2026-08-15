@@ -1221,9 +1221,7 @@ export class SessionManager {
     } finally {
       reportMaterialized(false);
       if (this.launchGenerations.get(spec.sessionId) === launchGeneration) {
-        const queued = this.preLaunchQueues.get(spec.sessionId);
-        if (queued) this.rejectQueued(queued, "session launch failed before runner admission");
-        this.preLaunchQueues.delete(spec.sessionId);
+        this.rejectPreLaunchQueue(spec.sessionId, "session launch failed before runner admission");
       }
       if (this.preLaunchAdmissionGenerations.get(spec.sessionId) === launchGeneration) {
         this.preLaunchAdmissionGenerations.delete(spec.sessionId);
@@ -2714,8 +2712,7 @@ export class SessionManager {
     if (!queue?.length) return;
     const entry = this.active.get(sessionId);
     if (!entry) {
-      this.rejectQueued(queue, "session launch ended before runner admission");
-      this.preLaunchQueues.delete(sessionId);
+      this.rejectPreLaunchQueue(sessionId, "session launch ended before runner admission");
       return;
     }
     for (const prompt of queue) {
@@ -3659,6 +3656,16 @@ export class SessionManager {
 
   private rejectQueued(queue: QueuedPrompt[], error: string): void {
     for (const prompt of queue) this.failQueuedPrompt(prompt, error, "COMMAND_CANCELLED");
+  }
+
+  /** Terminalize and remove a pre-admission queue, then clear its live dashboard projection. */
+  private rejectPreLaunchQueue(sessionId: string, error: string): boolean {
+    const queue = this.preLaunchQueues.get(sessionId);
+    if (!queue) return false;
+    this.rejectQueued(queue, error);
+    this.preLaunchQueues.delete(sessionId);
+    this.emitQueue(sessionId);
+    return true;
   }
 
   private failQueuedPrompt(
@@ -4811,9 +4818,7 @@ export class SessionManager {
     this.releaseAdmissionIfInactive(sessionId);
     const entry = this.active.get(sessionId);
     if (!entry) {
-      const queued = this.preLaunchQueues.get(sessionId);
-      if (queued) this.rejectQueued(queued, "session cancelled before runner admission");
-      this.preLaunchQueues.delete(sessionId);
+      this.rejectPreLaunchQueue(sessionId, "session cancelled before runner admission");
       if (cancelledPreparation || cancelledWait || cancelledAdmittedStart) {
         this.emitStatus(
           sessionId,
@@ -4921,9 +4926,7 @@ export class SessionManager {
     this.clearSteeringState(sessionId, "session stopped before steering settled");
     const entry = this.active.get(sessionId);
     if (!entry) {
-      const queued = this.preLaunchQueues.get(sessionId);
-      if (queued) this.rejectQueued(queued, "session stopped before runner admission");
-      this.preLaunchQueues.delete(sessionId);
+      this.rejectPreLaunchQueue(sessionId, "session stopped before runner admission");
       this.cancelAdmissionWait(sessionId);
       // Not in-process but may exist in the store — record the stop there too.
       if (this.store.has(sessionId)) {
@@ -5001,9 +5004,7 @@ export class SessionManager {
       }
 
       this.beginLaunchGeneration(sessionId);
-      const preLaunch = this.preLaunchQueues.get(sessionId);
-      if (preLaunch) this.rejectQueued(preLaunch, "session deleted before runner admission");
-      this.preLaunchQueues.delete(sessionId);
+      this.rejectPreLaunchQueue(sessionId, "session deleted before runner admission");
       // Deletion is terminal, not a replacement launch. Stale continuations may perform only
       // idempotent lock/admission release; the deletion journal exclusively owns destructive
       // worktree/provider cleanup.

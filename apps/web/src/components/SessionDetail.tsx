@@ -40,7 +40,7 @@ import { RightPanel, type RightPanelState } from "./RightPanel.js";
 import { useGitStatus, useGitSummary } from "./useGitStatus.js";
 import { ImageStrip, usePastedImages } from "./images.js";
 import { PromptImageView } from "./PromptImageView.js";
-import { PendingPromptBubbles } from "./PendingPromptBubbles.js";
+import { PendingPromptBubbles, shouldShowOptimisticPrompt } from "./PendingPromptBubbles.js";
 import { ApprovalsControl, ModelEffortControl } from "./ComposerControls.js";
 import { modelSupportsImages, resolveCaps } from "../caps.js";
 import { PinnedSummary } from "./PinnedSummary.js";
@@ -1492,10 +1492,10 @@ function SessionDetailLoaded({
     // from the queued list. The queue list under the composer is the honest echo there.
     // input_required counts as active: a turn parked on a mid-turn tool approval still holds the
     // runner's turn slot, so a send there queues exactly like running/starting.
-    const willQueue =
-      session.status === "running" || session.status === "starting" || session.status === "input_required";
     sendBaselineRef.current = timelineUserPrompts.length;
-    if (!willQueue && !durableProviderInvocation) setPending({ text: outgoing, images: outgoingImages });
+    if (shouldShowOptimisticPrompt(session.status, durableProviderInvocation)) {
+      setPending({ text: outgoing, images: outgoingImages });
+    }
     let providerAccepted = false;
     let preservedDraftVersion: number | null = null;
     const reservationPromise = reserveComposerDraftSnapshot(

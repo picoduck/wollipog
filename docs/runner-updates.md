@@ -80,7 +80,7 @@ Pre-v57 runners remain compatible with terminal open/input/close, but their proc
 exited on disconnect because they cannot prove a surviving inventory; update before relying on
 detach/reconnect recovery.
 
-Protocol v76 carries ordinary prompts admitted during queued/starting launches through the durable
+Protocol v77 carries ordinary prompts admitted during queued/starting launches through the durable
 command journal. The command ID is also the runner queue ID and the canonical user-event identity,
 so the dashboard can show one pending transcript bubble across reload, retry, live admission, and
 history reconciliation without matching user text. Cancellation remains deliberately narrow: the
