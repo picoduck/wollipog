@@ -18,6 +18,13 @@ export interface ComposerDraft {
   commandSubmission?: ComposerCommandSubmission;
 }
 
+export interface ComposerDraftReservation extends ComposerDraft {
+  /** A matching IndexedDB revision observed immediately before this reservation had to fall back
+   * to localStorage. Provider acceptance owns that exact pre-reservation snapshot too, while any
+   * later cross-tab save has a different revision and must remain visible. */
+  supersededRevision?: string;
+}
+
 export interface ComposerCommandSubmission {
   submissionId: string;
   providerCommandId: string;
@@ -62,6 +69,7 @@ type ExternalDeletionMarker =
       deletedAt: number;
       fingerprint?: string;
       expectedRevision?: string;
+      supersededRevision?: string;
     };
 
 function loadFallbackTombstone(sessionId: string, instanceScope: string): ExternalDeletionMarker | null {
@@ -77,17 +85,21 @@ function loadFallbackTombstone(sessionId: string, instanceScope: string): Extern
     const expectedRevision = typeof marker.expectedRevision === "string"
       ? marker.expectedRevision
       : undefined;
+    const supersededRevision = typeof marker.supersededRevision === "string"
+      ? marker.supersededRevision
+      : undefined;
     const fingerprint = typeof marker.fingerprint === "string" &&
       /^[a-f0-9]{64}$/.test(marker.fingerprint)
       ? marker.fingerprint
       : undefined;
-    if (!expectedRevision && !fingerprint) return null;
+    if (!expectedRevision && !supersededRevision && !fingerprint) return null;
     return {
       version: 1,
       kind: "conditional",
       deletedAt: marker.deletedAt!,
       ...(fingerprint ? { fingerprint } : {}),
       ...(expectedRevision ? { expectedRevision } : {}),
+      ...(supersededRevision ? { supersededRevision } : {}),
     };
   } catch {
     return null;
@@ -127,11 +139,15 @@ function normalizedDraftFingerprintInput(
 async function draftFingerprint(text: string, images: readonly PromptImageInput[]): Promise<string | null> {
   const subtle = globalThis.crypto?.subtle;
   if (!subtle) return null;
-  const digest = await subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(normalizedDraftFingerprintInput(text, images)),
-  );
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  try {
+    const digest = await subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(normalizedDraftFingerprintInput(text, images)),
+    );
+    return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  } catch {
+    return null;
+  }
 }
 
 async function markerSuppressesDraft(
@@ -140,17 +156,19 @@ async function markerSuppressesDraft(
 ): Promise<boolean> {
   if (!marker || !draft) return false;
   if (marker.kind === "unconditional") return draft.updatedAt <= marker.deletedAt;
-  if (marker.expectedRevision !== undefined) {
-    if (draft.revision !== marker.expectedRevision) return false;
+  if (draft.revision !== undefined &&
+      (draft.revision === marker.expectedRevision || draft.revision === marker.supersededRevision)) {
     // A revision is the immutable identity minted for this exact reservation. It is sufficient on
-    // non-secure LAN HTTP where SubtleCrypto is unavailable; a fingerprint remains additive when
-    // one was already recorded by an older/degraded cleanup path.
-    if (!marker.fingerprint) return true;
-  } else if (draft.updatedAt > marker.deletedAt) {
-    // Fingerprint-only intent identifies content, not a stable snapshot. Do not let it suppress an
-    // identical draft saved after the conditional deletion was attempted.
-    return false;
+    // non-secure LAN HTTP where SubtleCrypto is unavailable. A separately observed superseded
+    // revision is equally exact; a later cross-tab save necessarily mints another revision.
+    return true;
   }
+  // Once a marker carries revision identities, any other revision is a distinct save even when
+  // its content and timestamp happen to match. Fingerprints are only the legacy/id-less fallback.
+  if (marker.expectedRevision !== undefined || marker.supersededRevision !== undefined) return false;
+  // Fingerprint fallback identifies content, not a stable snapshot. Do not let it suppress an
+  // identical draft saved after the acceptance/deletion attempt.
+  if (draft.updatedAt > marker.deletedAt) return false;
   return marker.fingerprint !== undefined &&
     (await draftFingerprint(draft.text, draft.images)) === marker.fingerprint;
 }
@@ -616,9 +634,11 @@ export async function deleteComposerDraft(
   };
   pendingHandoffs.delete(key);
   revisions.set(key, revision(key) + 1);
+  let idbDeleted = false;
   if (typeof indexedDB !== "undefined") {
     try {
       await idbDelete(await openDb(), key);
+      idbDeleted = true;
     } catch {
       // The current database cannot carry its atomic tombstone. Record the confirmed deletion in
       // current-only instance storage before clearing fallback data or consulting legacy again.
@@ -628,6 +648,11 @@ export async function deleteComposerDraft(
     saveFallbackTombstone(sessionId, instanceScope, deletionMarker);
   }
   removeInstanceStorageValue(fallbackLogicalKey(sessionId), instanceScope);
+  // A successful IndexedDB tombstone already blocks legacy re-import. Retain the external marker
+  // only when a fallback record physically survived its best-effort removal.
+  if (idbDeleted && fallbackLoadRaw(sessionId, instanceScope) === null) {
+    clearFallbackTombstone(sessionId, instanceScope);
+  }
 }
 
 /** Delete only the exact submitted snapshot. A newer edit must survive a delayed prompt or
@@ -638,6 +663,7 @@ export async function deleteComposerDraftIfMatches(
   images: readonly PromptImageInput[],
   instanceScope = LOCAL_INSTANCE_SCOPE,
   expectedRevision?: string,
+  supersededRevision?: string,
 ): Promise<boolean> {
   const key = draftKey(sessionId, instanceScope);
   const deletedAt = Date.now();
@@ -674,21 +700,28 @@ export async function deleteComposerDraftIfMatches(
     deleted = true;
   }
   if (!currentIdbReliable || (deleted && !idbDeleted)) {
-    const fingerprint = expectedRevision === undefined
+    const fingerprint = expectedRevision === undefined && supersededRevision === undefined
       ? await draftFingerprint(text, images)
       : null;
-    if (expectedRevision === undefined && !fingerprint) return deleted;
+    if (expectedRevision === undefined && supersededRevision === undefined && !fingerprint) return deleted;
     const deletionMarker: ExternalDeletionMarker = {
       version: 1,
       kind: "conditional",
       deletedAt,
       ...(fingerprint ? { fingerprint } : {}),
       ...(expectedRevision !== undefined ? { expectedRevision } : {}),
+      ...(supersededRevision !== undefined ? { supersededRevision } : {}),
     };
     // A failed operation is uncertain even when no currently readable snapshot matched, while a
     // matched handoff/fallback can outlive a reliable-but-nonmatching IDB view. In both cases the
     // typed marker suppresses only the submitted snapshot and preserves a newer record.
     saveFallbackTombstone(sessionId, instanceScope, deletionMarker);
+  }
+  if (idbDeleted) {
+    const survivingFallback = fallbackLoadRaw(sessionId, instanceScope);
+    const submittedFallbackSurvived = composerDraftMatches(survivingFallback, text, images) &&
+      (expectedRevision === undefined || survivingFallback?.revision === expectedRevision);
+    if (!submittedFallbackSurvived) clearFallbackTombstone(sessionId, instanceScope);
   }
   return deleted;
 }
@@ -702,17 +735,19 @@ export async function markComposerDraftAccepted(
   images: readonly PromptImageInput[],
   instanceScope = LOCAL_INSTANCE_SCOPE,
   expectedRevision?: string,
+  supersededRevision?: string,
 ): Promise<boolean> {
-  const fingerprint = expectedRevision === undefined
+  const fingerprint = expectedRevision === undefined && supersededRevision === undefined
     ? await draftFingerprint(text, images)
     : null;
-  if (expectedRevision === undefined && !fingerprint) return false;
+  if (expectedRevision === undefined && supersededRevision === undefined && !fingerprint) return false;
   const marker: ExternalDeletionMarker = {
     version: 1,
     kind: "conditional",
     deletedAt: Date.now(),
     ...(fingerprint ? { fingerprint } : {}),
     ...(expectedRevision !== undefined ? { expectedRevision } : {}),
+    ...(supersededRevision !== undefined ? { supersededRevision } : {}),
   };
   return saveFallbackTombstone(sessionId, instanceScope, marker);
 }
@@ -725,7 +760,7 @@ export async function reserveComposerDraftSnapshot(
   images: PromptImageInput[],
   instanceScope = LOCAL_INSTANCE_SCOPE,
   commandSubmission?: ComposerCommandSubmission,
-): Promise<ComposerDraft> {
+): Promise<ComposerDraftReservation> {
   const key = draftKey(sessionId, instanceScope);
   const draft: ComposerDraft = {
     text,
@@ -736,9 +771,21 @@ export async function reserveComposerDraftSnapshot(
   };
   if (discardedSessionIds.has(key)) return draft;
   pendingHandoffs.delete(key);
+  let supersededRevision: string | undefined;
   if (typeof indexedDB !== "undefined") {
     try {
-      await idbPut(await openDb(), key, draft);
+      const db = await openDb();
+      try {
+        const prior = await idbReadCurrent(db, key);
+        const priorDraft = prior.tombstoned ? null : parseComposerDraft(prior.value);
+        if (composerDraftMatches(priorDraft, text, images) && priorDraft?.revision !== draft.revision) {
+          supersededRevision = priorDraft?.revision;
+        }
+      } catch {
+        // The write can still succeed. If it does not, the exact fallback reservation remains
+        // protected; never guess at an unreadable prior revision and risk hiding a newer edit.
+      }
+      await idbPut(db, key, draft);
       clearFallbackTombstone(sessionId, instanceScope);
       if (discardedSessionIds.has(key)) {
         await idbDelete(await openDb(), key);
@@ -759,7 +806,10 @@ export async function reserveComposerDraftSnapshot(
     JSON.stringify(fallbackDraft),
     instanceScope,
   );
-  return fallbackDraft;
+  return {
+    ...fallbackDraft,
+    ...(supersededRevision ? { supersededRevision } : {}),
+  };
 }
 
 /** Permanently discard a deleted session's draft and reject late debounce/unmount writes. Session

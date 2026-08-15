@@ -1503,6 +1503,7 @@ function SessionDetailLoaded({
         submittedDraft.images,
         instanceScope,
         reservedDraft.revision,
+        reservedDraft.supersededRevision,
       ).catch(() => false);
       const deleted = await composerDraftCleanup(
         sessionId,
@@ -1510,6 +1511,7 @@ function SessionDetailLoaded({
         submittedDraft.images,
         instanceScope,
         reservedDraft.revision,
+        reservedDraft.supersededRevision,
       ).catch(() => false);
       if (preservedImages.length && preservedDraftVersion !== null &&
           viewGenerationRef.current === generation &&
@@ -1605,6 +1607,7 @@ function SessionDetailLoaded({
         submittedDraft.images,
         instanceScope,
         reservedDraft.revision,
+        reservedDraft.supersededRevision,
       );
     } catch (cause) {
       recoverReservation = true;
