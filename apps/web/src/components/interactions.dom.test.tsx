@@ -201,6 +201,48 @@ function offlinePolicySession(requestId: string, withContext: boolean): SessionV
   } as SessionView;
 }
 
+function authenticationSession(): SessionView {
+  return {
+    id: "session-1",
+    runnerId: "runner-1",
+    title: "Session",
+    status: "input_required",
+    pendingApproval: {
+      kind: "authentication",
+      requestId: "provider-auth:test",
+      title: "Authentication Required — Claude Code",
+      options: [],
+      context: { toolName: "Claude Code", input: "Run `claude` in this exact context." },
+    },
+  } as unknown as SessionView;
+}
+
+test("provider authentication card uses the visible Authentication Required accessible name", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      <SessionApprovalRegion
+        session={authenticationSession()}
+        runnerOnline
+        fallbackFocusRef={{ current: null }}
+      />,
+    );
+  });
+  const card = container.querySelector<HTMLElement>('[aria-label="Authentication Required"]');
+  assert.ok(card);
+  assert.match(card.textContent ?? "", /Authentication Required — Claude Code/);
+  assert.deepEqual(
+    [...card.querySelectorAll<HTMLButtonElement>(".approval-actions button")].map((button) => button.textContent?.trim()),
+    ["Hide Details"],
+    "terminal login guidance offers context details but no fake provider approval action",
+  );
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
 function OfflineApprovalHarness({ requestId, withContext }: { requestId: string; withContext: boolean }) {
   const fallbackRef = useRef<HTMLTextAreaElement>(null);
   return (

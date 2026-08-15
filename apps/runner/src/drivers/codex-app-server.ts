@@ -23,6 +23,7 @@ import type {
   DriverSteerResult,
   StopReason,
 } from "./driver.js";
+import { isProviderAuthenticationFailure } from "./provider-auth-failure.js";
 import { stagePromptImages, type StagedPromptImages } from "./prompt-images.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -232,7 +233,10 @@ export class CodexAppServerDriver implements Driver {
     child.stderr.on("data", (t: string) => {
       if (this.disposed) return;
       const s = String(t).trim();
-      if (s && !/DeprecationWarning|trace-deprecation/.test(s)) this.cb.onStderr(s);
+      if (s && !/DeprecationWarning|trace-deprecation/.test(s)) {
+        if (isProviderAuthenticationFailure(s)) this.cb.onAuthenticationFailure?.();
+        else this.cb.onStderr(s);
+      }
     });
     child.on("exit", (code) => {
       peer.dispose("codex app-server exited");
@@ -344,7 +348,7 @@ export class CodexAppServerDriver implements Driver {
       const params = buildCodexTurnParams(this.config, this.threadId, this.cwd, input);
 
       this.peer!.request("turn/start", params).catch((e: Json) => {
-        this.cb.onEvent({ kind: "error", message: `turn/start failed: ${e?.message ?? String(e)}` });
+        this.emitDriverError(`turn/start failed: ${e?.message ?? String(e)}`);
         this.settleTurn("refusal");
       });
     });
@@ -610,7 +614,8 @@ export class CodexAppServerDriver implements Driver {
     }
     if (!message || this.emittedErrors.has(message)) return;
     this.emittedErrors.add(message);
-    this.cb.onEvent({ kind: "error", message });
+    if (isProviderAuthenticationFailure(message)) this.cb.onAuthenticationFailure?.();
+    else this.cb.onEvent({ kind: "error", message });
   }
 
   private emitPendingTurnUsage(): void {

@@ -21,6 +21,7 @@ import { join } from "node:path";
 import type { AgentContext, PlanEntry, PromptImage, SessionConfig } from "@wollipog/protocol";
 import { killTree, spawnAgent, type AgentProcess } from "../spawn.js";
 import type { Driver, DriverCallbacks, DriverOptions, StopReason } from "./driver.js";
+import { isProviderAuthenticationFailure } from "./provider-auth-failure.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Json = any;
@@ -222,7 +223,10 @@ export class CodexDriver implements Driver {
       child.stderr.on("data", (t: string) => {
         if (this.disposed || this.cancelled) return;
         const s = String(t).trim();
-        if (s && !/Reading additional input from stdin/i.test(s)) this.cb.onStderr(s);
+        if (s && !/Reading additional input from stdin/i.test(s)) {
+          if (isProviderAuthenticationFailure(s)) this.cb.onAuthenticationFailure?.();
+          else this.cb.onStderr(s);
+        }
       });
 
       child.on("error", (err: Error) => {
@@ -300,14 +304,19 @@ export class CodexDriver implements Driver {
         return "end_turn";
       }
       case "turn.failed":
-        if (msg.error?.message) this.cb.onEvent({ kind: "error", message: String(msg.error.message) });
+        if (msg.error?.message) this.emitErrorOrAuthenticationFailure(String(msg.error.message));
         return "refusal";
       case "error":
-        this.cb.onEvent({ kind: "error", message: String(msg.message ?? "codex error") });
+        this.emitErrorOrAuthenticationFailure(String(msg.message ?? "codex error"));
         return "refusal";
       default:
         return null;
     }
+  }
+
+  private emitErrorOrAuthenticationFailure(message: string): void {
+    if (isProviderAuthenticationFailure(message)) this.cb.onAuthenticationFailure?.();
+    else this.cb.onEvent({ kind: "error", message });
   }
 
   private handleItem(phase: string, item: Json): void {

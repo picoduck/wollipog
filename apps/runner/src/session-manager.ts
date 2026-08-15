@@ -311,6 +311,9 @@ interface ActiveSession {
   /** The current manual command crossed its durable started boundary and may have reached the
    * provider. History-integrity containment must settle this lane as uncertain, never rejected. */
   sessionCommandProviderStarted?: boolean;
+  /** A provider credential failure cancelled the current turn. Existing FIFO work stays held until
+   * a new user prompt explicitly asks the runner to revalidate the exact installation. */
+  authenticationBlocked?: boolean;
 }
 
 /** Capability-derived resume gate. ACP must have proven stable resume or load in its last live
@@ -2012,6 +2015,7 @@ export class SessionManager {
         onAuthStatus: (status) => {
           if (meta.agentId) this.onAgentAuthUpdate?.(meta.agentId, { status });
         },
+        onAuthenticationFailure: () => this.onProviderAuthenticationFailure(sessionId),
         onAcpCapabilities: (capabilities) => {
           meta.acpCapabilities = capabilities;
           this.store.patchMeta(sessionId, { acpCapabilities: capabilities });
@@ -2213,6 +2217,19 @@ export class SessionManager {
         client.dispose();
         if (this.active.get(sessionId) === entry) this.active.delete(sessionId);
         await this.cancelNewCloudHandoff(meta, hadCloudHandoffBeforeLaunch, "session launch was cancelled during driver initialization", launchGeneration);
+        return false;
+      }
+      if (entry.authenticationBlocked) {
+        this.emitTelemetry(meta, {
+          metric: "launch",
+          outcome: "failure",
+          durationMs: Date.now() - launchStarted,
+          reason: resumeId ? "process_restart" : "fresh",
+        });
+        this.emitStatus(sessionId, "input_required", `${providerDisplayName(meta.driver)} authentication is required`);
+        client.dispose();
+        if (this.active.get(sessionId) === entry) this.active.delete(sessionId);
+        await this.cancelNewCloudHandoff(meta, hadCloudHandoffBeforeLaunch, "provider authentication is required", launchGeneration);
         return false;
       }
       this.emitTelemetry(meta, {
@@ -2617,6 +2634,13 @@ export class SessionManager {
       }
     }
 
+    const persistedAuthenticationBlock = isProviderAuthenticationBlock(
+      this.store.readMeta(sessionId)?.pendingApproval,
+    );
+    if (persistedAuthenticationBlock) {
+      if (syntheticRecovery) return false;
+      this.store.patchMeta(sessionId, { pendingApproval: null });
+    }
     const recovering = this.recoveryQueues.get(sessionId);
     if (recovering) {
       if (!this.queueCanAccept(this.recoveryQueueCapacityView(sessionId, recovering), text, images)) {
@@ -2645,6 +2669,13 @@ export class SessionManager {
     if (entry.historyIntegrityFailure) {
       durable?.failed(entry.historyIntegrityFailure, "INVALID_COMMAND");
       return false;
+    }
+    if (entry.authenticationBlocked && !syntheticRecovery) {
+      entry.authenticationBlocked = false;
+      const pending = this.store.readMeta(sessionId)?.pendingApproval;
+      if (isProviderAuthenticationBlock(pending)) {
+        this.store.patchMeta(sessionId, { pendingApproval: null });
+      }
     }
     // Bound the queue by count AND bytes: entries hold full prompt text + image payloads in
     // memory, so a runaway sender (a looping automation, a stuck retry, a burst of pasted
@@ -2694,6 +2725,10 @@ export class SessionManager {
     }
     if (!entry.providerReady) {
       lifecycle.failed("the provider command is unavailable until session launch completes", "COMMAND_UNAVAILABLE");
+      return false;
+    }
+    if (entry.authenticationBlocked) {
+      lifecycle.failed("provider authentication is required", "COMMAND_UNAVAILABLE");
       return false;
     }
     if (entry.historyIntegrityFailure) {
@@ -3811,7 +3846,7 @@ export class SessionManager {
     this.lockTimers.set(sessionId, refresh);
     entry.running = true;
     try {
-      while (this.active.has(sessionId) && entry.queue.length) {
+      while (this.active.has(sessionId) && entry.queue.length && !entry.authenticationBlocked) {
         if (this.steerFences(entry).size || this.reservedPromotionPrecedesQueue(sessionId, entry)) break;
         const next = entry.queue.shift()!;
         this.ensureQueueOrdinal(sessionId, next);
@@ -3877,6 +3912,7 @@ export class SessionManager {
           entry.activeTurnId = undefined;
           entry.activeTurnConfig = undefined;
         }
+        if (entry.authenticationBlocked) break;
         if (this.steerFences(entry).size) {
           await this.waitForSteeringFences(entry);
           if (this.active.get(sessionId) !== entry) break;
@@ -4160,6 +4196,11 @@ export class SessionManager {
       }
       await this.recordConversationForkPoint(sessionId, entry, stop, postTurnTree);
       if (entry.historyIntegrityFailure) return;
+      if (entry.authenticationBlocked) {
+        this.emitStatus(sessionId, "input_required", "Provider authentication is required");
+        durable?.failed("provider authentication is required", "PROVIDER_AUTHENTICATION_REQUIRED");
+        return;
+      }
       const interrupted = !entry.governanceTripped && entry.interruptRequested && stop === "cancelled";
       if (interrupted) {
         this.emitEvent(sessionId, { kind: "turn_interrupted" });
@@ -4192,6 +4233,11 @@ export class SessionManager {
       if (entry.governanceTripped) {
         this.emitStatus(sessionId, "idle");
         durable?.completed();
+        return;
+      }
+      if (entry.authenticationBlocked) {
+        this.emitStatus(sessionId, "input_required", "Provider authentication is required");
+        durable?.failed("provider authentication is required", "PROVIDER_AUTHENTICATION_REQUIRED");
         return;
       }
       this.emitEvent(sessionId, { kind: "error", message: `prompt failed: ${errText(err)}` }, durable);
@@ -5951,6 +5997,30 @@ export class SessionManager {
     this.emitEvent(sessionId, { kind: "stderr", text });
   }
 
+  private onProviderAuthenticationFailure(sessionId: string): void {
+    const entry = this.active.get(sessionId);
+    const meta = this.store.readMeta(sessionId);
+    if (!entry || !meta || entry.authenticationBlocked || entry.historyIntegrityFailure) return;
+    entry.authenticationBlocked = true;
+    if (meta.agentId) this.onAgentAuthUpdate?.(meta.agentId, { status: "unauthenticated" });
+    const provider = providerDisplayName(meta.driver);
+    const guidance = providerAuthenticationGuidance(meta);
+    if (!this.emitEvent(sessionId, {
+      kind: "permission_request",
+      requestId: `provider-auth:${randomUUID()}`,
+      title: `Authentication Required — ${provider}`,
+      options: [],
+      purpose: "authentication",
+      context: { toolName: provider, input: guidance },
+    })) return;
+    this.emitStatus(sessionId, "input_required", `${provider} authentication is required`);
+    try {
+      entry.client.cancel();
+    } catch (error) {
+      this.log(`provider authentication cancellation failed for ${sessionId}: ${errText(error)}`);
+    }
+  }
+
   private emitTelemetry(
     meta: SessionMeta,
     event: Pick<Extract<RunnerToControlPlane, { type: "driver_telemetry" }>, "metric" | "outcome" | "durationMs" | "reason">,
@@ -6042,6 +6112,34 @@ function errText(err: unknown): string {
     return String((err as { message: unknown }).message);
   }
   return String(err);
+}
+
+function isProviderAuthenticationBlock(pending: SessionMeta["pendingApproval"] | undefined): boolean {
+  return pending?.kind === "authentication" && pending.options.length === 0 &&
+    pending.requestId.startsWith("provider-auth:");
+}
+
+function providerDisplayName(driver: AgentDriverKind): string {
+  if (driver === "claude-code") return "Claude Code";
+  if (driver === "codex" || driver === "codex-app-server") return "Codex";
+  return "Agent Provider";
+}
+
+function providerAuthenticationGuidance(meta: SessionMeta): string {
+  const provider = providerDisplayName(meta.driver);
+  const login = meta.driver === "claude-code" ? "claude" : meta.driver === "acp" ? meta.command : "codex login";
+  const machine = meta.executionTarget
+    ? `${meta.executionTarget.adapter} target ${meta.executionTarget.id}`
+    : meta.context.kind === "wsl"
+      ? `WSL distribution ${meta.context.distro}`
+      : "this native runner";
+  const location = meta.worktreePath ?? meta.repoPath;
+  return [
+    `Provider: ${provider}`,
+    `Machine: ${machine}`,
+    `Location: ${location}`,
+    `Run \`${login}\` in that exact context and complete sign-in. Then send a new message to retry.`,
+  ].join("\n");
 }
 
 function boundedSessionIdForLog(sessionId: string): string {

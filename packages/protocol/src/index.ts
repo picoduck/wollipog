@@ -3406,6 +3406,7 @@ export type DurableSessionCommandErrorCode =
   | "SESSION_NOT_FOUND"
   | "QUEUE_FULL"
   | "COMMAND_CANCELLED"
+  | "PROVIDER_AUTHENTICATION_REQUIRED"
   | "RECEIPT_STORE_FULL";
 
 /** Direct response to one delivery attempt. The runner derives duplicate status from its durable

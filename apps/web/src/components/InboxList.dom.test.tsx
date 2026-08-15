@@ -292,6 +292,17 @@ test("busy rows show activity while stalled approval remains distinct and access
     pendingApproval: { requestId: "request-1", title: "Allow command?", options: [] },
   };
   const idle = session("idle", "Idle Session");
+  const authentication = {
+    ...session("authentication", "Authentication Block"),
+    status: "input_required" as const,
+    column: "input_required" as const,
+    pendingApproval: {
+      kind: "authentication" as const,
+      requestId: "provider-auth:test",
+      title: "Authentication Required — Claude Code",
+      options: [],
+    },
+  };
   const activityBySession = new Map([
     [running.id, recordSessionActivity(undefined, now)],
     [stalled.id, recordSessionActivity(undefined, now - 11 * 60_000)],
@@ -300,7 +311,7 @@ test("busy rows show activity while stalled approval remains distinct and access
   await act(async () => {
     root.render(
       <InboxList
-        entries={[running, stalled, idle].map((entry) => ({ session: entry, projectName: "Wollipog", unread: false }))}
+        entries={[running, stalled, idle, authentication].map((entry) => ({ session: entry, projectName: "Wollipog", unread: false }))}
         selectedSessionId={running.id}
         pinnedSessionIds={new Set()}
         activityBySession={activityBySession}
@@ -317,7 +328,7 @@ test("busy rows show activity while stalled approval remains distinct and access
   });
 
   const rows = [...container.querySelectorAll<HTMLElement>('[role="row"]')];
-  assert.equal(container.querySelectorAll(".activity-strip").length, 2, "idle sessions have no activity strip");
+  assert.equal(container.querySelectorAll(".activity-strip").length, 3, "idle sessions have no activity strip");
   assert.equal(rows[1]!.classList.contains("stalled"), true);
   assert.match(rows[1]!.textContent ?? "", /Approval/);
   assert.match(rows[1]!.textContent ?? "", /Stalled/);
@@ -325,6 +336,7 @@ test("busy rows show activity while stalled approval remains distinct and access
     rows[1]!.querySelector('[aria-label="Stalled: No Activity for at Least 10 Minutes"]')?.textContent?.trim(),
     "Stalled",
   );
+  assert.match(rows[3]!.textContent ?? "", /Authentication Required/);
 
   await act(async () => { root.unmount(); });
   container.remove();

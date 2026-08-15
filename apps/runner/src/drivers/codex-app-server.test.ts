@@ -24,7 +24,13 @@ function makeHarness(
   imageStager?: (images: any[], context: any) => Promise<StagedPromptImages>,
 ) {
   const events: SessionEventPayload[] = [];
-  const cb: DriverCallbacks = { onEvent: (p) => events.push(p), onStderr: () => {}, onExit: () => {} };
+  let authenticationFailures = 0;
+  const cb: DriverCallbacks = {
+    onEvent: (p) => events.push(p),
+    onStderr: () => {},
+    onExit: () => {},
+    onAuthenticationFailure: () => { authenticationFailures += 1; },
+  };
   const opts: DriverOptions = {
     command: "codex",
     args: [],
@@ -39,8 +45,16 @@ function makeHarness(
     : new CodexAppServerDriver(opts, cb);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const onItem = (item: unknown, completed: boolean) => (driver as any).onItem(item, completed);
-  return { driver, events, onItem };
+  return { driver, events, onItem, authenticationFailures: () => authenticationFailures };
 }
+
+test("app-server auth errors emit a secret-free auth signal", () => {
+  const h = makeHarness();
+  const raw = "unexpected status 401 Unauthorized: bearer token secret-value";
+  (h.driver as any).emitDriverError(raw);
+  assert.equal(h.authenticationFailures(), 1);
+  assert.deepEqual(h.events, []);
+});
 
 function activateSteer(
   driver: CodexAppServerDriver,

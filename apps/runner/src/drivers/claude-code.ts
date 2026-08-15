@@ -32,6 +32,7 @@ import type {
   PreparedDriverCommand,
   StopReason,
 } from "./driver.js";
+import { isProviderAuthenticationFailure } from "./provider-auth-failure.js";
 import { readCompatibleEnv, type Environment } from "../env-compat.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -678,7 +679,7 @@ export class ClaudeCodeDriver implements Driver {
       child.stderr.on("data", (t: string) => {
         if (this.disposed || this.cancelled) return;
         const s = String(t).trim();
-        if (s) this.cb.onStderr(s);
+        if (s) this.emitStderrOrAuthenticationFailure(s);
       });
 
       child.on("error", (err: Error) => {
@@ -889,7 +890,7 @@ export class ClaudeCodeDriver implements Driver {
     child.stderr.on("data", (chunk: string) => {
       if (this.disposed || generation !== this.persistentGeneration) return;
       const text = String(chunk).trim();
-      if (text) this.cb.onStderr(text);
+      if (text) this.emitStderrOrAuthenticationFailure(text);
     });
     child.on("error", (err: Error) => {
       if (generation !== this.persistentGeneration) return;
@@ -1540,6 +1541,11 @@ export class ClaudeCodeDriver implements Driver {
     this.auxiliaryChildren.clear();
   }
 
+  private emitStderrOrAuthenticationFailure(text: string): void {
+    if (isProviderAuthenticationFailure(text)) this.cb.onAuthenticationFailure?.();
+    else this.cb.onStderr(text);
+  }
+
   /** Map one claude stream-json event; return a StopReason when the turn ends. */
   private handleEvent(msg: Json): StopReason | null {
     if (this.disposed) return null;
@@ -1557,7 +1563,9 @@ export class ClaudeCodeDriver implements Driver {
           this.cb.onModelResolved?.(msg.model);
         }
         if (msg.subtype === "api_retry") {
-          this.cb.onStderr(`retry ${msg.attempt}/${msg.max_retries}: ${msg.error ?? ""}`);
+          const error = String(msg.error ?? "");
+          if (isProviderAuthenticationFailure(error)) this.cb.onAuthenticationFailure?.();
+          else this.cb.onStderr(`retry ${msg.attempt}/${msg.max_retries}: ${error}`);
         }
         return null;
 
