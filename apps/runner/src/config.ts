@@ -108,7 +108,7 @@ export interface RunnerConfig {
   token: string;
   workspaces: RunnerConfigWorkspace[];
   agents: RunnerConfigAgent[];
-  /** Host-native runner state root (sessions, worktrees, cleanup records). */
+  /** Exclusively owned host-native runner state root (sessions, credentials, worktrees, journals). */
   dataDir: string;
   /** Maximum simultaneously live agent processes on this box. */
   maxConcurrentSessions: number;

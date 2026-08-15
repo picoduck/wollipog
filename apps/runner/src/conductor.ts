@@ -18,6 +18,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { AgentDefinition, SessionLaunchSpec } from "@wollipog/protocol";
 import { defaultRunnerReentryHost, runnerReentryCommand, type RunnerReentryHost } from "./runner-reentry.js";
+import { scopedRunnerCredentialFile, type RunnerDataDirIdentity } from "./runner-data-dir.js";
 import { winQuoteArg } from "./spawn.js";
 
 export const CONDUCTOR_AGENT_ID = "conductor";
@@ -134,9 +135,15 @@ export interface StagedRunnerCredentialFile {
  * processes read. The WebSocket `registered` acknowledgement is the cutover boundary: only then
  * does promote atomically replace the active file. Rejection/disconnect can leave the old active
  * credential untouched. */
-export function stageRunnerCredentialFile(dataDir: string, token: string): StagedRunnerCredentialFile {
-  const dir = join(dataDir, "credentials");
-  const activePath = join(dir, "active-runner-token");
+export function stageRunnerCredentialFile(
+  dataDir: string,
+  token: string,
+  identity?: RunnerDataDirIdentity,
+): StagedRunnerCredentialFile {
+  const activePath = identity
+    ? scopedRunnerCredentialFile(dataDir, identity)
+    : join(dataDir, "credentials", "active-runner-token");
+  const dir = dirname(activePath);
   const stagedPath = join(dir, `.pending-runner-token-${process.pid}-${randomUUID()}`);
   mkdirSync(dir, { recursive: true });
   writeFileSync(stagedPath, token, { mode: 0o600, flag: "wx" });
@@ -204,7 +211,7 @@ export function writeConductorMcpConfig(
       },
     },
   };
-  // 0600: the file carries the manager token. The mode is a POSIX no-op on Windows.
+  // 0600: the file carries the protected credential path and launch details. The mode is a POSIX no-op on Windows.
   writeFileSync(file, JSON.stringify(config, null, 2), { mode: 0o600 });
   try { chmodSync(file, 0o600); } catch { /* Windows ACLs are managed by the owning account */ }
 }
