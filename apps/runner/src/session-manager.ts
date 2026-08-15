@@ -505,6 +505,9 @@ export class SessionManager {
   private readonly deletedExpiry = new Map<string, ReturnType<typeof setTimeout>>();
   /** Every start captures one generation; delete/restart invalidates all older async continuations. */
   private readonly launchGenerations = new Map<string, number>();
+  /** Only start() generations own the admission queue. Resume/recovery generations use their
+   * existing dedicated queues and must never strand a prompt in preLaunchQueues. */
+  private readonly preLaunchAdmissionGenerations = new Map<string, number>();
   /** Last generation ever begun for this live session id. Unlike launchGenerations, this survives
    * a fast replacement finishing so an older continuation can still identify that replacement. */
   private readonly latestLaunchGenerations = new Map<string, number>();
@@ -1205,6 +1208,7 @@ export class SessionManager {
       }
     }
     const launchGeneration = this.beginLaunchGeneration(spec.sessionId);
+    this.preLaunchAdmissionGenerations.set(spec.sessionId, launchGeneration);
     try {
       return await this.startGeneration(
         spec,
@@ -1220,6 +1224,9 @@ export class SessionManager {
         const queued = this.preLaunchQueues.get(spec.sessionId);
         if (queued) this.rejectQueued(queued, "session launch failed before runner admission");
         this.preLaunchQueues.delete(spec.sessionId);
+      }
+      if (this.preLaunchAdmissionGenerations.get(spec.sessionId) === launchGeneration) {
+        this.preLaunchAdmissionGenerations.delete(spec.sessionId);
       }
       this.finishLaunchGeneration(spec.sessionId, launchGeneration);
     }
@@ -2647,7 +2654,9 @@ export class SessionManager {
       return true;
     }
     const entry = this.active.get(sessionId);
-    if (!entry && this.launchGenerations.has(sessionId)) {
+    const currentGeneration = this.launchGenerations.get(sessionId);
+    if (!entry && currentGeneration !== undefined &&
+        this.preLaunchAdmissionGenerations.get(sessionId) === currentGeneration) {
       const queue = this.preLaunchQueues.get(sessionId) ?? [];
       if (!this.queueCanAccept(queue, text, images)) {
         durable?.failed("prompt queue is full while the session waits for runner admission", "QUEUE_FULL");
@@ -5540,6 +5549,7 @@ export class SessionManager {
     this.shuttingDown = true;
     this.sessionCommandAuthority.clearAll();
     this.launchGenerations.clear();
+    this.preLaunchAdmissionGenerations.clear();
     clearInterval(this.providerStateReconcileTimer);
     clearInterval(this.historyMaintenanceTimer);
     if (this.historyMaintenanceKickoff) clearTimeout(this.historyMaintenanceKickoff);

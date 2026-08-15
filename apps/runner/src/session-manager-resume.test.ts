@@ -646,6 +646,35 @@ test("a failed initial launch terminalizes every admission-retained prompt", asy
   }
 });
 
+test("resume generations never capture later prompts in the initial-admission queue", async () => {
+  const transitions: string[] = [];
+  const lifecycle = (commandId: string): DurableCommandLifecycle => ({
+    commandId,
+    queued: () => transitions.push(`${commandId}:queued`),
+    started: () => transitions.push(`${commandId}:started`),
+    completed: () => transitions.push(`${commandId}:completed`),
+    failed: () => transitions.push(`${commandId}:failed`),
+    uncertain: () => transitions.push(`${commandId}:uncertain`),
+  });
+  const h = harness();
+  const internals = h.manager as any;
+  try {
+    assert.equal(h.manager.prompt(
+      "resume-session", "resume A", [], undefined, undefined, lifecycle("A"),
+    ), true);
+    assert.equal(h.manager.prompt(
+      "resume-session", "resume B", [], undefined, undefined, lifecycle("B"),
+    ), true);
+    assert.equal(internals.preLaunchQueues.has("resume-session"), false);
+    assert.equal(transitions.includes("B:queued"), false,
+      "resume/recovery generations keep their existing lifecycle instead of entering preLaunchQueues");
+    for (let attempt = 0; attempt < 10; attempt++) await tick();
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
 test("cancelling a capacity-queued resume releases its lock and terminalizes its receipt", async () => {
   const failures: Array<[string, string | undefined]> = [];
   const durable: DurableCommandLifecycle = {

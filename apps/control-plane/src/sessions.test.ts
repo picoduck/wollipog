@@ -2346,6 +2346,26 @@ test("completed durable prompts compact their retained content", () => {
   assert.equal(db.getSession(id)?.queued, undefined);
 });
 
+test("receipt-horizon uncertainty remains visible for a bounded terminal window", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { prompt: "initial" });
+  hub.sentToRunner.length = 0;
+  assert.equal(svc.prompt(id, "prompt with a lost receipt").ok, true);
+  const sent = hub.sentOfType("durable_session_command")[0]!;
+  const horizon = Date.now();
+  db.raw().prepare("UPDATE session_prompt_commands SET expires_at=? WHERE command_id=?")
+    .run(horizon, sent.commandId);
+
+  svc.maintainPrompts(horizon);
+  const retained = db.getSessionPromptCommand(sent.commandId)!;
+  assert.equal(retained.state, "uncertain");
+  assert.ok(retained.expiresAt > horizon);
+  assert.equal(db.getSession(id)?.queued?.[0]?.durableDeliveryState, "uncertain");
+
+  svc.maintainPrompts(retained.expiresAt);
+  assert.equal(db.getSessionPromptCommand(sent.commandId), null);
+});
+
 test("prompt stages its exact merged config before mutations and skips the legacy hub send", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub, { config: { permissionMode: "plan" } });
