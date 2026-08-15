@@ -6464,10 +6464,18 @@ export class SessionManager {
         entry?.queue.some((prompt) => prompt.backgroundJobIds?.some((id) => jobIds.includes(id)))) return;
     this.backgroundContinuationLaunching.add(sessionId);
     try {
+      const selected = (meta.backgroundJobs ?? []).filter((job) => jobIds.includes(job.id));
+      const resultSummary = selected.filter((job) => job.terminalStatus && job.terminalObservedAt).slice(0, 128).map((job) => ({
+        id: job.id,
+        launchType: job.launchType,
+        status: job.terminalStatus!,
+        terminalAt: job.terminalObservedAt!,
+      }));
+      const prompt = `${BACKGROUND_CONTINUATION_PROMPT}\n\nRunner-managed terminal results:\n${JSON.stringify(resultSummary)}`;
       if (entry) {
         this.prompt(
           sessionId,
-          BACKGROUND_CONTINUATION_PROMPT,
+          prompt,
           [],
           undefined,
           undefined,
@@ -6480,7 +6488,7 @@ export class SessionManager {
       } else {
         await this.resumeAndPrompt(
           sessionId,
-          BACKGROUND_CONTINUATION_PROMPT,
+          prompt,
           [],
           undefined,
           undefined,
@@ -6540,8 +6548,20 @@ export class SessionManager {
     const parentTurnId = current.backgroundJobs.find((job) => selected.has(job.id))?.parentTurnId;
     if (!continuationId || !parentTurnId) return;
     const peerProtocol = this.controlPlaneProtocolVersion();
+    const results = current.backgroundJobs.filter((job) => selected.has(job.id) &&
+      job.terminalStatus && job.terminalObservedAt).slice(0, 128).map((job) => ({
+        id: job.id,
+        launchType: job.launchType,
+        status: job.terminalStatus!,
+        terminalAt: job.terminalObservedAt!,
+      }));
     const deliveryEvent = runnerSupportsProtocol(peerProtocol, "managedBackgroundDelivery")
-      ? this.emitEvent(sessionId, { kind: "background_continuation_delivered", continuationId, parentTurnId })
+      ? this.emitEvent(sessionId, {
+          kind: "background_continuation_delivered",
+          continuationId,
+          parentTurnId,
+          ...(runnerSupportsProtocol(peerProtocol, "backgroundWorkTracking") ? { results } : {}),
+        })
       : this.emitEvent(sessionId, {
           kind: "stderr",
           text: `${BACKGROUND_CONTINUATION_DELIVERED_PREFIX}${continuationId}`,

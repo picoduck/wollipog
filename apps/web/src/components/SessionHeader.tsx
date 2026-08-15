@@ -206,6 +206,13 @@ export function SessionHeader({
           aria-label={BACKGROUND_WORK_DOT_LABELS[session.backgroundWorkState]}
         />
       )}
+      {!session.backgroundWorkState && session.backgroundWorkTracking === "untracked" && (
+        <span
+          className="bgwork-indicator bgwork-untracked"
+          title="Detached Work: Untracked"
+          aria-label="Detached Work: Untracked"
+        />
+      )}
       {!runnerOnline && <span className="tag tag-offline">Runner Offline</span>}
       <div className="detail-actions">
         {note && <span className="detail-note" role="status" aria-live="polite">{note}</span>}

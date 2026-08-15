@@ -264,9 +264,17 @@ The lifetime policy is quiescence-aware and fail-safe:
   without submitting another provider turn; that bookkeeping marker is hidden from the rendered
   timeline. Protocol v78 also sends a projection-safe, bounded job inventory to the control plane;
   provider context, local paths, and output references stay runner-local.
+- Protocol v79 sends bounded provider-neutral terminal summaries (`id`, launch type, status, and
+  terminal time) in both the synthetic continuation prompt and the structured delivery proof.
+  It also explicitly classifies every provider as **Managed** or **Untracked**. Untracked is a
+  capability warning, not evidence that a detached process exists: Wollipog does not invent a job,
+  cancellation result, timeout, or recovery promise when the provider exposes no lifecycle signal.
 - The control plane mirrors job facts monotonically and keeps separate durable timestamps for
   runner result persistence, transcript projection, notification queueing, and authenticated
-  dashboard observation. Each job mirror retains the exact Machine, workspace, and control-plane
+  dashboard observation. Managed completion also creates one durable Web Push outbox row per
+  authorized subscription. Push-service 2xx acceptance, service-worker display, and user click are
+  separate receipts; retries resend only the encrypted notification and never replay a provider
+  continuation or arbitrary side effect. Each job mirror retains the exact Machine, workspace, and control-plane
   Location observed at registration without exposing its provider context or output reference.
   A present v78 inventory is authoritative: jobs missing from a later inventory become inactive
   audit tombstones, preventing stopped work from resurfacing as a watchdog after same-session
@@ -292,8 +300,9 @@ The lifetime policy is quiescence-aware and fail-safe:
   `{"expiresAt":<future Unix epoch milliseconds>}`; valid holds suppress eviction until their TTL,
   bounded by `WOLLIPOG_CLAUDE_PENDING_MAX_MS` unless that ceiling is disabled, while expired, invalid,
   or unreadable holds are logged and ignored.
-  Arbitrary provider-opaque detachment remains untracked and is never promised an automatic
-  continuation.
+  Arbitrary provider-opaque detachment remains explicitly **Untracked** and is never promised an
+  automatic continuation. This boundary is the same for local, SSH-hosted, native Windows, and WSL
+  sessions; transport placement does not manufacture provider lifecycle evidence.
 - A prompt write may restart/resume once only before Node acknowledges the stdin write. After that
   acknowledgement boundary, a terminated or malformed stream fails the active turn and the prompt
   is never submitted automatically again. The next distinct prompt gets one persistent `--resume`

@@ -2235,6 +2235,7 @@ export class SessionStore {
 const NATIVE_ELICITATION_OVERLAY_PROTOCOL_VERSION = 66;
 const NATIVE_SLASH_COMMAND_OVERLAY_PROTOCOL_VERSION = 74;
 const MANAGED_BACKGROUND_JOBS_PROTOCOL_VERSION = 80;
+const BACKGROUND_WORK_TRACKING_PROTOCOL_VERSION = 81;
 
 export function metaToSnapshot(
   m: SessionMeta,
@@ -2281,6 +2282,10 @@ export function metaToSnapshot(
     preview: m.preview,
     pendingApproval: m.pendingApproval,
     backgroundWorkState: m.backgroundWorkState,
+    backgroundWorkTracking: controlPlaneProtocolVersion != null &&
+      controlPlaneProtocolVersion >= BACKGROUND_WORK_TRACKING_PROTOCOL_VERSION
+      ? (m.driver === "claude-code" ? "managed" : "untracked")
+      : undefined,
     backgroundJobs: controlPlaneProtocolVersion != null &&
       controlPlaneProtocolVersion >= MANAGED_BACKGROUND_JOBS_PROTOCOL_VERSION &&
       m.backgroundJobs !== undefined

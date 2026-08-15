@@ -3,7 +3,13 @@ import { test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import { BackgroundDeliveryBadge, BackgroundWorkBadge, CopyButton } from "./common.js";
+import {
+  BackgroundDeliveryBadge,
+  BackgroundNotificationBadge,
+  BackgroundWorkBadge,
+  CopyButton,
+  UntrackedBackgroundWorkBadge,
+} from "./common.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 for (const [name, value] of Object.entries({
@@ -124,6 +130,31 @@ test("background-delivery watchdog badges use precise Title Case stage labels", 
         "Background Delivery: Notification Awaiting Dashboard",
       ],
     );
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
+test("Untracked capability and push receipt badges expose honest Title Case boundaries", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(<>
+        <UntrackedBackgroundWorkBadge />
+        <BackgroundNotificationBadge state="service_accepted" />
+        <BackgroundNotificationBadge state="shown" />
+        <BackgroundNotificationBadge state="clicked" />
+      </>);
+    });
+    assert.deepEqual(
+      [...container.querySelectorAll(".background-work-badge")].map((badge) => badge.textContent),
+      ["Detached Work: Untracked", "Push Service Accepted", "Notification Displayed", "Notification Clicked"],
+    );
+    assert.match(container.querySelector(".background-work-untracked")?.getAttribute("title") ?? "", /cannot promise/i);
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();

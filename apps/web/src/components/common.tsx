@@ -1,6 +1,7 @@
 import React, { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import type {
   BackgroundDeliveryWatchdogState,
+  BackgroundNotificationReceiptState,
   BackgroundWorkState,
   SessionStatus,
 } from "@wollipog/protocol";
@@ -174,6 +175,19 @@ export function BackgroundWorkBadge({ state }: { state: BackgroundWorkState }) {
   );
 }
 
+export function UntrackedBackgroundWorkBadge() {
+  return (
+    <span
+      className="background-work-badge background-work-untracked"
+      aria-label="Detached Work: Untracked"
+      title="This provider does not expose a durable detached-work lifecycle. Wollipog cannot promise automatic completion, cancellation, or recovery."
+    >
+      <span className="background-work-dot" aria-hidden="true" />
+      Detached Work: Untracked
+    </span>
+  );
+}
+
 const BACKGROUND_DELIVERY_LABELS: Record<BackgroundDeliveryWatchdogState, string> = {
   terminal_without_continuation: "Terminal Result Awaiting Continuation",
   accepted_without_result: "Accepted Continuation Awaiting Result",
@@ -185,6 +199,30 @@ export function BackgroundDeliveryBadge({ state }: { state: BackgroundDeliveryWa
   const label = `Background Delivery: ${BACKGROUND_DELIVERY_LABELS[state]}`;
   return (
     <span className="background-work-badge background-work-orphaned" aria-label={label}>
+      <span className="background-work-dot" aria-hidden="true" />
+      {label}
+    </span>
+  );
+}
+
+const BACKGROUND_NOTIFICATION_LABELS: Record<BackgroundNotificationReceiptState, string> = {
+  pending: "Push Pending",
+  retry: "Push Retry Pending",
+  service_accepted: "Push Service Accepted",
+  shown: "Notification Displayed",
+  clicked: "Notification Clicked",
+  permanent_failure: "Push Failed",
+  expired: "Push Expired",
+};
+
+export function BackgroundNotificationBadge({ state }: { state: BackgroundNotificationReceiptState }) {
+  const label = BACKGROUND_NOTIFICATION_LABELS[state];
+  const attention = state === "pending" || state === "retry" || state === "permanent_failure" || state === "expired";
+  return (
+    <span
+      className={`background-work-badge ${attention ? "background-work-orphaned" : "background-work-resumed"}`}
+      aria-label={label}
+    >
       <span className="background-work-dot" aria-hidden="true" />
       {label}
     </span>

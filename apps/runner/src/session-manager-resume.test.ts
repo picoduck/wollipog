@@ -1955,6 +1955,9 @@ test("two idle managed-job completions cross one durable barrier and resume the 
     await tick();
     assert.equal(h.prompts.length, 2);
     assert.match(h.prompts[1] ?? "", /deliver the parent workflow's final user-visible result/i);
+    assert.match(h.prompts[1] ?? "", /"id":"task-1","launchType":"agent","status":"completed","terminalAt":20/);
+    assert.match(h.prompts[1] ?? "", /"id":"task-2","launchType":"workflow","status":"failed","terminalAt":21/);
+    assert.equal(h.prompts[1]?.includes("outputReference"), false, "provider-local output references stay private");
     const delivered = h.store.readMeta("resume-session")?.backgroundJobs ?? [];
     assert.ok(delivered.every((job) => job.continuationQueuedAt));
     assert.equal(new Set(delivered.map((job) => job.continuationId)).size, 1);
@@ -1974,8 +1977,12 @@ test("two idle managed-job completions cross one durable barrier and resume the 
         kind: "background_continuation_delivered",
         continuationId: delivered[0]!.continuationId,
         parentTurnId: delivered[0]!.parentTurnId,
+        results: [
+          { id: "task-1", launchType: "agent", status: "completed", terminalAt: 20 },
+          { id: "task-2", launchType: "workflow", status: "failed", terminalAt: 21 },
+        ],
       }],
-      "v78 emits one structured, replayable delivery proof for the parent barrier",
+      "v79 emits one structured, replayable delivery proof with provider-neutral terminal evidence",
     );
     const stderr = h.store.readEvents("resume-session").flatMap((event) =>
       event.payload.kind === "stderr" ? [event.payload.text] : []);

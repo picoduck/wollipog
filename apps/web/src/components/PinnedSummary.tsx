@@ -18,7 +18,7 @@ import type { GitStatus, GitSummary } from "./useGitStatus.js";
 import { GitPinnedSection } from "./GitVisibility.js";
 import { AgentIcon } from "./AgentIcon.js";
 import { BranchIcon, ComputerIcon, DialIcon, FolderOutlineIcon, GitHubIcon, GlobeIcon, NotesIcon, PullRequestIcon, TuningIcon } from "./Icons.js";
-import { BackgroundDeliveryBadge, BackgroundWorkBadge, Spinner, StatusBadge } from "./common.js";
+import { BackgroundDeliveryBadge, BackgroundNotificationBadge, BackgroundWorkBadge, Spinner, StatusBadge, UntrackedBackgroundWorkBadge } from "./common.js";
 import { relativeTime, resolvedModelLabel } from "../format.js";
 import { sessionAgentLabel } from "./agent-options.js";
 
@@ -116,6 +116,11 @@ export function PinnedSummary({
             <BackgroundWorkBadge state={session.backgroundWorkState} />
           </div>
         )}
+        {!session.backgroundWorkState && session.backgroundWorkTracking === "untracked" && (
+          <div className="ps-row is-static">
+            <UntrackedBackgroundWorkBadge />
+          </div>
+        )}
         {session.backgroundDeliveries?.find((delivery) => delivery.watchdogState)?.watchdogState && (
           <div className="ps-row is-static">
             <BackgroundDeliveryBadge
@@ -123,6 +128,11 @@ export function PinnedSummary({
             />
           </div>
         )}
+        {session.backgroundDeliveries?.flatMap((delivery) => delivery.notifications ?? []).slice(-2).map((receipt) => (
+          <div className="ps-row is-static" key={receipt.deliveryId}>
+            <BackgroundNotificationBadge state={receipt.state} />
+          </div>
+        ))}
       </div>
       <div className="ps-section">
         <div className="ps-section-head">

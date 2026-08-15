@@ -38,6 +38,20 @@ function encodeRouteId(value) {
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
+async function acknowledgePushReceipt(receipt, stage) {
+  if (!receipt || typeof receipt.deliveryId !== "string" || typeof receipt.token !== "string") return;
+  try {
+    await fetch("/api/public/push-receipt", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deliveryId: receipt.deliveryId, token: receipt.token, stage }),
+    });
+  } catch {
+    // Display/navigation must not fail because the receipt connection is unavailable. The
+    // control plane keeps service acceptance distinct and surfaces a missing display receipt.
+  }
+}
+
 self.addEventListener("push", (event) => {
   let data = null;
   try {
@@ -53,6 +67,7 @@ self.addEventListener("push", (event) => {
     ts: data && typeof data.ts === "number" ? data.ts : 0,
     sessionId,
     view,
+    receipt: data && data.receipt && typeof data.receipt === "object" ? data.receipt : null,
   };
   // Explicit notification/session keys are stable across worker versions. During an old/new worker
   // handoff only a fully generic card can momentarily use two local tags; payload delivery and
@@ -73,6 +88,7 @@ self.addEventListener("push", (event) => {
       newestShown.set(tag, {
         title: show.title, body: show.body, ts: show.ts,
         sessionId: show.sessionId || null, view: show.view || null,
+        receipt: show.receipt || null,
       });
       if (newestShown.size > 500) newestShown.delete(newestShown.keys().next().value); // bound it
       await self.registration.showNotification(show.title, {
@@ -86,8 +102,10 @@ self.addEventListener("push", (event) => {
           ts: show.ts,
           title: show.title,
           body: show.body,
+          receipt: show.receipt || null,
         },
       });
+      await acknowledgePushReceipt(show.receipt, "shown");
     })(),
   );
 });
@@ -96,18 +114,25 @@ self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   const sessionId = event.notification.data && event.notification.data.sessionId;
   const view = event.notification.data && event.notification.data.view;
+  const receipt = event.notification.data && event.notification.data.receipt;
   event.waitUntil(
     (async () => {
+      const acknowledgement = acknowledgePushReceipt(receipt, "clicked");
       // Prefer focusing a live dashboard and deep-linking it in place; only open a new
       // window when none exists. Canonical paths survive reload and browser history.
-      const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
-      const client = windows[0];
-      if (client) {
-        await client.focus();
-        if (sessionId) client.postMessage({ type: "wollipog:open-session", sessionId });
-        else if (view === "automations") client.postMessage({ type: "wollipog:open-automations" });
-      } else {
-        await self.clients.openWindow(sessionId ? `/sessions/~${encodeRouteId(sessionId)}` : view === "automations" ? "/automations" : "/");
+      try {
+        const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+        const client = windows[0];
+        if (client) {
+          await client.focus();
+          if (sessionId) client.postMessage({ type: "wollipog:open-session", sessionId });
+          else if (view === "automations") client.postMessage({ type: "wollipog:open-automations" });
+        } else {
+          await self.clients.openWindow(sessionId ? `/sessions/~${encodeRouteId(sessionId)}` : view === "automations" ? "/automations" : "/");
+        }
+      } finally {
+        // The click is already a fact even if focusing/navigation fails.
+        await acknowledgement;
       }
     })(),
   );

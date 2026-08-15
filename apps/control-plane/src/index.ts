@@ -497,6 +497,7 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
   const principal = authenticated?.principal ?? null;
   if (principal) requestPrincipals.set(req, principal);
   const routePath = req.routeOptions?.url ?? req.url.split("?")[0] ?? "";
+  if (req.method === "POST" && routePath === "/api/public/push-receipt") return null;
   const mutationError = mutationAuthorizationError(req.method, routePath, principal);
   if (mutationError) return mutationError;
   if (!principal) return null;
@@ -711,6 +712,32 @@ app.setNotFoundHandler((req, reply) => {
 const pushSender = new WebPushSender(db, {
   info: (m) => app.log.info(m),
   warn: (m) => app.log.warn(m),
+});
+
+let pushReceiptWindowStartedAt = 0;
+let pushReceiptWindowCount = 0;
+const PUSH_RECEIPT_WINDOW_MS = 10_000;
+const MAX_PUSH_RECEIPT_ACKS_PER_WINDOW = 256;
+
+app.post("/api/public/push-receipt", async (req, reply) => {
+  const now = Date.now();
+  if (now - pushReceiptWindowStartedAt >= PUSH_RECEIPT_WINDOW_MS) {
+    pushReceiptWindowStartedAt = now;
+    pushReceiptWindowCount = 0;
+  }
+  if (++pushReceiptWindowCount > MAX_PUSH_RECEIPT_ACKS_PER_WINDOW) {
+    return reply.code(429).send({ error: "push receipt rate limit exceeded" });
+  }
+  const body = req.body as { deliveryId?: unknown; token?: unknown; stage?: unknown } | null;
+  if (!body || typeof body.deliveryId !== "string" || body.deliveryId.length > 256 ||
+      typeof body.token !== "string" || body.token.length > 128 ||
+      (body.stage !== "shown" && body.stage !== "clicked")) {
+    return reply.code(400).send({ error: "deliveryId, token, and shown/clicked stage are required" });
+  }
+  // Do not reveal whether a capability or delivery id exists. A valid acknowledgement is
+  // idempotent; an invalid one receives the same content-free response.
+  db.acknowledgeBackgroundPushReceipt(body.deliveryId, body.token, body.stage, now);
+  return reply.code(204).send();
 });
 
 const svc = new SessionsService(
@@ -3675,6 +3702,17 @@ const sessionCommandRetryTimer = setInterval(() => {
   }
 }, 5_000);
 sessionCommandRetryTimer.unref();
+void pushSender.retryDurableBackground().catch((error) => {
+  app.log.warn({ error: error instanceof Error ? error.message : String(error) },
+    "background push recovery deferred");
+});
+const backgroundPushRetryTimer = setInterval(() => {
+  void pushSender.retryDurableBackground().catch((error) => {
+    app.log.warn({ error: error instanceof Error ? error.message : String(error) },
+      "background push retry deferred");
+  });
+}, 5_000);
+backgroundPushRetryTimer.unref();
 reconcilePolicyHooksSafely(svc, app.log, Date.now());
 const policyHookApprovalTimer = setInterval(
   () => reconcilePolicyHooksSafely(svc, app.log, Date.now()),
@@ -3702,6 +3740,7 @@ app.addHook("onClose", async () => {
   clearInterval(workflowRecoveryTimer);
   clearInterval(automationTimer);
   clearInterval(sessionCommandRetryTimer);
+  clearInterval(backgroundPushRetryTimer);
   clearInterval(policyHookApprovalTimer);
   clearInterval(artifactMaintenanceTimer);
   orchestrator.shutdown();

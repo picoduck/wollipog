@@ -11,7 +11,9 @@ phone locked, or the PWA backgrounded — at the attention moments:
 - **needs your input** — a permission request, an agent question (AskUserQuestion), or a
   guardrail pause (cost budget / tool-call limit), carrying the ask's title (urgency `high`);
 - **ready** — a turn settled to idle after running;
-- **completed / failed** — terminal outcomes.
+- **completed / failed** — terminal outcomes;
+- **managed background result ready** — a durable, per-subscription outbox created from the
+  structured continuation event.
 
 The decision policy is `apps/control-plane/src/push-decision.ts` — deliberately the twin of the
 web app's in-tab `notifyDecision` (apps/web/src/notify.ts), so a phone and an open dashboard
@@ -45,6 +47,16 @@ that created them (`NULL` for the authenticated local-bootstrap dashboard) — *
 also silences its pushes**. Rows self-prune when the push service answers 404/410 (browser unsubscribed, PWA
 uninstalled) or when stored keys can't encrypt.
 
+Managed-background notifications use `background_push_deliveries`, separate from the legacy
+best-effort status notifier. Each row has a stable delivery id, lease, retry schedule, expiry, and
+privacy-safe endpoint hash. A 2xx response records only **Push Service Accepted**. The encrypted
+payload carries a high-entropy HMAC capability; after `showNotification()` resolves the service
+worker records **Notification Displayed**, and a notification click records **Notification
+Clicked**. Neither a WebSocket enqueue nor a push-service response is described as user-visible.
+Restart recovery claims expired leases and retries only the notification card.
+The capability-bearing endpoint is erased from an outbox row once retry is no longer possible;
+only its hash and stage evidence remain.
+
 ## Routes
 
 Normal `/api/*` gating requires the local startup credential or a paired-device bearer:
@@ -53,6 +65,9 @@ Normal `/api/*` gating requires the local startup credential or a paired-device 
 - `POST /api/push/subscriptions` `{ endpoint, keys: { p256dh, auth } }` — validated
   (https-only, real P-256 point, 16-byte auth), upserted
 - `POST /api/push/unsubscribe` `{ endpoint }`
+
+The service worker also uses `POST /api/public/push-receipt` with its per-delivery capability. The
+route is content-bounded, rate-admitted, origin-checked, and returns no delivery-existence oracle.
 
 ## Client
 

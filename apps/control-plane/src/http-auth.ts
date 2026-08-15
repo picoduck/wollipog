@@ -53,10 +53,16 @@ export function isPublicTranscriptShareRead(method: string, routePath: string): 
   return method === "GET" && routePath === "/api/public/transcript-share";
 }
 
+/** Service workers acknowledge an encrypted push through a high-entropy per-delivery capability. */
+export function isPublicPushReceiptAck(method: string, routePath: string): boolean {
+  return method === "POST" && routePath === "/api/public/push-receipt";
+}
+
 export function registerAuthGate(app: FastifyInstance, deps: AuthGateDeps): void {
   app.addHook("onRequest", async (req, reply) => {
     const routePath = req.routeOptions?.url ?? req.url.split("?")[0] ?? "";
-    if (requiresDeviceAuth(routePath) && !isPublicTranscriptShareRead(req.method, routePath)) {
+    if (requiresDeviceAuth(routePath) && !isPublicTranscriptShareRead(req.method, routePath) &&
+        !isPublicPushReceiptAck(req.method, routePath)) {
       if (routePath === "/ui") return; // authenticated inside the /ui upgrade handler
       const principal = deps.authenticate(req);
       if (!principal) return reply.code(401).send({ error: UNAUTHORIZED });

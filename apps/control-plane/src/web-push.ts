@@ -231,6 +231,21 @@ export interface PushMessage {
   ts?: number;
 }
 
+export interface DurableBackgroundPushDelivery {
+  deliveryId: string;
+  sessionId: string;
+  continuationId: string;
+  endpoint: string;
+  message: PushMessage;
+  ackToken: string;
+  attemptCount: number;
+}
+
+export type PushServiceOutcome =
+  | { kind: "service_accepted"; status: number }
+  | { kind: "retry"; status?: number; error?: string }
+  | { kind: "permanent_failure"; status?: number; error?: string };
+
 interface SenderDb {
   listPushSubscriptions(audience?: PushAudience): StoredPushSubscription[];
   /** Liveness read right before a POST: returns the endpoint's CURRENT row (or null when
@@ -244,6 +259,8 @@ interface SenderDb {
   deletePushSubscriptionMatching(sub: StoredPushSubscription): boolean;
   getVapidKeys(): VapidKeys | null;
   setVapidKeys(keys: VapidKeys, now: number): void;
+  claimDueBackgroundPushDeliveries?(now: number, limit?: number): DurableBackgroundPushDelivery[];
+  settleBackgroundPushDelivery?(deliveryId: string, outcome: PushServiceOutcome, now: number): boolean;
 }
 
 type FetchLike = (url: string, init: {
@@ -330,6 +347,39 @@ export class WebPushSender {
     void this.drain();
   }
 
+  /** Drain the durable background-notification lane. Each endpoint has an independent lease and
+   * receipt; retrying this encrypted notification never replays a provider prompt or side effect. */
+  async retryDurableBackground(now = Date.now()): Promise<number> {
+    const deliveries = this.db.claimDueBackgroundPushDeliveries?.(now, 16) ?? [];
+    let settled = 0;
+    for (const delivery of deliveries) {
+      let outcome: PushServiceOutcome;
+      try {
+        const live = this.db.getPushSubscription(delivery.endpoint, {
+          kind: "session",
+          sessionId: delivery.sessionId,
+        });
+        if (!live) {
+          outcome = { kind: "permanent_failure", error: "subscription_revoked" };
+        } else {
+          const payload = Buffer.from(JSON.stringify({
+            ...delivery.message,
+            receipt: { deliveryId: delivery.deliveryId, token: delivery.ackToken },
+          }));
+          outcome = payload.length > MAX_PUSH_PAYLOAD_BYTES
+            ? { kind: "permanent_failure", error: "payload_too_large" }
+            : await this.sendOne(live, delivery.message, payload);
+        }
+      } catch (error) {
+        const code = (error as { code?: string; name?: string }).code ??
+          (error as { name?: string }).name ?? "network_error";
+        outcome = { kind: "retry", error: String(code).slice(0, 120) };
+      }
+      if (this.db.settleBackgroundPushDelivery?.(delivery.deliveryId, outcome, Date.now())) settled++;
+    }
+    return settled;
+  }
+
   private async drain(): Promise<void> {
     if (this.draining) return;
     this.draining = true;
@@ -364,7 +414,11 @@ export class WebPushSender {
     }
   }
 
-  private async sendOne(sub: StoredPushSubscription, message: PushMessage, payload: Buffer): Promise<void> {
+  private async sendOne(
+    sub: StoredPushSubscription,
+    message: PushMessage,
+    payload: Buffer,
+  ): Promise<PushServiceOutcome> {
     let body: Buffer;
     try {
       body = encryptPushPayload(payload, { p256dh: sub.p256dh, auth: sub.auth });
@@ -373,7 +427,7 @@ export class WebPushSender {
       // off-curve point) — drop THIS row (conditionally) rather than failing forever.
       this.db.deletePushSubscriptionMatching(sub);
       this.log.warn(`web-push: dropped subscription with malformed keys (${redactEndpoint(sub.endpoint)})`);
-      return;
+      return { kind: "permanent_failure", error: "malformed_subscription_keys" };
     }
     const res = await this.fetchImpl(sub.endpoint, {
       method: "POST",
@@ -397,6 +451,7 @@ export class WebPushSender {
       // the row still holds the keys THIS send used (see deletePushSubscriptionMatching).
       this.db.deletePushSubscriptionMatching(sub);
       this.log.info(`web-push: pruned expired subscription (${redactEndpoint(sub.endpoint)})`);
+      return { kind: "permanent_failure", status: res.status, error: "subscription_expired" };
     } else if (res.status === 401 || res.status === 403) {
       // The push service rejected OUR credential: the subscription is bound to a different
       // applicationServerKey (e.g. the CP database — and with it the VAPID pair — was
@@ -406,9 +461,12 @@ export class WebPushSender {
       this.log.warn(
         `web-push: ${res.status} (VAPID rejected) for ${redactEndpoint(sub.endpoint)} — dropped; the device re-subscribes on its next reconcile`,
       );
-    } else if (res.status >= 400) {
+      return { kind: "permanent_failure", status: res.status, error: "vapid_rejected" };
+    } else if (res.status >= 400 || res.status < 200 || res.status >= 300) {
       this.log.warn(`web-push: ${res.status} from push service for ${redactEndpoint(sub.endpoint)}`);
+      return { kind: "retry", status: res.status, error: "push_service_rejected" };
     }
+    return { kind: "service_accepted", status: res.status };
   }
 }
 
