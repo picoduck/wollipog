@@ -1986,6 +1986,19 @@ app.post("/api/sessions/:id/cancel-queued", async (req, reply) => {
   return reply.code(204).send();
 });
 
+app.post("/api/sessions/:id/pending-prompts/:commandId/resolve", async (req, reply) => {
+  const { id, commandId } = req.params as { id: string; commandId: string };
+  const body = (req.body ?? {}) as { action?: unknown };
+  if (body.action !== "cancel" && body.action !== "dismiss") {
+    return reply.code(400).send({ error: "action must be cancel or dismiss" });
+  }
+  const result = body.action === "cancel"
+    ? svc.cancelPendingPrompt(id, commandId)
+    : svc.dismissPendingPrompt(id, commandId);
+  if (!result.ok) return reply.code(result.status).send({ error: result.error });
+  return result.data;
+});
+
 // Shells panel: durable bounded history and detachable runner-owned processes.
 app.get("/api/sessions/:id/shells", async (req) => {
   return { shells: shellRegistry.list((req.params as { id: string }).id) };

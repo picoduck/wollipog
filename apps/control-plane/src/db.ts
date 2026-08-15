@@ -113,6 +113,7 @@ import {
   type SessionCommandInvocationState,
   type SessionCommandInvocationUpdateMessage,
   type SessionCommandInvocationView,
+  type PendingPromptView,
   type SessionEvent,
   type SessionEventPayload,
   type SessionSnapshot,
@@ -443,6 +444,7 @@ CREATE TABLE IF NOT EXISTS session_prompt_commands (
   error            TEXT,
   error_code       TEXT,
   user_event_seq   INTEGER,
+  dismissed_at     INTEGER,
   created_at       INTEGER NOT NULL,
   updated_at       INTEGER NOT NULL,
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
@@ -1725,6 +1727,7 @@ interface SessionPromptCommandRow {
   error: string | null;
   error_code: DurableSessionCommandErrorCode | null;
   user_event_seq: number | null;
+  dismissed_at: number | null;
   created_at: number;
   updated_at: number;
 }
@@ -2330,6 +2333,7 @@ export interface SessionPromptCommandRecord {
   error?: string;
   errorCode?: DurableSessionCommandErrorCode;
   userEventSeq?: number;
+  dismissedAt?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -2633,6 +2637,11 @@ export class ControlPlaneDb {
       `UPDATE session_command_invocations SET next_attempt_at=updated_at
        WHERE next_attempt_at IS NULL AND state IN ('pending','sent')`,
     );
+    try {
+      db.exec("ALTER TABLE session_prompt_commands ADD COLUMN dismissed_at INTEGER");
+    } catch {
+      /* column already present */
+    }
     db.exec(
       `CREATE INDEX IF NOT EXISTS idx_session_command_invocations_due
        ON session_command_invocations(next_attempt_at,runner_id)
@@ -9281,6 +9290,7 @@ export class ControlPlaneDb {
       ...(row.error ? { error: row.error } : {}),
       ...(row.error_code ? { errorCode: row.error_code } : {}),
       ...(row.user_event_seq != null ? { userEventSeq: row.user_event_seq } : {}),
+      ...(row.dismissed_at != null ? { dismissedAt: row.dismissed_at } : {}),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -9464,6 +9474,42 @@ export class ControlPlaneDb {
       ).run(row.state === "pending" ? "failed" : "uncertain", reason, now, row.command_id);
     }
     return rows.length;
+  }
+
+  cancelPendingSessionPromptCommand(
+    sessionId: string,
+    commandId: string,
+    now: number,
+  ): "cancelled" | "not_found" | "delivery_started" {
+    const row = this.stmt(
+      "SELECT state FROM session_prompt_commands WHERE session_id=? AND command_id=? AND dismissed_at IS NULL",
+    ).get(sessionId, commandId) as { state: SessionPromptCommandState } | undefined;
+    if (!row) return "not_found";
+    if (row.state !== "pending") return "delivery_started";
+    const updated = this.stmt(
+      `UPDATE session_prompt_commands SET state='failed',revision=revision+1,
+       error='prompt cancelled before runner delivery',error_code='COMMAND_CANCELLED',
+       next_attempt_at=NULL,updated_at=?
+       WHERE session_id=? AND command_id=? AND state='pending' AND dismissed_at IS NULL`,
+    ).run(now, sessionId, commandId);
+    return Number(updated.changes) === 1 ? "cancelled" : "delivery_started";
+  }
+
+  dismissTerminalSessionPromptCommand(
+    sessionId: string,
+    commandId: string,
+    now: number,
+  ): "dismissed" | "not_found" | "not_terminal" {
+    const row = this.stmt(
+      "SELECT state FROM session_prompt_commands WHERE session_id=? AND command_id=? AND dismissed_at IS NULL",
+    ).get(sessionId, commandId) as { state: SessionPromptCommandState } | undefined;
+    if (!row) return "not_found";
+    if (row.state !== "failed" && row.state !== "uncertain") return "not_terminal";
+    const updated = this.stmt(
+      `UPDATE session_prompt_commands SET dismissed_at=?,payload_json='null',updated_at=?
+       WHERE session_id=? AND command_id=? AND state IN ('failed','uncertain') AND dismissed_at IS NULL`,
+    ).run(now, now, sessionId, commandId);
+    return Number(updated.changes) === 1 ? "dismissed" : "not_terminal";
   }
 
   pruneSessionPromptCommands(now: number, limit = 1_000): string[] {
@@ -10095,6 +10141,7 @@ export class ControlPlaneDb {
     }
 
     const durablePromptQueue = this.pendingSessionPromptQueue(row.id);
+    const pendingPrompts = this.pendingSessionPrompts(row.id);
     return {
       id: row.id,
       runnerId: row.runner_id,
@@ -10142,6 +10189,7 @@ export class ControlPlaneDb {
       preview: row.preview,
       pendingApproval: pending,
       ...(durablePromptQueue.length ? { queued: durablePromptQueue } : {}),
+      ...(pendingPrompts.length ? { pendingPrompts } : {}),
       ...(() => {
         const steeringAttempts = this.listSteeringAttempts(row.id);
         return steeringAttempts.length ? { steeringAttempts } : {};
@@ -10178,7 +10226,8 @@ export class ControlPlaneDb {
       `SELECT command_id,payload_json,state,error FROM (
          SELECT command_id,payload_json,state,error,created_at,rowid AS prompt_rowid
          FROM session_prompt_commands
-         WHERE session_id=? AND state IN ('pending','sent','accepted','queued','failed','uncertain')
+         WHERE session_id=? AND dismissed_at IS NULL
+           AND state IN ('pending','sent','accepted','queued','failed','uncertain')
          ORDER BY created_at DESC,rowid DESC LIMIT 100
        ) ORDER BY created_at,prompt_rowid`,
     ).all(sessionId) as Array<{
@@ -10208,6 +10257,42 @@ export class ControlPlaneDb {
       } catch {
         return [];
       }
+    });
+  }
+
+  private pendingSessionPrompts(sessionId: string): PendingPromptView[] {
+    const rows = this.stmt(
+      `SELECT * FROM (
+         SELECT *,rowid AS prompt_rowid FROM session_prompt_commands
+         WHERE session_id=? AND dismissed_at IS NULL
+           AND state IN ('pending','sent','accepted','queued','started','failed','uncertain')
+         ORDER BY created_at DESC,rowid DESC LIMIT 100
+       ) ORDER BY created_at,prompt_rowid`,
+    ).all(sessionId) as unknown as SessionPromptCommandRow[];
+    return rows.flatMap((row) => {
+      if (row.state === "completed") return [];
+      let command: PromptSessionMessage;
+      try {
+        command = JSON.parse(row.payload_json) as PromptSessionMessage;
+      } catch {
+        return [];
+      }
+      if (command?.type !== "prompt_session") return [];
+      return [{
+        commandId: row.command_id,
+        text: command.text.length > 4_096 ? `${command.text.slice(0, 4_095)}…` : command.text,
+        hasImages: Boolean(command.images?.length),
+        state: row.state,
+        revision: row.revision,
+        attemptCount: row.attempt_count,
+        ...(row.error ? { error: row.error } : {}),
+        ...(row.error_code ? { errorCode: row.error_code } : {}),
+        ...(row.user_event_seq != null ? { userEventSeq: row.user_event_seq } : {}),
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        ...(row.state === "pending" ? { canCancel: true } : {}),
+        ...(row.state === "failed" || row.state === "uncertain" ? { canDismiss: true } : {}),
+      }];
     });
   }
 

@@ -141,6 +141,26 @@ export class SessionPromptOutbox {
     return changed;
   }
 
+  cancelPending(
+    sessionId: string,
+    commandId: string,
+    now = Date.now(),
+  ): "cancelled" | "not_found" | "delivery_started" {
+    const result = this.db.cancelPendingSessionPromptCommand(sessionId, commandId, now);
+    if (result === "cancelled") this.hub.sessionChangedById(sessionId);
+    return result;
+  }
+
+  dismissTerminal(
+    sessionId: string,
+    commandId: string,
+    now = Date.now(),
+  ): "dismissed" | "not_found" | "not_terminal" {
+    const result = this.db.dismissTerminalSessionPromptCommand(sessionId, commandId, now);
+    if (result === "dismissed") this.hub.sessionChangedById(sessionId);
+    return result;
+  }
+
   private failMalformed(row: SessionPromptCommandRecord, error: string, now: number): void {
     this.log.warn(`${error} (${row.commandId})`);
     this.db.recordSessionPromptCommandReceipt({

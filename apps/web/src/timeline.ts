@@ -20,6 +20,8 @@ export type TimelineItem =
       images?: PromptImageInput[];
       /** Runner queue id for reconciling a formerly queued prompt without text de-duplication. */
       turnId?: string;
+      /** Durable prompt identity; reconciles its pending bubble without text matching. */
+      commandId?: string;
       /** Stable receipt identity retained only for canonical steering reconciliation. */
       submissionId?: string;
       /** A canonical user message incorporated into an already-active turn. */
@@ -553,6 +555,7 @@ export class TimelineBuilder {
           text: p.text,
           images: p.images,
           turnId: p.turnId,
+          commandId: p.commandId,
           submissionId: p.submissionId,
           deliveryIntent: p.deliveryIntent,
           commandInvocation: p.commandInvocation,

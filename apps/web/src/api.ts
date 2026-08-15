@@ -458,6 +458,12 @@ export function createApiClient(transport: ApiTransport) {
   cancelQueuedPrompt: (id: string, promptId: string) =>
     req<void>(`/api/sessions/${id}/cancel-queued`, { method: "POST", body: JSON.stringify({ promptId }) }),
 
+  resolvePendingPrompt: (id: string, commandId: string, action: "cancel" | "dismiss") =>
+    req<SessionView>(
+      `/api/sessions/${encodeURIComponent(id)}/pending-prompts/${encodeURIComponent(commandId)}/resolve`,
+      { method: "POST", body: JSON.stringify({ action }) },
+    ),
+
   restart: (id: string) => req<SessionView>(`/api/sessions/${id}/restart`, { method: "POST" }),
 
   approve: (id: string, body: ApproveRequest) =>

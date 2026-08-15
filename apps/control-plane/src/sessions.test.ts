@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { test } from "node:test";
 import type {
   ControlPlaneToRunner,
+  DurableSessionCommand,
   GitSummaryInfo,
   PodContextEntry,
   PodView,
@@ -25,6 +26,7 @@ import {
   PROTOCOL_VERSION,
 } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
+import { automationCommandDigest, canonicalAutomationCommandJson } from "./automation-command-outbox.js";
 import { Hub, RunnerRequestNotSentError, type RunnerRequestResult } from "./hub.js";
 import { agentDelegationAuthorizationError, type AgentPrincipal } from "./identity.js";
 import { pushDecision } from "./push-decision.js";
@@ -2330,6 +2332,114 @@ test("a staged admission prompt fails closed instead of replaying after runner d
     db.getSessionPromptCommand(staged.id)?.error ?? "",
     /no longer supports durable queued prompt identity/,
   );
+});
+
+test("pending prompt cancellation is definite before send and wins late admission receipts", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { prompt: "initial" });
+  hub.sentToRunner.length = 0;
+  const command: DurableSessionCommand = {
+    type: "prompt_session", sessionId: id, text: "cancel before delivery",
+  };
+  const commandId = "prompt-cancel-before-send";
+  const now = Date.now();
+  db.stageSessionPromptCommand({
+    commandId,
+    sessionId: id,
+    runnerId: RUNNER_ID,
+    payloadJson: canonicalAutomationCommandJson(command),
+    payloadSha256: automationCommandDigest(command),
+    expiresAt: now + 60_000,
+    now,
+  });
+
+  const before = db.getSession(id)?.pendingPrompts?.[0];
+  assert.ok(before);
+  assert.equal(before.commandId, commandId);
+  assert.equal(before.state, "pending");
+  assert.equal(before.canCancel, true);
+  assert.equal(before.attemptCount, 0);
+
+  const restarted = new SessionsService(db, hub as unknown as Hub, NOOP_LOG);
+  assert.equal(db.getSession(id)?.pendingPrompts?.[0]?.commandId, before.commandId,
+    "reload preserves the durable bubble identity");
+  assert.equal(restarted.cancelPendingPrompt(id, before.commandId).ok, true);
+  const cancelled = db.getSession(id)?.pendingPrompts?.[0];
+  assert.equal(cancelled?.commandId, before.commandId);
+  assert.equal(cancelled?.state, "failed");
+  assert.equal(cancelled?.errorCode, "COMMAND_CANCELLED");
+  assert.equal(cancelled?.canDismiss, true);
+  assert.equal(cancelled?.canCancel, undefined);
+
+  assert.equal(restarted.retryDuePrompts(Date.now() + 60_000), 0,
+    "a definitely cancelled prompt never enters the send lane");
+  assert.equal(restarted.onDurablePromptReceipt(RUNNER_ID, {
+    type: "durable_session_command_update",
+    commandId: before.commandId,
+    sessionId: id,
+    state: "queued",
+    revision: 10,
+  }), true);
+  assert.equal(db.getSessionPromptCommand(before.commandId)?.state, "failed",
+    "a late runner receipt cannot resurrect a terminal local cancellation");
+
+  assert.equal(restarted.dismissPendingPrompt(id, before.commandId).ok, true);
+  assert.equal(db.getSession(id)?.pendingPrompts, undefined);
+  assert.equal(db.getSessionPromptCommand(before.commandId)?.payloadJson, "null",
+    "dismissal scrubs retained prompt content without deleting the outcome tombstone");
+});
+
+test("pending prompt cancel loses safely once the send boundary is crossed", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { prompt: "initial" });
+  hub.sentToRunner.length = 0;
+  const command: DurableSessionCommand = {
+    type: "prompt_session", sessionId: id, text: "race admission",
+  };
+  const commandId = "prompt-send-wins-cancel";
+  const now = Date.now();
+  db.stageSessionPromptCommand({
+    commandId,
+    sessionId: id,
+    runnerId: RUNNER_ID,
+    payloadJson: canonicalAutomationCommandJson(command),
+    payloadSha256: automationCommandDigest(command),
+    expiresAt: now + 60_000,
+    now,
+  });
+
+  assert.equal(svc.retryDuePrompts(Date.now() + 1), 1);
+  const sent = db.getSession(id)?.pendingPrompts?.[0];
+  assert.equal(sent?.commandId, commandId);
+  assert.equal(sent?.state, "sent");
+  assert.equal(sent?.attemptCount, 1);
+  const cancelled = svc.cancelPendingPrompt(id, commandId);
+  assert.equal(cancelled.ok, false);
+  if (!cancelled.ok) assert.equal(cancelled.status, 409);
+  assert.equal(db.getSessionPromptCommand(commandId)?.state, "sent");
+
+  assert.equal(svc.onDurablePromptReceipt(RUNNER_ID, {
+    type: "durable_session_command_update",
+    commandId,
+    sessionId: id,
+    state: "queued",
+    revision: 2,
+  }), true);
+  assert.equal(db.getSession(id)?.pendingPrompts?.[0]?.state, "queued");
+  assert.equal(svc.cancelPendingPrompt(id, commandId).ok, false,
+    "control-plane cancellation remains unavailable after durable runner admission");
+
+  assert.equal(svc.onDurablePromptReceipt(RUNNER_ID, {
+    type: "durable_session_command_update",
+    commandId,
+    sessionId: id,
+    state: "failed",
+    revision: 3,
+    error: "queued command was cancelled",
+    code: "COMMAND_CANCELLED",
+  }), true);
+  assert.equal(db.getSession(id)?.pendingPrompts?.[0]?.state, "failed");
+  assert.equal(db.getSession(id)?.pendingPrompts?.[0]?.error, "queued command was cancelled");
 });
 
 test("durable queued prompts accept revision-zero failures and stop retrying after terminal status", () => {

@@ -2883,6 +2883,26 @@ export class SessionsService {
     return this.promptOutbox.receipt(runnerId, message);
   }
 
+  cancelPendingPrompt(sessionId: string, commandId: string): ServiceResult<SessionView> {
+    const session = this.db.getSession(sessionId);
+    if (!session) return fail("session not found", 404);
+    const result = this.promptOutbox.cancelPending(sessionId, commandId);
+    if (result === "not_found") return fail("pending prompt not found", 404);
+    if (result === "delivery_started") {
+      return fail("prompt delivery may already have started; cancel it only from a live runner queue", 409);
+    }
+    return ok(this.db.getSession(sessionId)!);
+  }
+
+  dismissPendingPrompt(sessionId: string, commandId: string): ServiceResult<SessionView> {
+    const session = this.db.getSession(sessionId);
+    if (!session) return fail("session not found", 404);
+    const result = this.promptOutbox.dismissTerminal(sessionId, commandId);
+    if (result === "not_found") return fail("pending prompt not found", 404);
+    if (result === "not_terminal") return fail("only failed or uncertain prompts can be dismissed", 409);
+    return ok(this.db.getSession(sessionId)!);
+  }
+
   /** Change model/effort/approval mode mid-session (applies to the next turn). */
   setConfig(
     sessionId: string,

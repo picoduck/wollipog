@@ -2647,7 +2647,7 @@ export class SessionManager {
       }
       durable?.queued();
       this.insertQueuedPrompt(sessionId, recovering, {
-        id: randomUUID(), ordinal: this.nextQueueOrdinal(sessionId), text, images, slashCommand,
+        id: durable?.commandId ?? randomUUID(), ordinal: this.nextQueueOrdinal(sessionId), text, images, slashCommand,
         config: effectiveConfig, durable, syntheticRecovery,
       });
       if (!this.recoveryLaunching.has(sessionId)) setImmediate(() => void this.recoverQueuedAppServer(sessionId));
@@ -2664,10 +2664,11 @@ export class SessionManager {
       }
       durable?.queued();
       this.insertQueuedPrompt(sessionId, queue, {
-        id: randomUUID(), ordinal: this.nextQueueOrdinal(sessionId), text, images, slashCommand,
+        id: durable?.commandId ?? randomUUID(), ordinal: this.nextQueueOrdinal(sessionId), text, images, slashCommand,
         config: effectiveConfig, durable, syntheticRecovery,
       });
       this.preLaunchQueues.set(sessionId, queue);
+      this.emitQueue(sessionId);
       return true;
     }
     if (!entry) {
@@ -2700,7 +2701,7 @@ export class SessionManager {
     // applied now: with prompts B(config X) and C(config Y) queued, B must run under X, not Y.
     durable?.queued();
     this.insertQueuedPrompt(sessionId, entry.queue, {
-      id: randomUUID(), ordinal: this.nextQueueOrdinal(sessionId), text, images, slashCommand,
+      id: durable?.commandId ?? randomUUID(), ordinal: this.nextQueueOrdinal(sessionId), text, images, slashCommand,
       config: effectiveConfig, durable, syntheticRecovery,
     });
     this.emitQueue(sessionId);
@@ -3552,10 +3553,14 @@ export class SessionManager {
    * every connected dashboard. The full text stays in the runner's queue for the actual turn. */
   private emitQueue(sessionId: string): void {
     const entry = this.active.get(sessionId);
-    const visible = entry
+    const waitingForAdmission = !entry ? this.preLaunchQueues.get(sessionId) : undefined;
+    const visible = entry || waitingForAdmission
       ? [
-          ...entry.queue.map((prompt) => ({ prompt, steeringState: undefined as "promoting" | "uncertain" | undefined })),
-          ...[...this.reservedPromotions(entry).values()]
+          ...(entry?.queue ?? waitingForAdmission ?? []).map((prompt) => ({
+            prompt,
+            steeringState: undefined as "promoting" | "uncertain" | undefined,
+          })),
+          ...[...(entry ? this.reservedPromotions(entry).values() : [])]
             .filter((operation) => operation.source)
             .map((operation) => ({
               prompt: operation.source!,
@@ -3585,6 +3590,7 @@ export class SessionManager {
           steerable: eligibility.eligible,
           ...(!eligibility.eligible ? { steerDisabledReason: eligibility.message } : {}),
           ...(steeringState ? { steeringState } : {}),
+          liveQueueObserved: true,
         };
       }),
       ...(entry?.holdQueuedPromptsAfterInterrupt ? { held: true } : {}),
@@ -3618,9 +3624,10 @@ export class SessionManager {
    * so it can't be cancelled this way). No-op if the id already ran or the session isn't active. */
   removeQueuedPrompt(sessionId: string, promptId: string): void {
     const entry = this.active.get(sessionId);
-    if (!entry) return;
-    const reserved = this.reservedPromotions(entry).get(promptId);
-    if (reserved) {
+    const preLaunch = !entry ? this.preLaunchQueues.get(sessionId) : undefined;
+    if (!entry && !preLaunch) return;
+    const reserved = entry ? this.reservedPromotions(entry).get(promptId) : undefined;
+    if (reserved && entry) {
       if (reserved.result?.disposition === "uncertain") {
         // Queue cancellation is the dashboard's legacy spelling of Dismiss. Route it through the
         // same terminal transition so the retained payload is scrubbed and a later Queue Again
@@ -3640,11 +3647,14 @@ export class SessionManager {
       }
       return;
     }
-    const before = entry.queue.length;
-    const removed = entry.queue.filter((q) => q.id === promptId);
-    entry.queue = entry.queue.filter((q) => q.id !== promptId);
+    const queue = entry?.queue ?? preLaunch!;
+    const before = queue.length;
+    const removed = queue.filter((q) => q.id === promptId);
+    const retained = queue.filter((q) => q.id !== promptId);
+    if (entry) entry.queue = retained;
+    else this.preLaunchQueues.set(sessionId, retained);
     this.rejectQueued(removed, "queued command was cancelled");
-    if (entry.queue.length !== before) this.emitQueue(sessionId);
+    if (retained.length !== before) this.emitQueue(sessionId);
   }
 
   private rejectQueued(queue: QueuedPrompt[], error: string): void {

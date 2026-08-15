@@ -2073,6 +2073,31 @@ export interface QueuedPromptView {
   /** Control-plane durable delivery state before the runner exposes its live queue identity. */
   durableDeliveryState?: "pending" | "queued" | "failed" | "uncertain";
   durableDeliveryError?: string;
+  /** True only when this entry came from the current runner's live in-memory queue. */
+  liveQueueObserved?: boolean;
+}
+
+export type PendingPromptState =
+  | "pending" | "sent" | "accepted" | "queued" | "started" | "failed" | "uncertain";
+
+/** Control-plane durable prompt projection. Unlike `queued`, this identity and state survive
+ * reconnects/reloads and remain visible until a canonical command-tagged user event or dismissal. */
+export interface PendingPromptView {
+  commandId: string;
+  text: string;
+  hasImages?: boolean;
+  state: PendingPromptState;
+  revision: number;
+  attemptCount: number;
+  error?: string;
+  errorCode?: DurableSessionCommandErrorCode;
+  userEventSeq?: number;
+  createdAt: number;
+  updatedAt: number;
+  /** Safe only before any runner send attempt has been recorded. */
+  canCancel?: boolean;
+  /** Terminal evidence may be hidden without changing its recorded outcome. */
+  canDismiss?: boolean;
 }
 
 export type SteerDisposition = "accepted" | "converted_to_queue" | "rejected" | "uncertain";
@@ -2238,6 +2263,8 @@ export interface SessionView {
   toolCallCount?: number;
   /** Prompts queued behind the running turn (ephemeral; absent/empty ⇒ nothing queued). */
   queued?: QueuedPromptView[];
+  /** Durable user prompts rendered in the transcript while delivery remains incomplete/terminal. */
+  pendingPrompts?: PendingPromptView[];
   /** The runner interrupted the active turn and is holding the preserved FIFO for explicit resume. */
   queueHeld?: boolean;
   /** Ephemeral runner-owned coordinate for the currently dequeued turn. */
