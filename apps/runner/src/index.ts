@@ -1558,6 +1558,7 @@ function shutdown(): void {
 
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
+process.on("SIGHUP", shutdown);
 
 log(
   `starting v${VERSION} — host=${metadata.hostname} os=${metadata.os} ` +
