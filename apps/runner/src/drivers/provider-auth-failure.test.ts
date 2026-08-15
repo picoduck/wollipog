@@ -5,6 +5,8 @@ import { isProviderAuthenticationFailure } from "./provider-auth-failure.js";
 test("classifies provider login failures without conflating other retry classes", () => {
   for (const message of [
     "authentication_failed",
+    "authentication_error",
+    "stream error: unexpected status 401 Unauthorized; retrying 1/5",
     "unexpected status 401 Unauthorized: Missing bearer or basic authentication in header",
     "You are not logged in. Run codex login.",
     "OAuth token expired",
@@ -19,6 +21,7 @@ test("classifies provider login failures without conflating other retry classes"
     "runner pairing is required",
     "Wollipog account authentication failed",
     "subscription entitlement is unavailable",
+    "MCP server returned 401 because its credentials expired",
     "the provider is temporarily overloaded",
   ]) assert.equal(isProviderAuthenticationFailure(message), false, message);
 });

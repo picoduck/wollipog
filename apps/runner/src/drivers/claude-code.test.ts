@@ -132,6 +132,24 @@ test("provider commands are synchronously prepared, driver-bound, and single-use
   }), /invalid.*command name/i);
 });
 
+test("auth failures retain a secret-free diagnostic when no structured callback is installed", () => {
+  const stderr: string[] = [];
+  const driver = new ClaudeCodeDriver(baseOpts, {
+    onEvent: () => {},
+    onStderr: (text) => stderr.push(text),
+    onExit: () => {},
+  });
+  (driver as any).handleEvent({
+    type: "system",
+    subtype: "api_retry",
+    error: "authentication_failed secret-value",
+    attempt: 1,
+    max_retries: 5,
+  });
+  assert.deepEqual(stderr, ["provider authentication is required"]);
+  assert.equal(stderr.join(" ").includes("secret-value"), false);
+});
+
 test("persistent settings default on, accept zero/unbounded values, and reject footguns loudly", () => {
   assert.equal(CLAUDE_GRACEFUL_STOP_BUDGET_MS, 11_500);
   assert.deepEqual(claudePersistentSettings({}), {

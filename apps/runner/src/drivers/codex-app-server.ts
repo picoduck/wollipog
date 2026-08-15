@@ -234,7 +234,7 @@ export class CodexAppServerDriver implements Driver {
       if (this.disposed) return;
       const s = String(t).trim();
       if (s && !/DeprecationWarning|trace-deprecation/.test(s)) {
-        if (isProviderAuthenticationFailure(s)) this.cb.onAuthenticationFailure?.();
+        if (isProviderAuthenticationFailure(s)) this.signalAuthenticationFailure();
         else this.cb.onStderr(s);
       }
     });
@@ -614,8 +614,13 @@ export class CodexAppServerDriver implements Driver {
     }
     if (!message || this.emittedErrors.has(message)) return;
     this.emittedErrors.add(message);
-    if (isProviderAuthenticationFailure(message)) this.cb.onAuthenticationFailure?.();
+    if (isProviderAuthenticationFailure(message)) this.signalAuthenticationFailure();
     else this.cb.onEvent({ kind: "error", message });
+  }
+
+  private signalAuthenticationFailure(): void {
+    if (this.cb.onAuthenticationFailure) this.cb.onAuthenticationFailure();
+    else this.cb.onStderr("provider authentication is required");
   }
 
   private emitPendingTurnUsage(): void {

@@ -2637,10 +2637,7 @@ export class SessionManager {
     const persistedAuthenticationBlock = isProviderAuthenticationBlock(
       this.store.readMeta(sessionId)?.pendingApproval,
     );
-    if (persistedAuthenticationBlock) {
-      if (syntheticRecovery) return false;
-      this.store.patchMeta(sessionId, { pendingApproval: null });
-    }
+    if (persistedAuthenticationBlock && syntheticRecovery) return false;
     const recovering = this.recoveryQueues.get(sessionId);
     if (recovering) {
       if (!this.queueCanAccept(this.recoveryQueueCapacityView(sessionId, recovering), text, images)) {
@@ -2652,6 +2649,7 @@ export class SessionManager {
         durable?.failed("prompt queue is full while the agent is recovering", "QUEUE_FULL");
         return false;
       }
+      if (persistedAuthenticationBlock) this.store.patchMeta(sessionId, { pendingApproval: null });
       durable?.queued();
       this.insertQueuedPrompt(sessionId, recovering, {
         id: randomUUID(), ordinal: this.nextQueueOrdinal(sessionId), text, images, slashCommand,
@@ -2670,13 +2668,6 @@ export class SessionManager {
       durable?.failed(entry.historyIntegrityFailure, "INVALID_COMMAND");
       return false;
     }
-    if (entry.authenticationBlocked && !syntheticRecovery) {
-      entry.authenticationBlocked = false;
-      const pending = this.store.readMeta(sessionId)?.pendingApproval;
-      if (isProviderAuthenticationBlock(pending)) {
-        this.store.patchMeta(sessionId, { pendingApproval: null });
-      }
-    }
     // Bound the queue by count AND bytes: entries hold full prompt text + image payloads in
     // memory, so a runaway sender (a looping automation, a stuck retry, a burst of pasted
     // screenshots) must fail loudly, not OOM the box.
@@ -2688,6 +2679,8 @@ export class SessionManager {
       durable?.failed("prompt queue is full", "QUEUE_FULL");
       return false;
     }
+    if (entry.authenticationBlocked && !syntheticRecovery) entry.authenticationBlocked = false;
+    if (persistedAuthenticationBlock) this.store.patchMeta(sessionId, { pendingApproval: null });
     // Only a user-originated prompt is the explicit resume signal. It may arrive while the
     // cancelled provider turn is still settling; clearing the hold now lets the current drain
     // continue into the preserved FIFO as soon as that turn returns.
@@ -2728,7 +2721,7 @@ export class SessionManager {
       return false;
     }
     if (entry.authenticationBlocked) {
-      lifecycle.failed("provider authentication is required", "COMMAND_UNAVAILABLE");
+      lifecycle.failed("provider authentication is required", "PROVIDER_AUTHENTICATION_REQUIRED");
       return false;
     }
     if (entry.historyIntegrityFailure) {
@@ -3809,7 +3802,11 @@ export class SessionManager {
     if (!ok) {
       this.releaseAdmissionIfInactive(sessionId);
       if (resumeId) this.store.releaseLock(sessionId, this.lockOwner);
-      durable?.failed("provider session could not be resumed", "INVALID_COMMAND");
+      if (isProviderAuthenticationBlock(this.store.readMeta(sessionId)?.pendingApproval)) {
+        durable?.failed("provider authentication is required", "PROVIDER_AUTHENTICATION_REQUIRED");
+      } else {
+        durable?.failed("provider session could not be resumed", "INVALID_COMMAND");
+      }
       return;
     }
     this.prompt(sessionId, text, images, slashCommand, config, durable, syntheticRecovery);
@@ -4482,6 +4479,12 @@ export class SessionManager {
         return;
       }
 
+      if (entry.authenticationBlocked) {
+        this.emitStatus(sessionId, "input_required", "Provider authentication is required");
+        lifecycle.failed("provider authentication is required", "PROVIDER_AUTHENTICATION_REQUIRED");
+        return;
+      }
+
       const interrupted = !entry.governanceTripped && entry.interruptRequested && stop === "cancelled";
       if (interrupted) {
         this.emitEvent(sessionId, { kind: "turn_interrupted" });
@@ -4514,6 +4517,11 @@ export class SessionManager {
       if (entry.governanceTripped) {
         this.emitStatus(sessionId, "idle");
         lifecycle.completed();
+        return;
+      }
+      if (entry.authenticationBlocked) {
+        this.emitStatus(sessionId, "input_required", "Provider authentication is required");
+        lifecycle.failed("provider authentication is required", "PROVIDER_AUTHENTICATION_REQUIRED");
         return;
       }
       this.emitEvent(sessionId, { kind: "error", message: `session command failed: ${errText(error)}` });
@@ -5361,6 +5369,23 @@ export class SessionManager {
       this.rejectQueued(queued, entry.historyIntegrityFailure);
       return; // never append an exit event or overwrite the latched integrity failure
     }
+    if (entry.authenticationBlocked) {
+      this.restoreUnsubmittedPromotions(sessionId, entry);
+      if (!this.emitEvent(sessionId, { kind: "stderr", text: `agent process exited (code ${code})` })) {
+        this.active.delete(sessionId);
+        return;
+      }
+      const queued = entry.queue.splice(0);
+      const hadQueueProjection = queued.length > 0 || this.reservedPromotions(entry).size > 0;
+      this.active.delete(sessionId);
+      if (hadQueueProjection) this.emitQueue(sessionId);
+      if (queued.length) {
+        this.stabilizeRecoveryQueue(sessionId, queued);
+        this.recoveryQueues.set(sessionId, queued);
+      }
+      this.emitStatus(sessionId, "input_required", "Provider authentication is required");
+      return;
+    }
     if (entry.status !== "stopped") {
       this.restoreUnsubmittedPromotions(sessionId, entry);
       // Keep the entry installed until this append completes: if it is the first integrity
@@ -6005,15 +6030,15 @@ export class SessionManager {
     if (meta.agentId) this.onAgentAuthUpdate?.(meta.agentId, { status: "unauthenticated" });
     const provider = providerDisplayName(meta.driver);
     const guidance = providerAuthenticationGuidance(meta);
-    if (!this.emitEvent(sessionId, {
+    const emitted = this.emitEvent(sessionId, {
       kind: "permission_request",
       requestId: `provider-auth:${randomUUID()}`,
       title: `Authentication Required — ${provider}`,
       options: [],
       purpose: "authentication",
       context: { toolName: provider, input: guidance },
-    })) return;
-    this.emitStatus(sessionId, "input_required", `${provider} authentication is required`);
+    });
+    if (emitted) this.emitStatus(sessionId, "input_required", `${provider} authentication is required`);
     try {
       entry.client.cancel();
     } catch (error) {
@@ -6127,7 +6152,11 @@ function providerDisplayName(driver: AgentDriverKind): string {
 
 function providerAuthenticationGuidance(meta: SessionMeta): string {
   const provider = providerDisplayName(meta.driver);
-  const login = meta.driver === "claude-code" ? "claude" : meta.driver === "acp" ? meta.command : "codex login";
+  const login = meta.driver === "claude-code"
+    ? "claude auth login"
+    : meta.driver === "codex" || meta.driver === "codex-app-server"
+      ? "codex login"
+      : "the provider-specific login command";
   const machine = meta.executionTarget
     ? `${meta.executionTarget.adapter} target ${meta.executionTarget.id}`
     : meta.context.kind === "wsl"

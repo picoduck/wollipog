@@ -1542,8 +1542,13 @@ export class ClaudeCodeDriver implements Driver {
   }
 
   private emitStderrOrAuthenticationFailure(text: string): void {
-    if (isProviderAuthenticationFailure(text)) this.cb.onAuthenticationFailure?.();
+    if (isProviderAuthenticationFailure(text)) this.signalAuthenticationFailure();
     else this.cb.onStderr(text);
+  }
+
+  private signalAuthenticationFailure(): void {
+    if (this.cb.onAuthenticationFailure) this.cb.onAuthenticationFailure();
+    else this.cb.onStderr("provider authentication is required");
   }
 
   /** Map one claude stream-json event; return a StopReason when the turn ends. */
@@ -1564,7 +1569,7 @@ export class ClaudeCodeDriver implements Driver {
         }
         if (msg.subtype === "api_retry") {
           const error = String(msg.error ?? "");
-          if (isProviderAuthenticationFailure(error)) this.cb.onAuthenticationFailure?.();
+          if (isProviderAuthenticationFailure(error)) this.signalAuthenticationFailure();
           else this.cb.onStderr(`retry ${msg.attempt}/${msg.max_retries}: ${error}`);
         }
         return null;

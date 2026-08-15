@@ -11,7 +11,13 @@ export function isProviderAuthenticationFailure(message: unknown): boolean {
   const normalized = message.trim().toLowerCase();
   if (!normalized) return false;
 
+  // A provider can include downstream tool failures in its terminal turn error. Those credentials
+  // do not authenticate the harness itself and `codex login` / `claude auth login` cannot repair
+  // them, so keep the original diagnostic on the ordinary error path.
+  if (/\b(?:mcp server|connector|tool call)\b/.test(normalized)) return false;
+
   if (/\bauthentication_failed\b/.test(normalized) ||
+      /\bauthentication[_ -]?error\b/.test(normalized) ||
       /\b(?:not|never) (?:logged|signed) in\b/.test(normalized) ||
       /\blogin (?:is )?required\b/.test(normalized)) return true;
 
@@ -19,6 +25,9 @@ export function isProviderAuthenticationFailure(message: unknown): boolean {
   const invalid = /\b(?:invalid|incorrect|expired|revoked|missing|malformed|unrecognized)\b/;
   if (credential.test(normalized) && invalid.test(normalized)) return true;
 
-  return /\b401\b|\bunauthorized\b/.test(normalized) &&
-    /\b(?:auth(?:entication)?|bearer|basic|credential|token|api[ -]?key|login|sign[ -]?in)\b/.test(normalized);
+  const unauthorized = /\b401\b|\bunauthorized\b/.test(normalized);
+  return unauthorized && (
+    /\b(?:auth(?:entication)?|bearer|basic|credential|token|api[ -]?key|login|sign[ -]?in)\b/.test(normalized) ||
+    /\b(?:unexpected status|status code|stream error|api retry|retrying)\b/.test(normalized)
+  );
 }
