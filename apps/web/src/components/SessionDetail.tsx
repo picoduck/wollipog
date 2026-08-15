@@ -1611,7 +1611,7 @@ function SessionDetailLoaded({
         reservedDraft.revision,
         reservedDraft.supersededRevision,
       ).catch(() => false);
-      await deleteComposerDraftIfMatches(
+      await composerDraftCleanup(
         sessionId,
         submittedDraft.text,
         submittedDraft.images,

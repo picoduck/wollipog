@@ -163,9 +163,11 @@ async function markerSuppressesDraft(
     // revision is equally exact; a later cross-tab save necessarily mints another revision.
     return true;
   }
-  // Once a marker carries revision identities, any other revision is a distinct save even when
-  // its content and timestamp happen to match. Fingerprints are only the legacy/id-less fallback.
-  if (marker.expectedRevision !== undefined || marker.supersededRevision !== undefined) return false;
+  // Once a marker carries revision identities, any other current revision is a distinct save even
+  // when its content and timestamp happen to match. A copied-forward legacy draft can be id-less,
+  // so retain the fingerprint fallback for that record only.
+  if (draft.revision !== undefined &&
+      (marker.expectedRevision !== undefined || marker.supersededRevision !== undefined)) return false;
   // Fingerprint fallback identifies content, not a stable snapshot. Do not let it suppress an
   // identical draft saved after the acceptance/deletion attempt.
   if (draft.updatedAt > marker.deletedAt) return false;

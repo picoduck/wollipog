@@ -4,7 +4,7 @@ const CURRENT_DB = "wollipog-composer-drafts";
 const LEGACY_DB = "mam-composer-drafts";
 const STORE = "drafts";
 
-type Draft = { text: string; images: []; updatedAt: number; revision: string };
+type Draft = { text: string; images: []; updatedAt: number; revision?: string };
 
 function resourceKey(prefix: string, sessionId: string, instanceScope: string): string {
   const tuple = [instanceScope, sessionId].map((part) => `${part.length}:${part}`).join("");
@@ -555,6 +555,57 @@ test("accepted fallback reservation suppresses the exact superseded IndexedDB re
   await page.reload();
   await expect(page.locator("html")).toHaveAttribute("data-ready", "1");
   expect(await load(page, sessionId, scope)).toEqual(newer);
+});
+
+test("accepted fallback reservation suppresses a matching revision-less legacy record", async ({ page }) => {
+  const sessionId = "accepted-fallback-revisionless";
+  const scope = "remote-a";
+  const key = currentKey(sessionId, scope);
+  const prior: Draft = { text: "submitted", images: [], updatedAt: Date.now() };
+  await putRecord(page, CURRENT_DB, key, prior);
+
+  const result = await page.evaluate(async ({ sessionId, scope }) => {
+    const prototype = IDBDatabase.prototype;
+    const original = prototype.transaction;
+    let rejectReservationWrite = true;
+    Object.defineProperty(prototype, "transaction", {
+      configurable: true,
+      value(
+        this: IDBDatabase,
+        storeNames: string | string[],
+        mode?: IDBTransactionMode,
+        options?: IDBTransactionOptions,
+      ) {
+        if (this.name === "wollipog-composer-drafts" && mode === "readwrite" && rejectReservationWrite) {
+          rejectReservationWrite = false;
+          throw new Error("reservation write fault");
+        }
+        return original.call(this, storeNames, mode, options);
+      },
+    });
+    try {
+      const reserved = await window.__WOLLIPOG_COMPOSER_DRAFTS_E2E__
+        .reserve(sessionId, "submitted", scope);
+      const marked = await window.__WOLLIPOG_COMPOSER_DRAFTS_E2E__
+        .markAccepted(sessionId, reserved.text, reserved.revision, scope, reserved.supersededRevision);
+      const deleted = await window.__WOLLIPOG_COMPOSER_DRAFTS_E2E__
+        .deleteIfMatches(sessionId, reserved.text, reserved.revision, scope, reserved.supersededRevision);
+      return { reserved, marked, deleted };
+    } finally {
+      Object.defineProperty(prototype, "transaction", { configurable: true, value: original });
+    }
+  }, { sessionId, scope });
+
+  expect(result.reserved.revision).toBeTruthy();
+  expect(result.reserved.supersededRevision).toBeUndefined();
+  expect(result.marked).toBe(true);
+  expect(result.deleted).toBe(true);
+  expect(await getRecord(page, CURRENT_DB, key)).toEqual(prior);
+  expect(await load(page, sessionId, scope)).toBeNull();
+
+  await page.reload();
+  await expect(page.locator("html")).toHaveAttribute("data-ready", "1");
+  expect(await load(page, sessionId, scope)).toBeNull();
 });
 
 test("healthy accepted cleanup removes its redundant localStorage marker", async ({ page }) => {
