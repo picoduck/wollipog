@@ -5,35 +5,24 @@ import {
   constants,
   existsSync,
   fstatSync,
+  fsyncSync,
+  linkSync,
   mkdirSync,
   openSync,
   readFileSync,
   realpathSync,
-  renameSync,
+  rmdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { hostname as systemHostname } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 const OWNER_FILE = ".wollipog-runner-owner-v1.json";
 const LEASE_FILE = ".wollipog-runner-active-v1.lock";
+const RECOVERY_DIR = ".wollipog-runner-lease-recovery-v1";
 const MAX_METADATA_BYTES = 4_096;
 const LEGACY_CREDENTIAL = join("credentials", "active-runner-token");
-const LEGACY_STATE_ENTRIES = [
-  "admission",
-  "checkpoint-ref-ownership",
-  "command-receipts",
-  "conductor",
-  "hooks",
-  "provider-state",
-  "provider-state-cleanup",
-  "registry",
-  "session-command-receipts",
-  "sessions",
-  "worktree-cleanup.json",
-  "worktrees",
-];
 
 export interface RunnerDataDirIdentity {
   runnerId: string;
@@ -75,6 +64,10 @@ export function normalizeControlPlaneEndpoint(controlPlaneUrl: string): string {
   }
   endpoint.hash = "";
   endpoint.pathname = endpoint.pathname.replace(/\/+$/, "") || "/";
+  if (/^127(?:\.\d{1,3}){3}$/u.test(endpoint.hostname) || ["localhost", "[::1]"].includes(endpoint.hostname)) {
+    endpoint.hostname = "localhost";
+    endpoint.port = "";
+  }
   return endpoint.toString();
 }
 
@@ -117,53 +110,55 @@ function defaultProcessAlive(pid: number): boolean {
   }
 }
 
-function sameSecret(left: Buffer, right: string): boolean {
+function sameSecret(left: Buffer, right: Buffer): boolean {
   const rightHash = createHash("sha256").update(right).digest();
   const leftHash = createHash("sha256").update(left).digest();
   return timingSafeEqual(leftHash, rightHash);
 }
 
-function legacyCredentialForClaim(dataDir: string, token: string): Buffer | null {
+function legacyCredentialForClaim(dataDir: string): Buffer | null {
   const credentialFile = join(dataDir, LEGACY_CREDENTIAL);
-  const hasLegacyState = existsSync(credentialFile) || LEGACY_STATE_ENTRIES.some((entry) => existsSync(join(dataDir, entry)));
-  if (!hasLegacyState) return null;
-  if (!existsSync(credentialFile)) {
-    throw new Error(
-      `legacy runner data at ${dataDir} has no ownership marker or active credential; move it aside or select a distinct --data-dir`,
-    );
-  }
-  let legacyToken: Buffer;
+  if (!existsSync(credentialFile)) return null;
   try {
-    legacyToken = protectedRead(credentialFile);
+    return protectedRead(credentialFile);
   } catch (error) {
     throw new Error(`legacy runner credential cannot be safely adopted: ${(error as Error).message}`);
   }
-  if (!sameSecret(legacyToken, token)) {
-    throw new Error(
-      `legacy runner data at ${dataDir} is bound to another credential; use its matching token or select a distinct --data-dir`,
-    );
+}
+
+function publishProtected(file: string, contents: string | Buffer): void {
+  const temp = join(dirname(file), `.${basename(file)}.publish-${process.pid}-${randomUUID()}`);
+  writeFileSync(temp, contents, { flag: "wx", mode: 0o600 });
+  try {
+    try {
+      chmodSync(temp, 0o600);
+    } catch {
+      // Windows ACLs are managed by the owning account.
+    }
+    const fd = openSync(temp, constants.O_RDONLY);
+    try {
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    linkSync(temp, file);
+  } finally {
+    rmSync(temp, { force: true });
   }
-  return legacyToken;
 }
 
 function writeProtected(file: string, value: unknown): void {
-  writeFileSync(file, `${JSON.stringify(value)}\n`, { flag: "wx", mode: 0o600 });
-  try {
-    chmodSync(file, 0o600);
-  } catch {
-    // Windows ACLs are managed by the owning account.
-  }
+  publishProtected(file, `${JSON.stringify(value)}\n`);
 }
 
 /**
  * Claim a runner state root before any mutable store is opened. The durable owner marker prevents
  * a later runner identity from silently adopting the root, while the process lease rejects live
- * concurrent use. A legacy root is adopted only when its protected active token matches exactly.
+ * concurrent use. A legacy root is claimed once under the lease because it has no owner metadata.
  */
 export function acquireRunnerDataDirLease(
   requestedDataDir: string,
   identity: RunnerDataDirIdentity,
-  token: string,
   options: RunnerDataDirLeaseOptions = {},
 ): RunnerDataDirLease {
   mkdirSync(requestedDataDir, { recursive: true });
@@ -171,35 +166,48 @@ export function acquireRunnerDataDirLease(
   const ownerHash = runnerDataDirOwnerHash(identity);
   const ownerPath = join(dataDir, OWNER_FILE);
   const leasePath = join(dataDir, LEASE_FILE);
+  const recoveryPath = join(dataDir, RECOVERY_DIR);
   const pid = options.pid ?? process.pid;
   const hostname = options.hostname ?? systemHostname();
   const isProcessAlive = options.isProcessAlive ?? defaultProcessAlive;
   const leaseId = randomUUID();
 
-  for (;;) {
-    const lease: LeaseRecord = {
-      version: 1,
-      ownerHash,
-      leaseId,
-      pid,
-      hostname,
-      createdAt: new Date().toISOString(),
-    };
+  const lease: LeaseRecord = {
+    version: 1,
+    ownerHash,
+    leaseId,
+    pid,
+    hostname,
+    createdAt: new Date().toISOString(),
+  };
+  if (existsSync(recoveryPath)) {
+    throw new Error(`runner data directory ${dataDir} has an incomplete lease recovery; verify no runner is active before removing ${recoveryPath}`);
+  }
+  try {
+    writeProtected(leasePath, lease);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     try {
-      writeProtected(leasePath, lease);
-      break;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      mkdirSync(recoveryPath);
+    } catch (guardError) {
+      if ((guardError as NodeJS.ErrnoException).code === "EEXIST") {
+        throw new Error(`runner data directory ${dataDir} lease recovery is already in progress; retry startup`);
+      }
+      throw guardError;
+    }
+    try {
       let existing: LeaseRecord;
       try {
         existing = parseRecord<LeaseRecord>(leasePath);
       } catch (readError) {
-        if ((readError as NodeJS.ErrnoException).code === "ENOENT") continue;
+        if ((readError as NodeJS.ErrnoException).code === "ENOENT") {
+          throw new Error(`runner data directory ${dataDir} lease changed during recovery; retry startup`);
+        }
         throw readError;
       }
       if (
         existing.version !== 1 ||
-        typeof existing.leaseId !== "string" ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(existing.leaseId) ||
         !Number.isSafeInteger(existing.pid) ||
         existing.pid <= 0 ||
         typeof existing.hostname !== "string" ||
@@ -213,13 +221,10 @@ export function acquireRunnerDataDirLease(
       if (isProcessAlive(existing.pid)) {
         throw new Error(`runner data directory ${dataDir} is already in use by process ${existing.pid}; use a distinct --data-dir`);
       }
-      const stalePath = `${leasePath}.stale-${existing.leaseId}`;
-      try {
-        renameSync(leasePath, stalePath);
-        rmSync(stalePath, { force: true });
-      } catch (renameError) {
-        if ((renameError as NodeJS.ErrnoException).code !== "ENOENT") throw renameError;
-      }
+      rmSync(leasePath);
+      writeProtected(leasePath, lease);
+    } finally {
+      rmdirSync(recoveryPath);
     }
   }
 
@@ -244,18 +249,13 @@ export function acquireRunnerDataDirLease(
         );
       }
     } else {
-      const legacyCredential = legacyCredentialForClaim(dataDir, token);
+      const legacyCredential = legacyCredentialForClaim(dataDir);
       if (legacyCredential) {
         const scopedCredential = scopedRunnerCredentialFile(dataDir, identity);
         mkdirSync(dirname(scopedCredential), { recursive: true });
         if (!existsSync(scopedCredential)) {
-          writeFileSync(scopedCredential, legacyCredential, { flag: "wx", mode: 0o600 });
-          try {
-            chmodSync(scopedCredential, 0o600);
-          } catch {
-            // Windows ACLs are managed by the owning account.
-          }
-        } else if (!sameSecret(protectedRead(scopedCredential), legacyCredential.toString("utf8"))) {
+          publishProtected(scopedCredential, legacyCredential);
+        } else if (!sameSecret(protectedRead(scopedCredential), legacyCredential)) {
           throw new Error(`scoped runner credential at ${scopedCredential} conflicts with legacy migration`);
         }
       }

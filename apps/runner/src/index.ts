@@ -190,7 +190,6 @@ try {
   dataDirLease = acquireRunnerDataDirLease(
     config.dataDir,
     runnerDataIdentity,
-    config.token,
   );
 } catch (error) {
   console.error(`[runner ${config.runnerId}] data directory unavailable: ${(error as Error).message}`);
