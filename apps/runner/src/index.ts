@@ -5,6 +5,7 @@
  */
 
 import { hostname } from "node:os";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import WebSocket from "ws";
@@ -191,10 +192,17 @@ const warnLegacyEnvironment = (message: string) => console.warn(`[runner ${confi
 const conductorFeatureEnabled = conductorEnabled(process.env, warnLegacyEnvironment);
 const claudeHookFeatureEnabled = claudeHooksEnabled(process.env, warnLegacyEnvironment);
 warnLegacyClaudeLifetimeEnvironment(process.env, warnLegacyEnvironment);
+const v1Credential = readV1RunnerCredentialForAttestation(config.dataDir, {
+  runnerId: config.runnerId,
+  controlPlaneUrl: config.controlPlaneUrl,
+});
 const attestation = await waitForRunnerControlPlaneAttestation({
   controlPlaneUrl: config.controlPlaneUrl,
   runnerId: config.runnerId,
   token: config.token,
+  ...(v1Credential
+    ? { priorCredentialHash: createHash("sha256").update(v1Credential).digest("hex") }
+    : {}),
   onRetry: (error, delayMs) => log(`${error.message}; retrying in ${delayMs}ms`),
 });
 const runnerDataIdentity = {
@@ -202,22 +210,14 @@ const runnerDataIdentity = {
   controlPlaneUrl: config.controlPlaneUrl,
   controlPlaneInstanceId: attestation.instanceId,
 };
-const v1Credential = readV1RunnerCredentialForAttestation(config.dataDir, runnerDataIdentity);
-let allowLegacyEndpointMigration = v1Credential === config.token;
+const allowLegacyEndpointMigration = Boolean(v1Credential) && (
+  v1Credential === config.token || attestation.priorCredentialValid === true
+);
 if (v1Credential && !allowLegacyEndpointMigration) {
-  try {
-    const priorAttestation = await waitForRunnerControlPlaneAttestation({
-      controlPlaneUrl: config.controlPlaneUrl,
-      runnerId: config.runnerId,
-      token: v1Credential,
-      onRetry: (error, delayMs) => log(`${error.message} while verifying v1 ownership; retrying in ${delayMs}ms`),
-    });
-    allowLegacyEndpointMigration = priorAttestation.instanceId === attestation.instanceId;
-  } catch {
-    log("v1 endpoint ownership could not be proven to this control plane; preserving it in place");
-  }
+  log("v1 endpoint ownership could not be proven to this control plane; preserving it in place");
 }
 let dataDirLease: RunnerDataDirLease;
+const requestedDataDir = config.dataDir;
 try {
   dataDirLease = acquireRunnerDataDirLease(
     config.dataDir,
@@ -227,6 +227,9 @@ try {
 } catch (error) {
   console.error(`[runner ${config.runnerId}] data directory unavailable: ${(error as Error).message}`);
   process.exit(1);
+}
+if (resolve(requestedDataDir) !== resolve(dataDirLease.dataDir)) {
+  log(`using isolated runner state at ${dataDirLease.dataDir}; prior owner state remains untouched`);
 }
 config.dataDir = dataDirLease.dataDir;
 process.once("exit", dataDirLease.release);

@@ -996,6 +996,9 @@ export class SessionManager {
         pendingCleanup,
         this.forkingTargets,
         [...this.isolationContexts, ...pendingCleanup.map((record) => record.context)],
+        Date.now(),
+        undefined,
+        providerStateKey(this.runnerId),
       );
       if (result.removed.length) this.log(`reconciled ${result.removed.length} isolated provider-state path(s)`);
       for (const error of result.errors) this.log(`provider-state reconciliation skipped ${error}`);
@@ -1832,6 +1835,12 @@ export class SessionManager {
     launchGeneration?: number,
   ): Promise<void> {
     if (this.executionIsolation.mode !== "bwrap" || meta.providerStateVersion === 3) return;
+    // Native v2 and v3 use the same dataDir partition. Never re-import the retained provider-wide
+    // legacy leaf over a session that already completed the v2 migration.
+    if (meta.context.kind === "native" && meta.providerStateVersion === 2) {
+      this.store.patchMeta(meta.sessionId, { providerStateVersion: 3 });
+      return;
+    }
     const inFlight = this.providerStateMigrations.get(meta.sessionId);
     if (inFlight) {
       await inFlight;
@@ -1851,7 +1860,7 @@ export class SessionManager {
     const refresh = setInterval(() => this.store.refreshLock(meta.sessionId, this.lockOwner), LOCK_REFRESH_MS);
     try {
       // Double-check after acquiring the cross-process lock: another runner may have completed the
-      // copy while this caller waited. Never rm/copy a partition that is already published as v2.
+      // copy while this caller waited. Never rm/copy a partition that is already published as v3.
       const current = this.store.readMeta(meta.sessionId);
       if (!current || current.providerStateVersion === 3) return;
       const migration = this.migrateIsolationState(
@@ -4987,16 +4996,22 @@ export class SessionManager {
       }
     }
     try {
+      const ownedWslPath = record.context.kind === "wsl" && this.runnerOwnerHash &&
+        record.worktreePath.includes(`/runner-instances/${this.runnerOwnerHash}/worktrees/`);
       await removeWorktree(
         record.repoPath,
         {
           path: record.worktreePath,
-          branch: record.context.kind === "wsl" && this.runnerOwnerHash &&
-              record.worktreePath.includes(`/runner-instances/${this.runnerOwnerHash}/worktrees/`)
+          branch: ownedWslPath
             ? `agent/${this.runnerOwnerHash.slice(0, 16)}/${record.sessionId}`
             : `agent/${record.sessionId}`,
         },
-        { context: record.context, dataDir: this.dataDir, ownerHash: this.runnerOwnerHash },
+        {
+          context: record.context,
+          dataDir: this.dataDir,
+          ownerHash: this.runnerOwnerHash,
+          legacyWslRoot: record.context.kind === "wsl" && !ownedWslPath,
+        },
       );
     } catch {
       worktreeRemoved = false;

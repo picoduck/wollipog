@@ -26,7 +26,10 @@ test("runner attestation is exact-runner authenticated, uncached, and read-only"
   });
   assert.equal(invalidId.statusCode, 401);
   const response = await app.inject({
-    method: "GET", url: "/runner/attestation/runner-one", headers: { authorization: "Bearer secret" },
+    method: "GET", url: "/runner/attestation/runner-one", headers: {
+      authorization: "Bearer secret",
+      "x-wollipog-prior-runner-credential-sha256": "a".repeat(64),
+    },
   });
   assert.equal(response.statusCode, 200);
   assert.equal(response.headers["cache-control"], "private, no-store");
@@ -35,8 +38,10 @@ test("runner attestation is exact-runner authenticated, uncached, and read-only"
     service: WOLLIPOG_CONTROL_PLANE_SERVICE,
     instanceId: INSTANCE_ID,
     protocolVersion: PROTOCOL_VERSION,
+    priorCredentialValid: true,
   });
   assert.equal(calls.at(-1)?.runnerId, "runner-one");
   assert.equal(calls.at(-1)?.now, 1234);
   assert.equal(JSON.stringify(calls).includes("secret"), false);
+  assert.equal(calls.at(-1)?.tokenHash, "a".repeat(64));
 });

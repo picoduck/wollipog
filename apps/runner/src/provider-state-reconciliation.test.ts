@@ -119,6 +119,34 @@ test("failed exact cleanup survives restart and retry removes only its hashed pa
   }
 });
 
+test("stable WSL ownership preserves the legacy native marker key during upgrade", async () => {
+  const now = Date.UTC(2026, 6, 12);
+  const nativeOwner = providerStateKey("runner-a");
+  const stableOwner = "e".repeat(64);
+  const orphan = "a".repeat(64);
+  const removed: string[] = [];
+  await reconcileProviderState(
+    bwrap,
+    "/data",
+    [],
+    stableOwner,
+    [],
+    new Set(),
+    [],
+    now,
+    {
+      list: async (context, root) => context.kind === "native" && root === "/data/provider-state/codex"
+        ? [{ name: orphan, mtimeMs: 0, bytes: 1, ownerKey: nativeOwner }]
+        : [],
+      claim: async () => {},
+      remove: async (_context, path) => { removed.push(path); },
+      wslHome: async () => "/home/me",
+    },
+    nativeOwner,
+  );
+  assert.deepEqual(removed, [`/data/provider-state/codex/${orphan}`]);
+});
+
 test("one offline WSL distro does not abort later reconciliation contexts", async () => {
   const now = Date.UTC(2026, 6, 12);
   const ownerKey = providerStateKey("runner-a");

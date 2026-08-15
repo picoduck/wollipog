@@ -281,6 +281,8 @@ export interface RunnerControlPlaneAttestation {
   service: ControlPlaneService;
   instanceId: string;
   protocolVersion: number;
+  /** Present only when the runner supplied a prior credential hash for safe v1 migration. */
+  priorCredentialValid?: boolean;
 }
 
 /** Minimum runner protocol for UI/control-plane commands that old runners otherwise ignore.

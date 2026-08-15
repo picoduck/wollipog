@@ -55,6 +55,8 @@ export interface WorktreeOptions {
   dataDir?: string;
   /** Stable attested owner for WSL paths and repository-global branch names. */
   ownerHash?: string;
+  /** Cleanup-only compatibility boundary for a persisted pre-attestation WSL worktree path. */
+  legacyWslRoot?: boolean;
 }
 
 export interface WorktreeHandle {
@@ -130,6 +132,11 @@ async function wslHome(context: Extract<AgentContext, { kind: "wsl" }>): Promise
 async function worktreeRootPath(options: WorktreeOptions = {}): Promise<string> {
   const context = options.context ?? nativeContext;
   if (context.kind === "wsl") {
+    if (options.legacyWslRoot) {
+      const root = `${await wslHome(context)}/.agent-manager/worktrees`;
+      await runContextCommand(context, "mkdir", ["-p", "--", root], { cwd: "/", timeoutMs: 8_000 });
+      return root;
+    }
     if (!options.ownerHash || !/^[a-f0-9]{64}$/u.test(options.ownerHash)) {
       throw new Error("WSL worktrees require a valid attested runner owner hash");
     }
