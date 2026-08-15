@@ -118,15 +118,21 @@ the owner-scoped transcript of a WSL session created after this upgrade: it sees
 shared leaf. No bytes are removed; roll forward to the current runner to resume that session.
 Fork verification requires non-empty history
 because a provider-native fork always starts from a completed source turn. Network denial is offline/local-model-only because it also
-removes access to cloud model APIs. Provider mode remains the broadest compatibility default.
+removes access to cloud model APIs. New checkpoint refs use
+`refs/{wollipog,mam}/owners/<full-attested-owner>/<session>/<kind>-<turn>`; persisted legacy rows and
+cleanup journals retain their exact unscoped layout until explicit offline adoption. Native provider
+mode remains the broadest compatibility default but takes an exclusive whole-HOME lease shared by
+Claude, Codex, ACP, Seatbelt, Windows Job, and Agent TUI launches. Direct WSL provider mode fails
+closed; choose bwrap or a dedicated distro/account.
 
 On upgrade, a persisted Conductor `--mcp-config` argument is rewritten to the attested runner's
 owned data directory before launch. The former `~/.agent-manager/conductor/*.mcp.json` file is never
 updated or deleted automatically: it has no trustworthy owner metadata and may still be used by an
-older runner. To retire those files, stop every pre-attestation runner for the OS account, inspect the
-directory without printing file contents, archive it for rollback, and only then remove it manually.
-Provider-mode Claude/Codex homes and external transcript discovery remain operator-owned shared state;
-use bwrap or separate OS accounts when concurrent control planes require a writable isolation boundary.
+older runner. To retire those files, stop every pre-attestation runner for the OS account, run the
+redacted `--state-doctor inventory`, then use the explicit quarantine action. Adoption conditionally
+copies legacy checkpoint or WSL provider state and preserves all source bytes; divergent targets fail
+closed. Provider-home bytes remain operator-owned even though native mutable launches are cross-process
+leased. Use bwrap or separate WSL distros/accounts for concurrent owners.
 
 `makeDriver(spec, cb): Driver` (`drivers/factory.ts`) switches on `spec.driver`
 (`"acp" | "claude-code" | "codex"`). `AcpDriver` (`drivers/acp-driver.ts`) constructs the existing

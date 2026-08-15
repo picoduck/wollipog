@@ -133,12 +133,14 @@ export interface SessionMeta {
   /** Isolated provider transcript layout. Absent identifies the legacy provider-wide root;
    * version 2 is a hashed per-manager-session partition. Runner-only, never sent as capability. */
   providerStateVersion?: 2 | 3;
+  /** Checkpoint ref layout. Absent is the pre-attestation shared namespace; v2 is stable-owner scoped. */
+  checkpointRefVersion?: 2;
   /** Tree sha snapshotting the worktree at the start of the most recent prompt turn (the last_turn
    * diff base). null = the snapshot attempt failed for that turn; absent = never captured. Box-local
    * (names an object in this repo's odb) — deliberately NOT part of SessionSnapshot. */
   lastTurnBaseTree?: string | null;
   /** Prompt turns run so far — numbers the per-turn checkpoint refs
-   * (refs/{wollipog,mam}/<sid>/turn-<n> during the compatibility window).
+   * (refs/{wollipog,mam}/owners/<owner>/<sid>/turn-<n> for checkpointRefVersion 2).
    * Box-local like lastTurnBaseTree. */
   turnCount?: number;
   /** Completed provider turns that can be forked, keyed by manager turn number. Box-local because

@@ -449,6 +449,38 @@ export async function migrateExecutionIsolationState(
   await runtime.copyNative(legacy, providerStateLocation(dataDir, driver, sessionId)!);
 }
 
+/** Operator-authorized offline adoption for unattributable WSL bwrap state. Exactly one legacy
+ * source shape may exist; the source is copied into the attested root and never removed. */
+export async function adoptLegacyWslExecutionIsolationState(
+  context: Extract<AgentContext, { kind: "wsl" }>,
+  driver: AgentDriverKind,
+  sessionId: string,
+  ownerHash: string,
+  deps: Partial<IsolationDeps> = {},
+): Promise<"absent" | "adopted"> {
+  if (!statePath(driver)) return "absent";
+  if (!/^[a-f0-9]{64}$/u.test(ownerHash)) throw new Error("WSL provider adoption requires an attested owner hash");
+  const runtime = { ...defaultDeps, ...deps };
+  const resolved = await runtime.resolveWsl(context);
+  if (!resolved) throw new Error(`cannot inventory legacy provider state inside WSL distro ${context.distro}`);
+  const sharedBase = wslRunnerStateBase(resolved.home);
+  const providerWide = legacyProviderStateLocation(sharedBase, driver)!;
+  const partition = providerStateLocation(sharedBase, driver, sessionId)!;
+  const hasProviderWide = await runtime.existsWsl(context, providerWide.leaf);
+  const hasPartition = await runtime.existsWsl(context, partition.leaf);
+  if (hasProviderWide && hasPartition) {
+    throw new Error("legacy WSL provider state has both provider-wide and partitioned sources; quarantine or resolve it explicitly");
+  }
+  const source = hasPartition ? partition : hasProviderWide ? providerWide : null;
+  if (!source) return "absent";
+  const target = providerStateLocation(wslRunnerStateBase(resolved.home, ownerHash), driver, sessionId)!;
+  if (await runtime.existsWsl(context, target.leaf)) {
+    throw new Error("owned WSL provider-state target already exists; refusing to merge or overwrite it");
+  }
+  await runtime.copyWsl(context, source, target);
+  return "adopted";
+}
+
 /** Best-effort callers may use this during failed-fork/session cleanup. It removes only the hashed
  * session partition and never follows a control-plane id as a path. */
 export async function removeExecutionIsolationState(

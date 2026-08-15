@@ -10,7 +10,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { anchorForkRef, anchorTurnRef, captureWorktreeTree, clearGhPrCacheForTests, computeDiffHash, deleteTurnRef, deleteTurnRefs, gitDiff, gitStatus, gitSummary, readTurnRef, restoreWorktreeToTree, runPodReconcile, synchronizeCheckpointRefs } from "./git-ops.js";
+import { adoptLegacyCheckpointRefs, anchorForkRef, anchorTurnRef, captureWorktreeTree, clearGhPrCacheForTests, computeDiffHash, deleteTurnRef, deleteTurnRefs, gitDiff, gitStatus, gitSummary, readTurnRef, restoreWorktreeToTree, runPodReconcile, synchronizeCheckpointRefs } from "./git-ops.js";
 
 function gitAvailable(): boolean {
   try {
@@ -424,6 +424,53 @@ test("checkpoint namespace compatibility mirrors one-sided refs and fails closed
     await anchorForkRef(repo, "s_fork", 4, secondTree);
     assert.equal(git(repo, ["rev-parse", "refs/mam/s_fork/fork-4"]).trim(), secondTree);
     assert.equal(git(repo, ["rev-parse", "refs/wollipog/s_fork/fork-4"]).trim(), secondTree);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("checkpoint owner namespaces isolate identical session ids and exact cleanup", { skip: !GIT }, async () => {
+  const repo = mkdtempSync(join(tmpdir(), "wollipog-ckpt-owner-"));
+  const ownerA = "a".repeat(64);
+  const ownerB = "b".repeat(64);
+  try {
+    initRepo(repo);
+    writeFileSync(join(repo, "a.txt"), "first\n");
+    git(repo, ["add", "-A"]);
+    git(repo, ["commit", "-q", "-m", "base"]);
+    const firstTree = await captureWorktreeTree(repo);
+    writeFileSync(join(repo, "a.txt"), "second\n");
+    const secondTree = await captureWorktreeTree(repo);
+
+    await anchorTurnRef(repo, "same-session", 1, firstTree, ownerA);
+    await anchorTurnRef(repo, "same-session", 1, secondTree, ownerB);
+    assert.equal(await readTurnRef(repo, "same-session", 1, ownerA), firstTree);
+    assert.equal(await readTurnRef(repo, "same-session", 1, ownerB), secondTree);
+    assert.equal(await readTurnRef(repo, "same-session", 1), null, "owned refs never populate the legacy root");
+
+    await deleteTurnRefs(repo, "same-session", ownerA);
+    assert.equal(await readTurnRef(repo, "same-session", 1, ownerA), null);
+    assert.equal(await readTurnRef(repo, "same-session", 1, ownerB), secondTree,
+      "one owner cleanup cannot enumerate or remove its sibling");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("explicit checkpoint adoption verifies and preserves legacy source refs", { skip: !GIT }, async () => {
+  const repo = mkdtempSync(join(tmpdir(), "wollipog-ckpt-adopt-"));
+  const owner = "c".repeat(64);
+  try {
+    initRepo(repo);
+    writeFileSync(join(repo, "a.txt"), "checkpoint\n");
+    git(repo, ["add", "-A"]);
+    git(repo, ["commit", "-q", "-m", "base"]);
+    const tree = await captureWorktreeTree(repo);
+    await anchorTurnRef(repo, "legacy-session", 1, tree);
+    assert.equal(await adoptLegacyCheckpointRefs(repo, "legacy-session", owner), 1);
+    assert.equal(await readTurnRef(repo, "legacy-session", 1), tree, "legacy rollback source remains");
+    assert.equal(await readTurnRef(repo, "legacy-session", 1, owner), tree);
+    assert.equal(await adoptLegacyCheckpointRefs(repo, "legacy-session", owner), 0, "retry is idempotent");
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }

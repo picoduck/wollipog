@@ -7,6 +7,7 @@ import {
   buildSeatbeltProfile,
   cloneExecutionIsolationState,
   migrateExecutionIsolationState,
+  adoptLegacyWslExecutionIsolationState,
   parseWslIsolationProbe,
   providerStateKey,
   removeExecutionIsolationState,
@@ -409,6 +410,24 @@ test("attested WSL owners get disjoint provider roots and ambiguous v2 state fai
     return true;
   });
   assert.equal(copied, false, "unattributable shared bytes remain untouched");
+});
+
+test("explicit offline WSL adoption copies one legacy source and preserves it", async () => {
+  const owner = "a".repeat(64);
+  const copies: Array<{ source: string; target: string }> = [];
+  const result = await adoptLegacyWslExecutionIsolationState(
+    { kind: "wsl", distro: "Ubuntu" }, "claude-code", "same-session", owner,
+    {
+      resolveWsl: async () => ({ command: "/usr/bin/bwrap", uid: 1000, home: "/home/me" }),
+      existsWsl: async (_context, path) => path === `/home/me/.agent-manager/provider-state/claude/${providerStateKey("same-session")}/projects`,
+      copyWsl: async (_context, source, target) => copies.push({ source: source.leaf, target: target.leaf }),
+    },
+  );
+  assert.equal(result, "adopted");
+  assert.deepEqual(copies, [{
+    source: `/home/me/.agent-manager/provider-state/claude/${providerStateKey("same-session")}/projects`,
+    target: `/home/me/.agent-manager/runner-instances/${owner}/provider-state/claude/${providerStateKey("same-session")}/projects`,
+  }]);
 });
 
 test("relative HOME overrides fail closed instead of mounting the wrong state path", async () => {

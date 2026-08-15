@@ -75,6 +75,8 @@ export interface WorktreeCleanupRecord {
   repoPath: string;
   worktreePath: string;
   context: AgentContext;
+  /** Exact checkpoint namespace owned by this worktree generation. Absent means legacy refs. */
+  checkpointOwnerHash?: string;
 }
 
 /** Native-host cleanup journal. Session rows can be deleted immediately while failed context

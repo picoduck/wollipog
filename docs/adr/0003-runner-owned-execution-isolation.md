@@ -14,7 +14,11 @@ adapter process, so wrapping only the adapter would leave a policy gap.
 ## Decision
 
 `executionIsolation.mode: "provider"` remains the compatibility default. The runner advertises this
-honestly as provider-owned behavior and does not claim a uniform OS boundary.
+honestly as provider-owned behavior and does not claim a uniform OS boundary. Native mutable provider
+launches take an owner-attested process-lifetime lease for the whole canonical effective `HOME`, shared
+by Claude, Codex, unknown ACP adapters, Seatbelt, Windows Job, and standalone Agent TUI processes.
+Direct WSL provider mode fails closed; bwrap or a dedicated distro/account is required. Container and
+cloud provider homes are independent.
 
 `mode: "bwrap"` is an opt-in runner-owned profile for native Linux and WSL. Before constructing a
 driver, the runner resolves `bwrap` in the target process namespace. It then launches every provider
@@ -87,6 +91,12 @@ without granting write access to the user's real transcript store. Functional re
 CLI tolerating read-only auxiliary files such as Claude's root project index/todos and Codex history;
 deterministic mount tests do not claim that live parity. Provider-mode history is not copied into the
 isolated store, so switching an existing session may be non-resumable.
+
+Repository checkpoints use the same stable owner identity under
+`refs/{wollipog,mam}/owners/<ownerHash>/<sessionId>`. A durable layout discriminator and cleanup-ledger
+owner hash keep restarts, rollback, and deletion on the exact namespace originally selected. Legacy
+unscoped refs are never automatically imported; the offline state doctor conditionally creates owner
+refs in one verified transaction and leaves every source ref intact.
 
 The control-plane session id is SHA-256 keyed before it reaches path syntax. Unrelated isolated sessions
 therefore cannot mount each other's transcript stores. A provider-native conversation fork first asks the

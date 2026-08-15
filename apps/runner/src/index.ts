@@ -250,7 +250,9 @@ const stagedRunnerCredential = stageRunnerCredentialFile(
 const runnerCredentialFile = stagedRunnerCredential.activePath;
 const conductorHost = {
   ...defaultConductorHost(),
-  configDir: resolve(config.dataDir, "conductor"),
+  // The pre-attestation default root also used ~/.agent-manager/conductor. Always add an
+  // attested leaf so startup sweeping can never delete unattributable legacy configurations.
+  configDir: resolve(config.dataDir, "conductor", "runner-instances", dataDirLease.ownerHash),
 };
 const claudeHookHost = {
   ...defaultClaudeHookHost(),
@@ -1167,7 +1169,11 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         consumeCancellation: (shellId) => pendingShellOpenCancellations.consume(shellId),
         sessionCanOpen: (sessionId) => sessions.sessionCanOpen(sessionId),
         resolveTarget: (sessionId) => sessionFilesTarget(sessionId),
-        resolveAgentTuiLaunch: (meta) => agentTuiLaunch(meta),
+        resolveAgentTuiLaunch: (meta) => {
+          const launch = agentTuiLaunch(meta);
+          if (launch) sessions.acquireAgentTuiProviderHome(meta);
+          return launch;
+        },
         open: (message, target, launch) => shells.open(
           message.shellId,
           message.sessionId,

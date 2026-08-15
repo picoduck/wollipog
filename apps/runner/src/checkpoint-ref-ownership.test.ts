@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { test } from "node:test";
 import {
   CheckpointRefOwnershipLedger,
+  checkpointRefOwnershipKey,
   type CheckpointRefOwnershipClaim,
 } from "./checkpoint-ref-ownership.js";
 
@@ -31,6 +32,30 @@ test("ownership claims survive restart and exact duplicate claims are idempotent
   assert.equal(readdirSync(join(root, "checkpoint-ref-ownership")).filter((name) => name.endsWith(".json")).length, 1);
 });
 
+test("legacy v2 claims keep their original key while stable owners get disjoint v3 keys", (t) => {
+  const { root, ledger } = tempLedger(t);
+  const legacy = nativeClaim(root);
+  const legacyKey = checkpointRefOwnershipKey(legacy);
+  const dir = join(root, "checkpoint-ref-ownership");
+  writeFileSync(join(dir, `${legacyKey}.json`), `${JSON.stringify({ version: 2, ...legacy })}\n`, { mode: 0o600 });
+
+  assert.deepEqual(ledger.get(legacy), { version: 2, ...legacy });
+  const ownerA = ledger.claim({ ...legacy, ownerHash: "a".repeat(64) });
+  const ownerB = ledger.claim({ ...legacy, ownerHash: "b".repeat(64) });
+  assert.notEqual(checkpointRefOwnershipKey(ownerA), legacyKey);
+  assert.notEqual(checkpointRefOwnershipKey(ownerA), checkpointRefOwnershipKey(ownerB));
+  assert.equal(ledger.listSession(legacy.sessionId).length, 3);
+});
+
+test("impossible v2 owner records fail closed and remain available for inspection", (t) => {
+  const { root, ledger } = tempLedger(t);
+  const claim = { ...nativeClaim(root), ownerHash: "a".repeat(64) };
+  const path = join(root, "checkpoint-ref-ownership", `${checkpointRefOwnershipKey(claim)}.json`);
+  writeFileSync(path, `${JSON.stringify({ version: 2, ...claim })}\n`, { mode: 0o600 });
+  assert.throws(() => ledger.list(), /record is invalid/);
+  assert.equal(existsSync(path), true);
+});
+
 test("unsupported hard links fall back to exclusive durable publication", (t) => {
   const { root, ledger } = tempLedger(t);
   const claim = nativeClaim(root);
@@ -39,7 +64,7 @@ test("unsupported hard links fall back to exclusive durable publication", (t) =>
   };
 
   const first = ledger.claim(claim);
-  assert.deepEqual(first, { version: 2, ...claim });
+  assert.deepEqual(first, { version: 3, ...claim });
   assert.deepEqual(ledger.claim(claim), first, "an exact repeated claim remains idempotent");
   assert.deepEqual(new CheckpointRefOwnershipLedger(root, 4).list(), [first]);
   assert.equal(readdirSync(join(root, "checkpoint-ref-ownership")).some((name) => name.endsWith(".tmp")), false);
