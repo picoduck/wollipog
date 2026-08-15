@@ -2290,6 +2290,62 @@ test("admission-queued prompts persist before success, survive service restart, 
     "stopped sessions never replay retained prompts");
 });
 
+test("durable queued prompts accept revision-zero failures and stop retrying after terminal status", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { prompt: "initial" });
+  hub.sentToRunner.length = 0;
+
+  assert.equal(svc.prompt(id, "journal capacity prompt").ok, true);
+  const rejected = hub.sentOfType("durable_session_command")[0]!;
+  assert.equal(svc.onDurablePromptReceipt(RUNNER_ID, {
+    type: "durable_session_command_result",
+    requestId: rejected.requestId,
+    commandId: rejected.commandId,
+    sessionId: id,
+    state: "failed",
+    revision: 0,
+    duplicate: false,
+    error: "durable command receipt store is full",
+    code: "RECEIPT_STORE_FULL",
+  }), true);
+  assert.equal(db.getSessionPromptCommand(rejected.commandId)?.state, "failed");
+  assert.equal(db.dueSessionPromptCommands(Date.now() + 60_000, RUNNER_ID).length, 0);
+
+  hub.sentToRunner.length = 0;
+  assert.equal(svc.prompt(id, "prompt before launch failure").ok, true);
+  const stranded = hub.sentOfType("durable_session_command")[0]!;
+  svc.onSessionStatus(id, "failed", "provider launch failed", RUNNER_ID);
+  assert.equal(db.getSessionPromptCommand(stranded.commandId)?.state, "uncertain");
+  assert.equal(db.dueSessionPromptCommands(Date.now() + 60_000, RUNNER_ID).length, 0,
+    "terminal sessions fence every durable retry path");
+
+  db.raw().prepare("UPDATE session_prompt_commands SET expires_at=? WHERE command_id IN (?,?)")
+    .run(Date.now() - 1, rejected.commandId, stranded.commandId);
+  svc.maintainPrompts();
+  assert.equal(db.getSessionPromptCommand(rejected.commandId), null);
+  assert.equal(db.getSessionPromptCommand(stranded.commandId), null);
+});
+
+test("completed durable prompts compact their retained content", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { prompt: "initial" });
+  hub.sentToRunner.length = 0;
+  assert.equal(svc.prompt(id, "content that should be compacted").ok, true);
+  const sent = hub.sentOfType("durable_session_command")[0]!;
+
+  assert.equal(svc.onDurablePromptReceipt(RUNNER_ID, {
+    type: "durable_session_command_update",
+    commandId: sent.commandId,
+    sessionId: id,
+    state: "completed",
+    revision: 3,
+  }), true);
+  const raw = db.raw().prepare("SELECT payload_json FROM session_prompt_commands WHERE command_id=?")
+    .get(sent.commandId) as { payload_json: string };
+  assert.equal(raw.payload_json, "null");
+  assert.equal(db.getSession(id)?.queued, undefined);
+});
+
 test("prompt stages its exact merged config before mutations and skips the legacy hub send", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub, { config: { permissionMode: "plan" } });

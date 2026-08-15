@@ -1216,6 +1216,11 @@ export class SessionManager {
       );
     } finally {
       reportMaterialized(false);
+      if (this.launchGenerations.get(spec.sessionId) === launchGeneration) {
+        const queued = this.preLaunchQueues.get(spec.sessionId);
+        if (queued) this.rejectQueued(queued, "session launch failed before runner admission");
+        this.preLaunchQueues.delete(spec.sessionId);
+      }
       this.finishLaunchGeneration(spec.sessionId, launchGeneration);
     }
   }
@@ -2698,7 +2703,11 @@ export class SessionManager {
     const queue = this.preLaunchQueues.get(sessionId);
     if (!queue?.length) return;
     const entry = this.active.get(sessionId);
-    if (!entry) return;
+    if (!entry) {
+      this.rejectQueued(queue, "session launch ended before runner admission");
+      this.preLaunchQueues.delete(sessionId);
+      return;
+    }
     for (const prompt of queue) {
       if (!this.queueCanAccept(this.queueCapacityView(entry), prompt.text, prompt.images)) {
         this.failQueuedPrompt(prompt, "prompt queue is full after runner admission", "QUEUE_FULL");

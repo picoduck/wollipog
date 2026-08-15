@@ -2094,6 +2094,9 @@ function SessionDetailLoaded({
                       <span className="queued-text">
                         {q.hasImages && <span className="queued-img" aria-hidden="true">🖼 </span>}
                         {q.text || (q.hasImages ? "(image)" : "")}
+                        {q.durableDeliveryError && (
+                          <span className="queued-error"> — {q.durableDeliveryError}</span>
+                        )}
                       </span>
                       <div className="queued-actions">
                         <button
@@ -2119,6 +2122,8 @@ function SessionDetailLoaded({
                                 )
                               : reserved || locallyPromoting
                                 ? "Resolve steering before cancelling this queued message."
+                                : durable
+                                  ? "Durable delivery entries cannot be cancelled before runner admission."
                                 : "Cancel this queued message."
                           }
                           aria-label={canCancelThis ? "Cancel Queued Message" : "Queued Message Cancellation Unavailable"}

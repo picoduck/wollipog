@@ -605,6 +605,47 @@ test("stopping an admission-queued session terminalizes every retained prompt", 
   }
 });
 
+test("a failed initial launch terminalizes every admission-retained prompt", async () => {
+  const failures: string[] = [];
+  const lifecycle = (commandId: string): DurableCommandLifecycle => ({
+    commandId,
+    queued: () => {}, started: () => {}, completed: () => {}, uncertain: () => {},
+    failed: (error, code) => failures.push(`${commandId}:${code}:${error}`),
+  });
+  const h = harness(
+    {},
+    async () => { throw new Error("injected initialization failure"); },
+    Promise.resolve(),
+    () => {},
+    undefined,
+    undefined,
+    1,
+  );
+  const internals = h.manager as any;
+  try {
+    h.store.create(stored(h.root, {
+      sessionId: "capacity-blocker", agentSessionId: null, status: "running",
+    }));
+    assert.equal(await internals.acquireAdmission("capacity-blocker"), true);
+    const started = h.manager.start(launchSpec(h.root), "initial prompt");
+    await tick();
+    h.manager.prompt("resume-session", "queued B", [], undefined, undefined, lifecycle("B"));
+    h.manager.prompt("resume-session", "queued C", [], undefined, undefined, lifecycle("C"));
+
+    internals.releaseAdmission("capacity-blocker");
+    assert.equal(await started, false);
+    assert.deepEqual(failures, [
+      "B:COMMAND_CANCELLED:session launch failed before runner admission",
+      "C:COMMAND_CANCELLED:session launch failed before runner admission",
+    ]);
+    assert.equal(internals.preLaunchQueues.has("resume-session"), false);
+  } finally {
+    internals.releaseAdmission("capacity-blocker");
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
 test("cancelling a capacity-queued resume releases its lock and terminalizes its receipt", async () => {
   const failures: Array<[string, string | undefined]> = [];
   const durable: DurableCommandLifecycle = {

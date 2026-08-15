@@ -125,9 +125,10 @@ export class SessionPromptOutbox {
   }
 
   maintain(now = Date.now()): number {
-    const sessions = this.db.expireSessionPromptCommands(now);
+    const sessions = new Set(this.db.expireSessionPromptCommands(now));
+    for (const sessionId of this.db.pruneSessionPromptCommands(now)) sessions.add(sessionId);
     for (const sessionId of sessions) this.hub.sessionChangedById(sessionId);
-    return sessions.length;
+    return sessions.size;
   }
 
   stopSession(sessionId: string, now = Date.now()): number {
