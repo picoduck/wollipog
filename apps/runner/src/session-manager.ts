@@ -2628,6 +2628,7 @@ export class SessionManager {
     config?: SessionConfig,
     durable?: DurableCommandLifecycle,
     syntheticRecovery = false,
+    reservedOrdinal?: number,
   ): boolean {
     if (durable && this.store.readEvents(sessionId).some((event) =>
       event.payload.kind === "user_message" && event.payload.commandId === durable.commandId)) {
@@ -2685,10 +2686,10 @@ export class SessionManager {
     }
 
     const persistedMeta = this.store.readMeta(sessionId);
-    const persistedAuthenticationBlock = !!persistedMeta?.providerAuthBlock ||
-      isProviderAuthenticationBlock(persistedMeta?.pendingApproval);
-    if (persistedAuthenticationBlock && syntheticRecovery) return false;
-    if (persistedAuthenticationBlock && this.providerAuthRecovery && !syntheticRecovery) {
+    const durableAuthenticationBlock = !!persistedMeta?.providerAuthBlock;
+    const projectedAuthenticationBlock = isProviderAuthenticationBlock(persistedMeta?.pendingApproval);
+    if ((durableAuthenticationBlock || projectedAuthenticationBlock) && syntheticRecovery) return false;
+    if (durableAuthenticationBlock && this.providerAuthRecovery && !syntheticRecovery) {
       this.emitEvent(sessionId, {
         kind: "stderr",
         text: "Authentication is still blocked. Use Recheck Authentication after signing in in the exact provider context.",
@@ -2697,6 +2698,9 @@ export class SessionManager {
       durable?.failed("provider authentication must be revalidated before retry", "PROVIDER_AUTHENTICATION_REQUIRED");
       return false;
     }
+    // Adapters without an exact-context status probe receive the bounded legacy projection only.
+    // A successfully admitted new user prompt clears that card at the queue insertion boundary;
+    // it never replays the interrupted/uncertain provider turn. Capacity rejection leaves it parked.
     const recovering = this.recoveryQueues.get(sessionId);
     if (recovering) {
       if (!this.queueCanAccept(this.recoveryQueueCapacityView(sessionId, recovering), text, images)) {
@@ -2708,10 +2712,14 @@ export class SessionManager {
         durable?.failed("prompt queue is full while the agent is recovering", "QUEUE_FULL");
         return false;
       }
-      if (persistedAuthenticationBlock) this.store.patchMeta(sessionId, { pendingApproval: null });
+      if (projectedAuthenticationBlock) this.store.patchMeta(sessionId, { pendingApproval: null });
       durable?.queued();
       this.insertQueuedPrompt(sessionId, recovering, {
-        id: durable?.commandId ?? randomUUID(), ordinal: this.nextQueueOrdinal(sessionId), text, images, slashCommand,
+        id: durable?.commandId ?? randomUUID(),
+        ordinal: reservedOrdinal ?? this.nextQueueOrdinal(sessionId),
+        text,
+        images,
+        slashCommand,
         config: effectiveConfig, durable, syntheticRecovery,
       });
       if (!this.recoveryLaunching.has(sessionId)) setImmediate(() => void this.recoverQueuedAppServer(sessionId));
@@ -2737,7 +2745,8 @@ export class SessionManager {
     }
     if (!entry) {
       // Not running in-process — try to RESUME it from the box store (Phase 2).
-      void this.resumeAndPrompt(sessionId, text, images, slashCommand, effectiveConfig, durable, syntheticRecovery);
+      const ordinal = reservedOrdinal ?? this.nextQueueOrdinal(sessionId);
+      void this.resumeAndPrompt(sessionId, text, images, slashCommand, effectiveConfig, durable, syntheticRecovery, ordinal);
       return true;
     }
     if (entry.historyIntegrityFailure) {
@@ -2756,7 +2765,7 @@ export class SessionManager {
       return false;
     }
     if (entry.authenticationBlocked && !syntheticRecovery) entry.authenticationBlocked = false;
-    if (persistedAuthenticationBlock) this.store.patchMeta(sessionId, { pendingApproval: null });
+    if (projectedAuthenticationBlock) this.store.patchMeta(sessionId, { pendingApproval: null });
     // Only a user-originated prompt is the explicit resume signal. It may arrive while the
     // cancelled provider turn is still settling; clearing the hold now lets the current drain
     // continue into the preserved FIFO as soon as that turn returns.
@@ -2767,7 +2776,11 @@ export class SessionManager {
     // applied now: with prompts B(config X) and C(config Y) queued, B must run under X, not Y.
     durable?.queued();
     this.insertQueuedPrompt(sessionId, entry.queue, {
-      id: durable?.commandId ?? randomUUID(), ordinal: this.nextQueueOrdinal(sessionId), text, images, slashCommand,
+      id: durable?.commandId ?? randomUUID(),
+      ordinal: reservedOrdinal ?? this.nextQueueOrdinal(sessionId),
+      text,
+      images,
+      slashCommand,
       config: effectiveConfig, durable, syntheticRecovery,
     });
     this.emitQueue(sessionId);
@@ -3786,6 +3799,7 @@ export class SessionManager {
     config?: SessionConfig,
     durable?: DurableCommandLifecycle,
     syntheticRecovery = false,
+    reservedOrdinal?: number,
   ): Promise<void> {
     const meta = this.store.readMeta(sessionId);
     if (!meta) {
@@ -3928,7 +3942,13 @@ export class SessionManager {
         this.store.patchMeta(sessionId, {
           providerAuthBlock: {
             ...blocked.providerAuthBlock,
-            retry: { text, images: [], ...(slashCommand ? { slashCommand } : {}), ...(config ? { config } : {}) },
+            retry: {
+              ...(reservedOrdinal ? { ordinal: reservedOrdinal } : {}),
+              text,
+              images: [],
+              ...(slashCommand ? { slashCommand } : {}),
+              ...(config ? { config } : {}),
+            },
           },
         });
         // This payload is the proof that the turn was retained before provider submission.
@@ -3941,7 +3961,7 @@ export class SessionManager {
       }
       return;
     }
-    this.prompt(sessionId, text, images, slashCommand, config, durable, syntheticRecovery);
+    this.prompt(sessionId, text, images, slashCommand, config, durable, syntheticRecovery, reservedOrdinal);
   }
 
   /** Persist turn configuration without presenting a model resolved under an older alias. */
@@ -6457,6 +6477,9 @@ export class SessionManager {
           retry.images,
           retry.slashCommand,
           retry.config,
+          undefined,
+          false,
+          retry.ordinal,
         ));
       } else {
         if (block.delivery === "uncertain") {

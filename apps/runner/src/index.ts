@@ -341,7 +341,17 @@ function updateAgentAuthStatus(agentId: string, update: AcpAuthRuntime): void {
   acpAuthStatus.set(agentId, { ...prior, ...update });
   metadata.agents = overlayAcpAuthStatus(metadata.agents, acpAuthStatus).map((agent) =>
     agent.id === agentId && update.status !== undefined
-      ? { ...agent, authStatus: update.status }
+      ? {
+          ...agent,
+          authStatus: update.status,
+          ...((agent.driver ?? "acp") === "acp"
+            ? {}
+            : update.status === "unauthenticated"
+              ? { available: false }
+              : update.status === "authenticated"
+                ? { available: true }
+                : {}),
+        }
       : agent);
   sendUp({
     type: "agents_updated",
@@ -668,9 +678,30 @@ async function runDiscovery(refreshModels = false): Promise<void> {
       claudeHookFeatureEnabled,
       log,
     );
+    // A definitive native discovery result is newer authoritative evidence than the process-local
+    // failure overlay. Drop only its status (preserving ACP capability state) so a terminal login
+    // followed by rediscovery cannot be overwritten by stale "unauthenticated" state.
+    for (const agent of metadata.agents) {
+      if ((agent.driver ?? "acp") === "acp" || agent.authStatus === undefined || agent.authStatus === "unknown") continue;
+      const runtime = acpAuthStatus.get(agent.id);
+      if (!runtime?.status) continue;
+      if (runtime.capabilities) acpAuthStatus.set(agent.id, { capabilities: runtime.capabilities });
+      else acpAuthStatus.delete(agent.id);
+    }
     metadata.agents = overlayAcpAuthStatus(metadata.agents, acpAuthStatus).map((agent) => {
       const runtime = acpAuthStatus.get(agent.id);
-      return runtime?.status ? { ...agent, authStatus: runtime.status } : agent;
+      if (!runtime?.status) return agent;
+      return {
+        ...agent,
+        authStatus: runtime.status,
+        ...((agent.driver ?? "acp") === "acp"
+          ? {}
+          : runtime.status === "unauthenticated"
+            ? { available: false }
+            : runtime.status === "authenticated"
+              ? { available: true }
+              : {}),
+      };
     });
     metadata.editors = editors;
     discoveryDone = true;

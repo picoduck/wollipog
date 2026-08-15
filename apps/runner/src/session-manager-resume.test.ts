@@ -230,6 +230,11 @@ test("provider auth failure stops the turn, parks exact recovery context, and ho
       h.manager.prompt("resume-session", "queued before sign-in");
       h.callbacks().onAuthenticationFailure?.();
     }
+  }, {
+    describe: () => null,
+    revalidate: async () => ({ status: "unknown" }),
+    startLogin: async () => "failed",
+    cancel: () => false,
   });
   try {
     h.manager.prompt("resume-session", "first attempt", [], undefined, undefined, durable);

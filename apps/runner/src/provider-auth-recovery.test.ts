@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
   NativeProviderAuthRecovery,
@@ -75,18 +78,51 @@ test("Claude status derives only an opaque account identity and never returns pr
   assert.equal(JSON.stringify(observation).includes("must-not-escape"), false);
 });
 
-test("provider denial is unauthenticated while transport and context failures remain unknown", async () => {
+test("production auth probe spawn scrubs daemon-only credentials", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "wollipog-auth-probe-"));
+  const script = join(dir, "probe.mjs");
+  const prior = process.env.ANTHROPIC_API_KEY;
+  try {
+    await writeFile(script, [
+      "const loggedIn = !process.env.ANTHROPIC_API_KEY;",
+      "process.stdout.write(JSON.stringify({ loggedIn, email: loggedIn ? 'account@example.test' : null }));",
+    ].join("\n"), { mode: 0o600 });
+    process.env.ANTHROPIC_API_KEY = "daemon-only-secret";
+    const controller = new NativeProviderAuthRecovery(undefined, "runner-local-hmac-key");
+    const observation = await controller.revalidate(meta({
+      driver: "claude-code",
+      command: process.execPath,
+      args: [script],
+    }));
+    assert.equal(observation.status, "authenticated");
+    assert.match(observation.identityId ?? "", /^[a-f0-9]{64}$/);
+  } finally {
+    if (prior === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = prior;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("only structured provider denial is unauthenticated while exit and context failures remain unknown", async () => {
   const denied = new NativeProviderAuthRecovery(async () => {
-    throw Object.assign(new Error("logged out"), { code: 1 });
+    throw Object.assign(new Error("logged out"), {
+      code: 1,
+      stdout: JSON.stringify({ loggedIn: false }),
+    });
+  });
+  const unsupported = new NativeProviderAuthRecovery(async () => {
+    throw Object.assign(new Error("unsupported auth status"), { code: 1, stdout: "usage: claude" });
   });
   const unavailable = new NativeProviderAuthRecovery(async () => {
     throw Object.assign(new Error("spawn failed with sensitive diagnostics"), { code: "ENOENT" });
   });
-  assert.equal((await denied.revalidate(meta())).status, "unauthenticated");
+  assert.equal((await denied.revalidate(meta({ driver: "claude-code", command: "claude" }))).status, "unauthenticated");
+  assert.equal((await unsupported.revalidate(meta({ driver: "claude-code", command: "claude" }))).status, "unknown");
+  assert.equal((await denied.revalidate(meta())).status, "unknown", "Codex exit codes alone are not auth evidence");
   assert.equal((await unavailable.revalidate(meta())).status, "unknown");
 });
 
-test("in-app login is fail-closed for WSL, configured credentials, and remote targets", () => {
+test("in-app login is fail-closed and remote targets do not claim runner-owned recovery", () => {
   assert.equal(describeProviderCredentialScope(meta())?.canStartLogin, false, "awaits the issue #17 provider-home lease");
   assert.equal(describeProviderCredentialScope(meta({ context: { kind: "wsl", distro: "Ubuntu" } }))?.canStartLogin, false);
   assert.equal(describeProviderCredentialScope(meta({ env: { OPENAI_API_KEY: "secret" } }))?.canStartLogin, false);
@@ -99,5 +135,5 @@ test("in-app login is fail-closed for WSL, configured credentials, and remote ta
       adapter: "container",
       boundaries: { filesystem: "container", network: "deny", secrets: "none", billing: "unknown" },
     },
-  }))?.canStartLogin, false);
+  })), null);
 });

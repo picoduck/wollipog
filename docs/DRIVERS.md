@@ -396,8 +396,9 @@ before enqueue. Uncertain turns and terminalized durable commands are never retr
 
 Use **Recheck Authentication** after completing `claude auth login` or `codex login` in the Location
 shown on the card. **Start Sign-In** remains fail-closed until issue #17/PR42's cross-process
-provider-home ownership lease is available on this branch. Configured environment credentials,
-WSL, container, and cloud contexts remain revalidation/manual-login only.
+provider-home ownership lease is available on this branch. Configured environment credentials and
+WSL remain revalidation/manual-login only. Container/cloud adapters do not yet expose an exact-context
+status probe, so they keep the process-local fail-closed behavior and do not claim durable recovery.
 
 **Plan / TodoWrite**: claude surfaces plans via the `TodoWrite` tool call, not a dedicated event — map
 a `TodoWrite` tool_use input to `{kind:"plan", entries}` when its name is `TodoWrite`.

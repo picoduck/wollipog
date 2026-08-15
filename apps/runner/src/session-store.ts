@@ -128,6 +128,8 @@ export interface SessionMeta {
     /** Correlates one live login subprocess; stale cancels cannot target a later generation. */
     loginOperationId?: string;
     retry?: {
+      /** Original runner-local FIFO position reserved before asynchronous launch/preflight. */
+      ordinal?: number;
       text: string;
       images: PromptImageInput[];
       slashCommand?: string;

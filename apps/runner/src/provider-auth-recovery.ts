@@ -95,7 +95,11 @@ function credentialHome(meta: SessionMeta, provider: "claude" | "codex"): string
 
 export function describeProviderCredentialScope(meta: SessionMeta, digestKey?: string): ProviderCredentialScope | null {
   const provider = providerFamily(meta.driver);
-  if (!provider) return null;
+  // Container/cloud adapters own their provider process and credential projection, but do not yet
+  // expose a provider-native status probe. Persisting a runner-owned block for one would create a
+  // durable state that Recheck can never prove or clear. Keep the pre-existing process-local
+  // fail-closed behavior until an adapter supplies an exact-context probe.
+  if (!provider || (meta.executionTarget && meta.executionTarget.adapter !== "host")) return null;
   const credentialNames = credentialEnvNames(meta, provider);
   const configuredCredential = credentialNames.length > 0;
   const id = digest({
@@ -236,7 +240,7 @@ export class NativeProviderAuthRecovery implements ProviderAuthRecoveryControlle
 
   async revalidate(meta: SessionMeta): Promise<ProviderAuthObservation> {
     const scope = this.describe(meta);
-    if (!scope || (meta.executionTarget && meta.executionTarget.adapter !== "host")) return { status: "unknown" };
+    if (!scope) return { status: "unknown" };
     try {
       if (scope.provider === "claude") {
         const result = await this.runExact(meta, meta.command, providerArgs(meta, ["auth", "status"]), 15_000, 64 * 1024);
@@ -246,17 +250,15 @@ export class NativeProviderAuthRecovery implements ProviderAuthRecoveryControlle
       const identityId = codexIdentity(meta, this.digestKey);
       return { status: "authenticated", ...(identityId ? { identityId } : {}) };
     } catch (error) {
-      const code = error && typeof error === "object" && "code" in error
-        ? (error as { code?: unknown }).code
-        : undefined;
-      const causeCode = error && typeof error === "object" && "cause" in error &&
-        (error as { cause?: unknown }).cause && typeof (error as { cause: object }).cause === "object" &&
-        "code" in (error as { cause: object }).cause
-        ? ((error as { cause: { code?: unknown } }).cause.code)
-        : undefined;
-      return typeof code === "number" || typeof causeCode === "number"
-        ? { status: "unauthenticated" }
-        : { status: "unknown" };
+      // Exit status alone is not authentication evidence: old CLIs without the status subcommand,
+      // transient provider failures, and a real sign-out can all be numeric non-zero exits. Claude
+      // sometimes still emits its structured status payload before that exit, so accept only that
+      // positive provider-native evidence and otherwise remain unknown/fail closed.
+      if (scope.provider === "claude" && error && typeof error === "object" && "stdout" in error) {
+        const stdout = (error as { stdout?: unknown }).stdout;
+        if (typeof stdout === "string") return claudeObservation({ stdout, stderr: "" }, this.digestKey);
+      }
+      return { status: "unknown" };
     }
   }
 
