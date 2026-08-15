@@ -241,7 +241,7 @@ test("only the exact POST push receipt capability route bypasses device authenti
     method: "POST",
     url: "/api/public/push-receipt",
     remoteAddress: REMOTE,
-    headers: { "content-type": "application/json" },
+    headers: { origin: "https://box.tail1234.ts.net", "content-type": "application/json" },
     body: {},
   })).statusCode, 200);
   assert.equal(isPublicPushReceiptAck("POST", "/api/public/push-receipt"), true);

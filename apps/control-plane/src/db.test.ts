@@ -2320,33 +2320,55 @@ test("background push receipts are per-endpoint, retryable, capability-authentic
       deviceId: null,
       now: 1_010,
     });
+    const stagedBefore = Date.now();
     db.appendEvent("background-push", {
       kind: "background_continuation_delivered",
       continuationId: "bgcont-push",
       parentTurnId: "turn-push",
       results: [{ id: "job-push", launchType: "shell", status: "completed", terminalAt: 1_020 }],
     }, 1_020);
+    const stagedAfter = Date.now();
 
     let receipts = db.getSession("background-push")?.backgroundDeliveries?.[0]?.notifications ?? [];
     assert.equal(receipts.length, 1);
     assert.equal(receipts[0]?.state, "pending");
     assert.equal(JSON.stringify(receipts).includes("capability/secret"), false, "endpoint capability is never projected");
 
-    const first = db.claimDueBackgroundPushDeliveries(1_020);
+    const schedule = db.raw().prepare(
+      "SELECT next_attempt_at, expires_at FROM background_push_deliveries WHERE continuation_id=?",
+    ).get("bgcont-push") as { next_attempt_at: number; expires_at: number };
+    assert.ok(schedule.next_attempt_at >= stagedBefore && schedule.next_attempt_at <= stagedAfter,
+      "delivery is scheduled from the control-plane observation clock, not stale runner time");
+    assert.equal(schedule.expires_at - schedule.next_attempt_at, 7 * 24 * 60 * 60_000);
+    const first = db.claimDueBackgroundPushDeliveries(stagedAfter);
     assert.equal(first.length, 1);
+    assert.equal(first[0]!.message.ts, 1_020, "the runner timestamp remains informational evidence");
     assert.match(first[0]!.ackToken, /^[A-Za-z0-9_-]{43}$/);
     assert.equal(db.settleBackgroundPushDelivery(first[0]!.deliveryId, {
       kind: "retry", status: 503, error: "push_service_rejected",
-    }, 1_030), true);
-    assert.deepEqual(db.claimDueBackgroundPushDeliveries(6_029), []);
-    const retry = db.claimDueBackgroundPushDeliveries(6_030);
+    }, stagedAfter + 10), true);
+    assert.deepEqual(db.claimDueBackgroundPushDeliveries(stagedAfter + 5_009), []);
+    const retry = db.claimDueBackgroundPushDeliveries(stagedAfter + 5_010);
     assert.equal(retry.length, 1);
     assert.equal(db.settleBackgroundPushDelivery(retry[0]!.deliveryId, {
       kind: "service_accepted", status: 201,
-    }, 6_040), true);
-    assert.equal(db.acknowledgeBackgroundPushReceipt(retry[0]!.deliveryId, "wrong", "shown", 6_050), false);
-    assert.equal(db.acknowledgeBackgroundPushReceipt(retry[0]!.deliveryId, retry[0]!.ackToken, "shown", 6_050), true);
-    assert.equal(db.acknowledgeBackgroundPushReceipt(retry[0]!.deliveryId, retry[0]!.ackToken, "clicked", 6_060), true);
+    }, stagedAfter + 5_020), true);
+    assert.equal(db.settleBackgroundPushDelivery(retry[0]!.deliveryId, {
+      kind: "retry", error: "stale_response_lost",
+    }, stagedAfter + 5_021), false, "a stale settle cannot regress terminal push-service evidence");
+    assert.equal(
+      db.getSession("background-push")?.backgroundDeliveries?.[0]?.notifications?.[0]?.state,
+      "service_accepted",
+    );
+    assert.equal(db.acknowledgeBackgroundPushReceipt(
+      retry[0]!.deliveryId, "wrong", "shown", stagedAfter + 5_030,
+    ), false);
+    assert.equal(db.acknowledgeBackgroundPushReceipt(
+      retry[0]!.deliveryId, retry[0]!.ackToken, "shown", stagedAfter + 5_030,
+    ), true);
+    assert.equal(db.acknowledgeBackgroundPushReceipt(
+      retry[0]!.deliveryId, retry[0]!.ackToken, "clicked", stagedAfter + 5_040,
+    ), true);
     assert.equal((db.raw().prepare(
       "SELECT endpoint FROM background_push_deliveries WHERE delivery_id=?",
     ).get(retry[0]!.deliveryId) as { endpoint: string | null }).endpoint, null,
@@ -2357,13 +2379,16 @@ test("background push receipts are per-endpoint, retryable, capability-authentic
       continuationId: "bgcont-race",
       parentTurnId: "turn-race",
     }, 7_000);
-    const raced = db.claimDueBackgroundPushDeliveries(7_000).find((delivery) =>
+    const racedAt = Date.now();
+    const raced = db.claimDueBackgroundPushDeliveries(racedAt).find((delivery) =>
       delivery.continuationId === "bgcont-race");
     assert.ok(raced);
-    assert.equal(db.acknowledgeBackgroundPushReceipt(raced.deliveryId, raced.ackToken, "shown", 7_010), true);
+    assert.equal(db.acknowledgeBackgroundPushReceipt(
+      raced.deliveryId, raced.ackToken, "shown", racedAt + 10,
+    ), true);
     assert.equal(db.settleBackgroundPushDelivery(raced.deliveryId, {
       kind: "retry", error: "response_lost",
-    }, 7_020), true);
+    }, racedAt + 20), false);
     assert.equal(
       db.getSession("background-push")?.backgroundDeliveries
         ?.find((delivery) => delivery.continuationId === "bgcont-race")
@@ -2371,7 +2396,7 @@ test("background push receipts are per-endpoint, retryable, capability-authentic
       "shown",
       "a display receipt wins a race with a lost push-service response",
     );
-    assert.equal(db.claimDueBackgroundPushDeliveries(100_000).some((delivery) =>
+    assert.equal(db.claimDueBackgroundPushDeliveries(racedAt + 100_000).some((delivery) =>
       delivery.deliveryId === raced.deliveryId), false, "shown notifications are never resent");
     db.close();
 
@@ -2382,9 +2407,9 @@ test("background push receipts are per-endpoint, retryable, capability-authentic
       deliveryId: retry[0]!.deliveryId,
       state: "clicked",
       attemptCount: 2,
-      serviceAcceptedAt: 6_040,
-      shownAt: 6_050,
-      clickedAt: 6_060,
+      serviceAcceptedAt: stagedAfter + 5_020,
+      shownAt: stagedAfter + 5_030,
+      clickedAt: stagedAfter + 5_040,
       lastStatus: 201,
     }]);
     db.close();

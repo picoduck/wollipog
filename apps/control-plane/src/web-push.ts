@@ -298,6 +298,7 @@ export class WebPushSender {
   /** notification key → newest pending message+payload (coalesced; see class comment). */
   private readonly pending = new Map<string, { message: PushMessage; payload: Buffer; audience?: PushAudience }>();
   private draining = false;
+  private durableBackgroundDraining = false;
   /** Strictly-increasing send stamp: same-millisecond transitions and (in-process) clock
    * steps still order correctly in the service worker's newest-wins check. */
   private lastTs = 0;
@@ -350,34 +351,40 @@ export class WebPushSender {
   /** Drain the durable background-notification lane. Each endpoint has an independent lease and
    * receipt; retrying this encrypted notification never replays a provider prompt or side effect. */
   async retryDurableBackground(now = Date.now()): Promise<number> {
-    const deliveries = this.db.claimDueBackgroundPushDeliveries?.(now, 16) ?? [];
-    let settled = 0;
-    for (const delivery of deliveries) {
-      let outcome: PushServiceOutcome;
-      try {
-        const live = this.db.getPushSubscription(delivery.endpoint, {
-          kind: "session",
-          sessionId: delivery.sessionId,
-        });
-        if (!live) {
-          outcome = { kind: "permanent_failure", error: "subscription_revoked" };
-        } else {
-          const payload = Buffer.from(JSON.stringify({
-            ...delivery.message,
-            receipt: { deliveryId: delivery.deliveryId, token: delivery.ackToken },
-          }));
-          outcome = payload.length > MAX_PUSH_PAYLOAD_BYTES
-            ? { kind: "permanent_failure", error: "payload_too_large" }
-            : await this.sendOne(live, delivery.message, payload);
+    if (this.durableBackgroundDraining) return 0;
+    this.durableBackgroundDraining = true;
+    try {
+      const deliveries = this.db.claimDueBackgroundPushDeliveries?.(now, 16) ?? [];
+      let settled = 0;
+      for (const delivery of deliveries) {
+        let outcome: PushServiceOutcome;
+        try {
+          const live = this.db.getPushSubscription(delivery.endpoint, {
+            kind: "session",
+            sessionId: delivery.sessionId,
+          });
+          if (!live) {
+            outcome = { kind: "permanent_failure", error: "subscription_revoked" };
+          } else {
+            const payload = Buffer.from(JSON.stringify({
+              ...delivery.message,
+              receipt: { deliveryId: delivery.deliveryId, token: delivery.ackToken },
+            }));
+            outcome = payload.length > MAX_PUSH_PAYLOAD_BYTES
+              ? { kind: "permanent_failure", error: "payload_too_large" }
+              : await this.sendOne(live, delivery.message, payload);
+          }
+        } catch (error) {
+          const code = (error as { code?: string; name?: string }).code ??
+            (error as { name?: string }).name ?? "network_error";
+          outcome = { kind: "retry", error: String(code).slice(0, 120) };
         }
-      } catch (error) {
-        const code = (error as { code?: string; name?: string }).code ??
-          (error as { name?: string }).name ?? "network_error";
-        outcome = { kind: "retry", error: String(code).slice(0, 120) };
+        if (this.db.settleBackgroundPushDelivery?.(delivery.deliveryId, outcome, Date.now())) settled++;
       }
-      if (this.db.settleBackgroundPushDelivery?.(delivery.deliveryId, outcome, Date.now())) settled++;
+      return settled;
+    } finally {
+      this.durableBackgroundDraining = false;
     }
-    return settled;
   }
 
   private async drain(): Promise<void> {

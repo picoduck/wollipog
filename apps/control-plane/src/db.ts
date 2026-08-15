@@ -6221,7 +6221,8 @@ export class ControlPlaneDb {
       const rows = this.stmt(
         `SELECT delivery_id, session_id, continuation_id, endpoint, payload_json, attempt_count
            FROM background_push_deliveries
-          WHERE state IN ('pending','retry') AND next_attempt_at<=? AND expires_at>?
+          WHERE state IN ('pending','retry') AND endpoint IS NOT NULL
+            AND next_attempt_at<=? AND expires_at>?
             AND (lease_expires_at IS NULL OR lease_expires_at<=?)
           ORDER BY next_attempt_at, created_at, delivery_id LIMIT ?`,
       ).all(now, now, now, limit) as unknown as Array<{
@@ -6264,7 +6265,8 @@ export class ControlPlaneDb {
                            WHEN shown_at IS NOT NULL THEN 'shown' ELSE 'service_accepted' END,
                 attempt_count=attempt_count+1, last_status=?, last_error=NULL,
                 service_accepted_at=COALESCE(service_accepted_at, ?), next_attempt_at=NULL,
-                endpoint=NULL, lease_expires_at=NULL, updated_at=? WHERE delivery_id=?`,
+                endpoint=NULL, lease_expires_at=NULL, updated_at=?
+          WHERE delivery_id=? AND state IN ('pending','retry')`,
       ).run(outcome.status, now, now, deliveryId).changes) > 0;
     }
     if (outcome.kind === "permanent_failure") {
@@ -6274,7 +6276,7 @@ export class ControlPlaneDb {
                        WHEN shown_at IS NOT NULL THEN 'shown' ELSE 'permanent_failure' END,
             attempt_count=attempt_count+1,
             last_status=?, last_error=?, endpoint=NULL, next_attempt_at=NULL, lease_expires_at=NULL, updated_at=?
-          WHERE delivery_id=?`,
+          WHERE delivery_id=? AND state IN ('pending','retry')`,
       ).run(outcome.status ?? null, (outcome.error ?? "permanent_failure").slice(0, 120), now, deliveryId).changes) > 0;
     }
     const row = this.stmt("SELECT attempt_count, expires_at FROM background_push_deliveries WHERE delivery_id=?")
@@ -6284,15 +6286,17 @@ export class ControlPlaneDb {
     const next = Math.min(row.expires_at, now + Math.min(60 * 60_000, 5_000 * 2 ** Math.min(attempts - 1, 8)));
     return Number(this.stmt(
       `UPDATE background_push_deliveries SET
-          state=CASE WHEN clicked_at IS NOT NULL THEN 'clicked'
+          state=CASE WHEN service_accepted_at IS NOT NULL THEN 'service_accepted'
+                     WHEN clicked_at IS NOT NULL THEN 'clicked'
                      WHEN shown_at IS NOT NULL THEN 'shown'
                      WHEN expires_at<=? THEN 'expired' ELSE 'retry' END,
           attempt_count=?, last_status=?, last_error=?,
-          next_attempt_at=CASE WHEN shown_at IS NOT NULL OR clicked_at IS NOT NULL OR expires_at<=?
+          next_attempt_at=CASE WHEN service_accepted_at IS NOT NULL OR shown_at IS NOT NULL OR clicked_at IS NOT NULL OR expires_at<=?
                                THEN NULL ELSE ? END,
-          endpoint=CASE WHEN shown_at IS NOT NULL OR clicked_at IS NOT NULL OR expires_at<=?
+          endpoint=CASE WHEN service_accepted_at IS NOT NULL OR shown_at IS NOT NULL OR clicked_at IS NOT NULL OR expires_at<=?
                         THEN NULL ELSE endpoint END,
-          lease_expires_at=NULL, updated_at=? WHERE delivery_id=?`,
+          lease_expires_at=NULL, updated_at=?
+        WHERE delivery_id=? AND state IN ('pending','retry')`,
     ).run(now, attempts, outcome.status ?? null, (outcome.error ?? "transient_failure").slice(0, 120),
       now, next, now, now, deliveryId).changes) > 0;
   }
@@ -6322,31 +6326,42 @@ export class ControlPlaneDb {
     return Number(result.changes) > 0;
   }
 
-  listBackgroundNotificationReceipts(
+  private listBackgroundNotificationReceipts(
     sessionId: string,
-    continuationId: string,
-  ): BackgroundNotificationReceiptView[] {
+    continuationIds: string[],
+  ): Map<string, BackgroundNotificationReceiptView[]> {
+    const grouped = new Map<string, BackgroundNotificationReceiptView[]>();
+    if (continuationIds.length === 0) return grouped;
+    const placeholders = continuationIds.map(() => "?").join(",");
     const rows = this.stmt(
-      `SELECT delivery_id, endpoint_key, state, attempt_count, service_accepted_at,
+      `SELECT continuation_id, delivery_id, endpoint_key, state, attempt_count, service_accepted_at,
               shown_at, clicked_at, last_status, last_error
-         FROM background_push_deliveries WHERE session_id=? AND continuation_id=?
-        ORDER BY endpoint_key LIMIT 64`,
-    ).all(sessionId, continuationId) as unknown as Array<{
-      delivery_id: string; endpoint_key: string; state: BackgroundNotificationReceiptState;
+         FROM background_push_deliveries
+        WHERE session_id=? AND continuation_id IN (${placeholders})
+        ORDER BY continuation_id, endpoint_key LIMIT 2048`,
+    ).all(sessionId, ...continuationIds) as unknown as Array<{
+      continuation_id: string; delivery_id: string; endpoint_key: string;
+      state: BackgroundNotificationReceiptState;
       attempt_count: number; service_accepted_at: number | null; shown_at: number | null;
       clicked_at: number | null; last_status: number | null; last_error: string | null;
     }>;
-    return rows.map((row) => ({
-      deliveryId: row.delivery_id,
-      endpointKey: row.endpoint_key.slice(0, 16),
-      state: row.state,
-      attemptCount: row.attempt_count,
-      ...(row.service_accepted_at != null ? { serviceAcceptedAt: row.service_accepted_at } : {}),
-      ...(row.shown_at != null ? { shownAt: row.shown_at } : {}),
-      ...(row.clicked_at != null ? { clickedAt: row.clicked_at } : {}),
-      ...(row.last_status != null ? { lastStatus: row.last_status } : {}),
-      ...(row.last_error ? { lastError: row.last_error } : {}),
-    }));
+    for (const row of rows) {
+      const receipts = grouped.get(row.continuation_id) ?? [];
+      if (receipts.length >= 64) continue;
+      receipts.push({
+        deliveryId: row.delivery_id,
+        endpointKey: row.endpoint_key.slice(0, 16),
+        state: row.state,
+        attemptCount: row.attempt_count,
+        ...(row.service_accepted_at != null ? { serviceAcceptedAt: row.service_accepted_at } : {}),
+        ...(row.shown_at != null ? { shownAt: row.shown_at } : {}),
+        ...(row.clicked_at != null ? { clickedAt: row.clicked_at } : {}),
+        ...(row.last_status != null ? { lastStatus: row.last_status } : {}),
+        ...(row.last_error ? { lastError: row.last_error } : {}),
+      });
+      grouped.set(row.continuation_id, receipts);
+    }
+    return grouped;
   }
 
   /* ------------------------------- Boxes --------------------------------- */
@@ -8171,13 +8186,19 @@ export class ControlPlaneDb {
       ts,
       ts,
     );
-    this.stageBackgroundPushDeliveriesInTransaction(sessionId, payload.continuationId, ts);
+    this.stageBackgroundPushDeliveriesInTransaction(
+      sessionId,
+      payload.continuationId,
+      ts,
+      Date.now(),
+    );
   }
 
   private stageBackgroundPushDeliveriesInTransaction(
     sessionId: string,
     continuationId: string,
-    now: number,
+    eventTs: number,
+    observedAt: number,
   ): void {
     const message = JSON.stringify({
       title: "Managed Background Work Completed",
@@ -8185,7 +8206,7 @@ export class ControlPlaneDb {
       sessionId,
       notificationKey: `background-continuation:${continuationId}`,
       urgency: "normal",
-      ts: now,
+      ts: eventTs,
     });
     const insert = this.stmt(
       `INSERT OR IGNORE INTO background_push_deliveries
@@ -8205,10 +8226,10 @@ export class ControlPlaneDb {
         sub.endpoint,
         endpointHash,
         message,
-        now,
-        now + 7 * 24 * 60 * 60_000,
-        now,
-        now,
+        observedAt,
+        observedAt + 7 * 24 * 60 * 60_000,
+        observedAt,
+        observedAt,
       );
     }
   }
@@ -8263,6 +8284,10 @@ export class ControlPlaneDb {
       terminal_count: number;
       active_job_count: number;
     }>;
+    const notificationsByContinuation = this.listBackgroundNotificationReceipts(
+      sessionId,
+      rows.map((row) => row.continuation_id),
+    );
     const views = rows.map((row): BackgroundDeliveryView => {
       let watchdogState: BackgroundDeliveryWatchdogState | undefined;
       if (status !== "stopped" && row.active_job_count > 0 &&
@@ -8286,10 +8311,9 @@ export class ControlPlaneDb {
         ...(row.transcript_projected_at != null ? { transcriptProjectedAt: row.transcript_projected_at } : {}),
         ...(row.notification_queued_at != null ? { notificationQueuedAt: row.notification_queued_at } : {}),
         ...(row.dashboard_observed_at != null ? { dashboardObservedAt: row.dashboard_observed_at } : {}),
-        ...(() => {
-          const notifications = this.listBackgroundNotificationReceipts(sessionId, row.continuation_id);
-          return notifications.length ? { notifications } : {};
-        })(),
+        ...(notificationsByContinuation.get(row.continuation_id)?.length
+          ? { notifications: notificationsByContinuation.get(row.continuation_id)! }
+          : {}),
         ...(watchdogState ? { watchdogState } : {}),
       };
     });

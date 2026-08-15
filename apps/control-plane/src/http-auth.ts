@@ -70,8 +70,11 @@ export function registerAuthGate(app: FastifyInstance, deps: AuthGateDeps): void
     }
 
     // Independently protect the capability-authenticated public transcript route from a foreign
-    // browser Origin. Device-authenticated API calls returned above: possession beats Origin.
-    if (isApiRoute(routePath)) {
+    // browser Origin. The push-receipt route is different: its HMAC is scoped to one delivery,
+    // its response is non-oracular, and a service worker legitimately posts through a same-origin
+    // reverse-proxy hostname (for example Tailscale Serve) that is not in the loopback allowlist.
+    // Device-authenticated API calls returned above: possession beats Origin.
+    if (isApiRoute(routePath) && !isPublicPushReceiptAck(req.method, routePath)) {
       const origin = req.headers.origin;
       if (origin && !deps.isAllowedOrigin(origin) && !deps.authenticate(req)) {
         return reply.code(403).send({ error: CROSS_ORIGIN_BLOCKED });

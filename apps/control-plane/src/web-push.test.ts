@@ -209,6 +209,7 @@ function senderHarness(
     inFlight: 0,
     maxInFlight: 0,
     durable: [...(opts.durableDeliveries ?? [])],
+    durableClaims: 0,
     settled: [] as Array<{ deliveryId: string; outcome: PushServiceOutcome }>,
   };
   const matches = (s: StoredPushSubscription, sub: StoredPushSubscription) =>
@@ -228,7 +229,10 @@ function senderHarness(
       state.vapid = k;
       state.vapidWrites++;
     },
-    claimDueBackgroundPushDeliveries: () => state.durable.splice(0),
+    claimDueBackgroundPushDeliveries: () => {
+      state.durableClaims++;
+      return state.durable.splice(0);
+    },
     settleBackgroundPushDelivery: (deliveryId: string, outcome: PushServiceOutcome) => {
       state.settled.push({ deliveryId, outcome });
       return true;
@@ -421,6 +425,34 @@ test("durable background pushes carry one receipt capability and settle only the
     deliveryId: delivery.deliveryId,
     outcome: { kind: "service_accepted", status: 201 },
   }]);
+});
+
+test("durable background push retries never overlap one sender drain", async () => {
+  const delivery: DurableBackgroundPushDelivery = {
+    deliveryId: "bgpush_serial",
+    sessionId: "s_1",
+    continuationId: "bgcont_1",
+    endpoint: SUB(1).endpoint,
+    message: {
+      title: "Managed Background Work Completed",
+      body: "The result is ready.",
+      sessionId: "s_1",
+      notificationKey: "background-continuation:bgcont_1",
+      urgency: "normal",
+      ts: 10,
+    },
+    ackToken: "high-entropy-capability",
+    attemptCount: 0,
+  };
+  const { state, sender } = senderHarness([SUB(1)], { [SUB(1).endpoint]: 201 }, {
+    durableDeliveries: [delivery],
+    delayMs: 30,
+  });
+  const first = sender.retryDurableBackground(10);
+  await waitFor(() => state.inFlight === 1);
+  assert.equal(await sender.retryDurableBackground(20), 0);
+  assert.equal(state.durableClaims, 1, "the overlapping timer never reclaims leased rows");
+  assert.equal(await first, 1);
 });
 
 test("durable background pushes retry transient service failures and terminalize revoked endpoints", async () => {
