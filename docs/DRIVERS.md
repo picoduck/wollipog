@@ -251,6 +251,15 @@ The lifetime policy is quiescence-aware and fail-safe:
   Claude's `<temp>/claude/<project>/<session>/tasks/*.output` artifacts against the provider
   transcript. Startup fallback reads native and WSL stores in their own execution context;
   ambiguous, unreadable, or oversized ledger evidence keeps work pending.
+- Each promoted managed job is persisted before the launch result can detach it, including its
+  provider identity, parent runner turn, Machine/workspace/execution context, launch type, timing,
+  and a bounded runner-local output reference. Jobs from one parent turn form a barrier. When the
+  final job in that barrier becomes terminal outside its parent turn, the runner durably queues one
+  synthetic continuation and the UI moves from **Waiting on External Job** to
+  **Continuation Pending**. Claude's stdin-write callback is the acceptance boundary; definite
+  pre-acceptance failures remain retryable, while accepted or uncertain submissions are never
+  replayed. A stable continuation id and durable terminal marker let startup reconcile a persisted
+  assistant result without submitting another provider turn.
 - `WOLLIPOG_CLAUDE_PENDING_MAX_MS` is a leak backstop for pending work (default seven days; `0` means
   unlimited). Hitting it writes a durable orphan marker before eviction.
 - Eviction and runner-shutdown stops send EOF first and allow five seconds for a clean exit before
@@ -265,6 +274,8 @@ The lifetime policy is quiescence-aware and fail-safe:
   `{"expiresAt":<future Unix epoch milliseconds>}`; valid holds suppress eviction until their TTL,
   bounded by `WOLLIPOG_CLAUDE_PENDING_MAX_MS` unless that ceiling is disabled, while expired, invalid,
   or unreadable holds are logged and ignored.
+  Arbitrary provider-opaque detachment remains untracked and is never promised an automatic
+  continuation.
 - A prompt write may restart/resume once only before Node acknowledges the stdin write. After that
   acknowledgement boundary, a terminated or malformed stream fails the active turn and the prompt
   is never submitted automatically again. The next distinct prompt gets one persistent `--resume`

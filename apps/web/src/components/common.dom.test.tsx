@@ -72,6 +72,7 @@ test("background-work badges expose every durable state with Title Case visible 
       root.render(
         <>
           <BackgroundWorkBadge state="running" />
+          <BackgroundWorkBadge state="continuation_pending" />
           <BackgroundWorkBadge state="orphaned" />
           <BackgroundWorkBadge state="resumed" />
         </>,
@@ -81,17 +82,17 @@ test("background-work badges expose every durable state with Title Case visible 
     const badges = [...container.querySelectorAll(".background-work-badge")];
     assert.deepEqual(
       badges.map((badge) => badge.textContent),
-      ["Background Work: Running", "Background Work: Orphaned", "Background Work: Resumed"],
+      ["Background Work: Waiting on External Job", "Background Work: Continuation Pending", "Background Work: Orphaned", "Background Work: Resumed"],
     );
     assert.deepEqual(
       badges.map((badge) => badge.getAttribute("aria-label")),
-      ["Background Work: Running", "Background Work: Orphaned", "Background Work: Resumed"],
+      ["Background Work: Waiting on External Job", "Background Work: Continuation Pending", "Background Work: Orphaned", "Background Work: Resumed"],
     );
     assert.deepEqual(
       badges.map((badge) => [...badge.classList].at(-1)),
-      ["background-work-running", "background-work-orphaned", "background-work-resumed"],
+      ["background-work-running", "background-work-running", "background-work-orphaned", "background-work-resumed"],
     );
-    assert.equal(container.querySelectorAll(".background-work-dot[aria-hidden='true']").length, 3);
+    assert.equal(container.querySelectorAll(".background-work-dot[aria-hidden='true']").length, 4);
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();

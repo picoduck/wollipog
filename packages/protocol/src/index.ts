@@ -226,7 +226,9 @@
 //     older validator still accepts a terminal receipt; the runner-local journal keeps exact truth.
 // 80: runner-owned subscription-usage sources publish normalized, secret-free provider windows;
 //     correlated refresh requests remain no-turn and preserve last-known control-plane snapshots.
-export const PROTOCOL_VERSION = 80;
+// 81: Claude managed background work distinguishes an external-job wait from the durable
+//     continuation-delivery barrier. Older peers continue to treat the optional state as absent.
+export const PROTOCOL_VERSION = 81;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
@@ -2165,7 +2167,7 @@ export type SessionTitleSource = "generated" | "user" | "provider";
 
 /** Runner-observed durable Claude background-work lifecycle. Absent means the runner does not
  * expose background work for this session (including older runners and non-Claude drivers). */
-export type BackgroundWorkState = "running" | "orphaned" | "resumed";
+export type BackgroundWorkState = "running" | "continuation_pending" | "orphaned" | "resumed";
 
 /** A prompt waiting behind the running turn (the runner serializes turns one at a time). Ephemeral
  * runner state surfaced to the UI so queued messages are visible + individually cancelable. */

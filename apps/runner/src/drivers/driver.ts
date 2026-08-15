@@ -57,9 +57,30 @@ export type DriverSteerResult =
   | { outcome: "rejected"; reason: string }
   | { outcome: "uncertain"; reason: string };
 
+export type DriverBackgroundLaunchType = "agent" | "shell" | "monitor" | "workflow" | "unknown";
+
+export interface DriverBackgroundJob {
+  id: string;
+  toolUseId?: string;
+  launchType: DriverBackgroundLaunchType;
+  startedAt: number;
+  outputFile?: string;
+}
+
+export interface DriverBackgroundTerminalJob extends DriverBackgroundJob {
+  status: "completed" | "failed" | "killed";
+  terminalAt: number;
+  /** True only when the terminal observation arrived outside a provider turn. */
+  continuationRequired: boolean;
+}
+
 export interface DriverBackgroundWorkUpdate {
   state: "running" | "orphaned" | null;
   pendingTaskIds: string[];
+  /** Complete runner-observed pending set, used to durably register work before detachment. */
+  jobs?: DriverBackgroundJob[];
+  /** Newly terminal jobs; an idle observation becomes an all-pending-work continuation barrier. */
+  terminalJobs?: DriverBackgroundTerminalJob[];
   /** Pending ids re-observed from this live provider process, excluding restart seed state. */
   observedTaskIds?: string[];
   oldestPendingAt?: number;
@@ -80,6 +101,8 @@ export interface DriverCallbacks {
   onExit: (code: number | null) => void;
   /** Claude-only lifecycle signal. The session manager persists it before process teardown. */
   onBackgroundWork?: (update: DriverBackgroundWorkUpdate) => void;
+  /** Exact provider input acknowledgement for the currently active prompt. */
+  onPromptAccepted?: () => void;
   /** Provider-confirmed account readiness changes; credentials and identity never cross here. */
   onAuthStatus?: (status: "authenticated" | "unauthenticated") => void;
   /** A harness request proved that its provider credentials need user action. Raw provider text

@@ -90,6 +90,15 @@ started, or offline queued work is never reported as cancelled without runner ev
 failed/uncertain bubbles may be dismissed locally; dismissal retains the outcome tombstone while
 scrubbing the stored prompt payload.
 
+Protocol v79 adds exact provider-authentication terminal receipt projection for mixed-version peers.
+
+Protocol v80 distinguishes managed external-job waits from continuation delivery. The runner now
+persists structured Claude job identity and parent-turn barriers before detachment, resumes a parent
+when its barrier becomes terminal, and retains an accepted-but-undelivered continuation as visibly
+pending instead of replaying it. Update runner and control plane together before relying on the
+**Waiting on External Job** or **Continuation Pending** states. Provider-opaque detached processes
+remain untracked and carry no automatic-resume promise.
+
 | Capability | Minimum protocol |
 | --- | ---: |
 | Find/adopt unmanaged agent sessions | 6 |
@@ -106,6 +115,7 @@ scrubbing the stored prompt payload.
 | Accept retryable durable automation commands | 53 |
 | Reconcile detachable terminal sessions and bounded history | 57 |
 | Preserve queued prompt identity across admission and reconnects | 78 |
+| Resume a parent after managed background-job completion | 80 |
 
 A missing protocol version is treated as **unknown**, not optimistically supported. Protocol
 metadata itself arrived in v15, so the dashboard cannot prove which earlier commands such a runner

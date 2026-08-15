@@ -14469,5 +14469,7 @@ function parseJson<T>(raw: string | null): T | null {
 }
 
 function parseBackgroundWorkState(raw: string | null): BackgroundWorkState | undefined {
-  return raw === "running" || raw === "orphaned" || raw === "resumed" ? raw : undefined;
+  return raw === "running" || raw === "continuation_pending" || raw === "orphaned" || raw === "resumed"
+    ? raw
+    : undefined;
 }

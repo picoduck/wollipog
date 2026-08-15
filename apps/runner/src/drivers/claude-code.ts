@@ -26,6 +26,9 @@ import { prepareClaudeHookArgs } from "../hook-settings.js";
 import { killTree, spawnAgent, trackPendingKill, type AgentProcess, type SpawnAgentOptions } from "../spawn.js";
 import type {
   Driver,
+  DriverBackgroundJob,
+  DriverBackgroundLaunchType,
+  DriverBackgroundTerminalJob,
   DriverCallbacks,
   DriverCommandInput,
   DriverOptions,
@@ -71,6 +74,8 @@ interface PendingBackgroundTask {
   toolUseId?: string;
   startedAt: number;
   outputFile?: string;
+  launchType: DriverBackgroundLaunchType;
+  parentPersistentTurnId?: number;
   /** True when launch input proves a status-less acknowledgment cannot mean completion. */
   requiresTerminalEvidence?: boolean;
 }
@@ -342,7 +347,7 @@ export class ClaudeCodeDriver implements Driver {
     this.pendingMaxMs = persistent.pendingMaxMs;
     for (const id of opts.initialBackgroundTaskIds ?? []) {
       if (id) {
-        this.pendingBackgroundTasks.set(id, { id, startedAt: this.deps.now() });
+        this.pendingBackgroundTasks.set(id, { id, startedAt: this.deps.now(), launchType: "unknown" });
         this.unverifiedBackgroundTaskIds.add(id);
       }
     }
@@ -714,17 +719,20 @@ export class ClaudeCodeDriver implements Driver {
       });
 
       try {
+        const accepted = (error?: Error | null) => {
+          if (!error) this.cb.onPromptAccepted?.();
+        };
         if (perm.streamInput) {
           // Deliver the prompt (and any images) as a stream-json user message. Interactive
           // turns keep stdin OPEN to write control_responses (approvals), closing it on the
           // `result` event; a non-interactive stream-json turn (images only) has no approvals,
           // so close stdin now to start the turn.
-          child.stdin.write(JSON.stringify(buildClaudeUserMessage(promptText, imgs)) + "\n");
+          child.stdin.write(JSON.stringify(buildClaudeUserMessage(promptText, imgs)) + "\n", accepted);
           if (!this.interactive) child.stdin.end();
         } else {
           // `claude -p` accepts a plain-text prompt from stdin. This also keeps CR/LF and
           // cmd.exe metacharacters out of argv on Windows; EOF starts the turn immediately.
-          child.stdin.end(promptText);
+          child.stdin.end(promptText, accepted);
         }
       } catch {
         /* ignore */
@@ -868,6 +876,7 @@ export class ClaudeCodeDriver implements Driver {
         // This is the duplication boundary: after the stream acknowledges the write we never
         // automatically submit this user message again, even if the CLI terminates mid-turn.
         turn.writeAcknowledged = true;
+        this.cb.onPromptAccepted?.();
       });
     } catch (err) {
       this.handlePersistentFailure(`prompt write failed: ${(err as Error).message}`, turn);
@@ -981,11 +990,19 @@ export class ClaudeCodeDriver implements Driver {
       const taskId = typeof msg.task_id === "string" ? msg.task_id : null;
       const toolUseId = typeof msg.tool_use_id === "string" ? msg.tool_use_id : undefined;
       if ((msg.subtype === "task_started" || msg.subtype === "task_progress") && taskId) {
-        this.recordPendingTask(taskId, toolUseId, undefined, true);
+        this.recordPendingTask(
+          taskId,
+          toolUseId,
+          undefined,
+          true,
+          true,
+          undefined,
+          this.activePersistentTurn?.id,
+        );
       } else if (msg.subtype === "task_notification" && taskId) {
         const status = typeof msg.status === "string" ? msg.status.toLowerCase() : "";
         if (status === "completed" || status === "failed" || status === "killed") {
-          this.completePendingTask(taskId, toolUseId);
+          this.completePendingTask(taskId, toolUseId, status);
         } else {
           // `stopped` has no durable completion record and an unknown future status is ambiguous.
           this.recordPendingTask(taskId, toolUseId, undefined, true);
@@ -1002,7 +1019,15 @@ export class ClaudeCodeDriver implements Driver {
         if (!isBackgroundCapableLaunch(name, input)) continue;
         // A tool_use is provisional. Only a provider task lifecycle event or a structured
         // async-launch result promotes it to a hold that requires separate terminal evidence.
-        this.recordPendingTask(`tool:${block.id}`, block.id, undefined, false);
+        this.recordPendingTask(
+          `tool:${block.id}`,
+          block.id,
+          undefined,
+          false,
+          true,
+          backgroundLaunchType(name),
+          this.activePersistentTurn?.id,
+        );
       }
       return;
     }
@@ -1021,6 +1046,8 @@ export class ClaudeCodeDriver implements Driver {
     outputFile?: string,
     requiresTerminalEvidence?: boolean,
     observed = true,
+    launchType?: DriverBackgroundLaunchType,
+    parentPersistentTurnId?: number,
   ): void {
     const fallback = toolUseId
       ? [...this.pendingBackgroundTasks.values()].find((task) => task.toolUseId === toolUseId)
@@ -1033,6 +1060,10 @@ export class ClaudeCodeDriver implements Driver {
         fallback?.toolUseId ? { toolUseId: fallback.toolUseId } : {}),
       ...(outputFile ? { outputFile } : existing?.outputFile ? { outputFile: existing.outputFile } :
         fallback?.outputFile ? { outputFile: fallback.outputFile } : {}),
+      launchType: launchType ?? existing?.launchType ?? fallback?.launchType ?? "unknown",
+      ...((parentPersistentTurnId ?? existing?.parentPersistentTurnId ?? fallback?.parentPersistentTurnId) != null
+        ? { parentPersistentTurnId: parentPersistentTurnId ?? existing?.parentPersistentTurnId ?? fallback?.parentPersistentTurnId }
+        : {}),
       ...((requiresTerminalEvidence ?? existing?.requiresTerminalEvidence ?? fallback?.requiresTerminalEvidence) != null
         ? { requiresTerminalEvidence: requiresTerminalEvidence ?? existing?.requiresTerminalEvidence ?? fallback?.requiresTerminalEvidence }
         : {}),
@@ -1045,17 +1076,32 @@ export class ClaudeCodeDriver implements Driver {
     if (changed || (fallback != null && fallback.id !== id)) this.pendingWorkChanged();
   }
 
-  private completePendingTask(id: string, toolUseId?: string): void {
+  private completePendingTask(
+    id: string,
+    toolUseId?: string,
+    status: "completed" | "failed" | "killed" = "completed",
+  ): void {
+    const terminal = new Map<string, DriverBackgroundTerminalJob>();
+    const capture = (task: PendingBackgroundTask) => terminal.set(task.id, {
+      ...driverBackgroundJob(task),
+      status,
+      terminalAt: this.deps.now(),
+      continuationRequired: this.activePersistentTurn == null ||
+        (task.parentPersistentTurnId != null && task.parentPersistentTurnId !== this.activePersistentTurn.id),
+    });
     this.unverifiedBackgroundTaskIds.delete(id);
+    const direct = this.pendingBackgroundTasks.get(id);
+    if (direct) capture(direct);
     let changed = this.pendingBackgroundTasks.delete(id);
     if (toolUseId) {
       for (const [key, task] of this.pendingBackgroundTasks) {
         if (task.toolUseId !== toolUseId) continue;
+        capture(task);
         this.pendingBackgroundTasks.delete(key);
         changed = true;
       }
     }
-    if (changed) this.pendingWorkChanged();
+    if (changed) this.pendingWorkChanged([...terminal.values()]);
   }
 
   private reconcileBackgroundToolResult(toolUseId: string, content: Json, isError: boolean): void {
@@ -1071,7 +1117,11 @@ export class ClaudeCodeDriver implements Driver {
     const provisional = [...this.pendingBackgroundTasks.values()].find((task) => task.toolUseId === toolUseId);
     if (isError || status === "completed" || status === "failed" || status === "killed" ||
         provisional?.requiresTerminalEvidence !== true) {
-      this.completePendingTask(`tool:${toolUseId}`, toolUseId);
+      this.completePendingTask(
+        `tool:${toolUseId}`,
+        toolUseId,
+        status === "failed" || isError ? "failed" : status === "killed" ? "killed" : "completed",
+      );
     }
   }
 
@@ -1086,12 +1136,16 @@ export class ClaudeCodeDriver implements Driver {
     if (changed) this.pendingWorkChanged();
   }
 
-  private pendingWorkChanged(): void {
+  private pendingWorkChanged(terminalJobs: DriverBackgroundTerminalJob[] = []): void {
     this.clearIdleTimer();
     if (this.pendingBackgroundTasks.size === 0) {
       this.pendingCeilingReached = false;
       this.clearPendingTimer();
-      this.cb.onBackgroundWork?.({ state: null, pendingTaskIds: [] });
+      this.cb.onBackgroundWork?.({
+        state: null,
+        pendingTaskIds: [],
+        ...(terminalJobs.length ? { terminalJobs } : {}),
+      });
       this.armIdleEviction();
       return;
     }
@@ -1099,6 +1153,8 @@ export class ClaudeCodeDriver implements Driver {
     this.cb.onBackgroundWork?.({
       state: "running",
       pendingTaskIds: tasks.map((task) => task.id).sort(),
+      jobs: tasks.map(driverBackgroundJob).sort((left, right) => left.id.localeCompare(right.id)),
+      ...(terminalJobs.length ? { terminalJobs } : {}),
       observedTaskIds: tasks.filter((task) => !this.unverifiedBackgroundTaskIds.has(task.id)).map((task) => task.id).sort(),
       oldestPendingAt: Math.min(...tasks.map((task) => task.startedAt)),
     });
@@ -1134,21 +1190,32 @@ export class ClaudeCodeDriver implements Driver {
     }
   }
 
-  private applyBackgroundInspection(inspection: ClaudeBackgroundWorkInspection): void {
+  private applyBackgroundInspection(
+    inspection: ClaudeBackgroundWorkInspection,
+    continuationRequired = false,
+  ): void {
     for (const artifact of inspection.incompleteArtifacts) {
       if (!this.pendingBackgroundTasks.has(artifact.id)) {
         this.recordPendingTask(artifact.id, undefined, artifact.outputFile, true, false);
       }
     }
     let changed = false;
+    const terminalJobs: DriverBackgroundTerminalJob[] = [];
     for (const id of inspection.terminalTaskIds) {
-      if (this.pendingBackgroundTasks.has(id)) {
+      const task = this.pendingBackgroundTasks.get(id);
+      if (task) {
+        terminalJobs.push({
+          ...driverBackgroundJob(task),
+          status: "completed",
+          terminalAt: this.deps.now(),
+          continuationRequired,
+        });
         this.pendingBackgroundTasks.delete(id);
         this.unverifiedBackgroundTaskIds.delete(id);
         changed = true;
       }
     }
-    if (changed) this.pendingWorkChanged();
+    if (changed) this.pendingWorkChanged(terminalJobs);
   }
 
   private providerProjectsRoot(): string | undefined {
@@ -1167,23 +1234,23 @@ export class ClaudeCodeDriver implements Driver {
     };
   }
 
-  private reconcilePendingTaskFiles(): void {
+  private reconcilePendingTaskFiles(continuationRequired = false): void {
     this.applyBackgroundInspection(inspectClaudeBackgroundWork(
       this.cwd,
       this.sessionId,
       this.pendingBackgroundTasks.keys(),
       this.nativeDiscoveryRoots(),
-    ));
+    ), continuationRequired);
   }
 
-  private async reconcilePendingTaskFilesInContext(): Promise<void> {
+  private async reconcilePendingTaskFilesInContext(continuationRequired = false): Promise<void> {
     this.applyBackgroundInspection(await this.deps.inspectBackgroundWork(
       this.opts.context,
       this.cwd,
       this.sessionId,
       this.pendingBackgroundTasks.keys(),
       { env: this.opts.env, projectsRoot: this.providerProjectsRoot() },
-    ));
+    ), continuationRequired);
   }
 
   private finishIdleEvictionAfterReconcile(): void {
@@ -1209,9 +1276,9 @@ export class ClaudeCodeDriver implements Driver {
       }
       if (this.activePersistentTurn) return;
       if (this.opts.context.kind === "wsl") {
-        void this.reconcilePendingTaskFilesInContext().then(() => this.finishIdleEvictionAfterReconcile());
+        void this.reconcilePendingTaskFilesInContext(true).then(() => this.finishIdleEvictionAfterReconcile());
       } else {
-        this.reconcilePendingTaskFiles();
+        this.reconcilePendingTaskFiles(true);
         this.finishIdleEvictionAfterReconcile();
       }
     }, chunk);
@@ -1242,8 +1309,8 @@ export class ClaudeCodeDriver implements Driver {
         if (this.activePersistentTurn) { this.pendingCeilingReached = true; return; }
         this.evictPendingAtCeiling();
       };
-      if (this.opts.context.kind === "wsl") void this.reconcilePendingTaskFilesInContext().then(() => finish(true));
-      else { this.reconcilePendingTaskFiles(); finish(); }
+      if (this.opts.context.kind === "wsl") void this.reconcilePendingTaskFilesInContext(true).then(() => finish(true));
+      else { this.reconcilePendingTaskFiles(true); finish(); }
     }, chunk);
     this.pendingTimer.unref?.();
   }
@@ -1822,6 +1889,24 @@ function isBackgroundCapableLaunch(name: string, input?: Record<string, Json>): 
   if (name === "Agent" || name === "Task") return input?.run_in_background !== false;
   if (name === "Bash" || name === "PowerShell") return input?.run_in_background === true;
   return name === "Monitor" || name === "Workflow";
+}
+
+function backgroundLaunchType(name: string): DriverBackgroundLaunchType {
+  if (name === "Agent" || name === "Task") return "agent";
+  if (name === "Bash" || name === "PowerShell") return "shell";
+  if (name === "Monitor") return "monitor";
+  if (name === "Workflow") return "workflow";
+  return "unknown";
+}
+
+function driverBackgroundJob(task: PendingBackgroundTask): DriverBackgroundJob {
+  return {
+    id: task.id,
+    ...(task.toolUseId ? { toolUseId: task.toolUseId } : {}),
+    launchType: task.launchType,
+    startedAt: task.startedAt,
+    ...(task.outputFile ? { outputFile: task.outputFile } : {}),
+  };
 }
 
 export function normalizeQuestions(input: Json): AgentQuestion[] {
