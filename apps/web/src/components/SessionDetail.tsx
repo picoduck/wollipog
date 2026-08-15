@@ -1,3 +1,4 @@
+import { browserRandomUUID } from "../browser-crypto.js";
 import {
   type KeyboardEvent,
   type ReactNode,
@@ -1424,7 +1425,7 @@ function SessionDetailLoaded({
         submissionId: retry && retry.providerCommandId === candidate.providerCommandId &&
           retry.catalogRevision === candidate.catalogRevision && retry.argumentText === candidate.argumentText
           ? retry.submissionId
-          : `web_${crypto.randomUUID()}`,
+          : `web_${browserRandomUUID()}`,
         ...candidate,
       };
       commandSubmissionRetryRef.current = commandSubmission;
@@ -1556,7 +1557,7 @@ function SessionDetailLoaded({
     );
     try {
       const receipt = await api.steer(sessionId, {
-        submissionId: crypto.randomUUID(),
+        submissionId: browserRandomUUID(),
         turnId: session.activeTurnId!,
         ...(outgoing ? { text: outgoing } : {}),
         ...(submittedImages.length ? { images: submittedImages } : {}),
@@ -1620,7 +1621,7 @@ function SessionDetailLoaded({
     setError(null);
     try {
       await api.steer(sessionId, {
-        submissionId: crypto.randomUUID(),
+        submissionId: browserRandomUUID(),
         turnId: session.activeTurnId!,
         promotePromptId: prompt.id,
       });

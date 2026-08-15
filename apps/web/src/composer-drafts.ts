@@ -1,3 +1,4 @@
+import { browserRandomUUID } from "./browser-crypto.js";
 import type { PromptImageInput } from "@wollipog/protocol";
 import {
   LOCAL_INSTANCE_SCOPE,
@@ -549,7 +550,7 @@ export async function saveComposerDraft(
   if (discardedSessionIds.has(key)) return;
   if (!text && images.length === 0) return deleteComposerDraft(sessionId, instanceScope);
   const startedAtRevision = revision(key);
-  const draft: ComposerDraft = { text, images, updatedAt: Date.now(), revision: crypto.randomUUID() };
+  const draft: ComposerDraft = { text, images, updatedAt: Date.now(), revision: browserRandomUUID() };
   if (typeof indexedDB !== "undefined") {
     try {
       const db = await openDb();
@@ -677,7 +678,7 @@ export async function reserveComposerDraftSnapshot(
     text,
     images,
     updatedAt: Date.now(),
-    revision: crypto.randomUUID(),
+    revision: browserRandomUUID(),
     ...(commandSubmission ? { commandSubmission } : {}),
   };
   if (discardedSessionIds.has(key)) return draft;

@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import {
   controlPlaneHttp,
   developmentConfigPath,
+  developmentDataDir,
   isControlPlaneService,
   isRunnerCredentialToken,
   developmentStartTimeout,
@@ -208,6 +209,13 @@ test("health wait verifies the service marker and honors custom dev coordinates"
   assert.match(developmentConfigPath("C:/repo", {}, () => true), /runner\.config\.json$/);
   assert.match(developmentConfigPath("C:/repo", {}, () => false), /runner\.config\.example\.json$/);
   assert.match(developmentConfigPath("C:/repo", { WOLLIPOG_DEV_RUNNER_CONFIG: "custom.json" }, () => false), /custom\.json$/);
+  const defaultDataDir = developmentDataDir("/repo", {}, undefined, "/home/dev");
+  assert.match(defaultDataDir, /^\/home\/dev\/\.wollipog-dev\/[a-f0-9]{12}$/);
+  assert.notEqual(defaultDataDir, developmentDataDir("/other-repo", {}, undefined, "/home/dev"));
+  assert.equal(developmentDataDir("/repo", {}, "config/runner", "/home/dev"), resolve("/repo", "config/runner"));
+  assert.equal(developmentDataDir("/repo", { RUNNER_DATA_DIR: "scratch/runner" }, "config/runner"), resolve("/repo", "scratch/runner"));
+  assert.equal(developmentDataDir("/repo", { RUNNER_DATA_DIR: "/var/lib/wollipog-dev" }), "/var/lib/wollipog-dev");
+  assert.equal(developmentDataDir("C:/repo", { RUNNER_DATA_DIR: "D:\\wollipog-dev" }), "D:\\wollipog-dev");
 });
 
 test("development bootstrap aliases prefer Wollipog names and warn only on legacy fallback", () => {

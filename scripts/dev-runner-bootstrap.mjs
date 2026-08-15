@@ -8,8 +8,10 @@
  * environment. The secret is never written to disk, placed in argv, or logged.
  */
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { readCompatibleEnv } from "./env-compat.mjs";
@@ -65,6 +67,18 @@ export function developmentStartTimeout(env = process.env, warn) {
     "MAM_DEV_START_TIMEOUT_MS",
     warn,
   ) || 30_000);
+}
+
+/** Keep development credentials and mutable runner state outside both the installed runner data
+ * directory and the source checkout. Environment and file configuration remain authoritative. */
+export function developmentDataDir(root = repoRoot, env = process.env, fileDataDir, home = homedir()) {
+  const configured = env.RUNNER_DATA_DIR?.trim() || fileDataDir?.trim();
+  if (configured) {
+    if (configured.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(configured)) return configured;
+    return resolve(root, configured);
+  }
+  const checkout = createHash("sha256").update(resolve(root)).digest("hex").slice(0, 12);
+  return resolve(home, ".wollipog-dev", checkout);
 }
 
 /** Resolve relative control-plane coordinates from the package cwd used by pnpm --filter. */
@@ -161,7 +175,7 @@ export async function provisionDevelopmentCredential(baseUrl, runnerId, localDev
   return body.token;
 }
 
-export async function configuredRunnerId(configPath) {
+export async function configuredRunnerSettings(configPath) {
   let parsed;
   try {
     parsed = JSON.parse(await readFile(configPath, "utf8"));
@@ -171,16 +185,26 @@ export async function configuredRunnerId(configPath) {
   }
   const runnerId = typeof parsed?.runnerId === "string" ? parsed.runnerId.trim() : "";
   if (!runnerId) throw new Error(`${configPath} must contain a non-empty runnerId`);
-  return runnerId;
+  const dataDir = typeof parsed?.dataDir === "string" ? parsed.dataDir.trim() : "";
+  return { runnerId, dataDir: dataDir || undefined };
 }
 
-function startRunner(token, baseUrl, configPath) {
+export async function configuredRunnerId(configPath) {
+  return (await configuredRunnerSettings(configPath)).runnerId;
+}
+
+function startRunner(token, baseUrl, configPath, dataDir) {
   const tsxCli = fileURLToPath(import.meta.resolve("tsx/cli"));
   // Invoke Node + tsx by argv so config paths remain inert on every platform. The credential stays
   // exclusively in the child environment, never in argv or a shell command.
   return spawn(process.execPath, [tsxCli, "watch", "apps/runner/src/cli.ts", "--config", configPath], {
     cwd: repoRoot,
-    env: { ...process.env, RUNNER_TOKEN: token, CONTROL_PLANE_URL: runnerWebSocketUrl(baseUrl) },
+    env: {
+      ...process.env,
+      RUNNER_TOKEN: token,
+      CONTROL_PLANE_URL: runnerWebSocketUrl(baseUrl),
+      RUNNER_DATA_DIR: dataDir,
+    },
     stdio: "inherit",
   });
 }
@@ -188,15 +212,17 @@ function startRunner(token, baseUrl, configPath) {
 export async function main() {
   const warnLegacyEnvironment = (warning) => console.warn(`[dev-runner] ${warning}`);
   const configPath = developmentConfigPath(repoRoot, process.env, existsSync, warnLegacyEnvironment);
-  const runnerId = await configuredRunnerId(configPath);
+  const configured = await configuredRunnerSettings(configPath);
+  const runnerId = configured.runnerId;
   const baseUrl = controlPlaneHttp(process.env, warnLegacyEnvironment);
   await waitForControlPlane(baseUrl, {
     timeoutMs: developmentStartTimeout(process.env, warnLegacyEnvironment),
   });
   const localDeviceToken = await readLocalDeviceToken(localDeviceTokenPath());
   const token = await provisionDevelopmentCredential(baseUrl, runnerId, localDeviceToken);
-  console.log(`[dev-runner] starting ${runnerId} with an ephemeral exact-id credential`);
-  const child = startRunner(token, baseUrl, configPath);
+  const dataDir = developmentDataDir(repoRoot, process.env, configured.dataDir);
+  console.log(`[dev-runner] starting ${runnerId} with an ephemeral exact-id credential and isolated state at ${dataDir}`);
+  const child = startRunner(token, baseUrl, configPath, dataDir);
   const forward = (signal) => {
     if (!child.killed) child.kill(signal);
   };

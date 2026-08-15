@@ -38,6 +38,7 @@ import {
   type InstanceStatus,
 } from "./instances-context.js";
 import { viewFromPath, type View } from "./navigation.js";
+import { browserRandomUUID } from "./browser-crypto.js";
 
 const LOCAL_PROFILE: InstanceProfile = {
   id: "local",
@@ -66,7 +67,7 @@ const nativeDesktop: ProviderDesktopRuntime = {
 function localRuntime(): InstanceRuntime {
   return createBrowserInstanceRuntime({
     instanceId: "local",
-    runtimeKey: `local:${crypto.randomUUID()}`,
+    runtimeKey: `local:${browserRandomUUID()}`,
     httpOrigin: CONTROL_PLANE_HTTP,
     websocketOrigin: CONTROL_PLANE_WS,
     token: deviceToken,
