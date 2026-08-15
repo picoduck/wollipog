@@ -97,6 +97,23 @@ test("plaintext is returned once while SQLite stores only its SHA-256 digest", (
   }
 });
 
+test("pre-store attestation accepts a live pending credential without activating or touching it", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const issued = issueRunnerCredential(db, {
+    runnerId: "runner-attest",
+    scope: organizationScope,
+    now: 1_000,
+  });
+  const hash = hashToken(issued.token);
+  assert.equal(db.verifyRunnerCredentialForAttestation("runner-attest", hash, 2_000), true);
+  assert.equal(db.listRunnerCredentials(PERSONAL_ORGANIZATION_ID)[0]?.status, "pending");
+  assert.equal(db.listRunnerCredentials(PERSONAL_ORGANIZATION_ID)[0]?.lastUsedAt, null);
+  assert.equal(db.verifyRunnerCredentialForAttestation("another-runner", hash, 2_000), false);
+  assert.equal(db.verifyRunnerCredentialForAttestation("runner-attest", hash, issued.credential.expiresAt!), false);
+  assert.equal(db.listRunnerCredentials(PERSONAL_ORGANIZATION_ID)[0]?.status, "pending");
+  db.close();
+});
+
 test("existing legacy credentials stay active until an exact Wollipog rotation registers", () => {
   const db = ControlPlaneDb.open(":memory:");
   const legacyToken = `mamr_${"a".repeat(43)}`;

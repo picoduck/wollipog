@@ -64,7 +64,7 @@ test("session launch passes one resolved isolation boundary to every driver", as
     assert.deepEqual(captured?.isolation, isolation);
     assert.deepEqual(state, { driver: "claude-code", dataDir: join(root, ".runner-data"), env: {}, sessionId: "s1", cwd: "/repo" });
     assert.deepEqual(migrations, ["s1"]);
-    assert.equal(store.readMeta("s1")?.providerStateVersion, 2);
+    assert.equal(store.readMeta("s1")?.providerStateVersion, 3);
     manager.shutdownAll();
   } finally {
     rmSync(root, { recursive: true, force: true });

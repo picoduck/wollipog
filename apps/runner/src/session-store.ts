@@ -132,7 +132,7 @@ export interface SessionMeta {
   adoptedBackgroundRecoveryAuthorized?: boolean;
   /** Isolated provider transcript layout. Absent identifies the legacy provider-wide root;
    * version 2 is a hashed per-manager-session partition. Runner-only, never sent as capability. */
-  providerStateVersion?: 2;
+  providerStateVersion?: 2 | 3;
   /** Tree sha snapshotting the worktree at the start of the most recent prompt turn (the last_turn
    * diff base). null = the snapshot attempt failed for that turn; absent = never captured. Box-local
    * (names an object in this repo's odb) — deliberately NOT part of SessionSnapshot. */

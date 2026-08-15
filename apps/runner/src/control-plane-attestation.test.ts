@@ -1,0 +1,69 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { WOLLIPOG_CONTROL_PLANE_SERVICE } from "@wollipog/protocol";
+import {
+  attestRunnerControlPlane,
+  ControlPlaneAttestationError,
+  waitForRunnerControlPlaneAttestation,
+} from "./control-plane-attestation.js";
+
+const INSTANCE_ID = "8ded292f-18b6-4d36-a82f-f506ad207f2f";
+const valid = { service: WOLLIPOG_CONTROL_PLANE_SERVICE, instanceId: INSTANCE_ID, protocolVersion: 77 };
+
+test("runner attestation sends the credential only in Authorization and validates identity", async () => {
+  let requested = "";
+  let authorization = "";
+  const result = await attestRunnerControlPlane({
+    controlPlaneUrl: "wss://manager.example.test/runner",
+    runnerId: "runner one",
+    token: "top-secret",
+    fetchImpl: (async (input, init) => {
+      requested = String(input);
+      authorization = (init?.headers as Record<string, string>).authorization;
+      return new Response(JSON.stringify(valid), { headers: { "content-length": "107" } });
+    }) as typeof fetch,
+  });
+  assert.deepEqual(result, valid);
+  assert.equal(requested, "https://manager.example.test/runner/attestation/runner%20one");
+  assert.equal(requested.includes("top-secret"), false);
+  assert.equal(authorization, "Bearer top-secret");
+});
+
+test("runner attestation retries transient failures but rejects credentials permanently", async () => {
+  let calls = 0;
+  const delays: number[] = [];
+  const result = await waitForRunnerControlPlaneAttestation({
+    controlPlaneUrl: "ws://localhost:4317/runner",
+    runnerId: "runner-one",
+    token: "token",
+    fetchImpl: (async () => {
+      calls++;
+      return calls < 3 ? new Response("unavailable", { status: 503 }) : new Response(JSON.stringify(valid));
+    }) as typeof fetch,
+    wait: async (delay) => { delays.push(delay); },
+  });
+  assert.deepEqual(result, valid);
+  assert.deepEqual(delays, [1_000, 2_000]);
+
+  await assert.rejects(
+    () => waitForRunnerControlPlaneAttestation({
+      controlPlaneUrl: "ws://localhost:4317/runner",
+      runnerId: "runner-one",
+      token: "wrong",
+      fetchImpl: (async () => new Response("no", { status: 401 })) as typeof fetch,
+      wait: async () => assert.fail("permanent auth failure must not retry"),
+    }),
+    (error) => error instanceof ControlPlaneAttestationError && !error.retryable,
+  );
+});
+
+test("runner attestation fails closed on malformed or oversized identity", async () => {
+  await assert.rejects(() => attestRunnerControlPlane({
+    controlPlaneUrl: "ws://localhost/runner", runnerId: "r", token: "t",
+    fetchImpl: (async () => new Response(JSON.stringify({ ...valid, instanceId: "not-a-uuid" }))) as typeof fetch,
+  }), /invalid identity/);
+  await assert.rejects(() => attestRunnerControlPlane({
+    controlPlaneUrl: "ws://localhost/runner", runnerId: "r", token: "t",
+    fetchImpl: (async () => new Response("{}", { headers: { "content-length": "4097" } })) as typeof fetch,
+  }), /too large/);
+});

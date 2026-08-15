@@ -53,6 +53,8 @@ export interface WorktreeOptions {
   context?: AgentContext;
   /** Runner data directory. Native worktrees live below `<dataDir>/worktrees`. */
   dataDir?: string;
+  /** Stable attested owner for WSL paths and repository-global branch names. */
+  ownerHash?: string;
 }
 
 export interface WorktreeHandle {
@@ -128,7 +130,10 @@ async function wslHome(context: Extract<AgentContext, { kind: "wsl" }>): Promise
 async function worktreeRootPath(options: WorktreeOptions = {}): Promise<string> {
   const context = options.context ?? nativeContext;
   if (context.kind === "wsl") {
-    const root = `${await wslHome(context)}/.agent-manager/worktrees`;
+    if (!options.ownerHash || !/^[a-f0-9]{64}$/u.test(options.ownerHash)) {
+      throw new Error("WSL worktrees require a valid attested runner owner hash");
+    }
+    const root = `${await wslHome(context)}/.agent-manager/runner-instances/${options.ownerHash}/worktrees`;
     await runContextCommand(context, "mkdir", ["-p", "--", root], { cwd: "/", timeoutMs: 8_000 });
     return root;
   }
@@ -184,7 +189,9 @@ export async function isGitRepo(repoPath: string, options: WorktreeOptions = {})
 export async function createWorktree(repoPath: string, sessionId: string, options: WorktreeOptions = {}): Promise<WorktreeHandle> {
   const context = options.context ?? nativeContext;
   const path = await sessionPath(repoPath, sessionId, options);
-  const branch = `agent/${sessionId}`;
+  const branch = context.kind === "wsl" && options.ownerHash
+    ? `agent/${options.ownerHash.slice(0, 16)}/${sessionId}`
+    : `agent/${sessionId}`;
   const listed = await command(context, repoPath, ["worktree", "list", "--porcelain"]);
   const registered = listed
     .split(/\n\s*\n/)
@@ -226,7 +233,9 @@ export async function createWorktreeFromTree(
 ): Promise<WorktreeHandle> {
   const context = options.context ?? nativeContext;
   const path = await sessionPath(repoPath, sessionId, options);
-  const branch = `agent/${sessionId}`;
+  const branch = context.kind === "wsl" && options.ownerHash
+    ? `agent/${options.ownerHash.slice(0, 16)}/${sessionId}`
+    : `agent/${sessionId}`;
   await command(context, repoPath, ["worktree", "add", "-B", branch, path, baseRef], 120_000);
   const handle = { path, branch, created: true };
   try {

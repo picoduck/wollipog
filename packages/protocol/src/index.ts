@@ -217,7 +217,9 @@
 //     linked worktrees, dirty categories, in-progress operations, shallow repositories, and the
 //     shared remote-ref timestamp. Git status/summary may target a primary checkout by session id;
 //     the runner resolves its authoritative repoPath and all other actions remain linked-only.
-export const PROTOCOL_VERSION = 76;
+// 77: runners authenticate a read-only control-plane identity attestation before opening mutable
+//     local stores, so persistent state can be bound to the installation rather than an endpoint.
+export const PROTOCOL_VERSION = 77;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
@@ -272,6 +274,13 @@ export interface ControlPlaneInstanceInfo {
   apiVersion: typeof CONTROL_PLANE_API_VERSION;
   appVersion: string;
   capabilities: Array<(typeof CONTROL_PLANE_CAPABILITIES)[number] | string>;
+}
+
+/** Minimal runner-authenticated identity returned before the runner opens any mutable local store. */
+export interface RunnerControlPlaneAttestation {
+  service: ControlPlaneService;
+  instanceId: string;
+  protocolVersion: number;
 }
 
 /** Minimum runner protocol for UI/control-plane commands that old runners otherwise ignore.

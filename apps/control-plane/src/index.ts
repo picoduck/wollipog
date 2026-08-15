@@ -116,6 +116,7 @@ import { RUNNER_RELEASE_TAG } from "./release-version.js";
 import { readSshConfigHosts } from "./ssh-config.js";
 import { ControlPlaneDb, GOVERNANCE_AUDIT_RETENTION_MS } from "./db.js";
 import { registerSessionLookupRoute } from "./session-lookup-route.js";
+import { registerRunnerAttestationRoute } from "./runner-attestation-route.js";
 import {
   canAssignSessionProject,
   resolveSessionCreationOwnership,
@@ -1399,6 +1400,7 @@ registerInstanceRoute(app, {
   instanceId: () => db.instanceId(),
   displayName: () => db.localIdentityContext().organizationName,
 });
+registerRunnerAttestationRoute(app, db);
 
 // Connection coordinates are reusable; runner-specific credentials are issued separately and
 // their plaintext is returned only once after the caller has chosen the exact runner id.

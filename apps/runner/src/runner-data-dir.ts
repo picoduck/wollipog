@@ -11,6 +11,7 @@ import {
   openSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmdirSync,
   rmSync,
   writeFileSync,
@@ -27,10 +28,11 @@ const LEGACY_CREDENTIAL = join("credentials", "active-runner-token");
 export interface RunnerDataDirIdentity {
   runnerId: string;
   controlPlaneUrl: string;
+  controlPlaneInstanceId: string;
 }
 
 interface OwnerRecord {
-  version: 1;
+  version: 1 | 2;
   ownerHash: string;
 }
 
@@ -44,6 +46,7 @@ interface LeaseRecord extends OwnerRecord {
 export interface RunnerDataDirLease {
   dataDir: string;
   credentialFile: string;
+  ownerHash: string;
   release(): void;
 }
 
@@ -51,6 +54,8 @@ export interface RunnerDataDirLeaseOptions {
   pid?: number;
   hostname?: string;
   isProcessAlive?: (pid: number) => boolean;
+  /** Set only after the v1 scoped credential independently attests to this stable CP identity. */
+  allowLegacyEndpointMigration?: boolean;
 }
 
 function sha256(value: string): string {
@@ -72,11 +77,33 @@ export function normalizeControlPlaneEndpoint(controlPlaneUrl: string): string {
 }
 
 export function runnerDataDirOwnerHash(identity: RunnerDataDirIdentity): string {
+  return sha256(`${identity.runnerId}\0${identity.controlPlaneInstanceId.toLowerCase()}`);
+}
+
+/** v1 used the mutable network endpoint. Retained only for an attested, lease-protected upgrade. */
+export function legacyRunnerDataDirOwnerHash(identity: Pick<RunnerDataDirIdentity, "runnerId" | "controlPlaneUrl">): string {
   return sha256(`${identity.runnerId}\0${normalizeControlPlaneEndpoint(identity.controlPlaneUrl)}`);
 }
 
 export function scopedRunnerCredentialFile(dataDir: string, identity: RunnerDataDirIdentity): string {
   return join(dataDir, "credentials", "instances", runnerDataDirOwnerHash(identity), "active-runner-token");
+}
+
+/** Read-only upgrade probe used before stores and before the lease. It returns a credential only
+ * when the protected v1 marker exactly matches this runner and endpoint. */
+export function readV1RunnerCredentialForAttestation(
+  requestedDataDir: string,
+  identity: RunnerDataDirIdentity,
+): string | null {
+  if (!existsSync(requestedDataDir)) return null;
+  const dataDir = realpathSync(requestedDataDir);
+  const ownerPath = join(dataDir, OWNER_FILE);
+  if (!existsSync(ownerPath)) return null;
+  const owner = parseRecord<OwnerRecord>(ownerPath);
+  const legacyHash = legacyRunnerDataDirOwnerHash(identity);
+  if (owner.version !== 1 || owner.ownerHash !== legacyHash) return null;
+  const credential = join(dataDir, "credentials", "instances", legacyHash, "active-runner-token");
+  return existsSync(credential) ? protectedRead(credential).toString("utf8").trim() : null;
 }
 
 function protectedRead(file: string): Buffer {
@@ -156,6 +183,31 @@ function writeProtected(file: string, value: unknown): void {
   publishProtected(file, `${JSON.stringify(value)}\n`);
 }
 
+function replaceProtected(file: string, value: unknown): void {
+  const temp = join(dirname(file), `.${basename(file)}.replace-${process.pid}-${randomUUID()}`);
+  writeFileSync(temp, `${JSON.stringify(value)}\n`, { flag: "wx", mode: 0o600 });
+  try {
+    try { chmodSync(temp, 0o600); } catch { /* Windows ACLs are managed by the owning account. */ }
+    const fd = openSync(temp, constants.O_RDONLY);
+    try { fsyncSync(fd); } finally { closeSync(fd); }
+    renameSync(temp, file);
+  } finally {
+    rmSync(temp, { force: true });
+  }
+}
+
+function migrateV1Credential(dataDir: string, identity: RunnerDataDirIdentity): void {
+  const oldFile = join(dataDir, "credentials", "instances", legacyRunnerDataDirOwnerHash(identity), "active-runner-token");
+  if (!existsSync(oldFile)) return;
+  const newFile = scopedRunnerCredentialFile(dataDir, identity);
+  const legacy = protectedRead(oldFile);
+  mkdirSync(dirname(newFile), { recursive: true });
+  if (!existsSync(newFile)) publishProtected(newFile, legacy);
+  else if (!sameSecret(protectedRead(newFile), legacy)) {
+    throw new Error(`stable runner credential at ${newFile} conflicts with v1 migration`);
+  }
+}
+
 /**
  * Claim a runner state root before any mutable store is opened. The durable owner marker prevents
  * a later runner identity from silently adopting the root, while the process lease rejects live
@@ -170,6 +222,7 @@ function acquireRunnerDataDirLeaseAt(
   mkdirSync(requestedDataDir, { recursive: true });
   const dataDir = realpathSync(requestedDataDir);
   const ownerHash = runnerDataDirOwnerHash(identity);
+  const legacyOwnerHash = legacyRunnerDataDirOwnerHash(identity);
   const ownerPath = join(dataDir, OWNER_FILE);
   const leasePath = join(dataDir, LEASE_FILE);
   const recoveryPath = join(dataDir, RECOVERY_DIR);
@@ -180,10 +233,12 @@ function acquireRunnerDataDirLeaseAt(
 
   if (allowOwnerNamespace && existsSync(ownerPath)) {
     const existingOwner = parseRecord<OwnerRecord>(ownerPath);
-    if (existingOwner.version !== 1 || typeof existingOwner.ownerHash !== "string") {
+    if (![1, 2].includes(existingOwner.version) || typeof existingOwner.ownerHash !== "string") {
       throw new Error(`runner data directory ${dataDir} has invalid owner metadata; refusing unsafe recovery`);
     }
-    if (existingOwner.ownerHash !== ownerHash) {
+    if (existingOwner.ownerHash !== ownerHash && !(
+      options.allowLegacyEndpointMigration && existingOwner.version === 1 && existingOwner.ownerHash === legacyOwnerHash
+    )) {
       return acquireRunnerDataDirLeaseAt(join(dataDir, "runner-instances", ownerHash), identity, options, false);
     }
   }
@@ -231,7 +286,9 @@ function acquireRunnerDataDirLeaseAt(
       ) {
         throw new Error(`runner data directory ${dataDir} has an invalid active lease; refusing unsafe recovery`);
       }
-      if (allowOwnerNamespace && existing.ownerHash !== ownerHash) {
+      if (allowOwnerNamespace && existing.ownerHash !== ownerHash && !(
+        options.allowLegacyEndpointMigration && existing.ownerHash === legacyOwnerHash
+      )) {
         return acquireRunnerDataDirLeaseAt(join(dataDir, "runner-instances", ownerHash), identity, options, false);
       }
       if (existing.hostname !== hostname) {
@@ -262,7 +319,10 @@ function acquireRunnerDataDirLeaseAt(
   try {
     if (existsSync(ownerPath)) {
       const owner = parseRecord<OwnerRecord>(ownerPath);
-      if (owner.version !== 1 || owner.ownerHash !== ownerHash) {
+      if (options.allowLegacyEndpointMigration && owner.version === 1 && owner.ownerHash === legacyOwnerHash) {
+        migrateV1Credential(dataDir, identity);
+        replaceProtected(ownerPath, { version: 2, ownerHash } satisfies OwnerRecord);
+      } else if (owner.version !== 2 || owner.ownerHash !== ownerHash) {
         release();
         if (allowOwnerNamespace) {
           return acquireRunnerDataDirLeaseAt(join(dataDir, "runner-instances", ownerHash), identity, options, false);
@@ -280,7 +340,7 @@ function acquireRunnerDataDirLeaseAt(
           throw new Error(`scoped runner credential at ${scopedCredential} conflicts with legacy migration`);
         }
       }
-      writeProtected(ownerPath, { version: 1, ownerHash } satisfies OwnerRecord);
+      writeProtected(ownerPath, { version: 2, ownerHash } satisfies OwnerRecord);
     }
   } catch (error) {
     release();
@@ -290,6 +350,7 @@ function acquireRunnerDataDirLeaseAt(
   return {
     dataDir,
     credentialFile: scopedRunnerCredentialFile(dataDir, identity),
+    ownerHash,
     release,
   };
 }

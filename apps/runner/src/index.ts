@@ -130,7 +130,12 @@ import { PendingShellOpenCancellations } from "./pending-shell-open-cancellation
 import { handleShellOpenCommand } from "./shell-open-command.js";
 import { startSessionWithMaterializationFence } from "./session-start-command.js";
 import { handleSessionCancellationCommand } from "./session-cancellation-command.js";
-import { acquireRunnerDataDirLease, type RunnerDataDirLease } from "./runner-data-dir.js";
+import {
+  acquireRunnerDataDirLease,
+  readV1RunnerCredentialForAttestation,
+  type RunnerDataDirLease,
+} from "./runner-data-dir.js";
+import { waitForRunnerControlPlaneAttestation } from "./control-plane-attestation.js";
 
 const INITIAL_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 30_000;
@@ -179,17 +184,45 @@ try {
   console.error(`[runner] ${(err as Error).message}`);
   process.exit(1);
 }
+
+async function startRunner(config: RunnerConfig): Promise<void> {
 const log = (msg: string) => console.log(`[runner ${config.runnerId}] ${msg}`);
 const warnLegacyEnvironment = (message: string) => console.warn(`[runner ${config.runnerId}] ${message}`);
 const conductorFeatureEnabled = conductorEnabled(process.env, warnLegacyEnvironment);
 const claudeHookFeatureEnabled = claudeHooksEnabled(process.env, warnLegacyEnvironment);
 warnLegacyClaudeLifetimeEnvironment(process.env, warnLegacyEnvironment);
-const runnerDataIdentity = { runnerId: config.runnerId, controlPlaneUrl: config.controlPlaneUrl };
+const attestation = await waitForRunnerControlPlaneAttestation({
+  controlPlaneUrl: config.controlPlaneUrl,
+  runnerId: config.runnerId,
+  token: config.token,
+  onRetry: (error, delayMs) => log(`${error.message}; retrying in ${delayMs}ms`),
+});
+const runnerDataIdentity = {
+  runnerId: config.runnerId,
+  controlPlaneUrl: config.controlPlaneUrl,
+  controlPlaneInstanceId: attestation.instanceId,
+};
+const v1Credential = readV1RunnerCredentialForAttestation(config.dataDir, runnerDataIdentity);
+let allowLegacyEndpointMigration = v1Credential === config.token;
+if (v1Credential && !allowLegacyEndpointMigration) {
+  try {
+    const priorAttestation = await waitForRunnerControlPlaneAttestation({
+      controlPlaneUrl: config.controlPlaneUrl,
+      runnerId: config.runnerId,
+      token: v1Credential,
+      onRetry: (error, delayMs) => log(`${error.message} while verifying v1 ownership; retrying in ${delayMs}ms`),
+    });
+    allowLegacyEndpointMigration = priorAttestation.instanceId === attestation.instanceId;
+  } catch {
+    log("v1 endpoint ownership could not be proven to this control plane; preserving it in place");
+  }
+}
 let dataDirLease: RunnerDataDirLease;
 try {
   dataDirLease = acquireRunnerDataDirLease(
     config.dataDir,
     runnerDataIdentity,
+    { allowLegacyEndpointMigration },
   );
 } catch (error) {
   console.error(`[runner ${config.runnerId}] data directory unavailable: ${(error as Error).message}`);
@@ -396,6 +429,7 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
   containerTargets,
   cloudTargets,
   () => controlPlaneProtocolVersion,
+  dataDirLease.ownerHash,
 );
 const sessionStarts = new SessionStartFence();
 const pendingShellOpenCancellations = new PendingShellOpenCancellations();
@@ -1582,5 +1616,11 @@ void Promise.all([containerTargets.initialize(), cloudTargets.initialize()]).the
   connect();
 }).catch((error) => {
   console.error(`[runner] execution target checks failed unexpectedly: ${errText(error)}`);
+  process.exit(1);
+});
+}
+
+void startRunner(config).catch((error) => {
+  console.error(`[runner ${config.runnerId}] startup blocked: ${(error as Error).message}`);
   process.exit(1);
 });

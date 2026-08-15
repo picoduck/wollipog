@@ -184,7 +184,7 @@ export interface ProviderStateSession {
   sessionId: string;
   driver: AgentDriverKind;
   context: AgentContext;
-  providerStateVersion?: 2;
+  providerStateVersion?: 2 | 3;
 }
 
 export interface ProviderStateReconcileResult { removed: string[]; retainedBytes: number; errors: string[]; }
@@ -219,7 +219,9 @@ export async function reconcileProviderState(
   let retainedBytes = 0;
   for (const context of contexts) {
     try {
-      const base = context.kind === "wsl" ? posix.join(await fs.wslHome(context), ".agent-manager") : dataDir;
+      const base = context.kind === "wsl"
+        ? posix.join(await fs.wslHome(context), ".agent-manager", "runner-instances", ownerKey)
+        : dataDir;
       for (const providerName of ["claude", "codex"] as const) {
       const root = context.kind === "wsl"
         ? posix.join(base, "provider-state", providerName)
@@ -290,12 +292,15 @@ export async function retryProviderStateCleanup(
   protectedSessionIds: ReadonlySet<string>,
   log: (message: string) => void,
   now = Date.now(),
+  ownerHash?: string,
 ): Promise<void> {
   for (const record of journal.list()) {
     if (protectedSessionIds.has(record.sessionId)) continue;
     if (now - journal.createdAt(record.sessionId) < MIN_ORPHAN_AGE_MS) continue;
     try {
-      await removeExecutionIsolationState({ ...policy, mode: "bwrap" }, record.context, record.driver, dataDir, record.sessionId);
+      await removeExecutionIsolationState(
+        { ...policy, mode: "bwrap" }, record.context, record.driver, dataDir, record.sessionId, {}, ownerHash,
+      );
       journal.remove(record.sessionId);
     } catch (error) {
       log(`isolated provider state cleanup for ${record.sessionId} needs retry: ${(error as Error).message}`);

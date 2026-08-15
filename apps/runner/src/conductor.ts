@@ -255,9 +255,8 @@ export function buildConductorArgs(mcpConfigPath: string, selfSessionId: string)
  * flags, and force permissionMode "default" (runner belt — the control plane clamp is the
  * enforcement). No-op for non-conductor specs; WSL conductors are skipped with a log (path
  * translation for the config file + a Linux-side entry are out of scope). Idempotent: a
- * spec whose args already carry --mcp-config keeps them verbatim, but a missing config
- * file is re-created (the natural reaction to token litter is cleaning the dir, and
- * --strict-mcp-config would otherwise fail every turn with nothing to heal it).
+ * spec whose args already carry --mcp-config is migrated to this runner's owned config directory.
+ * The former shared file is deliberately left untouched because its owning runner is unknowable.
  */
 export function provisionConductor(
   spec: ConductorLaunchSpec,
@@ -280,21 +279,17 @@ export function provisionConductor(
 
   const provisioned = spec.args.indexOf("--mcp-config");
   if (provisioned !== -1) {
-    // Already provisioned (a restart re-sends persisted args). Heal a missing file at the
-    // EXACT path the args reference — that is what claude reads under --strict-mcp-config.
-    // NOTE: the box-store resume path (resumeAndPrompt reuses persisted meta.args) never
-    // calls provisionConductor, so a file deleted between turns is healed only by a
-    // CP-side restart (start_session), which lands here.
-    const file = spec.args[provisioned + 1];
-    if (file) {
-      writeConductorMcpConfig(file, {
-        sessionId: spec.sessionId,
-        launch: conductorMcpCommand(host),
-        cpHttpUrl: deriveCpHttpUrl(config.controlPlaneUrl),
-        tokenFile: config.tokenFile,
-      });
-      log(`conductor ${spec.sessionId}: mcp-config refreshed ${file}`);
-    }
+    const prior = spec.args[provisioned + 1];
+    if (!prior || prior.startsWith("--")) throw new Error("persisted conductor --mcp-config has no path");
+    const file = conductorMcpConfigPath(host.configDir, spec.sessionId);
+    writeConductorMcpConfig(file, {
+      sessionId: spec.sessionId,
+      launch: conductorMcpCommand(host),
+      cpHttpUrl: deriveCpHttpUrl(config.controlPlaneUrl),
+      tokenFile: config.tokenFile,
+    });
+    spec.args[provisioned + 1] = file;
+    log(`conductor ${spec.sessionId}: mcp-config ${prior === file ? "refreshed" : "migrated"} ${file}`);
     return;
   }
 
