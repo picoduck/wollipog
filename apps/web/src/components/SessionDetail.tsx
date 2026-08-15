@@ -1503,18 +1503,22 @@ function SessionDetailLoaded({
         submittedDraft.images,
         instanceScope,
         reservedDraft.revision,
-      );
+      ).catch(() => false);
       const deleted = await composerDraftCleanup(
         sessionId,
         submittedDraft.text,
         submittedDraft.images,
         instanceScope,
         reservedDraft.revision,
-      );
-      if (preservedImages.length && deleted && preservedDraftVersion !== null &&
+      ).catch(() => false);
+      if (preservedImages.length && preservedDraftVersion !== null &&
           viewGenerationRef.current === generation &&
           composerDraftVersionRef.current === preservedDraftVersion) {
-        await saveComposerDraft(sessionId, "", preservedImages, instanceScope);
+        // A false cleanup can mean either that the accepted reservation survived behind its
+        // marker or that another writer stored a newer draft. Re-save the command-owned images
+        // only when storage is now empty; never replace another tab's newer edit.
+        const currentDraft = deleted ? null : await loadComposerDraft(sessionId, instanceScope);
+        if (!currentDraft) await saveComposerDraft(sessionId, "", preservedImages, instanceScope);
       }
     } catch (e) {
       await reservationPromise.catch(() => undefined);

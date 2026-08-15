@@ -169,6 +169,7 @@ interface FixtureOptions {
   mainEventPayloads?: SessionEvent["payload"][];
   rightPanelMode?: "launcher" | "sidechat";
   composerDraftCleanup?: typeof deleteComposerDraftIfMatches;
+  sessionCapabilities?: SessionView["agentCapabilities"];
 }
 
 function EventSeeder({ sessionId, payloads }: { sessionId: string; payloads: SessionEvent["payload"][] }) {
@@ -202,6 +203,13 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
   frames = [];
   const currentSession = session(`composer-focus-${fixtureSequence}`);
   const alternateSession = session(`composer-focus-${fixtureSequence}-alternate`);
+  if (options.sessionCapabilities) currentSession.agentCapabilities = options.sessionCapabilities;
+  const fixtureRunner = options.sessionCapabilities && "models" in options.sessionCapabilities
+    ? {
+        ...runner,
+        agents: runner.agents.map((agent) => ({ ...agent, capabilities: options.sessionCapabilities })),
+      } as RunnerView
+    : runner;
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
     instanceId: `composer-focus-${fixtureSequence}`,
@@ -290,7 +298,7 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
         paginatedSessionHistory: false,
         projects: true,
       },
-      runners: [runner],
+      runners: [fixtureRunner],
       boxes: [],
       projects: [],
       sessions: [currentSession, alternateSession],
@@ -472,6 +480,50 @@ test("an accepted submission marker preserves a newer edit made while the prompt
     const remounted = await fixture.remountWithDraftLoader(loadComposerDraft);
     await flushAsyncWork();
     assert.equal(remounted.value, "newer local edit");
+    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("an accepted provider command keeps its preserved attachment when cleanup is inconclusive", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const invocations: unknown[] = [];
+  const fixture = await mountFixture(draft, {
+    client: {
+      invokeSessionCommand: async (_sessionId, request) => {
+        invocations.push(request);
+        return undefined as never;
+      },
+    },
+    composerDraftCleanup: async () => false,
+    sessionCapabilities: {
+      models: [],
+      effortLevels: [],
+      slashCommands: [{
+        name: "Review",
+        source: "project",
+        invocation: {
+          id: "review-command",
+          catalogRevision: "catalog-1",
+          executionMode: "structured",
+        },
+      }],
+      supportsImages: true,
+      supportsApprovals: false,
+    },
+  });
+  try {
+    await resolveComposerDraft(draft, { text: "/review focus", images: [submittedImage], updatedAt: 1 });
+    await act(async () => { sendButton(fixture).click(); });
+    await flushAsyncWork();
+
+    assert.equal(invocations.length, 1);
+    assert.equal(fixture.composer.value, "");
+    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
+    const remounted = await fixture.remountWithDraftLoader(loadComposerDraft);
+    await flushAsyncWork();
+    assert.equal(remounted.value, "");
     assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
   } finally {
     await unmountFixture(fixture);

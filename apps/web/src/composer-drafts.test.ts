@@ -102,6 +102,46 @@ test("provider acceptance suppresses the reserved revision before best-effort cl
   );
 });
 
+test("unavailable SubtleCrypto cannot block cleanup after provider acceptance", async () => {
+  const reserved = await reserveComposerDraftSnapshot("accepted-without-subtle", "submitted", []);
+  const cryptoDescriptor = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+  const cryptoApi = globalThis.crypto;
+  Object.defineProperty(globalThis, "crypto", {
+    configurable: true,
+    value: { getRandomValues: cryptoApi.getRandomValues.bind(cryptoApi) },
+  });
+  try {
+    assert.equal(
+      await markComposerDraftAccepted(
+        "accepted-without-subtle",
+        reserved.text,
+        reserved.images,
+        "local",
+        reserved.revision,
+      ),
+      true,
+    );
+    assert.equal(
+      await loadComposerDraft("accepted-without-subtle"),
+      null,
+      "the revision-scoped accepted marker does not require a content digest",
+    );
+    assert.equal(
+      await deleteComposerDraftIfMatches(
+        "accepted-without-subtle",
+        reserved.text,
+        reserved.images,
+        "local",
+        reserved.revision,
+      ),
+      true,
+    );
+  } finally {
+    if (cryptoDescriptor) Object.defineProperty(globalThis, "crypto", cryptoDescriptor);
+  }
+  assert.equal(await loadComposerDraft("accepted-without-subtle"), null);
+});
+
 test("provider acceptance does not suppress a newer revision with identical content", async () => {
   const images = [{ mimeType: "image/png", data: "same" }];
   const reserved = await reserveComposerDraftSnapshot("accepted-newer", "same text", images);

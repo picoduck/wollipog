@@ -450,6 +450,39 @@ test("healthy exact IDB conditional deletion does not compute a fallback fingerp
   expect(await load(page, sessionId, scope)).toBeNull();
 });
 
+test("an accepted marker suppresses only the exact IndexedDB revision across reload", async ({ page }) => {
+  const sessionId = "accepted-idb-revision";
+  const scope = "remote-a";
+  const key = currentKey(sessionId, scope);
+  await page.evaluate(({ sessionId, scope }) =>
+    window.__WOLLIPOG_COMPOSER_DRAFTS_E2E__.save(sessionId, "submitted", scope),
+  { sessionId, scope });
+  const submitted = await load(page, sessionId, scope);
+  expect(submitted?.revision).toBeTruthy();
+
+  expect(await page.evaluate(({ sessionId, scope, revision }) =>
+    window.__WOLLIPOG_COMPOSER_DRAFTS_E2E__
+      .markAccepted(sessionId, "submitted", revision, scope),
+  { sessionId, scope, revision: submitted!.revision! })).toBe(true);
+  expect(await getRecord(page, CURRENT_DB, key)).toEqual(submitted);
+  expect(await load(page, sessionId, scope)).toBeNull();
+
+  await page.reload();
+  await expect(page.locator("html")).toHaveAttribute("data-ready", "1");
+  expect(await load(page, sessionId, scope)).toBeNull();
+
+  const newer: Draft = {
+    text: "submitted",
+    images: [],
+    updatedAt: submitted!.updatedAt + 1,
+    revision: "newer-identical-revision",
+  };
+  await putRecord(page, CURRENT_DB, key, newer);
+  await page.reload();
+  await expect(page.locator("html")).toHaveAttribute("data-ready", "1");
+  expect(await load(page, sessionId, scope)).toEqual(newer);
+});
+
 test("stale save cleanup cannot erase a later identical-content revision", async ({ page }) => {
   const sessionId = "stale-save-race";
   const scope = "remote-a";

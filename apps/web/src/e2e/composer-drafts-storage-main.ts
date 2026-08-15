@@ -2,6 +2,7 @@ import {
   deleteComposerDraft,
   deleteComposerDraftIfMatches,
   loadComposerDraft,
+  markComposerDraftAccepted,
   saveComposerDraft,
 } from "../composer-drafts.js";
 
@@ -17,6 +18,12 @@ declare global {
         revision?: string,
         instanceScope?: string,
       ): ReturnType<typeof deleteComposerDraftIfMatches>;
+      markAccepted(
+        sessionId: string,
+        text: string,
+        revision?: string,
+        instanceScope?: string,
+      ): ReturnType<typeof markComposerDraftAccepted>;
     };
   }
 }
@@ -27,6 +34,8 @@ window.__WOLLIPOG_COMPOSER_DRAFTS_E2E__ = {
   delete: (sessionId, instanceScope) => deleteComposerDraft(sessionId, instanceScope),
   deleteIfMatches: (sessionId, text, revision, instanceScope) =>
     deleteComposerDraftIfMatches(sessionId, text, [], instanceScope, revision),
+  markAccepted: (sessionId, text, revision, instanceScope) =>
+    markComposerDraftAccepted(sessionId, text, [], instanceScope, revision),
 };
 
 document.documentElement.dataset.ready = "1";

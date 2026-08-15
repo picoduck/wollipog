@@ -56,7 +56,13 @@ function fallbackTombstoneKey(sessionId: string, instanceScope: string): string 
 
 type ExternalDeletionMarker =
   | { version: 1; kind: "unconditional"; deletedAt: number }
-  | { version: 1; kind: "conditional"; deletedAt: number; fingerprint: string; expectedRevision?: string };
+  | {
+      version: 1;
+      kind: "conditional";
+      deletedAt: number;
+      fingerprint?: string;
+      expectedRevision?: string;
+    };
 
 function loadFallbackTombstone(sessionId: string, instanceScope: string): ExternalDeletionMarker | null {
   try {
@@ -67,16 +73,21 @@ function loadFallbackTombstone(sessionId: string, instanceScope: string): Extern
     if (marker.kind === "unconditional") {
       return { version: 1, kind: "unconditional", deletedAt: marker.deletedAt! };
     }
-    if (marker.kind !== "conditional" || typeof marker.fingerprint !== "string" ||
-        !/^[a-f0-9]{64}$/.test(marker.fingerprint)) return null;
+    if (marker.kind !== "conditional") return null;
+    const expectedRevision = typeof marker.expectedRevision === "string"
+      ? marker.expectedRevision
+      : undefined;
+    const fingerprint = typeof marker.fingerprint === "string" &&
+      /^[a-f0-9]{64}$/.test(marker.fingerprint)
+      ? marker.fingerprint
+      : undefined;
+    if (!expectedRevision && !fingerprint) return null;
     return {
       version: 1,
       kind: "conditional",
       deletedAt: marker.deletedAt!,
-      fingerprint: marker.fingerprint,
-      ...(typeof marker.expectedRevision === "string"
-        ? { expectedRevision: marker.expectedRevision }
-        : {}),
+      ...(fingerprint ? { fingerprint } : {}),
+      ...(expectedRevision ? { expectedRevision } : {}),
     };
   } catch {
     return null;
@@ -113,8 +124,10 @@ function normalizedDraftFingerprintInput(
   });
 }
 
-async function draftFingerprint(text: string, images: readonly PromptImageInput[]): Promise<string> {
-  const digest = await crypto.subtle.digest(
+async function draftFingerprint(text: string, images: readonly PromptImageInput[]): Promise<string | null> {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) return null;
+  const digest = await subtle.digest(
     "SHA-256",
     new TextEncoder().encode(normalizedDraftFingerprintInput(text, images)),
   );
@@ -129,12 +142,17 @@ async function markerSuppressesDraft(
   if (marker.kind === "unconditional") return draft.updatedAt <= marker.deletedAt;
   if (marker.expectedRevision !== undefined) {
     if (draft.revision !== marker.expectedRevision) return false;
+    // A revision is the immutable identity minted for this exact reservation. It is sufficient on
+    // non-secure LAN HTTP where SubtleCrypto is unavailable; a fingerprint remains additive when
+    // one was already recorded by an older/degraded cleanup path.
+    if (!marker.fingerprint) return true;
   } else if (draft.updatedAt > marker.deletedAt) {
     // Fingerprint-only intent identifies content, not a stable snapshot. Do not let it suppress an
     // identical draft saved after the conditional deletion was attempted.
     return false;
   }
-  return await draftFingerprint(draft.text, draft.images) === marker.fingerprint;
+  return marker.fingerprint !== undefined &&
+    (await draftFingerprint(draft.text, draft.images)) === marker.fingerprint;
 }
 
 function advanceDraftPastFallbackTombstone(
@@ -656,11 +674,15 @@ export async function deleteComposerDraftIfMatches(
     deleted = true;
   }
   if (!currentIdbReliable || (deleted && !idbDeleted)) {
+    const fingerprint = expectedRevision === undefined
+      ? await draftFingerprint(text, images)
+      : null;
+    if (expectedRevision === undefined && !fingerprint) return deleted;
     const deletionMarker: ExternalDeletionMarker = {
       version: 1,
       kind: "conditional",
       deletedAt,
-      fingerprint: await draftFingerprint(text, images),
+      ...(fingerprint ? { fingerprint } : {}),
       ...(expectedRevision !== undefined ? { expectedRevision } : {}),
     };
     // A failed operation is uncertain even when no currently readable snapshot matched, while a
@@ -681,11 +703,15 @@ export async function markComposerDraftAccepted(
   instanceScope = LOCAL_INSTANCE_SCOPE,
   expectedRevision?: string,
 ): Promise<boolean> {
+  const fingerprint = expectedRevision === undefined
+    ? await draftFingerprint(text, images)
+    : null;
+  if (expectedRevision === undefined && !fingerprint) return false;
   const marker: ExternalDeletionMarker = {
     version: 1,
     kind: "conditional",
     deletedAt: Date.now(),
-    fingerprint: await draftFingerprint(text, images),
+    ...(fingerprint ? { fingerprint } : {}),
     ...(expectedRevision !== undefined ? { expectedRevision } : {}),
   };
   return saveFallbackTombstone(sessionId, instanceScope, marker);
