@@ -170,6 +170,8 @@ interface FixtureOptions {
   rightPanelMode?: "launcher" | "sidechat";
   composerDraftCleanup?: typeof deleteComposerDraftIfMatches;
   sessionCapabilities?: SessionView["agentCapabilities"];
+  sessionPatch?: Partial<SessionView>;
+  runnerProtocolVersion?: number;
 }
 
 function EventSeeder({ sessionId, payloads }: { sessionId: string; payloads: SessionEvent["payload"][] }) {
@@ -203,13 +205,15 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
   frames = [];
   const currentSession = session(`composer-focus-${fixtureSequence}`);
   const alternateSession = session(`composer-focus-${fixtureSequence}-alternate`);
+  if (options.sessionPatch) Object.assign(currentSession, options.sessionPatch);
   if (options.sessionCapabilities) currentSession.agentCapabilities = options.sessionCapabilities;
   const fixtureRunner = options.sessionCapabilities && "models" in options.sessionCapabilities
     ? {
         ...runner,
+        protocolVersion: options.runnerProtocolVersion ?? runner.protocolVersion,
         agents: runner.agents.map((agent) => ({ ...agent, capabilities: options.sessionCapabilities })),
       } as RunnerView
-    : runner;
+    : { ...runner, protocolVersion: options.runnerProtocolVersion ?? runner.protocolVersion };
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
     instanceId: `composer-focus-${fixtureSequence}`,
@@ -435,6 +439,64 @@ test("cleanup throwing after provider acceptance cannot recover the accepted dra
     await flushAsyncWork();
     assert.equal(remounted.value, "");
     assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 0);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("cleanup throwing after accepted steering cannot recover the accepted draft", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const calls: string[] = [];
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 73,
+    sessionPatch: { status: "running", activeTurnId: "turn-1" },
+    sessionCapabilities: {
+      models: [],
+      effortLevels: [],
+      slashCommands: [],
+      supportsImages: true,
+      supportsApprovals: false,
+      supportsSteering: true,
+    },
+    client: {
+      steer: async (_sessionId, request) => {
+        calls.push(request.text ?? "");
+        return {
+          submissionId: request.submissionId,
+          turnId: request.turnId,
+          source: "direct",
+          text: request.text ?? "",
+          state: "accepted",
+          reason: "accepted",
+          createdAt: 1,
+          updatedAt: 1,
+        };
+      },
+    },
+    composerDraftCleanup: async () => { throw new Error("draft storage cleanup failed"); },
+  });
+  try {
+    await resolveDraft(draft, "steer once");
+    await act(async () => {
+      Simulate.keyDown(fixture.composer, {
+        key: "Enter",
+        ctrlKey: true,
+        metaKey: false,
+        shiftKey: false,
+        altKey: false,
+      });
+    });
+    await flushAsyncWork();
+
+    assert.deepEqual(
+      calls,
+      ["steer once"],
+      fixture.container.querySelector(".composer-error")?.textContent ?? "steering was not invoked",
+    );
+    assert.equal(fixture.container.querySelector(".composer-error"), null);
+    const remounted = await fixture.remountWithDraftLoader(loadComposerDraft);
+    await flushAsyncWork();
+    assert.equal(remounted.value, "");
   } finally {
     await unmountFixture(fixture);
   }

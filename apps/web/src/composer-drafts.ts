@@ -700,9 +700,10 @@ export async function deleteComposerDraftIfMatches(
     deleted = true;
   }
   if (!currentIdbReliable || (deleted && !idbDeleted)) {
-    const fingerprint = expectedRevision === undefined && supersededRevision === undefined
-      ? await draftFingerprint(text, images)
-      : null;
+    // Older bundles require the fingerprint field even when a revision is present. Emit both in
+    // secure contexts so rollback retains its exact-revision suppression behavior; current code
+    // never consults the digest when either revision identity is available.
+    const fingerprint = await draftFingerprint(text, images);
     if (expectedRevision === undefined && supersededRevision === undefined && !fingerprint) return deleted;
     const deletionMarker: ExternalDeletionMarker = {
       version: 1,
@@ -737,9 +738,9 @@ export async function markComposerDraftAccepted(
   expectedRevision?: string,
   supersededRevision?: string,
 ): Promise<boolean> {
-  const fingerprint = expectedRevision === undefined && supersededRevision === undefined
-    ? await draftFingerprint(text, images)
-    : null;
+  // Preserve rollback readability: the compatibility build requires a fingerprint on every
+  // conditional marker, while the current build uses revisions without depending on SubtleCrypto.
+  const fingerprint = await draftFingerprint(text, images);
   if (expectedRevision === undefined && supersededRevision === undefined && !fingerprint) return false;
   const marker: ExternalDeletionMarker = {
     version: 1,

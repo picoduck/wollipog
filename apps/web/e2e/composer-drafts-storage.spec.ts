@@ -569,6 +569,12 @@ test("healthy accepted cleanup removes its redundant localStorage marker", async
   { sessionId, scope, revision: reserved.revision })).toBe(true);
   expect(await page.evaluate((key) => localStorage.getItem(key), fallbackMarkerKey(sessionId, scope)))
     .not.toBeNull();
+  const marker = await page.evaluate((key) => JSON.parse(localStorage.getItem(key) ?? "null") as {
+    fingerprint?: string;
+    expectedRevision?: string;
+  } | null, fallbackMarkerKey(sessionId, scope));
+  expect(marker?.expectedRevision).toBe(reserved.revision);
+  expect(marker?.fingerprint).toMatch(/^[a-f0-9]{64}$/);
 
   expect(await page.evaluate(({ sessionId, scope, revision }) =>
     window.__WOLLIPOG_COMPOSER_DRAFTS_E2E__.deleteIfMatches(sessionId, "submitted", revision, scope),

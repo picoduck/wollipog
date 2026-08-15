@@ -1571,6 +1571,7 @@ function SessionDetailLoaded({
     setError(null);
     setHistIdx(-1);
     let recoverReservation = false;
+    let providerAccepted = false;
     const reservationPromise = reserveComposerDraftSnapshot(
       sessionId,
       submittedDraft.text,
@@ -1592,6 +1593,7 @@ function SessionDetailLoaded({
         consumedDraftsRef.current.delete(mutationKey);
         return;
       }
+      providerAccepted = true;
       if (viewGenerationRef.current === generation &&
           composerDraftVersionRef.current === submissionVersion) {
         draftDirty.current = true;
@@ -1601,6 +1603,14 @@ function SessionDetailLoaded({
       }
       const reservedDraft = await reservationPromise;
       updateComposerMutationDraft(mutationKey, mutation.token, reservedDraft);
+      await markComposerDraftAccepted(
+        sessionId,
+        submittedDraft.text,
+        submittedDraft.images,
+        instanceScope,
+        reservedDraft.revision,
+        reservedDraft.supersededRevision,
+      ).catch(() => false);
       await deleteComposerDraftIfMatches(
         sessionId,
         submittedDraft.text,
@@ -1608,19 +1618,21 @@ function SessionDetailLoaded({
         instanceScope,
         reservedDraft.revision,
         reservedDraft.supersededRevision,
-      );
+      ).catch(() => false);
     } catch (cause) {
-      recoverReservation = true;
       await reservationPromise.catch(() => undefined);
-      if (consumedDraftsRef.current.get(mutationKey)?.draftVersion === submissionVersion) {
-        consumedDraftsRef.current.delete(mutationKey);
+      if (!providerAccepted) {
+        recoverReservation = true;
+        if (consumedDraftsRef.current.get(mutationKey)?.draftVersion === submissionVersion) {
+          consumedDraftsRef.current.delete(mutationKey);
+        }
+        if (viewGenerationRef.current === generation) setError((cause as Error).message);
       }
-      if (viewGenerationRef.current === generation) setError((cause as Error).message);
     } finally {
       releaseComposerMutation(
         mutationKey,
         mutation.token,
-        recoverReservation && composerDraftVersionRef.current === submissionVersion
+        !providerAccepted && recoverReservation && composerDraftVersionRef.current === submissionVersion
           ? submittedDraft
           : undefined,
       );
