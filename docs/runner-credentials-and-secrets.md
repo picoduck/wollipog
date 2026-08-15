@@ -89,7 +89,9 @@ secrets. Native and WSL launches pass resolved values through the child environm
 
 Conductor MCP sessions likewise do not duplicate the active credential. Before opening any mutable
 store, the runner takes an exclusive process lease on `dataDir` and checks a protected owner marker
-bound to the runner id and normalized control-plane endpoint. A live second process fails before it
+bound to the runner id and normalized control-plane endpoint. Loopback ports are excluded because
+managed SSH tunnel ports are allocated per control-plane process; non-loopback ports remain part of
+the endpoint identity. A live second process fails before it
 can stage a credential or open a session store. The marker remains after shutdown, so a different
 runner or control plane cannot later adopt the same root silently. Use `--data-dir` or
 `RUNNER_DATA_DIR` to give each runner a distinct root.
@@ -101,12 +103,20 @@ before every launch or resume. Startup removes legacy per-session MCP JSON that 
 `MANAGER_TOKEN`. The MCP process still understands the legacy environment variable for rolling
 compatibility, but current runner launches use only the protected file reference.
 
-For a pre-marker data root, startup adopts existing state only when the protected legacy
-`<dataDir>/credentials/active-runner-token` bytes match the configured token. It copies those bytes
-to the scoped path before recording ownership and leaves the legacy file intact for rollback. A
-missing or different legacy token fails closed with instructions to select another data directory.
+For a pre-marker data root, startup performs a one-time claim under the exclusive process lease. If
+the protected legacy `<dataDir>/credentials/active-runner-token` exists, startup copies its bytes to
+the scoped path before recording ownership and leaves the legacy file intact for rollback. The
+newly issued launch token remains staged until registration, so ordinary credential rotation does
+not make an upgrade unreadable. A root from a runner that never registered can be claimed without
+an old active token. This trust-on-first-use migration is necessary because legacy roots contain no
+durable runner or control-plane owner identity.
+
 An abandoned same-host process lease is reclaimed only after its recorded process is no longer
-alive; leases from another host and malformed lease metadata fail closed.
+alive. A separate atomic recovery guard serializes stale reapers; if recovery itself is interrupted,
+startup fails closed until an operator verifies no runner is active and removes the named guard.
+Leases from another host and malformed lease metadata fail closed. Owner and lease records are
+fully written and flushed before an exclusive hard-link publish, so a partial record is never
+installed at the canonical path.
 
 The ownership boundary covers runner-managed sessions, native worktrees, admission records,
 durable-command and session-command receipts, checkpoint ownership, cleanup journals, registry
@@ -115,6 +125,11 @@ partitions because their production constructors all receive the claimed data ro
 installation, discovery, login state, and transcripts used without runner isolation remain
 operator-owned files in the selected native or WSL account; the runner does not claim or migrate
 those external provider homes.
+
+The runner scrubs obsolete Conductor configs only inside its owned `<dataDir>/conductor` directory.
+It deliberately does not sweep the former shared home-level Conductor directory because those files
+cannot be attributed safely while an older runner may still be using them. After stopping every
+pre-migration runner for the account, an operator may remove that legacy directory manually.
 
 ## Backup and operational boundary
 
