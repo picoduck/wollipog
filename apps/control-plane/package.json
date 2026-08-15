@@ -13,7 +13,7 @@
   },
   "dependencies": {
     "@fastify/cors": "^10.0.2",
-    "@fastify/static": "^9.3.0",
+    "@fastify/static": "^10.1.2",
     "@fastify/websocket": "^11.0.2",
     "@wollipog/protocol": "workspace:*",
     "fastify": "^5.2.1"
