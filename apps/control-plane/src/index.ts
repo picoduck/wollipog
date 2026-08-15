@@ -4,7 +4,7 @@
  */
 
 import os from "node:os";
-import { readFileSync, writeSync } from "node:fs";
+import { writeSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
@@ -148,7 +148,14 @@ import { ShellRegistry } from "./shell-registry.js";
 import { registerAuthGate } from "./http-auth.js";
 import { pushDecision } from "./push-decision.js";
 import { validateSubscription, WebPushSender } from "./web-push.js";
-import { injectSameOriginMarker, isIndexHtmlPath, isSpaNavigation, resolveWebDist } from "./web-dist.js";
+import {
+  injectSameOriginMarker,
+  readWebIndexHtml,
+  isIndexHtmlPath,
+  isSpaNavigation,
+  resolveWebDist,
+  shouldCacheWebIndex,
+} from "./web-dist.js";
 import { normalizeDriverTelemetry, telemetryWindowDays } from "./driver-telemetry.js";
 import { registerUsageRoutes } from "./usage-routes.js";
 import { validateRegistryApproval, type RegistryApprovalInput } from "./registry-approval.js";
@@ -657,13 +664,13 @@ if (webDist) {
   app.log.info("no web bundle found (run `pnpm --filter @wollipog/web build`) — serving the API only");
 }
 
-/** The app shell with the same-origin marker injected. Read once, then cached. */
+/** The app shell with the same-origin marker injected. Packaged assets are cached; watched source builds reload. */
+const cacheWebIndex = shouldCacheWebIndex(process.execPath, process.env.npm_lifecycle_event);
 let cachedIndexHtml: string | null = null;
 function indexHtml(): string | null {
   if (!webDist) return null;
-  if (cachedIndexHtml === null) {
-    cachedIndexHtml = injectSameOriginMarker(readFileSync(join(webDist, "index.html"), "utf8"));
-  }
+  if (cachedIndexHtml !== null && cacheWebIndex) return cachedIndexHtml;
+  cachedIndexHtml = readWebIndexHtml(webDist, cachedIndexHtml);
   return cachedIndexHtml;
 }
 

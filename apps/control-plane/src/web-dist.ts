@@ -11,7 +11,7 @@
  * `tauri.localhost` and talks to the sidecar's API over 127.0.0.1.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { readCompatibleEnv, type LegacyEnvironmentWarning } from "./env-compat.js";
 
@@ -34,6 +34,11 @@ export function isPackagedExec(execPath: string): boolean {
   // not depend on which OS is inspecting the path.
   const exe = (execPath.split(/[\\/]/).pop() ?? "").toLowerCase();
   return exe !== "node" && exe !== "node.exe";
+}
+
+/** Cache the app shell only for immutable packaged assets, never a watched source build. */
+export function shouldCacheWebIndex(execPath: string, lifecycleEvent?: string): boolean {
+  return isPackagedExec(execPath) || lifecycleEvent !== "dev";
 }
 
 /**
@@ -171,4 +176,17 @@ export function injectSameOriginMarker(html: string): string {
   const tag = `<script>${assignments}</script>`;
   const i = html.indexOf("</head>");
   return i === -1 ? tag + html : html.slice(0, i) + tag + html.slice(i);
+}
+
+/** Read the current marked shell, retaining the last complete copy across watched-build races. */
+export function readWebIndexHtml(
+  webDist: string,
+  lastGood: string | null,
+  read: (path: string, encoding: "utf8") => string = readFileSync,
+): string | null {
+  try {
+    return injectSameOriginMarker(read(join(webDist, "index.html"), "utf8"));
+  } catch {
+    return lastGood;
+  }
 }

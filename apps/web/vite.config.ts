@@ -34,11 +34,12 @@ function excludePwaAssetsFromDesktop(): Plugin {
 
 // The control plane runs separately (default http://127.0.0.1:4317). The web app
 // talks to it directly over CORS + websocket; override via VITE_CONTROL_PLANE_*.
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   plugins: [react(), excludePwaAssetsFromDesktop()],
+  build: mode === "same-origin-dev" ? { emptyOutDir: false } : undefined,
   server: {
     host: "127.0.0.1",
     port: 5173,
     strictPort: true,
   },
-});
+}));

@@ -8,7 +8,9 @@ import {
   isSpaNavigation,
   looksLikeBuiltBundle,
   normalizeRequestPath,
+  readWebIndexHtml,
   resolveWebDist,
+  shouldCacheWebIndex,
   webDistCandidates,
 } from "./web-dist.js";
 
@@ -24,6 +26,13 @@ test("isPackagedExec: true only for a packaged binary, not a plain node/tsx run"
   assert.equal(isPackagedExec("/usr/bin/node"), false);
   assert.equal(isPackagedExec("C:\\Program Files\\nodejs\\node.exe"), false);
   assert.equal(isPackagedExec("C:\\Program Files\\nodejs\\NODE.EXE"), false); // case-insensitive
+});
+
+test("shouldCacheWebIndex reloads only the pnpm dev lifecycle", () => {
+  assert.equal(shouldCacheWebIndex("/opt/app/control-plane", "dev"), true);
+  assert.equal(shouldCacheWebIndex("/usr/bin/node", "dev"), false);
+  assert.equal(shouldCacheWebIndex("/usr/bin/node", "start"), true);
+  assert.equal(shouldCacheWebIndex("/usr/bin/node"), true);
 });
 
 test("webDistCandidates: env override wins, then execDir (packaged only), then the cwd layouts", () => {
@@ -219,4 +228,15 @@ test("injectSameOriginMarker: inserts before </head> and is idempotent", () => {
   const bridged = injectSameOriginMarker(renamed);
   assert.equal(bridged.match(/__WOLLIPOG_SAME_ORIGIN__/g)?.length, 1, "renamed marker is not duplicated");
   assert.ok(bridged.includes("window.__MAM_SAME_ORIGIN__=1"), "stale bundles also work with renamed-marked HTML");
+});
+
+test("readWebIndexHtml retains the last complete shell across watched-build races", () => {
+  const fresh = readWebIndexHtml("/web", null, (path, encoding) => {
+    assert.equal(path, join("/web", "index.html"));
+    assert.equal(encoding, "utf8");
+    return "<head></head><body>fresh</body>";
+  });
+  assert.match(fresh!, /__WOLLIPOG_SAME_ORIGIN__/u);
+  assert.equal(readWebIndexHtml("/web", fresh, () => { throw new Error("ENOENT"); }), fresh);
+  assert.equal(readWebIndexHtml("/web", null, () => { throw new Error("ENOENT"); }), null);
 });

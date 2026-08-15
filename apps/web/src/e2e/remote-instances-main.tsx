@@ -1,3 +1,4 @@
+import { browserRandomUUID } from "../browser-crypto.js";
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { createApiClient } from "../api.js";
@@ -49,7 +50,7 @@ function runtime(instanceId: string, publicOrigin: string): InstanceRuntime {
     api: createApiClient(transport),
     ui: {
       instanceId,
-      runtimeKey: `${instanceId}:${crypto.randomUUID()}`,
+      runtimeKey: `${instanceId}:${browserRandomUUID()}`,
       createSocket() { throw new Error("The E2E management fixture does not mount a session socket."); },
       close() {},
     },
