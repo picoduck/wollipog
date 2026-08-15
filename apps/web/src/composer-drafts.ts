@@ -473,17 +473,21 @@ function fallbackLogicalKey(sessionId: string): string {
   return `${FALLBACK_PREFIX}${sessionId}`;
 }
 
-async function fallbackLoad(sessionId: string, instanceScope: string): Promise<ComposerDraft | null> {
+function fallbackLoadRaw(sessionId: string, instanceScope: string): ComposerDraft | null {
   try {
-    const draft = parseComposerDraft(JSON.parse(
+    return parseComposerDraft(JSON.parse(
       loadInstanceStorageValue(fallbackLogicalKey(sessionId), instanceScope) ?? "null",
     ));
-    return await markerSuppressesDraft(loadFallbackTombstone(sessionId, instanceScope), draft)
-      ? null
-      : draft;
   } catch {
     return null;
   }
+}
+
+async function fallbackLoad(sessionId: string, instanceScope: string): Promise<ComposerDraft | null> {
+  const draft = fallbackLoadRaw(sessionId, instanceScope);
+  return await markerSuppressesDraft(loadFallbackTombstone(sessionId, instanceScope), draft)
+    ? null
+    : draft;
 }
 
 export async function loadComposerDraft(
@@ -642,7 +646,10 @@ export async function deleteComposerDraftIfMatches(
       currentIdbReliable = false;
     }
   }
-  const fallback = await fallbackLoad(sessionId, instanceScope);
+  // Read the physical fallback record without applying its deletion marker. Provider acceptance
+  // records that marker before cleanup begins, so applying it here would hide the exact record
+  // this best-effort cleanup is meant to remove.
+  const fallback = fallbackLoadRaw(sessionId, instanceScope);
   if (composerDraftMatches(fallback, text, images) &&
       (expectedRevision === undefined || fallback?.revision === expectedRevision)) {
     removeInstanceStorageValue(fallbackLogicalKey(sessionId), instanceScope);
@@ -662,6 +669,26 @@ export async function deleteComposerDraftIfMatches(
     saveFallbackTombstone(sessionId, instanceScope, deletionMarker);
   }
   return deleted;
+}
+
+/** Record provider acceptance before best-effort local cleanup. The revision-scoped marker makes
+ * the submitted recovery snapshot unreadable across navigation and reload even if conditional
+ * deletion reports a mismatch or throws, while a later/newer draft remains visible. */
+export async function markComposerDraftAccepted(
+  sessionId: string,
+  text: string,
+  images: readonly PromptImageInput[],
+  instanceScope = LOCAL_INSTANCE_SCOPE,
+  expectedRevision?: string,
+): Promise<boolean> {
+  const marker: ExternalDeletionMarker = {
+    version: 1,
+    kind: "conditional",
+    deletedAt: Date.now(),
+    fingerprint: await draftFingerprint(text, images),
+    ...(expectedRevision !== undefined ? { expectedRevision } : {}),
+  };
+  return saveFallbackTombstone(sessionId, instanceScope, marker);
 }
 
 /** Persist the exact snapshot being submitted and return its immutable identity. Cleanup can then

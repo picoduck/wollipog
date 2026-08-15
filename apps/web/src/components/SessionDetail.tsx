@@ -55,6 +55,7 @@ import {
   deleteComposerDraftIfMatches,
   consumeComposerDraftHandoff,
   loadComposerDraft,
+  markComposerDraftAccepted,
   reserveComposerDraftSnapshot,
   saveComposerDraft,
   stageComposerDraftHandoff,
@@ -269,6 +270,8 @@ export type SessionDetailProps = {
   onPreviewNavigationReady?: (controls: PreviewNavigationControls | null) => void;
   /** Injectable storage boundary for deterministic component tests; production uses durable storage. */
   composerDraftLoader?: (sessionId: string, instanceScope: string) => Promise<ComposerDraft | null>;
+  /** Injectable cleanup boundary for deterministic post-acceptance storage-fault tests. */
+  composerDraftCleanup?: typeof deleteComposerDraftIfMatches;
 };
 
 type MessageActionState = {
@@ -387,6 +390,7 @@ function SessionDetailLoaded({
   providerCommandAttachmentPolicy = "send",
   onPreviewNavigationReady,
   composerDraftLoader = loadComposerDraft,
+  composerDraftCleanup = deleteComposerDraftIfMatches,
   session,
 }: SessionDetailProps & { session: SessionView }) {
   const api = useApi();
@@ -1453,7 +1457,7 @@ function SessionDetailLoaded({
       session.status === "running" || session.status === "starting" || session.status === "input_required";
     sendBaselineRef.current = timelineUserPrompts.length;
     if (!willQueue && !durableProviderInvocation) setPending({ text: outgoing, images: outgoingImages });
-    let recoverReservation = false;
+    let providerAccepted = false;
     let preservedDraftVersion: number | null = null;
     const reservationPromise = reserveComposerDraftSnapshot(
       sessionId,
@@ -1478,6 +1482,7 @@ function SessionDetailLoaded({
         await api.prompt(sessionId, promptText, outgoingImages, cfg, slashCommand);
         pendingConfig.current = {};
       }
+      providerAccepted = true;
       if (viewGenerationRef.current === generation &&
           composerDraftVersionRef.current === submissionVersion) {
         draftDirty.current = true;
@@ -1489,7 +1494,17 @@ function SessionDetailLoaded({
       }
       const reservedDraft = await reservationPromise;
       updateComposerMutationDraft(mutationKey, mutation.token, reservedDraft);
-      const deleted = await deleteComposerDraftIfMatches(
+      // Acceptance and local cleanup are separate outcomes. Persist a revision-scoped suppression
+      // marker first so a failed or inconclusive delete cannot resurrect the accepted submission
+      // on navigation, remount, or reload. A newer edit has a different revision and remains live.
+      await markComposerDraftAccepted(
+        sessionId,
+        submittedDraft.text,
+        submittedDraft.images,
+        instanceScope,
+        reservedDraft.revision,
+      );
+      const deleted = await composerDraftCleanup(
         sessionId,
         submittedDraft.text,
         submittedDraft.images,
@@ -1502,20 +1517,21 @@ function SessionDetailLoaded({
         await saveComposerDraft(sessionId, "", preservedImages, instanceScope);
       }
     } catch (e) {
-      recoverReservation = true;
       await reservationPromise.catch(() => undefined);
-      if (consumedDraftsRef.current.get(mutationKey)?.draftVersion === submissionVersion) {
-        consumedDraftsRef.current.delete(mutationKey);
-      }
-      if (viewGenerationRef.current === generation) {
-        setError((e as Error).message);
-        setPending(null); // send failed — retract the optimistic bubble
+      if (!providerAccepted) {
+        if (consumedDraftsRef.current.get(mutationKey)?.draftVersion === submissionVersion) {
+          consumedDraftsRef.current.delete(mutationKey);
+        }
+        if (viewGenerationRef.current === generation) {
+          setError((e as Error).message);
+          setPending(null); // send failed — retract the optimistic bubble
+        }
       }
     } finally {
       releaseComposerMutation(
         mutationKey,
         mutation.token,
-        recoverReservation && composerDraftVersionRef.current === submissionVersion
+        !providerAccepted && composerDraftVersionRef.current === submissionVersion
           ? submittedDraft
           : undefined,
       );

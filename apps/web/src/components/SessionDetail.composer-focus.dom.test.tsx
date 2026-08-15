@@ -7,7 +7,11 @@ import { Window } from "happy-dom";
 import type { ControlPlaneToUi, RunnerView, SessionEvent, SessionView, SideChatView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
-import type { ComposerDraft } from "../composer-drafts.js";
+import {
+  deleteComposerDraftIfMatches,
+  loadComposerDraft,
+  type ComposerDraft,
+} from "../composer-drafts.js";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreActions, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
@@ -154,6 +158,7 @@ interface Fixture {
   root: Root;
   rerenderWithDraftLoader: (loader: ComposerDraftLoader) => Promise<void>;
   rerenderSessionWithDraftLoader: (sessionId: string, loader: ComposerDraftLoader) => Promise<void>;
+  remountWithDraftLoader: (loader: ComposerDraftLoader) => Promise<HTMLTextAreaElement>;
   alternateSessionId: string;
 }
 
@@ -163,6 +168,7 @@ interface FixtureOptions {
   client?: Partial<ApiClient>;
   mainEventPayloads?: SessionEvent["payload"][];
   rightPanelMode?: "launcher" | "sidechat";
+  composerDraftCleanup?: typeof deleteComposerDraftIfMatches;
 }
 
 function EventSeeder({ sessionId, payloads }: { sessionId: string; payloads: SessionEvent["payload"][] }) {
@@ -234,6 +240,7 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
+  let detailMount = 0;
   const renderWithDraftLoader = (loader: ComposerDraftLoader, sessionId = currentSession.id) => {
     root.render(
       <ApiProvider client={client}>
@@ -242,12 +249,14 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
             <EventSeeder sessionId={currentSession.id} payloads={options.mainEventPayloads} />
           )}
           <SessionDetail
+            key={detailMount}
             sessionId={sessionId}
             rightPanel={rightPanel}
             onOpenTerminal={() => {}}
             pinnedOpen={false}
             focusComposer
             composerDraftLoader={loader}
+            composerDraftCleanup={options.composerDraftCleanup}
           />
         </StoreProvider>
       </ApiProvider>,
@@ -258,6 +267,16 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
   };
   const rerenderSessionWithDraftLoader = async (sessionId: string, loader: ComposerDraftLoader) => {
     await act(async () => renderWithDraftLoader(loader, sessionId));
+  };
+  const remountWithDraftLoader = async (loader: ComposerDraftLoader) => {
+    detailMount += 1;
+    await act(async () => {
+      renderWithDraftLoader(loader);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const remounted = container.querySelector(".composer-input") as HTMLTextAreaElement | null;
+    assert.ok(remounted, "the remounted SessionDetail composer is available");
+    return remounted;
   };
   await act(async () => {
     renderWithDraftLoader(() => draft.promise);
@@ -287,6 +306,7 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
     root,
     rerenderWithDraftLoader,
     rerenderSessionWithDraftLoader,
+    remountWithDraftLoader,
     alternateSessionId: alternateSession.id,
   };
 }
@@ -318,6 +338,145 @@ async function resolveDraft(draft: Deferred<ComposerDraft | null>, text: string)
     await draft.promise;
   });
 }
+
+async function resolveComposerDraft(draft: Deferred<ComposerDraft | null>, value: ComposerDraft) {
+  await act(async () => {
+    draft.resolve(value);
+    await draft.promise;
+  });
+}
+
+async function flushAsyncWork(delay = 0) {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    await Promise.resolve();
+  });
+}
+
+function sendButton(fixture: Fixture): HTMLButtonElement {
+  const button = fixture.container.querySelector('button[aria-label="Send"]') as HTMLButtonElement | null;
+  assert.ok(button, "the composer Send button is mounted");
+  return button;
+}
+
+const submittedImage = { mimeType: "image/png", data: "aW1hZ2U=" } as const;
+
+test("an accepted text-and-image submission stays cleared after SessionDetail remount", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const calls: Array<{ text: string; images: unknown[] }> = [];
+  const fixture = await mountFixture(draft, {
+    client: {
+      prompt: async (_sessionId, text, images) => {
+        calls.push({ text, images: images ?? [] });
+        return undefined as never;
+      },
+    },
+  });
+  try {
+    await resolveComposerDraft(draft, { text: "inspect this", images: [submittedImage], updatedAt: 1 });
+    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
+
+    await act(async () => { sendButton(fixture).click(); });
+    await flushAsyncWork();
+
+    assert.deepEqual(calls, [{ text: "inspect this", images: [submittedImage] }]);
+    assert.equal(fixture.composer.value, "");
+    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 0);
+    const remounted = await fixture.remountWithDraftLoader(loadComposerDraft);
+    await flushAsyncWork();
+    assert.equal(remounted.value, "");
+    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 0);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("conditional cleanup returning false cannot restore an accepted submission", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft, {
+    client: { prompt: async () => undefined as never },
+    composerDraftCleanup: async () => false,
+  });
+  try {
+    await resolveComposerDraft(draft, { text: "accepted once", images: [submittedImage], updatedAt: 1 });
+    await act(async () => { sendButton(fixture).click(); });
+    await flushAsyncWork();
+
+    const remounted = await fixture.remountWithDraftLoader(loadComposerDraft);
+    await flushAsyncWork();
+    assert.equal(remounted.value, "");
+    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 0);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("cleanup throwing after provider acceptance cannot recover the accepted draft", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft, {
+    client: { prompt: async () => undefined as never },
+    composerDraftCleanup: async () => { throw new Error("draft storage cleanup failed"); },
+  });
+  try {
+    await resolveComposerDraft(draft, { text: "already accepted", images: [submittedImage], updatedAt: 1 });
+    await act(async () => { sendButton(fixture).click(); });
+    await flushAsyncWork();
+
+    assert.equal(fixture.container.querySelector('[role="alert"]'), null, "cleanup is not reported as a send rejection");
+    const remounted = await fixture.remountWithDraftLoader(loadComposerDraft);
+    await flushAsyncWork();
+    assert.equal(remounted.value, "");
+    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 0);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a genuine prompt rejection restores the exact text and attachment after remount", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft, {
+    client: { prompt: async () => { throw new Error("transport rejected"); } },
+  });
+  try {
+    await resolveComposerDraft(draft, { text: "please retry", images: [submittedImage], updatedAt: 1 });
+    await act(async () => { sendButton(fixture).click(); });
+    await flushAsyncWork();
+
+    const remounted = await fixture.remountWithDraftLoader(loadComposerDraft);
+    await flushAsyncWork();
+    assert.equal(remounted.value, "please retry");
+    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("an accepted submission marker preserves a newer edit made while the prompt is in flight", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const prompt = deferred<never>();
+  const fixture = await mountFixture(draft, {
+    client: { prompt: () => prompt.promise },
+    composerDraftCleanup: async () => false,
+  });
+  try {
+    await resolveComposerDraft(draft, { text: "submitted text", images: [submittedImage], updatedAt: 1 });
+    await act(async () => { sendButton(fixture).click(); });
+    await act(async () => {
+      fixture.composer.value = "newer local edit";
+      Simulate.change(fixture.composer);
+    });
+    await flushAsyncWork(450);
+    await act(async () => { prompt.resolve(undefined as never); });
+    await flushAsyncWork();
+
+    const remounted = await fixture.remountWithDraftLoader(loadComposerDraft);
+    await flushAsyncWork();
+    assert.equal(remounted.value, "newer local edit");
+    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
 
 test("SessionDetail restores a deferred hydrated draft caret only after the text commits", async () => {
   const draft = deferred<ComposerDraft | null>();
