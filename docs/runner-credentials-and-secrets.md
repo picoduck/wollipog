@@ -93,8 +93,10 @@ bound to the runner id and normalized control-plane endpoint. Loopback ports are
 managed SSH tunnel ports are allocated per control-plane process; non-loopback ports remain part of
 the endpoint identity. A live second process fails before it
 can stage a credential or open a session store. The marker remains after shutdown, so a different
-runner or control plane cannot later adopt the same root silently. Use `--data-dir` or
-`RUNNER_DATA_DIR` to give each runner a distinct root.
+runner or control plane cannot later adopt the same root silently. Instead, a different owner is
+placed deterministically below `<dataDir>/runner-instances/<owner-hash>`. This also lets a managed
+machine that is removed and later added with a new runner id start cleanly without taking over the
+old sessions. Operators may still use `--data-dir` or `RUNNER_DATA_DIR` for an explicit root.
 
 The active credential is mode 0600 at
 `<dataDir>/credentials/instances/<owner-hash>/active-runner-token`. Per-session Conductor MCP

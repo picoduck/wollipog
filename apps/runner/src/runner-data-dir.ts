@@ -141,7 +141,12 @@ function publishProtected(file: string, contents: string | Buffer): void {
     } finally {
       closeSync(fd);
     }
-    linkSync(temp, file);
+    try {
+      linkSync(temp, file);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") throw error;
+      throw new Error(`runner data directory must support protected hard-link publication: ${(error as Error).message}`);
+    }
   } finally {
     rmSync(temp, { force: true });
   }
@@ -156,10 +161,11 @@ function writeProtected(file: string, value: unknown): void {
  * a later runner identity from silently adopting the root, while the process lease rejects live
  * concurrent use. A legacy root is claimed once under the lease because it has no owner metadata.
  */
-export function acquireRunnerDataDirLease(
+function acquireRunnerDataDirLeaseAt(
   requestedDataDir: string,
   identity: RunnerDataDirIdentity,
   options: RunnerDataDirLeaseOptions = {},
+  allowOwnerNamespace = true,
 ): RunnerDataDirLease {
   mkdirSync(requestedDataDir, { recursive: true });
   const dataDir = realpathSync(requestedDataDir);
@@ -172,6 +178,16 @@ export function acquireRunnerDataDirLease(
   const isProcessAlive = options.isProcessAlive ?? defaultProcessAlive;
   const leaseId = randomUUID();
 
+  if (allowOwnerNamespace && existsSync(ownerPath)) {
+    const existingOwner = parseRecord<OwnerRecord>(ownerPath);
+    if (existingOwner.version !== 1 || typeof existingOwner.ownerHash !== "string") {
+      throw new Error(`runner data directory ${dataDir} has invalid owner metadata; refusing unsafe recovery`);
+    }
+    if (existingOwner.ownerHash !== ownerHash) {
+      return acquireRunnerDataDirLeaseAt(join(dataDir, "runner-instances", ownerHash), identity, options, false);
+    }
+  }
+
   const lease: LeaseRecord = {
     version: 1,
     ownerHash,
@@ -181,7 +197,7 @@ export function acquireRunnerDataDirLease(
     createdAt: new Date().toISOString(),
   };
   if (existsSync(recoveryPath)) {
-    throw new Error(`runner data directory ${dataDir} has an incomplete lease recovery; verify no runner is active before removing ${recoveryPath}`);
+    throw new Error(`runner data directory ${dataDir} lease recovery is present; retry shortly, then verify no runner is active before removing ${recoveryPath}`);
   }
   try {
     writeProtected(leasePath, lease);
@@ -211,9 +227,12 @@ export function acquireRunnerDataDirLease(
         !Number.isSafeInteger(existing.pid) ||
         existing.pid <= 0 ||
         typeof existing.hostname !== "string" ||
-        typeof existing.ownerHash !== "string"
+        !/^[a-f0-9]{64}$/u.test(existing.ownerHash)
       ) {
         throw new Error(`runner data directory ${dataDir} has an invalid active lease; refusing unsafe recovery`);
+      }
+      if (allowOwnerNamespace && existing.ownerHash !== ownerHash) {
+        return acquireRunnerDataDirLeaseAt(join(dataDir, "runner-instances", ownerHash), identity, options, false);
       }
       if (existing.hostname !== hostname) {
         throw new Error(`runner data directory ${dataDir} is leased by host ${existing.hostname}; use a distinct --data-dir`);
@@ -244,9 +263,11 @@ export function acquireRunnerDataDirLease(
     if (existsSync(ownerPath)) {
       const owner = parseRecord<OwnerRecord>(ownerPath);
       if (owner.version !== 1 || owner.ownerHash !== ownerHash) {
-        throw new Error(
-          `runner data directory ${dataDir} belongs to a different runner or control plane; use a distinct --data-dir`,
-        );
+        release();
+        if (allowOwnerNamespace) {
+          return acquireRunnerDataDirLeaseAt(join(dataDir, "runner-instances", ownerHash), identity, options, false);
+        }
+        throw new Error(`runner data directory ${dataDir} has conflicting owner metadata; refusing unsafe recovery`);
       }
     } else {
       const legacyCredential = legacyCredentialForClaim(dataDir);
@@ -271,4 +292,12 @@ export function acquireRunnerDataDirLease(
     credentialFile: scopedRunnerCredentialFile(dataDir, identity),
     release,
   };
+}
+
+export function acquireRunnerDataDirLease(
+  requestedDataDir: string,
+  identity: RunnerDataDirIdentity,
+  options: RunnerDataDirLeaseOptions = {},
+): RunnerDataDirLease {
+  return acquireRunnerDataDirLeaseAt(requestedDataDir, identity, options);
 }

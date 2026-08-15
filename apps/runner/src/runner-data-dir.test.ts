@@ -27,7 +27,7 @@ function tempRoot(): string {
   return mkdtempSync(join(tmpdir(), "wollipog-runner-owner-"));
 }
 
-test("data root rejects concurrent use and remains permanently bound to its runner and control plane", () => {
+test("same-owner concurrency is rejected while different owners receive deterministic isolated roots", () => {
   const root = tempRoot();
   try {
     const first = acquireRunnerDataDirLease(root, FIRST);
@@ -35,19 +35,22 @@ test("data root rejects concurrent use and remains permanently bound to its runn
       () => acquireRunnerDataDirLease(root, FIRST),
       /already in use.*distinct --data-dir/,
     );
-    assert.throws(
-      () => acquireRunnerDataDirLease(root, SECOND),
-      /already in use.*distinct --data-dir/,
-    );
-    assert.equal(existsSync(scopedRunnerCredentialFile(root, SECOND)), false);
+    const second = acquireRunnerDataDirLease(root, SECOND);
+    assert.notEqual(second.dataDir, first.dataDir);
+    assert.equal(second.dataDir, join(root, "runner-instances", runnerDataDirOwnerHash(SECOND)));
+    stageRunnerCredentialFile(first.dataDir, "token-first", FIRST).promote();
+    stageRunnerCredentialFile(second.dataDir, "token-second", SECOND).promote();
+    assert.equal(readFileSync(first.credentialFile, "utf8"), "token-first");
+    assert.equal(readFileSync(second.credentialFile, "utf8"), "token-second");
 
     first.release();
+    second.release();
     const restarted = acquireRunnerDataDirLease(root, FIRST);
+    const secondRestarted = acquireRunnerDataDirLease(root, SECOND);
+    assert.equal(secondRestarted.dataDir, second.dataDir);
+    assert.equal(readFileSync(secondRestarted.credentialFile, "utf8"), "token-second");
     restarted.release();
-    assert.throws(
-      () => acquireRunnerDataDirLease(root, SECOND),
-      /belongs to a different runner or control plane.*distinct --data-dir/,
-    );
+    secondRestarted.release();
     assert.equal(existsSync(join(root, ".wollipog-runner-active-v1.lock")), false);
 
     const marker = readFileSync(join(root, ".wollipog-runner-owner-v1.json"), "utf8");
@@ -78,7 +81,7 @@ test("stale same-host leases are reclaimed but foreign-host leases fail closed",
         competingAttempted = true;
         assert.throws(
           () => acquireRunnerDataDirLease(root, FIRST, { hostname: "test-host", isProcessAlive: () => false }),
-          /(?:lease recovery is already in progress|incomplete lease recovery)/,
+          /lease recovery (?:is already in progress|is present)/,
         );
         return false;
       },
@@ -125,7 +128,7 @@ test("malformed lease identity and interrupted recovery metadata fail closed", (
     mkdirSync(join(interruptedRoot, ".wollipog-runner-lease-recovery-v1"));
     assert.throws(
       () => acquireRunnerDataDirLease(interruptedRoot, FIRST),
-      /incomplete lease recovery.*verify no runner is active/,
+      /lease recovery is present.*verify no runner is active/,
     );
     assert.equal(existsSync(join(interruptedRoot, ".wollipog-runner-active-v1.lock")), false);
   } finally {
