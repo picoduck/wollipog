@@ -36,6 +36,8 @@ import {
   type CreateSessionRequest,
   type DirectoryEntry,
   type DurableSessionCommand,
+  type DurableSessionCommandResultMessage,
+  type DurableSessionCommandUpdateMessage,
   type DispatchWorkflowNodeResult,
   type ExternalSessionDescriptor,
   type GovernanceActor,
@@ -107,6 +109,7 @@ import {
   type ControlPlaneDb,
 } from "./db.js";
 import { isRunnerRequestNotSentError, isRunnerRequestTimeoutError, type Hub } from "./hub.js";
+import { SessionPromptOutbox } from "./session-prompt-outbox.js";
 import {
   approvalForDecision,
   conductorSafetyPolicy,
@@ -625,6 +628,7 @@ export class SessionsService {
   private readonly reviewQueueSampleOffsets = new Map<string, number>();
   /** Remember authoritative no-repository results across refreshes and offline intervals. */
   private readonly reviewQueueNoRepository = new Set<string>();
+  private readonly promptOutbox: SessionPromptOutbox;
 
   constructor(
     private readonly db: ControlPlaneDb,
@@ -637,6 +641,7 @@ export class SessionsService {
     private readonly notify?: (prev: SessionView, view: SessionView) => void,
     private readonly steeringRequestTimeoutMs = STEERING_REQUEST_TIMEOUT_MS,
   ) {
+    this.promptOutbox = new SessionPromptOutbox(this.db, this.hub, this.log);
     // A restart can happen after a prompt reached a runner but before the delivery marker was
     // committed. Automatic retry would risk a duplicate turn, so recovery pauses every such cycle
     // for an explicit human restart and marks the uncertain step failed.
@@ -2815,11 +2820,36 @@ export class SessionsService {
       const floored = Math.floor(effectiveConfig.maxToolCalls);
       this.db.updateSessionMaxToolCalls(sessionId, floored > 0 ? floored : null, now);
     }
-    // The runner emits the user_message into the box store + stream (source of truth); the control
-    // plane just marks the session running and forwards the prompt.
-    this.db.updateSessionStatus(sessionId, "running", now);
+    // Current runners accept ordinary user prompts through the same durable, idempotent receipt
+    // lane used by scheduler commands. Persistence happens before success is returned; retries
+    // carry the stable command identity and the runner journals acceptance before queueing it.
+    const durablePrompt = !delivery && (session.status === "queued" || session.status === "starting") &&
+      runnerSupportsProtocol(
+      this.db.getRunner(session.runnerId)?.protocolVersion,
+      "automationCommandReceipts",
+    );
+    if (durablePrompt) {
+      try {
+        this.promptOutbox.stage(sessionId, session.runnerId, command, now);
+      } catch (error) {
+        return fail(`prompt could not be persisted: ${(error as Error).message}`, 500);
+      }
+    }
+    // Preserve runner-authoritative admission state while its provider slot is still queued.
+    // Once admitted, the runner's status/event stream advances this normally.
+    if (!durablePrompt || (session.status !== "queued" && session.status !== "starting")) {
+      this.db.updateSessionStatus(sessionId, "running", now);
+    }
     if (delivery) {
       delivery.activate(plan!);
+    } else if (durablePrompt) {
+      try {
+        this.promptOutbox.flush(now, session.runnerId);
+      } catch (error) {
+        // Persistence is the success boundary. A failed immediate flush remains due for the
+        // reconnect/timer recovery path and must not invite a duplicate HTTP resubmission.
+        this.log.warn(`durable prompt flush deferred for ${sessionId}: ${(error as Error).message}`);
+      }
     } else {
       const delivered = this.hub.sendToRunner(session.runnerId, command);
       if (!delivered) {
@@ -2830,6 +2860,21 @@ export class SessionsService {
     }
     this.hub.sessionChangedById(sessionId);
     return ok(this.db.getSession(sessionId)!);
+  }
+
+  retryDuePrompts(now = Date.now(), runnerId?: string): number {
+    return this.promptOutbox.flush(now, runnerId);
+  }
+
+  maintainPrompts(now = Date.now()): number {
+    return this.promptOutbox.maintain(now);
+  }
+
+  onDurablePromptReceipt(
+    runnerId: string,
+    message: DurableSessionCommandResultMessage | DurableSessionCommandUpdateMessage,
+  ): boolean {
+    return this.promptOutbox.receipt(runnerId, message);
   }
 
   /** Change model/effort/approval mode mid-session (applies to the next turn). */
@@ -3486,6 +3531,7 @@ export class SessionsService {
     if (!session) return fail("session not found", 404);
     this.hub.sendToRunner(session.runnerId, { type: "stop_session", sessionId });
     const now = Date.now();
+    this.promptOutbox.stopSession(sessionId, now);
     this.abortPolicyHookApprovals(session, now, "session-stopped");
     this.db.updateSessionStatus(sessionId, "stopped", now);
     this.hub.sessionChangedById(sessionId);

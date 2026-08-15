@@ -261,6 +261,14 @@ class FakeHub {
   }
 }
 
+function sentPromptCommands(hub: FakeHub) {
+  return hub.sentToRunner.flatMap(({ msg }) => {
+    if (msg.type === "prompt_session") return [msg];
+    if (msg.type === "durable_session_command" && msg.command.type === "prompt_session") return [msg.command];
+    return [];
+  });
+}
+
 const NOOP_LOG = { info() {}, warn() {}, error() {} };
 
 function runnerMeta(): RunnerMetadata {
@@ -2217,6 +2225,71 @@ test("prompt fails 404 for an unknown session", () => {
   assert.equal(res.status, 404);
 });
 
+test("admission-queued prompts persist before success, survive service restart, and retain FIFO", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { prompt: "initial" });
+  assert.equal(db.getSession(id)?.status, "queued");
+  hub.sentToRunner.length = 0;
+
+  assert.equal(svc.prompt(id, "first while queued").ok, true);
+  assert.equal(svc.prompt(id, "second while queued").ok, true);
+
+  const firstDelivery = hub.sentOfType("durable_session_command");
+  assert.deepEqual(
+    firstDelivery.map((message) => message.command.type === "prompt_session" ? message.command.text : ""),
+    ["first while queued", "second while queued"],
+  );
+  assert.deepEqual(
+    db.getSession(id)?.queued?.map((prompt) => prompt.text),
+    ["first while queued", "second while queued"],
+    "durable commands are immediately visible before runner admission",
+  );
+
+  const commandIds = firstDelivery.map((message) => message.commandId);
+  hub.sentToRunner.length = 0;
+  const restarted = new SessionsService(db, hub as unknown as Hub, NOOP_LOG);
+  restarted.retryDuePrompts(Date.now() + 60_000);
+  const replay = hub.sentOfType("durable_session_command");
+  assert.deepEqual(replay.map((message) => message.commandId), commandIds);
+  assert.deepEqual(
+    replay.map((message) => message.command.type === "prompt_session" ? message.command.text : ""),
+    ["first while queued", "second while queued"],
+  );
+
+  assert.equal(restarted.onDurablePromptReceipt(RUNNER_ID, {
+    type: "durable_session_command_update",
+    commandId: commandIds[0]!,
+    sessionId: id,
+    state: "queued",
+    revision: 2,
+  }), true);
+  assert.deepEqual(
+    db.getSession(id)?.queued?.map((prompt) => prompt.text),
+    ["first while queued", "second while queued"],
+    "runner acceptance does not make the durable queue disappear before turn start",
+  );
+  assert.equal(db.getSessionPromptCommand(commandIds[0]!)?.state, "queued");
+  assert.equal(restarted.onDurablePromptReceipt(RUNNER_ID, {
+    type: "durable_session_command_update",
+    commandId: commandIds[0]!,
+    sessionId: id,
+    state: "accepted",
+    revision: 1,
+  }), true);
+  assert.equal(db.getSessionPromptCommand(commandIds[0]!)?.state, "queued", "late retries cannot regress state");
+
+  assert.equal(svc.setArchived(id, true).ok, true);
+  assert.equal(db.getSessionPromptCommand(commandIds[1]!)?.state, "sent",
+    "archiving is display-only and preserves queued delivery");
+  assert.equal(restarted.stop(id).ok, true);
+  assert.equal(db.getSessionPromptCommand(commandIds[0]!)?.state, "uncertain");
+  assert.equal(db.getSessionPromptCommand(commandIds[1]!)?.state, "uncertain");
+  hub.sentToRunner.length = 0;
+  restarted.retryDuePrompts(Date.now() + 120_000);
+  assert.equal(hub.sentOfType("durable_session_command").length, 0,
+    "stopped sessions never replay retained prompts");
+});
+
 test("prompt stages its exact merged config before mutations and skips the legacy hub send", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub, { config: { permissionMode: "plan" } });
@@ -2309,7 +2382,7 @@ test("raw prompt image artifacts produce metadata-only commands and reject cross
   hub.sentToRunner.length = 0;
   const prompted = svc.prompt(id, "inspect", [uploaded.data!]);
   assert.equal(prompted.ok, true, prompted.error);
-  const sent = hub.lastSent();
+  const sent = sentPromptCommands(hub).find((command) => command.sessionId === id);
   assert.ok(sent?.type === "prompt_session");
   assert.deepEqual(sent.images, [uploaded.data!]);
   assert.equal(JSON.stringify(sent).includes("data"), false);
@@ -2320,7 +2393,7 @@ test("raw prompt image artifacts produce metadata-only commands and reject cross
   db.recordSessionFork(other, id, 1, Date.now());
   const inherited = svc.prompt(other, "edit inherited image", [uploaded.data!]);
   assert.equal(inherited.ok, true, inherited.error);
-  assert.deepEqual((hub.lastSent() as Extract<ControlPlaneToRunner, { type: "prompt_session" }>).images, [uploaded.data!]);
+  assert.deepEqual(sentPromptCommands(hub).at(-1)?.images, [uploaded.data!]);
   const descendant = seedSession(svc, hub);
   db.recordSessionFork(descendant, other, 1, Date.now());
   const transitive = svc.prompt(descendant, "edit image from an earlier fork", [uploaded.data!]);
@@ -2335,7 +2408,7 @@ test("legacy inline prompt images externalize atomically and clean partial conve
   hub.sentToRunner.length = 0;
   const success = svc.prompt(id, "legacy", [{ mimeType: "image/jpeg", data: "/9j/2Q==" }]);
   assert.equal(success.ok, true, success.error);
-  const sent = hub.lastSent();
+  const sent = sentPromptCommands(hub).at(-1);
   assert.ok(sent?.type === "prompt_session" && sent.images?.[0] && "artifactId" in sent.images[0]);
   assert.equal(JSON.stringify(sent).includes("/9j/2Q=="), false);
   const before = Number((db.raw().prepare("SELECT COUNT(*) AS count FROM artifacts").get() as unknown as { count: number }).count);
@@ -2410,7 +2483,7 @@ test("prompt sends prompt_session carrying the session's stored config", () => {
   assert.ok(res.ok);
   assert.equal(res.status, 200);
 
-  const prompts = hub.sentOfType("prompt_session");
+  const prompts = sentPromptCommands(hub);
   assert.equal(prompts.length, 1);
   const msg = prompts[0];
   assert.equal(msg.sessionId, id);
@@ -2451,7 +2524,7 @@ test("prompt with a config arg merges + persists it BEFORE sending (atomic chang
   assert.equal(stored.maxToolCalls, 4);
 
   // And the prompt_session sent to the runner carries the merged config.
-  const msg = hub.sentOfType("prompt_session").at(-1)!;
+  const msg = sentPromptCommands(hub).at(-1)!;
   assert.equal(msg.config!.model, "opus");
   assert.equal(msg.config!.effort, "low");
   assert.equal(msg.config!.costBudgetUsd, 8);
@@ -2484,9 +2557,7 @@ test("prompt heals persisted Claude knobs without rewriting a compatible model a
   assert.equal(db.getSession(id)!.model, "opus");
   assert.equal(db.getSession(id)!.effort, null);
   assert.equal(db.getSession(id)!.permissionMode, null);
-  assert.deepEqual(hub.sentOfType("prompt_session")[0]!.config, {
-    model: "opus", effort: undefined, permissionMode: undefined,
-  });
+  assert.deepEqual(sentPromptCommands(hub)[0]!.config, { model: "opus" });
 });
 
 test("explicit unsupported Claude effort and permission values still fail capability validation", () => {
@@ -2911,7 +2982,7 @@ test("prompt-time config with a non-default permissionMode on a conductor sessio
   // A plain prompt (and one that echoes "default") sails through with the clamped config.
   const plain = svc.prompt(id, "what is running?");
   assert.ok(plain.ok);
-  const msg = hub.sentOfType("prompt_session").at(-1)!;
+  const msg = sentPromptCommands(hub).at(-1)!;
   assert.equal(msg.config!.permissionMode, "default");
   const explicit = svc.prompt(id, "list sessions", [], undefined, { permissionMode: "default" });
   assert.ok(explicit.ok);

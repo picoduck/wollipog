@@ -2067,6 +2067,9 @@ export interface QueuedPromptView {
   /** Explicit false lets the runner explain why this particular entry cannot be promoted. */
   steerable?: boolean;
   steerDisabledReason?: string;
+  /** Control-plane durable delivery state before the runner exposes its live queue identity. */
+  durableDeliveryState?: "pending" | "queued" | "failed" | "uncertain";
+  durableDeliveryError?: string;
 }
 
 export type SteerDisposition = "accepted" | "converted_to_queue" | "rejected" | "uncertain";

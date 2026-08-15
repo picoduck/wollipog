@@ -2063,7 +2063,14 @@ function SessionDetailLoaded({
                   const availability = queuedPromptSteeringAvailability(steeringAvailabilityInput, q);
                   const locallyPromoting = queueSteeringPending.has(q.id);
                   const reserved = q.steeringState === "promoting" || q.steeringState === "uncertain";
-                  const queueLabel = locallyPromoting || q.steeringState === "promoting"
+                  const durable = q.durableDeliveryState !== undefined;
+                  const queueLabel = q.durableDeliveryState === "failed"
+                    ? "Delivery Failed"
+                    : q.durableDeliveryState === "uncertain"
+                      ? "Delivery Uncertain"
+                      : q.durableDeliveryState === "pending"
+                        ? "Pending Delivery"
+                        : locallyPromoting || q.steeringState === "promoting"
                     ? "Steering…"
                     : q.steeringState === "uncertain"
                       ? "Delivery Uncertain"
@@ -2073,7 +2080,7 @@ function SessionDetailLoaded({
                     : !availability.available
                       ? availability.reason
                       : "Promote this queued message into the active turn.";
-                  const canCancelThis = canCancelQueued && !reserved && !locallyPromoting;
+                  const canCancelThis = canCancelQueued && !durable && !reserved && !locallyPromoting;
                   return (
                     <div className="queued-item" key={q.id} data-testid={`queued-prompt-${q.id}`}>
                       <span

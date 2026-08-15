@@ -525,6 +525,86 @@ test("Restart superseding a capacity-queued resume keeps the replacement admissi
   }
 });
 
+test("prompts received during initial capacity admission join the original launch in FIFO order", async () => {
+  const transitions: string[] = [];
+  const lifecycle = (commandId: string): DurableCommandLifecycle => ({
+    commandId,
+    queued: () => transitions.push(`${commandId}:queued`),
+    started: () => transitions.push(`${commandId}:started`),
+    completed: () => transitions.push(`${commandId}:completed`),
+    failed: (error) => transitions.push(`${commandId}:failed:${error}`),
+    uncertain: (error) => transitions.push(`${commandId}:uncertain:${error}`),
+  });
+  const h = harness({}, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 1);
+  const internals = h.manager as any;
+  try {
+    h.store.create(stored(h.root, {
+      sessionId: "capacity-blocker", agentSessionId: null, status: "running",
+    }));
+    assert.equal(await internals.acquireAdmission("capacity-blocker"), true);
+
+    const started = h.manager.start(launchSpec(h.root), "initial prompt");
+    await tick();
+    assert.deepEqual(
+      internals.admissionQueue.map((entry: { request: { sessionId: string } }) => entry.request.sessionId),
+      ["resume-session"],
+    );
+    assert.equal(h.manager.prompt("resume-session", "queued B", [], undefined, undefined, lifecycle("B")), true);
+    assert.equal(h.manager.prompt("resume-session", "queued C", [], undefined, undefined, lifecycle("C")), true);
+    assert.deepEqual(
+      internals.admissionQueue.map((entry: { request: { sessionId: string } }) => entry.request.sessionId),
+      ["resume-session"],
+      "later prompts must not supersede the original admission waiter",
+    );
+    assert.deepEqual(transitions, ["B:queued", "C:queued"]);
+
+    internals.releaseAdmission("capacity-blocker");
+    assert.equal(await started, true);
+    for (let attempt = 0; attempt < 20 && h.prompts.length < 3; attempt++) await tick();
+    assert.deepEqual(h.prompts, ["initial prompt", "queued B", "queued C"]);
+    assert.deepEqual(transitions, [
+      "B:queued", "C:queued", "B:started", "B:completed", "C:started", "C:completed",
+    ]);
+  } finally {
+    internals.releaseAdmission("capacity-blocker");
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("stopping an admission-queued session terminalizes every retained prompt", async () => {
+  const failures: string[] = [];
+  const lifecycle = (commandId: string): DurableCommandLifecycle => ({
+    commandId,
+    queued: () => {}, started: () => {}, completed: () => {}, uncertain: () => {},
+    failed: (error, code) => failures.push(`${commandId}:${code}:${error}`),
+  });
+  const h = harness({}, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 1);
+  const internals = h.manager as any;
+  try {
+    h.store.create(stored(h.root, {
+      sessionId: "capacity-blocker", agentSessionId: null, status: "running",
+    }));
+    assert.equal(await internals.acquireAdmission("capacity-blocker"), true);
+    void h.manager.start(launchSpec(h.root), "initial prompt");
+    await tick();
+    h.manager.prompt("resume-session", "queued B", [], undefined, undefined, lifecycle("B"));
+    h.manager.prompt("resume-session", "queued C", [], undefined, undefined, lifecycle("C"));
+
+    h.manager.stop("resume-session");
+    await tick();
+    assert.deepEqual(failures, [
+      "B:COMMAND_CANCELLED:session stopped before runner admission",
+      "C:COMMAND_CANCELLED:session stopped before runner admission",
+    ]);
+    assert.equal(internals.preLaunchQueues.has("resume-session"), false);
+  } finally {
+    internals.releaseAdmission("capacity-blocker");
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
 test("cancelling a capacity-queued resume releases its lock and terminalizes its receipt", async () => {
   const failures: Array<[string, string | undefined]> = [];
   const durable: DurableCommandLifecycle = {
