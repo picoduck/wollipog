@@ -87,12 +87,34 @@ scrubs pre-v54 environment values from control-plane durable commands, runner me
 session snapshots; commands that have not begun are rejected instead of being replayed with removed
 secrets. Native and WSL launches pass resolved values through the child environment, never argv.
 
-Conductor MCP sessions likewise do not duplicate the active credential. The runner writes one
-mode-0600 `<dataDir>/credentials/active-runner-token` file, generates per-session MCP configuration
-containing only `MANAGER_TOKEN_FILE`, and refreshes that configuration before every launch/resume.
-Startup removes legacy per-session MCP JSON that may have embedded `MANAGER_TOKEN`. The MCP process
-still understands the legacy environment variable for rolling compatibility, but current runner
-launches use only the protected file reference.
+Conductor MCP sessions likewise do not duplicate the active credential. Before opening any mutable
+store, the runner takes an exclusive process lease on `dataDir` and checks a protected owner marker
+bound to the runner id and normalized control-plane endpoint. A live second process fails before it
+can stage a credential or open a session store. The marker remains after shutdown, so a different
+runner or control plane cannot later adopt the same root silently. Use `--data-dir` or
+`RUNNER_DATA_DIR` to give each runner a distinct root.
+
+The active credential is mode 0600 at
+`<dataDir>/credentials/instances/<owner-hash>/active-runner-token`. Per-session Conductor MCP
+configuration lives under `<dataDir>/conductor`, contains only `MANAGER_TOKEN_FILE`, and is refreshed
+before every launch or resume. Startup removes legacy per-session MCP JSON that may have embedded
+`MANAGER_TOKEN`. The MCP process still understands the legacy environment variable for rolling
+compatibility, but current runner launches use only the protected file reference.
+
+For a pre-marker data root, startup adopts existing state only when the protected legacy
+`<dataDir>/credentials/active-runner-token` bytes match the configured token. It copies those bytes
+to the scoped path before recording ownership and leaves the legacy file intact for rollback. A
+missing or different legacy token fails closed with instructions to select another data directory.
+An abandoned same-host process lease is reclaimed only after its recorded process is no longer
+alive; leases from another host and malformed lease metadata fail closed.
+
+The ownership boundary covers runner-managed sessions, native worktrees, admission records,
+durable-command and session-command receipts, checkpoint ownership, cleanup journals, registry
+approvals, Claude hook launch files, Conductor launch files, and native isolated provider-state
+partitions because their production constructors all receive the claimed data root. Provider CLI
+installation, discovery, login state, and transcripts used without runner isolation remain
+operator-owned files in the selected native or WSL account; the runner does not claim or migrate
+those external provider homes.
 
 ## Backup and operational boundary
 
