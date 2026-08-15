@@ -110,7 +110,7 @@ export function scopedRunnerCredentialFile(dataDir: string, identity: RunnerData
  * when the protected v1 marker exactly matches this runner and endpoint. */
 export function readV1RunnerCredentialForAttestation(
   requestedDataDir: string,
-  identity: RunnerDataDirIdentity,
+  identity: Pick<RunnerDataDirIdentity, "runnerId" | "controlPlaneUrl">,
 ): string | null {
   if (!existsSync(requestedDataDir)) return null;
   const dataDir = realpathSync(requestedDataDir);

@@ -20,6 +20,7 @@ export interface ControlPlaneAttestationOptions {
   token: string;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
+  priorCredentialHash?: string;
 }
 
 function validated(value: unknown): RunnerControlPlaneAttestation | null {
@@ -27,7 +28,8 @@ function validated(value: unknown): RunnerControlPlaneAttestation | null {
   const result = value as Partial<RunnerControlPlaneAttestation>;
   return isControlPlaneService(result.service) && typeof result.instanceId === "string" &&
       UUID_V4.test(result.instanceId) && Number.isSafeInteger(result.protocolVersion) &&
-      (result.protocolVersion ?? 0) > 0
+      (result.protocolVersion ?? 0) > 0 &&
+      (result.priorCredentialValid === undefined || typeof result.priorCredentialValid === "boolean")
     ? result as RunnerControlPlaneAttestation
     : null;
 }
@@ -47,7 +49,12 @@ export async function attestRunnerControlPlane(
         `${root}/runner/attestation/${encodeURIComponent(options.runnerId)}`,
         {
           method: "GET",
-          headers: { authorization: `Bearer ${options.token}` },
+          headers: {
+            authorization: `Bearer ${options.token}`,
+            ...(options.priorCredentialHash
+              ? { "x-wollipog-prior-runner-credential-sha256": options.priorCredentialHash }
+              : {}),
+          },
           cache: "no-store",
           redirect: "error",
           signal: controller.signal,
@@ -56,22 +63,47 @@ export async function attestRunnerControlPlane(
     } catch (error) {
       throw new ControlPlaneAttestationError(`control-plane attestation unavailable: ${(error as Error).message}`, true);
     }
-    if (response.status === 401 || response.status === 403 || response.status === 404) {
+    if (response.status === 401 || response.status === 403) {
       throw new ControlPlaneAttestationError(
         "control-plane attestation rejected the runner credential or is not supported; verify the runner URL and credential",
         false,
       );
     }
+    if (response.status === 404) {
+      throw new ControlPlaneAttestationError(
+        "control plane does not support runner identity attestation; upgrade the control plane before this runner",
+        false,
+      );
+    }
     if (!response.ok) {
-      throw new ControlPlaneAttestationError(`control-plane attestation returned HTTP ${response.status}`, response.status >= 500);
+      const retryable = [408, 425, 429].includes(response.status) || response.status >= 500;
+      throw new ControlPlaneAttestationError(`control-plane attestation returned HTTP ${response.status}`, retryable);
     }
     const declared = Number(response.headers.get("content-length"));
     if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
       throw new ControlPlaneAttestationError("control-plane attestation response is too large", false);
     }
-    const text = await response.text();
-    if (Buffer.byteLength(text) > MAX_RESPONSE_BYTES) {
-      throw new ControlPlaneAttestationError("control-plane attestation response is too large", false);
+    let text: string;
+    if (response.body) {
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let bytes = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        bytes += value.byteLength;
+        if (bytes > MAX_RESPONSE_BYTES) {
+          await reader.cancel();
+          throw new ControlPlaneAttestationError("control-plane attestation response is too large", false);
+        }
+        chunks.push(value);
+      }
+      const body = new Uint8Array(bytes);
+      let offset = 0;
+      for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.byteLength; }
+      text = new TextDecoder().decode(body);
+    } else {
+      text = "";
     }
     let decoded: unknown;
     try {

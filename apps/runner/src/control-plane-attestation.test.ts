@@ -13,13 +13,16 @@ const valid = { service: WOLLIPOG_CONTROL_PLANE_SERVICE, instanceId: INSTANCE_ID
 test("runner attestation sends the credential only in Authorization and validates identity", async () => {
   let requested = "";
   let authorization = "";
+  let priorHash = "";
   const result = await attestRunnerControlPlane({
     controlPlaneUrl: "wss://manager.example.test/runner",
     runnerId: "runner one",
     token: "top-secret",
+    priorCredentialHash: "a".repeat(64),
     fetchImpl: (async (input, init) => {
       requested = String(input);
       authorization = (init?.headers as Record<string, string>).authorization;
+      priorHash = (init?.headers as Record<string, string>)["x-wollipog-prior-runner-credential-sha256"];
       return new Response(JSON.stringify(valid), { headers: { "content-length": "107" } });
     }) as typeof fetch,
   });
@@ -27,6 +30,8 @@ test("runner attestation sends the credential only in Authorization and validate
   assert.equal(requested, "https://manager.example.test/runner/attestation/runner%20one");
   assert.equal(requested.includes("top-secret"), false);
   assert.equal(authorization, "Bearer top-secret");
+  assert.equal(priorHash, "a".repeat(64));
+  assert.equal(JSON.stringify((result)).includes("top-secret"), false);
 });
 
 test("runner attestation retries transient failures but rejects credentials permanently", async () => {
@@ -38,7 +43,8 @@ test("runner attestation retries transient failures but rejects credentials perm
     token: "token",
     fetchImpl: (async () => {
       calls++;
-      return calls < 3 ? new Response("unavailable", { status: 503 }) : new Response(JSON.stringify(valid));
+      return calls === 1 ? new Response("busy", { status: 429 })
+        : calls === 2 ? new Response("unavailable", { status: 503 }) : new Response(JSON.stringify(valid));
     }) as typeof fetch,
     wait: async (delay) => { delays.push(delay); },
   });
@@ -65,5 +71,16 @@ test("runner attestation fails closed on malformed or oversized identity", async
   await assert.rejects(() => attestRunnerControlPlane({
     controlPlaneUrl: "ws://localhost/runner", runnerId: "r", token: "t",
     fetchImpl: (async () => new Response("{}", { headers: { "content-length": "4097" } })) as typeof fetch,
+  }), /too large/);
+  const oversized = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new Uint8Array(3_000));
+      controller.enqueue(new Uint8Array(3_000));
+      controller.close();
+    },
+  });
+  await assert.rejects(() => attestRunnerControlPlane({
+    controlPlaneUrl: "ws://localhost/runner", runnerId: "r", token: "t",
+    fetchImpl: (async () => new Response(oversized)) as typeof fetch,
   }), /too large/);
 });

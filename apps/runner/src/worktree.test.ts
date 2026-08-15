@@ -304,10 +304,11 @@ test("WSL worktrees are created, used, and removed inside the selected distro", 
     await runContextCommand(context, "git", ["config", "user.email", "test@example.com"], { cwd: repo });
     await runContextCommand(context, "git", ["config", "user.name", "Test"], { cwd: repo });
     await runContextCommand(context, "git", ["commit", "--allow-empty", "-m", "base"], { cwd: repo });
-    const handle = await createWorktree(repo, "s_wsl", { context });
-    assert.match(handle.path, /^\/home\/[^/]+\/\.agent-manager\/worktrees\//);
+    const ownerHash = "1".repeat(64);
+    const handle = await createWorktree(repo, "s_wsl", { context, ownerHash });
+    assert.match(handle.path, new RegExp(`/home/[^/]+/\\.agent-manager/runner-instances/${ownerHash}/worktrees/`));
     assert.equal((await runContextCommand(context, "git", ["rev-parse", "--is-inside-work-tree"], { cwd: handle.path })).stdout.trim(), "true");
-    await removeWorktree(repo, handle, { context });
+    await removeWorktree(repo, handle, { context, ownerHash });
     await assert.rejects(runContextCommand(context, "git", ["status"], { cwd: handle.path }));
   } finally {
     await runContextCommand(context, "rm", ["-rf", "--", repo], { cwd: "/" }).catch(() => {});

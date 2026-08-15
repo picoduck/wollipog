@@ -201,6 +201,7 @@ export async function reconcileProviderState(
   knownContexts: AgentContext[] = [],
   now = Date.now(),
   fs: StateFs = defaultFs,
+  nativeOwnerKey = ownerKey,
 ): Promise<ProviderStateReconcileResult> {
   const retentionMs = (policy.providerStateRetentionDays ?? 7) * 86_400_000;
   const maxBytes = policy.providerStateMaxBytes ?? 5 * 1024 ** 3;
@@ -219,6 +220,7 @@ export async function reconcileProviderState(
   let retainedBytes = 0;
   for (const context of contexts) {
     try {
+      const effectiveOwnerKey = context.kind === "native" ? nativeOwnerKey : ownerKey;
       const base = context.kind === "wsl"
         ? posix.join(await fs.wslHome(context), ".agent-manager", "runner-instances", ownerKey)
         : dataDir;
@@ -242,20 +244,20 @@ export async function reconcileProviderState(
           ? posix.join(root, key)
           : join(root, key);
         try {
-          await fs.claim(context, path, ownerKey);
+          await fs.claim(context, path, effectiveOwnerKey);
           claimedKeys.add(key);
         } catch (error) {
           errors.push(`${context.kind === "wsl" ? `WSL ${context.distro}` : "native"} ${providerName} ${claim.label} ${claim.sessionId}: ${(error as Error).message}`);
         }
       }
-      const claimedEntries = entries.map((entry) => claimedKeys.has(entry.name) ? { ...entry, ownerKey } : entry);
+      const claimedEntries = entries.map((entry) => claimedKeys.has(entry.name) ? { ...entry, ownerKey: effectiveOwnerKey } : entry);
       const protectedKeys = new Set([
         ...matching.map((session) => providerStateKey(session.sessionId)),
         ...ownedOrphanRecords.map((record) => providerStateKey(record.sessionId)),
         ...[...protectedSessionIds].map(providerStateKey),
       ]);
       const candidates = claimedEntries
-        .filter((entry) => /^[a-f0-9]{64}$/.test(entry.name) && entry.ownerKey === ownerKey && !protectedKeys.has(entry.name))
+        .filter((entry) => /^[a-f0-9]{64}$/.test(entry.name) && entry.ownerKey === effectiveOwnerKey && !protectedKeys.has(entry.name))
         .sort((a, b) => a.mtimeMs - b.mtimeMs);
       let pressureBytes = candidates
         .filter((entry) => now - entry.mtimeMs >= MIN_ORPHAN_AGE_MS)

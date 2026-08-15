@@ -27,10 +27,15 @@ export function registerRunnerAttestationRoute(
     if (!runnerId || !bearer || !deps.verifyRunnerCredentialForAttestation(runnerId, hashToken(bearer), now())) {
       return reply.code(401).headers(ATTESTATION_HEADERS).send({ error: "runner credential is invalid" });
     }
+    const priorHash = req.headers["x-wollipog-prior-runner-credential-sha256"];
+    const priorCredentialValid = typeof priorHash === "string" && /^[a-f0-9]{64}$/u.test(priorHash)
+      ? deps.verifyRunnerCredentialForAttestation(runnerId, priorHash, now())
+      : false;
     return reply.headers(ATTESTATION_HEADERS).send({
       service: CONTROL_PLANE_SERVICE,
       instanceId: deps.instanceId(),
       protocolVersion: PROTOCOL_VERSION,
+      ...(typeof priorHash === "string" ? { priorCredentialValid } : {}),
     } satisfies RunnerControlPlaneAttestation);
   });
 }
