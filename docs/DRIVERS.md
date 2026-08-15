@@ -258,8 +258,11 @@ The lifetime policy is quiescence-aware and fail-safe:
   synthetic continuation and the UI moves from **Waiting on External Job** to
   **Continuation Pending**. Claude's stdin-write callback is the acceptance boundary; definite
   pre-acceptance failures remain retryable, while accepted or uncertain submissions are never
-  replayed. A stable continuation id and durable terminal marker let startup reconcile a persisted
-  assistant result without submitting another provider turn.
+  replayed. Cancellation before the write callback is treated as uncertain rather than replayed,
+  because the provider may have received the bytes before local acknowledgement. A stable
+  continuation id and durable terminal marker let startup reconcile a persisted assistant result
+  without submitting another provider turn; that bookkeeping marker is hidden from the rendered
+  timeline.
 - `WOLLIPOG_CLAUDE_PENDING_MAX_MS` is a leak backstop for pending work (default seven days; `0` means
   unlimited). Hitting it writes a durable orphan marker before eviction.
 - Eviction and runner-shutdown stops send EOF first and allow five seconds for a clean exit before

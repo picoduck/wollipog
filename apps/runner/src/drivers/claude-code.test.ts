@@ -1742,11 +1742,12 @@ test("cancel fences an idle persistent child before an immediate new prompt", as
 test("one-shot fixed-rule mode delivers multiline prompts through stdin, never argv", async () => {
   const child = fakeProcess();
   const writes: string[] = [];
+  let acceptedPrompts = 0;
   child.stdin.on("data", (chunk: Buffer) => writes.push(chunk.toString("utf8")));
   const launches: any[] = [];
   const driver = new ClaudeCodeDriver(
     { ...baseOpts, env: { [CLAUDE_PERSISTENT_FLAG]: "0" }, config: { permissionMode: "acceptEdits" } },
-    noopCb,
+    { ...noopCb, onPromptAccepted: () => { acceptedPrompts += 1; } },
     { spawn: (opts: any) => { launches.push(opts); return child; }, kill: () => {} } as any,
   );
   const prompt = "first line\r\nsecond line with %USERPROFILE% & more";
@@ -1758,6 +1759,7 @@ test("one-shot fixed-rule mode delivers multiline prompts through stdin, never a
   assert.equal(launches[0].args.includes(prompt), false, "user content must not reach cmd.exe argv");
   assert.equal(writes.join(""), prompt);
   assert.equal(child.stdin.writableEnded, true);
+  assert.equal(acceptedPrompts, 1, "one-shot acceptance is emitted from the stdin end callback");
 
   child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
   child.emit("exit", 0);

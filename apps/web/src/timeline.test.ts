@@ -137,6 +137,15 @@ test("turn interruption is a standalone non-error transcript outcome with record
   assert.deepEqual(groupTimeline(items).map((group) => group.kind), ["item", "item", "item"]);
 });
 
+test("managed continuation delivery markers remain durable but hidden from the timeline", () => {
+  const items = deriveTimeline([
+    ev({ kind: "stderr", text: "before" }),
+    ev({ kind: "stderr", text: "Managed background continuation delivered: bgcont_hidden" }),
+    ev({ kind: "stderr", text: "after" }),
+  ]);
+  assert.deepEqual(items.map((item) => item.kind === "stderr" ? item.text : ""), ["before", "after"]);
+});
+
 test("timeline delta metadata retains only the immediate predecessor snapshot", () => {
   const builder = new TimelineBuilder();
   builder.push(ev({ kind: "user_message", text: "one" }));

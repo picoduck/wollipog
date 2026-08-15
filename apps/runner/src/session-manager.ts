@@ -425,7 +425,7 @@ const ORPHAN_RECOVERY_PROMPT =
   "Continue after runner restart: consume queued background-task notifications, reconcile every orphaned task, and resume or report unfinished work without waiting for another user message.";
 const BACKGROUND_CONTINUATION_PROMPT =
   "Managed background jobs reached their terminal barrier. Consume every queued task notification and deliver the parent workflow's final user-visible result without waiting for another user message.";
-const MAX_DURABLE_BACKGROUND_JOBS = 128;
+const MAX_RETAINED_DELIVERED_BACKGROUND_JOBS = 128;
 const MAX_BACKGROUND_OUTPUT_REFERENCE_CHARS = 4_096;
 const BACKGROUND_CONTINUATION_DELIVERED_PREFIX = "Managed background continuation delivered: ";
 
@@ -838,6 +838,7 @@ export class SessionManager {
       if (m.driver === "claude-code" && m.status === "stopped") {
         reconciled = this.store.patchMeta(m.sessionId, {
           backgroundWorkState: undefined,
+          backgroundJobs: [],
           pendingBackgroundTaskIds: [],
           orphanedWork: undefined,
         }) ?? m;
@@ -4397,7 +4398,9 @@ export class SessionManager {
     const userEvent = syntheticRecovery
       ? this.emitEvent(sessionId, {
           kind: "stderr",
-          text: "Runner resumed orphaned background work automatically.",
+          text: backgroundJobIds?.length
+            ? "Runner continued after managed background work completed."
+            : "Runner resumed orphaned background work automatically.",
         })
       : this.emitEvent(sessionId, {
           kind: "user_message",
@@ -4544,7 +4547,7 @@ export class SessionManager {
         }
         else this.finishOrphanRecovery(sessionId);
       }
-      if (!syntheticRecovery && stop !== "cancelled" && stop !== "refusal") {
+      if (stop !== "cancelled" && stop !== "refusal") {
         this.finishParentTurnBackgroundJobs(sessionId, queued.id);
       }
       if (!this.active.has(sessionId)) {
@@ -6157,7 +6160,7 @@ export class SessionManager {
       // Artifact-only evidence cannot revive a task whose unattended recovery was already handled.
       // A real provider stream event appears in observedTaskIds and removes its tombstone above.
       updated = this.store.patchMeta(sessionId, {
-        backgroundWorkState: "resumed",
+        backgroundWorkState: queuedJobIds.length > 0 ? "continuation_pending" : "resumed",
         backgroundJobs,
         pendingBackgroundTaskIds: [],
         recoveredBackgroundTaskIds: durableRecoveredTaskIds,
@@ -6165,7 +6168,7 @@ export class SessionManager {
       });
     } else if (update.state === "running") {
       updated = this.store.patchMeta(sessionId, {
-        backgroundWorkState: "running",
+        backgroundWorkState: queuedJobIds.length > 0 ? "continuation_pending" : "running",
         backgroundJobs,
         pendingBackgroundTaskIds: eligiblePendingTaskIds,
         recoveredBackgroundTaskIds: durableRecoveredTaskIds,
@@ -6186,7 +6189,7 @@ export class SessionManager {
       const sameRecovery = previousOrphan &&
         previousOrphan.pendingTaskIds.some((id) => eligiblePendingTaskIds.includes(id));
       updated = this.store.patchMeta(sessionId, {
-        backgroundWorkState: "orphaned",
+        backgroundWorkState: queuedJobIds.length > 0 ? "continuation_pending" : "orphaned",
         backgroundJobs,
         pendingBackgroundTaskIds: eligiblePendingTaskIds,
         recoveredBackgroundTaskIds: durableRecoveredTaskIds,
@@ -6295,8 +6298,10 @@ export class SessionManager {
     }
     const all = [...byId.values()].sort((left, right) => left.registeredAt - right.registeredAt);
     const unresolved = all.filter((job) => !job.assistantResultPersistedAt);
-    const delivered = all.filter((job) => job.assistantResultPersistedAt)
-      .slice(-Math.max(0, MAX_DURABLE_BACKGROUND_JOBS - unresolved.length));
+    const deliveredLimit = Math.max(0, MAX_RETAINED_DELIVERED_BACKGROUND_JOBS - unresolved.length);
+    const delivered = deliveredLimit === 0
+      ? []
+      : all.filter((job) => job.assistantResultPersistedAt).slice(-deliveredLimit);
     return { jobs: [...unresolved, ...delivered], queuedJobIds };
   }
 
@@ -6574,7 +6579,7 @@ export class SessionManager {
     const persistedAt = Date.now();
     let changed = false;
     const backgroundJobs = current.backgroundJobs.map((job) => {
-      if (job.parentTurnId !== parentTurnId || !job.terminalObservedAt ||
+      if ((job.parentTurnId !== parentTurnId && job.parentTurnId !== "unknown") || !job.terminalObservedAt ||
           job.continuationRequired || job.assistantResultPersistedAt) return job;
       changed = true;
       return { ...job, assistantResultPersistedAt: persistedAt };

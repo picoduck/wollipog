@@ -1967,8 +1967,50 @@ test("two idle managed-job completions cross one durable barrier and resume the 
       1,
       "the continuation never impersonates a second user message",
     );
+    const stderr = h.store.readEvents("resume-session").flatMap((event) =>
+      event.payload.kind === "stderr" ? [event.payload.text] : []);
+    assert.ok(stderr.includes("Runner continued after managed background work completed."));
+    assert.equal(stderr.includes("Runner resumed orphaned background work automatically."), false);
   } finally {
     parentTurn.resolve();
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("an in-turn managed completion is persisted without a synthetic continuation", async () => {
+  let h!: ReturnType<typeof harness>;
+  h = harness({
+    driver: "claude-code",
+    agentId: "claude-code",
+    command: "claude",
+    agentSessionId: "claude-session",
+  }, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, async (text) => {
+    if (text !== "finish inline") return;
+    h.callbacks().onBackgroundWork?.({
+      state: "running",
+      pendingTaskIds: ["inline-job"],
+      jobs: [{ id: "inline-job", toolUseId: "inline-tool", launchType: "agent", startedAt: 10 }],
+    });
+    h.callbacks().onBackgroundWork?.({
+      state: null,
+      pendingTaskIds: [],
+      terminalJobs: [{
+        id: "inline-job", toolUseId: "inline-tool", launchType: "agent", startedAt: 10,
+        status: "completed", terminalAt: 20, continuationRequired: false,
+      }],
+    });
+    h.callbacks().onEvent({ kind: "agent_message", text: "Inline result delivered." });
+  });
+  try {
+    h.manager.prompt("resume-session", "finish inline", []);
+    await tick();
+    await tick();
+    assert.deepEqual(h.prompts, ["finish inline"]);
+    const job = h.store.readMeta("resume-session")?.backgroundJobs?.[0];
+    assert.ok(job?.assistantResultPersistedAt);
+    assert.equal(job?.continuationQueuedAt, undefined);
+  } finally {
     h.manager.shutdownAll();
     h.cleanup();
   }
@@ -2126,6 +2168,109 @@ test("parent-turn barriers remain independent when another workflow is still run
   }
 });
 
+test("a ready parent barrier stays continuation-pending while unrelated work runs", () => {
+  const h = harness({
+    driver: "claude-code",
+    backgroundJobs: [
+      {
+        id: "ready-job", parentTurnId: "turn-ready", runnerId: "runner", workspaceId: "workspace",
+        context: { kind: "native" }, launchType: "agent", registeredAt: 1,
+      },
+      {
+        id: "running-job", parentTurnId: "turn-running", runnerId: "runner", workspaceId: "workspace",
+        context: { kind: "native" }, launchType: "workflow", registeredAt: 2,
+      },
+    ],
+  });
+  try {
+    (h.manager as any).onDriverBackgroundWork("resume-session", {
+      state: "running",
+      pendingTaskIds: ["running-job"],
+      jobs: [{ id: "running-job", launchType: "workflow", startedAt: 2 }],
+      terminalJobs: [{
+        id: "ready-job", launchType: "agent", startedAt: 1, status: "completed",
+        terminalAt: 3, continuationRequired: true,
+      }],
+    });
+    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, "continuation_pending");
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("durable job retention drops delivered history before unresolved obligations", () => {
+  const unresolved = Array.from({ length: 128 }, (_, index) => ({
+    id: `pending-${index}`,
+    parentTurnId: `turn-${index}`,
+    runnerId: "runner",
+    workspaceId: "workspace",
+    context: { kind: "native" as const },
+    launchType: "agent" as const,
+    registeredAt: index,
+  }));
+  const h = harness({
+    driver: "claude-code",
+    backgroundJobs: [
+      ...unresolved,
+      {
+        id: "delivered-old", parentTurnId: "turn-old", runnerId: "runner", workspaceId: "workspace",
+        context: { kind: "native" }, launchType: "agent", registeredAt: 200,
+        assistantResultPersistedAt: 201,
+      },
+      {
+        id: "delivered-new", parentTurnId: "turn-new", runnerId: "runner", workspaceId: "workspace",
+        context: { kind: "native" }, launchType: "agent", registeredAt: 202,
+        assistantResultPersistedAt: 203,
+      },
+    ],
+  });
+  try {
+    const merged = (h.manager as any).mergeDurableBackgroundJobs(
+      h.store.readMeta("resume-session"),
+      { state: "running", pendingTaskIds: unresolved.map((job) => job.id) },
+      undefined,
+    );
+    assert.equal(merged.jobs.length, 128);
+    assert.ok(merged.jobs.every((job: any) => !job.assistantResultPersistedAt));
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("provider task promotion preserves the provisional job's parent turn", () => {
+  const h = harness({ driver: "claude-code" });
+  try {
+    const provisional = (h.manager as any).mergeDurableBackgroundJobs(
+      h.store.readMeta("resume-session"),
+      {
+        state: "running",
+        pendingTaskIds: ["tool:spawn-1"],
+        jobs: [{ id: "tool:spawn-1", toolUseId: "spawn-1", launchType: "agent", startedAt: 10 }],
+      },
+      "parent-turn",
+    );
+    h.store.patchMeta("resume-session", { backgroundJobs: provisional.jobs });
+    const promoted = (h.manager as any).mergeDurableBackgroundJobs(
+      h.store.readMeta("resume-session"),
+      {
+        state: "running",
+        pendingTaskIds: ["provider-task-1"],
+        jobs: [{ id: "provider-task-1", toolUseId: "spawn-1", launchType: "agent", startedAt: 11 }],
+      },
+      undefined,
+    );
+    assert.equal(promoted.jobs.length, 1);
+    assert.equal(promoted.jobs[0]?.id, "provider-task-1");
+    assert.equal(promoted.jobs[0]?.parentTurnId, "parent-turn");
+    assert.equal(promoted.jobs[0]?.registeredAt, 10);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
 test("a definite pre-acceptance continuation failure clears submission for a safe retry", async () => {
   let attempts = 0;
   let h!: ReturnType<typeof harness>;
@@ -2238,6 +2383,29 @@ test("an explicitly stopped Claude session is not resurrected by startup recover
     assert.deepEqual(h.prompts, ["start background work"]);
   } finally {
     restarted?.shutdownAll();
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("startup clears stale durable background jobs from an already stopped session", () => {
+  const h = harness({
+    driver: "claude-code",
+    status: "stopped",
+    backgroundWorkState: "continuation_pending",
+    backgroundJobs: [{
+      id: "stale-job", parentTurnId: "turn-stale", runnerId: "runner", workspaceId: "workspace",
+      context: { kind: "native" }, launchType: "agent", registeredAt: 1,
+      terminalStatus: "completed", terminalObservedAt: 2, continuationRequired: true,
+      continuationQueuedAt: 3, continuationId: "bgcont-stale",
+    }],
+  });
+  try {
+    h.manager.reconcileStore();
+    const stopped = h.store.readMeta("resume-session");
+    assert.equal(stopped?.backgroundWorkState, undefined);
+    assert.deepEqual(stopped?.backgroundJobs, []);
+  } finally {
     h.manager.shutdownAll();
     h.cleanup();
   }
