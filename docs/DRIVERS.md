@@ -380,6 +380,25 @@ that decision remains Phase 2.5.
 | `control_request` (`subtype:"can_use_tool"`) | `request_id`, `request.tool_name`, `request.description`, `request.input` | `{kind:"permission_request", requestId, title:"<tool_name>: <description ≤80>", options:[allow_once,reject_once]}` (input stashed for the reply) |
 | `control_request` (unrecognized subtype) | `request_id` | no event — stderr canary + auto-decline `subtype:"error"` control_response |
 
+### 2.4.1 Provider Authentication Recovery
+
+Native Claude and Codex sessions run provider-native status checks in the runner's exact launch
+context. The runner strips daemon-only environment variables with the same policy as the provider
+driver, parses status locally, and sends the control plane only a bounded Authentication Required
+card. Provider output, auth URLs, account labels, credential paths, environment values, and
+repository paths never enter session events, telemetry, or snapshots.
+
+The durable runner block records an HMAC-scoped installation/credential context and whether the
+failed prompt was definitely not delivered or has uncertain delivery. Revalidation unblocks only
+sessions whose freshly resolved scope and expected account digest match. A retained ordinary prompt
+may retry once only when failure occurred before provider creation; the retry tombstone is flushed
+before enqueue. Uncertain turns and terminalized durable commands are never retried automatically.
+
+Use **Recheck Authentication** after completing `claude auth login` or `codex login` in the Location
+shown on the card. **Start Sign-In** remains fail-closed until issue #17/PR42's cross-process
+provider-home ownership lease is available on this branch. Configured environment credentials,
+WSL, container, and cloud contexts remain revalidation/manual-login only.
+
 **Plan / TodoWrite**: claude surfaces plans via the `TodoWrite` tool call, not a dedicated event — map
 a `TodoWrite` tool_use input to `{kind:"plan", entries}` when its name is `TodoWrite`.
 

@@ -45,6 +45,7 @@ import type {
   ExecutionHandoffRequest,
   ExecutionTargetRef,
   PendingApproval,
+  PromptImageInput,
   SessionConfig,
   AcpSessionContextConfig,
   SessionEventPayload,
@@ -107,6 +108,34 @@ export interface SessionMeta {
   costUsd: number;
   preview: string | null;
   pendingApproval: PendingApproval | null;
+  /** Runner-only structural identity for the provider installation + credential home/source. */
+  providerCredentialScopeId?: string;
+  /** Runner-only account/credential digest observed while provider-native status was authenticated. */
+  providerCredentialIdentityId?: string;
+  /** Durable authentication recovery state. Never projected into SessionSnapshot; the browser sees
+   * only the bounded pendingApproval card and its random recovery request id. */
+  providerAuthBlock?: {
+    version: 1;
+    recoveryId: string;
+    credentialScopeId: string;
+    detectedAt: number;
+    phase: "launch" | "turn";
+    delivery: "not_delivered" | "uncertain";
+    canStartLogin: boolean;
+    configuredCredential: boolean;
+    expectedIdentityId?: string;
+    identityMismatch?: boolean;
+    /** Correlates one live login subprocess; stale cancels cannot target a later generation. */
+    loginOperationId?: string;
+    retry?: {
+      text: string;
+      images: PromptImageInput[];
+      slashCommand?: string;
+      config?: SessionConfig;
+    };
+  };
+  /** At-most-once tombstone written and flushed before an automatic recovery prompt is enqueued. */
+  providerAuthRetryAttemptedRecoveryId?: string;
   /** Claude background work observed by the runner. Optional for older sessions and other drivers. */
   backgroundWorkState?: BackgroundWorkState;
   /** Provider task ids retained across runner restarts for automatic recovery. */

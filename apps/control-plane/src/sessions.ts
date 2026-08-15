@@ -3786,6 +3786,25 @@ export class SessionsService {
 
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
 
+    // Authentication actions are runner-owned, asynchronous operations rather than provider
+    // permission decisions. Keep the durable card/status parked until the runner reports a new
+    // card or a terminal recovery outcome; optimistic clearing would create a false Running state
+    // during login and would make reconnect retries ambiguous.
+    if (pending.kind === "authentication") {
+      if (optionId !== null && !pending.options.some((option) => option.optionId === optionId)) {
+        return fail("authentication action is not offered by the current recovery request", 409);
+      }
+      const sent = this.hub.sendToRunner(session.runnerId, {
+        type: "resolve_permission",
+        sessionId,
+        requestId,
+        optionId,
+      });
+      if (!sent) return fail("runner is offline", 409);
+      this.recordGovernanceAudit(session, pending, "resolution", optionId === null ? "dismissed" : "allowed", actor, now, { optionId });
+      return ok(this.db.getSession(sessionId)!);
+    }
+
     // Continue advances the absolute threshold by the original allowance window. A v47 runner may
     // have cancelled the in-flight turn and held queued prompts at the threshold, so deliver its
     // re-arm BEFORE mutating CP state. Older runners retain the between-turn behavior and receive

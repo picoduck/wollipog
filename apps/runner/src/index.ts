@@ -75,6 +75,7 @@ import {
   withGitExecutionContext,
 } from "./git-ops.js";
 import { SessionManager } from "./session-manager.js";
+import { NativeProviderAuthRecovery } from "./provider-auth-recovery.js";
 import { handleResolveSteeringAttemptMessage, handleSteerSessionMessage } from "./steering-handler.js";
 import {
   CLAUDE_GRACEFUL_STOP_BUDGET_MS,
@@ -338,7 +339,10 @@ function updateAgentAuthStatus(agentId: string, update: AcpAuthRuntime): void {
     (update.capabilities === undefined || sameAcpCapabilities(prior.capabilities, update.capabilities))
   ) return;
   acpAuthStatus.set(agentId, { ...prior, ...update });
-  metadata.agents = overlayAcpAuthStatus(metadata.agents, acpAuthStatus);
+  metadata.agents = overlayAcpAuthStatus(metadata.agents, acpAuthStatus).map((agent) =>
+    agent.id === agentId && update.status !== undefined
+      ? { ...agent, authStatus: update.status }
+      : agent);
   sendUp({
     type: "agents_updated",
     runnerId: config.runnerId,
@@ -444,6 +448,9 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
   cloudTargets,
   () => controlPlaneProtocolVersion,
   dataDirLease.ownerHash,
+  // The existing runner credential is already staged in a protected local file. Reuse it only as
+  // an HMAC key so structural scope/account equality cannot be dictionary-tested from meta.json.
+  new NativeProviderAuthRecovery(undefined, config.token),
 );
 const sessionStarts = new SessionStartFence();
 const pendingShellOpenCancellations = new PendingShellOpenCancellations();
@@ -661,7 +668,10 @@ async function runDiscovery(refreshModels = false): Promise<void> {
       claudeHookFeatureEnabled,
       log,
     );
-    metadata.agents = overlayAcpAuthStatus(metadata.agents, acpAuthStatus);
+    metadata.agents = overlayAcpAuthStatus(metadata.agents, acpAuthStatus).map((agent) => {
+      const runtime = acpAuthStatus.get(agent.id);
+      return runtime?.status ? { ...agent, authStatus: runtime.status } : agent;
+    });
     metadata.editors = editors;
     discoveryDone = true;
     const extra = metadata.agents.length - configAgents.length;

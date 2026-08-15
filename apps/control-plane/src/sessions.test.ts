@@ -3998,6 +3998,33 @@ test("approve delivers resolve_permission and clears the pending approval", () =
   assert.equal(hub.sessionEventCalls.filter((e) => e.payload.kind === "permission_resolved").length, 0);
 });
 
+test("authentication actions remain parked until the runner reports their outcome", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.setPendingApproval(id, {
+    requestId: "provider-auth:recovery-a",
+    title: "Authentication Required — Claude Code",
+    kind: "authentication",
+    options: [{ optionId: "auth:revalidate", name: "Recheck Authentication", kind: "allow_once" }],
+  });
+  db.updateSessionStatus(id, "input_required", Date.now());
+
+  const res = svc.approve(id, "provider-auth:recovery-a", "auth:revalidate");
+  assert.ok(res.ok);
+  assert.deepEqual(hub.sentOfType("resolve_permission").at(-1), {
+    type: "resolve_permission",
+    sessionId: id,
+    requestId: "provider-auth:recovery-a",
+    optionId: "auth:revalidate",
+  });
+  assert.equal(db.getSession(id)!.pendingApproval?.requestId, "provider-auth:recovery-a");
+  assert.equal(db.getSession(id)!.status, "input_required");
+
+  const stale = svc.approve(id, "provider-auth:recovery-a", "auth:not-offered");
+  assert.equal(stale.ok, false);
+  assert.equal(stale.status, 409);
+});
+
 test("approve with a null optionId returns the session to idle", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);
