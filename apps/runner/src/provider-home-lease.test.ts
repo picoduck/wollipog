@@ -86,3 +86,13 @@ test("the whole effective HOME is shared across providers and relative HOME fail
   assert.throws(() => first.acquire({ ...request(home), env: { HOME: "relative" } }), /HOME must be absolute/);
   first.releaseAll();
 });
+
+test("an incomplete provider-home lease fails closed with actionable recovery guidance", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-incomplete-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  mkdirSync(join(home, ".agent-manager", "provider-home-leases-v1", "mutable-home.lock"), {
+    recursive: true,
+  });
+  const registry = new ProviderHomeLeaseRegistry("a".repeat(64));
+  assert.throws(() => registry.acquire(request(home)), /incomplete.*proving no provider process.*quarantine/);
+});

@@ -152,16 +152,21 @@ export class ProviderHomeLeaseRegistry {
     }
     try {
       const marker = join(lockDir, MARKER);
+      const entries = readdirSync(lockDir);
+      if (entries.length === 0) {
+        throw new Error(
+          `provider home lease at ${lockDir} is incomplete; after proving no provider process uses this HOME, quarantine the empty directory and retry`,
+        );
+      }
+      if (entries.length !== 1 || entries[0] !== MARKER) {
+        throw new Error(`provider home lease directory ${lockDir} contains unexpected entries; refusing unsafe recovery`);
+      }
       const existing = readRecord(marker);
       if (existing.hostname !== this.hostname) {
         throw new Error(`provider home is leased by host ${existing.hostname}; use an isolated OS account`);
       }
       if (this.isProcessAlive(existing.pid)) {
         throw new Error(`provider home is already in use by process ${existing.pid}; use bwrap or an isolated OS account`);
-      }
-      const entries = readdirSync(lockDir);
-      if (entries.length !== 1 || entries[0] !== MARKER) {
-        throw new Error(`provider home lease directory ${lockDir} contains unexpected entries; refusing unsafe recovery`);
       }
       const confirmed = readRecord(marker);
       if (confirmed.leaseId !== existing.leaseId) throw new Error("provider home lease changed during recovery; retry");

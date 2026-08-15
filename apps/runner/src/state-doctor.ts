@@ -16,6 +16,7 @@ import type { AgentContext, AgentDriverKind } from "@wollipog/protocol";
 import { adoptLegacyWslExecutionIsolationState } from "./execution-isolation.js";
 import { adoptLegacyCheckpointRefs, withGitExecutionContext } from "./git-ops.js";
 import { runContextCommand } from "./context-command.js";
+import { CheckpointRefOwnershipLedger } from "./checkpoint-ref-ownership.js";
 import type { SessionMeta } from "./session-store.js";
 
 const OWNER_FILE = ".wollipog-runner-owner-v1.json";
@@ -139,7 +140,10 @@ async function inventoryWsl(distro: string): Promise<{ available: boolean; legac
   }
 }
 
-export async function runStateDoctor(argv = process.argv): Promise<void> {
+export async function runStateDoctor(
+  argv = process.argv,
+  writeOutput: (value: string) => unknown = (value) => process.stdout.write(value),
+): Promise<void> {
   const args = parseDoctorArgs(argv);
   const ownerHash = offlineOwner(args.dataDir);
   if (args.command === "inventory") {
@@ -155,7 +159,7 @@ export async function runStateDoctor(argv = process.argv): Promise<void> {
       unreadableSessionMetadata: unreadable,
       ...(wsl ? { wsl } : {}),
     };
-    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    writeOutput(`${JSON.stringify(report, null, 2)}\n`);
     return;
   }
   requireMutation(args);
@@ -166,6 +170,7 @@ export async function runStateDoctor(argv = process.argv): Promise<void> {
     mkdirSync(target, { recursive: true, mode: 0o700 });
     const manifest = files.map((source, index) => ({
       itemId: createHash("sha256").update(basename(source)).digest("hex"),
+      originalName: basename(source),
       storedAs: `${String(index + 1).padStart(4, "0")}.mcp.json`,
     }));
     // Publish the secret-free rollback map before the first move. A crash may leave a partial
@@ -176,7 +181,7 @@ export async function runStateDoctor(argv = process.argv): Promise<void> {
       if (!item) throw new Error("conductor quarantine manifest changed unexpectedly");
       renameSync(source, join(target, item.storedAs));
     }
-    process.stdout.write(`${JSON.stringify({ quarantined: files.length, quarantineId })}\n`);
+    writeOutput(`${JSON.stringify({ quarantined: files.length, quarantineId })}\n`);
     return;
   }
   if (args.command === "quarantine-wsl") {
@@ -186,7 +191,7 @@ export async function runStateDoctor(argv = process.argv): Promise<void> {
       'set -eu; q="$HOME/.agent-manager/state-quarantine/$1"; umask 077; mkdir -p -- "$q"; n=0; for name in provider-state worktrees; do src="$HOME/.agent-manager/$name"; if [ -e "$src" ]; then mv -- "$src" "$q/$name"; n=$((n+1)); fi; done; printf "%s" "$n"',
       "state-doctor", quarantineId,
     ], { cwd: "/", timeoutMs: 30_000, maxBuffer: 1024 });
-    process.stdout.write(`${JSON.stringify({ quarantinedRoots: Number.parseInt(result.stdout.trim(), 10) || 0, quarantineId })}\n`);
+    writeOutput(`${JSON.stringify({ quarantinedRoots: Number.parseInt(result.stdout.trim(), 10) || 0, quarantineId })}\n`);
     return;
   }
   if (!args.sessionId) throw new Error(`${args.command} requires --session-id`);
@@ -195,8 +200,19 @@ export async function runStateDoctor(argv = process.argv): Promise<void> {
     if (meta.checkpointRefVersion !== undefined) throw new Error("session checkpoint refs are already owner-scoped");
     const count = await withGitExecutionContext(meta.context, () =>
       adoptLegacyCheckpointRefs(meta.repoPath, meta.sessionId, ownerHash));
+    // Source refs become an explicitly operator-preserved rollback copy. Remove only their old
+    // cleanup proof before publishing the scoped layout; otherwise startup would classify that
+    // unscoped proof as stale and silently delete the source refs. If metadata publication fails,
+    // the legacy row simply reclaims its legacy proof on the next startup.
+    const ledger = new CheckpointRefOwnershipLedger(args.dataDir);
+    const legacyOwnership = ledger.get({
+      sessionId: meta.sessionId,
+      repoPath: meta.repoPath,
+      context: meta.context,
+    });
+    if (legacyOwnership) ledger.remove(legacyOwnership);
     replaceMeta(path, { ...meta, checkpointRefVersion: 2, updatedAt: Date.now() });
-    process.stdout.write(`${JSON.stringify({ adoptedCheckpointEntries: count, sourcePreserved: true })}\n`);
+    writeOutput(`${JSON.stringify({ adoptedCheckpointEntries: count, sourcePreserved: true })}\n`);
     return;
   }
   if (meta.context.kind !== "wsl") throw new Error("adopt-provider-state requires a WSL session");
@@ -208,5 +224,5 @@ export async function runStateDoctor(argv = process.argv): Promise<void> {
     ownerHash,
   );
   replaceMeta(path, { ...meta, providerStateVersion: 3, updatedAt: Date.now() });
-  process.stdout.write(`${JSON.stringify({ providerState: outcome, sourcePreserved: true })}\n`);
+  writeOutput(`${JSON.stringify({ providerState: outcome, sourcePreserved: true })}\n`);
 }
