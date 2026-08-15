@@ -9,7 +9,9 @@ import { fetchPromptImageReference } from "./prompt-image-fetch.js";
 import {
   acquireRunnerDataDirLease,
   canIgnoreRunnerDataDirDirectorySyncError,
+  legacyRunnerDataDirOwnerHash,
   normalizeControlPlaneEndpoint,
+  readV1RunnerCredentialForAttestation,
   runnerDataDirOwnerHash,
   scopedRunnerCredentialFile,
   type RunnerDataDirIdentity,
@@ -18,10 +20,12 @@ import {
 const FIRST: RunnerDataDirIdentity = {
   runnerId: "runner-first",
   controlPlaneUrl: "ws://127.0.0.1:4317/runner",
+  controlPlaneInstanceId: "11111111-1111-4111-8111-111111111111",
 };
 const SECOND: RunnerDataDirIdentity = {
   runnerId: "runner-second",
   controlPlaneUrl: "wss://manager.example.test/runner",
+  controlPlaneInstanceId: "22222222-2222-4222-8222-222222222222",
 };
 
 function tempRoot(): string {
@@ -408,7 +412,7 @@ test("separate runner roots keep image authentication independent across credent
   }
 });
 
-test("credential scopes include both runner identity and normalized control-plane endpoint", () => {
+test("credential scopes use runner identity and stable control-plane identity, not the endpoint", () => {
   const root = "/runner-data";
   assert.equal(
     normalizeControlPlaneEndpoint("ws://EXAMPLE.test:4317/runner/#fragment"),
@@ -426,11 +430,11 @@ test("credential scopes include both runner identity and normalized control-plan
     scopedRunnerCredentialFile(root, FIRST),
     scopedRunnerCredentialFile(root, { ...FIRST, controlPlaneUrl: "ws://localhost:7777/runner" }),
   );
-  assert.notEqual(
+  assert.equal(
     scopedRunnerCredentialFile(root, SECOND),
     scopedRunnerCredentialFile(root, { ...SECOND, controlPlaneUrl: "wss://manager.example.test:9443/runner" }),
   );
-  assert.notEqual(
+  assert.equal(
     scopedRunnerCredentialFile(root, FIRST),
     scopedRunnerCredentialFile(root, { ...FIRST, controlPlaneUrl: `${FIRST.controlPlaneUrl}?tenant=other` }),
   );
@@ -438,4 +442,66 @@ test("credential scopes include both runner identity and normalized control-plan
     scopedRunnerCredentialFile(root, FIRST),
     scopedRunnerCredentialFile(root, { ...FIRST, runnerId: "another-runner" }),
   );
+  assert.notEqual(
+    scopedRunnerCredentialFile(root, FIRST),
+    scopedRunnerCredentialFile(root, { ...FIRST, controlPlaneInstanceId: SECOND.controlPlaneInstanceId }),
+  );
+});
+
+test("attested restart atomically upgrades a v1 endpoint owner and credential to stable v2", () => {
+  const root = tempRoot();
+  try {
+    const legacyHash = legacyRunnerDataDirOwnerHash(FIRST);
+    const oldCredential = join(root, "credentials", "instances", legacyHash, "active-runner-token");
+    mkdirSync(join(root, "credentials", "instances", legacyHash), { recursive: true });
+    writeFileSync(join(root, ".wollipog-runner-owner-v1.json"), JSON.stringify({
+      version: 1,
+      ownerHash: legacyHash,
+    }), { mode: 0o600 });
+    writeFileSync(oldCredential, "last-known-good", { mode: 0o600 });
+
+    assert.equal(readV1RunnerCredentialForAttestation(root, FIRST), "last-known-good");
+    const upgraded = acquireRunnerDataDirLease(root, FIRST, { allowLegacyEndpointMigration: true });
+    assert.equal(upgraded.dataDir, root);
+    assert.equal(upgraded.ownerHash, runnerDataDirOwnerHash(FIRST));
+    assert.equal(readFileSync(upgraded.credentialFile, "utf8"), "last-known-good");
+    assert.equal(readFileSync(oldCredential, "utf8"), "last-known-good", "rollback credential is preserved");
+    assert.deepEqual(JSON.parse(readFileSync(join(root, ".wollipog-runner-owner-v1.json"), "utf8")), {
+      version: 2,
+      ownerHash: runnerDataDirOwnerHash(FIRST),
+    });
+    upgraded.release();
+
+    const movedEndpoint = acquireRunnerDataDirLease(root, {
+      ...FIRST,
+      controlPlaneUrl: "wss://new-address.example.test:9443/runner",
+    });
+    assert.equal(movedEndpoint.dataDir, root);
+    assert.equal(readFileSync(movedEndpoint.credentialFile, "utf8"), "last-known-good");
+    movedEndpoint.release();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("unproven v1 endpoint ownership remains untouched when an endpoint is reused", () => {
+  const root = tempRoot();
+  try {
+    const legacyHash = legacyRunnerDataDirOwnerHash(FIRST);
+    const oldCredential = join(root, "credentials", "instances", legacyHash, "active-runner-token");
+    mkdirSync(join(root, "credentials", "instances", legacyHash), { recursive: true });
+    writeFileSync(join(root, ".wollipog-runner-owner-v1.json"), JSON.stringify({ version: 1, ownerHash: legacyHash }));
+    writeFileSync(oldCredential, "credential-from-former-control-plane", { mode: 0o600 });
+
+    const isolated = acquireRunnerDataDirLease(root, FIRST);
+    assert.equal(isolated.dataDir, join(root, "runner-instances", runnerDataDirOwnerHash(FIRST)));
+    assert.deepEqual(JSON.parse(readFileSync(join(root, ".wollipog-runner-owner-v1.json"), "utf8")), {
+      version: 1,
+      ownerHash: legacyHash,
+    });
+    assert.equal(readFileSync(oldCredential, "utf8"), "credential-from-former-control-plane");
+    isolated.release();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

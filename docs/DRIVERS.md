@@ -89,22 +89,35 @@ launcher provides kill-on-close descendant containment only; it never claims fil
 restriction, and `network: "deny"` is rejected for that mode.
 
 The bwrap profile maps Claude's `projects` and Codex's `sessions` stores to hashed per-manager-session
-roots under runner data. Provider forks copy the completed source store into the child partition before
+roots under runner data. In WSL, those roots live below
+`~/.agent-manager/runner-instances/<attested-owner>/`, so runners with the same distro user cannot
+reconcile or remove each other's state. Provider forks copy the completed source store into the child partition before
 publishing the child, after polling for a non-empty size-stable provider-specific fork artifact; a
 missing or continuously growing artifact fails the fork. Failed forks and session deletion remove only
 their exact partition. Functional
 resume/fork still depends on the installed CLI tolerating its other read-only indexes/history and is not
-claimed without real-host conformance. Pre-partition sessions copy the legacy provider-wide store once;
-new sessions are marked at creation and never import it. Credentials/config remain read-only, ACP state is not guessed,
+claimed without real-host conformance. Native pre-partition sessions copy the legacy provider-wide store once.
+WSL v1/v2 state is not automatically adopted because runner-id-only or absent markers cannot prove a
+control-plane owner; resume fails with instructions to stop pre-attestation runners and explicitly archive
+or adopt the bytes. New sessions are marked at creation and never import it. Credentials/config remain read-only, ACP state is not guessed,
 and existing provider-mode transcripts are not imported automatically. Failed exact cleanup is journaled;
 startup GC expires runner-owned orphans and enforces the configured per-provider/context byte ceiling while
 protecting every stored session. Pending cleanup/fork records claim short-lived failed partitions for exact
 retry; a surviving session row or in-flight fork target keeps cleanup intent dormant, and a fresh record
 has a one-hour cross-process grace. WSL GC additionally requires the current runner's ownership marker and
-skips an offline distro without aborting other contexts. The unowned legacy shared leaf is retained until
+skips an offline distro without aborting other contexts. New WSL worktree directories and branches carry
+the same attested owner namespace. The unowned legacy shared leaf is retained until
 provider-specific inventory can prove exclusive migration. Fork verification requires non-empty history
 because a provider-native fork always starts from a completed source turn. Network denial is offline/local-model-only because it also
 removes access to cloud model APIs. Provider mode remains the broadest compatibility default.
+
+On upgrade, a persisted Conductor `--mcp-config` argument is rewritten to the attested runner's
+owned data directory before launch. The former `~/.agent-manager/conductor/*.mcp.json` file is never
+updated or deleted automatically: it has no trustworthy owner metadata and may still be used by an
+older runner. To retire those files, stop every pre-attestation runner for the OS account, inspect the
+directory without printing file contents, archive it for rollback, and only then remove it manually.
+Provider-mode Claude/Codex homes and external transcript discovery remain operator-owned shared state;
+use bwrap or separate OS accounts when concurrent control planes require a writable isolation boundary.
 
 `makeDriver(spec, cb): Driver` (`drivers/factory.ts`) switches on `spec.driver`
 (`"acp" | "claude-code" | "codex"`). `AcpDriver` (`drivers/acp-driver.ts`) constructs the existing
