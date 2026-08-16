@@ -348,17 +348,17 @@ function migrateV1Credential(
 }
 
 /** Keep the marker understood by the immediately previous runner generation. The stable v2
- * marker remains authoritative for current runners; v1 records only the latest endpoint that
- * this already-attested stable owner used, so a deliberate binary rollback can reacquire it. */
+ * marker remains authoritative for current runners; v1 is frozen to the endpoint that first
+ * published it so that both generations continue to coordinate through the same lease hash. */
 function ensureLegacyRollbackOwner(
   file: string,
-  legacyOwnerHash: string,
+  rollbackOwnerHash: string,
   stableOwner: OwnerRecord,
   options: RunnerDataDirLeaseOptions,
 ): void {
   const desired = {
     version: 1,
-    ownerHash: legacyOwnerHash,
+    ownerHash: rollbackOwnerHash,
     ...(stableOwner.legacyMigration ? { legacyMigration: stableOwner.legacyMigration } : {}),
   } satisfies LegacyOwnerRecord;
   if (!existsSync(file)) {
@@ -369,8 +369,10 @@ function ensureLegacyRollbackOwner(
   if (!isValidLegacyOwnerRecord(existing)) {
     throw new Error(`runner data directory ${dirname(file)} has invalid legacy owner metadata; refusing unsafe recovery`);
   }
-  if (existing.ownerHash !== desired.ownerHash
-      || JSON.stringify(existing.legacyMigration) !== JSON.stringify(desired.legacyMigration)) {
+  if (existing.ownerHash !== rollbackOwnerHash) {
+    throw new Error(`runner data directory ${dirname(file)} legacy owner changed during lease acquisition; refusing unsafe recovery`);
+  }
+  if (JSON.stringify(existing.legacyMigration) !== JSON.stringify(desired.legacyMigration)) {
     replaceProtected(file, desired, options);
   }
 }
@@ -406,8 +408,9 @@ function acquireRunnerDataDirLeaseAt(
   const legacyMigrationRequired = !ownerExistedAtClaim && readdirSync(dataDir).some(
     (entry) => entry !== LEASE_FILE && entry !== RECOVERY_DIR,
   );
+  let rollbackOwnerHash = legacyOwnerHash;
 
-  if (allowOwnerNamespace && ownerExistedAtClaim) {
+  if (ownerExistedAtClaim) {
     const hasStableOwner = existsSync(ownerPath);
     let existingOwner: OwnerRecord | LegacyOwnerRecord;
     if (hasStableOwner) {
@@ -435,7 +438,19 @@ function acquireRunnerDataDirLeaseAt(
           `runner data directory ${dataDir} is already owned by another runner; refusing to record legacy adoption in a replacement namespace`,
         );
       }
-      return acquireRunnerDataDirLeaseAt(join(dataDir, "runner-instances", ownerHash), identity, options, false);
+      if (allowOwnerNamespace) {
+        return acquireRunnerDataDirLeaseAt(join(dataDir, "runner-instances", ownerHash), identity, options, false);
+      }
+      throw new Error(`runner data directory ${dataDir} has conflicting owner metadata; refusing unsafe recovery`);
+    }
+    if (hasStableOwner && existsSync(legacyOwnerPath)) {
+      const legacyOwner = parseRecord<unknown>(legacyOwnerPath);
+      if (!isValidLegacyOwnerRecord(legacyOwner)) {
+        throw new Error(`runner data directory ${dataDir} has invalid legacy owner metadata; refusing unsafe recovery`);
+      }
+      rollbackOwnerHash = legacyOwner.ownerHash;
+    } else if (!hasStableOwner) {
+      rollbackOwnerHash = existingOwner.ownerHash;
     }
   }
 
@@ -447,7 +462,7 @@ function acquireRunnerDataDirLeaseAt(
 
   const lease: LeaseRecord = {
     version: 1,
-    ownerHash,
+    ownerHash: rollbackOwnerHash,
     leaseId,
     pid,
     hostname,
@@ -490,15 +505,16 @@ function acquireRunnerDataDirLeaseAt(
       ) {
         throw new Error(`runner data directory ${dataDir} has an invalid active lease; refusing unsafe recovery`);
       }
-      const canMigrateLegacyEndpoint = options.legacyEndpointMigrationCredentialHash !== undefined
-        && existing.ownerHash === legacyOwnerHash;
-      if (allowOwnerNamespace && existing.ownerHash !== ownerHash && !canMigrateLegacyEndpoint) {
+      if (existing.ownerHash !== rollbackOwnerHash) {
         if (options.adoptLegacyDataDir) {
           throw new Error(
             `runner data directory ${dataDir} is leased by another runner; refusing to record legacy adoption in a replacement namespace`,
           );
         }
-        return acquireRunnerDataDirLeaseAt(join(dataDir, "runner-instances", ownerHash), identity, options, false);
+        if (allowOwnerNamespace && !ownerExistedAtClaim) {
+          return acquireRunnerDataDirLeaseAt(join(dataDir, "runner-instances", ownerHash), identity, options, false);
+        }
+        throw new Error(`runner data directory ${dataDir} has a conflicting active lease; refusing unsafe recovery`);
       }
       if (existing.hostname !== hostname) {
         throw new Error(`runner data directory ${dataDir} is leased by host ${existing.hostname}; use a distinct --data-dir`);
@@ -609,7 +625,7 @@ function acquireRunnerDataDirLeaseAt(
       };
       writeProtected(ownerPath, stableOwner, options);
     }
-    ensureLegacyRollbackOwner(legacyOwnerPath, legacyOwnerHash, stableOwner, options);
+    ensureLegacyRollbackOwner(legacyOwnerPath, rollbackOwnerHash, stableOwner, options);
   } catch (error) {
     release();
     throw error;

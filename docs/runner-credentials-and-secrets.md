@@ -116,14 +116,21 @@ secrets. Native and WSL launches pass resolved values through the child environm
 
 Conductor MCP sessions likewise do not duplicate the active credential. Before opening any mutable
 store, the runner takes an exclusive process lease on `dataDir` and checks a protected owner marker
-bound to the runner id and normalized control-plane endpoint. Loopback ports are excluded because
-managed SSH tunnel ports are allocated per control-plane process; non-loopback ports remain part of
-the endpoint identity. A live second process fails before it
-can stage a credential or open a session store. The marker remains after shutdown, so a different
-runner or control plane cannot later adopt the same root silently. Instead, a different owner is
-placed deterministically below `<dataDir>/runner-instances/<owner-hash>`. This also lets a managed
-machine that is removed and later added with a new runner id start cleanly without taking over the
-old sessions. Operators may still use `--data-dir` or `RUNNER_DATA_DIR` for an explicit root.
+bound to the runner id and the control plane's durable instance id. A frozen v1 marker retains the
+normalized endpoint used when that compatibility marker was first published, and both current and
+rollback runners write the shared lease with its v1 hash. A live process therefore fails before a
+runner from either generation can stage a credential or open a session store. The stable marker
+remains after shutdown, so a different runner or control plane cannot later adopt the same root
+silently. Instead, a different owner is placed deterministically below
+`<dataDir>/runner-instances/<owner-hash>`. This also lets a managed machine that is removed and later
+added with a new runner id start cleanly without taking over the old sessions. Operators may still
+use `--data-dir` or `RUNNER_DATA_DIR` for an explicit root.
+
+When rolling back to the preceding endpoint-owned runner generation, use the endpoint and runner
+configuration that originally published the v1 marker. A current runner may move endpoints because
+its stable ownership no longer depends on the address, but the v1 marker is deliberately not
+rewritten: after such a move, the rollback-era endpoint/configuration is required to reopen the
+same root while preserving cross-version mutual exclusion.
 
 The active credential is mode 0600 at
 `<dataDir>/credentials/instances/<owner-hash>/active-runner-token`. Per-session Conductor MCP
