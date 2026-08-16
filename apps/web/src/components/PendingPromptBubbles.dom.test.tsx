@@ -36,6 +36,39 @@ test("queued and active-turn prompts never create a legacy optimistic transcript
   assert.equal(shouldShowOptimisticPrompt("idle", true), false);
 });
 
+test("one pending action disables every prompt action", async () => {
+  const container = domWindow.document.createElement("div");
+  domWindow.document.body.append(container);
+  const root = createRoot(container as unknown as HTMLDivElement);
+  const actions: string[] = [];
+  try {
+    await act(async () => {
+      root.render(<PendingPromptBubbles
+        prompts={[
+          pending({ commandId: "prompt-1", canCancel: true }),
+          pending({ commandId: "prompt-2", state: "failed", canDismiss: true }),
+        ]}
+        deliveredCommandIds={new Set()}
+        liveQueueIds={new Set()}
+        canCancelLive
+        pendingAction="prompt-1"
+        onCancelPending={() => actions.push("pending")}
+        onCancelLive={() => actions.push("live")}
+        onDismiss={() => actions.push("dismiss")}
+      />);
+    });
+    const buttons = [...container.querySelectorAll("button")];
+    assert.equal(buttons.length, 2);
+    assert.equal(buttons.every((button) => button.disabled), true);
+    assert.match(container.textContent ?? "", /Cancelling…/);
+    await act(async () => { buttons[1]!.click(); });
+    assert.deepEqual(actions, []);
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
 test("pending prompts render as stable transcript bubbles and reconcile by command id", async () => {
   const container = domWindow.document.createElement("div");
   domWindow.document.body.append(container);

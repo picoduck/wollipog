@@ -80,7 +80,7 @@ Pre-v57 runners remain compatible with terminal open/input/close, but their proc
 exited on disconnect because they cannot prove a surviving inventory; update before relying on
 detach/reconnect recovery.
 
-Protocol v77 carries ordinary prompts admitted during queued/starting launches through the durable
+Protocol v78 carries ordinary prompts admitted during queued/starting launches through the durable
 command journal. The command ID is also the runner queue ID and the canonical user-event identity,
 so the dashboard can show one pending transcript bubble across reload, retry, live admission, and
 history reconciliation without matching user text. Cancellation remains deliberately narrow: the
@@ -105,6 +105,7 @@ scrubbing the stored prompt payload.
 | Fork a provider conversation | 28 |
 | Accept retryable durable automation commands | 53 |
 | Reconcile detachable terminal sessions and bounded history | 57 |
+| Preserve queued prompt identity across admission and reconnects | 78 |
 
 A missing protocol version is treated as **unknown**, not optimistically supported. Protocol
 metadata itself arrived in v15, so the dashboard cannot prove which earlier commands such a runner

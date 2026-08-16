@@ -45,6 +45,7 @@ export function PendingPromptBubbles({
 }) {
   return prompts.filter((prompt) => !deliveredCommandIds.has(prompt.commandId)).map((prompt) => {
     const busy = pendingAction === prompt.commandId;
+    const actionPending = pendingAction !== undefined;
     const cancelPending = prompt.canCancel === true;
     const cancelLive = !cancelPending && !prompt.canDismiss && canCancelLive &&
       liveQueueIds.has(prompt.commandId);
@@ -73,7 +74,7 @@ export function PendingPromptBubbles({
                 <button
                   type="button"
                   className="btn ghost sm"
-                  disabled={busy}
+                  disabled={actionPending}
                   aria-label="Cancel Pending Message"
                   aria-describedby={detailsId}
                   onClick={() => cancelPending
@@ -87,7 +88,7 @@ export function PendingPromptBubbles({
                 <button
                   type="button"
                   className="btn ghost sm"
-                  disabled={busy}
+                  disabled={actionPending}
                   aria-label="Dismiss Pending Message"
                   aria-describedby={detailsId}
                   onClick={() => onDismiss(prompt.commandId)}
