@@ -159,6 +159,7 @@ export function InboxView({
   const activePointerIdsRef = useRef(new Set<number>());
   const structuralOrderKeyRef = useRef<string | null>(null);
   const liveIdsRef = useRef<string[]>([]);
+  const displayedIdsRef = useRef<string[]>([]);
   const tabRefs = useRef(new Map<string, HTMLButtonElement>());
   const previousSurfaceRef = useRef<{ expanded: boolean; sessionId: string | null } | null>(null);
   const expandedSessionIdRef = useRef(expandedSessionId);
@@ -219,19 +220,17 @@ export function InboxView({
   }, [exitPending, query, deferredQuery]);
 
   const exitSearch = useCallback(() => {
-    clearHeldOrder();
     setQuery("");
     setExitPending(true);
-  }, [clearHeldOrder]);
+  }, []);
 
   // Typing CANCELS a pending handoff. Escape on a nonempty query, then a new search before the
   // deferred value converged, used to leave the request armed: clearing the second search with
   // Backspace fired the stale handoff and stole focus out of the box the user was still typing in.
   const changeQuery = useCallback((next: string) => {
-    clearHeldOrder();
     setQuery(next);
     setExitPending(false);
-  }, [clearHeldOrder]);
+  }, []);
 
   useEffect(() => {
     window.addEventListener("wollipog:clear-inbox-query", exitSearch);
@@ -386,9 +385,16 @@ export function InboxView({
     return reconcileInboxItems(heldOrder, liveEntries, (entry) => entry.session.id);
   }, [heldOrder, liveEntries]);
   const displayedIds = useMemo(() => entries.map((entry) => entry.session.id), [entries]);
+  displayedIdsRef.current = displayedIds;
   const displayedSelection = repairedSelection && displayedIds.includes(repairedSelection) ? repairedSelection : null;
   const displayedSelectedSession = displayedSelection ? sessions.get(displayedSelection) ?? null : null;
   const expanded = expandedSessionId !== null;
+  useEffect(() => {
+    if (!expanded) return;
+    activePointerIdsRef.current.clear();
+    targetPointerIdsRef.current.clear();
+    clearHeldOrder();
+  }, [clearHeldOrder, expanded]);
   const surfaceSessionId = expandedSessionId ?? selectedSession?.id ?? null;
 
   useLayoutEffect(() => {
@@ -425,8 +431,8 @@ export function InboxView({
   const holdDisplayedOrder = useCallback(() => {
     if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
     settleTimerRef.current = null;
-    setHeldOrder((current) => current ?? displayedIds);
-  }, [displayedIds]);
+    setHeldOrder((current) => current ?? displayedIdsRef.current);
+  }, []);
 
   const holdOrderAfterNavigation = useCallback(() => {
     holdDisplayedOrder();
