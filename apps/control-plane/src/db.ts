@@ -30,6 +30,8 @@ import {
   runnerSupportsProtocol,
   validatePromptImageInputs,
   type AutomationAuditEvent,
+  type AccessScopeChangePreview,
+  type AccessScopeAuditView,
   type AutomationAuditEventKind,
   type AutomationCommandState,
   type AutomationCommandView,
@@ -1129,8 +1131,34 @@ CREATE TABLE IF NOT EXISTS boxes (
   auto_reconnect   INTEGER NOT NULL DEFAULT 1,
   deployed_version TEXT,
   triple           TEXT,
+  runner_data_dir  TEXT,
+  legacy_adoption_epoch TEXT,
+  legacy_adoption_pending INTEGER NOT NULL DEFAULT 0,
+  legacy_adoption_authorized_by TEXT,
+  legacy_adoption_authorized_role TEXT,
+  legacy_adoption_authorized_at INTEGER,
+  legacy_adoption_completed_at INTEGER,
   created_at       INTEGER NOT NULL,
   updated_at       INTEGER NOT NULL
+);
+
+-- Canonical legacy-root ownership audit is keyed by the persisted SSH connection identity, not a
+-- box FK: deleting the adopter must not make surviving/future legacy siblings forget remote owner
+-- bytes that remain on disk. The boxes legacy_* columns are retained as a rollback-compatible
+-- per-box mirror, but all account admission/projection reads this table.
+CREATE TABLE IF NOT EXISTS legacy_ssh_account_adoptions (
+  ssh_target                TEXT NOT NULL,
+  ssh_port                  INTEGER NOT NULL,
+  epoch                     TEXT NOT NULL,
+  status                    TEXT NOT NULL CHECK (status IN ('pending','completed')),
+  adopter_box_id            TEXT NOT NULL,
+  authorized_by             TEXT NOT NULL,
+  authorized_role           TEXT NOT NULL CHECK (authorized_role IN ('owner','admin')),
+  authorized_at             INTEGER NOT NULL,
+  completed_at              INTEGER,
+  completed_credential_id   TEXT,
+  completed_binary_identity TEXT,
+  PRIMARY KEY (ssh_target, ssh_port)
 );
 
 -- Paired devices: revocable bearer tokens for REST + /ui access. token_hash is sha256(token)
@@ -1328,6 +1356,34 @@ CREATE TABLE IF NOT EXISTS mutation_audit_archive (
 );
 CREATE INDEX IF NOT EXISTS idx_mutation_audit_archive_org
   ON mutation_audit_archive(organization_id, created_at DESC, row_id DESC);
+
+-- Scope transitions need enough content-safe evidence to reconstruct the exact privacy change.
+-- No names, request bodies, credentials, paths, or confirmation tokens are retained.
+CREATE TABLE IF NOT EXISTS access_scope_audit (
+  row_id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  scope_change_id       TEXT NOT NULL UNIQUE,
+  mutation_audit_id     TEXT,
+  actor_id               TEXT NOT NULL,
+  user_id                TEXT NOT NULL,
+  device_id              TEXT,
+  organization_id        TEXT NOT NULL,
+  resource               TEXT NOT NULL CHECK (resource IN ('project','workspace')),
+  resource_id            TEXT NOT NULL,
+  runner_id              TEXT,
+  old_organization_id    TEXT NOT NULL,
+  old_owner_kind         TEXT NOT NULL CHECK (old_owner_kind IN ('organization','user','team')),
+  old_owner_id           TEXT NOT NULL,
+  new_organization_id    TEXT NOT NULL,
+  new_owner_kind         TEXT NOT NULL CHECK (new_owner_kind IN ('organization','user','team')),
+  new_owner_id           TEXT NOT NULL,
+  affected_project_ids   TEXT NOT NULL,
+  active_session_ids     TEXT NOT NULL,
+  session_ids            TEXT NOT NULL,
+  narrowed_session_ids   TEXT NOT NULL,
+  created_at             INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_access_scope_audit_org
+  ON access_scope_audit(organization_id, created_at DESC, row_id DESC);
 
 CREATE TABLE IF NOT EXISTS devices (
   id           TEXT PRIMARY KEY,
@@ -2068,7 +2124,28 @@ interface BoxRow {
   auto_reconnect: number;
   deployed_version: string | null;
   triple: string | null;
+  runner_data_dir: string | null;
+  legacy_adoption_epoch: string | null;
+  legacy_adoption_pending: number;
+  legacy_adoption_authorized_by: string | null;
+  legacy_adoption_authorized_role: string | null;
+  legacy_adoption_authorized_at: number | null;
+  legacy_adoption_completed_at: number | null;
   created_at: number;
+}
+
+interface LegacySshAccountAdoptionRow {
+  ssh_target: string;
+  ssh_port: number;
+  epoch: string;
+  status: "pending" | "completed";
+  adopter_box_id: string;
+  authorized_by: string;
+  authorized_role: "owner" | "admin";
+  authorized_at: number;
+  completed_at: number | null;
+  completed_credential_id: string | null;
+  completed_binary_identity: string | null;
 }
 
 /** Data the control plane needs to tell a runner how to launch a session. */
@@ -2145,6 +2222,14 @@ export interface BoxConfig {
   deployedVersion: string | null;
   /** Target triple detected on a previous bootstrap; null until first detection. */
   triple: string | null;
+  /** Server-derived home-relative root for new managed boxes; null preserves the legacy default. */
+  runnerDataDir: string | null;
+  /** Durable one-time authorization carried across CP restarts until exact registration. */
+  pendingLegacyDataAdoptionEpoch: string | null;
+  /** Latest authorization, including completed rows; non-null makes authorization create-once. */
+  legacyDataAdoptionEpoch: string | null;
+  /** Canonical durable state for the legacy root shared by this exact SSH target and port. */
+  legacyDataAccountStatus: "unclaimed" | "pending" | "adopted";
 }
 
 export interface NewBoxInput {
@@ -2154,6 +2239,8 @@ export interface NewBoxInput {
   sshPort: number;
   workspaces: { id: string; name: string; path: string }[];
   autoReconnect: boolean;
+  /** Server-derived home-relative runner root. Null is reserved for migrated legacy rows. */
+  runnerDataDir?: string | null;
   /** Server-derived ownership reserved before the runner's first registration. */
   scope?: ResourceScope;
   now: number;
@@ -3067,6 +3154,55 @@ export class ControlPlaneDb {
     } catch {
       /* column already present */
     }
+    for (const column of [
+      "runner_data_dir TEXT",
+      "legacy_adoption_epoch TEXT",
+      "legacy_adoption_pending INTEGER NOT NULL DEFAULT 0",
+      "legacy_adoption_authorized_by TEXT",
+      "legacy_adoption_authorized_role TEXT",
+      "legacy_adoption_authorized_at INTEGER",
+      "legacy_adoption_completed_at INTEGER",
+    ]) {
+      try {
+        db.exec(`ALTER TABLE boxes ADD COLUMN ${column}`);
+      } catch {
+        /* column already present */
+      }
+    }
+    // Older databases must receive the rollback-compatible box mirror columns before this
+    // backfill is prepared. CREATE TABLE IF NOT EXISTS does not upgrade an existing boxes table,
+    // and SQLite resolves SELECT columns even when boxes has no rows.
+    db.exec(
+      `CREATE TABLE IF NOT EXISTS legacy_ssh_account_adoptions (
+         ssh_target TEXT NOT NULL,
+         ssh_port INTEGER NOT NULL,
+         epoch TEXT NOT NULL,
+         status TEXT NOT NULL CHECK (status IN ('pending','completed')),
+         adopter_box_id TEXT NOT NULL,
+         authorized_by TEXT NOT NULL,
+         authorized_role TEXT NOT NULL CHECK (authorized_role IN ('owner','admin')),
+         authorized_at INTEGER NOT NULL,
+         completed_at INTEGER,
+         completed_credential_id TEXT,
+         completed_binary_identity TEXT,
+         PRIMARY KEY (ssh_target, ssh_port)
+       )`,
+    );
+    db.exec(
+      `INSERT OR IGNORE INTO legacy_ssh_account_adoptions
+         (ssh_target, ssh_port, epoch, status, adopter_box_id, authorized_by, authorized_role,
+          authorized_at, completed_at, completed_binary_identity)
+       SELECT trim(ssh_target), ssh_port, legacy_adoption_epoch,
+              CASE WHEN legacy_adoption_pending=1 THEN 'pending' ELSE 'completed' END,
+              box_id, legacy_adoption_authorized_by, legacy_adoption_authorized_role,
+              legacy_adoption_authorized_at, legacy_adoption_completed_at, deployed_version
+         FROM boxes
+        WHERE legacy_adoption_epoch IS NOT NULL
+          AND legacy_adoption_authorized_by IS NOT NULL
+          AND legacy_adoption_authorized_role IN ('owner','admin')
+          AND legacy_adoption_authorized_at IS NOT NULL
+        ORDER BY legacy_adoption_pending DESC, legacy_adoption_authorized_at ASC, box_id ASC`,
+    );
     // One-time backfill for rows that predate message_count (and any row that somehow lost it):
     // cheap at open (one scan), and keeps sessionView free of per-row COUNT(*) forever after.
     db.exec(
@@ -3482,6 +3618,7 @@ export class ControlPlaneDb {
     runnerId: string,
     input: { name: string; path: string },
     now = Date.now(),
+    requestedScope?: ResourceScope,
   ): WorkspaceInfo {
     const name = input.name.trim();
     const path = input.path.trim();
@@ -3490,8 +3627,16 @@ export class ControlPlaneDb {
     if (!projectScope) throw new Error("project not found");
     const runnerScope = this.runnerScope(runnerId);
     if (!runnerScope) throw new Error("runner not found");
-    if (!scopeAudienceContained(projectScope, runnerScope)) {
+    if (!this.scopeAudienceContainedWithMembership(projectScope, runnerScope)) {
       throw new Error("project access must not expose a private runner");
+    }
+    const workspaceScope = requestedScope ?? projectScope;
+    if (workspaceScope.organizationId !== projectScope.organizationId ||
+        !this.scopeAudienceContainedWithMembership(projectScope, workspaceScope)) {
+      throw new Error("project access must not expose a private workspace");
+    }
+    if (!this.scopeAudienceContainedWithMembership(workspaceScope, runnerScope)) {
+      throw new Error("location access must not expose a private runner");
     }
     const existing = this.stmt(
       `SELECT id FROM workspaces WHERE runner_id=? AND path=?
@@ -3505,13 +3650,13 @@ export class ControlPlaneDb {
     this.atomic(() => {
       this.stmt("INSERT INTO workspace_extras (runner_id, id, name, path, created_at) VALUES (?, ?, ?, ?, ?)")
         .run(runnerId, id, name, path, now);
-      const ownerId = projectScope.owner.kind === "organization" ? projectScope.owner.organizationId
-        : projectScope.owner.kind === "user" ? projectScope.owner.userId : projectScope.owner.teamId;
+      const ownerId = workspaceScope.owner.kind === "organization" ? workspaceScope.owner.organizationId
+        : workspaceScope.owner.kind === "user" ? workspaceScope.owner.userId : workspaceScope.owner.teamId;
       this.stmt(
         `INSERT INTO workspace_ownership
          (runner_id, workspace_id, organization_id, owner_kind, owner_id, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      ).run(runnerId, id, projectScope.organizationId, projectScope.owner.kind, ownerId, now, now);
+      ).run(runnerId, id, workspaceScope.organizationId, workspaceScope.owner.kind, ownerId, now, now);
       this.addProjectLocation(projectId, { runnerId, workspaceId: id }, now);
     });
     return { id, name, path };
@@ -3587,6 +3732,7 @@ export class ControlPlaneDb {
   }
 
   private projectView(row: ProjectRow, principal?: AuthPrincipal): ProjectView {
+    const projectScope = this.projectScope(row.id);
     const locationRows = this.stmt(
       `SELECT id, project_id, runner_id, workspace_id, name, path, source, last_seen_at,
               detached_at, removed_at, created_at, updated_at
@@ -3627,7 +3773,8 @@ export class ControlPlaneDb {
       id: row.id,
       name: row.name,
       hidden: row.hidden_at !== null,
-      audience: this.projectScope(row.id)?.owner.kind,
+      audience: projectScope?.owner.kind,
+      ...(projectScope ? { scope: projectScope } : {}),
       canManage: principal ? this.canManageProject(principal, row.id) : true,
       locations: locationRows.map((location) => ({
         id: location.id,
@@ -3639,6 +3786,13 @@ export class ControlPlaneDb {
         source: location.source,
         availability: this.projectLocationAvailability(location),
         isDefault: location.id === row.default_location_id,
+        ...(() => {
+          const scope = this.workspaceScope(location.runner_id, location.workspace_id) ?? projectScope;
+          return scope ? {
+            scope,
+            canManage: principal ? this.canManageWorkspace(principal, location.runner_id, location.workspace_id) : true,
+          } : {};
+        })(),
         activeSessionCount: locationSessionCounts.get(location.id)?.activeSessionCount ?? 0,
         unarchivedSessionCount: locationSessionCounts.get(location.id)?.unarchivedSessionCount ?? 0,
         totalSessionCount: locationSessionCounts.get(location.id)?.totalSessionCount ?? 0,
@@ -3971,7 +4125,8 @@ export class ControlPlaneDb {
     if (!workspace) throw new Error("workspace not found");
     const projectScope = this.projectScope(projectId);
     const locationScope = this.workspaceScope(input.runnerId, input.workspaceId) ?? this.runnerScope(input.runnerId);
-    if (!projectScope || !locationScope || !scopeAudienceContained(projectScope, locationScope)) {
+    if (!projectScope || !locationScope ||
+        !this.scopeAudienceContainedWithMembership(projectScope, locationScope)) {
       throw new Error("project access must not expose a private workspace");
     }
     const locationId = detached?.id ?? `loc_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
@@ -4019,7 +4174,8 @@ export class ControlPlaneDb {
     const sourceScope = this.projectScope(location.projectId);
     const targetScope = this.projectScope(targetProjectId);
     const locationScope = this.workspaceScope(location.runnerId, location.workspaceId) ?? sourceScope;
-    if (!sourceScope || !targetScope || !locationScope || !scopeAudienceContained(targetScope, locationScope)) {
+    if (!sourceScope || !targetScope || !locationScope ||
+        !this.scopeAudienceContainedWithMembership(targetScope, locationScope)) {
       throw new Error("target project access must not expose a private workspace");
     }
     const workspace = this.workspaceLocationDefinition(location.runnerId, location.workspaceId);
@@ -4033,7 +4189,7 @@ export class ControlPlaneDb {
       "SELECT id FROM sessions WHERE project_location_id=?",
     ).all(locationId) as unknown as Array<{ id: string }>).map((row) => row.id)) {
       const sessionScope = this.sessionScope(sessionId);
-      if (!sessionScope || !scopeAudienceContained(sessionScope, targetScope)) {
+      if (!sessionScope || !this.scopeAudienceContainedWithMembership(sessionScope, targetScope)) {
         throw new Error("target project cannot contain every session at this location");
       }
     }
@@ -4145,20 +4301,21 @@ export class ControlPlaneDb {
     const executionScope = session.workspaceId
       ? this.workspaceScope(session.runnerId, session.workspaceId) ?? this.runnerScope(session.runnerId)
       : this.runnerScope(session.runnerId);
-    if (projectScope && (!executionScope || !scopeAudienceContained(projectScope, executionScope))) {
+    if (projectScope &&
+        (!executionScope || !this.scopeAudienceContainedWithMembership(projectScope, executionScope))) {
       throw new Error("project access would expose the execution Location");
     }
     const sessionScope = this.sessionScope(sessionId);
     if (!sessionScope) throw new Error("session ownership is unavailable");
-    let adoptProjectScope = false;
-    if (projectScope && !scopeAudienceContained(sessionScope, projectScope)) {
-      // The only supported audience expansion is an explicit personal-session share into a team
-      // the acting user can access. Organization/team sessions are never silently narrowed into a
-      // different owner, and user-to-user transfers remain a separate ownership concern.
-      adoptProjectScope = Boolean(adoptTeamProjectForUserId &&
-        sessionScope.owner.kind === "user" && sessionScope.owner.userId === adoptTeamProjectForUserId &&
-        projectScope.owner.kind === "team");
-      if (!adoptProjectScope) throw new Error("session access is broader than project access");
+    // Explicitly filing a personal session into its team Project is a deliberate share and retains
+    // the established behavior of adopting the team scope, even though membership also proves that
+    // keeping the personal scope would satisfy containment.
+    const adoptProjectScope = Boolean(projectScope && adoptTeamProjectForUserId &&
+      sessionScope.owner.kind === "user" && sessionScope.owner.userId === adoptTeamProjectForUserId &&
+      projectScope.owner.kind === "team");
+    if (projectScope && !adoptProjectScope &&
+        !this.scopeAudienceContainedWithMembership(sessionScope, projectScope)) {
+      throw new Error("session access is broader than project access");
     }
     this.atomic(() => {
       // A deliberate personal-to-team share adopts the team audience atomically. Safe filing into
@@ -4550,6 +4707,18 @@ export class ControlPlaneDb {
     ).get(runnerId, tokenHash));
   }
 
+  /** Read-only pre-registration verification. Attestation must not activate a pending token,
+   * revoke the previous active token, or update last-used timestamps before the runner has safely
+   * acquired its local stores. */
+  verifyRunnerCredentialForAttestation(runnerId: string, tokenHash: string, now: number): boolean {
+    return Boolean(this.stmt(
+      `SELECT 1 FROM runner_credentials
+       WHERE runner_id=? AND token_hash=? AND (
+         status='active' OR (status='pending' AND expires_at IS NOT NULL AND expires_at>?)
+       )`,
+    ).get(runnerId, tokenHash, now));
+  }
+
   revokeRunnerCredential(runnerId: string, organizationId: string, now: number): boolean {
     const changed = this.stmt(
       `UPDATE runner_credentials SET status='revoked', revoked_at=?
@@ -4922,6 +5091,17 @@ export class ControlPlaneDb {
     if (!team) return null;
     this.db.exec("BEGIN");
     try {
+      const proposedMemberIds = new Set(input.memberUserIds);
+      const removedMemberIds = new Set((this.stmt(
+        "SELECT user_id FROM identity_team_members WHERE team_id=?",
+      ).all(input.teamId) as unknown as Array<{ user_id: string }>)
+        .map((row) => row.user_id)
+        .filter((userId) => !proposedMemberIds.has(userId)));
+      this.assertTeamMemberRemovalPreservesResourceContainment(
+        input.teamId,
+        input.organizationId,
+        removedMemberIds,
+      );
       this.stmt("DELETE FROM identity_team_members WHERE team_id=?").run(input.teamId);
       this.insertIdentityTeamMembers(input.teamId, input.organizationId, input.memberUserIds, input.now);
       this.stmt("UPDATE identity_teams SET updated_at=? WHERE team_id=?").run(input.now, input.teamId);
@@ -4932,6 +5112,76 @@ export class ControlPlaneDb {
     }
     const context = { ...this.localIdentityContext(), organizationId: input.organizationId };
     return this.identityAdministration(context).teams.find((item) => item.teamId === input.teamId)!;
+  }
+
+  /** Membership can be part of a persisted privacy invariant: a user-owned resource is safely
+   * nested inside a team-owned parent only while that user remains a member of the team. */
+  private assertTeamMemberRemovalPreservesResourceContainment(
+    teamId: string,
+    organizationId: string,
+    removedMemberIds: ReadonlySet<string>,
+  ): void {
+    if (removedMemberIds.size === 0) return;
+    const dependency = (
+      narrower: ResourceScope | null,
+      wider: ResourceScope | null,
+      relationship: string,
+    ): void => {
+      if (!narrower || !wider || narrower.organizationId !== organizationId ||
+          wider.organizationId !== organizationId || narrower.owner.kind !== "user" ||
+          wider.owner.kind !== "team" || wider.owner.teamId !== teamId ||
+          !removedMemberIds.has(narrower.owner.userId)) return;
+      throw new Error(
+        `cannot remove user '${narrower.owner.userId}' from this team because ${relationship} ` +
+        "relies on that membership; change the related access scopes first",
+      );
+    };
+    const locations = this.stmt(
+      `SELECT id, project_id, runner_id, workspace_id FROM project_locations
+       WHERE removed_at IS NULL`,
+    ).all() as unknown as Array<{
+      id: string;
+      project_id: string;
+      runner_id: string;
+      workspace_id: string;
+    }>;
+    for (const location of locations) {
+      const projectScope = this.projectScope(location.project_id);
+      const runnerScope = this.runnerScope(location.runner_id);
+      const locationScope = this.workspaceScope(location.runner_id, location.workspace_id) ?? runnerScope;
+      dependency(projectScope, locationScope,
+        `Project '${location.project_id}' containment in Location '${location.id}'`);
+    }
+    const workspaces = this.stmt(
+      "SELECT runner_id, workspace_id FROM workspace_ownership WHERE organization_id=?",
+    ).all(organizationId) as unknown as Array<{ runner_id: string; workspace_id: string }>;
+    for (const workspace of workspaces) {
+      dependency(
+        this.workspaceScope(workspace.runner_id, workspace.workspace_id),
+        this.runnerScope(workspace.runner_id),
+        `Location '${workspace.workspace_id}' containment in Machine '${workspace.runner_id}'`,
+      );
+    }
+    const sessions = this.stmt(
+      "SELECT id, project_id, runner_id, workspace_id FROM sessions",
+    ).all() as unknown as Array<{
+      id: string;
+      project_id: string | null;
+      runner_id: string;
+      workspace_id: string | null;
+    }>;
+    for (const session of sessions) {
+      const sessionScope = this.sessionScope(session.id);
+      const projectScope = session.project_id ? this.projectScope(session.project_id) : null;
+      const runnerScope = this.runnerScope(session.runner_id);
+      const executionScope = session.workspace_id
+        ? this.workspaceScope(session.runner_id, session.workspace_id) ?? runnerScope
+        : runnerScope;
+      dependency(sessionScope, projectScope,
+        `Session '${session.id}' containment in Project '${session.project_id ?? "unknown"}'`);
+      dependency(sessionScope, executionScope,
+        `Session '${session.id}' containment in its execution Location or Machine`);
+    }
   }
 
   private insertIdentityTeamMembers(teamId: string, organizationId: string, userIds: string[], now: number): void {
@@ -5163,7 +5413,19 @@ export class ControlPlaneDb {
       .filter((runner) => this.canAccessRunner(principal, runner.runnerId))
       .map((runner) => ({
         ...runner,
-        workspaces: runner.workspaces.filter((workspace) => this.canAccessWorkspace(principal, runner.runnerId, workspace.id)),
+        ...(() => {
+          const scope = this.runnerScope(runner.runnerId);
+          return scope ? { scope } : {};
+        })(),
+        workspaces: runner.workspaces
+          .filter((workspace) => this.canAccessWorkspace(principal, runner.runnerId, workspace.id))
+          .map((workspace) => {
+            const scope = this.workspaceScope(runner.runnerId, workspace.id);
+            return {
+              ...workspace,
+              ...(scope ? { scope, canManage: this.canManageWorkspace(principal, runner.runnerId, workspace.id) } : {}),
+            };
+          }),
         agents: administers ? runner.agents : runner.agents.map((agent) => ({ ...agent, env: {} })),
         runtime: administers ? runner.runtime : undefined,
       }));
@@ -5171,6 +5433,334 @@ export class ControlPlaneDb {
 
   listSessionsForPrincipal(principal: AuthPrincipal, includeArchived = false): SessionView[] {
     return this.listSessions({ includeArchived }).filter((session) => this.canAccessSession(principal, session.id));
+  }
+
+  private accessScopeChangeToken(input: Omit<AccessScopeChangePreview, "confirmationToken">, evidence: unknown): string {
+    return createHash("sha256").update(JSON.stringify({ input, evidence })).digest("hex");
+  }
+
+  /** Server-only containment that can prove a user's audience is inside a team they actively belong to. */
+  scopeAudienceContainedWithMembership(narrower: ResourceScope, wider: ResourceScope): boolean {
+    if (scopeAudienceContained(narrower, wider)) return true;
+    if (narrower.organizationId !== wider.organizationId ||
+        narrower.owner.kind !== "user" || wider.owner.kind !== "team") return false;
+    return this.stmt(
+      `SELECT 1 FROM identity_team_members member
+       JOIN identity_teams team ON team.team_id=member.team_id
+       JOIN identity_memberships membership
+         ON membership.organization_id=team.organization_id AND membership.user_id=member.user_id
+       WHERE team.organization_id=? AND team.team_id=? AND member.user_id=?`,
+    ).get(narrower.organizationId, wider.owner.teamId, narrower.owner.userId) !== undefined;
+  }
+
+  private accessScopeSessionRows(where: string, args: string[]): Array<{
+    id: string;
+    status: SessionStatus;
+    scope: ResourceScope;
+  }> {
+    const rows = this.stmt(
+      `SELECT sessions.id, sessions.status, ownership.organization_id, ownership.owner_kind, ownership.owner_id
+       FROM sessions JOIN session_ownership ownership ON ownership.session_id=sessions.id
+       WHERE ${where} ORDER BY sessions.id`,
+    ).all(...args) as unknown as Array<{
+      id: string;
+      status: SessionStatus;
+      organization_id: string;
+      owner_kind: "organization" | "user" | "team";
+      owner_id: string;
+    }>;
+    return rows.map((row) => ({ id: row.id, status: row.status, scope: this.scopeFromRow(row) }));
+  }
+
+  private scopeChangeSessionImpact(
+    sessions: Array<{ id: string; status: SessionStatus; scope: ResourceScope }>,
+    targetScope: ResourceScope,
+  ): { activeSessionCount: number; sessionsToNarrow: string[]; incompatibleSessionId?: string } {
+    const activeSessionCount = sessions.filter((session) =>
+      ["queued", "starting", "running", "input_required"].includes(session.status)).length;
+    const sessionsToNarrow: string[] = [];
+    for (const session of sessions) {
+      if (this.scopeAudienceContainedWithMembership(session.scope, targetScope)) continue;
+      if (this.scopeAudienceContainedWithMembership(targetScope, session.scope)) sessionsToNarrow.push(session.id);
+      else return { activeSessionCount, sessionsToNarrow, incompatibleSessionId: session.id };
+    }
+    return { activeSessionCount, sessionsToNarrow };
+  }
+
+  previewProjectAccessScope(projectId: string, targetScope: ResourceScope): AccessScopeChangePreview | null {
+    const project = this.getProject(projectId);
+    const currentScope = this.projectScope(projectId);
+    if (!project || !currentScope || currentScope.organizationId !== targetScope.organizationId) return null;
+    const affectedProjects = [{ projectId, name: project.name }];
+    const sessions = this.accessScopeSessionRows("sessions.project_id=?", [projectId]);
+    const sessionImpact = this.scopeChangeSessionImpact(sessions, targetScope);
+    let reason: string | undefined;
+    const locationEvidence = project.locations.map((location) => ({
+      runnerId: location.runnerId,
+      workspaceId: location.workspaceId,
+      scope: this.workspaceScope(location.runnerId, location.workspaceId) ?? currentScope,
+    }));
+    const incompatibleLocation = locationEvidence.find((location) =>
+      !this.scopeAudienceContainedWithMembership(targetScope, location.scope));
+    if (incompatibleLocation) {
+      reason = "The requested Project access would expose a narrower Location. Change that Location first or choose a narrower Project scope.";
+    } else if (sessionImpact.incompatibleSessionId) {
+      reason = "A session in this Project has an incompatible private owner and cannot be transferred by a Project access change.";
+    }
+    const preview: AccessScopeChangePreview = {
+      resource: "project",
+      resourceId: projectId,
+      currentScope,
+      targetScope,
+      affectedProjects,
+      activeSessionCount: sessionImpact.activeSessionCount,
+      totalSessionCount: sessions.length,
+      sessionsToNarrow: sessionImpact.sessionsToNarrow.length,
+      compatible: reason === undefined,
+      ...(reason ? { reason } : {}),
+    };
+    return preview.compatible ? {
+      ...preview,
+      confirmationToken: this.accessScopeChangeToken(preview, { locationEvidence, sessions }),
+    } : preview;
+  }
+
+  previewWorkspaceAccessScope(
+    runnerId: string,
+    workspaceId: string,
+    targetScope: ResourceScope,
+  ): AccessScopeChangePreview | null {
+    const workspace = this.workspaceLocationDefinition(runnerId, workspaceId);
+    const currentScope = this.workspaceScope(runnerId, workspaceId);
+    const runnerScope = this.runnerScope(runnerId);
+    if (!workspace || !currentScope || !runnerScope || currentScope.organizationId !== targetScope.organizationId) return null;
+    const affectedProjects = this.projectIdsForWorkspace(runnerId, workspaceId).map((projectId) => {
+      const project = this.getProject(projectId)!;
+      return { projectId, name: project.name };
+    });
+    const projectEvidence = affectedProjects.map(({ projectId }) => ({
+      projectId,
+      scope: this.projectScope(projectId),
+    }));
+    const sessions = this.accessScopeSessionRows(
+      "sessions.runner_id=? AND sessions.workspace_id=?",
+      [runnerId, workspaceId],
+    );
+    const sessionImpact = this.scopeChangeSessionImpact(sessions, targetScope);
+    let reason: string | undefined;
+    if (!this.scopeAudienceContainedWithMembership(targetScope, runnerScope)) {
+      reason = "The requested Location access would be broader than its Machine access.";
+    } else if (projectEvidence.some((project) =>
+      !project.scope || !this.scopeAudienceContainedWithMembership(project.scope, targetScope))) {
+      reason = "The requested Location access is narrower than an attached Project. Narrow those Projects first or choose a broader Location scope.";
+    } else if (sessionImpact.incompatibleSessionId) {
+      reason = "A session in this Location has an incompatible private owner and cannot be transferred by a Location access change.";
+    }
+    const preview: AccessScopeChangePreview = {
+      resource: "workspace",
+      resourceId: workspaceId,
+      runnerId,
+      currentScope,
+      targetScope,
+      affectedProjects,
+      activeSessionCount: sessionImpact.activeSessionCount,
+      totalSessionCount: sessions.length,
+      sessionsToNarrow: sessionImpact.sessionsToNarrow.length,
+      compatible: reason === undefined,
+      ...(reason ? { reason } : {}),
+    };
+    return preview.compatible ? {
+      ...preview,
+      confirmationToken: this.accessScopeChangeToken(preview, { runnerScope, projectEvidence, sessions }),
+    } : preview;
+  }
+
+  applyProjectAccessScope(
+    projectId: string,
+    targetScope: ResourceScope,
+    confirmationToken: string,
+    now: number,
+    audit: { principal: HumanPrincipal; mutationAuditId?: string },
+  ): AccessScopeChangePreview | null {
+    const preview = this.previewProjectAccessScope(projectId, targetScope);
+    if (!preview) return null;
+    if (audit.principal.organizationId !== preview.currentScope.organizationId) {
+      throw new Error("access-scope audit actor must belong to the resource organization");
+    }
+    if (!preview.compatible || !preview.confirmationToken) throw new Error(preview.reason ?? "project access change is incompatible");
+    if (preview.confirmationToken !== confirmationToken) throw new Error("access scope changed after preview; review the current impact and try again");
+    const sessions = this.accessScopeSessionRows("sessions.project_id=?", [projectId]);
+    const narrowedSessionIds = sessions
+      .filter((session) => !this.scopeAudienceContainedWithMembership(session.scope, targetScope))
+      .map((session) => session.id);
+    const ownerId = targetScope.owner.kind === "organization" ? targetScope.owner.organizationId
+      : targetScope.owner.kind === "user" ? targetScope.owner.userId : targetScope.owner.teamId;
+    this.atomic(() => {
+      this.stmt(
+        "UPDATE project_ownership SET organization_id=?, owner_kind=?, owner_id=?, updated_at=? WHERE project_id=?",
+      ).run(targetScope.organizationId, targetScope.owner.kind, ownerId, now, projectId);
+      this.stmt("UPDATE projects SET updated_at=? WHERE id=?").run(now, projectId);
+      for (const session of sessions) {
+        if (this.scopeAudienceContainedWithMembership(session.scope, targetScope)) continue;
+        this.stmt(
+          "UPDATE session_ownership SET organization_id=?, owner_kind=?, owner_id=?, updated_at=? WHERE session_id=?",
+        ).run(targetScope.organizationId, targetScope.owner.kind, ownerId, now, session.id);
+      }
+      this.insertAccessScopeAudit({
+        mutationAuditId: audit.mutationAuditId,
+        principal: audit.principal,
+        resource: "project",
+        resourceId: projectId,
+        currentScope: preview.currentScope,
+        targetScope,
+        affectedProjectIds: preview.affectedProjects.map((project) => project.projectId),
+        sessions,
+        narrowedSessionIds,
+        now,
+      });
+    });
+    return preview;
+  }
+
+  applyWorkspaceAccessScope(
+    runnerId: string,
+    workspaceId: string,
+    targetScope: ResourceScope,
+    confirmationToken: string,
+    now: number,
+    audit: { principal: HumanPrincipal; mutationAuditId?: string },
+  ): AccessScopeChangePreview | null {
+    const preview = this.previewWorkspaceAccessScope(runnerId, workspaceId, targetScope);
+    if (!preview) return null;
+    if (audit.principal.organizationId !== preview.currentScope.organizationId) {
+      throw new Error("access-scope audit actor must belong to the resource organization");
+    }
+    if (!preview.compatible || !preview.confirmationToken) throw new Error(preview.reason ?? "location access change is incompatible");
+    if (preview.confirmationToken !== confirmationToken) throw new Error("access scope changed after preview; review the current impact and try again");
+    const sessions = this.accessScopeSessionRows(
+      "sessions.runner_id=? AND sessions.workspace_id=?",
+      [runnerId, workspaceId],
+    );
+    const narrowedSessionIds = sessions
+      .filter((session) => !this.scopeAudienceContainedWithMembership(session.scope, targetScope))
+      .map((session) => session.id);
+    const ownerId = targetScope.owner.kind === "organization" ? targetScope.owner.organizationId
+      : targetScope.owner.kind === "user" ? targetScope.owner.userId : targetScope.owner.teamId;
+    this.atomic(() => {
+      this.stmt(
+        `UPDATE workspace_ownership SET organization_id=?, owner_kind=?, owner_id=?, updated_at=?
+         WHERE runner_id=? AND workspace_id=?`,
+      ).run(targetScope.organizationId, targetScope.owner.kind, ownerId, now, runnerId, workspaceId);
+      for (const session of sessions) {
+        if (this.scopeAudienceContainedWithMembership(session.scope, targetScope)) continue;
+        this.stmt(
+          "UPDATE session_ownership SET organization_id=?, owner_kind=?, owner_id=?, updated_at=? WHERE session_id=?",
+        ).run(targetScope.organizationId, targetScope.owner.kind, ownerId, now, session.id);
+      }
+      for (const project of preview.affectedProjects) {
+        this.stmt("UPDATE projects SET updated_at=? WHERE id=?").run(now, project.projectId);
+      }
+      this.insertAccessScopeAudit({
+        mutationAuditId: audit.mutationAuditId,
+        principal: audit.principal,
+        resource: "workspace",
+        resourceId: workspaceId,
+        runnerId,
+        currentScope: preview.currentScope,
+        targetScope,
+        affectedProjectIds: preview.affectedProjects.map((project) => project.projectId),
+        sessions,
+        narrowedSessionIds,
+        now,
+      });
+    });
+    return preview;
+  }
+
+  private insertAccessScopeAudit(input: {
+    mutationAuditId?: string;
+    principal: HumanPrincipal;
+    resource: "project" | "workspace";
+    resourceId: string;
+    runnerId?: string;
+    currentScope: ResourceScope;
+    targetScope: ResourceScope;
+    affectedProjectIds: string[];
+    sessions: Array<{ id: string; status: SessionStatus }>;
+    narrowedSessionIds: string[];
+    now: number;
+  }): void {
+    const ownerId = (scope: ResourceScope) => scope.owner.kind === "organization"
+      ? scope.owner.organizationId : scope.owner.kind === "user" ? scope.owner.userId : scope.owner.teamId;
+    const activeSessionIds = input.sessions
+      .filter((session) => ["queued", "starting", "running", "input_required"].includes(session.status))
+      .map((session) => session.id);
+    this.stmt(
+      `INSERT INTO access_scope_audit
+       (scope_change_id, mutation_audit_id, actor_id, user_id, device_id, organization_id,
+        resource, resource_id, runner_id,
+        old_organization_id, old_owner_kind, old_owner_id,
+        new_organization_id, new_owner_kind, new_owner_id,
+        affected_project_ids, active_session_ids, session_ids, narrowed_session_ids, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      `scope_${randomUUID().replace(/-/g, "")}`,
+      input.mutationAuditId ?? null,
+      input.principal.actorId,
+      input.principal.userId,
+      input.principal.deviceId,
+      input.principal.organizationId,
+      input.resource,
+      input.resourceId,
+      input.runnerId ?? null,
+      input.currentScope.organizationId,
+      input.currentScope.owner.kind,
+      ownerId(input.currentScope),
+      input.targetScope.organizationId,
+      input.targetScope.owner.kind,
+      ownerId(input.targetScope),
+      JSON.stringify(input.affectedProjectIds),
+      JSON.stringify(activeSessionIds),
+      JSON.stringify(input.sessions.map((session) => session.id)),
+      JSON.stringify(input.narrowedSessionIds),
+      input.now,
+    );
+  }
+
+  listAccessScopeAudit(organizationId: string, limit = 100): AccessScopeAuditView[] {
+    const rows = this.stmt(
+      `SELECT * FROM access_scope_audit WHERE organization_id=?
+       ORDER BY created_at DESC, row_id DESC LIMIT ?`,
+    ).all(organizationId, Math.max(1, Math.min(250, Math.floor(limit)))) as unknown as Array<Record<string, unknown>>;
+    return rows.map((row) => {
+      const scope = (prefix: "old" | "new"): ResourceScope => {
+        const kind = row[`${prefix}_owner_kind`] as "organization" | "user" | "team";
+        const ownerId = row[`${prefix}_owner_id`] as string;
+        return {
+          organizationId: row[`${prefix}_organization_id`] as string,
+          owner: kind === "organization" ? { kind, organizationId: ownerId }
+            : kind === "user" ? { kind, userId: ownerId } : { kind, teamId: ownerId },
+        };
+      };
+      return {
+        scopeChangeId: row.scope_change_id as string,
+        ...(row.mutation_audit_id ? { mutationAuditId: row.mutation_audit_id as string } : {}),
+        actorId: row.actor_id as string,
+        userId: row.user_id as string,
+        ...(row.device_id ? { deviceId: row.device_id as string } : {}),
+        organizationId: row.organization_id as string,
+        resource: row.resource as "project" | "workspace",
+        resourceId: row.resource_id as string,
+        ...(row.runner_id ? { runnerId: row.runner_id as string } : {}),
+        currentScope: scope("old"),
+        targetScope: scope("new"),
+        affectedProjectIds: JSON.parse(row.affected_project_ids as string) as string[],
+        activeSessionIds: JSON.parse(row.active_session_ids as string) as string[],
+        sessionIds: JSON.parse(row.session_ids as string) as string[],
+        narrowedSessionIds: JSON.parse(row.narrowed_session_ids as string) as string[],
+        createdAt: row.created_at as number,
+      };
+    });
   }
 
   setResourceScope(input: {
@@ -5202,10 +5792,10 @@ export class ControlPlaneDb {
     if (input.resource === "workspace" && input.runnerId) {
       for (const projectId of this.projectIdsForWorkspace(input.runnerId, input.resourceId)) {
         const projectScope = this.projectScope(projectId);
-        if (!projectScope || scopeAudienceContained(projectScope, input.scope)) continue;
+        if (!projectScope || this.scopeAudienceContainedWithMembership(projectScope, input.scope)) continue;
         const projectFollowedWorkspaceScope =
-          scopeAudienceContained(projectScope, currentScope) &&
-          scopeAudienceContained(currentScope, projectScope);
+          this.scopeAudienceContainedWithMembership(projectScope, currentScope) &&
+          this.scopeAudienceContainedWithMembership(currentScope, projectScope);
         if (!projectFollowedWorkspaceScope) return false;
         const activeLocationCount = this.stmt(
           `SELECT COUNT(*) AS count FROM project_locations
@@ -5220,17 +5810,18 @@ export class ControlPlaneDb {
       if (!project) return false;
       for (const location of project.locations) {
         const locationScope = this.workspaceScope(location.runnerId, location.workspaceId) ?? currentScope;
-        if (!scopeAudienceContained(input.scope, locationScope)) return false;
+        if (!this.scopeAudienceContainedWithMembership(input.scope, locationScope)) return false;
       }
       for (const sessionId of this.sessionIdsForProject(input.resourceId)) {
         const scope = this.sessionScope(sessionId);
-        if (!scope || !scopeAudienceContained(scope, input.scope)) return false;
+        if (!scope || !this.scopeAudienceContainedWithMembership(scope, input.scope)) return false;
       }
     }
     if (input.resource === "session") {
       const session = this.getSession(input.resourceId);
       const projectScope = session?.projectId ? this.projectScope(session.projectId) : null;
-      clearSessionProject = Boolean(projectScope && !scopeAudienceContained(input.scope, projectScope));
+      clearSessionProject = Boolean(projectScope &&
+        !this.scopeAudienceContainedWithMembership(input.scope, projectScope));
     }
     const table = input.resource === "runner" ? "runner_ownership"
       : input.resource === "workspace" ? "workspace_ownership"
@@ -5251,7 +5842,7 @@ export class ControlPlaneDb {
         ).run(input.scope.organizationId, input.scope.owner.kind, ownerId, input.now, cascadedProjectId);
         for (const sessionId of this.sessionIdsForProject(cascadedProjectId)) {
           const scope = this.sessionScope(sessionId);
-          if (!scope || !scopeAudienceContained(scope, input.scope)) {
+          if (!scope || !this.scopeAudienceContainedWithMembership(scope, input.scope)) {
             this.stmt(
               "UPDATE sessions SET project_id=NULL, project_location_id=NULL, updated_at=? WHERE id=?",
             ).run(input.now, sessionId);
@@ -5405,8 +5996,9 @@ export class ControlPlaneDb {
     try {
       this.stmt(
         `INSERT INTO boxes
-           (box_id, runner_id, ssh_target, ssh_port, workspaces, status, auto_reconnect, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, 'bootstrapping', ?, ?, ?)`,
+           (box_id, runner_id, ssh_target, ssh_port, workspaces, status, auto_reconnect,
+            runner_data_dir, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'bootstrapping', ?, ?, ?, ?)`,
       )
       .run(
         input.boxId,
@@ -5415,6 +6007,7 @@ export class ControlPlaneDb {
         input.sshPort,
         JSON.stringify(input.workspaces),
         input.autoReconnect ? 1 : 0,
+        input.runnerDataDir ?? null,
         input.now,
         input.now,
       );
@@ -5435,6 +6028,82 @@ export class ControlPlaneDb {
       .run(status, lastError, now, boxId);
   }
 
+  authorizeBoxLegacyDataAdoption(input: {
+    boxId: string;
+    epoch: string;
+    authorizedBy: string;
+    authorizedRole: "owner" | "admin";
+    now: number;
+  }): boolean {
+    this.db.exec("BEGIN");
+    try {
+      const account = this.stmt(
+        `INSERT INTO legacy_ssh_account_adoptions
+           (ssh_target, ssh_port, epoch, status, adopter_box_id, authorized_by, authorized_role, authorized_at)
+         SELECT trim(ssh_target), ssh_port, ?, 'pending', box_id, ?, ?, ?
+           FROM boxes
+          WHERE box_id=? AND runner_data_dir IS NULL AND legacy_adoption_epoch IS NULL
+         ON CONFLICT(ssh_target, ssh_port) DO NOTHING`,
+      ).run(input.epoch, input.authorizedBy, input.authorizedRole, input.now, input.boxId);
+      if (account.changes !== 1) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      const mirror = this.stmt(
+        `UPDATE boxes
+            SET legacy_adoption_epoch=?, legacy_adoption_pending=1,
+                legacy_adoption_authorized_by=?, legacy_adoption_authorized_role=?,
+                legacy_adoption_authorized_at=?, legacy_adoption_completed_at=NULL, updated_at=?
+          WHERE box_id=? AND runner_data_dir IS NULL AND legacy_adoption_epoch IS NULL`,
+      ).run(input.epoch, input.authorizedBy, input.authorizedRole, input.now, input.now, input.boxId);
+      if (mirror.changes !== 1) throw new Error("legacy SSH account adoption mirror raced");
+      this.db.exec("COMMIT");
+      return true;
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+      throw error;
+    }
+  }
+
+  completeBoxLegacyDataAdoption(
+    boxId: string,
+    epoch: string,
+    now: number,
+    credentialId?: string,
+    binarySha256?: string,
+  ): boolean {
+    this.db.exec("BEGIN");
+    try {
+      const account = this.stmt(
+        `UPDATE legacy_ssh_account_adoptions
+            SET status='completed', completed_at=?, completed_credential_id=?,
+                completed_binary_identity=?
+          WHERE adopter_box_id=? AND epoch=? AND status='pending'`,
+      ).run(now, credentialId ?? null, binarySha256 ?? null, boxId, epoch);
+      if (account.changes !== 1) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      const mirror = this.stmt(
+        `UPDATE boxes
+            SET legacy_adoption_pending=0, legacy_adoption_completed_at=?, updated_at=?
+          WHERE box_id=? AND legacy_adoption_pending=1 AND legacy_adoption_epoch=?`,
+      ).run(now, now, boxId, epoch);
+      if (mirror.changes !== 1) throw new Error("legacy SSH account adoption completion mirror raced");
+      this.db.exec("COMMIT");
+      return true;
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+      throw error;
+    }
+  }
+
+  boxHasPendingLegacyDataAdoption(boxId: string): boolean {
+    return Boolean(this.stmt(
+      "SELECT 1 FROM legacy_ssh_account_adoptions WHERE adopter_box_id=? AND status='pending'",
+    ).get(boxId));
+  }
+
   setBoxDeployedVersion(boxId: string, version: string, now: number): void {
     this.stmt("UPDATE boxes SET deployed_version=?, updated_at=? WHERE box_id=?").run(version, now, boxId);
   }
@@ -5448,6 +6117,9 @@ export class ControlPlaneDb {
    * `sessions`/`runs` cascades their events/members). Returns the runner id + the removed session
    * ids so the caller can broadcast their removal to the UI. */
   deleteBox(boxId: string): { runnerId: string; sessionIds: string[]; runIds: string[]; podIds: string[] } | null {
+    if (this.boxHasPendingLegacyDataAdoption(boxId)) {
+      throw new Error("cannot delete the Machine while its legacy SSH account adoption is pending");
+    }
     const row = this.stmt("SELECT runner_id FROM boxes WHERE box_id=?").get(boxId) as
       | { runner_id: string }
       | undefined;
@@ -5494,6 +6166,12 @@ export class ControlPlaneDb {
   deleteRunner(runnerId: string): { sessionIds: string[]; runIds: string[]; podIds: string[] } | null {
     const exists = this.stmt("SELECT 1 FROM runners WHERE runner_id=?").get(runnerId);
     if (!exists) return null;
+    const managedBox = this.stmt("SELECT box_id FROM boxes WHERE runner_id=?").get(runnerId) as
+      | { box_id: string }
+      | undefined;
+    if (managedBox && this.boxHasPendingLegacyDataAdoption(managedBox.box_id)) {
+      throw new Error("cannot delete the Machine runner while its legacy SSH account adoption is pending");
+    }
     const sessionIds = (
       this.stmt("SELECT id FROM sessions WHERE runner_id=?").all(runnerId) as unknown as { id: string }[]
     ).map((s) => s.id);
@@ -5565,6 +6243,7 @@ export class ControlPlaneDb {
   }
 
   private boxView(row: BoxRow): BoxView {
+    const accountAdoption = this.legacySshAccountAdoption(row.ssh_target, row.ssh_port);
     return {
       boxId: row.box_id,
       displayName: this.machineDisplayName(row.runner_id),
@@ -5575,6 +6254,17 @@ export class ControlPlaneDb {
       createdAt: row.created_at,
       deployedVersion: row.deployed_version,
       triple: row.triple,
+      runnerDataLayout: row.runner_data_dir === null ? "legacy" : "isolated-v1",
+      legacyDataAdoption: row.legacy_adoption_epoch && row.legacy_adoption_authorized_at !== null
+        ? {
+            status: row.legacy_adoption_pending === 1 ? "pending" : "completed",
+            authorizedAt: row.legacy_adoption_authorized_at,
+            ...(row.legacy_adoption_completed_at === null ? {} : { completedAt: row.legacy_adoption_completed_at }),
+          }
+        : null,
+      legacyDataAccountStatus: accountAdoption
+        ? accountAdoption.status === "pending" ? "pending" : "adopted"
+        : "unclaimed",
     };
   }
 
@@ -5585,6 +6275,7 @@ export class ControlPlaneDb {
     } catch {
       /* malformed; treat as none */
     }
+    const accountAdoption = this.legacySshAccountAdoption(row.ssh_target, row.ssh_port);
     return {
       boxId: row.box_id,
       runnerId: row.runner_id,
@@ -5594,7 +6285,21 @@ export class ControlPlaneDb {
       autoReconnect: row.auto_reconnect === 1,
       deployedVersion: row.deployed_version,
       triple: row.triple,
+      runnerDataDir: row.runner_data_dir,
+      pendingLegacyDataAdoptionEpoch: row.legacy_adoption_pending === 1
+        ? row.legacy_adoption_epoch
+        : null,
+      legacyDataAdoptionEpoch: row.legacy_adoption_epoch,
+      legacyDataAccountStatus: accountAdoption
+        ? accountAdoption.status === "pending" ? "pending" : "adopted"
+        : "unclaimed",
     };
+  }
+
+  private legacySshAccountAdoption(sshTarget: string, sshPort: number): LegacySshAccountAdoptionRow | null {
+    return (this.stmt(
+      "SELECT * FROM legacy_ssh_account_adoptions WHERE ssh_target=? AND ssh_port=?",
+    ).get(sshTarget.trim(), sshPort) as unknown as LegacySshAccountAdoptionRow | undefined) ?? null;
   }
 
   private runnerView(row: RunnerRow): RunnerView {
@@ -6435,7 +7140,7 @@ export class ControlPlaneDb {
       : projectLocationId ? this.projectLocation(projectLocationId)?.projectId ?? null : inferredLocation?.projectId ?? null;
     if (projectId) {
       const projectScope = this.projectScope(projectId);
-      if (!projectScope || !scopeAudienceContained(scope, projectScope)) {
+      if (!projectScope || !this.scopeAudienceContainedWithMembership(scope, projectScope)) {
         if (input.projectId !== undefined || input.projectLocationId !== undefined) {
           throw new Error("session access is broader than project access");
         }
@@ -6524,7 +7229,7 @@ export class ControlPlaneDb {
       ? importedLocation.projectLocation
       : workspaceId ? this.findProjectLocation(runnerId, workspaceId) : null;
     const inferredProject = inferredProjectLocation && this.projectScope(inferredProjectLocation.projectId) &&
-      scopeAudienceContained(scope, this.projectScope(inferredProjectLocation.projectId)!)
+      this.scopeAudienceContainedWithMembership(scope, this.projectScope(inferredProjectLocation.projectId)!)
       ? inferredProjectLocation
       : null;
     const projectId = explicitProject ? explicitProject.projectId : inferredProject?.projectId ?? null;
@@ -6532,7 +7237,7 @@ export class ControlPlaneDb {
     if (projectId === null && projectLocationId !== null) throw new Error("a project location requires a project");
     if (projectId !== null) {
       const projectScope = this.projectScope(projectId);
-      if (!projectScope || !scopeAudienceContained(scope, projectScope)) {
+      if (!projectScope || !this.scopeAudienceContainedWithMembership(scope, projectScope)) {
         throw new Error("session access is broader than project access");
       }
     }
@@ -6671,7 +7376,10 @@ export class ControlPlaneDb {
       : null;
     const authoritativeProjectLocation = authoritativeProjectCandidate && authoritativeScope &&
       this.projectScope(authoritativeProjectCandidate.projectId) &&
-      scopeAudienceContained(authoritativeScope, this.projectScope(authoritativeProjectCandidate.projectId)!)
+      this.scopeAudienceContainedWithMembership(
+        authoritativeScope,
+        this.projectScope(authoritativeProjectCandidate.projectId)!,
+      )
       ? authoritativeProjectCandidate
       : null;
     const expectedHandoffRequest = this.getExecutionHandoffRequest(id);
@@ -6970,7 +7678,8 @@ export class ControlPlaneDb {
     const inferred = session && workspaceId ? this.findProjectLocation(session.runner_id, workspaceId) : null;
     const sessionScope = this.sessionScope(id);
     const projectScope = inferred ? this.projectScope(inferred.projectId) : null;
-    const location = inferred && sessionScope && projectScope && scopeAudienceContained(sessionScope, projectScope)
+    const location = inferred && sessionScope && projectScope &&
+      this.scopeAudienceContainedWithMembership(sessionScope, projectScope)
       ? inferred
       : null;
     this.stmt(

@@ -7,6 +7,7 @@ import {
   buildSeatbeltProfile,
   cloneExecutionIsolationState,
   migrateExecutionIsolationState,
+  adoptLegacyWslExecutionIsolationState,
   parseWslIsolationProbe,
   providerStateKey,
   removeExecutionIsolationState,
@@ -361,6 +362,72 @@ test("WSL isolation probe parsing requires three absolute, well-formed lines", (
   assert.equal(parseWslIsolationProbe("/usr/bin/bwrap\n1000\nrelative\n"), null);
   assert.equal(parseWslIsolationProbe("/usr/bin/bwrap\n1000\n/home/u/../../etc\n"), null);
   assert.equal(parseWslIsolationProbe("/usr/bin/bwrap\nnot-a-uid\n/home/me\n"), null);
+});
+
+test("attested WSL owners get disjoint provider roots and ambiguous v2 state fails closed", async () => {
+  const firstOwner = "1".repeat(64);
+  const secondOwner = "2".repeat(64);
+  const resolve = (ownerHash: string) => resolveExecutionIsolation(
+    bwrap,
+    { kind: "wsl", distro: "Ubuntu" },
+    {
+      platform: "win32",
+      resolveWsl: async () => ({ command: "/usr/bin/bwrap", uid: 1000, home: "/home/me" }),
+      mkdirWsl: async () => {},
+    },
+    { driver: "claude-code", dataDir: "C:/ignored", env: {}, sessionId: "same-session", cwd: "/work", ownerHash },
+  );
+  const [first, second] = await Promise.all([resolve(firstOwner), resolve(secondOwner)]);
+  const firstSource = first?.writableBinds?.[0]?.source;
+  const secondSource = second?.writableBinds?.[0]?.source;
+  assert.match(firstSource ?? "", new RegExp(`/runner-instances/${firstOwner}/provider-state/claude/`));
+  assert.match(secondSource ?? "", new RegExp(`/runner-instances/${secondOwner}/provider-state/claude/`));
+  assert.notEqual(firstSource, secondSource);
+
+  let copied = false;
+  await assert.rejects(() => migrateExecutionIsolationState(
+    bwrap,
+    { kind: "wsl", distro: "Ubuntu" },
+    "claude-code",
+    "C:/ignored",
+    "same-session",
+    {
+      resolveWsl: async () => ({ command: "/usr/bin/bwrap", uid: 1000, home: "/home/me" }),
+      existsWsl: async (_context, path) => path.includes(providerStateKey("same-session")),
+      copyWsl: async () => { copied = true; },
+    },
+    firstOwner,
+  ), (error) => {
+    assert.match((error as Error).message, /no control-plane ownership proof/);
+    assert.match(
+      (error as Error).message,
+      new RegExp(`/provider-state/claude/${providerStateKey("same-session")}/projects`),
+    );
+    assert.match(
+      (error as Error).message,
+      new RegExp(`/runner-instances/${firstOwner}/provider-state/claude/${providerStateKey("same-session")}/projects`),
+    );
+    return true;
+  });
+  assert.equal(copied, false, "unattributable shared bytes remain untouched");
+});
+
+test("explicit offline WSL adoption copies one legacy source and preserves it", async () => {
+  const owner = "a".repeat(64);
+  const copies: Array<{ source: string; target: string }> = [];
+  const result = await adoptLegacyWslExecutionIsolationState(
+    { kind: "wsl", distro: "Ubuntu" }, "claude-code", "same-session", owner,
+    {
+      resolveWsl: async () => ({ command: "/usr/bin/bwrap", uid: 1000, home: "/home/me" }),
+      existsWsl: async (_context, path) => path === `/home/me/.agent-manager/provider-state/claude/${providerStateKey("same-session")}/projects`,
+      copyWsl: async (_context, source, target) => copies.push({ source: source.leaf, target: target.leaf }),
+    },
+  );
+  assert.equal(result, "adopted");
+  assert.deepEqual(copies, [{
+    source: `/home/me/.agent-manager/provider-state/claude/${providerStateKey("same-session")}/projects`,
+    target: `/home/me/.agent-manager/runner-instances/${owner}/provider-state/claude/${providerStateKey("same-session")}/projects`,
+  }]);
 });
 
 test("relative HOME overrides fail closed instead of mounting the wrong state path", async () => {

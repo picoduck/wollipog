@@ -7,6 +7,7 @@ import {
   discardComposerDraft,
   consumeComposerDraftHandoff,
   loadComposerDraft,
+  markComposerDraftAccepted,
   parseComposerDraft,
   reserveComposerDraftSnapshot,
   saveComposerDraft,
@@ -83,6 +84,79 @@ test("conditional deletion consumes only the exact submitted draft snapshot", as
   await saveComposerDraft("conditional", "submitted", submittedImages);
   assert.equal(await deleteComposerDraftIfMatches("conditional", "submitted", submittedImages), true);
   assert.equal(await loadComposerDraft("conditional"), null);
+});
+
+test("provider acceptance suppresses the reserved revision before best-effort cleanup", async () => {
+  const images = [{ mimeType: "image/png", data: "accepted" }];
+  const reserved = await reserveComposerDraftSnapshot("accepted", "submitted", images);
+
+  assert.equal(
+    await markComposerDraftAccepted("accepted", reserved.text, reserved.images, "local", reserved.revision),
+    true,
+  );
+  assert.equal(await loadComposerDraft("accepted"), null, "the accepted revision is unreadable before deletion");
+  assert.equal(
+    await deleteComposerDraftIfMatches("accepted", reserved.text, reserved.images, "local", reserved.revision),
+    true,
+    "cleanup still sees and removes the physical fallback record behind the marker",
+  );
+});
+
+test("unavailable SubtleCrypto cannot block cleanup after provider acceptance", async () => {
+  const reserved = await reserveComposerDraftSnapshot("accepted-without-subtle", "submitted", []);
+  const cryptoDescriptor = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+  const cryptoApi = globalThis.crypto;
+  Object.defineProperty(globalThis, "crypto", {
+    configurable: true,
+    value: { getRandomValues: cryptoApi.getRandomValues.bind(cryptoApi) },
+  });
+  try {
+    assert.equal(
+      await markComposerDraftAccepted(
+        "accepted-without-subtle",
+        reserved.text,
+        reserved.images,
+        "local",
+        reserved.revision,
+      ),
+      true,
+    );
+    assert.equal(
+      await loadComposerDraft("accepted-without-subtle"),
+      null,
+      "the revision-scoped accepted marker does not require a content digest",
+    );
+    assert.equal(
+      await deleteComposerDraftIfMatches(
+        "accepted-without-subtle",
+        reserved.text,
+        reserved.images,
+        "local",
+        reserved.revision,
+      ),
+      true,
+    );
+  } finally {
+    if (cryptoDescriptor) Object.defineProperty(globalThis, "crypto", cryptoDescriptor);
+  }
+  assert.equal(await loadComposerDraft("accepted-without-subtle"), null);
+});
+
+test("provider acceptance does not suppress a newer revision with identical content", async () => {
+  const images = [{ mimeType: "image/png", data: "same" }];
+  const reserved = await reserveComposerDraftSnapshot("accepted-newer", "same text", images);
+  await saveComposerDraft("accepted-newer", "same text", images);
+  const newer = await loadComposerDraft("accepted-newer");
+
+  await markComposerDraftAccepted(
+    "accepted-newer",
+    reserved.text,
+    reserved.images,
+    "local",
+    reserved.revision,
+  );
+  assert.notEqual(newer?.revision, reserved.revision);
+  assert.equal((await loadComposerDraft("accepted-newer"))?.revision, newer?.revision);
 });
 
 test("conditional deletion preserves a newer edit and its attachments", async () => {

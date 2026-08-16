@@ -82,6 +82,7 @@ export function NewSessionDialog({
     projects: storedProjects,
     projectsSupported,
     projectLocationCreationSupported,
+    accessScopeManagementSupported,
     nativeTuiLaunchSupported,
     navigate,
   } = useStore();
@@ -900,6 +901,7 @@ export function NewSessionDialog({
     </Modal>}
     {creatingProject && (
       <CreateProjectDialog
+        accessScopeManagementSupported={accessScopeManagementSupported}
         onClose={() => setCreatingProject(false)}
         onCreated={(project) => {
           projectSelectionChangedRef.current = true;
@@ -918,6 +920,7 @@ export function NewSessionDialog({
         runners={runners}
         boxes={boxes}
         canCreateLocation={projectLocationCreationSupported}
+        accessScopeManagementSupported={accessScopeManagementSupported}
         onClose={() => setAddingLocation(false)}
         onManageConnections={() => {
           setAddingLocation(false);

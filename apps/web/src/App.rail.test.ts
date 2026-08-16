@@ -231,7 +231,7 @@ test("durable Project management is a first-class workspace with a compact Inbox
   assert.match(projectLocationDialog, /targetLink\?\.availability === "runner_removed"[\s\S]*"Relink Location"/,
     "a returned exact workspace offers stable-identity relinking instead of duplicating its tombstone");
   for (const contract of [
-    /await onCreate\(\{ runnerId: selectedRunnerId, name, path: selectedFolder \}\)/,
+    /await onCreate\(\{[\s\S]*runnerId: selectedRunnerId,[\s\S]*path: selectedFolder,[\s\S]*owner: selectedScope\.owner/,
     /Create New Location[\s\S]*<span>Machine<\/span>/,
     /Browse for a Folder…/,
     /<DirectoryPicker/,

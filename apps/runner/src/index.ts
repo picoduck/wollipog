@@ -5,6 +5,7 @@
  */
 
 import { hostname } from "node:os";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import WebSocket from "ws";
@@ -48,6 +49,7 @@ import {
 } from "./config.js";
 import {
   applyConductorFeature,
+  defaultConductorHost,
   provisionConductor,
   removeConductorMcpConfig,
   sweepConductorMcpConfigs,
@@ -129,6 +131,12 @@ import { PendingShellOpenCancellations } from "./pending-shell-open-cancellation
 import { handleShellOpenCommand } from "./shell-open-command.js";
 import { startSessionWithMaterializationFence } from "./session-start-command.js";
 import { handleSessionCancellationCommand } from "./session-cancellation-command.js";
+import {
+  acquireRunnerDataDirLease,
+  readV1RunnerCredentialForAttestation,
+  type RunnerDataDirLease,
+} from "./runner-data-dir.js";
+import { waitForRunnerControlPlaneAttestation } from "./control-plane-attestation.js";
 
 const INITIAL_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 30_000;
@@ -177,18 +185,80 @@ try {
   console.error(`[runner] ${(err as Error).message}`);
   process.exit(1);
 }
+
+async function startRunner(config: RunnerConfig): Promise<void> {
 const log = (msg: string) => console.log(`[runner ${config.runnerId}] ${msg}`);
 const warnLegacyEnvironment = (message: string) => console.warn(`[runner ${config.runnerId}] ${message}`);
 const conductorFeatureEnabled = conductorEnabled(process.env, warnLegacyEnvironment);
 const claudeHookFeatureEnabled = claudeHooksEnabled(process.env, warnLegacyEnvironment);
 warnLegacyClaudeLifetimeEnvironment(process.env, warnLegacyEnvironment);
-const stagedRunnerCredential = stageRunnerCredentialFile(config.dataDir, config.token);
+const v1Credential = readV1RunnerCredentialForAttestation(config.dataDir, {
+  runnerId: config.runnerId,
+  controlPlaneUrl: config.controlPlaneUrl,
+});
+const v1CredentialHash = v1Credential
+  ? createHash("sha256").update(v1Credential).digest("hex")
+  : undefined;
+const attestation = await waitForRunnerControlPlaneAttestation({
+  controlPlaneUrl: config.controlPlaneUrl,
+  runnerId: config.runnerId,
+  token: config.token,
+  ...(v1CredentialHash
+    ? { priorCredentialHash: v1CredentialHash }
+    : {}),
+  onRetry: (error, delayMs) => log(`${error.message}; retrying in ${delayMs}ms`),
+});
+const runnerDataIdentity = {
+  runnerId: config.runnerId,
+  controlPlaneUrl: config.controlPlaneUrl,
+  controlPlaneInstanceId: attestation.instanceId,
+};
+const legacyEndpointMigrationCredentialHash = v1CredentialHash && (
+  v1Credential === config.token || attestation.priorCredentialValid === true
+) ? v1CredentialHash : undefined;
+if (v1Credential && !legacyEndpointMigrationCredentialHash) {
+  log("v1 endpoint ownership could not be proven to this control plane; preserving it in place");
+}
+let dataDirLease: RunnerDataDirLease;
+const requestedDataDir = config.dataDir;
+try {
+  dataDirLease = acquireRunnerDataDirLease(
+    config.dataDir,
+    runnerDataIdentity,
+    {
+      adoptLegacyDataDir: parsed.adoptLegacyDataDir,
+      legacyEndpointMigrationCredentialHash,
+    },
+  );
+} catch (error) {
+  console.error(`[runner ${config.runnerId}] data directory unavailable: ${(error as Error).message}`);
+  process.exit(1);
+}
+if (resolve(requestedDataDir) !== resolve(dataDirLease.dataDir)) {
+  log(`using isolated runner state at ${dataDirLease.dataDir}; prior owner state remains untouched`);
+}
+config.dataDir = dataDirLease.dataDir;
+process.once("exit", dataDirLease.release);
+if (dataDirLease.migratedLegacyDataDir) {
+  log(`claimed legacy data directory ${config.dataDir} after explicit --adopt-legacy-data-dir authorization`);
+}
+const stagedRunnerCredential = stageRunnerCredentialFile(
+  config.dataDir,
+  config.token,
+  runnerDataIdentity,
+);
 const runnerCredentialFile = stagedRunnerCredential.activePath;
+const conductorHost = {
+  ...defaultConductorHost(),
+  // The pre-attestation default root also used ~/.agent-manager/conductor. Always add an
+  // attested leaf so startup sweeping can never delete unattributable legacy configurations.
+  configDir: resolve(config.dataDir, "conductor", "runner-instances", dataDirLease.ownerHash),
+};
 const claudeHookHost = {
   ...defaultClaudeHookHost(),
   configDir: claudeHookRunnerConfigDir(config.dataDir, config.runnerId),
 };
-sweepConductorMcpConfigs();
+sweepConductorMcpConfigs(conductorHost.configDir);
 sweepClaudeHookFiles(claudeHookHost.configDir);
 
 const runnerHostname = hostname();
@@ -339,6 +409,7 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
         enabled: conductorFeatureEnabled,
       },
       log,
+      conductorHost,
     );
     provisionClaudeHooks(
       meta,
@@ -372,6 +443,7 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
   containerTargets,
   cloudTargets,
   () => controlPlaneProtocolVersion,
+  dataDirLease.ownerHash,
 );
 const sessionStarts = new SessionStartFence();
 const pendingShellOpenCancellations = new PendingShellOpenCancellations();
@@ -733,6 +805,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             enabled: conductorFeatureEnabled,
           },
           log,
+          conductorHost,
         );
         provisionClaudeHooks(
           msg.spec,
@@ -854,6 +927,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
               enabled: conductorFeatureEnabled,
             },
             log,
+            conductorHost,
           );
           provisionClaudeHooks(
             msg.command.spec,
@@ -920,9 +994,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         log(`session deletion failed for ${msg.sessionId}: ${errText(error)}`);
       });
       shells.closeForSession(msg.sessionId);
-      // Reap the conductor's per-session mcp-config too (it holds MANAGER_TOKEN in
-      // plaintext); best-effort and a no-op for non-conductor sessions.
-      removeConductorMcpConfig(msg.sessionId);
+      // Reap the conductor per-session MCP config too. It references the runner credential file;
+      // best-effort removal is a no-op for non-conductor sessions.
+      removeConductorMcpConfig(msg.sessionId, conductorHost.configDir);
       removeClaudeHookFiles(msg.sessionId, claudeHookHost.configDir);
       break;
     case "resolve_permission":
@@ -1095,7 +1169,11 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         consumeCancellation: (shellId) => pendingShellOpenCancellations.consume(shellId),
         sessionCanOpen: (sessionId) => sessions.sessionCanOpen(sessionId),
         resolveTarget: (sessionId) => sessionFilesTarget(sessionId),
-        resolveAgentTuiLaunch: (meta) => agentTuiLaunch(meta),
+        resolveAgentTuiLaunch: (meta) => {
+          const launch = agentTuiLaunch(meta);
+          if (launch) sessions.acquireAgentTuiProviderHome(meta);
+          return launch;
+        },
         open: (message, target, launch) => shells.open(
           message.shellId,
           message.sessionId,
@@ -1527,11 +1605,18 @@ function shutdown(): void {
   // sequence is pidfile retries + TERM + 2s + KILL. The deadline covers Claude's 5s clean-exit
   // interval plus the reap's 6s safety cap.
   // No active sessions ⇒ zero pending kills ⇒ instant exit (dev restarts stay snappy).
-  void waitForPendingKills(CLAUDE_GRACEFUL_STOP_BUDGET_MS + 500).then(() => process.exit(0));
+  void waitForPendingKills(CLAUDE_GRACEFUL_STOP_BUDGET_MS + 500).then((processTreesReaped) => {
+    try {
+      sessions.releaseProviderHomeLeasesAfterShutdown(processTreesReaped);
+    } finally {
+      process.exit(0);
+    }
+  });
 }
 
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
+process.on("SIGHUP", shutdown);
 
 log(
   `starting v${VERSION} — host=${metadata.hostname} os=${metadata.os} ` +
@@ -1555,5 +1640,11 @@ void Promise.all([containerTargets.initialize(), cloudTargets.initialize()]).the
   connect();
 }).catch((error) => {
   console.error(`[runner] execution target checks failed unexpectedly: ${errText(error)}`);
+  process.exit(1);
+});
+}
+
+void startRunner(config).catch((error) => {
+  console.error(`[runner ${config.runnerId}] startup blocked: ${(error as Error).message}`);
   process.exit(1);
 });

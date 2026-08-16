@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -177,6 +177,53 @@ test("startup cleanup contains journal removal failures and retries later", {
       () => new WorktreeCleanupJournal(dataDir).list().length === 0,
       "the next startup pass did not remove the retained cleanup record",
     );
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("startup cleanup retains a journaled worktree for a forward checkpoint layout", {
+  skip: !haveGit(),
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-checkpoint-forward-cleanup-"));
+  const repo = join(root, "repo");
+  const dataDir = join(root, "data");
+  const store = new SessionStore(join(dataDir, "sessions"));
+  const logs: string[] = [];
+  let manager: SessionManager | undefined;
+  try {
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    const handle = await createWorktree(repo, "s_forward", { dataDir });
+    store.create({
+      sessionId: "s_forward", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: handle.path, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "stopped", title: "forward",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1, indexReset: true,
+      checkpointRefVersion: 3 as 2,
+    });
+    const journal = new WorktreeCleanupJournal(dataDir);
+    journal.add({
+      sessionId: "s_forward",
+      repoPath: repo,
+      worktreePath: handle.path,
+      context: { kind: "native" },
+    });
+    manager = new SessionManager(
+      () => {}, (line) => logs.push(line), store, "runner", undefined, undefined, dataDir,
+    );
+
+    assert.doesNotThrow(() => manager!.reconcileStore());
+    await waitFor(
+      () => logs.some((line) => line.includes("needs retry after checkpoint ownership validation")),
+      "forward-layout cleanup validation was not contained and logged",
+    );
+    assert.equal(existsSync(handle.path), true, "an unknown live namespace keeps its worktree");
+    assert.equal(journal.list().length, 1, "the durable cleanup record remains retryable");
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
@@ -445,6 +492,41 @@ test("stale cleanup tuple cannot delete a current replacement tuple for the same
     assert.equal(git(repoB, ["rev-parse", "refs/wollipog/s_replaced/turn-1"]), treeB);
     assert.equal(git(repoB, ["rev-parse", "refs/mam/s_replaced/turn-1"]), treeB);
     assert.equal(ledger.listSession("s_replaced").some((ownership) => ownership.repoPath === repoB), true);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("delete passes its journaled owner identity to immediate worktree cleanup", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-checkpoint-delete-owner-"));
+  const dataDir = join(root, "data");
+  const store = new SessionStore(join(dataDir, "sessions"));
+  const ownerHash = "d".repeat(64);
+  const worktreePath = join(root, "worktree");
+  let manager: SessionManager | undefined;
+  try {
+    store.create({
+      sessionId: "s_delete_owner", agentId: "claude", workspaceId: "repo", repoPath: root,
+      worktreePath, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "stopped", title: "owned",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1, indexReset: true, checkpointRefVersion: 2,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    const internals = manager as any;
+    internals.runnerOwnerHash = ownerHash;
+    internals.cleanupProviderState = async () => {};
+    let reaped: unknown;
+    internals.reapWorktree = async (record: unknown) => { reaped = record; };
+
+    await manager.delete("s_delete_owner");
+
+    const journaled = new WorktreeCleanupJournal(dataDir).list();
+    assert.equal(journaled.length, 1);
+    assert.equal(journaled[0]?.checkpointOwnerHash, ownerHash);
+    assert.deepEqual(reaped, journaled[0],
+      "immediate cleanup must retain the exact owner proof installed in the durable journal");
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });

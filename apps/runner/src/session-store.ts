@@ -1,7 +1,7 @@
 /**
  * Phase 2: the box's on-disk session store — the SOURCE OF TRUTH for sessions. Lives at
- * `~/.agent-manager/sessions/<sessionId>/` and is SHARED by every runner instance on the box, so a
- * session created by one dashboard's runner is visible to (and resumable from) another's.
+ * `<dataDir>/sessions/<sessionId>/` inside the runner-owned data root. Runner startup exclusively
+ * leases that root, so another runner process cannot read or mutate this store concurrently.
  *
  *   <sessionId>/meta.json      session metadata incl. the resumable agent-session-id + seq high-water
  *   <sessionId>/events.ndjson  initial append-only event log (or legacy-writer directory fence)
@@ -132,13 +132,15 @@ export interface SessionMeta {
   adoptedBackgroundRecoveryAuthorized?: boolean;
   /** Isolated provider transcript layout. Absent identifies the legacy provider-wide root;
    * version 2 is a hashed per-manager-session partition. Runner-only, never sent as capability. */
-  providerStateVersion?: 2;
+  providerStateVersion?: 2 | 3;
+  /** Checkpoint ref layout. Absent is the pre-attestation shared namespace; v2 is stable-owner scoped. */
+  checkpointRefVersion?: 2;
   /** Tree sha snapshotting the worktree at the start of the most recent prompt turn (the last_turn
    * diff base). null = the snapshot attempt failed for that turn; absent = never captured. Box-local
    * (names an object in this repo's odb) — deliberately NOT part of SessionSnapshot. */
   lastTurnBaseTree?: string | null;
   /** Prompt turns run so far — numbers the per-turn checkpoint refs
-   * (refs/{wollipog,mam}/<sid>/turn-<n> during the compatibility window).
+   * (refs/{wollipog,mam}/owners/<owner>/<sid>/turn-<n> for checkpointRefVersion 2).
    * Box-local like lastTurnBaseTree. */
   turnCount?: number;
   /** Completed provider turns that can be forked, keyed by manager turn number. Box-local because

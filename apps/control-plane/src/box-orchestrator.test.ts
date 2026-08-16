@@ -1,27 +1,38 @@
 import assert from "node:assert/strict";
+import type { ChildProcess } from "node:child_process";
 import { test } from "node:test";
 import {
+  BoxOrchestrator,
   binaryIsCurrent,
   binaryDeployIdentity,
+  buildContentAddressedAttestationCommand,
+  buildContentAddressedPromoteCommand,
+  buildContentAddressedStageCommand,
   buildPromoteCommand,
   buildRemoteCommand,
   buildSshArgs,
   buildStageSweepCommand,
   buildTokenDeployCommand,
   classifyRunnerUpdate,
+  contentAddressedRunnerPath,
   deploymentAttemptIsCurrent,
   githubAssetDownloadUrl,
   githubCliDownloadArgs,
   githubCliReleaseMetadataArgs,
   githubMetadataRequestError,
+  managedAdoptionEpochIsCurrent,
+  managedBoxRunnerDataDir,
   posixQuote,
   resolveReleaseArtifactWithFallback,
   ReleaseAssetNotFoundError,
   remoteCredentialPath,
   runnerAssetNames,
   stagedRunnerPath,
+  stagedContentAddressedRunnerPath,
   tripleFromUname,
 } from "./box-orchestrator.js";
+import { ControlPlaneDb } from "./db.js";
+import type { Hub } from "./hub.js";
 
 const LEGACY_RUNNER_ASSET_WARNING =
   "Wollipog used a legacy runner asset because the canonical asset was absent; update the release producer before compatibility is removed.";
@@ -259,6 +270,496 @@ test("buildRemoteCommand quotes every value, uses --token-file, and repeats --wo
   assert.ok(!cmd.includes("--token "));
 });
 
+test("managed boxes use isolated roots and only exact pending epochs receive adoption authority", () => {
+  assert.equal(managedBoxRunnerDataDir("box-0123abcd"), ".agent-manager/runner-data/box-0123abcd");
+  assert.throws(() => managedBoxRunnerDataDir("../../root"), /invalid box id/);
+  assert.equal(managedAdoptionEpochIsCurrent(4, 4, "adopt-current", "adopt-current"), true);
+  assert.equal(managedAdoptionEpochIsCurrent(5, 4, "adopt-current", "adopt-current"), false);
+  assert.equal(managedAdoptionEpochIsCurrent(4, 4, "adopt-new", "adopt-old"), false);
+  assert.equal(managedAdoptionEpochIsCurrent(4, 4, null, null), false);
+
+  const isolated = buildRemoteCommand({
+    runnerPath: ".agent-manager/agent-manager-runner",
+    runnerId: "box-0123abcd",
+    controlPlaneUrl: "ws://127.0.0.1:47100/runner",
+    tokenFile: ".agent-manager/credentials/rcred_0123456789abcdef0123456789abcdef",
+    dataDir: ".agent-manager/runner-data/box-0123abcd",
+    workspaces: [],
+  });
+  assert.match(isolated, /--data-dir '\.agent-manager\/runner-data\/box-0123abcd'/);
+  assert.doesNotMatch(isolated, /--adopt-legacy-data-dir/);
+  const adoption = buildRemoteCommand({
+    runnerPath: ".agent-manager/agent-manager-runner",
+    runnerId: "box-0123abcd",
+    controlPlaneUrl: "ws://127.0.0.1:47100/runner",
+    tokenFile: ".agent-manager/credentials/rcred_0123456789abcdef0123456789abcdef",
+    dataDir: null,
+    adoptLegacyDataDir: true,
+    workspaces: [],
+  });
+  assert.doesNotMatch(adoption, /--data-dir/);
+  assert.match(adoption, /--adopt-legacy-data-dir/);
+});
+
+function adoptionDb(): ControlPlaneDb {
+  const db = ControlPlaneDb.open(":memory:");
+  db.createBox({
+    boxId: "box-0123abcd",
+    runnerId: "box-runner",
+    sshTarget: "me@example",
+    sshPort: 22,
+    workspaces: [{ id: "home", name: "home", path: "." }],
+    autoReconnect: true,
+    runnerDataDir: null,
+    now: 1,
+  });
+  return db;
+}
+
+function adoptionOrchestrator(
+  db: ControlPlaneDb,
+  stopManagedChild?: (child: ChildProcess) => Promise<void>,
+): BoxOrchestrator {
+  return new BoxOrchestrator({
+    db,
+    hub: { boxChanged() {} } as unknown as Hub,
+    cpPort: 4317,
+    issueCredential: () => { throw new Error("bootstrap must not run in this test"); },
+    resolveBinary: async () => { throw new Error("bootstrap must not run in this test"); },
+    stopManagedChild,
+  });
+}
+
+type TestRuntime = {
+  child: ChildProcess | null;
+  remotePort: number;
+  reconnectTimer: ReturnType<typeof setTimeout> | null;
+  backoffMs: number;
+  removed: boolean;
+  epoch: number;
+  activeAdoptionEpoch: string | null;
+  activeCredentialId: string | null;
+  activeBinaryVerified: boolean;
+  activeBinarySha256?: string | null;
+};
+
+function installRuntime(orchestrator: BoxOrchestrator, runtime: TestRuntime, boxId = "box-0123abcd"): void {
+  (orchestrator as unknown as { runtimes: Map<string, TestRuntime> }).runtimes.set(boxId, runtime);
+}
+
+function addLegacySibling(db: ControlPlaneDb, overrides: { boxId?: string; runnerId?: string; autoReconnect?: boolean } = {}) {
+  db.createBox({
+    boxId: overrides.boxId ?? "box-sibling",
+    runnerId: overrides.runnerId ?? "runner-sibling",
+    sshTarget: "me@example",
+    sshPort: 22,
+    workspaces: [{ id: "home", name: "home", path: "." }],
+    autoReconnect: overrides.autoReconnect ?? true,
+    runnerDataDir: null,
+    now: 2,
+  });
+}
+
+test("legacy adoption retains the exact child after stop failure and retries safely", async () => {
+  const db = adoptionDb();
+  const child = { killed: false } as ChildProcess;
+  let stopAttempts = 0;
+  let starts = 0;
+  const orchestrator = adoptionOrchestrator(db, async (candidate) => {
+    assert.equal(candidate, child);
+    stopAttempts++;
+    if (stopAttempts === 1) throw new Error("stop failed");
+  });
+  const runtime: TestRuntime = {
+    child,
+    remotePort: 47100,
+    reconnectTimer: null,
+    backoffMs: 2_000,
+    removed: false,
+    epoch: 1,
+    activeAdoptionEpoch: null,
+    activeCredentialId: "rcred_old",
+    activeBinaryVerified: false,
+  };
+  installRuntime(orchestrator, runtime);
+  (orchestrator as unknown as { start: () => void }).start = () => { starts++; };
+  assert.equal(await orchestrator.authorizeLegacyDataAdoption(
+    "box-0123abcd",
+    { userId: "user-owner", role: "owner" },
+  ), "stop_failed");
+  assert.equal(db.getBoxConfig("box-0123abcd")?.pendingLegacyDataAdoptionEpoch, null);
+  assert.equal(db.getBox("box-0123abcd")?.status, "failed");
+  assert.equal(runtime.child, child, "failed stop retains the exact process for retry/shutdown");
+  assert.equal(await orchestrator.authorizeLegacyDataAdoption(
+    "box-0123abcd",
+    { userId: "user-owner", role: "owner" },
+  ), "started");
+  assert.equal(stopAttempts, 2);
+  assert.equal(starts, 1);
+  assert.equal(runtime.child, null);
+  assert.notEqual(db.getBoxConfig("box-0123abcd")?.pendingLegacyDataAdoptionEpoch, null);
+});
+
+test("concurrent adoption requests cannot cross the unresolved managed-child stop barrier", async () => {
+  const db = adoptionDb();
+  const child = { killed: false } as ChildProcess;
+  let releaseStop!: () => void;
+  const stopGate = new Promise<void>((resolve) => { releaseStop = resolve; });
+  let starts = 0;
+  const orchestrator = adoptionOrchestrator(db, async () => stopGate);
+  const runtime: TestRuntime = {
+    child,
+    remotePort: 47100,
+    reconnectTimer: null,
+    backoffMs: 2_000,
+    removed: false,
+    epoch: 1,
+    activeAdoptionEpoch: null,
+    activeCredentialId: "rcred_old",
+    activeBinaryVerified: false,
+  };
+  installRuntime(orchestrator, runtime);
+  (orchestrator as unknown as { start: () => void }).start = () => { starts++; };
+
+  const first = orchestrator.authorizeLegacyDataAdoption(
+    "box-0123abcd",
+    { userId: "user-owner", role: "owner" },
+  );
+  assert.equal(await orchestrator.authorizeLegacyDataAdoption(
+    "box-0123abcd",
+    { userId: "user-admin", role: "admin" },
+  ), "in_progress");
+  assert.equal(db.getBoxConfig("box-0123abcd")?.pendingLegacyDataAdoptionEpoch, null);
+  assert.equal(starts, 0);
+  assert.equal(runtime.child, child, "the child remains reachable throughout the awaited stop");
+
+  releaseStop();
+  assert.equal(await first, "started");
+  assert.notEqual(db.getBoxConfig("box-0123abcd")?.pendingLegacyDataAdoptionEpoch, null);
+  assert.equal(starts, 1);
+  assert.equal(runtime.child, null);
+});
+
+test("reconnect and adoption routes share one unresolved-stop lifecycle barrier", async () => {
+  const db = adoptionDb();
+  const child = { killed: false } as ChildProcess;
+  let releaseStop!: () => void;
+  const stopGate = new Promise<void>((resolve) => { releaseStop = resolve; });
+  let starts = 0;
+  const orchestrator = adoptionOrchestrator(db, async () => stopGate);
+  const runtime: TestRuntime = {
+    child,
+    remotePort: 47100,
+    reconnectTimer: null,
+    backoffMs: 8_000,
+    removed: false,
+    epoch: 1,
+    activeAdoptionEpoch: null,
+    activeCredentialId: "rcred_old",
+    activeBinaryVerified: true,
+  };
+  installRuntime(orchestrator, runtime);
+  (orchestrator as unknown as { start: () => void }).start = () => { starts++; };
+
+  const reconnect = orchestrator.reconnect("box-0123abcd");
+  assert.equal(await orchestrator.authorizeLegacyDataAdoption(
+    "box-0123abcd",
+    { userId: "user-owner", role: "owner" },
+  ), "in_progress");
+  assert.equal(db.getBoxConfig("box-0123abcd")?.pendingLegacyDataAdoptionEpoch, null);
+  assert.equal(runtime.child, child);
+  assert.equal(starts, 0);
+
+  releaseStop();
+  assert.equal(await reconnect, "started");
+  assert.equal(runtime.child, null);
+  assert.equal(starts, 1);
+  assert.equal(runtime.backoffMs, 2_000);
+});
+
+test("legacy adoption fences every sibling on the same SSH account before authorization", async () => {
+  const db = adoptionDb();
+  addLegacySibling(db);
+  const targetChild = { killed: false } as ChildProcess;
+  const siblingChild = { killed: false } as ChildProcess;
+  let releaseSibling!: () => void;
+  const siblingStop = new Promise<void>((resolve) => { releaseSibling = resolve; });
+  const stopped: ChildProcess[] = [];
+  const orchestrator = adoptionOrchestrator(db, async (child) => {
+    stopped.push(child);
+    if (child === siblingChild) await siblingStop;
+  });
+  const targetRuntime: TestRuntime = {
+    child: targetChild, remotePort: 47100, reconnectTimer: null, backoffMs: 2_000,
+    removed: false, epoch: 1, activeAdoptionEpoch: null, activeCredentialId: null, activeBinaryVerified: false,
+  };
+  const siblingTimer = setTimeout(() => assert.fail("sibling reconnect timer must be superseded"), 60_000);
+  const siblingRuntime: TestRuntime = {
+    child: siblingChild, remotePort: 47101, reconnectTimer: siblingTimer, backoffMs: 2_000,
+    removed: false, epoch: 4, activeAdoptionEpoch: null, activeCredentialId: null, activeBinaryVerified: false,
+  };
+  installRuntime(orchestrator, targetRuntime);
+  installRuntime(orchestrator, siblingRuntime, "box-sibling");
+  let starts = 0;
+  (orchestrator as unknown as { start: () => void }).start = () => { starts++; };
+
+  const adoption = orchestrator.authorizeLegacyDataAdoption(
+    "box-0123abcd",
+    { userId: "user-owner", role: "owner" },
+  );
+  assert.equal(await orchestrator.reconnect("box-sibling"), "in_progress");
+  assert.equal(db.getBoxConfig("box-0123abcd")?.pendingLegacyDataAdoptionEpoch, null);
+  assert.equal(starts, 0);
+  assert.equal(siblingRuntime.reconnectTimer, null);
+  assert.deepEqual(new Set(stopped), new Set([targetChild, siblingChild]));
+  releaseSibling();
+  assert.equal(await adoption, "started");
+  assert.equal(targetRuntime.child, null);
+  assert.equal(siblingRuntime.child, null);
+  assert.notEqual(db.getBoxConfig("box-0123abcd")?.pendingLegacyDataAdoptionEpoch, null);
+  assert.equal(starts, 1, "only the authorized target begins bootstrap while siblings remain fenced");
+});
+
+test("a partial sibling stop failure retains the failed child and persists no adoption authority", async () => {
+  const db = adoptionDb();
+  addLegacySibling(db);
+  const targetChild = { killed: false } as ChildProcess;
+  const siblingChild = { killed: false } as ChildProcess;
+  const orchestrator = adoptionOrchestrator(db, async (child) => {
+    if (child === siblingChild) throw new Error("sibling refused stop");
+  });
+  const targetRuntime: TestRuntime = {
+    child: targetChild, remotePort: 47100, reconnectTimer: null, backoffMs: 2_000,
+    removed: false, epoch: 1, activeAdoptionEpoch: null, activeCredentialId: null, activeBinaryVerified: false,
+  };
+  const siblingRuntime: TestRuntime = {
+    child: siblingChild, remotePort: 47101, reconnectTimer: null, backoffMs: 2_000,
+    removed: false, epoch: 1, activeAdoptionEpoch: null, activeCredentialId: null, activeBinaryVerified: false,
+  };
+  installRuntime(orchestrator, targetRuntime);
+  installRuntime(orchestrator, siblingRuntime, "box-sibling");
+  assert.equal(await orchestrator.authorizeLegacyDataAdoption(
+    "box-0123abcd",
+    { userId: "user-owner", role: "owner" },
+  ), "stop_failed");
+  assert.equal(db.getBoxConfig("box-0123abcd")?.pendingLegacyDataAdoptionEpoch, null);
+  assert.equal(targetRuntime.child, null, "successfully stopped siblings stay parked for safe retry");
+  assert.equal(siblingRuntime.child, siblingChild, "the exact failed child remains reachable");
+  assert.equal(db.getBox("box-sibling")?.status, "failed");
+});
+
+test("restart rehydrates only the pending adoption target and keeps legacy siblings fenced", () => {
+  const db = adoptionDb();
+  addLegacySibling(db);
+  assert.equal(db.authorizeBoxLegacyDataAdoption({
+    boxId: "box-0123abcd",
+    epoch: "adopt-after-restart",
+    authorizedBy: "user-owner",
+    authorizedRole: "owner",
+    now: 3,
+  }), true);
+  const orchestrator = adoptionOrchestrator(db);
+  const bootstraps: string[] = [];
+  (orchestrator as unknown as { bootstrap(cfg: { boxId: string }): void }).bootstrap = (cfg) => {
+    bootstraps.push(cfg.boxId);
+  };
+  orchestrator.rehydrate();
+  assert.deepEqual(bootstraps, ["box-0123abcd"]);
+});
+
+test("exact adoption completion releases parked siblings to owner-aware current-binary startup", () => {
+  const db = adoptionDb();
+  addLegacySibling(db);
+  assert.equal(db.authorizeBoxLegacyDataAdoption({
+    boxId: "box-0123abcd",
+    epoch: "adopt-current",
+    authorizedBy: "user-owner",
+    authorizedRole: "owner",
+    now: 3,
+  }), true);
+  const orchestrator = adoptionOrchestrator(db);
+  installRuntime(orchestrator, {
+    child: null, remotePort: 47100, reconnectTimer: null, backoffMs: 2_000,
+    removed: false, epoch: 1, activeAdoptionEpoch: "adopt-current",
+    activeCredentialId: "rcred_current", activeBinaryVerified: true,
+    activeBinarySha256: "e".repeat(64),
+  });
+  const released: string[] = [];
+  (orchestrator as unknown as { start(cfg: { boxId: string }): void }).start = (cfg) => {
+    released.push(cfg.boxId);
+  };
+  orchestrator.onRunnerRegistered("box-runner", "rcred_current");
+  assert.equal(db.getBoxConfig("box-0123abcd")?.pendingLegacyDataAdoptionEpoch, null);
+  assert.deepEqual(released, ["box-sibling"]);
+});
+
+test("a completed account adoption rejects sibling adoption before any stop or durable mutation", async () => {
+  const db = adoptionDb();
+  addLegacySibling(db);
+  assert.equal(db.authorizeBoxLegacyDataAdoption({
+    boxId: "box-0123abcd",
+    epoch: "adopt-completed",
+    authorizedBy: "user-owner",
+    authorizedRole: "owner",
+    now: 3,
+  }), true);
+  assert.equal(db.completeBoxLegacyDataAdoption("box-0123abcd", "adopt-completed", 4), true);
+  const siblingChild = { killed: false } as ChildProcess;
+  let stops = 0;
+  const orchestrator = adoptionOrchestrator(db, async () => { stops++; });
+  const siblingRuntime: TestRuntime = {
+    child: siblingChild, remotePort: 47101, reconnectTimer: null, backoffMs: 2_000,
+    removed: false, epoch: 1, activeAdoptionEpoch: null, activeCredentialId: null, activeBinaryVerified: false,
+  };
+  installRuntime(orchestrator, siblingRuntime, "box-sibling");
+  assert.equal(await orchestrator.authorizeLegacyDataAdoption(
+    "box-sibling",
+    { userId: "user-owner", role: "owner" },
+  ), "account_already_adopted");
+  assert.equal(stops, 0);
+  assert.equal(siblingRuntime.child, siblingChild);
+  assert.equal(db.getBoxConfig("box-sibling")?.legacyDataAdoptionEpoch, null);
+  assert.equal(db.getBoxConfig("box-sibling")?.pendingLegacyDataAdoptionEpoch, null);
+});
+
+test("first exact runner registration completes pending adoption but a stale runtime cannot", () => {
+  const db = adoptionDb();
+  assert.equal(db.authorizeBoxLegacyDataAdoption({
+    boxId: "box-0123abcd",
+    epoch: "adopt-current",
+    authorizedBy: "user-admin",
+    authorizedRole: "admin",
+    now: 10,
+  }), true);
+  const stale = adoptionOrchestrator(db);
+  installRuntime(stale, {
+    child: null,
+    remotePort: 47100,
+    reconnectTimer: null,
+    backoffMs: 2_000,
+    removed: false,
+    epoch: 1,
+    activeAdoptionEpoch: "adopt-stale",
+    activeCredentialId: "rcred_stale",
+    activeBinaryVerified: true,
+    activeBinarySha256: "e".repeat(64),
+  });
+  stale.onRunnerRegistered("box-runner", "rcred_current");
+  assert.equal(db.getBoxConfig("box-0123abcd")?.pendingLegacyDataAdoptionEpoch, "adopt-current");
+
+  const current = adoptionOrchestrator(db);
+  const runtime: TestRuntime = {
+    child: null,
+    remotePort: 47101,
+    reconnectTimer: null,
+    backoffMs: 2_000,
+    removed: false,
+    epoch: 1,
+    activeAdoptionEpoch: "adopt-current",
+    activeCredentialId: "rcred_current",
+    activeBinaryVerified: false,
+    activeBinarySha256: "e".repeat(64),
+  };
+  installRuntime(current, runtime);
+  current.onRunnerRegistered("box-runner", "rcred_old");
+  assert.equal(
+    db.getBoxConfig("box-0123abcd")?.pendingLegacyDataAdoptionEpoch,
+    "adopt-current",
+    "a stale credential cannot complete the current adoption launch",
+  );
+  current.onRunnerRegistered("box-runner", "rcred_current");
+  assert.equal(
+    db.getBoxConfig("box-0123abcd")?.pendingLegacyDataAdoptionEpoch,
+    "adopt-current",
+    "an exact credential from an unverified fallback binary cannot complete adoption",
+  );
+  runtime.activeBinaryVerified = true;
+  current.onRunnerRegistered("box-runner", "rcred_current");
+  assert.equal(db.getBoxConfig("box-0123abcd")?.pendingLegacyDataAdoptionEpoch, null);
+  assert.equal(db.getBox("box-0123abcd")?.legacyDataAdoption?.status, "completed");
+});
+
+type BootstrapHarness = {
+  bootstrap(cfg: ReturnType<ControlPlaneDb["getBoxConfig"]> extends infer C ? Exclude<C, null> : never,
+    runtime: TestRuntime, epoch: number, adoptionEpoch: string | null): Promise<void>;
+  detectTriple(): Promise<string>;
+  probeRemoteRunner(): Promise<string | null>;
+};
+
+test("owned layouts and pending, completed, or sibling-account adoption never fall back to an old binary", async () => {
+  for (const scenario of ["isolated", "adoption", "completed-adoption", "sibling-after-account-adoption"] as const) {
+    const db = ControlPlaneDb.open(":memory:");
+    db.createBox({
+      boxId: "box-0123abcd",
+      runnerId: "box-runner",
+      sshTarget: "me@example",
+      sshPort: 22,
+      workspaces: [{ id: "home", name: "home", path: "." }],
+      autoReconnect: false,
+      runnerDataDir: scenario === "isolated" ? ".agent-manager/runner-data/box-0123abcd" : null,
+      now: 1,
+    });
+    if (scenario !== "isolated") {
+      assert.equal(db.authorizeBoxLegacyDataAdoption({
+        boxId: "box-0123abcd",
+        epoch: "adopt-current",
+        authorizedBy: "user-owner",
+        authorizedRole: "owner",
+        now: 2,
+      }), true);
+      if (scenario === "completed-adoption") {
+        assert.equal(db.completeBoxLegacyDataAdoption("box-0123abcd", "adopt-current", 3), true);
+      }
+      if (scenario === "sibling-after-account-adoption") {
+        assert.equal(db.completeBoxLegacyDataAdoption("box-0123abcd", "adopt-current", 3), true);
+        addLegacySibling(db);
+      }
+    }
+    let credentialsIssued = 0;
+    const orchestrator = new BoxOrchestrator({
+      db,
+      hub: { boxChanged() {} } as unknown as Hub,
+      cpPort: 4317,
+      issueCredential: () => {
+        credentialsIssued++;
+        throw new Error("credential issue must remain unreachable");
+      },
+      resolveBinary: async () => { throw new Error("artifact unavailable"); },
+    });
+    const runtime: TestRuntime = {
+      child: null,
+      remotePort: 47100,
+      reconnectTimer: null,
+      backoffMs: 2_000,
+      removed: false,
+      epoch: 1,
+      activeAdoptionEpoch: scenario === "adoption" ? "adopt-current" : null,
+      activeCredentialId: null,
+      activeBinaryVerified: false,
+    };
+    const launchedBoxId = scenario === "sibling-after-account-adoption" ? "box-sibling" : "box-0123abcd";
+    installRuntime(orchestrator, runtime, launchedBoxId);
+    const harness = orchestrator as unknown as BootstrapHarness;
+    harness.detectTriple = async () => "x86_64-unknown-linux-gnu";
+    harness.probeRemoteRunner = async () => "pre-upgrade-runner";
+    const cfg = db.getBoxConfig(launchedBoxId);
+    assert.ok(cfg);
+    await harness.bootstrap(cfg, runtime, 1, runtime.activeAdoptionEpoch);
+    assert.equal(credentialsIssued, 0, `${scenario} launch aborts before credential issue`);
+    assert.equal(runtime.child, null, `${scenario} launch never bootstraps an old binary`);
+    assert.equal(runtime.activeBinaryVerified, false);
+    const box = db.getBox(launchedBoxId);
+    assert.equal(box?.status, "failed", `${scenario} fallback must fail the managed bootstrap: ${JSON.stringify(box)}`);
+    assert.match(box?.lastError ?? "", /requires the current binary/);
+    if (scenario === "adoption") {
+      assert.equal(db.getBoxConfig("box-0123abcd")?.pendingLegacyDataAdoptionEpoch, "adopt-current");
+      orchestrator.onRunnerRegistered("box-runner", "unrelated-active-credential");
+      assert.equal(db.getBoxConfig("box-0123abcd")?.pendingLegacyDataAdoptionEpoch, "adopt-current");
+    }
+    orchestrator.shutdown();
+  }
+});
+
 test("buildRemoteCommand is injection-safe for hostile workspace paths", () => {
   const cmd = buildRemoteCommand({
     runnerPath: "r",
@@ -372,6 +873,138 @@ test("deployment commands are atomic, zsh-safe, permission-safe, and epoch-isola
   assert.match(token, /chmod 600 \.agent-manager\/credentials\/rcred_[a-f0-9]+\.new-\$\$/);
   assert.match(token, /mv -f \.agent-manager\/credentials\/rcred_[a-f0-9]+\.new-\$\$ \.agent-manager\/credentials\/rcred_[a-f0-9]+$/);
   assert.doesNotMatch(token, /\.agent-manager\/token/, "never touch the legacy shared token path");
+});
+
+test("flag-dependent runner paths are immutable, digest-addressed, and promotion-race isolated", () => {
+  const first = "a".repeat(64);
+  const second = "b".repeat(64);
+  const firstPath = contentAddressedRunnerPath(first);
+  const secondPath = contentAddressedRunnerPath(second);
+  assert.equal(firstPath, `.agent-manager/runners/${first}/wollipog-runner`);
+  assert.notEqual(firstPath, secondPath);
+  assert.throws(() => contentAddressedRunnerPath("../shared"), /invalid runner SHA-256/);
+
+  const attemptA = "11111111-1111-4111-8111-111111111111";
+  const attemptB = "22222222-2222-4222-8222-222222222222";
+  assert.notEqual(
+    stagedContentAddressedRunnerPath(first, attemptA),
+    stagedContentAddressedRunnerPath(first, attemptB),
+    "separate CP/box attempts never interleave one scp destination",
+  );
+  const promoteFirst = buildContentAddressedPromoteCommand(first, attemptA);
+  const promoteSecond = buildContentAddressedPromoteCommand(second, attemptB);
+  assert.match(promoteFirst, new RegExp(first));
+  assert.doesNotMatch(promoteFirst, new RegExp(second));
+  assert.match(promoteSecond, new RegExp(second));
+  assert.doesNotMatch(promoteFirst, /\.agent-manager\/agent-manager-runner(?:\s|$)/u);
+  assert.match(promoteFirst, /sha256sum.*shasum -a 256/u);
+  assert.match(buildContentAddressedAttestationCommand(first), /test -f .*test "\$actual" = '[a-f0-9]+'/u);
+  assert.match(buildContentAddressedStageCommand(first), /mkdir -p .*find .*'wollipog-runner\.new-\*'/u);
+
+  const launch = buildRemoteCommand({
+    runnerPath: firstPath,
+    runnerId: "runner",
+    controlPlaneUrl: "ws://127.0.0.1:47100/runner",
+    tokenFile: ".agent-manager/credentials/rcred_0123456789abcdef0123456789abcdef",
+    dataDir: ".agent-manager/runner-data/box",
+    workspaces: [],
+  });
+  assert.ok(launch.startsWith(`'${firstPath}' `), "the attested immutable path is shell-quoted as the executable");
+});
+
+type BinaryHarness = {
+  ensureBinary(
+    cfg: Exclude<ReturnType<ControlPlaneDb["getBoxConfig"]>, null>,
+    triple: string,
+    runtime: TestRuntime,
+    epoch: number,
+  ): Promise<{ kind: "verified" | "fallback"; runnerPath: string; sha256: string | null }>;
+  remoteRunnerMatches(
+    cfg: Exclude<ReturnType<ControlPlaneDb["getBoxConfig"]>, null>,
+    sha256: string,
+  ): Promise<boolean>;
+  runCmd(command: string, args: string[]): Promise<void>;
+};
+
+test("stale deployed metadata and an overwritten shared alias cannot bypass remote content attestation", async () => {
+  const db = adoptionDb();
+  const digest = "c".repeat(64);
+  db.setBoxDeployedVersion("box-0123abcd", digest.slice(0, 16), 2);
+  const orchestrator = new BoxOrchestrator({
+    db,
+    hub: { boxChanged() {} } as unknown as Hub,
+    cpPort: 4317,
+    issueCredential: () => { throw new Error("not used"); },
+    resolveBinary: async () => ({ path: "/local/current-runner", sha256: digest, source: "staged" }),
+  });
+  const runtime: TestRuntime = {
+    child: null,
+    remotePort: 47100,
+    reconnectTimer: null,
+    backoffMs: 2_000,
+    removed: false,
+    epoch: 1,
+    activeAdoptionEpoch: null,
+    activeCredentialId: null,
+    activeBinaryVerified: false,
+  };
+  const harness = orchestrator as unknown as BinaryHarness;
+  const attestations: boolean[] = [false, true];
+  harness.remoteRunnerMatches = async (_cfg, sha256) => {
+    assert.equal(sha256, digest);
+    return attestations.shift() ?? false;
+  };
+  const commands: Array<{ command: string; args: string[] }> = [];
+  harness.runCmd = async (command, args) => { commands.push({ command, args }); };
+  const cfg = db.getBoxConfig("box-0123abcd");
+  assert.ok(cfg);
+  const readiness = await harness.ensureBinary(cfg, "x86_64-unknown-linux-gnu", runtime, 1);
+  assert.deepEqual(readiness, { kind: "verified", runnerPath: contentAddressedRunnerPath(digest), sha256: digest });
+  assert.equal(attestations.length, 0, "the exact remote path is checked both before and after promotion");
+  assert.ok(commands.some(({ command }) => command === "scp"), "matching DB metadata never skips a missing exact binary");
+  assert.ok(commands.some(({ args }) => args.at(-1)?.includes(contentAddressedRunnerPath(digest))),
+    "the mutable shared alias is never the promotion target");
+});
+
+test("failed post-promotion attestation aborts before credential issue or managed launch", async () => {
+  const db = adoptionDb();
+  const digest = "d".repeat(64);
+  let credentialsIssued = 0;
+  const orchestrator = new BoxOrchestrator({
+    db,
+    hub: { boxChanged() {} } as unknown as Hub,
+    cpPort: 4317,
+    issueCredential: () => {
+      credentialsIssued++;
+      throw new Error("must not be reached");
+    },
+    resolveBinary: async () => ({ path: "/local/current-runner", sha256: digest, source: "staged" }),
+  });
+  const runtime: TestRuntime = {
+    child: null,
+    remotePort: 47100,
+    reconnectTimer: null,
+    backoffMs: 2_000,
+    removed: false,
+    epoch: 1,
+    activeAdoptionEpoch: null,
+    activeCredentialId: null,
+    activeBinaryVerified: false,
+  };
+  installRuntime(orchestrator, runtime);
+  const harness = orchestrator as unknown as BinaryHarness & BootstrapHarness;
+  harness.detectTriple = async () => "x86_64-unknown-linux-gnu";
+  harness.remoteRunnerMatches = async () => false;
+  harness.runCmd = async () => {};
+  const cfg = db.getBoxConfig("box-0123abcd");
+  assert.ok(cfg);
+  await harness.bootstrap(cfg, runtime, 1, null);
+  assert.equal(credentialsIssued, 0);
+  assert.equal(runtime.child, null);
+  assert.equal(runtime.activeBinaryVerified, false);
+  assert.equal(db.getBox("box-0123abcd")?.status, "failed");
+  assert.match(db.getBox("box-0123abcd")?.lastError ?? "", /failed remote SHA-256 attestation/);
+  orchestrator.shutdown();
 });
 
 test("reconnect, removal, and shutdown supersede every older deployment attempt", () => {

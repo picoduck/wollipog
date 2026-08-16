@@ -241,22 +241,37 @@ test("provisioning keeps argv idempotent and refreshes the credential reference 
   });
 });
 
-test("re-provision heals a deleted mcp-config file at the exact path the args reference", () => {
+test("re-provision migrates persisted shared mcp-config argv without touching legacy bytes", () => {
   withTempDir((dir) => {
     const logs: string[] = [];
     const spec = makeSpec();
+    const legacyDir = join(dir, "legacy-shared");
+    mkdirSync(legacyDir);
+    const legacy = join(legacyDir, "s_cond1.mcp.json");
+    writeFileSync(legacy, "legacy-bytes");
+    spec.args = ["--mcp-config", legacy, "--strict-mcp-config"];
     provisionConductor(spec, CP_CONFIG, (m) => logs.push(m), makeHost(dir));
     const file = join(dir, "s_cond1.mcp.json");
-    rmSync(file); // the user cleaned ~/.agent-manager/conductor between sessions
-
-    const argsBefore = [...spec.args];
-    provisionConductor(spec, CP_CONFIG, (m) => logs.push(m), makeHost(dir));
-    assert.deepEqual(spec.args, argsBefore, "still idempotent — no duplicated flags");
-    assert.ok(existsSync(file), "the missing file was recreated (--strict-mcp-config would fail without it)");
+    assert.equal(spec.args[1], file);
+    assert.ok(existsSync(file), "the owned config is generated before launch");
+    assert.equal(readFileSync(legacy, "utf8"), "legacy-bytes");
     const parsed = JSON.parse(readFileSync(file, "utf8"));
     assert.equal(parsed.mcpServers.manager.env.MANAGER_TOKEN_FILE, "/secure/active-runner-token");
     assert.ok(parsed.mcpServers.manager.args.includes("--self-session-id"));
-    assert.ok(logs.some((l) => l.includes("refreshed")), "the refresh is logged");
+    assert.ok(logs.some((l) => l.includes("migrated")), "the migration is logged");
+  });
+});
+
+test("re-provision fails closed when persisted --mcp-config has no path", () => {
+  withTempDir((dir) => {
+    for (const args of [["--mcp-config"], ["--mcp-config", "--strict-mcp-config"]]) {
+      const spec = makeSpec({ args });
+      assert.throws(
+        () => provisionConductor(spec, CP_CONFIG, () => {}, makeHost(dir)),
+        /persisted conductor --mcp-config has no path/,
+      );
+      assert.equal(existsSync(join(dir, "s_cond1.mcp.json")), false);
+    }
   });
 });
 
@@ -298,7 +313,7 @@ test("pending runner rotation preserves the active conductor token until acknowl
   });
 });
 
-test("removeConductorMcpConfig deletes the per-session token file; missing files no-op", () => {
+test("removeConductorMcpConfig deletes the per-session credential-reference file; missing files no-op", () => {
   withTempDir((dir) => {
     const spec = makeSpec();
     provisionConductor(spec, CP_CONFIG, () => {}, makeHost(dir));

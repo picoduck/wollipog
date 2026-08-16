@@ -24,6 +24,7 @@ import {
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
   type AddBoxRequest,
+  type AccessScopeChangePreview,
   type AddPodMemberRequest,
   type AppendPodContextRequest,
   type ApprovalQueueRejectRequest,
@@ -51,6 +52,7 @@ import {
   type GovernancePolicy,
   type OnboardingInfo,
   type OrganizationRole,
+  type ResourceOwner,
   type ResourceScope,
   type SessionView,
   type ShellView,
@@ -110,12 +112,17 @@ import {
   localDeviceTokenPath,
   localPairingUrl,
 } from "./local-device-credential.js";
-import { BoxOrchestrator, makeBinaryResolver } from "./box-orchestrator.js";
-import { decideScopedBoxLifecycle, parseBoxLifecycleForce } from "./box-lifecycle.js";
+import { BoxOrchestrator, makeBinaryResolver, managedBoxRunnerDataDir } from "./box-orchestrator.js";
+import {
+  decideScopedBoxLifecycle,
+  parseBoxLifecycleForce,
+} from "./box-lifecycle.js";
+import { registerBoxLegacyAdoptionRoute } from "./box-legacy-adoption-route.js";
 import { RUNNER_RELEASE_TAG } from "./release-version.js";
 import { readSshConfigHosts } from "./ssh-config.js";
 import { ControlPlaneDb, GOVERNANCE_AUDIT_RETENTION_MS } from "./db.js";
 import { registerSessionLookupRoute } from "./session-lookup-route.js";
+import { registerRunnerAttestationRoute } from "./runner-attestation-route.js";
 import {
   canAssignSessionProject,
   resolveSessionCreationOwnership,
@@ -181,6 +188,7 @@ import {
   revokeAuthorizedTranscriptShare,
 } from "./transcript-shares.js";
 import { registerPublicTranscriptShareRoute } from "./transcript-share-route.js";
+import { scopeAudienceContained } from "./resource-scope.js";
 import {
   MAX_UI_CLIENT_MESSAGE_BYTES,
   normalizeUiClientRawData,
@@ -497,7 +505,8 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
     routePath === "/api/push/unsubscribe" ||
     routePath === "/api/artifacts/:artifactId/export" ||
     routePath === "/api/runners/:runnerId/host-action" ||
-    routePath === "/api/runners/:runnerId/workspaces/:workspaceId/rename";
+    routePath === "/api/runners/:runnerId/workspaces/:workspaceId/rename" ||
+    routePath === "/api/runners/:runnerId/workspaces/:workspaceId/access-scope";
   const organizationAdminRoute = routePath === "/api/identity" || routePath.startsWith("/api/identity/") ||
     routePath === "/api/runner-credentials" || routePath.startsWith("/api/runner-credentials/") ||
     routePath === "/api/devices" || routePath.startsWith("/api/devices/");
@@ -895,7 +904,7 @@ app.register(async (instance) => {
         hub.runnerChanged(runnerId);
         for (const projectId of db.projectIdsForRunner(runnerId)) hub.projectChangedById(projectId);
         // If this runner is a box's runner (connected through the SSH tunnel), flip it online.
-        orchestrator.onRunnerRegistered(runnerId);
+        orchestrator.onRunnerRegistered(runnerId, credential.credentialId);
         app.log.info(
           `runner online: ${runnerId} (${msg.runner.hostname}, ${msg.runner.os}) ` +
             `agents=[${msg.runner.agents.map((a) => a.id).join(", ")}]`,
@@ -1170,6 +1179,81 @@ const projectName = (value: unknown): string | null => {
   return name && name.length <= 120 && !/[\0-\x1f\x7f]/.test(name) ? name : null;
 };
 
+const requestedAccessScope = (
+  principal: HumanPrincipal,
+  value: unknown,
+  fallback?: ResourceScope,
+): { ok: true; scope: ResourceScope } | { ok: false; status: 400 | 403; error: string } => {
+  const requestedValue = value === undefined ? fallback?.owner : value;
+  if (!requestedValue || typeof requestedValue !== "object" || Array.isArray(requestedValue)) {
+    return { ok: false, status: 400, error: "owner must select a valid access scope" };
+  }
+  const owner = requestedValue as Partial<ResourceOwner>;
+  const administers = canAdministerIdentity(principal.role);
+  if (owner.kind === "organization") {
+    if (owner.organizationId !== principal.organizationId) {
+      return { ok: false, status: 400, error: "organization access must use the current organization" };
+    }
+    if (!administers) {
+      return { ok: false, status: 403, error: "organization owner or admin permission is required for organization access" };
+    }
+    return { ok: true, scope: { organizationId: principal.organizationId, owner: {
+      kind: "organization", organizationId: principal.organizationId,
+    } } };
+  }
+  if (owner.kind === "user") {
+    if (owner.userId !== principal.userId) {
+      return { ok: false, status: 403, error: "a private scope can only be assigned to the current user" };
+    }
+    return { ok: true, scope: { organizationId: principal.organizationId, owner: {
+      kind: "user", userId: principal.userId,
+    } } };
+  }
+  if (owner.kind === "team" && typeof owner.teamId === "string") {
+    const team = db.identityAdministration(principal).teams.find((candidate) => candidate.teamId === owner.teamId);
+    if (!team || (!administers && !team.memberUserIds.includes(principal.userId))) {
+      return { ok: false, status: 403, error: "the selected team is not available to the current user" };
+    }
+    return { ok: true, scope: { organizationId: principal.organizationId, owner: {
+      kind: "team", teamId: owner.teamId,
+    } } };
+  }
+  return { ok: false, status: 400, error: "owner must select a valid access scope" };
+};
+
+const accessScopeTransitionError = (
+  principal: HumanPrincipal,
+  currentScope: ResourceScope,
+  targetScope: ResourceScope,
+): string | null => {
+  if (canAdministerIdentity(principal.role)) return null;
+  const sameAudience = scopeAudienceContained(currentScope, targetScope) &&
+    scopeAudienceContained(targetScope, currentScope);
+  if (sameAudience || (db.scopeAudienceContainedWithMembership(targetScope, currentScope) &&
+      !db.scopeAudienceContainedWithMembership(currentScope, targetScope))) return null;
+  return "organization owner or admin permission is required unless the access change only narrows the current audience";
+};
+
+const accessScopeOwnerFromQuery = (query: unknown): ResourceOwner | undefined => {
+  const { ownerKind, ownerId } = (query ?? {}) as { ownerKind?: unknown; ownerId?: unknown };
+  if (ownerKind === "organization" && typeof ownerId === "string") {
+    return { kind: "organization", organizationId: ownerId };
+  }
+  if (ownerKind === "user" && typeof ownerId === "string") return { kind: "user", userId: ownerId };
+  if (ownerKind === "team" && typeof ownerId === "string") return { kind: "team", teamId: ownerId };
+  return undefined;
+};
+
+/** Keep relationship evidence internal when a Location manager cannot access an attached Project. */
+const accessScopePreviewForPrincipal = (
+  principal: AuthPrincipal,
+  preview: AccessScopeChangePreview,
+): AccessScopeChangePreview => ({
+  ...preview,
+  affectedProjects: preview.affectedProjects.filter((project) =>
+    db.canAccessProject(principal, project.projectId)),
+});
+
 const accessibleProject = (req: FastifyRequest, projectId: string) => {
   const principal = requestPrincipal(req);
   return principal ? db.getProjectForPrincipal(principal, projectId) : null;
@@ -1203,16 +1287,20 @@ app.get("/api/projects/:id", async (req, reply) => {
 app.post("/api/projects", async (req, reply) => {
   const principal = requestHuman(req);
   if (!principal) return reply.code(403).send({ error: "human identity is required" });
-  const name = projectName((req.body as CreateProjectRequest | undefined)?.name);
+  const body = (req.body ?? {}) as CreateProjectRequest;
+  const name = projectName(body.name);
   if (!name) return reply.code(400).send({ error: "name must be 1-120 characters" });
+  const defaultScope: ResourceScope = {
+    organizationId: principal.organizationId,
+    owner: principal.role === "owner" || principal.role === "admin"
+      ? { kind: "organization", organizationId: principal.organizationId }
+      : { kind: "user", userId: principal.userId },
+  };
+  const requested = requestedAccessScope(principal, body.owner, defaultScope);
+  if (!requested.ok) return reply.code(requested.status).send({ error: requested.error });
   const project = db.createProject({
     name,
-    scope: {
-      organizationId: principal.organizationId,
-      owner: principal.role === "owner" || principal.role === "admin"
-        ? { kind: "organization", organizationId: principal.organizationId }
-        : { kind: "user", userId: principal.userId },
-    },
+    scope: requested.scope,
   });
   hub.projectChanged(project);
   return reply.code(201).send({ project: db.getProjectForPrincipal(principal, project.id)! });
@@ -1236,6 +1324,51 @@ app.patch("/api/projects/:id", async (req, reply) => {
   const project = db.getProject(id)!;
   hub.projectChanged(project);
   return { project: db.getProjectForPrincipal(principal, id)! };
+});
+
+app.get("/api/projects/:id/access-scope", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestHuman(req);
+  if (!principal) return reply.code(403).send({ error: "human identity is required" });
+  if (!manageableProject(req, id)) return reply.code(404).send({ error: "project not found" });
+  const requested = requestedAccessScope(principal, accessScopeOwnerFromQuery(req.query));
+  if (!requested.ok) return reply.code(requested.status).send({ error: requested.error });
+  const currentScope = db.projectScope(id);
+  if (!currentScope) return reply.code(404).send({ error: "project not found" });
+  const transitionError = accessScopeTransitionError(principal, currentScope, requested.scope);
+  if (transitionError) return reply.code(403).send({ error: transitionError });
+  const preview = db.previewProjectAccessScope(id, requested.scope);
+  return preview ? { preview } : reply.code(404).send({ error: "project not found" });
+});
+
+app.put("/api/projects/:id/access-scope", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestHuman(req);
+  if (!principal) return reply.code(403).send({ error: "human identity is required" });
+  if (!manageableProject(req, id)) return reply.code(404).send({ error: "project not found" });
+  const body = (req.body ?? {}) as { owner?: unknown; confirmationToken?: unknown };
+  const requested = requestedAccessScope(principal, body.owner);
+  if (!requested.ok) return reply.code(requested.status).send({ error: requested.error });
+  const currentScope = db.projectScope(id);
+  if (!currentScope) return reply.code(404).send({ error: "project not found" });
+  const transitionError = accessScopeTransitionError(principal, currentScope, requested.scope);
+  if (transitionError) return reply.code(403).send({ error: transitionError });
+  if (typeof body.confirmationToken !== "string" || !/^[a-f0-9]{64}$/u.test(body.confirmationToken)) {
+    return reply.code(400).send({ error: "a valid access-scope confirmation token is required" });
+  }
+  try {
+    const preview = db.applyProjectAccessScope(id, requested.scope, body.confirmationToken, Date.now(), {
+      principal,
+      mutationAuditId: requestMutationAudits.get(req),
+    });
+    if (!preview) return reply.code(404).send({ error: "project not found" });
+    hub.closeScopedUiClients();
+    hub.synchronizeProjectSessionState();
+    hub.projectChangedById(id);
+    return { project: db.getProjectForPrincipal(principal, id)!, preview };
+  } catch (error) {
+    return reply.code(409).send({ error: error instanceof Error ? error.message : "project access update failed" });
+  }
 });
 
 app.delete("/api/projects/:id", async (req, reply) => {
@@ -1288,6 +1421,10 @@ app.post("/api/projects/:id/locations/new", async (req, reply) => {
     return reply.code(400).send({ error: "runnerId, a 1-120 character name, and a valid path are required" });
   }
   if (!db.canAccessRunner(principal, runnerId)) return reply.code(404).send({ error: "runner not found" });
+  const projectScope = db.projectScope(id);
+  if (!projectScope) return reply.code(404).send({ error: "project not found" });
+  const requested = requestedAccessScope(principal, body.owner, projectScope);
+  if (!requested.ok) return reply.code(requested.status).send({ error: requested.error });
   if (!hub.isRunnerOnline(runnerId)) return reply.code(409).send({ error: "runner is offline" });
   const unsupported = runnerCapabilityError(runnerId, "directoryListing", "Directory browsing");
   if (unsupported) return reply.code(409).send({ error: unsupported });
@@ -1300,7 +1437,7 @@ app.post("/api/projects/:id/locations/new", async (req, reply) => {
   }
   if (!browsed.data?.path) return reply.code(502).send({ error: "the runner did not return the selected directory" });
   try {
-    db.createProjectWorkspace(id, runnerId, { name, path: browsed.data.path });
+    db.createProjectWorkspace(id, runnerId, { name, path: browsed.data.path }, Date.now(), requested.scope);
   } catch (error) {
     const message = (error as Error).message;
     return reply.code(message.includes("already registered") ? 409 : 400).send({ error: message });
@@ -1399,6 +1536,7 @@ registerInstanceRoute(app, {
   instanceId: () => db.instanceId(),
   displayName: () => db.localIdentityContext().organizationName,
 });
+registerRunnerAttestationRoute(app, db);
 
 // Connection coordinates are reusable; runner-specific credentials are issued separately and
 // their plaintext is returned only once after the caller has chosen the exact runner id.
@@ -1617,11 +1755,20 @@ app.get("/api/identity/mutation-audit", async (req, reply) => {
   return { audit: db.listMutationAudit(principal.organizationId, Number.isFinite(rawLimit) ? rawLimit : 100) };
 });
 
+app.get("/api/identity/access-scope-audit", async (req, reply) => {
+  const principal = requestHuman(req);
+  if (!principal || !canAdministerIdentity(principal.role)) {
+    return reply.code(403).send({ error: "organization owner or admin permission is required" });
+  }
+  const rawLimit = Number((req.query as { limit?: string }).limit ?? 100);
+  return { audit: db.listAccessScopeAudit(principal.organizationId, Number.isFinite(rawLimit) ? rawLimit : 100) };
+});
+
 app.put("/api/identity/ownership/:resource/:resourceId", async (req, reply) => {
   const principal = requestHuman(req)!;
   const { resource, resourceId } = req.params as { resource: string; resourceId: string };
-  if (resource !== "runner" && resource !== "workspace" && resource !== "session") {
-    return reply.code(400).send({ error: "resource must be runner, workspace, or session" });
+  if (resource !== "runner" && resource !== "session") {
+    return reply.code(400).send({ error: "resource must be runner or session; Location access uses the preflighted access-scope endpoint" });
   }
   const body = (req.body ?? {}) as { runnerId?: unknown; owner?: unknown };
   const owner = body.owner as ResourceScope["owner"] | undefined;
@@ -1629,19 +1776,13 @@ app.put("/api/identity/ownership/:resource/:resourceId", async (req, reply) => {
     owner?.kind === "user" && typeof owner.userId === "string" ||
     owner?.kind === "team" && typeof owner.teamId === "string";
   if (!validOwner) return reply.code(400).send({ error: "invalid resource owner" });
-  if (resource === "workspace" && typeof body.runnerId !== "string") {
-    return reply.code(400).send({ error: "runnerId is required for workspace ownership" });
-  }
   try {
-    const affectedProjectIds = resource === "workspace" && typeof body.runnerId === "string"
-      ? db.projectIdsForWorkspace(body.runnerId, resourceId)
-      : resource === "session"
-        ? [db.getSession(resourceId)?.projectId].filter((id): id is string => Boolean(id))
-        : [];
+    const affectedProjectIds = resource === "session"
+      ? [db.getSession(resourceId)?.projectId].filter((id): id is string => Boolean(id))
+      : [];
     const updated = db.setResourceScope({
       resource,
       resourceId,
-      runnerId: typeof body.runnerId === "string" ? body.runnerId : undefined,
       scope: { organizationId: principal.organizationId, owner: owner! },
       now: Date.now(),
     });
@@ -1649,8 +1790,7 @@ app.put("/api/identity/ownership/:resource/:resourceId", async (req, reply) => {
     hub.closeScopedUiClients();
     hub.synchronizeProjectSessionState();
     for (const projectId of affectedProjectIds) hub.projectChangedById(projectId);
-    return { scope: resource === "runner" ? db.runnerScope(resourceId)
-      : resource === "workspace" ? db.workspaceScope(body.runnerId as string, resourceId) : db.sessionScope(resourceId) };
+    return { scope: resource === "runner" ? db.runnerScope(resourceId) : db.sessionScope(resourceId) };
   } catch (error) {
     return reply.code(409).send({ error: error instanceof Error ? error.message : "ownership update failed" });
   }
@@ -2074,6 +2214,7 @@ app.post("/api/boxes", async (req, reply) => {
     sshPort,
     workspaces,
     autoReconnect: true,
+    runnerDataDir: managedBoxRunnerDataDir(boxId),
     scope: boxScope,
     now: Date.now(),
   });
@@ -2082,6 +2223,8 @@ app.post("/api/boxes", async (req, reply) => {
   orchestrator.add(boxId);
   return reply.code(201).send({ box: db.getBox(boxId) });
 });
+
+registerBoxLegacyAdoptionRoute(app, { db, orchestrator, requestHuman });
 
 app.post("/api/boxes/:id/reconnect", async (req, reply) => {
   const id = (req.params as { id: string }).id;
@@ -2098,7 +2241,11 @@ app.post("/api/boxes/:id/reconnect", async (req, reply) => {
     (sessionId) => db.canAccessSession(principal, sessionId),
   );
   if (!decision.ok) return reply.code(409).send(decision.conflict);
-  orchestrator.reconnect(id);
+  const result = await orchestrator.reconnect(id);
+  if (result === "not_found") return reply.code(404).send({ error: "box not found" });
+  if (result === "in_progress") return reply.code(409).send({ error: "another lifecycle operation is already stopping this box's managed runner" });
+  if (result === "stop_failed") return reply.code(409).send({ error: "the managed runner could not be stopped; reconnect was not started" });
+  if (result === "superseded") return reply.code(409).send({ error: "a newer box lifecycle operation superseded reconnect" });
   return { ok: true, forced: force.force };
 });
 
@@ -2138,7 +2285,13 @@ app.post("/api/boxes/:id/update-runner", async (req, reply) => {
     (sessionId) => db.canAccessSession(principal, sessionId),
   );
   if (!decision.ok) return reply.code(409).send(decision.conflict);
-  const status = orchestrator.startPreparedRunnerUpdate(prepared);
+  const status = await orchestrator.startPreparedRunnerUpdate(prepared);
+  if (status === "in_progress") {
+    return reply.code(409).send({ error: "another lifecycle operation is already stopping this box's managed runner" });
+  }
+  if (status === "stop_failed") {
+    return reply.code(409).send({ error: "the managed runner could not be stopped; update was not started" });
+  }
   return {
     ok: true,
     status,
@@ -2153,6 +2306,12 @@ app.post("/api/boxes/:id/update-runner", async (req, reply) => {
 app.delete("/api/boxes/:id", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const box = db.getBox(id);
+  if (box && db.boxHasPendingLegacyDataAdoption(id)) {
+    return reply.code(409).send({
+      error: "this Machine cannot be deleted while its legacy SSH account adoption is pending",
+      code: "LEGACY_DATA_ADOPTION_PENDING",
+    });
+  }
   const projectIds = box ? db.projectIdsForRunner(box.runnerId) : [];
   orchestrator.remove(id);
   const res = db.deleteBox(id);
@@ -2872,6 +3031,64 @@ app.post("/api/runners/:runnerId/workspaces", async (req, reply) => {
     hub.projectChangedById(projectId);
   }
   return { workspace };
+});
+
+app.get("/api/runners/:runnerId/workspaces/:workspaceId/access-scope", async (req, reply) => {
+  const { runnerId, workspaceId } = req.params as { runnerId: string; workspaceId: string };
+  const principal = requestHuman(req);
+  if (!principal) return reply.code(403).send({ error: "human identity is required" });
+  if (!db.canManageWorkspace(principal, runnerId, workspaceId)) {
+    return reply.code(404).send({ error: "workspace not found" });
+  }
+  const requested = requestedAccessScope(principal, accessScopeOwnerFromQuery(req.query));
+  if (!requested.ok) return reply.code(requested.status).send({ error: requested.error });
+  const currentScope = db.workspaceScope(runnerId, workspaceId);
+  if (!currentScope) return reply.code(404).send({ error: "workspace not found" });
+  const transitionError = accessScopeTransitionError(principal, currentScope, requested.scope);
+  if (transitionError) return reply.code(403).send({ error: transitionError });
+  const preview = db.previewWorkspaceAccessScope(runnerId, workspaceId, requested.scope);
+  return preview
+    ? { preview: accessScopePreviewForPrincipal(principal, preview) }
+    : reply.code(404).send({ error: "workspace not found" });
+});
+
+app.put("/api/runners/:runnerId/workspaces/:workspaceId/access-scope", async (req, reply) => {
+  const { runnerId, workspaceId } = req.params as { runnerId: string; workspaceId: string };
+  const principal = requestHuman(req);
+  if (!principal) return reply.code(403).send({ error: "human identity is required" });
+  if (!db.canManageWorkspace(principal, runnerId, workspaceId)) {
+    return reply.code(404).send({ error: "workspace not found" });
+  }
+  const body = (req.body ?? {}) as { owner?: unknown; confirmationToken?: unknown };
+  const requested = requestedAccessScope(principal, body.owner);
+  if (!requested.ok) return reply.code(requested.status).send({ error: requested.error });
+  const currentScope = db.workspaceScope(runnerId, workspaceId);
+  if (!currentScope) return reply.code(404).send({ error: "workspace not found" });
+  const transitionError = accessScopeTransitionError(principal, currentScope, requested.scope);
+  if (transitionError) return reply.code(403).send({ error: transitionError });
+  if (typeof body.confirmationToken !== "string" || !/^[a-f0-9]{64}$/u.test(body.confirmationToken)) {
+    return reply.code(400).send({ error: "a valid access-scope confirmation token is required" });
+  }
+  try {
+    const preview = db.applyWorkspaceAccessScope(
+      runnerId,
+      workspaceId,
+      requested.scope,
+      body.confirmationToken,
+      Date.now(),
+      { principal, mutationAuditId: requestMutationAudits.get(req) },
+    );
+    if (!preview) return reply.code(404).send({ error: "workspace not found" });
+    hub.closeScopedUiClients();
+    hub.synchronizeProjectSessionState();
+    hub.runnerChanged(runnerId);
+    for (const project of preview.affectedProjects) hub.projectChangedById(project.projectId);
+    const workspace = db.listRunnersForPrincipal(principal)
+      .find((runner) => runner.runnerId === runnerId)?.workspaces.find((item) => item.id === workspaceId);
+    return { workspace, preview: accessScopePreviewForPrincipal(principal, preview) };
+  } catch (error) {
+    return reply.code(409).send({ error: error instanceof Error ? error.message : "location access update failed" });
+  }
 });
 
 // Rename a project (workspace display name). CP-owned override — the runner's own config

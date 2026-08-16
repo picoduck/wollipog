@@ -32,6 +32,7 @@ test("provider-state reconciliation protects live sessions, expires owned orphan
   const peerWsl = "f".repeat(64);
   const failedCleanup = providerStateKey("failed-cleanup");
   const ownerKey = providerStateKey("runner-a");
+  const wslBase = `/home/me/.agent-manager/runner-instances/${ownerKey}`;
   const byRoot = new Map<string, StateEntry[]>([
     ["/data/provider-state/claude", [
       { name: activeClaude, mtimeMs: now - 30 * day, bytes: 500 },
@@ -45,8 +46,8 @@ test("provider-state reconciliation protects live sessions, expires owned orphan
       { name: failedCleanup, mtimeMs: now - 8 * day, bytes: 10 },
       { name: "sessions", mtimeMs: now - 30 * day, bytes: 900 },
     ]],
-    ["/home/me/.agent-manager/provider-state/claude", []],
-    ["/home/me/.agent-manager/provider-state/codex", [
+    [`${wslBase}/provider-state/claude`, []],
+    [`${wslBase}/provider-state/codex`, [
       { name: activeWslCodex, mtimeMs: now - 30 * day, bytes: 500 },
       { name: wslOrphan, mtimeMs: now - 8 * day, bytes: 25, ownerKey },
       { name: peerWsl, mtimeMs: now - 30 * day, bytes: 500, ownerKey: providerStateKey("runner-b") },
@@ -71,7 +72,7 @@ test("provider-state reconciliation protects live sessions, expires owned orphan
   assert.deepEqual(removed.sort(), [
     `/data/provider-state/claude/${expired}`,
     `/data/provider-state/codex/${freshOldest}`,
-    `/home/me/.agent-manager/provider-state/codex/${wslOrphan}`,
+    `${wslBase}/provider-state/codex/${wslOrphan}`,
   ].sort());
   assert.equal(removed.includes("/data/provider-state/claude/projects"), false, "legacy root remains until every old session migrates");
   assert.equal(removed.includes("/data/provider-state/codex/sessions"), false, "unowned shared legacy roots fail safe");
@@ -118,6 +119,34 @@ test("failed exact cleanup survives restart and retry removes only its hashed pa
   }
 });
 
+test("stable WSL ownership preserves the legacy native marker key during upgrade", async () => {
+  const now = Date.UTC(2026, 6, 12);
+  const nativeOwner = providerStateKey("runner-a");
+  const stableOwner = "e".repeat(64);
+  const orphan = "a".repeat(64);
+  const removed: string[] = [];
+  await reconcileProviderState(
+    bwrap,
+    "/data",
+    [],
+    stableOwner,
+    [],
+    new Set(),
+    [],
+    now,
+    {
+      list: async (context, root) => context.kind === "native" && root === "/data/provider-state/codex"
+        ? [{ name: orphan, mtimeMs: 0, bytes: 1, ownerKey: nativeOwner }]
+        : [],
+      claim: async () => {},
+      remove: async (_context, path) => { removed.push(path); },
+      wslHome: async () => "/home/me",
+    },
+    nativeOwner,
+  );
+  assert.deepEqual(removed, [`/data/provider-state/codex/${orphan}`]);
+});
+
 test("one offline WSL distro does not abort later reconciliation contexts", async () => {
   const now = Date.UTC(2026, 6, 12);
   const ownerKey = providerStateKey("runner-a");
@@ -153,5 +182,7 @@ test("one offline WSL distro does not abort later reconciliation contexts", asyn
     "WSL Offline: distro unavailable",
     "WSL Debian codex session peer-live: belongs to another runner",
   ].sort());
-  assert.deepEqual(removed, [`/home/me/.agent-manager/provider-state/codex/${orphan}`]);
+  assert.deepEqual(removed, [
+    `/home/me/.agent-manager/runner-instances/${ownerKey}/provider-state/codex/${orphan}`,
+  ]);
 });

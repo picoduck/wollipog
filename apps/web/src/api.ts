@@ -1,5 +1,6 @@
 import type {
   AddBoxRequest,
+  AccessScopeChangePreview,
   AddPodMemberRequest,
   AppendPodContextRequest,
   ApprovalQueueItem,
@@ -43,6 +44,7 @@ import type {
   OnboardingInfo,
   OrganizationMembershipView,
   OrganizationRole,
+  ResourceOwner,
   PodContextEntry,
   PodContextPage,
   PodOrchestrationActionResult,
@@ -143,6 +145,12 @@ async function requestJson<T>(transport: ApiTransport, path: string, init?: Requ
 
 export function sessionLookupPath(id: string): string {
   return `/api/sessions/lookup/by-id?${new URLSearchParams({ id }).toString()}`;
+}
+
+function accessScopeQuery(owner: ResourceOwner): string {
+  const ownerId = owner.kind === "organization" ? owner.organizationId
+    : owner.kind === "user" ? owner.userId : owner.teamId;
+  return new URLSearchParams({ ownerKind: owner.kind, ownerId }).toString();
 }
 
 async function transcriptExport(
@@ -259,6 +267,17 @@ export function createApiClient(transport: ApiTransport) {
       body: JSON.stringify(body),
     }),
 
+  previewProjectAccessScope: (id: string, owner: ResourceOwner) =>
+    req<{ preview: AccessScopeChangePreview }>(
+      `/api/projects/${encodeURIComponent(id)}/access-scope?${accessScopeQuery(owner)}`,
+    ),
+
+  updateProjectAccessScope: (id: string, owner: ResourceOwner, confirmationToken: string) =>
+    req<ProjectResponse & { preview: AccessScopeChangePreview }>(
+      `/api/projects/${encodeURIComponent(id)}/access-scope`,
+      { method: "PUT", body: JSON.stringify({ owner, confirmationToken }) },
+    ),
+
   deleteProject: (id: string) =>
     req<DeleteProjectResponse>(`/api/projects/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
@@ -273,6 +292,22 @@ export function createApiClient(transport: ApiTransport) {
       method: "POST",
       body: JSON.stringify(body),
     }),
+
+  previewWorkspaceAccessScope: (runnerId: string, workspaceId: string, owner: ResourceOwner) =>
+    req<{ preview: AccessScopeChangePreview }>(
+      `/api/runners/${encodeURIComponent(runnerId)}/workspaces/${encodeURIComponent(workspaceId)}` +
+      `/access-scope?${accessScopeQuery(owner)}`,
+    ),
+
+  updateWorkspaceAccessScope: (
+    runnerId: string,
+    workspaceId: string,
+    owner: ResourceOwner,
+    confirmationToken: string,
+  ) => req<{ workspace: WorkspaceInfo; preview: AccessScopeChangePreview }>(
+    `/api/runners/${encodeURIComponent(runnerId)}/workspaces/${encodeURIComponent(workspaceId)}/access-scope`,
+    { method: "PUT", body: JSON.stringify({ owner, confirmationToken }) },
+  ),
 
   moveProjectLocation: (projectId: string, body: MoveProjectLocationRequest) =>
     req<ProjectResponse>(`/api/projects/${encodeURIComponent(projectId)}/locations/move`, {
@@ -835,6 +870,15 @@ export function createApiClient(transport: ApiTransport) {
       method: "POST",
       body: JSON.stringify({ force }),
     }),
+
+  adoptLegacyBoxData: (boxId: string, force = false) =>
+    req<{ ok: true; status: "started"; forced?: boolean }>(
+      `/api/boxes/${encodeURIComponent(boxId)}/adopt-legacy-data-dir`,
+      {
+        method: "POST",
+        body: JSON.stringify({ force, acknowledgeAllLegacyRunnersStopped: true }),
+      },
+    ),
 
   removeBox: (boxId: string) => req<void>(`/api/boxes/${encodeURIComponent(boxId)}`, { method: "DELETE" }),
 

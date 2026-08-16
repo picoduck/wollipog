@@ -173,6 +173,8 @@ export interface State {
   projectsSupported: boolean;
   /** False against older control planes whose Project API cannot register a newly browsed folder. */
   projectLocationCreationSupported: boolean;
+  /** False against older control planes without explicit, preflighted access-scope mutations. */
+  accessScopeManagementSupported: boolean;
   /** True only when New Session can atomically open the separate Native TUI process. */
   nativeTuiLaunchSupported: boolean;
   runners: Map<string, RunnerView>;
@@ -717,6 +719,7 @@ function reducer(state: State, action: Action): State {
             snapshotRevision: state.snapshotRevision + 1,
             projectsSupported: msg.capabilities?.projects === true || msg.projects !== undefined,
             projectLocationCreationSupported: msg.capabilities?.createProjectLocations === true,
+            accessScopeManagementSupported: msg.capabilities?.accessScopeManagement === true,
             nativeTuiLaunchSupported: msg.capabilities?.nativeTuiLaunch === true,
             runners: new Map(msg.runners.map((r) => [r.runnerId, r])),
             // `boxes` may be absent from an older control plane's snapshot — tolerate it.
@@ -1011,6 +1014,7 @@ function initialState(view: View = { name: "inbox" }, inbox = loadInboxState()):
     snapshotRevision: 0,
     projectsSupported: false,
     projectLocationCreationSupported: false,
+    accessScopeManagementSupported: false,
     nativeTuiLaunchSupported: false,
     runners: new Map(),
     boxes: new Map(),

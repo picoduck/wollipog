@@ -60,6 +60,7 @@ import {
   verifyExecutionIsolationForkState,
 } from "./execution-isolation.js";
 import type { SpawnIsolation } from "./spawn.js";
+import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
 import {
   ProviderStateCleanupJournal,
   reconcileProviderState,
@@ -214,6 +215,7 @@ interface PreparedCommandCheckpoint {
   priorTurnCount: number;
   priorLastTurnBaseTree: string | null | undefined;
   priorTurnRef: string | null;
+  ownerHash?: string;
   anchored: boolean;
   accountingApplied: boolean;
 }
@@ -565,6 +567,7 @@ export class SessionManager {
   /** Async seam covers WSL markerless recovery without blocking runner startup. */
   private discoverClaudeTasksInContext: typeof discoverIncompleteClaudeTasksInContext = discoverIncompleteClaudeTasksInContext;
   private readonly sessionCommandAuthority = new SessionCommandAuthorityRegistry();
+  private readonly providerHomeLeases?: ProviderHomeLeaseRegistry;
 
   constructor(
     private send: Send,
@@ -597,8 +600,10 @@ export class SessionManager {
     private readonly containerTargets?: ContainerTargetRegistry,
     private readonly cloudTargets?: CloudTargetRegistry,
     private readonly controlPlaneProtocolVersion: () => number | null = () => PROTOCOL_VERSION,
+    private readonly runnerOwnerHash?: string,
   ) {
     this.lockOwner = `${runnerId}#${randomUUID()}`;
+    this.providerHomeLeases = runnerOwnerHash ? new ProviderHomeLeaseRegistry(runnerOwnerHash) : undefined;
     this.stateDir = dataDir ?? join(store.rootPath(), ".runner-data");
     this.cleanupJournal = new WorktreeCleanupJournal(this.stateDir);
     this.providerStateCleanupJournal = new ProviderStateCleanupJournal(this.stateDir);
@@ -615,9 +620,31 @@ export class SessionManager {
     this.historyMaintenanceTimer.unref?.();
   }
 
+  private checkpointOwnerHash(meta: Pick<SessionMeta, "checkpointRefVersion">): string | undefined {
+    if (meta.checkpointRefVersion === undefined) return undefined;
+    if (meta.checkpointRefVersion !== 2) throw new Error("unsupported checkpoint ref layout");
+    if (!this.runnerOwnerHash) throw new Error("owned checkpoint layout requires an attested runner owner");
+    return this.runnerOwnerHash;
+  }
+
+  private checkpointOwnership(meta: Pick<SessionMeta, "sessionId" | "repoPath" | "context" | "checkpointRefVersion">): CheckpointRefOwnershipClaim {
+    const ownerHash = this.checkpointOwnerHash(meta);
+    return { sessionId: meta.sessionId, repoPath: meta.repoPath, context: meta.context, ...(ownerHash ? { ownerHash } : {}) };
+  }
+
   /** Swap the upstream send fn when the control-plane socket reconnects. */
   setSend(send: Send): void {
     this.send = send;
+  }
+
+  /** A standalone Agent TUI bypasses structured-driver isolation but shares provider HOME. */
+  acquireAgentTuiProviderHome(meta: SessionMeta): void {
+    this.providerHomeLeases?.acquire({
+      driver: meta.driver,
+      command: meta.command,
+      context: meta.context,
+      env: meta.env,
+    });
   }
 
   /** Re-scan durable Claude work after each successful control-plane registration/reconnect. */
@@ -710,24 +737,18 @@ export class SessionManager {
       // session is between worktrees (for example, after interrupted or failed materialization).
       // Worktree presence gates mirroring, not ownership. Otherwise startup reclaim can silently
       // delete the still-live row's rewind and fork refs during that ordinary transient state.
-      currentCheckpointOwnershipKeys.add(checkpointRefOwnershipKey({
-        sessionId: m.sessionId,
-        repoPath: m.repoPath,
-        context: m.context,
-      }));
-      if (m.worktreePath) {
-        try {
-          const ownership = this.checkpointRefOwnership.claim({
-            sessionId: m.sessionId,
-            repoPath: m.repoPath,
-            context: m.context,
-          });
+      try {
+        const expectedOwnership = this.checkpointOwnership(m);
+        currentCheckpointOwnershipKeys.add(checkpointRefOwnershipKey(expectedOwnership));
+        if (m.worktreePath) {
+          const ownership = this.checkpointRefOwnership.claim(expectedOwnership);
           currentCheckpointOwnershipKeys.add(checkpointRefOwnershipKey(ownership));
           this.scheduleCheckpointRefSync(m, ownership);
-        } catch (error) {
-          // Never mint or mirror canonical refs without durable exact-session ownership proof.
-          this.log(`checkpoint ref ownership claim failed for ${m.sessionId}: ${errText(error)}`);
         }
+      } catch (error) {
+        // One malformed/forward-version row must fail closed for its own refs without preventing
+        // cleanup-journal replay and tombstone reconciliation for every other stored session.
+        this.log(`checkpoint ref ownership claim failed for ${m.sessionId}: ${errText(error)}`);
       }
       let reconciled = m;
       if (m.driver === "claude-code" && m.status === "stopped") {
@@ -845,7 +866,7 @@ export class SessionManager {
       try {
         const result = await withGitExecutionContext(
           meta.context,
-          () => synchronizeCheckpointRefs(meta.repoPath, meta.sessionId),
+          () => synchronizeCheckpointRefs(meta.repoPath, meta.sessionId, ownership.ownerHash),
         );
         if (result.conflicts.length) {
           this.log(
@@ -881,7 +902,7 @@ export class SessionManager {
         try {
           await withGitExecutionContext(
             ownership.context,
-            () => deleteTurnRefs(ownership.repoPath, ownership.sessionId),
+            () => deleteTurnRefs(ownership.repoPath, ownership.sessionId, ownership.ownerHash),
           );
         } catch (error) {
           const permanentlyUnavailable = nativeRepositoryPathIsUnavailable(
@@ -903,11 +924,7 @@ export class SessionManager {
   private currentCheckpointOwnershipKey(sessionId: string): string | null {
     const current = this.store.readMeta(sessionId);
     if (!current || this.store.isDeleted(sessionId)) return null;
-    return checkpointRefOwnershipKey({
-      sessionId,
-      repoPath: current.repoPath,
-      context: current.context,
-    });
+    return checkpointRefOwnershipKey(this.checkpointOwnership(current));
   }
 
   private reclaimCheckpointRefOwnership(ownership: CheckpointRefOwnershipRecord): Promise<void> {
@@ -983,16 +1000,21 @@ export class SessionManager {
         this.providerStateCleanupJournal,
         protectedSessionIds,
         this.log,
+        Date.now(),
+        this.runnerOwnerHash,
       );
       const pendingCleanup = this.providerStateCleanupJournal.list();
       const result = await reconcileProviderState(
         this.executionIsolation,
         this.stateDir,
         stored,
-        providerStateKey(this.runnerId),
+        this.runnerOwnerHash ?? providerStateKey(this.runnerId),
         pendingCleanup,
         this.forkingTargets,
         [...this.isolationContexts, ...pendingCleanup.map((record) => record.context)],
+        Date.now(),
+        undefined,
+        providerStateKey(this.runnerId),
       );
       if (result.removed.length) this.log(`reconciled ${result.removed.length} isolated provider-state path(s)`);
       for (const error of result.errors) this.log(`provider-state reconciliation skipped ${error}`);
@@ -1011,7 +1033,9 @@ export class SessionManager {
   ): Promise<void> {
     if (!journaled) this.providerStateCleanupJournal.add({ sessionId, driver, context });
     try {
-      await this.removeIsolationState({ ...this.executionIsolation, mode: "bwrap" }, context, driver, this.stateDir, sessionId);
+      await this.removeIsolationState(
+        { ...this.executionIsolation, mode: "bwrap" }, context, driver, this.stateDir, sessionId, {}, this.runnerOwnerHash,
+      );
       this.providerStateCleanupJournal.remove(sessionId);
     } catch (error) {
       this.log(`isolated provider state cleanup for ${sessionId} needs reconciliation: ${errText(error)}`);
@@ -1069,7 +1093,8 @@ export class SessionManager {
       preview: null,
       pendingApproval: null,
       adopted: true,
-      providerStateVersion: 2,
+      providerStateVersion: descriptor.context.kind === "wsl" ? 3 : 2,
+      ...(this.runnerOwnerHash ? { checkpointRefVersion: 2 as const } : {}),
       seq: 0,
       createdAt: descriptor.createdAt,
       updatedAt: now,
@@ -1330,7 +1355,10 @@ export class SessionManager {
       // Manager-driven: a continued session is no longer a pristine transcript, so it isn't
       // reprocessable (re-reading the original transcript would drop the continuation).
       adopted: false,
-      providerStateVersion: prior ? prior.providerStateVersion : 2,
+      providerStateVersion: prior ? prior.providerStateVersion : (context.kind === "wsl" ? 3 : 2),
+      checkpointRefVersion: prior
+        ? prior.checkpointRefVersion
+        : (this.runnerOwnerHash ? 2 : undefined),
       seq: prior?.seq ?? 0,
       createdAt: prior?.createdAt ?? now,
       updatedAt: now,
@@ -1378,7 +1406,16 @@ export class SessionManager {
         return false;
       }
       try {
-        const worktreeOptions = { context, dataDir: this.dataDir };
+        const worktreeOptions = {
+          context,
+          dataDir: this.dataDir,
+          ownerHash: this.runnerOwnerHash,
+          ...(context.kind === "wsl" && prior?.context.kind === "wsl" &&
+            prior.context.distro === context.distro && prior.worktreePath &&
+            prior.worktreePath.includes("/.agent-manager/worktrees/")
+            ? { legacyWslWorktreePath: prior.worktreePath }
+            : {}),
+        };
         const gitRepo = await isGitRepo(repoPath, worktreeOptions);
         if (!this.launchIsCurrent(spec.sessionId, launchGeneration)) return false;
         if (gitRepo) {
@@ -1389,13 +1426,15 @@ export class SessionManager {
           // created tree. Only an explicit false proves that this call reused durable state.
           worktreeOwnedByLaunch = worktree.created !== false;
           try {
-            const ownership = this.checkpointRefOwnership.claim({ sessionId: spec.sessionId, repoPath, context });
+            const ownership = this.checkpointRefOwnership.claim(this.checkpointOwnership(meta));
             await this.reclaimStaleCheckpointRefOwnership(ownership);
           } catch (claimError) {
             // A worktree without durable ref ownership proof must never be published or reach its
             // first checkpoint. Unwind only a worktree this launch actually materialized.
             if (worktreeOwnedByLaunch) {
-              const cleanup = { sessionId: spec.sessionId, repoPath, worktreePath: worktree.path, context };
+              const checkpointOwnerHash = this.checkpointOwnerHash(meta);
+              const cleanup = { sessionId: spec.sessionId, repoPath, worktreePath: worktree.path, context,
+                ...(checkpointOwnerHash ? { checkpointOwnerHash } : {}) };
               this.cleanupJournal.add(cleanup);
               await this.reapWorktree(cleanup, true);
             }
@@ -1411,7 +1450,9 @@ export class SessionManager {
               this.store.isDeleted(spec.sessionId);
             const superseded = this.launchWasSuperseded(spec.sessionId, launchGeneration);
             if (worktreeOwnedByLaunch || deleted) {
-              const cleanup = { sessionId: spec.sessionId, repoPath, worktreePath: worktree.path, context };
+              const checkpointOwnerHash = this.checkpointOwnerHash(meta);
+              const cleanup = { sessionId: spec.sessionId, repoPath, worktreePath: worktree.path, context,
+                ...(checkpointOwnerHash ? { checkpointOwnerHash } : {}) };
               this.cleanupJournal.add(cleanup);
               await this.reapWorktree(cleanup, worktreeOwnedByLaunch && !superseded);
             }
@@ -1456,7 +1497,9 @@ export class SessionManager {
         this.store.isDeleted(spec.sessionId);
       const superseded = this.launchWasSuperseded(spec.sessionId, launchGeneration);
       if (worktree && (worktreeOwnedByLaunch || deleted)) {
-        const cleanup = { sessionId: spec.sessionId, repoPath, worktreePath: worktree.path, context };
+        const checkpointOwnerHash = this.checkpointOwnerHash(meta);
+        const cleanup = { sessionId: spec.sessionId, repoPath, worktreePath: worktree.path, context,
+          ...(checkpointOwnerHash ? { checkpointOwnerHash } : {}) };
         this.cleanupJournal.add(cleanup);
         await this.reapWorktree(cleanup, worktreeOwnedByLaunch && !superseded);
       }
@@ -1521,7 +1564,9 @@ export class SessionManager {
       if (priorResumeId) this.store.releaseLock(spec.sessionId, this.lockOwner);
       // The session never started; if WE just created its worktree, it's garbage — reap it.
       if (worktree && worktreeOwnedByLaunch && !deleted) {
-        const cleanup = { sessionId: spec.sessionId, repoPath, worktreePath: worktree.path, context };
+        const checkpointOwnerHash = this.checkpointOwnerHash(meta);
+        const cleanup = { sessionId: spec.sessionId, repoPath, worktreePath: worktree.path, context,
+          ...(checkpointOwnerHash ? { checkpointOwnerHash } : {}) };
         this.cleanupJournal.add(cleanup);
         this.store.patchMeta(spec.sessionId, { worktreePath: null });
         await this.reapWorktree(cleanup, true);
@@ -1826,7 +1871,17 @@ export class SessionManager {
     meta: SessionMeta,
     launchGeneration?: number,
   ): Promise<void> {
-    if (this.executionIsolation.mode !== "bwrap" || meta.providerStateVersion === 2) return;
+    if (this.executionIsolation.mode !== "bwrap") return;
+    const expectedVersion = meta.context.kind === "wsl" ? 3 : 2;
+    if (meta.providerStateVersion === expectedVersion) return;
+    // Native v2 already uses the session-owned provider HOME layout. Never stamp it with the WSL
+    // v3 marker: an origin/main rollback treats every non-v2 row as legacy and would copy retained
+    // shared bytes back over the session partition. A native v3 row may exist from an interrupted
+    // pre-fix build; safely restore only its compatibility marker because its layout never changed.
+    if (meta.context.kind === "native" && meta.providerStateVersion === 3) {
+      this.store.patchMeta(meta.sessionId, { providerStateVersion: 2 });
+      return;
+    }
     const inFlight = this.providerStateMigrations.get(meta.sessionId);
     if (inFlight) {
       await inFlight;
@@ -1834,8 +1889,8 @@ export class SessionManager {
       if (!current) return;
       if (launchGeneration !== undefined &&
           !this.launchIsCurrent(meta.sessionId, launchGeneration)) return;
-      if (current.providerStateVersion !== 2) {
-        this.store.patchMeta(meta.sessionId, { providerStateVersion: 2 });
+      if (current.providerStateVersion !== expectedVersion) {
+        this.store.patchMeta(meta.sessionId, { providerStateVersion: expectedVersion });
       }
       return;
     }
@@ -1846,15 +1901,17 @@ export class SessionManager {
     const refresh = setInterval(() => this.store.refreshLock(meta.sessionId, this.lockOwner), LOCK_REFRESH_MS);
     try {
       // Double-check after acquiring the cross-process lock: another runner may have completed the
-      // copy while this caller waited. Never rm/copy a partition that is already published as v2.
+      // copy while this caller waited. Never rm/copy a partition that is already published as v3.
       const current = this.store.readMeta(meta.sessionId);
-      if (!current || current.providerStateVersion === 2) return;
+      if (!current || current.providerStateVersion === expectedVersion) return;
       const migration = this.migrateIsolationState(
         this.executionIsolation,
         current.context,
         current.driver,
         this.stateDir,
         current.sessionId,
+        {},
+        this.runnerOwnerHash,
       );
       this.providerStateMigrations.set(current.sessionId, migration);
       try {
@@ -1866,7 +1923,7 @@ export class SessionManager {
       }
       if (launchGeneration !== undefined &&
           !this.launchIsCurrent(current.sessionId, launchGeneration)) return;
-      this.store.patchMeta(current.sessionId, { providerStateVersion: 2 });
+      this.store.patchMeta(current.sessionId, { providerStateVersion: expectedVersion });
     } finally {
       clearInterval(refresh);
       if (!alreadyOwned) this.store.releaseLock(meta.sessionId, this.lockOwner);
@@ -1910,7 +1967,8 @@ export class SessionManager {
         this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
       }
       if (meta.executionTarget?.adapter !== "container" && meta.executionTarget?.adapter !== "cloud" &&
-          this.executionIsolation.mode === "bwrap" && meta.providerStateVersion !== 2) {
+          this.executionIsolation.mode === "bwrap" &&
+          meta.providerStateVersion !== (meta.context.kind === "wsl" ? 3 : 2)) {
         await this.ensureProviderStateLayout(meta, launchGeneration);
       }
       isolation = await this.resolveLaunchIsolation(meta, cwd, launchGeneration);
@@ -1932,6 +1990,13 @@ export class SessionManager {
 
     let client: Driver;
     try {
+      this.providerHomeLeases?.acquire({
+        driver: meta.driver,
+        command: meta.command,
+        context: meta.context,
+        env: meta.env,
+        isolation,
+      });
       client = this.createDriver(
         meta.driver,
         { command: meta.command, args: meta.args, cwd, env: meta.env, config: meta.config, context: meta.context, capabilities: meta.capabilities, resumeId, acpSessionContext: meta.acpSessionContext, isolation, sessionStateDir: this.store.sessionPath(sessionId), initialBackgroundTaskIds: meta.orphanedWork?.pendingTaskIds ?? meta.pendingBackgroundTaskIds },
@@ -2198,6 +2263,7 @@ export class SessionManager {
       env: meta.env,
       sessionId: meta.sessionId,
       cwd,
+      ...(this.runnerOwnerHash ? { ownerHash: this.runnerOwnerHash } : {}),
     });
   }
 
@@ -3857,10 +3923,11 @@ export class SessionManager {
       const baseCommit = await worktreeHead(entry.worktree.path, {
         context: entry.context,
         dataDir: this.dataDir,
+        ownerHash: this.runnerOwnerHash,
       });
       await withGitExecutionContext(
         entry.context,
-        () => anchorForkRef(entry.worktree!.path, sessionId, turn, tree),
+        () => anchorForkRef(entry.worktree!.path, sessionId, turn, tree, this.checkpointOwnerHash(meta)),
       );
       // Record the point BEFORE the visible event. A crash between the two leaves no button
       // (safe); event-first would leave a durable button whose required point was lost.
@@ -3909,8 +3976,8 @@ export class SessionManager {
     if (!checkpoint.anchored || !entry.worktree) return;
     try {
       await withGitExecutionContext(entry.context, () => checkpoint.priorTurnRef
-        ? anchorTurnRef(entry.worktree!.path, sessionId, checkpoint.turn, checkpoint.priorTurnRef!)
-        : deleteTurnRef(entry.worktree!.path, sessionId, checkpoint.turn));
+        ? anchorTurnRef(entry.worktree!.path, sessionId, checkpoint.turn, checkpoint.priorTurnRef!, checkpoint.ownerHash)
+        : deleteTurnRef(entry.worktree!.path, sessionId, checkpoint.turn, checkpoint.ownerHash));
       checkpoint.anchored = false;
     } catch (error) {
       this.log(`command checkpoint ref rollback failed for ${sessionId} turn ${checkpoint.turn}: ${errText(error)}`);
@@ -4011,7 +4078,13 @@ export class SessionManager {
         durable?.uncertain("session disappeared after the durable user event was recorded");
         return;
       }
-      const turn = (this.store.readMeta(sessionId)?.turnCount ?? 0) + 1;
+      const checkpointMeta = this.store.readMeta(sessionId);
+      if (!checkpointMeta) {
+        durable?.uncertain("session disappeared after the durable user event was recorded");
+        return;
+      }
+      const checkpointOwnerHash = this.checkpointOwnerHash(checkpointMeta);
+      const turn = (checkpointMeta.turnCount ?? 0) + 1;
       this.store.patchMeta(sessionId, { lastTurnBaseTree: snap, turnCount: turn });
       // Per-turn CHECKPOINT (T3-style rewind target): anchor the pre-turn tree under a real
       // ref (gc can't prune it, unlike the dangling lastTurnBaseTree) and record it on the
@@ -4019,7 +4092,9 @@ export class SessionManager {
       // failed anchor only loses the rewind target for this turn.
       if (snap) {
         try {
-          await withGitExecutionContext(entry.context, () => anchorTurnRef(entry.worktree!.path, sessionId, turn, snap!));
+          await withGitExecutionContext(entry.context, () => anchorTurnRef(
+            entry.worktree!.path, sessionId, turn, snap!, checkpointOwnerHash,
+          ));
           this.emitEvent(sessionId, { kind: "checkpoint", turn, tree: snap });
         } catch (err) {
           this.log(`checkpoint anchor failed for ${sessionId} turn ${turn}: ${errText(err)}`);
@@ -4168,7 +4243,7 @@ export class SessionManager {
       try {
         priorTurnRef = await withGitExecutionContext(
           entry.context,
-          () => readTurnRef(entry.worktree!.path, sessionId, turn),
+          () => readTurnRef(entry.worktree!.path, sessionId, turn, this.checkpointOwnerHash(priorMeta)),
         );
       } catch (error) {
         const detail = `checkpoint refs could not be verified: ${errText(error)}`;
@@ -4184,6 +4259,7 @@ export class SessionManager {
         priorTurnCount: priorMeta.turnCount ?? 0,
         priorLastTurnBaseTree: priorMeta.lastTurnBaseTree,
         priorTurnRef,
+        ownerHash: this.checkpointOwnerHash(priorMeta),
         anchored: false,
         accountingApplied: false,
       };
@@ -4191,7 +4267,7 @@ export class SessionManager {
         try {
           await withGitExecutionContext(
             entry.context,
-            () => anchorTurnRef(entry.worktree!.path, sessionId, turn, snapshot!),
+            () => anchorTurnRef(entry.worktree!.path, sessionId, turn, snapshot!, this.checkpointOwnerHash(priorMeta)),
           );
           checkpoint.anchored = true;
         } catch (error) {
@@ -4199,7 +4275,7 @@ export class SessionManager {
           try {
             checkpoint.anchored = await withGitExecutionContext(
               entry.context,
-              () => readTurnRef(entry.worktree!.path, sessionId, turn),
+              () => readTurnRef(entry.worktree!.path, sessionId, turn, checkpoint?.ownerHash),
             ) === snapshot;
           } catch (error) {
             // git transport failures are soft reads, so a thrown read here is a durable namespace
@@ -4467,7 +4543,8 @@ export class SessionManager {
     let forkedThreadId: string | null = null;
     let providerStateJournaled = false;
     try {
-      if (this.executionIsolation.mode === "bwrap" && source.providerStateVersion !== 2) {
+      if (this.executionIsolation.mode === "bwrap" &&
+          source.providerStateVersion !== (source.context.kind === "wsl" ? 3 : 2)) {
         await this.ensureProviderStateLayout(source);
       }
       client = live?.client;
@@ -4492,6 +4569,13 @@ export class SessionManager {
           this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
         }
         const isolation = await this.resolveLaunchIsolation(source, source.worktreePath);
+        this.providerHomeLeases?.acquire({
+          driver: source.driver,
+          command: source.command,
+          context: source.context,
+          env: source.env,
+          isolation,
+        });
         temporary = this.createDriver(
           source.driver,
           {
@@ -4514,15 +4598,17 @@ export class SessionManager {
       if (!client.forkSession) return { ok: false, error: "this driver build does not support provider forks" };
       // Preserve the source worktree's commit base as well as its exact post-turn files. The new
       // thread gets the target cwd at fork time so it never resumes against the source worktree.
-      const worktreeOptions = { context: source.context, dataDir: this.dataDir };
+      const worktreeOptions = { context: source.context, dataDir: this.dataDir, ownerHash: this.runnerOwnerHash };
       const baseRef = point.baseCommit ?? (await worktreeHead(source.worktreePath, worktreeOptions));
       worktree = await createWorktreeFromTree(source.repoPath, targetSessionId, point.tree, baseRef, worktreeOptions);
       // Fork refs are anchored before the target session row exists, so their immutable ownership
       // proof must land immediately after worktree creation and before anchorForkRef.
+      const targetCheckpointOwner = this.runnerOwnerHash;
       const ownership = this.checkpointRefOwnership.claim({
         sessionId: targetSessionId,
         repoPath: source.repoPath,
         context: source.context,
+        ...(targetCheckpointOwner ? { ownerHash: targetCheckpointOwner } : {}),
       });
       await this.reclaimStaleCheckpointRefOwnership(ownership);
       if (this.executionIsolation.mode === "bwrap") {
@@ -4541,6 +4627,8 @@ export class SessionManager {
         this.stateDir,
         sourceSessionId,
         forkedThreadId,
+        {},
+        this.runnerOwnerHash,
       );
       await this.cloneIsolationState(
         this.executionIsolation,
@@ -4549,8 +4637,12 @@ export class SessionManager {
         this.stateDir,
         sourceSessionId,
         targetSessionId,
+        {},
+        this.runnerOwnerHash,
       );
-      await withGitExecutionContext(source.context, () => anchorForkRef(worktree!.path, targetSessionId, turn, point.tree));
+      await withGitExecutionContext(source.context, () => anchorForkRef(
+        worktree!.path, targetSessionId, turn, point.tree, targetCheckpointOwner,
+      ));
       const now = Date.now();
       const target: SessionMeta = {
         ...source,
@@ -4568,7 +4660,8 @@ export class SessionManager {
         sessionSlashCommandProvenance: undefined,
         env: {},
         adopted: false,
-        providerStateVersion: 2,
+        providerStateVersion: source.context.kind === "wsl" ? 3 : 2,
+        ...(targetCheckpointOwner ? { checkpointRefVersion: 2 as const } : {}),
         lastTurnBaseTree: point.tree,
         turnCount: turn,
         // Inherited events are re-sequenced in the child, so the parent's eventSeq is not valid
@@ -4623,6 +4716,7 @@ export class SessionManager {
           repoPath: source.repoPath,
           worktreePath: worktree.path,
           context: source.context,
+          ...(this.runnerOwnerHash ? { checkpointOwnerHash: this.runnerOwnerHash } : {}),
         };
         try {
           this.cleanupJournal.add(cleanup);
@@ -4820,13 +4914,17 @@ export class SessionManager {
       const providerStateMigration = this.providerStateMigrations.get(sessionId);
       // Install every cleanup record before discarding the live entry or the only durable row. If
       // either journal write fails, a retry still has the complete session state to converge from.
+      let worktreeCleanup: WorktreeCleanupRecord | undefined;
       if (meta?.worktreePath) {
-        this.cleanupJournal.add({
+        const checkpointOwnerHash = this.checkpointOwnerHash(meta);
+        worktreeCleanup = {
           sessionId,
           repoPath: meta.repoPath,
           worktreePath: meta.worktreePath,
           context: meta.context,
-        });
+          ...(checkpointOwnerHash ? { checkpointOwnerHash } : {}),
+        };
+        this.cleanupJournal.add(worktreeCleanup);
       }
       if (meta) {
         this.providerStateCleanupJournal.add({ sessionId, driver: meta.driver, context: meta.context });
@@ -4872,7 +4970,9 @@ export class SessionManager {
       }
       this.cloudHandoffOwners.delete(sessionId);
       if (!meta?.worktreePath && meta?.repoPath) {
-        await withGitExecutionContext(meta.context, () => deleteTurnRefs(meta.repoPath, sessionId)).catch(() => {});
+        await withGitExecutionContext(meta.context, () => deleteTurnRefs(
+          meta.repoPath, sessionId, this.checkpointOwnerHash(meta),
+        )).catch(() => {});
         // A prior worktree generation may have used this same session id in another repository or
         // execution context. The current in-place row has no cleanup journal, so independently
         // drive every durable exact tuple now; failures retain their proof for startup retry.
@@ -4895,8 +4995,8 @@ export class SessionManager {
       if (meta) {
         await this.cleanupProviderState(sessionId, meta.driver, meta.context, true);
       }
-      if (meta?.worktreePath) {
-        await this.reapWorktree({ sessionId, repoPath: meta.repoPath, worktreePath: meta.worktreePath, context: meta.context });
+      if (worktreeCleanup) {
+        await this.reapWorktree(worktreeCleanup);
       }
       this.log(`deleted session ${sessionId} from the box store`);
     } finally {
@@ -4936,14 +5036,24 @@ export class SessionManager {
       sessionId: record.sessionId,
       repoPath: record.repoPath,
       context: record.context,
+      ...(record.checkpointOwnerHash ? { ownerHash: record.checkpointOwnerHash } : {}),
     };
     const cleanupOwnershipKey = checkpointRefOwnershipKey(cleanupOwnership);
     // A failed fork can publish its temporary row before inherited-history copying fails. Its
     // catch path still owns that exact generation and explicitly marks it disposable; ordinary
     // journal replay must preserve any independently recreated current session.
-    const currentOwnershipKey = cleanupCurrentGeneration
-      ? null
-      : this.currentCheckpointOwnershipKey(record.sessionId);
+    let currentOwnershipKey: string | null;
+    try {
+      currentOwnershipKey = cleanupCurrentGeneration
+        ? null
+        : this.currentCheckpointOwnershipKey(record.sessionId);
+    } catch {
+      // A forward-version or malformed live row is not permission to reclaim its refs or
+      // worktree. Startup runs this method fire-and-forget, so contain the validation failure and
+      // retain the durable cleanup record for a compatible build or operator repair.
+      this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after checkpoint ownership validation`);
+      return;
+    }
     if (currentOwnershipKey === cleanupOwnershipKey) {
       // A replacement generation reused this exact durable tuple. The older cleanup record is
       // superseded; touching either its refs or worktree would destroy the live replacement.
@@ -4974,10 +5084,22 @@ export class SessionManager {
       }
     }
     try {
+      const ownedWslPath = record.context.kind === "wsl" && this.runnerOwnerHash &&
+        record.worktreePath.includes(`/runner-instances/${this.runnerOwnerHash}/worktrees/`);
       await removeWorktree(
         record.repoPath,
-        { path: record.worktreePath, branch: `agent/${record.sessionId}` },
-        { context: record.context, dataDir: this.dataDir },
+        {
+          path: record.worktreePath,
+          branch: ownedWslPath
+            ? `agent/${this.runnerOwnerHash.slice(0, 16)}/${record.sessionId}`
+            : `agent/${record.sessionId}`,
+        },
+        {
+          context: record.context,
+          dataDir: this.dataDir,
+          ownerHash: this.runnerOwnerHash,
+          legacyWslRoot: record.context.kind === "wsl" && !ownedWslPath,
+        },
       );
     } catch {
       worktreeRemoved = false;
@@ -5048,7 +5170,9 @@ export class SessionManager {
         return { ok: false, error: "another runner is driving this session" };
       }
       try {
-        const tree = await withGitExecutionContext(meta.context, () => readTurnRef(root, sessionId, turn));
+        const tree = await withGitExecutionContext(meta.context, () => readTurnRef(
+          root, sessionId, turn, this.checkpointOwnerHash(meta),
+        ));
         if (!tree) return { ok: false, error: `no checkpoint exists for turn ${turn}` };
         await withGitExecutionContext(meta.context, () => restoreWorktreeToTree(root, tree));
         this.emitEvent(sessionId, { kind: "checkpoint_restored", turn });
@@ -5162,7 +5286,7 @@ export class SessionManager {
     // lines per turn, forever). Full cumulative diffs stay available on demand via the Git
     // panel's git_action. Falls back to cumulative when the snapshot is missing/pruned.
     const base = this.store.readMeta(sessionId)?.lastTurnBaseTree;
-    const worktreeOptions = { context: entry.context, dataDir: this.dataDir };
+    const worktreeOptions = { context: entry.context, dataDir: this.dataDir, ownerHash: this.runnerOwnerHash };
     const captured = base ? await captureTurnDiff(entry.worktree.path, base, worktreeOptions) : null;
     const diff = captured?.diff ?? (await worktreeDiff(entry.worktree.path, worktreeOptions));
     if (diff.trim()) this.emitEvent(sessionId, { kind: "file_edit", path: "worktree", diff });
@@ -5397,6 +5521,17 @@ export class SessionManager {
     // Debounced meta writes (seq/preview/usage) must land before the process exits — a lost
     // seq flush would only self-heal on the next append, and usage totals would be dropped.
     this.store.flushAll();
+  }
+
+  /** Release mutable provider HOME ownership only after every spawned provider/TUI process tree
+   * has been reaped. shutdownAll() merely initiates that asynchronous drain. */
+  releaseProviderHomeLeasesAfterShutdown(processTreesReaped: boolean): boolean {
+    if (!this.shuttingDown) {
+      throw new Error("provider-home leases may only be released after shutdown begins");
+    }
+    if (!processTreesReaped) return false;
+    this.providerHomeLeases?.releaseAll();
+    return true;
   }
 
   private emitStatus(

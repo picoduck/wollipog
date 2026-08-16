@@ -69,6 +69,8 @@ export type AgentProcess = ChildProcessByStdio<Writable, Readable, Readable> & {
    * signal the whole group. Absent for native spawns.
    */
   wslReap?: WslReapInfo;
+  /** Internal proof that Node already emitted close; close is not replayed to later listeners. */
+  closeObserved?: boolean;
 };
 
 export interface SpawnAgentOptions {
@@ -429,6 +431,9 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
     // orphan. Windows uses taskkill /T; the WSL bridge has its own setsid+PGID reap.
     detached: !isWindows,
   }) as AgentProcess;
+  child.once("close", () => {
+    child.closeObserved = true;
+  });
   if (wslReap) child.wslReap = wslReap;
   return child;
 }
@@ -466,14 +471,15 @@ export function trackPendingKill(work: Promise<void>): void {
 /** Wait for all in-flight kills to finish delivering their signals, up to `deadlineMs`.
  * The deadline timer is deliberately REF'd: during shutdown the sockets are gone and the
  * kill-internal timers are unref'd, so without a live handle the event loop could drain
- * and exit the process before the escalations ever fire. */
-export async function waitForPendingKills(deadlineMs: number): Promise<void> {
+ * and exit the process before the escalations ever fire. Returns false when the deadline leaves
+ * process trees pending, so shutdown can retain external ownership leases while exiting. */
+export async function waitForPendingKills(deadlineMs: number): Promise<boolean> {
   const expiresAt = Date.now() + Math.max(0, deadlineMs);
   // A graceful stop can register its force-kill only after the five-second EOF window. Drain in
   // waves so work added by an earlier pending operation is still covered by the same deadline.
   while (pendingKills.size > 0) {
     const remaining = expiresAt - Date.now();
-    if (remaining <= 0) return;
+    if (remaining <= 0) return false;
     let deadline: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([
       Promise.allSettled([...pendingKills]),
@@ -483,10 +489,12 @@ export async function waitForPendingKills(deadlineMs: number): Promise<void> {
     ]);
     if (deadline) clearTimeout(deadline);
   }
+  return true;
 }
 
 /** Kill a process and all of its children, cross-platform. */
 export function killTree(child: AgentProcess): void {
+  if (child.closeObserved) return;
   if (!child.pid) {
     // Not spawned yet: wait so we tree-kill the REAL agent rather than the shell
     // wrapper (or no-op). Bail if the spawn fails outright.
@@ -539,8 +547,10 @@ export function killTree(child: AgentProcess): void {
       new Promise<void>((resolve) => {
         const t = setTimeout(() => {
           signalGroup("SIGKILL");
-          resolve();
         }, 2000);
+        // Ownership may be released only after Node observes process exit, not merely when the
+        // escalation signal is delivered. The outer shutdown deadline retains the lease if close
+        // never arrives.
         t.unref?.();
         child.once("close", () => {
           clearTimeout(t);

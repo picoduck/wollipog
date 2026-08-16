@@ -158,6 +158,11 @@ export interface SubagentRollup {
   costUsd?: number;
 }
 
+/** Maximum number of concurrently streamed provider text items retained between transcript
+ * boundaries. Real providers keep this set small; the cap prevents malformed/unclosed streams
+ * from turning stable message identities into transcript-lifetime state. */
+export const MAX_OPEN_PROVIDER_TEXT_ITEMS = 128;
+
 /** A rendered row is either a standalone item or a collapsible block of "work" (reasoning + tools). */
 export type TimelineGroup =
   | { kind: "item"; item: TimelineItem }
@@ -375,9 +380,10 @@ export class TimelineBuilder {
   /** Kept independently from duration closure: terminal usage can arrive before the durable
    * conversation checkpoint that proves this user message completed and is fork-addressable. */
   private pendingConversationUserIndex: number | null = null;
-  // Only the contiguous open text item is retained. This is deliberately O(1): streamed drivers
-  // cannot all emit a closing event, so a transcript-lifetime messageId map would grow forever.
-  private lastText: { kind: string; index: number; parent?: string; messageId?: string } | null = null;
+  // ID-less providers retain the historical contiguous-only behavior. Identified provider items
+  // may interleave, so they use a separate bounded LRU set until completion or a real boundary.
+  private lastText: { kind: string; index: number; parent?: string } | null = null;
+  private readonly openProviderTexts = new Map<string, number>();
   private dirty = true;
   private dirtyFrom = 0;
   private readonly dirtyIndexes = new Set<number>();
@@ -430,15 +436,61 @@ export class TimelineBuilder {
     // Coalesce consecutive same-kind chunks (live streaming emits many word-deltas per message).
     // A `final` event is a COMPLETE message (backfill/adopt) — keep it as its own item, and don't
     // let the next same-kind event merge into it, so adopted transcripts don't run together.
-    // Exception: a final carrying the currently open provider id is its authoritative replacement.
-    // Only coalesce chunks from the SAME subagent (or both top-level): a parent-context switch
-    // starts a new bubble so one agent's words never fold into another's.
+    // Exception: a final carrying an open provider id is its authoritative replacement.
+    // Only coalesce identified chunks from the SAME subagent (or both top-level): another parent
+    // gets a distinct map key and bubble so one agent's words never fold into another's.
+    if ((kind === "agent_message" || kind === "agent_thought") && messageId != null && messageId.length > 0 && !textRefs?.length) {
+      // Provider identity is authoritative across other identified deltas, but only within the
+      // same kind and parent context. Updating the Map entry also makes the cap true LRU.
+      const key = JSON.stringify([kind, parentToolUseId ?? "", messageId]);
+      const openIndex = this.openProviderTexts.get(key);
+      this.lastText = null;
+      if (openIndex != null) {
+        const idx = openIndex;
+        const it = this.items[idx] as Extract<TimelineItem, { kind: "agent_message" | "agent_thought" }>;
+        const activityAt = Number.isFinite(createdAt)
+          ? latestTimelineTimestamp(it.lastActivityAt ?? it.createdAt, createdAt!)
+          : undefined;
+        this.items[idx] = {
+          ...it,
+          sourceEndId: id,
+          text: final ? text : it.text + text,
+          ...(activityAt != null ? { lastActivityAt: activityAt } : {}),
+          ...(final && activityAt != null ? { completedAt: activityAt } : {}),
+        };
+        this.markDirty(idx);
+        this.openProviderTexts.delete(key);
+        if (!final) this.rememberProviderText(key, idx);
+        return;
+      }
+
+      const index = this.items.push({
+        kind,
+        id,
+        sourceEndId: id,
+        text,
+        messageId,
+        parentToolUseId,
+        ...(Number.isFinite(createdAt)
+          ? {
+              createdAt,
+              lastActivityAt: createdAt,
+              ...(final ? { completedAt: createdAt } : {}),
+            }
+          : {}),
+      } as TimelineItem) - 1;
+      this.markDirty(index);
+      if (!final) this.rememberProviderText(key, index);
+      return;
+    }
+
+    // Losing provider identity is an ambiguity boundary: keep legacy chunks contiguous, but never
+    // let a later reintroduced id reach backward across untagged output.
+    this.openProviderTexts.clear();
     const open = this.lastText;
-    const sameOpenLane = !textRefs?.length && open != null &&
-      open.kind === kind && open.parent === parentToolUseId;
-    const sameProviderMessage = sameOpenLane && messageId !== undefined && open.messageId === messageId;
-    const legacyChunk = sameOpenLane && messageId === undefined && open.messageId === undefined && !final;
-    if (open && (sameProviderMessage || legacyChunk)) {
+    const legacyChunk = !textRefs?.length && open != null && open.kind === kind &&
+      open.parent === parentToolUseId && !final;
+    if (open && legacyChunk) {
       const idx = open.index;
       const it = this.items[idx] as Extract<TimelineItem, { kind: "agent_message" | "agent_thought" }>;
       const activityAt = Number.isFinite(createdAt)
@@ -452,7 +504,7 @@ export class TimelineBuilder {
         ...(final && activityAt != null ? { completedAt: activityAt } : {}),
       };
       this.markDirty(idx);
-      this.lastText = final ? null : { kind, index: idx, parent: parentToolUseId, messageId };
+      this.lastText = { kind, index: idx, parent: parentToolUseId };
       return;
     }
     const index = this.items.push({
@@ -460,7 +512,6 @@ export class TimelineBuilder {
       id,
       sourceEndId: id,
       text,
-      ...(messageId ? { messageId } : {}),
       ...((kind === "command_output" || kind === "stderr") && textRefs?.length ? { textRefs } : {}),
       parentToolUseId,
       ...((kind === "agent_message" || kind === "agent_thought") && Number.isFinite(createdAt)
@@ -474,11 +525,21 @@ export class TimelineBuilder {
     this.markDirty(index);
     this.lastText = final || textRefs?.length
       ? null
-      : { kind, index: this.items.length - 1, parent: parentToolUseId, messageId };
+      : { kind, index: this.items.length - 1, parent: parentToolUseId };
+  }
+
+  private rememberProviderText(key: string, index: number): void {
+    this.openProviderTexts.set(key, index);
+    while (this.openProviderTexts.size > MAX_OPEN_PROVIDER_TEXT_ITEMS) {
+      const oldest = this.openProviderTexts.keys().next().value;
+      if (oldest === undefined) break;
+      this.openProviderTexts.delete(oldest);
+    }
   }
 
   private breakText(): void {
     this.lastText = null;
+    this.openProviderTexts.clear();
   }
 
   push(ev: SessionEvent): void {

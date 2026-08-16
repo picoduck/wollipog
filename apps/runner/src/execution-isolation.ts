@@ -106,6 +106,8 @@ interface IsolationStateOptions {
   env: Record<string, string>;
   sessionId: string;
   cwd: string;
+  /** Stable attested runner/control-plane owner for state outside dataDir (currently WSL). */
+  ownerHash?: string;
   /** Canonical shared provider leaf used by Seatbelt when a home component is symlinked. */
   providerStatePath?: string;
 }
@@ -140,6 +142,13 @@ function providerStateLocation(base: string, driver: AgentDriverKind, sessionId:
   if (!mapping) return null;
   const root = posix.join(base, "provider-state", mapping.provider, providerStateKey(sessionId));
   return { root, leaf: posix.join(root, mapping.relative.split("/").at(-1)!) };
+}
+
+function wslRunnerStateBase(home: string, ownerHash?: string): string {
+  const base = `${absoluteHome(home, "probed HOME inside WSL")}/.agent-manager`;
+  if (!ownerHash) return base;
+  if (!/^[a-f0-9]{64}$/u.test(ownerHash)) throw new Error("WSL runner state requires a valid attested owner hash");
+  return posix.join(base, "runner-instances", ownerHash);
 }
 
 function legacyProviderStateLocation(base: string, driver: AgentDriverKind): ProviderStateLocation | null {
@@ -250,7 +259,7 @@ export async function resolveExecutionIsolation(
     const mapping = state && statePath(state.driver);
     const writableBinds = mapping ? (() => {
       const targetHome = absoluteHome(state?.env.HOME ?? resolved.home, "HOME inside WSL");
-      const location = providerStateLocation(`${resolved.home}/.agent-manager`, state.driver, state.sessionId)!;
+      const location = providerStateLocation(wslRunnerStateBase(resolved.home, state.ownerHash), state.driver, state.sessionId)!;
       return [{
         source: location.leaf,
         target: `${targetHome}/${mapping.relative}`,
@@ -341,13 +350,14 @@ export async function cloneExecutionIsolationState(
   sourceSessionId: string,
   targetSessionId: string,
   deps: Partial<IsolationDeps> = {},
+  ownerHash?: string,
 ): Promise<void> {
   if (policy.mode !== "bwrap" || !statePath(driver)) return;
   const runtime = { ...defaultDeps, ...deps };
   if (context.kind === "wsl") {
     const resolved = await runtime.resolveWsl(context);
     if (!resolved) throw new Error(`cannot transfer isolated provider state inside WSL distro ${context.distro}`);
-    const base = `${absoluteHome(resolved.home, "probed HOME inside WSL")}/.agent-manager`;
+    const base = wslRunnerStateBase(resolved.home, ownerHash);
     await runtime.copyWsl(
       context,
       providerStateLocation(base, driver, sourceSessionId)!,
@@ -371,6 +381,7 @@ export async function verifyExecutionIsolationForkState(
   sourceSessionId: string,
   providerSessionId: string,
   deps: Partial<IsolationDeps> = {},
+  ownerHash?: string,
 ): Promise<void> {
   if (policy.mode !== "bwrap" || !statePath(driver)) return;
   safeProviderSessionId(providerSessionId);
@@ -380,7 +391,7 @@ export async function verifyExecutionIsolationForkState(
   if (context.kind === "wsl") {
     const resolved = await runtime.resolveWsl(context);
     if (!resolved) throw new Error(`cannot verify isolated provider fork inside WSL distro ${context.distro}`);
-    const base = `${absoluteHome(resolved.home, "probed HOME inside WSL")}/.agent-manager`;
+    const base = wslRunnerStateBase(resolved.home, ownerHash);
     const location = providerStateLocation(base, driver, sourceSessionId)!;
     for (let attempt = 0; attempt < 20 && stableReads < 2; attempt++) {
       const size = await runtime.forkSizeWsl(context, location, driver, providerSessionId);
@@ -411,21 +422,63 @@ export async function migrateExecutionIsolationState(
   dataDir: string,
   sessionId: string,
   deps: Partial<IsolationDeps> = {},
+  ownerHash?: string,
 ): Promise<void> {
   if (policy.mode !== "bwrap" || !statePath(driver)) return;
   const runtime = { ...defaultDeps, ...deps };
   if (context.kind === "wsl") {
     const resolved = await runtime.resolveWsl(context);
     if (!resolved) throw new Error(`cannot migrate isolated provider state inside WSL distro ${context.distro}`);
-    const base = `${absoluteHome(resolved.home, "probed HOME inside WSL")}/.agent-manager`;
-    const legacy = legacyProviderStateLocation(base, driver)!;
+    const sharedBase = wslRunnerStateBase(resolved.home);
+    const ownedBase = wslRunnerStateBase(resolved.home, ownerHash);
+    const legacy = legacyProviderStateLocation(sharedBase, driver)!;
+    const partition = providerStateLocation(sharedBase, driver, sessionId)!;
+    const ownedPartition = providerStateLocation(ownedBase, driver, sessionId)!;
+    if (ownerHash && (await runtime.existsWsl(context, legacy.leaf) || await runtime.existsWsl(context, partition.leaf))) {
+      throw new Error(
+        `legacy WSL provider state at ${legacy.leaf} or ${partition.leaf} has no control-plane ownership proof; ` +
+        `stop all pre-attestation runners, archive those retained bytes, and manually migrate the intended session to ${ownedPartition.leaf} before resuming`,
+      );
+    }
     if (!await runtime.existsWsl(context, legacy.leaf)) return;
-    await runtime.copyWsl(context, legacy, providerStateLocation(base, driver, sessionId)!);
+    await runtime.copyWsl(context, legacy, ownedPartition);
     return;
   }
   const legacy = legacyProviderStateLocation(dataDir, driver)!;
   if (!await runtime.existsNative(legacy.leaf)) return;
   await runtime.copyNative(legacy, providerStateLocation(dataDir, driver, sessionId)!);
+}
+
+/** Operator-authorized offline adoption for unattributable WSL bwrap state. Exactly one legacy
+ * source shape may exist; the source is copied into the attested root and never removed. */
+export async function adoptLegacyWslExecutionIsolationState(
+  context: Extract<AgentContext, { kind: "wsl" }>,
+  driver: AgentDriverKind,
+  sessionId: string,
+  ownerHash: string,
+  deps: Partial<IsolationDeps> = {},
+): Promise<"absent" | "adopted"> {
+  if (!statePath(driver)) return "absent";
+  if (!/^[a-f0-9]{64}$/u.test(ownerHash)) throw new Error("WSL provider adoption requires an attested owner hash");
+  const runtime = { ...defaultDeps, ...deps };
+  const resolved = await runtime.resolveWsl(context);
+  if (!resolved) throw new Error(`cannot inventory legacy provider state inside WSL distro ${context.distro}`);
+  const sharedBase = wslRunnerStateBase(resolved.home);
+  const providerWide = legacyProviderStateLocation(sharedBase, driver)!;
+  const partition = providerStateLocation(sharedBase, driver, sessionId)!;
+  const hasProviderWide = await runtime.existsWsl(context, providerWide.leaf);
+  const hasPartition = await runtime.existsWsl(context, partition.leaf);
+  if (hasProviderWide && hasPartition) {
+    throw new Error("legacy WSL provider state has both provider-wide and partitioned sources; quarantine or resolve it explicitly");
+  }
+  const source = hasPartition ? partition : hasProviderWide ? providerWide : null;
+  if (!source) return "absent";
+  const target = providerStateLocation(wslRunnerStateBase(resolved.home, ownerHash), driver, sessionId)!;
+  if (await runtime.existsWsl(context, target.leaf)) {
+    throw new Error("owned WSL provider-state target already exists; refusing to merge or overwrite it");
+  }
+  await runtime.copyWsl(context, source, target);
+  return "adopted";
 }
 
 /** Best-effort callers may use this during failed-fork/session cleanup. It removes only the hashed
@@ -437,13 +490,14 @@ export async function removeExecutionIsolationState(
   dataDir: string,
   sessionId: string,
   deps: Partial<IsolationDeps> = {},
+  ownerHash?: string,
 ): Promise<void> {
   if (policy.mode !== "bwrap" || !statePath(driver)) return;
   const runtime = { ...defaultDeps, ...deps };
   if (context.kind === "wsl") {
     const home = await runtime.resolveWslHome(context);
     if (!home) throw new Error(`cannot clean isolated provider state inside WSL distro ${context.distro}`);
-    const base = `${home}/.agent-manager`;
+    const base = wslRunnerStateBase(home, ownerHash);
     await runtime.removeWsl(context, providerStateLocation(base, driver, sessionId)!);
     return;
   }

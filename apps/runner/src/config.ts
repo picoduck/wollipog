@@ -108,7 +108,7 @@ export interface RunnerConfig {
   token: string;
   workspaces: RunnerConfigWorkspace[];
   agents: RunnerConfigAgent[];
-  /** Host-native runner state root (sessions, worktrees, cleanup records). */
+  /** Exclusively owned host-native runner state root (sessions, credentials, worktrees, journals). */
   dataDir: string;
   /** Maximum simultaneously live agent processes on this box. */
   maxConcurrentSessions: number;
@@ -147,6 +147,8 @@ export interface ParsedArgs {
   tokenFile?: string;
   /** `--version` / `-v`: print the version and exit. */
   showVersion: boolean;
+  /** Explicit one-time acknowledgement for claiming a populated pre-ownership data root. */
+  adoptLegacyDataDir: boolean;
 }
 
 /**
@@ -161,6 +163,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let explicitConfig = false;
   let tokenFile: string | undefined;
   let showVersion = false;
+  let adoptLegacyDataDir = false;
   const overrides: Partial<RunnerConfig> = {};
   const workspaces: RunnerConfigWorkspace[] = [];
 
@@ -172,6 +175,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
     const arg = argv[i] ?? "";
     if (arg === "--version" || arg === "-v") {
       showVersion = true;
+    } else if (arg === "--adopt-legacy-data-dir") {
+      adoptLegacyDataDir = true;
     } else if (arg === "--config" || arg === "-c" || arg.startsWith("--config=")) {
       const [v, ni] = valueOf(arg, i);
       if (v) { configPath = v; explicitConfig = true; i = ni; }
@@ -200,7 +205,14 @@ export function parseArgs(argv: string[]): ParsedArgs {
     }
   }
   if (workspaces.length) overrides.workspaces = workspaces;
-  return { configPath: resolve(process.cwd(), configPath), explicitConfig, overrides, tokenFile, showVersion };
+  return {
+    configPath: resolve(process.cwd(), configPath),
+    explicitConfig,
+    overrides,
+    tokenFile,
+    showVersion,
+    adoptLegacyDataDir,
+  };
 }
 
 /** Parse a `--workspace id:path` value. A bare `path` is allowed (id derives from the basename).
