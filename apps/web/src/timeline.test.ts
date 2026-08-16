@@ -5,6 +5,7 @@ import {
   deriveSidePaneContent,
   deriveTimeline,
   groupTimeline,
+  MAX_OPEN_PROVIDER_TEXT_ITEMS,
   nestSubagents,
   SubagentTreeProjector,
   TimelineBuilder,
@@ -173,6 +174,107 @@ test("provider message ids coalesce same-item deltas and split adjacent items", 
   ]);
 });
 
+test("interleaved provider message deltas resume their original logical rows", () => {
+  const items = deriveTimeline([
+    ev({ kind: "agent_message", text: "A1", messageId: "a" }),
+    ev({ kind: "agent_message", text: "B1", messageId: "b" }),
+    ev({ kind: "agent_message", text: "A2", messageId: "a" }),
+    ev({ kind: "agent_message", text: "B2", messageId: "b" }),
+  ]) as Extract<TimelineItem, { kind: "agent_message" }>[];
+  assert.deepEqual(items.map(({ text, messageId }) => [text, messageId]), [
+    ["A1A2", "a"],
+    ["B1B2", "b"],
+  ]);
+  assert.deepEqual(items.map(({ sourceEndId }) => sourceEndId), [items[0]!.id + 2, items[1]!.id + 2]);
+});
+
+test("several identified streams remain separate and incremental replay matches full history", () => {
+  const events = [
+    ev({ kind: "agent_message", text: "A1", messageId: "a" }),
+    ev({ kind: "agent_message", text: "B1", messageId: "b" }),
+    ev({ kind: "agent_message", text: "C1", messageId: "c" }),
+    ev({ kind: "agent_message", text: "B2", messageId: "b" }),
+    ev({ kind: "agent_message", text: "A2", messageId: "a" }),
+    ev({ kind: "agent_message", text: "C2", messageId: "c" }),
+  ];
+  const builder = new TimelineBuilder();
+  for (const event of events) {
+    builder.push(event);
+    builder.snapshot();
+  }
+  assert.deepEqual(builder.snapshot(), deriveTimeline(events));
+  assert.deepEqual(
+    builder.snapshot().map((item) => item.kind === "agent_message" ? [item.messageId, item.text] : null),
+    [["a", "A1A2"], ["b", "B1B2"], ["c", "C1C2"]],
+  );
+});
+
+test("matching provider ids remain isolated by kind and parent context", () => {
+  const items = deriveTimeline([
+    ev({ kind: "agent_message", text: "top-1", messageId: "shared" }),
+    ev({ kind: "agent_message", text: "child-1", messageId: "shared", parentToolUseId: "task" }),
+    ev({ kind: "agent_thought", text: "thought-1", messageId: "shared" }),
+    ev({ kind: "agent_message", text: "top-2", messageId: "shared" }),
+    ev({ kind: "agent_message", text: "child-2", messageId: "shared", parentToolUseId: "task" }),
+    ev({ kind: "agent_thought", text: "thought-2", messageId: "shared" }),
+  ]);
+  assert.deepEqual(items.map((item) => [
+    item.kind,
+    "parentToolUseId" in item ? item.parentToolUseId : undefined,
+    "text" in item ? item.text : undefined,
+  ]), [
+    ["agent_message", undefined, "top-1top-2"],
+    ["agent_message", "task", "child-1child-2"],
+    ["agent_thought", undefined, "thought-1thought-2"],
+  ]);
+});
+
+test("provider completion reconciles streamed content once and closes that identity", () => {
+  const items = deriveTimeline([
+    ev({ kind: "agent_message", text: "Hel", messageId: "a" }),
+    ev({ kind: "agent_message", text: "Wor", messageId: "b" }),
+    ev({ kind: "agent_message", text: "Hello", messageId: "a", final: true }),
+    ev({ kind: "agent_message", text: "World", messageId: "b", final: true }),
+    ev({ kind: "agent_message", text: "new", messageId: "a" }),
+  ]);
+  assert.deepEqual(items.map((item) => item.kind === "agent_message" ? [item.messageId, item.text] : null), [
+    ["a", "Hello"],
+    ["b", "World"],
+    ["a", "new"],
+  ]);
+});
+
+test("turn, structural, and identity-loss boundaries prevent provider-id reachback", () => {
+  const items = deriveTimeline([
+    ev({ kind: "agent_message", text: "before-user", messageId: "same" }),
+    ev({ kind: "user_message", text: "next turn" }),
+    ev({ kind: "agent_message", text: "after-user", messageId: "same" }),
+    ev({ kind: "tool_call", toolCallId: "tool", title: "Tool", status: "completed" }),
+    ev({ kind: "agent_message", text: "after-tool", messageId: "same" }),
+    ev({ kind: "agent_message", text: "untagged" }),
+    ev({ kind: "agent_message", text: "retagged", messageId: "same" }),
+  ]);
+  assert.deepEqual(
+    items.filter((item): item is Extract<TimelineItem, { kind: "agent_message" }> => item.kind === "agent_message")
+      .map((item) => item.text),
+    ["before-user", "after-user", "after-tool", "untagged", "retagged"],
+  );
+});
+
+test("open provider-message tracking evicts least-recently-used identities at its bound", () => {
+  const events: SessionEvent[] = [];
+  for (let index = 0; index <= MAX_OPEN_PROVIDER_TEXT_ITEMS; index += 1) {
+    events.push(ev({ kind: "agent_message", text: `${index}:`, messageId: `message-${index}` }));
+  }
+  events.push(ev({ kind: "agent_message", text: "resumed", messageId: "message-0" }));
+  const messages = deriveTimeline(events).filter(
+    (item): item is Extract<TimelineItem, { kind: "agent_message" }> => item.kind === "agent_message",
+  );
+  assert.equal(messages.length, MAX_OPEN_PROVIDER_TEXT_ITEMS + 2);
+  assert.equal(messages[0]!.text, "0:");
+  assert.equal(messages.at(-1)!.text, "resumed");
+});
+
 test("mixed ACP tagging splits once when message identity evidence disappears", () => {
   const items = deriveTimeline([
     ev({ kind: "agent_message", text: "Tagged ", messageId: "acp-message" }),
@@ -222,6 +324,17 @@ test("old-runner id-less chunks retain new-web legacy coalescing", () => {
   ]);
   assert.equal(items.length, 1);
   assert.equal((items[0] as Extract<TimelineItem, { kind: "agent_message" }>).text, "Legacy stream");
+});
+
+test("empty provider ids fail closed to contiguous legacy coalescing", () => {
+  const items = deriveTimeline([
+    ev({ kind: "agent_message", text: "Empty ", messageId: "" }),
+    ev({ kind: "agent_message", text: "identity", messageId: "" }),
+  ]);
+  assert.equal(items.length, 1);
+  const message = items[0] as Extract<TimelineItem, { kind: "agent_message" }>;
+  assert.equal(message.text, "Empty identity");
+  assert.equal(message.messageId, undefined);
 });
 
 test("artifact-backed output remains a standalone preview and keeps its ordered references", () => {

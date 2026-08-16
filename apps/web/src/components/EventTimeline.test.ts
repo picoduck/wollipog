@@ -266,6 +266,51 @@ test("ordinary streaming updates project only the active tail row", () => {
   assert.equal(update.rows.at(-1)!.key, tailKey, "the growing text row keeps its virtual key");
 });
 
+test("resumed interleaved messages update stable existing virtual rows", () => {
+  const builder = new TimelineBuilder();
+  let sequence = 0;
+  const push = (payload: SessionEventPayload) => {
+    sequence += 1;
+    builder.push({ id: sequence, sessionId: "interleaved", seq: sequence, ts: sequence, payload });
+  };
+  push({ kind: "agent_message", text: "A1", messageId: "a" });
+  push({ kind: "agent_message", text: "B1", messageId: "b" });
+
+  const disclosure = new Map<string, boolean>();
+  const projector = new IncrementalTimelineRows();
+  const initial = projector.project(builder.snapshot(), disclosure);
+  const initialKeys = initial.rows.map((row) => row.key);
+  const untouchedSecondRow = initial.rows[1];
+
+  push({ kind: "agent_message", text: "A2", messageId: "a" });
+  const resumed = projector.project(builder.snapshot(), disclosure);
+  assert.equal(resumed.incremental, true);
+  assert.equal(resumed.processedItems, 1);
+  assert.equal(resumed.rows.length, 2, "resuming a message does not add a virtualized row");
+  assert.deepEqual(resumed.rows.map((row) => row.key), initialKeys, "copy controls and scroll anchors keep their row keys");
+  assert.equal(resumed.rows[1], untouchedSecondRow, "the interleaved sibling row remains structurally shared");
+  assert.equal(
+    resumed.rows[0]?.kind === "item" && resumed.rows[0].item.kind === "agent_message"
+      ? resumed.rows[0].item.text
+      : null,
+    "A1A2",
+  );
+
+  push({ kind: "agent_message", text: "B2", messageId: "b" });
+  push({ kind: "agent_message", text: "A3", messageId: "a" });
+  const batched = projector.project(builder.snapshot(), disclosure);
+  assert.equal(batched.incremental, false, "multiple dirty rows take the defensive projection path");
+  assert.deepEqual(
+    batched.rows.map((row) => row.key),
+    initialKeys,
+    "batched interleaving also preserves copy controls and scroll anchors",
+  );
+  assert.deepEqual(
+    batched.rows.map((row) => row.kind === "item" && row.item.kind === "agent_message" ? row.item.text : null),
+    ["A1A2A3", "B1B2"],
+  );
+});
+
 test("ambiguous duplicate tool ids retain distinct virtual keys", () => {
   const groups = groupTimeline([
     { kind: "tool_call", id: 1, toolCallId: "duplicate", title: "one", status: "completed", text: "" },
