@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import type { ChildProcess } from "node:child_process";
 import { test } from "node:test";
 import {
+  BoxOrchestrator,
   binaryIsCurrent,
   binaryDeployIdentity,
   buildPromoteCommand,
@@ -14,6 +16,8 @@ import {
   githubCliDownloadArgs,
   githubCliReleaseMetadataArgs,
   githubMetadataRequestError,
+  managedAdoptionEpochIsCurrent,
+  managedBoxRunnerDataDir,
   posixQuote,
   resolveReleaseArtifactWithFallback,
   ReleaseAssetNotFoundError,
@@ -22,6 +26,8 @@ import {
   stagedRunnerPath,
   tripleFromUname,
 } from "./box-orchestrator.js";
+import { ControlPlaneDb } from "./db.js";
+import type { Hub } from "./hub.js";
 
 const LEGACY_RUNNER_ASSET_WARNING =
   "Wollipog used a legacy runner asset because the canonical asset was absent; update the release producer before compatibility is removed.";
@@ -257,6 +263,151 @@ test("buildRemoteCommand quotes every value, uses --token-file, and repeats --wo
   );
   // The secret token never appears in the command (it's delivered as a file).
   assert.ok(!cmd.includes("--token "));
+});
+
+test("managed boxes use isolated roots and only exact pending epochs receive adoption authority", () => {
+  assert.equal(managedBoxRunnerDataDir("box-0123abcd"), ".agent-manager/runner-data/box-0123abcd");
+  assert.throws(() => managedBoxRunnerDataDir("../../root"), /invalid box id/);
+  assert.equal(managedAdoptionEpochIsCurrent(4, 4, "adopt-current", "adopt-current"), true);
+  assert.equal(managedAdoptionEpochIsCurrent(5, 4, "adopt-current", "adopt-current"), false);
+  assert.equal(managedAdoptionEpochIsCurrent(4, 4, "adopt-new", "adopt-old"), false);
+  assert.equal(managedAdoptionEpochIsCurrent(4, 4, null, null), false);
+
+  const isolated = buildRemoteCommand({
+    runnerPath: ".agent-manager/agent-manager-runner",
+    runnerId: "box-0123abcd",
+    controlPlaneUrl: "ws://127.0.0.1:47100/runner",
+    tokenFile: ".agent-manager/credentials/rcred_0123456789abcdef0123456789abcdef",
+    dataDir: ".agent-manager/runner-data/box-0123abcd",
+    workspaces: [],
+  });
+  assert.match(isolated, /--data-dir '\.agent-manager\/runner-data\/box-0123abcd'/);
+  assert.doesNotMatch(isolated, /--adopt-legacy-data-dir/);
+  const adoption = buildRemoteCommand({
+    runnerPath: ".agent-manager/agent-manager-runner",
+    runnerId: "box-0123abcd",
+    controlPlaneUrl: "ws://127.0.0.1:47100/runner",
+    tokenFile: ".agent-manager/credentials/rcred_0123456789abcdef0123456789abcdef",
+    dataDir: null,
+    adoptLegacyDataDir: true,
+    workspaces: [],
+  });
+  assert.doesNotMatch(adoption, /--data-dir/);
+  assert.match(adoption, /--adopt-legacy-data-dir/);
+});
+
+function adoptionDb(): ControlPlaneDb {
+  const db = ControlPlaneDb.open(":memory:");
+  db.createBox({
+    boxId: "box-0123abcd",
+    runnerId: "box-runner",
+    sshTarget: "me@example",
+    sshPort: 22,
+    workspaces: [{ id: "home", name: "home", path: "." }],
+    autoReconnect: true,
+    runnerDataDir: null,
+    now: 1,
+  });
+  return db;
+}
+
+function adoptionOrchestrator(
+  db: ControlPlaneDb,
+  stopManagedChild?: (child: ChildProcess) => Promise<void>,
+): BoxOrchestrator {
+  return new BoxOrchestrator({
+    db,
+    hub: { boxChanged() {} } as unknown as Hub,
+    cpPort: 4317,
+    issueCredential: () => { throw new Error("bootstrap must not run in this test"); },
+    resolveBinary: async () => { throw new Error("bootstrap must not run in this test"); },
+    stopManagedChild,
+  });
+}
+
+type TestRuntime = {
+  child: ChildProcess | null;
+  remotePort: number;
+  reconnectTimer: ReturnType<typeof setTimeout> | null;
+  backoffMs: number;
+  removed: boolean;
+  epoch: number;
+  activeAdoptionEpoch: string | null;
+  activeCredentialId: string | null;
+};
+
+function installRuntime(orchestrator: BoxOrchestrator, runtime: TestRuntime): void {
+  (orchestrator as unknown as { runtimes: Map<string, TestRuntime> }).runtimes.set("box-0123abcd", runtime);
+}
+
+test("legacy adoption never persists authority when the managed process cannot stop", async () => {
+  const db = adoptionDb();
+  const child = { killed: false } as ChildProcess;
+  const orchestrator = adoptionOrchestrator(db, async (candidate) => {
+    assert.equal(candidate, child);
+    throw new Error("stop failed");
+  });
+  installRuntime(orchestrator, {
+    child,
+    remotePort: 47100,
+    reconnectTimer: null,
+    backoffMs: 2_000,
+    removed: false,
+    epoch: 1,
+    activeAdoptionEpoch: null,
+    activeCredentialId: "rcred_old",
+  });
+  assert.equal(await orchestrator.authorizeLegacyDataAdoption(
+    "box-0123abcd",
+    { userId: "user-owner", role: "owner" },
+  ), "stop_failed");
+  assert.equal(db.getBoxConfig("box-0123abcd")?.pendingLegacyDataAdoptionEpoch, null);
+  assert.equal(db.getBox("box-0123abcd")?.status, "failed");
+});
+
+test("first exact runner registration completes pending adoption but a stale runtime cannot", () => {
+  const db = adoptionDb();
+  assert.equal(db.authorizeBoxLegacyDataAdoption({
+    boxId: "box-0123abcd",
+    epoch: "adopt-current",
+    authorizedBy: "user-admin",
+    authorizedRole: "admin",
+    now: 10,
+  }), true);
+  const stale = adoptionOrchestrator(db);
+  installRuntime(stale, {
+    child: null,
+    remotePort: 47100,
+    reconnectTimer: null,
+    backoffMs: 2_000,
+    removed: false,
+    epoch: 1,
+    activeAdoptionEpoch: "adopt-stale",
+    activeCredentialId: "rcred_stale",
+  });
+  stale.onRunnerRegistered("box-runner", "rcred_current");
+  assert.equal(db.getBoxConfig("box-0123abcd")?.pendingLegacyDataAdoptionEpoch, "adopt-current");
+
+  const current = adoptionOrchestrator(db);
+  installRuntime(current, {
+    child: null,
+    remotePort: 47101,
+    reconnectTimer: null,
+    backoffMs: 2_000,
+    removed: false,
+    epoch: 1,
+    activeAdoptionEpoch: "adopt-current",
+    activeCredentialId: "rcred_current",
+  });
+  current.onRunnerRegistered("box-runner", "rcred_old");
+  assert.equal(
+    db.getBoxConfig("box-0123abcd")?.pendingLegacyDataAdoptionEpoch,
+    "adopt-current",
+    "a stale credential cannot complete the current adoption launch",
+  );
+  current.onRunnerRegistered("box-runner", "rcred_current");
+  assert.equal(db.getBoxConfig("box-0123abcd")?.pendingLegacyDataAdoptionEpoch, null);
+  assert.equal(db.getBox("box-0123abcd")?.legacyDataAdoption?.status, "completed");
 });
 
 test("buildRemoteCommand is injection-safe for hostile workspace paths", () => {

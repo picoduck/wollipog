@@ -1129,6 +1129,13 @@ CREATE TABLE IF NOT EXISTS boxes (
   auto_reconnect   INTEGER NOT NULL DEFAULT 1,
   deployed_version TEXT,
   triple           TEXT,
+  runner_data_dir  TEXT,
+  legacy_adoption_epoch TEXT,
+  legacy_adoption_pending INTEGER NOT NULL DEFAULT 0,
+  legacy_adoption_authorized_by TEXT,
+  legacy_adoption_authorized_role TEXT,
+  legacy_adoption_authorized_at INTEGER,
+  legacy_adoption_completed_at INTEGER,
   created_at       INTEGER NOT NULL,
   updated_at       INTEGER NOT NULL
 );
@@ -2068,6 +2075,13 @@ interface BoxRow {
   auto_reconnect: number;
   deployed_version: string | null;
   triple: string | null;
+  runner_data_dir: string | null;
+  legacy_adoption_epoch: string | null;
+  legacy_adoption_pending: number;
+  legacy_adoption_authorized_by: string | null;
+  legacy_adoption_authorized_role: string | null;
+  legacy_adoption_authorized_at: number | null;
+  legacy_adoption_completed_at: number | null;
   created_at: number;
 }
 
@@ -2145,6 +2159,12 @@ export interface BoxConfig {
   deployedVersion: string | null;
   /** Target triple detected on a previous bootstrap; null until first detection. */
   triple: string | null;
+  /** Server-derived home-relative root for new managed boxes; null preserves the legacy default. */
+  runnerDataDir: string | null;
+  /** Durable one-time authorization carried across CP restarts until exact registration. */
+  pendingLegacyDataAdoptionEpoch: string | null;
+  /** Latest authorization, including completed rows; non-null makes authorization create-once. */
+  legacyDataAdoptionEpoch: string | null;
 }
 
 export interface NewBoxInput {
@@ -2154,6 +2174,8 @@ export interface NewBoxInput {
   sshPort: number;
   workspaces: { id: string; name: string; path: string }[];
   autoReconnect: boolean;
+  /** Server-derived home-relative runner root. Null is reserved for migrated legacy rows. */
+  runnerDataDir?: string | null;
   /** Server-derived ownership reserved before the runner's first registration. */
   scope?: ResourceScope;
   now: number;
@@ -3066,6 +3088,21 @@ export class ControlPlaneDb {
       db.exec("ALTER TABLE boxes ADD COLUMN triple TEXT");
     } catch {
       /* column already present */
+    }
+    for (const column of [
+      "runner_data_dir TEXT",
+      "legacy_adoption_epoch TEXT",
+      "legacy_adoption_pending INTEGER NOT NULL DEFAULT 0",
+      "legacy_adoption_authorized_by TEXT",
+      "legacy_adoption_authorized_role TEXT",
+      "legacy_adoption_authorized_at INTEGER",
+      "legacy_adoption_completed_at INTEGER",
+    ]) {
+      try {
+        db.exec(`ALTER TABLE boxes ADD COLUMN ${column}`);
+      } catch {
+        /* column already present */
+      }
     }
     // One-time backfill for rows that predate message_count (and any row that somehow lost it):
     // cheap at open (one scan), and keeps sessionView free of per-row COUNT(*) forever after.
@@ -5405,8 +5442,9 @@ export class ControlPlaneDb {
     try {
       this.stmt(
         `INSERT INTO boxes
-           (box_id, runner_id, ssh_target, ssh_port, workspaces, status, auto_reconnect, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, 'bootstrapping', ?, ?, ?)`,
+           (box_id, runner_id, ssh_target, ssh_port, workspaces, status, auto_reconnect,
+            runner_data_dir, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'bootstrapping', ?, ?, ?, ?)`,
       )
       .run(
         input.boxId,
@@ -5415,6 +5453,7 @@ export class ControlPlaneDb {
         input.sshPort,
         JSON.stringify(input.workspaces),
         input.autoReconnect ? 1 : 0,
+        input.runnerDataDir ?? null,
         input.now,
         input.now,
       );
@@ -5433,6 +5472,39 @@ export class ControlPlaneDb {
   setBoxStatus(boxId: string, status: BoxStatus, now: number, lastError: string | null = null): void {
     this.stmt("UPDATE boxes SET status=?, last_error=?, updated_at=? WHERE box_id=?")
       .run(status, lastError, now, boxId);
+  }
+
+  authorizeBoxLegacyDataAdoption(input: {
+    boxId: string;
+    epoch: string;
+    authorizedBy: string;
+    authorizedRole: "owner" | "admin";
+    now: number;
+  }): boolean {
+    const result = this.stmt(
+      `UPDATE boxes
+          SET legacy_adoption_epoch=?, legacy_adoption_pending=1,
+              legacy_adoption_authorized_by=?, legacy_adoption_authorized_role=?,
+              legacy_adoption_authorized_at=?, legacy_adoption_completed_at=NULL, updated_at=?
+        WHERE box_id=? AND runner_data_dir IS NULL AND legacy_adoption_epoch IS NULL`,
+    ).run(
+      input.epoch,
+      input.authorizedBy,
+      input.authorizedRole,
+      input.now,
+      input.now,
+      input.boxId,
+    );
+    return result.changes === 1;
+  }
+
+  completeBoxLegacyDataAdoption(boxId: string, epoch: string, now: number): boolean {
+    const result = this.stmt(
+      `UPDATE boxes
+          SET legacy_adoption_pending=0, legacy_adoption_completed_at=?, updated_at=?
+        WHERE box_id=? AND legacy_adoption_pending=1 AND legacy_adoption_epoch=?`,
+    ).run(now, now, boxId, epoch);
+    return result.changes === 1;
   }
 
   setBoxDeployedVersion(boxId: string, version: string, now: number): void {
@@ -5575,6 +5647,14 @@ export class ControlPlaneDb {
       createdAt: row.created_at,
       deployedVersion: row.deployed_version,
       triple: row.triple,
+      runnerDataLayout: row.runner_data_dir === null ? "legacy" : "isolated-v1",
+      legacyDataAdoption: row.legacy_adoption_epoch && row.legacy_adoption_authorized_at !== null
+        ? {
+            status: row.legacy_adoption_pending === 1 ? "pending" : "completed",
+            authorizedAt: row.legacy_adoption_authorized_at,
+            ...(row.legacy_adoption_completed_at === null ? {} : { completedAt: row.legacy_adoption_completed_at }),
+          }
+        : null,
     };
   }
 
@@ -5594,6 +5674,11 @@ export class ControlPlaneDb {
       autoReconnect: row.auto_reconnect === 1,
       deployedVersion: row.deployed_version,
       triple: row.triple,
+      runnerDataDir: row.runner_data_dir,
+      pendingLegacyDataAdoptionEpoch: row.legacy_adoption_pending === 1
+        ? row.legacy_adoption_epoch
+        : null,
+      legacyDataAdoptionEpoch: row.legacy_adoption_epoch,
     };
   }
 

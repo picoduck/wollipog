@@ -836,6 +836,15 @@ export function createApiClient(transport: ApiTransport) {
       body: JSON.stringify({ force }),
     }),
 
+  adoptLegacyBoxData: (boxId: string, force = false) =>
+    req<{ ok: true; status: "started"; forced?: boolean }>(
+      `/api/boxes/${encodeURIComponent(boxId)}/adopt-legacy-data-dir`,
+      {
+        method: "POST",
+        body: JSON.stringify({ force, acknowledgeAllLegacyRunnersStopped: true }),
+      },
+    ),
+
   removeBox: (boxId: string) => req<void>(`/api/boxes/${encodeURIComponent(boxId)}`, { method: "DELETE" }),
 
   sshConfigHosts: () => req<{ hosts: SshConfigHost[] }>("/api/ssh-config-hosts"),

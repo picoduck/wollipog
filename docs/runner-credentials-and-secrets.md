@@ -68,6 +68,22 @@ bounded timeout terminates a stuck transfer, and files older than seven days are
 occurs only when the intended runner registers, so an unsuccessful bootstrap does not revoke the
 currently working credential.
 
+New dashboard-managed boxes also receive a server-derived
+`.agent-manager/runner-data/<box-id>` root through `--data-dir`. The value is persisted with the box,
+is shell-quoted by the launcher, and is never supplied by the browser. Boxes created by older
+control planes retain a `NULL` layout marker and continue to name the historical
+`.agent-manager` root; they are not silently reinterpreted as isolated boxes.
+
+An owner or administrator can authorize migration for one of those legacy boxes from **Manage
+Machine → Legacy Runner Data** only after confirming that every old runner using the SSH account is
+stopped. Active sessions still require the existing explicit force confirmation. The orchestrator
+supersedes reconnect timers, stops and waits for its managed SSH child, and only then durably records
+a random adoption epoch with actor, role, and timestamp. A stop failure records no authority. A
+control-plane restart rehydrates the pending epoch, but only the matching current launch receives
+`--adopt-legacy-data-dir`; stale attempts cannot reuse it. The first matching runner registration
+marks the authorization completed while retaining its audit metadata. The UI and API expose only
+the bounded pending/completed state and timestamps, never credential material or parsed stderr.
+
 ## Agent and conductor secrets stay runner-local
 
 An agent `env` entry may be a literal string for compatibility or a host reference:

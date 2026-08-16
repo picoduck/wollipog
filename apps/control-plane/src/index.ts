@@ -110,8 +110,13 @@ import {
   localDeviceTokenPath,
   localPairingUrl,
 } from "./local-device-credential.js";
-import { BoxOrchestrator, makeBinaryResolver } from "./box-orchestrator.js";
-import { decideScopedBoxLifecycle, parseBoxLifecycleForce } from "./box-lifecycle.js";
+import { BoxOrchestrator, makeBinaryResolver, managedBoxRunnerDataDir } from "./box-orchestrator.js";
+import {
+  canAuthorizeLegacyDataAdoption,
+  decideScopedBoxLifecycle,
+  parseBoxLifecycleForce,
+  parseLegacyDataAdoption,
+} from "./box-lifecycle.js";
 import { RUNNER_RELEASE_TAG } from "./release-version.js";
 import { readSshConfigHosts } from "./ssh-config.js";
 import { ControlPlaneDb, GOVERNANCE_AUDIT_RETENTION_MS } from "./db.js";
@@ -895,7 +900,7 @@ app.register(async (instance) => {
         hub.runnerChanged(runnerId);
         for (const projectId of db.projectIdsForRunner(runnerId)) hub.projectChangedById(projectId);
         // If this runner is a box's runner (connected through the SSH tunnel), flip it online.
-        orchestrator.onRunnerRegistered(runnerId);
+        orchestrator.onRunnerRegistered(runnerId, credential.credentialId);
         app.log.info(
           `runner online: ${runnerId} (${msg.runner.hostname}, ${msg.runner.os}) ` +
             `agents=[${msg.runner.agents.map((a) => a.id).join(", ")}]`,
@@ -2074,6 +2079,7 @@ app.post("/api/boxes", async (req, reply) => {
     sshPort,
     workspaces,
     autoReconnect: true,
+    runnerDataDir: managedBoxRunnerDataDir(boxId),
     scope: boxScope,
     now: Date.now(),
   });
@@ -2081,6 +2087,42 @@ app.post("/api/boxes", async (req, reply) => {
   hub.boxChanged(boxId);
   orchestrator.add(boxId);
   return reply.code(201).send({ box: db.getBox(boxId) });
+});
+
+app.post("/api/boxes/:id/adopt-legacy-data-dir", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const box = db.getBox(id);
+  if (!box) return reply.code(404).send({ error: "box not found" });
+  const principal = requestHuman(req);
+  if (!canAuthorizeLegacyDataAdoption(principal)) {
+    return reply.code(403).send({ error: "organization owner or admin permission is required" });
+  }
+  const adoption = parseLegacyDataAdoption(req.body);
+  if (!adoption.ok) return reply.code(400).send({ error: adoption.error });
+  const decision = decideScopedBoxLifecycle(
+    db.listSessions({ includeArchived: true }),
+    box.runnerId,
+    adoption.force,
+    "adopt",
+    (sessionId) => db.canAccessSession(principal, sessionId),
+  );
+  if (!decision.ok) return reply.code(409).send(decision.conflict);
+  const result = await orchestrator.authorizeLegacyDataAdoption(id, {
+    userId: principal.userId,
+    role: principal.role,
+  });
+  if (result === "not_found") return reply.code(404).send({ error: "box not found" });
+  if (result === "not_legacy") return reply.code(409).send({ error: "box already uses an isolated runner data directory" });
+  if (result === "already_authorized") {
+    return reply.code(409).send({ error: "legacy data adoption was already authorized for this box" });
+  }
+  if (result === "stop_failed") {
+    return reply.code(409).send({ error: "the managed runner could not be stopped; legacy data adoption was not authorized" });
+  }
+  if (result === "superseded") {
+    return reply.code(409).send({ error: "a newer box lifecycle operation superseded legacy data adoption" });
+  }
+  return { ok: true, status: result, forced: adoption.force };
 });
 
 app.post("/api/boxes/:id/reconnect", async (req, reply) => {

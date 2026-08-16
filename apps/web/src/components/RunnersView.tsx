@@ -527,7 +527,7 @@ function normalizedSessionTitle(value: unknown): string {
 
 export function lifecycleConflictPresentation(
   error: ApiError,
-  action: "update" | "reconnect",
+  action: "update" | "reconnect" | "adopt",
 ): LifecycleConflictPresentation {
   const count = typeof error.details?.activeSessionCount === "number" ? error.details.activeSessionCount : null;
   const sessions = Array.isArray(error.details?.activeSessions)
@@ -541,7 +541,7 @@ export function lifecycleConflictPresentation(
         }))
         .slice(0, 4)
     : [];
-  const actionLabel = action === "update" ? "Updating" : "Reconnecting";
+  const actionLabel = action === "update" ? "Updating" : action === "reconnect" ? "Reconnecting" : "Adopting legacy data for";
   const message = count == null
     ? `${actionLabel} this runner will interrupt active work.`
     : `${actionLabel} this runner will interrupt ${count} active session${count === 1 ? "" : "s"}.`;
@@ -607,6 +607,7 @@ function MachineSettingsDialog({
   const [workspaceName, setWorkspaceName] = useState("");
   const [nameEdited, setNameEdited] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [adoptingLegacyData, setAdoptingLegacyData] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const canBrowse = runner?.status === "online" &&
     runnerSupportsProtocol(runner.protocolVersion, "directoryListing");
@@ -669,6 +670,42 @@ function MachineSettingsDialog({
     } catch (cause) {
       setError((cause as Error).message);
       setDeleting(false);
+    }
+  };
+
+  const adoptLegacyData = async () => {
+    if (!box || adoptingLegacyData) return;
+    const approved = await confirm({
+      title: `Adopt Legacy Data for ${display.name}?`,
+      message: "Confirm that every legacy runner process using this SSH account is stopped. Wollipog will preserve the existing state and authorize one migration attempt.",
+      confirmLabel: "Adopt Legacy Data",
+      tone: "danger",
+    });
+    if (!approved) return;
+    setAdoptingLegacyData(true);
+    setError(null);
+    try {
+      try {
+        await api.adoptLegacyBoxData(box.boxId, false);
+      } catch (cause) {
+        if (!(cause instanceof ApiError) || cause.status !== 409 || cause.code !== "BOX_HAS_ACTIVE_SESSIONS") throw cause;
+        setAdoptingLegacyData(false);
+        const conflict = lifecycleConflictPresentation(cause, "adopt");
+        const force = await confirm({
+          title: `Interrupt Sessions and Adopt Legacy Data for ${display.name}?`,
+          message: conflict.message,
+          details: <LifecycleConflictDetails conflict={conflict} />,
+          confirmLabel: "Interrupt Sessions and Adopt Legacy Data",
+          tone: "danger",
+        });
+        if (!force) return;
+        setAdoptingLegacyData(true);
+        await api.adoptLegacyBoxData(box.boxId, true);
+      }
+    } catch (cause) {
+      setError(machineSettingsMutationError(cause));
+    } finally {
+      setAdoptingLegacyData(false);
     }
   };
 
@@ -780,6 +817,25 @@ function MachineSettingsDialog({
 
       <section className="machine-settings-section machine-danger-zone">
         <h3>Danger Zone</h3>
+        {box?.runnerDataLayout === "legacy" && box.legacyDataAdoption?.status !== "completed" && (
+          <div className="machine-settings-danger-action">
+            <h4>Legacy Runner Data</h4>
+            <p>
+              This Machine predates isolated managed-runner data. Stop every legacy runner on its SSH account,
+              then authorize one state-preserving migration attempt.
+            </p>
+            <button
+              type="button"
+              className="btn danger"
+              disabled={adoptingLegacyData || box.legacyDataAdoption?.status === "pending"}
+              onClick={() => void adoptLegacyData()}
+            >
+              {box.legacyDataAdoption?.status === "pending"
+                ? "Legacy Data Adoption Pending"
+                : adoptingLegacyData ? "Authorizing…" : "Adopt Legacy Data"}
+            </button>
+          </div>
+        )}
         <p>Deleting a Machine removes its sessions and run history from Wollipog. Files on the Machine remain in place.</p>
         <button
           type="button"

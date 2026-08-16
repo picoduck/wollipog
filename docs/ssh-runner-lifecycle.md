@@ -47,6 +47,16 @@ via `--token-file`; the old active credential remains usable until the new conne
 activates the pending credential. A delayed superseded bootstrap cannot overwrite the newer path,
 and credential files older than seven days are swept. The secret is never placed in argv.
 
+New boxes are launched with a persisted, server-derived
+`.agent-manager/runner-data/<box-id>` data directory so unrelated managed boxes on one SSH account
+cannot claim each other's mutable runner state. Existing box rows keep the historical root. Their
+owner/admin-only **Adopt Legacy Data** action requires an exact acknowledgement that all legacy
+runners on the account are stopped and uses the ordinary active-session/force gate. The control
+plane waits for its supervised SSH child to exit before durably authorizing one epoch; stop failure
+leaves no authorization. Pending authorization survives a control-plane restart, is attached only
+to the matching current launch, and is completed only by that launch's runner registration. Legacy
+bytes remain in place throughout the runner's state-preserving adoption.
+
 If artifact resolution fails, bootstrap may use an already-deployed executable only when its
 `--version` probe succeeds. It never overwrites or deletes that rollback binary on a failed download.
 The local artifact cache keeps the current release and one previous known-good release; older
@@ -94,6 +104,8 @@ Repository tests deterministically cover:
 - zsh-safe stale-stage cleanup;
 - immutable credential-path `umask 077` construction, activation cutover, stale-file cleanup, and
   absence of token argv;
+- isolated per-box data-dir launch arguments plus restart-safe, epoch-fenced legacy adoption;
+- rejection before authorization when the supervised child cannot be stopped;
 - concurrent refresh sharing and reconnect/update supersession guards;
 - full-digest reuse plus current-and-one-rollback cache retention;
 - authenticated `gh` fallback and atomic partial-file promotion in all release installers.

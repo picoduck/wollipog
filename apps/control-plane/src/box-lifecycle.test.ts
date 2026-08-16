@@ -4,9 +4,11 @@ import type { SessionView } from "@wollipog/protocol";
 import {
   blockingRunnerSessions,
   boxLifecycleConflict,
+  canAuthorizeLegacyDataAdoption,
   decideBoxLifecycle,
   decideScopedBoxLifecycle,
   parseBoxLifecycleForce,
+  parseLegacyDataAdoption,
 } from "./box-lifecycle.js";
 
 const session = (id: string, runnerId: string, status: SessionView["status"]): Pick<SessionView, "id" | "runnerId" | "title" | "status"> => ({
@@ -67,6 +69,26 @@ test("box lifecycle force parsing fails closed and conflict payload stays bounde
     assert.equal(scopedDecision.conflict.activeSessionCount, 25);
     assert.deepEqual(scopedDecision.conflict.activeSessions.map(({ id }) => id), ["session-24"]);
   }
+});
+
+test("legacy adoption requires exact acknowledgement and owner or admin authority", () => {
+  assert.equal(parseLegacyDataAdoption(undefined).ok, false);
+  assert.equal(parseLegacyDataAdoption({}).ok, false);
+  assert.equal(parseLegacyDataAdoption({ acknowledgeAllLegacyRunnersStopped: false }).ok, false);
+  assert.equal(parseLegacyDataAdoption({ acknowledgeAllLegacyRunnersStopped: true, force: "yes" }).ok, false);
+  assert.deepEqual(parseLegacyDataAdoption({ acknowledgeAllLegacyRunnersStopped: true }), {
+    ok: true,
+    force: false,
+  });
+  assert.deepEqual(parseLegacyDataAdoption({ acknowledgeAllLegacyRunnersStopped: true, force: true }), {
+    ok: true,
+    force: true,
+  });
+  assert.equal(canAuthorizeLegacyDataAdoption(null), false);
+  assert.equal(canAuthorizeLegacyDataAdoption({ role: "viewer" }), false);
+  assert.equal(canAuthorizeLegacyDataAdoption({ role: "member" }), false);
+  assert.equal(canAuthorizeLegacyDataAdoption({ role: "admin" }), true);
+  assert.equal(canAuthorizeLegacyDataAdoption({ role: "owner" }), true);
 });
 
 test("scoped lifecycle conflicts hide inaccessible session metadata without weakening the safety gate", () => {

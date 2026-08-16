@@ -90,6 +90,12 @@ test("machine cards use consistent action rows and progressively disclose deploy
   assert.match(view, /api\.registerMachineWorkspace/);
   assert.match(view, /machineSettingsMutationError\(cause\)/);
   assert.match(view, /disabled=\{deleting \|\| onlineNativeRunner\}/);
+  assert.match(view, /box\?\.runnerDataLayout === "legacy"/);
+  assert.match(view, /Confirm that every legacy runner process using this SSH account is stopped\./);
+  assert.match(view, /confirmLabel: "Adopt Legacy Data"/);
+  assert.match(view, /confirmLabel: "Interrupt Sessions and Adopt Legacy Data"/);
+  assert.match(view, /api\.adoptLegacyBoxData\(box\.boxId, false\)/);
+  assert.match(view, /api\.adoptLegacyBoxData\(box\.boxId, true\)/);
 });
 
 test("runner repair preserves identity, rotates when needed, and exposes selection semantics", () => {

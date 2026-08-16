@@ -14,6 +14,7 @@ function box(overrides: Partial<NewBoxInput> = {}): NewBoxInput {
     sshPort: 22,
     workspaces: [{ id: "repo", name: "repo", path: "/home/me/repo" }],
     autoReconnect: true,
+    runnerDataDir: null,
     now: 1000,
     ...overrides,
   };
@@ -42,6 +43,89 @@ test("getBoxConfig returns ssh details + parsed workspaces", () => {
   assert.equal(c?.autoReconnect, true);
   assert.deepEqual(c?.workspaces, [{ id: "repo", name: "repo", path: "/home/me/repo" }]);
   assert.equal(c?.deployedVersion, null);
+  assert.equal(c?.runnerDataDir, null);
+  assert.equal(c?.pendingLegacyDataAdoptionEpoch, null);
+  assert.equal(c?.legacyDataAdoptionEpoch, null);
+  assert.equal(db.getBox("box-1")?.runnerDataLayout, "legacy");
+});
+
+test("new managed data roots and legacy adoption authorization survive restart with stale-safe completion", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-box-data-adoption-"));
+  const path = join(root, "control-plane.db");
+  let db: ControlPlaneDb | undefined;
+  try {
+    db = ControlPlaneDb.open(path);
+    db.createBox(box({
+      boxId: "box-new",
+      runnerId: "box-new",
+      runnerDataDir: ".agent-manager/runner-data/box-new",
+    }));
+    assert.equal(db.getBoxConfig("box-new")?.runnerDataDir, ".agent-manager/runner-data/box-new");
+    assert.equal(db.getBox("box-new")?.runnerDataLayout, "isolated-v1");
+    assert.equal(db.authorizeBoxLegacyDataAdoption({
+      boxId: "box-new",
+      epoch: "adopt-not-allowed",
+      authorizedBy: "user-owner",
+      authorizedRole: "owner",
+      now: 1100,
+    }), false, "isolated roots never accept legacy adoption authorization");
+
+    db.createBox(box({ boxId: "box-legacy", runnerId: "box-legacy", runnerDataDir: null }));
+    assert.equal(db.authorizeBoxLegacyDataAdoption({
+      boxId: "box-legacy",
+      epoch: "adopt-epoch-one",
+      authorizedBy: "user-admin",
+      authorizedRole: "admin",
+      now: 1200,
+    }), true);
+    assert.equal(db.getBoxConfig("box-legacy")?.pendingLegacyDataAdoptionEpoch, "adopt-epoch-one");
+    assert.equal(db.authorizeBoxLegacyDataAdoption({
+      boxId: "box-legacy",
+      epoch: "adopt-replay",
+      authorizedBy: "user-owner",
+      authorizedRole: "owner",
+      now: 1250,
+    }), false, "pending authorization is create-once and its audit cannot be overwritten");
+    assert.deepEqual(db.getBox("box-legacy")?.legacyDataAdoption, {
+      status: "pending",
+      authorizedAt: 1200,
+    });
+    db.close();
+    db = ControlPlaneDb.open(path);
+    assert.equal(db.getBoxConfig("box-legacy")?.pendingLegacyDataAdoptionEpoch, "adopt-epoch-one");
+    assert.equal(db.completeBoxLegacyDataAdoption("box-legacy", "stale-epoch", 1300), false);
+    assert.equal(db.getBoxConfig("box-legacy")?.pendingLegacyDataAdoptionEpoch, "adopt-epoch-one");
+    assert.equal(db.completeBoxLegacyDataAdoption("box-legacy", "adopt-epoch-one", 1400), true);
+    assert.equal(db.getBoxConfig("box-legacy")?.pendingLegacyDataAdoptionEpoch, null);
+    assert.equal(db.getBoxConfig("box-legacy")?.legacyDataAdoptionEpoch, "adopt-epoch-one");
+    assert.equal(db.authorizeBoxLegacyDataAdoption({
+      boxId: "box-legacy",
+      epoch: "adopt-after-completion",
+      authorizedBy: "user-owner",
+      authorizedRole: "owner",
+      now: 1500,
+    }), false, "completed audit is retained and cannot be replaced");
+    assert.deepEqual(db.getBox("box-legacy")?.legacyDataAdoption, {
+      status: "completed",
+      authorizedAt: 1200,
+      completedAt: 1400,
+    });
+    const audit = db.raw().prepare(
+      `SELECT legacy_adoption_epoch, legacy_adoption_authorized_by, legacy_adoption_authorized_role,
+              legacy_adoption_authorized_at, legacy_adoption_completed_at
+         FROM boxes WHERE box_id='box-legacy'`,
+    ).get() as Record<string, unknown>;
+    assert.deepEqual({ ...audit }, {
+      legacy_adoption_epoch: "adopt-epoch-one",
+      legacy_adoption_authorized_by: "user-admin",
+      legacy_adoption_authorized_role: "admin",
+      legacy_adoption_authorized_at: 1200,
+      legacy_adoption_completed_at: 1400,
+    });
+  } finally {
+    db?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("setBoxStatus + setBoxDeployedVersion update the row", () => {

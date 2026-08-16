@@ -80,6 +80,8 @@ export function buildRemoteCommand(o: {
   runnerId: string;
   controlPlaneUrl: string;
   tokenFile: string;
+  dataDir?: string | null;
+  adoptLegacyDataDir?: boolean;
   workspaces: { id: string; path: string }[];
 }): string {
   const parts = [
@@ -88,8 +90,28 @@ export function buildRemoteCommand(o: {
     "--control-plane-url", posixQuote(o.controlPlaneUrl),
     "--token-file", posixQuote(o.tokenFile),
   ];
+  if (o.dataDir) parts.push("--data-dir", posixQuote(o.dataDir));
+  if (o.adoptLegacyDataDir) parts.push("--adopt-legacy-data-dir");
   for (const w of o.workspaces) parts.push("--workspace", posixQuote(`${w.id}:${w.path}`));
   return parts.join(" ");
+}
+
+/** New managed boxes never share the historical home-level runner root. */
+export function managedBoxRunnerDataDir(boxId: string): string {
+  if (!/^box-[a-f0-9]{8}$/u.test(boxId)) throw new Error("invalid box id");
+  return `.agent-manager/runner-data/${boxId}`;
+}
+
+/** Adoption authority is attempt-scoped: stale persisted/runtime epochs never gain the flag. */
+export function managedAdoptionEpochIsCurrent(
+  currentRuntimeEpoch: number,
+  attemptRuntimeEpoch: number,
+  pendingAdoptionEpoch: string | null,
+  attemptAdoptionEpoch: string | null,
+): boolean {
+  return currentRuntimeEpoch === attemptRuntimeEpoch &&
+    attemptAdoptionEpoch !== null &&
+    pendingAdoptionEpoch === attemptAdoptionEpoch;
 }
 
 /** ssh argv (spawn with shell:false) opening a reverse tunnel and running the remote command.
@@ -928,6 +950,10 @@ interface BoxRuntime {
   /** Bumped on every (re)start and stop; in-flight async attempts capture it and bail once
    * superseded, so reconnect spam can't leave two bootstraps/ssh children racing for one box. */
   epoch: number;
+  /** Exact durable authorization carried by this launch/reconnect chain, if any. */
+  activeAdoptionEpoch: string | null;
+  /** Credential minted for this exact launch; registration must prove it before adoption settles. */
+  activeCredentialId: string | null;
 }
 
 export interface OrchestratorDeps {
@@ -936,7 +962,42 @@ export interface OrchestratorDeps {
   cpPort: number;
   issueCredential: (runnerId: string) => RunnerCredentialSecret;
   resolveBinary: BinaryResolver;
+  stopManagedChild?: (child: ChildProcess) => Promise<void>;
   log?: (msg: string) => void;
+}
+
+export type LegacyDataAdoptionStartResult =
+  | "started"
+  | "not_found"
+  | "not_legacy"
+  | "already_authorized"
+  | "stop_failed"
+  | "superseded";
+
+export function stopAndWaitForManagedChild(child: ChildProcess, timeoutMs = 10_000): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.off("exit", onExit);
+      child.off("error", onError);
+      error ? reject(error) : resolve();
+    };
+    const onExit = () => finish();
+    const onError = (error: Error) => finish(error);
+    child.once("exit", onExit);
+    child.once("error", onError);
+    timer = setTimeout(() => finish(new Error("managed runner did not stop before the adoption timeout")), timeoutMs);
+    try {
+      if (!child.killed && !child.kill()) finish(new Error("managed runner refused the stop signal"));
+    } catch (error) {
+      finish(error as Error);
+    }
+  });
 }
 
 export interface PreparedRunnerUpdate {
@@ -985,7 +1046,10 @@ export class BoxOrchestrator {
   // binding cpPort on the box collides ("remote port forwarding failed").
   private nextRemotePort = 47100;
   private stopping = false;
-  constructor(private readonly deps: OrchestratorDeps) {}
+  private readonly stopManagedChild: (child: ChildProcess) => Promise<void>;
+  constructor(private readonly deps: OrchestratorDeps) {
+    this.stopManagedChild = deps.stopManagedChild ?? stopAndWaitForManagedChild;
+  }
 
   private allocRemotePort(): number {
     const p = this.nextRemotePort;
@@ -1017,6 +1081,67 @@ export class BoxOrchestrator {
     const rt = this.runtimes.get(boxId);
     if (rt) rt.backoffMs = INITIAL_BACKOFF_MS;
     this.start(cfg);
+  }
+
+  /** Stop the old managed process before durably authorizing one exact legacy-root adoption. */
+  async authorizeLegacyDataAdoption(
+    boxId: string,
+    actor: { userId: string; role: "owner" | "admin" },
+  ): Promise<LegacyDataAdoptionStartResult> {
+    const cfg = this.deps.db.getBoxConfig(boxId);
+    if (!cfg) return "not_found";
+    if (cfg.runnerDataDir !== null) return "not_legacy";
+    if (cfg.legacyDataAdoptionEpoch !== null) return "already_authorized";
+
+    let rt = this.runtimes.get(boxId);
+    if (!rt) {
+      rt = {
+        child: null,
+        remotePort: this.allocRemotePort(),
+        reconnectTimer: null,
+        backoffMs: INITIAL_BACKOFF_MS,
+        removed: false,
+        epoch: 0,
+        activeAdoptionEpoch: null,
+        activeCredentialId: null,
+      };
+      this.runtimes.set(boxId, rt);
+    }
+    const lifecycleEpoch = ++rt.epoch;
+    if (rt.reconnectTimer) {
+      clearTimeout(rt.reconnectTimer);
+      rt.reconnectTimer = null;
+    }
+    const child = rt.child;
+    rt.child = null;
+    rt.activeAdoptionEpoch = null;
+    rt.activeCredentialId = null;
+    if (child) {
+      try {
+        await this.stopManagedChild(child);
+      } catch (error) {
+        if (rt.epoch === lifecycleEpoch && !rt.removed && !this.stopping) {
+          this.setStatus(boxId, "failed", (error as Error).message);
+        }
+        return "stop_failed";
+      }
+    }
+    if (rt.epoch !== lifecycleEpoch || rt.removed || this.stopping) return "superseded";
+
+    const adoptionEpoch = `adopt-${randomUUID()}`;
+    if (!this.deps.db.authorizeBoxLegacyDataAdoption({
+      boxId,
+      epoch: adoptionEpoch,
+      authorizedBy: actor.userId,
+      authorizedRole: actor.role,
+      now: Date.now(),
+    })) return "not_legacy";
+    this.deps.hub.boxChanged(boxId);
+    const authorized = this.deps.db.getBoxConfig(boxId);
+    if (!authorized || authorized.pendingLegacyDataAdoptionEpoch !== adoptionEpoch) return "superseded";
+    rt.backoffMs = INITIAL_BACKOFF_MS;
+    this.start(authorized);
+    return "started";
   }
 
   /** Resolve the exact candidate before asking permission to interrupt work. An identical artifact
@@ -1059,11 +1184,19 @@ export class BoxOrchestrator {
   }
 
   /** Called from the /runner register handler: flip the matching box → online. */
-  onRunnerRegistered(runnerId: string): void {
+  onRunnerRegistered(runnerId: string, credentialId: string): void {
     const boxId = this.deps.db.boxIdForRunner(runnerId);
     if (!boxId) return;
     const rt = this.runtimes.get(boxId);
     if (rt) rt.backoffMs = INITIAL_BACKOFF_MS; // a healthy connection resets backoff
+    if (rt?.activeAdoptionEpoch && rt.activeCredentialId === credentialId && this.deps.db.completeBoxLegacyDataAdoption(
+      boxId,
+      rt.activeAdoptionEpoch,
+      Date.now(),
+    )) {
+      rt.activeAdoptionEpoch = null;
+      this.deps.hub.boxChanged(boxId);
+    }
     this.setStatus(boxId, "online");
   }
 
@@ -1092,12 +1225,16 @@ export class BoxOrchestrator {
         backoffMs: INITIAL_BACKOFF_MS,
         removed: false,
         epoch: 0,
+        activeAdoptionEpoch: null,
+        activeCredentialId: null,
       };
       this.runtimes.set(cfg.boxId, rt);
     }
     rt.removed = false;
+    rt.activeAdoptionEpoch = cfg.pendingLegacyDataAdoptionEpoch;
+    rt.activeCredentialId = null;
     const epoch = ++rt.epoch; // this attempt owns the runtime until something supersedes it
-    void this.bootstrap(cfg, rt, epoch);
+    void this.bootstrap(cfg, rt, epoch, rt.activeAdoptionEpoch);
   }
 
   /** Is `epoch` still the current attempt for `rt` (not superseded/removed/shutting down)? */
@@ -1105,7 +1242,12 @@ export class BoxOrchestrator {
     return deploymentAttemptIsCurrent(rt.epoch, epoch, rt.removed, this.stopping);
   }
 
-  private async bootstrap(cfg: BoxConfig, rt: BoxRuntime, epoch: number): Promise<void> {
+  private async bootstrap(
+    cfg: BoxConfig,
+    rt: BoxRuntime,
+    epoch: number,
+    adoptionEpoch: string | null,
+  ): Promise<void> {
     try {
       if (!this.live(rt, epoch)) return;
       this.setStatus(cfg.boxId, "bootstrapping");
@@ -1118,10 +1260,19 @@ export class BoxOrchestrator {
       await this.ensureBinary(cfg, triple, rt, epoch);
       if (!this.live(rt, epoch)) return;
       const secret = this.deps.issueCredential(cfg.runnerId);
+      rt.activeCredentialId = secret.credential.credentialId;
       const tokenFile = remoteCredentialPath(secret.credential.credentialId);
       await this.deployTokenFile(cfg, secret);
       if (!this.live(rt, epoch)) return;
-      this.launch(cfg, rt, epoch, tokenFile);
+      const fresh = this.deps.db.getBoxConfig(cfg.boxId);
+      if (!fresh) return;
+      if (adoptionEpoch && !managedAdoptionEpochIsCurrent(
+        rt.epoch,
+        epoch,
+        fresh.pendingLegacyDataAdoptionEpoch,
+        adoptionEpoch,
+      )) return;
+      this.launch(fresh, rt, epoch, tokenFile, adoptionEpoch);
     } catch (err) {
       if (!this.live(rt, epoch)) return;
       const msg = (err as Error).message;
@@ -1131,13 +1282,21 @@ export class BoxOrchestrator {
     }
   }
 
-  private launch(cfg: BoxConfig, rt: BoxRuntime, epoch: number, tokenFile: string): void {
+  private launch(
+    cfg: BoxConfig,
+    rt: BoxRuntime,
+    epoch: number,
+    tokenFile: string,
+    adoptionEpoch: string | null,
+  ): void {
     const controlPlaneUrl = `ws://127.0.0.1:${rt.remotePort}/runner`;
     const remoteCommand = buildRemoteCommand({
       runnerPath: REMOTE_RUNNER_PATH,
       runnerId: cfg.runnerId,
       controlPlaneUrl,
       tokenFile,
+      dataDir: cfg.runnerDataDir,
+      adoptLegacyDataDir: adoptionEpoch !== null,
       workspaces: cfg.workspaces,
     });
     const args = buildSshArgs({
@@ -1182,7 +1341,7 @@ export class BoxOrchestrator {
       rt.reconnectTimer = null;
       if (!this.live(rt, epoch)) return;
       const fresh = this.deps.db.getBoxConfig(cfg.boxId);
-      if (fresh) void this.bootstrap(fresh, rt, epoch); // same epoch — continuation of this attempt chain
+      if (fresh) void this.bootstrap(fresh, rt, epoch, rt.activeAdoptionEpoch); // same epoch — continuation of this attempt chain
     }, delay);
   }
 
@@ -1195,6 +1354,8 @@ export class BoxOrchestrator {
     const rt = this.runtimes.get(boxId);
     if (!rt) return;
     rt.epoch++; // supersede any in-flight attempt and pending reconnect timers
+    rt.activeAdoptionEpoch = null;
+    rt.activeCredentialId = null;
     if (rt.reconnectTimer) {
       clearTimeout(rt.reconnectTimer);
       rt.reconnectTimer = null;
