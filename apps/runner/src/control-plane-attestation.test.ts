@@ -133,4 +133,20 @@ test("runner attestation fails closed on malformed or oversized identity", async
     controlPlaneUrl: "ws://localhost/runner", runnerId: "r", token: "t",
     fetchImpl: (async () => new Response(oversized)) as typeof fetch,
   }), /too large/);
+  const oversizedWithBrokenCancel = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new Uint8Array(3_000));
+      controller.enqueue(new Uint8Array(3_000));
+    },
+    cancel() { throw new Error("cancel failed"); },
+  });
+  await assert.rejects(() => attestRunnerControlPlane({
+    controlPlaneUrl: "ws://localhost/runner", runnerId: "r", token: "t",
+    fetchImpl: (async () => new Response(oversizedWithBrokenCancel)) as typeof fetch,
+  }), (error) => {
+    assert.equal(error instanceof ControlPlaneAttestationError, true);
+    assert.equal((error as ControlPlaneAttestationError).retryable, false);
+    assert.match((error as Error).message, /too large/);
+    return true;
+  });
 });

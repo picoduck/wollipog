@@ -396,7 +396,18 @@ test("attested WSL owners get disjoint provider roots and ambiguous v2 state fai
       copyWsl: async () => { copied = true; },
     },
     firstOwner,
-  ), /no control-plane ownership proof/);
+  ), (error) => {
+    assert.match((error as Error).message, /no control-plane ownership proof/);
+    assert.match(
+      (error as Error).message,
+      new RegExp(`/provider-state/claude/${providerStateKey("same-session")}/projects`),
+    );
+    assert.match(
+      (error as Error).message,
+      new RegExp(`/runner-instances/${firstOwner}/provider-state/claude/${providerStateKey("same-session")}/projects`),
+    );
+    return true;
+  });
   assert.equal(copied, false, "unattributable shared bytes remain untouched");
 });
 

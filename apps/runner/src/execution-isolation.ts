@@ -433,13 +433,15 @@ export async function migrateExecutionIsolationState(
     const ownedBase = wslRunnerStateBase(resolved.home, ownerHash);
     const legacy = legacyProviderStateLocation(sharedBase, driver)!;
     const partition = providerStateLocation(sharedBase, driver, sessionId)!;
+    const ownedPartition = providerStateLocation(ownedBase, driver, sessionId)!;
     if (ownerHash && (await runtime.existsWsl(context, legacy.leaf) || await runtime.existsWsl(context, partition.leaf))) {
       throw new Error(
-        "legacy WSL provider state has no control-plane ownership proof; stop all pre-attestation runners and explicitly adopt or archive it before resuming",
+        `legacy WSL provider state at ${legacy.leaf} or ${partition.leaf} has no control-plane ownership proof; ` +
+        `stop all pre-attestation runners, archive those retained bytes, and manually migrate the intended session to ${ownedPartition.leaf} before resuming`,
       );
     }
     if (!await runtime.existsWsl(context, legacy.leaf)) return;
-    await runtime.copyWsl(context, legacy, providerStateLocation(ownedBase, driver, sessionId)!);
+    await runtime.copyWsl(context, legacy, ownedPartition);
     return;
   }
   const legacy = legacyProviderStateLocation(dataDir, driver)!;

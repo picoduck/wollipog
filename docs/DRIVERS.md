@@ -99,7 +99,8 @@ resume/fork still depends on the installed CLI tolerating its other read-only in
 claimed without real-host conformance. Native pre-partition sessions copy the legacy provider-wide store once.
 WSL v1/v2 state is not automatically adopted because runner-id-only or absent markers cannot prove a
 control-plane owner; resume fails with instructions to stop pre-attestation runners and explicitly archive
-or adopt the bytes. New sessions are marked at creation and never import it. Credentials/config remain read-only, ACP state is not guessed,
+the reported retained source paths, then manually migrate the intended session into the reported owner-scoped
+target path. New sessions are marked at creation and never import it. Credentials/config remain read-only, ACP state is not guessed,
 and existing provider-mode transcripts are not imported automatically. Failed exact cleanup is journaled;
 startup GC expires runner-owned orphans and enforces the configured per-provider/context byte ceiling while
 protecting every stored session. Pending cleanup/fork records claim short-lived failed partitions for exact

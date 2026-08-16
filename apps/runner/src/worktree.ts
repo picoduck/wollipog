@@ -173,15 +173,22 @@ export async function resolveWorktreeRoot(options: WorktreeOptions = {}): Promis
   return root;
 }
 
-async function sessionPath(repoPath: string, sessionId: string, options: WorktreeOptions): Promise<string> {
+async function sessionPath(
+  repoPath: string,
+  sessionId: string,
+  options: WorktreeOptions,
+  capacityPreflight = true,
+): Promise<string> {
   if (!/^[a-zA-Z0-9._-]+$/.test(sessionId) || sessionId === "." || sessionId === "..") {
     throw new Error("session id is not safe for a worktree path/branch");
   }
-  const root = await resolveWorktreeRoot(options);
+  const root = capacityPreflight ? await resolveWorktreeRoot(options) : await worktreeRootPath(options);
   const context = options.context ?? nativeContext;
   const parent = context.kind === "wsl" ? `${root}/${repoKey(repoPath)}` : join(root, repoKey(repoPath));
-  if (context.kind === "wsl") await runContextCommand(context, "mkdir", ["-p", "--", parent], { cwd: "/", timeoutMs: 8_000 });
-  else await mkdir(parent, { recursive: true });
+  if (capacityPreflight) {
+    if (context.kind === "wsl") await runContextCommand(context, "mkdir", ["-p", "--", parent], { cwd: "/", timeoutMs: 8_000 });
+    else await mkdir(parent, { recursive: true });
+  }
   return context.kind === "wsl" ? `${parent}/${sessionId}` : join(parent, sessionId);
 }
 
@@ -229,18 +236,20 @@ export async function reuseRegisteredLegacyWslWorktree(
 
 export async function createWorktree(repoPath: string, sessionId: string, options: WorktreeOptions = {}): Promise<WorktreeHandle> {
   const context = options.context ?? nativeContext;
-  const path = await sessionPath(repoPath, sessionId, options);
   const branch = context.kind === "wsl" && options.ownerHash
     ? `agent/${options.ownerHash.slice(0, 16)}/${sessionId}`
     : `agent/${sessionId}`;
   const listed = await command(context, repoPath, ["worktree", "list", "--porcelain"]);
   if (context.kind === "wsl" && options.legacyWslWorktreePath) {
-    const legacyPath = await sessionPath(repoPath, sessionId, { ...options, legacyWslRoot: true });
+    // Reusing an already registered worktree neither allocates storage nor needs the new owner's
+    // root. Avoid rejecting recovery solely because creation capacity is currently unavailable.
+    const legacyPath = await sessionPath(repoPath, sessionId, { ...options, legacyWslRoot: true }, false);
     return reuseRegisteredLegacyWslWorktree(
       options.legacyWslWorktreePath, legacyPath, sessionId, listed,
       async () => (await command(context, legacyPath, ["rev-parse", "--is-inside-work-tree"])).trim() === "true",
     );
   }
+  const path = await sessionPath(repoPath, sessionId, options);
   const registered = listed
     .split(/\n\s*\n/)
     .map((block) => block.split("\n").find((line) => line.startsWith("worktree "))?.slice(9).trim())

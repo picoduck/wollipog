@@ -154,6 +154,12 @@ auditable startup action. For a configured runner, stop its service and run its 
 as `wollipog-runner --config <path> --adopt-legacy-data-dir`; config-less launchers append the same
 flag to their otherwise unchanged command.
 
+The explicit flag can also adopt a v1 endpoint-owned root whose marker still matches the configured
+runner id and endpoint when its prior scoped credential is unavailable or no longer accepted. The
+operator's stop acknowledgement is the authority in that recovery case; without the flag, startup
+leaves the v1 root untouched and uses a separate stable-owner namespace. A mismatched v1 marker is
+never adopted.
+
 During the authorized migration, startup copies the protected legacy
 `<dataDir>/credentials/active-runner-token` bytes to the scoped path before recording ownership and
 leaves every legacy file intact for rollback. The newly issued launch token remains staged until

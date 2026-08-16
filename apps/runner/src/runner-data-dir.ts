@@ -300,13 +300,13 @@ function writeProtected(file: string, value: unknown, options: RunnerDataDirLeas
   publishProtected(file, `${JSON.stringify(value)}\n`, options);
 }
 
-function replaceProtected(
+function replaceProtectedContents(
   file: string,
-  value: unknown,
+  contents: string | Buffer,
   options: RunnerDataDirLeaseOptions,
 ): void {
   const temp = join(dirname(file), `.${basename(file)}.replace-${process.pid}-${randomUUID()}`);
-  writeFileSync(temp, `${JSON.stringify(value)}\n`, { flag: "wx", mode: 0o600 });
+  writeFileSync(temp, contents, { flag: "wx", mode: 0o600 });
   try {
     try { chmodSync(temp, 0o600); } catch { /* Windows ACLs are managed by the owning account. */ }
     const fd = openSync(temp, constants.O_RDONLY);
@@ -323,6 +323,10 @@ function replaceProtected(
     rmSync(temp, { force: true });
     syncDirectory(dirname(file), options);
   }
+}
+
+function replaceProtected(file: string, value: unknown, options: RunnerDataDirLeaseOptions): void {
+  replaceProtectedContents(file, `${JSON.stringify(value)}\n`, options);
 }
 
 function migrateV1Credential(
@@ -343,7 +347,10 @@ function migrateV1Credential(
   ensureDurableDirectory(dirname(newFile), options);
   if (!existsSync(newFile)) publishProtected(newFile, legacy, options);
   else if (!sameSecret(protectedRead(newFile), legacy)) {
-    throw new Error(`stable runner credential at ${newFile} conflicts with v1 migration`);
+    // A crash after credential publication but before the v2 owner marker can leave the previous
+    // attested bytes here. Under the acquired v1 lease and with no v2 owner yet, the freshly
+    // attested v1 credential is authoritative and can safely resume the interrupted publication.
+    replaceProtectedContents(newFile, legacy, options);
   }
 }
 
@@ -409,6 +416,7 @@ function acquireRunnerDataDirLeaseAt(
     (entry) => entry !== LEASE_FILE && entry !== RECOVERY_DIR,
   );
   let rollbackOwnerHash = legacyOwnerHash;
+  let explicitlyAdoptingLegacyEndpoint = false;
 
   if (ownerExistedAtClaim) {
     const hasStableOwner = existsSync(ownerPath);
@@ -429,9 +437,12 @@ function acquireRunnerDataDirLeaseAt(
     const canMigrateLegacyEndpoint = !hasStableOwner
       && options.legacyEndpointMigrationCredentialHash !== undefined
       && existingOwner.ownerHash === legacyOwnerHash;
+    explicitlyAdoptingLegacyEndpoint = !hasStableOwner
+      && options.adoptLegacyDataDir === true
+      && existingOwner.ownerHash === legacyOwnerHash;
     const ownerMatches = hasStableOwner
       ? existingOwner.ownerHash === ownerHash
-      : canMigrateLegacyEndpoint;
+      : canMigrateLegacyEndpoint || explicitlyAdoptingLegacyEndpoint;
     if (!ownerMatches) {
       if (options.adoptLegacyDataDir) {
         throw new Error(
@@ -590,6 +601,16 @@ function acquireRunnerDataDirLeaseAt(
           ...(legacyOwner.legacyMigration ? { legacyMigration: legacyOwner.legacyMigration } : {}),
         };
         writeProtected(ownerPath, stableOwner, options);
+      } else if (explicitlyAdoptingLegacyEndpoint && legacyOwner.ownerHash === legacyOwnerHash) {
+        stableOwner = {
+          version: 2,
+          ownerHash,
+          legacyMigration: legacyOwner.legacyMigration ?? {
+            authorization: "--adopt-legacy-data-dir",
+            authorizedAt: new Date().toISOString(),
+          },
+        };
+        writeProtected(ownerPath, stableOwner, options);
       } else {
         release();
         if (options.adoptLegacyDataDir) {
@@ -634,7 +655,7 @@ function acquireRunnerDataDirLeaseAt(
   return {
     dataDir,
     credentialFile: scopedRunnerCredentialFile(dataDir, identity),
-    migratedLegacyDataDir: legacyMigrationRequired,
+    migratedLegacyDataDir: legacyMigrationRequired || explicitlyAdoptingLegacyEndpoint,
     ownerHash,
     release,
   };

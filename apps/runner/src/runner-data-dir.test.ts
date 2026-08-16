@@ -670,6 +670,59 @@ test("v1 ownership migration rejects credential rotation after attestation", () 
   }
 });
 
+test("explicit adoption upgrades a matching v1 endpoint owner when prior credential proof is unavailable", () => {
+  const root = tempRoot();
+  try {
+    const legacyHash = legacyRunnerDataDirOwnerHash(FIRST);
+    const legacyOwnerPath = join(root, ".wollipog-runner-owner-v1.json");
+    writeFileSync(legacyOwnerPath, JSON.stringify({ version: 1, ownerHash: legacyHash }), { mode: 0o600 });
+
+    const adopted = acquireRunnerDataDirLease(root, FIRST, { adoptLegacyDataDir: true });
+    assert.equal(adopted.dataDir, root);
+    assert.equal(adopted.migratedLegacyDataDir, true);
+    const stableOwner = JSON.parse(readFileSync(join(root, ".wollipog-runner-owner-v2.json"), "utf8")) as {
+      version: number;
+      ownerHash: string;
+      legacyMigration: { authorization: string; authorizedAt: string };
+    };
+    assert.equal(stableOwner.version, 2);
+    assert.equal(stableOwner.ownerHash, runnerDataDirOwnerHash(FIRST));
+    assert.equal(stableOwner.legacyMigration.authorization, "--adopt-legacy-data-dir");
+    assert.equal(Number.isNaN(Date.parse(stableOwner.legacyMigration.authorizedAt)), false);
+    assert.deepEqual(JSON.parse(readFileSync(legacyOwnerPath, "utf8")), {
+      version: 1,
+      ownerHash: legacyHash,
+      legacyMigration: stableOwner.legacyMigration,
+    });
+    adopted.release();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("v1 migration resumes after a crash and credential rotation before v2 ownership publication", () => {
+  const root = tempRoot();
+  try {
+    const legacyHash = legacyRunnerDataDirOwnerHash(FIRST);
+    const oldCredential = join(root, "credentials", "instances", legacyHash, "active-runner-token");
+    const stableCredential = scopedRunnerCredentialFile(root, FIRST);
+    mkdirSync(join(root, "credentials", "instances", legacyHash), { recursive: true });
+    mkdirSync(join(root, "credentials", "instances", runnerDataDirOwnerHash(FIRST)), { recursive: true });
+    writeFileSync(join(root, ".wollipog-runner-owner-v1.json"), JSON.stringify({ version: 1, ownerHash: legacyHash }));
+    writeFileSync(oldCredential, "rotated-v1-token", { mode: 0o600 });
+    writeFileSync(stableCredential, "stale-pre-crash-token", { mode: 0o600 });
+
+    const resumed = acquireRunnerDataDirLease(root, FIRST, {
+      legacyEndpointMigrationCredentialHash: createHash("sha256").update("rotated-v1-token").digest("hex"),
+    });
+    assert.equal(readFileSync(resumed.credentialFile, "utf8"), "rotated-v1-token");
+    assert.equal(existsSync(join(root, ".wollipog-runner-owner-v2.json")), true);
+    resumed.release();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("post-lease malformed ownership fails closed without creating an isolated namespace", () => {
   const root = tempRoot();
   try {

@@ -152,7 +152,9 @@ export async function attestRunnerControlPlane(
           if (done) break;
           bytes += value.byteLength;
           if (bytes > MAX_RESPONSE_BYTES) {
-            await reader.cancel();
+            // The response-size violation is permanent regardless of transport cleanup behavior.
+            // Do not let a broken cancel() turn it into a retryable read failure.
+            await reader.cancel().catch(() => {});
             throw new ControlPlaneAttestationError("control-plane attestation response is too large", false);
           }
           chunks.push(value);
