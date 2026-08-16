@@ -817,7 +817,27 @@ function MachineSettingsDialog({
 
       <section className="machine-settings-section machine-danger-zone">
         <h3>Danger Zone</h3>
-        {box?.runnerDataLayout === "legacy" && box.legacyDataAdoption?.status !== "completed" && (
+        {box?.runnerDataLayout === "legacy" && box.legacyDataAccountStatus === "adopted" && (
+          <div className="machine-settings-danger-action">
+            <h4>Legacy Runner Data Adopted</h4>
+            <p>
+              This SSH account&apos;s legacy data is already owned. This Machine uses the current runner&apos;s
+              owner-aware isolated namespace and does not require another adoption.
+            </p>
+          </div>
+        )}
+        {box?.runnerDataLayout === "legacy" && box.legacyDataAccountStatus === "pending"
+          && box.legacyDataAdoption?.status !== "pending" && (
+          <div className="machine-settings-danger-action">
+            <h4>Legacy Data Adoption in Progress</h4>
+            <p>
+              Another Machine on this SSH account is adopting the shared legacy data. This Machine remains
+              parked until that exact current-runner registration completes.
+            </p>
+          </div>
+        )}
+        {box?.runnerDataLayout === "legacy" && box.legacyDataAccountStatus !== "adopted"
+          && (box.legacyDataAccountStatus !== "pending" || box.legacyDataAdoption?.status === "pending") && (
           <div className="machine-settings-danger-action">
             <h4>Legacy Runner Data</h4>
             <p>

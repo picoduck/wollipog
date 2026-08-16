@@ -161,6 +161,58 @@ export function buildPromoteCommand(epoch: number): string {
   return `chmod +x ${staged} && mv -f ${staged} ${REMOTE_RUNNER_PATH}`;
 }
 
+const REMOTE_RUNNER_CONTENT_ROOT = ".agent-manager/runners";
+
+function checkedRunnerDigest(sha256: string): string {
+  if (!/^[0-9a-f]{64}$/u.test(sha256)) throw new Error("invalid runner SHA-256 digest");
+  return sha256;
+}
+
+/** Immutable remote location for one exact runner artifact. Mutable deployment metadata and the
+ * legacy shared filename are never accepted as proof for launch-contract-dependent flags. */
+export function contentAddressedRunnerPath(sha256: string): string {
+  const digest = checkedRunnerDigest(sha256);
+  return `${REMOTE_RUNNER_CONTENT_ROOT}/${digest}/wollipog-runner`;
+}
+
+export function stagedContentAddressedRunnerPath(sha256: string, attemptId: string): string {
+  const live = contentAddressedRunnerPath(sha256);
+  if (!/^[a-f0-9-]{16,64}$/u.test(attemptId)) throw new Error("invalid runner deployment attempt id");
+  return `${live}.new-${attemptId}`;
+}
+
+function remoteSha256(path: string): string {
+  return (
+    `if command -v sha256sum >/dev/null 2>&1; then sha256sum ${path} | awk '{print $1}'; ` +
+    `elif command -v shasum >/dev/null 2>&1; then shasum -a 256 ${path} | awk '{print $1}'; ` +
+    `else exit 127; fi`
+  );
+}
+
+export function buildContentAddressedAttestationCommand(sha256: string): string {
+  const digest = checkedRunnerDigest(sha256);
+  const live = contentAddressedRunnerPath(digest);
+  return `test -f ${live} && actual=$(${remoteSha256(live)}) && test "$actual" = '${digest}'`;
+}
+
+export function buildContentAddressedStageCommand(sha256: string): string {
+  const digest = checkedRunnerDigest(sha256);
+  return (
+    `mkdir -p ${REMOTE_RUNNER_CONTENT_ROOT}/${digest} && ` +
+    `find ${REMOTE_RUNNER_CONTENT_ROOT}/${digest} -maxdepth 1 -name 'wollipog-runner.new-*' -mmin +60 -delete`
+  );
+}
+
+export function buildContentAddressedPromoteCommand(sha256: string, attemptId: string): string {
+  const digest = checkedRunnerDigest(sha256);
+  const staged = stagedContentAddressedRunnerPath(digest, attemptId);
+  const live = contentAddressedRunnerPath(digest);
+  return (
+    `actual=$(${remoteSha256(staged)}) && test "$actual" = '${digest}' && ` +
+    `chmod +x ${staged} && mv -f ${staged} ${live}`
+  );
+}
+
 /** Attempt-specific credential paths prevent a superseded deploy from overwriting the token used
  * by a newer launch. Only generated credential ids are accepted in remote paths. */
 export function remoteCredentialPath(credentialId: string): string {
@@ -954,6 +1006,16 @@ interface BoxRuntime {
   activeAdoptionEpoch: string | null;
   /** Credential minted for this exact launch; registration must prove it before adoption settles. */
   activeCredentialId: string | null;
+  /** True only when this launch used the exact resolved/staged artifact, never remote fallback. */
+  activeBinaryVerified: boolean;
+  /** Full digest remotely attested for this exact launch. */
+  activeBinarySha256: string | null;
+}
+
+interface BinaryReadiness {
+  kind: "verified" | "fallback";
+  runnerPath: string;
+  sha256: string | null;
 }
 
 export interface OrchestratorDeps {
@@ -971,8 +1033,32 @@ export type LegacyDataAdoptionStartResult =
   | "not_found"
   | "not_legacy"
   | "already_authorized"
+  | "account_already_adopted"
+  | "in_progress"
   | "stop_failed"
   | "superseded";
+
+export type ManagedBoxReconnectResult =
+  | "started"
+  | "not_found"
+  | "in_progress"
+  | "stop_failed"
+  | "superseded";
+
+/** Exact persisted SSH connection identity for boxes that share the legacy home-level data root.
+ * SSH aliases are intentionally not resolved: the stored target+port is the connection contract
+ * used by every orchestrated command, while display labels must never affect safety grouping. */
+export function managedBoxSshAccountKey(cfg: Pick<BoxConfig, "sshTarget" | "sshPort">): string {
+  return `${cfg.sshPort}\0${cfg.sshTarget.trim()}`;
+}
+
+export function legacySshAccountBoxes(
+  configs: readonly BoxConfig[],
+  target: Pick<BoxConfig, "sshTarget" | "sshPort">,
+): BoxConfig[] {
+  const key = managedBoxSshAccountKey(target);
+  return configs.filter((cfg) => cfg.runnerDataDir === null && managedBoxSshAccountKey(cfg) === key);
+}
 
 export function stopAndWaitForManagedChild(child: ChildProcess, timeoutMs = 10_000): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
@@ -1041,6 +1127,9 @@ export function classifyRunnerUpdate(input: {
 
 export class BoxOrchestrator {
   private readonly runtimes = new Map<string, BoxRuntime>();
+  private readonly lifecycleOperations = new Map<string, Promise<unknown>>();
+  private readonly pendingStops = new Map<string, Promise<void>>();
+  private readonly legacyAccountOperations = new Map<string, Promise<unknown>>();
   // Distinct high loopback port per box for the reverse tunnel's REMOTE listener. Must not be
   // cpPort: under mirrored-networking WSL, the box's loopback already maps to the host's CP, so
   // binding cpPort on the box collides ("remote port forwarding failed").
@@ -1074,17 +1163,83 @@ export class BoxOrchestrator {
     if (cfg) this.start(cfg);
   }
 
-  reconnect(boxId: string): void {
+  reconnect(boxId: string): Promise<ManagedBoxReconnectResult> {
     const cfg = this.deps.db.getBoxConfig(boxId);
-    if (!cfg) return;
-    this.stopRuntime(boxId); // supersedes any in-flight attempt (bumps epoch, kills child, clears timer)
+    if (!cfg) return Promise.resolve("not_found");
+    const accountKey = managedBoxSshAccountKey(cfg);
+    const pendingAdoption = this.pendingLegacyAccountAdoption(cfg);
+    if (this.legacyAccountOperations.has(accountKey) || (pendingAdoption && pendingAdoption.boxId !== boxId)) {
+      return Promise.resolve("in_progress");
+    }
+    if (this.lifecycleOperations.has(boxId)) return Promise.resolve("in_progress");
+    const operation = this.reconnectOnce(boxId);
+    this.lifecycleOperations.set(boxId, operation);
+    return operation.finally(() => {
+      if (this.lifecycleOperations.get(boxId) === operation) this.lifecycleOperations.delete(boxId);
+    });
+  }
+
+  private async reconnectOnce(boxId: string): Promise<ManagedBoxReconnectResult> {
+    const cfg = this.deps.db.getBoxConfig(boxId);
+    if (!cfg) return "not_found";
     const rt = this.runtimes.get(boxId);
-    if (rt) rt.backoffMs = INITIAL_BACKOFF_MS;
-    this.start(cfg);
+    if (rt?.child) {
+      const lifecycleEpoch = ++rt.epoch;
+      if (rt.reconnectTimer) {
+        clearTimeout(rt.reconnectTimer);
+        rt.reconnectTimer = null;
+      }
+      rt.activeAdoptionEpoch = null;
+      rt.activeCredentialId = null;
+      rt.activeBinaryVerified = false;
+      rt.activeBinarySha256 = null;
+      const child = rt.child;
+      const stop = this.stopManagedChild(child);
+      this.pendingStops.set(boxId, stop);
+      try {
+        await stop;
+      } catch (error) {
+        if (rt.epoch === lifecycleEpoch && !rt.removed && !this.stopping) {
+          if (rt.child === null) rt.child = child;
+          this.setStatus(boxId, "failed", (error as Error).message);
+        }
+        return "stop_failed";
+      } finally {
+        if (this.pendingStops.get(boxId) === stop) this.pendingStops.delete(boxId);
+      }
+      if (rt.child === child) rt.child = null;
+      if (rt.epoch !== lifecycleEpoch || rt.removed || this.stopping) return "superseded";
+    } else {
+      this.stopRuntime(boxId);
+    }
+    const current = this.runtimes.get(boxId);
+    if (current) current.backoffMs = INITIAL_BACKOFF_MS;
+    const fresh = this.deps.db.getBoxConfig(boxId);
+    if (!fresh || this.stopping) return "superseded";
+    this.start(fresh);
+    return "started";
   }
 
   /** Stop the old managed process before durably authorizing one exact legacy-root adoption. */
-  async authorizeLegacyDataAdoption(
+  authorizeLegacyDataAdoption(
+    boxId: string,
+    actor: { userId: string; role: "owner" | "admin" },
+  ): Promise<LegacyDataAdoptionStartResult> {
+    const cfg = this.deps.db.getBoxConfig(boxId);
+    if (!cfg) return Promise.resolve("not_found");
+    const accountKey = managedBoxSshAccountKey(cfg);
+    if (this.legacyAccountOperations.has(accountKey)) return Promise.resolve("in_progress");
+    if (this.lifecycleOperations.has(boxId)) return Promise.resolve("in_progress");
+    const operation = this.authorizeLegacyDataAdoptionOnce(boxId, actor);
+    this.legacyAccountOperations.set(accountKey, operation);
+    this.lifecycleOperations.set(boxId, operation);
+    return operation.finally(() => {
+      if (this.legacyAccountOperations.get(accountKey) === operation) this.legacyAccountOperations.delete(accountKey);
+      if (this.lifecycleOperations.get(boxId) === operation) this.lifecycleOperations.delete(boxId);
+    });
+  }
+
+  private async authorizeLegacyDataAdoptionOnce(
     boxId: string,
     actor: { userId: string; role: "owner" | "admin" },
   ): Promise<LegacyDataAdoptionStartResult> {
@@ -1092,41 +1247,13 @@ export class BoxOrchestrator {
     if (!cfg) return "not_found";
     if (cfg.runnerDataDir !== null) return "not_legacy";
     if (cfg.legacyDataAdoptionEpoch !== null) return "already_authorized";
+    if (cfg.legacyDataAccountStatus !== "unclaimed") return "account_already_adopted";
 
-    let rt = this.runtimes.get(boxId);
-    if (!rt) {
-      rt = {
-        child: null,
-        remotePort: this.allocRemotePort(),
-        reconnectTimer: null,
-        backoffMs: INITIAL_BACKOFF_MS,
-        removed: false,
-        epoch: 0,
-        activeAdoptionEpoch: null,
-        activeCredentialId: null,
-      };
-      this.runtimes.set(boxId, rt);
-    }
-    const lifecycleEpoch = ++rt.epoch;
-    if (rt.reconnectTimer) {
-      clearTimeout(rt.reconnectTimer);
-      rt.reconnectTimer = null;
-    }
-    const child = rt.child;
-    rt.child = null;
-    rt.activeAdoptionEpoch = null;
-    rt.activeCredentialId = null;
-    if (child) {
-      try {
-        await this.stopManagedChild(child);
-      } catch (error) {
-        if (rt.epoch === lifecycleEpoch && !rt.removed && !this.stopping) {
-          this.setStatus(boxId, "failed", (error as Error).message);
-        }
-        return "stop_failed";
-      }
-    }
-    if (rt.epoch !== lifecycleEpoch || rt.removed || this.stopping) return "superseded";
+    const siblings = legacySshAccountBoxes(this.deps.db.listBoxConfigs(), cfg);
+    const stopped = await this.stopLegacyAccountRuntimes(siblings);
+    if (!stopped) return "stop_failed";
+    const rt = this.runtimeFor(boxId);
+    if (rt.removed || this.stopping) return "superseded";
 
     const adoptionEpoch = `adopt-${randomUUID()}`;
     if (!this.deps.db.authorizeBoxLegacyDataAdoption({
@@ -1135,7 +1262,13 @@ export class BoxOrchestrator {
       authorizedBy: actor.userId,
       authorizedRole: actor.role,
       now: Date.now(),
-    })) return "not_legacy";
+    })) {
+      const latest = this.deps.db.getBoxConfig(boxId);
+      if (latest?.legacyDataAdoptionEpoch) return "already_authorized";
+      return latest && latest.legacyDataAccountStatus !== "unclaimed"
+        ? "account_already_adopted"
+        : "not_legacy";
+    }
     this.deps.hub.boxChanged(boxId);
     const authorized = this.deps.db.getBoxConfig(boxId);
     if (!authorized || authorized.pendingLegacyDataAdoptionEpoch !== adoptionEpoch) return "superseded";
@@ -1167,13 +1300,15 @@ export class BoxOrchestrator {
   }
 
   /** Start a prepared update only if no newer lifecycle operation superseded its artifact check. */
-  startPreparedRunnerUpdate(prepared: PreparedRunnerUpdate): "started" | "superseded" {
+  async startPreparedRunnerUpdate(
+    prepared: PreparedRunnerUpdate,
+  ): Promise<"started" | "superseded" | "in_progress" | "stop_failed"> {
     if ((this.runtimes.get(prepared.boxId)?.epoch ?? -1) !== prepared.startEpoch) {
       this.log(`${prepared.boxId} update superseded by a newer reconnect/update — skipping its reconnect`);
       return "superseded";
     }
-    this.reconnect(prepared.boxId);
-    return "started";
+    const result = await this.reconnect(prepared.boxId);
+    return result === "not_found" ? "superseded" : result;
   }
 
   remove(boxId: string): void {
@@ -1189,13 +1324,23 @@ export class BoxOrchestrator {
     if (!boxId) return;
     const rt = this.runtimes.get(boxId);
     if (rt) rt.backoffMs = INITIAL_BACKOFF_MS; // a healthy connection resets backoff
-    if (rt?.activeAdoptionEpoch && rt.activeCredentialId === credentialId && this.deps.db.completeBoxLegacyDataAdoption(
+    const completedAdoption = Boolean(rt?.activeAdoptionEpoch && rt.activeBinaryVerified && rt.activeBinarySha256
+      && rt.activeCredentialId === credentialId && this.deps.db.completeBoxLegacyDataAdoption(
       boxId,
       rt.activeAdoptionEpoch,
       Date.now(),
-    )) {
+      credentialId,
+      rt.activeBinarySha256,
+    ));
+    if (completedAdoption && rt) {
       rt.activeAdoptionEpoch = null;
       this.deps.hub.boxChanged(boxId);
+      const completed = this.deps.db.getBoxConfig(boxId);
+      if (completed) {
+        for (const sibling of legacySshAccountBoxes(this.deps.db.listBoxConfigs(), completed)) {
+          if (sibling.boxId !== boxId && sibling.autoReconnect) this.start(sibling);
+        }
+      }
     }
     this.setStatus(boxId, "online");
   }
@@ -1214,25 +1359,104 @@ export class BoxOrchestrator {
     for (const id of [...this.runtimes.keys()]) this.stopRuntime(id);
   }
 
+  private runtimeFor(boxId: string): BoxRuntime {
+    const existing = this.runtimes.get(boxId);
+    if (existing) return existing;
+    const created: BoxRuntime = {
+      child: null,
+      remotePort: this.allocRemotePort(),
+      reconnectTimer: null,
+      backoffMs: INITIAL_BACKOFF_MS,
+      removed: false,
+      epoch: 0,
+      activeAdoptionEpoch: null,
+      activeCredentialId: null,
+      activeBinaryVerified: false,
+      activeBinarySha256: null,
+    };
+    this.runtimes.set(boxId, created);
+    return created;
+  }
+
+  private pendingLegacyAccountAdoption(cfg: Pick<BoxConfig, "sshTarget" | "sshPort">): BoxConfig | null {
+    return legacySshAccountBoxes(this.deps.db.listBoxConfigs(), cfg)
+      .find((candidate) => candidate.pendingLegacyDataAdoptionEpoch !== null) ?? null;
+  }
+
+  /** Fence one legacy SSH account as a unit. Epochs/timers are superseded synchronously before
+   * any stop is awaited. Authorization is persisted only after every known child exits; failures
+   * retain the exact failed child and leave successfully stopped siblings parked for retry. */
+  private async stopLegacyAccountRuntimes(configs: readonly BoxConfig[]): Promise<boolean> {
+    const candidates = configs.map((cfg) => {
+      const runtime = this.runtimeFor(cfg.boxId);
+      runtime.epoch++;
+      if (runtime.reconnectTimer) {
+        clearTimeout(runtime.reconnectTimer);
+        runtime.reconnectTimer = null;
+      }
+      runtime.activeAdoptionEpoch = null;
+      runtime.activeCredentialId = null;
+      runtime.activeBinaryVerified = false;
+      runtime.activeBinarySha256 = null;
+      return { cfg, runtime, epoch: runtime.epoch, child: runtime.child };
+    });
+    const results = await Promise.all(candidates.map(async (candidate) => {
+      if (!candidate.child) return { candidate, error: null as Error | null };
+      const stop = this.stopManagedChild(candidate.child);
+      this.pendingStops.set(candidate.cfg.boxId, stop);
+      try {
+        await stop;
+        return { candidate, error: null as Error | null };
+      } catch (error) {
+        return { candidate, error: error as Error };
+      } finally {
+        if (this.pendingStops.get(candidate.cfg.boxId) === stop) this.pendingStops.delete(candidate.cfg.boxId);
+      }
+    }));
+    let ok = true;
+    for (const { candidate, error } of results) {
+      const { cfg, runtime, epoch, child } = candidate;
+      if (runtime.epoch !== epoch || runtime.removed || this.stopping) {
+        ok = false;
+        continue;
+      }
+      if (error) {
+        ok = false;
+        if (runtime.child === null) runtime.child = child;
+        this.setStatus(cfg.boxId, "failed", error.message);
+      } else if (runtime.child === child) {
+        runtime.child = null;
+      }
+    }
+    return ok;
+  }
+
   private start(cfg: BoxConfig): void {
     if (this.stopping) return;
-    let rt = this.runtimes.get(cfg.boxId);
-    if (!rt) {
-      rt = {
-        child: null,
-        remotePort: this.allocRemotePort(),
-        reconnectTimer: null,
-        backoffMs: INITIAL_BACKOFF_MS,
-        removed: false,
-        epoch: 0,
-        activeAdoptionEpoch: null,
-        activeCredentialId: null,
-      };
-      this.runtimes.set(cfg.boxId, rt);
+    const pendingAccountAdoption = cfg.runnerDataDir === null ? this.pendingLegacyAccountAdoption(cfg) : null;
+    if (
+      (this.legacyAccountOperations.has(managedBoxSshAccountKey(cfg)) && cfg.pendingLegacyDataAdoptionEpoch === null)
+      || (pendingAccountAdoption && pendingAccountAdoption.boxId !== cfg.boxId)
+    ) return;
+    const rt = this.runtimeFor(cfg.boxId);
+    const pendingStop = this.pendingStops.get(cfg.boxId);
+    if (pendingStop) {
+      const waitingEpoch = rt.epoch;
+      void pendingStop.then(() => {
+        const current = this.runtimes.get(cfg.boxId);
+        if (!current || current.epoch !== waitingEpoch || current.removed || this.stopping) return;
+        const fresh = this.deps.db.getBoxConfig(cfg.boxId);
+        if (fresh) this.start(fresh);
+      }).catch(() => {
+        // The stop owner records the failure and retains the exact child for an explicit retry.
+      });
+      return;
     }
     rt.removed = false;
     rt.activeAdoptionEpoch = cfg.pendingLegacyDataAdoptionEpoch;
     rt.activeCredentialId = null;
+    rt.activeBinaryVerified = false;
+    rt.activeBinarySha256 = null;
     const epoch = ++rt.epoch; // this attempt owns the runtime until something supersedes it
     void this.bootstrap(cfg, rt, epoch, rt.activeAdoptionEpoch);
   }
@@ -1257,8 +1481,19 @@ export class BoxOrchestrator {
       if (cfg.triple !== triple) this.deps.db.setBoxTriple(cfg.boxId, triple, Date.now());
       if (!this.live(rt, epoch)) return;
       this.setStatus(cfg.boxId, "deploying");
-      await this.ensureBinary(cfg, triple, rt, epoch);
+      const binaryReadiness = await this.ensureBinary(cfg, triple, rt, epoch);
       if (!this.live(rt, epoch)) return;
+      const legacyAccountOwned = cfg.runnerDataDir === null && cfg.legacyDataAccountStatus !== "unclaimed";
+      if (
+        binaryReadiness.kind !== "verified"
+        && (cfg.runnerDataDir !== null || legacyAccountOwned || adoptionEpoch !== null)
+      ) {
+        throw new Error(
+          "the managed runner requires the current binary before isolated data or legacy adoption can be launched; retry after artifact resolution succeeds",
+        );
+      }
+      rt.activeBinaryVerified = binaryReadiness.kind === "verified";
+      rt.activeBinarySha256 = binaryReadiness.sha256;
       const secret = this.deps.issueCredential(cfg.runnerId);
       rt.activeCredentialId = secret.credential.credentialId;
       const tokenFile = remoteCredentialPath(secret.credential.credentialId);
@@ -1272,7 +1507,7 @@ export class BoxOrchestrator {
         fresh.pendingLegacyDataAdoptionEpoch,
         adoptionEpoch,
       )) return;
-      this.launch(fresh, rt, epoch, tokenFile, adoptionEpoch);
+      this.launch(fresh, rt, epoch, tokenFile, adoptionEpoch, binaryReadiness.runnerPath);
     } catch (err) {
       if (!this.live(rt, epoch)) return;
       const msg = (err as Error).message;
@@ -1288,10 +1523,11 @@ export class BoxOrchestrator {
     epoch: number,
     tokenFile: string,
     adoptionEpoch: string | null,
+    runnerPath: string,
   ): void {
     const controlPlaneUrl = `ws://127.0.0.1:${rt.remotePort}/runner`;
     const remoteCommand = buildRemoteCommand({
-      runnerPath: REMOTE_RUNNER_PATH,
+      runnerPath,
       runnerId: cfg.runnerId,
       controlPlaneUrl,
       tokenFile,
@@ -1356,6 +1592,8 @@ export class BoxOrchestrator {
     rt.epoch++; // supersede any in-flight attempt and pending reconnect timers
     rt.activeAdoptionEpoch = null;
     rt.activeCredentialId = null;
+    rt.activeBinaryVerified = false;
+    rt.activeBinarySha256 = null;
     if (rt.reconnectTimer) {
       clearTimeout(rt.reconnectTimer);
       rt.reconnectTimer = null;
@@ -1367,7 +1605,7 @@ export class BoxOrchestrator {
         /* already gone */
       }
     }
-    rt.child = null;
+    if (!this.pendingStops.has(boxId)) rt.child = null;
   }
 
   /** ssh argv for a one-shot remote command (no tunnel). `--` keeps the target out of options. */
@@ -1386,7 +1624,12 @@ export class BoxOrchestrator {
     });
   }
 
-  private async ensureBinary(cfg: BoxConfig, triple: string, rt: BoxRuntime, epoch: number): Promise<void> {
+  private async ensureBinary(
+    cfg: BoxConfig,
+    triple: string,
+    rt: BoxRuntime,
+    epoch: number,
+  ): Promise<BinaryReadiness> {
     let local: ResolvedRunnerBinary;
     try {
       local = await this.deps.resolveBinary(triple);
@@ -1396,44 +1639,44 @@ export class BoxOrchestrator {
       const existing = await this.probeRemoteRunner(cfg);
       if (existing) {
         this.log(`${cfg.boxId} no local runner binary; using the one already on the box (${existing})`);
-        return;
+        return { kind: "fallback", runnerPath: REMOTE_RUNNER_PATH, sha256: null };
       }
       throw err;
     }
-    // Skip the (slow) copy only when THIS exact binary is already deployed to THIS box. Keyed on
-    // content, so a stale remote runner (e.g. one that predates --token-file) is always replaced.
-    const hash = binaryDeployIdentity(local);
-    if (binaryIsCurrent(cfg.deployedVersion, hash)) return;
-    if (!this.live(rt, epoch)) return;
-    // Upload beside the live binary, then promote atomically: an interrupted scp straight over
-    // REMOTE_RUNNER_PATH would truncate the WORKING runner, and the probe fallback (or the next
-    // launch) would happily execute the partial file. The staged name carries the EPOCH so a
-    // superseded attempt (stopRuntime can't cancel an in-flight scp) writes to its own path and
-    // can never interleave its bytes with a newer attempt's upload. The liveness check immediately
-    // before promotion prevents an already-superseded attempt from launching `mv`; a remote `mv`
-    // already in flight is not cancellable, but normally completes before a newer full scp.
-    // Abandoned staged files from superseded attempts are swept before each upload.
-    const staged = stagedRunnerPath(epoch);
-    // The sweep must not use a shell glob: SSH remote commands run in the target user's LOGIN
-    // shell, and zsh (unlike bash) hard-errors on an unmatched glob ("no matches found"),
-    // failing the whole deploy on any box whose default shell is zsh. find's quoted -name
-    // pattern never touches shell expansion and succeeds when nothing matches.
-    //
-    // `-mmin +60`: only STALE staged files are swept. Sweeps from different epochs are
-    // independent SSH processes a superseding attempt cannot cancel, so an unconditioned
-    // delete from a slow, superseded epoch could land AFTER a newer epoch staged its upload
-    // and unlink it mid-deploy (review-caught race). An in-flight upload is always minutes
-    // old at most; hour-old staged files are abandoned by definition. (Residual: an scp that
-    // takes >1h could still be swept — accepted; deploys are ~100MB over LAN/tailnet.)
-    await this.runCmd(
-      "ssh",
-      this.sshArgs(cfg, buildStageSweepCommand()),
-    );
+    const deployIdentity = binaryDeployIdentity(local);
+    const runnerPath = contentAddressedRunnerPath(local.sha256);
+    if (await this.remoteRunnerMatches(cfg, local.sha256)) {
+      if (!binaryIsCurrent(cfg.deployedVersion, deployIdentity)) {
+        this.deps.db.setBoxDeployedVersion(cfg.boxId, deployIdentity, Date.now());
+      }
+      return { kind: "verified", runnerPath, sha256: local.sha256 };
+    }
+    if (!this.live(rt, epoch)) return { kind: "verified", runnerPath, sha256: local.sha256 };
+    // Each full digest owns a distinct immutable destination. A superseded promotion for another
+    // digest cannot overwrite it, while same-digest writers are byte-identical and independently
+    // attested. The random staging suffix also prevents separate CPs/boxes sharing one SSH account
+    // from interleaving their scp writes.
+    const attemptId = randomUUID();
+    const staged = stagedContentAddressedRunnerPath(local.sha256, attemptId);
+    await this.runCmd("ssh", this.sshArgs(cfg, buildContentAddressedStageCommand(local.sha256)));
     await this.runCmd("scp", ["-P", String(cfg.sshPort), ...SSH_BASE_OPTS, "--", local.path, `${cfg.sshTarget}:${staged}`]);
-    if (!this.live(rt, epoch)) return; // superseded mid-upload — leave the live binary alone
-    await this.runCmd("ssh", this.sshArgs(cfg, buildPromoteCommand(epoch)));
-    if (!this.live(rt, epoch)) return; // never persist a hash a newer attempt may have replaced
-    this.deps.db.setBoxDeployedVersion(cfg.boxId, hash, Date.now());
+    if (!this.live(rt, epoch)) return { kind: "verified", runnerPath, sha256: local.sha256 };
+    await this.runCmd("ssh", this.sshArgs(cfg, buildContentAddressedPromoteCommand(local.sha256, attemptId)));
+    if (!this.live(rt, epoch)) return { kind: "verified", runnerPath, sha256: local.sha256 };
+    if (!await this.remoteRunnerMatches(cfg, local.sha256)) {
+      throw new Error("the promoted managed runner failed remote SHA-256 attestation");
+    }
+    this.deps.db.setBoxDeployedVersion(cfg.boxId, deployIdentity, Date.now());
+    return { kind: "verified", runnerPath, sha256: local.sha256 };
+  }
+
+  private async remoteRunnerMatches(cfg: BoxConfig, sha256: string): Promise<boolean> {
+    try {
+      await this.runCmd("ssh", this.sshArgs(cfg, buildContentAddressedAttestationCommand(sha256)));
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /** Write the registration token to a mode-600 file on the box over SSH stdin, so the secret

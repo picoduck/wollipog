@@ -5519,6 +5519,11 @@ button.file-head.source-path-link {
 .machine-danger-zone {
   align-items: flex-start;
 }
+.machine-settings-danger-action {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
 @media (max-width: 680px) {
   .machine-name-row,
   .machine-workspace-form {

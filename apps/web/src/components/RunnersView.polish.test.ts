@@ -91,6 +91,9 @@ test("machine cards use consistent action rows and progressively disclose deploy
   assert.match(view, /machineSettingsMutationError\(cause\)/);
   assert.match(view, /disabled=\{deleting \|\| onlineNativeRunner\}/);
   assert.match(view, /box\?\.runnerDataLayout === "legacy"/);
+  assert.match(view, /box\.legacyDataAccountStatus === "adopted"/);
+  assert.match(view, /Legacy Runner Data Adopted/);
+  assert.match(view, /Legacy Data Adoption in Progress/);
   assert.match(view, /Confirm that every legacy runner process using this SSH account is stopped\./);
   assert.match(view, /confirmLabel: "Adopt Legacy Data"/);
   assert.match(view, /confirmLabel: "Interrupt Sessions and Adopt Legacy Data"/);

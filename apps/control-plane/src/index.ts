@@ -112,11 +112,10 @@ import {
 } from "./local-device-credential.js";
 import { BoxOrchestrator, makeBinaryResolver, managedBoxRunnerDataDir } from "./box-orchestrator.js";
 import {
-  canAuthorizeLegacyDataAdoption,
   decideScopedBoxLifecycle,
   parseBoxLifecycleForce,
-  parseLegacyDataAdoption,
 } from "./box-lifecycle.js";
+import { registerBoxLegacyAdoptionRoute } from "./box-legacy-adoption-route.js";
 import { RUNNER_RELEASE_TAG } from "./release-version.js";
 import { readSshConfigHosts } from "./ssh-config.js";
 import { ControlPlaneDb, GOVERNANCE_AUDIT_RETENTION_MS } from "./db.js";
@@ -2089,41 +2088,7 @@ app.post("/api/boxes", async (req, reply) => {
   return reply.code(201).send({ box: db.getBox(boxId) });
 });
 
-app.post("/api/boxes/:id/adopt-legacy-data-dir", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const box = db.getBox(id);
-  if (!box) return reply.code(404).send({ error: "box not found" });
-  const principal = requestHuman(req);
-  if (!canAuthorizeLegacyDataAdoption(principal)) {
-    return reply.code(403).send({ error: "organization owner or admin permission is required" });
-  }
-  const adoption = parseLegacyDataAdoption(req.body);
-  if (!adoption.ok) return reply.code(400).send({ error: adoption.error });
-  const decision = decideScopedBoxLifecycle(
-    db.listSessions({ includeArchived: true }),
-    box.runnerId,
-    adoption.force,
-    "adopt",
-    (sessionId) => db.canAccessSession(principal, sessionId),
-  );
-  if (!decision.ok) return reply.code(409).send(decision.conflict);
-  const result = await orchestrator.authorizeLegacyDataAdoption(id, {
-    userId: principal.userId,
-    role: principal.role,
-  });
-  if (result === "not_found") return reply.code(404).send({ error: "box not found" });
-  if (result === "not_legacy") return reply.code(409).send({ error: "box already uses an isolated runner data directory" });
-  if (result === "already_authorized") {
-    return reply.code(409).send({ error: "legacy data adoption was already authorized for this box" });
-  }
-  if (result === "stop_failed") {
-    return reply.code(409).send({ error: "the managed runner could not be stopped; legacy data adoption was not authorized" });
-  }
-  if (result === "superseded") {
-    return reply.code(409).send({ error: "a newer box lifecycle operation superseded legacy data adoption" });
-  }
-  return { ok: true, status: result, forced: adoption.force };
-});
+registerBoxLegacyAdoptionRoute(app, { db, orchestrator, requestHuman });
 
 app.post("/api/boxes/:id/reconnect", async (req, reply) => {
   const id = (req.params as { id: string }).id;
@@ -2140,7 +2105,11 @@ app.post("/api/boxes/:id/reconnect", async (req, reply) => {
     (sessionId) => db.canAccessSession(principal, sessionId),
   );
   if (!decision.ok) return reply.code(409).send(decision.conflict);
-  orchestrator.reconnect(id);
+  const result = await orchestrator.reconnect(id);
+  if (result === "not_found") return reply.code(404).send({ error: "box not found" });
+  if (result === "in_progress") return reply.code(409).send({ error: "another lifecycle operation is already stopping this box's managed runner" });
+  if (result === "stop_failed") return reply.code(409).send({ error: "the managed runner could not be stopped; reconnect was not started" });
+  if (result === "superseded") return reply.code(409).send({ error: "a newer box lifecycle operation superseded reconnect" });
   return { ok: true, forced: force.force };
 });
 
@@ -2180,7 +2149,13 @@ app.post("/api/boxes/:id/update-runner", async (req, reply) => {
     (sessionId) => db.canAccessSession(principal, sessionId),
   );
   if (!decision.ok) return reply.code(409).send(decision.conflict);
-  const status = orchestrator.startPreparedRunnerUpdate(prepared);
+  const status = await orchestrator.startPreparedRunnerUpdate(prepared);
+  if (status === "in_progress") {
+    return reply.code(409).send({ error: "another lifecycle operation is already stopping this box's managed runner" });
+  }
+  if (status === "stop_failed") {
+    return reply.code(409).send({ error: "the managed runner could not be stopped; update was not started" });
+  }
   return {
     ok: true,
     status,
@@ -2195,6 +2170,12 @@ app.post("/api/boxes/:id/update-runner", async (req, reply) => {
 app.delete("/api/boxes/:id", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const box = db.getBox(id);
+  if (box && db.boxHasPendingLegacyDataAdoption(id)) {
+    return reply.code(409).send({
+      error: "this Machine cannot be deleted while its legacy SSH account adoption is pending",
+      code: "LEGACY_DATA_ADOPTION_PENDING",
+    });
+  }
   const projectIds = box ? db.projectIdsForRunner(box.runnerId) : [];
   orchestrator.remove(id);
   const res = db.deleteBox(id);

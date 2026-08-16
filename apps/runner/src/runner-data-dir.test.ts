@@ -222,6 +222,63 @@ test("legacy migration preserves the last active token through a newly issued cr
   }
 });
 
+test("explicit legacy adoption fails closed when the requested root belongs to another owner", () => {
+  const root = tempRoot();
+  try {
+    const first = acquireRunnerDataDirLease(root, FIRST);
+    first.release();
+    const ownerBefore = readFileSync(join(root, ".wollipog-runner-owner-v1.json"));
+    const replacementRoot = join(root, "runner-instances", runnerDataDirOwnerHash(SECOND));
+    assert.throws(
+      () => acquireRunnerDataDirLease(root, SECOND, { adoptLegacyDataDir: true }),
+      /already owned by another runner.*refusing to record legacy adoption/,
+    );
+    assert.deepEqual(readFileSync(join(root, ".wollipog-runner-owner-v1.json")), ownerBefore);
+    assert.equal(existsSync(replacementRoot), false, "an adoption attempt never creates a replacement namespace");
+
+    const isolated = acquireRunnerDataDirLease(root, SECOND);
+    assert.equal(isolated.dataDir, replacementRoot, "ordinary foreign-owner startup remains safely namespaced");
+    isolated.release();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("explicit legacy adoption fails closed if a foreign owner appears after its lease is published", () => {
+  const root = tempRoot();
+  try {
+    const ownerPath = join(root, ".wollipog-runner-owner-v1.json");
+    const leasePath = join(root, ".wollipog-runner-active-v1.lock");
+    const foreignOwner = {
+      version: 1,
+      ownerHash: runnerDataDirOwnerHash(FIRST),
+    };
+    let injected = false;
+    assert.throws(
+      () => acquireRunnerDataDirLease(root, SECOND, {
+        adoptLegacyDataDir: true,
+        beforeDurabilityOperationForTest: (operation, path) => {
+          if (!injected && operation === "fsync-directory" && path === root && existsSync(leasePath)) {
+            injected = true;
+            writeFileSync(ownerPath, `${JSON.stringify(foreignOwner)}\n`, { mode: 0o600 });
+          }
+        },
+      }),
+      /became owned by another runner.*refusing to record adoption/,
+    );
+    assert.equal(injected, true, "the owner race is injected only after lease publication");
+    assert.deepEqual(JSON.parse(readFileSync(ownerPath, "utf8")), foreignOwner);
+    assert.equal(existsSync(leasePath), false, "the failed claimant releases only its own lease");
+    assert.equal(
+      existsSync(join(root, "runner-instances", runnerDataDirOwnerHash(SECOND))),
+      false,
+      "an explicit adoption never falls through to a replacement namespace",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("protected publication orders file and directory durability before ownership", () => {
   const root = tempRoot();
   const operations: Array<{ operation: string; path: string }> = [];

@@ -1033,6 +1033,8 @@ export interface BoxView {
     authorizedAt: number;
     completedAt?: number;
   } | null;
+  /** Bounded account-level state shared by every legacy box with the same SSH target and port. */
+  legacyDataAccountStatus?: "unclaimed" | "pending" | "adopted";
 }
 
 /* ========================================================================== */

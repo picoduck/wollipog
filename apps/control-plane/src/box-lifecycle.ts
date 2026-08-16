@@ -90,7 +90,20 @@ export function decideScopedBoxLifecycle(
   action: "reconnect" | "update" | "adopt",
   canAccessSession: (sessionId: string) => boolean,
 ) {
-  const activeSessions = blockingRunnerSessions(sessions, runnerId);
+  return decideScopedBoxLifecycleForRunners(sessions, [runnerId], force, action, canAccessSession);
+}
+
+export function decideScopedBoxLifecycleForRunners(
+  sessions: readonly Pick<SessionView, "id" | "runnerId" | "title" | "status">[],
+  runnerIds: readonly string[],
+  force: boolean,
+  action: "reconnect" | "update" | "adopt",
+  canAccessSession: (sessionId: string) => boolean,
+) {
+  const selected = new Set(runnerIds);
+  const activeSessions = sessions
+    .filter((session) => selected.has(session.runnerId) && !TERMINAL_SESSION_STATUSES.has(session.status))
+    .map(({ id, title, status }) => ({ id, title, status }));
   const visibleSessions = activeSessions.filter((session) => canAccessSession(session.id));
   return decideBoxLifecycle(activeSessions, force, action, visibleSessions);
 }

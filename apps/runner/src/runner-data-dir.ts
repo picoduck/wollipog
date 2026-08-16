@@ -271,6 +271,11 @@ function acquireRunnerDataDirLeaseAt(
       throw new Error(`runner data directory ${dataDir} has invalid owner metadata; refusing unsafe recovery`);
     }
     if (existingOwner.ownerHash !== ownerHash) {
+      if (options.adoptLegacyDataDir) {
+        throw new Error(
+          `runner data directory ${dataDir} is already owned by another runner; refusing to record legacy adoption in a replacement namespace`,
+        );
+      }
       return acquireRunnerDataDirLeaseAt(join(dataDir, "runner-instances", ownerHash), identity, options, false);
     }
   }
@@ -365,8 +370,17 @@ function acquireRunnerDataDirLeaseAt(
   try {
     if (existsSync(ownerPath)) {
       const owner = parseRecord<OwnerRecord>(ownerPath);
-      if (owner.version !== 1 || owner.ownerHash !== ownerHash) {
+      if (owner.version !== 1 || typeof owner.ownerHash !== "string") {
         release();
+        throw new Error(`runner data directory ${dataDir} has invalid owner metadata; refusing unsafe recovery`);
+      }
+      if (owner.ownerHash !== ownerHash) {
+        release();
+        if (options.adoptLegacyDataDir) {
+          throw new Error(
+            `runner data directory ${dataDir} became owned by another runner while legacy adoption was starting; refusing to record adoption in a replacement namespace`,
+          );
+        }
         if (allowOwnerNamespace) {
           return acquireRunnerDataDirLeaseAt(join(dataDir, "runner-instances", ownerHash), identity, options, false);
         }

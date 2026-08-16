@@ -76,13 +76,24 @@ control planes retain a `NULL` layout marker and continue to name the historical
 
 An owner or administrator can authorize migration for one of those legacy boxes from **Manage
 Machine → Legacy Runner Data** only after confirming that every old runner using the SSH account is
-stopped. Active sessions still require the existing explicit force confirmation. The orchestrator
-supersedes reconnect timers, stops and waits for its managed SSH child, and only then durably records
-a random adoption epoch with actor, role, and timestamp. A stop failure records no authority. A
-control-plane restart rehydrates the pending epoch, but only the matching current launch receives
-`--adopt-legacy-data-dir`; stale attempts cannot reuse it. The first matching runner registration
-marks the authorization completed while retaining its audit metadata. The UI and API expose only
-the bounded pending/completed state and timestamps, never credential material or parsed stderr.
+stopped. Active sessions on every known legacy box sharing the exact SSH target and port require the
+existing explicit force confirmation. The orchestrator serializes that account, supersedes every
+sibling's reconnect timer, stops and awaits every managed child, and only then records a random
+adoption epoch with actor, role, and timestamp. A partial stop failure records no authority and
+retains the exact failed child. A control-plane restart rehydrates the pending epoch, but only the
+matching current launch receives `--adopt-legacy-data-dir`; siblings remain parked until exact
+registration completes. The first matching registration retains the audit and releases siblings
+through owner-aware isolated namespaces. The UI/API expose only bounded account pending/adopted
+state and timestamps, never credential material or parsed stderr, and never offer a second adoption
+for an already-owned account. The account audit is independent of box deletion and records the exact
+completion credential and attested binary identity; a pending adopter cannot be deleted. Any
+isolated, adopted-account, or `--adopt-legacy-data-dir` launch
+requires a remotely SHA-256-attested, full-digest-addressed current runner binary; the mutable
+legacy fallback is rejected before credential issue because an older parser may ignore ownership
+flags.
+Completion additionally requires that current-binary proof and the exact credential minted for the
+launch. An explicit adoption attempt against a root already owned by another runner fails closed
+instead of recording a migration in that runner's replacement namespace.
 
 ## Agent and conductor secrets stay runner-local
 

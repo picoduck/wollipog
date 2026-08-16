@@ -7,6 +7,7 @@ import {
   canAuthorizeLegacyDataAdoption,
   decideBoxLifecycle,
   decideScopedBoxLifecycle,
+  decideScopedBoxLifecycleForRunners,
   parseBoxLifecycleForce,
   parseLegacyDataAdoption,
 } from "./box-lifecycle.js";
@@ -115,5 +116,35 @@ test("scoped lifecycle conflicts hide inaccessible session metadata without weak
     decideScopedBoxLifecycle(sessions, "box-runner", true, "update", () => false),
     { ok: true },
     "explicit force still permits the action even when every blocking session is hidden",
+  );
+});
+
+test("legacy account admission includes active sessions from every sibling runner", () => {
+  const sessions = [
+    session("target-idle", "target-runner", "idle"),
+    session("sibling-running", "sibling-runner", "running"),
+    session("unrelated", "other-runner", "running"),
+  ];
+  const blocked = decideScopedBoxLifecycleForRunners(
+    sessions,
+    ["target-runner", "sibling-runner"],
+    false,
+    "adopt",
+    () => true,
+  );
+  assert.equal(blocked.ok, false);
+  if (!blocked.ok) {
+    assert.deepEqual(blocked.conflict.activeSessions.map(({ id }) => id), ["target-idle", "sibling-running"]);
+  }
+  assert.deepEqual(
+    decideScopedBoxLifecycleForRunners(
+      sessions,
+      ["target-runner", "sibling-runner"],
+      true,
+      "adopt",
+      () => true,
+    ),
+    { ok: true },
+    "the explicit force acknowledgement covers the complete legacy SSH-account sibling set",
   );
 });

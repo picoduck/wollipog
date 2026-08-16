@@ -36,10 +36,14 @@ the exact packaged release artifact (or an explicitly staged operator build), ca
 full SHA-256 through deployment without hashing the large binary again, and compares the short
 content identity with the box's persisted `deployed_version`.
 
-When content differs, upload goes to an epoch-specific sibling path. Only the still-current epoch
-may `chmod` and atomically rename that complete file over the live binary. An interrupted or
-superseded upload never truncates the working binary. Hour-old abandoned staging files are swept
-with a quoted `find -name` pattern that is safe in bash, sh, and zsh login shells. Each bootstrap
+Resolved runner artifacts are published under an immutable full-digest path,
+`.agent-manager/runners/<sha256>/wollipog-runner`. Bootstrap remotely verifies that exact path with
+`sha256sum` or `shasum`; persisted deployment metadata and the mutable legacy executable are never
+treated as proof. Missing or mismatched bytes upload to a random attempt-private sibling, are
+hash-checked before atomic promotion within that digest directory, and are verified again before
+credentials are minted. Superseded different-digest promotions cannot overwrite each other, and
+same-digest writers are byte-identical. Hour-old abandoned staging files are swept with a quoted
+`find -name` pattern that is safe in bash, sh, and zsh login shells. Each bootstrap
 mints a pending credential for the exact box runner id. Its plaintext is streamed over SSH stdin
 into an immutable `.agent-manager/credentials/<credential-id>` path created under `umask 077`, set
 to mode 600, and atomically installed without following symlinks. The runner starts with that path
@@ -51,11 +55,22 @@ New boxes are launched with a persisted, server-derived
 `.agent-manager/runner-data/<box-id>` data directory so unrelated managed boxes on one SSH account
 cannot claim each other's mutable runner state. Existing box rows keep the historical root. Their
 owner/admin-only **Adopt Legacy Data** action requires an exact acknowledgement that all legacy
-runners on the account are stopped and uses the ordinary active-session/force gate. The control
-plane waits for its supervised SSH child to exit before durably authorizing one epoch; stop failure
-leaves no authorization. Pending authorization survives a control-plane restart, is attached only
-to the matching current launch, and is completed only by that launch's runner registration. Legacy
-bytes remain in place throughout the runner's state-preserving adoption.
+runners on the SSH account are stopped. Admission, force confirmation, lifecycle serialization,
+timer supersession, and awaited child stops cover every known legacy box with the exact persisted
+SSH target and port. Any partial stop failure leaves no authorization and retains the failed child;
+successfully stopped siblings stay parked for a safe retry. Pending authorization survives a
+control-plane restart and fences sibling relaunches until the matching current launch registers.
+Completion releases siblings through the current owner-aware binary, which selects isolated owner
+namespaces. Account-level pending/adopted state is projected without secrets; a sibling never offers
+or persists a second, unfinishable adoption. Its canonical audit is stored independently by trimmed
+SSH target and port, so completed ownership survives deleting the adopter and control-plane restart.
+The active adopter cannot be deleted while authorization is pending. Legacy bytes remain in place
+throughout migration.
+All isolated, pending-adoption, completed-adoption, and same-account sibling launches reject the
+best-effort pre-existing-binary fallback because an older runner can ignore ownership flags.
+Adoption completion is fenced by remote content proof, the durable epoch, and the exact launch
+credential. A foreign owner marker makes explicit adoption fail closed at every pre/post-lease
+observation; ordinary owner-aware startup continues in its isolated namespace.
 
 If artifact resolution fails, bootstrap may use an already-deployed executable only when its
 `--version` probe succeeds. It never overwrites or deletes that rollback binary on a failed download.

@@ -1140,6 +1140,25 @@ CREATE TABLE IF NOT EXISTS boxes (
   updated_at       INTEGER NOT NULL
 );
 
+-- Canonical legacy-root ownership audit is keyed by the persisted SSH connection identity, not a
+-- box FK: deleting the adopter must not make surviving/future legacy siblings forget remote owner
+-- bytes that remain on disk. The boxes legacy_* columns are retained as a rollback-compatible
+-- per-box mirror, but all account admission/projection reads this table.
+CREATE TABLE IF NOT EXISTS legacy_ssh_account_adoptions (
+  ssh_target                TEXT NOT NULL,
+  ssh_port                  INTEGER NOT NULL,
+  epoch                     TEXT NOT NULL,
+  status                    TEXT NOT NULL CHECK (status IN ('pending','completed')),
+  adopter_box_id            TEXT NOT NULL,
+  authorized_by             TEXT NOT NULL,
+  authorized_role           TEXT NOT NULL CHECK (authorized_role IN ('owner','admin')),
+  authorized_at             INTEGER NOT NULL,
+  completed_at              INTEGER,
+  completed_credential_id   TEXT,
+  completed_binary_identity TEXT,
+  PRIMARY KEY (ssh_target, ssh_port)
+);
+
 -- Paired devices: revocable bearer tokens for REST + /ui access. token_hash is sha256(token)
 -- (the plaintext exists only in the pairing response). Revocation = row deletion.
 CREATE TABLE IF NOT EXISTS identity_users (
@@ -2085,6 +2104,20 @@ interface BoxRow {
   created_at: number;
 }
 
+interface LegacySshAccountAdoptionRow {
+  ssh_target: string;
+  ssh_port: number;
+  epoch: string;
+  status: "pending" | "completed";
+  adopter_box_id: string;
+  authorized_by: string;
+  authorized_role: "owner" | "admin";
+  authorized_at: number;
+  completed_at: number | null;
+  completed_credential_id: string | null;
+  completed_binary_identity: string | null;
+}
+
 /** Data the control plane needs to tell a runner how to launch a session. */
 export interface AgentLaunch {
   command: string;
@@ -2165,6 +2198,8 @@ export interface BoxConfig {
   pendingLegacyDataAdoptionEpoch: string | null;
   /** Latest authorization, including completed rows; non-null makes authorization create-once. */
   legacyDataAdoptionEpoch: string | null;
+  /** Canonical durable state for the legacy root shared by this exact SSH target and port. */
+  legacyDataAccountStatus: "unclaimed" | "pending" | "adopted";
 }
 
 export interface NewBoxInput {
@@ -2487,6 +2522,37 @@ export class ControlPlaneDb {
         /* column already present */
       }
     }
+    db.exec(
+      `CREATE TABLE IF NOT EXISTS legacy_ssh_account_adoptions (
+         ssh_target TEXT NOT NULL,
+         ssh_port INTEGER NOT NULL,
+         epoch TEXT NOT NULL,
+         status TEXT NOT NULL CHECK (status IN ('pending','completed')),
+         adopter_box_id TEXT NOT NULL,
+         authorized_by TEXT NOT NULL,
+         authorized_role TEXT NOT NULL CHECK (authorized_role IN ('owner','admin')),
+         authorized_at INTEGER NOT NULL,
+         completed_at INTEGER,
+         completed_credential_id TEXT,
+         completed_binary_identity TEXT,
+         PRIMARY KEY (ssh_target, ssh_port)
+       )`,
+    );
+    db.exec(
+      `INSERT OR IGNORE INTO legacy_ssh_account_adoptions
+         (ssh_target, ssh_port, epoch, status, adopter_box_id, authorized_by, authorized_role,
+          authorized_at, completed_at, completed_binary_identity)
+       SELECT trim(ssh_target), ssh_port, legacy_adoption_epoch,
+              CASE WHEN legacy_adoption_pending=1 THEN 'pending' ELSE 'completed' END,
+              box_id, legacy_adoption_authorized_by, legacy_adoption_authorized_role,
+              legacy_adoption_authorized_at, legacy_adoption_completed_at, deployed_version
+         FROM boxes
+        WHERE legacy_adoption_epoch IS NOT NULL
+          AND legacy_adoption_authorized_by IS NOT NULL
+          AND legacy_adoption_authorized_role IN ('owner','admin')
+          AND legacy_adoption_authorized_at IS NOT NULL
+        ORDER BY legacy_adoption_pending DESC, legacy_adoption_authorized_at ASC, box_id ASC`,
+    );
     db.exec(
       `UPDATE session_command_invocations SET next_attempt_at=updated_at
        WHERE next_attempt_at IS NULL AND state IN ('pending','sent')`,
@@ -5481,30 +5547,73 @@ export class ControlPlaneDb {
     authorizedRole: "owner" | "admin";
     now: number;
   }): boolean {
-    const result = this.stmt(
-      `UPDATE boxes
-          SET legacy_adoption_epoch=?, legacy_adoption_pending=1,
-              legacy_adoption_authorized_by=?, legacy_adoption_authorized_role=?,
-              legacy_adoption_authorized_at=?, legacy_adoption_completed_at=NULL, updated_at=?
-        WHERE box_id=? AND runner_data_dir IS NULL AND legacy_adoption_epoch IS NULL`,
-    ).run(
-      input.epoch,
-      input.authorizedBy,
-      input.authorizedRole,
-      input.now,
-      input.now,
-      input.boxId,
-    );
-    return result.changes === 1;
+    this.db.exec("BEGIN");
+    try {
+      const account = this.stmt(
+        `INSERT INTO legacy_ssh_account_adoptions
+           (ssh_target, ssh_port, epoch, status, adopter_box_id, authorized_by, authorized_role, authorized_at)
+         SELECT trim(ssh_target), ssh_port, ?, 'pending', box_id, ?, ?, ?
+           FROM boxes
+          WHERE box_id=? AND runner_data_dir IS NULL AND legacy_adoption_epoch IS NULL
+         ON CONFLICT(ssh_target, ssh_port) DO NOTHING`,
+      ).run(input.epoch, input.authorizedBy, input.authorizedRole, input.now, input.boxId);
+      if (account.changes !== 1) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      const mirror = this.stmt(
+        `UPDATE boxes
+            SET legacy_adoption_epoch=?, legacy_adoption_pending=1,
+                legacy_adoption_authorized_by=?, legacy_adoption_authorized_role=?,
+                legacy_adoption_authorized_at=?, legacy_adoption_completed_at=NULL, updated_at=?
+          WHERE box_id=? AND runner_data_dir IS NULL AND legacy_adoption_epoch IS NULL`,
+      ).run(input.epoch, input.authorizedBy, input.authorizedRole, input.now, input.now, input.boxId);
+      if (mirror.changes !== 1) throw new Error("legacy SSH account adoption mirror raced");
+      this.db.exec("COMMIT");
+      return true;
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+      throw error;
+    }
   }
 
-  completeBoxLegacyDataAdoption(boxId: string, epoch: string, now: number): boolean {
-    const result = this.stmt(
-      `UPDATE boxes
-          SET legacy_adoption_pending=0, legacy_adoption_completed_at=?, updated_at=?
-        WHERE box_id=? AND legacy_adoption_pending=1 AND legacy_adoption_epoch=?`,
-    ).run(now, now, boxId, epoch);
-    return result.changes === 1;
+  completeBoxLegacyDataAdoption(
+    boxId: string,
+    epoch: string,
+    now: number,
+    credentialId?: string,
+    binarySha256?: string,
+  ): boolean {
+    this.db.exec("BEGIN");
+    try {
+      const account = this.stmt(
+        `UPDATE legacy_ssh_account_adoptions
+            SET status='completed', completed_at=?, completed_credential_id=?,
+                completed_binary_identity=?
+          WHERE adopter_box_id=? AND epoch=? AND status='pending'`,
+      ).run(now, credentialId ?? null, binarySha256 ?? null, boxId, epoch);
+      if (account.changes !== 1) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      const mirror = this.stmt(
+        `UPDATE boxes
+            SET legacy_adoption_pending=0, legacy_adoption_completed_at=?, updated_at=?
+          WHERE box_id=? AND legacy_adoption_pending=1 AND legacy_adoption_epoch=?`,
+      ).run(now, now, boxId, epoch);
+      if (mirror.changes !== 1) throw new Error("legacy SSH account adoption completion mirror raced");
+      this.db.exec("COMMIT");
+      return true;
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+      throw error;
+    }
+  }
+
+  boxHasPendingLegacyDataAdoption(boxId: string): boolean {
+    return Boolean(this.stmt(
+      "SELECT 1 FROM legacy_ssh_account_adoptions WHERE adopter_box_id=? AND status='pending'",
+    ).get(boxId));
   }
 
   setBoxDeployedVersion(boxId: string, version: string, now: number): void {
@@ -5520,6 +5629,9 @@ export class ControlPlaneDb {
    * `sessions`/`runs` cascades their events/members). Returns the runner id + the removed session
    * ids so the caller can broadcast their removal to the UI. */
   deleteBox(boxId: string): { runnerId: string; sessionIds: string[]; runIds: string[]; podIds: string[] } | null {
+    if (this.boxHasPendingLegacyDataAdoption(boxId)) {
+      throw new Error("cannot delete the Machine while its legacy SSH account adoption is pending");
+    }
     const row = this.stmt("SELECT runner_id FROM boxes WHERE box_id=?").get(boxId) as
       | { runner_id: string }
       | undefined;
@@ -5566,6 +5678,12 @@ export class ControlPlaneDb {
   deleteRunner(runnerId: string): { sessionIds: string[]; runIds: string[]; podIds: string[] } | null {
     const exists = this.stmt("SELECT 1 FROM runners WHERE runner_id=?").get(runnerId);
     if (!exists) return null;
+    const managedBox = this.stmt("SELECT box_id FROM boxes WHERE runner_id=?").get(runnerId) as
+      | { box_id: string }
+      | undefined;
+    if (managedBox && this.boxHasPendingLegacyDataAdoption(managedBox.box_id)) {
+      throw new Error("cannot delete the Machine runner while its legacy SSH account adoption is pending");
+    }
     const sessionIds = (
       this.stmt("SELECT id FROM sessions WHERE runner_id=?").all(runnerId) as unknown as { id: string }[]
     ).map((s) => s.id);
@@ -5637,6 +5755,7 @@ export class ControlPlaneDb {
   }
 
   private boxView(row: BoxRow): BoxView {
+    const accountAdoption = this.legacySshAccountAdoption(row.ssh_target, row.ssh_port);
     return {
       boxId: row.box_id,
       displayName: this.machineDisplayName(row.runner_id),
@@ -5655,6 +5774,9 @@ export class ControlPlaneDb {
             ...(row.legacy_adoption_completed_at === null ? {} : { completedAt: row.legacy_adoption_completed_at }),
           }
         : null,
+      legacyDataAccountStatus: accountAdoption
+        ? accountAdoption.status === "pending" ? "pending" : "adopted"
+        : "unclaimed",
     };
   }
 
@@ -5665,6 +5787,7 @@ export class ControlPlaneDb {
     } catch {
       /* malformed; treat as none */
     }
+    const accountAdoption = this.legacySshAccountAdoption(row.ssh_target, row.ssh_port);
     return {
       boxId: row.box_id,
       runnerId: row.runner_id,
@@ -5679,7 +5802,16 @@ export class ControlPlaneDb {
         ? row.legacy_adoption_epoch
         : null,
       legacyDataAdoptionEpoch: row.legacy_adoption_epoch,
+      legacyDataAccountStatus: accountAdoption
+        ? accountAdoption.status === "pending" ? "pending" : "adopted"
+        : "unclaimed",
     };
+  }
+
+  private legacySshAccountAdoption(sshTarget: string, sshPort: number): LegacySshAccountAdoptionRow | null {
+    return (this.stmt(
+      "SELECT * FROM legacy_ssh_account_adoptions WHERE ssh_target=? AND ssh_port=?",
+    ).get(sshTarget.trim(), sshPort) as unknown as LegacySshAccountAdoptionRow | undefined) ?? null;
   }
 
   private runnerView(row: RunnerRow): RunnerView {

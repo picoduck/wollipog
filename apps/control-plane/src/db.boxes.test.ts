@@ -71,6 +71,7 @@ test("new managed data roots and legacy adoption authorization survive restart w
     }), false, "isolated roots never accept legacy adoption authorization");
 
     db.createBox(box({ boxId: "box-legacy", runnerId: "box-legacy", runnerDataDir: null }));
+    db.createBox(box({ boxId: "box-legacy-sibling", runnerId: "box-legacy-sibling", runnerDataDir: null }));
     assert.equal(db.authorizeBoxLegacyDataAdoption({
       boxId: "box-legacy",
       epoch: "adopt-epoch-one",
@@ -90,6 +91,8 @@ test("new managed data roots and legacy adoption authorization survive restart w
       status: "pending",
       authorizedAt: 1200,
     });
+    assert.equal(db.getBox("box-legacy")?.legacyDataAccountStatus, "pending");
+    assert.equal(db.getBox("box-legacy-sibling")?.legacyDataAccountStatus, "pending");
     db.close();
     db = ControlPlaneDb.open(path);
     assert.equal(db.getBoxConfig("box-legacy")?.pendingLegacyDataAdoptionEpoch, "adopt-epoch-one");
@@ -110,6 +113,8 @@ test("new managed data roots and legacy adoption authorization survive restart w
       authorizedAt: 1200,
       completedAt: 1400,
     });
+    assert.equal(db.getBox("box-legacy")?.legacyDataAccountStatus, "adopted");
+    assert.equal(db.getBox("box-legacy-sibling")?.legacyDataAccountStatus, "adopted");
     const audit = db.raw().prepare(
       `SELECT legacy_adoption_epoch, legacy_adoption_authorized_by, legacy_adoption_authorized_role,
               legacy_adoption_authorized_at, legacy_adoption_completed_at
@@ -122,6 +127,111 @@ test("new managed data roots and legacy adoption authorization survive restart w
       legacy_adoption_authorized_at: 1200,
       legacy_adoption_completed_at: 1400,
     });
+  } finally {
+    db?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("account adoption audit survives completed-adopter deletion and restart", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-box-account-adoption-"));
+  const path = join(root, "control-plane.db");
+  let db: ControlPlaneDb | undefined;
+  try {
+    db = ControlPlaneDb.open(path);
+    db.createBox(box({ boxId: "box-adopter", runnerId: "runner-adopter", autoReconnect: false }));
+    db.createBox(box({ boxId: "box-sibling", runnerId: "runner-sibling", autoReconnect: false }));
+    db.createBox(box({
+      boxId: "box-other-port",
+      runnerId: "runner-other-port",
+      sshPort: 2222,
+      autoReconnect: false,
+    }));
+    db.createBox(box({
+      boxId: "box-other-target",
+      runnerId: "runner-other-target",
+      sshTarget: "other@devbox",
+      autoReconnect: false,
+    }));
+    db.setBoxDeployedVersion("box-adopter", "a1b2c3d4e5f60718", 10);
+    assert.equal(db.authorizeBoxLegacyDataAdoption({
+      boxId: "box-adopter",
+      epoch: "adopt-account",
+      authorizedBy: "user-owner",
+      authorizedRole: "owner",
+      now: 11,
+    }), true);
+    assert.equal(db.completeBoxLegacyDataAdoption(
+      "box-adopter",
+      "adopt-account",
+      12,
+      "rcred_0123456789abcdef0123456789abcdef",
+      "ab".repeat(32),
+    ), true);
+    const proof = db.raw().prepare(
+      `SELECT status, adopter_box_id, completed_credential_id, completed_binary_identity
+         FROM legacy_ssh_account_adoptions WHERE ssh_target='me@devbox' AND ssh_port=22`,
+    ).get() as Record<string, unknown>;
+    assert.deepEqual({ ...proof }, {
+      status: "completed",
+      adopter_box_id: "box-adopter",
+      completed_credential_id: "rcred_0123456789abcdef0123456789abcdef",
+      completed_binary_identity: "ab".repeat(32),
+    });
+    assert.equal(db.getBox("box-sibling")?.legacyDataAccountStatus, "adopted");
+    assert.equal(db.getBox("box-other-port")?.legacyDataAccountStatus, "unclaimed");
+    assert.equal(db.getBox("box-other-target")?.legacyDataAccountStatus, "unclaimed");
+    assert.ok(db.deleteBox("box-adopter"));
+    assert.equal(db.getBox("box-sibling")?.legacyDataAccountStatus, "adopted");
+    db.close();
+    db = ControlPlaneDb.open(path);
+    assert.equal(db.getBoxConfig("box-sibling")?.legacyDataAccountStatus, "adopted");
+    assert.equal(db.authorizeBoxLegacyDataAdoption({
+      boxId: "box-sibling",
+      epoch: "adopt-again",
+      authorizedBy: "user-owner",
+      authorizedRole: "owner",
+      now: 13,
+    }), false, "a surviving sibling can never recreate account adoption authority");
+  } finally {
+    db?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("pending account adoption blocks adopter deletion and old box mirrors backfill the account ledger", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-box-account-backfill-"));
+  const path = join(root, "control-plane.db");
+  let db: ControlPlaneDb | undefined;
+  try {
+    db = ControlPlaneDb.open(path);
+    db.createBox(box({ boxId: "box-pending", runnerId: "runner-pending", autoReconnect: false }));
+    assert.equal(db.authorizeBoxLegacyDataAdoption({
+      boxId: "box-pending",
+      epoch: "adopt-pending",
+      authorizedBy: "user-admin",
+      authorizedRole: "admin",
+      now: 20,
+    }), true);
+    assert.throws(() => db?.deleteBox("box-pending"), /cannot delete.*adoption is pending/);
+    db.registerRunner({
+      runnerId: "runner-pending",
+      hostname: "devbox",
+      os: "linux",
+      version: "1.0.0",
+      workspaces: [],
+      agents: [],
+    }, 21);
+    assert.throws(() => db?.deleteRunner("runner-pending"), /cannot delete.*adoption is pending/);
+    assert.ok(db.getBox("box-pending"));
+
+    db.raw().prepare("DELETE FROM legacy_ssh_account_adoptions").run();
+    assert.equal(db.boxHasPendingLegacyDataAdoption("box-pending"), false);
+    db.close();
+    db = ControlPlaneDb.open(path);
+    assert.equal(db.boxHasPendingLegacyDataAdoption("box-pending"), true);
+    assert.equal(db.getBox("box-pending")?.legacyDataAccountStatus, "pending");
+    assert.equal(db.getBoxConfig("box-pending")?.pendingLegacyDataAdoptionEpoch, "adopt-pending");
   } finally {
     db?.close();
     rmSync(root, { recursive: true, force: true });
