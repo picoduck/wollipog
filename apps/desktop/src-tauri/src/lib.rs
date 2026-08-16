@@ -59,6 +59,8 @@ const OWNERSHIP_NOTIFICATION_FOCUS_TIMEOUT: Duration = Duration::from_secs(1);
 const OWNERSHIP_NOTIFICATION_TAKEOVER_TIMEOUT: Duration = Duration::from_secs(20);
 const OWNERSHIP_NOTIFICATION_JOIN_TIMEOUT: Duration = Duration::from_secs(1);
 const OWNED_CHILD_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+const LOCAL_RUNNER_LEGACY_OWNER_FILE: &str = ".wollipog-runner-owner-v1.json";
+const LOCAL_RUNNER_OWNER_FILE: &str = ".wollipog-runner-owner-v2.json";
 
 /// An advisory ownership lock backed by the OS, not by the file's presence.
 ///
@@ -2640,10 +2642,58 @@ fn start_sidecar(app: &tauri::AppHandle) {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LocalRunnerLaunchIntent {
+    RestoreSaved,
+    UserRequested,
+}
+
+fn local_runner_owner_marker_present(data_dir: &Path) -> Result<bool, String> {
+    for marker in [LOCAL_RUNNER_OWNER_FILE, LOCAL_RUNNER_LEGACY_OWNER_FILE] {
+        let marker_path = data_dir.join(marker);
+        match marker_path.try_exists() {
+            Ok(true) => return Ok(true),
+            Ok(false) => {}
+            Err(error) => {
+                return Err(format!(
+                    "could not inspect the local runner owner marker {}: {error}",
+                    marker_path.display()
+                ));
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn local_runner_args(
+    runner_id: &str,
+    token_file: &Path,
+    data_dir: &Path,
+    intent: LocalRunnerLaunchIntent,
+) -> Result<Vec<String>, String> {
+    let mut args = vec![
+        "--runner-id".to_string(),
+        runner_id.to_string(),
+        "--control-plane-url".to_string(),
+        format!("ws://{LOCAL_HOST}:{CP_PORT}/runner"),
+        "--token-file".to_string(),
+        token_file.to_string_lossy().into_owned(),
+        "--data-dir".to_string(),
+        data_dir.to_string_lossy().into_owned(),
+    ];
+    if intent == LocalRunnerLaunchIntent::UserRequested
+        && !local_runner_owner_marker_present(data_dir)?
+    {
+        args.push("--adopt-legacy-data-dir".to_string());
+    }
+    Ok(args)
+}
+
 fn spawn_local_runner(
     app: &tauri::AppHandle,
     runner_id: &str,
     generation: u64,
+    intent: LocalRunnerLaunchIntent,
 ) -> Result<ManagedChild, String> {
     if !valid_runner_id(runner_id) {
         return Err("the local runner id is invalid".into());
@@ -2656,16 +2706,7 @@ fn spawn_local_runner(
     fs::create_dir_all(&data_dir)
         .map_err(|error| format!("could not create the local runner data directory: {error}"))?;
     let cwd = app_data_dir(app)?;
-    let args = vec![
-        "--runner-id".to_string(),
-        runner_id.to_string(),
-        "--control-plane-url".to_string(),
-        format!("ws://{LOCAL_HOST}:{CP_PORT}/runner"),
-        "--token-file".to_string(),
-        token_file.to_string_lossy().into_owned(),
-        "--data-dir".to_string(),
-        data_dir.to_string_lossy().into_owned(),
-    ];
+    let args = local_runner_args(runner_id, &token_file, &data_dir, intent)?;
     let (mut rx, child) = app
         .shell()
         .sidecar("runner")
@@ -2749,6 +2790,7 @@ fn restore_replacement_credential_if_decided(
 fn replace_local_runner(
     app: &tauri::AppHandle,
     runner_id: &str,
+    intent: LocalRunnerLaunchIntent,
     stage_credential: impl FnOnce() -> Result<(), String>,
     writes_credential: bool,
     publish_settings: impl FnOnce() -> Result<(), String>,
@@ -2798,7 +2840,7 @@ fn replace_local_runner(
         generation: Some(generation),
         credential_generation,
     })?;
-    let child = spawn_local_runner(app, runner_id, generation).map_err(|message| {
+    let child = spawn_local_runner(app, runner_id, generation, intent).map_err(|message| {
         LocalRunnerReplacementFailure {
             message,
             generation: Some(generation),
@@ -2875,7 +2917,14 @@ fn start_saved_local_runner(app: &tauri::AppHandle) {
             );
             return;
         }
-        match replace_local_runner(&task_app, &local.runner_id, || Ok(()), false, || Ok(())) {
+        match replace_local_runner(
+            &task_app,
+            &local.runner_id,
+            LocalRunnerLaunchIntent::RestoreSaved,
+            || Ok(()),
+            false,
+            || Ok(()),
+        ) {
             Ok(()) => eprintln!("[desktop] local runner started as {}", local.runner_id),
             Err(error) => eprintln!(
                 "[desktop] could not start the saved local runner: {}",
@@ -3042,6 +3091,7 @@ fn connect_local_runner_blocking(
     if let Err(failure) = replace_local_runner(
         app,
         &runner_id,
+        LocalRunnerLaunchIntent::UserRequested,
         || {
             if let Err(error) = write_local_runner_token(app, &token) {
                 let rollback = if same_runner_id {
@@ -3865,6 +3915,108 @@ mod tests {
             source[start..end].contains("tokio::task::spawn_blocking"),
             "process, filesystem, and TCP replacement work must not block an async worker"
         );
+    }
+
+    #[test]
+    fn local_runner_adoption_requires_an_explicit_reconnect() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "wollipog-local-runner-args-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&data_dir).unwrap();
+        let token_file = Path::new("runner-token");
+        let restored = local_runner_args(
+            "local-runner",
+            token_file,
+            &data_dir,
+            LocalRunnerLaunchIntent::RestoreSaved,
+        )
+        .unwrap();
+        let reconnected = local_runner_args(
+            "local-runner",
+            token_file,
+            &data_dir,
+            LocalRunnerLaunchIntent::UserRequested,
+        )
+        .unwrap();
+        assert!(!restored.iter().any(|arg| arg == "--adopt-legacy-data-dir"));
+        assert_eq!(
+            reconnected
+                .iter()
+                .filter(|arg| arg.as_str() == "--adopt-legacy-data-dir")
+                .count(),
+            1
+        );
+        fs::write(
+            data_dir.join(LOCAL_RUNNER_OWNER_FILE),
+            b"malformed marker must remain fail-closed",
+        )
+        .unwrap();
+        let owned_restore = local_runner_args(
+            "local-runner",
+            token_file,
+            &data_dir,
+            LocalRunnerLaunchIntent::RestoreSaved,
+        )
+        .unwrap();
+        assert!(
+            !owned_restore
+                .iter()
+                .any(|arg| arg == "--adopt-legacy-data-dir"),
+            "automatic restore must never receive legacy adoption authority"
+        );
+        let owned_reconnect = local_runner_args(
+            "renamed-runner",
+            token_file,
+            &data_dir,
+            LocalRunnerLaunchIntent::UserRequested,
+        )
+        .unwrap();
+        assert!(
+            !owned_reconnect
+                .iter()
+                .any(|arg| arg == "--adopt-legacy-data-dir"),
+            "an existing or malformed owner marker must reach the runner's fail-closed validation"
+        );
+        fs::remove_dir_all(&data_dir).unwrap();
+
+        let source = include_str!("lib.rs");
+        let saved_start = source
+            .find("fn start_saved_local_runner(")
+            .expect("saved local runner startup");
+        let saved_end = source[saved_start..]
+            .find("fn local_runner_status_snapshot(")
+            .map(|offset| saved_start + offset)
+            .expect("saved startup boundary");
+        let saved_source = &source[saved_start..saved_end];
+        assert!(saved_source.contains("LocalRunnerLaunchIntent::RestoreSaved"));
+        assert!(!saved_source.contains("LocalRunnerLaunchIntent::UserRequested"));
+
+        let reconnect_start = source
+            .find("fn connect_local_runner_blocking(")
+            .expect("user reconnect implementation");
+        let reconnect_end = source[reconnect_start..]
+            .find("fn disconnect_local_runner_blocking(")
+            .map(|offset| reconnect_start + offset)
+            .expect("user reconnect boundary");
+        assert!(source[reconnect_start..reconnect_end]
+            .contains("LocalRunnerLaunchIntent::UserRequested"));
+
+        let replacement_start = source
+            .find("fn replace_local_runner(")
+            .expect("local runner replacement");
+        let replacement_end = source[replacement_start..]
+            .find("fn start_saved_local_runner(")
+            .map(|offset| replacement_start + offset)
+            .expect("replacement boundary");
+        let replacement_source = &source[replacement_start..replacement_end];
+        let terminate = replacement_source
+            .find("terminate_managed_child(child, \"previous local runner\")")
+            .expect("previous runner termination");
+        let spawn = replacement_source
+            .find("spawn_local_runner(app, runner_id, generation, intent)")
+            .expect("new runner spawn");
+        assert!(terminate < spawn, "the managed child must stop before adoption");
     }
 
     #[test]

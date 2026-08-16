@@ -6,11 +6,17 @@ reconstruction failures seen during real development sessions.
 
 ## Upgrade and Rollback Warning
 
-Upgrade the desktop and control plane before upgrading standalone or remote runners. Protocol v77
-adds an authenticated, read-only control-plane identity attestation that the current runner requires
-before it opens mutable local stores. A v0.19.0 runner refuses an older control plane that does not
-provide this endpoint. Existing older runners can remain connected during the control-plane upgrade,
-but they do not gain the new ownership isolation until they are upgraded.
+Upgrade the control plane before upgrading standalone or remote runners. Protocol v77 adds an
+authenticated, read-only control-plane identity attestation that the current runner requires before
+it opens mutable local stores. A v0.19.0 runner refuses an older control plane that does not provide
+this endpoint. Existing older runners can remain connected during the control-plane upgrade, but
+they do not gain the new ownership isolation until they are upgraded.
+
+The desktop bundle upgrades its embedded control plane and local runner together. An existing
+markerless local runner remains offline after the first v0.19.0 start rather than claiming its state
+silently. Stop every older Wollipog desktop and local-runner process, then choose **Reconnect This
+Machine**. That explicit repair stops the desktop's managed child before launching once with legacy
+adoption authority. Automatic saved-runner startup never adopts legacy state.
 
 Before upgrading an existing populated runner data directory, stop every pre-v0.19.0 runner that
 uses that directory or OS account and preserve its configuration and binary. A configured standalone
@@ -21,14 +27,11 @@ than being claimed automatically.
 
 Use retained v0.18.0 binaries and configuration as the rollback baseline. This repository did not
 have a published v0.18.0 GitHub release when v0.19.0 was prepared, so verify that those artifacts are
-available locally before upgrading if rollback is required. Rollback to the endpoint-owned runner
-generation must use the runner ID and endpoint configuration that originally published the legacy
-owner marker. If a current runner moved endpoints, restore that earlier endpoint configuration
-before reopening its original root.
-
-A rollback runner cannot reopen a secondary stable-owner namespace created by v0.19.0, and it cannot
-resume owner-scoped WSL provider state or checkpoint state created only after the upgrade. Those
-bytes are retained; roll forward to v0.19.0 to resume them.
+available locally before upgrading if rollback is required. v0.18.0 predates runner owner markers
+and can reopen the original shared data root from the preserved legacy bytes. It cannot discover a
+secondary stable-owner namespace created by v0.19.0 or resume owner-scoped WSL provider or
+checkpoint state created only after the upgrade. Those bytes are retained; roll forward to v0.19.0
+to resume them.
 
 The control plane continues to advertise the `wollipog-control-plane` service identity.
 Desktop v0.15.0 and later accept both the current and legacy service identities.
