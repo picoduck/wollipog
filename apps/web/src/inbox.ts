@@ -335,18 +335,32 @@ export function nextInboxSplitKey(
 }
 
 /**
- * Keep the displayed order stable during the 500 ms navigation settle window. Removed rows
- * disappear immediately and genuinely new rows append in their incoming order; once settled,
- * the latest canonical order is returned unchanged.
+ * Accumulate arrivals in observed order. Missing ids remain as tombstones until lease release so a
+ * removed selected row can still repair against the slot the user was actually seeing.
  */
-export function settledInboxOrder(
+export function extendInboxHeldOrder(
   currentIds: readonly string[],
   nextIds: readonly string[],
-  lastNavigationAt: number | null,
-  now: number,
-  settleMs = INBOX_REORDER_SETTLE_MS,
 ): string[] {
-  if (lastNavigationAt === null || now - lastNavigationAt >= settleMs) return [...nextIds];
+  const extended = [...currentIds];
+  const extendedSet = new Set(extended);
+  for (const id of nextIds) {
+    if (!extendedSet.has(id)) {
+      extended.push(id);
+      extendedSet.add(id);
+    }
+  }
+  return extended;
+}
+
+/**
+ * Project the latest Inbox membership through a held visual order. Existing rows retain their
+ * relative positions, removed rows disappear immediately, and genuinely new rows append.
+ */
+export function reconcileInboxOrder(
+  currentIds: readonly string[],
+  nextIds: readonly string[],
+): string[] {
   const nextSet = new Set(nextIds);
   const projected = currentIds.filter((id) => nextSet.has(id));
   const projectedSet = new Set(projected);
@@ -357,6 +371,40 @@ export function settledInboxOrder(
     }
   }
   return projected;
+}
+
+/** Keep current row objects live while applying an interaction-held id order. */
+export function reconcileInboxItems<T>(
+  currentIds: readonly string[],
+  nextItems: readonly T[],
+  getId: (item: T) => string,
+): T[] {
+  const itemById = new Map(nextItems.map((item) => [getId(item), item]));
+  return reconcileInboxOrder(currentIds, [...itemById.keys()])
+    .map((id) => itemById.get(id))
+    .filter((item): item is T => item !== undefined);
+}
+
+/**
+ * Repair a vanished selection against the order the user was actually seeing. The row occupying
+ * the removed row slot wins, falling back to the preceding row at the end of the list.
+ */
+export function repairInboxSelectionForHeldOrder(
+  snapshotLoaded: boolean,
+  nextIds: readonly string[],
+  heldIds: readonly string[] | null,
+  selectedId: string | null,
+): string | null {
+  if (!snapshotLoaded) return selectedId;
+  if (selectedId && nextIds.includes(selectedId)) return selectedId;
+  if (nextIds.length === 0) return null;
+  if (!heldIds) return nextIds[0]!;
+  const nextSet = new Set(nextIds);
+  const survivors = heldIds.filter((id) => nextSet.has(id));
+  if (survivors.length === 0) return nextIds[0]!;
+  const removedIndex = selectedId ? heldIds.indexOf(selectedId) : -1;
+  if (removedIndex < 0) return survivors[0]!;
+  return survivors[Math.min(removedIndex, survivors.length - 1)]!;
 }
 
 /**
