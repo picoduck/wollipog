@@ -310,12 +310,6 @@ export function ProjectLocationDialog({
                   </span>
                 </div>
               )}
-              {identityError && (
-                <div className="project-location-error" role="alert">
-                  <strong>Access Scopes Could Not Be Loaded</strong>
-                  <span>{identityError}</span>
-                </div>
-              )}
               {browsing && selectedMachine && (
                 <DirectoryPicker
                   runnerId={selectedMachine.runner.runnerId}
@@ -351,6 +345,12 @@ export function ProjectLocationDialog({
             <span>{error}</span>
           </div>
         )}
+        {identityError && (
+          <div className="project-location-error" role="alert">
+            <strong>Access Scopes Could Not Be Loaded</strong>
+            <span>{identityError}</span>
+          </div>
+        )}
         <div className="project-location-existing-heading">
           <strong>Existing Locations</strong>
           <span className="muted">A Location can be used by more than one Project.</span>
@@ -376,7 +376,8 @@ export function ProjectLocationDialog({
             const scopeCompatible = !accessScopeManagementSupported || !identity || !project.scope || !candidate.scope
               ? null
               : scopeAudienceContainedForIdentity(identity, project.scope, candidate.scope);
-            const scopeCheckPending = accessScopeManagementSupported && !identity;
+            const scopeCheckPending = accessScopeManagementSupported && !identity && !identityError;
+            const scopeCheckFailed = accessScopeManagementSupported && !identity && Boolean(identityError);
             const scopeCheckUnavailable = accessScopeManagementSupported && Boolean(identity) &&
               (!project.scope || !candidate.scope);
             const canNarrowProject = Boolean(identity && project.scope && candidate.scope &&
@@ -435,7 +436,7 @@ export function ProjectLocationDialog({
                   type="button"
                   className="btn sm"
                   disabled={alreadyAdded || busyKey !== null || scopeCompatible === false ||
-                    scopeCheckPending || scopeCheckUnavailable}
+                    scopeCheckPending || scopeCheckFailed || scopeCheckUnavailable}
                   onClick={() => void choose(candidate)}
                 >
                   {busyKey === candidate.key

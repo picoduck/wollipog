@@ -24,6 +24,7 @@ import {
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
   type AddBoxRequest,
+  type AccessScopeChangePreview,
   type AddPodMemberRequest,
   type AppendPodContextRequest,
   type ApprovalQueueRejectRequest,
@@ -1241,6 +1242,16 @@ const accessScopeOwnerFromQuery = (query: unknown): ResourceOwner | undefined =>
   if (ownerKind === "team" && typeof ownerId === "string") return { kind: "team", teamId: ownerId };
   return undefined;
 };
+
+/** Keep relationship evidence internal when a Location manager cannot access an attached Project. */
+const accessScopePreviewForPrincipal = (
+  principal: AuthPrincipal,
+  preview: AccessScopeChangePreview,
+): AccessScopeChangePreview => ({
+  ...preview,
+  affectedProjects: preview.affectedProjects.filter((project) =>
+    db.canAccessProject(principal, project.projectId)),
+});
 
 const accessibleProject = (req: FastifyRequest, projectId: string) => {
   const principal = requestPrincipal(req);
@@ -3034,7 +3045,9 @@ app.get("/api/runners/:runnerId/workspaces/:workspaceId/access-scope", async (re
   const transitionError = accessScopeTransitionError(principal, currentScope, requested.scope);
   if (transitionError) return reply.code(403).send({ error: transitionError });
   const preview = db.previewWorkspaceAccessScope(runnerId, workspaceId, requested.scope);
-  return preview ? { preview } : reply.code(404).send({ error: "workspace not found" });
+  return preview
+    ? { preview: accessScopePreviewForPrincipal(principal, preview) }
+    : reply.code(404).send({ error: "workspace not found" });
 });
 
 app.put("/api/runners/:runnerId/workspaces/:workspaceId/access-scope", async (req, reply) => {
@@ -3070,7 +3083,7 @@ app.put("/api/runners/:runnerId/workspaces/:workspaceId/access-scope", async (re
     for (const project of preview.affectedProjects) hub.projectChangedById(project.projectId);
     const workspace = db.listRunnersForPrincipal(principal)
       .find((runner) => runner.runnerId === runnerId)?.workspaces.find((item) => item.id === workspaceId);
-    return { workspace, preview };
+    return { workspace, preview: accessScopePreviewForPrincipal(principal, preview) };
   } catch (error) {
     return reply.code(409).send({ error: error instanceof Error ? error.message : "location access update failed" });
   }

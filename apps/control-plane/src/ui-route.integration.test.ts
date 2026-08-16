@@ -1029,6 +1029,17 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   });
   assert.equal(memberTeamLinkResponse.status, 200,
     "the same membership-aware rule permits linking an existing team Location");
+  const privateProjectPreviewResponse = await fetch(
+    `${httpBase}/api/runners/${memberTeamLocation.runnerId}/workspaces/${memberTeamLocation.workspaceId}` +
+      `/access-scope?ownerKind=team&ownerId=${scopeTeam.teamId}`,
+    { headers: { authorization: `Bearer ${operatorToken}` } },
+  );
+  assert.equal(privateProjectPreviewResponse.status, 200);
+  const privateProjectPreview = (await privateProjectPreviewResponse.json() as {
+    preview: { affectedProjects: Array<{ projectId: string; name: string }> };
+  }).preview;
+  assert.deepEqual(privateProjectPreview.affectedProjects, [],
+    "a Location manager cannot discover another member's private attached Projects through preflight");
   const nonmemberTeamLinkResponse = await ownerFetch(`/api/projects/${bobPrivateProject.id}/locations`, {
     method: "POST",
     headers: { "content-type": "application/json" },
