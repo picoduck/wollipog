@@ -190,6 +190,7 @@ function harness(
     undefined,
     undefined,
     undefined,
+    undefined,
     providerAuthRecovery,
   );
   return {
@@ -413,6 +414,7 @@ test("provider-native revalidation retries a proven-not-delivered prompt once ac
       undefined,
       undefined,
       [],
+      undefined,
       undefined,
       undefined,
       undefined,
