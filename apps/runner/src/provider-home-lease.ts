@@ -168,6 +168,11 @@ export class ProviderHomeLeaseRegistry {
       if (this.isProcessAlive(existing.pid)) {
         throw new Error(`provider home is already in use by process ${existing.pid}; use bwrap or an isolated OS account`);
       }
+      if (existing.ownerHash !== this.ownerHash) {
+        throw new Error(
+          `provider home is leased by another attested owner; refuse automatic recovery and use an isolated OS account or manually quarantine the stale lease after verification`,
+        );
+      }
       const confirmed = readRecord(marker);
       if (confirmed.leaseId !== existing.leaseId) throw new Error("provider home lease changed during recovery; retry");
       rmSync(marker);

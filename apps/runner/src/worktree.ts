@@ -4,7 +4,17 @@ import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { mkdir, rm, statfs } from "node:fs/promises";
-import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import type { AgentContext } from "@wollipog/protocol";
 import { runContextCommand } from "./context-command.js";
 import {
@@ -112,8 +122,26 @@ export class WorktreeCleanupJournal {
 
   private flush(): void {
     const temp = `${this.path}.${process.pid}.tmp`;
-    writeFileSync(temp, JSON.stringify(this.list(), null, 2));
-    renameSync(temp, this.path);
+    let fd: number | undefined;
+    try {
+      fd = openSync(temp, "w", 0o600);
+      writeFileSync(fd, JSON.stringify(this.list(), null, 2));
+      fsyncSync(fd);
+      closeSync(fd);
+      fd = undefined;
+      renameSync(temp, this.path);
+      let directoryFd: number | undefined;
+      try {
+        directoryFd = openSync(dirname(this.path), constants.O_RDONLY);
+        fsyncSync(directoryFd);
+      } catch (error) {
+        if (process.platform !== "win32") throw error;
+      } finally {
+        if (directoryFd !== undefined) closeSync(directoryFd);
+      }
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
   }
 }
 

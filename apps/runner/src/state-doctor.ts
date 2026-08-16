@@ -4,20 +4,25 @@ import {
   constants,
   existsSync,
   fstatSync,
+  fsyncSync,
   mkdirSync,
   openSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { hostname as systemHostname } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
 import type { AgentContext, AgentDriverKind } from "@wollipog/protocol";
 import { adoptLegacyWslExecutionIsolationState } from "./execution-isolation.js";
 import { adoptLegacyCheckpointRefs, withGitExecutionContext } from "./git-ops.js";
 import { runContextCommand } from "./context-command.js";
 import { CheckpointRefOwnershipLedger } from "./checkpoint-ref-ownership.js";
 import type { SessionMeta } from "./session-store.js";
+import { WorktreeCleanupJournal, type WorktreeCleanupRecord } from "./worktree.js";
 
 const OWNER_FILE = ".wollipog-runner-owner-v1.json";
 const ACTIVE_LEASE = ".wollipog-runner-active-v1.lock";
@@ -33,6 +38,30 @@ interface DoctorArgs {
   sessionId?: string;
   distro?: string;
   acknowledged: boolean;
+}
+
+export type StateDoctorDurabilityOperation =
+  | "maintenance-lease-published"
+  | "fsync-file"
+  | "fsync-directory"
+  | "rename"
+  | "checkpoint-refs-adopted"
+  | "checkpoint-owner-published"
+  | "session-meta-published";
+
+export interface StateDoctorOptions {
+  pid?: number;
+  hostname?: string;
+  beforeDurabilityOperationForTest?: (operation: StateDoctorDurabilityOperation, path: string) => void;
+}
+
+interface MaintenanceLeaseRecord {
+  version: 2;
+  ownerHash: string;
+  leaseId: string;
+  pid: number;
+  hostname: string;
+  createdAt: string;
 }
 
 function parseDoctorArgs(argv: string[]): DoctorArgs {
@@ -78,14 +107,131 @@ function protectedJson<T>(path: string): T {
 }
 
 function offlineOwner(dataDir: string): string {
-  if (existsSync(join(dataDir, ACTIVE_LEASE))) {
-    throw new Error("runner data directory has an active or unrecovered lease; stop every runner and resolve the lease before offline maintenance");
-  }
   const owner = protectedJson<{ version?: unknown; ownerHash?: unknown }>(join(dataDir, OWNER_FILE));
   if (owner.version !== 2 || typeof owner.ownerHash !== "string" || !/^[a-f0-9]{64}$/u.test(owner.ownerHash)) {
     throw new Error("runner data directory does not contain stable attested owner metadata");
   }
   return owner.ownerHash;
+}
+
+function beforeDurabilityOperation(
+  options: StateDoctorOptions,
+  operation: StateDoctorDurabilityOperation,
+  path: string,
+): void {
+  options.beforeDurabilityOperationForTest?.(operation, path);
+}
+
+function syncFile(path: string, options: StateDoctorOptions): void {
+  beforeDurabilityOperation(options, "fsync-file", path);
+  const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try { fsyncSync(fd); } finally { closeSync(fd); }
+}
+
+function syncDirectory(path: string, options: StateDoctorOptions): void {
+  beforeDurabilityOperation(options, "fsync-directory", path);
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, constants.O_RDONLY);
+    fsyncSync(fd);
+  } catch (error) {
+    if (process.platform !== "win32") throw error;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+function createDurableDirectories(path: string, options: StateDoctorOptions): void {
+  const missing: string[] = [];
+  let cursor = path;
+  while (!existsSync(cursor)) {
+    missing.push(cursor);
+    const parent = dirname(cursor);
+    if (parent === cursor) break;
+    cursor = parent;
+  }
+  for (const directory of missing.reverse()) {
+    mkdirSync(directory, { mode: 0o700 });
+    syncDirectory(dirname(directory), options);
+  }
+}
+
+function createDurableFile(path: string, contents: string, options: StateDoctorOptions): void {
+  writeFileSync(path, contents, { flag: "wx", mode: 0o600 });
+  syncFile(path, options);
+  syncDirectory(dirname(path), options);
+}
+
+function replaceMeta(path: string, meta: SessionMeta, options: StateDoctorOptions): void {
+  const temp = `${path}.state-doctor-${process.pid}-${randomUUID()}`;
+  try {
+    writeFileSync(temp, `${JSON.stringify(meta, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+    syncFile(temp, options);
+    beforeDurabilityOperation(options, "rename", path);
+    renameSync(temp, path);
+    syncDirectory(dirname(path), options);
+    beforeDurabilityOperation(options, "session-meta-published", path);
+  } finally {
+    rmSync(temp, { force: true });
+  }
+}
+
+function acquireMaintenanceLease(
+  requestedDataDir: string,
+  options: StateDoctorOptions,
+): { dataDir: string; ownerHash: string; release: () => void } {
+  const dataDir = realpathSync(requestedDataDir);
+  const ownerHash = offlineOwner(dataDir);
+  const leasePath = join(dataDir, ACTIVE_LEASE);
+  const leaseId = randomUUID();
+  const record: MaintenanceLeaseRecord = {
+    version: 2,
+    ownerHash,
+    leaseId,
+    pid: options.pid ?? process.pid,
+    hostname: options.hostname ?? systemHostname(),
+    createdAt: new Date().toISOString(),
+  };
+  let created = false;
+  try {
+    writeFileSync(leasePath, `${JSON.stringify(record)}\n`, { flag: "wx", mode: 0o600 });
+    created = true;
+    syncFile(leasePath, options);
+    syncDirectory(dataDir, options);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      throw new Error("runner data directory has an active or unrecovered lease; stop every runner and resolve the lease before offline maintenance");
+    }
+    if (created) {
+      try {
+        rmSync(leasePath);
+        syncDirectory(dataDir, options);
+      } catch { /* An uncertain lease publication deliberately remains fail-closed. */ }
+    }
+    throw error;
+  }
+  let released = false;
+  const release = (): void => {
+    if (released) return;
+    const current = protectedJson<Partial<MaintenanceLeaseRecord>>(leasePath);
+    if (current.leaseId !== leaseId || current.ownerHash !== ownerHash) {
+      throw new Error("state-doctor maintenance lease changed before release; refusing to remove replacement ownership");
+    }
+    rmSync(leasePath);
+    syncDirectory(dataDir, options);
+    released = true;
+  };
+  try {
+    const confirmedOwner = offlineOwner(dataDir);
+    if (confirmedOwner !== ownerHash) {
+      throw new Error("runner data directory owner changed during maintenance lease acquisition");
+    }
+    beforeDurabilityOperation(options, "maintenance-lease-published", leasePath);
+    return { dataDir, ownerHash, release };
+  } catch (error) {
+    try { release(); } catch { /* Preserve the acquisition failure. */ }
+    throw error;
+  }
 }
 
 function sessionMeta(dataDir: string, sessionId: string): { path: string; meta: SessionMeta } {
@@ -95,10 +241,48 @@ function sessionMeta(dataDir: string, sessionId: string): { path: string; meta: 
   return { path, meta };
 }
 
-function replaceMeta(path: string, meta: SessionMeta): void {
-  const temp = `${path}.state-doctor-${process.pid}-${randomUUID()}`;
-  writeFileSync(temp, `${JSON.stringify(meta, null, 2)}\n`, { flag: "wx", mode: 0o600 });
-  renameSync(temp, path);
+function sameContext(left: AgentContext, right: AgentContext): boolean {
+  return left.kind === right.kind &&
+    (left.kind !== "wsl" || (right.kind === "wsl" && left.distro === right.distro));
+}
+
+function deletionMarker(dataDir: string, sessionId: string): string {
+  return join(dataDir, "sessions", ".deleted", createHash("sha256").update(sessionId).digest("hex"));
+}
+
+function refuseDeletedSession(dataDir: string, sessionId: string): void {
+  if (existsSync(deletionMarker(dataDir, sessionId))) {
+    throw new Error("checkpoint adoption refuses a deletion-tombstoned session");
+  }
+}
+
+function retireMatchingLegacyCleanup(dataDir: string, meta: SessionMeta): void {
+  if (!meta.worktreePath) throw new Error("checkpoint adoption requires a persisted worktree path");
+  const journalPath = join(dataDir, "worktree-cleanup.json");
+  if (!existsSync(journalPath)) return;
+  const parsed = protectedJson<unknown>(journalPath);
+  if (!Array.isArray(parsed)) throw new Error("worktree cleanup journal is invalid; refusing checkpoint adoption");
+  const matches = parsed.filter((value): value is WorktreeCleanupRecord =>
+    !!value && typeof value === "object" &&
+    (value as Partial<WorktreeCleanupRecord>).sessionId === meta.sessionId);
+  if (matches.length > 1) {
+    throw new Error("multiple worktree cleanup records claim this session; refusing ambiguous checkpoint adoption");
+  }
+  const cleanup = matches[0];
+  if (!cleanup) return;
+  if (cleanup.checkpointOwnerHash !== undefined) {
+    throw new Error("worktree cleanup record already names an owner-scoped generation; refusing checkpoint adoption");
+  }
+  if (!cleanup.context || typeof cleanup.context !== "object" ||
+      cleanup.repoPath !== meta.repoPath || cleanup.worktreePath !== meta.worktreePath ||
+      !sameContext(cleanup.context, meta.context)) {
+    throw new Error("worktree cleanup record does not exactly match the live legacy session; refusing checkpoint adoption");
+  }
+  const journal = new WorktreeCleanupJournal(dataDir);
+  journal.remove(meta.sessionId);
+  if (new WorktreeCleanupJournal(dataDir).list().some((record) => record.sessionId === meta.sessionId)) {
+    throw new Error("worktree cleanup record remained after durable retirement");
+  }
 }
 
 function requireMutation(args: DoctorArgs): void {
@@ -143,86 +327,113 @@ async function inventoryWsl(distro: string): Promise<{ available: boolean; legac
 export async function runStateDoctor(
   argv = process.argv,
   writeOutput: (value: string) => unknown = (value) => process.stdout.write(value),
+  options: StateDoctorOptions = {},
 ): Promise<void> {
   const args = parseDoctorArgs(argv);
-  const ownerHash = offlineOwner(args.dataDir);
-  if (args.command === "inventory") {
-    const { metas, unreadable } = storedMetas(args.dataDir);
-    const wsl = args.distro ? await inventoryWsl(args.distro) : undefined;
-    const report = {
-      version: 1,
-      ownerId: createHash("sha256").update(ownerHash).digest("hex").slice(0, 16),
-      legacyCheckpointSessions: metas.filter((meta) => meta.checkpointRefVersion === undefined && meta.worktreePath).length,
-      legacyWslWorktrees: metas.filter((meta) => meta.context.kind === "wsl" && meta.worktreePath && !meta.worktreePath.includes("/runner-instances/")).length,
-      legacyWslProviderSessions: metas.filter((meta) => meta.context.kind === "wsl" && meta.providerStateVersion !== 3).length,
-      legacyConductorConfigs: legacyConductorFiles(args.dataDir).length,
-      unreadableSessionMetadata: unreadable,
-      ...(wsl ? { wsl } : {}),
-    };
-    writeOutput(`${JSON.stringify(report, null, 2)}\n`);
-    return;
-  }
-  requireMutation(args);
-  if (args.command === "quarantine-conductor") {
-    const files = legacyConductorFiles(args.dataDir);
-    const quarantineId = randomUUID();
-    const target = join(args.dataDir, "state-quarantine", quarantineId, "conductor");
-    mkdirSync(target, { recursive: true, mode: 0o700 });
-    const manifest = files.map((source, index) => ({
-      itemId: createHash("sha256").update(basename(source)).digest("hex"),
-      originalName: basename(source),
-      storedAs: `${String(index + 1).padStart(4, "0")}.mcp.json`,
-    }));
-    // Publish the secret-free rollback map before the first move. A crash may leave a partial
-    // quarantine, but never anonymous files whose original names can no longer be identified.
-    writeFileSync(join(target, "manifest.json"), `${JSON.stringify({ version: 1, items: manifest }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-    for (const [index, source] of files.entries()) {
-      const item = manifest[index];
-      if (!item) throw new Error("conductor quarantine manifest changed unexpectedly");
-      renameSync(source, join(target, item.storedAs));
+  const maintenance = acquireMaintenanceLease(args.dataDir, options);
+  const dataDir = maintenance.dataDir;
+  const ownerHash = maintenance.ownerHash;
+  try {
+    if (args.command === "inventory") {
+      const { metas, unreadable } = storedMetas(dataDir);
+      const wsl = args.distro ? await inventoryWsl(args.distro) : undefined;
+      const report = {
+        version: 1,
+        ownerId: createHash("sha256").update(ownerHash).digest("hex").slice(0, 16),
+        legacyCheckpointSessions: metas.filter((meta) => meta.checkpointRefVersion === undefined && meta.worktreePath).length,
+        legacyWslWorktrees: metas.filter((meta) => meta.context.kind === "wsl" && meta.worktreePath && !meta.worktreePath.includes("/runner-instances/")).length,
+        legacyWslProviderSessions: metas.filter((meta) => meta.context.kind === "wsl" && meta.providerStateVersion !== 3).length,
+        legacyConductorConfigs: legacyConductorFiles(dataDir).length,
+        unreadableSessionMetadata: unreadable,
+        ...(wsl ? { wsl } : {}),
+      };
+      writeOutput(`${JSON.stringify(report, null, 2)}\n`);
+      return;
     }
-    writeOutput(`${JSON.stringify({ quarantined: files.length, quarantineId })}\n`);
-    return;
+    requireMutation(args);
+    if (args.command === "quarantine-conductor") {
+      const files = legacyConductorFiles(dataDir);
+      const quarantineId = randomUUID();
+      const sourceDirectory = join(dataDir, "conductor");
+      const target = join(dataDir, "state-quarantine", quarantineId, "conductor");
+      createDurableDirectories(target, options);
+      const manifest = files.map((source, index) => ({
+        itemId: createHash("sha256").update(basename(source)).digest("hex"),
+        originalName: basename(source),
+        storedAs: `${String(index + 1).padStart(4, "0")}.mcp.json`,
+      }));
+      // Publish and sync the rollback map before the first move. Each cross-directory rename then
+      // syncs both directory entries, so every crash prefix remains identifiable and retryable.
+      createDurableFile(
+        join(target, "manifest.json"),
+        `${JSON.stringify({ version: 1, items: manifest }, null, 2)}\n`,
+        options,
+      );
+      for (const [index, source] of files.entries()) {
+        const item = manifest[index];
+        if (!item) throw new Error("conductor quarantine manifest changed unexpectedly");
+        const destination = join(target, item.storedAs);
+        beforeDurabilityOperation(options, "rename", destination);
+        renameSync(source, destination);
+        syncDirectory(sourceDirectory, options);
+        syncDirectory(target, options);
+      }
+      writeOutput(`${JSON.stringify({ quarantined: files.length, quarantineId })}\n`);
+      return;
+    }
+    if (args.command === "quarantine-wsl") {
+      if (!args.distro) throw new Error("quarantine-wsl requires --wsl-distro");
+      const quarantineId = randomUUID();
+      const result = await runContextCommand({ kind: "wsl", distro: args.distro }, "sh", ["-c",
+        'set -eu; root="$HOME/.agent-manager"; q="$root/state-quarantine/$1"; umask 077; mkdir -p -- "$q"; sync -d -- "$root/state-quarantine" "$q"; n=0; for name in provider-state worktrees; do src="$root/$name"; if [ -e "$src" ]; then mv -- "$src" "$q/$name"; sync -d -- "$root" "$q"; n=$((n+1)); fi; done; printf "%s" "$n"',
+        "state-doctor", quarantineId,
+      ], { cwd: "/", timeoutMs: 30_000, maxBuffer: 1024 });
+      writeOutput(`${JSON.stringify({ quarantinedRoots: Number.parseInt(result.stdout.trim(), 10) || 0, quarantineId })}\n`);
+      return;
+    }
+    if (!args.sessionId) throw new Error(`${args.command} requires --session-id`);
+    const { path, meta } = sessionMeta(dataDir, args.sessionId);
+    if (args.command === "adopt-checkpoints") {
+      if (meta.checkpointRefVersion !== undefined) throw new Error("session checkpoint refs are already owner-scoped");
+      refuseDeletedSession(dataDir, meta.sessionId);
+      // Retire only an exact legacy cleanup tuple before changing any ownership namespace. A crash
+      // from here leaves the live legacy row/worktree intact and makes retry safe.
+      retireMatchingLegacyCleanup(dataDir, meta);
+      const count = await withGitExecutionContext(meta.context, () =>
+        adoptLegacyCheckpointRefs(meta.repoPath, meta.sessionId, ownerHash));
+      beforeDurabilityOperation(options, "checkpoint-refs-adopted", meta.sessionId);
+      const ledger = new CheckpointRefOwnershipLedger(dataDir);
+      ledger.claim({
+        sessionId: meta.sessionId,
+        repoPath: meta.repoPath,
+        context: meta.context,
+        ownerHash,
+      });
+      beforeDurabilityOperation(options, "checkpoint-owner-published", meta.sessionId);
+      // Source refs are an explicit rollback copy. Their legacy deletion proof must be durably
+      // absent before the metadata switches startup reconciliation to the owner-scoped layout.
+      const legacyOwnership = ledger.get({
+        sessionId: meta.sessionId,
+        repoPath: meta.repoPath,
+        context: meta.context,
+      });
+      if (legacyOwnership) ledger.remove(legacyOwnership);
+      refuseDeletedSession(dataDir, meta.sessionId);
+      replaceMeta(path, { ...meta, checkpointRefVersion: 2, updatedAt: Date.now() }, options);
+      writeOutput(`${JSON.stringify({ adoptedCheckpointEntries: count, sourcePreserved: true })}\n`);
+      return;
+    }
+    if (meta.context.kind !== "wsl") throw new Error("adopt-provider-state requires a WSL session");
+    if (meta.providerStateVersion === 3) throw new Error("session provider state is already owner-scoped");
+    const outcome = await adoptLegacyWslExecutionIsolationState(
+      meta.context,
+      meta.driver as AgentDriverKind,
+      meta.sessionId,
+      ownerHash,
+    );
+    replaceMeta(path, { ...meta, providerStateVersion: 3, updatedAt: Date.now() }, options);
+    writeOutput(`${JSON.stringify({ providerState: outcome, sourcePreserved: true })}\n`);
+  } finally {
+    maintenance.release();
   }
-  if (args.command === "quarantine-wsl") {
-    if (!args.distro) throw new Error("quarantine-wsl requires --wsl-distro");
-    const quarantineId = randomUUID();
-    const result = await runContextCommand({ kind: "wsl", distro: args.distro }, "sh", ["-c",
-      'set -eu; q="$HOME/.agent-manager/state-quarantine/$1"; umask 077; mkdir -p -- "$q"; n=0; for name in provider-state worktrees; do src="$HOME/.agent-manager/$name"; if [ -e "$src" ]; then mv -- "$src" "$q/$name"; n=$((n+1)); fi; done; printf "%s" "$n"',
-      "state-doctor", quarantineId,
-    ], { cwd: "/", timeoutMs: 30_000, maxBuffer: 1024 });
-    writeOutput(`${JSON.stringify({ quarantinedRoots: Number.parseInt(result.stdout.trim(), 10) || 0, quarantineId })}\n`);
-    return;
-  }
-  if (!args.sessionId) throw new Error(`${args.command} requires --session-id`);
-  const { path, meta } = sessionMeta(args.dataDir, args.sessionId);
-  if (args.command === "adopt-checkpoints") {
-    if (meta.checkpointRefVersion !== undefined) throw new Error("session checkpoint refs are already owner-scoped");
-    const count = await withGitExecutionContext(meta.context, () =>
-      adoptLegacyCheckpointRefs(meta.repoPath, meta.sessionId, ownerHash));
-    // Source refs become an explicitly operator-preserved rollback copy. Remove only their old
-    // cleanup proof before publishing the scoped layout; otherwise startup would classify that
-    // unscoped proof as stale and silently delete the source refs. If metadata publication fails,
-    // the legacy row simply reclaims its legacy proof on the next startup.
-    const ledger = new CheckpointRefOwnershipLedger(args.dataDir);
-    const legacyOwnership = ledger.get({
-      sessionId: meta.sessionId,
-      repoPath: meta.repoPath,
-      context: meta.context,
-    });
-    if (legacyOwnership) ledger.remove(legacyOwnership);
-    replaceMeta(path, { ...meta, checkpointRefVersion: 2, updatedAt: Date.now() });
-    writeOutput(`${JSON.stringify({ adoptedCheckpointEntries: count, sourcePreserved: true })}\n`);
-    return;
-  }
-  if (meta.context.kind !== "wsl") throw new Error("adopt-provider-state requires a WSL session");
-  if (meta.providerStateVersion === 3) throw new Error("session provider state is already owner-scoped");
-  const outcome = await adoptLegacyWslExecutionIsolationState(
-    meta.context,
-    meta.driver as AgentDriverKind,
-    meta.sessionId,
-    ownerHash,
-  );
-  replaceMeta(path, { ...meta, providerStateVersion: 3, updatedAt: Date.now() });
-  writeOutput(`${JSON.stringify({ providerState: outcome, sourcePreserved: true })}\n`);
 }

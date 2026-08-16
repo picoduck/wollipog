@@ -5504,10 +5504,18 @@ export class SessionManager {
     // remains the crash-recovery boundary for leases that never settle.
     this.admitted.clear();
     this.boxAdmission.releaseAll();
-    this.providerHomeLeases?.releaseAll();
     // Debounced meta writes (seq/preview/usage) must land before the process exits — a lost
     // seq flush would only self-heal on the next append, and usage totals would be dropped.
     this.store.flushAll();
+  }
+
+  /** Release mutable provider HOME ownership only after every spawned provider/TUI process tree
+   * has been reaped. shutdownAll() merely initiates that asynchronous drain. */
+  releaseProviderHomeLeasesAfterShutdown(): void {
+    if (!this.shuttingDown) {
+      throw new Error("provider-home leases may only be released after shutdown begins");
+    }
+    this.providerHomeLeases?.releaseAll();
   }
 
   private emitStatus(

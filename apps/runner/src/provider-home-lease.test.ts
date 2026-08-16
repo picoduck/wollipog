@@ -40,7 +40,7 @@ test("provider-home leases recover only a validated stale same-host record", (t)
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const stale = new ProviderHomeLeaseRegistry("a".repeat(64), { pid: 101, hostname: "host-a" });
   stale.acquire(request(home));
-  const replacement = new ProviderHomeLeaseRegistry("b".repeat(64), {
+  const replacement = new ProviderHomeLeaseRegistry("a".repeat(64), {
     pid: 202,
     hostname: "host-a",
     isProcessAlive: () => false,
@@ -53,6 +53,20 @@ test("provider-home leases recover only a validated stale same-host record", (t)
     isProcessAlive: (pid) => pid === 202,
   }).acquire(request(home)), /already in use by process 202/);
   replacement.releaseAll();
+});
+
+test("provider-home leases never automatically recover a foreign owner's stale record", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-foreign-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const stale = new ProviderHomeLeaseRegistry("a".repeat(64), { pid: 101, hostname: "host-a" });
+  stale.acquire(request(home));
+  const foreign = new ProviderHomeLeaseRegistry("b".repeat(64), {
+    pid: 202,
+    hostname: "host-a",
+    isProcessAlive: () => false,
+  });
+  assert.throws(() => foreign.acquire(request(home)), /another attested owner.*manual.*quarantine/);
+  stale.releaseAll();
 });
 
 test("provider-home leases fail closed for WSL direct mode and bypass redirected bwrap homes", (t) => {
