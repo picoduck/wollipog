@@ -13,7 +13,10 @@ import {
   inboxSplitByKey,
   nextInboxSplitKey,
   repairInboxSelectionAfterSnapshot,
-  settledInboxOrder,
+  extendInboxHeldOrder,
+  reconcileInboxItems,
+  reconcileInboxOrder,
+  repairInboxSelectionForHeldOrder,
   shouldRestoreInboxScroll,
   type InboxApprovalIntent,
 } from "../inbox.js";
@@ -152,14 +155,24 @@ export function InboxView({
   const dragRatioRef = useRef<number | null>(null);
   const seenTimerRef = useRef<number | null>(null);
   const settleTimerRef = useRef<number | null>(null);
+  const targetPointerIdsRef = useRef(new Set<number>());
+  const activePointerIdsRef = useRef(new Set<number>());
+  const structuralOrderKeyRef = useRef<string | null>(null);
+  const liveIdsRef = useRef<string[]>([]);
+  const displayedIdsRef = useRef<string[]>([]);
   const tabRefs = useRef(new Map<string, HTMLButtonElement>());
-  const lastNavigationAtRef = useRef<number | null>(null);
   const previousSurfaceRef = useRef<{ expanded: boolean; sessionId: string | null } | null>(null);
   const expandedSessionIdRef = useRef(expandedSessionId);
   expandedSessionIdRef.current = expandedSessionId;
   const mountedRef = useRef(true);
   const selectedSessionIdRef = useRef(inbox.selectedSessionId);
   selectedSessionIdRef.current = inbox.selectedSessionId;
+
+  const clearHeldOrder = useCallback(() => {
+    if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
+    settleTimerRef.current = null;
+    setHeldOrder(null);
+  }, []);
 
   const beginBusy = useCallback((sessionId: string) => {
     if (busySessionIdsRef.current.has(sessionId)) return false;
@@ -176,8 +189,9 @@ export function InboxView({
     setInboxSelection(sessionId, splitKey, !isMobile);
   }, [isMobile, setInboxSelection]);
   const selectSplit = useCallback((splitKey: string | null) => {
+    clearHeldOrder();
     setInboxSplit(splitKey, !isMobile);
-  }, [isMobile, setInboxSplit]);
+  }, [clearHeldOrder, isMobile, setInboxSplit]);
 
   useLayoutEffect(() => {
     setInboxPersistenceEnabled(!isMobile);
@@ -268,7 +282,13 @@ export function InboxView({
     onShortcutNewSessionPresetChange?.(activeNewSessionPreset);
     return () => onShortcutNewSessionPresetChange?.(undefined);
   }, [activeNewSessionPreset, onShortcutNewSessionPresetChange]);
-  const repairedSelection = repairInboxSelectionAfterSnapshot(snapshotLoaded, activeSplit, inbox.selectedSessionId);
+  const activeSessionIds = useMemo(
+    () => (activeSplit?.sessions ?? []).map((session) => session.id),
+    [activeSplit?.sessions],
+  );
+  const repairedSelection = heldOrder
+    ? repairInboxSelectionForHeldOrder(snapshotLoaded, activeSessionIds, heldOrder, inbox.selectedSessionId)
+    : repairInboxSelectionAfterSnapshot(snapshotLoaded, activeSplit, inbox.selectedSessionId);
 
   useEffect(() => {
     if (!snapshotLoaded) return;
@@ -329,21 +349,52 @@ export function InboxView({
       projectName: inboxProjectName(session, projectsSupported ? projects : undefined),
       unread: seen[session.id] != null && session.lastEventAt != null && session.lastEventAt > seen[session.id]!,
     })), [activeSplit?.sessions, normalizedQuery, projects, projectsSupported, seen]);
-  const liveEntryById = useMemo(() => new Map(liveEntries.map((entry) => [entry.session.id, entry])), [liveEntries]);
+  const liveIds = useMemo(() => liveEntries.map((entry) => entry.session.id), [liveEntries]);
+  liveIdsRef.current = liveIds;
+  const structuralOrderKey = JSON.stringify([
+    instanceScope,
+    activeSplit?.key ?? null,
+    normalizedQuery,
+    [...pinnedSessions].sort(),
+    [...pinnedProjects].sort(),
+  ]);
+  useLayoutEffect(() => {
+    if (structuralOrderKeyRef.current === null) {
+      structuralOrderKeyRef.current = structuralOrderKey;
+      return;
+    }
+    if (structuralOrderKeyRef.current === structuralOrderKey) return;
+    structuralOrderKeyRef.current = structuralOrderKey;
+    if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
+    settleTimerRef.current = null;
+    setHeldOrder(targetPointerIdsRef.current.size > 0 || activePointerIdsRef.current.size > 0
+      ? liveIdsRef.current
+      : null);
+  }, [structuralOrderKey]);
+
+  useLayoutEffect(() => {
+    setHeldOrder((current) => {
+      if (!current) return current;
+      const extended = extendInboxHeldOrder(current, liveIds);
+      return extended.length === current.length ? current : extended;
+    });
+  }, [liveIds]);
+
   const entries = useMemo(() => {
     if (!heldOrder) return liveEntries;
-    const ids = settledInboxOrder(
-      heldOrder,
-      liveEntries.map((entry) => entry.session.id),
-      lastNavigationAtRef.current,
-      Date.now(),
-    );
-    return ids.map((id) => liveEntryById.get(id)).filter((entry): entry is InboxListEntry => entry !== undefined);
-  }, [heldOrder, liveEntries, liveEntryById]);
+    return reconcileInboxItems(heldOrder, liveEntries, (entry) => entry.session.id);
+  }, [heldOrder, liveEntries]);
   const displayedIds = useMemo(() => entries.map((entry) => entry.session.id), [entries]);
+  displayedIdsRef.current = displayedIds;
   const displayedSelection = repairedSelection && displayedIds.includes(repairedSelection) ? repairedSelection : null;
   const displayedSelectedSession = displayedSelection ? sessions.get(displayedSelection) ?? null : null;
   const expanded = expandedSessionId !== null;
+  useEffect(() => {
+    if (!expanded) return;
+    activePointerIdsRef.current.clear();
+    targetPointerIdsRef.current.clear();
+    clearHeldOrder();
+  }, [clearHeldOrder, expanded]);
   const surfaceSessionId = expandedSessionId ?? selectedSession?.id ?? null;
 
   useLayoutEffect(() => {
@@ -365,17 +416,76 @@ export function InboxView({
     return () => window.cancelAnimationFrame(frame);
   }, [expanded, focusComposerSessionId, instanceScope, surfaceSessionId]);
 
-  const holdOrderAfterNavigation = useCallback(() => {
-    const now = Date.now();
-    lastNavigationAtRef.current = now;
-    setHeldOrder(displayedIds);
+  const scheduleOrderRelease = useCallback(() => {
     if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
     settleTimerRef.current = window.setTimeout(() => {
-      lastNavigationAtRef.current = null;
+      if (targetPointerIdsRef.current.size > 0 || activePointerIdsRef.current.size > 0) {
+        settleTimerRef.current = null;
+        return;
+      }
       setHeldOrder(null);
       settleTimerRef.current = null;
     }, INBOX_REORDER_SETTLE_MS);
-  }, [displayedIds]);
+  }, []);
+
+  const holdDisplayedOrder = useCallback(() => {
+    if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
+    settleTimerRef.current = null;
+    setHeldOrder((current) => current ?? displayedIdsRef.current);
+  }, []);
+
+  const holdOrderAfterNavigation = useCallback(() => {
+    holdDisplayedOrder();
+    scheduleOrderRelease();
+  }, [holdDisplayedOrder, scheduleOrderRelease]);
+
+  const handlePointerTargetChange = useCallback((pointerId: number, targeting: boolean) => {
+    if (targeting) {
+      targetPointerIdsRef.current.add(pointerId);
+      holdDisplayedOrder();
+      return;
+    }
+    targetPointerIdsRef.current.delete(pointerId);
+    if (targetPointerIdsRef.current.size === 0 && activePointerIdsRef.current.size === 0) scheduleOrderRelease();
+  }, [holdDisplayedOrder, scheduleOrderRelease]);
+
+  const handlePointerPressChange = useCallback((pointerId: number, active: boolean, pointerType: string) => {
+    if (active) {
+      activePointerIdsRef.current.add(pointerId);
+      holdDisplayedOrder();
+      return;
+    }
+    if (!activePointerIdsRef.current.delete(pointerId)) return;
+    if (pointerType === "touch") targetPointerIdsRef.current.delete(pointerId);
+    if (targetPointerIdsRef.current.size === 0 && activePointerIdsRef.current.size === 0) scheduleOrderRelease();
+  }, [holdDisplayedOrder, scheduleOrderRelease]);
+
+  useEffect(() => {
+    const finishPointer = (event: PointerEvent) => {
+      handlePointerPressChange(event.pointerId, false, event.pointerType);
+    };
+    const finishAllPointers = () => {
+      if (activePointerIdsRef.current.size === 0 && targetPointerIdsRef.current.size === 0) return;
+      activePointerIdsRef.current.clear();
+      targetPointerIdsRef.current.clear();
+      scheduleOrderRelease();
+    };
+    window.addEventListener("pointerup", finishPointer);
+    window.addEventListener("pointercancel", finishPointer);
+    window.addEventListener("blur", finishAllPointers);
+    return () => {
+      window.removeEventListener("pointerup", finishPointer);
+      window.removeEventListener("pointercancel", finishPointer);
+      window.removeEventListener("blur", finishAllPointers);
+    };
+  }, [handlePointerPressChange, scheduleOrderRelease]);
+
+  useEffect(() => {
+    if (liveIds.length > 0) return;
+    activePointerIdsRef.current.clear();
+    targetPointerIdsRef.current.clear();
+    scheduleOrderRelease();
+  }, [liveIds.length, scheduleOrderRelease]);
 
   const moveSelection = useCallback((direction: "next" | "previous") => {
     if (!activeSplit) return;
@@ -405,14 +515,16 @@ export function InboxView({
   }, [isMobile, expand, selectSession, activeSplit?.key]);
 
   const togglePin = useCallback((sessionId: string) => {
+    clearHeldOrder();
     const next = loadKeySet(SESSION_PIN_KEY, instanceScope);
     if (next.has(sessionId)) next.delete(sessionId);
     else next.add(sessionId);
     saveKeySet(SESSION_PIN_KEY, next, instanceScope);
     setPinnedSessions(next);
-  }, [instanceScope]);
+  }, [clearHeldOrder, instanceScope]);
 
   const setProjectPinned = useCallback((split: NonNullable<typeof activeSplit>, enabled: boolean) => {
+    clearHeldOrder();
     // Reload before writing so another tab or surface cannot be overwritten by stale React state.
     const next = loadKeySet(PROJECT_PIN_KEY, instanceScope);
     const keys = [split.key, ...(split.project?.kind === "durable" ? split.project.legacyKeys : [])]
@@ -421,7 +533,7 @@ export function InboxView({
     if (enabled && split.key !== null) next.add(split.key);
     saveKeySet(PROJECT_PIN_KEY, next, instanceScope);
     setPinnedProjects(next);
-  }, [instanceScope]);
+  }, [clearHeldOrder, instanceScope]);
 
   const focusSplit = useCallback((splitKey: string | null) => {
     selectSplit(splitKey);
@@ -715,6 +827,8 @@ export function InboxView({
           onSelect={handleSelect}
           onExpand={expand}
           onScrollPosition={(scrollTop) => inboxScrollPositions.set(instanceScope, scrollTop)}
+          onPointerTargetChange={handlePointerTargetChange}
+          onPointerPressChange={handlePointerPressChange}
         />
         <footer className="inbox-activity-footer" aria-label="Inbox Status and Shortcuts">
           <div className="inbox-activity-summary" aria-label="Inbox Activity Summary">

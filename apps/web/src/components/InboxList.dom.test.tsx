@@ -17,6 +17,9 @@ for (const [name, value] of Object.entries({
   Node: domWindow.Node,
   Event: domWindow.Event,
   MouseEvent: domWindow.MouseEvent,
+  PointerEvent: domWindow.PointerEvent,
+  requestAnimationFrame: domWindow.requestAnimationFrame.bind(domWindow),
+  cancelAnimationFrame: domWindow.cancelAnimationFrame.bind(domWindow),
   React,
   IS_REACT_ACT_ENVIRONMENT: true,
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
@@ -131,6 +134,61 @@ test("inbox list exposes selection semantics and mouse select/expand paths", asy
     primaryButtons[1]!.dispatchEvent(new domWindow.MouseEvent("dblclick", { bubbles: true }) as unknown as Event);
   });
   assert.deepEqual(expanded, [second.id]);
+
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("inbox list keeps live row content and the visible touch target while interaction is owned", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const events: string[] = [];
+  const selected: string[] = [];
+  const renderList = (entry: SessionView) => (
+    <InboxList
+      entries={[{ session: entry, projectName: "Wollipog", unread: false }]}
+      selectedSessionId="target"
+      pinnedSessionIds={new Set()}
+      activityBySession={new Map()}
+      stalledSessionIds={new Set()}
+      activityNow={60_000}
+      runningCount={0}
+      filtered={false}
+      onNewSession={() => undefined}
+      onSelect={(sessionId) => selected.push(sessionId)}
+      onExpand={() => undefined}
+      onScrollPosition={() => undefined}
+      onPointerTargetChange={(pointerId, targeting, pointerType) => events.push(`target:${pointerId}:${targeting}:${pointerType}`)}
+      onPointerPressChange={(pointerId, active, pointerType) => events.push(`press:${pointerId}:${active}:${pointerType}`)}
+    />
+  );
+  await act(async () => { root.render(renderList(session("target", "Target Session"))); });
+
+  const grid = container.querySelector<HTMLElement>(".inbox-list")!;
+  const pointer = (type: string, pointerId: number, pointerType: string) =>
+    grid.dispatchEvent(new domWindow.PointerEvent(type, { bubbles: true, pointerId, pointerType }) as unknown as Event);
+  await act(async () => {
+    pointer("pointerover", 1, "mouse");
+    pointer("pointerdown", 7, "touch");
+  });
+  await act(async () => {
+    root.render(renderList({
+      ...session("target", "Target Session"),
+      preview: "Approval arrived while targeting.",
+      status: "input_required",
+    }));
+  });
+  assert.match(container.textContent ?? "", /Approval arrived while targeting/);
+  assert.match(container.textContent ?? "", /Approval/);
+
+  await act(async () => {
+    pointer("pointerup", 7, "touch");
+    container.querySelector<HTMLButtonElement>(".inbox-row")!.click();
+    pointer("pointerout", 1, "mouse");
+  });
+  assert.deepEqual(selected, ["target"]);
+  assert.deepEqual(events, ["target:1:true:mouse", "press:7:true:touch", "press:7:false:touch", "target:1:false:mouse"]);
 
   await act(async () => { root.unmount(); });
   container.remove();

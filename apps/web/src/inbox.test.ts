@@ -13,6 +13,7 @@ import {
   clampInboxSplitRatio,
   deriveInboxSplits,
   durableInboxProjectKey,
+  extendInboxHeldOrder,
   inboxProjectName,
   migrateInboxProjectPins,
   newSessionPresetForInboxSplit,
@@ -27,8 +28,10 @@ import {
   nextInboxSplitKey,
   repairInboxSelection,
   repairInboxSelectionAfterSnapshot,
+  repairInboxSelectionForHeldOrder,
+  reconcileInboxItems,
+  reconcileInboxOrder,
   serializeInboxSplitRatio,
-  settledInboxOrder,
   shouldRestoreInboxScroll,
   sortInboxSessions,
 } from "./inbox.js";
@@ -390,12 +393,36 @@ test("split cycling wraps in both directions and tolerates a removed active spli
   assert.equal(nextInboxSplitKey([], "removed", "next"), "removed");
 });
 
-test("navigation settle projection suppresses reorder for 500 ms without retaining removed rows", () => {
-  const current = ["selected", "older", "newest"];
-  const canonical = ["newest", "selected", "arrived"];
-  assert.deepEqual(settledInboxOrder(current, canonical, 1_000, 1_499), ["selected", "newest", "arrived"]);
-  assert.deepEqual(settledInboxOrder(current, canonical, 1_000, 1_500), canonical);
-  assert.deepEqual(settledInboxOrder(current, canonical, null, 1_100), canonical);
+test("interaction order retains existing rows, removes vanished rows, and appends arrivals", () => {
+  assert.deepEqual(
+    reconcileInboxOrder(["selected", "older", "newest"], ["arrived", "newest", "selected"]),
+    ["selected", "newest", "arrived"],
+  );
+});
+
+test("successive arrivals append without moving an earlier arrival", () => {
+  const afterFirst = extendInboxHeldOrder(["older", "newest"], ["arrival-1", "newest", "older"]);
+  const afterSecond = extendInboxHeldOrder(afterFirst, ["arrival-2", "arrival-1", "newest", "older"]);
+  assert.deepEqual(afterSecond, ["older", "newest", "arrival-1", "arrival-2"]);
+  assert.deepEqual(reconcileInboxOrder(afterSecond, ["arrival-2", "arrival-1", "newest", "older"]), afterSecond);
+});
+
+test("interaction order uses current row data instead of freezing live content", () => {
+  const current = [{ id: "older", status: "idle" }, { id: "newest", status: "idle" }];
+  const next = [{ id: "newest", status: "needs-input" }, { id: "older", status: "failed" }];
+  assert.deepEqual(reconcileInboxItems(current.map(({ id }) => id), next, ({ id }) => id), [
+    { id: "older", status: "failed" },
+    { id: "newest", status: "needs-input" },
+  ]);
+});
+
+test("selection repair follows the held visual slot after external removal", () => {
+  const held = ["first", "selected", "last"];
+  assert.equal(repairInboxSelectionForHeldOrder(true, ["last", "first"], held, "selected"), "last");
+  assert.equal(repairInboxSelectionForHeldOrder(true, ["first", "selected"], held, "last"), "selected");
+  assert.equal(repairInboxSelectionForHeldOrder(true, ["last", "first"], held, "first"), "first");
+  assert.equal(repairInboxSelectionForHeldOrder(true, ["hidden", "first"], ["first", "selected"], "selected"), "first");
+  assert.equal(repairInboxSelectionForHeldOrder(false, [], held, "selected"), "selected");
 });
 
 test("approval keyboard intents require one exact semantic option and never guess", () => {
