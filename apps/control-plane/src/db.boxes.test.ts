@@ -49,6 +49,50 @@ test("getBoxConfig returns ssh details + parsed workspaces", () => {
   assert.equal(db.getBox("box-1")?.runnerDataLayout, "legacy");
 });
 
+test("pre-PR box schemas migrate before account-ledger backfill when empty or populated", () => {
+  for (const populated of [false, true]) {
+    const root = mkdtempSync(join(tmpdir(), `wollipog-box-pre-pr-${populated ? "populated" : "empty"}-`));
+    const path = join(root, "control-plane.db");
+    let db: ControlPlaneDb | undefined;
+    try {
+      db = ControlPlaneDb.open(path);
+      if (populated) db.createBox(box({ autoReconnect: false }));
+      db.close();
+      db = undefined;
+
+      const legacy = new DatabaseSync(path);
+      legacy.exec("DROP TABLE legacy_ssh_account_adoptions");
+      for (const column of [
+        "runner_data_dir",
+        "legacy_adoption_epoch",
+        "legacy_adoption_pending",
+        "legacy_adoption_authorized_by",
+        "legacy_adoption_authorized_role",
+        "legacy_adoption_authorized_at",
+        "legacy_adoption_completed_at",
+      ]) {
+        legacy.exec(`ALTER TABLE boxes DROP COLUMN ${column}`);
+      }
+      legacy.close();
+
+      db = ControlPlaneDb.open(path);
+      const columns = new Set(
+        (db.raw().prepare("PRAGMA table_info(boxes)").all() as Array<{ name: string }>).map((row) => row.name),
+      );
+      assert.ok(columns.has("runner_data_dir"));
+      assert.ok(columns.has("legacy_adoption_epoch"));
+      assert.equal(
+        Number((db.raw().prepare("SELECT COUNT(*) AS count FROM legacy_ssh_account_adoptions").get() as { count: number }).count),
+        0,
+      );
+      assert.equal(Boolean(db.getBox("box-1")), populated);
+    } finally {
+      db?.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("new managed data roots and legacy adoption authorization survive restart with stale-safe completion", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-box-data-adoption-"));
   const path = join(root, "control-plane.db");

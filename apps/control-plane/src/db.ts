@@ -2523,37 +2523,6 @@ export class ControlPlaneDb {
       }
     }
     db.exec(
-      `CREATE TABLE IF NOT EXISTS legacy_ssh_account_adoptions (
-         ssh_target TEXT NOT NULL,
-         ssh_port INTEGER NOT NULL,
-         epoch TEXT NOT NULL,
-         status TEXT NOT NULL CHECK (status IN ('pending','completed')),
-         adopter_box_id TEXT NOT NULL,
-         authorized_by TEXT NOT NULL,
-         authorized_role TEXT NOT NULL CHECK (authorized_role IN ('owner','admin')),
-         authorized_at INTEGER NOT NULL,
-         completed_at INTEGER,
-         completed_credential_id TEXT,
-         completed_binary_identity TEXT,
-         PRIMARY KEY (ssh_target, ssh_port)
-       )`,
-    );
-    db.exec(
-      `INSERT OR IGNORE INTO legacy_ssh_account_adoptions
-         (ssh_target, ssh_port, epoch, status, adopter_box_id, authorized_by, authorized_role,
-          authorized_at, completed_at, completed_binary_identity)
-       SELECT trim(ssh_target), ssh_port, legacy_adoption_epoch,
-              CASE WHEN legacy_adoption_pending=1 THEN 'pending' ELSE 'completed' END,
-              box_id, legacy_adoption_authorized_by, legacy_adoption_authorized_role,
-              legacy_adoption_authorized_at, legacy_adoption_completed_at, deployed_version
-         FROM boxes
-        WHERE legacy_adoption_epoch IS NOT NULL
-          AND legacy_adoption_authorized_by IS NOT NULL
-          AND legacy_adoption_authorized_role IN ('owner','admin')
-          AND legacy_adoption_authorized_at IS NOT NULL
-        ORDER BY legacy_adoption_pending DESC, legacy_adoption_authorized_at ASC, box_id ASC`,
-    );
-    db.exec(
       `UPDATE session_command_invocations SET next_attempt_at=updated_at
        WHERE next_attempt_at IS NULL AND state IN ('pending','sent')`,
     );
@@ -3170,6 +3139,40 @@ export class ControlPlaneDb {
         /* column already present */
       }
     }
+    // Older databases must receive the rollback-compatible box mirror columns before this
+    // backfill is prepared. CREATE TABLE IF NOT EXISTS does not upgrade an existing boxes table,
+    // and SQLite resolves SELECT columns even when boxes has no rows.
+    db.exec(
+      `CREATE TABLE IF NOT EXISTS legacy_ssh_account_adoptions (
+         ssh_target TEXT NOT NULL,
+         ssh_port INTEGER NOT NULL,
+         epoch TEXT NOT NULL,
+         status TEXT NOT NULL CHECK (status IN ('pending','completed')),
+         adopter_box_id TEXT NOT NULL,
+         authorized_by TEXT NOT NULL,
+         authorized_role TEXT NOT NULL CHECK (authorized_role IN ('owner','admin')),
+         authorized_at INTEGER NOT NULL,
+         completed_at INTEGER,
+         completed_credential_id TEXT,
+         completed_binary_identity TEXT,
+         PRIMARY KEY (ssh_target, ssh_port)
+       )`,
+    );
+    db.exec(
+      `INSERT OR IGNORE INTO legacy_ssh_account_adoptions
+         (ssh_target, ssh_port, epoch, status, adopter_box_id, authorized_by, authorized_role,
+          authorized_at, completed_at, completed_binary_identity)
+       SELECT trim(ssh_target), ssh_port, legacy_adoption_epoch,
+              CASE WHEN legacy_adoption_pending=1 THEN 'pending' ELSE 'completed' END,
+              box_id, legacy_adoption_authorized_by, legacy_adoption_authorized_role,
+              legacy_adoption_authorized_at, legacy_adoption_completed_at, deployed_version
+         FROM boxes
+        WHERE legacy_adoption_epoch IS NOT NULL
+          AND legacy_adoption_authorized_by IS NOT NULL
+          AND legacy_adoption_authorized_role IN ('owner','admin')
+          AND legacy_adoption_authorized_at IS NOT NULL
+        ORDER BY legacy_adoption_pending DESC, legacy_adoption_authorized_at ASC, box_id ASC`,
+    );
     // One-time backfill for rows that predate message_count (and any row that somehow lost it):
     // cheap at open (one scan), and keeps sessionView free of per-row COUNT(*) forever after.
     db.exec(
