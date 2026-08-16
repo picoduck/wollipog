@@ -47,6 +47,7 @@ interface Harness {
   stderr: string[];
   resolvedModels: string[];
   authenticationFailures: number;
+  subscriptionUsage: unknown[];
   /** Invoke the private mapper and return its StopReason | null. */
   feed: (msg: unknown) => unknown;
 }
@@ -56,11 +57,13 @@ function makeHarness(): Harness {
   const stderr: string[] = [];
   const resolvedModels: string[] = [];
   let authenticationFailures = 0;
+  const subscriptionUsage: unknown[] = [];
   const cb: DriverCallbacks = {
     onEvent: (payload) => events.push(payload),
     onStderr: (text) => stderr.push(text),
     onModelResolved: (model) => resolvedModels.push(model),
     onAuthenticationFailure: () => { authenticationFailures += 1; },
+    onSubscriptionUsage: (update) => subscriptionUsage.push(update),
     onExit: () => {},
   };
   const opts: DriverOptions = {
@@ -75,8 +78,30 @@ function makeHarness(): Harness {
   const driver = new ClaudeCodeDriver(opts, cb);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const feed = (msg: unknown) => (driver as any).handleEvent(msg);
-  return { driver, events, stderr, resolvedModels, get authenticationFailures() { return authenticationFailures; }, feed };
+  return {
+    driver,
+    events,
+    stderr,
+    resolvedModels,
+    get authenticationFailures() { return authenticationFailures; },
+    subscriptionUsage,
+    feed,
+  };
 }
+
+test("Claude rate-limit events forward during and between turns without transcript or stderr noise", () => {
+  const h = makeHarness();
+  const active = { type: "rate_limit_event", rate_limit_info: { rate_limit_type: "five_hour", resets_at: 2_000_000_000 } };
+  assert.equal(h.feed(active), null);
+  (h.driver as any).processPersistentLine(JSON.stringify({
+    type: "rate_limit_event",
+    rate_limits: { seven_day: { used_percentage: 45 } },
+  }));
+  assert.equal(h.subscriptionUsage.length, 2);
+  assert.deepEqual(h.subscriptionUsage[0], { provider: "claude", kind: "sparse", payload: active });
+  assert.deepEqual(h.events, []);
+  assert.deepEqual(h.stderr, []);
+});
 
 const baseOpts: DriverOptions = {
   command: "claude",

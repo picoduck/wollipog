@@ -165,6 +165,10 @@ import {
 } from "./web-dist.js";
 import { normalizeDriverTelemetry, telemetryWindowDays } from "./driver-telemetry.js";
 import { registerUsageRoutes } from "./usage-routes.js";
+import {
+  validateSubscriptionUsageInventory,
+  validateSubscriptionUsageSnapshot,
+} from "./subscription-usage.js";
 import { validateRegistryApproval, type RegistryApprovalInput } from "./registry-approval.js";
 import { AutomationsService } from "./automations.js";
 import { buildAuthorizedSessionTranscriptExport, type TranscriptExportFormat } from "./session-exports.js";
@@ -959,6 +963,64 @@ app.register(async (instance) => {
           app.log.info(`runner ${msg.runnerId} agents: [${msg.agents.map((a) => a.id).join(", ")}]`);
         }
         break;
+      case "subscription_usage_updated":
+        if (!runnerSupportsProtocol(db.getRunner(runnerId!)?.protocolVersion, "subscriptionUsage")) {
+          app.log.warn(`runner ${runnerId} sent subscription usage without negotiated support`);
+          break;
+        }
+        try {
+          db.upsertSubscriptionUsageSnapshot(
+            validateSubscriptionUsageSnapshot(msg.snapshot, runnerId!, db),
+          );
+        } catch (error) {
+          app.log.warn(
+            `runner ${runnerId} sent invalid subscription usage — ${error instanceof Error ? error.message : "ignored"}`,
+          );
+        }
+        break;
+      case "subscription_usage_inventory":
+        if (!runnerSupportsProtocol(db.getRunner(runnerId!)?.protocolVersion, "subscriptionUsage")) {
+          app.log.warn(`runner ${runnerId} sent a subscription usage inventory without negotiated support`);
+          break;
+        }
+        if (runnerId !== msg.runnerId) {
+          app.log.warn(`runner ${runnerId} sent a mismatched subscription usage inventory`);
+          break;
+        }
+        try {
+          db.replaceSubscriptionUsageSnapshots(
+            runnerId,
+            validateSubscriptionUsageInventory(msg.snapshots, runnerId, db),
+          );
+        } catch (error) {
+          app.log.warn(
+            `runner ${runnerId} sent invalid subscription usage inventory — ${error instanceof Error ? error.message : "ignored"}`,
+          );
+        }
+        break;
+      case "subscription_usage_refresh_result": {
+        if (!runnerSupportsProtocol(db.getRunner(runnerId!)?.protocolVersion, "subscriptionUsage")) {
+          app.log.warn(`runner ${runnerId} sent a subscription usage refresh result without negotiated support`);
+          break;
+        }
+        if (!msg.ok) {
+          hub.resolveRunnerRequest(msg, runnerId!);
+          break;
+        }
+        try {
+          const snapshots = validateSubscriptionUsageInventory(msg.snapshots, runnerId!, db);
+          db.replaceSubscriptionUsageSnapshots(runnerId!, snapshots);
+          hub.resolveRunnerRequest({ ...msg, snapshots }, runnerId!);
+        } catch (error) {
+          hub.resolveRunnerRequest({
+            type: "subscription_usage_refresh_result",
+            requestId: msg.requestId,
+            ok: false,
+            error: error instanceof Error ? error.message : "invalid subscription usage refresh result",
+          }, runnerId!);
+        }
+        break;
+      }
       case "driver_telemetry": {
         const event = normalizeDriverTelemetry(msg);
         if (runnerId != null && event) {
@@ -2736,7 +2798,7 @@ app.get("/api/telemetry/drivers", async (req, reply) => {
 
 // Content-free, observation-time usage accounting. Human members see only frozen ownership
 // scopes they may access; conductor credentials are deliberately excluded from this surface.
-registerUsageRoutes(app, db, requestPrincipal);
+registerUsageRoutes(app, db, requestPrincipal, hub);
 
 // Per-turn checkpoint rewind (T3-style, files only — the conversation continues). The runner
 // re-checks authoritatively (turn running, checkpoint exists); guards here fail fast.

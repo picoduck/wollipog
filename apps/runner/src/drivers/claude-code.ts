@@ -943,7 +943,11 @@ export class ClaudeCodeDriver implements Driver {
     const turn = this.activePersistentTurn;
     if (!turn) {
       this.observeBackgroundLifecycle(msg);
-      if (msg.type !== "system") this.cb.onStderr(`ignored ${String(msg.type ?? "unknown")} outside an active Claude turn`);
+      if (msg.type === "rate_limit_event") {
+        this.cb.onSubscriptionUsage?.({ provider: "claude", kind: "sparse", payload: msg });
+      } else if (msg.type !== "system") {
+        this.cb.onStderr(`ignored ${String(msg.type ?? "unknown")} outside an active Claude turn`);
+      }
       return;
     }
     if (msg.type === "system" && msg.subtype === "init" && msg.session_id === this.sessionId) {
@@ -1563,6 +1567,10 @@ export class ClaudeCodeDriver implements Driver {
     const parentId = typeof msg.parent_tool_use_id === "string" && msg.parent_tool_use_id ? msg.parent_tool_use_id : null;
     const pp = parentId ? { parentToolUseId: parentId } : null;
     switch (msg.type) {
+      case "rate_limit_event":
+        this.cb.onSubscriptionUsage?.({ provider: "claude", kind: "sparse", payload: msg });
+        return null;
+
       case "system":
         if (msg.subtype === "init" && typeof msg.model === "string" && msg.model) {
           this.cb.onModelResolved?.(msg.model);

@@ -16,6 +16,7 @@
 import type {
   AgentCapabilities,
   AgentContext,
+  AgentDefinition,
   AgentDriverKind,
   AgentSlashCommand,
   AcpRuntimeCapabilities,
@@ -42,7 +43,12 @@ import { isPromptImageReference, PROTOCOL_VERSION, providerSupportsConversationF
 import { createHash, randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import { makeDriver, type Driver } from "./drivers/factory.js";
-import type { DriverBackgroundWorkUpdate, DriverSteerResult, StopReason } from "./drivers/driver.js";
+import type {
+  DriverBackgroundWorkUpdate,
+  DriverSteerResult,
+  DriverSubscriptionUsageUpdate,
+  StopReason,
+} from "./drivers/driver.js";
 import { CodexAppServerResumeError } from "./drivers/codex-app-server.js";
 import { BoxAdmission, type AdmissionRequest } from "./box-admission.js";
 import { discoverIncompleteClaudeTasks, discoverIncompleteClaudeTasksInContext } from "./claude-background-work.js";
@@ -620,6 +626,12 @@ export class SessionManager {
     private readonly controlPlaneProtocolVersion: () => number | null = () => PROTOCOL_VERSION,
     private readonly runnerOwnerHash?: string,
     private readonly providerAuthRecovery?: ProviderAuthRecoveryController,
+    private readonly onSubscriptionUsageUpdate?: (
+      agentId: string,
+      driver: AgentDriverKind,
+      context: AgentContext,
+      update: DriverSubscriptionUsageUpdate,
+    ) => void,
   ) {
     this.lockOwner = `${runnerId}#${randomUUID()}`;
     this.providerHomeLeases = runnerOwnerHash ? new ProviderHomeLeaseRegistry(runnerOwnerHash) : undefined;
@@ -664,6 +676,32 @@ export class SessionManager {
       context: meta.context,
       env: meta.env,
     });
+  }
+
+  /** Account probes are no-turn provider launches, but the provider may still mutate its effective
+   * HOME while initializing. Bind them to the same attested owner lease as sessions and TUIs. */
+  async prepareSubscriptionUsageProbe(
+    agent: AgentDefinition,
+    env: Record<string, string>,
+    sourceId: string,
+  ): Promise<SpawnIsolation | undefined> {
+    const context = agent.context ?? { kind: "native" as const };
+    const isolation = await this.resolveIsolation(this.executionIsolation, context, {}, {
+      driver: agent.driver ?? "acp",
+      dataDir: this.stateDir,
+      env,
+      sessionId: `subscription-usage:${sourceId}`,
+      cwd: this.stateDir,
+      ...(this.runnerOwnerHash ? { ownerHash: this.runnerOwnerHash } : {}),
+    });
+    this.providerHomeLeases?.acquire({
+      driver: agent.driver ?? "acp",
+      command: agent.command,
+      context,
+      env,
+      isolation,
+    });
+    return isolation;
   }
 
   /** Re-scan durable Claude work after each successful control-plane registration/reconnect. */
@@ -2084,6 +2122,11 @@ export class SessionManager {
           const live = this.active.get(sessionId);
           if (!live || live.client !== client || live.launchGeneration !== launchGeneration) return;
           this.onProviderAuthenticationFailure(sessionId, meta);
+        },
+        onSubscriptionUsage: (update) => {
+          if (meta.agentId) {
+            this.onSubscriptionUsageUpdate?.(meta.agentId, meta.driver, meta.context, update);
+          }
         },
         onAcpCapabilities: (capabilities) => {
           meta.acpCapabilities = capabilities;

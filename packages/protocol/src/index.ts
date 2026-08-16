@@ -224,7 +224,9 @@
 // 79: provider-authentication terminal receipts use a distinct error code. A v79 runner sending
 //     to an older control plane downgrades only the wire projection to COMMAND_CANCELLED so the
 //     older validator still accepts a terminal receipt; the runner-local journal keeps exact truth.
-export const PROTOCOL_VERSION = 79;
+// 80: runner-owned subscription-usage sources publish normalized, secret-free provider windows;
+//     correlated refresh requests remain no-turn and preserve last-known control-plane snapshots.
+export const PROTOCOL_VERSION = 80;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
@@ -337,6 +339,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   gitVisibility: 76,
   durablePromptQueueIdentity: 78,
   providerAuthenticationReceipts: 79,
+  subscriptionUsage: 80,
 } as const;
 
 /* ========================================================================== */
@@ -2023,6 +2026,81 @@ export interface UsageAggregationResponse {
   byRunner: UsageBreakdown[];
 }
 
+/* ---------------- Provider subscription usage (account-level) ---------- */
+
+export type SubscriptionUsageProvider = "codex" | "claude";
+export type SubscriptionUsageState =
+  | "available"
+  | "unavailable"
+  | "unsupported"
+  | "unauthenticated"
+  | "not_applicable";
+export type SubscriptionUsageFreshness = "fresh" | "stale";
+
+/** One provider-defined allowance window. IDs and labels come from the provider where available;
+ * unknown buckets remain renderable without a Wollipog release. Percentages are 0..100. */
+export interface SubscriptionUsageBucket {
+  id: string;
+  label: string;
+  usedPercent?: number;
+  remainingPercent?: number;
+  windowDurationMinutes?: number;
+  /** Unix epoch milliseconds. */
+  resetsAt?: number;
+  /** Provider-reported availability of this exact window, independent of the source state. */
+  status?: "available" | "warning" | "exhausted";
+}
+
+export interface SubscriptionUsageCredits {
+  hasCredits?: boolean;
+  unlimited?: boolean;
+  /** Provider-authored decimal display value; never parsed as currency by the control plane. */
+  balance?: string;
+}
+
+export interface SubscriptionUsageSpendControl {
+  id: string;
+  label: string;
+  limit?: string;
+  used?: string;
+  remainingPercent?: number;
+  /** Unix epoch milliseconds. */
+  resetsAt?: number;
+  reached?: boolean;
+}
+
+/** Secret-free runner snapshot for one configured provider source. `sourceId` is an opaque hash of
+ * runner-local agent/context metadata, never an account id, email, credential, or filesystem path. */
+export interface SubscriptionUsageSnapshot {
+  sourceId: string;
+  runnerId: string;
+  agentId: string;
+  provider: SubscriptionUsageProvider;
+  state: SubscriptionUsageState;
+  detail?: string;
+  fetchedAt: number;
+  buckets: SubscriptionUsageBucket[];
+  plan?: string;
+  credits?: SubscriptionUsageCredits;
+  spendControls?: SubscriptionUsageSpendControl[];
+}
+
+/** Principal-scoped control-plane projection. Last-known data remains present while stale/offline. */
+export interface SubscriptionUsageSourceView extends SubscriptionUsageSnapshot {
+  runnerName: string;
+  agentName: string;
+  runnerStatus: RunnerStatus;
+  freshness: SubscriptionUsageFreshness;
+}
+
+export interface SubscriptionUsageResponse {
+  sources: SubscriptionUsageSourceView[];
+  staleAfterMs: number;
+  generatedAt: number;
+  /** Present only after a manual refresh; failures retain last-known source data. */
+  refresh?: { attempted: number; failed: number };
+}
+
 /* ------------------- Operational transcript projection ------------------- */
 
 /**
@@ -3181,6 +3259,29 @@ export interface AgentsUpdatedMessage {
   editors?: EditorInfo[];
 }
 
+/** Event-driven or initial account-level provider usage update. The control plane validates the
+ * runner binding and persists only this normalized, secret-free shape. */
+export interface SubscriptionUsageUpdatedMessage {
+  type: "subscription_usage_updated";
+  snapshot: SubscriptionUsageSnapshot;
+}
+
+/** Authoritative replacement of one runner's complete provider-source inventory. */
+export interface SubscriptionUsageInventoryMessage {
+  type: "subscription_usage_inventory";
+  runnerId: string;
+  snapshots: SubscriptionUsageSnapshot[];
+}
+
+/** Correlated completion of one bounded, no-turn refresh request. */
+export interface SubscriptionUsageRefreshResultMessage {
+  type: "subscription_usage_refresh_result";
+  requestId: string;
+  ok: boolean;
+  snapshots?: SubscriptionUsageSnapshot[];
+  error?: string;
+}
+
 /** Runner reports the current queue of prompts waiting behind a session's running turn (ephemeral,
  * relayed to dashboards — never persisted). Sent whenever the queue changes (enqueue/dequeue/cancel);
  * an empty list means the queue drained. */
@@ -3282,6 +3383,9 @@ export type RunnerToControlPlane =
   | ShellInventoryCompleteMessage
   | ProcessStatusMessage
   | AgentsUpdatedMessage
+  | SubscriptionUsageUpdatedMessage
+  | SubscriptionUsageInventoryMessage
+  | SubscriptionUsageRefreshResultMessage
   | SessionQueueMessage
   | InterruptTurnResultMessage
   | SteerSessionResultMessage
@@ -3605,6 +3709,12 @@ export interface ForkResultMessage {
 export interface RediscoverMessage {
   type: "rediscover";
   runnerId: string;
+}
+
+/** Ask the runner to refresh provider-owned account usage without starting or interrupting a turn. */
+export interface RefreshSubscriptionUsageMessage {
+  type: "refresh_subscription_usage";
+  requestId: string;
 }
 
 export interface LogoutAgentMessage {
@@ -4327,6 +4437,7 @@ export type ControlPlaneToRunner =
   | RewindSessionMessage
   | ForkSessionMessage
   | RediscoverMessage
+  | RefreshSubscriptionUsageMessage
   | LogoutAgentMessage
   | AcpRegistryApprovalMessage
   | GitActionRequestMessage

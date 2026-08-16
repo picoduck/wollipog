@@ -13,10 +13,12 @@ import {
   parseMessage,
   PROTOCOL_VERSION,
   projectRunnerMessageForProtocol,
+  runnerSupportsProtocol,
   validatePromptImageInputs,
   type AdoptSessionMessage,
   type AcpRuntimeCapabilities,
   type AgentDriverKind,
+  type AgentDefinition,
   type AgentContext,
   type AgentsUpdatedMessage,
   type ControlPlaneToRunner,
@@ -139,6 +141,10 @@ import {
   type RunnerDataDirLease,
 } from "./runner-data-dir.js";
 import { waitForRunnerControlPlaneAttestation } from "./control-plane-attestation.js";
+import {
+  SubscriptionUsageManager,
+  type SubscriptionUsageManagerOptions,
+} from "./subscription-usage.js";
 
 const INITIAL_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 30_000;
@@ -333,6 +339,18 @@ function runnerLocalAgentEnv(agentId: string | null, driver: AgentDriverKind, co
   return { ...(exact?.env ?? resolveLaunchForDriver(metadata.agents, driver, context)?.env ?? {}) };
 }
 
+let authorizeSubscriptionUsageProbe: SubscriptionUsageManagerOptions["authorizeProbe"];
+
+const subscriptionUsage = new SubscriptionUsageManager({
+  runnerId: config.runnerId,
+  agents: () => metadata.agents,
+  resolveEnv: (agentId, driver, context) =>
+    runnerLocalAgentEnv(agentId, driver ?? "acp", context),
+  authorizeProbe: (agent, env, sourceId) => authorizeSubscriptionUsageProbe?.(agent, env, sourceId),
+  publish: (snapshot) => sendUp({ type: "subscription_usage_updated", snapshot }),
+  log,
+});
+
 function updateAgentAuthStatus(agentId: string, update: AcpAuthRuntime): void {
   const prior = acpAuthStatus.get(agentId) ?? {};
   if (
@@ -452,7 +470,12 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
   // The existing runner credential is already staged in a protected local file. Reuse it only as
   // an HMAC key so structural scope/account equality cannot be dictionary-tested from meta.json.
   new NativeProviderAuthRecovery(undefined, config.token),
+  (agentId, driver, context, update) => {
+    subscriptionUsage.observe(agentId, driver, context, update);
+  },
 );
+authorizeSubscriptionUsageProbe = (agent, env, sourceId) =>
+  sessions.prepareSubscriptionUsageProbe(agent, env, sourceId);
 const sessionStarts = new SessionStartFence();
 const pendingShellOpenCancellations = new PendingShellOpenCancellations();
 sessions.reconcileStore(); // demote any sessions left mid-flight by a previous run to idle
@@ -701,6 +724,13 @@ async function runDiscovery(refreshModels = false): Promise<void> {
       editors,
     };
     sendUp(update);
+    if (registered && runnerSupportsProtocol(controlPlaneProtocolVersion, "subscriptionUsage")) {
+      sendUp({
+        type: "subscription_usage_inventory",
+        runnerId: config.runnerId,
+        snapshots: subscriptionUsage.syncSources(),
+      });
+    }
   } catch (err) {
     log(`discovery failed: ${(err as Error).message}`);
   } finally {
@@ -778,6 +808,20 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       // agent rows, and a duplicate next to a just-flushed agents_updated is harmless.
       if (discoveryDone) {
         sendUp({ type: "agents_updated", runnerId: config.runnerId, agents: agentsForControlPlane(), editors: metadata.editors });
+      }
+      if (runnerSupportsProtocol(controlPlaneProtocolVersion, "subscriptionUsage")) {
+        sendUp({
+          type: "subscription_usage_inventory",
+          runnerId: config.runnerId,
+          snapshots: subscriptionUsage.syncSources(),
+        });
+        void subscriptionUsage.refreshAll()
+          .then((snapshots) => sendUp({
+            type: "subscription_usage_inventory",
+            runnerId: config.runnerId,
+            snapshots,
+          }))
+          .catch((error) => log(`subscription usage refresh failed: ${errText(error)}`));
       }
       // The CP dropped this runner's queue overlays on register (in-memory queues are assumed
       // dead), but OURS survived the socket blip — re-report every non-empty queue or those
@@ -1082,6 +1126,21 @@ function handleCommand(msg: ControlPlaneToRunner): void {
     case "rediscover":
       log("rediscover requested");
       void runDiscovery(true);
+      break;
+    case "refresh_subscription_usage":
+      void subscriptionUsage.refreshAll()
+        .then((snapshots) => sendUp({
+          type: "subscription_usage_refresh_result",
+          requestId: msg.requestId,
+          ok: true,
+          snapshots,
+        }))
+        .catch((error) => sendUp({
+          type: "subscription_usage_refresh_result",
+          requestId: msg.requestId,
+          ok: false,
+          error: `subscription usage refresh failed: ${errText(error)}`,
+        }));
       break;
     case "logout_agent":
       void sessions.logoutAgent(msg.sessionId).then((result) =>

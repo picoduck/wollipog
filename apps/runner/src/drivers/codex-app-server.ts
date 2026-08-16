@@ -578,6 +578,9 @@ export class CodexAppServerDriver implements Driver {
       const u = flattenUsage(p?.tokenUsage?.last ?? p?.tokenUsage?.lastTurn ?? p?.tokenUsage?.last_turn);
       if (u && !this.turnUsageClosed) this.pendingTurnUsage = u;
     });
+    peer.onNotification("account/rateLimits/updated", (payload: Json) => {
+      this.cb.onSubscriptionUsage?.({ provider: "codex", kind: "sparse", payload });
+    });
     peer.onNotification("turn/completed", (p: Json) => {
       this.closeTurnUsage();
       const status = p?.turn?.status;

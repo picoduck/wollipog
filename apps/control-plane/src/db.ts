@@ -78,6 +78,8 @@ import {
   type UsageAggregationResponse,
   type UsageAmount,
   type UsageRetentionPolicy,
+  type SubscriptionUsageResponse,
+  type SubscriptionUsageSnapshot,
   type UserStatus,
   type OS,
   type PendingApproval,
@@ -1541,6 +1543,20 @@ CREATE TABLE IF NOT EXISTS usage_aggregation_meta (
   id                 INTEGER PRIMARY KEY CHECK (id = 1),
   baseline_seeded_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS subscription_usage_snapshots (
+  runner_id           TEXT NOT NULL,
+  source_id           TEXT NOT NULL,
+  agent_id            TEXT NOT NULL,
+  provider            TEXT NOT NULL CHECK (provider IN ('codex', 'claude')),
+  snapshot             TEXT NOT NULL,
+  fetched_at           INTEGER NOT NULL,
+  updated_at           INTEGER NOT NULL,
+  PRIMARY KEY (runner_id, source_id),
+  FOREIGN KEY (runner_id) REFERENCES runners(runner_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_subscription_usage_runner
+  ON subscription_usage_snapshots(runner_id, provider, agent_id);
 `;
 
 /**
@@ -7148,6 +7164,160 @@ export class ControlPlaneDb {
       byAgent: breakdown("agent"),
       byRunner: breakdown("runner"),
     };
+  }
+
+  private subscriptionUsageSnapshotForStorage(
+    snapshot: SubscriptionUsageSnapshot,
+    prior: SubscriptionUsageSnapshot | undefined,
+  ): SubscriptionUsageSnapshot {
+    if (snapshot.state !== "unavailable" || snapshot.buckets.length > 0 ||
+        !Array.isArray(prior?.buckets) || prior.buckets.length === 0 ||
+        prior.provider !== snapshot.provider || prior.agentId !== snapshot.agentId) {
+      return snapshot;
+    }
+    return {
+      ...prior,
+      detail: snapshot.detail ?? "The latest provider refresh was unavailable; showing the last provider snapshot.",
+    };
+  }
+
+  private writeSubscriptionUsageSnapshot(snapshot: SubscriptionUsageSnapshot, now: number): void {
+    this.stmt(
+      `INSERT INTO subscription_usage_snapshots
+         (runner_id, source_id, agent_id, provider, snapshot, fetched_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(runner_id, source_id) DO UPDATE SET
+         agent_id=excluded.agent_id,
+         provider=excluded.provider,
+         snapshot=excluded.snapshot,
+         fetched_at=excluded.fetched_at,
+         updated_at=excluded.updated_at`,
+    ).run(
+      snapshot.runnerId,
+      snapshot.sourceId,
+      snapshot.agentId,
+      snapshot.provider,
+      JSON.stringify(snapshot),
+      snapshot.fetchedAt,
+      now,
+    );
+  }
+
+  upsertSubscriptionUsageSnapshot(snapshot: SubscriptionUsageSnapshot, now = Date.now()): void {
+    const row = this.stmt(
+      "SELECT snapshot FROM subscription_usage_snapshots WHERE runner_id=? AND source_id=?",
+    ).get(snapshot.runnerId, snapshot.sourceId) as { snapshot: string } | undefined;
+    let prior: SubscriptionUsageSnapshot | undefined;
+    try {
+      prior = row ? JSON.parse(row.snapshot) as SubscriptionUsageSnapshot : undefined;
+    } catch {
+      prior = undefined;
+    }
+    this.writeSubscriptionUsageSnapshot(this.subscriptionUsageSnapshotForStorage(snapshot, prior), now);
+  }
+
+  /** Replace the inventory for one authenticated runner without affecting another runner's data. */
+  replaceSubscriptionUsageSnapshots(
+    runnerId: string,
+    snapshots: SubscriptionUsageSnapshot[],
+    now = Date.now(),
+  ): void {
+    this.atomic(() => {
+      const existingRows = this.stmt(
+        "SELECT source_id, snapshot FROM subscription_usage_snapshots WHERE runner_id=?",
+      ).all(runnerId) as unknown as Array<{ source_id: string; snapshot: string }>;
+      const existing = new Map<string, SubscriptionUsageSnapshot>();
+      for (const row of existingRows) {
+        try {
+          existing.set(row.source_id, JSON.parse(row.snapshot) as SubscriptionUsageSnapshot);
+        } catch {
+          // A corrupt row is intentionally replaced, never retained as last-known state.
+        }
+      }
+      this.stmt("DELETE FROM subscription_usage_snapshots WHERE runner_id=?").run(runnerId);
+      for (const snapshot of snapshots) {
+        if (snapshot.runnerId !== runnerId) throw new Error("subscription usage inventory runner mismatch");
+        this.writeSubscriptionUsageSnapshot(
+          this.subscriptionUsageSnapshotForStorage(snapshot, existing.get(snapshot.sourceId)),
+          now,
+        );
+      }
+    });
+  }
+
+  /** Principal-scoped provider allowance projection. It is deliberately separate from historical
+   * token/cost aggregation: these snapshots are account-level provider state, not session usage. */
+  subscriptionUsageForPrincipal(
+    principal: AuthPrincipal,
+    now = Date.now(),
+    staleAfterMs = 10 * 60_000,
+  ): SubscriptionUsageResponse {
+    if (principal.kind !== "human") throw new Error("subscription usage requires a human principal");
+    const runners = this.listRunnersForPrincipal(principal);
+    const visibleRunnerIds = new Set(runners.map((runner) => runner.runnerId));
+    const rows = this.stmt(
+      `SELECT runner_id, source_id, snapshot
+       FROM subscription_usage_snapshots ORDER BY runner_id, provider, agent_id, source_id`,
+    ).all() as unknown as Array<{ runner_id: string; source_id: string; snapshot: string }>;
+    const stored = new Map<string, SubscriptionUsageSnapshot>();
+    for (const row of rows) {
+      if (!visibleRunnerIds.has(row.runner_id)) continue;
+      try {
+        const snapshot = JSON.parse(row.snapshot) as SubscriptionUsageSnapshot;
+        if (snapshot && typeof snapshot === "object" &&
+            snapshot.runnerId === row.runner_id && snapshot.sourceId === row.source_id &&
+            Array.isArray(snapshot.buckets)) {
+          stored.set(`${row.runner_id}:${row.source_id}`, snapshot);
+        }
+      } catch {
+        // Ignore a corrupt local row. The next authoritative runner inventory replaces it.
+      }
+    }
+
+    const sources: SubscriptionUsageResponse["sources"] = [];
+    for (const runner of runners) {
+      for (const agent of runner.agents) {
+        const provider = agent.driver === "codex-app-server"
+          ? "codex" as const
+          : agent.driver === "claude-code"
+            ? "claude" as const
+            : null;
+        if (!provider || agent.id === "conductor") continue;
+        const context = agent.context?.kind === "wsl" ? `wsl:${agent.context.distro}` : "native";
+        const sourceId = createHash("sha256")
+          .update(JSON.stringify({ runnerId: runner.runnerId, agentId: agent.id, provider, context }))
+          .digest("hex")
+          .slice(0, 32);
+        const persisted = stored.get(`${runner.runnerId}:${sourceId}`);
+        const fetchedAt = persisted?.fetchedAt ?? runner.lastSeen ?? now;
+        const snapshot: SubscriptionUsageSnapshot = persisted ?? {
+          sourceId,
+          runnerId: runner.runnerId,
+          agentId: agent.id,
+          provider,
+          state: runnerSupportsProtocol(runner.protocolVersion, "subscriptionUsage")
+            ? "unavailable"
+            : "unsupported",
+          detail: runnerSupportsProtocol(runner.protocolVersion, "subscriptionUsage")
+            ? "This provider has not reported subscription usage yet."
+            : "Update this runner to view subscription usage.",
+          fetchedAt,
+          buckets: [],
+        };
+        sources.push({
+          ...snapshot,
+          runnerName: runner.displayName ?? runner.hostname ?? runner.runnerId,
+          agentName: agent.name,
+          runnerStatus: runner.status,
+          freshness: runner.status === "offline" || now - fetchedAt > staleAfterMs ? "stale" : "fresh",
+        });
+      }
+    }
+    sources.sort((left, right) =>
+      left.provider.localeCompare(right.provider) ||
+      left.runnerName.localeCompare(right.runnerName) ||
+      left.agentName.localeCompare(right.agentName));
+    return { sources, staleAfterMs, generatedAt: now };
   }
 
   getWorkspacePath(runnerId: string, workspaceId: string): string | null {

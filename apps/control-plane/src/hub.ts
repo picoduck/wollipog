@@ -35,6 +35,7 @@ import type {
   SessionHistoryResultMessage,
   SessionHistoryPageResultMessage,
   SessionView,
+  SubscriptionUsageRefreshResultMessage,
   SteerSessionResultMessage,
 } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
@@ -149,6 +150,7 @@ export type RunnerRequestResult =
   | HostActionResultMessage
   | InterruptTurnResultMessage
   | ResolveSteeringAttemptResultMessage
+  | SubscriptionUsageRefreshResultMessage
   | SteerSessionResultMessage;
 
 interface PendingRequest {

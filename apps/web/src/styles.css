@@ -10048,6 +10048,29 @@ body.shell-dock-dragging * {
 .usage-range { display: flex; flex-wrap: wrap; gap: 6px; }
 .usage-state { padding: 28px; color: var(--text-dim); text-align: center; }
 .usage-state.error { color: var(--red); }
+.subscription-usage { margin: 0 0 24px; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-elev); }
+.subscription-usage-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.subscription-usage-heading h3 { margin: 0; }
+.subscription-usage-heading p { margin: 5px 0 0; color: var(--text-dim); font-size: var(--text-sm); }
+.subscription-usage-status { margin-top: 10px; color: var(--text-dim); font-size: var(--text-sm); }
+.subscription-source-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
+.subscription-source { padding: 14px; min-width: 0; }
+.subscription-source > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.subscription-source h4 { margin: 0; }
+.subscription-source header p, .subscription-source footer { margin: 4px 0 0; color: var(--text-dim); font-size: var(--text-xs); }
+.subscription-source footer { margin-top: 12px; }
+.subscription-state { flex: none; border: 1px solid var(--border); border-radius: var(--radius-pill); padding: 3px 7px; color: var(--text-dim); font-size: var(--text-2xs); font-weight: 700; text-transform: uppercase; letter-spacing: .03em; }
+.subscription-state[data-state="available"][data-freshness="fresh"] { border-color: color-mix(in srgb, var(--green) 50%, var(--border)); color: var(--green); }
+.subscription-state[data-freshness="stale"], .subscription-state[data-state="unavailable"] { border-color: color-mix(in srgb, var(--yellow) 50%, var(--border)); color: var(--yellow); }
+.subscription-detail { margin: 10px 0 0; color: var(--text-dim); font-size: var(--text-sm); }
+.subscription-buckets { display: grid; gap: 8px; margin: 12px 0 0; }
+.subscription-bucket { display: grid; grid-template-columns: minmax(110px, .8fr) minmax(0, 1.2fr); gap: 12px; border-top: 1px solid var(--border); padding-top: 9px; }
+.subscription-bucket dt { font-size: var(--text-sm); font-weight: 650; }
+.subscription-bucket dd { display: grid; gap: 2px; margin: 0; font-size: var(--text-xs); color: var(--text-dim); }
+.subscription-bucket dd strong { color: var(--text); font-size: var(--text-md); }
+.subscription-bucket.warning dd strong, .subscription-bucket.warning .subscription-warning { color: var(--yellow); }
+.subscription-bucket.exhausted dd strong, .subscription-bucket.exhausted .subscription-warning { color: var(--red); }
+.subscription-warning { font-weight: 700; }
 .usage-coverage { margin: 0 0 14px; font-size: 12px; }
 .usage-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 0 0 18px; }
 .usage-summary > div { border: 1px solid var(--border); background: var(--bg-elev); border-radius: 10px; padding: 14px; }
@@ -10136,6 +10159,10 @@ body.shell-dock-dragging * {
   .usage-breakdowns { grid-template-columns: minmax(0, 1fr); }
   .usage-retention { grid-template-columns: minmax(0, 1fr); align-items: stretch; }
   .usage-retention .btn { min-height: 44px; }
+  .subscription-source-grid { grid-template-columns: minmax(0, 1fr); }
+  .subscription-usage-heading { align-items: stretch; flex-direction: column; }
+  .subscription-usage-heading .btn { min-height: 44px; }
+  .subscription-bucket { grid-template-columns: minmax(0, 1fr); gap: 4px; }
 }
 
 /* ===================== Settings row primitives ==============   Three visually distinct rows. Previously an off switch, an unselected radio, and a plain

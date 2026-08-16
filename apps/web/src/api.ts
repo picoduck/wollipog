@@ -85,6 +85,7 @@ import type {
   TranscriptShareView,
   UsageAggregationGranularity,
   UsageAggregationResponse,
+  SubscriptionUsageResponse,
   UsageRetentionPolicy,
   UserStatus,
   WorkspaceInfo,
@@ -243,6 +244,12 @@ export function createApiClient(transport: ApiTransport) {
     }
     return req<UsageAggregationResponse>(`/api/usage?${query.toString()}`);
   },
+
+  subscriptionUsage: () => req<SubscriptionUsageResponse>("/api/usage/subscriptions"),
+
+  refreshSubscriptionUsage: () => req<SubscriptionUsageResponse>("/api/usage/subscriptions/refresh", {
+    method: "POST",
+  }),
 
   updateUsageRetention: (body: Pick<UsageRetentionPolicy, "hourlyDays" | "dailyDays">) =>
     req<{ retention: UsageRetentionPolicy }>("/api/usage/retention", {

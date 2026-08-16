@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import Fastify from "fastify";
+import { PROTOCOL_VERSION, type ControlPlaneToRunner } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import type { AuthPrincipal, HumanPrincipal } from "./identity.js";
 import { registerUsageRoutes } from "./usage-routes.js";
@@ -101,6 +103,67 @@ test("usage routes enforce human scope, retention roles, strict inputs, and cont
   assert.equal(JSON.stringify(body).includes("Bearer owner"), false);
   assert.equal(body.privacy, "content-free aggregates only; no session ids, prompts, paths, tool inputs, event bodies, environment values, or auth data");
 
+  await app.close();
+  db.close();
+});
+
+test("subscription usage routes are human-scoped and refresh only visible current online runners", async () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const agent = {
+    id: "codex", name: "Codex", command: "codex", args: [], env: {},
+    driver: "codex-app-server" as const, context: { kind: "native" as const },
+    codexAppServer: { status: "supported" as const, appServerAvailable: true, transport: "stdio" as const,
+      contractFingerprint: "test" },
+  };
+  const register = (runnerId: string, protocolVersion: number, userId: string) => db.registerRunner({
+    runnerId, hostname: runnerId, os: "linux", version: "1", agents: [agent], workspaces: [],
+  }, Date.now(), protocolVersion, {
+    organizationId: "org_personal", owner: { kind: "user", userId },
+  });
+  register("current", PROTOCOL_VERSION, "operator-user");
+  register("old", 77, "operator-user");
+  register("foreign-private", PROTOCOL_VERSION, "someone-else");
+  const sent: Array<{ runnerId: string; message: ControlPlaneToRunner; timeoutMs: number }> = [];
+  const sourceId = createHash("sha256").update(JSON.stringify({
+    runnerId: "current", agentId: "codex", provider: "codex", context: "native",
+  })).digest("hex").slice(0, 32);
+  const app = Fastify();
+  registerUsageRoutes(app, db, (request) => {
+    const token = request.headers.authorization?.replace(/^Bearer /, "");
+    if (token === "operator") return human("operator");
+    if (token === "agent") return {
+      kind: "agent", actorId: "agent", organizationId: "org_personal",
+      delegatedScope: { organizationId: "org_personal", owner: { kind: "user", userId: "operator-user" } },
+    };
+    return null;
+  }, {
+    requestFromRunner: async (runnerId, _requestId, message, timeoutMs) => {
+      sent.push({ runnerId, message, timeoutMs });
+      const snapshot = {
+        sourceId, runnerId, agentId: "codex", provider: "codex" as const, state: "available" as const,
+        fetchedAt: Date.now(), buckets: [{ id: "codex:primary", label: "Five-Hour Window", usedPercent: 20 }],
+      };
+      db.upsertSubscriptionUsageSnapshot(snapshot);
+      return { type: "subscription_usage_refresh_result", requestId: message.requestId!, ok: true, snapshots: [snapshot] };
+    },
+  });
+
+  for (const url of ["/api/usage/subscriptions", "/api/usage/subscriptions/refresh"]) {
+    assert.equal((await app.inject({ method: url.endsWith("refresh") ? "POST" : "GET", url })).statusCode, 403);
+    assert.equal((await app.inject({
+      method: url.endsWith("refresh") ? "POST" : "GET", url, headers: { authorization: "Bearer agent" },
+    })).statusCode, 403);
+  }
+  const response = await app.inject({
+    method: "POST", url: "/api/usage/subscriptions/refresh", headers: { authorization: "Bearer operator" },
+  });
+  assert.equal(response.statusCode, 200);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0]?.runnerId, "current", "old-protocol and inaccessible runners are not contacted");
+  assert.equal(sent[0]?.message.type, "refresh_subscription_usage");
+  assert.equal(sent[0]?.timeoutMs, 10_000);
+  assert.equal(response.json().sources[0].state, "available");
+  assert.deepEqual(response.json().refresh, { attempted: 1, failed: 0 });
   await app.close();
   db.close();
 });
