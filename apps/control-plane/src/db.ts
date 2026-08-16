@@ -3627,15 +3627,15 @@ export class ControlPlaneDb {
     if (!projectScope) throw new Error("project not found");
     const runnerScope = this.runnerScope(runnerId);
     if (!runnerScope) throw new Error("runner not found");
-    if (!scopeAudienceContained(projectScope, runnerScope)) {
+    if (!this.scopeAudienceContainedWithMembership(projectScope, runnerScope)) {
       throw new Error("project access must not expose a private runner");
     }
     const workspaceScope = requestedScope ?? projectScope;
     if (workspaceScope.organizationId !== projectScope.organizationId ||
-        !scopeAudienceContained(projectScope, workspaceScope)) {
+        !this.scopeAudienceContainedWithMembership(projectScope, workspaceScope)) {
       throw new Error("project access must not expose a private workspace");
     }
-    if (!scopeAudienceContained(workspaceScope, runnerScope)) {
+    if (!this.scopeAudienceContainedWithMembership(workspaceScope, runnerScope)) {
       throw new Error("location access must not expose a private runner");
     }
     const existing = this.stmt(
@@ -4125,7 +4125,8 @@ export class ControlPlaneDb {
     if (!workspace) throw new Error("workspace not found");
     const projectScope = this.projectScope(projectId);
     const locationScope = this.workspaceScope(input.runnerId, input.workspaceId) ?? this.runnerScope(input.runnerId);
-    if (!projectScope || !locationScope || !scopeAudienceContained(projectScope, locationScope)) {
+    if (!projectScope || !locationScope ||
+        !this.scopeAudienceContainedWithMembership(projectScope, locationScope)) {
       throw new Error("project access must not expose a private workspace");
     }
     const locationId = detached?.id ?? `loc_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
@@ -4173,7 +4174,8 @@ export class ControlPlaneDb {
     const sourceScope = this.projectScope(location.projectId);
     const targetScope = this.projectScope(targetProjectId);
     const locationScope = this.workspaceScope(location.runnerId, location.workspaceId) ?? sourceScope;
-    if (!sourceScope || !targetScope || !locationScope || !scopeAudienceContained(targetScope, locationScope)) {
+    if (!sourceScope || !targetScope || !locationScope ||
+        !this.scopeAudienceContainedWithMembership(targetScope, locationScope)) {
       throw new Error("target project access must not expose a private workspace");
     }
     const workspace = this.workspaceLocationDefinition(location.runnerId, location.workspaceId);
@@ -4187,7 +4189,7 @@ export class ControlPlaneDb {
       "SELECT id FROM sessions WHERE project_location_id=?",
     ).all(locationId) as unknown as Array<{ id: string }>).map((row) => row.id)) {
       const sessionScope = this.sessionScope(sessionId);
-      if (!sessionScope || !scopeAudienceContained(sessionScope, targetScope)) {
+      if (!sessionScope || !this.scopeAudienceContainedWithMembership(sessionScope, targetScope)) {
         throw new Error("target project cannot contain every session at this location");
       }
     }
@@ -4299,20 +4301,21 @@ export class ControlPlaneDb {
     const executionScope = session.workspaceId
       ? this.workspaceScope(session.runnerId, session.workspaceId) ?? this.runnerScope(session.runnerId)
       : this.runnerScope(session.runnerId);
-    if (projectScope && (!executionScope || !scopeAudienceContained(projectScope, executionScope))) {
+    if (projectScope &&
+        (!executionScope || !this.scopeAudienceContainedWithMembership(projectScope, executionScope))) {
       throw new Error("project access would expose the execution Location");
     }
     const sessionScope = this.sessionScope(sessionId);
     if (!sessionScope) throw new Error("session ownership is unavailable");
-    let adoptProjectScope = false;
-    if (projectScope && !scopeAudienceContained(sessionScope, projectScope)) {
-      // The only supported audience expansion is an explicit personal-session share into a team
-      // the acting user can access. Organization/team sessions are never silently narrowed into a
-      // different owner, and user-to-user transfers remain a separate ownership concern.
-      adoptProjectScope = Boolean(adoptTeamProjectForUserId &&
-        sessionScope.owner.kind === "user" && sessionScope.owner.userId === adoptTeamProjectForUserId &&
-        projectScope.owner.kind === "team");
-      if (!adoptProjectScope) throw new Error("session access is broader than project access");
+    // Explicitly filing a personal session into its team Project is a deliberate share and retains
+    // the established behavior of adopting the team scope, even though membership also proves that
+    // keeping the personal scope would satisfy containment.
+    const adoptProjectScope = Boolean(projectScope && adoptTeamProjectForUserId &&
+      sessionScope.owner.kind === "user" && sessionScope.owner.userId === adoptTeamProjectForUserId &&
+      projectScope.owner.kind === "team");
+    if (projectScope && !adoptProjectScope &&
+        !this.scopeAudienceContainedWithMembership(sessionScope, projectScope)) {
+      throw new Error("session access is broader than project access");
     }
     this.atomic(() => {
       // A deliberate personal-to-team share adopts the team audience atomically. Safe filing into
@@ -5076,6 +5079,17 @@ export class ControlPlaneDb {
     if (!team) return null;
     this.db.exec("BEGIN");
     try {
+      const proposedMemberIds = new Set(input.memberUserIds);
+      const removedMemberIds = new Set((this.stmt(
+        "SELECT user_id FROM identity_team_members WHERE team_id=?",
+      ).all(input.teamId) as unknown as Array<{ user_id: string }>)
+        .map((row) => row.user_id)
+        .filter((userId) => !proposedMemberIds.has(userId)));
+      this.assertTeamMemberRemovalPreservesResourceContainment(
+        input.teamId,
+        input.organizationId,
+        removedMemberIds,
+      );
       this.stmt("DELETE FROM identity_team_members WHERE team_id=?").run(input.teamId);
       this.insertIdentityTeamMembers(input.teamId, input.organizationId, input.memberUserIds, input.now);
       this.stmt("UPDATE identity_teams SET updated_at=? WHERE team_id=?").run(input.now, input.teamId);
@@ -5086,6 +5100,76 @@ export class ControlPlaneDb {
     }
     const context = { ...this.localIdentityContext(), organizationId: input.organizationId };
     return this.identityAdministration(context).teams.find((item) => item.teamId === input.teamId)!;
+  }
+
+  /** Membership can be part of a persisted privacy invariant: a user-owned resource is safely
+   * nested inside a team-owned parent only while that user remains a member of the team. */
+  private assertTeamMemberRemovalPreservesResourceContainment(
+    teamId: string,
+    organizationId: string,
+    removedMemberIds: ReadonlySet<string>,
+  ): void {
+    if (removedMemberIds.size === 0) return;
+    const dependency = (
+      narrower: ResourceScope | null,
+      wider: ResourceScope | null,
+      relationship: string,
+    ): void => {
+      if (!narrower || !wider || narrower.organizationId !== organizationId ||
+          wider.organizationId !== organizationId || narrower.owner.kind !== "user" ||
+          wider.owner.kind !== "team" || wider.owner.teamId !== teamId ||
+          !removedMemberIds.has(narrower.owner.userId)) return;
+      throw new Error(
+        `cannot remove user '${narrower.owner.userId}' from this team because ${relationship} ` +
+        "relies on that membership; change the related access scopes first",
+      );
+    };
+    const locations = this.stmt(
+      `SELECT id, project_id, runner_id, workspace_id FROM project_locations
+       WHERE removed_at IS NULL`,
+    ).all() as unknown as Array<{
+      id: string;
+      project_id: string;
+      runner_id: string;
+      workspace_id: string;
+    }>;
+    for (const location of locations) {
+      const projectScope = this.projectScope(location.project_id);
+      const runnerScope = this.runnerScope(location.runner_id);
+      const locationScope = this.workspaceScope(location.runner_id, location.workspace_id) ?? runnerScope;
+      dependency(projectScope, locationScope,
+        `Project '${location.project_id}' containment in Location '${location.id}'`);
+    }
+    const workspaces = this.stmt(
+      "SELECT runner_id, workspace_id FROM workspace_ownership WHERE organization_id=?",
+    ).all(organizationId) as unknown as Array<{ runner_id: string; workspace_id: string }>;
+    for (const workspace of workspaces) {
+      dependency(
+        this.workspaceScope(workspace.runner_id, workspace.workspace_id),
+        this.runnerScope(workspace.runner_id),
+        `Location '${workspace.workspace_id}' containment in Machine '${workspace.runner_id}'`,
+      );
+    }
+    const sessions = this.stmt(
+      "SELECT id, project_id, runner_id, workspace_id FROM sessions",
+    ).all() as unknown as Array<{
+      id: string;
+      project_id: string | null;
+      runner_id: string;
+      workspace_id: string | null;
+    }>;
+    for (const session of sessions) {
+      const sessionScope = this.sessionScope(session.id);
+      const projectScope = session.project_id ? this.projectScope(session.project_id) : null;
+      const runnerScope = this.runnerScope(session.runner_id);
+      const executionScope = session.workspace_id
+        ? this.workspaceScope(session.runner_id, session.workspace_id) ?? runnerScope
+        : runnerScope;
+      dependency(sessionScope, projectScope,
+        `Session '${session.id}' containment in Project '${session.project_id ?? "unknown"}'`);
+      dependency(sessionScope, executionScope,
+        `Session '${session.id}' containment in its execution Location or Machine`);
+    }
   }
 
   private insertIdentityTeamMembers(teamId: string, organizationId: string, userIds: string[], now: number): void {
@@ -5351,10 +5435,9 @@ export class ControlPlaneDb {
     return this.stmt(
       `SELECT 1 FROM identity_team_members member
        JOIN identity_teams team ON team.team_id=member.team_id
-       JOIN identity_users user ON user.user_id=member.user_id AND user.status='active'
        JOIN identity_memberships membership
-         ON membership.organization_id=team.organization_id AND membership.user_id=user.user_id
-       WHERE team.organization_id=? AND team.team_id=? AND user.user_id=?`,
+         ON membership.organization_id=team.organization_id AND membership.user_id=member.user_id
+       WHERE team.organization_id=? AND team.team_id=? AND member.user_id=?`,
     ).get(narrower.organizationId, wider.owner.teamId, narrower.owner.userId) !== undefined;
   }
 
@@ -5697,10 +5780,10 @@ export class ControlPlaneDb {
     if (input.resource === "workspace" && input.runnerId) {
       for (const projectId of this.projectIdsForWorkspace(input.runnerId, input.resourceId)) {
         const projectScope = this.projectScope(projectId);
-        if (!projectScope || scopeAudienceContained(projectScope, input.scope)) continue;
+        if (!projectScope || this.scopeAudienceContainedWithMembership(projectScope, input.scope)) continue;
         const projectFollowedWorkspaceScope =
-          scopeAudienceContained(projectScope, currentScope) &&
-          scopeAudienceContained(currentScope, projectScope);
+          this.scopeAudienceContainedWithMembership(projectScope, currentScope) &&
+          this.scopeAudienceContainedWithMembership(currentScope, projectScope);
         if (!projectFollowedWorkspaceScope) return false;
         const activeLocationCount = this.stmt(
           `SELECT COUNT(*) AS count FROM project_locations
@@ -5715,17 +5798,18 @@ export class ControlPlaneDb {
       if (!project) return false;
       for (const location of project.locations) {
         const locationScope = this.workspaceScope(location.runnerId, location.workspaceId) ?? currentScope;
-        if (!scopeAudienceContained(input.scope, locationScope)) return false;
+        if (!this.scopeAudienceContainedWithMembership(input.scope, locationScope)) return false;
       }
       for (const sessionId of this.sessionIdsForProject(input.resourceId)) {
         const scope = this.sessionScope(sessionId);
-        if (!scope || !scopeAudienceContained(scope, input.scope)) return false;
+        if (!scope || !this.scopeAudienceContainedWithMembership(scope, input.scope)) return false;
       }
     }
     if (input.resource === "session") {
       const session = this.getSession(input.resourceId);
       const projectScope = session?.projectId ? this.projectScope(session.projectId) : null;
-      clearSessionProject = Boolean(projectScope && !scopeAudienceContained(input.scope, projectScope));
+      clearSessionProject = Boolean(projectScope &&
+        !this.scopeAudienceContainedWithMembership(input.scope, projectScope));
     }
     const table = input.resource === "runner" ? "runner_ownership"
       : input.resource === "workspace" ? "workspace_ownership"
@@ -5746,7 +5830,7 @@ export class ControlPlaneDb {
         ).run(input.scope.organizationId, input.scope.owner.kind, ownerId, input.now, cascadedProjectId);
         for (const sessionId of this.sessionIdsForProject(cascadedProjectId)) {
           const scope = this.sessionScope(sessionId);
-          if (!scope || !scopeAudienceContained(scope, input.scope)) {
+          if (!scope || !this.scopeAudienceContainedWithMembership(scope, input.scope)) {
             this.stmt(
               "UPDATE sessions SET project_id=NULL, project_location_id=NULL, updated_at=? WHERE id=?",
             ).run(input.now, sessionId);
@@ -7044,7 +7128,7 @@ export class ControlPlaneDb {
       : projectLocationId ? this.projectLocation(projectLocationId)?.projectId ?? null : inferredLocation?.projectId ?? null;
     if (projectId) {
       const projectScope = this.projectScope(projectId);
-      if (!projectScope || !scopeAudienceContained(scope, projectScope)) {
+      if (!projectScope || !this.scopeAudienceContainedWithMembership(scope, projectScope)) {
         if (input.projectId !== undefined || input.projectLocationId !== undefined) {
           throw new Error("session access is broader than project access");
         }
@@ -7133,7 +7217,7 @@ export class ControlPlaneDb {
       ? importedLocation.projectLocation
       : workspaceId ? this.findProjectLocation(runnerId, workspaceId) : null;
     const inferredProject = inferredProjectLocation && this.projectScope(inferredProjectLocation.projectId) &&
-      scopeAudienceContained(scope, this.projectScope(inferredProjectLocation.projectId)!)
+      this.scopeAudienceContainedWithMembership(scope, this.projectScope(inferredProjectLocation.projectId)!)
       ? inferredProjectLocation
       : null;
     const projectId = explicitProject ? explicitProject.projectId : inferredProject?.projectId ?? null;
@@ -7141,7 +7225,7 @@ export class ControlPlaneDb {
     if (projectId === null && projectLocationId !== null) throw new Error("a project location requires a project");
     if (projectId !== null) {
       const projectScope = this.projectScope(projectId);
-      if (!projectScope || !scopeAudienceContained(scope, projectScope)) {
+      if (!projectScope || !this.scopeAudienceContainedWithMembership(scope, projectScope)) {
         throw new Error("session access is broader than project access");
       }
     }
@@ -7280,7 +7364,10 @@ export class ControlPlaneDb {
       : null;
     const authoritativeProjectLocation = authoritativeProjectCandidate && authoritativeScope &&
       this.projectScope(authoritativeProjectCandidate.projectId) &&
-      scopeAudienceContained(authoritativeScope, this.projectScope(authoritativeProjectCandidate.projectId)!)
+      this.scopeAudienceContainedWithMembership(
+        authoritativeScope,
+        this.projectScope(authoritativeProjectCandidate.projectId)!,
+      )
       ? authoritativeProjectCandidate
       : null;
     const expectedHandoffRequest = this.getExecutionHandoffRequest(id);
@@ -7579,7 +7666,8 @@ export class ControlPlaneDb {
     const inferred = session && workspaceId ? this.findProjectLocation(session.runner_id, workspaceId) : null;
     const sessionScope = this.sessionScope(id);
     const projectScope = inferred ? this.projectScope(inferred.projectId) : null;
-    const location = inferred && sessionScope && projectScope && scopeAudienceContained(sessionScope, projectScope)
+    const location = inferred && sessionScope && projectScope &&
+      this.scopeAudienceContainedWithMembership(sessionScope, projectScope)
       ? inferred
       : null;
     this.stmt(

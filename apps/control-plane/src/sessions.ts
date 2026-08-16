@@ -107,7 +107,6 @@ import {
   type ControlPlaneDb,
 } from "./db.js";
 import { isRunnerRequestNotSentError, isRunnerRequestTimeoutError, type Hub } from "./hub.js";
-import { scopeAudienceContained } from "./resource-scope.js";
 import {
   approvalForDecision,
   conductorSafetyPolicy,
@@ -2308,7 +2307,7 @@ export class SessionsService {
     if (!projectScope) return fail("project ownership is unavailable", 409);
     // A narrower Project may safely execute in a broader Location. The reverse would let Project
     // members observe a workspace they could not otherwise access.
-    if (!scopeAudienceContained(projectScope, executionScope)) {
+    if (!this.db.scopeAudienceContainedWithMembership(projectScope, executionScope)) {
       return fail("project access would expose the execution Location", 409);
     }
     return ok(projectScope);
@@ -2527,7 +2526,8 @@ export class SessionsService {
       if (!projectSessionScope.ok || !projectSessionScope.data) {
         return fail(projectSessionScope.error ?? "session ownership is unavailable", projectSessionScope.status);
       }
-      if (sessionScope && !scopeAudienceContained(sessionScope, projectSessionScope.data)) {
+      if (sessionScope &&
+          !this.db.scopeAudienceContainedWithMembership(sessionScope, projectSessionScope.data)) {
         return fail("session access is broader than project access", 409);
       }
       sessionScope ??= projectSessionScope.data;
@@ -4241,7 +4241,10 @@ export class SessionsService {
     // every worker still adopts the selected Project scope and identity.
     const orchestratorProject = members.some((member) => member.orchestrator) &&
       requestedProject.data.projectId && orchestratorScope &&
-      !scopeAudienceContained(orchestratorScope, this.db.projectScope(requestedProject.data.projectId)!)
+      !this.db.scopeAudienceContainedWithMembership(
+        orchestratorScope,
+        this.db.projectScope(requestedProject.data.projectId)!,
+      )
       ? { projectId: null, projectLocationId: null }
       : requestedProject.data;
 

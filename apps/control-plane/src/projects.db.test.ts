@@ -858,6 +858,194 @@ test("Project-scoped workspace creation adds one managed Location without an orp
   db.close();
 });
 
+test("membership-aware containment permits member-private Projects and sessions inside team execution scopes", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const identity = db.localIdentityContext();
+  for (const userId of ["usr_member_alice", "usr_nonmember_bob"]) {
+    db.createIdentityMember({
+      userId, displayName: userId, organizationId: identity.organizationId, role: "operator", now: 1,
+    });
+  }
+  const team = db.createIdentityTeam({
+    teamId: "team_containment", organizationId: identity.organizationId, name: "Containment Team",
+    memberUserIds: ["usr_member_alice"], now: 2,
+  });
+  const teamScope = {
+    organizationId: identity.organizationId,
+    owner: { kind: "team" as const, teamId: team.teamId },
+  };
+  const aliceScope = {
+    organizationId: identity.organizationId,
+    owner: { kind: "user" as const, userId: "usr_member_alice" },
+  };
+  const bobScope = {
+    organizationId: identity.organizationId,
+    owner: { kind: "user" as const, userId: "usr_nonmember_bob" },
+  };
+  db.registerRunner(runner("runner-team", []), 3);
+  assert.equal(db.setResourceScope({
+    resource: "runner", resourceId: "runner-team", scope: teamScope, now: 4,
+  }), true);
+
+  const aliceProject = db.createProject({ name: "Alice Private", scope: aliceScope, now: 5 });
+  const workspace = db.createProjectWorkspace(
+    aliceProject.id,
+    "runner-team",
+    { name: "Team Location", path: "/team/location" },
+    6,
+    teamScope,
+  );
+  assert.deepEqual(db.workspaceScope("runner-team", workspace.id), teamScope,
+    "an Alice-private Project may use a team Location and Machine containing Alice");
+
+  const secondAliceProject = db.createProject({ name: "Second Alice Private", scope: aliceScope, now: 7 });
+  assert.equal(db.addProjectLocation(secondAliceProject.id, {
+    runnerId: "runner-team", workspaceId: workspace.id,
+  }, 8).projectId, secondAliceProject.id,
+  "linking an existing team Location uses the same membership-aware containment rule");
+
+  const bobProject = db.createProject({ name: "Bob Private", scope: bobScope, now: 9 });
+  assert.throws(() => db.addProjectLocation(bobProject.id, {
+    runnerId: "runner-team", workspaceId: workspace.id,
+  }, 10), /must not expose a private workspace/,
+  "a nonmember's private Project remains incomparable with the team Location");
+
+  const teamProject = db.createProject({ name: "Team Project", scope: teamScope, now: 11 });
+  const teamLocation = db.addProjectLocation(teamProject.id, {
+    runnerId: "runner-team", workspaceId: workspace.id,
+  }, 12);
+  const aliceSession = db.createSession({
+    ...session("alice-private-team-session", "runner-team", workspace.id, 13),
+    projectId: teamProject.id,
+    projectLocationId: teamLocation.id,
+    scope: aliceScope,
+  });
+  assert.equal(aliceSession.projectId, teamProject.id,
+    "a member-private session may be assigned end-to-end to its team Project and Location");
+  assert.throws(() => db.createSession({
+    ...session("bob-private-team-session", "runner-team", workspace.id, 14),
+    projectId: teamProject.id,
+    projectLocationId: teamLocation.id,
+    scope: bobScope,
+  }), /session access is broader than project access/,
+  "the equivalent nonmember session assignment fails closed");
+  db.close();
+});
+
+test("team membership removal cannot invalidate persisted resource containment, even while suspended", () => {
+  const cases: Array<{
+    name: string;
+    expected: RegExp;
+    build: (db: ControlPlaneDb, scopes: {
+      team: { organizationId: string; owner: { kind: "team"; teamId: string } };
+      user: { organizationId: string; owner: { kind: "user"; userId: string } };
+    }) => void;
+  }> = [{
+    name: "Project to Location",
+    expected: /Project '.+' containment in Location '.+'/,
+    build: (db, scopes) => {
+      db.registerRunner(runner("runner-project-location", []), 10);
+      const workspace = db.registerMachineWorkspace(
+        "runner-project-location", { name: "Team Location", path: "/team/project" }, scopes.team, 11,
+      );
+      const project = db.createProject({ name: "Private Project", scope: scopes.user, now: 12 });
+      db.addProjectLocation(project.id, {
+        runnerId: "runner-project-location", workspaceId: workspace.id,
+      }, 13);
+    },
+  }, {
+    name: "Location to Machine",
+    expected: /Location '.+' containment in Machine '.+'/,
+    build: (db, scopes) => {
+      db.registerRunner(runner("runner-location-machine", []), 10);
+      assert.equal(db.setResourceScope({
+        resource: "runner", resourceId: "runner-location-machine", scope: scopes.team, now: 11,
+      }), true);
+      db.registerMachineWorkspace(
+        "runner-location-machine", { name: "Private Location", path: "/private/location" }, scopes.user, 12,
+      );
+    },
+  }, {
+    name: "Session to Project and execution Location",
+    expected: /Session '.+' containment in Project '.+'|Session '.+' containment in its execution/,
+    build: (db, scopes) => {
+      db.registerRunner(runner("runner-session", []), 10);
+      assert.equal(db.setResourceScope({
+        resource: "runner", resourceId: "runner-session", scope: scopes.team, now: 11,
+      }), true);
+      const workspace = db.registerMachineWorkspace(
+        "runner-session", { name: "Team Location", path: "/team/session" }, scopes.team, 12,
+      );
+      const project = db.createProject({ name: "Team Project", scope: scopes.team, now: 13 });
+      const location = db.addProjectLocation(project.id, {
+        runnerId: "runner-session", workspaceId: workspace.id,
+      }, 14);
+      db.createSession({
+        ...session("member-private-session", "runner-session", workspace.id, 15),
+        projectId: project.id,
+        projectLocationId: location.id,
+        scope: scopes.user,
+      });
+    },
+  }];
+
+  for (const lifecycleCase of cases) {
+    const db = ControlPlaneDb.open(":memory:");
+    const identity = db.localIdentityContext();
+    const member = db.createIdentityMember({
+      userId: "usr_lifecycle_member", displayName: "Lifecycle Member",
+      organizationId: identity.organizationId, role: "operator", now: 1,
+    });
+    const team = db.createIdentityTeam({
+      teamId: "team_lifecycle", organizationId: identity.organizationId, name: "Lifecycle Team",
+      memberUserIds: [member.userId], now: 2,
+    });
+    const scopes = {
+      team: {
+        organizationId: identity.organizationId,
+        owner: { kind: "team" as const, teamId: team.teamId },
+      },
+      user: {
+        organizationId: identity.organizationId,
+        owner: { kind: "user" as const, userId: member.userId },
+      },
+    };
+    lifecycleCase.build(db, scopes);
+    db.updateIdentityMember({
+      organizationId: identity.organizationId,
+      userId: member.userId,
+      displayName: "Lifecycle Member",
+      role: "operator",
+      status: "suspended",
+      now: 20,
+    });
+    assert.equal(db.scopeAudienceContainedWithMembership(scopes.user, scopes.team), true,
+      `${lifecycleCase.name}: suspension does not invalidate durable containment`);
+    assert.throws(() => db.updateIdentityTeamMembers({
+      teamId: team.teamId,
+      organizationId: identity.organizationId,
+      memberUserIds: [],
+      now: 21,
+    }), lifecycleCase.expected, `${lifecycleCase.name}: removal fails before the membership mutation`);
+    assert.deepEqual(
+      db.identityAdministration({ ...identity }).teams.find((item) => item.teamId === team.teamId)?.memberUserIds,
+      [member.userId],
+      `${lifecycleCase.name}: rejected removal rolls back atomically`,
+    );
+    db.updateIdentityMember({
+      organizationId: identity.organizationId,
+      userId: member.userId,
+      displayName: "Lifecycle Member",
+      role: "operator",
+      status: "active",
+      now: 22,
+    });
+    assert.equal(db.scopeAudienceContainedWithMembership(scopes.user, scopes.team), true,
+      `${lifecycleCase.name}: reactivation preserves the same containment proof`);
+    db.close();
+  }
+});
+
 test("access-scope previews bind relationships and atomically narrow or broaden sessions and Locations", () => {
   const db = ControlPlaneDb.open(":memory:");
   const identity = db.localIdentityContext();

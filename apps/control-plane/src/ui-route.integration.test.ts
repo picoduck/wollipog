@@ -255,11 +255,18 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     role: "operator",
     now: 1,
   });
+  seed.createIdentityMember({
+    userId: "usr_ui_route_bob",
+    displayName: "UI Route Bob",
+    organizationId: identity.organizationId,
+    role: "operator",
+    now: 1,
+  });
   const scopeTeam = seed.createIdentityTeam({
     teamId: "team_ui_route_scope",
     organizationId: identity.organizationId,
     name: "UI Route Scope Team",
-    memberUserIds: ["usr_ui_route_operator"],
+    memberUserIds: ["usr_ui_route_operator", "usr_ui_route_alice"],
     now: 1,
   });
   const alicePrivateProject = seed.createProject({
@@ -267,6 +274,22 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     scope: {
       organizationId: identity.organizationId,
       owner: { kind: "user", userId: "usr_ui_route_alice" },
+    },
+    now: 1,
+  });
+  const secondAlicePrivateProject = seed.createProject({
+    name: "Second Alice Private Project",
+    scope: {
+      organizationId: identity.organizationId,
+      owner: { kind: "user", userId: "usr_ui_route_alice" },
+    },
+    now: 1,
+  });
+  const bobPrivateProject = seed.createProject({
+    name: "Bob Private Project",
+    scope: {
+      organizationId: identity.organizationId,
+      owner: { kind: "user", userId: "usr_ui_route_bob" },
     },
     now: 1,
   });
@@ -593,7 +616,12 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     name: string;
     locations: Array<{ id: string; runnerId: string; workspaceId: string }>;
   }>;
-  assert.deepEqual(initialProjects.map((project) => project.name), ["Alice Private Project", "Workspace"]);
+  assert.deepEqual(initialProjects.map((project) => project.name), [
+    "Alice Private Project",
+    "Bob Private Project",
+    "Second Alice Private Project",
+    "Workspace",
+  ]);
   assert.deepEqual(
     (snapshot.sessions as Array<{ id: string }>).map((session) => session.id).sort(),
     [createdSessionId, "session-history", "session-other", "session-target"].sort(),
@@ -959,6 +987,60 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   );
   assert.equal(rejectedImplicitCrossUserLocation.status, 403,
     "an omitted owner cannot bypass cross-user private assignment validation");
+
+  const memberTeamLocationRequest = ownerFetch(
+    `/api/projects/${alicePrivateProject.id}/locations/new`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        runnerId: "runner-ui-route",
+        name: "Alice Team Location",
+        path: "/repos/alice-team-location",
+        owner: { kind: "team", teamId: scopeTeam.teamId },
+      }),
+    },
+  );
+  const memberTeamBrowse = await runnerInbox.take((message) =>
+    message.type === "list_directory" && message.path === "/repos/alice-team-location");
+  runner.send(JSON.stringify({
+    type: "list_directory_result",
+    requestId: memberTeamBrowse.requestId,
+    ok: true,
+    path: "/repos/alice-team-location",
+    parent: "/repos",
+    entries: [],
+  }));
+  const memberTeamLocationResponse = await memberTeamLocationRequest;
+  assert.equal(memberTeamLocationResponse.status, 201,
+    "Alice's private Project may create a team Location when Alice is a member");
+  const memberTeamLocation = (await memberTeamLocationResponse.json() as {
+    project: { locations: Array<{ id: string; runnerId: string; workspaceId: string; path: string }> };
+  }).project.locations.find((location) => location.path === "/repos/alice-team-location")!;
+  assert.ok(memberTeamLocation);
+
+  const memberTeamLinkResponse = await ownerFetch(`/api/projects/${secondAlicePrivateProject.id}/locations`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      runnerId: memberTeamLocation.runnerId,
+      workspaceId: memberTeamLocation.workspaceId,
+    }),
+  });
+  assert.equal(memberTeamLinkResponse.status, 200,
+    "the same membership-aware rule permits linking an existing team Location");
+  const nonmemberTeamLinkResponse = await ownerFetch(`/api/projects/${bobPrivateProject.id}/locations`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      runnerId: memberTeamLocation.runnerId,
+      workspaceId: memberTeamLocation.workspaceId,
+    }),
+  });
+  assert.equal(nonmemberTeamLinkResponse.status, 400,
+    "a nonmember's private Project cannot link the team Location");
+  assert.match((await nonmemberTeamLinkResponse.json() as { error: string }).error,
+    /must not expose a private workspace/);
 
   const deniedOperatorLocation = await fetch(`${httpBase}/api/projects/${createdProject.id}/locations/new`, {
     method: "POST",
