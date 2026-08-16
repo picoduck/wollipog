@@ -196,12 +196,15 @@ const v1Credential = readV1RunnerCredentialForAttestation(config.dataDir, {
   runnerId: config.runnerId,
   controlPlaneUrl: config.controlPlaneUrl,
 });
+const v1CredentialHash = v1Credential
+  ? createHash("sha256").update(v1Credential).digest("hex")
+  : undefined;
 const attestation = await waitForRunnerControlPlaneAttestation({
   controlPlaneUrl: config.controlPlaneUrl,
   runnerId: config.runnerId,
   token: config.token,
-  ...(v1Credential
-    ? { priorCredentialHash: createHash("sha256").update(v1Credential).digest("hex") }
+  ...(v1CredentialHash
+    ? { priorCredentialHash: v1CredentialHash }
     : {}),
   onRetry: (error, delayMs) => log(`${error.message}; retrying in ${delayMs}ms`),
 });
@@ -210,10 +213,10 @@ const runnerDataIdentity = {
   controlPlaneUrl: config.controlPlaneUrl,
   controlPlaneInstanceId: attestation.instanceId,
 };
-const allowLegacyEndpointMigration = Boolean(v1Credential) && (
+const legacyEndpointMigrationCredentialHash = v1CredentialHash && (
   v1Credential === config.token || attestation.priorCredentialValid === true
-);
-if (v1Credential && !allowLegacyEndpointMigration) {
+) ? v1CredentialHash : undefined;
+if (v1Credential && !legacyEndpointMigrationCredentialHash) {
   log("v1 endpoint ownership could not be proven to this control plane; preserving it in place");
 }
 let dataDirLease: RunnerDataDirLease;
@@ -224,7 +227,7 @@ try {
     runnerDataIdentity,
     {
       adoptLegacyDataDir: parsed.adoptLegacyDataDir,
-      allowLegacyEndpointMigration,
+      legacyEndpointMigrationCredentialHash,
     },
   );
 } catch (error) {
