@@ -20,7 +20,8 @@ import {
 import { hostname as systemHostname } from "node:os";
 import { basename, dirname, join } from "node:path";
 
-const OWNER_FILE = ".wollipog-runner-owner-v1.json";
+const LEGACY_OWNER_FILE = ".wollipog-runner-owner-v1.json";
+const OWNER_FILE = ".wollipog-runner-owner-v2.json";
 const LEASE_FILE = ".wollipog-runner-active-v1.lock";
 const RECOVERY_DIR = ".wollipog-runner-lease-recovery-v1";
 const MAX_METADATA_BYTES = 4_096;
@@ -34,7 +35,7 @@ export interface RunnerDataDirIdentity {
 }
 
 interface OwnerRecord {
-  version: 1 | 2;
+  version: 2;
   ownerHash: string;
   legacyMigration?: {
     authorization: "--adopt-legacy-data-dir";
@@ -42,7 +43,13 @@ interface OwnerRecord {
   };
 }
 
-interface LeaseRecord extends OwnerRecord {
+interface LegacyOwnerRecord extends Omit<OwnerRecord, "version"> {
+  version: 1;
+}
+
+interface LeaseRecord {
+  version: 1;
+  ownerHash: string;
   leaseId: string;
   pid: number;
   hostname: string;
@@ -80,11 +87,10 @@ function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function isValidOwnerRecord(value: unknown): value is OwnerRecord {
+function hasValidOwnerFields(value: unknown): value is Omit<OwnerRecord, "version"> & { version: unknown } {
   if (!value || typeof value !== "object") return false;
   const owner = value as Partial<OwnerRecord>;
-  if ((owner.version !== 1 && owner.version !== 2)
-      || typeof owner.ownerHash !== "string"
+  if (typeof owner.ownerHash !== "string"
       || !SHA256_HEX.test(owner.ownerHash)) {
     return false;
   }
@@ -94,6 +100,14 @@ function isValidOwnerRecord(value: unknown): value is OwnerRecord {
   return migration.authorization === "--adopt-legacy-data-dir"
     && typeof migration.authorizedAt === "string"
     && !Number.isNaN(Date.parse(migration.authorizedAt));
+}
+
+function isValidOwnerRecord(value: unknown): value is OwnerRecord {
+  return hasValidOwnerFields(value) && value.version === 2;
+}
+
+function isValidLegacyOwnerRecord(value: unknown): value is LegacyOwnerRecord {
+  return hasValidOwnerFields(value) && value.version === 1;
 }
 
 export function normalizeControlPlaneEndpoint(controlPlaneUrl: string): string {
@@ -131,14 +145,14 @@ export function readV1RunnerCredentialForAttestation(
 ): string | null {
   if (!existsSync(requestedDataDir)) return null;
   const dataDir = realpathSync(requestedDataDir);
-  const ownerPath = join(dataDir, OWNER_FILE);
+  const ownerPath = join(dataDir, LEGACY_OWNER_FILE);
   if (!existsSync(ownerPath)) return null;
   const owner = parseRecord<unknown>(ownerPath);
-  if (!isValidOwnerRecord(owner)) {
+  if (!isValidLegacyOwnerRecord(owner)) {
     throw new Error(`runner data directory ${dataDir} has invalid owner metadata; refusing unsafe recovery`);
   }
   const legacyHash = legacyRunnerDataDirOwnerHash(identity);
-  if (owner.version !== 1 || owner.ownerHash !== legacyHash) return null;
+  if (owner.ownerHash !== legacyHash) return null;
   const credential = join(dataDir, "credentials", "instances", legacyHash, "active-runner-token");
   return existsSync(credential) ? protectedRead(credential).toString("utf8").trim() : null;
 }
@@ -333,6 +347,34 @@ function migrateV1Credential(
   }
 }
 
+/** Keep the marker understood by the immediately previous runner generation. The stable v2
+ * marker remains authoritative for current runners; v1 records only the latest endpoint that
+ * this already-attested stable owner used, so a deliberate binary rollback can reacquire it. */
+function ensureLegacyRollbackOwner(
+  file: string,
+  legacyOwnerHash: string,
+  stableOwner: OwnerRecord,
+  options: RunnerDataDirLeaseOptions,
+): void {
+  const desired = {
+    version: 1,
+    ownerHash: legacyOwnerHash,
+    ...(stableOwner.legacyMigration ? { legacyMigration: stableOwner.legacyMigration } : {}),
+  } satisfies LegacyOwnerRecord;
+  if (!existsSync(file)) {
+    writeProtected(file, desired, options);
+    return;
+  }
+  const existing = parseRecord<unknown>(file);
+  if (!isValidLegacyOwnerRecord(existing)) {
+    throw new Error(`runner data directory ${dirname(file)} has invalid legacy owner metadata; refusing unsafe recovery`);
+  }
+  if (existing.ownerHash !== desired.ownerHash
+      || JSON.stringify(existing.legacyMigration) !== JSON.stringify(desired.legacyMigration)) {
+    replaceProtected(file, desired, options);
+  }
+}
+
 /**
  * Claim a runner state root before any mutable store is opened. The durable owner marker prevents
  * a later runner identity from silently adopting the root, while the process lease rejects live
@@ -353,26 +395,41 @@ function acquireRunnerDataDirLeaseAt(
   const ownerHash = runnerDataDirOwnerHash(identity);
   const legacyOwnerHash = legacyRunnerDataDirOwnerHash(identity);
   const ownerPath = join(dataDir, OWNER_FILE);
+  const legacyOwnerPath = join(dataDir, LEGACY_OWNER_FILE);
   const leasePath = join(dataDir, LEASE_FILE);
   const recoveryPath = join(dataDir, RECOVERY_DIR);
   const pid = options.pid ?? process.pid;
   const hostname = options.hostname ?? systemHostname();
   const isProcessAlive = options.isProcessAlive ?? defaultProcessAlive;
   const leaseId = randomUUID();
-  const ownerExistedAtClaim = existsSync(ownerPath);
+  const ownerExistedAtClaim = existsSync(ownerPath) || existsSync(legacyOwnerPath);
   const legacyMigrationRequired = !ownerExistedAtClaim && readdirSync(dataDir).some(
     (entry) => entry !== LEASE_FILE && entry !== RECOVERY_DIR,
   );
 
   if (allowOwnerNamespace && ownerExistedAtClaim) {
-    const existingOwner = parseRecord<unknown>(ownerPath);
-    if (!isValidOwnerRecord(existingOwner)) {
-      throw new Error(`runner data directory ${dataDir} has invalid owner metadata; refusing unsafe recovery`);
+    const hasStableOwner = existsSync(ownerPath);
+    let existingOwner: OwnerRecord | LegacyOwnerRecord;
+    if (hasStableOwner) {
+      const parsed = parseRecord<unknown>(ownerPath);
+      if (!isValidOwnerRecord(parsed)) {
+        throw new Error(`runner data directory ${dataDir} has invalid owner metadata; refusing unsafe recovery`);
+      }
+      existingOwner = parsed;
+    } else {
+      const parsed = parseRecord<unknown>(legacyOwnerPath);
+      if (!isValidLegacyOwnerRecord(parsed)) {
+        throw new Error(`runner data directory ${dataDir} has invalid owner metadata; refusing unsafe recovery`);
+      }
+      existingOwner = parsed;
     }
-    const canMigrateLegacyEndpoint = options.legacyEndpointMigrationCredentialHash !== undefined
-      && existingOwner.version === 1
+    const canMigrateLegacyEndpoint = !hasStableOwner
+      && options.legacyEndpointMigrationCredentialHash !== undefined
       && existingOwner.ownerHash === legacyOwnerHash;
-    if (existingOwner.ownerHash !== ownerHash && !canMigrateLegacyEndpoint) {
+    const ownerMatches = hasStableOwner
+      ? existingOwner.ownerHash === ownerHash
+      : canMigrateLegacyEndpoint;
+    if (!ownerMatches) {
       if (options.adoptLegacyDataDir) {
         throw new Error(
           `runner data directory ${dataDir} is already owned by another runner; refusing to record legacy adoption in a replacement namespace`,
@@ -477,27 +534,14 @@ function acquireRunnerDataDirLeaseAt(
   };
 
   try {
+    let stableOwner: OwnerRecord;
     if (existsSync(ownerPath)) {
       const owner = parseRecord<unknown>(ownerPath);
       if (!isValidOwnerRecord(owner)) {
         release();
         throw new Error(`runner data directory ${dataDir} has invalid owner metadata; refusing unsafe recovery`);
       }
-      if (options.legacyEndpointMigrationCredentialHash !== undefined
-          && owner.version === 1
-          && owner.ownerHash === legacyOwnerHash) {
-        migrateV1Credential(
-          dataDir,
-          identity,
-          options,
-          options.legacyEndpointMigrationCredentialHash,
-        );
-        replaceProtected(ownerPath, {
-          version: 2,
-          ownerHash,
-          ...(owner.legacyMigration ? { legacyMigration: owner.legacyMigration } : {}),
-        } satisfies OwnerRecord, options);
-      } else if (owner.version !== 2 || owner.ownerHash !== ownerHash) {
+      if (owner.ownerHash !== ownerHash) {
         release();
         if (options.adoptLegacyDataDir) {
           throw new Error(
@@ -507,7 +551,40 @@ function acquireRunnerDataDirLeaseAt(
         if (allowOwnerNamespace) {
           return acquireRunnerDataDirLeaseAt(join(dataDir, "runner-instances", ownerHash), identity, options, false);
         }
+        throw new Error(`runner data directory ${dataDir} has conflicting owner metadata; refusing unsafe recovery`);
+      }
+      stableOwner = owner;
+    } else if (existsSync(legacyOwnerPath)) {
+      const legacyOwner = parseRecord<unknown>(legacyOwnerPath);
+      if (!isValidLegacyOwnerRecord(legacyOwner)) {
+        release();
         throw new Error(`runner data directory ${dataDir} has invalid owner metadata; refusing unsafe recovery`);
+      }
+      if (options.legacyEndpointMigrationCredentialHash !== undefined
+          && legacyOwner.ownerHash === legacyOwnerHash) {
+        migrateV1Credential(
+          dataDir,
+          identity,
+          options,
+          options.legacyEndpointMigrationCredentialHash,
+        );
+        stableOwner = {
+          version: 2,
+          ownerHash,
+          ...(legacyOwner.legacyMigration ? { legacyMigration: legacyOwner.legacyMigration } : {}),
+        };
+        writeProtected(ownerPath, stableOwner, options);
+      } else {
+        release();
+        if (options.adoptLegacyDataDir) {
+          throw new Error(
+            `runner data directory ${dataDir} became owned by another runner while legacy adoption was starting; refusing to record adoption in a replacement namespace`,
+          );
+        }
+        if (allowOwnerNamespace) {
+          return acquireRunnerDataDirLeaseAt(join(dataDir, "runner-instances", ownerHash), identity, options, false);
+        }
+        throw new Error(`runner data directory ${dataDir} has conflicting owner metadata; refusing unsafe recovery`);
       }
     } else {
       const legacyCredential = legacyCredentialForClaim(dataDir);
@@ -520,7 +597,7 @@ function acquireRunnerDataDirLeaseAt(
           throw new Error(`scoped runner credential at ${scopedCredential} conflicts with legacy migration`);
         }
       }
-      writeProtected(ownerPath, {
+      stableOwner = {
         version: 2,
         ownerHash,
         ...(legacyMigrationRequired ? {
@@ -529,8 +606,10 @@ function acquireRunnerDataDirLeaseAt(
             authorizedAt: new Date().toISOString(),
           },
         } : {}),
-      } satisfies OwnerRecord, options);
+      };
+      writeProtected(ownerPath, stableOwner, options);
     }
+    ensureLegacyRollbackOwner(legacyOwnerPath, legacyOwnerHash, stableOwner, options);
   } catch (error) {
     release();
     throw error;

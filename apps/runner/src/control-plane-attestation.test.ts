@@ -15,8 +15,8 @@ test("runner attestation sends the credential only in Authorization and validate
   let authorization = "";
   let priorHash = "";
   const result = await attestRunnerControlPlane({
-    controlPlaneUrl: "wss://manager.example.test/runner",
-    runnerId: "runner one",
+    controlPlaneUrl: "wss://manager.example.test/prefix/runner?transport=websocket#local-only",
+    runnerId: "runner-α",
     token: "top-secret",
     priorCredentialHash: "a".repeat(64),
     fetchImpl: (async (input, init) => {
@@ -27,11 +27,39 @@ test("runner attestation sends the credential only in Authorization and validate
     }) as typeof fetch,
   });
   assert.deepEqual(result, valid);
-  assert.equal(requested, "https://manager.example.test/runner/attestation/runner%20one");
+  assert.equal(
+    requested,
+    "https://manager.example.test/prefix/runner/attestation/runner-%CE%B1?transport=websocket",
+  );
   assert.equal(requested.includes("top-secret"), false);
   assert.equal(authorization, "Bearer top-secret");
   assert.equal(priorHash, "a".repeat(64));
   assert.equal(JSON.stringify((result)).includes("top-secret"), false);
+});
+
+test("runner attestation never retries deterministic URL or header configuration errors", async () => {
+  for (const options of [
+    { controlPlaneUrl: "not a URL", runnerId: "runner-one", token: "token", priorCredentialHash: undefined },
+    { controlPlaneUrl: "https://manager.example.test/runner", runnerId: "runner-one", token: "token", priorCredentialHash: undefined },
+    { controlPlaneUrl: "ws://user:password@manager.example.test/runner", runnerId: "runner-one", token: "token", priorCredentialHash: undefined },
+    { controlPlaneUrl: "ws://manager.example.test/runner", runnerId: "runner/one", token: "token", priorCredentialHash: undefined },
+    { controlPlaneUrl: "ws://manager.example.test/runner", runnerId: "runner-one", token: "line\nbreak", priorCredentialHash: undefined },
+    { controlPlaneUrl: "ws://manager.example.test/runner", runnerId: "runner-one", token: "token", priorCredentialHash: "not-sha256" },
+  ]) {
+    let fetched = false;
+    await assert.rejects(
+      () => waitForRunnerControlPlaneAttestation({
+        ...options,
+        fetchImpl: (async () => {
+          fetched = true;
+          return new Response(JSON.stringify(valid));
+        }) as typeof fetch,
+        wait: async () => assert.fail("deterministic configuration errors must not retry"),
+      }),
+      (error) => error instanceof ControlPlaneAttestationError && !error.retryable,
+    );
+    assert.equal(fetched, false);
+  }
 });
 
 test("runner attestation retries transient failures but rejects credentials permanently", async () => {

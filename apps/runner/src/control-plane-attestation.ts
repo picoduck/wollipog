@@ -6,6 +6,7 @@ import { deriveCpHttpUrl } from "./conductor.js";
 
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const MAX_RESPONSE_BYTES = 4_096;
+const SHA256_HEX = /^[a-f0-9]{64}$/u;
 
 export class ControlPlaneAttestationError extends Error {
   constructor(message: string, readonly retryable: boolean) {
@@ -34,27 +35,84 @@ function validated(value: unknown): RunnerControlPlaneAttestation | null {
     : null;
 }
 
+function attestationUrl(controlPlaneUrl: string, runnerId: string): string {
+  if (runnerId.length < 1 || runnerId.length > 128 || runnerId.trim() !== runnerId
+      || /[\u0000-\u0020\u007f/\\?#]/u.test(runnerId)) {
+    throw new ControlPlaneAttestationError(
+      "control-plane attestation configuration has an invalid runner id",
+      false,
+    );
+  }
+  let configured: URL;
+  try {
+    configured = new URL(controlPlaneUrl);
+  } catch (error) {
+    throw new ControlPlaneAttestationError(
+      `control-plane attestation configuration is invalid: ${(error as Error).message}`,
+      false,
+    );
+  }
+  if (configured.protocol !== "ws:" && configured.protocol !== "wss:") {
+    throw new ControlPlaneAttestationError(
+      "control-plane attestation configuration must use a ws:// or wss:// URL",
+      false,
+    );
+  }
+  if (configured.username || configured.password) {
+    throw new ControlPlaneAttestationError(
+      "control-plane attestation configuration must not contain embedded credentials",
+      false,
+    );
+  }
+  const root = new URL(deriveCpHttpUrl(configured.toString()));
+  root.pathname = `${root.pathname.replace(/\/+$/u, "")}/runner/attestation/${encodeURIComponent(runnerId)}`;
+  root.hash = "";
+  return root.toString();
+}
+
+function attestationHeaders(options: ControlPlaneAttestationOptions): Record<string, string> {
+  const headers = {
+    authorization: `Bearer ${options.token}`,
+    ...(options.priorCredentialHash
+      ? { "x-wollipog-prior-runner-credential-sha256": options.priorCredentialHash }
+      : {}),
+  };
+  if (options.priorCredentialHash !== undefined && !SHA256_HEX.test(options.priorCredentialHash)) {
+    throw new ControlPlaneAttestationError(
+      "control-plane attestation configuration has an invalid prior credential hash",
+      false,
+    );
+  }
+  try {
+    // Fetch would reject malformed header values too, but that deterministic configuration error
+    // must not be mistaken for a transient network outage and retried forever.
+    new Headers(headers);
+  } catch (error) {
+    throw new ControlPlaneAttestationError(
+      `control-plane attestation configuration has invalid headers: ${(error as Error).message}`,
+      false,
+    );
+  }
+  return headers;
+}
+
 /** Authenticate the configured runner credential without opening or mutating any local store. */
 export async function attestRunnerControlPlane(
   options: ControlPlaneAttestationOptions,
 ): Promise<RunnerControlPlaneAttestation> {
+  const url = attestationUrl(options.controlPlaneUrl, options.runnerId);
+  const headers = attestationHeaders(options);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 10_000);
   timeout.unref?.();
   try {
     let response: Response;
     try {
-      const root = deriveCpHttpUrl(options.controlPlaneUrl);
       response = await (options.fetchImpl ?? fetch)(
-        `${root}/runner/attestation/${encodeURIComponent(options.runnerId)}`,
+        url,
         {
           method: "GET",
-          headers: {
-            authorization: `Bearer ${options.token}`,
-            ...(options.priorCredentialHash
-              ? { "x-wollipog-prior-runner-credential-sha256": options.priorCredentialHash }
-              : {}),
-          },
+          headers,
           cache: "no-store",
           redirect: "error",
           signal: controller.signal,
