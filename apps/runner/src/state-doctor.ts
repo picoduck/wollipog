@@ -21,6 +21,7 @@ import { adoptLegacyWslExecutionIsolationState } from "./execution-isolation.js"
 import { adoptLegacyCheckpointRefs, withGitExecutionContext } from "./git-ops.js";
 import { runContextCommand } from "./context-command.js";
 import { CheckpointRefOwnershipLedger } from "./checkpoint-ref-ownership.js";
+import { canIgnoreRunnerDataDirDirectorySyncError } from "./runner-data-dir.js";
 import type { SessionMeta } from "./session-store.js";
 import { WorktreeCleanupJournal, type WorktreeCleanupRecord } from "./worktree.js";
 
@@ -135,7 +136,7 @@ function syncDirectory(path: string, options: StateDoctorOptions): void {
     fd = openSync(path, constants.O_RDONLY);
     fsyncSync(fd);
   } catch (error) {
-    if (process.platform !== "win32") throw error;
+    if (!canIgnoreRunnerDataDirDirectorySyncError(error as NodeJS.ErrnoException)) throw error;
   } finally {
     if (fd !== undefined) closeSync(fd);
   }
@@ -385,7 +386,7 @@ export async function runStateDoctor(
       if (!args.distro) throw new Error("quarantine-wsl requires --wsl-distro");
       const quarantineId = randomUUID();
       const result = await runContextCommand({ kind: "wsl", distro: args.distro }, "sh", ["-c",
-        'set -eu; root="$HOME/.agent-manager"; q="$root/state-quarantine/$1"; umask 077; mkdir -p -- "$q"; sync -d -- "$root/state-quarantine" "$q"; n=0; for name in provider-state worktrees; do src="$root/$name"; if [ -e "$src" ]; then mv -- "$src" "$q/$name"; sync -d -- "$root" "$q"; n=$((n+1)); fi; done; printf "%s" "$n"',
+        'set -eu; root="$HOME/.agent-manager"; q="$root/state-quarantine/$1"; umask 077; mkdir -p -- "$q"; sync; n=0; for name in provider-state worktrees; do src="$root/$name"; if [ -e "$src" ]; then mv -- "$src" "$q/$name"; sync; n=$((n+1)); fi; done; printf "%s" "$n"',
         "state-doctor", quarantineId,
       ], { cwd: "/", timeoutMs: 30_000, maxBuffer: 1024 });
       writeOutput(`${JSON.stringify({ quarantinedRoots: Number.parseInt(result.stdout.trim(), 10) || 0, quarantineId })}\n`);

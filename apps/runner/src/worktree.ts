@@ -1,6 +1,6 @@
 /** Context-native, externally stored per-session git worktrees. */
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { mkdir, rm, statfs } from "node:fs/promises";
@@ -12,6 +12,7 @@ import {
   openSync,
   readFileSync,
   renameSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -121,10 +122,10 @@ export class WorktreeCleanupJournal {
   }
 
   private flush(): void {
-    const temp = `${this.path}.${process.pid}.tmp`;
+    const temp = `${this.path}.${process.pid}.${randomUUID()}.tmp`;
     let fd: number | undefined;
     try {
-      fd = openSync(temp, "w", 0o600);
+      fd = openSync(temp, "wx", 0o600);
       writeFileSync(fd, JSON.stringify(this.list(), null, 2));
       fsyncSync(fd);
       closeSync(fd);
@@ -141,6 +142,7 @@ export class WorktreeCleanupJournal {
       }
     } finally {
       if (fd !== undefined) closeSync(fd);
+      rmSync(temp, { force: true });
     }
   }
 }
