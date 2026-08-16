@@ -5511,11 +5511,13 @@ export class SessionManager {
 
   /** Release mutable provider HOME ownership only after every spawned provider/TUI process tree
    * has been reaped. shutdownAll() merely initiates that asynchronous drain. */
-  releaseProviderHomeLeasesAfterShutdown(): void {
+  releaseProviderHomeLeasesAfterShutdown(processTreesReaped: boolean): boolean {
     if (!this.shuttingDown) {
       throw new Error("provider-home leases may only be released after shutdown begins");
     }
+    if (!processTreesReaped) return false;
     this.providerHomeLeases?.releaseAll();
+    return true;
   }
 
   private emitStatus(

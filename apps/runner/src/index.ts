@@ -1605,9 +1605,9 @@ function shutdown(): void {
   // sequence is pidfile retries + TERM + 2s + KILL. The deadline covers Claude's 5s clean-exit
   // interval plus the reap's 6s safety cap.
   // No active sessions ⇒ zero pending kills ⇒ instant exit (dev restarts stay snappy).
-  void waitForPendingKills(CLAUDE_GRACEFUL_STOP_BUDGET_MS + 500).then(() => {
+  void waitForPendingKills(CLAUDE_GRACEFUL_STOP_BUDGET_MS + 500).then((processTreesReaped) => {
     try {
-      sessions.releaseProviderHomeLeasesAfterShutdown();
+      sessions.releaseProviderHomeLeasesAfterShutdown(processTreesReaped);
     } finally {
       process.exit(0);
     }

@@ -23,9 +23,11 @@ test("provider-home ownership is released only after shutdown process trees are 
     releaseAll: () => { releases++; },
   };
 
-  assert.throws(() => manager.releaseProviderHomeLeasesAfterShutdown(), /only be released after shutdown begins/);
+  assert.throws(() => manager.releaseProviderHomeLeasesAfterShutdown(true), /only be released after shutdown begins/);
   manager.shutdownAll();
   assert.equal(releases, 0, "shutdown initiation must retain ownership while process kills drain");
-  manager.releaseProviderHomeLeasesAfterShutdown();
+  assert.equal(manager.releaseProviderHomeLeasesAfterShutdown(false), false);
+  assert.equal(releases, 0, "a reap deadline retains the durable lease for fail-closed recovery");
+  assert.equal(manager.releaseProviderHomeLeasesAfterShutdown(true), true);
   assert.equal(releases, 1);
 });

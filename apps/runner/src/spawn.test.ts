@@ -616,8 +616,16 @@ test("waitForPendingKills drains kill work registered by an earlier pending oper
 
   const waiting = waitForPendingKills(1_000);
   releaseFirst();
-  await waiting;
+  assert.equal(await waiting, true);
   assert.equal(secondFinished, true);
+});
+
+test("waitForPendingKills reports a deadline with process trees still pending", async () => {
+  let release!: () => void;
+  trackPendingKill(new Promise<void>((resolve) => { release = resolve; }));
+  assert.equal(await waitForPendingKills(5), false);
+  release();
+  assert.equal(await waitForPendingKills(1_000), true, "later shutdown tests see a drained registry");
 });
 
 test("bubblewrap remains the in-distro executable for an isolated WSL launch", () => {
