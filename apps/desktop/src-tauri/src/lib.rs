@@ -3947,37 +3947,37 @@ mod tests {
                 .count(),
             1
         );
-        fs::write(
-            data_dir.join(LOCAL_RUNNER_OWNER_FILE),
-            b"malformed marker must remain fail-closed",
-        )
-        .unwrap();
-        let owned_restore = local_runner_args(
-            "local-runner",
-            token_file,
-            &data_dir,
-            LocalRunnerLaunchIntent::RestoreSaved,
-        )
-        .unwrap();
-        assert!(
-            !owned_restore
-                .iter()
-                .any(|arg| arg == "--adopt-legacy-data-dir"),
-            "automatic restore must never receive legacy adoption authority"
-        );
-        let owned_reconnect = local_runner_args(
-            "renamed-runner",
-            token_file,
-            &data_dir,
-            LocalRunnerLaunchIntent::UserRequested,
-        )
-        .unwrap();
-        assert!(
-            !owned_reconnect
-                .iter()
-                .any(|arg| arg == "--adopt-legacy-data-dir"),
-            "an existing or malformed owner marker must reach the runner's fail-closed validation"
-        );
+        for marker in [LOCAL_RUNNER_OWNER_FILE, LOCAL_RUNNER_LEGACY_OWNER_FILE] {
+            let marker_path = data_dir.join(marker);
+            fs::write(&marker_path, b"malformed marker must remain fail-closed").unwrap();
+            let owned_restore = local_runner_args(
+                "local-runner",
+                token_file,
+                &data_dir,
+                LocalRunnerLaunchIntent::RestoreSaved,
+            )
+            .unwrap();
+            assert!(
+                !owned_restore
+                    .iter()
+                    .any(|arg| arg == "--adopt-legacy-data-dir"),
+                "automatic restore must never receive legacy adoption authority"
+            );
+            let owned_reconnect = local_runner_args(
+                "renamed-runner",
+                token_file,
+                &data_dir,
+                LocalRunnerLaunchIntent::UserRequested,
+            )
+            .unwrap();
+            assert!(
+                !owned_reconnect
+                    .iter()
+                    .any(|arg| arg == "--adopt-legacy-data-dir"),
+                "{marker} must reach the runner's fail-closed validation"
+            );
+            fs::remove_file(marker_path).unwrap();
+        }
         fs::remove_dir_all(&data_dir).unwrap();
 
         let source = include_str!("lib.rs");
