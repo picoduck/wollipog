@@ -10,6 +10,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmdirSync,
   rmSync,
@@ -32,6 +33,10 @@ export interface RunnerDataDirIdentity {
 interface OwnerRecord {
   version: 1;
   ownerHash: string;
+  legacyMigration?: {
+    authorization: "--adopt-legacy-data-dir";
+    authorizedAt: string;
+  };
 }
 
 interface LeaseRecord extends OwnerRecord {
@@ -44,13 +49,25 @@ interface LeaseRecord extends OwnerRecord {
 export interface RunnerDataDirLease {
   dataDir: string;
   credentialFile: string;
+  migratedLegacyDataDir: boolean;
   release(): void;
 }
+
+export type RunnerDataDirDurabilityOperation =
+  | "mkdir"
+  | "fsync-file"
+  | "link"
+  | "fsync-directory"
+  | "unlink";
 
 export interface RunnerDataDirLeaseOptions {
   pid?: number;
   hostname?: string;
   isProcessAlive?: (pid: number) => boolean;
+  /** One-time operator acknowledgement that every pre-ownership runner using this root is stopped. */
+  adoptLegacyDataDir?: boolean;
+  /** Fault/ordering hook used only by the filesystem durability regressions. */
+  beforeDurabilityOperationForTest?: (operation: RunnerDataDirDurabilityOperation, path: string) => void;
 }
 
 function sha256(value: string): string {
@@ -126,7 +143,68 @@ function legacyCredentialForClaim(dataDir: string): Buffer | null {
   }
 }
 
-function publishProtected(file: string, contents: string | Buffer): void {
+const WINDOWS_UNSUPPORTED_DIRECTORY_SYNC_ERRORS = new Set(["EINVAL", "EISDIR", "EPERM"]);
+
+export function canIgnoreRunnerDataDirDirectorySyncError(
+  error: NodeJS.ErrnoException,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  return platform === "win32" && typeof error.code === "string" && WINDOWS_UNSUPPORTED_DIRECTORY_SYNC_ERRORS.has(error.code);
+}
+
+function beforeDurabilityOperation(
+  options: RunnerDataDirLeaseOptions,
+  operation: RunnerDataDirDurabilityOperation,
+  path: string,
+): void {
+  options.beforeDurabilityOperationForTest?.(operation, path);
+}
+
+function syncDirectory(directory: string, options: RunnerDataDirLeaseOptions): void {
+  beforeDurabilityOperation(options, "fsync-directory", directory);
+  let fd: number | undefined;
+  try {
+    fd = openSync(directory, constants.O_RDONLY);
+    fsyncSync(fd);
+  } catch (error) {
+    if (!canIgnoreRunnerDataDirDirectorySyncError(error as NodeJS.ErrnoException)) {
+      throw new Error(`could not durably publish runner data directory ${directory}: ${(error as Error).message}`, { cause: error });
+    }
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+function ensureDurableDirectory(directory: string, options: RunnerDataDirLeaseOptions): void {
+  const missing: string[] = [];
+  let cursor = directory;
+  while (!existsSync(cursor)) {
+    missing.push(cursor);
+    const parent = dirname(cursor);
+    if (parent === cursor) break;
+    cursor = parent;
+  }
+  for (const path of missing.reverse()) {
+    beforeDurabilityOperation(options, "mkdir", path);
+    try {
+      mkdirSync(path, { mode: 0o700 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+    try {
+      chmodSync(path, 0o700);
+    } catch {
+      // Windows ACLs are managed by the owning account.
+    }
+    syncDirectory(dirname(path), options);
+  }
+}
+
+function publishProtected(
+  file: string,
+  contents: string | Buffer,
+  options: RunnerDataDirLeaseOptions,
+): void {
   const temp = join(dirname(file), `.${basename(file)}.publish-${process.pid}-${randomUUID()}`);
   writeFileSync(temp, contents, { flag: "wx", mode: 0o600 });
   try {
@@ -137,23 +215,28 @@ function publishProtected(file: string, contents: string | Buffer): void {
     }
     const fd = openSync(temp, constants.O_RDONLY);
     try {
+      beforeDurabilityOperation(options, "fsync-file", temp);
       fsyncSync(fd);
     } finally {
       closeSync(fd);
     }
     try {
+      beforeDurabilityOperation(options, "link", file);
       linkSync(temp, file);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "EEXIST") throw error;
       throw new Error(`runner data directory must support protected hard-link publication: ${(error as Error).message}`);
     }
+    syncDirectory(dirname(file), options);
   } finally {
+    beforeDurabilityOperation(options, "unlink", temp);
     rmSync(temp, { force: true });
+    syncDirectory(dirname(file), options);
   }
 }
 
-function writeProtected(file: string, value: unknown): void {
-  publishProtected(file, `${JSON.stringify(value)}\n`);
+function writeProtected(file: string, value: unknown, options: RunnerDataDirLeaseOptions): void {
+  publishProtected(file, `${JSON.stringify(value)}\n`, options);
 }
 
 /**
@@ -167,7 +250,7 @@ function acquireRunnerDataDirLeaseAt(
   options: RunnerDataDirLeaseOptions = {},
   allowOwnerNamespace = true,
 ): RunnerDataDirLease {
-  mkdirSync(requestedDataDir, { recursive: true });
+  ensureDurableDirectory(requestedDataDir, options);
   const dataDir = realpathSync(requestedDataDir);
   const ownerHash = runnerDataDirOwnerHash(identity);
   const ownerPath = join(dataDir, OWNER_FILE);
@@ -177,8 +260,12 @@ function acquireRunnerDataDirLeaseAt(
   const hostname = options.hostname ?? systemHostname();
   const isProcessAlive = options.isProcessAlive ?? defaultProcessAlive;
   const leaseId = randomUUID();
+  const ownerExistedAtClaim = existsSync(ownerPath);
+  const legacyMigrationRequired = !ownerExistedAtClaim && readdirSync(dataDir).some(
+    (entry) => entry !== LEASE_FILE && entry !== RECOVERY_DIR,
+  );
 
-  if (allowOwnerNamespace && existsSync(ownerPath)) {
+  if (allowOwnerNamespace && ownerExistedAtClaim) {
     const existingOwner = parseRecord<OwnerRecord>(ownerPath);
     if (existingOwner.version !== 1 || typeof existingOwner.ownerHash !== "string") {
       throw new Error(`runner data directory ${dataDir} has invalid owner metadata; refusing unsafe recovery`);
@@ -186,6 +273,12 @@ function acquireRunnerDataDirLeaseAt(
     if (existingOwner.ownerHash !== ownerHash) {
       return acquireRunnerDataDirLeaseAt(join(dataDir, "runner-instances", ownerHash), identity, options, false);
     }
+  }
+
+  if (legacyMigrationRequired && !options.adoptLegacyDataDir) {
+    throw new Error(
+      `runner data directory ${dataDir} contains legacy state without an owner marker; stop every pre-upgrade runner using this root, then retry once with --adopt-legacy-data-dir`,
+    );
   }
 
   const lease: LeaseRecord = {
@@ -200,11 +293,13 @@ function acquireRunnerDataDirLeaseAt(
     throw new Error(`runner data directory ${dataDir} lease recovery is present; retry shortly, then verify no runner is active before removing ${recoveryPath}`);
   }
   try {
-    writeProtected(leasePath, lease);
+    writeProtected(leasePath, lease, options);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     try {
+      beforeDurabilityOperation(options, "mkdir", recoveryPath);
       mkdirSync(recoveryPath);
+      syncDirectory(dataDir, options);
     } catch (guardError) {
       if ((guardError as NodeJS.ErrnoException).code === "EEXIST") {
         throw new Error(`runner data directory ${dataDir} lease recovery is already in progress; retry startup`);
@@ -240,10 +335,14 @@ function acquireRunnerDataDirLeaseAt(
       if (isProcessAlive(existing.pid)) {
         throw new Error(`runner data directory ${dataDir} is already in use by process ${existing.pid}; use a distinct --data-dir`);
       }
+      beforeDurabilityOperation(options, "unlink", leasePath);
       rmSync(leasePath);
-      writeProtected(leasePath, lease);
+      syncDirectory(dataDir, options);
+      writeProtected(leasePath, lease, options);
     } finally {
+      beforeDurabilityOperation(options, "unlink", recoveryPath);
       rmdirSync(recoveryPath);
+      syncDirectory(dataDir, options);
     }
   }
 
@@ -252,7 +351,11 @@ function acquireRunnerDataDirLeaseAt(
     if (released) return;
     try {
       const current = parseRecord<LeaseRecord>(leasePath);
-      if (current.leaseId === leaseId) rmSync(leasePath, { force: true });
+      if (current.leaseId === leaseId) {
+        beforeDurabilityOperation(options, "unlink", leasePath);
+        rmSync(leasePath, { force: true });
+        syncDirectory(dataDir, options);
+      }
     } catch {
       // Never remove an unreadable or replacement lease.
     }
@@ -273,14 +376,23 @@ function acquireRunnerDataDirLeaseAt(
       const legacyCredential = legacyCredentialForClaim(dataDir);
       if (legacyCredential) {
         const scopedCredential = scopedRunnerCredentialFile(dataDir, identity);
-        mkdirSync(dirname(scopedCredential), { recursive: true });
+        ensureDurableDirectory(dirname(scopedCredential), options);
         if (!existsSync(scopedCredential)) {
-          publishProtected(scopedCredential, legacyCredential);
+          publishProtected(scopedCredential, legacyCredential, options);
         } else if (!sameSecret(protectedRead(scopedCredential), legacyCredential)) {
           throw new Error(`scoped runner credential at ${scopedCredential} conflicts with legacy migration`);
         }
       }
-      writeProtected(ownerPath, { version: 1, ownerHash } satisfies OwnerRecord);
+      writeProtected(ownerPath, {
+        version: 1,
+        ownerHash,
+        ...(legacyMigrationRequired ? {
+          legacyMigration: {
+            authorization: "--adopt-legacy-data-dir" as const,
+            authorizedAt: new Date().toISOString(),
+          },
+        } : {}),
+      } satisfies OwnerRecord, options);
     }
   } catch (error) {
     release();
@@ -290,6 +402,7 @@ function acquireRunnerDataDirLeaseAt(
   return {
     dataDir,
     credentialFile: scopedRunnerCredentialFile(dataDir, identity),
+    migratedLegacyDataDir: legacyMigrationRequired,
     release,
   };
 }

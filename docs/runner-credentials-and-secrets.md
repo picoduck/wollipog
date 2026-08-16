@@ -105,20 +105,32 @@ before every launch or resume. Startup removes legacy per-session MCP JSON that 
 `MANAGER_TOKEN`. The MCP process still understands the legacy environment variable for rolling
 compatibility, but current runner launches use only the protected file reference.
 
-For a pre-marker data root, startup performs a one-time claim under the exclusive process lease. If
-the protected legacy `<dataDir>/credentials/active-runner-token` exists, startup copies its bytes to
-the scoped path before recording ownership and leaves the legacy file intact for rollback. The
-newly issued launch token remains staged until registration, so ordinary credential rotation does
-not make an upgrade unreadable. A root from a runner that never registered can be claimed without
-an old active token. This trust-on-first-use migration is necessary because legacy roots contain no
-durable runner or control-plane owner identity.
+An empty pre-marker data root is claimed automatically. A populated pre-marker root fails before
+publishing a lease or changing any byte because a still-running old binary cannot honor the new
+lease. After stopping every pre-upgrade runner that uses the root, an operator may authorize exactly
+one migration by adding the CLI-only `--adopt-legacy-data-dir` flag. The durable owner marker records
+that authorization and its timestamp, so subsequent starts do not need the flag. Environment and
+configuration-file equivalents are intentionally unavailable: migration must be a deliberate,
+auditable startup action. For a configured runner, stop its service and run its normal command once
+as `wollipog-runner --config <path> --adopt-legacy-data-dir`; config-less launchers append the same
+flag to their otherwise unchanged command.
+
+During the authorized migration, startup copies the protected legacy
+`<dataDir>/credentials/active-runner-token` bytes to the scoped path before recording ownership and
+leaves every legacy file intact for rollback. The newly issued launch token remains staged until
+registration, so ordinary credential rotation does not make an upgrade unreadable. A populated root
+from a runner that never registered still requires explicit authorization because its session and
+other mutable state cannot prove that an old process has stopped.
 
 An abandoned same-host process lease is reclaimed only after its recorded process is no longer
 alive. A separate atomic recovery guard serializes stale reapers; if recovery itself is interrupted,
 startup fails closed until an operator verifies no runner is active and removes the named guard.
-Leases from another host and malformed lease metadata fail closed. Owner and lease records are
-fully written and flushed before an exclusive hard-link publish, so a partial record is never
-installed at the canonical path.
+Leases from another host and malformed lease metadata fail closed. Owner, lease, recovery-guard,
+and migrated credential publication is crash-durable on platforms that support directory flushes:
+new directory entries are flushed in order, file contents are flushed before the exclusive hard
+link, and the containing directory is flushed after link and cleanup. Windows errors that precisely
+indicate unsupported directory open/flush behavior are tolerated; permission, I/O, and bad-handle
+errors still fail closed. Other durability failures abort startup before mutable stores open.
 
 The ownership boundary covers runner-managed sessions, native worktrees, admission records,
 durable-command and session-command receipts, checkpoint ownership, cleanup journals, registry

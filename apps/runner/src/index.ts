@@ -190,6 +190,7 @@ try {
   dataDirLease = acquireRunnerDataDirLease(
     config.dataDir,
     runnerDataIdentity,
+    { adoptLegacyDataDir: parsed.adoptLegacyDataDir },
   );
 } catch (error) {
   console.error(`[runner ${config.runnerId}] data directory unavailable: ${(error as Error).message}`);
@@ -197,6 +198,9 @@ try {
 }
 config.dataDir = dataDirLease.dataDir;
 process.once("exit", dataDirLease.release);
+if (dataDirLease.migratedLegacyDataDir) {
+  log(`claimed legacy data directory ${config.dataDir} after explicit --adopt-legacy-data-dir authorization`);
+}
 const stagedRunnerCredential = stageRunnerCredentialFile(
   config.dataDir,
   config.token,
