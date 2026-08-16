@@ -142,26 +142,34 @@ export async function attestRunnerControlPlane(
       throw new ControlPlaneAttestationError("control-plane attestation response is too large", false);
     }
     let text: string;
-    if (response.body) {
-      const reader = response.body.getReader();
-      const chunks: Uint8Array[] = [];
-      let bytes = 0;
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        bytes += value.byteLength;
-        if (bytes > MAX_RESPONSE_BYTES) {
-          await reader.cancel();
-          throw new ControlPlaneAttestationError("control-plane attestation response is too large", false);
+    try {
+      if (response.body) {
+        const reader = response.body.getReader();
+        const chunks: Uint8Array[] = [];
+        let bytes = 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          bytes += value.byteLength;
+          if (bytes > MAX_RESPONSE_BYTES) {
+            await reader.cancel();
+            throw new ControlPlaneAttestationError("control-plane attestation response is too large", false);
+          }
+          chunks.push(value);
         }
-        chunks.push(value);
+        const body = new Uint8Array(bytes);
+        let offset = 0;
+        for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.byteLength; }
+        text = new TextDecoder().decode(body);
+      } else {
+        text = "";
       }
-      const body = new Uint8Array(bytes);
-      let offset = 0;
-      for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.byteLength; }
-      text = new TextDecoder().decode(body);
-    } else {
-      text = "";
+    } catch (error) {
+      if (error instanceof ControlPlaneAttestationError) throw error;
+      throw new ControlPlaneAttestationError(
+        `control-plane attestation unavailable while reading the response: ${(error as Error).message}`,
+        true,
+      );
     }
     let decoded: unknown;
     try {

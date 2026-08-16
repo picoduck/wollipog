@@ -110,6 +110,11 @@ the same attested owner namespace. A stored pre-attestation WSL session continue
 registered legacy worktree so upgrade cannot strand uncommitted changes; an absent, unhealthy, or
 unexpected legacy path fails closed for manual recovery instead of creating a replacement worktree.
 The unowned legacy shared leaf is retained until provider-specific inventory can prove exclusive migration.
+That same ownership boundary applies to pre-attestation cleanup journals: a current runner does not
+delete a shared WSL leaf merely because an old journal names the session, because another runner may
+own identically named shared state. A rollback to the preceding runner generation also cannot resume
+the owner-scoped transcript of a WSL session created after this upgrade: it sees only the retained
+shared leaf. No bytes are removed; roll forward to the current runner to resume that session.
 Fork verification requires non-empty history
 because a provider-native fork always starts from a completed source turn. Network denial is offline/local-model-only because it also
 removes access to cloud model APIs. Provider mode remains the broadest compatibility default.

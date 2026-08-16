@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createWorktree, isGitRepo, nativeRepositoryPathIsUnavailable, removeWorktree, resolveWorktreeRoot, setStatfsForTests, WorktreeCleanupJournal } from "./worktree.js";
+import { createWorktree, isGitRepo, nativeRepositoryPathIsUnavailable, removeWorktree, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, setStatfsForTests, WorktreeCleanupJournal } from "./worktree.js";
 import { randomUUID } from "node:crypto";
 import { runContextCommand } from "./context-command.js";
 import { SessionStore } from "./session-store.js";
@@ -43,6 +43,44 @@ test("native repository availability recognizes only terminal filesystem states"
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("persisted legacy WSL worktree reuse fails closed unless the exact path is registered and healthy", async () => {
+  const expected = "/home/me/.agent-manager/worktrees/repo-key/session-one";
+  const porcelain = [
+    "worktree /repo",
+    "HEAD " + "a".repeat(40),
+    "",
+    `worktree ${expected}/`,
+    "HEAD " + "b".repeat(40),
+    "",
+  ].join("\n");
+  let healthChecks = 0;
+  assert.deepEqual(
+    await reuseRegisteredLegacyWslWorktree(
+      `${expected}/`, expected, "session-one", porcelain,
+      async () => { healthChecks++; return true; },
+    ),
+    { path: expected, branch: "agent/session-one", created: false },
+  );
+  assert.equal(healthChecks, 1);
+
+  await assert.rejects(
+    reuseRegisteredLegacyWslWorktree("/unexpected/session-one", expected, "session-one", porcelain, async () => true),
+    /outside the expected legacy session path/,
+  );
+  await assert.rejects(
+    reuseRegisteredLegacyWslWorktree(expected, expected, "session-one", "worktree /other\n", async () => true),
+    /no longer registered/,
+  );
+  await assert.rejects(
+    reuseRegisteredLegacyWslWorktree(expected, expected, "session-one", porcelain, async () => false),
+    /not healthy/,
+  );
+  await assert.rejects(
+    reuseRegisteredLegacyWslWorktree(expected, expected, "session-one", porcelain, async () => { throw new Error("offline"); }),
+    /not healthy/,
+  );
 });
 
 test("native worktrees live under the external runner data root and clean up", { skip: !haveGit() }, async () => {

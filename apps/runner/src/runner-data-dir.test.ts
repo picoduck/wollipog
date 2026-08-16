@@ -32,9 +32,11 @@ function tempRoot(): string {
   return mkdtempSync(join(tmpdir(), "wollipog-runner-owner-"));
 }
 
-/** The owner and lease decisions performed by origin/main before stable CP identity existed.
- * This covers the compatibility-critical namespace, live-process, and stale-recovery branches
- * without coupling production code back to the retired ownership algorithm. */
+/** The owner and lease decisions performed by pinned base 79c0ea4 before stable CP identity
+ * existed. These tests invoke the model only for a valid, matching root-owner marker, where it
+ * covers the compatibility-critical live-process and stale-recovery branches without coupling
+ * production code back to the retired algorithm. It intentionally does not model malformed,
+ * pre-marker, or foreign-owner namespace acquisition; those are not evidence claimed here. */
 function acquireWithOriginMainSemantics(
   root: string,
   identity: Pick<RunnerDataDirIdentity, "runnerId" | "controlPlaneUrl">,

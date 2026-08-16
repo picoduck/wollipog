@@ -196,6 +196,37 @@ export async function isGitRepo(repoPath: string, options: WorktreeOptions = {})
   }
 }
 
+/** Reuse a persisted pre-attestation WSL worktree only when its exact expected path remains
+ * registered and healthy. Kept independent from WSL command execution so every fail-closed
+ * decision is covered on all CI hosts. */
+export async function reuseRegisteredLegacyWslWorktree(
+  persistedPath: string,
+  expectedPath: string,
+  sessionId: string,
+  porcelain: string,
+  isHealthy: () => Promise<boolean>,
+): Promise<WorktreeHandle> {
+  if (persistedPath.replace(/\/$/u, "") !== expectedPath.replace(/\/$/u, "")) {
+    throw new Error("persisted WSL worktree is outside the expected legacy session path");
+  }
+  const registered = porcelain
+    .split(/\n\s*\n/u)
+    .map((block) => block.split("\n").find((line) => line.startsWith("worktree "))?.slice(9).trim())
+    .filter((candidate): candidate is string => !!candidate)
+    .some((candidate) => candidate.replace(/\/$/u, "") === expectedPath.replace(/\/$/u, ""));
+  if (!registered) {
+    throw new Error("persisted legacy WSL worktree is no longer registered; recover it manually before restarting this session");
+  }
+  try {
+    if (await isHealthy()) {
+      return { path: expectedPath, branch: `agent/${sessionId}`, created: false };
+    }
+  } catch {
+    // Fail closed below so user changes are never replaced.
+  }
+  throw new Error("persisted legacy WSL worktree is not healthy; recover it manually before restarting this session");
+}
+
 export async function createWorktree(repoPath: string, sessionId: string, options: WorktreeOptions = {}): Promise<WorktreeHandle> {
   const context = options.context ?? nativeContext;
   const path = await sessionPath(repoPath, sessionId, options);
@@ -205,23 +236,10 @@ export async function createWorktree(repoPath: string, sessionId: string, option
   const listed = await command(context, repoPath, ["worktree", "list", "--porcelain"]);
   if (context.kind === "wsl" && options.legacyWslWorktreePath) {
     const legacyPath = await sessionPath(repoPath, sessionId, { ...options, legacyWslRoot: true });
-    if (!sameContextPath(context, options.legacyWslWorktreePath, legacyPath)) {
-      throw new Error("persisted WSL worktree is outside the expected legacy session path");
-    }
-    const legacyRegistered = listed
-      .split(/\n\s*\n/)
-      .map((block) => block.split("\n").find((line) => line.startsWith("worktree "))?.slice(9).trim())
-      .filter((candidate): candidate is string => !!candidate)
-      .some((candidate) => sameContextPath(context, candidate, legacyPath));
-    if (!legacyRegistered) {
-      throw new Error("persisted legacy WSL worktree is no longer registered; recover it manually before restarting this session");
-    }
-    try {
-      if ((await command(context, legacyPath, ["rev-parse", "--is-inside-work-tree"])).trim() === "true") {
-        return { path: legacyPath, branch: `agent/${sessionId}`, created: false };
-      }
-    } catch { /* fail closed below so user changes are never replaced */ }
-    throw new Error("persisted legacy WSL worktree is not healthy; recover it manually before restarting this session");
+    return reuseRegisteredLegacyWslWorktree(
+      options.legacyWslWorktreePath, legacyPath, sessionId, listed,
+      async () => (await command(context, legacyPath, ["rev-parse", "--is-inside-work-tree"])).trim() === "true",
+    );
   }
   const registered = listed
     .split(/\n\s*\n/)

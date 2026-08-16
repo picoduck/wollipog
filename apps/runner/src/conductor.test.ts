@@ -262,6 +262,19 @@ test("re-provision migrates persisted shared mcp-config argv without touching le
   });
 });
 
+test("re-provision fails closed when persisted --mcp-config has no path", () => {
+  withTempDir((dir) => {
+    for (const args of [["--mcp-config"], ["--mcp-config", "--strict-mcp-config"]]) {
+      const spec = makeSpec({ args });
+      assert.throws(
+        () => provisionConductor(spec, CP_CONFIG, () => {}, makeHost(dir)),
+        /persisted conductor --mcp-config has no path/,
+      );
+      assert.equal(existsSync(join(dir, "s_cond1.mcp.json")), false);
+    }
+  });
+});
+
 test("runner credential file is mode 600 and startup sweep removes legacy conductor configs", () => {
   withTempDir((dir) => {
     const credential = writeRunnerCredentialFile(dir, "opaque-runner-token");

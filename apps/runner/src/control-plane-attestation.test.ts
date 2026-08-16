@@ -92,6 +92,27 @@ test("runner attestation retries transient failures but rejects credentials perm
   );
 });
 
+test("runner attestation retries a transient response-body failure", async () => {
+  let calls = 0;
+  const delays: number[] = [];
+  const result = await waitForRunnerControlPlaneAttestation({
+    controlPlaneUrl: "ws://localhost:4317/runner",
+    runnerId: "runner-one",
+    token: "token",
+    fetchImpl: (async () => {
+      calls++;
+      if (calls > 1) return new Response(JSON.stringify(valid));
+      return new Response(new ReadableStream<Uint8Array>({
+        pull(controller) { controller.error(new TypeError("terminated")); },
+      }));
+    }) as typeof fetch,
+    wait: async (delay) => { delays.push(delay); },
+  });
+  assert.deepEqual(result, valid);
+  assert.equal(calls, 2);
+  assert.deepEqual(delays, [1_000]);
+});
+
 test("runner attestation fails closed on malformed or oversized identity", async () => {
   await assert.rejects(() => attestRunnerControlPlane({
     controlPlaneUrl: "ws://localhost/runner", runnerId: "r", token: "t",

@@ -130,7 +130,12 @@ When rolling back to the preceding endpoint-owned runner generation, use the end
 configuration that originally published the v1 marker. A current runner may move endpoints because
 its stable ownership no longer depends on the address, but the v1 marker is deliberately not
 rewritten: after such a move, the rollback-era endpoint/configuration is required to reopen the
-same root while preserving cross-version mutual exclusion.
+same root while preserving cross-version mutual exclusion. This compatibility applies to the owner
+of the requested root. A second runner placed below `runner-instances/<stable-owner-hash>` cannot be
+reopened there by the preceding generation, whose namespace hash used the endpoint instead of the
+attested control-plane identity. Rolling that runner back starts a separate endpoint-hashed namespace
+and does not expose its current sessions; keep the current binary available to recover them, or give
+each rollback-sensitive runner its own explicit data root.
 
 The active credential is mode 0600 at
 `<dataDir>/credentials/instances/<owner-hash>/active-runner-token`. Per-session Conductor MCP
