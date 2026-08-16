@@ -3594,7 +3594,7 @@ textarea,
 .pending-prompt-attempts,
 .pending-prompt-attachment {
   font-size: var(--text-xs);
-  color: color-mix(in srgb, var(--on-accent-deep) 78%, transparent);
+  color: var(--on-accent-deep);
 }
 .pending-prompt-error {
   margin-top: 6px;

@@ -1,4 +1,9 @@
-import type { PendingPromptState, PendingPromptView, SessionStatus } from "@wollipog/protocol";
+import type {
+  PendingPromptState,
+  PendingPromptView,
+  QueuedPromptView,
+  SessionStatus,
+} from "@wollipog/protocol";
 
 const LABELS: Record<PendingPromptState, string> = {
   pending: "Pending",
@@ -22,6 +27,20 @@ export function shouldShowOptimisticPrompt(
 ): boolean {
   return !durableProviderInvocation &&
     !["queued", "running", "starting", "input_required"].includes(status);
+}
+
+export function hasNewPendingPrompt(
+  knownCommandIds: ReadonlySet<string>,
+  prompts: readonly PendingPromptView[] | undefined,
+): boolean {
+  return prompts?.some((prompt) => !knownCommandIds.has(prompt.commandId)) ?? false;
+}
+
+/** Transcript projection must not remove the separate live queue's steering controls. */
+export function queuedPromptsWithControls(
+  queued: readonly QueuedPromptView[] | undefined,
+): readonly QueuedPromptView[] {
+  return queued ?? [];
 }
 
 export function PendingPromptBubbles({
@@ -69,13 +88,13 @@ export function PendingPromptBubbles({
             {prompt.error && <div className="pending-prompt-error">{prompt.error}</div>}
           </div>
           {(cancelPending || cancelLive || prompt.canDismiss) && (
-            <div className="pending-prompt-actions">
+            <div className="pending-prompt-actions" aria-busy={busy || undefined}>
               {(cancelPending || cancelLive) && (
                 <button
                   type="button"
                   className="btn ghost sm"
                   disabled={actionPending}
-                  aria-label="Cancel Pending Message"
+                  aria-label={busy ? "Cancelling Pending Message" : "Cancel Pending Message"}
                   aria-describedby={detailsId}
                   onClick={() => cancelPending
                     ? onCancelPending(prompt.commandId)
@@ -89,7 +108,7 @@ export function PendingPromptBubbles({
                   type="button"
                   className="btn ghost sm"
                   disabled={actionPending}
-                  aria-label="Dismiss Pending Message"
+                  aria-label={busy ? "Dismissing Pending Message" : "Dismiss Pending Message"}
                   aria-describedby={detailsId}
                   onClick={() => onDismiss(prompt.commandId)}
                 >

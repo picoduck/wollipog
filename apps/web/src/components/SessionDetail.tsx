@@ -40,7 +40,12 @@ import { RightPanel, type RightPanelState } from "./RightPanel.js";
 import { useGitStatus, useGitSummary } from "./useGitStatus.js";
 import { ImageStrip, usePastedImages } from "./images.js";
 import { PromptImageView } from "./PromptImageView.js";
-import { PendingPromptBubbles, shouldShowOptimisticPrompt } from "./PendingPromptBubbles.js";
+import {
+  hasNewPendingPrompt,
+  PendingPromptBubbles,
+  queuedPromptsWithControls,
+  shouldShowOptimisticPrompt,
+} from "./PendingPromptBubbles.js";
 import { ApprovalsControl, ModelEffortControl } from "./ComposerControls.js";
 import { modelSupportsImages, resolveCaps } from "../caps.js";
 import { PinnedSummary } from "./PinnedSummary.js";
@@ -940,10 +945,7 @@ function SessionDetailLoaded({
   const liveQueueIds = useMemo(() => new Set((session.queued ?? []).flatMap((prompt) =>
     prompt.liveQueueObserved ? [prompt.id] : []
   )), [session.queued]);
-  const pendingPromptIds = useMemo(
-    () => new Set((session.pendingPrompts ?? []).map((prompt) => prompt.commandId)),
-    [session.pendingPrompts],
-  );
+  const queuedPromptControls = queuedPromptsWithControls(session.queued);
   const resolvePendingPrompt = useCallback(async (
     commandId: string,
     action: "cancel" | "dismiss",
@@ -1493,6 +1495,9 @@ function SessionDetailLoaded({
     // input_required counts as active: a turn parked on a mid-turn tool approval still holds the
     // runner's turn slot, so a send there queues exactly like running/starting.
     sendBaselineRef.current = timelineUserPrompts.length;
+    const knownPendingPromptIds = new Set(
+      (session.pendingPrompts ?? []).map((prompt) => prompt.commandId),
+    );
     if (shouldShowOptimisticPrompt(session.status, durableProviderInvocation)) {
       setPending({ text: outgoing, images: outgoingImages });
     }
@@ -1518,7 +1523,14 @@ function SessionDetailLoaded({
         });
         commandSubmissionRetryRef.current = null;
       } else {
-        await api.prompt(sessionId, promptText, outgoingImages, cfg, slashCommand);
+        const prompted = await api.prompt(sessionId, promptText, outgoingImages, cfg, slashCommand);
+        if (prompted && viewGenerationRef.current === generation &&
+            (prompted.status === "queued" || prompted.status === "starting") &&
+            hasNewPendingPrompt(knownPendingPromptIds, prompted.pendingPrompts)) {
+          // The server had newer admission state than this render and durably staged the prompt.
+          // Replace the stale optimistic echo with the authoritative command-keyed bubble now.
+          setPending(null);
+        }
         pendingConfig.current = {};
       }
       providerAccepted = true;
@@ -2106,9 +2118,9 @@ function SessionDetailLoaded({
               onQueueAgain={(submissionId) => void resolveSteeringAttempt(submissionId, "queue_again")}
               onDismiss={(submissionId) => void resolveSteeringAttempt(submissionId, "dismiss")}
             />
-            {session.queued?.some((prompt) => !pendingPromptIds.has(prompt.id)) && (
+            {queuedPromptControls.length > 0 && (
               <div className="queued-list" aria-label="Queued Messages">
-                {session.queued.filter((prompt) => !pendingPromptIds.has(prompt.id)).map((q) => {
+                {queuedPromptControls.map((q) => {
                   const availability = queuedPromptSteeringAvailability(steeringAvailabilityInput, q);
                   const locallyPromoting = queueSteeringPending.has(q.id);
                   const reserved = q.steeringState === "promoting" || q.steeringState === "uncertain";

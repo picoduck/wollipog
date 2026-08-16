@@ -4,7 +4,12 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { PendingPromptView } from "@wollipog/protocol";
-import { PendingPromptBubbles, shouldShowOptimisticPrompt } from "./PendingPromptBubbles.js";
+import {
+  hasNewPendingPrompt,
+  PendingPromptBubbles,
+  queuedPromptsWithControls,
+  shouldShowOptimisticPrompt,
+} from "./PendingPromptBubbles.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 for (const [name, value] of Object.entries({
@@ -36,6 +41,22 @@ test("queued and active-turn prompts never create a legacy optimistic transcript
   assert.equal(shouldShowOptimisticPrompt("idle", true), false);
 });
 
+test("a newly returned durable prompt retracts a stale-status optimistic bubble", () => {
+  const known = new Set(["older-prompt"]);
+  assert.equal(hasNewPendingPrompt(known, [pending({ commandId: "older-prompt" })]), false);
+  assert.equal(hasNewPendingPrompt(known, [
+    pending({ commandId: "older-prompt" }),
+    pending({ commandId: "new-prompt" }),
+  ]), true);
+  assert.equal(hasNewPendingPrompt(known, undefined), false);
+});
+
+test("durable transcript projection retains the live queue's steering controls", () => {
+  const queue = [{ id: "new-prompt", text: "Steer me", hasImages: false, steerable: true }];
+  assert.equal(queuedPromptsWithControls(queue), queue);
+  assert.deepEqual(queuedPromptsWithControls(undefined), []);
+});
+
 test("one pending action disables every prompt action", async () => {
   const container = domWindow.document.createElement("div");
   domWindow.document.body.append(container);
@@ -60,6 +81,10 @@ test("one pending action disables every prompt action", async () => {
     const buttons = [...container.querySelectorAll("button")];
     assert.equal(buttons.length, 2);
     assert.equal(buttons.every((button) => button.disabled), true);
+    assert.equal(buttons[0]!.getAttribute("aria-label"), "Cancelling Pending Message");
+    assert.equal(buttons[0]!.parentElement?.getAttribute("aria-busy"), "true");
+    assert.equal(buttons[1]!.getAttribute("aria-label"), "Dismiss Pending Message");
+    assert.equal(buttons[1]!.parentElement?.getAttribute("aria-busy"), null);
     assert.match(container.textContent ?? "", /Cancelling…/);
     await act(async () => { buttons[1]!.click(); });
     assert.deepEqual(actions, []);

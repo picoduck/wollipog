@@ -2709,7 +2709,10 @@ export class SessionManager {
 
   private activatePreLaunchQueue(sessionId: string): void {
     const queue = this.preLaunchQueues.get(sessionId);
-    if (!queue?.length) return;
+    if (!queue?.length) {
+      if (queue) this.preLaunchQueues.delete(sessionId);
+      return;
+    }
     const entry = this.active.get(sessionId);
     if (!entry) {
       this.rejectPreLaunchQueue(sessionId, "session launch ended before runner admission");
@@ -3649,7 +3652,8 @@ export class SessionManager {
     const removed = queue.filter((q) => q.id === promptId);
     const retained = queue.filter((q) => q.id !== promptId);
     if (entry) entry.queue = retained;
-    else this.preLaunchQueues.set(sessionId, retained);
+    else if (retained.length) this.preLaunchQueues.set(sessionId, retained);
+    else this.preLaunchQueues.delete(sessionId);
     this.rejectQueued(removed, "queued command was cancelled");
     if (retained.length !== before) this.emitQueue(sessionId);
   }

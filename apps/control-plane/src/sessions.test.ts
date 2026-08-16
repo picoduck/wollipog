@@ -2349,7 +2349,7 @@ test("pending prompt cancellation is definite before send and wins late admissio
     runnerId: RUNNER_ID,
     payloadJson: canonicalAutomationCommandJson(command),
     payloadSha256: automationCommandDigest(command),
-    expiresAt: now + 60_000,
+    expiresAt: now + 30 * 24 * 60 * 60_000,
     now,
   });
 
@@ -2370,6 +2370,10 @@ test("pending prompt cancellation is definite before send and wins late admissio
   assert.equal(cancelled?.errorCode, "COMMAND_CANCELLED");
   assert.equal(cancelled?.canDismiss, true);
   assert.equal(cancelled?.canCancel, undefined);
+  assert.ok(db.getSessionPromptCommand(commandId)!.expiresAt <= now + 7 * 24 * 60 * 60_000 + 1_000,
+    "terminal cancellation shortens the retained row to the seven-day horizon");
+  assert.ok(db.getSessionPromptCommand(commandId)!.expiresAt >= now + 7 * 24 * 60 * 60_000,
+    "terminal cancellation retains its outcome for the full seven-day horizon");
 
   assert.equal(restarted.retryDuePrompts(Date.now() + 60_000), 0,
     "a definitely cancelled prompt never enters the send lane");
@@ -2461,6 +2465,9 @@ test("durable queued prompts accept revision-zero failures and stop retrying aft
     code: "RECEIPT_STORE_FULL",
   }), true);
   assert.equal(db.getSessionPromptCommand(rejected.commandId)?.state, "failed");
+  assert.ok(db.getSessionPromptCommand(rejected.commandId)!.expiresAt <=
+    Date.now() + 7 * 24 * 60 * 60_000 + 1_000,
+    "runner-authoritative terminal receipts shorten retention to seven days");
   assert.equal(db.dueSessionPromptCommands(Date.now() + 60_000, RUNNER_ID).length, 0);
 
   hub.sentToRunner.length = 0;
@@ -2468,10 +2475,14 @@ test("durable queued prompts accept revision-zero failures and stop retrying aft
   const stranded = hub.sentOfType("durable_session_command")[0]!;
   svc.onSessionStatus(id, "failed", "provider launch failed", RUNNER_ID);
   assert.equal(db.getSessionPromptCommand(stranded.commandId)?.state, "uncertain");
+  assert.ok(db.getSessionPromptCommand(stranded.commandId)!.expiresAt <=
+    Date.now() + 7 * 24 * 60 * 60_000 + 1_000,
+    "session terminality shortens conservative outcomes to seven days");
   assert.equal(db.dueSessionPromptCommands(Date.now() + 60_000, RUNNER_ID).length, 0,
     "terminal sessions fence every durable retry path");
 
-  const uncertainRevision = db.getSessionPromptCommand(stranded.commandId)!.revision;
+  const uncertainRecord = db.getSessionPromptCommand(stranded.commandId)!;
+  const uncertainRevision = uncertainRecord.revision;
   assert.equal(svc.onDurablePromptReceipt(RUNNER_ID, {
     type: "durable_session_command_update",
     commandId: stranded.commandId,
@@ -2481,6 +2492,9 @@ test("durable queued prompts accept revision-zero failures and stop retrying aft
   }), true);
   assert.equal(db.getSessionPromptCommand(stranded.commandId)?.state, "completed",
     "a later authoritative terminal receipt narrows conservative status uncertainty");
+  assert.ok(db.getSessionPromptCommand(stranded.commandId)!.expiresAt <=
+    uncertainRecord.expiresAt,
+    "authoritative refinement does not extend terminal retention");
 
   db.raw().prepare("UPDATE session_prompt_commands SET expires_at=? WHERE command_id IN (?,?)")
     .run(Date.now() - 1, rejected.commandId, stranded.commandId);
@@ -2520,6 +2534,11 @@ test("durable prompt retry attempt identities stay bounded while recent receipts
     "SELECT COUNT(*) AS count FROM session_prompt_command_attempts WHERE command_id=?",
   ).get(commandId) as { count: number };
   assert.equal(count.count, 128);
+  const attemptIndexes = db.raw().prepare(
+    "PRAGMA index_list('session_prompt_command_attempts')",
+  ).all() as Array<{ name: string }>;
+  assert.ok(attemptIndexes.some((index) => index.name === "idx_session_prompt_command_attempts_command"),
+    "bounded per-command trimming has a command-scoped index");
   assert.equal(svc.onDurablePromptReceipt(RUNNER_ID, {
     type: "durable_session_command_result",
     requestId: "bounded-attempt-159",
