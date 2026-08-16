@@ -197,6 +197,9 @@ pre-migration runner for the account, use `--state-doctor inventory` and the exp
 `adopt-checkpoints` and `adopt-provider-state` actions copy legacy state into the attested namespace
 without deleting sources; `quarantine-wsl` atomically moves the ambiguous shared provider/worktree
 roots aside. Mutations require `--ack-all-legacy-runners-stopped` and refuse an active data lease.
+Quarantining those whole roots also makes any stored legacy WSL session that names one of their
+worktrees unavailable until the root is restored or the session is explicitly migrated; inventory
+and back up the shared roots before acknowledging that operation.
 An incomplete or stale provider-home lease fails closed with manual quarantine guidance; even a
 same-owner restart cannot reclaim it automatically because a detached provider tree may have
 survived the runner. Remove it only after proving no provider process is using that HOME.

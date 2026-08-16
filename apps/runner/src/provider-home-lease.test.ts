@@ -3,7 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
+import { providerLaunchNeedsSharedHomeLease, ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
+import type { SpawnIsolation } from "./spawn.js";
 
 function request(home: string) {
   return {
@@ -13,6 +14,23 @@ function request(home: string) {
     env: { HOME: home },
   };
 }
+
+test("container and cloud launches never lease the host provider HOME", () => {
+  const remote: SpawnIsolation[] = [
+    {
+      backend: "container", command: "docker", args: [], image: `x@sha256:${"a".repeat(64)}`,
+      network: "deny", templateId: "tools", runnerKey: "runner-key", containerName: "session",
+      hostAgentCommand: "claude", hostAgentArgs: [], agentCommand: "claude", agentArgs: [],
+    },
+    {
+      backend: "cloud", command: "cloud-proxy", args: [], env: {}, targetId: "remote",
+      handoffId: "handoff", sessionId: "session", hostAgentCommand: "claude",
+      hostAgentArgs: [], agentCommand: "claude", agentArgs: [],
+    },
+  ];
+  for (const isolation of remote) assert.equal(providerLaunchNeedsSharedHomeLease(isolation), false);
+  assert.equal(providerLaunchNeedsSharedHomeLease(undefined), true);
+});
 
 test("provider-home leases are process-reentrant and reject a live competing owner", (t) => {
   const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-"));

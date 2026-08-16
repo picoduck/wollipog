@@ -286,9 +286,21 @@ test("state doctor rejects ambiguous arguments and reports unreadable metadata w
   assert.equal((JSON.parse(output) as { unreadableSessionMetadata: number }).unreadableSessionMetadata, 1);
   assert.equal(output.includes("SECRET_CANARY"), false);
   await assert.rejects(runStateDoctor([
+    "runner", "--state-doctor", "adopt-checkpoints", "--data-dir", root,
+    "--session-id", "s_secret", "--ack-all-legacy-runners-stopped",
+  ]), (error: unknown) => {
+    const text = String(error);
+    assert.match(text, /unsafe state metadata: meta\.json/u);
+    assert.equal(text.includes("SECRET_CANARY"), false);
+    return true;
+  });
+  await assert.rejects(runStateDoctor([
     "runner", "--state-doctor", "inventory", "--data-dir", root, "--data-dir", root,
   ]), /duplicate state-doctor argument/);
   await assert.rejects(runStateDoctor([
     "runner", "--state-doctor", "inventory", "--data-dir",
   ]), /requires a value/);
+  await assert.rejects(runStateDoctor([
+    "runner", "--state-doctor", "inventory", "--data-dir", "--session-id", "s_secret",
+  ]), /--data-dir requires a value/);
 });

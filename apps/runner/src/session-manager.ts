@@ -4915,12 +4915,13 @@ export class SessionManager {
       // Install every cleanup record before discarding the live entry or the only durable row. If
       // either journal write fails, a retry still has the complete session state to converge from.
       if (meta?.worktreePath) {
+        const checkpointOwnerHash = this.checkpointOwnerHash(meta);
         this.cleanupJournal.add({
           sessionId,
           repoPath: meta.repoPath,
           worktreePath: meta.worktreePath,
           context: meta.context,
-          ...(this.checkpointOwnerHash(meta) ? { checkpointOwnerHash: this.checkpointOwnerHash(meta) } : {}),
+          ...(checkpointOwnerHash ? { checkpointOwnerHash } : {}),
         });
       }
       if (meta) {
@@ -5039,9 +5040,18 @@ export class SessionManager {
     // A failed fork can publish its temporary row before inherited-history copying fails. Its
     // catch path still owns that exact generation and explicitly marks it disposable; ordinary
     // journal replay must preserve any independently recreated current session.
-    const currentOwnershipKey = cleanupCurrentGeneration
-      ? null
-      : this.currentCheckpointOwnershipKey(record.sessionId);
+    let currentOwnershipKey: string | null;
+    try {
+      currentOwnershipKey = cleanupCurrentGeneration
+        ? null
+        : this.currentCheckpointOwnershipKey(record.sessionId);
+    } catch {
+      // A forward-version or malformed live row is not permission to reclaim its refs or
+      // worktree. Startup runs this method fire-and-forget, so contain the validation failure and
+      // retain the durable cleanup record for a compatible build or operator repair.
+      this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after checkpoint ownership validation`);
+      return;
+    }
     if (currentOwnershipKey === cleanupOwnershipKey) {
       // A replacement generation reused this exact durable tuple. The older cleanup record is
       // superseded; touching either its refs or worktree would destroy the live replacement.

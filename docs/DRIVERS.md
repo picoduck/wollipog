@@ -124,6 +124,8 @@ cleanup journals retain their exact unscoped layout until explicit offline adopt
 mode remains the broadest compatibility default but takes an exclusive whole-HOME lease shared by
 Claude, Codex, ACP, Seatbelt, Windows Job, and Agent TUI launches. Direct WSL provider mode fails
 closed; choose bwrap or a dedicated distro/account.
+Standalone Agent TUI processes are not bwrapped, so Agent TUI attachment from a WSL session requires
+a dedicated distro/account even when the session's structured provider launch uses bwrap.
 
 On upgrade, a persisted Conductor `--mcp-config` argument is rewritten to the attested runner's
 owned data directory before launch. The former `~/.agent-manager/conductor/*.mcp.json` file is never

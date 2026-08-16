@@ -82,13 +82,14 @@ function parseDoctorArgs(argv: string[]): DoctorArgs {
     if (seen.has(arg)) throw new Error(`duplicate state-doctor argument: ${arg}`);
     seen.add(arg);
     if (arg === "--ack-all-legacy-runners-stopped") acknowledged = true;
-    else if (arg === "--data-dir") dataDir = argv[++i];
-    else if (arg === "--session-id") sessionId = argv[++i];
-    else if (arg === "--wsl-distro") distro = argv[++i];
-    else throw new Error(`unknown state-doctor argument: ${arg}`);
-    if (arg !== "--ack-all-legacy-runners-stopped" && argv[i] === undefined) {
-      throw new Error(`${arg} requires a value`);
-    }
+    else if (arg === "--data-dir" || arg === "--session-id" || arg === "--wsl-distro") {
+      const value = argv[i + 1];
+      if (value === undefined || value.startsWith("--")) throw new Error(`${arg} requires a value`);
+      i++;
+      if (arg === "--data-dir") dataDir = value;
+      else if (arg === "--session-id") sessionId = value;
+      else distro = value;
+    } else throw new Error(`unknown state-doctor argument: ${arg}`);
   }
   if (!dataDir) throw new Error("--data-dir is required");
   if (sessionId && !SESSION_ID.test(sessionId)) throw new Error("--session-id is invalid");
@@ -101,7 +102,13 @@ function protectedJson<T>(path: string): T {
   try {
     const stat = fstatSync(fd);
     if (!stat.isFile() || stat.size > MAX_JSON_BYTES) throw new Error(`unsafe state metadata: ${basename(path)}`);
-    return JSON.parse(readFileSync(fd, "utf8")) as T;
+    try {
+      return JSON.parse(readFileSync(fd, "utf8")) as T;
+    } catch {
+      // V8 includes a window of invalid JSON in SyntaxError messages. State metadata can contain
+      // credentials and private paths, so report only the protected file's basename.
+      throw new Error(`unsafe state metadata: ${basename(path)}`);
+    }
   } finally {
     closeSync(fd);
   }
