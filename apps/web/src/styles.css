@@ -7375,6 +7375,18 @@ body.shell-dock-dragging * {
   background: color-mix(in srgb, var(--yellow) 7%, transparent);
   font-size: 11px;
 }
+.access-scope-field { min-width: min(100%, 260px); }
+.access-scope-field small { color: var(--text-dim); font-size: var(--text-xs); font-weight: 400; }
+.access-scope-settings { display: flex; max-width: 660px; align-items: flex-end; gap: 10px; margin-top: 12px; }
+.access-scope-settings .access-scope-field { flex: 1; }
+.access-scope-settings > .muted { align-self: center; font-size: var(--text-xs); }
+.access-scope-preview { display: grid; gap: 12px; }
+.access-scope-preview > p { margin: 0; }
+.access-scope-preview dl { display: grid; margin: 0; gap: 8px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.access-scope-preview dl > div { padding: 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); }
+.access-scope-preview dt { color: var(--text-dim); font-size: var(--text-xs); font-weight: 650; }
+.access-scope-preview dd { margin: 3px 0 0; font-size: var(--text-lg); font-weight: 700; }
+.project-location-corrections { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .project-manager-error { margin-bottom: 10px; }
 .project-location-list { display: flex; flex-direction: column; gap: 9px; }
 .project-location-row,
@@ -7535,6 +7547,7 @@ body.shell-dock-dragging * {
   .project-detail-heading,
   .project-section-heading { align-items: stretch; flex-direction: column; }
   .project-name-form { align-items: stretch; flex-direction: column; }
+  .access-scope-settings { align-items: stretch; flex-direction: column; }
   .project-name-form .btn { justify-content: center; }
   .project-location-candidate { align-items: stretch; flex-direction: column; }
   .project-location-candidate .btn { width: 100%; justify-content: center; }

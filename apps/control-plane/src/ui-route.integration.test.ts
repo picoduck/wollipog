@@ -8,7 +8,7 @@ import { createRequire } from "node:module";
 import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { PROTOCOL_VERSION, type RunnerMetadata } from "@wollipog/protocol";
+import { PROTOCOL_VERSION, type ResourceScope, type RunnerMetadata } from "@wollipog/protocol";
 import { hashToken } from "./auth.js";
 import { ControlPlaneDb } from "./db.js";
 import { defaultLocalDeviceTokenPath, loadOrCreateLocalDeviceToken } from "./local-device-credential.js";
@@ -563,6 +563,7 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     paginatedSessionHistory: true,
     projects: true,
     createProjectLocations: true,
+    accessScopeManagement: true,
     nativeTuiLaunch: true,
   });
   const initialProjects = snapshot.projects as Array<{
@@ -757,6 +758,97 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   }).project;
   assert.equal(createdProject.canManage, true);
   await uiInbox.take((message) => message.type === "project_upsert" && message.project.id === createdProject.id);
+
+  const deniedOperatorOrganizationProject = await fetch(`${httpBase}/api/projects`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${operatorToken}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      name: "Unauthorized Shared Project",
+      owner: { kind: "organization", organizationId: identity.organizationId },
+    }),
+  });
+  assert.equal(deniedOperatorOrganizationProject.status, 403,
+    "ordinary members cannot create organization-visible Projects");
+  const deniedCrossUserProject = await fetch(`${httpBase}/api/projects`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${operatorToken}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      name: "Cross-User Project",
+      owner: { kind: "user", userId: identity.userId },
+    }),
+  });
+  assert.equal(deniedCrossUserProject.status, 403, "private scope cannot be assigned across users");
+  const operatorPrivateProjectResponse = await fetch(`${httpBase}/api/projects`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${operatorToken}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      name: "Operator Private Project",
+      owner: { kind: "user", userId: "usr_ui_route_operator" },
+    }),
+  });
+  assert.equal(operatorPrivateProjectResponse.status, 201);
+  const operatorPrivateProject = (await operatorPrivateProjectResponse.json() as {
+    project: { id: string; audience?: string; scope?: ResourceScope };
+  }).project;
+  assert.equal(operatorPrivateProject.audience, "user");
+  assert.deepEqual(operatorPrivateProject.scope?.owner, { kind: "user", userId: "usr_ui_route_operator" });
+  const deniedOperatorScopeChange = await fetch(
+    `${httpBase}/api/projects/${operatorPrivateProject.id}/access-scope?ownerKind=user&ownerId=usr_ui_route_operator`,
+    { headers: { authorization: `Bearer ${operatorToken}` } },
+  );
+  assert.equal(deniedOperatorScopeChange.status, 403,
+    "post-creation access changes require organization owner or admin permission server-side");
+
+  const managedScopeProjectResponse = await ownerFetch("/api/projects", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      name: "Managed Scope Project",
+      owner: { kind: "organization", organizationId: identity.organizationId },
+    }),
+  });
+  assert.equal(managedScopeProjectResponse.status, 201);
+  const managedScopeProject = (await managedScopeProjectResponse.json() as {
+    project: { id: string; scope?: ResourceScope };
+  }).project;
+  const scopePreviewResponse = await ownerFetch(
+    `/api/projects/${managedScopeProject.id}/access-scope?ownerKind=user&ownerId=${identity.userId}`,
+  );
+  assert.equal(scopePreviewResponse.status, 200);
+  const scopePreview = (await scopePreviewResponse.json() as {
+    preview: { confirmationToken?: string; compatible: boolean };
+  }).preview;
+  assert.equal(scopePreview.compatible, true);
+  assert.match(scopePreview.confirmationToken ?? "", /^[a-f0-9]{64}$/u);
+  const appliedScopeResponse = await ownerFetch(`/api/projects/${managedScopeProject.id}/access-scope`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      owner: { kind: "user", userId: identity.userId },
+      confirmationToken: scopePreview.confirmationToken,
+    }),
+  });
+  assert.equal(appliedScopeResponse.status, 200);
+  const appliedScopeProject = (await appliedScopeResponse.json() as {
+    project: { scope?: ResourceScope };
+  }).project;
+  assert.deepEqual(appliedScopeProject.scope?.owner, { kind: "user", userId: identity.userId });
+  const scopeAudit = (await (await ownerFetch("/api/identity/mutation-audit?limit=100")).json() as {
+    audit: Array<{ method: string; route: string; targetId?: string; statusCode: number }>;
+  }).audit;
+  assert.equal(scopeAudit.some((entry) =>
+    entry.method === "PUT" && entry.route === "/api/projects/:id/access-scope" &&
+    entry.targetId === managedScopeProject.id && entry.statusCode === 200), true,
+    "successful access-scope changes are attributed in the mutation audit");
 
   const deniedOperatorLocation = await fetch(`${httpBase}/api/projects/${createdProject.id}/locations/new`, {
     method: "POST",

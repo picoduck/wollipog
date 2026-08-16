@@ -1,11 +1,19 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   runnerSupportsProtocol,
   type BoxView,
   type ProjectView,
+  type ResourceOwner,
   type RunnerView,
 } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
+import {
+  accessScopeChoices,
+  accessScopeLabel,
+  canAssignAccessScope,
+  resourceOwnerKey,
+  scopeAudienceContained,
+} from "../access-scopes.js";
 import { machineOptionLabels, runnerDisplay } from "../runners.js";
 import {
   buildProjectLocationCandidates,
@@ -14,12 +22,18 @@ import {
   type ProjectLocationCandidate,
 } from "../project-management.js";
 import { DirectoryPicker } from "./DirectoryPicker.js";
+import {
+  AccessScopeChangeDialog,
+  AccessScopeField,
+  useAccessScopeIdentity,
+} from "./AccessScopeControls.js";
 import { Modal } from "./common.js";
 
 interface NewProjectLocation {
   runnerId: string;
   name: string;
   path: string;
+  owner?: ResourceOwner;
 }
 
 export function projectLocationCreationError(cause: unknown): string {
@@ -42,6 +56,7 @@ export function ProjectLocationDialog({
   runners,
   boxes,
   canCreateLocation,
+  accessScopeManagementSupported,
   onClose,
   onAdd,
   onCreate,
@@ -52,6 +67,7 @@ export function ProjectLocationDialog({
   runners: ReadonlyMap<string, RunnerView>;
   boxes: ReadonlyMap<string, BoxView>;
   canCreateLocation: boolean;
+  accessScopeManagementSupported: boolean;
   onClose: () => void;
   onAdd: (candidate: ProjectLocationCandidate) => Promise<void>;
   onCreate: (location: NewProjectLocation) => Promise<void>;
@@ -66,6 +82,13 @@ export function ProjectLocationDialog({
   const [folderSelection, setFolderSelection] = useState<{ runnerId: string; path: string } | null>(null);
   const [createExpanded, setCreateExpanded] = useState(false);
   const [browsing, setBrowsing] = useState(false);
+  const [scopeKey, setScopeKey] = useState("");
+  const [scopeCorrection, setScopeCorrection] = useState<{
+    resource: { kind: "project"; projectId: string; name: string } |
+      { kind: "workspace"; runnerId: string; workspaceId: string; name: string };
+    owner: ResourceOwner;
+  } | null>(null);
+  const { identity, error: identityError } = useAccessScopeIdentity(accessScopeManagementSupported);
   const close = () => {
     if (!busyKey) onClose();
   };
@@ -90,6 +113,20 @@ export function ProjectLocationDialog({
   const selectedMachine = browseMachines.find(({ runner }) => runner.runnerId === runnerId) ?? browseMachines[0] ?? null;
   const selectedRunnerId = selectedMachine?.runner.runnerId ?? "";
   const selectedFolder = folderSelection?.runnerId === selectedRunnerId ? folderSelection.path : null;
+  const creationScopeChoices = useMemo(() => identity ? accessScopeChoices(identity, project.scope)
+    .filter((choice) => {
+      const scope = { organizationId: identity.context.organizationId, owner: choice.owner };
+      return (!project.scope || scopeAudienceContained(project.scope, scope)) &&
+        (!selectedMachine?.runner.scope || scopeAudienceContained(scope, selectedMachine.runner.scope));
+    }) : [], [identity, project.scope, selectedMachine]);
+  useEffect(() => {
+    if (!accessScopeManagementSupported || creationScopeChoices.length === 0) return;
+    const preferred = project.scope ? resourceOwnerKey(project.scope.owner) : creationScopeChoices[0]!.key;
+    if (!creationScopeChoices.some((choice) => choice.key === scopeKey)) {
+      setScopeKey(creationScopeChoices.some((choice) => choice.key === preferred)
+        ? preferred : creationScopeChoices[0]!.key);
+    }
+  }, [accessScopeManagementSupported, creationScopeChoices, project.scope, scopeKey]);
   const candidates = useMemo(() => buildProjectLocationCandidates(projects, runners.values()), [projects, runners]);
   const filtered = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
@@ -132,11 +169,18 @@ export function ProjectLocationDialog({
 
   const create = async () => {
     const name = locationName.trim();
-    if (busyKey || !selectedRunnerId || !selectedFolder || !name) return;
+    const selectedScope = creationScopeChoices.find((choice) => choice.key === scopeKey);
+    if (busyKey || !selectedRunnerId || !selectedFolder || !name ||
+        (accessScopeManagementSupported && !selectedScope)) return;
     setBusyKey("create");
     setError(null);
     try {
-      await onCreate({ runnerId: selectedRunnerId, name, path: selectedFolder });
+      await onCreate({
+        runnerId: selectedRunnerId,
+        name,
+        path: selectedFolder,
+        ...(selectedScope ? { owner: selectedScope.owner } : {}),
+      });
       onClose();
     } catch (cause) {
       setError(projectLocationCreationError(cause));
@@ -244,6 +288,24 @@ export function ProjectLocationDialog({
                   </button>
                 </div>
               </div>
+              {accessScopeManagementSupported && creationScopeChoices.length > 0 && (
+                <AccessScopeField
+                  choices={creationScopeChoices}
+                  value={scopeKey}
+                  onChange={setScopeKey}
+                  disabled={busyKey !== null}
+                  label="Location Access"
+                />
+              )}
+              {accessScopeManagementSupported && !identity && !identityError && (
+                <span className="muted">Loading permitted access scopes…</span>
+              )}
+              {identityError && (
+                <div className="project-location-error" role="alert">
+                  <strong>Access Scopes Could Not Be Loaded</strong>
+                  <span>{identityError}</span>
+                </div>
+              )}
               {browsing && selectedMachine && (
                 <DirectoryPicker
                   runnerId={selectedMachine.runner.runnerId}
@@ -256,7 +318,8 @@ export function ProjectLocationDialog({
                 <button
                   type="button"
                   className="btn primary"
-                  disabled={busyKey !== null || !selectedFolder || !locationName.trim()}
+                  disabled={busyKey !== null || !selectedFolder || !locationName.trim() ||
+                    (accessScopeManagementSupported && !creationScopeChoices.some((choice) => choice.key === scopeKey))}
                   onClick={() => void create()}
                 >
                   {busyKey === "create" ? "Adding…" : "Add Location"}
@@ -300,6 +363,10 @@ export function ProjectLocationDialog({
               .filter((link) => link.projectId !== project.id)
               .map((link) => projectById.get(link.projectId)?.name)
               .filter((name): name is string => Boolean(name));
+            const scopeCompatible = !accessScopeManagementSupported || !project.scope || !candidate.scope
+              ? null
+              : scopeAudienceContained(project.scope, candidate.scope);
+            const administers = identity?.context.role === "owner" || identity?.context.role === "admin";
             return (
               <article className="project-location-candidate" role="listitem" key={candidate.key}>
                 <div className="project-location-main">
@@ -311,12 +378,43 @@ export function ProjectLocationDialog({
                   </div>
                   <code title={candidate.path}>{candidate.path}</code>
                   <span className="muted">{display.name} · {display.kind === "ssh" ? "SSH" : "Native Runner"}</span>
+                  {candidate.scope && (
+                    <span className="muted">Location Access: {accessScopeLabel(candidate.scope, identity)}</span>
+                  )}
                   {usedBy.length > 0 && <span className="muted">Also Used by: {usedBy.join(", ")}</span>}
+                  {scopeCompatible === false && (
+                    <div className="project-location-reason">
+                      This Location is narrower than the Project, so adding it would expose a private workspace.
+                      {administers && (
+                        <span className="project-location-corrections">
+                          {project.canManage !== false && candidate.scope &&
+                            canAssignAccessScope(identity!, candidate.scope.owner) && (
+                            <button type="button" className="btn ghost sm" onClick={() => setScopeCorrection({
+                              resource: { kind: "project", projectId: project.id, name: project.name },
+                              owner: candidate.scope!.owner,
+                            })}>Narrow Project Access</button>
+                          )}
+                          {candidate.canManage !== false && project.scope &&
+                            canAssignAccessScope(identity!, project.scope.owner) && (
+                            <button type="button" className="btn ghost sm" onClick={() => setScopeCorrection({
+                              resource: {
+                                kind: "workspace",
+                                runnerId: candidate.runnerId,
+                                workspaceId: candidate.workspaceId,
+                                name: candidate.name,
+                              },
+                              owner: project.scope!.owner,
+                            })}>Broaden Location Access</button>
+                          )}
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </div>
                 <button
                   type="button"
                   className="btn sm"
-                  disabled={alreadyAdded || busyKey !== null}
+                  disabled={alreadyAdded || busyKey !== null || scopeCompatible === false}
                   onClick={() => void choose(candidate)}
                 >
                   {busyKey === candidate.key
@@ -340,6 +438,15 @@ export function ProjectLocationDialog({
           )}
         </div>
       </div>
+      {scopeCorrection && identity && (
+        <AccessScopeChangeDialog
+          resource={scopeCorrection.resource}
+          owner={scopeCorrection.owner}
+          identity={identity}
+          onClose={() => setScopeCorrection(null)}
+          onUpdated={onClose}
+        />
+      )}
     </Modal>
   );
 }

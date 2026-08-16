@@ -30,6 +30,7 @@ import {
   runnerSupportsProtocol,
   validatePromptImageInputs,
   type AutomationAuditEvent,
+  type AccessScopeChangePreview,
   type AutomationAuditEventKind,
   type AutomationCommandState,
   type AutomationCommandView,
@@ -3588,6 +3589,7 @@ export class ControlPlaneDb {
     runnerId: string,
     input: { name: string; path: string },
     now = Date.now(),
+    requestedScope?: ResourceScope,
   ): WorkspaceInfo {
     const name = input.name.trim();
     const path = input.path.trim();
@@ -3598,6 +3600,14 @@ export class ControlPlaneDb {
     if (!runnerScope) throw new Error("runner not found");
     if (!scopeAudienceContained(projectScope, runnerScope)) {
       throw new Error("project access must not expose a private runner");
+    }
+    const workspaceScope = requestedScope ?? projectScope;
+    if (workspaceScope.organizationId !== projectScope.organizationId ||
+        !scopeAudienceContained(projectScope, workspaceScope)) {
+      throw new Error("project access must not expose a private workspace");
+    }
+    if (!scopeAudienceContained(workspaceScope, runnerScope)) {
+      throw new Error("location access must not expose a private runner");
     }
     const existing = this.stmt(
       `SELECT id FROM workspaces WHERE runner_id=? AND path=?
@@ -3611,13 +3621,13 @@ export class ControlPlaneDb {
     this.atomic(() => {
       this.stmt("INSERT INTO workspace_extras (runner_id, id, name, path, created_at) VALUES (?, ?, ?, ?, ?)")
         .run(runnerId, id, name, path, now);
-      const ownerId = projectScope.owner.kind === "organization" ? projectScope.owner.organizationId
-        : projectScope.owner.kind === "user" ? projectScope.owner.userId : projectScope.owner.teamId;
+      const ownerId = workspaceScope.owner.kind === "organization" ? workspaceScope.owner.organizationId
+        : workspaceScope.owner.kind === "user" ? workspaceScope.owner.userId : workspaceScope.owner.teamId;
       this.stmt(
         `INSERT INTO workspace_ownership
          (runner_id, workspace_id, organization_id, owner_kind, owner_id, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      ).run(runnerId, id, projectScope.organizationId, projectScope.owner.kind, ownerId, now, now);
+      ).run(runnerId, id, workspaceScope.organizationId, workspaceScope.owner.kind, ownerId, now, now);
       this.addProjectLocation(projectId, { runnerId, workspaceId: id }, now);
     });
     return { id, name, path };
@@ -3693,6 +3703,7 @@ export class ControlPlaneDb {
   }
 
   private projectView(row: ProjectRow, principal?: AuthPrincipal): ProjectView {
+    const projectScope = this.projectScope(row.id);
     const locationRows = this.stmt(
       `SELECT id, project_id, runner_id, workspace_id, name, path, source, last_seen_at,
               detached_at, removed_at, created_at, updated_at
@@ -3733,7 +3744,8 @@ export class ControlPlaneDb {
       id: row.id,
       name: row.name,
       hidden: row.hidden_at !== null,
-      audience: this.projectScope(row.id)?.owner.kind,
+      audience: projectScope?.owner.kind,
+      ...(projectScope ? { scope: projectScope } : {}),
       canManage: principal ? this.canManageProject(principal, row.id) : true,
       locations: locationRows.map((location) => ({
         id: location.id,
@@ -3745,6 +3757,13 @@ export class ControlPlaneDb {
         source: location.source,
         availability: this.projectLocationAvailability(location),
         isDefault: location.id === row.default_location_id,
+        ...(() => {
+          const scope = this.workspaceScope(location.runner_id, location.workspace_id) ?? projectScope;
+          return scope ? {
+            scope,
+            canManage: principal ? this.canManageWorkspace(principal, location.runner_id, location.workspace_id) : true,
+          } : {};
+        })(),
         activeSessionCount: locationSessionCounts.get(location.id)?.activeSessionCount ?? 0,
         unarchivedSessionCount: locationSessionCounts.get(location.id)?.unarchivedSessionCount ?? 0,
         totalSessionCount: locationSessionCounts.get(location.id)?.totalSessionCount ?? 0,
@@ -5269,7 +5288,19 @@ export class ControlPlaneDb {
       .filter((runner) => this.canAccessRunner(principal, runner.runnerId))
       .map((runner) => ({
         ...runner,
-        workspaces: runner.workspaces.filter((workspace) => this.canAccessWorkspace(principal, runner.runnerId, workspace.id)),
+        ...(() => {
+          const scope = this.runnerScope(runner.runnerId);
+          return scope ? { scope } : {};
+        })(),
+        workspaces: runner.workspaces
+          .filter((workspace) => this.canAccessWorkspace(principal, runner.runnerId, workspace.id))
+          .map((workspace) => {
+            const scope = this.workspaceScope(runner.runnerId, workspace.id);
+            return {
+              ...workspace,
+              ...(scope ? { scope, canManage: this.canManageWorkspace(principal, runner.runnerId, workspace.id) } : {}),
+            };
+          }),
         agents: administers ? runner.agents : runner.agents.map((agent) => ({ ...agent, env: {} })),
         runtime: administers ? runner.runtime : undefined,
       }));
@@ -5277,6 +5308,194 @@ export class ControlPlaneDb {
 
   listSessionsForPrincipal(principal: AuthPrincipal, includeArchived = false): SessionView[] {
     return this.listSessions({ includeArchived }).filter((session) => this.canAccessSession(principal, session.id));
+  }
+
+  private accessScopeChangeToken(input: Omit<AccessScopeChangePreview, "confirmationToken">, evidence: unknown): string {
+    return createHash("sha256").update(JSON.stringify({ input, evidence })).digest("hex");
+  }
+
+  private accessScopeSessionRows(where: string, args: string[]): Array<{
+    id: string;
+    status: SessionStatus;
+    scope: ResourceScope;
+  }> {
+    const rows = this.stmt(
+      `SELECT sessions.id, sessions.status, ownership.organization_id, ownership.owner_kind, ownership.owner_id
+       FROM sessions JOIN session_ownership ownership ON ownership.session_id=sessions.id
+       WHERE ${where} ORDER BY sessions.id`,
+    ).all(...args) as unknown as Array<{
+      id: string;
+      status: SessionStatus;
+      organization_id: string;
+      owner_kind: "organization" | "user" | "team";
+      owner_id: string;
+    }>;
+    return rows.map((row) => ({ id: row.id, status: row.status, scope: this.scopeFromRow(row) }));
+  }
+
+  private scopeChangeSessionImpact(
+    sessions: Array<{ id: string; status: SessionStatus; scope: ResourceScope }>,
+    targetScope: ResourceScope,
+  ): { activeSessionCount: number; sessionsToNarrow: string[]; incompatibleSessionId?: string } {
+    const activeSessionCount = sessions.filter((session) =>
+      ["queued", "starting", "running", "input_required"].includes(session.status)).length;
+    const sessionsToNarrow: string[] = [];
+    for (const session of sessions) {
+      if (scopeAudienceContained(session.scope, targetScope)) continue;
+      if (scopeAudienceContained(targetScope, session.scope)) sessionsToNarrow.push(session.id);
+      else return { activeSessionCount, sessionsToNarrow, incompatibleSessionId: session.id };
+    }
+    return { activeSessionCount, sessionsToNarrow };
+  }
+
+  previewProjectAccessScope(projectId: string, targetScope: ResourceScope): AccessScopeChangePreview | null {
+    const project = this.getProject(projectId);
+    const currentScope = this.projectScope(projectId);
+    if (!project || !currentScope || currentScope.organizationId !== targetScope.organizationId) return null;
+    const affectedProjects = [{ projectId, name: project.name }];
+    const sessions = this.accessScopeSessionRows("sessions.project_id=?", [projectId]);
+    const sessionImpact = this.scopeChangeSessionImpact(sessions, targetScope);
+    let reason: string | undefined;
+    const locationEvidence = project.locations.map((location) => ({
+      runnerId: location.runnerId,
+      workspaceId: location.workspaceId,
+      scope: this.workspaceScope(location.runnerId, location.workspaceId) ?? currentScope,
+    }));
+    const incompatibleLocation = locationEvidence.find((location) =>
+      !scopeAudienceContained(targetScope, location.scope));
+    if (incompatibleLocation) {
+      reason = "The requested Project access would expose a narrower Location. Change that Location first or choose a narrower Project scope.";
+    } else if (sessionImpact.incompatibleSessionId) {
+      reason = "A session in this Project has an incompatible private owner and cannot be transferred by a Project access change.";
+    }
+    const preview: AccessScopeChangePreview = {
+      resource: "project",
+      resourceId: projectId,
+      currentScope,
+      targetScope,
+      affectedProjects,
+      activeSessionCount: sessionImpact.activeSessionCount,
+      totalSessionCount: sessions.length,
+      sessionsToNarrow: sessionImpact.sessionsToNarrow.length,
+      compatible: reason === undefined,
+      ...(reason ? { reason } : {}),
+    };
+    return preview.compatible ? {
+      ...preview,
+      confirmationToken: this.accessScopeChangeToken(preview, { locationEvidence, sessions }),
+    } : preview;
+  }
+
+  previewWorkspaceAccessScope(
+    runnerId: string,
+    workspaceId: string,
+    targetScope: ResourceScope,
+  ): AccessScopeChangePreview | null {
+    const workspace = this.workspaceLocationDefinition(runnerId, workspaceId);
+    const currentScope = this.workspaceScope(runnerId, workspaceId);
+    const runnerScope = this.runnerScope(runnerId);
+    if (!workspace || !currentScope || !runnerScope || currentScope.organizationId !== targetScope.organizationId) return null;
+    const affectedProjects = this.projectIdsForWorkspace(runnerId, workspaceId).map((projectId) => {
+      const project = this.getProject(projectId)!;
+      return { projectId, name: project.name };
+    });
+    const projectEvidence = affectedProjects.map(({ projectId }) => ({
+      projectId,
+      scope: this.projectScope(projectId),
+    }));
+    const sessions = this.accessScopeSessionRows(
+      "sessions.runner_id=? AND sessions.workspace_id=?",
+      [runnerId, workspaceId],
+    );
+    const sessionImpact = this.scopeChangeSessionImpact(sessions, targetScope);
+    let reason: string | undefined;
+    if (!scopeAudienceContained(targetScope, runnerScope)) {
+      reason = "The requested Location access would be broader than its Machine access.";
+    } else if (projectEvidence.some((project) => !project.scope || !scopeAudienceContained(project.scope, targetScope))) {
+      reason = "The requested Location access is narrower than an attached Project. Narrow those Projects first or choose a broader Location scope.";
+    } else if (sessionImpact.incompatibleSessionId) {
+      reason = "A session in this Location has an incompatible private owner and cannot be transferred by a Location access change.";
+    }
+    const preview: AccessScopeChangePreview = {
+      resource: "workspace",
+      resourceId: workspaceId,
+      runnerId,
+      currentScope,
+      targetScope,
+      affectedProjects,
+      activeSessionCount: sessionImpact.activeSessionCount,
+      totalSessionCount: sessions.length,
+      sessionsToNarrow: sessionImpact.sessionsToNarrow.length,
+      compatible: reason === undefined,
+      ...(reason ? { reason } : {}),
+    };
+    return preview.compatible ? {
+      ...preview,
+      confirmationToken: this.accessScopeChangeToken(preview, { runnerScope, projectEvidence, sessions }),
+    } : preview;
+  }
+
+  applyProjectAccessScope(
+    projectId: string,
+    targetScope: ResourceScope,
+    confirmationToken: string,
+    now: number,
+  ): AccessScopeChangePreview | null {
+    const preview = this.previewProjectAccessScope(projectId, targetScope);
+    if (!preview) return null;
+    if (!preview.compatible || !preview.confirmationToken) throw new Error(preview.reason ?? "project access change is incompatible");
+    if (preview.confirmationToken !== confirmationToken) throw new Error("access scope changed after preview; review the current impact and try again");
+    const sessions = this.accessScopeSessionRows("sessions.project_id=?", [projectId]);
+    const ownerId = targetScope.owner.kind === "organization" ? targetScope.owner.organizationId
+      : targetScope.owner.kind === "user" ? targetScope.owner.userId : targetScope.owner.teamId;
+    this.atomic(() => {
+      this.stmt(
+        "UPDATE project_ownership SET organization_id=?, owner_kind=?, owner_id=?, updated_at=? WHERE project_id=?",
+      ).run(targetScope.organizationId, targetScope.owner.kind, ownerId, now, projectId);
+      this.stmt("UPDATE projects SET updated_at=? WHERE id=?").run(now, projectId);
+      for (const session of sessions) {
+        if (scopeAudienceContained(session.scope, targetScope)) continue;
+        this.stmt(
+          "UPDATE session_ownership SET organization_id=?, owner_kind=?, owner_id=?, updated_at=? WHERE session_id=?",
+        ).run(targetScope.organizationId, targetScope.owner.kind, ownerId, now, session.id);
+      }
+    });
+    return preview;
+  }
+
+  applyWorkspaceAccessScope(
+    runnerId: string,
+    workspaceId: string,
+    targetScope: ResourceScope,
+    confirmationToken: string,
+    now: number,
+  ): AccessScopeChangePreview | null {
+    const preview = this.previewWorkspaceAccessScope(runnerId, workspaceId, targetScope);
+    if (!preview) return null;
+    if (!preview.compatible || !preview.confirmationToken) throw new Error(preview.reason ?? "location access change is incompatible");
+    if (preview.confirmationToken !== confirmationToken) throw new Error("access scope changed after preview; review the current impact and try again");
+    const sessions = this.accessScopeSessionRows(
+      "sessions.runner_id=? AND sessions.workspace_id=?",
+      [runnerId, workspaceId],
+    );
+    const ownerId = targetScope.owner.kind === "organization" ? targetScope.owner.organizationId
+      : targetScope.owner.kind === "user" ? targetScope.owner.userId : targetScope.owner.teamId;
+    this.atomic(() => {
+      this.stmt(
+        `UPDATE workspace_ownership SET organization_id=?, owner_kind=?, owner_id=?, updated_at=?
+         WHERE runner_id=? AND workspace_id=?`,
+      ).run(targetScope.organizationId, targetScope.owner.kind, ownerId, now, runnerId, workspaceId);
+      for (const session of sessions) {
+        if (scopeAudienceContained(session.scope, targetScope)) continue;
+        this.stmt(
+          "UPDATE session_ownership SET organization_id=?, owner_kind=?, owner_id=?, updated_at=? WHERE session_id=?",
+        ).run(targetScope.organizationId, targetScope.owner.kind, ownerId, now, session.id);
+      }
+      for (const project of preview.affectedProjects) {
+        this.stmt("UPDATE projects SET updated_at=? WHERE id=?").run(now, project.projectId);
+      }
+    });
+    return preview;
   }
 
   setResourceScope(input: {

@@ -857,3 +857,69 @@ test("Project-scoped workspace creation adds one managed Location without an orp
   assert.equal(db.getProject(project.id)?.locations[0]?.availability, "available");
   db.close();
 });
+
+test("access-scope previews bind relationships and atomically narrow or broaden sessions and Locations", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const identity = db.localIdentityContext();
+  const privateScope = {
+    organizationId: identity.organizationId,
+    owner: { kind: "user" as const, userId: identity.userId },
+  };
+  const organizationScope = {
+    organizationId: identity.organizationId,
+    owner: { kind: "organization" as const, organizationId: identity.organizationId },
+  };
+  db.registerRunner(runner(), 10);
+  const project = db.listProjects(true)[0]!;
+  const location = project.locations[0]!;
+  const created = db.createSession({
+    ...session("scope-change-session", "runner-1", "ws-1", 20),
+    projectId: project.id,
+    projectLocationId: location.id,
+    scope: organizationScope,
+  });
+  assert.equal(created.status, "queued");
+
+  const initial = db.previewProjectAccessScope(project.id, privateScope)!;
+  assert.deepEqual({
+    compatible: initial.compatible,
+    activeSessionCount: initial.activeSessionCount,
+    totalSessionCount: initial.totalSessionCount,
+    sessionsToNarrow: initial.sessionsToNarrow,
+    affectedProjects: initial.affectedProjects.map((item) => item.projectId),
+  }, {
+    compatible: true,
+    activeSessionCount: 1,
+    totalSessionCount: 1,
+    sessionsToNarrow: 1,
+    affectedProjects: [project.id],
+  });
+  assert.match(initial.confirmationToken ?? "", /^[a-f0-9]{64}$/u);
+
+  db.updateSessionStatus(created.id, "completed", 21);
+  assert.throws(
+    () => db.applyProjectAccessScope(project.id, privateScope, initial.confirmationToken!, 22),
+    /changed after preview/,
+    "session activity changes invalidate the displayed impact",
+  );
+  const current = db.previewProjectAccessScope(project.id, privateScope)!;
+  db.applyProjectAccessScope(project.id, privateScope, current.confirmationToken!, 23);
+  assert.deepEqual(db.projectScope(project.id), privateScope);
+  assert.deepEqual(db.sessionScope(created.id), privateScope);
+  assert.deepEqual(db.workspaceScope("runner-1", "ws-1"), organizationScope,
+    "narrowing a Project never silently changes Location access");
+
+  const narrowLocation = db.previewWorkspaceAccessScope("runner-1", "ws-1", privateScope)!;
+  assert.equal(narrowLocation.compatible, true);
+  assert.deepEqual(narrowLocation.affectedProjects.map((item) => item.projectId), [project.id]);
+  db.applyWorkspaceAccessScope("runner-1", "ws-1", privateScope, narrowLocation.confirmationToken!, 24);
+  assert.deepEqual(db.workspaceScope("runner-1", "ws-1"), privateScope);
+
+  const broadenLocation = db.previewWorkspaceAccessScope("runner-1", "ws-1", organizationScope)!;
+  assert.equal(broadenLocation.compatible, true);
+  assert.equal(broadenLocation.sessionsToNarrow, 0, "broadening a Location preserves private sessions");
+  db.applyWorkspaceAccessScope("runner-1", "ws-1", organizationScope, broadenLocation.confirmationToken!, 25);
+  assert.deepEqual(db.workspaceScope("runner-1", "ws-1"), organizationScope);
+  assert.deepEqual(db.sessionScope(created.id), privateScope);
+  db.close();
+});

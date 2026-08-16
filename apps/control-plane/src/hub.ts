@@ -366,6 +366,7 @@ export class Hub {
         paginatedSessionHistory: true,
         projects: true,
         createProjectLocations: true,
+        accessScopeManagement: true,
         nativeTuiLaunch: true,
       },
       runners,
