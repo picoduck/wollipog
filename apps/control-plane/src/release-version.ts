@@ -3,7 +3,7 @@
  * The release workflow verifies this value against the tag, desktop packages, root package, and
  * runner VERSION before producing any installer or runner binary.
  */
-export const APP_RELEASE_VERSION = "0.19.0";
+export const APP_RELEASE_VERSION = "0.19.1";
 
 declare const __WOLLIPOG_RUNNER_RELEASE_TAG__: string;
 
