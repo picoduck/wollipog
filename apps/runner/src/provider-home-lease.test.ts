@@ -35,7 +35,7 @@ test("provider-home leases are process-reentrant and reject a live competing own
   second.releaseAll();
 });
 
-test("provider-home leases recover only a validated stale same-host record", (t) => {
+test("provider-home leases require manual quarantine for a validated stale same-owner record", (t) => {
   const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-stale-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const stale = new ProviderHomeLeaseRegistry("a".repeat(64), { pid: 101, hostname: "host-a" });
@@ -45,13 +45,9 @@ test("provider-home leases recover only a validated stale same-host record", (t)
     hostname: "host-a",
     isProcessAlive: () => false,
   });
-  replacement.acquire(request(home));
+  assert.throws(() => replacement.acquire(request(home)), /stale lease.*proving no provider process.*manually quarantine/);
   stale.releaseAll();
-  assert.throws(() => new ProviderHomeLeaseRegistry("c".repeat(64), {
-    pid: 303,
-    hostname: "host-a",
-    isProcessAlive: (pid) => pid === 202,
-  }).acquire(request(home)), /already in use by process 202/);
+  replacement.acquire(request(home));
   replacement.releaseAll();
 });
 
@@ -65,7 +61,7 @@ test("provider-home leases never automatically recover a foreign owner's stale r
     hostname: "host-a",
     isProcessAlive: () => false,
   });
-  assert.throws(() => foreign.acquire(request(home)), /another attested owner.*manual.*quarantine/);
+  assert.throws(() => foreign.acquire(request(home)), /stale lease.*manual.*quarantine/);
   stale.releaseAll();
 });
 

@@ -135,53 +135,32 @@ export class ProviderHomeLeaseRegistry {
       writeFileSync(join(lockDir, MARKER), `${JSON.stringify(record)}\n`, { flag: "wx", mode: 0o600 });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      this.recoverOrReject(lockDir, record);
+      this.rejectExistingLease(lockDir);
     }
     this.held.set(key, { leaseId, lockDir });
   }
 
-  private recoverOrReject(lockDir: string, replacement: ProviderHomeLeaseRecord): void {
-    const recoveryDir = `${lockDir}.recovery`;
-    try {
-      mkdirSync(recoveryDir, { mode: 0o700 });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-        throw new Error(`provider home lease recovery is already in progress at ${recoveryDir}; retry shortly`);
-      }
-      throw error;
+  private rejectExistingLease(lockDir: string): never {
+    const marker = join(lockDir, MARKER);
+    const entries = readdirSync(lockDir);
+    if (entries.length === 0) {
+      throw new Error(
+        `provider home lease at ${lockDir} is incomplete; after proving no provider process uses this HOME, quarantine the empty directory and retry`,
+      );
     }
-    try {
-      const marker = join(lockDir, MARKER);
-      const entries = readdirSync(lockDir);
-      if (entries.length === 0) {
-        throw new Error(
-          `provider home lease at ${lockDir} is incomplete; after proving no provider process uses this HOME, quarantine the empty directory and retry`,
-        );
-      }
-      if (entries.length !== 1 || entries[0] !== MARKER) {
-        throw new Error(`provider home lease directory ${lockDir} contains unexpected entries; refusing unsafe recovery`);
-      }
-      const existing = readRecord(marker);
-      if (existing.hostname !== this.hostname) {
-        throw new Error(`provider home is leased by host ${existing.hostname}; use an isolated OS account`);
-      }
-      if (this.isProcessAlive(existing.pid)) {
-        throw new Error(`provider home is already in use by process ${existing.pid}; use bwrap or an isolated OS account`);
-      }
-      if (existing.ownerHash !== this.ownerHash) {
-        throw new Error(
-          `provider home is leased by another attested owner; refuse automatic recovery and use an isolated OS account or manually quarantine the stale lease after verification`,
-        );
-      }
-      const confirmed = readRecord(marker);
-      if (confirmed.leaseId !== existing.leaseId) throw new Error("provider home lease changed during recovery; retry");
-      rmSync(marker);
-      rmdirSync(lockDir);
-      mkdirSync(lockDir, { mode: 0o700 });
-      writeFileSync(join(lockDir, MARKER), `${JSON.stringify(replacement)}\n`, { flag: "wx", mode: 0o600 });
-    } finally {
-      rmdirSync(recoveryDir);
+    if (entries.length !== 1 || entries[0] !== MARKER) {
+      throw new Error(`provider home lease directory ${lockDir} contains unexpected entries; refusing unsafe recovery`);
     }
+    const existing = readRecord(marker);
+    if (existing.hostname !== this.hostname) {
+      throw new Error(`provider home is leased by host ${existing.hostname}; use an isolated OS account`);
+    }
+    if (this.isProcessAlive(existing.pid)) {
+      throw new Error(`provider home is already in use by process ${existing.pid}; use bwrap or an isolated OS account`);
+    }
+    throw new Error(
+      `provider home has a stale lease from process ${existing.pid}; after proving no provider process uses this HOME, manually quarantine ${lockDir} and retry`,
+    );
   }
 
   releaseAll(): void {
