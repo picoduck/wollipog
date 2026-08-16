@@ -24,7 +24,7 @@ import { CheckpointRefOwnershipLedger } from "./checkpoint-ref-ownership.js";
 import type { SessionMeta } from "./session-store.js";
 import { WorktreeCleanupJournal, type WorktreeCleanupRecord } from "./worktree.js";
 
-const OWNER_FILE = ".wollipog-runner-owner-v1.json";
+const OWNER_FILE = ".wollipog-runner-owner-v2.json";
 const ACTIVE_LEASE = ".wollipog-runner-active-v1.lock";
 const MAX_JSON_BYTES = 256 * 1024;
 const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;

@@ -12,9 +12,13 @@ import { WorktreeCleanupJournal } from "./worktree.js";
 function fixture(t: Parameters<typeof test>[1] extends (t: infer T) => unknown ? T : never) {
   const root = mkdtempSync(join(tmpdir(), "wollipog-state-doctor-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  writeFileSync(join(root, ".wollipog-runner-owner-v1.json"), `${JSON.stringify({
+  writeFileSync(join(root, ".wollipog-runner-owner-v2.json"), `${JSON.stringify({
     version: 2,
     ownerHash: "a".repeat(64),
+  })}\n`, { mode: 0o600 });
+  writeFileSync(join(root, ".wollipog-runner-owner-v1.json"), `${JSON.stringify({
+    version: 1,
+    ownerHash: "b".repeat(64),
   })}\n`, { mode: 0o600 });
   return root;
 }
