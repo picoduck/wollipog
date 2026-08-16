@@ -385,7 +385,7 @@ export interface CheckpointRefSyncResult {
 }
 
 function assertCheckpointSessionId(sessionId: string): void {
-  if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(sessionId)) {
+  if (sessionId === "owners" || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(sessionId)) {
     throw new Error(`invalid checkpoint session id: ${sessionId}`);
   }
 }

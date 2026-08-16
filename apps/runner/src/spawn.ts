@@ -541,8 +541,10 @@ export function killTree(child: AgentProcess): void {
       new Promise<void>((resolve) => {
         const t = setTimeout(() => {
           signalGroup("SIGKILL");
-          resolve();
         }, 2000);
+        // Ownership may be released only after Node observes process exit, not merely when the
+        // escalation signal is delivered. The outer shutdown deadline retains the lease if close
+        // never arrives.
         t.unref?.();
         child.once("close", () => {
           clearTimeout(t);

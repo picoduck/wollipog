@@ -152,7 +152,8 @@ export class CheckpointRefOwnershipLedger {
   }
 
   claim(claim: CheckpointRefOwnershipClaim): CheckpointRefOwnershipRecord {
-    const record = parseRecord(JSON.stringify({ ...claim, version: RECORD_VERSION }));
+    // Ownerless claims remain readable by the rollback generation; only stable-owner keys need v3.
+    const record = parseRecord(JSON.stringify({ ...claim, version: claim.ownerHash ? RECORD_VERSION : 2 }));
     const path = this.recordPath(record);
     try {
       const existing = parseRecord(readFileSync(path, "utf8"), `${checkpointRefOwnershipKey(record)}.json`);

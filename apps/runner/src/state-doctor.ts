@@ -123,9 +123,15 @@ function beforeDurabilityOperation(
   options.beforeDurabilityOperationForTest?.(operation, path);
 }
 
+export function stateDoctorFileSyncFlags(platform: NodeJS.Platform = process.platform): number {
+  const access = platform === "win32" ? constants.O_RDWR : constants.O_RDONLY;
+  return access | (constants.O_NOFOLLOW ?? 0);
+}
+
 function syncFile(path: string, options: StateDoctorOptions): void {
   beforeDurabilityOperation(options, "fsync-file", path);
-  const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  // libuv maps fsync to FlushFileBuffers on Windows, which requires a write-capable handle.
+  const fd = openSync(path, stateDoctorFileSyncFlags());
   try { fsyncSync(fd); } finally { closeSync(fd); }
 }
 
@@ -334,6 +340,7 @@ export async function runStateDoctor(
   const maintenance = acquireMaintenanceLease(args.dataDir, options);
   const dataDir = maintenance.dataDir;
   const ownerHash = maintenance.ownerHash;
+  let operationFailure: unknown;
   try {
     if (args.command === "inventory") {
       const { metas, unreadable } = storedMetas(dataDir);
@@ -434,7 +441,14 @@ export async function runStateDoctor(
     );
     replaceMeta(path, { ...meta, providerStateVersion: 3, updatedAt: Date.now() }, options);
     writeOutput(`${JSON.stringify({ providerState: outcome, sourcePreserved: true })}\n`);
+  } catch (error) {
+    operationFailure = error;
+    throw error;
   } finally {
-    maintenance.release();
+    try {
+      maintenance.release();
+    } catch (error) {
+      if (operationFailure === undefined) throw error;
+    }
   }
 }

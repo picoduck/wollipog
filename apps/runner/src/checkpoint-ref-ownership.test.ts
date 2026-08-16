@@ -24,6 +24,7 @@ test("ownership claims survive restart and exact duplicate claims are idempotent
   const claim = nativeClaim(root);
   const first = ledger.claim(claim);
   const duplicate = ledger.claim(claim);
+  assert.equal(first.version, 2);
   assert.deepEqual(duplicate, first);
   assert.deepEqual(ledger.get(claim), first);
   assert.equal(ledger.get(nativeClaim(root, "s_missing")), null);
@@ -64,7 +65,7 @@ test("unsupported hard links fall back to exclusive durable publication", (t) =>
   };
 
   const first = ledger.claim(claim);
-  assert.deepEqual(first, { version: 3, ...claim });
+  assert.deepEqual(first, { version: 2, ...claim });
   assert.deepEqual(ledger.claim(claim), first, "an exact repeated claim remains idempotent");
   assert.deepEqual(new CheckpointRefOwnershipLedger(root, 4).list(), [first]);
   assert.equal(readdirSync(join(root, "checkpoint-ref-ownership")).some((name) => name.endsWith(".tmp")), false);

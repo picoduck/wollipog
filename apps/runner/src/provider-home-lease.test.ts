@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -105,4 +105,18 @@ test("an incomplete provider-home lease fails closed with actionable recovery gu
   });
   const registry = new ProviderHomeLeaseRegistry("a".repeat(64));
   assert.throws(() => registry.acquire(request(home)), /incomplete.*proving no provider process.*quarantine/);
+});
+
+test("a marker publication failure unwinds only the lock directory created by that attempt", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-publish-fail-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const failure = Object.assign(new Error("disk full"), { code: "ENOSPC" });
+  const registry = new ProviderHomeLeaseRegistry("a".repeat(64), {
+    beforeMarkerWriteForTest: () => { throw failure; },
+  });
+  assert.throws(() => registry.acquire(request(home)), /disk full/);
+  assert.equal(
+    existsSync(join(home, ".agent-manager", "provider-home-leases-v1", "mutable-home.lock")),
+    false,
+  );
 });

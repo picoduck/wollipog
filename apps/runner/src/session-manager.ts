@@ -737,16 +737,18 @@ export class SessionManager {
       // session is between worktrees (for example, after interrupted or failed materialization).
       // Worktree presence gates mirroring, not ownership. Otherwise startup reclaim can silently
       // delete the still-live row's rewind and fork refs during that ordinary transient state.
-      currentCheckpointOwnershipKeys.add(checkpointRefOwnershipKey(this.checkpointOwnership(m)));
-      if (m.worktreePath) {
-        try {
-          const ownership = this.checkpointRefOwnership.claim(this.checkpointOwnership(m));
+      try {
+        const expectedOwnership = this.checkpointOwnership(m);
+        currentCheckpointOwnershipKeys.add(checkpointRefOwnershipKey(expectedOwnership));
+        if (m.worktreePath) {
+          const ownership = this.checkpointRefOwnership.claim(expectedOwnership);
           currentCheckpointOwnershipKeys.add(checkpointRefOwnershipKey(ownership));
           this.scheduleCheckpointRefSync(m, ownership);
-        } catch (error) {
-          // Never mint or mirror canonical refs without durable exact-session ownership proof.
-          this.log(`checkpoint ref ownership claim failed for ${m.sessionId}: ${errText(error)}`);
         }
+      } catch (error) {
+        // One malformed/forward-version row must fail closed for its own refs without preventing
+        // cleanup-journal replay and tombstone reconciliation for every other stored session.
+        this.log(`checkpoint ref ownership claim failed for ${m.sessionId}: ${errText(error)}`);
       }
       let reconciled = m;
       if (m.driver === "claude-code" && m.status === "stopped") {

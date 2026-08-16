@@ -36,6 +36,7 @@ export interface ProviderHomeLeaseOptions {
   pid?: number;
   hostname?: string;
   isProcessAlive?: (pid: number) => boolean;
+  beforeMarkerWriteForTest?: () => void;
 }
 
 export interface ProviderHomeLeaseRequest {
@@ -94,12 +95,14 @@ export class ProviderHomeLeaseRegistry {
   private readonly pid: number;
   private readonly hostname: string;
   private readonly isProcessAlive: (pid: number) => boolean;
+  private readonly beforeMarkerWriteForTest?: () => void;
 
   constructor(private readonly ownerHash: string, options: ProviderHomeLeaseOptions = {}) {
     if (!OWNER_HASH.test(ownerHash)) throw new Error("provider-home lease requires an attested owner hash");
     this.pid = options.pid ?? process.pid;
     this.hostname = options.hostname ?? systemHostname();
     this.isProcessAlive = options.isProcessAlive ?? defaultProcessAlive;
+    this.beforeMarkerWriteForTest = options.beforeMarkerWriteForTest;
   }
 
   acquire(request: ProviderHomeLeaseRequest): void {
@@ -130,11 +133,25 @@ export class ProviderHomeLeaseRegistry {
       provider,
       createdAt: new Date().toISOString(),
     };
+    let lockCreated = false;
     try {
       mkdirSync(lockDir, { mode: 0o700 });
+      lockCreated = true;
+      this.beforeMarkerWriteForTest?.();
       writeFileSync(join(lockDir, MARKER), `${JSON.stringify(record)}\n`, { flag: "wx", mode: 0o600 });
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        // No provider has launched yet, so this call can safely unwind only the lock it created.
+        if (lockCreated) {
+          rmSync(join(lockDir, MARKER), { force: true });
+          try {
+            rmdirSync(lockDir);
+          } catch {
+            // Unexpected concurrent entries remain fail-closed and available for inspection.
+          }
+        }
+        throw error;
+      }
       this.rejectExistingLease(lockDir);
     }
     this.held.set(key, { leaseId, lockDir });

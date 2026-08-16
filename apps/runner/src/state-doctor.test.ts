@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { constants, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { test } from "node:test";
 import { CheckpointRefOwnershipLedger } from "./checkpoint-ref-ownership.js";
-import { runStateDoctor } from "./state-doctor.js";
+import { runStateDoctor, stateDoctorFileSyncFlags } from "./state-doctor.js";
 import { WorktreeCleanupJournal } from "./worktree.js";
 
 function fixture(t: Parameters<typeof test>[1] extends (t: infer T) => unknown ? T : never) {
@@ -28,6 +28,11 @@ async function capture(argv: string[]): Promise<string> {
   await runStateDoctor(argv, (value) => { output += value; });
   return output;
 }
+
+test("Windows state-doctor file fsync uses a write-capable handle", () => {
+  assert.notEqual(stateDoctorFileSyncFlags("win32") & constants.O_RDWR, 0);
+  assert.equal(stateDoctorFileSyncFlags("linux") & constants.O_RDWR, 0);
+});
 
 test("state doctor inventory is redacted, deterministic in shape, and read-only", async (t) => {
   const root = fixture(t);
@@ -248,6 +253,25 @@ test("conductor quarantine fsyncs its manifest before moving any secret file", a
   const afterMove = operations.slice(firstMove + 1).filter((entry) => entry.operation === "fsync-directory");
   assert.ok(afterMove.some((entry) => entry.path === conductor), "source directory entry is durable");
   assert.ok(afterMove.some((entry) => entry.path.endsWith("conductor")), "target directory entry is durable");
+});
+
+test("maintenance lease release cannot mask the primary doctor operation failure", async (t) => {
+  const root = fixture(t);
+  const conductor = join(root, "conductor");
+  mkdirSync(conductor);
+  writeFileSync(join(conductor, "session.mcp.json"), "secret", { mode: 0o600 });
+  const lease = join(root, ".wollipog-runner-active-v1.lock");
+  await assert.rejects(runStateDoctor([
+    "runner", "--state-doctor", "quarantine-conductor", "--data-dir", root,
+    "--ack-all-legacy-runners-stopped",
+  ], () => {}, {
+    beforeDurabilityOperationForTest: (operation) => {
+      if (operation !== "rename") return;
+      writeFileSync(lease, "{}\n", { mode: 0o600 });
+      throw new Error("primary quarantine failure");
+    },
+  }), /primary quarantine failure/);
+  assert.equal(existsSync(lease), true, "a replacement lease is never removed");
 });
 
 test("state doctor rejects ambiguous arguments and reports unreadable metadata without exposing it", async (t) => {
