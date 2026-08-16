@@ -497,3 +497,38 @@ test("stale cleanup tuple cannot delete a current replacement tuple for the same
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("delete passes its journaled owner identity to immediate worktree cleanup", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-checkpoint-delete-owner-"));
+  const dataDir = join(root, "data");
+  const store = new SessionStore(join(dataDir, "sessions"));
+  const ownerHash = "d".repeat(64);
+  const worktreePath = join(root, "worktree");
+  let manager: SessionManager | undefined;
+  try {
+    store.create({
+      sessionId: "s_delete_owner", agentId: "claude", workspaceId: "repo", repoPath: root,
+      worktreePath, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "stopped", title: "owned",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1, indexReset: true, checkpointRefVersion: 2,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    const internals = manager as any;
+    internals.runnerOwnerHash = ownerHash;
+    internals.cleanupProviderState = async () => {};
+    let reaped: unknown;
+    internals.reapWorktree = async (record: unknown) => { reaped = record; };
+
+    await manager.delete("s_delete_owner");
+
+    const journaled = new WorktreeCleanupJournal(dataDir).list();
+    assert.equal(journaled.length, 1);
+    assert.equal(journaled[0]?.checkpointOwnerHash, ownerHash);
+    assert.deepEqual(reaped, journaled[0],
+      "immediate cleanup must retain the exact owner proof installed in the durable journal");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

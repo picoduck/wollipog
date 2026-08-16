@@ -64,7 +64,8 @@ function providerKey(driver: AgentDriverKind, command: string): string {
 
 /** bwrap redirects mutable transcripts; container/cloud providers do not mutate the host home. */
 export function providerLaunchNeedsSharedHomeLease(isolation?: SpawnIsolation): boolean {
-  return isolation === undefined || isolation.backend === "seatbelt" || isolation.backend === "windows-job";
+  return isolation?.backend !== "bwrap" && isolation?.backend !== "container" &&
+    isolation?.backend !== "cloud";
 }
 
 function readRecord(path: string): ProviderHomeLeaseRecord {
@@ -110,7 +111,7 @@ export class ProviderHomeLeaseRegistry {
     const provider = providerKey(request.driver, request.command);
     if (request.context.kind === "wsl") {
       throw new Error(
-        `shared ${provider} provider home in WSL cannot be safely owner-leased; select bwrap isolation or use a dedicated distro/OS account`,
+        `shared ${provider} provider home in WSL cannot be safely owner-leased; use bwrap for structured provider launches or use a dedicated distro/OS account`,
       );
     }
     const requestedHome = request.env.HOME || homedir();

@@ -30,6 +30,10 @@ test("container and cloud launches never lease the host provider HOME", () => {
   ];
   for (const isolation of remote) assert.equal(providerLaunchNeedsSharedHomeLease(isolation), false);
   assert.equal(providerLaunchNeedsSharedHomeLease(undefined), true);
+  assert.equal(
+    providerLaunchNeedsSharedHomeLease({ backend: "future-host-backend" } as unknown as SpawnIsolation),
+    true, "an unknown backend fails closed by retaining the shared-home lease",
+  );
 });
 
 test("provider-home leases are process-reentrant and reject a live competing owner", (t) => {

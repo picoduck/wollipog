@@ -125,6 +125,7 @@ test("container launches exclude explicit and inherited product-prefixed values 
       child.on("error", reject);
       child.on("close", () => resolve());
     });
+    assert.equal(child.closeObserved, true);
     assert.deepEqual(JSON.parse(out), { explicit: null, current: null, legacy: null });
   } finally {
     if (oldCurrent === undefined) delete process.env.WOLLIPOG_PLAIN;
@@ -639,11 +640,28 @@ test("POSIX kill completion waits for close after SIGKILL delivery", {
   }) as unknown as AgentProcess;
   killTree(child);
   child.emit("exit", 0, null);
-  assert.equal(await waitForPendingKills(2_200), false,
+  assert.equal(await waitForPendingKills(3_000), false,
     "signal delivery and the exit event are not proof that Node closed process resources");
   assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
   child.emit("close", 0, null);
   assert.equal(await waitForPendingKills(1_000), true);
+});
+
+test("POSIX kill completion settles when close was already observed", {
+  skip: process.platform === "win32",
+}, async () => {
+  const signals: Array<NodeJS.Signals | number | undefined> = [];
+  const child = Object.assign(new EventEmitter(), {
+    pid: 2_147_483_647,
+    closeObserved: true,
+    exitCode: 0,
+    signalCode: null,
+    kill: (signal?: NodeJS.Signals | number) => { signals.push(signal); return true; },
+  }) as unknown as AgentProcess;
+  killTree(child);
+  assert.equal(await waitForPendingKills(1_000), true,
+    "a close event observed before cleanup cannot leave a permanent pending kill");
+  assert.deepEqual(signals, [], "an already-closed PID is not safe to signal after possible reuse");
 });
 
 test("bubblewrap remains the in-distro executable for an isolated WSL launch", () => {

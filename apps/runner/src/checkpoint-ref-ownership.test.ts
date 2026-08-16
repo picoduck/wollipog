@@ -43,9 +43,14 @@ test("legacy v2 claims keep their original key while stable owners get disjoint 
   assert.deepEqual(ledger.get(legacy), { version: 2, ...legacy });
   const ownerA = ledger.claim({ ...legacy, ownerHash: "a".repeat(64) });
   const ownerB = ledger.claim({ ...legacy, ownerHash: "b".repeat(64) });
+  const names = readdirSync(dir).filter((name) => name.endsWith(".json"));
   assert.notEqual(checkpointRefOwnershipKey(ownerA), legacyKey);
   assert.notEqual(checkpointRefOwnershipKey(ownerA), checkpointRefOwnershipKey(ownerB));
   assert.equal(ledger.listSession(legacy.sessionId).length, 3);
+  assert.deepEqual(names.filter((name) => /^[a-f0-9]{64}\.json$/u.test(name)), [`${legacyKey}.json`],
+    "a rollback reader sees only the compatible v2 record");
+  assert.equal(names.filter((name) => name.startsWith("owner-")).length, 2,
+    "stable-owner records use a rollback-opaque filename");
 });
 
 test("impossible v2 owner records fail closed and remain available for inspection", (t) => {
@@ -55,6 +60,20 @@ test("impossible v2 owner records fail closed and remain available for inspectio
   writeFileSync(path, `${JSON.stringify({ version: 2, ...claim })}\n`, { mode: 0o600 });
   assert.throws(() => ledger.list(), /record is invalid/);
   assert.equal(existsSync(path), true);
+});
+
+test("malformed ownership records do not echo their input in errors", (t) => {
+  const { root, ledger } = tempLedger(t);
+  const canary = "PRIVATE_CHECKPOINT_CANARY";
+  const path = join(root, "checkpoint-ref-ownership", `${"c".repeat(64)}.json`);
+  writeFileSync(path, canary, { mode: 0o600 });
+
+  assert.throws(() => ledger.list(), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    assert.match(error.message, /record is not valid JSON/);
+    assert.doesNotMatch(error.message, new RegExp(canary));
+    return true;
+  });
 });
 
 test("unsupported hard links fall back to exclusive durable publication", (t) => {

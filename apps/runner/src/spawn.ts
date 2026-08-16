@@ -69,6 +69,8 @@ export type AgentProcess = ChildProcessByStdio<Writable, Readable, Readable> & {
    * signal the whole group. Absent for native spawns.
    */
   wslReap?: WslReapInfo;
+  /** Internal proof that Node already emitted close; close is not replayed to later listeners. */
+  closeObserved?: boolean;
 };
 
 export interface SpawnAgentOptions {
@@ -429,6 +431,9 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
     // orphan. Windows uses taskkill /T; the WSL bridge has its own setsid+PGID reap.
     detached: !isWindows,
   }) as AgentProcess;
+  child.once("close", () => {
+    child.closeObserved = true;
+  });
   if (wslReap) child.wslReap = wslReap;
   return child;
 }
@@ -489,6 +494,7 @@ export async function waitForPendingKills(deadlineMs: number): Promise<boolean> 
 
 /** Kill a process and all of its children, cross-platform. */
 export function killTree(child: AgentProcess): void {
+  if (child.closeObserved) return;
   if (!child.pid) {
     // Not spawned yet: wait so we tree-kill the REAL agent rather than the shell
     // wrapper (or no-op). Bail if the spawn fails outright.

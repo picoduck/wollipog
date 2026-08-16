@@ -4914,15 +4914,17 @@ export class SessionManager {
       const providerStateMigration = this.providerStateMigrations.get(sessionId);
       // Install every cleanup record before discarding the live entry or the only durable row. If
       // either journal write fails, a retry still has the complete session state to converge from.
+      let worktreeCleanup: WorktreeCleanupRecord | undefined;
       if (meta?.worktreePath) {
         const checkpointOwnerHash = this.checkpointOwnerHash(meta);
-        this.cleanupJournal.add({
+        worktreeCleanup = {
           sessionId,
           repoPath: meta.repoPath,
           worktreePath: meta.worktreePath,
           context: meta.context,
           ...(checkpointOwnerHash ? { checkpointOwnerHash } : {}),
-        });
+        };
+        this.cleanupJournal.add(worktreeCleanup);
       }
       if (meta) {
         this.providerStateCleanupJournal.add({ sessionId, driver: meta.driver, context: meta.context });
@@ -4993,8 +4995,8 @@ export class SessionManager {
       if (meta) {
         await this.cleanupProviderState(sessionId, meta.driver, meta.context, true);
       }
-      if (meta?.worktreePath) {
-        await this.reapWorktree({ sessionId, repoPath: meta.repoPath, worktreePath: meta.worktreePath, context: meta.context });
+      if (worktreeCleanup) {
+        await this.reapWorktree(worktreeCleanup);
       }
       this.log(`deleted session ${sessionId} from the box store`);
     } finally {

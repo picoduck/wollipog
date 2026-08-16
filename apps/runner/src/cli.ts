@@ -10,7 +10,7 @@
 
 if (process.argv.includes("--state-doctor")) {
   void import("./state-doctor.js").then((m) => m.runStateDoctor(process.argv)).catch((error) => {
-    console.error(`[state-doctor] ${(error as Error).message}`);
+    console.error(`[state-doctor] ${error instanceof Error ? error.message : String(error)}`);
     process.exitCode = 1;
   });
 } else if (process.argv.includes("--policy-hook")) {

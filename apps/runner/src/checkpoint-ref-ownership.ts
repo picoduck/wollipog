@@ -19,7 +19,7 @@ const MAX_REPO_PATH_LENGTH = 4_096;
 const MAX_DISTRO_LENGTH = 256;
 const RECORD_VERSION = 3;
 const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
-const RECORD_NAME = /^[a-f0-9]{64}\.json$/;
+const RECORD_NAME = /^(?:owner-)?[a-f0-9]{64}\.json$/;
 const HARD_LINK_UNSUPPORTED = new Set(["ENOSYS", "ENOTSUP", "EOPNOTSUPP", "EXDEV", "EPERM"]);
 
 export interface CheckpointRefOwnershipRecord {
@@ -61,8 +61,8 @@ function parseRecord(raw: string, expectedName?: string): CheckpointRefOwnership
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
-  } catch (error) {
-    throw new Error(`checkpoint ref ownership record is not valid JSON: ${(error as Error).message}`);
+  } catch {
+    throw new Error("checkpoint ref ownership record is not valid JSON");
   }
   if (!parsed || typeof parsed !== "object") throw new Error("checkpoint ref ownership record is invalid");
   const candidate = parsed as Partial<CheckpointRefOwnershipRecord>;
@@ -81,7 +81,7 @@ function parseRecord(raw: string, expectedName?: string): CheckpointRefOwnership
     context: candidate.context,
     ...(candidate.ownerHash ? { ownerHash: candidate.ownerHash } : {}),
   };
-  if (expectedName && `${checkpointRefOwnershipKey(record)}.json` !== expectedName) {
+  if (expectedName && checkpointRefOwnershipRecordName(record) !== expectedName) {
     throw new Error("checkpoint ref ownership record does not match its filename");
   }
   return record;
@@ -102,6 +102,13 @@ export function checkpointRefOwnershipKey(
     ? `${record.sessionId}\0${context}\0${record.repoPath}\0${record.ownerHash}`
     : `${record.sessionId}\0${context}\0${record.repoPath}`;
   return createHash("sha256").update(identity).digest("hex");
+}
+
+/** Stable owners use a filename ignored by rollback generations that understand only v2. */
+function checkpointRefOwnershipRecordName(
+  record: CheckpointRefOwnershipClaim | CheckpointRefOwnershipRecord,
+): string {
+  return `${record.ownerHash ? "owner-" : ""}${checkpointRefOwnershipKey(record)}.json`;
 }
 
 /**
@@ -139,7 +146,7 @@ export class CheckpointRefOwnershipLedger {
     const record = parseRecord(JSON.stringify({ ...claim, version: RECORD_VERSION }));
     const path = this.recordPath(record);
     try {
-      return parseRecord(readFileSync(path, "utf8"), `${checkpointRefOwnershipKey(record)}.json`);
+      return parseRecord(readFileSync(path, "utf8"), checkpointRefOwnershipRecordName(record));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw error;
@@ -156,7 +163,7 @@ export class CheckpointRefOwnershipLedger {
     const record = parseRecord(JSON.stringify({ ...claim, version: claim.ownerHash ? RECORD_VERSION : 2 }));
     const path = this.recordPath(record);
     try {
-      const existing = parseRecord(readFileSync(path, "utf8"), `${checkpointRefOwnershipKey(record)}.json`);
+      const existing = parseRecord(readFileSync(path, "utf8"), checkpointRefOwnershipRecordName(record));
       if (!sameRecord(existing, record)) throw new Error("checkpoint ref ownership record key collision");
       return existing;
     } catch (error) {
@@ -190,7 +197,7 @@ export class CheckpointRefOwnershipLedger {
       // cleanup or POSIX directory-fsync failures remain hard durability failures.
       if (!published && (error as NodeJS.ErrnoException).code === "EEXIST") {
         try {
-          const existing = parseRecord(readFileSync(path, "utf8"), `${checkpointRefOwnershipKey(record)}.json`);
+          const existing = parseRecord(readFileSync(path, "utf8"), checkpointRefOwnershipRecordName(record));
           if (sameRecord(existing, record)) return existing;
         } catch {
           // Preserve the original publication collision below.
@@ -205,7 +212,7 @@ export class CheckpointRefOwnershipLedger {
     const path = this.recordPath(expected);
     let current: CheckpointRefOwnershipRecord;
     try {
-      current = parseRecord(readFileSync(path, "utf8"), `${checkpointRefOwnershipKey(expected)}.json`);
+      current = parseRecord(readFileSync(path, "utf8"), checkpointRefOwnershipRecordName(expected));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
       throw error;
@@ -224,7 +231,7 @@ export class CheckpointRefOwnershipLedger {
 
   private recordPath(record: CheckpointRefOwnershipClaim | CheckpointRefOwnershipRecord): string {
     if (!SESSION_ID.test(record.sessionId)) throw new Error(`invalid checkpoint session id: ${record.sessionId}`);
-    return join(this.dir, `${checkpointRefOwnershipKey(record)}.json`);
+    return join(this.dir, checkpointRefOwnershipRecordName(record));
   }
 
   private publishRecord(temp: string, path: string, serialized: string): void {
