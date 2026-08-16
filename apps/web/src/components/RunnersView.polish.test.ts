@@ -108,6 +108,7 @@ test("runner repair preserves identity, rotates when needed, and exposes selecti
   assert.match(onboarding, /initialRunnerId\?: string/);
   assert.match(onboarding, /api\.rotateRunnerCredential\(id, "Connection repair"\)/);
   assert.match(onboarding, /readOnly=\{repairingExisting\}/);
+  assert.match(onboarding, /showLocalSetup && mode !== "local" && \(\s*<button/);
   assert.match(onboarding, /mode !== "local" && \(!showLocalSetup \|\| advancedOpen\)/);
   assert.match(onboarding, /Wollipog could not access its managed local runner\. Close this dialog and try again\./);
   assert.match(onboarding, /role="radiogroup"/);

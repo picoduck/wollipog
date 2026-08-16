@@ -274,7 +274,7 @@ export function OnboardRunnerDialog({
             </section>
           )}
 
-          {showLocalSetup && (
+          {showLocalSetup && mode !== "local" && (
             <button
               type="button"
               className="btn ghost onboard-advanced-toggle"
