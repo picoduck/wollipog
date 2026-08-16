@@ -37,7 +37,7 @@ function validated(value: unknown): RunnerControlPlaneAttestation | null {
 
 function attestationUrl(controlPlaneUrl: string, runnerId: string): string {
   if (runnerId.length < 1 || runnerId.length > 128 || runnerId.trim() !== runnerId
-      || /[\u0000-\u0020\u007f/\\?#]/u.test(runnerId)) {
+      || runnerId === "." || runnerId === ".." || /[\u0000-\u0020\u007f/\\?#]/u.test(runnerId)) {
     throw new ControlPlaneAttestationError(
       "control-plane attestation configuration has an invalid runner id",
       false,

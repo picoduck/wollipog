@@ -106,8 +106,11 @@ protecting every stored session. Pending cleanup/fork records claim short-lived 
 retry; a surviving session row or in-flight fork target keeps cleanup intent dormant, and a fresh record
 has a one-hour cross-process grace. WSL GC additionally requires the current runner's ownership marker and
 skips an offline distro without aborting other contexts. New WSL worktree directories and branches carry
-the same attested owner namespace. The unowned legacy shared leaf is retained until
-provider-specific inventory can prove exclusive migration. Fork verification requires non-empty history
+the same attested owner namespace. A stored pre-attestation WSL session continues using its exact
+registered legacy worktree so upgrade cannot strand uncommitted changes; an absent, unhealthy, or
+unexpected legacy path fails closed for manual recovery instead of creating a replacement worktree.
+The unowned legacy shared leaf is retained until provider-specific inventory can prove exclusive migration.
+Fork verification requires non-empty history
 because a provider-native fork always starts from a completed source turn. Network denial is offline/local-model-only because it also
 removes access to cloud model APIs. Provider mode remains the broadest compatibility default.
 

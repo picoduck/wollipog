@@ -57,6 +57,9 @@ export interface WorktreeOptions {
   ownerHash?: string;
   /** Cleanup-only compatibility boundary for a persisted pre-attestation WSL worktree path. */
   legacyWslRoot?: boolean;
+  /** Persisted pre-attestation WSL worktree. Creation may reuse this exact registered path, but
+   * must never silently replace or abandon it. */
+  legacyWslWorktreePath?: string;
 }
 
 export interface WorktreeHandle {
@@ -200,6 +203,26 @@ export async function createWorktree(repoPath: string, sessionId: string, option
     ? `agent/${options.ownerHash.slice(0, 16)}/${sessionId}`
     : `agent/${sessionId}`;
   const listed = await command(context, repoPath, ["worktree", "list", "--porcelain"]);
+  if (context.kind === "wsl" && options.legacyWslWorktreePath) {
+    const legacyPath = await sessionPath(repoPath, sessionId, { ...options, legacyWslRoot: true });
+    if (!sameContextPath(context, options.legacyWslWorktreePath, legacyPath)) {
+      throw new Error("persisted WSL worktree is outside the expected legacy session path");
+    }
+    const legacyRegistered = listed
+      .split(/\n\s*\n/)
+      .map((block) => block.split("\n").find((line) => line.startsWith("worktree "))?.slice(9).trim())
+      .filter((candidate): candidate is string => !!candidate)
+      .some((candidate) => sameContextPath(context, candidate, legacyPath));
+    if (!legacyRegistered) {
+      throw new Error("persisted legacy WSL worktree is no longer registered; recover it manually before restarting this session");
+    }
+    try {
+      if ((await command(context, legacyPath, ["rev-parse", "--is-inside-work-tree"])).trim() === "true") {
+        return { path: legacyPath, branch: `agent/${sessionId}`, created: false };
+      }
+    } catch { /* fail closed below so user changes are never replaced */ }
+    throw new Error("persisted legacy WSL worktree is not healthy; recover it manually before restarting this session");
+  }
   const registered = listed
     .split(/\n\s*\n/)
     .map((block) => block.split("\n").find((line) => line.startsWith("worktree "))?.slice(9).trim())

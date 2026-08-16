@@ -43,6 +43,7 @@ test("runner attestation never retries deterministic URL or header configuration
     { controlPlaneUrl: "https://manager.example.test/runner", runnerId: "runner-one", token: "token", priorCredentialHash: undefined },
     { controlPlaneUrl: "ws://user:password@manager.example.test/runner", runnerId: "runner-one", token: "token", priorCredentialHash: undefined },
     { controlPlaneUrl: "ws://manager.example.test/runner", runnerId: "runner/one", token: "token", priorCredentialHash: undefined },
+    { controlPlaneUrl: "ws://manager.example.test/runner", runnerId: "..", token: "token", priorCredentialHash: undefined },
     { controlPlaneUrl: "ws://manager.example.test/runner", runnerId: "runner-one", token: "line\nbreak", priorCredentialHash: undefined },
     { controlPlaneUrl: "ws://manager.example.test/runner", runnerId: "runner-one", token: "token", priorCredentialHash: "not-sha256" },
   ]) {

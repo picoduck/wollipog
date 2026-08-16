@@ -310,6 +310,18 @@ test("WSL worktrees are created, used, and removed inside the selected distro", 
     assert.equal((await runContextCommand(context, "git", ["rev-parse", "--is-inside-work-tree"], { cwd: handle.path })).stdout.trim(), "true");
     await removeWorktree(repo, handle, { context, ownerHash });
     await assert.rejects(runContextCommand(context, "git", ["status"], { cwd: handle.path }));
+
+    const legacy = await createWorktree(repo, "s_legacy", { context, legacyWslRoot: true });
+    await runContextCommand(context, "sh", ["-c", "printf preserved > sentinel.txt"], { cwd: legacy.path });
+    const resumed = await createWorktree(repo, "s_legacy", {
+      context,
+      ownerHash,
+      legacyWslWorktreePath: legacy.path,
+    });
+    assert.equal(resumed.path, legacy.path);
+    assert.equal(resumed.created, false);
+    assert.equal((await runContextCommand(context, "cat", ["sentinel.txt"], { cwd: resumed.path })).stdout, "preserved");
+    await removeWorktree(repo, resumed, { context, legacyWslRoot: true });
   } finally {
     await runContextCommand(context, "rm", ["-rf", "--", repo], { cwd: "/" }).catch(() => {});
   }

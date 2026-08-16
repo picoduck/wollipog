@@ -1077,7 +1077,7 @@ export class SessionManager {
       preview: null,
       pendingApproval: null,
       adopted: true,
-      providerStateVersion: 3,
+      providerStateVersion: descriptor.context.kind === "wsl" ? 3 : 2,
       seq: 0,
       createdAt: descriptor.createdAt,
       updatedAt: now,
@@ -1338,7 +1338,7 @@ export class SessionManager {
       // Manager-driven: a continued session is no longer a pristine transcript, so it isn't
       // reprocessable (re-reading the original transcript would drop the continuation).
       adopted: false,
-      providerStateVersion: prior ? prior.providerStateVersion : 3,
+      providerStateVersion: prior ? prior.providerStateVersion : (context.kind === "wsl" ? 3 : 2),
       seq: prior?.seq ?? 0,
       createdAt: prior?.createdAt ?? now,
       updatedAt: now,
@@ -1386,7 +1386,16 @@ export class SessionManager {
         return false;
       }
       try {
-        const worktreeOptions = { context, dataDir: this.dataDir, ownerHash: this.runnerOwnerHash };
+        const worktreeOptions = {
+          context,
+          dataDir: this.dataDir,
+          ownerHash: this.runnerOwnerHash,
+          ...(context.kind === "wsl" && prior?.context.kind === "wsl" &&
+            prior.context.distro === context.distro && prior.worktreePath &&
+            prior.worktreePath.includes("/.agent-manager/worktrees/")
+            ? { legacyWslWorktreePath: prior.worktreePath }
+            : {}),
+        };
         const gitRepo = await isGitRepo(repoPath, worktreeOptions);
         if (!this.launchIsCurrent(spec.sessionId, launchGeneration)) return false;
         if (gitRepo) {
@@ -1834,11 +1843,15 @@ export class SessionManager {
     meta: SessionMeta,
     launchGeneration?: number,
   ): Promise<void> {
-    if (this.executionIsolation.mode !== "bwrap" || meta.providerStateVersion === 3) return;
-    // Native v2 and v3 use the same dataDir partition. Never re-import the retained provider-wide
-    // legacy leaf over a session that already completed the v2 migration.
-    if (meta.context.kind === "native" && meta.providerStateVersion === 2) {
-      this.store.patchMeta(meta.sessionId, { providerStateVersion: 3 });
+    if (this.executionIsolation.mode !== "bwrap") return;
+    const expectedVersion = meta.context.kind === "wsl" ? 3 : 2;
+    if (meta.providerStateVersion === expectedVersion) return;
+    // Native v2 already uses the session-owned provider HOME layout. Never stamp it with the WSL
+    // v3 marker: an origin/main rollback treats every non-v2 row as legacy and would copy retained
+    // shared bytes back over the session partition. A native v3 row may exist from an interrupted
+    // pre-fix build; safely restore only its compatibility marker because its layout never changed.
+    if (meta.context.kind === "native" && meta.providerStateVersion === 3) {
+      this.store.patchMeta(meta.sessionId, { providerStateVersion: 2 });
       return;
     }
     const inFlight = this.providerStateMigrations.get(meta.sessionId);
@@ -1848,8 +1861,8 @@ export class SessionManager {
       if (!current) return;
       if (launchGeneration !== undefined &&
           !this.launchIsCurrent(meta.sessionId, launchGeneration)) return;
-      if (current.providerStateVersion !== 3) {
-        this.store.patchMeta(meta.sessionId, { providerStateVersion: 3 });
+      if (current.providerStateVersion !== expectedVersion) {
+        this.store.patchMeta(meta.sessionId, { providerStateVersion: expectedVersion });
       }
       return;
     }
@@ -1862,7 +1875,7 @@ export class SessionManager {
       // Double-check after acquiring the cross-process lock: another runner may have completed the
       // copy while this caller waited. Never rm/copy a partition that is already published as v3.
       const current = this.store.readMeta(meta.sessionId);
-      if (!current || current.providerStateVersion === 3) return;
+      if (!current || current.providerStateVersion === expectedVersion) return;
       const migration = this.migrateIsolationState(
         this.executionIsolation,
         current.context,
@@ -1882,7 +1895,7 @@ export class SessionManager {
       }
       if (launchGeneration !== undefined &&
           !this.launchIsCurrent(current.sessionId, launchGeneration)) return;
-      this.store.patchMeta(current.sessionId, { providerStateVersion: 3 });
+      this.store.patchMeta(current.sessionId, { providerStateVersion: expectedVersion });
     } finally {
       clearInterval(refresh);
       if (!alreadyOwned) this.store.releaseLock(meta.sessionId, this.lockOwner);
@@ -1926,7 +1939,8 @@ export class SessionManager {
         this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
       }
       if (meta.executionTarget?.adapter !== "container" && meta.executionTarget?.adapter !== "cloud" &&
-          this.executionIsolation.mode === "bwrap" && meta.providerStateVersion !== 3) {
+          this.executionIsolation.mode === "bwrap" &&
+          meta.providerStateVersion !== (meta.context.kind === "wsl" ? 3 : 2)) {
         await this.ensureProviderStateLayout(meta, launchGeneration);
       }
       isolation = await this.resolveLaunchIsolation(meta, cwd, launchGeneration);
@@ -4485,7 +4499,8 @@ export class SessionManager {
     let forkedThreadId: string | null = null;
     let providerStateJournaled = false;
     try {
-      if (this.executionIsolation.mode === "bwrap" && source.providerStateVersion !== 3) {
+      if (this.executionIsolation.mode === "bwrap" &&
+          source.providerStateVersion !== (source.context.kind === "wsl" ? 3 : 2)) {
         await this.ensureProviderStateLayout(source);
       }
       client = live?.client;
@@ -4590,7 +4605,7 @@ export class SessionManager {
         sessionSlashCommandProvenance: undefined,
         env: {},
         adopted: false,
-        providerStateVersion: 3,
+        providerStateVersion: source.context.kind === "wsl" ? 3 : 2,
         lastTurnBaseTree: point.tree,
         turnCount: turn,
         // Inherited events are re-sequenced in the child, so the parent's eventSeq is not valid

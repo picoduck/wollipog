@@ -64,14 +64,14 @@ test("session launch passes one resolved isolation boundary to every driver", as
     assert.deepEqual(captured?.isolation, isolation);
     assert.deepEqual(state, { driver: "claude-code", dataDir: join(root, ".runner-data"), env: {}, sessionId: "s1", cwd: "/repo" });
     assert.deepEqual(migrations, ["s1"]);
-    assert.equal(store.readMeta("s1")?.providerStateVersion, 3);
+    assert.equal(store.readMeta("s1")?.providerStateVersion, 2);
     manager.shutdownAll();
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("native v2 provider state upgrades metadata without re-importing retained legacy bytes", async () => {
+test("native v2 provider state preserves the rollback-compatible marker without re-importing retained legacy bytes", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-session-native-v2-"));
   try {
     const store = new SessionStore(root);
@@ -86,7 +86,29 @@ test("native v2 provider state upgrades metadata without re-importing retained l
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await (manager as any).ensureProviderStateLayout(store.readMeta("s1"));
     assert.equal(migrated, false);
-    assert.equal(store.readMeta("s1")?.providerStateVersion, 3);
+    assert.equal(store.readMeta("s1")?.providerStateVersion, 2);
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("native v3 metadata from an interrupted build is restored to the rollback-compatible v2 marker", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-session-native-v3-"));
+  try {
+    const store = new SessionStore(root);
+    store.create({ ...meta(), providerStateVersion: 3 });
+    let migrated = false;
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, undefined, undefined, 1,
+      undefined, undefined, { agentLimits: {}, agentWeights: {} },
+      { mode: "bwrap", network: "deny" }, undefined, undefined, undefined,
+      async () => { migrated = true; },
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (manager as any).ensureProviderStateLayout(store.readMeta("s1"));
+    assert.equal(migrated, false);
+    assert.equal(store.readMeta("s1")?.providerStateVersion, 2);
     manager.shutdownAll();
   } finally {
     rmSync(root, { recursive: true, force: true });
