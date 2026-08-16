@@ -4016,7 +4016,10 @@ mod tests {
         let spawn = replacement_source
             .find("spawn_local_runner(app, runner_id, generation, intent)")
             .expect("new runner spawn");
-        assert!(terminate < spawn, "the managed child must stop before adoption");
+        assert!(
+            terminate < spawn,
+            "the managed child must stop before adoption"
+        );
     }
 
     #[test]
