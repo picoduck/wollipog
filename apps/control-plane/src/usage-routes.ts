@@ -6,8 +6,8 @@ import type { Hub } from "./hub.js";
 import type { AuthPrincipal } from "./identity.js";
 import { canAdministerIdentity } from "./identity.js";
 import {
-  SUBSCRIPTION_USAGE_REFRESH_TIMEOUT_MS,
   SUBSCRIPTION_USAGE_STALE_AFTER_MS,
+  subscriptionUsageRefreshTimeoutMs,
 } from "./subscription-usage.js";
 import { parseUsageAggregationQuery, parseUsageRetentionInput } from "./usage-aggregation.js";
 
@@ -55,7 +55,9 @@ export function registerUsageRoutes(
         runner.runnerId,
         requestId,
         { type: "refresh_subscription_usage", requestId },
-        SUBSCRIPTION_USAGE_REFRESH_TIMEOUT_MS,
+        subscriptionUsageRefreshTimeoutMs(
+          runner.agents.filter((agent) => agent.driver === "codex-app-server").length,
+        ),
       );
       if (result.type !== "subscription_usage_refresh_result" || !result.ok) {
         throw new Error("runner could not refresh subscription usage");

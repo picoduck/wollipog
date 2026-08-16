@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -93,13 +93,16 @@ test("subscription probes resolve runner isolation before acquiring provider-HOM
     id: "codex", name: "Codex", command: "codex", args: [], env: {},
     driver: "codex-app-server", context: { kind: "wsl", distro: "Ubuntu" },
   };
-  assert.equal(await manager.prepareSubscriptionUsageProbe(agent, { HOME: "/home/alice" }, "a".repeat(32)), isolation);
+  assert.deepEqual(
+    await manager.prepareSubscriptionUsageProbe(agent, { HOME: "/home/alice" }, "a".repeat(32)),
+    { cwd: "/tmp", isolation },
+  );
   assert.deepEqual(resolvedState, {
     driver: "codex-app-server",
     dataDir: root,
     env: { HOME: "/home/alice" },
     sessionId: `subscription-usage:${"a".repeat(32)}`,
-    cwd: root,
+    cwd: "/tmp",
   });
   assert.deepEqual(leaseRequest, {
     driver: "codex-app-server",
@@ -108,5 +111,34 @@ test("subscription probes resolve runner isolation before acquiring provider-HOM
     env: { HOME: "/home/alice" },
     isolation,
   });
+  manager.shutdownAll();
+});
+
+test("native subscription probes create their narrow cwd before isolation resolves it", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-subscription-probe-cwd-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const manager = new SessionManager(
+    () => {},
+    () => {},
+    new SessionStore(join(root, "sessions")),
+    "runner",
+    undefined,
+    undefined,
+    root,
+  );
+  let cwdExistedDuringResolution = false;
+  (manager as unknown as { resolveIsolation: (...args: unknown[]) => Promise<undefined> }).resolveIsolation =
+    async (...args: unknown[]) => {
+      const state = args[3] as { cwd: string };
+      cwdExistedDuringResolution = existsSync(state.cwd);
+      return undefined;
+    };
+  const sourceId = "b".repeat(32);
+  const result = await manager.prepareSubscriptionUsageProbe({
+    id: "codex", name: "Codex", command: "codex", args: [], env: {},
+    driver: "codex-app-server", context: { kind: "native" },
+  }, {}, sourceId);
+  assert.equal(cwdExistedDuringResolution, true);
+  assert.equal(result.cwd, join(root, "subscription-usage-probes", sourceId));
   manager.shutdownAll();
 });

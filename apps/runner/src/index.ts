@@ -142,6 +142,7 @@ import {
 } from "./runner-data-dir.js";
 import { waitForRunnerControlPlaneAttestation } from "./control-plane-attestation.js";
 import {
+  shouldPublishSubscriptionUsageInventory,
   SubscriptionUsageManager,
   type SubscriptionUsageManagerOptions,
 } from "./subscription-usage.js";
@@ -346,8 +347,17 @@ const subscriptionUsage = new SubscriptionUsageManager({
   agents: () => metadata.agents,
   resolveEnv: (agentId, driver, context) =>
     runnerLocalAgentEnv(agentId, driver ?? "acp", context),
-  authorizeProbe: (agent, env, sourceId) => authorizeSubscriptionUsageProbe?.(agent, env, sourceId),
-  publish: (snapshot) => sendUp({ type: "subscription_usage_updated", snapshot }),
+  authorizeProbe: (agent, env, sourceId) => {
+    if (!authorizeSubscriptionUsageProbe) {
+      throw new Error("subscription usage probe authorization is not initialized");
+    }
+    return authorizeSubscriptionUsageProbe(agent, env, sourceId);
+  },
+  publish: (snapshot) => {
+    if (runnerSupportsProtocol(controlPlaneProtocolVersion, "subscriptionUsage")) {
+      sendUp({ type: "subscription_usage_updated", snapshot });
+    }
+  },
   log,
 });
 
@@ -653,6 +663,26 @@ let discoveryDone = false;
 const DISCOVERY_REFRESH_MS = 5 * 60_000;
 let discoveryTimer: ReturnType<typeof setInterval> | null = null;
 
+function publishSubscriptionUsageInventory(refreshCodex: boolean): void {
+  if (!shouldPublishSubscriptionUsageInventory(discoveryDone, controlPlaneProtocolVersion)) return;
+  sendUp({
+    type: "subscription_usage_inventory",
+    runnerId: config.runnerId,
+    snapshots: subscriptionUsage.syncSources(),
+  });
+  if (!refreshCodex) return;
+  void subscriptionUsage.refreshAll()
+    .then((snapshots) => {
+      if (!shouldPublishSubscriptionUsageInventory(discoveryDone, controlPlaneProtocolVersion)) return;
+      sendUp({
+        type: "subscription_usage_inventory",
+        runnerId: config.runnerId,
+        snapshots,
+      });
+    })
+    .catch((error) => log(`subscription usage refresh failed: ${errText(error)}`));
+}
+
 /** Probe installed agents, merge into the advertised list, and push to the control
  * plane if already registered. Safe to call repeatedly (e.g. on a rediscover) — a
  * call made while a pass is in flight is coalesced into a single trailing rerun. */
@@ -724,13 +754,7 @@ async function runDiscovery(refreshModels = false): Promise<void> {
       editors,
     };
     sendUp(update);
-    if (registered && runnerSupportsProtocol(controlPlaneProtocolVersion, "subscriptionUsage")) {
-      sendUp({
-        type: "subscription_usage_inventory",
-        runnerId: config.runnerId,
-        snapshots: subscriptionUsage.syncSources(),
-      });
-    }
+    if (registered) publishSubscriptionUsageInventory(true);
   } catch (err) {
     log(`discovery failed: ${(err as Error).message}`);
   } finally {
@@ -809,20 +833,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       if (discoveryDone) {
         sendUp({ type: "agents_updated", runnerId: config.runnerId, agents: agentsForControlPlane(), editors: metadata.editors });
       }
-      if (runnerSupportsProtocol(controlPlaneProtocolVersion, "subscriptionUsage")) {
-        sendUp({
-          type: "subscription_usage_inventory",
-          runnerId: config.runnerId,
-          snapshots: subscriptionUsage.syncSources(),
-        });
-        void subscriptionUsage.refreshAll()
-          .then((snapshots) => sendUp({
-            type: "subscription_usage_inventory",
-            runnerId: config.runnerId,
-            snapshots,
-          }))
-          .catch((error) => log(`subscription usage refresh failed: ${errText(error)}`));
-      }
+      publishSubscriptionUsageInventory(true);
       // The CP dropped this runner's queue overlays on register (in-memory queues are assumed
       // dead), but OURS survived the socket blip — re-report every non-empty queue or those
       // prompts stay invisible and uncancelable until the queue next changes.

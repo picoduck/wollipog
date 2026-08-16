@@ -7,6 +7,7 @@ import {
   normalizeClaudeRateLimits,
   normalizeCodexRateLimits,
   probeCodexSubscriptionUsage,
+  shouldPublishSubscriptionUsageInventory,
   SubscriptionUsageManager,
   subscriptionUsageSourceId,
 } from "./subscription-usage.js";
@@ -64,6 +65,21 @@ test("Claude normalization accepts named, model-specific, additional, and status
   assert.equal(snapshot.buckets[3]?.status, "warning");
 });
 
+test("provider-controlled bucket ids are sanitized to control-plane bounds", () => {
+  const rawId = `${"x".repeat(140)}\u0007`;
+  const codex = normalizeCodexRateLimits({
+    rateLimitsByLimitId: { [rawId]: { primary: { usedPercent: 10 } } },
+  }, base, 1_000);
+  const claude = normalizeClaudeRateLimits({
+    rate_limits: { [rawId]: { used_percentage: 10 } },
+  }, base, 1_000);
+  assert.ok(codex);
+  assert.ok(claude);
+  assert.ok((codex.buckets[0]?.id.length ?? 0) <= 96);
+  assert.ok((claude.buckets[0]?.id.length ?? 0) <= 96);
+  assert.doesNotMatch(JSON.stringify([codex.buckets[0], claude.buckets[0]]), /\u0007/);
+});
+
 test("the Codex refresh probe uses only account APIs, never starts a turn, and always reaps", async () => {
   const requestStream = new PassThrough();
   const responseStream = new PassThrough();
@@ -92,13 +108,16 @@ test("the Codex refresh probe uses only account APIs, never starts a turn, and a
       responseStream.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }) + "\n");
     }
   });
+  const isolation = { backend: "bwrap" as const, command: "bwrap", args: [], network: "deny" as const };
   const result = await probeCodexSubscriptionUsage(agent(), {}, 1_000, {
     spawn: ((options: SpawnAgentOptions) => { launched = options; return child; }) as never,
     kill: (() => { killed++; }) as never,
-  });
+  }, { cwd: "/safe/subscription-probe", isolation });
   assert.deepEqual(methods, ["initialize", "initialized", "account/read", "account/rateLimits/read"]);
   assert.equal(methods.some((method) => /turn|thread|session/i.test(method)), false);
   assert.deepEqual(launched?.args, ["app-server"]);
+  assert.equal(launched?.cwd, "/safe/subscription-probe");
+  assert.equal(launched?.isolation, isolation);
   assert.equal(killed, 1);
   assert.equal(result.state, "available");
 });
@@ -123,7 +142,7 @@ test("event updates merge sparse buckets and concurrent manual refreshes share o
   let now = 1_000;
   let probes = 0;
   let authorizations = 0;
-  let probeIsolation: unknown;
+  let probeAuthorization: unknown;
   let releaseProbe!: () => void;
   const gate = new Promise<void>((resolve) => { releaseProbe = resolve; });
   const published: SubscriptionUsageSnapshot[] = [];
@@ -134,13 +153,16 @@ test("event updates merge sparse buckets and concurrent manual refreshes share o
     resolveEnv: () => ({}),
     authorizeProbe: () => {
       authorizations++;
-      return { backend: "bwrap", command: "bwrap", args: [], network: "deny" };
+      return {
+        cwd: "/safe/subscription-probe",
+        isolation: { backend: "bwrap", command: "bwrap", args: [], network: "deny" },
+      };
     },
     publish: (snapshot) => published.push(snapshot),
     now: () => now,
-    probeCodex: async (_agent, _env, _timeout, _dependencies, isolation) => {
+    probeCodex: async (_agent, _env, _timeout, _dependencies, authorization) => {
       probes++;
-      probeIsolation = isolation;
+      probeAuthorization = authorization;
       await gate;
       return {
         state: "available",
@@ -168,6 +190,7 @@ test("event updates merge sparse buckets and concurrent manual refreshes share o
   assert.deepEqual(manager.inventory()[0]?.buckets.map((bucket) => [bucket.id, bucket.usedPercent]), [
     ["codex:primary", 30], ["codex:secondary", 70],
   ]);
+  assert.equal(manager.inventory()[0]?.detail, undefined, "live data clears the pre-first-response detail");
   now = 1_500;
   manager.observe("codex", "codex-app-server", { kind: "native" }, {
     provider: "codex",
@@ -188,8 +211,48 @@ test("event updates merge sparse buckets and concurrent manual refreshes share o
   await Promise.all([first, second]);
   assert.equal(probes, 1);
   assert.equal(authorizations, 1, "HOME authorization runs once before the shared provider probe");
-  assert.deepEqual(probeIsolation, { backend: "bwrap", command: "bwrap", args: [], network: "deny" });
+  assert.deepEqual(probeAuthorization, {
+    cwd: "/safe/subscription-probe",
+    isolation: { backend: "bwrap", command: "bwrap", args: [], network: "deny" },
+  });
   assert.equal(published.at(-1)?.buckets.find((bucket) => bucket.id === "codex:secondary")?.usedPercent, 70);
+});
+
+test("a successful refresh clears a prior fallback detail", async () => {
+  let now = 1_000;
+  let fail = true;
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [agent()],
+    resolveEnv: () => ({}),
+    authorizeProbe: () => ({ cwd: "/safe/subscription-probe" }),
+    publish: () => {},
+    now: () => now,
+    probeCodex: async () => {
+      if (fail) throw new Error("temporary provider failure");
+      return {
+        state: "available",
+        rateLimits: { rateLimits: { limitId: "codex", primary: { usedPercent: 10 } } },
+      };
+    },
+  });
+  manager.observe("codex", "codex-app-server", { kind: "native" }, {
+    provider: "codex",
+    payload: { rateLimits: { limitId: "codex", primary: { usedPercent: 20 } } },
+  });
+  now = 20_000;
+  await manager.refreshAll();
+  assert.match(manager.inventory()[0]?.detail ?? "", /latest Codex refresh failed/);
+  fail = false;
+  now = 40_000;
+  await manager.refreshAll();
+  assert.equal(manager.inventory()[0]?.detail, undefined);
+});
+
+test("subscription inventories wait for discovery and negotiated protocol support", () => {
+  assert.equal(shouldPublishSubscriptionUsageInventory(false, 78), false);
+  assert.equal(shouldPublishSubscriptionUsageInventory(true, 77), false);
+  assert.equal(shouldPublishSubscriptionUsageInventory(true, 78), true);
 });
 
 test("source synchronization reports auth modes without probing or exposing account identity", async () => {

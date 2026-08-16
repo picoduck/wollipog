@@ -41,6 +41,7 @@ import type {
 } from "@wollipog/protocol";
 import { isPromptImageReference, PROTOCOL_VERSION, providerSupportsConversationFork } from "@wollipog/protocol";
 import { createHash, randomUUID } from "node:crypto";
+import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { makeDriver, type Driver } from "./drivers/factory.js";
 import type {
@@ -66,6 +67,7 @@ import {
   verifyExecutionIsolationForkState,
 } from "./execution-isolation.js";
 import type { SpawnIsolation } from "./spawn.js";
+import type { SubscriptionUsageProbeAuthorization } from "./subscription-usage.js";
 import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
 import {
   ProviderStateCleanupJournal,
@@ -684,14 +686,20 @@ export class SessionManager {
     agent: AgentDefinition,
     env: Record<string, string>,
     sourceId: string,
-  ): Promise<SpawnIsolation | undefined> {
+  ): Promise<SubscriptionUsageProbeAuthorization> {
     const context = agent.context ?? { kind: "native" as const };
+    const cwd = context.kind === "wsl"
+      ? "/tmp"
+      : join(this.stateDir, "subscription-usage-probes", sourceId);
+    if (context.kind === "native") {
+      await mkdir(cwd, { recursive: true, mode: 0o700 });
+    }
     const isolation = await this.resolveIsolation(this.executionIsolation, context, {}, {
       driver: agent.driver ?? "acp",
       dataDir: this.stateDir,
       env,
       sessionId: `subscription-usage:${sourceId}`,
-      cwd: this.stateDir,
+      cwd,
       ...(this.runnerOwnerHash ? { ownerHash: this.runnerOwnerHash } : {}),
     });
     this.providerHomeLeases?.acquire({
@@ -701,7 +709,7 @@ export class SessionManager {
       env,
       isolation,
     });
-    return isolation;
+    return { cwd, ...(isolation ? { isolation } : {}) };
   }
 
   /** Re-scan durable Claude work after each successful control-plane registration/reconnect. */

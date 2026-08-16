@@ -11,9 +11,18 @@ type JsonRecord = Record<string, unknown>;
 
 export const SUBSCRIPTION_USAGE_STALE_AFTER_MS = 10 * 60_000;
 export const SUBSCRIPTION_USAGE_REFRESH_TIMEOUT_MS = 10_000;
+export const MAX_SUBSCRIPTION_USAGE_REFRESH_TIMEOUT_MS = 60_000;
 export const MAX_SUBSCRIPTION_USAGE_SNAPSHOTS = 32;
 const MAX_BUCKETS = 64;
 const MAX_SPEND_CONTROLS = 64;
+
+export function subscriptionUsageRefreshTimeoutMs(codexSourceCount: number): number {
+  return Math.min(
+    MAX_SUBSCRIPTION_USAGE_REFRESH_TIMEOUT_MS,
+    SUBSCRIPTION_USAGE_REFRESH_TIMEOUT_MS +
+      Math.max(0, Math.floor(codexSourceCount) - 1) * 8_000,
+  );
+}
 
 function record(value: unknown): JsonRecord {
   if (value == null || typeof value !== "object" || Array.isArray(value)) {

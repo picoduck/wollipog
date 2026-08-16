@@ -7,6 +7,7 @@ import type {
   SubscriptionUsageSnapshot,
   SubscriptionUsageSpendControl,
 } from "@wollipog/protocol";
+import { runnerSupportsProtocol } from "@wollipog/protocol";
 import { JsonRpcPeer } from "./jsonrpc.js";
 import { killTree, spawnAgent, type AgentProcess, type SpawnIsolation } from "./spawn.js";
 import type { DriverSubscriptionUsageUpdate } from "./drivers/driver.js";
@@ -25,7 +26,7 @@ function record(value: unknown): JsonRecord | null {
 
 function stringValue(value: unknown, max = 160): string | undefined {
   if (typeof value !== "string") return undefined;
-  const normalized = value.trim().replace(/[\r\n\t]+/g, " ");
+  const normalized = value.trim().replace(/[\u0000-\u001f\u007f]+/g, " ");
   return normalized ? normalized.slice(0, max) : undefined;
 }
 
@@ -133,7 +134,10 @@ function normalizeCodexSnapshot(
 } | null {
   const snapshot = record(input);
   if (!snapshot) return null;
-  const limitId = stringValue(snapshot.limitId ?? snapshot.limit_id, 96) ?? fallbackId;
+  // Bucket ids append `:secondary`; keep the provider segment within the control-plane's
+  // exact 96-character bound and sanitize map keys just like explicit ids.
+  const limitId = stringValue(snapshot.limitId ?? snapshot.limit_id, 86) ??
+    stringValue(fallbackId, 86) ?? "codex";
   const limitLabel = stringValue(snapshot.limitName ?? snapshot.limit_name, 120) ??
     subscriptionUsageBucketLabel(limitId);
   const buckets = [
@@ -224,9 +228,11 @@ function claudeWindow(id: string, input: unknown): SubscriptionUsageBucket | nul
     : rawStatus === "allowed_warning" || (usedPercent !== undefined && usedPercent >= 80)
       ? "warning" as const
       : "available" as const;
+  const safeId = stringValue(id, 96);
+  if (!safeId) return null;
   return {
-    id,
-    label: subscriptionUsageBucketLabel(id),
+    id: safeId,
+    label: subscriptionUsageBucketLabel(safeId),
     ...(usedPercent === undefined ? {} : {
       usedPercent,
       remainingPercent: Math.max(0, 100 - usedPercent),
@@ -284,8 +290,9 @@ function mergeSnapshot(
   for (const item of update.spendControls ?? []) {
     spendControls.set(item.id, { ...spendControls.get(item.id), ...item });
   }
+  const { detail: _priorDetail, ...priorWithoutDetail } = prior;
   return {
-    ...prior,
+    ...priorWithoutDetail,
     ...update,
     buckets: [...buckets.values()].slice(0, MAX_PROVIDER_BUCKETS),
     ...(update.credits || prior.credits ? { credits: { ...prior.credits, ...update.credits } } : {}),
@@ -300,6 +307,11 @@ export interface CodexSubscriptionProbeResult {
   rateLimits?: unknown;
 }
 
+export interface SubscriptionUsageProbeAuthorization {
+  cwd: string;
+  isolation?: SpawnIsolation;
+}
+
 interface CodexProbeDeps {
   spawn: typeof spawnAgent;
   kill: typeof killTree;
@@ -311,7 +323,7 @@ export async function probeCodexSubscriptionUsage(
   env: Record<string, string>,
   timeoutMs = SUBSCRIPTION_USAGE_PROBE_TIMEOUT_MS,
   dependencies: Partial<CodexProbeDeps> = {},
-  isolation?: SpawnIsolation,
+  authorization?: SubscriptionUsageProbeAuthorization,
 ): Promise<CodexSubscriptionProbeResult> {
   const deps: CodexProbeDeps = {
     spawn: dependencies.spawn ?? spawnAgent,
@@ -324,11 +336,11 @@ export async function probeCodexSubscriptionUsage(
     child = deps.spawn({
       command: agent.command,
       args: [...agent.args, "app-server"],
-      cwd: process.cwd(),
+      cwd: authorization?.cwd ?? process.cwd(),
       env,
       context: agent.context,
       scrubInheritedEnv: ["OPENAI_API_KEY"],
-      isolation,
+      isolation: authorization?.isolation,
     });
     child.stderr.resume();
     peer = new JsonRpcPeer(child.stdin, child.stdout);
@@ -389,7 +401,7 @@ export interface SubscriptionUsageManagerOptions {
     agent: AgentDefinition,
     env: Record<string, string>,
     sourceId: string,
-  ) => SpawnIsolation | undefined | Promise<SpawnIsolation | undefined>;
+  ) => SubscriptionUsageProbeAuthorization | Promise<SubscriptionUsageProbeAuthorization>;
   publish: (snapshot: SubscriptionUsageSnapshot) => void;
   log?: (message: string) => void;
   now?: () => number;
@@ -554,8 +566,9 @@ export class SubscriptionUsageManager {
   private async refreshAllNow(): Promise<SubscriptionUsageSnapshot[]> {
     this.syncSources();
     const codexSources = this.sources().filter((source) => source.provider === "codex");
-    // A runner may advertise several contexts. Probe sequentially to avoid provider/auth bursts;
-    // duplicate manual requests share refreshPromise and each source has its own minimum interval.
+    // A runner may advertise several contexts. Probe sequentially to avoid concurrent mutation of
+    // one provider HOME; the control plane derives a bounded deadline from this source count.
+    // Duplicate manual requests share refreshPromise and each source has its own minimum interval.
     for (const source of codexSources) await this.refreshCodex(source);
     return this.inventory();
   }
@@ -591,13 +604,14 @@ export class SubscriptionUsageManager {
         this.options.publish(notApplicable);
         return;
       }
-      const isolation = await this.options.authorizeProbe?.(source.agent, env, source.sourceId);
+      const authorization = await this.options.authorizeProbe?.(source.agent, env, source.sourceId);
+      if (!authorization) throw new Error("subscription usage probe authorization is unavailable");
       const result = await (this.options.probeCodex ?? probeCodexSubscriptionUsage)(
         source.agent,
         env,
         SUBSCRIPTION_USAGE_PROBE_TIMEOUT_MS,
         {},
-        isolation,
+        authorization,
       );
       if (result.state === "available") {
         const normalized = normalizeCodexRateLimits(
@@ -645,4 +659,11 @@ export class SubscriptionUsageManager {
       this.options.publish(failed);
     }
   }
+}
+
+export function shouldPublishSubscriptionUsageInventory(
+  discoveryDone: boolean,
+  controlPlaneProtocolVersion: number | null,
+): boolean {
+  return discoveryDone && runnerSupportsProtocol(controlPlaneProtocolVersion, "subscriptionUsage");
 }

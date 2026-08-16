@@ -5,9 +5,18 @@ import { PROTOCOL_VERSION, type AgentDefinition, type RunnerMetadata } from "@wo
 import { ControlPlaneDb } from "./db.js";
 import type { HumanPrincipal } from "./identity.js";
 import {
+  MAX_SUBSCRIPTION_USAGE_REFRESH_TIMEOUT_MS,
+  subscriptionUsageRefreshTimeoutMs,
   validateSubscriptionUsageInventory,
   validateSubscriptionUsageSnapshot,
 } from "./subscription-usage.js";
+
+test("manual refresh deadlines cover sequential Codex sources with a bounded ceiling", () => {
+  assert.equal(subscriptionUsageRefreshTimeoutMs(0), 10_000);
+  assert.equal(subscriptionUsageRefreshTimeoutMs(1), 10_000);
+  assert.equal(subscriptionUsageRefreshTimeoutMs(2), 18_000);
+  assert.equal(subscriptionUsageRefreshTimeoutMs(100), MAX_SUBSCRIPTION_USAGE_REFRESH_TIMEOUT_MS);
+});
 
 function codexAgent(id = "codex"): AgentDefinition {
   return {
