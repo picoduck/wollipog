@@ -597,6 +597,7 @@ export class SessionManager {
     private readonly containerTargets?: ContainerTargetRegistry,
     private readonly cloudTargets?: CloudTargetRegistry,
     private readonly controlPlaneProtocolVersion: () => number | null = () => PROTOCOL_VERSION,
+    private readonly runnerOwnerHash?: string,
   ) {
     this.lockOwner = `${runnerId}#${randomUUID()}`;
     this.stateDir = dataDir ?? join(store.rootPath(), ".runner-data");
@@ -983,16 +984,21 @@ export class SessionManager {
         this.providerStateCleanupJournal,
         protectedSessionIds,
         this.log,
+        Date.now(),
+        this.runnerOwnerHash,
       );
       const pendingCleanup = this.providerStateCleanupJournal.list();
       const result = await reconcileProviderState(
         this.executionIsolation,
         this.stateDir,
         stored,
-        providerStateKey(this.runnerId),
+        this.runnerOwnerHash ?? providerStateKey(this.runnerId),
         pendingCleanup,
         this.forkingTargets,
         [...this.isolationContexts, ...pendingCleanup.map((record) => record.context)],
+        Date.now(),
+        undefined,
+        providerStateKey(this.runnerId),
       );
       if (result.removed.length) this.log(`reconciled ${result.removed.length} isolated provider-state path(s)`);
       for (const error of result.errors) this.log(`provider-state reconciliation skipped ${error}`);
@@ -1011,7 +1017,9 @@ export class SessionManager {
   ): Promise<void> {
     if (!journaled) this.providerStateCleanupJournal.add({ sessionId, driver, context });
     try {
-      await this.removeIsolationState({ ...this.executionIsolation, mode: "bwrap" }, context, driver, this.stateDir, sessionId);
+      await this.removeIsolationState(
+        { ...this.executionIsolation, mode: "bwrap" }, context, driver, this.stateDir, sessionId, {}, this.runnerOwnerHash,
+      );
       this.providerStateCleanupJournal.remove(sessionId);
     } catch (error) {
       this.log(`isolated provider state cleanup for ${sessionId} needs reconciliation: ${errText(error)}`);
@@ -1069,7 +1077,7 @@ export class SessionManager {
       preview: null,
       pendingApproval: null,
       adopted: true,
-      providerStateVersion: 2,
+      providerStateVersion: descriptor.context.kind === "wsl" ? 3 : 2,
       seq: 0,
       createdAt: descriptor.createdAt,
       updatedAt: now,
@@ -1330,7 +1338,7 @@ export class SessionManager {
       // Manager-driven: a continued session is no longer a pristine transcript, so it isn't
       // reprocessable (re-reading the original transcript would drop the continuation).
       adopted: false,
-      providerStateVersion: prior ? prior.providerStateVersion : 2,
+      providerStateVersion: prior ? prior.providerStateVersion : (context.kind === "wsl" ? 3 : 2),
       seq: prior?.seq ?? 0,
       createdAt: prior?.createdAt ?? now,
       updatedAt: now,
@@ -1378,7 +1386,16 @@ export class SessionManager {
         return false;
       }
       try {
-        const worktreeOptions = { context, dataDir: this.dataDir };
+        const worktreeOptions = {
+          context,
+          dataDir: this.dataDir,
+          ownerHash: this.runnerOwnerHash,
+          ...(context.kind === "wsl" && prior?.context.kind === "wsl" &&
+            prior.context.distro === context.distro && prior.worktreePath &&
+            prior.worktreePath.includes("/.agent-manager/worktrees/")
+            ? { legacyWslWorktreePath: prior.worktreePath }
+            : {}),
+        };
         const gitRepo = await isGitRepo(repoPath, worktreeOptions);
         if (!this.launchIsCurrent(spec.sessionId, launchGeneration)) return false;
         if (gitRepo) {
@@ -1826,7 +1843,17 @@ export class SessionManager {
     meta: SessionMeta,
     launchGeneration?: number,
   ): Promise<void> {
-    if (this.executionIsolation.mode !== "bwrap" || meta.providerStateVersion === 2) return;
+    if (this.executionIsolation.mode !== "bwrap") return;
+    const expectedVersion = meta.context.kind === "wsl" ? 3 : 2;
+    if (meta.providerStateVersion === expectedVersion) return;
+    // Native v2 already uses the session-owned provider HOME layout. Never stamp it with the WSL
+    // v3 marker: an origin/main rollback treats every non-v2 row as legacy and would copy retained
+    // shared bytes back over the session partition. A native v3 row may exist from an interrupted
+    // pre-fix build; safely restore only its compatibility marker because its layout never changed.
+    if (meta.context.kind === "native" && meta.providerStateVersion === 3) {
+      this.store.patchMeta(meta.sessionId, { providerStateVersion: 2 });
+      return;
+    }
     const inFlight = this.providerStateMigrations.get(meta.sessionId);
     if (inFlight) {
       await inFlight;
@@ -1834,8 +1861,8 @@ export class SessionManager {
       if (!current) return;
       if (launchGeneration !== undefined &&
           !this.launchIsCurrent(meta.sessionId, launchGeneration)) return;
-      if (current.providerStateVersion !== 2) {
-        this.store.patchMeta(meta.sessionId, { providerStateVersion: 2 });
+      if (current.providerStateVersion !== expectedVersion) {
+        this.store.patchMeta(meta.sessionId, { providerStateVersion: expectedVersion });
       }
       return;
     }
@@ -1846,15 +1873,17 @@ export class SessionManager {
     const refresh = setInterval(() => this.store.refreshLock(meta.sessionId, this.lockOwner), LOCK_REFRESH_MS);
     try {
       // Double-check after acquiring the cross-process lock: another runner may have completed the
-      // copy while this caller waited. Never rm/copy a partition that is already published as v2.
+      // copy while this caller waited. Never rm/copy a partition that is already published as v3.
       const current = this.store.readMeta(meta.sessionId);
-      if (!current || current.providerStateVersion === 2) return;
+      if (!current || current.providerStateVersion === expectedVersion) return;
       const migration = this.migrateIsolationState(
         this.executionIsolation,
         current.context,
         current.driver,
         this.stateDir,
         current.sessionId,
+        {},
+        this.runnerOwnerHash,
       );
       this.providerStateMigrations.set(current.sessionId, migration);
       try {
@@ -1866,7 +1895,7 @@ export class SessionManager {
       }
       if (launchGeneration !== undefined &&
           !this.launchIsCurrent(current.sessionId, launchGeneration)) return;
-      this.store.patchMeta(current.sessionId, { providerStateVersion: 2 });
+      this.store.patchMeta(current.sessionId, { providerStateVersion: expectedVersion });
     } finally {
       clearInterval(refresh);
       if (!alreadyOwned) this.store.releaseLock(meta.sessionId, this.lockOwner);
@@ -1910,7 +1939,8 @@ export class SessionManager {
         this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
       }
       if (meta.executionTarget?.adapter !== "container" && meta.executionTarget?.adapter !== "cloud" &&
-          this.executionIsolation.mode === "bwrap" && meta.providerStateVersion !== 2) {
+          this.executionIsolation.mode === "bwrap" &&
+          meta.providerStateVersion !== (meta.context.kind === "wsl" ? 3 : 2)) {
         await this.ensureProviderStateLayout(meta, launchGeneration);
       }
       isolation = await this.resolveLaunchIsolation(meta, cwd, launchGeneration);
@@ -2198,6 +2228,7 @@ export class SessionManager {
       env: meta.env,
       sessionId: meta.sessionId,
       cwd,
+      ...(this.runnerOwnerHash ? { ownerHash: this.runnerOwnerHash } : {}),
     });
   }
 
@@ -3857,6 +3888,7 @@ export class SessionManager {
       const baseCommit = await worktreeHead(entry.worktree.path, {
         context: entry.context,
         dataDir: this.dataDir,
+        ownerHash: this.runnerOwnerHash,
       });
       await withGitExecutionContext(
         entry.context,
@@ -4467,7 +4499,8 @@ export class SessionManager {
     let forkedThreadId: string | null = null;
     let providerStateJournaled = false;
     try {
-      if (this.executionIsolation.mode === "bwrap" && source.providerStateVersion !== 2) {
+      if (this.executionIsolation.mode === "bwrap" &&
+          source.providerStateVersion !== (source.context.kind === "wsl" ? 3 : 2)) {
         await this.ensureProviderStateLayout(source);
       }
       client = live?.client;
@@ -4514,7 +4547,7 @@ export class SessionManager {
       if (!client.forkSession) return { ok: false, error: "this driver build does not support provider forks" };
       // Preserve the source worktree's commit base as well as its exact post-turn files. The new
       // thread gets the target cwd at fork time so it never resumes against the source worktree.
-      const worktreeOptions = { context: source.context, dataDir: this.dataDir };
+      const worktreeOptions = { context: source.context, dataDir: this.dataDir, ownerHash: this.runnerOwnerHash };
       const baseRef = point.baseCommit ?? (await worktreeHead(source.worktreePath, worktreeOptions));
       worktree = await createWorktreeFromTree(source.repoPath, targetSessionId, point.tree, baseRef, worktreeOptions);
       // Fork refs are anchored before the target session row exists, so their immutable ownership
@@ -4541,6 +4574,8 @@ export class SessionManager {
         this.stateDir,
         sourceSessionId,
         forkedThreadId,
+        {},
+        this.runnerOwnerHash,
       );
       await this.cloneIsolationState(
         this.executionIsolation,
@@ -4549,6 +4584,8 @@ export class SessionManager {
         this.stateDir,
         sourceSessionId,
         targetSessionId,
+        {},
+        this.runnerOwnerHash,
       );
       await withGitExecutionContext(source.context, () => anchorForkRef(worktree!.path, targetSessionId, turn, point.tree));
       const now = Date.now();
@@ -4568,7 +4605,7 @@ export class SessionManager {
         sessionSlashCommandProvenance: undefined,
         env: {},
         adopted: false,
-        providerStateVersion: 2,
+        providerStateVersion: source.context.kind === "wsl" ? 3 : 2,
         lastTurnBaseTree: point.tree,
         turnCount: turn,
         // Inherited events are re-sequenced in the child, so the parent's eventSeq is not valid
@@ -4974,10 +5011,22 @@ export class SessionManager {
       }
     }
     try {
+      const ownedWslPath = record.context.kind === "wsl" && this.runnerOwnerHash &&
+        record.worktreePath.includes(`/runner-instances/${this.runnerOwnerHash}/worktrees/`);
       await removeWorktree(
         record.repoPath,
-        { path: record.worktreePath, branch: `agent/${record.sessionId}` },
-        { context: record.context, dataDir: this.dataDir },
+        {
+          path: record.worktreePath,
+          branch: ownedWslPath
+            ? `agent/${this.runnerOwnerHash.slice(0, 16)}/${record.sessionId}`
+            : `agent/${record.sessionId}`,
+        },
+        {
+          context: record.context,
+          dataDir: this.dataDir,
+          ownerHash: this.runnerOwnerHash,
+          legacyWslRoot: record.context.kind === "wsl" && !ownedWslPath,
+        },
       );
     } catch {
       worktreeRemoved = false;
@@ -5162,7 +5211,7 @@ export class SessionManager {
     // lines per turn, forever). Full cumulative diffs stay available on demand via the Git
     // panel's git_action. Falls back to cumulative when the snapshot is missing/pruned.
     const base = this.store.readMeta(sessionId)?.lastTurnBaseTree;
-    const worktreeOptions = { context: entry.context, dataDir: this.dataDir };
+    const worktreeOptions = { context: entry.context, dataDir: this.dataDir, ownerHash: this.runnerOwnerHash };
     const captured = base ? await captureTurnDiff(entry.worktree.path, base, worktreeOptions) : null;
     const diff = captured?.diff ?? (await worktreeDiff(entry.worktree.path, worktreeOptions));
     if (diff.trim()) this.emitEvent(sessionId, { kind: "file_edit", path: "worktree", diff });

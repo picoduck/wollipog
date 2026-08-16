@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createWorktree, isGitRepo, nativeRepositoryPathIsUnavailable, removeWorktree, resolveWorktreeRoot, setStatfsForTests, WorktreeCleanupJournal } from "./worktree.js";
+import { createWorktree, isGitRepo, nativeRepositoryPathIsUnavailable, removeWorktree, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, setStatfsForTests, WorktreeCleanupJournal } from "./worktree.js";
 import { randomUUID } from "node:crypto";
 import { runContextCommand } from "./context-command.js";
 import { SessionStore } from "./session-store.js";
@@ -43,6 +43,44 @@ test("native repository availability recognizes only terminal filesystem states"
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("persisted legacy WSL worktree reuse fails closed unless the exact path is registered and healthy", async () => {
+  const expected = "/home/me/.agent-manager/worktrees/repo-key/session-one";
+  const porcelain = [
+    "worktree /repo",
+    "HEAD " + "a".repeat(40),
+    "",
+    `worktree ${expected}/`,
+    "HEAD " + "b".repeat(40),
+    "",
+  ].join("\n");
+  let healthChecks = 0;
+  assert.deepEqual(
+    await reuseRegisteredLegacyWslWorktree(
+      `${expected}/`, expected, "session-one", porcelain,
+      async () => { healthChecks++; return true; },
+    ),
+    { path: expected, branch: "agent/session-one", created: false },
+  );
+  assert.equal(healthChecks, 1);
+
+  await assert.rejects(
+    reuseRegisteredLegacyWslWorktree("/unexpected/session-one", expected, "session-one", porcelain, async () => true),
+    /outside the expected legacy session path/,
+  );
+  await assert.rejects(
+    reuseRegisteredLegacyWslWorktree(expected, expected, "session-one", "worktree /other\n", async () => true),
+    /no longer registered/,
+  );
+  await assert.rejects(
+    reuseRegisteredLegacyWslWorktree(expected, expected, "session-one", porcelain, async () => false),
+    /not healthy/,
+  );
+  await assert.rejects(
+    reuseRegisteredLegacyWslWorktree(expected, expected, "session-one", porcelain, async () => { throw new Error("offline"); }),
+    /not healthy/,
+  );
 });
 
 test("native worktrees live under the external runner data root and clean up", { skip: !haveGit() }, async () => {
@@ -304,11 +342,24 @@ test("WSL worktrees are created, used, and removed inside the selected distro", 
     await runContextCommand(context, "git", ["config", "user.email", "test@example.com"], { cwd: repo });
     await runContextCommand(context, "git", ["config", "user.name", "Test"], { cwd: repo });
     await runContextCommand(context, "git", ["commit", "--allow-empty", "-m", "base"], { cwd: repo });
-    const handle = await createWorktree(repo, "s_wsl", { context });
-    assert.match(handle.path, /^\/home\/[^/]+\/\.agent-manager\/worktrees\//);
+    const ownerHash = "1".repeat(64);
+    const handle = await createWorktree(repo, "s_wsl", { context, ownerHash });
+    assert.match(handle.path, new RegExp(`/home/[^/]+/\\.agent-manager/runner-instances/${ownerHash}/worktrees/`));
     assert.equal((await runContextCommand(context, "git", ["rev-parse", "--is-inside-work-tree"], { cwd: handle.path })).stdout.trim(), "true");
-    await removeWorktree(repo, handle, { context });
+    await removeWorktree(repo, handle, { context, ownerHash });
     await assert.rejects(runContextCommand(context, "git", ["status"], { cwd: handle.path }));
+
+    const legacy = await createWorktree(repo, "s_legacy", { context, legacyWslRoot: true });
+    await runContextCommand(context, "sh", ["-c", "printf preserved > sentinel.txt"], { cwd: legacy.path });
+    const resumed = await createWorktree(repo, "s_legacy", {
+      context,
+      ownerHash,
+      legacyWslWorktreePath: legacy.path,
+    });
+    assert.equal(resumed.path, legacy.path);
+    assert.equal(resumed.created, false);
+    assert.equal((await runContextCommand(context, "cat", ["sentinel.txt"], { cwd: resumed.path })).stdout, "preserved");
+    await removeWorktree(repo, resumed, { context, legacyWslRoot: true });
   } finally {
     await runContextCommand(context, "rm", ["-rf", "--", repo], { cwd: "/" }).catch(() => {});
   }

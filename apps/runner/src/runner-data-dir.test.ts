@@ -9,7 +9,9 @@ import { fetchPromptImageReference } from "./prompt-image-fetch.js";
 import {
   acquireRunnerDataDirLease,
   canIgnoreRunnerDataDirDirectorySyncError,
+  legacyRunnerDataDirOwnerHash,
   normalizeControlPlaneEndpoint,
+  readV1RunnerCredentialForAttestation,
   runnerDataDirOwnerHash,
   scopedRunnerCredentialFile,
   type RunnerDataDirIdentity,
@@ -18,14 +20,79 @@ import {
 const FIRST: RunnerDataDirIdentity = {
   runnerId: "runner-first",
   controlPlaneUrl: "ws://127.0.0.1:4317/runner",
+  controlPlaneInstanceId: "11111111-1111-4111-8111-111111111111",
 };
 const SECOND: RunnerDataDirIdentity = {
   runnerId: "runner-second",
   controlPlaneUrl: "wss://manager.example.test/runner",
+  controlPlaneInstanceId: "22222222-2222-4222-8222-222222222222",
 };
 
 function tempRoot(): string {
   return mkdtempSync(join(tmpdir(), "wollipog-runner-owner-"));
+}
+
+/** The owner and lease decisions performed by pinned base 79c0ea4 before stable CP identity
+ * existed. These tests invoke the model only for a valid, matching root-owner marker, where it
+ * covers the compatibility-critical live-process and stale-recovery branches without coupling
+ * production code back to the retired algorithm. It intentionally does not model malformed,
+ * pre-marker, or foreign-owner namespace acquisition; those are not evidence claimed here. */
+function acquireWithOriginMainSemantics(
+  root: string,
+  identity: Pick<RunnerDataDirIdentity, "runnerId" | "controlPlaneUrl">,
+  options: {
+    pid?: number;
+    hostname?: string;
+    isProcessAlive?: (pid: number) => boolean;
+  } = {},
+): { dataDir: string; release(): void } {
+  const ownerPath = join(root, ".wollipog-runner-owner-v1.json");
+  const leasePath = join(root, ".wollipog-runner-active-v1.lock");
+  const owner = JSON.parse(readFileSync(ownerPath, "utf8")) as { version?: unknown; ownerHash?: unknown };
+  const expectedOwnerHash = legacyRunnerDataDirOwnerHash(identity);
+  if (owner.version !== 1 || owner.ownerHash !== expectedOwnerHash) {
+    const isolated = join(root, "runner-instances", expectedOwnerHash);
+    mkdirSync(isolated, { recursive: true });
+    return { dataDir: isolated, release: () => rmSync(isolated, { recursive: true, force: true }) };
+  }
+  const pid = options.pid ?? process.pid;
+  const hostname = options.hostname ?? "rollback-host";
+  if (existsSync(leasePath)) {
+    const existing = JSON.parse(readFileSync(leasePath, "utf8")) as {
+      version?: unknown;
+      ownerHash?: unknown;
+      pid?: unknown;
+      hostname?: unknown;
+    };
+    if (existing.version !== 1 || typeof existing.ownerHash !== "string"
+        || !Number.isSafeInteger(existing.pid) || typeof existing.hostname !== "string") {
+      throw new Error("origin/main would reject an invalid active lease");
+    }
+    if (existing.ownerHash !== expectedOwnerHash) {
+      const isolated = join(root, "runner-instances", expectedOwnerHash);
+      mkdirSync(isolated, { recursive: true });
+      return { dataDir: isolated, release: () => rmSync(isolated, { recursive: true, force: true }) };
+    }
+    if (existing.hostname !== hostname) throw new Error("origin/main would reject a foreign-host lease");
+    if ((options.isProcessAlive ?? (() => true))(existing.pid as number)) {
+      throw new Error("origin/main would reject an active lease");
+    }
+    rmSync(leasePath);
+  }
+  writeFileSync(leasePath, `${JSON.stringify({
+    version: 1,
+    ownerHash: expectedOwnerHash,
+    leaseId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    pid,
+    hostname,
+    createdAt: new Date(0).toISOString(),
+  })}\n`, { flag: "wx", mode: 0o600 });
+  const postLeaseOwner = JSON.parse(readFileSync(ownerPath, "utf8")) as { version?: unknown; ownerHash?: unknown };
+  if (postLeaseOwner.version !== 1 || postLeaseOwner.ownerHash !== expectedOwnerHash) {
+    rmSync(leasePath, { force: true });
+    throw new Error("origin/main would reject ownership after publishing its lease");
+  }
+  return { dataDir: root, release: () => rmSync(leasePath, { force: true }) };
 }
 
 test("same-owner concurrency is rejected while different owners receive deterministic isolated roots", () => {
@@ -54,9 +121,11 @@ test("same-owner concurrency is rejected while different owners receive determin
     secondRestarted.release();
     assert.equal(existsSync(join(root, ".wollipog-runner-active-v1.lock")), false);
 
-    const marker = readFileSync(join(root, ".wollipog-runner-owner-v1.json"), "utf8");
-    assert.equal(marker.includes("token-first"), false);
-    assert.equal(marker.includes(FIRST.controlPlaneUrl), false);
+    for (const name of [".wollipog-runner-owner-v1.json", ".wollipog-runner-owner-v2.json"]) {
+      const marker = readFileSync(join(root, name), "utf8");
+      assert.equal(marker.includes("token-first"), false);
+      assert.equal(marker.includes(FIRST.controlPlaneUrl), false);
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -69,7 +138,7 @@ test("stale same-host leases are reclaimed but foreign-host leases fail closed",
     const recoveryPath = join(root, ".wollipog-runner-lease-recovery-v1");
     writeFileSync(leasePath, JSON.stringify({
       version: 1,
-      ownerHash: runnerDataDirOwnerHash(FIRST),
+      ownerHash: legacyRunnerDataDirOwnerHash(FIRST),
       leaseId: "00000000-0000-4000-8000-000000000001",
       pid: 424242,
       hostname: "test-host",
@@ -120,7 +189,7 @@ test("stale same-host leases are reclaimed but foreign-host leases fail closed",
 
     writeFileSync(leasePath, JSON.stringify({
       version: 1,
-      ownerHash: runnerDataDirOwnerHash(FIRST),
+      ownerHash: legacyRunnerDataDirOwnerHash(FIRST),
       leaseId: "00000000-0000-4000-8000-000000000002",
       pid: 202,
       hostname: "other-host",
@@ -181,6 +250,7 @@ test("legacy migration preserves the last active token through a newly issued cr
     );
     assert.equal(existsSync(join(root, ".wollipog-runner-active-v1.lock")), false);
     assert.equal(existsSync(join(root, ".wollipog-runner-owner-v1.json")), false);
+    assert.equal(existsSync(join(root, ".wollipog-runner-owner-v2.json")), false);
     assert.deepEqual(readFileSync(join(root, "credentials", "active-runner-token")), beforeRejectedClaim);
 
     const adopted = acquireRunnerDataDirLease(root, FIRST, { adoptLegacyDataDir: true });
@@ -193,10 +263,12 @@ test("legacy migration preserves the last active token through a newly issued cr
     pending.promote();
     assert.equal(readFileSync(adopted.credentialFile, "utf8"), "newly-issued-token");
     assert.equal(readFileSync(join(root, "credentials", "active-runner-token"), "utf8"), "legacy-token");
-    const owner = JSON.parse(readFileSync(join(root, ".wollipog-runner-owner-v1.json"), "utf8")) as {
+    const owner = JSON.parse(readFileSync(join(root, ".wollipog-runner-owner-v2.json"), "utf8")) as {
+      version: number;
       ownerHash: string;
       legacyMigration: { authorization: string; authorizedAt: string };
     };
+    assert.equal(owner.version, 2);
     assert.equal(owner.ownerHash, runnerDataDirOwnerHash(FIRST));
     assert.equal(owner.legacyMigration.authorization, "--adopt-legacy-data-dir");
     assert.equal(Number.isNaN(Date.parse(owner.legacyMigration.authorizedAt)), false);
@@ -227,13 +299,13 @@ test("explicit legacy adoption fails closed when the requested root belongs to a
   try {
     const first = acquireRunnerDataDirLease(root, FIRST);
     first.release();
-    const ownerBefore = readFileSync(join(root, ".wollipog-runner-owner-v1.json"));
+    const ownerBefore = readFileSync(join(root, ".wollipog-runner-owner-v2.json"));
     const replacementRoot = join(root, "runner-instances", runnerDataDirOwnerHash(SECOND));
     assert.throws(
       () => acquireRunnerDataDirLease(root, SECOND, { adoptLegacyDataDir: true }),
       /already owned by another runner.*refusing to record legacy adoption/,
     );
-    assert.deepEqual(readFileSync(join(root, ".wollipog-runner-owner-v1.json")), ownerBefore);
+    assert.deepEqual(readFileSync(join(root, ".wollipog-runner-owner-v2.json")), ownerBefore);
     assert.equal(existsSync(replacementRoot), false, "an adoption attempt never creates a replacement namespace");
 
     const isolated = acquireRunnerDataDirLease(root, SECOND);
@@ -291,7 +363,7 @@ test("protected publication orders file and directory durability before ownershi
     });
     const credential = scopedRunnerCredentialFile(root, FIRST);
     const lease = join(root, ".wollipog-runner-active-v1.lock");
-    const owner = join(root, ".wollipog-runner-owner-v1.json");
+    const owner = join(root, ".wollipog-runner-owner-v2.json");
     const leaseLink = operations.findIndex((entry) => entry.operation === "link" && entry.path === lease);
     const leaseDirectorySync = operations.findIndex(
       (entry, index) => index > leaseLink && entry.operation === "fsync-directory" && entry.path === root,
@@ -340,6 +412,7 @@ test("a directory durability fault aborts migration before ownership and preserv
     );
     assert.equal(injected, true);
     assert.equal(existsSync(join(root, ".wollipog-runner-owner-v1.json")), false);
+    assert.equal(existsSync(join(root, ".wollipog-runner-owner-v2.json")), false);
     assert.equal(existsSync(join(root, ".wollipog-runner-active-v1.lock")), false);
     assert.equal(readFileSync(join(root, "credentials", "active-runner-token"), "utf8"), "legacy-token");
 
@@ -408,7 +481,7 @@ test("separate runner roots keep image authentication independent across credent
   }
 });
 
-test("credential scopes include both runner identity and normalized control-plane endpoint", () => {
+test("credential scopes use runner identity and stable control-plane identity, not the endpoint", () => {
   const root = "/runner-data";
   assert.equal(
     normalizeControlPlaneEndpoint("ws://EXAMPLE.test:4317/runner/#fragment"),
@@ -426,11 +499,11 @@ test("credential scopes include both runner identity and normalized control-plan
     scopedRunnerCredentialFile(root, FIRST),
     scopedRunnerCredentialFile(root, { ...FIRST, controlPlaneUrl: "ws://localhost:7777/runner" }),
   );
-  assert.notEqual(
+  assert.equal(
     scopedRunnerCredentialFile(root, SECOND),
     scopedRunnerCredentialFile(root, { ...SECOND, controlPlaneUrl: "wss://manager.example.test:9443/runner" }),
   );
-  assert.notEqual(
+  assert.equal(
     scopedRunnerCredentialFile(root, FIRST),
     scopedRunnerCredentialFile(root, { ...FIRST, controlPlaneUrl: `${FIRST.controlPlaneUrl}?tenant=other` }),
   );
@@ -438,4 +511,287 @@ test("credential scopes include both runner identity and normalized control-plan
     scopedRunnerCredentialFile(root, FIRST),
     scopedRunnerCredentialFile(root, { ...FIRST, runnerId: "another-runner" }),
   );
+  assert.notEqual(
+    scopedRunnerCredentialFile(root, FIRST),
+    scopedRunnerCredentialFile(root, { ...FIRST, controlPlaneInstanceId: SECOND.controlPlaneInstanceId }),
+  );
+});
+
+test("attested restart atomically upgrades a v1 endpoint owner and credential to stable v2", () => {
+  const root = tempRoot();
+  try {
+    const legacyHash = legacyRunnerDataDirOwnerHash(FIRST);
+    const oldCredential = join(root, "credentials", "instances", legacyHash, "active-runner-token");
+    const legacyMigration = {
+      authorization: "--adopt-legacy-data-dir",
+      authorizedAt: new Date(0).toISOString(),
+    };
+    const operations: Array<{ operation: string; path: string }> = [];
+    mkdirSync(join(root, "credentials", "instances", legacyHash), { recursive: true });
+    const legacyOwnerPath = join(root, ".wollipog-runner-owner-v1.json");
+    const stableOwnerPath = join(root, ".wollipog-runner-owner-v2.json");
+    writeFileSync(legacyOwnerPath, JSON.stringify({
+      version: 1,
+      ownerHash: legacyHash,
+      legacyMigration,
+    }), { mode: 0o600 });
+    writeFileSync(oldCredential, "last-known-good", { mode: 0o600 });
+
+    assert.equal(readV1RunnerCredentialForAttestation(root, FIRST), "last-known-good");
+    const upgraded = acquireRunnerDataDirLease(root, FIRST, {
+      pid: 501,
+      hostname: "compat-host",
+      legacyEndpointMigrationCredentialHash: createHash("sha256").update("last-known-good").digest("hex"),
+      beforeDurabilityOperationForTest: (operation, path) => operations.push({ operation, path }),
+    });
+    assert.equal(upgraded.dataDir, root);
+    assert.equal(upgraded.ownerHash, runnerDataDirOwnerHash(FIRST));
+    assert.equal(readFileSync(upgraded.credentialFile, "utf8"), "last-known-good");
+    assert.equal(readFileSync(oldCredential, "utf8"), "last-known-good", "rollback credential is preserved");
+    assert.deepEqual(JSON.parse(readFileSync(legacyOwnerPath, "utf8")), {
+      version: 1,
+      ownerHash: legacyHash,
+      legacyMigration,
+    }, "the prior runner's endpoint marker remains rollback-compatible");
+    assert.deepEqual(JSON.parse(readFileSync(stableOwnerPath, "utf8")), {
+      version: 2,
+      ownerHash: runnerDataDirOwnerHash(FIRST),
+      legacyMigration,
+    });
+    const stableCredentialDirectory = join(root, "credentials", "instances", runnerDataDirOwnerHash(FIRST));
+    const credentialDirectorySync = operations.findIndex(
+      (entry) => entry.operation === "fsync-directory" && entry.path === stableCredentialDirectory,
+    );
+    const ownerFileSync = operations.findIndex(
+      (entry) => entry.operation === "fsync-file"
+        && entry.path.includes(".wollipog-runner-owner-v2.json.publish-"),
+    );
+    const ownerDirectorySync = operations.findIndex(
+      (entry, index) => index > ownerFileSync
+        && entry.operation === "fsync-directory"
+        && entry.path === root,
+    );
+    assert.ok(credentialDirectorySync >= 0 && credentialDirectorySync < ownerFileSync);
+    assert.ok(ownerFileSync < ownerDirectorySync);
+    assert.throws(
+      () => acquireWithOriginMainSemantics(root, FIRST, {
+        hostname: "compat-host",
+        isProcessAlive: (pid) => pid === 501,
+      }),
+      /origin\/main would reject an active lease/,
+      "the rollback runner must not namespace around a live current runner",
+    );
+    assert.equal(existsSync(join(root, "runner-instances", legacyHash)), false);
+    upgraded.release();
+
+    const movedIdentity = {
+      ...FIRST,
+      controlPlaneUrl: "wss://new-address.example.test:9443/runner",
+    };
+    const movedEndpoint = acquireRunnerDataDirLease(root, movedIdentity, {
+      pid: 502,
+      hostname: "compat-host",
+    });
+    assert.equal(movedEndpoint.dataDir, root);
+    assert.equal(readFileSync(movedEndpoint.credentialFile, "utf8"), "last-known-good");
+    assert.equal(
+      (JSON.parse(readFileSync(legacyOwnerPath, "utf8")) as { ownerHash: string }).ownerHash,
+      legacyHash,
+      "the rollback marker stays bound to the endpoint that originally published it",
+    );
+    assert.equal(
+      (JSON.parse(readFileSync(join(root, ".wollipog-runner-active-v1.lock"), "utf8")) as { ownerHash: string }).ownerHash,
+      legacyHash,
+      "the shared lease remains visible to the rollback generation after a stable endpoint move",
+    );
+    assert.throws(
+      () => acquireWithOriginMainSemantics(root, FIRST, {
+        hostname: "compat-host",
+        isProcessAlive: (pid) => pid === 502,
+      }),
+      /origin\/main would reject an active lease/,
+    );
+
+    const rolledBack = acquireWithOriginMainSemantics(root, FIRST, {
+      pid: 503,
+      hostname: "compat-host",
+      isProcessAlive: () => false,
+    });
+    assert.equal(rolledBack.dataDir, root, "origin/main recovers a stale current lease instead of namespacing it");
+    movedEndpoint.release();
+    assert.throws(
+      () => acquireRunnerDataDirLease(root, movedIdentity, {
+        hostname: "compat-host",
+        isProcessAlive: (pid) => pid === 503,
+      }),
+      /already in use.*distinct --data-dir/,
+      "the current runner recognizes a live rollback-era lease after validating stable ownership",
+    );
+    rolledBack.release();
+
+    const resumedStable = acquireRunnerDataDirLease(root, movedIdentity, {
+      pid: 504,
+      hostname: "compat-host",
+    });
+    assert.equal(resumedStable.dataDir, root, "the current runner reacquires the root after rollback exits");
+    resumedStable.release();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("v1 ownership migration rejects credential rotation after attestation", () => {
+  const root = tempRoot();
+  try {
+    const legacyHash = legacyRunnerDataDirOwnerHash(FIRST);
+    const ownerPath = join(root, ".wollipog-runner-owner-v1.json");
+    const oldCredential = join(root, "credentials", "instances", legacyHash, "active-runner-token");
+    mkdirSync(join(root, "credentials", "instances", legacyHash), { recursive: true });
+    writeFileSync(ownerPath, JSON.stringify({ version: 1, ownerHash: legacyHash }), { mode: 0o600 });
+    writeFileSync(oldCredential, "attested-token", { mode: 0o600 });
+    const attestedHash = createHash("sha256").update("attested-token").digest("hex");
+
+    writeFileSync(oldCredential, "rotated-after-attestation", { mode: 0o600 });
+    assert.throws(
+      () => acquireRunnerDataDirLease(root, FIRST, {
+        legacyEndpointMigrationCredentialHash: attestedHash,
+      }),
+      /credential changed after attestation/,
+    );
+    assert.deepEqual(JSON.parse(readFileSync(ownerPath, "utf8")), {
+      version: 1,
+      ownerHash: legacyHash,
+    });
+    assert.equal(existsSync(join(root, ".wollipog-runner-owner-v2.json")), false);
+    assert.equal(existsSync(scopedRunnerCredentialFile(root, FIRST)), false);
+    assert.equal(existsSync(join(root, ".wollipog-runner-active-v1.lock")), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("explicit adoption upgrades a matching v1 endpoint owner when prior credential proof is unavailable", () => {
+  const root = tempRoot();
+  try {
+    const legacyHash = legacyRunnerDataDirOwnerHash(FIRST);
+    const legacyOwnerPath = join(root, ".wollipog-runner-owner-v1.json");
+    writeFileSync(legacyOwnerPath, JSON.stringify({ version: 1, ownerHash: legacyHash }), { mode: 0o600 });
+
+    const adopted = acquireRunnerDataDirLease(root, FIRST, { adoptLegacyDataDir: true });
+    assert.equal(adopted.dataDir, root);
+    assert.equal(adopted.migratedLegacyDataDir, true);
+    const stableOwner = JSON.parse(readFileSync(join(root, ".wollipog-runner-owner-v2.json"), "utf8")) as {
+      version: number;
+      ownerHash: string;
+      legacyMigration: { authorization: string; authorizedAt: string };
+    };
+    assert.equal(stableOwner.version, 2);
+    assert.equal(stableOwner.ownerHash, runnerDataDirOwnerHash(FIRST));
+    assert.equal(stableOwner.legacyMigration.authorization, "--adopt-legacy-data-dir");
+    assert.equal(Number.isNaN(Date.parse(stableOwner.legacyMigration.authorizedAt)), false);
+    assert.deepEqual(JSON.parse(readFileSync(legacyOwnerPath, "utf8")), {
+      version: 1,
+      ownerHash: legacyHash,
+      legacyMigration: stableOwner.legacyMigration,
+    });
+    adopted.release();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("v1 migration resumes after a crash and credential rotation before v2 ownership publication", () => {
+  const root = tempRoot();
+  try {
+    const legacyHash = legacyRunnerDataDirOwnerHash(FIRST);
+    const oldCredential = join(root, "credentials", "instances", legacyHash, "active-runner-token");
+    const stableCredential = scopedRunnerCredentialFile(root, FIRST);
+    mkdirSync(join(root, "credentials", "instances", legacyHash), { recursive: true });
+    mkdirSync(join(root, "credentials", "instances", runnerDataDirOwnerHash(FIRST)), { recursive: true });
+    writeFileSync(join(root, ".wollipog-runner-owner-v1.json"), JSON.stringify({ version: 1, ownerHash: legacyHash }));
+    writeFileSync(oldCredential, "rotated-v1-token", { mode: 0o600 });
+    writeFileSync(stableCredential, "stale-pre-crash-token", { mode: 0o600 });
+
+    const resumed = acquireRunnerDataDirLease(root, FIRST, {
+      legacyEndpointMigrationCredentialHash: createHash("sha256").update("rotated-v1-token").digest("hex"),
+    });
+    assert.equal(readFileSync(resumed.credentialFile, "utf8"), "rotated-v1-token");
+    assert.equal(existsSync(join(root, ".wollipog-runner-owner-v2.json")), true);
+    resumed.release();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("post-lease malformed ownership fails closed without creating an isolated namespace", () => {
+  const root = tempRoot();
+  try {
+    const ownerPath = join(root, ".wollipog-runner-owner-v1.json");
+    const leasePath = join(root, ".wollipog-runner-active-v1.lock");
+    let injected = false;
+    assert.throws(
+      () => acquireRunnerDataDirLease(root, FIRST, {
+        beforeDurabilityOperationForTest: (operation, path) => {
+          if (!injected && operation === "fsync-directory" && path === root && existsSync(leasePath)) {
+            injected = true;
+            writeFileSync(ownerPath, JSON.stringify({ version: 9, ownerHash: "invalid" }), { mode: 0o600 });
+          }
+        },
+      }),
+      /invalid owner metadata/,
+    );
+    assert.equal(injected, true);
+    assert.equal(existsSync(join(root, "runner-instances", runnerDataDirOwnerHash(FIRST))), false);
+    assert.equal(existsSync(leasePath), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("explicit legacy adoption rejects a foreign lease without namespacing", () => {
+  const root = tempRoot();
+  try {
+    mkdirSync(join(root, "sessions"));
+    writeFileSync(join(root, ".wollipog-runner-active-v1.lock"), `${JSON.stringify({
+      version: 1,
+      ownerHash: runnerDataDirOwnerHash(SECOND),
+      leaseId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      pid: 424242,
+      hostname: "stale-host",
+      createdAt: new Date(0).toISOString(),
+    })}\n`, { mode: 0o600 });
+    assert.throws(
+      () => acquireRunnerDataDirLease(root, FIRST, {
+        adoptLegacyDataDir: true,
+        hostname: "current-host",
+        isProcessAlive: () => false,
+      }),
+      /leased by another runner.*refusing to record legacy adoption/,
+    );
+    assert.equal(existsSync(join(root, "runner-instances", runnerDataDirOwnerHash(FIRST))), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("unproven v1 endpoint ownership remains untouched when an endpoint is reused", () => {
+  const root = tempRoot();
+  try {
+    const legacyHash = legacyRunnerDataDirOwnerHash(FIRST);
+    const oldCredential = join(root, "credentials", "instances", legacyHash, "active-runner-token");
+    mkdirSync(join(root, "credentials", "instances", legacyHash), { recursive: true });
+    writeFileSync(join(root, ".wollipog-runner-owner-v1.json"), JSON.stringify({ version: 1, ownerHash: legacyHash }));
+    writeFileSync(oldCredential, "credential-from-former-control-plane", { mode: 0o600 });
+
+    const isolated = acquireRunnerDataDirLease(root, FIRST);
+    assert.equal(isolated.dataDir, join(root, "runner-instances", runnerDataDirOwnerHash(FIRST)));
+    assert.deepEqual(JSON.parse(readFileSync(join(root, ".wollipog-runner-owner-v1.json"), "utf8")), {
+      version: 1,
+      ownerHash: legacyHash,
+    });
+    assert.equal(readFileSync(oldCredential, "utf8"), "credential-from-former-control-plane");
+    isolated.release();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

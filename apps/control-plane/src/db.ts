@@ -4707,6 +4707,18 @@ export class ControlPlaneDb {
     ).get(runnerId, tokenHash));
   }
 
+  /** Read-only pre-registration verification. Attestation must not activate a pending token,
+   * revoke the previous active token, or update last-used timestamps before the runner has safely
+   * acquired its local stores. */
+  verifyRunnerCredentialForAttestation(runnerId: string, tokenHash: string, now: number): boolean {
+    return Boolean(this.stmt(
+      `SELECT 1 FROM runner_credentials
+       WHERE runner_id=? AND token_hash=? AND (
+         status='active' OR (status='pending' AND expires_at IS NOT NULL AND expires_at>?)
+       )`,
+    ).get(runnerId, tokenHash, now));
+  }
+
   revokeRunnerCredential(runnerId: string, organizationId: string, now: number): boolean {
     const changed = this.stmt(
       `UPDATE runner_credentials SET status='revoked', revoked_at=?
