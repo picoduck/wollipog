@@ -113,6 +113,7 @@ export function InboxView({
   const sessions = useStoreSelector((state) => state.sessions);
   const projects = useStoreSelector((state) => state.projects);
   const projectsSupported = useStoreSelector((state) => state.projectsSupported);
+  const accessScopeManagementSupported = useStoreSelector((state) => state.accessScopeManagementSupported);
   const stalledIndex = useStoreSelector((state) => state.stalledSessionIds);
   const stalledRevision = useStoreSelector((state) => state.stalledRevision);
   const runners = useStoreSelector((state) => state.runners);
@@ -802,6 +803,7 @@ export function InboxView({
       )}
       {creatingProject && (
         <CreateProjectDialog
+          accessScopeManagementSupported={accessScopeManagementSupported}
           onClose={() => setCreatingProject(false)}
           onCreated={(project) => {
             setCreatingProject(false);

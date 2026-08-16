@@ -763,6 +763,10 @@ export interface WorkspaceInfo {
   path: string;
   /** Operator-approved choices. A session must still explicitly select each directory. */
   additionalDirectoryGrants?: string[];
+  /** Principal-visible ownership for explicit Location access controls. Older control planes omit it. */
+  scope?: ResourceScope;
+  /** Principal-specific authority to manage this Location's access. Older control planes omit it. */
+  canManage?: boolean;
 }
 
 /** How a durable Project Location entered the control-plane catalog. */
@@ -788,6 +792,10 @@ export interface ProjectLocationView {
   source: ProjectLocationSource;
   availability: ProjectLocationAvailability;
   isDefault: boolean;
+  /** Principal-visible ownership for the backing Location. Older control planes omit it. */
+  scope?: ResourceScope;
+  /** Principal-specific authority to manage the backing Location. Older control planes omit it. */
+  canManage?: boolean;
   /** Principal-scoped session totals for this exact Location. Older control planes may omit them. */
   activeSessionCount?: number;
   unarchivedSessionCount?: number;
@@ -804,6 +812,8 @@ export interface ProjectView {
   hidden: boolean;
   /** Ownership audience for user-facing sharing copy. Older control planes may omit it. */
   audience?: ResourceOwner["kind"];
+  /** Exact ownership for explicit access controls. Older control planes may omit it. */
+  scope?: ResourceScope;
   /** Principal-specific management authority. Older control planes may omit it. */
   canManage?: boolean;
   locations: ProjectLocationView[];
@@ -931,6 +941,8 @@ export type RunnerStatus = "online" | "offline";
 /** Denormalised runner record as the UI consumes it (REST + WS). */
 export interface RunnerView {
   runnerId: string;
+  /** Principal-visible Machine ownership used to constrain new Location access. */
+  scope?: ResourceScope;
   /** User-owned Machine name. Falls back to hostname/runner id when absent. */
   displayName?: string;
   hostname: string;
@@ -4270,6 +4282,8 @@ export interface UiSnapshotMessage {
     projects?: boolean;
     /** The control plane can register a browsed folder as a new Project Location. */
     createProjectLocations?: boolean;
+    /** Project and Location creation/settings support explicit, preflighted access scopes. */
+    accessScopeManagement?: boolean;
     /** New Session can atomically create a session and open its separate provider TUI. */
     nativeTuiLaunch?: boolean;
   };
@@ -4532,6 +4546,8 @@ export interface SetWorkspaceRequest {
 /** Create a durable Project independently of its sessions and Locations. */
 export interface CreateProjectRequest {
   name: string;
+  /** Explicit owner. Omitted only for compatibility with older clients. */
+  owner?: ResourceOwner;
 }
 
 /** Rename and/or show/hide a durable Project. Omitted fields remain unchanged. */
@@ -4551,6 +4567,55 @@ export interface CreateProjectLocationRequest {
   runnerId: string;
   name: string;
   path: string;
+  /** Explicit owner. Omitted only for compatibility with older clients. */
+  owner?: ResourceOwner;
+}
+
+export interface AccessScopeAffectedProject {
+  projectId: string;
+  name: string;
+}
+
+/** Exact, server-derived impact that must be shown before changing Project or Location access. */
+export interface AccessScopeChangePreview {
+  resource: "project" | "workspace";
+  resourceId: string;
+  runnerId?: string;
+  currentScope: ResourceScope;
+  targetScope: ResourceScope;
+  affectedProjects: AccessScopeAffectedProject[];
+  activeSessionCount: number;
+  totalSessionCount: number;
+  sessionsToNarrow: number;
+  compatible: boolean;
+  reason?: string;
+  /** Binds confirmation to the exact relationships, sessions, and scopes inspected by the server. */
+  confirmationToken?: string;
+}
+
+/** Content-safe, durable evidence for one committed Project or Location scope transition. */
+export interface AccessScopeAuditView {
+  scopeChangeId: string;
+  mutationAuditId?: string;
+  actorId: string;
+  userId: string;
+  deviceId?: string;
+  organizationId: string;
+  resource: "project" | "workspace";
+  resourceId: string;
+  runnerId?: string;
+  currentScope: ResourceScope;
+  targetScope: ResourceScope;
+  affectedProjectIds: string[];
+  activeSessionIds: string[];
+  sessionIds: string[];
+  narrowedSessionIds: string[];
+  createdAt: number;
+}
+
+export interface UpdateAccessScopeRequest {
+  owner: ResourceOwner;
+  confirmationToken: string;
 }
 
 /** @deprecated Rolling-compatibility request for older clients. New clients add a shared

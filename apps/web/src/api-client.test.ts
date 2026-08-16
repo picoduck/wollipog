@@ -168,6 +168,8 @@ test("Project API methods use stable encoded resource paths and exact mutation b
   await client.project("project/a");
   await client.createProject({ name: "Project One" });
   await client.updateProject("project/a", { name: "Renamed", hidden: true });
+  await client.previewProjectAccessScope("project/a", { kind: "user", userId: "user/1" });
+  await client.updateProjectAccessScope("project/a", { kind: "user", userId: "user/1" }, "a".repeat(64));
   await client.deleteProject("project/a");
   await client.addProjectLocation("project/a", { runnerId: "runner-1", workspaceId: "workspace-1" });
   await client.createProjectLocation("project/a", {
@@ -175,6 +177,15 @@ test("Project API methods use stable encoded resource paths and exact mutation b
     name: "New Location",
     path: "/repos/new-location",
   });
+  await client.previewWorkspaceAccessScope("runner/1", "workspace/1", {
+    kind: "organization", organizationId: "org/1",
+  });
+  await client.updateWorkspaceAccessScope(
+    "runner/1",
+    "workspace/1",
+    { kind: "organization", organizationId: "org/1" },
+    "b".repeat(64),
+  );
   await client.moveProjectLocation("project/a", { locationId: "location/1" });
   await client.removeProjectLocation("project/a", "location/1");
   await client.setDefaultProjectLocation("project/a", "location/1");
@@ -187,6 +198,16 @@ test("Project API methods use stable encoded resource paths and exact mutation b
     { path: "/api/projects/project%2Fa", method: "GET", body: undefined },
     { path: "/api/projects", method: "POST", body: { name: "Project One" } },
     { path: "/api/projects/project%2Fa", method: "PATCH", body: { name: "Renamed", hidden: true } },
+    {
+      path: "/api/projects/project%2Fa/access-scope?ownerKind=user&ownerId=user%2F1",
+      method: "GET",
+      body: undefined,
+    },
+    {
+      path: "/api/projects/project%2Fa/access-scope",
+      method: "PUT",
+      body: { owner: { kind: "user", userId: "user/1" }, confirmationToken: "a".repeat(64) },
+    },
     { path: "/api/projects/project%2Fa", method: "DELETE", body: undefined },
     {
       path: "/api/projects/project%2Fa/locations",
@@ -197,6 +218,19 @@ test("Project API methods use stable encoded resource paths and exact mutation b
       path: "/api/projects/project%2Fa/locations/new",
       method: "POST",
       body: { runnerId: "runner-1", name: "New Location", path: "/repos/new-location" },
+    },
+    {
+      path: "/api/runners/runner%2F1/workspaces/workspace%2F1/access-scope?ownerKind=organization&ownerId=org%2F1",
+      method: "GET",
+      body: undefined,
+    },
+    {
+      path: "/api/runners/runner%2F1/workspaces/workspace%2F1/access-scope",
+      method: "PUT",
+      body: {
+        owner: { kind: "organization", organizationId: "org/1" },
+        confirmationToken: "b".repeat(64),
+      },
     },
     { path: "/api/projects/project%2Fa/locations/move", method: "POST", body: { locationId: "location/1" } },
     { path: "/api/projects/project%2Fa/locations/location%2F1", method: "DELETE", body: undefined },

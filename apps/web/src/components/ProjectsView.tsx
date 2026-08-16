@@ -19,6 +19,7 @@ import {
 import { runnerDisplay } from "../runners.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { CreateProjectDialog } from "./CreateProjectDialog.js";
+import { AccessScopeSettings, useAccessScopeIdentity } from "./AccessScopeControls.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { PlusIcon, SearchIcon } from "./Icons.js";
 import type { NewSessionPreset } from "./NewSessionDialog.js";
@@ -84,6 +85,7 @@ export function ProjectsView({
   const storedProjects = useStoreSelector((state) => state.projects);
   const projectsSupported = useStoreSelector((state) => state.projectsSupported);
   const projectLocationCreationSupported = useStoreSelector((state) => state.projectLocationCreationSupported);
+  const accessScopeManagementSupported = useStoreSelector((state) => state.accessScopeManagementSupported);
   const snapshotLoaded = useStoreSelector((state) => state.snapshotLoaded);
   const runners = useStoreSelector((state) => state.runners);
   const boxes = useStoreSelector((state) => state.boxes);
@@ -95,6 +97,7 @@ export function ProjectsView({
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
+  const { identity: accessIdentity, error: accessIdentityError } = useAccessScopeIdentity(accessScopeManagementSupported);
   const createButtonRef = useRef<HTMLButtonElement>(null);
 
   const projectMap = useMemo(() => {
@@ -237,6 +240,15 @@ export function ProjectsView({
     }
   };
   const manageConnections = () => navigate({ name: "runners", section: "machines" });
+  const refreshSelectedProject = async () => {
+    if (!selected) return;
+    try {
+      applyProject((await api.project(selected.id)).project);
+      showToast("Access scope updated.");
+    } catch (cause) {
+      setError((cause as Error).message);
+    }
+  };
 
   if (!snapshotLoaded) {
     // The placeholder renders the REAL intro and the REAL grid shell, because neither depends on
@@ -363,6 +375,11 @@ export function ProjectsView({
                 </div>
               )}
               {error && <div className="form-error project-manager-error" role="alert">{error}</div>}
+              {accessIdentityError && (
+                <div className="form-error project-manager-error" role="alert">
+                  Access controls could not be loaded: {accessIdentityError}
+                </div>
+              )}
               <section className="project-detail-section" aria-labelledby="project-details-heading">
                 <div className="project-section-heading">
                   <div><h3 id="project-details-heading">Project Details</h3><p>Renaming a Project does not rename its folders or Locations.</p></div>
@@ -385,6 +402,15 @@ export function ProjectsView({
                 <button type="button" className="btn" disabled={selected.canManage === false || busy !== null} onClick={() => void toggleHidden()}>
                   {busy === "visibility" ? "Saving…" : selected.hidden ? "Show Project" : "Hide Project"}
                 </button>
+                {accessScopeManagementSupported && selected.scope && (
+                  <AccessScopeSettings
+                    resource={{ kind: "project", projectId: selected.id, name: selected.name }}
+                    scope={selected.scope}
+                    identity={accessIdentity}
+                    disabled={selected.canManage === false || busy !== null}
+                    onUpdated={() => void refreshSelectedProject()}
+                  />
+                )}
               </section>
               <section className="project-detail-section" aria-labelledby="project-locations-heading">
                 <div className="project-section-heading">
@@ -430,6 +456,20 @@ export function ProjectsView({
                             </div>
                             <code title={location.path}>{location.path}</code>
                             <span className="muted">{display.name} · {display.kind === "ssh" ? "SSH" : "Native Runner"}{count === null ? "" : ` · ${count} Session${count === 1 ? "" : "s"}`}</span>
+                            {accessScopeManagementSupported && location.scope && (
+                              <AccessScopeSettings
+                                resource={{
+                                  kind: "workspace",
+                                  runnerId: location.runnerId,
+                                  workspaceId: location.workspaceId,
+                                  name: location.name,
+                                }}
+                                scope={location.scope}
+                                identity={accessIdentity}
+                                disabled={location.canManage === false || selected.canManage === false || busy !== null}
+                                onUpdated={() => void refreshSelectedProject()}
+                              />
+                            )}
                             {revealReason && <span className="project-location-reason">{revealReason}</span>}
                           </div>
                           <div className="project-location-actions">
@@ -472,6 +512,7 @@ export function ProjectsView({
       </div>
       {dialog?.kind === "create" && (
         <CreateProjectDialog
+          accessScopeManagementSupported={accessScopeManagementSupported}
           onClose={() => setDialog(null)}
           onCreated={(project) => {
             applyProject(project);
@@ -487,6 +528,7 @@ export function ProjectsView({
           runners={runners}
           boxes={boxes}
           canCreateLocation={projectLocationCreationSupported}
+          accessScopeManagementSupported={accessScopeManagementSupported}
           onClose={() => setDialog(null)}
           onManageConnections={manageConnections}
           onAdd={async (candidate: ProjectLocationCandidate) => {

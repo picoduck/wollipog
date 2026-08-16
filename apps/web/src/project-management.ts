@@ -1,4 +1,4 @@
-import type { ProjectLocationAvailability, ProjectLocationView, ProjectView, RunnerView } from "@wollipog/protocol";
+import type { ProjectLocationAvailability, ProjectLocationView, ProjectView, ResourceScope, RunnerView } from "@wollipog/protocol";
 import { workspaceLocationKey } from "./projects.js";
 
 export type ProjectVisibilityFilter = "all" | "visible" | "hidden";
@@ -16,6 +16,8 @@ export interface ProjectLocationCandidate {
   name: string;
   path: string;
   availability: ProjectLocationAvailability;
+  scope?: ResourceScope;
+  canManage?: boolean;
   /** Project-specific memberships for this physical machine/workspace pair. */
   links: ProjectLocationLink[];
 }
@@ -84,6 +86,8 @@ export function buildProjectLocationCandidates(
         name: location.name,
         path: location.path,
         availability: location.availability,
+        ...(location.scope ? { scope: location.scope } : {}),
+        ...(location.canManage !== undefined ? { canManage: location.canManage } : {}),
         links: [link],
       });
     }
@@ -97,6 +101,8 @@ export function buildProjectLocationCandidates(
         name: workspace.name,
         path: workspace.path,
         availability: runner.status === "online" ? "available" : "runner_offline",
+        ...(workspace.scope ? { scope: workspace.scope } : {}),
+        ...(workspace.canManage !== undefined ? { canManage: workspace.canManage } : {}),
       } : {
         key,
         runnerId: runner.runnerId,
@@ -104,6 +110,8 @@ export function buildProjectLocationCandidates(
         name: workspace.name,
         path: workspace.path,
         availability: runner.status === "online" ? "available" : "runner_offline",
+        ...(workspace.scope ? { scope: workspace.scope } : {}),
+        ...(workspace.canManage !== undefined ? { canManage: workspace.canManage } : {}),
         links: [],
       });
     }
