@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { EventEmitter } from "node:events";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import net from "node:net";
 import { test } from "node:test";
-import { buildBwrapArgs, buildCloudArgs, buildContainerArgs, buildWslArgs, killTree, spawnAgent, trackPendingKill, waitForPendingKills, winQuoteArg } from "./spawn.js";
+import { buildBwrapArgs, buildCloudArgs, buildContainerArgs, buildWslArgs, killTree, spawnAgent, trackPendingKill, waitForPendingKills, winQuoteArg, type AgentProcess } from "./spawn.js";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
 import { WINDOWS_JOB_ENCODED_COMMAND, WINDOWS_JOB_LAUNCHER } from "./windows-job.js";
 
@@ -124,6 +125,7 @@ test("container launches exclude explicit and inherited product-prefixed values 
       child.on("error", reject);
       child.on("close", () => resolve());
     });
+    assert.equal(child.closeObserved, true);
     assert.deepEqual(JSON.parse(out), { explicit: null, current: null, legacy: null });
   } finally {
     if (oldCurrent === undefined) delete process.env.WOLLIPOG_PLAIN;
@@ -616,8 +618,50 @@ test("waitForPendingKills drains kill work registered by an earlier pending oper
 
   const waiting = waitForPendingKills(1_000);
   releaseFirst();
-  await waiting;
+  assert.equal(await waiting, true);
   assert.equal(secondFinished, true);
+});
+
+test("waitForPendingKills reports a deadline with process trees still pending", async () => {
+  let release!: () => void;
+  trackPendingKill(new Promise<void>((resolve) => { release = resolve; }));
+  assert.equal(await waitForPendingKills(5), false);
+  release();
+  assert.equal(await waitForPendingKills(1_000), true, "later shutdown tests see a drained registry");
+});
+
+test("POSIX kill completion waits for close after SIGKILL delivery", {
+  skip: process.platform === "win32",
+}, async () => {
+  const signals: Array<NodeJS.Signals | number | undefined> = [];
+  const child = Object.assign(new EventEmitter(), {
+    pid: 2_147_483_647,
+    kill: (signal?: NodeJS.Signals | number) => { signals.push(signal); return true; },
+  }) as unknown as AgentProcess;
+  killTree(child);
+  child.emit("exit", 0, null);
+  assert.equal(await waitForPendingKills(3_000), false,
+    "signal delivery and the exit event are not proof that Node closed process resources");
+  assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
+  child.emit("close", 0, null);
+  assert.equal(await waitForPendingKills(1_000), true);
+});
+
+test("POSIX kill completion settles when close was already observed", {
+  skip: process.platform === "win32",
+}, async () => {
+  const signals: Array<NodeJS.Signals | number | undefined> = [];
+  const child = Object.assign(new EventEmitter(), {
+    pid: 2_147_483_647,
+    closeObserved: true,
+    exitCode: 0,
+    signalCode: null,
+    kill: (signal?: NodeJS.Signals | number) => { signals.push(signal); return true; },
+  }) as unknown as AgentProcess;
+  killTree(child);
+  assert.equal(await waitForPendingKills(1_000), true,
+    "a close event observed before cleanup cannot leave a permanent pending kill");
+  assert.deepEqual(signals, [], "an already-closed PID is not safe to signal after possible reuse");
 });
 
 test("bubblewrap remains the in-distro executable for an isolated WSL launch", () => {

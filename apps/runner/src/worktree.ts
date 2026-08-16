@@ -1,10 +1,21 @@
 /** Context-native, externally stored per-session git worktrees. */
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { mkdir, rm, statfs } from "node:fs/promises";
-import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import type { AgentContext } from "@wollipog/protocol";
 import { runContextCommand } from "./context-command.js";
 import {
@@ -13,6 +24,7 @@ import {
   restoreWorktreeToTree,
   withGitExecutionContext,
 } from "./git-ops.js";
+import { canIgnoreRunnerDataDirDirectorySyncError } from "./runner-data-dir.js";
 
 const MIN_FREE_BYTES = 512 * 1024 * 1024;
 const nativeContext: AgentContext = { kind: "native" };
@@ -75,6 +87,8 @@ export interface WorktreeCleanupRecord {
   repoPath: string;
   worktreePath: string;
   context: AgentContext;
+  /** Exact checkpoint namespace owned by this worktree generation. Absent means legacy refs. */
+  checkpointOwnerHash?: string;
 }
 
 /** Native-host cleanup journal. Session rows can be deleted immediately while failed context
@@ -109,9 +123,28 @@ export class WorktreeCleanupJournal {
   }
 
   private flush(): void {
-    const temp = `${this.path}.${process.pid}.tmp`;
-    writeFileSync(temp, JSON.stringify(this.list(), null, 2));
-    renameSync(temp, this.path);
+    const temp = `${this.path}.${process.pid}.${randomUUID()}.tmp`;
+    let fd: number | undefined;
+    try {
+      fd = openSync(temp, "wx", 0o600);
+      writeFileSync(fd, JSON.stringify(this.list(), null, 2));
+      fsyncSync(fd);
+      closeSync(fd);
+      fd = undefined;
+      renameSync(temp, this.path);
+      let directoryFd: number | undefined;
+      try {
+        directoryFd = openSync(dirname(this.path), constants.O_RDONLY);
+        fsyncSync(directoryFd);
+      } catch (error) {
+        if (!canIgnoreRunnerDataDirDirectorySyncError(error as NodeJS.ErrnoException)) throw error;
+      } finally {
+        if (directoryFd !== undefined) closeSync(directoryFd);
+      }
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+      rmSync(temp, { force: true });
+    }
   }
 }
 

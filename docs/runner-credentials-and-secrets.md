@@ -139,8 +139,9 @@ each rollback-sensitive runner its own explicit data root.
 
 The active credential is mode 0600 at
 `<dataDir>/credentials/instances/<owner-hash>/active-runner-token`. Per-session Conductor MCP
-configuration lives under `<dataDir>/conductor`, contains only `MANAGER_TOKEN_FILE`, and is refreshed
-before every launch or resume. Startup removes legacy per-session MCP JSON that may have embedded
+configuration lives under `<dataDir>/conductor/runner-instances/<owner-hash>`, contains only
+`MANAGER_TOKEN_FILE`, and is refreshed before every launch or resume. Startup sweeps only that
+attested leaf; it never removes top-level legacy per-session MCP JSON that may have embedded
 `MANAGER_TOKEN`. The MCP process still understands the legacy environment variable for rolling
 compatibility, but current runner launches use only the protected file reference.
 
@@ -181,14 +182,27 @@ The ownership boundary covers runner-managed sessions, native worktrees, admissi
 durable-command and session-command receipts, checkpoint ownership, cleanup journals, registry
 approvals, Claude hook launch files, Conductor launch files, and native isolated provider-state
 partitions because their production constructors all receive the claimed data root. Provider CLI
-installation, discovery, login state, and transcripts used without runner isolation remain
-operator-owned files in the selected native or WSL account; the runner does not claim or migrate
-those external provider homes.
+installation, discovery, and login bytes remain operator-owned files. Mutable native provider,
+Seatbelt, Windows Job, ACP, and Agent TUI launches are serialized across control-plane owners by a
+process-lifetime lease beneath the canonical effective `HOME`. Direct WSL provider mode fails closed
+because its external lock cannot safely prove Windows process liveness; use bwrap or a dedicated
+distro/OS account. Container and cloud provider homes are independent.
 
-The runner scrubs obsolete Conductor configs only inside its owned `<dataDir>/conductor` directory.
+The runner scrubs obsolete Conductor configs only inside its owned
+`<dataDir>/conductor/runner-instances/<owner-hash>` directory.
 It deliberately does not sweep the former shared home-level Conductor directory because those files
 cannot be attributed safely while an older runner may still be using them. After stopping every
-pre-migration runner for the account, an operator may remove that legacy directory manually.
+pre-migration runner for the account, use `--state-doctor inventory` and the explicit
+`quarantine-conductor` action. The doctor prints redacted counts rather than contents. Its
+`adopt-checkpoints` and `adopt-provider-state` actions copy legacy state into the attested namespace
+without deleting sources; `quarantine-wsl` atomically moves the ambiguous shared provider/worktree
+roots aside. Mutations require `--ack-all-legacy-runners-stopped` and refuse an active data lease.
+Quarantining those whole roots also makes any stored legacy WSL session that names one of their
+worktrees unavailable until the root is restored or the session is explicitly migrated; inventory
+and back up the shared roots before acknowledging that operation.
+An incomplete or stale provider-home lease fails closed with manual quarantine guidance; even a
+same-owner restart cannot reclaim it automatically because a detached provider tree may have
+survived the runner. Remove it only after proving no provider process is using that HOME.
 
 ## Backup and operational boundary
 

@@ -374,6 +374,7 @@ export async function captureWorktreeTree(cwd: string): Promise<string> {
 const CURRENT_CHECKPOINT_REF_ROOT = "refs/wollipog";
 const LEGACY_CHECKPOINT_REF_ROOT = "refs/mam";
 const CHECKPOINT_REF_ROOTS = [CURRENT_CHECKPOINT_REF_ROOT, LEGACY_CHECKPOINT_REF_ROOT] as const;
+const CHECKPOINT_OWNER_HASH = /^[a-f0-9]{64}$/u;
 
 type CheckpointRefKind = "turn" | "fork";
 
@@ -384,9 +385,15 @@ export interface CheckpointRefSyncResult {
 }
 
 function assertCheckpointSessionId(sessionId: string): void {
-  if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(sessionId)) {
+  if (sessionId === "owners" || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(sessionId)) {
     throw new Error(`invalid checkpoint session id: ${sessionId}`);
   }
+}
+
+function checkpointSessionRoot(root: typeof CHECKPOINT_REF_ROOTS[number], sessionId: string, ownerHash?: string): string {
+  assertCheckpointSessionId(sessionId);
+  if (ownerHash !== undefined && !CHECKPOINT_OWNER_HASH.test(ownerHash)) throw new Error("invalid checkpoint owner hash");
+  return ownerHash ? `${root}/owners/${ownerHash}/${sessionId}` : `${root}/${sessionId}`;
 }
 
 /** Ref name for a session checkpoint. Session ids are runner-minted slugs (s_<hex>), safe as a
@@ -396,15 +403,15 @@ function checkpointRefName(
   sessionId: string,
   kind: CheckpointRefKind,
   turn: number,
+  ownerHash?: string,
 ): string {
-  assertCheckpointSessionId(sessionId);
-  return `${root}/${sessionId}/${kind}-${turn}`;
+  return `${checkpointSessionRoot(root, sessionId, ownerHash)}/${kind}-${turn}`;
 }
 
-function checkpointRefNames(sessionId: string, kind: CheckpointRefKind, turn: number) {
+function checkpointRefNames(sessionId: string, kind: CheckpointRefKind, turn: number, ownerHash?: string) {
   return {
-    current: checkpointRefName(CURRENT_CHECKPOINT_REF_ROOT, sessionId, kind, turn),
-    legacy: checkpointRefName(LEGACY_CHECKPOINT_REF_ROOT, sessionId, kind, turn),
+    current: checkpointRefName(CURRENT_CHECKPOINT_REF_ROOT, sessionId, kind, turn, ownerHash),
+    legacy: checkpointRefName(LEGACY_CHECKPOINT_REF_ROOT, sessionId, kind, turn, ownerHash),
   };
 }
 
@@ -444,8 +451,9 @@ async function anchorCheckpointRef(
   kind: CheckpointRefKind,
   turn: number,
   tree: string,
+  ownerHash?: string,
 ): Promise<void> {
-  const names = checkpointRefNames(sessionId, kind, turn);
+  const names = checkpointRefNames(sessionId, kind, turn, ownerHash);
   await updateCheckpointRefs(cwd, [
     `update ${names.legacy} ${tree}`,
     `update ${names.current} ${tree}`,
@@ -453,22 +461,22 @@ async function anchorCheckpointRef(
 }
 
 /** Keep a completed-turn tree alive for provider-native conversation forks. */
-export async function anchorForkRef(cwd: string, sessionId: string, turn: number, tree: string): Promise<void> {
-  await anchorCheckpointRef(cwd, sessionId, "fork", turn, tree);
+export async function anchorForkRef(cwd: string, sessionId: string, turn: number, tree: string, ownerHash?: string): Promise<void> {
+  await anchorCheckpointRef(cwd, sessionId, "fork", turn, tree, ownerHash);
 }
 
 /** Anchor a snapshot tree as real refs so `git gc` can never prune it (unlike the dangling
  * lastTurnBaseTree, which is only best-effort). Refs may point at tree objects directly. */
-export async function anchorTurnRef(cwd: string, sessionId: string, turn: number, tree: string): Promise<void> {
-  await anchorCheckpointRef(cwd, sessionId, "turn", turn, tree);
+export async function anchorTurnRef(cwd: string, sessionId: string, turn: number, tree: string, ownerHash?: string): Promise<void> {
+  await anchorCheckpointRef(cwd, sessionId, "turn", turn, tree, ownerHash);
 }
 
 /** Read a session's checkpoint tree for `turn` (null = never anchored / deleted). The current
  * namespace is probed first, but the legacy value is still checked: after a downgrade an old
  * runner can update only refs/mam, so silently preferring a stale current ref would rewind files
  * to the wrong tree. Divergence therefore fails closed for explicit repair. */
-export async function readTurnRef(cwd: string, sessionId: string, turn: number): Promise<string | null> {
-  const names = checkpointRefNames(sessionId, "turn", turn);
+export async function readTurnRef(cwd: string, sessionId: string, turn: number, ownerHash?: string): Promise<string | null> {
+  const names = checkpointRefNames(sessionId, "turn", turn, ownerHash);
   let pair: { current: string | null; legacy: string | null };
   try {
     pair = await readCheckpointRefPair(cwd, names);
@@ -491,8 +499,8 @@ export async function readTurnRef(cwd: string, sessionId: string, turn: number):
 }
 
 /** Remove one prepared checkpoint ref without disturbing earlier turns or fork points. */
-export async function deleteTurnRef(cwd: string, sessionId: string, turn: number): Promise<void> {
-  const names = checkpointRefNames(sessionId, "turn", turn);
+export async function deleteTurnRef(cwd: string, sessionId: string, turn: number, ownerHash?: string): Promise<void> {
+  const names = checkpointRefNames(sessionId, "turn", turn, ownerHash);
   await updateCheckpointRefs(cwd, [`delete ${names.current}`, `delete ${names.legacy}`]);
 }
 
@@ -500,9 +508,9 @@ async function listCheckpointRefs(
   cwd: string,
   sessionId: string,
   root: typeof CHECKPOINT_REF_ROOTS[number],
+  ownerHash?: string,
 ): Promise<Map<string, string>> {
-  assertCheckpointSessionId(sessionId);
-  const prefix = `${root}/${sessionId}/`;
+  const prefix = `${checkpointSessionRoot(root, sessionId, ownerHash)}/`;
   const out = await git(cwd, ["for-each-ref", "--format=%(refname)%09%(objectname)", prefix]);
   const refs = new Map<string, string>();
   for (const line of out.split("\n")) {
@@ -523,10 +531,13 @@ async function listCheckpointRefs(
 export async function synchronizeCheckpointRefs(
   cwd: string,
   sessionId: string,
+  ownerHash?: string,
 ): Promise<CheckpointRefSyncResult> {
   for (let attempt = 0; attempt < 2; attempt++) {
-    const current = await listCheckpointRefs(cwd, sessionId, CURRENT_CHECKPOINT_REF_ROOT);
-    const legacy = await listCheckpointRefs(cwd, sessionId, LEGACY_CHECKPOINT_REF_ROOT);
+    const current = await listCheckpointRefs(cwd, sessionId, CURRENT_CHECKPOINT_REF_ROOT, ownerHash);
+    const legacy = await listCheckpointRefs(cwd, sessionId, LEGACY_CHECKPOINT_REF_ROOT, ownerHash);
+    const currentPrefix = checkpointSessionRoot(CURRENT_CHECKPOINT_REF_ROOT, sessionId, ownerHash);
+    const legacyPrefix = checkpointSessionRoot(LEGACY_CHECKPOINT_REF_ROOT, sessionId, ownerHash);
     const commands: string[] = [];
     const conflicts: string[] = [];
     let mirroredToCurrent = 0;
@@ -542,14 +553,14 @@ export async function synchronizeCheckpointRefs(
       }
       if (legacyOid) {
         commands.push(
-          `verify ${LEGACY_CHECKPOINT_REF_ROOT}/${sessionId}/${suffix} ${legacyOid}`,
-          `create ${CURRENT_CHECKPOINT_REF_ROOT}/${sessionId}/${suffix} ${legacyOid}`,
+          `verify ${legacyPrefix}/${suffix} ${legacyOid}`,
+          `create ${currentPrefix}/${suffix} ${legacyOid}`,
         );
         mirroredToCurrent++;
       } else if (currentOid) {
         commands.push(
-          `verify ${CURRENT_CHECKPOINT_REF_ROOT}/${sessionId}/${suffix} ${currentOid}`,
-          `create ${LEGACY_CHECKPOINT_REF_ROOT}/${sessionId}/${suffix} ${currentOid}`,
+          `verify ${currentPrefix}/${suffix} ${currentOid}`,
+          `create ${legacyPrefix}/${suffix} ${currentOid}`,
         );
         mirroredToLegacy++;
       }
@@ -567,15 +578,49 @@ export async function synchronizeCheckpointRefs(
   return { mirroredToCurrent: 0, mirroredToLegacy: 0, conflicts: [] };
 }
 
+/** Explicit offline adoption: copy a legacy session namespace into one attested owner namespace.
+ * Source refs are verified in the same transaction and deliberately retained for rollback. */
+export async function adoptLegacyCheckpointRefs(cwd: string, sessionId: string, ownerHash: string): Promise<number> {
+  const legacyCurrent = await listCheckpointRefs(cwd, sessionId, CURRENT_CHECKPOINT_REF_ROOT);
+  const legacyMam = await listCheckpointRefs(cwd, sessionId, LEGACY_CHECKPOINT_REF_ROOT);
+  const ownedCurrent = await listCheckpointRefs(cwd, sessionId, CURRENT_CHECKPOINT_REF_ROOT, ownerHash);
+  const ownedMam = await listCheckpointRefs(cwd, sessionId, LEGACY_CHECKPOINT_REF_ROOT, ownerHash);
+  const suffixes = [...new Set([...legacyCurrent.keys(), ...legacyMam.keys()])].sort();
+  const commands: string[] = [];
+  let adopted = 0;
+  const sourceCurrentRoot = checkpointSessionRoot(CURRENT_CHECKPOINT_REF_ROOT, sessionId);
+  const sourceMamRoot = checkpointSessionRoot(LEGACY_CHECKPOINT_REF_ROOT, sessionId);
+  const targetCurrentRoot = checkpointSessionRoot(CURRENT_CHECKPOINT_REF_ROOT, sessionId, ownerHash);
+  const targetMamRoot = checkpointSessionRoot(LEGACY_CHECKPOINT_REF_ROOT, sessionId, ownerHash);
+  for (const suffix of suffixes) {
+    const current = legacyCurrent.get(suffix);
+    const mam = legacyMam.get(suffix);
+    if (current && mam && current !== mam) throw new Error(`legacy checkpoint refs diverged for ${sessionId}/${suffix}`);
+    const oid = current ?? mam!;
+    const targetCurrent = ownedCurrent.get(suffix);
+    const targetMam = ownedMam.get(suffix);
+    if ((targetCurrent && targetCurrent !== oid) || (targetMam && targetMam !== oid)) {
+      throw new Error(`owned checkpoint target conflicts for ${sessionId}/${suffix}`);
+    }
+    if (current) commands.push(`verify ${sourceCurrentRoot}/${suffix} ${current}`);
+    if (mam) commands.push(`verify ${sourceMamRoot}/${suffix} ${mam}`);
+    if (!targetCurrent) commands.push(`create ${targetCurrentRoot}/${suffix} ${oid}`);
+    if (!targetMam) commands.push(`create ${targetMamRoot}/${suffix} ${oid}`);
+    if (!targetCurrent || !targetMam) adopted++;
+  }
+  await updateCheckpointRefs(cwd, commands);
+  return adopted;
+}
+
 /** Drop every checkpoint ref a session anchored (session delete / worktree removal). */
-export async function deleteTurnRefs(cwd: string, sessionId: string): Promise<void> {
-  assertCheckpointSessionId(sessionId);
+export async function deleteTurnRefs(cwd: string, sessionId: string, ownerHash?: string): Promise<void> {
   const refs = new Set<string>();
   for (const root of CHECKPOINT_REF_ROOTS) {
-    const out = await git(cwd, ["for-each-ref", "--format=%(refname)", `${root}/${sessionId}/`]);
+    const prefix = `${checkpointSessionRoot(root, sessionId, ownerHash)}/`;
+    const out = await git(cwd, ["for-each-ref", "--format=%(refname)", prefix]);
     for (const ref of out.split("\n")) {
       const name = ref.trim();
-      if (name.startsWith(`${root}/${sessionId}/`)) refs.add(name);
+      if (name.startsWith(prefix)) refs.add(name);
     }
   }
   await updateCheckpointRefs(cwd, [...refs].sort().map((name) => `delete ${name}`));

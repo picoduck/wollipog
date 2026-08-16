@@ -72,6 +72,7 @@ test("checkpoint cleanup validates the session id before enumerating refs", asyn
   });
 
   await assert.rejects(deleteTurnRefs("/repo", "bad\nsession"), /invalid checkpoint session id/);
+  await assert.rejects(deleteTurnRefs("/repo", "owners"), /invalid checkpoint session id/);
   assert.equal(calls, 0);
 });
 

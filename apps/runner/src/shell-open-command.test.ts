@@ -94,6 +94,16 @@ test("manual Agent TUI attachment bypasses even a retained failed start fence", 
   assert.equal(state.replies[0]?.ok, true);
 });
 
+test("Agent TUI launch-resolution failures return a failed shell result", async () => {
+  const state = harness({
+    resolveAgentTuiLaunch: () => { throw new Error("provider HOME lease is unavailable"); },
+  });
+  await handleShellOpenCommand(command("agent_tui"), state.dependencies);
+  assert.equal(state.opens, 0);
+  assert.equal(state.replies[0]?.ok, false);
+  assert.match(state.replies[0]?.error ?? "", /provider HOME lease is unavailable/);
+});
+
 test("a close arriving while Agent TUI waits prevents the delayed spawn", async () => {
   let releaseStart!: (started: boolean) => void;
   const start = new Promise<boolean>((resolve) => { releaseStart = resolve; });
