@@ -52,14 +52,14 @@ export class SessionPromptOutbox {
     let sent = 0;
     for (const row of this.db.dueSessionPromptCommands(now, runnerId, 100)) {
       if (!this.hub.isRunnerOnline(row.runnerId)) continue;
-      if (!runnerSupportsProtocol(this.db.getRunner(row.runnerId)?.protocolVersion, "automationCommandReceipts")) {
+      if (!runnerSupportsProtocol(this.db.getRunner(row.runnerId)?.protocolVersion, "durablePromptQueueIdentity")) {
         this.db.recordSessionPromptCommandReceipt({
           commandId: row.commandId,
           runnerId: row.runnerId,
           sessionId: row.sessionId,
           state: row.state === "pending" ? "failed" : "uncertain",
           revision: row.revision + 1,
-          error: "runner no longer supports durable prompt receipts",
+          error: "runner no longer supports durable queued prompt identity",
           now,
         });
         this.hub.sessionChangedById(row.sessionId);

@@ -2309,6 +2309,29 @@ test("admission-queued prompts persist before success, survive service restart, 
     "stopped sessions never replay retained prompts");
 });
 
+test("a staged admission prompt fails closed instead of replaying after runner downgrade", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { prompt: "initial" });
+  hub.sentToRunner.length = 0;
+  hub.deliver = false;
+
+  assert.equal(svc.prompt(id, "do not replay to v77").ok, true);
+  const staged = db.getSession(id)?.queued?.[0];
+  assert.ok(staged);
+
+  db.registerRunner(runnerMeta(), Date.now(), 77);
+  hub.deliver = true;
+  hub.sentToRunner.length = 0;
+  const restarted = new SessionsService(db, hub as unknown as Hub, NOOP_LOG);
+  assert.equal(restarted.retryDuePrompts(Date.now() + 60_000), 0);
+  assert.equal(hub.sentOfType("durable_session_command").length, 0);
+  assert.equal(db.getSessionPromptCommand(staged.id)?.state, "uncertain");
+  assert.match(
+    db.getSessionPromptCommand(staged.id)?.error ?? "",
+    /no longer supports durable queued prompt identity/,
+  );
+});
+
 test("durable queued prompts accept revision-zero failures and stop retrying after terminal status", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub, { prompt: "initial" });
