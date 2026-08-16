@@ -5,7 +5,9 @@ import {
   accessScopeChoices,
   accessScopeLabel,
   canAssignAccessScope,
+  canChangeAccessScope,
   scopeAudienceContained,
+  scopeAudienceContainedForIdentity,
 } from "./access-scopes.js";
 
 function identity(role: IdentityAdministrationView["context"]["role"]): IdentityAdministrationView {
@@ -43,6 +45,8 @@ test("access choices expose only authorized creation scopes and use Title Case l
     "Team: Builders",
     "Organization-Wide",
   ]);
+  assert.deepEqual(accessScopeChoices(identity("viewer")), [],
+    "viewers are never offered creation scopes for a server-rejected mutation");
   assert.equal(accessScopeLabel(scope({ kind: "user", userId: "user-two" }), identity("admin")), "Private to Two");
 });
 
@@ -56,9 +60,13 @@ test("client compatibility preflight is conservative for private, team, cross-us
   assert.equal(scopeAudienceContained(one, one), true);
   assert.equal(scopeAudienceContained(one, two), false);
   assert.equal(scopeAudienceContained(one, team), false);
+  assert.equal(scopeAudienceContainedForIdentity(identity("operator"), one, team), true,
+    "the signed-in active team member is a narrower audience than their team");
 });
 
 test("corrective actions only target scopes the current actor may assign", () => {
+  const one = scope({ kind: "user", userId: "user-one" });
+  const team = scope({ kind: "team", teamId: "team" });
   const admin = identity("admin");
   assert.equal(canAssignAccessScope(admin, { kind: "organization", organizationId: "org" }), true);
   assert.equal(canAssignAccessScope(admin, { kind: "team", teamId: "team" }), true);
@@ -70,4 +78,10 @@ test("corrective actions only target scopes the current actor may assign", () =>
   assert.equal(canAssignAccessScope(member, { kind: "organization", organizationId: "org" }), false);
   assert.equal(canAssignAccessScope(member, { kind: "team", teamId: "team" }), true);
   assert.equal(canAssignAccessScope(member, { kind: "user", userId: "user-one" }), true);
+  assert.equal(canChangeAccessScope(member, team, { kind: "user", userId: "user-one" }), true,
+    "a team member may narrow a managed team resource to themselves");
+  assert.equal(canChangeAccessScope(member, one, { kind: "team", teamId: "team" }), false,
+    "an ordinary member may not broaden their private resource to a team");
+  assert.equal(canChangeAccessScope(identity("viewer"), team, { kind: "user", userId: "user-one" }), false,
+    "a Viewer remains read-only even when they belong to the current team");
 });

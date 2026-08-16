@@ -248,6 +248,28 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     role: "operator",
     now: 1,
   });
+  seed.createIdentityMember({
+    userId: "usr_ui_route_alice",
+    displayName: "UI Route Alice",
+    organizationId: identity.organizationId,
+    role: "operator",
+    now: 1,
+  });
+  const scopeTeam = seed.createIdentityTeam({
+    teamId: "team_ui_route_scope",
+    organizationId: identity.organizationId,
+    name: "UI Route Scope Team",
+    memberUserIds: ["usr_ui_route_operator"],
+    now: 1,
+  });
+  const alicePrivateProject = seed.createProject({
+    name: "Alice Private Project",
+    scope: {
+      organizationId: identity.organizationId,
+      owner: { kind: "user", userId: "usr_ui_route_alice" },
+    },
+    now: 1,
+  });
   seed.createDevice({
     id: "dev_ui_route_operator",
     name: "UI Route Operator Device",
@@ -571,7 +593,7 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     name: string;
     locations: Array<{ id: string; runnerId: string; workspaceId: string }>;
   }>;
-  assert.deepEqual(initialProjects.map((project) => project.name), ["Workspace"]);
+  assert.deepEqual(initialProjects.map((project) => project.name), ["Alice Private Project", "Workspace"]);
   assert.deepEqual(
     (snapshot.sessions as Array<{ id: string }>).map((session) => session.id).sort(),
     [createdSessionId, "session-history", "session-other", "session-target"].sort(),
@@ -802,11 +824,44 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   assert.equal(operatorPrivateProject.audience, "user");
   assert.deepEqual(operatorPrivateProject.scope?.owner, { kind: "user", userId: "usr_ui_route_operator" });
   const deniedOperatorScopeChange = await fetch(
-    `${httpBase}/api/projects/${operatorPrivateProject.id}/access-scope?ownerKind=user&ownerId=usr_ui_route_operator`,
+    `${httpBase}/api/projects/${operatorPrivateProject.id}/access-scope?ownerKind=organization&ownerId=${identity.organizationId}`,
     { headers: { authorization: `Bearer ${operatorToken}` } },
   );
   assert.equal(deniedOperatorScopeChange.status, 403,
-    "post-creation access changes require organization owner or admin permission server-side");
+    "ordinary members cannot broaden a private Project to organization access");
+
+  const teamProjectResponse = await ownerFetch("/api/projects", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      name: "Operator Team Project",
+      owner: { kind: "team", teamId: scopeTeam.teamId },
+    }),
+  });
+  assert.equal(teamProjectResponse.status, 201);
+  const teamProject = (await teamProjectResponse.json() as { project: { id: string } }).project;
+  const operatorNarrowPreviewResponse = await fetch(
+    `${httpBase}/api/projects/${teamProject.id}/access-scope?ownerKind=user&ownerId=usr_ui_route_operator`,
+    { headers: { authorization: `Bearer ${operatorToken}` } },
+  );
+  assert.equal(operatorNarrowPreviewResponse.status, 200);
+  const operatorNarrowPreview = (await operatorNarrowPreviewResponse.json() as {
+    preview: { confirmationToken?: string };
+  }).preview;
+  const operatorNarrowResponse = await fetch(`${httpBase}/api/projects/${teamProject.id}/access-scope`, {
+    method: "PUT",
+    headers: {
+      authorization: `Bearer ${operatorToken}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      owner: { kind: "user", userId: "usr_ui_route_operator" },
+      confirmationToken: operatorNarrowPreview.confirmationToken,
+    }),
+  });
+  assert.equal(operatorNarrowResponse.status, 200, "a team member may safely narrow a managed Project to themselves");
+  assert.deepEqual((await operatorNarrowResponse.json() as { project: { scope?: ResourceScope } }).project.scope?.owner,
+    { kind: "user", userId: "usr_ui_route_operator" });
 
   const managedScopeProjectResponse = await ownerFetch("/api/projects", {
     method: "POST",
@@ -843,12 +898,67 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   }).project;
   assert.deepEqual(appliedScopeProject.scope?.owner, { kind: "user", userId: identity.userId });
   const scopeAudit = (await (await ownerFetch("/api/identity/mutation-audit?limit=100")).json() as {
-    audit: Array<{ method: string; route: string; targetId?: string; statusCode: number }>;
+    audit: Array<{ auditId: string; method: string; route: string; targetId?: string; statusCode: number }>;
   }).audit;
   assert.equal(scopeAudit.some((entry) =>
     entry.method === "PUT" && entry.route === "/api/projects/:id/access-scope" &&
     entry.targetId === managedScopeProject.id && entry.statusCode === 200), true,
     "successful access-scope changes are attributed in the mutation audit");
+  const exactScopeAudit = (await (await ownerFetch("/api/identity/access-scope-audit?limit=100")).json() as {
+    audit: Array<{
+      mutationAuditId?: string;
+      actorId: string;
+      resource: string;
+      resourceId: string;
+      currentScope: ResourceScope;
+      targetScope: ResourceScope;
+      affectedProjectIds: string[];
+      activeSessionIds: string[];
+      sessionIds: string[];
+      narrowedSessionIds: string[];
+    }>;
+  }).audit;
+  const ownerScopeAudit = exactScopeAudit.find((entry) => entry.resourceId === managedScopeProject.id)!;
+  assert.equal(ownerScopeAudit.actorId, identity.userId);
+  assert.equal(ownerScopeAudit.resource, "project");
+  assert.deepEqual(ownerScopeAudit.currentScope.owner,
+    { kind: "organization", organizationId: identity.organizationId });
+  assert.deepEqual(ownerScopeAudit.targetScope.owner, { kind: "user", userId: identity.userId });
+  assert.deepEqual(ownerScopeAudit.affectedProjectIds, [managedScopeProject.id]);
+  assert.deepEqual(ownerScopeAudit.activeSessionIds, []);
+  assert.deepEqual(ownerScopeAudit.sessionIds, []);
+  assert.deepEqual(ownerScopeAudit.narrowedSessionIds, []);
+  assert.equal(scopeAudit.some((entry) => entry.auditId === ownerScopeAudit.mutationAuditId), true,
+    "the exact scope evidence links to the generic mutation attribution row");
+
+  const rejectedRawWorkspaceScope = await ownerFetch(
+    "/api/identity/ownership/workspace/workspace-ui-route",
+    {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        runnerId: "runner-ui-route",
+        owner: { kind: "user", userId: "usr_ui_route_alice" },
+      }),
+    },
+  );
+  assert.equal(rejectedRawWorkspaceScope.status, 400,
+    "the legacy raw ownership API cannot mutate Location access");
+
+  const rejectedImplicitCrossUserLocation = await ownerFetch(
+    `/api/projects/${alicePrivateProject.id}/locations/new`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        runnerId: "runner-ui-route",
+        name: "Implicit Alice Location",
+        path: "/repos/implicit-alice-location",
+      }),
+    },
+  );
+  assert.equal(rejectedImplicitCrossUserLocation.status, 403,
+    "an omitted owner cannot bypass cross-user private assignment validation");
 
   const deniedOperatorLocation = await fetch(`${httpBase}/api/projects/${createdProject.id}/locations/new`, {
     method: "POST",
@@ -945,7 +1055,8 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   };
   assert.equal(unchangedProject.project.name, "Durable Project");
 
-  const sharedLocation = initialProjects[0]!.locations[0]!;
+  const initialWorkspaceProject = initialProjects.find((project) => project.name === "Workspace")!;
+  const sharedLocation = initialWorkspaceProject.locations[0]!;
   const addLocationResponse = await ownerFetch(`/api/projects/${createdProject.id}/locations`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -959,7 +1070,7 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     location.runnerId === sharedLocation.runnerId && location.workspaceId === sharedLocation.workspaceId);
   assert.ok(addedLink);
   assert.notEqual(addedLink.id, sharedLocation.id, "each Project has an independent Location membership");
-  const sourceAfterSharing = await (await ownerFetch(`/api/projects/${initialProjects[0]!.id}`)).json() as {
+  const sourceAfterSharing = await (await ownerFetch(`/api/projects/${initialWorkspaceProject.id}`)).json() as {
     project: { locations: Array<{ id: string }> };
   };
   assert.equal(sourceAfterSharing.project.locations.some((location) => location.id === sharedLocation.id), true);

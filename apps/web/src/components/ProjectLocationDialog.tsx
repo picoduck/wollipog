@@ -10,9 +10,9 @@ import { ApiError } from "../api.js";
 import {
   accessScopeChoices,
   accessScopeLabel,
-  canAssignAccessScope,
+  canChangeAccessScope,
   resourceOwnerKey,
-  scopeAudienceContained,
+  scopeAudienceContainedForIdentity,
 } from "../access-scopes.js";
 import { machineOptionLabels, runnerDisplay } from "../runners.js";
 import {
@@ -113,11 +113,12 @@ export function ProjectLocationDialog({
   const selectedMachine = browseMachines.find(({ runner }) => runner.runnerId === runnerId) ?? browseMachines[0] ?? null;
   const selectedRunnerId = selectedMachine?.runner.runnerId ?? "";
   const selectedFolder = folderSelection?.runnerId === selectedRunnerId ? folderSelection.path : null;
-  const creationScopeChoices = useMemo(() => identity ? accessScopeChoices(identity, project.scope)
+  const creationScopeChoices = useMemo(() => identity ? accessScopeChoices(identity)
     .filter((choice) => {
       const scope = { organizationId: identity.context.organizationId, owner: choice.owner };
-      return (!project.scope || scopeAudienceContained(project.scope, scope)) &&
-        (!selectedMachine?.runner.scope || scopeAudienceContained(scope, selectedMachine.runner.scope));
+      return (!project.scope || scopeAudienceContainedForIdentity(identity, project.scope, scope)) &&
+        (!selectedMachine?.runner.scope ||
+          scopeAudienceContainedForIdentity(identity, scope, selectedMachine.runner.scope));
     }) : [], [identity, project.scope, selectedMachine]);
   useEffect(() => {
     if (!accessScopeManagementSupported || creationScopeChoices.length === 0) return;
@@ -300,6 +301,15 @@ export function ProjectLocationDialog({
               {accessScopeManagementSupported && !identity && !identityError && (
                 <span className="muted">Loading permitted access scopes…</span>
               )}
+              {accessScopeManagementSupported && identity && creationScopeChoices.length === 0 && (
+                <div className="project-location-error" role="alert">
+                  <strong>No Compatible Access Scope</strong>
+                  <span>
+                    No access scope you can assign is compatible with both this Project and Machine.
+                    Change the Project or Machine access first.
+                  </span>
+                </div>
+              )}
               {identityError && (
                 <div className="project-location-error" role="alert">
                   <strong>Access Scopes Could Not Be Loaded</strong>
@@ -363,10 +373,16 @@ export function ProjectLocationDialog({
               .filter((link) => link.projectId !== project.id)
               .map((link) => projectById.get(link.projectId)?.name)
               .filter((name): name is string => Boolean(name));
-            const scopeCompatible = !accessScopeManagementSupported || !project.scope || !candidate.scope
+            const scopeCompatible = !accessScopeManagementSupported || !identity || !project.scope || !candidate.scope
               ? null
-              : scopeAudienceContained(project.scope, candidate.scope);
-            const administers = identity?.context.role === "owner" || identity?.context.role === "admin";
+              : scopeAudienceContainedForIdentity(identity, project.scope, candidate.scope);
+            const scopeCheckPending = accessScopeManagementSupported && !identity;
+            const scopeCheckUnavailable = accessScopeManagementSupported && Boolean(identity) &&
+              (!project.scope || !candidate.scope);
+            const canNarrowProject = Boolean(identity && project.scope && candidate.scope &&
+              project.canManage !== false && canChangeAccessScope(identity, project.scope, candidate.scope.owner));
+            const canBroadenLocation = Boolean(identity && project.scope && candidate.scope &&
+              candidate.canManage !== false && canChangeAccessScope(identity, candidate.scope, project.scope.owner));
             return (
               <article className="project-location-candidate" role="listitem" key={candidate.key}>
                 <div className="project-location-main">
@@ -385,17 +401,15 @@ export function ProjectLocationDialog({
                   {scopeCompatible === false && (
                     <div className="project-location-reason">
                       This Location is narrower than the Project, so adding it would expose a private workspace.
-                      {administers && (
+                      {(canNarrowProject || canBroadenLocation) && (
                         <span className="project-location-corrections">
-                          {project.canManage !== false && candidate.scope &&
-                            canAssignAccessScope(identity!, candidate.scope.owner) && (
+                          {canNarrowProject && candidate.scope && (
                             <button type="button" className="btn ghost sm" onClick={() => setScopeCorrection({
                               resource: { kind: "project", projectId: project.id, name: project.name },
                               owner: candidate.scope!.owner,
                             })}>Narrow Project Access</button>
                           )}
-                          {candidate.canManage !== false && project.scope &&
-                            canAssignAccessScope(identity!, project.scope.owner) && (
+                          {canBroadenLocation && project.scope && (
                             <button type="button" className="btn ghost sm" onClick={() => setScopeCorrection({
                               resource: {
                                 kind: "workspace",
@@ -410,11 +424,18 @@ export function ProjectLocationDialog({
                       )}
                     </div>
                   )}
+                  {scopeCheckPending && <span className="muted">Checking access compatibility…</span>}
+                  {scopeCheckUnavailable && (
+                    <div className="project-location-reason">
+                      Access scope details are unavailable, so this Location cannot be added safely.
+                    </div>
+                  )}
                 </div>
                 <button
                   type="button"
                   className="btn sm"
-                  disabled={alreadyAdded || busyKey !== null || scopeCompatible === false}
+                  disabled={alreadyAdded || busyKey !== null || scopeCompatible === false ||
+                    scopeCheckPending || scopeCheckUnavailable}
                   onClick={() => void choose(candidate)}
                 >
                   {busyKey === candidate.key

@@ -10,6 +10,7 @@ import { useApi } from "../api-context.js";
 import {
   accessScopeChoices,
   accessScopeLabel,
+  canChangeAccessScope,
   resourceOwnerKey,
   sameResourceScope,
   type AccessScopeChoice,
@@ -194,26 +195,27 @@ export function AccessScopeSettings({
   disabled?: boolean;
   onUpdated: () => void;
 }) {
-  const choices = useMemo(() => identity ? accessScopeChoices(identity, scope) : [], [identity, scope]);
+  const choices = useMemo(() => identity ? accessScopeChoices(identity, scope).filter((choice) =>
+    choice.key === resourceOwnerKey(scope.owner) || canChangeAccessScope(identity, scope, choice.owner)) : [], [identity, scope]);
   const currentKey = resourceOwnerKey(scope.owner);
   const [selectedKey, setSelectedKey] = useState(currentKey);
   const [dialogOwner, setDialogOwner] = useState<ResourceOwner | null>(null);
   useEffect(() => setSelectedKey(currentKey), [currentKey]);
   const selected = choices.find((choice) => choice.key === selectedKey);
   if (!identity) return <span className="muted">Loading access controls…</span>;
-  const administers = identity.context.role === "owner" || identity.context.role === "admin";
+  const readOnly = identity.context.role === "viewer";
   return (
     <div className="access-scope-settings">
       <AccessScopeField
         choices={choices}
         value={selectedKey}
         onChange={setSelectedKey}
-        disabled={disabled || !administers}
+        disabled={disabled || readOnly}
       />
       <button
         type="button"
         className="btn"
-        disabled={disabled || !administers || !selected || sameResourceScope(scope, {
+        disabled={disabled || readOnly || !selected || !canChangeAccessScope(identity, scope, selected.owner) || sameResourceScope(scope, {
           organizationId: identity.context.organizationId,
           owner: selected.owner,
         })}
@@ -221,7 +223,7 @@ export function AccessScopeSettings({
       >
         Review Access Change
       </button>
-      {!administers && <span className="muted">Ask an organization owner or admin to change access.</span>}
+      {readOnly && <span className="muted">Your Viewer role is read-only.</span>}
       {dialogOwner && (
         <AccessScopeChangeDialog
           resource={resource}

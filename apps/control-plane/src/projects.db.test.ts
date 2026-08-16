@@ -869,6 +869,17 @@ test("access-scope previews bind relationships and atomically narrow or broaden 
     organizationId: identity.organizationId,
     owner: { kind: "organization" as const, organizationId: identity.organizationId },
   };
+  const audit = { principal: {
+    kind: "human" as const,
+    actorId: identity.userId,
+    userId: identity.userId,
+    userName: identity.userName,
+    organizationId: identity.organizationId,
+    organizationName: identity.organizationName,
+    role: "owner" as const,
+    deviceId: null,
+    localBootstrap: true,
+  } };
   db.registerRunner(runner(), 10);
   const project = db.listProjects(true)[0]!;
   const location = project.locations[0]!;
@@ -898,12 +909,12 @@ test("access-scope previews bind relationships and atomically narrow or broaden 
 
   db.updateSessionStatus(created.id, "completed", 21);
   assert.throws(
-    () => db.applyProjectAccessScope(project.id, privateScope, initial.confirmationToken!, 22),
+    () => db.applyProjectAccessScope(project.id, privateScope, initial.confirmationToken!, 22, audit),
     /changed after preview/,
     "session activity changes invalidate the displayed impact",
   );
   const current = db.previewProjectAccessScope(project.id, privateScope)!;
-  db.applyProjectAccessScope(project.id, privateScope, current.confirmationToken!, 23);
+  db.applyProjectAccessScope(project.id, privateScope, current.confirmationToken!, 23, audit);
   assert.deepEqual(db.projectScope(project.id), privateScope);
   assert.deepEqual(db.sessionScope(created.id), privateScope);
   assert.deepEqual(db.workspaceScope("runner-1", "ws-1"), organizationScope,
@@ -912,14 +923,121 @@ test("access-scope previews bind relationships and atomically narrow or broaden 
   const narrowLocation = db.previewWorkspaceAccessScope("runner-1", "ws-1", privateScope)!;
   assert.equal(narrowLocation.compatible, true);
   assert.deepEqual(narrowLocation.affectedProjects.map((item) => item.projectId), [project.id]);
-  db.applyWorkspaceAccessScope("runner-1", "ws-1", privateScope, narrowLocation.confirmationToken!, 24);
+  db.applyWorkspaceAccessScope("runner-1", "ws-1", privateScope, narrowLocation.confirmationToken!, 24, audit);
   assert.deepEqual(db.workspaceScope("runner-1", "ws-1"), privateScope);
 
   const broadenLocation = db.previewWorkspaceAccessScope("runner-1", "ws-1", organizationScope)!;
   assert.equal(broadenLocation.compatible, true);
   assert.equal(broadenLocation.sessionsToNarrow, 0, "broadening a Location preserves private sessions");
-  db.applyWorkspaceAccessScope("runner-1", "ws-1", organizationScope, broadenLocation.confirmationToken!, 25);
+  db.applyWorkspaceAccessScope("runner-1", "ws-1", organizationScope, broadenLocation.confirmationToken!, 25, audit);
   assert.deepEqual(db.workspaceScope("runner-1", "ws-1"), organizationScope);
   assert.deepEqual(db.sessionScope(created.id), privateScope);
+  db.close();
+});
+
+test("active team members atomically narrow Projects, Locations, and sessions to themselves with exact audit evidence", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const identity = db.localIdentityContext();
+  const member = db.createIdentityMember({
+    userId: "usr_scope_member", displayName: "Scope Member",
+    organizationId: identity.organizationId, role: "operator", now: 1,
+  });
+  const team = db.createIdentityTeam({
+    teamId: "team_scope", organizationId: identity.organizationId, name: "Scope Team",
+    memberUserIds: [member.userId], now: 2,
+  });
+  const principal: HumanPrincipal = {
+    kind: "human", actorId: member.userId, userId: member.userId, userName: member.displayName,
+    organizationId: identity.organizationId, organizationName: identity.organizationName,
+    role: "operator", deviceId: "dev_scope_member", localBootstrap: false,
+  };
+  const teamScope = {
+    organizationId: identity.organizationId,
+    owner: { kind: "team" as const, teamId: team.teamId },
+  };
+  const privateScope = {
+    organizationId: identity.organizationId,
+    owner: { kind: "user" as const, userId: member.userId },
+  };
+  db.registerRunner(runner(), 3);
+  assert.equal(db.setResourceScope({ resource: "runner", resourceId: "runner-1", scope: teamScope, now: 4 }), true);
+  assert.equal(db.setResourceScope({
+    resource: "workspace", runnerId: "runner-1", resourceId: "ws-1", scope: teamScope, now: 5,
+  }), true);
+  const project = db.listProjects(true)[0]!;
+  assert.deepEqual(db.projectScope(project.id), teamScope, "the sole generated Project follows its Location scope");
+  const projectSession = db.createSession({
+    ...session("team-project-session", "runner-1", "ws-1", 6),
+    projectId: project.id,
+    projectLocationId: project.locations[0]!.id,
+    scope: teamScope,
+  });
+
+  const projectPreview = db.previewProjectAccessScope(project.id, privateScope)!;
+  assert.equal(projectPreview.compatible, true);
+  assert.equal(projectPreview.sessionsToNarrow, 1);
+  db.applyProjectAccessScope(project.id, privateScope, projectPreview.confirmationToken!, 7, {
+    principal, mutationAuditId: "mut_project_narrow",
+  });
+  assert.deepEqual(db.projectScope(project.id), privateScope);
+  assert.deepEqual(db.sessionScope(projectSession.id), privateScope);
+  assert.deepEqual(db.workspaceScope("runner-1", "ws-1"), teamScope);
+
+  const locationSession = db.createSession({
+    ...session("team-location-session", "runner-1", "ws-1", 8),
+    scope: privateScope,
+  });
+  assert.equal(db.setResourceScope({
+    resource: "session", resourceId: locationSession.id, scope: teamScope, now: 9,
+  }), true);
+  assert.equal(db.getSession(locationSession.id)?.projectId, null,
+    "the intentionally broader Location session is detached from the private Project");
+  const locationPreview = db.previewWorkspaceAccessScope("runner-1", "ws-1", privateScope)!;
+  assert.equal(locationPreview.compatible, true);
+  assert.equal(locationPreview.sessionsToNarrow, 1);
+  db.applyWorkspaceAccessScope("runner-1", "ws-1", privateScope, locationPreview.confirmationToken!, 10, {
+    principal, mutationAuditId: "mut_location_narrow",
+  });
+  assert.deepEqual(db.workspaceScope("runner-1", "ws-1"), privateScope);
+  assert.deepEqual(db.sessionScope(locationSession.id), privateScope);
+
+  const audit = db.listAccessScopeAudit(identity.organizationId);
+  assert.deepEqual(audit.map((entry) => ({
+    mutationAuditId: entry.mutationAuditId,
+    actorId: entry.actorId,
+    deviceId: entry.deviceId,
+    resource: entry.resource,
+    resourceId: entry.resourceId,
+    currentOwner: entry.currentScope.owner,
+    targetOwner: entry.targetScope.owner,
+    affectedProjectIds: entry.affectedProjectIds,
+    activeSessionIds: entry.activeSessionIds,
+    sessionIds: entry.sessionIds,
+    narrowedSessionIds: entry.narrowedSessionIds,
+  })), [{
+    mutationAuditId: "mut_location_narrow",
+    actorId: member.userId,
+    deviceId: "dev_scope_member",
+    resource: "workspace",
+    resourceId: "ws-1",
+    currentOwner: teamScope.owner,
+    targetOwner: privateScope.owner,
+    affectedProjectIds: [project.id],
+    activeSessionIds: [locationSession.id, projectSession.id],
+    sessionIds: [locationSession.id, projectSession.id],
+    narrowedSessionIds: [locationSession.id],
+  }, {
+    mutationAuditId: "mut_project_narrow",
+    actorId: member.userId,
+    deviceId: "dev_scope_member",
+    resource: "project",
+    resourceId: project.id,
+    currentOwner: teamScope.owner,
+    targetOwner: privateScope.owner,
+    affectedProjectIds: [project.id],
+    activeSessionIds: [projectSession.id],
+    sessionIds: [projectSession.id],
+    narrowedSessionIds: [projectSession.id],
+  }]);
   db.close();
 });

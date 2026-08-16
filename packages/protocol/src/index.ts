@@ -4593,6 +4593,26 @@ export interface AccessScopeChangePreview {
   confirmationToken?: string;
 }
 
+/** Content-safe, durable evidence for one committed Project or Location scope transition. */
+export interface AccessScopeAuditView {
+  scopeChangeId: string;
+  mutationAuditId?: string;
+  actorId: string;
+  userId: string;
+  deviceId?: string;
+  organizationId: string;
+  resource: "project" | "workspace";
+  resourceId: string;
+  runnerId?: string;
+  currentScope: ResourceScope;
+  targetScope: ResourceScope;
+  affectedProjectIds: string[];
+  activeSessionIds: string[];
+  sessionIds: string[];
+  narrowedSessionIds: string[];
+  createdAt: number;
+}
+
 export interface UpdateAccessScopeRequest {
   owner: ResourceOwner;
   confirmationToken: string;

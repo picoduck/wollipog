@@ -31,6 +31,7 @@ import {
   validatePromptImageInputs,
   type AutomationAuditEvent,
   type AccessScopeChangePreview,
+  type AccessScopeAuditView,
   type AutomationAuditEventKind,
   type AutomationCommandState,
   type AutomationCommandView,
@@ -1355,6 +1356,34 @@ CREATE TABLE IF NOT EXISTS mutation_audit_archive (
 );
 CREATE INDEX IF NOT EXISTS idx_mutation_audit_archive_org
   ON mutation_audit_archive(organization_id, created_at DESC, row_id DESC);
+
+-- Scope transitions need enough content-safe evidence to reconstruct the exact privacy change.
+-- No names, request bodies, credentials, paths, or confirmation tokens are retained.
+CREATE TABLE IF NOT EXISTS access_scope_audit (
+  row_id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  scope_change_id       TEXT NOT NULL UNIQUE,
+  mutation_audit_id     TEXT,
+  actor_id               TEXT NOT NULL,
+  user_id                TEXT NOT NULL,
+  device_id              TEXT,
+  organization_id        TEXT NOT NULL,
+  resource               TEXT NOT NULL CHECK (resource IN ('project','workspace')),
+  resource_id            TEXT NOT NULL,
+  runner_id              TEXT,
+  old_organization_id    TEXT NOT NULL,
+  old_owner_kind         TEXT NOT NULL CHECK (old_owner_kind IN ('organization','user','team')),
+  old_owner_id           TEXT NOT NULL,
+  new_organization_id    TEXT NOT NULL,
+  new_owner_kind         TEXT NOT NULL CHECK (new_owner_kind IN ('organization','user','team')),
+  new_owner_id           TEXT NOT NULL,
+  affected_project_ids   TEXT NOT NULL,
+  active_session_ids     TEXT NOT NULL,
+  session_ids            TEXT NOT NULL,
+  narrowed_session_ids   TEXT NOT NULL,
+  created_at             INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_access_scope_audit_org
+  ON access_scope_audit(organization_id, created_at DESC, row_id DESC);
 
 CREATE TABLE IF NOT EXISTS devices (
   id           TEXT PRIMARY KEY,
@@ -5314,6 +5343,21 @@ export class ControlPlaneDb {
     return createHash("sha256").update(JSON.stringify({ input, evidence })).digest("hex");
   }
 
+  /** Server-only containment that can prove a user's audience is inside a team they actively belong to. */
+  scopeAudienceContainedWithMembership(narrower: ResourceScope, wider: ResourceScope): boolean {
+    if (scopeAudienceContained(narrower, wider)) return true;
+    if (narrower.organizationId !== wider.organizationId ||
+        narrower.owner.kind !== "user" || wider.owner.kind !== "team") return false;
+    return this.stmt(
+      `SELECT 1 FROM identity_team_members member
+       JOIN identity_teams team ON team.team_id=member.team_id
+       JOIN identity_users user ON user.user_id=member.user_id AND user.status='active'
+       JOIN identity_memberships membership
+         ON membership.organization_id=team.organization_id AND membership.user_id=user.user_id
+       WHERE team.organization_id=? AND team.team_id=? AND user.user_id=?`,
+    ).get(narrower.organizationId, wider.owner.teamId, narrower.owner.userId) !== undefined;
+  }
+
   private accessScopeSessionRows(where: string, args: string[]): Array<{
     id: string;
     status: SessionStatus;
@@ -5341,8 +5385,8 @@ export class ControlPlaneDb {
       ["queued", "starting", "running", "input_required"].includes(session.status)).length;
     const sessionsToNarrow: string[] = [];
     for (const session of sessions) {
-      if (scopeAudienceContained(session.scope, targetScope)) continue;
-      if (scopeAudienceContained(targetScope, session.scope)) sessionsToNarrow.push(session.id);
+      if (this.scopeAudienceContainedWithMembership(session.scope, targetScope)) continue;
+      if (this.scopeAudienceContainedWithMembership(targetScope, session.scope)) sessionsToNarrow.push(session.id);
       else return { activeSessionCount, sessionsToNarrow, incompatibleSessionId: session.id };
     }
     return { activeSessionCount, sessionsToNarrow };
@@ -5362,7 +5406,7 @@ export class ControlPlaneDb {
       scope: this.workspaceScope(location.runnerId, location.workspaceId) ?? currentScope,
     }));
     const incompatibleLocation = locationEvidence.find((location) =>
-      !scopeAudienceContained(targetScope, location.scope));
+      !this.scopeAudienceContainedWithMembership(targetScope, location.scope));
     if (incompatibleLocation) {
       reason = "The requested Project access would expose a narrower Location. Change that Location first or choose a narrower Project scope.";
     } else if (sessionImpact.incompatibleSessionId) {
@@ -5409,9 +5453,10 @@ export class ControlPlaneDb {
     );
     const sessionImpact = this.scopeChangeSessionImpact(sessions, targetScope);
     let reason: string | undefined;
-    if (!scopeAudienceContained(targetScope, runnerScope)) {
+    if (!this.scopeAudienceContainedWithMembership(targetScope, runnerScope)) {
       reason = "The requested Location access would be broader than its Machine access.";
-    } else if (projectEvidence.some((project) => !project.scope || !scopeAudienceContained(project.scope, targetScope))) {
+    } else if (projectEvidence.some((project) =>
+      !project.scope || !this.scopeAudienceContainedWithMembership(project.scope, targetScope))) {
       reason = "The requested Location access is narrower than an attached Project. Narrow those Projects first or choose a broader Location scope.";
     } else if (sessionImpact.incompatibleSessionId) {
       reason = "A session in this Location has an incompatible private owner and cannot be transferred by a Location access change.";
@@ -5440,12 +5485,19 @@ export class ControlPlaneDb {
     targetScope: ResourceScope,
     confirmationToken: string,
     now: number,
+    audit: { principal: HumanPrincipal; mutationAuditId?: string },
   ): AccessScopeChangePreview | null {
     const preview = this.previewProjectAccessScope(projectId, targetScope);
     if (!preview) return null;
+    if (audit.principal.organizationId !== preview.currentScope.organizationId) {
+      throw new Error("access-scope audit actor must belong to the resource organization");
+    }
     if (!preview.compatible || !preview.confirmationToken) throw new Error(preview.reason ?? "project access change is incompatible");
     if (preview.confirmationToken !== confirmationToken) throw new Error("access scope changed after preview; review the current impact and try again");
     const sessions = this.accessScopeSessionRows("sessions.project_id=?", [projectId]);
+    const narrowedSessionIds = sessions
+      .filter((session) => !this.scopeAudienceContainedWithMembership(session.scope, targetScope))
+      .map((session) => session.id);
     const ownerId = targetScope.owner.kind === "organization" ? targetScope.owner.organizationId
       : targetScope.owner.kind === "user" ? targetScope.owner.userId : targetScope.owner.teamId;
     this.atomic(() => {
@@ -5454,11 +5506,23 @@ export class ControlPlaneDb {
       ).run(targetScope.organizationId, targetScope.owner.kind, ownerId, now, projectId);
       this.stmt("UPDATE projects SET updated_at=? WHERE id=?").run(now, projectId);
       for (const session of sessions) {
-        if (scopeAudienceContained(session.scope, targetScope)) continue;
+        if (this.scopeAudienceContainedWithMembership(session.scope, targetScope)) continue;
         this.stmt(
           "UPDATE session_ownership SET organization_id=?, owner_kind=?, owner_id=?, updated_at=? WHERE session_id=?",
         ).run(targetScope.organizationId, targetScope.owner.kind, ownerId, now, session.id);
       }
+      this.insertAccessScopeAudit({
+        mutationAuditId: audit.mutationAuditId,
+        principal: audit.principal,
+        resource: "project",
+        resourceId: projectId,
+        currentScope: preview.currentScope,
+        targetScope,
+        affectedProjectIds: preview.affectedProjects.map((project) => project.projectId),
+        sessions,
+        narrowedSessionIds,
+        now,
+      });
     });
     return preview;
   }
@@ -5469,15 +5533,22 @@ export class ControlPlaneDb {
     targetScope: ResourceScope,
     confirmationToken: string,
     now: number,
+    audit: { principal: HumanPrincipal; mutationAuditId?: string },
   ): AccessScopeChangePreview | null {
     const preview = this.previewWorkspaceAccessScope(runnerId, workspaceId, targetScope);
     if (!preview) return null;
+    if (audit.principal.organizationId !== preview.currentScope.organizationId) {
+      throw new Error("access-scope audit actor must belong to the resource organization");
+    }
     if (!preview.compatible || !preview.confirmationToken) throw new Error(preview.reason ?? "location access change is incompatible");
     if (preview.confirmationToken !== confirmationToken) throw new Error("access scope changed after preview; review the current impact and try again");
     const sessions = this.accessScopeSessionRows(
       "sessions.runner_id=? AND sessions.workspace_id=?",
       [runnerId, workspaceId],
     );
+    const narrowedSessionIds = sessions
+      .filter((session) => !this.scopeAudienceContainedWithMembership(session.scope, targetScope))
+      .map((session) => session.id);
     const ownerId = targetScope.owner.kind === "organization" ? targetScope.owner.organizationId
       : targetScope.owner.kind === "user" ? targetScope.owner.userId : targetScope.owner.teamId;
     this.atomic(() => {
@@ -5486,7 +5557,7 @@ export class ControlPlaneDb {
          WHERE runner_id=? AND workspace_id=?`,
       ).run(targetScope.organizationId, targetScope.owner.kind, ownerId, now, runnerId, workspaceId);
       for (const session of sessions) {
-        if (scopeAudienceContained(session.scope, targetScope)) continue;
+        if (this.scopeAudienceContainedWithMembership(session.scope, targetScope)) continue;
         this.stmt(
           "UPDATE session_ownership SET organization_id=?, owner_kind=?, owner_id=?, updated_at=? WHERE session_id=?",
         ).run(targetScope.organizationId, targetScope.owner.kind, ownerId, now, session.id);
@@ -5494,8 +5565,107 @@ export class ControlPlaneDb {
       for (const project of preview.affectedProjects) {
         this.stmt("UPDATE projects SET updated_at=? WHERE id=?").run(now, project.projectId);
       }
+      this.insertAccessScopeAudit({
+        mutationAuditId: audit.mutationAuditId,
+        principal: audit.principal,
+        resource: "workspace",
+        resourceId: workspaceId,
+        runnerId,
+        currentScope: preview.currentScope,
+        targetScope,
+        affectedProjectIds: preview.affectedProjects.map((project) => project.projectId),
+        sessions,
+        narrowedSessionIds,
+        now,
+      });
     });
     return preview;
+  }
+
+  private insertAccessScopeAudit(input: {
+    mutationAuditId?: string;
+    principal: HumanPrincipal;
+    resource: "project" | "workspace";
+    resourceId: string;
+    runnerId?: string;
+    currentScope: ResourceScope;
+    targetScope: ResourceScope;
+    affectedProjectIds: string[];
+    sessions: Array<{ id: string; status: SessionStatus }>;
+    narrowedSessionIds: string[];
+    now: number;
+  }): void {
+    const ownerId = (scope: ResourceScope) => scope.owner.kind === "organization"
+      ? scope.owner.organizationId : scope.owner.kind === "user" ? scope.owner.userId : scope.owner.teamId;
+    const activeSessionIds = input.sessions
+      .filter((session) => ["queued", "starting", "running", "input_required"].includes(session.status))
+      .map((session) => session.id);
+    this.stmt(
+      `INSERT INTO access_scope_audit
+       (scope_change_id, mutation_audit_id, actor_id, user_id, device_id, organization_id,
+        resource, resource_id, runner_id,
+        old_organization_id, old_owner_kind, old_owner_id,
+        new_organization_id, new_owner_kind, new_owner_id,
+        affected_project_ids, active_session_ids, session_ids, narrowed_session_ids, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      `scope_${randomUUID().replace(/-/g, "")}`,
+      input.mutationAuditId ?? null,
+      input.principal.actorId,
+      input.principal.userId,
+      input.principal.deviceId,
+      input.principal.organizationId,
+      input.resource,
+      input.resourceId,
+      input.runnerId ?? null,
+      input.currentScope.organizationId,
+      input.currentScope.owner.kind,
+      ownerId(input.currentScope),
+      input.targetScope.organizationId,
+      input.targetScope.owner.kind,
+      ownerId(input.targetScope),
+      JSON.stringify(input.affectedProjectIds),
+      JSON.stringify(activeSessionIds),
+      JSON.stringify(input.sessions.map((session) => session.id)),
+      JSON.stringify(input.narrowedSessionIds),
+      input.now,
+    );
+  }
+
+  listAccessScopeAudit(organizationId: string, limit = 100): AccessScopeAuditView[] {
+    const rows = this.stmt(
+      `SELECT * FROM access_scope_audit WHERE organization_id=?
+       ORDER BY created_at DESC, row_id DESC LIMIT ?`,
+    ).all(organizationId, Math.max(1, Math.min(250, Math.floor(limit)))) as unknown as Array<Record<string, unknown>>;
+    return rows.map((row) => {
+      const scope = (prefix: "old" | "new"): ResourceScope => {
+        const kind = row[`${prefix}_owner_kind`] as "organization" | "user" | "team";
+        const ownerId = row[`${prefix}_owner_id`] as string;
+        return {
+          organizationId: row[`${prefix}_organization_id`] as string,
+          owner: kind === "organization" ? { kind, organizationId: ownerId }
+            : kind === "user" ? { kind, userId: ownerId } : { kind, teamId: ownerId },
+        };
+      };
+      return {
+        scopeChangeId: row.scope_change_id as string,
+        ...(row.mutation_audit_id ? { mutationAuditId: row.mutation_audit_id as string } : {}),
+        actorId: row.actor_id as string,
+        userId: row.user_id as string,
+        ...(row.device_id ? { deviceId: row.device_id as string } : {}),
+        organizationId: row.organization_id as string,
+        resource: row.resource as "project" | "workspace",
+        resourceId: row.resource_id as string,
+        ...(row.runner_id ? { runnerId: row.runner_id as string } : {}),
+        currentScope: scope("old"),
+        targetScope: scope("new"),
+        affectedProjectIds: JSON.parse(row.affected_project_ids as string) as string[],
+        activeSessionIds: JSON.parse(row.active_session_ids as string) as string[],
+        sessionIds: JSON.parse(row.session_ids as string) as string[],
+        narrowedSessionIds: JSON.parse(row.narrowed_session_ids as string) as string[],
+        createdAt: row.created_at as number,
+      };
+    });
   }
 
   setResourceScope(input: {

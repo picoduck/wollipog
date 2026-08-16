@@ -26,8 +26,9 @@ export function CreateProjectDialog({
     const defaultKey = identity.context.role === "owner" || identity.context.role === "admin"
       ? `organization:${identity.context.organizationId}`
       : `user:${identity.context.userId}`;
-    setScopeKey(defaultKey);
-  }, [identity, scopeKey]);
+    setScopeKey(scopeChoices.some((choice) => choice.key === defaultKey)
+      ? defaultKey : scopeChoices[0]?.key ?? "");
+  }, [identity, scopeChoices, scopeKey]);
   const close = () => {
     if (!busy) onClose();
   };
@@ -61,7 +62,8 @@ export function CreateProjectDialog({
             type="submit"
             className="btn primary"
             form="create-project-form"
-            disabled={busy || !name.trim() || (accessScopeManagementSupported && !scopeKey)}
+            disabled={busy || !name.trim() || (accessScopeManagementSupported &&
+              !scopeChoices.some((choice) => choice.key === scopeKey))}
           >
             {busy ? "Creating…" : "Create Project"}
           </button>
@@ -81,6 +83,9 @@ export function CreateProjectDialog({
         )}
         {accessScopeManagementSupported && !identity && !identityError && (
           <span className="muted">Loading permitted access scopes…</span>
+        )}
+        {accessScopeManagementSupported && identity?.context.role === "viewer" && (
+          <span className="muted">Your Viewer role cannot create Projects.</span>
         )}
         {identityError && <div className="form-error" role="alert">Access scopes could not be loaded: {identityError}</div>}
         {error && <div className="form-error" role="alert">{error}</div>}

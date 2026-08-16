@@ -186,6 +186,7 @@ import {
   revokeAuthorizedTranscriptShare,
 } from "./transcript-shares.js";
 import { registerPublicTranscriptShareRoute } from "./transcript-share-route.js";
+import { scopeAudienceContained } from "./resource-scope.js";
 import {
   MAX_UI_CLIENT_MESSAGE_BYTES,
   normalizeUiClientRawData,
@@ -1181,11 +1182,11 @@ const requestedAccessScope = (
   value: unknown,
   fallback?: ResourceScope,
 ): { ok: true; scope: ResourceScope } | { ok: false; status: 400 | 403; error: string } => {
-  if (value === undefined && fallback) return { ok: true, scope: fallback };
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
+  const requestedValue = value === undefined ? fallback?.owner : value;
+  if (!requestedValue || typeof requestedValue !== "object" || Array.isArray(requestedValue)) {
     return { ok: false, status: 400, error: "owner must select a valid access scope" };
   }
-  const owner = value as Partial<ResourceOwner>;
+  const owner = requestedValue as Partial<ResourceOwner>;
   const administers = canAdministerIdentity(principal.role);
   if (owner.kind === "organization") {
     if (owner.organizationId !== principal.organizationId) {
@@ -1216,6 +1217,19 @@ const requestedAccessScope = (
     } } };
   }
   return { ok: false, status: 400, error: "owner must select a valid access scope" };
+};
+
+const accessScopeTransitionError = (
+  principal: HumanPrincipal,
+  currentScope: ResourceScope,
+  targetScope: ResourceScope,
+): string | null => {
+  if (canAdministerIdentity(principal.role)) return null;
+  const sameAudience = scopeAudienceContained(currentScope, targetScope) &&
+    scopeAudienceContained(targetScope, currentScope);
+  if (sameAudience || (db.scopeAudienceContainedWithMembership(targetScope, currentScope) &&
+      !db.scopeAudienceContainedWithMembership(currentScope, targetScope))) return null;
+  return "organization owner or admin permission is required unless the access change only narrows the current audience";
 };
 
 const accessScopeOwnerFromQuery = (query: unknown): ResourceOwner | undefined => {
@@ -1305,11 +1319,12 @@ app.get("/api/projects/:id/access-scope", async (req, reply) => {
   const principal = requestHuman(req);
   if (!principal) return reply.code(403).send({ error: "human identity is required" });
   if (!manageableProject(req, id)) return reply.code(404).send({ error: "project not found" });
-  if (!canAdministerIdentity(principal.role)) {
-    return reply.code(403).send({ error: "organization owner or admin permission is required to change access" });
-  }
   const requested = requestedAccessScope(principal, accessScopeOwnerFromQuery(req.query));
   if (!requested.ok) return reply.code(requested.status).send({ error: requested.error });
+  const currentScope = db.projectScope(id);
+  if (!currentScope) return reply.code(404).send({ error: "project not found" });
+  const transitionError = accessScopeTransitionError(principal, currentScope, requested.scope);
+  if (transitionError) return reply.code(403).send({ error: transitionError });
   const preview = db.previewProjectAccessScope(id, requested.scope);
   return preview ? { preview } : reply.code(404).send({ error: "project not found" });
 });
@@ -1319,17 +1334,21 @@ app.put("/api/projects/:id/access-scope", async (req, reply) => {
   const principal = requestHuman(req);
   if (!principal) return reply.code(403).send({ error: "human identity is required" });
   if (!manageableProject(req, id)) return reply.code(404).send({ error: "project not found" });
-  if (!canAdministerIdentity(principal.role)) {
-    return reply.code(403).send({ error: "organization owner or admin permission is required to change access" });
-  }
   const body = (req.body ?? {}) as { owner?: unknown; confirmationToken?: unknown };
   const requested = requestedAccessScope(principal, body.owner);
   if (!requested.ok) return reply.code(requested.status).send({ error: requested.error });
+  const currentScope = db.projectScope(id);
+  if (!currentScope) return reply.code(404).send({ error: "project not found" });
+  const transitionError = accessScopeTransitionError(principal, currentScope, requested.scope);
+  if (transitionError) return reply.code(403).send({ error: transitionError });
   if (typeof body.confirmationToken !== "string" || !/^[a-f0-9]{64}$/u.test(body.confirmationToken)) {
     return reply.code(400).send({ error: "a valid access-scope confirmation token is required" });
   }
   try {
-    const preview = db.applyProjectAccessScope(id, requested.scope, body.confirmationToken, Date.now());
+    const preview = db.applyProjectAccessScope(id, requested.scope, body.confirmationToken, Date.now(), {
+      principal,
+      mutationAuditId: requestMutationAudits.get(req),
+    });
     if (!preview) return reply.code(404).send({ error: "project not found" });
     hub.closeScopedUiClients();
     hub.synchronizeProjectSessionState();
@@ -1723,11 +1742,20 @@ app.get("/api/identity/mutation-audit", async (req, reply) => {
   return { audit: db.listMutationAudit(principal.organizationId, Number.isFinite(rawLimit) ? rawLimit : 100) };
 });
 
+app.get("/api/identity/access-scope-audit", async (req, reply) => {
+  const principal = requestHuman(req);
+  if (!principal || !canAdministerIdentity(principal.role)) {
+    return reply.code(403).send({ error: "organization owner or admin permission is required" });
+  }
+  const rawLimit = Number((req.query as { limit?: string }).limit ?? 100);
+  return { audit: db.listAccessScopeAudit(principal.organizationId, Number.isFinite(rawLimit) ? rawLimit : 100) };
+});
+
 app.put("/api/identity/ownership/:resource/:resourceId", async (req, reply) => {
   const principal = requestHuman(req)!;
   const { resource, resourceId } = req.params as { resource: string; resourceId: string };
-  if (resource !== "runner" && resource !== "workspace" && resource !== "session") {
-    return reply.code(400).send({ error: "resource must be runner, workspace, or session" });
+  if (resource !== "runner" && resource !== "session") {
+    return reply.code(400).send({ error: "resource must be runner or session; Location access uses the preflighted access-scope endpoint" });
   }
   const body = (req.body ?? {}) as { runnerId?: unknown; owner?: unknown };
   const owner = body.owner as ResourceScope["owner"] | undefined;
@@ -1735,19 +1763,13 @@ app.put("/api/identity/ownership/:resource/:resourceId", async (req, reply) => {
     owner?.kind === "user" && typeof owner.userId === "string" ||
     owner?.kind === "team" && typeof owner.teamId === "string";
   if (!validOwner) return reply.code(400).send({ error: "invalid resource owner" });
-  if (resource === "workspace" && typeof body.runnerId !== "string") {
-    return reply.code(400).send({ error: "runnerId is required for workspace ownership" });
-  }
   try {
-    const affectedProjectIds = resource === "workspace" && typeof body.runnerId === "string"
-      ? db.projectIdsForWorkspace(body.runnerId, resourceId)
-      : resource === "session"
-        ? [db.getSession(resourceId)?.projectId].filter((id): id is string => Boolean(id))
-        : [];
+    const affectedProjectIds = resource === "session"
+      ? [db.getSession(resourceId)?.projectId].filter((id): id is string => Boolean(id))
+      : [];
     const updated = db.setResourceScope({
       resource,
       resourceId,
-      runnerId: typeof body.runnerId === "string" ? body.runnerId : undefined,
       scope: { organizationId: principal.organizationId, owner: owner! },
       now: Date.now(),
     });
@@ -1755,8 +1777,7 @@ app.put("/api/identity/ownership/:resource/:resourceId", async (req, reply) => {
     hub.closeScopedUiClients();
     hub.synchronizeProjectSessionState();
     for (const projectId of affectedProjectIds) hub.projectChangedById(projectId);
-    return { scope: resource === "runner" ? db.runnerScope(resourceId)
-      : resource === "workspace" ? db.workspaceScope(body.runnerId as string, resourceId) : db.sessionScope(resourceId) };
+    return { scope: resource === "runner" ? db.runnerScope(resourceId) : db.sessionScope(resourceId) };
   } catch (error) {
     return reply.code(409).send({ error: error instanceof Error ? error.message : "ownership update failed" });
   }
@@ -3006,11 +3027,12 @@ app.get("/api/runners/:runnerId/workspaces/:workspaceId/access-scope", async (re
   if (!db.canManageWorkspace(principal, runnerId, workspaceId)) {
     return reply.code(404).send({ error: "workspace not found" });
   }
-  if (!canAdministerIdentity(principal.role)) {
-    return reply.code(403).send({ error: "organization owner or admin permission is required to change access" });
-  }
   const requested = requestedAccessScope(principal, accessScopeOwnerFromQuery(req.query));
   if (!requested.ok) return reply.code(requested.status).send({ error: requested.error });
+  const currentScope = db.workspaceScope(runnerId, workspaceId);
+  if (!currentScope) return reply.code(404).send({ error: "workspace not found" });
+  const transitionError = accessScopeTransitionError(principal, currentScope, requested.scope);
+  if (transitionError) return reply.code(403).send({ error: transitionError });
   const preview = db.previewWorkspaceAccessScope(runnerId, workspaceId, requested.scope);
   return preview ? { preview } : reply.code(404).send({ error: "workspace not found" });
 });
@@ -3022,12 +3044,13 @@ app.put("/api/runners/:runnerId/workspaces/:workspaceId/access-scope", async (re
   if (!db.canManageWorkspace(principal, runnerId, workspaceId)) {
     return reply.code(404).send({ error: "workspace not found" });
   }
-  if (!canAdministerIdentity(principal.role)) {
-    return reply.code(403).send({ error: "organization owner or admin permission is required to change access" });
-  }
   const body = (req.body ?? {}) as { owner?: unknown; confirmationToken?: unknown };
   const requested = requestedAccessScope(principal, body.owner);
   if (!requested.ok) return reply.code(requested.status).send({ error: requested.error });
+  const currentScope = db.workspaceScope(runnerId, workspaceId);
+  if (!currentScope) return reply.code(404).send({ error: "workspace not found" });
+  const transitionError = accessScopeTransitionError(principal, currentScope, requested.scope);
+  if (transitionError) return reply.code(403).send({ error: transitionError });
   if (typeof body.confirmationToken !== "string" || !/^[a-f0-9]{64}$/u.test(body.confirmationToken)) {
     return reply.code(400).send({ error: "a valid access-scope confirmation token is required" });
   }
@@ -3038,6 +3061,7 @@ app.put("/api/runners/:runnerId/workspaces/:workspaceId/access-scope", async (re
       requested.scope,
       body.confirmationToken,
       Date.now(),
+      { principal, mutationAuditId: requestMutationAudits.get(req) },
     );
     if (!preview) return reply.code(404).send({ error: "workspace not found" });
     hub.closeScopedUiClients();
