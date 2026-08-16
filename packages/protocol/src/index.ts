@@ -219,7 +219,9 @@
 //     the runner resolves its authoritative repoPath and all other actions remain linked-only.
 // 77: runners authenticate a read-only control-plane identity attestation before opening mutable
 //     local stores, so persistent state can be bound to the installation rather than an endpoint.
-export const PROTOCOL_VERSION = 77;
+// 78: durable queued prompts share one command/queue/event identity and pre-admission queues are
+//     projected live, allowing exact cancellation without inferring authority from persisted rows.
+export const PROTOCOL_VERSION = 78;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
@@ -330,6 +332,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   conversationSteering: 73,
   sessionCommandInvocations: 75,
   gitVisibility: 76,
+  durablePromptQueueIdentity: 78,
 } as const;
 
 /* ========================================================================== */

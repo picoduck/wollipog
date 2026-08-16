@@ -2225,6 +2225,25 @@ test("prompt fails 404 for an unknown session", () => {
   assert.equal(res.status, 404);
 });
 
+test("admission-queued prompts fail closed for a released v77 runner before mutation", () => {
+  const { db, hub, svc } = makeHarness();
+  db.registerRunner(runnerMeta(), Date.now(), 77);
+  const id = seedSession(svc, hub, { prompt: "initial" });
+  assert.equal(db.getSession(id)?.status, "queued");
+  hub.sentToRunner.length = 0;
+
+  const result = svc.prompt(id, "must wait for a compatible runner");
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, 409);
+  assert.match(result.error ?? "", /requires protocol v78/);
+  assert.equal(hub.sentToRunner.length, 0);
+  assert.equal(db.getSession(id)?.queued, undefined);
+  assert.equal(db.getSession(id)?.status, "queued");
+  const count = db.raw().prepare("SELECT COUNT(*) AS count FROM session_prompt_commands").get() as { count: number };
+  assert.equal(count.count, 0);
+});
+
 test("admission-queued prompts persist before success, survive service restart, and retain FIFO", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub, { prompt: "initial" });

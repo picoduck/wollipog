@@ -93,8 +93,8 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 77", () => {
-  assert.equal(PROTOCOL_VERSION, 77);
+test("PROTOCOL_VERSION is 78", () => {
+  assert.equal(PROTOCOL_VERSION, 78);
 });
 
 test("slash-command argument hints remain additive metadata", () => {
@@ -189,6 +189,8 @@ test("v75 session commands carry opaque authorization and a distinct durable rec
   assert.equal(runnerSupportsProtocol(75, "sessionCommandInvocations"), true);
   assert.equal(runnerSupportsProtocol(75, "gitVisibility"), false);
   assert.equal(runnerSupportsProtocol(76, "gitVisibility"), true);
+  assert.equal(runnerSupportsProtocol(77, "durablePromptQueueIdentity"), false);
+  assert.equal(runnerSupportsProtocol(78, "durablePromptQueueIdentity"), true);
 });
 
 test("conversation steering types keep old peers optional and preserve correlated identities", () => {

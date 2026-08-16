@@ -2710,6 +2710,16 @@ export class SessionsService {
       return fail("tool-call limit reached — choose Continue or Stop before sending another prompt", 409);
     }
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
+    const admissionQueuedPrompt = !delivery &&
+      (session.status === "queued" || session.status === "starting");
+    if (admissionQueuedPrompt) {
+      const unsupported = this.capabilityFailure(
+        session.runnerId,
+        "durablePromptQueueIdentity",
+        "Admission-queued prompt delivery",
+      );
+      if (unsupported) return unsupported;
+    }
     const effectiveText = snapshotCommand?.type === "prompt_session" ? snapshotCommand.text : text;
     const effectiveImages = snapshotCommand?.type === "prompt_session" ? (snapshotCommand.images ?? []) : images;
     const effectiveSlashCommand = snapshotCommand?.type === "prompt_session" ? snapshotCommand.slashCommand : slashCommand;
@@ -2823,11 +2833,7 @@ export class SessionsService {
     // Current runners accept ordinary user prompts through the same durable, idempotent receipt
     // lane used by scheduler commands. Persistence happens before success is returned; retries
     // carry the stable command identity and the runner journals acceptance before queueing it.
-    const durablePrompt = !delivery && (session.status === "queued" || session.status === "starting") &&
-      runnerSupportsProtocol(
-      this.db.getRunner(session.runnerId)?.protocolVersion,
-      "automationCommandReceipts",
-    );
+    const durablePrompt = admissionQueuedPrompt;
     if (durablePrompt) {
       try {
         this.promptOutbox.stage(sessionId, session.runnerId, command, now);
