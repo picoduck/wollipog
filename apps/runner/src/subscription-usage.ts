@@ -17,6 +17,8 @@ type JsonRecord = Record<string, unknown>;
 export const SUBSCRIPTION_USAGE_PROBE_TIMEOUT_MS = 8_000;
 export const SUBSCRIPTION_USAGE_REFRESH_DEDUPE_MS = 15_000;
 const MAX_PROVIDER_BUCKETS = 64;
+const MAX_WINDOW_DURATION_MINUTES = 2 * 365 * 24 * 60;
+const MAX_RESET_AHEAD_MS = 2 * 365 * 24 * 60 * 60_000;
 
 function record(value: unknown): JsonRecord | null {
   return value != null && typeof value === "object" && !Array.isArray(value)
@@ -43,6 +45,24 @@ function epochMilliseconds(value: unknown): number | undefined {
   const parsed = finite(value);
   if (parsed === undefined || parsed <= 0) return undefined;
   return parsed < 10_000_000_000 ? Math.round(parsed * 1_000) : Math.round(parsed);
+}
+
+function boundedDurationMinutes(value: unknown): number | undefined {
+  const parsed = finite(value);
+  return parsed !== undefined && parsed >= 1 && parsed <= MAX_WINDOW_DURATION_MINUTES
+    ? parsed
+    : undefined;
+}
+
+function boundedResetAt(value: unknown, observedAt: number): number | undefined {
+  const parsed = epochMilliseconds(value);
+  return parsed !== undefined && parsed <= observedAt + MAX_RESET_AHEAD_MS ? parsed : undefined;
+}
+
+function errorText(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  const message = stringValue(record(error)?.message, 300);
+  return message ?? String(error);
 }
 
 function contextKey(context: AgentContext | undefined): string {
@@ -102,17 +122,20 @@ function codexWindow(
   limitLabel: string,
   lane: "primary" | "secondary",
   input: unknown,
+  observedAt: number,
 ): SubscriptionUsageBucket | null {
   const window = record(input);
   if (!window) return null;
   const usedPercent = percent(window.usedPercent ?? window.used_percentage);
-  const windowDurationMinutes = finite(window.windowDurationMins ?? window.window_duration_mins);
-  const resetsAt = epochMilliseconds(window.resetsAt ?? window.resets_at);
+  const windowDurationMinutes = boundedDurationMinutes(
+    window.windowDurationMins ?? window.window_duration_mins,
+  );
+  const resetsAt = boundedResetAt(window.resetsAt ?? window.resets_at, observedAt);
   if (usedPercent === undefined && windowDurationMinutes === undefined && resetsAt === undefined) return null;
   const laneLabel = durationLabel(windowDurationMinutes, lane === "primary" ? "Primary Window" : "Secondary Window");
   return {
     id: `${limitId}:${lane}`,
-    label: limitLabel === laneLabel ? limitLabel : `${limitLabel} — ${laneLabel}`,
+    label: stringValue(limitLabel === laneLabel ? limitLabel : `${limitLabel} — ${laneLabel}`, 160)!,
     ...(usedPercent === undefined ? {} : {
       usedPercent,
       remainingPercent: Math.max(0, 100 - usedPercent),
@@ -126,6 +149,7 @@ function codexWindow(
 function normalizeCodexSnapshot(
   input: unknown,
   fallbackId: string,
+  observedAt: number,
 ): {
   buckets: SubscriptionUsageBucket[];
   plan?: string;
@@ -141,8 +165,8 @@ function normalizeCodexSnapshot(
   const limitLabel = stringValue(snapshot.limitName ?? snapshot.limit_name, 120) ??
     subscriptionUsageBucketLabel(limitId);
   const buckets = [
-    codexWindow(limitId, limitLabel, "primary", snapshot.primary),
-    codexWindow(limitId, limitLabel, "secondary", snapshot.secondary),
+    codexWindow(limitId, limitLabel, "primary", snapshot.primary, observedAt),
+    codexWindow(limitId, limitLabel, "secondary", snapshot.secondary, observedAt),
   ].filter((bucket): bucket is SubscriptionUsageBucket => bucket !== null);
   const creditsRecord = record(snapshot.credits);
   const balance = creditsRecord ? stringValue(creditsRecord.balance, 80) : undefined;
@@ -160,9 +184,9 @@ function normalizeCodexSnapshot(
     ...(percent(spend.remainingPercent ?? spend.remaining_percent) === undefined
       ? {}
       : { remainingPercent: percent(spend.remainingPercent ?? spend.remaining_percent)! }),
-    ...(epochMilliseconds(spend.resetsAt ?? spend.resets_at) === undefined
+    ...(boundedResetAt(spend.resetsAt ?? spend.resets_at, observedAt) === undefined
       ? {}
-      : { resetsAt: epochMilliseconds(spend.resetsAt ?? spend.resets_at)! }),
+      : { resetsAt: boundedResetAt(spend.resetsAt ?? spend.resets_at, observedAt)! }),
     ...(typeof snapshot.spendControlReached === "boolean"
       ? { reached: snapshot.spendControlReached }
       : typeof snapshot.spend_control_reached === "boolean"
@@ -195,7 +219,7 @@ export function normalizeCodexRateLimits(
   let plan: string | undefined;
   let credits: SubscriptionUsageSnapshot["credits"];
   for (const [fallbackId, value] of snapshots.slice(0, MAX_PROVIDER_BUCKETS)) {
-    const normalized = normalizeCodexSnapshot(value, fallbackId);
+    const normalized = normalizeCodexSnapshot(value, fallbackId, fetchedAt);
     if (!normalized) continue;
     buckets.push(...normalized.buckets);
     plan ??= normalized.plan;
@@ -215,12 +239,12 @@ export function normalizeCodexRateLimits(
   };
 }
 
-function claudeWindow(id: string, input: unknown): SubscriptionUsageBucket | null {
+function claudeWindow(id: string, input: unknown, observedAt: number): SubscriptionUsageBucket | null {
   const window = record(input);
   if (!window) return null;
   const usedPercent = percent(window.used_percentage ?? window.usedPercent ?? window.utilization);
-  const resetsAt = epochMilliseconds(window.resets_at ?? window.resetsAt);
-  const duration = finite(window.window_duration_minutes ?? window.windowDurationMinutes);
+  const resetsAt = boundedResetAt(window.resets_at ?? window.resetsAt, observedAt);
+  const duration = boundedDurationMinutes(window.window_duration_minutes ?? window.windowDurationMinutes);
   const rawStatus = stringValue(window.status, 40);
   if (usedPercent === undefined && resetsAt === undefined && duration === undefined && !rawStatus) return null;
   const status = rawStatus === "rejected" || rawStatus === "exhausted"
@@ -254,14 +278,14 @@ export function normalizeClaudeRateLimits(
   const structured = record(root.rate_limits ?? root.rateLimits);
   if (structured) {
     for (const [id, value] of Object.entries(structured).slice(0, MAX_PROVIDER_BUCKETS)) {
-      const bucket = claudeWindow(id, value);
+      const bucket = claudeWindow(id, value, fetchedAt);
       if (bucket) buckets.push(bucket);
     }
   }
   const info = record(root.rate_limit_info ?? root.rateLimitInfo);
   if (info) {
     const id = stringValue(info.rateLimitType ?? info.rate_limit_type, 96) ?? "subscription";
-    const bucket = claudeWindow(id, info);
+    const bucket = claudeWindow(id, info, fetchedAt);
     if (bucket) buckets.push(bucket);
   }
   if (buckets.length === 0) return null;
@@ -316,6 +340,8 @@ interface CodexProbeDeps {
   spawn: typeof spawnAgent;
   kill: typeof killTree;
   now: () => number;
+  onSpawn?: (child: AgentProcess) => void;
+  onFinish?: (child: AgentProcess) => void;
 }
 
 export async function probeCodexSubscriptionUsage(
@@ -329,6 +355,8 @@ export async function probeCodexSubscriptionUsage(
     spawn: dependencies.spawn ?? spawnAgent,
     kill: dependencies.kill ?? killTree,
     now: dependencies.now ?? Date.now,
+    ...(dependencies.onSpawn ? { onSpawn: dependencies.onSpawn } : {}),
+    ...(dependencies.onFinish ? { onFinish: dependencies.onFinish } : {}),
   };
   let child: AgentProcess | null = null;
   let peer: JsonRpcPeer | null = null;
@@ -342,9 +370,11 @@ export async function probeCodexSubscriptionUsage(
       scrubInheritedEnv: ["OPENAI_API_KEY"],
       isolation: authorization?.isolation,
     });
+    deps.onSpawn?.(child);
     child.stderr.resume();
     peer = new JsonRpcPeer(child.stdin, child.stdout);
     child.on("exit", () => peer?.dispose("codex app-server usage probe exited"));
+    child.on("error", (error) => peer?.dispose(`codex app-server usage probe failed: ${errorText(error)}`));
     const deadlineAt = deps.now() + timeoutMs;
     await peer.requestWithDeadline("initialize", {
       clientInfo: { name: "wollipog-subscription-usage", version: "1" },
@@ -383,7 +413,10 @@ export async function probeCodexSubscriptionUsage(
     };
   } finally {
     peer?.dispose("codex app-server usage probe complete");
-    if (child) deps.kill(child);
+    if (child) {
+      deps.kill(child);
+      deps.onFinish?.(child);
+    }
   }
 }
 
@@ -406,13 +439,16 @@ export interface SubscriptionUsageManagerOptions {
   log?: (message: string) => void;
   now?: () => number;
   probeCodex?: typeof probeCodexSubscriptionUsage;
+  killProbe?: typeof killTree;
 }
 
 export class SubscriptionUsageManager {
   private readonly snapshots = new Map<string, SubscriptionUsageSnapshot>();
   private readonly lastProbeAt = new Map<string, number>();
   private readonly lastEvent = new Map<string, { signature: string; observedAt: number }>();
+  private readonly activeProbeChildren = new Set<AgentProcess>();
   private refreshPromise: Promise<SubscriptionUsageSnapshot[]> | null = null;
+  private shuttingDown = false;
 
   constructor(private readonly options: SubscriptionUsageManagerOptions) {}
 
@@ -530,6 +566,7 @@ export class SubscriptionUsageManager {
     context: AgentContext,
     update: DriverSubscriptionUsageUpdate,
   ): SubscriptionUsageSnapshot | null {
+    if (agentId === "conductor") return null;
     this.syncSources();
     const provider = driver === "codex-app-server" ? "codex" : driver === "claude-code" ? "claude" : null;
     if (!provider || provider !== update.provider) return null;
@@ -556,6 +593,7 @@ export class SubscriptionUsageManager {
   }
 
   refreshAll(): Promise<SubscriptionUsageSnapshot[]> {
+    if (this.shuttingDown) return Promise.reject(new Error("subscription usage manager is shutting down"));
     if (this.refreshPromise) return this.refreshPromise;
     this.refreshPromise = this.refreshAllNow().finally(() => {
       this.refreshPromise = null;
@@ -574,6 +612,7 @@ export class SubscriptionUsageManager {
   }
 
   private async refreshCodex(source: SubscriptionSource): Promise<void> {
+    if (this.shuttingDown) return;
     const initial = this.initialSnapshot(source);
     if (initial.state === "unsupported" ||
         initial.state === "unauthenticated" ||
@@ -606,13 +645,22 @@ export class SubscriptionUsageManager {
       }
       const authorization = await this.options.authorizeProbe?.(source.agent, env, source.sourceId);
       if (!authorization) throw new Error("subscription usage probe authorization is unavailable");
+      if (this.shuttingDown) return;
       const result = await (this.options.probeCodex ?? probeCodexSubscriptionUsage)(
         source.agent,
         env,
         SUBSCRIPTION_USAGE_PROBE_TIMEOUT_MS,
-        {},
+        {
+          kill: this.options.killProbe ?? killTree,
+          onSpawn: (child) => {
+            this.activeProbeChildren.add(child);
+            if (this.shuttingDown) (this.options.killProbe ?? killTree)(child);
+          },
+          onFinish: (child) => this.activeProbeChildren.delete(child),
+        },
         authorization,
       );
+      if (this.shuttingDown) return;
       if (result.state === "available") {
         const normalized = normalizeCodexRateLimits(
           result.rateLimits,
@@ -642,7 +690,8 @@ export class SubscriptionUsageManager {
       this.snapshots.set(source.sourceId, unavailable);
       this.options.publish(unavailable);
     } catch (error) {
-      this.options.log?.(`subscription usage probe failed for ${source.agent.id}: ${error instanceof Error ? error.message : String(error)}`);
+      if (this.shuttingDown) return;
+      this.options.log?.(`subscription usage probe failed for ${source.agent.id}: ${errorText(error)}`);
       const prior = this.snapshots.get(source.sourceId);
       const failed: SubscriptionUsageSnapshot = prior?.buckets.length
         ? {
@@ -658,6 +707,11 @@ export class SubscriptionUsageManager {
       this.snapshots.set(source.sourceId, failed);
       this.options.publish(failed);
     }
+  }
+
+  shutdown(): void {
+    this.shuttingDown = true;
+    for (const child of this.activeProbeChildren) (this.options.killProbe ?? killTree)(child);
   }
 }
 

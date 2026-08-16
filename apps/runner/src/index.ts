@@ -658,6 +658,7 @@ function startTrackedSession(
 let discovering = false;
 let rediscoverPending = false;
 let rediscoverRefreshModels = false;
+let rediscoverRefreshSubscriptionUsage = false;
 /** At least one discovery pass has completed — its result is baked into metadata.agents. */
 let discoveryDone = false;
 const DISCOVERY_REFRESH_MS = 5 * 60_000;
@@ -686,10 +687,11 @@ function publishSubscriptionUsageInventory(refreshCodex: boolean): void {
 /** Probe installed agents, merge into the advertised list, and push to the control
  * plane if already registered. Safe to call repeatedly (e.g. on a rediscover) — a
  * call made while a pass is in flight is coalesced into a single trailing rerun. */
-async function runDiscovery(refreshModels = false): Promise<void> {
+async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = true): Promise<void> {
   if (discovering) {
     rediscoverPending = true;
     rediscoverRefreshModels ||= refreshModels;
+    rediscoverRefreshSubscriptionUsage ||= refreshSubscriptionUsage;
     return;
   }
   discovering = true;
@@ -754,7 +756,7 @@ async function runDiscovery(refreshModels = false): Promise<void> {
       editors,
     };
     sendUp(update);
-    if (registered) publishSubscriptionUsageInventory(true);
+    if (registered) publishSubscriptionUsageInventory(refreshSubscriptionUsage);
   } catch (err) {
     log(`discovery failed: ${(err as Error).message}`);
   } finally {
@@ -762,8 +764,10 @@ async function runDiscovery(refreshModels = false): Promise<void> {
     if (rediscoverPending) {
       rediscoverPending = false;
       const refresh = rediscoverRefreshModels;
+      const refreshUsage = rediscoverRefreshSubscriptionUsage;
       rediscoverRefreshModels = false;
-      void runDiscovery(refresh);
+      rediscoverRefreshSubscriptionUsage = false;
+      void runDiscovery(refresh, refreshUsage);
     }
   }
 }
@@ -1139,6 +1143,15 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       void runDiscovery(true);
       break;
     case "refresh_subscription_usage":
+      if (!shouldPublishSubscriptionUsageInventory(discoveryDone, controlPlaneProtocolVersion)) {
+        sendUp({
+          type: "subscription_usage_refresh_result",
+          requestId: msg.requestId,
+          ok: false,
+          error: "subscription usage refresh is unavailable until agent discovery completes",
+        });
+        break;
+      }
       void subscriptionUsage.refreshAll()
         .then((snapshots) => sendUp({
           type: "subscription_usage_refresh_result",
@@ -1686,6 +1699,7 @@ function shutdown(): void {
   clearInterval(sessionCommandRecoveryTimer);
   if (discoveryTimer) clearInterval(discoveryTimer);
   if (reconnectTimer) clearTimeout(reconnectTimer);
+  subscriptionUsage.shutdown();
   sessions.shutdownAll();
   shells.dispose();
   log("shutting down");
@@ -1719,7 +1733,7 @@ void runDiscovery();
 // Claude Code can update itself while the runner remains connected. A bounded periodic pass
 // notices the new version and refreshes its flags/auth/slash commands; model discovery is already
 // keyed by version, so a changed binary automatically bypasses the prior version's cache entry.
-discoveryTimer = setInterval(() => void runDiscovery(), DISCOVERY_REFRESH_MS);
+discoveryTimer = setInterval(() => void runDiscovery(false, false), DISCOVERY_REFRESH_MS);
 discoveryTimer.unref?.();
 // Registration waits for deterministic runner-owned target checks. Missing adapters/images/checks
 // stay visible as unavailable; only an unexpected registry failure aborts startup.

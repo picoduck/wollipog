@@ -80,6 +80,29 @@ test("provider-controlled bucket ids are sanitized to control-plane bounds", () 
   assert.doesNotMatch(JSON.stringify([codex.buckets[0], claude.buckets[0]]), /\u0007/);
 });
 
+test("provider numeric sentinels are omitted instead of invalidating whole snapshots", () => {
+  const farFutureSeconds = 9_999_999_999;
+  const codex = normalizeCodexRateLimits({
+    rateLimits: {
+      limitId: "codex",
+      limitName: "x".repeat(120),
+      primary: { usedPercent: 10, windowDurationMins: 0, resetsAt: farFutureSeconds },
+    },
+  }, base, 1_000);
+  const claude = normalizeClaudeRateLimits({
+    rate_limits: {
+      five_hour: { used_percentage: 10, window_duration_minutes: -1, resets_at: farFutureSeconds },
+    },
+  }, base, 1_000);
+  assert.ok(codex);
+  assert.ok(claude);
+  for (const bucket of [codex.buckets[0], claude.buckets[0]]) {
+    assert.equal(bucket?.windowDurationMinutes, undefined);
+    assert.equal(bucket?.resetsAt, undefined);
+    assert.ok((bucket?.label.length ?? 0) <= 160);
+  }
+});
+
 test("the Codex refresh probe uses only account APIs, never starts a turn, and always reaps", async () => {
   const requestStream = new PassThrough();
   const responseStream = new PassThrough();
@@ -120,6 +143,28 @@ test("the Codex refresh probe uses only account APIs, never starts a turn, and a
   assert.equal(launched?.isolation, isolation);
   assert.equal(killed, 1);
   assert.equal(result.state, "available");
+});
+
+test("a probe spawn error rejects through the refresh path and still reaps", async () => {
+  const child = new EventEmitter() as AgentProcess;
+  Object.assign(child, {
+    pid: undefined,
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+  });
+  let killed = 0;
+  const probe = probeCodexSubscriptionUsage(agent(), {}, 1_000, {
+    spawn: (() => {
+      queueMicrotask(() => child.emit("error", new Error("launch failed")));
+      return child;
+    }) as never,
+    kill: (() => { killed++; }) as never,
+  }, { cwd: "/safe/subscription-probe" });
+  await assert.rejects(probe, (error: unknown) =>
+    typeof error === "object" && error !== null &&
+      "message" in error && String(error.message).includes("launch failed"));
+  assert.equal(killed, 1);
 });
 
 function agent(overrides: Partial<AgentDefinition> = {}): AgentDefinition {
@@ -253,6 +298,62 @@ test("subscription inventories wait for discovery and negotiated protocol suppor
   assert.equal(shouldPublishSubscriptionUsageInventory(false, 78), false);
   assert.equal(shouldPublishSubscriptionUsageInventory(true, 77), false);
   assert.equal(shouldPublishSubscriptionUsageInventory(true, 78), true);
+});
+
+test("shutdown reaps an in-flight detached probe and refuses new refreshes", async () => {
+  const child = new EventEmitter() as AgentProcess;
+  Object.assign(child, {
+    pid: 321,
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+  });
+  let releaseProbe!: () => void;
+  const gate = new Promise<void>((resolve) => { releaseProbe = resolve; });
+  let killed = 0;
+  let published = 0;
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [agent()],
+    resolveEnv: () => ({}),
+    authorizeProbe: () => ({ cwd: "/safe/subscription-probe" }),
+    publish: () => { published++; },
+    now: () => 20_000,
+    killProbe: () => { killed++; },
+    probeCodex: async (_agent, _env, _timeout, dependencies) => {
+      dependencies.onSpawn?.(child);
+      await gate;
+      dependencies.onFinish?.(child);
+      return {
+        state: "available",
+        rateLimits: { rateLimits: { limitId: "codex", primary: { usedPercent: 10 } } },
+      };
+    },
+  });
+  const refresh = manager.refreshAll();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  manager.shutdown();
+  assert.equal(killed, 1);
+  await assert.rejects(manager.refreshAll(), /shutting down/);
+  releaseProbe();
+  await refresh;
+  assert.equal(published, 0, "shutdown suppresses late probe publication");
+});
+
+test("conductor observations never create stored subscription sources", () => {
+  let published = 0;
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [agent({ id: "conductor", driver: "claude-code" })],
+    resolveEnv: () => ({}),
+    publish: () => { published++; },
+  });
+  assert.equal(manager.observe("conductor", "claude-code", { kind: "native" }, {
+    provider: "claude",
+    payload: { rate_limits: { five_hour: { used_percentage: 10 } } },
+  }), null);
+  assert.equal(published, 0);
+  assert.deepEqual(manager.inventory(), []);
 });
 
 test("source synchronization reports auth modes without probing or exposing account identity", async () => {
