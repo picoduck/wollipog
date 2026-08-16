@@ -47,3 +47,11 @@ test("runner lifecycle conflicts stay useful when the server omits session detai
   assert.equal(conflict.omittedSessionCount, 0);
   assert.equal(renderToStaticMarkup(<LifecycleConflictDetails conflict={conflict} />), "");
 });
+
+test("legacy adoption conflict copy preserves the explicit migration action", () => {
+  const conflict = lifecycleConflictPresentation(
+    new ApiError("active sessions", 409, "BOX_HAS_ACTIVE_SESSIONS", { activeSessionCount: 1 }),
+    "adopt",
+  );
+  assert.equal(conflict.message, "Adopting legacy data for this runner will interrupt 1 active session.");
+});

@@ -48,6 +48,7 @@ import {
 } from "./config.js";
 import {
   applyConductorFeature,
+  defaultConductorHost,
   provisionConductor,
   removeConductorMcpConfig,
   sweepConductorMcpConfigs,
@@ -129,6 +130,7 @@ import { PendingShellOpenCancellations } from "./pending-shell-open-cancellation
 import { handleShellOpenCommand } from "./shell-open-command.js";
 import { startSessionWithMaterializationFence } from "./session-start-command.js";
 import { handleSessionCancellationCommand } from "./session-cancellation-command.js";
+import { acquireRunnerDataDirLease, type RunnerDataDirLease } from "./runner-data-dir.js";
 
 const INITIAL_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 30_000;
@@ -182,13 +184,38 @@ const warnLegacyEnvironment = (message: string) => console.warn(`[runner ${confi
 const conductorFeatureEnabled = conductorEnabled(process.env, warnLegacyEnvironment);
 const claudeHookFeatureEnabled = claudeHooksEnabled(process.env, warnLegacyEnvironment);
 warnLegacyClaudeLifetimeEnvironment(process.env, warnLegacyEnvironment);
-const stagedRunnerCredential = stageRunnerCredentialFile(config.dataDir, config.token);
+const runnerDataIdentity = { runnerId: config.runnerId, controlPlaneUrl: config.controlPlaneUrl };
+let dataDirLease: RunnerDataDirLease;
+try {
+  dataDirLease = acquireRunnerDataDirLease(
+    config.dataDir,
+    runnerDataIdentity,
+    { adoptLegacyDataDir: parsed.adoptLegacyDataDir },
+  );
+} catch (error) {
+  console.error(`[runner ${config.runnerId}] data directory unavailable: ${(error as Error).message}`);
+  process.exit(1);
+}
+config.dataDir = dataDirLease.dataDir;
+process.once("exit", dataDirLease.release);
+if (dataDirLease.migratedLegacyDataDir) {
+  log(`claimed legacy data directory ${config.dataDir} after explicit --adopt-legacy-data-dir authorization`);
+}
+const stagedRunnerCredential = stageRunnerCredentialFile(
+  config.dataDir,
+  config.token,
+  runnerDataIdentity,
+);
 const runnerCredentialFile = stagedRunnerCredential.activePath;
+const conductorHost = {
+  ...defaultConductorHost(),
+  configDir: resolve(config.dataDir, "conductor"),
+};
 const claudeHookHost = {
   ...defaultClaudeHookHost(),
   configDir: claudeHookRunnerConfigDir(config.dataDir, config.runnerId),
 };
-sweepConductorMcpConfigs();
+sweepConductorMcpConfigs(conductorHost.configDir);
 sweepClaudeHookFiles(claudeHookHost.configDir);
 
 const runnerHostname = hostname();
@@ -339,6 +366,7 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
         enabled: conductorFeatureEnabled,
       },
       log,
+      conductorHost,
     );
     provisionClaudeHooks(
       meta,
@@ -733,6 +761,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             enabled: conductorFeatureEnabled,
           },
           log,
+          conductorHost,
         );
         provisionClaudeHooks(
           msg.spec,
@@ -854,6 +883,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
               enabled: conductorFeatureEnabled,
             },
             log,
+            conductorHost,
           );
           provisionClaudeHooks(
             msg.command.spec,
@@ -920,9 +950,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         log(`session deletion failed for ${msg.sessionId}: ${errText(error)}`);
       });
       shells.closeForSession(msg.sessionId);
-      // Reap the conductor's per-session mcp-config too (it holds MANAGER_TOKEN in
-      // plaintext); best-effort and a no-op for non-conductor sessions.
-      removeConductorMcpConfig(msg.sessionId);
+      // Reap the conductor per-session MCP config too. It references the runner credential file;
+      // best-effort removal is a no-op for non-conductor sessions.
+      removeConductorMcpConfig(msg.sessionId, conductorHost.configDir);
       removeClaudeHookFiles(msg.sessionId, claudeHookHost.configDir);
       break;
     case "resolve_permission":
@@ -1532,6 +1562,7 @@ function shutdown(): void {
 
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
+process.on("SIGHUP", shutdown);
 
 log(
   `starting v${VERSION} — host=${metadata.hostname} os=${metadata.os} ` +

@@ -298,7 +298,7 @@ test("pending runner rotation preserves the active conductor token until acknowl
   });
 });
 
-test("removeConductorMcpConfig deletes the per-session token file; missing files no-op", () => {
+test("removeConductorMcpConfig deletes the per-session credential-reference file; missing files no-op", () => {
   withTempDir((dir) => {
     const spec = makeSpec();
     provisionConductor(spec, CP_CONFIG, () => {}, makeHost(dir));

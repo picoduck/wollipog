@@ -4,9 +4,12 @@ import type { SessionView } from "@wollipog/protocol";
 import {
   blockingRunnerSessions,
   boxLifecycleConflict,
+  canAuthorizeLegacyDataAdoption,
   decideBoxLifecycle,
   decideScopedBoxLifecycle,
+  decideScopedBoxLifecycleForRunners,
   parseBoxLifecycleForce,
+  parseLegacyDataAdoption,
 } from "./box-lifecycle.js";
 
 const session = (id: string, runnerId: string, status: SessionView["status"]): Pick<SessionView, "id" | "runnerId" | "title" | "status"> => ({
@@ -69,6 +72,26 @@ test("box lifecycle force parsing fails closed and conflict payload stays bounde
   }
 });
 
+test("legacy adoption requires exact acknowledgement and owner or admin authority", () => {
+  assert.equal(parseLegacyDataAdoption(undefined).ok, false);
+  assert.equal(parseLegacyDataAdoption({}).ok, false);
+  assert.equal(parseLegacyDataAdoption({ acknowledgeAllLegacyRunnersStopped: false }).ok, false);
+  assert.equal(parseLegacyDataAdoption({ acknowledgeAllLegacyRunnersStopped: true, force: "yes" }).ok, false);
+  assert.deepEqual(parseLegacyDataAdoption({ acknowledgeAllLegacyRunnersStopped: true }), {
+    ok: true,
+    force: false,
+  });
+  assert.deepEqual(parseLegacyDataAdoption({ acknowledgeAllLegacyRunnersStopped: true, force: true }), {
+    ok: true,
+    force: true,
+  });
+  assert.equal(canAuthorizeLegacyDataAdoption(null), false);
+  assert.equal(canAuthorizeLegacyDataAdoption({ role: "viewer" }), false);
+  assert.equal(canAuthorizeLegacyDataAdoption({ role: "member" }), false);
+  assert.equal(canAuthorizeLegacyDataAdoption({ role: "admin" }), true);
+  assert.equal(canAuthorizeLegacyDataAdoption({ role: "owner" }), true);
+});
+
 test("scoped lifecycle conflicts hide inaccessible session metadata without weakening the safety gate", () => {
   const sessions = [
     session("visible", "box-runner", "idle"),
@@ -93,5 +116,35 @@ test("scoped lifecycle conflicts hide inaccessible session metadata without weak
     decideScopedBoxLifecycle(sessions, "box-runner", true, "update", () => false),
     { ok: true },
     "explicit force still permits the action even when every blocking session is hidden",
+  );
+});
+
+test("legacy account admission includes active sessions from every sibling runner", () => {
+  const sessions = [
+    session("target-idle", "target-runner", "idle"),
+    session("sibling-running", "sibling-runner", "running"),
+    session("unrelated", "other-runner", "running"),
+  ];
+  const blocked = decideScopedBoxLifecycleForRunners(
+    sessions,
+    ["target-runner", "sibling-runner"],
+    false,
+    "adopt",
+    () => true,
+  );
+  assert.equal(blocked.ok, false);
+  if (!blocked.ok) {
+    assert.deepEqual(blocked.conflict.activeSessions.map(({ id }) => id), ["target-idle", "sibling-running"]);
+  }
+  assert.deepEqual(
+    decideScopedBoxLifecycleForRunners(
+      sessions,
+      ["target-runner", "sibling-runner"],
+      true,
+      "adopt",
+      () => true,
+    ),
+    { ok: true },
+    "the explicit force acknowledgement covers the complete legacy SSH-account sibling set",
   );
 });

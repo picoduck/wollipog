@@ -1025,6 +1025,16 @@ export interface BoxView {
   /** Target triple detected on first bootstrap (e.g. `aarch64-unknown-linux-gnu`); tells the user
    * WHICH runner binary to rebuild when the dashboard can't resolve a fresh one. */
   triple?: string | null;
+  /** Server-managed runner state layout. Legacy roots require explicit adoption before upgrade. */
+  runnerDataLayout?: "legacy" | "isolated-v1";
+  /** Content-free projection of the latest explicit legacy-data adoption authorization. */
+  legacyDataAdoption?: {
+    status: "pending" | "completed";
+    authorizedAt: number;
+    completedAt?: number;
+  } | null;
+  /** Bounded account-level state shared by every legacy box with the same SSH target and port. */
+  legacyDataAccountStatus?: "unclaimed" | "pending" | "adopted";
 }
 
 /* ========================================================================== */

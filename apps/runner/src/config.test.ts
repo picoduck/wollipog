@@ -151,6 +151,12 @@ test("parseArgs --version sets showVersion", () => {
   assert.equal(parseArgs([]).showVersion, false);
 });
 
+test("parseArgs requires an exact CLI flag for one-time legacy data adoption", () => {
+  assert.equal(parseArgs([]).adoptLegacyDataDir, false);
+  assert.equal(parseArgs(["--adopt-legacy-data-dir"]).adoptLegacyDataDir, true);
+  assert.equal(parseArgs(["--adopt-legacy-data-dir=true"]).adoptLegacyDataDir, false);
+});
+
 test("parseWorkspaceArg splits id:path on the first colon, keeps Windows drive paths bare", () => {
   assert.deepEqual(parseWorkspaceArg("home:/home/me/x"), { id: "home", name: "home", path: "/home/me/x" });
   // A Windows drive path has no id → derive id from the basename.

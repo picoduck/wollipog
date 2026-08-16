@@ -1,7 +1,7 @@
 /**
  * Phase 2: the box's on-disk session store — the SOURCE OF TRUTH for sessions. Lives at
- * `~/.agent-manager/sessions/<sessionId>/` and is SHARED by every runner instance on the box, so a
- * session created by one dashboard's runner is visible to (and resumable from) another's.
+ * `<dataDir>/sessions/<sessionId>/` inside the runner-owned data root. Runner startup exclusively
+ * leases that root, so another runner process cannot read or mutate this store concurrently.
  *
  *   <sessionId>/meta.json      session metadata incl. the resumable agent-session-id + seq high-water
  *   <sessionId>/events.ndjson  initial append-only event log (or legacy-writer directory fence)
