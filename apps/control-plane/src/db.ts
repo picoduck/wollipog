@@ -171,6 +171,7 @@ export const MAX_PROJECTED_STEERING_ATTEMPTS = 50;
 export const MAX_UNRESOLVED_STEERING_ATTEMPTS = 50;
 export const MAX_PENDING_STEERING_RESOLUTION_REPLAYS = 50;
 const SESSION_PROMPT_TERMINAL_RETENTION_MS = 7 * 24 * 60 * 60_000;
+const SESSION_PROMPT_ATTEMPT_RETENTION_LIMIT = 128;
 
 const ARTIFACT_TABLE_SCHEMA = /* sql */ `
 CREATE TABLE IF NOT EXISTS artifacts (
@@ -9356,6 +9357,13 @@ export class ControlPlaneDb {
         "INSERT INTO session_prompt_command_attempts (request_id,command_id,runner_id,sent_at) VALUES (?,?,?,?)",
       ).run(requestId, commandId, row.runner_id, now);
       this.stmt(
+        `DELETE FROM session_prompt_command_attempts
+         WHERE command_id=? AND request_id NOT IN (
+           SELECT request_id FROM session_prompt_command_attempts
+           WHERE command_id=? ORDER BY sent_at DESC,rowid DESC LIMIT ?
+         )`,
+      ).run(commandId, commandId, SESSION_PROMPT_ATTEMPT_RETENTION_LIMIT);
+      this.stmt(
         `UPDATE session_prompt_commands
          SET state=CASE WHEN state IN ('pending','sent') THEN 'sent' ELSE state END,
              attempt_count=attempt_count+1,next_attempt_at=?,updated_at=?
@@ -9400,9 +9408,13 @@ export class ControlPlaneDb {
       }
       const terminal = new Set<SessionPromptCommandState>(["completed", "failed", "uncertain"]);
       const incomingTerminal = terminal.has(input.state);
-      const refinesCancellation = row.state === "uncertain" && input.state === "failed" &&
-        input.code === "COMMAND_CANCELLED" && input.revision >= row.revision;
-      if ((terminal.has(row.state) && !refinesCancellation) || input.revision < row.revision ||
+      // CP terminality is a conservative no-retry fence, not proof of the runner outcome. A later
+      // authenticated terminal receipt may narrow `uncertain` to the definitive provider result;
+      // no terminal state other than uncertainty is mutable, and nonterminal updates never revive it.
+      const refinesUncertain = row.state === "uncertain" &&
+        (input.state === "completed" || input.state === "failed") &&
+        input.revision >= row.revision;
+      if ((terminal.has(row.state) && !refinesUncertain) || input.revision < row.revision ||
           (input.revision === row.revision && input.state === row.state)) {
         this.db.exec("COMMIT");
         return { command: this.sessionPromptCommand(row), advanced: false };

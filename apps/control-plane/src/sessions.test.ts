@@ -2471,11 +2471,65 @@ test("durable queued prompts accept revision-zero failures and stop retrying aft
   assert.equal(db.dueSessionPromptCommands(Date.now() + 60_000, RUNNER_ID).length, 0,
     "terminal sessions fence every durable retry path");
 
+  const uncertainRevision = db.getSessionPromptCommand(stranded.commandId)!.revision;
+  assert.equal(svc.onDurablePromptReceipt(RUNNER_ID, {
+    type: "durable_session_command_update",
+    commandId: stranded.commandId,
+    sessionId: id,
+    state: "completed",
+    revision: uncertainRevision + 1,
+  }), true);
+  assert.equal(db.getSessionPromptCommand(stranded.commandId)?.state, "completed",
+    "a later authoritative terminal receipt narrows conservative status uncertainty");
+
   db.raw().prepare("UPDATE session_prompt_commands SET expires_at=? WHERE command_id IN (?,?)")
     .run(Date.now() - 1, rejected.commandId, stranded.commandId);
   svc.maintainPrompts();
   assert.equal(db.getSessionPromptCommand(rejected.commandId), null);
   assert.equal(db.getSessionPromptCommand(stranded.commandId), null);
+});
+
+test("durable prompt retry attempt identities stay bounded while recent receipts remain valid", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { prompt: "initial" });
+  hub.sentToRunner.length = 0;
+  const command: DurableSessionCommand = {
+    type: "prompt_session", sessionId: id, text: "bounded retry journal",
+  };
+  const commandId = "prompt-bounded-attempts";
+  const now = Date.now();
+  db.stageSessionPromptCommand({
+    commandId,
+    sessionId: id,
+    runnerId: RUNNER_ID,
+    payloadJson: canonicalAutomationCommandJson(command),
+    payloadSha256: automationCommandDigest(command),
+    expiresAt: now + 60_000,
+    now,
+  });
+
+  for (let attempt = 0; attempt < 160; attempt++) {
+    assert.ok(db.markSessionPromptCommandSent(
+      commandId,
+      `bounded-attempt-${attempt}`,
+      now + attempt,
+      now + attempt + 30_000,
+    ));
+  }
+  const count = db.raw().prepare(
+    "SELECT COUNT(*) AS count FROM session_prompt_command_attempts WHERE command_id=?",
+  ).get(commandId) as { count: number };
+  assert.equal(count.count, 128);
+  assert.equal(svc.onDurablePromptReceipt(RUNNER_ID, {
+    type: "durable_session_command_result",
+    requestId: "bounded-attempt-159",
+    commandId,
+    sessionId: id,
+    state: "accepted",
+    revision: 1,
+    duplicate: true,
+  }), true, "the newest retained request identity still authenticates its receipt");
+  assert.equal(db.getSessionPromptCommand(commandId)?.state, "accepted");
 });
 
 test("completed durable prompts compact their retained content", () => {
