@@ -274,7 +274,7 @@ export function OnboardRunnerDialog({
             </section>
           )}
 
-          {showLocalSetup && (
+          {showLocalSetup && mode !== "local" && (
             <button
               type="button"
               className="btn ghost onboard-advanced-toggle"
@@ -285,7 +285,13 @@ export function OnboardRunnerDialog({
             </button>
           )}
 
-          {(!showLocalSetup || advancedOpen) && <>
+          {mode === "local" && !showLocalSetup && (
+            <p className="form-error" role="alert">
+              {error ?? "Wollipog could not access its managed local runner. Close this dialog and try again."}
+            </p>
+          )}
+
+          {mode !== "local" && (!showLocalSetup || advancedOpen) && <>
           <p className="muted">
             A <strong>runner</strong> runs on any machine that owns a repo and toolchain — this box, a WSL distro, a Linux
             server, a Mac. It connects <em>out</em> to this control plane, so there's nothing to expose inbound on the runner.

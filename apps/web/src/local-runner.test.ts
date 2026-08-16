@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   connectLocalRunner,
   hasBundledLocalRunner,
+  isManagedLocalRunnerRepair,
   readLocalRunnerStatus,
   selectLocalRunnerId,
   type LocalRunnerDesktopRuntime,
@@ -58,6 +59,21 @@ test("desktop setup delegates credential provisioning and startup to the trusted
       args: { runnerId: "this-machine", localDeviceToken: token },
     },
   ]);
+});
+
+test("repair routing distinguishes the managed local runner from external runners", () => {
+  const status = {
+    available: true,
+    enabled: true,
+    running: false,
+    runnerId: "this-machine",
+  };
+  assert.equal(isManagedLocalRunnerRepair("this-machine", status, true, true), true);
+  assert.equal(isManagedLocalRunnerRepair("external-runner", status, true, true), false);
+  assert.equal(isManagedLocalRunnerRepair("this-machine", status, false, true), false);
+  assert.equal(isManagedLocalRunnerRepair("this-machine", status, true, false), false);
+  assert.equal(isManagedLocalRunnerRepair("this-machine", { ...status, available: false }, true, true), false);
+  assert.equal(isManagedLocalRunnerRepair("this-machine", null, true, true), false);
 });
 
 test("local runner setup preserves configuration and deconflicts the per-install suggestion", () => {
