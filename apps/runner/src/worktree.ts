@@ -24,6 +24,7 @@ import {
   restoreWorktreeToTree,
   withGitExecutionContext,
 } from "./git-ops.js";
+import { canIgnoreRunnerDataDirDirectorySyncError } from "./runner-data-dir.js";
 
 const MIN_FREE_BYTES = 512 * 1024 * 1024;
 const nativeContext: AgentContext = { kind: "native" };
@@ -136,7 +137,7 @@ export class WorktreeCleanupJournal {
         directoryFd = openSync(dirname(this.path), constants.O_RDONLY);
         fsyncSync(directoryFd);
       } catch (error) {
-        if (process.platform !== "win32") throw error;
+        if (!canIgnoreRunnerDataDirDirectorySyncError(error as NodeJS.ErrnoException)) throw error;
       } finally {
         if (directoryFd !== undefined) closeSync(directoryFd);
       }
