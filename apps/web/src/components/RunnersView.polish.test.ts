@@ -25,6 +25,7 @@ test("Connections separates machines from people and exposes durable machine rec
   assert.match(view, /Ask an organization owner or admin to repair this connection/);
   assert.match(view, /initialRunnerId=\{repairRunnerId\}/);
   assert.match(view, /isManagedLocalRunnerRepair\(runnerId, localRunnerStatus, bundledLocalRunner, localInstanceActive\)/);
+  assert.match(view, /isManagedLocalRunnerRepair[\s\S]*setOnboarding\("local"\)[\s\S]*setRepairRunnerId\(runnerId\)/);
   assert.match(view, /onRepair=\{repairRunner\}/);
   assert.match(view, /const needsUpdate = !!runner && runnerOutdated\(runner\.protocolVersion\)/);
   assert.match(view, /\{canManage && needsUpdate && !inProgress && \(/);
@@ -107,6 +108,8 @@ test("runner repair preserves identity, rotates when needed, and exposes selecti
   assert.match(onboarding, /initialRunnerId\?: string/);
   assert.match(onboarding, /api\.rotateRunnerCredential\(id, "Connection repair"\)/);
   assert.match(onboarding, /readOnly=\{repairingExisting\}/);
+  assert.match(onboarding, /mode !== "local" && \(!showLocalSetup \|\| advancedOpen\)/);
+  assert.match(onboarding, /Wollipog could not access its managed local runner\. Close this dialog and try again\./);
   assert.match(onboarding, /role="radiogroup"/);
   assert.match(onboarding, /role="radio"/);
   assert.match(onboarding, /aria-checked=\{host === h\}/);
