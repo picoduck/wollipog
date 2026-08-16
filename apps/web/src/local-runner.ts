@@ -21,6 +21,18 @@ export function hasBundledLocalRunner(desktop: LocalRunnerDesktopRuntime = runti
   return desktop.isTauri();
 }
 
+export function isManagedLocalRunnerRepair(
+  runnerId: string,
+  status: LocalRunnerStatus | null,
+  bundledLocalRunner: boolean,
+  localInstanceActive: boolean,
+): boolean {
+  return bundledLocalRunner
+    && localInstanceActive
+    && status?.available === true
+    && status.runnerId === runnerId;
+}
+
 /** Browser dashboards cannot install processes on the machine serving Wollipog. */
 export async function readLocalRunnerStatus(
   desktop: LocalRunnerDesktopRuntime = runtime,

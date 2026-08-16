@@ -24,6 +24,8 @@ test("Connections separates machines from people and exposes durable machine rec
   assert.match(view, /<NativeRunnerCard[\s\S]*canManage=\{canManageMachines\}/);
   assert.match(view, /Ask an organization owner or admin to repair this connection/);
   assert.match(view, /initialRunnerId=\{repairRunnerId\}/);
+  assert.match(view, /isManagedLocalRunnerRepair\(runnerId, localRunnerStatus, bundledLocalRunner, localInstanceActive\)/);
+  assert.match(view, /onRepair=\{repairRunner\}/);
   assert.match(view, /const needsUpdate = !!runner && runnerOutdated\(runner\.protocolVersion\)/);
   assert.match(view, /\{canManage && needsUpdate && !inProgress && \(/);
   assert.doesNotMatch(view, /\{needsUpdate && !updating && \(/);

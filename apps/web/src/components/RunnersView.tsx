@@ -50,6 +50,7 @@ import { useInstances } from "../instances-context.js";
 import type { ConnectionSection } from "../navigation.js";
 import {
   hasBundledLocalRunner,
+  isManagedLocalRunnerRepair,
   readLocalRunnerStatus,
   type LocalRunnerStatus,
 } from "../local-runner.js";
@@ -1272,6 +1273,13 @@ export function RunnersView() {
     localRunnerStatus?.runnerId && runners.get(localRunnerStatus.runnerId)?.status === "online",
   );
   const localInstanceActive = instances.activeProfile.kind === "local";
+  const repairRunner = (runnerId: string) => {
+    if (isManagedLocalRunnerRepair(runnerId, localRunnerStatus, bundledLocalRunner, localInstanceActive)) {
+      setOnboarding("local");
+      return;
+    }
+    setRepairRunnerId(runnerId);
+  };
   const offerLocalSetup = Boolean(
     localInstanceActive && localRunnerStatus?.available && (!localRunnerStatus.enabled || !localRunnerOnline),
   );
@@ -1425,7 +1433,7 @@ export function RunnersView() {
             removeError={removeError[runner.runnerId]}
             onRediscover={rediscover}
             onManage={setSettingsRunnerId}
-            onRepair={setRepairRunnerId}
+            onRepair={repairRunner}
           />
         ))}
         </div>}
