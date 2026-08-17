@@ -16,6 +16,7 @@ import "../styles.css";
 const params = new URLSearchParams(window.location.search);
 const mode = params.get("mode") === "preview" ? ("preview" as const) : ("expanded" as const);
 const frameHeight = Number(params.get("height") ?? "600");
+const frameWidth = Number(params.get("width") ?? "900");
 const pinnedOpen = params.get("pinned") === "1";
 
 const SESSION_ID = "recovery-e2e-session";
@@ -175,7 +176,7 @@ createRoot(document.getElementById("root")!).render(
       {/* The frame stands in for the pane an inbox splitter produces: fixed height, clipped. */}
       <div
         id="frame"
-        style={{ height: frameHeight, width: 900, display: "flex", flexDirection: "column", overflow: "hidden" }}
+        style={{ height: frameHeight, width: frameWidth, display: "flex", flexDirection: "column", overflow: "hidden" }}
       >
         <SessionDetail
           sessionId={SESSION_ID}

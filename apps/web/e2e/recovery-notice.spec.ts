@@ -63,3 +63,42 @@ test("a tall pane shows the in-flow pill and the pinned summary can never inters
   // In the tall pane the compact echo stays out of the strip.
   await expect(page.locator(".transcript-recovery-strip-echo")).toBeHidden();
 });
+
+test("a compressed expanded pane hides the pinned summary instead of letting it cover the strip", async ({ page }) => {
+  await page.setViewportSize({ width: 800, height: 720 });
+  await page.goto("/recovery-notice-e2e.html?mode=expanded&height=250&pinned=1");
+  // The reader is too short to contain the floating card, so it must not render at all —
+  // an escaped card previously covered the compact status strip.
+  await expect(page.locator(".pinned-summary")).toBeHidden();
+
+  // The compact strip (with its echo) survives fully inside the pane and stays usable.
+  const strip = page.locator(".transcript-status-strip");
+  await expect(strip).toBeVisible();
+  await expect(page.locator(".transcript-recovery-slot")).toBeHidden();
+  await expect(page.locator(".transcript-recovery-strip-echo")).toBeVisible();
+  const frame = await box(page.locator("#frame"));
+  const stripBox = await box(strip);
+  expect(stripBox.bottom).toBeLessThanOrEqual(frame.bottom + 0.5);
+  await page.locator(".follow-tail-chip").click();
+});
+
+test("a 320px-wide compact pane keeps the echo inside the viewport, truncating in place", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 720 });
+  await page.goto("/recovery-notice-e2e.html?mode=preview&height=150&width=320");
+  const echo = page.locator(".transcript-recovery-strip-echo");
+  await expect(echo).toBeVisible();
+
+  // The whole echo stays within its grid track and therefore within the viewport — the
+  // regression pushed it to x ≈ -100 with only the label's tail visible.
+  const echoBox = await echo.evaluate((el) => {
+    const r = el.getBoundingClientRect();
+    return { left: r.left, right: r.right };
+  });
+  expect(echoBox.left).toBeGreaterThanOrEqual(-0.5);
+  expect(echoBox.right).toBeLessThanOrEqual(320.5);
+
+  // And it truncates in place: the label is genuinely wider than its clipped box.
+  const truncated = await echo.locator("span").last()
+    .evaluate((el) => el.scrollWidth > el.clientWidth && getComputedStyle(el).textOverflow === "ellipsis");
+  expect(truncated).toBe(true);
+});

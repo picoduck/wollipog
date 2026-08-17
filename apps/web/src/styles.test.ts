@@ -217,6 +217,13 @@ test("short panes keep the status strip, and the pinned summary is bounded by th
   // The strip itself never flexes away beneath the slot.
   assert.match(soleRuleBody(".transcript-status-strip"), /flex:\s*none;/);
 
+  // Inbox preview panes always use the compact presentation: the pill band would permanently
+  // spend ~47px of a splitter-resizable reader, and shrinking the preview viewport measurably
+  // degrades virtualizer paging while freshly streamed rows are still measuring. Mode-based,
+  // not activity-based, so recovery toggles stay layout-free in previews too.
+  assert.match(soleRuleBody(".session-detail.preview .transcript-recovery-slot"), /display:\s*none;/);
+  assert.match(soleRuleBody(".session-detail.preview .transcript-recovery-strip-echo"), /display:\s*inline-flex;/);
+
   // The pinned summary's containing block is the reader region — which the DOM tests pin as
   // containing the scroller and neither the slot nor the strip — so no pixel reservation for
   // siblings may reappear in its max-height.
@@ -226,6 +233,27 @@ test("short panes keep the status strip, and the pinned summary is bounded by th
     "the summary reserves only its own top offset and bottom breathing room");
   assert.doesNotMatch(summary, /66px/,
     "the old strip-and-slot pixel reservation must not return");
+
+  // The reader region clips: in panes shorter than the scroller's own padding floor, the
+  // scroller would otherwise overflow the reader down over the strip and swallow its clicks.
+  assert.match(soleRuleBody(".detail-reader"), /overflow:\s*clip;/,
+    "nothing inside the reader may paint or intercept below its bounds");
+
+  // A reader too short to CONTAIN the summary must hide it: a max-height cap cannot shrink the
+  // card below its own offset + padding floor, so an escaped card covered the compact strip.
+  assert.match(soleRuleBody(".detail-reader"), /container:\s*transcript-reader \/ size;/);
+  const shortReader = /@container transcript-reader \(max-height:\s*\d+px\)\s*\{([\s\S]*?)\n\}/.exec(css);
+  assert.ok(shortReader, "the short-reader mode must exist");
+  assert.match(shortReader![1]!, /\.pinned-summary\s*\{\s*display:\s*none;\s*\}/,
+    "a reader that cannot contain the summary must hide it, not let it escape over the strip");
+
+  // The compact echo truncates IN PLACE: its grid cell is pinned to its track and the echo to
+  // its cell, so a phone-width strip ellipsizes the label instead of pushing it off-screen.
+  assert.match(soleRuleBody(".transcript-status-context"), /max-width:\s*100%;/,
+    "the strip's leading cell must not outgrow its grid track");
+  assert.match(soleRuleBody(".transcript-recovery-strip-echo"), /max-width:\s*100%;/,
+    "the echo must not outgrow the strip's leading cell");
+  assert.match(soleRuleBody(".transcript-recovery-strip-echo > span:last-child"), /text-overflow:\s*ellipsis;/);
 });
 
 /** Relative luminance per WCAG 2.1, from a `#rrggbb` token value. */

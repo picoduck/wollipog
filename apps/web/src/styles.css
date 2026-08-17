@@ -2269,6 +2269,16 @@ textarea {
   flex-direction: column;
   flex: 1;
   min-height: 0;
+  /* In a pane shorter than the scroller's own padding floor, the scroller would overflow the
+     reader region down over the status strip and swallow its clicks. The reader clips: nothing
+     inside it may ever paint or intercept below its bounds, so the strip always stays usable.
+     `clip` rather than `hidden` so the region can never become a scroll container either. */
+  overflow: clip;
+  /* Its own height-queried container (same basis-0% safety argument as .detail-main): the
+     floating pinned summary must be HIDDEN when the reader cannot contain it — a max-height
+     cap cannot shrink the card below its own offset + padding floor, so in compressed panes
+     the escaped card covered the status strip. */
+  container: transcript-reader / size;
 }
 
 /* --------- Pinned summary (Codex-style floating environment card) ---------- */
@@ -2290,6 +2300,13 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+/* A reader this short cannot CONTAIN the floating card (a max-height cap cannot shrink it
+   below its own offset + padding floor, so it escaped over the compact status strip), nor show
+   meaningful content inside it: hide it entirely. AFTER the base rule on purpose — the display
+   toggle ties on specificity, so source order must let the compact mode win. */
+@container transcript-reader (max-height: 179px) {
+  .pinned-summary { display: none; }
 }
 .ps-section {
   display: flex;
@@ -9084,6 +9101,10 @@ body.shell-dock-dragging * {
   align-items: center;
   justify-self: end;
   min-width: 0;
+  /* `justify-self: end` self-sizes this cell to its content; without a cap a wide child (the
+     compact recovery echo) pushed the whole cell out of its grid track and off-screen at phone
+     widths. Percentages resolve against the grid AREA, so this pins the cell to its track. */
+  max-width: 100%;
   color: var(--text-faint);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
@@ -10072,7 +10093,7 @@ body.shell-dock-dragging * {
    panes; the height-constrained container query below swaps it in for the slot. Its activity
    toggle is visibility-only, so neither mode ever changes layout when recovery starts or stops. */
 .transcript-recovery-strip-echo {
-  display: none; align-items: center; gap: 6px; min-width: 0;
+  display: none; align-items: center; gap: 6px; min-width: 0; max-width: 100%;
   color: var(--text); font-size: var(--text-xs); font-weight: 600;
 }
 .transcript-recovery-strip-echo:not(.active) { visibility: hidden; }
@@ -10090,6 +10111,14 @@ body.shell-dock-dragging * {
   .transcript-recovery-slot { display: none; }
   .transcript-recovery-strip-echo { display: inline-flex; }
 }
+/* Inbox PREVIEW panes always use the compact presentation, whatever their height. A preview is
+   a secondary, splitter-resizable reading surface: the pill band would permanently spend ~47px
+   of its reader on a notice that the strip echo carries just as clearly at the same lower edge,
+   and shrinking the preview viewport measurably degrades page-up distances when the virtualizer
+   is still measuring freshly streamed rows. Mode-based (not activity-based), so recovery
+   toggles remain layout-free here too. */
+.session-detail.preview .transcript-recovery-slot { display: none; }
+.session-detail.preview .transcript-recovery-strip-echo { display: inline-flex; }
 .transcript-skeleton { display: grid; gap: 20px; padding: 28px 20px; }
 .transcript-skeleton-row { display: grid; gap: 8px; width: min(68%, 620px); }
 .transcript-skeleton-row.user { justify-self: end; width: min(54%, 480px); }
