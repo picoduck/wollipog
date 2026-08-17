@@ -13,8 +13,6 @@ import {
   replaceIsolatedShareWithDashboard,
 } from "./navigation.js";
 import { ThemeProvider } from "./components/ThemeProvider.js";
-import { DesktopExternalLinkRouter } from "./components/DesktopExternalLinkRouter.js";
-import { FeedbackProvider } from "./components/FeedbackProvider.js";
 import "./styles.css";
 
 async function bootstrap(): Promise<void> {
@@ -50,12 +48,7 @@ async function bootstrap(): Promise<void> {
   createRoot(root).render(
     <React.StrictMode>
       <ThemeProvider>
-        {shared.requested ? (
-          <FeedbackProvider>
-            <DesktopExternalLinkRouter />
-            <SharedTranscript token={shared.token} />
-          </FeedbackProvider>
-        ) : <App />}
+        {shared.requested ? <SharedTranscript token={shared.token} /> : <App />}
       </ThemeProvider>
     </React.StrictMode>,
   );

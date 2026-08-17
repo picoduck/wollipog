@@ -9,14 +9,18 @@ export interface ExternalLinkDesktop {
 
 const shell: ExternalLinkDesktop = { isTauri, invoke };
 
+export const EXTERNAL_URL_POLICY_ERROR_PREFIX = "wollipog-external-url-policy:";
+
 /**
  * Return the exact href for an anchor that belongs in the system browser.
  *
  * App-relative and same-origin links remain WebView navigation. Every explicit non-HTTP scheme is
  * sent to the native validator too, so file:, mailto:, deep links, and other blocked schemes fail
- * visibly instead of navigating the WebView or disappearing silently.
+ * visibly instead of navigating the WebView or disappearing silently. Download anchors remain
+ * WebView-owned so generated blob downloads still work.
  */
 export function externalHref(anchor: HTMLAnchorElement, location: Location): string | null {
+  if (anchor.hasAttribute("download")) return null;
   const href = anchor.getAttribute("href");
   if (!href) return null;
   const explicitScheme = /^[A-Za-z][A-Za-z\d+.-]*:/u.test(href);
@@ -27,10 +31,10 @@ export function externalHref(anchor: HTMLAnchorElement, location: Location): str
   }
   if (explicitScheme) return href;
   if (href.startsWith("//")) {
-    const webScheme = location.protocol === "http:" ? "http:" : "https:";
-    const absoluteHref = `${webScheme}${href}`;
+    const currentSchemeHref = `${location.protocol}${href}`;
+    const absoluteHref = `https:${href}`;
     const sameBrowserOrigin = (location.protocol === "http:" || location.protocol === "https:")
-      && new URL(absoluteHref).origin === location.origin;
+      && new URL(currentSchemeHref).origin === location.origin;
     return sameBrowserOrigin ? null : absoluteHref;
   }
   return null;
@@ -63,11 +67,17 @@ export function DesktopExternalLinkRouter({ desktop = shell }: { desktop?: Exter
         await desktop.invoke("open_external_url", { url });
       };
       void open().catch((cause) => {
-        showToast(`Could not open link: ${errorDetail(cause)}`, {
+        const detail = errorDetail(cause);
+        if (detail.startsWith(EXTERNAL_URL_POLICY_ERROR_PREFIX)) {
+          showToast(detail.slice(EXTERNAL_URL_POLICY_ERROR_PREFIX.length), { tone: "error" });
+          return;
+        }
+        showToast(`Could not open link: ${detail}`, {
           tone: "error",
           durationMs: 0,
           action: {
             label: "Retry",
+            busyLabel: "Retrying…",
             run: open,
             failureLabel: "Could not open link",
           },

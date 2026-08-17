@@ -45,6 +45,7 @@ export interface ToastOptions {
   durationMs?: number;
   action?: {
     label: string;
+    busyLabel?: string;
     run: () => void | Promise<void>;
     failureLabel?: string;
     retryLabel?: string;
@@ -133,7 +134,7 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
   const showUndo = useCallback((message: string, undo: () => void | Promise<void>) => (
     showToast(message, {
       tone: "success",
-      action: { label: "Undo", run: undo, failureLabel: "Undo failed", retryLabel: "Retry undo" },
+      action: { label: "Undo", busyLabel: "Undoing…", run: undo, failureLabel: "Undo failed", retryLabel: "Retry undo" },
       durationMs: 10_000,
     })
   ), [showToast]);
@@ -270,7 +271,7 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
             <div className="toast-actions">
               {toast.action && (
                 <button className="btn ghost sm" type="button" disabled={toast.actionBusy} onClick={() => void runToastAction(toast)}>
-                  {toast.actionBusy ? "Undoing…" : toast.action.label}
+                  {toast.actionBusy ? toast.action.busyLabel ?? "Working…" : toast.action.label}
                 </button>
               )}
               <button className="icon-btn" type="button" aria-label="Dismiss Notification" onClick={() => dismissToast(toast.id)}>×</button>

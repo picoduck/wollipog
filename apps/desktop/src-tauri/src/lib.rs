@@ -2975,6 +2975,8 @@ fn local_runner_status_value(
     )
 }
 
+const EXTERNAL_URL_POLICY_ERROR_PREFIX: &str = "wollipog-external-url-policy:";
+
 fn external_url_has_userinfo(url: &str) -> bool {
     let authority = url
         .split_once("://")
@@ -3024,12 +3026,29 @@ fn validate_external_url(url: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ExternalUrlOpenError {
+    Policy(String),
+    Opener(String),
+}
+
 fn open_external_url_with(
     url: String,
     opener: impl FnOnce(String) -> Result<(), String>,
-) -> Result<(), String> {
-    validate_external_url(&url)?;
-    opener(url)
+) -> Result<(), ExternalUrlOpenError> {
+    validate_external_url(&url).map_err(ExternalUrlOpenError::Policy)?;
+    opener(url).map_err(ExternalUrlOpenError::Opener)
+}
+
+fn external_url_open_error_message(error: ExternalUrlOpenError) -> String {
+    match error {
+        ExternalUrlOpenError::Policy(message) => {
+            format!("{EXTERNAL_URL_POLICY_ERROR_PREFIX}{message}")
+        }
+        ExternalUrlOpenError::Opener(message) => {
+            format!("The system browser could not open this link: {message}")
+        }
+    }
 }
 
 /// The only page-accessible route to the OS opener. The caller cannot select a program, execute a
@@ -3038,10 +3057,9 @@ fn open_external_url_with(
 fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
     open_external_url_with(url, |url| {
         #[allow(deprecated)]
-        app.shell()
-            .open(url, None)
-            .map_err(|error| format!("The system browser could not open this link: {error}"))
+        app.shell().open(url, None).map_err(|error| error.to_string())
     })
+    .map_err(external_url_open_error_message)
 }
 
 #[tauri::command]
@@ -3630,15 +3648,26 @@ mod tests {
             calls.set(calls.get() + 1);
             Ok(())
         });
-        assert!(blocked.is_err());
+        assert!(matches!(blocked, Err(ExternalUrlOpenError::Policy(_))));
         assert_eq!(calls.get(), 0);
 
         let failure = open_external_url_with("https://example.com".into(), |_| {
             calls.set(calls.get() + 1);
             Err("mocked opener failure".into())
         });
-        assert_eq!(failure.unwrap_err(), "mocked opener failure");
+        assert_eq!(
+            failure,
+            Err(ExternalUrlOpenError::Opener("mocked opener failure".into()))
+        );
         assert_eq!(calls.get(), 1);
+        assert_eq!(
+            external_url_open_error_message(ExternalUrlOpenError::Policy("blocked".into())),
+            format!("{EXTERNAL_URL_POLICY_ERROR_PREFIX}blocked")
+        );
+        assert_eq!(
+            external_url_open_error_message(ExternalUrlOpenError::Opener("missing browser".into())),
+            "The system browser could not open this link: missing browser"
+        );
     }
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]

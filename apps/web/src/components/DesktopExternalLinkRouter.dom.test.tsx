@@ -3,7 +3,7 @@ import test from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import { DesktopExternalLinkRouter, externalHref, type ExternalLinkDesktop } from "./DesktopExternalLinkRouter.js";
+import { DesktopExternalLinkRouter, EXTERNAL_URL_POLICY_ERROR_PREFIX, externalHref, type ExternalLinkDesktop } from "./DesktopExternalLinkRouter.js";
 import { FeedbackContext } from "./FeedbackProvider.js";
 
 const domWindow = new Window({ url: "http://localhost:5173/sessions/active" });
@@ -95,7 +95,7 @@ test("externalHref preserves external and blocked URLs exactly while ignoring ap
   const cases: Array<[string, string | null]> = [
     ["https://example.com/a%2Fb?q=x%20y#fragment", "https://example.com/a%2Fb?q=x%20y#fragment"],
     ["HTTP://example.com/Case", "HTTP://example.com/Case"],
-    ["//docs.example.com/guide", "http://docs.example.com/guide"],
+    ["//docs.example.com/guide", "https://docs.example.com/guide"],
     ["//localhost:5173/internal", null],
     ["mailto:person@example.com", "mailto:person@example.com"],
     ["file:///tmp/report.txt", "file:///tmp/report.txt"],
@@ -138,6 +138,21 @@ test("pointer, Ctrl+click, and keyboard-generated clicks each reach the mocked o
   await unmount();
 });
 
+test("download anchors remain owned by the WebView", async () => {
+  const h = harness();
+  const { unmount } = await mount(h);
+  const link = anchor("blob:http://tauri.localhost/download-id");
+  link.setAttribute("download", "transcript.json");
+  const event = activate(link);
+  await act(async () => Promise.resolve());
+
+  assert.equal(event.defaultPrevented, false);
+  assert.deepEqual(h.calls, []);
+
+  link.remove();
+  await unmount();
+});
+
 test("internal links and browser builds retain ordinary navigation behavior", async () => {
   for (const isTauri of [true, false]) {
     const h = harness(isTauri);
@@ -165,7 +180,27 @@ test("native opener failures become persistent actionable errors", async () => {
   assert.match(h.toasts[0]!.message, /Could not open link: No browser is configured/);
   assert.equal(h.toasts[0]!.options.tone, "error");
   assert.equal(h.toasts[0]!.options.durationMs, 0);
-  assert.equal((h.toasts[0]!.options.action as { label: string }).label, "Retry");
+  assert.equal((h.toasts[0]!.options.action as { label: string; busyLabel: string }).label, "Retry");
+  assert.equal((h.toasts[0]!.options.action as { label: string; busyLabel: string }).busyLabel, "Retrying…");
+
+  link.remove();
+  await unmount();
+});
+
+test("native policy rejections are transient and never offer a futile retry", async () => {
+  const h = harness();
+  h.rejectWith = `${EXTERNAL_URL_POLICY_ERROR_PREFIX}Wollipog can open only HTTP and HTTPS links.`;
+  const { unmount } = await mount(h);
+  const link = anchor("mailto:person@example.com");
+  activate(link);
+  await act(async () => { await Promise.resolve(); });
+
+  assert.equal(h.calls.length, 1, "the native trust boundary still makes the policy decision");
+  assert.equal(h.toasts.length, 1);
+  assert.equal(h.toasts[0]!.message, "Wollipog can open only HTTP and HTTPS links.");
+  assert.equal(h.toasts[0]!.options.tone, "error");
+  assert.equal(h.toasts[0]!.options.durationMs, undefined);
+  assert.equal(h.toasts[0]!.options.action, undefined);
 
   link.remove();
   await unmount();
