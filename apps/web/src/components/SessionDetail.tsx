@@ -73,6 +73,7 @@ import {
   loadOlderSessionEvents,
   recoverSessionHistory,
   recoverSessionHistoryWindow,
+  shouldReadOpeningWindow,
 } from "../history-recovery.js";
 import {
   routedSessionPlaceholder,
@@ -446,10 +447,14 @@ function SessionDetailLoaded({
   const evsRef = useRef(evs);
   evsRef.current = evs;
   const olderInFlightRef = useRef(false);
+  // Whether a fetched history has ever completed for the CURRENT epoch. Read by the recovery effect
+  // before it registers its own load, so the effect sees the state that preceded it.
+  const everCompletedRef = useRef(false);
   const eventHistory = useStoreSelector((s) => {
     const history = s.eventHistory.get(sessionId);
     return history?.eventEpoch === (s.sessions.get(sessionId)?.eventEpoch ?? 0) ? history : undefined;
   });
+  everCompletedRef.current = eventHistory?.everComplete === true;
   const eventWindow = useStoreSelector((s) => {
     const window = s.eventWindows.get(sessionId);
     return window?.eventEpoch === (s.sessions.get(sessionId)?.eventEpoch ?? 0) ? window : undefined;
@@ -882,9 +887,16 @@ function SessionDetailLoaded({
     // window, and restoring it depends on those rows arriving in this same load. Reading only the
     // tail would strand them away from where they stopped, so those loads keep the full chain until
     // the list can restore an anchor against a windowed history.
-    const openWindow = after === 0 &&
-      (evsRef.current?.length ?? 0) === 0 &&
-      !hasSavedFollowTailAnchor(instanceScope, sessionId);
+    //
+    // "Nothing cached" is asked of completed HISTORY, not of the event array: a live event
+    // delivered between the subscription acknowledgement and this effect would otherwise divert a
+    // long session back to walking its log from seq 0. Live rows sit at the tail, so they merge
+    // into the window they arrive beside.
+    const openWindow = shouldReadOpeningWindow({
+      recoveryAfter: after,
+      historyEverCompleted: everCompletedRef.current,
+      hasSavedReadingPosition: hasSavedFollowTailAnchor(instanceScope, sessionId),
+    });
     const load = openWindow
       ? recoverSessionHistoryWindow(
         { sessionId, eventEpoch: epoch, recoveryRevision },
@@ -919,13 +931,15 @@ function SessionDetailLoaded({
     if (base <= 1 || olderInFlightRef.current) return;
     const epoch = recoveryEventEpoch;
     olderInFlightRef.current = true;
-    beginOlderEventsLoad(sessionId, epoch);
+    // Every dispatch carries the base this page was requested below. A reopen re-reads the tail,
+    // so a page that outlives its window must be dropped rather than prepended under a newer one.
+    beginOlderEventsLoad(sessionId, base, epoch);
     void loadOlderSessionEvents(sessionId, base, epoch, api.getSessionEventTailPage)
       .then((page) => {
-        if (page) loadOlderEvents(sessionId, page.events, page.hasOlder, page.eventEpoch);
-        else failOlderEventsLoad(sessionId, "Earlier activity is unavailable from this control plane.", epoch);
+        if (page) loadOlderEvents(sessionId, page.events, page.hasOlder, base, page.eventEpoch);
+        else failOlderEventsLoad(sessionId, "Earlier activity is unavailable from this control plane.", base, epoch);
       })
-      .catch(() => failOlderEventsLoad(sessionId, "Could not load earlier activity.", epoch))
+      .catch(() => failOlderEventsLoad(sessionId, "Could not load earlier activity.", base, epoch))
       .finally(() => {
         olderInFlightRef.current = false;
       });
@@ -2457,6 +2471,7 @@ function SessionDetailLoaded({
         {mode === "expanded" && <RightPanel
           state={rightPanel}
           session={session}
+          earlierActivityUnloaded={eventWindow?.hasOlder === true}
           sourceLocation={sourceLocation}
           onOpenSourceLocation={openSourceLocation}
           onClearSourceLocation={clearSourceLocation}

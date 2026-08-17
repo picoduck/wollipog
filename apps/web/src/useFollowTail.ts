@@ -141,7 +141,11 @@ function storeSnapshot(key: string, snapshot: FollowTailSnapshot): void {
  * nobody has paused in opens at its tail, while one with a saved position keeps loading the history
  * the restore depends on. */
 export function hasSavedFollowTailAnchor(scope: string, sessionId: string): boolean {
-  return followTailSnapshots.get(snapshotKey(scope, sessionId))?.anchor != null;
+  const snapshot = followTailSnapshots.get(snapshotKey(scope, sessionId));
+  // Exactly what `getInitialAnchor` would hand back. A visible anchor is recorded continuously,
+  // including while following, so testing the anchor alone would report every session ever
+  // rendered as needing restoration.
+  return snapshot != null && snapshot.state !== "following" && snapshot.anchor != null;
 }
 
 function isUpwardReadingKey(event: FollowTailKey): boolean {

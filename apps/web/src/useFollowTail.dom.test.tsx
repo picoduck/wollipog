@@ -723,11 +723,25 @@ test("a saved reading position is reported for load-shape decisions without dist
     });
     assert.equal(hasSavedFollowTailAnchor("window-scope", "windowed-session"), false);
 
+    // A visible anchor is recorded continuously, including while following. That is not a saved
+    // position — `getInitialAnchor` returns null in that state — so it must not divert the open.
     await act(async () => {
       api.onVisibleAnchorChange({ key: "item:agent_message:46", offset: -9, index: 45 });
-      api.pause();
     });
+    assert.equal(api.getInitialAnchor(), null);
+    assert.equal(
+      hasSavedFollowTailAnchor("window-scope", "windowed-session"),
+      false,
+      "following the tail leaves nothing below a window to restore",
+    );
+
+    await act(async () => { api.pause(); });
     assert.equal(hasSavedFollowTailAnchor("window-scope", "windowed-session"), true);
+
+    // Resuming follow gives the position up again.
+    await act(async () => { api.follow(); });
+    assert.equal(hasSavedFollowTailAnchor("window-scope", "windowed-session"), false);
+    await act(async () => { api.pause(); });
     assert.equal(
       hasSavedFollowTailAnchor("other-scope", "windowed-session"),
       false,

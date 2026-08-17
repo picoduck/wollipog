@@ -33,7 +33,14 @@ function elapsed(descriptor: SubagentDescriptor, now: number): string {
 export function subagentEmptyMessage(
   session: Pick<SessionView, "driver" | "status">,
   runnerOnline: boolean,
+  /** The transcript is showing a bounded window, so subagents spawned earlier are not in `items`. */
+  earlierActivityUnloaded = false,
 ): string {
+  // Claiming none were recorded would be false while the session's earlier turns are unloaded:
+  // the spawning tool call this panel needs can sit below the loaded window.
+  if (earlierActivityUnloaded) {
+    return "Earlier activity in this session is not loaded, so subagents from those turns are not listed. Load earlier activity to include them.";
+  }
   if (session.driver === "codex" || session.driver === "codex-app-server") {
     return runnerOnline && isTimelineSessionActive(session.status)
       ? "Codex does not currently expose live subagent identity or parent linkage, so Wollipog cannot show independently selectable live output."
@@ -56,6 +63,7 @@ export function SubagentsPanel({
   session,
   items,
   runnerOnline,
+  earlierActivityUnloaded = false,
   requestedId,
   focusRequest,
   onFocusRequestHandled,
@@ -63,6 +71,8 @@ export function SubagentsPanel({
 }: {
   session: SessionView;
   items: TimelineItem[];
+  /** True while the reader is showing a bounded window with older turns still unloaded. */
+  earlierActivityUnloaded?: boolean;
   runnerOnline: boolean;
   requestedId?: string | null;
   focusRequest?: number;
@@ -121,7 +131,7 @@ export function SubagentsPanel({
     return (
       <div className="subagents-empty" role="status">
         <div className="subagents-empty-title">No Selectable Subagents</div>
-        <p>{subagentEmptyMessage(session, runnerOnline)}</p>
+        <p>{subagentEmptyMessage(session, runnerOnline, earlierActivityUnloaded)}</p>
       </div>
     );
   }

@@ -182,6 +182,25 @@ export async function recoverSessionHistory(
   return (await recoverSessionHistoryTurn(request, options)).complete;
 }
 
+/**
+ * Whether an open should read the bounded tail window rather than the forward gap chain.
+ *
+ * - `recoveryAfter` is the cursor frozen when the acknowledged subscription was sent. Anything
+ *   above zero is a reconnect gap the forward chain owns.
+ * - `historyEverCompleted` asks about fetched HISTORY, not about the event array: a live event
+ *   delivered between the acknowledgement and the load would otherwise send a long session back to
+ *   walking its log from seq 0. Live rows sit at the tail and merge into the window beside them.
+ * - `hasSavedReadingPosition` keeps the full chain for a reader who paused somewhere, since that
+ *   position can sit below the window and restoring it depends on those rows arriving.
+ */
+export function shouldReadOpeningWindow(input: {
+  recoveryAfter: number;
+  historyEverCompleted: boolean;
+  hasSavedReadingPosition: boolean;
+}): boolean {
+  return input.recoveryAfter === 0 && !input.historyEverCompleted && !input.hasSavedReadingPosition;
+}
+
 export interface SessionHistoryWindowRequest {
   sessionId: string;
   eventEpoch: number;
@@ -248,8 +267,7 @@ export async function recoverSessionHistoryWindow(
     const responseEpoch = page.eventEpoch ?? request.eventEpoch;
     if (responseEpoch !== request.eventEpoch) return { supported: true, complete: false };
 
-    const complete = page.cacheComplete === true;
-    options.applyWindow(
+    const applyPage = (complete: boolean) => options.applyWindow(
       request.sessionId,
       page.events,
       responseEpoch,
@@ -257,11 +275,20 @@ export async function recoverSessionHistoryWindow(
       complete,
       page.hasMoreOlder === true,
     );
-    if (complete) return { supported: true, complete: true };
-    // The cache answered immediately while the bounded runner chain is still filling it. Re-read
-    // the same window rather than paging forward: the newest cached rows are what the reader is
-    // waiting for, and targeted WebSocket delivery supplies the same rows in the meantime.
-    if (++idlePolls > maxIdlePolls) return { supported: true, complete: false };
+    if (page.cacheComplete === true) {
+      applyPage(true);
+      return { supported: true, complete: true };
+    }
+    // The cache is still hydrating FORWARD from the runner, so its newest cached row can still be
+    // an old prefix of the log. Painting that would reproduce the oldest-first open this window
+    // exists to remove, so re-read the same window instead of showing it. Targeted WebSocket
+    // delivery supplies live rows in the meantime, and the reader keeps its loading state.
+    if (++idlePolls > maxIdlePolls) {
+      // The cache never caught up. Show whatever it does hold rather than leaving the reader with
+      // nothing, still reporting the load as incomplete so the transcript says so.
+      applyPage(false);
+      return { supported: true, complete: false };
+    }
     await wait(idlePollMs);
   }
   return { supported: true, complete: false };

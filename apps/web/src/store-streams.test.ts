@@ -729,16 +729,16 @@ test("reader-driven older pages extend the window downward without touching reco
   store.loadEvents("s1", [event("s1", 10), event("s1", 11)], 0, 1, true, generation, true);
   const cursorAfterOpen = store.recoveryAfter("s1");
 
-  store.beginOlderEventsLoad("s1", 0);
+  store.beginOlderEventsLoad("s1", 10, 0);
   assert.equal(store.getState().eventWindows.get("s1")?.loadingOlder, true);
-  store.loadOlderEvents("s1", [event("s1", 8), event("s1", 9)], true, 0);
+  store.loadOlderEvents("s1", [event("s1", 8), event("s1", 9)], true, 10, 0);
 
   assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [8, 9, 10, 11]);
   assert.equal(store.eventWindowBase("s1"), 8);
   assert.equal(store.getState().eventWindows.get("s1")?.loadingOlder, false);
   assert.equal(store.recoveryAfter("s1"), cursorAfterOpen, "a prepend is not recovery progress");
 
-  store.loadOlderEvents("s1", [event("s1", 7)], false, 0);
+  store.loadOlderEvents("s1", [event("s1", 7)], false, 8, 0);
   assert.equal(store.getState().eventWindows.get("s1")?.hasOlder, false);
   // A later re-read of the tail answers for its own boundary; the reader is already below it.
   store.loadEvents("s1", [event("s1", 10), event("s1", 11)], 0, 1, true, generation, true);
@@ -785,4 +785,36 @@ test("forward gap recovery leaves the loaded window boundary untouched", () => {
   store.loadEvents("s1", [event("s1", 22), event("s1", 23)], 0, undefined, true, generation);
   assert.equal(store.eventWindowBase("s1"), 20);
   assert.equal(store.getState().eventWindows.get("s1")?.hasOlder, true);
+});
+
+test("an older page that outlived its window is dropped instead of leaving an unreachable hole", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  store.loadEvents("s1", [event("s1", 801), event("s1", 802)], 0, undefined, true, generation, true);
+  store.beginOlderEventsLoad("s1", 801, 0);
+
+  // The reader leaves and comes back: the reopen re-reads a tail that has since advanced.
+  store.navigate({ name: "inbox" });
+  store.navigate({ name: "session", id: "s1" });
+  store.loadEvents("s1", [event("s1", 851), event("s1", 852)], 0, undefined, true, generation, true);
+  assert.equal(store.eventWindowBase("s1"), 851);
+
+  // The page requested below 801 finally resolves. Prepending it would strand 803-850 between the
+  // two, with no cursor able to ask for them.
+  store.loadOlderEvents("s1", [event("s1", 799), event("s1", 800)], false, 801, 0);
+  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [851, 852]);
+  assert.equal(store.eventWindowBase("s1"), 851);
+  assert.equal(store.getState().eventWindows.get("s1")?.hasOlder, true,
+    "the stale page cannot declare the log exhausted for a window it never described");
+
+  // A page requested below the CURRENT base still lands.
+  store.loadOlderEvents("s1", [event("s1", 849), event("s1", 850)], true, 851, 0);
+  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [849, 850, 851, 852]);
+  assert.equal(store.eventWindowBase("s1"), 849);
 });

@@ -247,14 +247,17 @@ type Action =
        * this page. Absent marks a forward gap-fill, which never redefines the loaded window. */
       windowHasOlder?: boolean;
     }
-  | { type: "events_older_loading"; sessionId: string; eventEpoch: number }
-  | { type: "events_older_failed"; sessionId: string; eventEpoch: number; error: string }
+  | { type: "events_older_loading"; sessionId: string; eventEpoch: number; requestedBase: number }
+  | { type: "events_older_failed"; sessionId: string; eventEpoch: number; requestedBase: number; error: string }
   | {
       type: "events_older_loaded";
       sessionId: string;
       events: SessionEvent[];
       eventEpoch: number;
       hasOlder: boolean;
+      /** The window base this page was requested below. A page that outlived its window would
+       * otherwise land under a newer one and leave an unreachable hole between them. */
+      requestedBase: number;
     }
   | { type: "subscription_requested"; revision: number; sessionIds: string[] }
   | { type: "event_history_loading"; sessionId: string; eventEpoch: number; recoveryRevision: number; recoveryGeneration: number }
@@ -644,6 +647,7 @@ function reducer(state: State, action: Action): State {
     case "events_older_loading": {
       const window = state.eventWindows.get(action.sessionId);
       if (!window || window.eventEpoch !== action.eventEpoch || window.loadingOlder) return state;
+      if (window.baseSeq !== action.requestedBase) return state;
       const eventWindows = new Map(state.eventWindows);
       eventWindows.set(action.sessionId, { ...window, loadingOlder: true, error: null });
       return { ...state, eventWindows };
@@ -651,6 +655,7 @@ function reducer(state: State, action: Action): State {
     case "events_older_failed": {
       const window = state.eventWindows.get(action.sessionId);
       if (!window || window.eventEpoch !== action.eventEpoch) return state;
+      if (window.baseSeq !== action.requestedBase) return state;
       const eventWindows = new Map(state.eventWindows);
       eventWindows.set(action.sessionId, { ...window, loadingOlder: false, error: action.error });
       return { ...state, eventWindows };
@@ -662,6 +667,10 @@ function reducer(state: State, action: Action): State {
       if (action.eventEpoch !== sessionEventEpoch(state.sessions.get(action.sessionId))) return state;
       const window = state.eventWindows.get(action.sessionId);
       if (!window || window.eventEpoch !== action.eventEpoch) return state;
+      // The window this page was requested below is gone: a reopen re-read the tail, and the tail
+      // may have advanced past it. Prepending here would leave a permanent hole between this page
+      // and the current base that no cursor can ever ask for.
+      if (window.baseSeq !== action.requestedBase) return state;
       const events = new Map(state.events);
       const merged = mergeEvents(events.get(action.sessionId), action.events);
       events.set(action.sessionId, merged);
@@ -1197,9 +1206,15 @@ interface StoreValue extends State {
     recoveryGeneration?: number,
     windowHasOlder?: boolean,
   ) => void;
-  loadOlderEvents: (sessionId: string, events: SessionEvent[], hasOlder: boolean, eventEpoch?: number) => void;
-  beginOlderEventsLoad: (sessionId: string, eventEpoch?: number) => void;
-  failOlderEventsLoad: (sessionId: string, error: string, eventEpoch?: number) => void;
+  loadOlderEvents: (
+    sessionId: string,
+    events: SessionEvent[],
+    hasOlder: boolean,
+    requestedBase: number,
+    eventEpoch?: number,
+  ) => void;
+  beginOlderEventsLoad: (sessionId: string, requestedBase: number, eventEpoch?: number) => void;
+  failOlderEventsLoad: (sessionId: string, error: string, requestedBase: number, eventEpoch?: number) => void;
   eventWindowBase: (sessionId: string) => number;
   loadSession: (session: SessionView) => void;
   beginEventHistoryLoad: (sessionId: string, eventEpoch?: number, recoveryRevision?: number, recoveryGeneration?: number) => void;
@@ -1307,19 +1322,22 @@ export class Store {
   });
   beginOlderEventsLoad = (
     sessionId: string,
+    requestedBase: number,
     eventEpoch = sessionEventEpoch(this.state.sessions.get(sessionId)),
-  ): void => this.dispatch({ type: "events_older_loading", sessionId, eventEpoch });
+  ): void => this.dispatch({ type: "events_older_loading", sessionId, eventEpoch, requestedBase });
   failOlderEventsLoad = (
     sessionId: string,
     error: string,
+    requestedBase: number,
     eventEpoch = sessionEventEpoch(this.state.sessions.get(sessionId)),
-  ): void => this.dispatch({ type: "events_older_failed", sessionId, eventEpoch, error });
+  ): void => this.dispatch({ type: "events_older_failed", sessionId, eventEpoch, requestedBase, error });
   loadOlderEvents = (
     sessionId: string,
     events: SessionEvent[],
     hasOlder: boolean,
+    requestedBase: number,
     eventEpoch = sessionEventEpoch(this.state.sessions.get(sessionId)),
-  ): void => this.dispatch({ type: "events_older_loaded", sessionId, events, hasOlder, eventEpoch });
+  ): void => this.dispatch({ type: "events_older_loaded", sessionId, events, hasOlder, requestedBase, eventEpoch });
   /** Oldest loaded seq for the session's current epoch, or 0 when no window is loaded. */
   eventWindowBase = (sessionId: string): number => {
     const window = this.state.eventWindows.get(sessionId);
