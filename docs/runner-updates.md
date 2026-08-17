@@ -80,6 +80,16 @@ Pre-v57 runners remain compatible with terminal open/input/close, but their proc
 exited on disconnect because they cannot prove a surviving inventory; update before relying on
 detach/reconnect recovery.
 
+Protocol v78 carries ordinary prompts admitted during queued/starting launches through the durable
+command journal. The command ID is also the runner queue ID and the canonical user-event identity,
+so the dashboard can show one pending transcript bubble across reload, retry, live admission, and
+history reconciliation without matching user text. Cancellation remains deliberately narrow: the
+control plane may cancel only a persisted command that has never entered its send lane; after that,
+the dashboard requires the exact ID in a current runner `session_queue` projection. Sent, accepted,
+started, or offline queued work is never reported as cancelled without runner evidence. Terminal
+failed/uncertain bubbles may be dismissed locally; dismissal retains the outcome tombstone while
+scrubbing the stored prompt payload.
+
 | Capability | Minimum protocol |
 | --- | ---: |
 | Find/adopt unmanaged agent sessions | 6 |
@@ -95,6 +105,7 @@ detach/reconnect recovery.
 | Fork a provider conversation | 28 |
 | Accept retryable durable automation commands | 53 |
 | Reconcile detachable terminal sessions and bounded history | 57 |
+| Preserve queued prompt identity across admission and reconnects | 78 |
 
 A missing protocol version is treated as **unknown**, not optimistically supported. Protocol
 metadata itself arrived in v15, so the dashboard cannot prove which earlier commands such a runner

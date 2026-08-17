@@ -719,6 +719,58 @@ test("prompts received during initial capacity admission join the original launc
   }
 });
 
+test("admission-retained durable prompts expose their command id and cancel before dequeue", async () => {
+  const transitions: string[] = [];
+  const lifecycle: DurableCommandLifecycle = {
+    commandId: "prompt-stable-b",
+    queued: () => transitions.push("queued"),
+    started: () => transitions.push("started"),
+    completed: () => transitions.push("completed"),
+    failed: (error, code) => transitions.push(`failed:${code}:${error}`),
+    uncertain: (error) => transitions.push(`uncertain:${error}`),
+  };
+  const h = harness({}, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 1);
+  const internals = h.manager as any;
+  try {
+    h.store.create(stored(h.root, {
+      sessionId: "capacity-blocker", agentSessionId: null, status: "running",
+    }));
+    assert.equal(await internals.acquireAdmission("capacity-blocker"), true);
+    const started = h.manager.start(launchSpec(h.root), "initial prompt");
+    await tick();
+    assert.equal(h.manager.prompt(
+      "resume-session", "cancel me", [], undefined, undefined, lifecycle,
+    ), true);
+
+    const projected = h.sent.filter((message) => message.type === "session_queue").at(-1)!;
+    assert.equal(projected.type, "session_queue");
+    assert.deepEqual(projected.queue.map((prompt) => ({ id: prompt.id, live: prompt.liveQueueObserved })), [{
+      id: "prompt-stable-b",
+      live: true,
+    }]);
+
+    h.manager.removeQueuedPrompt("resume-session", "prompt-stable-b");
+    assert.deepEqual(transitions, [
+      "queued",
+      "failed:COMMAND_CANCELLED:queued command was cancelled",
+    ]);
+    assert.deepEqual(
+      h.sent.filter((message) => message.type === "session_queue").at(-1)?.queue,
+      [],
+      "the exact durable identity disappears from the live admission queue",
+    );
+
+    internals.releaseAdmission("capacity-blocker");
+    assert.equal(await started, true);
+    for (let attempt = 0; attempt < 20 && h.prompts.length < 1; attempt++) await tick();
+    assert.deepEqual(h.prompts, ["initial prompt"], "cancelled work never reaches the provider");
+  } finally {
+    internals.releaseAdmission("capacity-blocker");
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
 test("stopping an admission-queued session terminalizes every retained prompt", async () => {
   const failures: string[] = [];
   const lifecycle = (commandId: string): DurableCommandLifecycle => ({
@@ -745,6 +797,11 @@ test("stopping an admission-queued session terminalizes every retained prompt", 
       "C:COMMAND_CANCELLED:session stopped before runner admission",
     ]);
     assert.equal(internals.preLaunchQueues.has("resume-session"), false);
+    assert.deepEqual(
+      h.sent.filter((message) => message.type === "session_queue").at(-1)?.queue,
+      [],
+      "stopping clears the formerly live pre-admission queue projection",
+    );
   } finally {
     internals.releaseAdmission("capacity-blocker");
     h.manager.shutdownAll();
@@ -786,6 +843,11 @@ test("a failed initial launch terminalizes every admission-retained prompt", asy
       "C:COMMAND_CANCELLED:session launch failed before runner admission",
     ]);
     assert.equal(internals.preLaunchQueues.has("resume-session"), false);
+    assert.deepEqual(
+      h.sent.filter((message) => message.type === "session_queue").at(-1)?.queue,
+      [],
+      "launch failure clears the formerly live pre-admission queue projection",
+    );
   } finally {
     internals.releaseAdmission("capacity-blocker");
     h.manager.shutdownAll();

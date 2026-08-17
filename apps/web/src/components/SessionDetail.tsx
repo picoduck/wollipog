@@ -40,6 +40,12 @@ import { RightPanel, type RightPanelState } from "./RightPanel.js";
 import { useGitStatus, useGitSummary } from "./useGitStatus.js";
 import { ImageStrip, usePastedImages } from "./images.js";
 import { PromptImageView } from "./PromptImageView.js";
+import {
+  hasNewPendingPrompt,
+  PendingPromptBubbles,
+  queuedPromptsWithControls,
+  shouldShowOptimisticPrompt,
+} from "./PendingPromptBubbles.js";
 import { ApprovalsControl, ModelEffortControl } from "./ComposerControls.js";
 import { modelSupportsImages, resolveCaps } from "../caps.js";
 import { PinnedSummary } from "./PinnedSummary.js";
@@ -448,6 +454,7 @@ function SessionDetailLoaded({
     "queue_again" | "dismiss"
   >>(() => new Map());
   const [stoppingTurn, setStoppingTurn] = useState(false);
+  const [pendingPromptAction, setPendingPromptAction] = useState<string>();
   const sendRequestBusy = busy || activeComposerMutation?.kind === "send";
   const steeringRequestBusy = steeringBusy || activeComposerMutation?.kind === "steer" ||
     activeComposerMutation?.kind === "promote";
@@ -932,6 +939,40 @@ function SessionDetailLoaded({
   }, [timelineUserPrompts.length, pending]);
 
   const canCancelQueued = runnerSupportsProtocol(runner?.protocolVersion, "queuedPromptCancellation");
+  const deliveredPromptCommandIds = useMemo(() => new Set(items.flatMap((item) =>
+    item.kind === "user_message" && item.commandId ? [item.commandId] : []
+  )), [items]);
+  const liveQueueIds = useMemo(() => new Set((session.queued ?? []).flatMap((prompt) =>
+    prompt.liveQueueObserved ? [prompt.id] : []
+  )), [session.queued]);
+  const queuedPromptControls = queuedPromptsWithControls(session.queued);
+  const resolvePendingPrompt = useCallback(async (
+    commandId: string,
+    action: "cancel" | "dismiss",
+  ) => {
+    if (pendingPromptAction) return;
+    setPendingPromptAction(commandId);
+    setError(null);
+    try {
+      await api.resolvePendingPrompt(session.id, commandId, action);
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setPendingPromptAction(undefined);
+    }
+  }, [api, pendingPromptAction, session.id]);
+  const cancelLivePendingPrompt = useCallback(async (commandId: string) => {
+    if (pendingPromptAction) return;
+    setPendingPromptAction(commandId);
+    setError(null);
+    try {
+      await api.cancelQueuedPrompt(session.id, commandId);
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setPendingPromptAction(undefined);
+    }
+  }, [api, pendingPromptAction, session.id]);
   const terminal = isTerminal(session.status);
   // A guardrail pause (cost budget / tool-call limit) must be resolved via the Continue/Stop card,
   // not bypassed by sending a prompt.
@@ -1453,10 +1494,13 @@ function SessionDetailLoaded({
     // from the queued list. The queue list under the composer is the honest echo there.
     // input_required counts as active: a turn parked on a mid-turn tool approval still holds the
     // runner's turn slot, so a send there queues exactly like running/starting.
-    const willQueue =
-      session.status === "running" || session.status === "starting" || session.status === "input_required";
     sendBaselineRef.current = timelineUserPrompts.length;
-    if (!willQueue && !durableProviderInvocation) setPending({ text: outgoing, images: outgoingImages });
+    const knownPendingPromptIds = new Set(
+      (session.pendingPrompts ?? []).map((prompt) => prompt.commandId),
+    );
+    if (shouldShowOptimisticPrompt(session.status, durableProviderInvocation)) {
+      setPending({ text: outgoing, images: outgoingImages });
+    }
     let providerAccepted = false;
     let preservedDraftVersion: number | null = null;
     const reservationPromise = reserveComposerDraftSnapshot(
@@ -1479,7 +1523,14 @@ function SessionDetailLoaded({
         });
         commandSubmissionRetryRef.current = null;
       } else {
-        await api.prompt(sessionId, promptText, outgoingImages, cfg, slashCommand);
+        const prompted = await api.prompt(sessionId, promptText, outgoingImages, cfg, slashCommand);
+        if (prompted && viewGenerationRef.current === generation &&
+            (prompted.status === "queued" || prompted.status === "starting") &&
+            hasNewPendingPrompt(knownPendingPromptIds, prompted.pendingPrompts)) {
+          // The server had newer admission state than this render and durably staged the prompt.
+          // Replace the stale optimistic echo with the authoritative command-keyed bubble now.
+          setPending(null);
+        }
         pendingConfig.current = {};
       }
       providerAccepted = true;
@@ -1913,7 +1964,7 @@ function SessionDetailLoaded({
                   title={conn === "unauthorized" ? "Pair to load activity" : "Activity Unavailable"}
                   hint={transcript.error ?? (conn === "offline" ? "Reconnect to load this transcript." : "This device needs access to the control plane.")}
                 />
-              ) : transcript.body === "empty" ? (
+              ) : transcript.body === "empty" && (session.pendingPrompts?.length ?? 0) === 0 ? (
                 <Empty title="No Activity Yet" hint="Waiting for the agent…" />
               ) : (
                 <>
@@ -1958,6 +2009,16 @@ function SessionDetailLoaded({
                       onRevealHandled={handleTimelineReveal}
                     />
                   )}
+                  <PendingPromptBubbles
+                    prompts={session.pendingPrompts ?? []}
+                    deliveredCommandIds={deliveredPromptCommandIds}
+                    liveQueueIds={liveQueueIds}
+                    canCancelLive={runnerOnline && canCancelQueued}
+                    pendingAction={pendingPromptAction}
+                    onCancelPending={(commandId) => void resolvePendingPrompt(commandId, "cancel")}
+                    onCancelLive={(commandId) => void cancelLivePendingPrompt(commandId)}
+                    onDismiss={(commandId) => void resolvePendingPrompt(commandId, "dismiss")}
+                  />
                   {showOptimistic && pending && (
                     <div className="tl-row user">
                       <div className="bubble user-bubble">
@@ -2057,9 +2118,9 @@ function SessionDetailLoaded({
               onQueueAgain={(submissionId) => void resolveSteeringAttempt(submissionId, "queue_again")}
               onDismiss={(submissionId) => void resolveSteeringAttempt(submissionId, "dismiss")}
             />
-            {session.queued && session.queued.length > 0 && (
+            {queuedPromptControls.length > 0 && (
               <div className="queued-list" aria-label="Queued Messages">
-                {session.queued.map((q) => {
+                {queuedPromptControls.map((q) => {
                   const availability = queuedPromptSteeringAvailability(steeringAvailabilityInput, q);
                   const locallyPromoting = queueSteeringPending.has(q.id);
                   const reserved = q.steeringState === "promoting" || q.steeringState === "uncertain";

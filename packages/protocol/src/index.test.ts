@@ -37,12 +37,14 @@ import {
   type AutomationRunnerTarget,
   type ProjectLocationView,
   type ProjectView,
+  type PendingPromptView,
   type ResolveSteeringAttemptMessage,
   type ResolveSteeringAttemptResultMessage,
   type RunnerToControlPlane,
   type SteerRequest,
   type SteerSessionMessage,
   type SteerSessionResultMessage,
+  type SessionView,
   type SteeringAttemptView,
   type InvokeSessionCommandMessage,
   type InvokeSessionCommandRequest,
@@ -254,6 +256,24 @@ test("uncertain steering resolution remains a distinct correlated v73 exchange",
   assert.equal(parseMessage<ControlPlaneToRunner>(JSON.stringify(outbound))?.type, "resolve_steering_attempt");
   assert.equal(parseMessage<RunnerToControlPlane>(JSON.stringify(inbound))?.type, "resolve_steering_attempt_result");
   assert.equal(result.requestId, request.requestId);
+});
+
+test("durable pending prompts retain exact identity, state, and safe actions", () => {
+  const view: PendingPromptView = {
+    commandId: "prompt-1",
+    text: "Run this later",
+    state: "uncertain",
+    revision: 4,
+    attemptCount: 2,
+    error: "runner disconnected after acceptance",
+    createdAt: 10,
+    updatedAt: 20,
+    canDismiss: true,
+  };
+  const session = { pendingPrompts: [view] } satisfies Pick<SessionView, "pendingPrompts">;
+  assert.equal(session.pendingPrompts[0]?.commandId, "prompt-1");
+  assert.equal(session.pendingPrompts[0]?.state, "uncertain");
+  assert.equal(session.pendingPrompts[0]?.canDismiss, true);
 });
 
 test("elicitation capabilities round-trip while legacy absence remains unknown", () => {

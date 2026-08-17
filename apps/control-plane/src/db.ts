@@ -113,6 +113,7 @@ import {
   type SessionCommandInvocationState,
   type SessionCommandInvocationUpdateMessage,
   type SessionCommandInvocationView,
+  type PendingPromptView,
   type SessionEvent,
   type SessionEventPayload,
   type SessionSnapshot,
@@ -170,6 +171,7 @@ export const MAX_PROJECTED_STEERING_ATTEMPTS = 50;
 export const MAX_UNRESOLVED_STEERING_ATTEMPTS = 50;
 export const MAX_PENDING_STEERING_RESOLUTION_REPLAYS = 50;
 const SESSION_PROMPT_TERMINAL_RETENTION_MS = 7 * 24 * 60 * 60_000;
+const SESSION_PROMPT_ATTEMPT_RETENTION_LIMIT = 128;
 
 const ARTIFACT_TABLE_SCHEMA = /* sql */ `
 CREATE TABLE IF NOT EXISTS artifacts (
@@ -443,6 +445,7 @@ CREATE TABLE IF NOT EXISTS session_prompt_commands (
   error            TEXT,
   error_code       TEXT,
   user_event_seq   INTEGER,
+  dismissed_at     INTEGER,
   created_at       INTEGER NOT NULL,
   updated_at       INTEGER NOT NULL,
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
@@ -459,6 +462,8 @@ CREATE TABLE IF NOT EXISTS session_prompt_command_attempts (
   sent_at       INTEGER NOT NULL,
   FOREIGN KEY (command_id) REFERENCES session_prompt_commands(command_id) ON DELETE CASCADE
 );
+CREATE INDEX IF NOT EXISTS idx_session_prompt_command_attempts_command
+  ON session_prompt_command_attempts(command_id, sent_at DESC);
 
 -- Steering is intentionally a control-plane-owned outbox/receipt. The request snapshot is
 -- inserted before dispatch and retained while delivery is unresolved; terminal content is
@@ -1725,6 +1730,7 @@ interface SessionPromptCommandRow {
   error: string | null;
   error_code: DurableSessionCommandErrorCode | null;
   user_event_seq: number | null;
+  dismissed_at: number | null;
   created_at: number;
   updated_at: number;
 }
@@ -2330,6 +2336,7 @@ export interface SessionPromptCommandRecord {
   error?: string;
   errorCode?: DurableSessionCommandErrorCode;
   userEventSeq?: number;
+  dismissedAt?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -2633,6 +2640,11 @@ export class ControlPlaneDb {
       `UPDATE session_command_invocations SET next_attempt_at=updated_at
        WHERE next_attempt_at IS NULL AND state IN ('pending','sent')`,
     );
+    try {
+      db.exec("ALTER TABLE session_prompt_commands ADD COLUMN dismissed_at INTEGER");
+    } catch {
+      /* column already present */
+    }
     db.exec(
       `CREATE INDEX IF NOT EXISTS idx_session_command_invocations_due
        ON session_command_invocations(next_attempt_at,runner_id)
@@ -9281,6 +9293,7 @@ export class ControlPlaneDb {
       ...(row.error ? { error: row.error } : {}),
       ...(row.error_code ? { errorCode: row.error_code } : {}),
       ...(row.user_event_seq != null ? { userEventSeq: row.user_event_seq } : {}),
+      ...(row.dismissed_at != null ? { dismissedAt: row.dismissed_at } : {}),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -9346,6 +9359,13 @@ export class ControlPlaneDb {
         "INSERT INTO session_prompt_command_attempts (request_id,command_id,runner_id,sent_at) VALUES (?,?,?,?)",
       ).run(requestId, commandId, row.runner_id, now);
       this.stmt(
+        `DELETE FROM session_prompt_command_attempts
+         WHERE command_id=? AND request_id NOT IN (
+           SELECT request_id FROM session_prompt_command_attempts
+           WHERE command_id=? ORDER BY sent_at DESC,rowid DESC LIMIT ?
+         )`,
+      ).run(commandId, commandId, SESSION_PROMPT_ATTEMPT_RETENTION_LIMIT);
+      this.stmt(
         `UPDATE session_prompt_commands
          SET state=CASE WHEN state IN ('pending','sent') THEN 'sent' ELSE state END,
              attempt_count=attempt_count+1,next_attempt_at=?,updated_at=?
@@ -9390,9 +9410,13 @@ export class ControlPlaneDb {
       }
       const terminal = new Set<SessionPromptCommandState>(["completed", "failed", "uncertain"]);
       const incomingTerminal = terminal.has(input.state);
-      const refinesCancellation = row.state === "uncertain" && input.state === "failed" &&
-        input.code === "COMMAND_CANCELLED" && input.revision >= row.revision;
-      if ((terminal.has(row.state) && !refinesCancellation) || input.revision < row.revision ||
+      // CP terminality is a conservative no-retry fence, not proof of the runner outcome. A later
+      // authenticated terminal receipt may narrow `uncertain` to the definitive provider result;
+      // no terminal state other than uncertainty is mutable, and nonterminal updates never revive it.
+      const refinesUncertain = row.state === "uncertain" &&
+        (input.state === "completed" || input.state === "failed") &&
+        input.revision >= row.revision;
+      if ((terminal.has(row.state) && !refinesUncertain) || input.revision < row.revision ||
           (input.revision === row.revision && input.state === row.state)) {
         this.db.exec("COMMIT");
         return { command: this.sessionPromptCommand(row), advanced: false };
@@ -9406,14 +9430,21 @@ export class ControlPlaneDb {
         this.db.exec("COMMIT");
         return { command: this.sessionPromptCommand(row), advanced: false };
       }
+      const terminalExpiresAt = refinesUncertain
+        ? Math.min(row.expires_at, input.now + SESSION_PROMPT_TERMINAL_RETENTION_MS)
+        : input.now + SESSION_PROMPT_TERMINAL_RETENTION_MS;
       this.stmt(
         `UPDATE session_prompt_commands SET state=?,revision=?,error=?,error_code=?,
          user_event_seq=COALESCE(?,user_event_seq),next_attempt_at=?,
-         payload_json=CASE WHEN ? THEN 'null' ELSE payload_json END,updated_at=? WHERE command_id=?`,
+         payload_json=CASE WHEN ? THEN 'null' ELSE payload_json END,
+         expires_at=CASE WHEN ? THEN ? ELSE expires_at END,
+         updated_at=? WHERE command_id=?`,
       ).run(
         input.state, input.revision, input.error ?? null, input.code ?? null,
         input.userEventSeq ?? null, terminal.has(input.state) ? null : input.now + 30_000,
-        input.state === "completed" ? 1 : 0, input.now, input.commandId,
+        input.state === "completed" ? 1 : 0,
+        incomingTerminal ? 1 : 0, terminalExpiresAt,
+        input.now, input.commandId,
       );
       this.db.exec("COMMIT");
     } catch (error) {
@@ -9460,10 +9491,53 @@ export class ControlPlaneDb {
       // Anything later may already have reached provider admission and is explicitly uncertain.
       this.stmt(
         `UPDATE session_prompt_commands SET state=?,revision=revision+1,error=?,error_code='COMMAND_CANCELLED',
-         next_attempt_at=NULL,updated_at=? WHERE command_id=?`,
-      ).run(row.state === "pending" ? "failed" : "uncertain", reason, now, row.command_id);
+         next_attempt_at=NULL,expires_at=?,updated_at=? WHERE command_id=?`,
+      ).run(
+        row.state === "pending" ? "failed" : "uncertain",
+        reason,
+        now + SESSION_PROMPT_TERMINAL_RETENTION_MS,
+        now,
+        row.command_id,
+      );
     }
     return rows.length;
+  }
+
+  cancelPendingSessionPromptCommand(
+    sessionId: string,
+    commandId: string,
+    now: number,
+  ): "cancelled" | "not_found" | "delivery_started" {
+    const row = this.stmt(
+      "SELECT state FROM session_prompt_commands WHERE session_id=? AND command_id=? AND dismissed_at IS NULL",
+    ).get(sessionId, commandId) as { state: SessionPromptCommandState } | undefined;
+    if (!row) return "not_found";
+    if (row.state !== "pending") return "delivery_started";
+    const updated = this.stmt(
+      `UPDATE session_prompt_commands SET state='failed',revision=revision+1,
+       error='prompt cancelled before runner delivery',error_code='COMMAND_CANCELLED',
+       next_attempt_at=NULL,expires_at=?,updated_at=?
+       WHERE session_id=? AND command_id=? AND state='pending' AND dismissed_at IS NULL`,
+    ).run(now + SESSION_PROMPT_TERMINAL_RETENTION_MS, now, sessionId, commandId);
+    return Number(updated.changes) === 1 ? "cancelled" : "delivery_started";
+  }
+
+  dismissTerminalSessionPromptCommand(
+    sessionId: string,
+    commandId: string,
+    now: number,
+  ): "dismissed" | "not_found" | "not_terminal" {
+    const row = this.stmt(
+      "SELECT state FROM session_prompt_commands WHERE session_id=? AND command_id=? AND dismissed_at IS NULL",
+    ).get(sessionId, commandId) as { state: SessionPromptCommandState } | undefined;
+    if (!row) return "not_found";
+    if (row.state !== "failed" && row.state !== "uncertain") return "not_terminal";
+    const updated = this.stmt(
+      `UPDATE session_prompt_commands SET dismissed_at=?,payload_json='null',
+       expires_at=MIN(expires_at,?),updated_at=?
+       WHERE session_id=? AND command_id=? AND state IN ('failed','uncertain') AND dismissed_at IS NULL`,
+    ).run(now, now + SESSION_PROMPT_TERMINAL_RETENTION_MS, now, sessionId, commandId);
+    return Number(updated.changes) === 1 ? "dismissed" : "not_terminal";
   }
 
   pruneSessionPromptCommands(now: number, limit = 1_000): string[] {
@@ -10095,6 +10169,7 @@ export class ControlPlaneDb {
     }
 
     const durablePromptQueue = this.pendingSessionPromptQueue(row.id);
+    const pendingPrompts = this.pendingSessionPrompts(row.id);
     return {
       id: row.id,
       runnerId: row.runner_id,
@@ -10142,6 +10217,7 @@ export class ControlPlaneDb {
       preview: row.preview,
       pendingApproval: pending,
       ...(durablePromptQueue.length ? { queued: durablePromptQueue } : {}),
+      ...(pendingPrompts.length ? { pendingPrompts } : {}),
       ...(() => {
         const steeringAttempts = this.listSteeringAttempts(row.id);
         return steeringAttempts.length ? { steeringAttempts } : {};
@@ -10178,7 +10254,8 @@ export class ControlPlaneDb {
       `SELECT command_id,payload_json,state,error FROM (
          SELECT command_id,payload_json,state,error,created_at,rowid AS prompt_rowid
          FROM session_prompt_commands
-         WHERE session_id=? AND state IN ('pending','sent','accepted','queued','failed','uncertain')
+         WHERE session_id=? AND dismissed_at IS NULL
+           AND state IN ('pending','sent','accepted','queued','failed','uncertain')
          ORDER BY created_at DESC,rowid DESC LIMIT 100
        ) ORDER BY created_at,prompt_rowid`,
     ).all(sessionId) as Array<{
@@ -10208,6 +10285,42 @@ export class ControlPlaneDb {
       } catch {
         return [];
       }
+    });
+  }
+
+  private pendingSessionPrompts(sessionId: string): PendingPromptView[] {
+    const rows = this.stmt(
+      `SELECT * FROM (
+         SELECT *,rowid AS prompt_rowid FROM session_prompt_commands
+         WHERE session_id=? AND dismissed_at IS NULL
+           AND state IN ('pending','sent','accepted','queued','started','failed','uncertain')
+         ORDER BY created_at DESC,rowid DESC LIMIT 100
+       ) ORDER BY created_at,prompt_rowid`,
+    ).all(sessionId) as unknown as SessionPromptCommandRow[];
+    return rows.flatMap((row) => {
+      if (row.state === "completed") return [];
+      let command: PromptSessionMessage;
+      try {
+        command = JSON.parse(row.payload_json) as PromptSessionMessage;
+      } catch {
+        return [];
+      }
+      if (command?.type !== "prompt_session") return [];
+      return [{
+        commandId: row.command_id,
+        text: command.text.length > 4_096 ? `${command.text.slice(0, 4_095)}…` : command.text,
+        hasImages: Boolean(command.images?.length),
+        state: row.state,
+        revision: row.revision,
+        attemptCount: row.attempt_count,
+        ...(row.error ? { error: row.error } : {}),
+        ...(row.error_code ? { errorCode: row.error_code } : {}),
+        ...(row.user_event_seq != null ? { userEventSeq: row.user_event_seq } : {}),
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        ...(row.state === "pending" ? { canCancel: true } : {}),
+        ...(row.state === "failed" || row.state === "uncertain" ? { canDismiss: true } : {}),
+      }];
     });
   }
 

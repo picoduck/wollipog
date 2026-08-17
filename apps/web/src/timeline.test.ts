@@ -40,11 +40,13 @@ test("user-message projection preserves queue and steering reconciliation identi
     kind: "user_message",
     text: "queued",
     turnId: "turn-queued",
+    commandId: "prompt-durable",
     submissionId: "submission-steered",
     deliveryIntent: "steer",
   })]);
   assert.equal(item?.kind, "user_message");
   assert.equal(item?.kind === "user_message" ? item.turnId : undefined, "turn-queued");
+  assert.equal(item?.kind === "user_message" ? item.commandId : undefined, "prompt-durable");
   assert.equal(item?.kind === "user_message" ? item.submissionId : undefined, "submission-steered");
   assert.equal(item?.kind === "user_message" ? item.deliveryIntent : undefined, "steer");
 });

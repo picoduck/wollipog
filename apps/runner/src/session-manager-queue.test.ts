@@ -103,6 +103,7 @@ test("queued prompts are reported with ids and are individually cancelable", () 
       hasImages: false,
       steerable: false,
       steerDisabledReason: "This provider does not support steering.",
+      liveQueueObserved: true,
     }]);
 
     // Cancelling an unknown id is a no-op (no new queue message).
@@ -641,6 +642,7 @@ test("reportQueues emits one authoritative frame for every stored non-deleted se
     assert.deepEqual(first.find((message) => message.sessionId === "active-nonempty")?.queue, [{
       id: "preserved", text: "survives reconnect", hasImages: false,
       steerable: false, steerDisabledReason: "This provider does not support steering.",
+      liveQueueObserved: true,
     }]);
     assert.equal(first.some((message) => message.sessionId === "deleted"), false);
 
@@ -651,6 +653,7 @@ test("reportQueues emits one authoritative frame for every stored non-deleted se
     assert.deepEqual(second.find((message) => message.sessionId === "active-nonempty")?.queue, [{
       id: "preserved", text: "survives reconnect", hasImages: false,
       steerable: false, steerDisabledReason: "This provider does not support steering.",
+      liveQueueObserved: true,
     }]);
   } finally {
     manager.shutdownAll();

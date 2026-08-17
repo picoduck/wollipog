@@ -1224,9 +1224,7 @@ export class SessionManager {
     } finally {
       reportMaterialized(false);
       if (this.launchGenerations.get(spec.sessionId) === launchGeneration) {
-        const queued = this.preLaunchQueues.get(spec.sessionId);
-        if (queued) this.rejectQueued(queued, "session launch failed before runner admission");
-        this.preLaunchQueues.delete(spec.sessionId);
+        this.rejectPreLaunchQueue(spec.sessionId, "session launch failed before runner admission");
       }
       if (this.preLaunchAdmissionGenerations.get(spec.sessionId) === launchGeneration) {
         this.preLaunchAdmissionGenerations.delete(spec.sessionId);
@@ -2669,7 +2667,7 @@ export class SessionManager {
       if (persistedAuthenticationBlock) this.store.patchMeta(sessionId, { pendingApproval: null });
       durable?.queued();
       this.insertQueuedPrompt(sessionId, recovering, {
-        id: randomUUID(), ordinal: this.nextQueueOrdinal(sessionId), text, images, slashCommand,
+        id: durable?.commandId ?? randomUUID(), ordinal: this.nextQueueOrdinal(sessionId), text, images, slashCommand,
         config: effectiveConfig, durable, syntheticRecovery,
       });
       if (!this.recoveryLaunching.has(sessionId)) setImmediate(() => void this.recoverQueuedAppServer(sessionId));
@@ -2686,10 +2684,11 @@ export class SessionManager {
       }
       durable?.queued();
       this.insertQueuedPrompt(sessionId, queue, {
-        id: randomUUID(), ordinal: this.nextQueueOrdinal(sessionId), text, images, slashCommand,
+        id: durable?.commandId ?? randomUUID(), ordinal: this.nextQueueOrdinal(sessionId), text, images, slashCommand,
         config: effectiveConfig, durable, syntheticRecovery,
       });
       this.preLaunchQueues.set(sessionId, queue);
+      this.emitQueue(sessionId);
       return true;
     }
     if (!entry) {
@@ -2724,7 +2723,7 @@ export class SessionManager {
     // applied now: with prompts B(config X) and C(config Y) queued, B must run under X, not Y.
     durable?.queued();
     this.insertQueuedPrompt(sessionId, entry.queue, {
-      id: randomUUID(), ordinal: this.nextQueueOrdinal(sessionId), text, images, slashCommand,
+      id: durable?.commandId ?? randomUUID(), ordinal: this.nextQueueOrdinal(sessionId), text, images, slashCommand,
       config: effectiveConfig, durable, syntheticRecovery,
     });
     this.emitQueue(sessionId);
@@ -2734,11 +2733,13 @@ export class SessionManager {
 
   private activatePreLaunchQueue(sessionId: string): void {
     const queue = this.preLaunchQueues.get(sessionId);
-    if (!queue?.length) return;
+    if (!queue?.length) {
+      if (queue) this.preLaunchQueues.delete(sessionId);
+      return;
+    }
     const entry = this.active.get(sessionId);
     if (!entry) {
-      this.rejectQueued(queue, "session launch ended before runner admission");
-      this.preLaunchQueues.delete(sessionId);
+      this.rejectPreLaunchQueue(sessionId, "session launch ended before runner admission");
       return;
     }
     for (const prompt of queue) {
@@ -3580,10 +3581,14 @@ export class SessionManager {
    * every connected dashboard. The full text stays in the runner's queue for the actual turn. */
   private emitQueue(sessionId: string): void {
     const entry = this.active.get(sessionId);
-    const visible = entry
+    const waitingForAdmission = !entry ? this.preLaunchQueues.get(sessionId) : undefined;
+    const visible = entry || waitingForAdmission
       ? [
-          ...entry.queue.map((prompt) => ({ prompt, steeringState: undefined as "promoting" | "uncertain" | undefined })),
-          ...[...this.reservedPromotions(entry).values()]
+          ...(entry?.queue ?? waitingForAdmission ?? []).map((prompt) => ({
+            prompt,
+            steeringState: undefined as "promoting" | "uncertain" | undefined,
+          })),
+          ...[...(entry ? this.reservedPromotions(entry).values() : [])]
             .filter((operation) => operation.source)
             .map((operation) => ({
               prompt: operation.source!,
@@ -3613,6 +3618,7 @@ export class SessionManager {
           steerable: eligibility.eligible,
           ...(!eligibility.eligible ? { steerDisabledReason: eligibility.message } : {}),
           ...(steeringState ? { steeringState } : {}),
+          liveQueueObserved: true,
         };
       }),
       ...(entry?.holdQueuedPromptsAfterInterrupt ? { held: true } : {}),
@@ -3646,9 +3652,10 @@ export class SessionManager {
    * so it can't be cancelled this way). No-op if the id already ran or the session isn't active. */
   removeQueuedPrompt(sessionId: string, promptId: string): void {
     const entry = this.active.get(sessionId);
-    if (!entry) return;
-    const reserved = this.reservedPromotions(entry).get(promptId);
-    if (reserved) {
+    const preLaunch = !entry ? this.preLaunchQueues.get(sessionId) : undefined;
+    if (!entry && !preLaunch) return;
+    const reserved = entry ? this.reservedPromotions(entry).get(promptId) : undefined;
+    if (reserved && entry) {
       if (reserved.result?.disposition === "uncertain") {
         // Queue cancellation is the dashboard's legacy spelling of Dismiss. Route it through the
         // same terminal transition so the retained payload is scrubbed and a later Queue Again
@@ -3668,15 +3675,29 @@ export class SessionManager {
       }
       return;
     }
-    const before = entry.queue.length;
-    const removed = entry.queue.filter((q) => q.id === promptId);
-    entry.queue = entry.queue.filter((q) => q.id !== promptId);
+    const queue = entry?.queue ?? preLaunch!;
+    const before = queue.length;
+    const removed = queue.filter((q) => q.id === promptId);
+    const retained = queue.filter((q) => q.id !== promptId);
+    if (entry) entry.queue = retained;
+    else if (retained.length) this.preLaunchQueues.set(sessionId, retained);
+    else this.preLaunchQueues.delete(sessionId);
     this.rejectQueued(removed, "queued command was cancelled");
-    if (entry.queue.length !== before) this.emitQueue(sessionId);
+    if (retained.length !== before) this.emitQueue(sessionId);
   }
 
   private rejectQueued(queue: QueuedPrompt[], error: string): void {
     for (const prompt of queue) this.failQueuedPrompt(prompt, error, "COMMAND_CANCELLED");
+  }
+
+  /** Terminalize and remove a pre-admission queue, then clear its live dashboard projection. */
+  private rejectPreLaunchQueue(sessionId: string, error: string): boolean {
+    const queue = this.preLaunchQueues.get(sessionId);
+    if (!queue) return false;
+    this.rejectQueued(queue, error);
+    this.preLaunchQueues.delete(sessionId);
+    this.emitQueue(sessionId);
+    return true;
   }
 
   private failQueuedPrompt(
@@ -4855,9 +4876,7 @@ export class SessionManager {
     this.releaseAdmissionIfInactive(sessionId);
     const entry = this.active.get(sessionId);
     if (!entry) {
-      const queued = this.preLaunchQueues.get(sessionId);
-      if (queued) this.rejectQueued(queued, "session cancelled before runner admission");
-      this.preLaunchQueues.delete(sessionId);
+      this.rejectPreLaunchQueue(sessionId, "session cancelled before runner admission");
       if (cancelledPreparation || cancelledWait || cancelledAdmittedStart) {
         this.emitStatus(
           sessionId,
@@ -4965,9 +4984,7 @@ export class SessionManager {
     this.clearSteeringState(sessionId, "session stopped before steering settled");
     const entry = this.active.get(sessionId);
     if (!entry) {
-      const queued = this.preLaunchQueues.get(sessionId);
-      if (queued) this.rejectQueued(queued, "session stopped before runner admission");
-      this.preLaunchQueues.delete(sessionId);
+      this.rejectPreLaunchQueue(sessionId, "session stopped before runner admission");
       this.cancelAdmissionWait(sessionId);
       // Not in-process but may exist in the store — record the stop there too.
       if (this.store.has(sessionId)) {
@@ -5045,9 +5062,7 @@ export class SessionManager {
       }
 
       this.beginLaunchGeneration(sessionId);
-      const preLaunch = this.preLaunchQueues.get(sessionId);
-      if (preLaunch) this.rejectQueued(preLaunch, "session deleted before runner admission");
-      this.preLaunchQueues.delete(sessionId);
+      this.rejectPreLaunchQueue(sessionId, "session deleted before runner admission");
       // Deletion is terminal, not a replacement launch. Stale continuations may perform only
       // idempotent lock/admission release; the deletion journal exclusively owns destructive
       // worktree/provider cleanup.
