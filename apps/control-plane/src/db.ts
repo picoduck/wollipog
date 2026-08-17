@@ -82,6 +82,7 @@ import {
   type OS,
   type PendingApproval,
   type PromptImageReference,
+  type PromptSessionMessage,
   type ProjectLocationAvailability,
   type ProjectLocationSource,
   type ProjectLocationView,
@@ -118,6 +119,7 @@ import {
   type SessionStatus,
   type SessionTitleSource,
   type SessionView,
+  type QueuedPromptView,
   type SteerDisposition,
   type SteerResultReason,
   type SteeringAttemptSource,
@@ -167,6 +169,7 @@ export const GOVERNANCE_AUDIT_RETENTION_MS = 90 * 24 * 60 * 60_000;
 export const MAX_PROJECTED_STEERING_ATTEMPTS = 50;
 export const MAX_UNRESOLVED_STEERING_ATTEMPTS = 50;
 export const MAX_PENDING_STEERING_RESOLUTION_REPLAYS = 50;
+const SESSION_PROMPT_TERMINAL_RETENTION_MS = 7 * 24 * 60 * 60_000;
 
 const ARTIFACT_TABLE_SCHEMA = /* sql */ `
 CREATE TABLE IF NOT EXISTS artifacts (
@@ -420,6 +423,41 @@ CREATE TABLE IF NOT EXISTS sessions (
   CHECK (policy_resume_status IS NULL OR policy_resume_status='idle'),
   FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
   FOREIGN KEY (project_location_id) REFERENCES project_locations(id) ON DELETE SET NULL
+);
+
+-- User-submitted prompts use the runner's durable v53 receipt lane too. Unlike scheduler-owned
+-- automation commands these rows belong directly to a session and remain recoverable across a
+-- control-plane restart without manufacturing an automation execution.
+CREATE TABLE IF NOT EXISTS session_prompt_commands (
+  command_id       TEXT PRIMARY KEY,
+  session_id       TEXT NOT NULL,
+  runner_id        TEXT NOT NULL,
+  payload_json     TEXT NOT NULL,
+  payload_sha256   TEXT NOT NULL,
+  state            TEXT NOT NULL CHECK (state IN
+                     ('pending','sent','accepted','queued','started','completed','failed','uncertain')),
+  revision         INTEGER NOT NULL DEFAULT 0,
+  attempt_count    INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at  INTEGER,
+  expires_at       INTEGER NOT NULL,
+  error            TEXT,
+  error_code       TEXT,
+  user_event_seq   INTEGER,
+  created_at       INTEGER NOT NULL,
+  updated_at       INTEGER NOT NULL,
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_session_prompt_commands_due
+  ON session_prompt_commands(next_attempt_at, created_at, command_id)
+  WHERE state IN ('pending','sent','accepted','queued','started');
+CREATE INDEX IF NOT EXISTS idx_session_prompt_commands_session
+  ON session_prompt_commands(session_id, created_at, command_id);
+CREATE TABLE IF NOT EXISTS session_prompt_command_attempts (
+  request_id    TEXT PRIMARY KEY,
+  command_id    TEXT NOT NULL,
+  runner_id     TEXT NOT NULL,
+  sent_at       INTEGER NOT NULL,
+  FOREIGN KEY (command_id) REFERENCES session_prompt_commands(command_id) ON DELETE CASCADE
 );
 
 -- Steering is intentionally a control-plane-owned outbox/receipt. The request snapshot is
@@ -1673,6 +1711,24 @@ interface SessionCommandInvocationRow {
   terminal_at: number | null;
 }
 
+interface SessionPromptCommandRow {
+  command_id: string;
+  session_id: string;
+  runner_id: string;
+  payload_json: string;
+  payload_sha256: string;
+  state: SessionPromptCommandState;
+  revision: number;
+  attempt_count: number;
+  next_attempt_at: number | null;
+  expires_at: number;
+  error: string | null;
+  error_code: DurableSessionCommandErrorCode | null;
+  user_event_seq: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
 export interface StageSessionCommandInvocationInput {
   invocationId: string;
   requestId: string;
@@ -2255,6 +2311,27 @@ export interface AutomationCommandRecord extends AutomationCommandView {
   errorCode?: DurableSessionCommandErrorCode;
   duplicate?: boolean;
   userEventSeq?: number;
+}
+
+export type SessionPromptCommandState = "pending" | "sent" |
+  "accepted" | "queued" | "started" | "completed" | "failed" | "uncertain";
+
+export interface SessionPromptCommandRecord {
+  commandId: string;
+  sessionId: string;
+  runnerId: string;
+  payloadJson: string;
+  payloadSha256: string;
+  state: SessionPromptCommandState;
+  revision: number;
+  attemptCount: number;
+  nextAttemptAt: number | null;
+  expiresAt: number;
+  error?: string;
+  errorCode?: DurableSessionCommandErrorCode;
+  userEventSeq?: number;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface AutomationTriggerRecord extends AutomationTriggerView {
@@ -7640,6 +7717,12 @@ export class ControlPlaneDb {
   updateSessionStatus(id: string, status: SessionStatus, now: number): void {
     this.stmt("UPDATE sessions SET status=?, updated_at=? WHERE id=?")
       .run(status, now, id);
+    if (status === "completed" || status === "failed" || status === "stopped") {
+      // Session terminality is the retry fence, regardless of which service path observed it.
+      // A never-sent prompt is definitely failed; anything marked before send may have reached
+      // the runner and is conservatively uncertain until a later receipt narrows the outcome.
+      this.cancelSessionPromptCommands(id, `session became ${status} before durable prompt delivery completed`, now);
+    }
     // Swallowed idle belongs only to the CP-owned pause that observed it. Any local or runner
     // transition back into execution (or into a terminal state) invalidates that settle proof,
     // including callers such as prompt/restart/stop that do not pass through onSessionStatus().
@@ -9183,6 +9266,219 @@ export class ControlPlaneDb {
     return Number(updated.changes) > 0;
   }
 
+  private sessionPromptCommand(row: SessionPromptCommandRow): SessionPromptCommandRecord {
+    return {
+      commandId: row.command_id,
+      sessionId: row.session_id,
+      runnerId: row.runner_id,
+      payloadJson: row.payload_json,
+      payloadSha256: row.payload_sha256,
+      state: row.state,
+      revision: row.revision,
+      attemptCount: row.attempt_count,
+      nextAttemptAt: row.next_attempt_at,
+      expiresAt: row.expires_at,
+      ...(row.error ? { error: row.error } : {}),
+      ...(row.error_code ? { errorCode: row.error_code } : {}),
+      ...(row.user_event_seq != null ? { userEventSeq: row.user_event_seq } : {}),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  stageSessionPromptCommand(input: {
+    commandId: string;
+    sessionId: string;
+    runnerId: string;
+    payloadJson: string;
+    payloadSha256: string;
+    expiresAt: number;
+    now: number;
+  }): SessionPromptCommandRecord {
+    JSON.parse(input.payloadJson);
+    this.stmt(
+      `INSERT INTO session_prompt_commands
+       (command_id,session_id,runner_id,payload_json,payload_sha256,state,revision,attempt_count,
+        next_attempt_at,expires_at,created_at,updated_at)
+       VALUES (?,?,?,?,?,'pending',0,0,?,?,?,?)`,
+    ).run(
+      input.commandId, input.sessionId, input.runnerId, input.payloadJson, input.payloadSha256,
+      input.now, input.expiresAt, input.now, input.now,
+    );
+    return this.getSessionPromptCommand(input.commandId)!;
+  }
+
+  getSessionPromptCommand(commandId: string): SessionPromptCommandRecord | null {
+    const row = this.stmt("SELECT * FROM session_prompt_commands WHERE command_id=?")
+      .get(commandId) as unknown as SessionPromptCommandRow | undefined;
+    return row ? this.sessionPromptCommand(row) : null;
+  }
+
+  dueSessionPromptCommands(now: number, runnerId?: string, limit = 100): SessionPromptCommandRecord[] {
+    const runner = runnerId ? "AND command.runner_id=?" : "";
+    const params = runnerId ? [now, now, runnerId, limit] : [now, now, limit];
+    const rows = this.stmt(
+      `SELECT command.* FROM session_prompt_commands command
+       JOIN sessions session ON session.id=command.session_id
+       WHERE command.state IN ('pending','sent','accepted','queued','started')
+         AND command.next_attempt_at IS NOT NULL AND command.next_attempt_at<=? AND command.expires_at>?
+         AND session.status NOT IN ('completed','failed','stopped') ${runner}
+       ORDER BY command.created_at,command.rowid LIMIT ?`,
+    ).all(...params) as unknown as SessionPromptCommandRow[];
+    return rows.map((row) => this.sessionPromptCommand(row));
+  }
+
+  markSessionPromptCommandSent(
+    commandId: string,
+    requestId: string,
+    now: number,
+    nextAttemptAt: number,
+  ): SessionPromptCommandRecord | null {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.stmt("SELECT * FROM session_prompt_commands WHERE command_id=?")
+        .get(commandId) as unknown as SessionPromptCommandRow | undefined;
+      if (!row || !["pending", "sent", "accepted", "queued", "started"].includes(row.state)) {
+        this.db.exec("COMMIT");
+        return null;
+      }
+      this.stmt(
+        "INSERT INTO session_prompt_command_attempts (request_id,command_id,runner_id,sent_at) VALUES (?,?,?,?)",
+      ).run(requestId, commandId, row.runner_id, now);
+      this.stmt(
+        `UPDATE session_prompt_commands
+         SET state=CASE WHEN state IN ('pending','sent') THEN 'sent' ELSE state END,
+             attempt_count=attempt_count+1,next_attempt_at=?,updated_at=?
+         WHERE command_id=?`,
+      ).run(nextAttemptAt, now, commandId);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return this.getSessionPromptCommand(commandId);
+  }
+
+  recordSessionPromptCommandReceipt(input: {
+    commandId: string;
+    runnerId: string;
+    sessionId: string;
+    state: Exclude<SessionPromptCommandState, "pending" | "sent">;
+    revision: number;
+    requestId?: string;
+    error?: string;
+    code?: DurableSessionCommandErrorCode;
+    userEventSeq?: number;
+    now: number;
+  }): { command: SessionPromptCommandRecord; advanced: boolean } | null {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.stmt("SELECT * FROM session_prompt_commands WHERE command_id=?")
+        .get(input.commandId) as unknown as SessionPromptCommandRow | undefined;
+      if (!row || row.runner_id !== input.runnerId || row.session_id !== input.sessionId) {
+        this.db.exec("ROLLBACK");
+        return null;
+      }
+      if (input.requestId) {
+        const attempt = this.stmt(
+          "SELECT 1 FROM session_prompt_command_attempts WHERE request_id=? AND command_id=? AND runner_id=?",
+        ).get(input.requestId, input.commandId, input.runnerId);
+        if (!attempt) {
+          this.db.exec("ROLLBACK");
+          return null;
+        }
+      }
+      const terminal = new Set<SessionPromptCommandState>(["completed", "failed", "uncertain"]);
+      const incomingTerminal = terminal.has(input.state);
+      const refinesCancellation = row.state === "uncertain" && input.state === "failed" &&
+        input.code === "COMMAND_CANCELLED" && input.revision >= row.revision;
+      if ((terminal.has(row.state) && !refinesCancellation) || input.revision < row.revision ||
+          (input.revision === row.revision && input.state === row.state)) {
+        this.db.exec("COMMIT");
+        return { command: this.sessionPromptCommand(row), advanced: false };
+      }
+      const rank: Record<SessionPromptCommandState, number> = {
+        pending: 0, sent: 1, accepted: 2, queued: 3, started: 4,
+        completed: 5, failed: 5, uncertain: 5,
+      };
+      if ((input.revision === row.revision && !incomingTerminal) ||
+          (!incomingTerminal && rank[input.state] < rank[row.state])) {
+        this.db.exec("COMMIT");
+        return { command: this.sessionPromptCommand(row), advanced: false };
+      }
+      this.stmt(
+        `UPDATE session_prompt_commands SET state=?,revision=?,error=?,error_code=?,
+         user_event_seq=COALESCE(?,user_event_seq),next_attempt_at=?,
+         payload_json=CASE WHEN ? THEN 'null' ELSE payload_json END,updated_at=? WHERE command_id=?`,
+      ).run(
+        input.state, input.revision, input.error ?? null, input.code ?? null,
+        input.userEventSeq ?? null, terminal.has(input.state) ? null : input.now + 30_000,
+        input.state === "completed" ? 1 : 0, input.now, input.commandId,
+      );
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return { command: this.getSessionPromptCommand(input.commandId)!, advanced: true };
+  }
+
+  expireSessionPromptCommands(now: number): string[] {
+    const rows = this.stmt(
+      `SELECT * FROM session_prompt_commands
+       WHERE state IN ('pending','sent','accepted','queued','started') AND expires_at<=?
+       ORDER BY expires_at,created_at,rowid LIMIT 100`,
+    ).all(now) as unknown as SessionPromptCommandRow[];
+    const sessions = new Set<string>();
+    for (const row of rows) {
+      const uncertain = row.state !== "pending";
+      this.stmt(
+        `UPDATE session_prompt_commands SET state=?,revision=revision+1,error=?,next_attempt_at=NULL,
+         expires_at=?,updated_at=?
+         WHERE command_id=?`,
+      ).run(
+        uncertain ? "uncertain" : "failed",
+        uncertain
+          ? "durable prompt exceeded its receipt horizon after possible runner acceptance"
+          : "durable prompt expired before runner acceptance",
+        now + SESSION_PROMPT_TERMINAL_RETENTION_MS,
+        now,
+        row.command_id,
+      );
+      sessions.add(row.session_id);
+    }
+    return [...sessions];
+  }
+
+  cancelSessionPromptCommands(sessionId: string, reason: string, now: number): number {
+    const rows = this.stmt(
+      `SELECT command_id,state FROM session_prompt_commands
+       WHERE session_id=? AND state IN ('pending','sent','accepted','queued','started')`,
+    ).all(sessionId) as Array<{ command_id: string; state: SessionPromptCommandState }>;
+    for (const row of rows) {
+      // `sent` is mark-before-send, so only a never-attempted pending row is definitely cancelled.
+      // Anything later may already have reached provider admission and is explicitly uncertain.
+      this.stmt(
+        `UPDATE session_prompt_commands SET state=?,revision=revision+1,error=?,error_code='COMMAND_CANCELLED',
+         next_attempt_at=NULL,updated_at=? WHERE command_id=?`,
+      ).run(row.state === "pending" ? "failed" : "uncertain", reason, now, row.command_id);
+    }
+    return rows.length;
+  }
+
+  pruneSessionPromptCommands(now: number, limit = 1_000): string[] {
+    const rows = this.stmt(
+      `SELECT command_id,session_id FROM session_prompt_commands
+       WHERE state IN ('completed','failed','uncertain') AND expires_at<=?
+       ORDER BY expires_at,created_at,rowid LIMIT ?`,
+    ).all(now, Math.max(1, Math.min(limit, 10_000))) as Array<{ command_id: string; session_id: string }>;
+    if (!rows.length) return [];
+    const placeholders = rows.map(() => "?").join(",");
+    this.stmt(`DELETE FROM session_prompt_commands WHERE command_id IN (${placeholders})`)
+      .run(...rows.map((row) => row.command_id));
+    return [...new Set(rows.map((row) => row.session_id))];
+  }
+
   private sessionCommandInvocationView(
     row: SessionCommandInvocationRow,
     argumentText = row.argument_text,
@@ -9798,6 +10094,7 @@ export class ControlPlaneDb {
       }
     }
 
+    const durablePromptQueue = this.pendingSessionPromptQueue(row.id);
     return {
       id: row.id,
       runnerId: row.runner_id,
@@ -9844,6 +10141,7 @@ export class ControlPlaneDb {
       eventEpoch: row.event_epoch ?? 0,
       preview: row.preview,
       pendingApproval: pending,
+      ...(durablePromptQueue.length ? { queued: durablePromptQueue } : {}),
       ...(() => {
         const steeringAttempts = this.listSteeringAttempts(row.id);
         return steeringAttempts.length ? { steeringAttempts } : {};
@@ -9871,6 +10169,46 @@ export class ControlPlaneDb {
       // Lazy: sessions without the guardrail never pay the COUNT (same class as messageCount).
       toolCallCount: row.max_tool_calls != null ? this.countToolCalls(row.id) : undefined,
     };
+  }
+
+  /** Commands not yet started remain visible across CP or runner restarts. A live runner queue
+   * overlay replaces this projection once admission creates its own steer/cancel identities. */
+  private pendingSessionPromptQueue(sessionId: string): QueuedPromptView[] {
+    const rows = this.stmt(
+      `SELECT command_id,payload_json,state,error FROM (
+         SELECT command_id,payload_json,state,error,created_at,rowid AS prompt_rowid
+         FROM session_prompt_commands
+         WHERE session_id=? AND state IN ('pending','sent','accepted','queued','failed','uncertain')
+         ORDER BY created_at DESC,rowid DESC LIMIT 100
+       ) ORDER BY created_at,prompt_rowid`,
+    ).all(sessionId) as Array<{
+      command_id: string;
+      payload_json: string;
+      state: SessionPromptCommandState;
+      error: string | null;
+    }>;
+    return rows.flatMap((row) => {
+      try {
+        const command = JSON.parse(row.payload_json) as PromptSessionMessage;
+        if (command.type !== "prompt_session") return [];
+        const durableDeliveryState = row.state === "queued" || row.state === "failed" || row.state === "uncertain"
+          ? row.state
+          : "pending";
+        return [{
+          id: row.command_id,
+          text: command.text.length > 500 ? `${command.text.slice(0, 500)}…` : command.text,
+          hasImages: Boolean(command.images?.length),
+          steerable: false,
+          steerDisabledReason: durableDeliveryState === "failed" || durableDeliveryState === "uncertain"
+            ? (row.error ?? "Durable delivery did not complete.")
+            : "Waiting for durable runner admission.",
+          durableDeliveryState,
+          ...(row.error ? { durableDeliveryError: row.error } : {}),
+        }];
+      } catch {
+        return [];
+      }
+    });
   }
 
   /* ----------------------------- Events ---------------------------------- */

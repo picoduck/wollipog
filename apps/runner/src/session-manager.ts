@@ -488,6 +488,10 @@ export class SessionManager {
   /** Prompts known not to have reached turn/start when app-server crashed. A recovery launch
    * consumes these; the in-flight prompt is deliberately absent because delivery is ambiguous. */
   private readonly recoveryQueues = new Map<string, QueuedPrompt[]>();
+  /** Prompts received after a session was materialized but before capacity admission. They must
+   * join the original launch instead of starting a competing resume generation. Durable command
+   * lifecycles make this in-memory FIFO recoverable after a runner restart. */
+  private readonly preLaunchQueues = new Map<string, QueuedPrompt[]>();
   private readonly recoveryLaunching = new Set<string>();
   private readonly orphanRecoveryLaunching = new Set<string>();
   private readonly orphanRecoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -504,6 +508,9 @@ export class SessionManager {
   private readonly deletedExpiry = new Map<string, ReturnType<typeof setTimeout>>();
   /** Every start captures one generation; delete/restart invalidates all older async continuations. */
   private readonly launchGenerations = new Map<string, number>();
+  /** Only start() generations own the admission queue. Resume/recovery generations use their
+   * existing dedicated queues and must never strand a prompt in preLaunchQueues. */
+  private readonly preLaunchAdmissionGenerations = new Map<string, number>();
   /** Last generation ever begun for this live session id. Unlike launchGenerations, this survives
    * a fast replacement finishing so an older continuation can still identify that replacement. */
   private readonly latestLaunchGenerations = new Map<string, number>();
@@ -1204,6 +1211,7 @@ export class SessionManager {
       }
     }
     const launchGeneration = this.beginLaunchGeneration(spec.sessionId);
+    this.preLaunchAdmissionGenerations.set(spec.sessionId, launchGeneration);
     try {
       return await this.startGeneration(
         spec,
@@ -1215,6 +1223,14 @@ export class SessionManager {
       );
     } finally {
       reportMaterialized(false);
+      if (this.launchGenerations.get(spec.sessionId) === launchGeneration) {
+        const queued = this.preLaunchQueues.get(spec.sessionId);
+        if (queued) this.rejectQueued(queued, "session launch failed before runner admission");
+        this.preLaunchQueues.delete(spec.sessionId);
+      }
+      if (this.preLaunchAdmissionGenerations.get(spec.sessionId) === launchGeneration) {
+        this.preLaunchAdmissionGenerations.delete(spec.sessionId);
+      }
       this.finishLaunchGeneration(spec.sessionId, launchGeneration);
     }
   }
@@ -1590,6 +1606,7 @@ export class SessionManager {
       this.emitStatus(spec.sessionId, "idle");
       durable?.completed();
     }
+    this.activatePreLaunchQueue(spec.sessionId);
     return true;
   }
 
@@ -2659,6 +2676,22 @@ export class SessionManager {
       return true;
     }
     const entry = this.active.get(sessionId);
+    const currentGeneration = this.launchGenerations.get(sessionId);
+    if (!entry && currentGeneration !== undefined &&
+        this.preLaunchAdmissionGenerations.get(sessionId) === currentGeneration) {
+      const queue = this.preLaunchQueues.get(sessionId) ?? [];
+      if (!this.queueCanAccept(queue, text, images)) {
+        durable?.failed("prompt queue is full while the session waits for runner admission", "QUEUE_FULL");
+        return false;
+      }
+      durable?.queued();
+      this.insertQueuedPrompt(sessionId, queue, {
+        id: randomUUID(), ordinal: this.nextQueueOrdinal(sessionId), text, images, slashCommand,
+        config: effectiveConfig, durable, syntheticRecovery,
+      });
+      this.preLaunchQueues.set(sessionId, queue);
+      return true;
+    }
     if (!entry) {
       // Not running in-process — try to RESUME it from the box store (Phase 2).
       void this.resumeAndPrompt(sessionId, text, images, slashCommand, effectiveConfig, durable, syntheticRecovery);
@@ -2697,6 +2730,27 @@ export class SessionManager {
     this.emitQueue(sessionId);
     this.scheduleDrain(sessionId);
     return true;
+  }
+
+  private activatePreLaunchQueue(sessionId: string): void {
+    const queue = this.preLaunchQueues.get(sessionId);
+    if (!queue?.length) return;
+    const entry = this.active.get(sessionId);
+    if (!entry) {
+      this.rejectQueued(queue, "session launch ended before runner admission");
+      this.preLaunchQueues.delete(sessionId);
+      return;
+    }
+    for (const prompt of queue) {
+      if (!this.queueCanAccept(this.queueCapacityView(entry), prompt.text, prompt.images)) {
+        this.failQueuedPrompt(prompt, "prompt queue is full after runner admission", "QUEUE_FULL");
+        continue;
+      }
+      this.insertQueuedPrompt(sessionId, entry.queue, prompt);
+    }
+    this.preLaunchQueues.delete(sessionId);
+    this.emitQueue(sessionId);
+    this.scheduleDrain(sessionId);
   }
 
   /** Admit a manual provider command only against authority minted by this live runner process.
@@ -3628,10 +3682,10 @@ export class SessionManager {
   private failQueuedPrompt(
     prompt: QueuedPrompt,
     error: string,
-    code: "COMMAND_CANCELLED" | "INVALID_COMMAND",
+    code: "COMMAND_CANCELLED" | "INVALID_COMMAND" | "QUEUE_FULL",
   ): void {
     prompt.durable?.failed(error, code);
-    prompt.sessionCommand?.lifecycle.failed(error, code);
+    prompt.sessionCommand?.lifecycle.failed(error, code === "QUEUE_FULL" ? "INVALID_COMMAND" : code);
   }
 
   /** Fire-and-forget drains are always observed. Event-history errors are contained at emitEvent;
@@ -4801,6 +4855,9 @@ export class SessionManager {
     this.releaseAdmissionIfInactive(sessionId);
     const entry = this.active.get(sessionId);
     if (!entry) {
+      const queued = this.preLaunchQueues.get(sessionId);
+      if (queued) this.rejectQueued(queued, "session cancelled before runner admission");
+      this.preLaunchQueues.delete(sessionId);
       if (cancelledPreparation || cancelledWait || cancelledAdmittedStart) {
         this.emitStatus(
           sessionId,
@@ -4908,6 +4965,9 @@ export class SessionManager {
     this.clearSteeringState(sessionId, "session stopped before steering settled");
     const entry = this.active.get(sessionId);
     if (!entry) {
+      const queued = this.preLaunchQueues.get(sessionId);
+      if (queued) this.rejectQueued(queued, "session stopped before runner admission");
+      this.preLaunchQueues.delete(sessionId);
       this.cancelAdmissionWait(sessionId);
       // Not in-process but may exist in the store — record the stop there too.
       if (this.store.has(sessionId)) {
@@ -4985,6 +5045,9 @@ export class SessionManager {
       }
 
       this.beginLaunchGeneration(sessionId);
+      const preLaunch = this.preLaunchQueues.get(sessionId);
+      if (preLaunch) this.rejectQueued(preLaunch, "session deleted before runner admission");
+      this.preLaunchQueues.delete(sessionId);
       // Deletion is terminal, not a replacement launch. Stale continuations may perform only
       // idempotent lock/admission release; the deletion journal exclusively owns destructive
       // worktree/provider cleanup.
@@ -5557,6 +5620,7 @@ export class SessionManager {
     this.shuttingDown = true;
     this.sessionCommandAuthority.clearAll();
     this.launchGenerations.clear();
+    this.preLaunchAdmissionGenerations.clear();
     clearInterval(this.providerStateReconcileTimer);
     clearInterval(this.historyMaintenanceTimer);
     if (this.historyMaintenanceKickoff) clearTimeout(this.historyMaintenanceKickoff);
@@ -5570,6 +5634,7 @@ export class SessionManager {
     this.closing.clear();
     this.deleting.clear();
     this.recoveryQueues.clear();
+    this.preLaunchQueues.clear();
     this.recoveryLaunching.clear();
     this.orphanRecoveryLaunching.clear();
     this.orphanDiscoveryLaunching.clear();

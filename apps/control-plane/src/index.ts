@@ -887,6 +887,7 @@ app.register(async (instance) => {
         }
         svc.recoverPendingSteeringResolutions(runnerId);
         svc.recoverPendingSessionCommands(runnerId);
+        svc.retryDuePrompts(Date.now(), runnerId);
         // A pre-v57 runner cannot emit the inventory fence that normally settles startup's
         // reconnecting rows. Its old transport already kills shells on disconnect, so resolve
         // those durable rows now; any queued legacy shell_exit frames remain idempotent.
@@ -969,7 +970,9 @@ app.register(async (instance) => {
       }
       case "durable_session_command_result":
       case "durable_session_command_update":
-        automations.onDurableCommandReceipt(runnerId!, msg);
+        if (!svc.onDurablePromptReceipt(runnerId!, msg)) {
+          automations.onDurableCommandReceipt(runnerId!, msg);
+        }
         break;
       case "session_command_invocation_result":
       case "session_command_invocation_update":
@@ -3520,6 +3523,7 @@ automationTimer.unref();
 const sessionCommandRetryTimer = setInterval(() => {
   try {
     svc.retryDueSessionCommands(Date.now());
+    svc.retryDuePrompts(Date.now());
   } catch (error) {
     app.log.warn({ error: error instanceof Error ? error.message : String(error) },
       "session command retry deferred");
@@ -3536,6 +3540,7 @@ const artifactMaintenanceTimer = setInterval(() => {
   try {
     const now = Date.now();
     svc.maintainSessionCommands(now);
+    svc.maintainPrompts(now);
     db.pruneSessionCommandInvocations(now - SESSION_COMMAND_INVOCATION_RETENTION_MS, 1_000);
     db.compactSteeringAttempts(now, 1_000);
     db.collectOrphanedSteeringPromptImages(1_000);

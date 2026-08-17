@@ -2063,7 +2063,14 @@ function SessionDetailLoaded({
                   const availability = queuedPromptSteeringAvailability(steeringAvailabilityInput, q);
                   const locallyPromoting = queueSteeringPending.has(q.id);
                   const reserved = q.steeringState === "promoting" || q.steeringState === "uncertain";
-                  const queueLabel = locallyPromoting || q.steeringState === "promoting"
+                  const durable = q.durableDeliveryState !== undefined;
+                  const queueLabel = q.durableDeliveryState === "failed"
+                    ? "Delivery Failed"
+                    : q.durableDeliveryState === "uncertain"
+                      ? "Delivery Uncertain"
+                      : q.durableDeliveryState === "pending"
+                        ? "Pending Delivery"
+                        : locallyPromoting || q.steeringState === "promoting"
                     ? "Steering…"
                     : q.steeringState === "uncertain"
                       ? "Delivery Uncertain"
@@ -2073,7 +2080,7 @@ function SessionDetailLoaded({
                     : !availability.available
                       ? availability.reason
                       : "Promote this queued message into the active turn.";
-                  const canCancelThis = canCancelQueued && !reserved && !locallyPromoting;
+                  const canCancelThis = canCancelQueued && !durable && !reserved && !locallyPromoting;
                   return (
                     <div className="queued-item" key={q.id} data-testid={`queued-prompt-${q.id}`}>
                       <span
@@ -2087,6 +2094,9 @@ function SessionDetailLoaded({
                       <span className="queued-text">
                         {q.hasImages && <span className="queued-img" aria-hidden="true">🖼 </span>}
                         {q.text || (q.hasImages ? "(image)" : "")}
+                        {q.durableDeliveryError && (
+                          <span className="queued-error"> — {q.durableDeliveryError}</span>
+                        )}
                       </span>
                       <div className="queued-actions">
                         <button
@@ -2112,6 +2122,8 @@ function SessionDetailLoaded({
                                 )
                               : reserved || locallyPromoting
                                 ? "Resolve steering before cancelling this queued message."
+                                : durable
+                                  ? "Durable delivery entries cannot be cancelled before runner admission."
                                 : "Cancel this queued message."
                           }
                           aria-label={canCancelThis ? "Cancel Queued Message" : "Queued Message Cancellation Unavailable"}

@@ -2639,6 +2639,7 @@ textarea {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.queued-error { color: var(--danger-text); }
 .queued-actions {
   display: flex;
   align-items: center;
