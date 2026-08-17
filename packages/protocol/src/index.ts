@@ -221,7 +221,10 @@
 //     local stores, so persistent state can be bound to the installation rather than an endpoint.
 // 78: durable queued prompts share one command/queue/event identity and pre-admission queues are
 //     projected live, allowing exact cancellation without inferring authority from persisted rows.
-export const PROTOCOL_VERSION = 78;
+// 79: provider-authentication terminal receipts use a distinct error code. A v79 runner sending
+//     to an older control plane downgrades only the wire projection to COMMAND_CANCELLED so the
+//     older validator still accepts a terminal receipt; the runner-local journal keeps exact truth.
+export const PROTOCOL_VERSION = 79;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
@@ -333,6 +336,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   sessionCommandInvocations: 75,
   gitVisibility: 76,
   durablePromptQueueIdentity: 78,
+  providerAuthenticationReceipts: 79,
 } as const;
 
 /* ========================================================================== */
@@ -452,6 +456,34 @@ export function runnerSupportsProtocol(
   capability: RunnerProtocolCapability,
 ): boolean {
   return Number.isInteger(protocolVersion) && protocolVersion! >= RUNNER_CAPABILITY_MIN_PROTOCOL[capability];
+}
+
+/** Preserve exact provider-authentication truth only when the receiving peer can validate the
+ * additive error code. Older/unknown control planes still receive a terminal, understood code. */
+export function providerAuthenticationReceiptCode(
+  protocolVersion: number | null | undefined,
+): "PROVIDER_AUTHENTICATION_REQUIRED" | "COMMAND_CANCELLED" {
+  return runnerSupportsProtocol(protocolVersion, "providerAuthenticationReceipts")
+    ? "PROVIDER_AUTHENTICATION_REQUIRED"
+    : "COMMAND_CANCELLED";
+}
+
+/** Project additive receipt codes at the actual socket-send boundary. Keeping buffered messages
+ * exact until then makes reconnecting to an older control plane safe. */
+export function projectRunnerMessageForProtocol(
+  message: RunnerToControlPlane,
+  protocolVersion: number | null | undefined,
+): RunnerToControlPlane {
+  if (
+    (message.type === "durable_session_command_result" ||
+      message.type === "durable_session_command_update" ||
+      message.type === "session_command_invocation_result" ||
+      message.type === "session_command_invocation_update") &&
+    message.code === "PROVIDER_AUTHENTICATION_REQUIRED"
+  ) {
+    return { ...message, code: providerAuthenticationReceiptCode(protocolVersion) };
+  }
+  return message;
 }
 
 /** Shared actionable copy for HTTP errors and disabled UI affordances. */

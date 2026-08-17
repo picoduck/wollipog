@@ -75,6 +75,11 @@ import {
 import { anchorForkRef, anchorTurnRef, captureWorktreeTree, deleteTurnRef, deleteTurnRefs, isMissingGitRepositoryError, readTurnRef, resetWorktreeIndex, restoreWorktreeToTree, synchronizeCheckpointRefs, withGitExecutionContext } from "./git-ops.js";
 import { SessionStore, isAdoptedSession, metaToSnapshot, type SessionMeta } from "./session-store.js";
 import { SessionCommandAuthorityRegistry } from "./session-command-authority.js";
+import type {
+  ProviderAuthObservation,
+  ProviderAuthRecoveryController,
+  ProviderCredentialScope,
+} from "./provider-auth-recovery.js";
 import {
   createWorktree,
   createWorktreeFromTree,
@@ -260,6 +265,8 @@ interface SteeringOperation {
 
 interface ActiveSession {
   sessionId: string;
+  /** Exact launch generation that owns this provider process; fences callbacks from retirees. */
+  launchGeneration: number;
   client: Driver;
   repoPath: string;
   cwd: string;
@@ -578,6 +585,7 @@ export class SessionManager {
   private discoverClaudeTasksInContext: typeof discoverIncompleteClaudeTasksInContext = discoverIncompleteClaudeTasksInContext;
   private readonly sessionCommandAuthority = new SessionCommandAuthorityRegistry();
   private readonly providerHomeLeases?: ProviderHomeLeaseRegistry;
+  private readonly providerAuthOperations = new Set<string>();
 
   constructor(
     private send: Send,
@@ -611,6 +619,7 @@ export class SessionManager {
     private readonly cloudTargets?: CloudTargetRegistry,
     private readonly controlPlaneProtocolVersion: () => number | null = () => PROTOCOL_VERSION,
     private readonly runnerOwnerHash?: string,
+    private readonly providerAuthRecovery?: ProviderAuthRecoveryController,
   ) {
     this.lockOwner = `${runnerId}#${randomUUID()}`;
     this.providerHomeLeases = runnerOwnerHash ? new ProviderHomeLeaseRegistry(runnerOwnerHash) : undefined;
@@ -781,13 +790,34 @@ export class SessionManager {
       } else {
         reconciled = this.discoverOrphanedClaudeWork(m);
       }
-      const automatic = automaticClaudeRecoveryAllowed(reconciled);
+      // A durable provider-auth block is authoritative across process restart. Read-only
+      // background discovery may still run, but it must not submit an unattended recovery turn.
+      const automatic = !reconciled.providerAuthBlock && automaticClaudeRecoveryAllowed(reconciled);
       if (reconciled.status !== "stopped" && automatic && reconciled.orphanedWork && !reconciled.orphanedWork.recoveryAttemptedAt) {
         this.scheduleOrphanRecovery(m.sessionId);
       } else if (reconciled.status !== "stopped") {
         this.scheduleContextOrphanDiscovery(reconciled, automatic);
       }
-      if (m.status === "starting" || m.status === "running" || m.status === "queued" || m.status === "input_required") {
+      if (m.providerAuthBlock && m.status === "stopped") {
+        // Terminal operator intent dominates a stale/incomplete recovery generation.
+        this.store.patchMeta(m.sessionId, {
+          providerAuthBlock: undefined,
+          pendingApproval: null,
+        });
+      } else if (m.providerAuthBlock) {
+        // A runner-owned sign-in subprocess cannot survive process restart. Clear only that stale
+        // operation generation, then reconstruct the bounded browser projection from durable,
+        // secret-free block metadata without appending a duplicate transcript event.
+        const block = m.providerAuthBlock.loginOperationId
+          ? { ...m.providerAuthBlock, loginOperationId: undefined }
+          : m.providerAuthBlock;
+        const projection = this.providerAuthenticationProjection(m, block);
+        this.store.patchMeta(m.sessionId, {
+          providerAuthBlock: block,
+          status: "input_required",
+          pendingApproval: projection,
+        });
+      } else if (m.status === "starting" || m.status === "running" || m.status === "queued" || m.status === "input_required") {
         // The process that owned any pending approval is gone — clear the stale card too.
         this.store.patchMeta(m.sessionId, { status: "idle", pendingApproval: null });
       }
@@ -1579,6 +1609,25 @@ export class SessionManager {
       }
       this.releaseAdmissionIfInactive(spec.sessionId);
       if (priorResumeId) this.store.releaseLock(spec.sessionId, this.lockOwner);
+      const authenticationBlocked = this.store.readMeta(spec.sessionId)?.providerAuthBlock;
+      if (authenticationBlocked) {
+        // Authentication is a recoverable launch state, not failed session construction. Preserve
+        // the materialized worktree and retain only ordinary, image-free work whose non-delivery
+        // was proven before a provider process existed. Durable commands were already settled by
+        // their receipt lane and must never execute later behind a terminal failure receipt.
+        if (!durable && authenticationBlocked.delivery === "not_delivered" && initialPrompt &&
+            (!initialImages || initialImages.length === 0) && !authenticationBlocked.retry) {
+          this.store.patchMeta(spec.sessionId, {
+            providerAuthBlock: {
+              ...authenticationBlocked,
+              retry: { text: initialPrompt, images: [] },
+            },
+          });
+          this.store.flush(spec.sessionId);
+        }
+        durable?.failed("provider authentication is required", "PROVIDER_AUTHENTICATION_REQUIRED");
+        return false;
+      }
       // The session never started; if WE just created its worktree, it's garbage — reap it.
       if (worktree && worktreeOwnedByLaunch && !deleted) {
         const checkpointOwnerHash = this.checkpointOwnerHash(meta);
@@ -1984,6 +2033,7 @@ export class SessionManager {
           priorSessionSlashCommands !== meta.sessionSlashCommands)) {
         this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
       }
+      if (!await this.preflightProviderAuthentication(meta, launchGeneration)) return false;
       if (meta.executionTarget?.adapter !== "container" && meta.executionTarget?.adapter !== "cloud" &&
           this.executionIsolation.mode === "bwrap" &&
           meta.providerStateVersion !== (meta.context.kind === "wsl" ? 3 : 2)) {
@@ -2030,7 +2080,11 @@ export class SessionManager {
         onAuthStatus: (status) => {
           if (meta.agentId) this.onAgentAuthUpdate?.(meta.agentId, { status });
         },
-        onAuthenticationFailure: () => this.onProviderAuthenticationFailure(sessionId),
+        onAuthenticationFailure: () => {
+          const live = this.active.get(sessionId);
+          if (!live || live.client !== client || live.launchGeneration !== launchGeneration) return;
+          this.onProviderAuthenticationFailure(sessionId, meta);
+        },
         onAcpCapabilities: (capabilities) => {
           meta.acpCapabilities = capabilities;
           this.store.patchMeta(sessionId, { acpCapabilities: capabilities });
@@ -2124,6 +2178,7 @@ export class SessionManager {
     }
     const entry: ActiveSession = {
       sessionId,
+      launchGeneration,
       client,
       repoPath: meta.repoPath,
       cwd,
@@ -2133,6 +2188,7 @@ export class SessionManager {
       providerReady: false,
       running: false,
       queue: [],
+      ...(meta.providerAuthBlock ? { authenticationBlocked: true } : {}),
       steerFenceIds: new Set(
         [...retainedPromotions.values()]
           .filter((operation) => !operation.settled)
@@ -2232,6 +2288,17 @@ export class SessionManager {
         client.dispose();
         if (this.active.get(sessionId) === entry) this.active.delete(sessionId);
         await this.cancelNewCloudHandoff(meta, hadCloudHandoffBeforeLaunch, "session launch was cancelled during driver initialization", launchGeneration);
+        return false;
+      }
+      if (entry.historyIntegrityFailure) {
+        client.dispose();
+        if (this.active.get(sessionId) === entry) this.active.delete(sessionId);
+        await this.cancelNewCloudHandoff(
+          meta,
+          hadCloudHandoffBeforeLaunch,
+          "session history integrity failed during provider initialization",
+          launchGeneration,
+        );
         return false;
       }
       if (entry.authenticationBlocked) {
@@ -2462,7 +2529,7 @@ export class SessionManager {
     return ordinal;
   }
 
-  private ensureQueueOrdinal(sessionId: string, prompt: QueuedPrompt): number {
+  private ensureQueueOrdinal(sessionId: string, prompt: Pick<QueuedPrompt, "ordinal">): number {
     if (typeof prompt.ordinal === "number" && Number.isSafeInteger(prompt.ordinal) && prompt.ordinal > 0) {
       const next = this.nextQueueOrdinalBySession.get(sessionId) ?? 1;
       if (prompt.ordinal >= next) this.nextQueueOrdinalBySession.set(sessionId, prompt.ordinal + 1);
@@ -2593,6 +2660,8 @@ export class SessionManager {
     config?: SessionConfig,
     durable?: DurableCommandLifecycle,
     syntheticRecovery = false,
+    reservedOrdinal?: number,
+    queueBeforeLaunch = false,
   ): boolean {
     if (durable && this.store.readEvents(sessionId).some((event) =>
       event.payload.kind === "user_message" && event.payload.commandId === durable.commandId)) {
@@ -2649,10 +2718,22 @@ export class SessionManager {
       }
     }
 
-    const persistedAuthenticationBlock = isProviderAuthenticationBlock(
-      this.store.readMeta(sessionId)?.pendingApproval,
-    );
-    if (persistedAuthenticationBlock && syntheticRecovery) return false;
+    const persistedMeta = this.store.readMeta(sessionId);
+    const durableAuthenticationBlock = !!persistedMeta?.providerAuthBlock;
+    const projectedAuthenticationBlock = isProviderAuthenticationBlock(persistedMeta?.pendingApproval);
+    if ((durableAuthenticationBlock || projectedAuthenticationBlock) && syntheticRecovery) return false;
+    if (durableAuthenticationBlock && this.providerAuthRecovery && !syntheticRecovery) {
+      this.emitEvent(sessionId, {
+        kind: "stderr",
+        text: "Authentication is still blocked. Use Recheck Authentication after signing in in the exact provider context.",
+      });
+      this.emitStatus(sessionId, "input_required", "Provider authentication is required");
+      durable?.failed("provider authentication must be revalidated before retry", "PROVIDER_AUTHENTICATION_REQUIRED");
+      return false;
+    }
+    // Adapters without an exact-context status probe receive the bounded legacy projection only.
+    // A successfully admitted new user prompt clears that card at the queue insertion boundary;
+    // it never replays the interrupted/uncertain provider turn. Capacity rejection leaves it parked.
     const recovering = this.recoveryQueues.get(sessionId);
     if (recovering) {
       if (!this.queueCanAccept(this.recoveryQueueCapacityView(sessionId, recovering), text, images)) {
@@ -2664,10 +2745,14 @@ export class SessionManager {
         durable?.failed("prompt queue is full while the agent is recovering", "QUEUE_FULL");
         return false;
       }
-      if (persistedAuthenticationBlock) this.store.patchMeta(sessionId, { pendingApproval: null });
+      if (projectedAuthenticationBlock) this.store.patchMeta(sessionId, { pendingApproval: null });
       durable?.queued();
       this.insertQueuedPrompt(sessionId, recovering, {
-        id: durable?.commandId ?? randomUUID(), ordinal: this.nextQueueOrdinal(sessionId), text, images, slashCommand,
+        id: durable?.commandId ?? randomUUID(),
+        ordinal: reservedOrdinal ?? this.nextQueueOrdinal(sessionId),
+        text,
+        images,
+        slashCommand,
         config: effectiveConfig, durable, syntheticRecovery,
       });
       if (!this.recoveryLaunching.has(sessionId)) setImmediate(() => void this.recoverQueuedAppServer(sessionId));
@@ -2693,7 +2778,18 @@ export class SessionManager {
     }
     if (!entry) {
       // Not running in-process — try to RESUME it from the box store (Phase 2).
-      void this.resumeAndPrompt(sessionId, text, images, slashCommand, effectiveConfig, durable, syntheticRecovery);
+      const ordinal = reservedOrdinal ?? this.nextQueueOrdinal(sessionId);
+      void this.resumeAndPrompt(
+        sessionId,
+        text,
+        images,
+        slashCommand,
+        effectiveConfig,
+        durable,
+        syntheticRecovery,
+        ordinal,
+        queueBeforeLaunch,
+      );
       return true;
     }
     if (entry.historyIntegrityFailure) {
@@ -2712,7 +2808,7 @@ export class SessionManager {
       return false;
     }
     if (entry.authenticationBlocked && !syntheticRecovery) entry.authenticationBlocked = false;
-    if (persistedAuthenticationBlock) this.store.patchMeta(sessionId, { pendingApproval: null });
+    if (projectedAuthenticationBlock) this.store.patchMeta(sessionId, { pendingApproval: null });
     // Only a user-originated prompt is the explicit resume signal. It may arrive while the
     // cancelled provider turn is still settling; clearing the hold now lets the current drain
     // continue into the preserved FIFO as soon as that turn returns.
@@ -2723,7 +2819,11 @@ export class SessionManager {
     // applied now: with prompts B(config X) and C(config Y) queued, B must run under X, not Y.
     durable?.queued();
     this.insertQueuedPrompt(sessionId, entry.queue, {
-      id: durable?.commandId ?? randomUUID(), ordinal: this.nextQueueOrdinal(sessionId), text, images, slashCommand,
+      id: durable?.commandId ?? randomUUID(),
+      ordinal: reservedOrdinal ?? this.nextQueueOrdinal(sessionId),
+      text,
+      images,
+      slashCommand,
       config: effectiveConfig, durable, syntheticRecovery,
     });
     this.emitQueue(sessionId);
@@ -3742,6 +3842,8 @@ export class SessionManager {
     config?: SessionConfig,
     durable?: DurableCommandLifecycle,
     syntheticRecovery = false,
+    reservedOrdinal?: number,
+    queueBeforeLaunch = false,
   ): Promise<void> {
     const meta = this.store.readMeta(sessionId);
     if (!meta) {
@@ -3828,14 +3930,40 @@ export class SessionManager {
       return;
     }
     const launchGeneration = this.beginLaunchGeneration(sessionId);
+    if (queueBeforeLaunch) {
+      this.preLaunchAdmissionGenerations.set(sessionId, launchGeneration);
+      const queue = this.preLaunchQueues.get(sessionId) ?? [];
+      this.insertQueuedPrompt(sessionId, queue, {
+        id: randomUUID(),
+        ordinal: reservedOrdinal ?? this.nextQueueOrdinal(sessionId),
+        text,
+        images,
+        slashCommand,
+        config: fresh.config,
+        durable,
+        syntheticRecovery,
+      });
+      this.preLaunchQueues.set(sessionId, queue);
+    }
+    const finishPreLaunch = (launched: boolean) => {
+      const ownsPreLaunch = this.preLaunchAdmissionGenerations.get(sessionId) === launchGeneration;
+      if (ownsPreLaunch) {
+        this.preLaunchAdmissionGenerations.delete(sessionId);
+      }
+      if (!launched && queueBeforeLaunch && ownsPreLaunch) {
+        this.rejectPreLaunchQueue(sessionId, "provider authentication retry failed before runner admission");
+      }
+    };
     if (!(await this.acquireAdmission(sessionId))) {
       const superseded = this.launchWasSuperseded(sessionId, launchGeneration);
       this.finishLaunchGeneration(sessionId, launchGeneration);
       if (superseded) {
+        finishPreLaunch(false);
         durable?.failed("session resume was superseded by a replacement", "COMMAND_CANCELLED");
         return;
       }
       if (resumeId) this.store.releaseLock(sessionId, this.lockOwner);
+      finishPreLaunch(false);
       durable?.failed("session resume was cancelled before runner admission", "COMMAND_CANCELLED");
       return;
     }
@@ -3843,6 +3971,7 @@ export class SessionManager {
       const superseded = this.launchWasSuperseded(sessionId, launchGeneration);
       this.finishLaunchGeneration(sessionId, launchGeneration);
       if (resumeId && !superseded) this.store.releaseLock(sessionId, this.lockOwner);
+      finishPreLaunch(false);
       durable?.failed(
         superseded
           ? "session resume was superseded by a replacement"
@@ -3866,6 +3995,7 @@ export class SessionManager {
     // preparation with no active entry yet, while already owning this same admission and lock.
     if (!stillOwnsLaunch) {
       if (resumeId && !superseded) this.store.releaseLock(sessionId, this.lockOwner);
+      finishPreLaunch(false);
       durable?.failed(
         superseded
           ? "session resume was superseded by a replacement"
@@ -3877,14 +4007,39 @@ export class SessionManager {
     if (!ok) {
       this.releaseAdmissionIfInactive(sessionId);
       if (resumeId) this.store.releaseLock(sessionId, this.lockOwner);
-      if (isProviderAuthenticationBlock(this.store.readMeta(sessionId)?.pendingApproval)) {
+      const blocked = this.store.readMeta(sessionId);
+      if (blocked?.providerAuthBlock?.delivery === "not_delivered" &&
+          blocked.providerAuthRetryAttemptedRecoveryId !== blocked.providerAuthBlock.recoveryId &&
+          !blocked.providerAuthBlock.retry && !syntheticRecovery && !durable && images.length === 0) {
+        this.store.patchMeta(sessionId, {
+          providerAuthBlock: {
+            ...blocked.providerAuthBlock,
+            retry: {
+              ...(reservedOrdinal ? { ordinal: reservedOrdinal } : {}),
+              text,
+              images: [],
+              ...(slashCommand ? { slashCommand } : {}),
+              ...(config ? { config } : {}),
+            },
+          },
+        });
+        // This payload is the proof that the turn was retained before provider submission.
+        this.store.flush(sessionId);
+      }
+      if (isProviderAuthenticationBlock(blocked?.pendingApproval)) {
         durable?.failed("provider authentication is required", "PROVIDER_AUTHENTICATION_REQUIRED");
       } else {
         durable?.failed("provider session could not be resumed", "INVALID_COMMAND");
       }
+      finishPreLaunch(false);
       return;
     }
-    this.prompt(sessionId, text, images, slashCommand, config, durable, syntheticRecovery);
+    if (queueBeforeLaunch) {
+      this.activatePreLaunchQueue(sessionId);
+      finishPreLaunch(true);
+    } else {
+      this.prompt(sessionId, text, images, slashCommand, config, durable, syntheticRecovery, reservedOrdinal);
+    }
   }
 
   /** Persist turn configuration without presenting a model resolved under an older alias. */
@@ -4270,7 +4425,13 @@ export class SessionManager {
       if (entry.historyIntegrityFailure) return;
       if (entry.authenticationBlocked) {
         this.emitStatus(sessionId, "input_required", "Provider authentication is required");
-        durable?.failed("provider authentication is required", "PROVIDER_AUTHENTICATION_REQUIRED");
+        const block = this.store.readMeta(sessionId)?.providerAuthBlock;
+        if (stop !== "cancelled" && stop !== "refusal") durable?.completed();
+        else if (block?.delivery !== "not_delivered") {
+          durable?.uncertain("provider authentication failed after submission; delivery or completion is uncertain");
+        } else {
+          durable?.failed("provider authentication is required", "PROVIDER_AUTHENTICATION_REQUIRED");
+        }
         return;
       }
       const interrupted = !entry.governanceTripped && entry.interruptRequested && stop === "cancelled";
@@ -4309,7 +4470,7 @@ export class SessionManager {
       }
       if (entry.authenticationBlocked) {
         this.emitStatus(sessionId, "input_required", "Provider authentication is required");
-        durable?.failed("provider authentication is required", "PROVIDER_AUTHENTICATION_REQUIRED");
+        durable?.uncertain("provider authentication failed after submission; delivery or completion is uncertain");
         return;
       }
       this.emitEvent(sessionId, { kind: "error", message: `prompt failed: ${errText(err)}` }, durable);
@@ -4556,7 +4717,13 @@ export class SessionManager {
 
       if (entry.authenticationBlocked) {
         this.emitStatus(sessionId, "input_required", "Provider authentication is required");
-        lifecycle.failed("provider authentication is required", "PROVIDER_AUTHENTICATION_REQUIRED");
+        const block = this.store.readMeta(sessionId)?.providerAuthBlock;
+        if (stop !== "cancelled" && stop !== "refusal") lifecycle.completed();
+        else if (block?.delivery !== "not_delivered") {
+          lifecycle.uncertain("provider authentication failed after submission; delivery or completion is uncertain");
+        } else {
+          lifecycle.failed("provider authentication is required", "PROVIDER_AUTHENTICATION_REQUIRED");
+        }
         return;
       }
 
@@ -4596,7 +4763,7 @@ export class SessionManager {
       }
       if (entry.authenticationBlocked) {
         this.emitStatus(sessionId, "input_required", "Provider authentication is required");
-        lifecycle.failed("provider authentication is required", "PROVIDER_AUTHENTICATION_REQUIRED");
+        lifecycle.uncertain("provider authentication failed after submission; delivery or completion is uncertain");
         return;
       }
       this.emitEvent(sessionId, { kind: "error", message: `session command failed: ${errText(error)}` });
@@ -4785,6 +4952,10 @@ export class SessionManager {
         costUsd: 0,
         preview: null,
         pendingApproval: null,
+        providerCredentialScopeId: undefined,
+        providerCredentialIdentityId: undefined,
+        providerAuthBlock: undefined,
+        providerAuthRetryAttemptedRecoveryId: undefined,
         sessionSlashCommands: undefined,
         sessionSlashCommandProvenance: undefined,
         env: {},
@@ -4982,6 +5153,10 @@ export class SessionManager {
     this.discardRecovery(sessionId);
     this.cancelApprovalTelemetry(sessionId);
     this.clearSteeringState(sessionId, "session stopped before steering settled");
+    const authenticationBlock = this.store.readMeta(sessionId)?.providerAuthBlock;
+    if (authenticationBlock?.loginOperationId) {
+      this.providerAuthRecovery?.cancel(authenticationBlock.credentialScopeId);
+    }
     const entry = this.active.get(sessionId);
     if (!entry) {
       this.rejectPreLaunchQueue(sessionId, "session stopped before runner admission");
@@ -4993,6 +5168,8 @@ export class SessionManager {
           backgroundWorkState: undefined,
           pendingBackgroundTaskIds: [],
           orphanedWork: undefined,
+          providerAuthBlock: undefined,
+          providerAuthRetryAttemptedRecoveryId: undefined,
         });
         this.emitStatus(sessionId, "stopped");
       }
@@ -5003,6 +5180,8 @@ export class SessionManager {
       backgroundWorkState: undefined,
       pendingBackgroundTaskIds: [],
       orphanedWork: undefined,
+      providerAuthBlock: undefined,
+      providerAuthRetryAttemptedRecoveryId: undefined,
     });
     this.active.delete(sessionId);
     this.rejectQueued(entry.queue, "session stopped before queued command started");
@@ -5324,6 +5503,19 @@ export class SessionManager {
   }
 
   resolvePermission(sessionId: string, requestId: string, optionId: string | null): void {
+    if (requestId.startsWith("provider-auth:")) {
+      void this.resolveProviderAuthentication(sessionId, requestId, optionId).catch(() => {
+        const meta = this.store.readMeta(sessionId);
+        if (meta?.providerAuthBlock) {
+          this.emitProviderAuthenticationCard(
+            meta,
+            meta.providerAuthBlock,
+            "Authentication recovery failed safely on the runner. No prompt was retried.",
+          );
+        }
+      });
+      return;
+    }
     const entry = this.active.get(sessionId);
     const delivered = entry ? entry.client.resolvePermission(requestId, optionId) : false;
     if (delivered) {
@@ -5458,8 +5650,15 @@ export class SessionManager {
       this.active.delete(sessionId);
       if (hadQueueProjection) this.emitQueue(sessionId);
       if (queued.length) {
-        this.stabilizeRecoveryQueue(sessionId, queued);
-        this.recoveryQueues.set(sessionId, queued);
+        if (meta?.driver === "codex-app-server" && meta.agentSessionId) {
+          this.stabilizeRecoveryQueue(sessionId, queued);
+          this.recoveryQueues.set(sessionId, queued);
+        } else {
+          this.rejectQueued(
+            queued,
+            "agent exited while authentication was blocked before queued work could start",
+          );
+        }
       }
       this.emitStatus(sessionId, "input_required", "Provider authentication is required");
       return;
@@ -5716,7 +5915,11 @@ export class SessionManager {
       `session history integrity failure: ${errText(error)}`;
     if (!entry) {
       durable?.failed(detail, "INVALID_COMMAND");
-      this.store.patchMeta(sessionId, { status: "failed", pendingApproval: null });
+      this.store.patchMeta(sessionId, {
+        status: "failed",
+        pendingApproval: null,
+        providerAuthBlock: undefined,
+      });
       this.send({ type: "session_status", sessionId, status: "failed", detail });
       return;
     }
@@ -5739,6 +5942,7 @@ export class SessionManager {
         `${detail}; provider command delivery or completion is uncertain`,
       );
     }
+    this.store.patchMeta(sessionId, { providerAuthBlock: undefined });
     this.emitStatus(sessionId, "failed", detail);
     try {
       entry.client.cancel();
@@ -6102,27 +6306,407 @@ export class SessionManager {
     this.emitEvent(sessionId, { kind: "stderr", text });
   }
 
-  private onProviderAuthenticationFailure(sessionId: string): void {
+  private async preflightProviderAuthentication(meta: SessionMeta, launchGeneration: number): Promise<boolean> {
+    const controller = this.providerAuthRecovery;
+    const scope = controller?.describe(meta);
+    if (!controller || !scope) return true;
+    this.store.patchMeta(meta.sessionId, { providerCredentialScopeId: scope.id });
+    const observation = await controller.revalidate(meta);
+    if (!this.launchIsCurrent(meta.sessionId, launchGeneration)) return false;
+    const current = this.store.readMeta(meta.sessionId);
+    if (!current) return false;
+    if (observation.status === "unauthenticated") {
+      if (current.agentId) this.onAgentAuthUpdate?.(current.agentId, { status: "unauthenticated" });
+      this.parkProviderAuthentication(current, scope, "launch", "not_delivered");
+      return false;
+    }
+    if (observation.status !== "authenticated") return true;
+    const expected = current.providerAuthBlock?.expectedIdentityId ?? current.providerCredentialIdentityId;
+    if (expected && observation.identityId && expected !== observation.identityId) {
+      this.parkProviderAuthentication(current, scope, "launch", "not_delivered", true);
+      return false;
+    }
+    if (current.providerAuthBlock) {
+      // A generic Restart or prompt must not resolve a durable block merely because a probe now
+      // succeeds. Only the correlated recovery action can validate account identity, consume the
+      // retry token, and clear matching sessions atomically.
+      this.emitProviderAuthenticationCard(current, current.providerAuthBlock,
+        "Authentication now responds, but this blocked generation still requires Recheck Authentication.");
+      return false;
+    }
+    this.store.patchMeta(meta.sessionId, {
+      providerCredentialScopeId: scope.id,
+      ...(observation.identityId ? { providerCredentialIdentityId: observation.identityId } : {}),
+    });
+    if (current.agentId) this.onAgentAuthUpdate?.(current.agentId, { status: "authenticated" });
+    return true;
+  }
+
+  private providerAuthenticationOptions(
+    block: NonNullable<SessionMeta["providerAuthBlock"]>,
+    inProgress = false,
+  ): Array<{ optionId: string; name: string; description: string; kind: string }> {
+    if (inProgress) {
+      return [{
+        optionId: "auth:cancel",
+        name: "Cancel Sign-In",
+        description: "Stop only this runner-owned provider sign-in attempt.",
+        kind: "reject_once",
+      }];
+    }
+    const options = block.identityMismatch ? [{
+      optionId: "auth:accept-current",
+      name: "Use Current Account",
+      description: "Explicitly accept the newly authenticated account for this session only.",
+      kind: "allow_once",
+    }] : [];
+    if (block.canStartLogin) {
+      options.push({
+        optionId: "auth:login",
+        name: "Start Sign-In",
+        description: "Run the provider's login flow in this exact runner context. Output stays on the runner.",
+        kind: "allow_once",
+      });
+    }
+    options.push({
+      optionId: "auth:revalidate",
+      name: "Recheck Authentication",
+      description: "Ask the provider in this exact context whether authentication is now valid.",
+      kind: "allow_once",
+    });
+    options.push({
+      optionId: "auth:dismiss",
+      name: "Dismiss Recovery",
+      description: "Discard any retained prompt and make the session promptable without retrying provider work.",
+      kind: "reject_once",
+    });
+    return options;
+  }
+
+  private emitProviderAuthenticationCard(
+    meta: SessionMeta,
+    block: NonNullable<SessionMeta["providerAuthBlock"]>,
+    detail?: string,
+    inProgress = false,
+  ): void {
+    const projection = this.providerAuthenticationProjection(meta, block, detail, inProgress);
+    const emitted = this.emitEvent(meta.sessionId, {
+      kind: "permission_request",
+      requestId: projection.requestId,
+      title: projection.title,
+      options: projection.options,
+      purpose: "authentication",
+      context: projection.context,
+    });
+    if (emitted) this.emitStatus(
+      meta.sessionId,
+      "input_required",
+      `${providerDisplayName(meta.driver)} authentication is required`,
+    );
+  }
+
+  private providerAuthenticationProjection(
+    meta: SessionMeta,
+    block: NonNullable<SessionMeta["providerAuthBlock"]>,
+    detail?: string,
+    inProgress = false,
+  ): NonNullable<SessionMeta["pendingApproval"]> {
+    const provider = providerDisplayName(meta.driver);
+    return {
+      requestId: providerAuthenticationRequestId(block),
+      title: inProgress ? `Signing In — ${provider}` : `Authentication Required — ${provider}`,
+      options: this.providerAuthenticationOptions(block, inProgress),
+      kind: "authentication",
+      context: { toolName: provider, input: providerAuthenticationGuidance(meta, block, detail) },
+    };
+  }
+
+  private parkProviderAuthentication(
+    meta: SessionMeta,
+    scope: ProviderCredentialScope,
+    phase: "launch" | "turn",
+    delivery: "not_delivered" | "uncertain",
+    identityMismatch = false,
+  ): void {
+    const prior = meta.providerAuthBlock?.credentialScopeId === scope.id ? meta.providerAuthBlock : undefined;
+    const block: NonNullable<SessionMeta["providerAuthBlock"]> = {
+      version: 1,
+      recoveryId: prior?.recoveryId ?? randomUUID(),
+      credentialScopeId: scope.id,
+      detectedAt: prior?.detectedAt ?? Date.now(),
+      phase: prior?.phase === "turn" ? "turn" : phase,
+      delivery: prior?.delivery === "uncertain" ? "uncertain" : delivery,
+      canStartLogin: scope.canStartLogin,
+      configuredCredential: scope.configuredCredential,
+      ...(prior?.expectedIdentityId ?? meta.providerCredentialIdentityId
+        ? { expectedIdentityId: prior?.expectedIdentityId ?? meta.providerCredentialIdentityId }
+        : {}),
+      ...(prior?.retry ? { retry: prior.retry } : {}),
+      ...(identityMismatch || prior?.identityMismatch ? { identityMismatch: true } : {}),
+    };
+    this.store.patchMeta(meta.sessionId, {
+      providerCredentialScopeId: scope.id,
+      providerAuthBlock: block,
+    });
+    this.store.flush(meta.sessionId);
+    this.emitProviderAuthenticationCard(meta, block);
+  }
+
+  private onProviderAuthenticationFailure(sessionId: string, launchMeta: SessionMeta): void {
     const entry = this.active.get(sessionId);
     const meta = this.store.readMeta(sessionId);
     if (!entry || !meta || entry.authenticationBlocked || entry.historyIntegrityFailure) return;
     entry.authenticationBlocked = true;
     if (meta.agentId) this.onAgentAuthUpdate?.(meta.agentId, { status: "unauthenticated" });
-    const provider = providerDisplayName(meta.driver);
-    const guidance = providerAuthenticationGuidance(meta);
-    const emitted = this.emitEvent(sessionId, {
-      kind: "permission_request",
-      requestId: `provider-auth:${randomUUID()}`,
-      title: `Authentication Required — ${provider}`,
-      options: [],
-      purpose: "authentication",
-      context: { toolName: provider, input: guidance },
-    });
-    if (emitted) this.emitStatus(sessionId, "input_required", `${provider} authentication is required`);
+    const scope = this.providerAuthRecovery?.describe(launchMeta);
+    if (scope) {
+      this.parkProviderAuthentication(
+        meta,
+        scope,
+        entry.providerReady ? "turn" : "launch",
+        entry.providerReady ? "uncertain" : "not_delivered",
+      );
+    } else {
+      const provider = providerDisplayName(meta.driver);
+      const guidance = providerAuthenticationGuidance(meta);
+      const emitted = this.emitEvent(sessionId, {
+        kind: "permission_request",
+        requestId: `provider-auth:${randomUUID()}`,
+        title: `Authentication Required — ${provider}`,
+        options: [{
+          optionId: "auth:dismiss",
+          name: "Dismiss Recovery",
+          description: "Dismiss this unsupported recovery card without retrying provider work.",
+          kind: "reject_once",
+        }],
+        purpose: "authentication",
+        context: { toolName: provider, input: guidance },
+      });
+      if (emitted) this.emitStatus(sessionId, "input_required", `${provider} authentication is required`);
+    }
     try {
       entry.client.cancel();
     } catch (error) {
       this.log(`provider authentication cancellation failed for ${sessionId}: ${errText(error)}`);
+    }
+  }
+
+  private async waitForAuthenticationTurnSettlement(sessionId: string): Promise<boolean> {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if (!this.active.get(sessionId)?.running) return true;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return !this.active.get(sessionId)?.running;
+  }
+
+  private async resolveProviderAuthentication(
+    sessionId: string,
+    requestId: string,
+    optionId: string | null,
+  ): Promise<void> {
+    let meta = this.store.readMeta(sessionId);
+    let block = meta?.providerAuthBlock;
+    if (!meta || meta.pendingApproval?.requestId !== requestId ||
+        meta.pendingApproval.kind !== "authentication") return;
+    if (optionId === "auth:dismiss") {
+      if (!await this.waitForAuthenticationTurnSettlement(sessionId)) {
+        this.emitEvent(sessionId, {
+          kind: "stderr",
+          text: "The provider turn is still settling. Dismiss Recovery again in a moment.",
+        });
+        this.emitStatus(sessionId, "input_required", "Provider authentication recovery is still settling");
+        return;
+      }
+      if (block?.loginOperationId) this.providerAuthRecovery?.cancel(block.credentialScopeId);
+      const current = this.store.readMeta(sessionId);
+      if (!current || current.pendingApproval?.requestId !== requestId) return;
+      const retainedPrompt = !!current.providerAuthBlock?.retry;
+      this.store.patchMeta(sessionId, {
+        providerAuthBlock: undefined,
+        pendingApproval: null,
+        ...(current.status === "stopped" ? {} : { status: "idle" as const }),
+      });
+      this.store.flush(sessionId);
+      const entry = this.active.get(sessionId);
+      if (entry) entry.authenticationBlocked = false;
+      this.emitEvent(sessionId, {
+        kind: "permission_resolved",
+        requestId,
+        optionId: "auth:dismiss",
+      });
+      if (retainedPrompt) {
+        this.emitEvent(sessionId, {
+          kind: "stderr",
+          text: "Authentication recovery was dismissed. The retained prompt was not retried; submit it again if needed.",
+        });
+      }
+      this.emitStatus(sessionId, current.status === "stopped" ? "stopped" : "idle");
+      return;
+    }
+    const controller = this.providerAuthRecovery;
+    if (!controller || !block || requestId !== providerAuthenticationRequestId(block)) return;
+    if (optionId === "auth:cancel" || optionId === null) {
+      controller.cancel(block.credentialScopeId);
+      this.emitProviderAuthenticationCard(meta, block, "The runner-owned sign-in was cancelled. No prompt was retried.");
+      return;
+    }
+    if (!["auth:login", "auth:revalidate", "auth:accept-current"].includes(optionId) ||
+        this.providerAuthOperations.has(block.credentialScopeId)) {
+      this.emitProviderAuthenticationCard(meta, block, "An authentication operation is already in progress for this credential scope.");
+      return;
+    }
+    this.providerAuthOperations.add(block.credentialScopeId);
+    try {
+      await this.prepareLaunch?.(meta);
+      const currentScope = controller.describe(meta);
+      if (!currentScope || currentScope.id !== block.credentialScopeId) {
+        this.emitProviderAuthenticationCard(meta, block, "The provider installation or credential context changed. Start recovery from the current session card.");
+        return;
+      }
+      if (optionId === "auth:login") {
+        block = { ...block, loginOperationId: randomUUID() };
+        this.store.patchMeta(sessionId, { providerAuthBlock: block });
+        this.emitProviderAuthenticationCard(meta, block, "The provider owns this sign-in flow; authentication output remains on the runner.", true);
+        const login = await controller.startLogin(meta);
+        if (login !== "completed") {
+          block = { ...block, loginOperationId: undefined };
+          this.store.patchMeta(sessionId, { providerAuthBlock: block });
+          this.emitProviderAuthenticationCard(meta, block, login === "cancelled"
+            ? "The runner-owned sign-in was cancelled."
+            : "The provider-native sign-in did not complete. Use the exact-context terminal command, then recheck.");
+          return;
+        }
+      }
+      const observation = await controller.revalidate(meta);
+      if (observation.status !== "authenticated") {
+        this.emitProviderAuthenticationCard(meta, block, observation.status === "unauthenticated"
+          ? "The provider still reports that this credential scope is unauthenticated."
+          : "The provider could not prove authentication in this credential scope.");
+        return;
+      }
+      const expected = block.expectedIdentityId;
+      const acceptingCurrent = optionId === "auth:accept-current";
+      if (!acceptingCurrent && (!expected || !observation.identityId || expected !== observation.identityId)) {
+        block = { ...block, identityMismatch: true };
+        this.store.patchMeta(sessionId, { providerAuthBlock: block });
+        this.emitProviderAuthenticationCard(meta, block, expected && observation.identityId
+          ? "A different provider account is authenticated. Confirm it explicitly for this session or sign in to the original account."
+          : "The provider could not prove the original account identity. Confirm the current account explicitly for this session.");
+        return;
+      }
+      if (!await this.waitForAuthenticationTurnSettlement(sessionId)) {
+        this.emitProviderAuthenticationCard(meta, block, "The cancelled provider turn is still settling. Recheck in a moment.");
+        return;
+      }
+      await this.completeProviderAuthentication(
+        sessionId,
+        block,
+        observation,
+        acceptingCurrent,
+      );
+    } finally {
+      this.providerAuthOperations.delete(block.credentialScopeId);
+    }
+  }
+
+  private async completeProviderAuthentication(
+    targetSessionId: string,
+    targetBlock: NonNullable<SessionMeta["providerAuthBlock"]>,
+    observation: ProviderAuthObservation,
+    targetOnly: boolean,
+  ): Promise<void> {
+    const candidates = targetOnly
+      ? this.store.listSessions().filter((meta) => meta.sessionId === targetSessionId)
+      : this.store.listSessions().filter((meta) =>
+          meta.providerAuthBlock?.credentialScopeId === targetBlock.credentialScopeId &&
+          meta.providerAuthBlock.expectedIdentityId === observation.identityId);
+    for (const candidate of candidates) {
+      let meta = this.store.readMeta(candidate.sessionId);
+      if (!meta) continue;
+      let block = meta.providerAuthBlock;
+      if (!block) continue;
+      if (meta.status === "stopped") {
+        this.store.patchMeta(meta.sessionId, {
+          providerAuthBlock: undefined,
+          pendingApproval: null,
+        });
+        continue;
+      }
+      if (meta.sessionId !== targetSessionId) {
+        await this.prepareLaunch?.(meta);
+        const currentScope = this.providerAuthRecovery?.describe(meta);
+        if (!currentScope || currentScope.id !== block.credentialScopeId) continue;
+        if (!await this.waitForAuthenticationTurnSettlement(meta.sessionId)) continue;
+        const current = this.store.readMeta(meta.sessionId);
+        if (!current || current.status === "stopped" ||
+            current.providerAuthBlock?.recoveryId !== block.recoveryId) {
+          if (current?.status === "stopped" && current.providerAuthBlock) {
+            this.store.patchMeta(current.sessionId, {
+              providerAuthBlock: undefined,
+              pendingApproval: null,
+            });
+          }
+          continue;
+        }
+        meta = current;
+        block = current.providerAuthBlock;
+      }
+      const retry = block.delivery === "not_delivered" && block.retry &&
+        meta.providerAuthRetryAttemptedRecoveryId !== block.recoveryId
+        ? block.retry
+        : undefined;
+      // A persisted retry can carry an ordinal greater than this process's fresh in-memory
+      // high-water. Observe it before clearing the durable block: once prompts are admitted again,
+      // every newer prompt must sort after the retained pre-crash work even if it races this
+      // recovery continuation.
+      if (retry) this.ensureQueueOrdinal(meta.sessionId, retry);
+      this.store.patchMeta(meta.sessionId, {
+        providerCredentialScopeId: block.credentialScopeId,
+        ...(observation.identityId ? { providerCredentialIdentityId: observation.identityId } : {}),
+        providerAuthBlock: undefined,
+        pendingApproval: null,
+        status: "idle",
+        ...(retry ? { providerAuthRetryAttemptedRecoveryId: block.recoveryId } : {}),
+      });
+      // Persist the one-shot tombstone before the recovered prompt can reach a provider.
+      if (retry) this.store.flush(meta.sessionId);
+      const entry = this.active.get(meta.sessionId);
+      if (entry) entry.authenticationBlocked = false;
+      if (meta.agentId) this.onAgentAuthUpdate?.(meta.agentId, { status: "authenticated" });
+      this.emitEvent(meta.sessionId, {
+        kind: "permission_resolved",
+        requestId: providerAuthenticationRequestId(block),
+        optionId: retry ? "auth:automatic-retry" : "auth:revalidated",
+      });
+      if (retry) {
+        // Admit the retained prompt synchronously after its tombstone is durable. The provider
+        // launch remains asynchronous, but no newer prompt can win the admission boundary between
+        // clearing the block and restoring the older FIFO item.
+        this.prompt(
+          meta.sessionId,
+          retry.text,
+          retry.images,
+          retry.slashCommand,
+          retry.config,
+          undefined,
+          false,
+          retry.ordinal,
+          true,
+        );
+      } else {
+        if (block.delivery === "uncertain") {
+          this.emitEvent(meta.sessionId, {
+            kind: "stderr",
+            text: "Authentication was restored, but the interrupted prompt was not retried because provider delivery was uncertain.",
+          });
+        }
+        this.emitStatus(meta.sessionId, "idle");
+        if (this.recoveryQueues.has(meta.sessionId)) {
+          setImmediate(() => void this.recoverQueuedAppServer(meta.sessionId));
+        } else if (entry?.queue.length) {
+          this.scheduleDrain(meta.sessionId);
+        }
+      }
     }
   }
 
@@ -6220,8 +6804,11 @@ function errText(err: unknown): string {
 }
 
 function isProviderAuthenticationBlock(pending: SessionMeta["pendingApproval"] | undefined): boolean {
-  return pending?.kind === "authentication" && pending.options.length === 0 &&
-    pending.requestId.startsWith("provider-auth:");
+  return pending?.kind === "authentication" && pending.requestId.startsWith("provider-auth:");
+}
+
+function providerAuthenticationRequestId(block: NonNullable<SessionMeta["providerAuthBlock"]>): string {
+  return `provider-auth:${block.recoveryId}${block.loginOperationId ? `:${block.loginOperationId}` : ""}`;
 }
 
 function providerDisplayName(driver: AgentDriverKind): string {
@@ -6230,7 +6817,11 @@ function providerDisplayName(driver: AgentDriverKind): string {
   return "Agent Provider";
 }
 
-function providerAuthenticationGuidance(meta: SessionMeta): string {
+function providerAuthenticationGuidance(
+  meta: SessionMeta,
+  block?: NonNullable<SessionMeta["providerAuthBlock"]>,
+  detail?: string,
+): string {
   const provider = providerDisplayName(meta.driver);
   const login = meta.driver === "claude-code"
     ? "claude auth login"
@@ -6242,12 +6833,21 @@ function providerAuthenticationGuidance(meta: SessionMeta): string {
     : meta.context.kind === "wsl"
       ? `WSL distribution ${meta.context.distro}`
       : "this native runner";
-  const location = meta.worktreePath ?? meta.repoPath;
   return [
     `Provider: ${provider}`,
     `Machine: ${machine}`,
-    `Location: ${location}`,
-    `Run \`${login}\` in that exact context and complete sign-in. Then send a new message to retry.`,
+    `Location: ${meta.context.kind === "wsl" ? "the provider credential home inside this WSL distribution" : "the provider credential home on this runner"}`,
+    block?.configuredCredential
+      ? "This session uses credentials from runner configuration. Update that configuration in this exact context, then recheck authentication."
+      : block?.canStartLogin
+        ? `Run \`${login}\` in that exact context, or use Start Sign-In, then recheck authentication.`
+        : `Run \`${login}\` in that exact context, then recheck authentication. In-app sign-in remains disabled until the runner can acquire the shared provider-home ownership lease.`,
+    block?.delivery === "uncertain"
+      ? "The interrupted prompt will not be retried automatically because provider delivery was uncertain."
+      : block?.retry
+        ? "The retained prompt is eligible for one automatic retry after the original account is revalidated."
+        : "No provider prompt will be sent until authentication is revalidated.",
+    ...(detail ? [detail] : []),
   ].join("\n");
 }
 

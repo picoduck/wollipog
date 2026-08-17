@@ -132,7 +132,7 @@ function message(
 function harness(options: {
   fresh?: boolean;
   commands?: AgentSlashCommand[];
-  invokeGate?: Promise<"end_turn">;
+  invokeGate?: Promise<"end_turn" | "cancelled" | "refusal">;
   driverKind?: "claude-code" | "acp";
   newSessionGate?: Promise<string>;
   agentTurnId?: string;
@@ -352,7 +352,7 @@ test("fresh v75 commands use a durable, provenance-preserving provider boundary 
   }
 });
 
-test("provider authentication blocks manual commands with a distinct receipt", async () => {
+test("provider authentication blocks later manual commands without overwriting a completed receipt", async () => {
   const provider = deferred<"end_turn">();
   const h = harness({ invokeGate: provider.promise });
   try {
@@ -367,8 +367,7 @@ test("provider authentication blocks manual commands with a distinct receipt", a
 
     h.callbacks().onAuthenticationFailure?.();
     provider.resolve("end_turn");
-    await waitFor(() => receipts.at(-1)?.state === "rejected");
-    assert.equal(receipts.at(-1)?.code, "PROVIDER_AUTHENTICATION_REQUIRED");
+    await waitFor(() => receipts.at(-1)?.state === "completed");
     assert.equal(h.store.readMeta("command-session")?.status, "input_required");
     assert.equal(h.store.readMeta("command-session")?.pendingApproval?.kind, "authentication");
 
@@ -381,6 +380,29 @@ test("provider authentication blocks manual commands with a distinct receipt", a
       receiptLifecycle("invocation-blocked", blockedReceipts),
     ), false);
     assert.equal(blockedReceipts[0]?.code, "PROVIDER_AUTHENTICATION_REQUIRED");
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("provider authentication after manual-command submission settles uncertain when cancellation wins", async () => {
+  const provider = deferred<"cancelled">();
+  const h = harness({ invokeGate: provider.promise });
+  try {
+    assert.equal(await h.start(), true);
+    const command = liveCommand(h.manager);
+    const receipts: Receipt[] = [];
+    assert.equal(h.manager.invokeSessionCommand(
+      message(command.invocation),
+      receiptLifecycle("invocation-auth-uncertain", receipts),
+    ), true);
+    await waitFor(() => h.invoked.length === 1);
+
+    h.callbacks().onAuthenticationFailure?.();
+    provider.resolve("cancelled");
+    await waitFor(() => receipts.at(-1)?.state === "uncertain");
+    assert.match(receipts.at(-1)?.error ?? "", /delivery or completion is uncertain/);
+    assert.equal(h.store.readMeta("command-session")?.status, "input_required");
   } finally {
     h.cleanup();
   }

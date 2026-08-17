@@ -12,6 +12,7 @@ import WebSocket from "ws";
 import {
   parseMessage,
   PROTOCOL_VERSION,
+  projectRunnerMessageForProtocol,
   validatePromptImageInputs,
   type AdoptSessionMessage,
   type AcpRuntimeCapabilities,
@@ -75,6 +76,7 @@ import {
   withGitExecutionContext,
 } from "./git-ops.js";
 import { SessionManager } from "./session-manager.js";
+import { NativeProviderAuthRecovery } from "./provider-auth-recovery.js";
 import { handleResolveSteeringAttemptMessage, handleSteerSessionMessage } from "./steering-handler.js";
 import {
   CLAUDE_GRACEFUL_STOP_BUDGET_MS,
@@ -338,6 +340,9 @@ function updateAgentAuthStatus(agentId: string, update: AcpAuthRuntime): void {
     (update.capabilities === undefined || sameAcpCapabilities(prior.capabilities, update.capabilities))
   ) return;
   acpAuthStatus.set(agentId, { ...prior, ...update });
+  // Native provider status is credential-scope specific (custom homes/env and execution context);
+  // it must not disable or enable the runner-wide agent catalog. ACP status is agent-global and is
+  // the only runtime status projected by overlayAcpAuthStatus.
   metadata.agents = overlayAcpAuthStatus(metadata.agents, acpAuthStatus);
   sendUp({
     type: "agents_updated",
@@ -444,6 +449,9 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
   cloudTargets,
   () => controlPlaneProtocolVersion,
   dataDirLease.ownerHash,
+  // The existing runner credential is already staged in a protected local file. Reuse it only as
+  // an HMAC key so structural scope/account equality cannot be dictionary-tested from meta.json.
+  new NativeProviderAuthRecovery(undefined, config.token),
 );
 const sessionStarts = new SessionStartFence();
 const pendingShellOpenCancellations = new PendingShellOpenCancellations();
@@ -469,7 +477,7 @@ const MAX_OUTBOX = 1000;
 
 function sendUp(msg: RunnerToControlPlane): void {
   if (ws && ws.readyState === WebSocket.OPEN && registered) {
-    ws.send(JSON.stringify(msg));
+    ws.send(JSON.stringify(projectRunnerMessageForProtocol(msg, controlPlaneProtocolVersion)));
     return;
   }
   // Coalesce redundant session_status / session_queue for the same session to bound growth —
@@ -486,7 +494,9 @@ function sendUp(msg: RunnerToControlPlane): void {
 
 function flushOutbox(): void {
   if (!ws || ws.readyState !== WebSocket.OPEN || !registered) return;
-  for (const m of outbox.splice(0)) ws.send(JSON.stringify(m));
+  for (const m of outbox.splice(0)) {
+    ws.send(JSON.stringify(projectRunnerMessageForProtocol(m, controlPlaneProtocolVersion)));
+  }
 }
 
 function sendDurableUpdate(receipt: DurableCommandReceipt): void {
@@ -661,6 +671,16 @@ async function runDiscovery(refreshModels = false): Promise<void> {
       claudeHookFeatureEnabled,
       log,
     );
+    // A definitive native discovery result is newer authoritative evidence than the process-local
+    // failure overlay. Drop only its status (preserving ACP capability state) so a terminal login
+    // followed by rediscovery cannot be overwritten by stale "unauthenticated" state.
+    for (const agent of metadata.agents) {
+      if ((agent.driver ?? "acp") === "acp" || agent.authStatus === undefined || agent.authStatus === "unknown") continue;
+      const runtime = acpAuthStatus.get(agent.id);
+      if (!runtime?.status) continue;
+      if (runtime.capabilities) acpAuthStatus.set(agent.id, { capabilities: runtime.capabilities });
+      else acpAuthStatus.delete(agent.id);
+    }
     metadata.agents = overlayAcpAuthStatus(metadata.agents, acpAuthStatus);
     metadata.editors = editors;
     discoveryDone = true;

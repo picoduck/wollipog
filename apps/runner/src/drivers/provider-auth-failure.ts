@@ -14,7 +14,7 @@ export function isProviderAuthenticationFailure(message: unknown): boolean {
   // A provider can include downstream tool failures in its terminal turn error. Those credentials
   // do not authenticate the harness itself and `codex login` / `claude auth login` cannot repair
   // them, so keep the original diagnostic on the ordinary error path.
-  if (/\b(?:mcp server|connector|tool call)\b/.test(normalized)) return false;
+  if (/\b(?:mcp[ _-]?server|connector|tool[ _-]?call)\b/.test(normalized)) return false;
 
   if (/\bauthentication_failed\b/.test(normalized) ||
       /\bauthentication[_ -]?error\b/.test(normalized) ||
