@@ -819,70 +819,6 @@ test("an older page that outlived its window is dropped instead of leaving an un
   assert.equal(store.eventWindowBase("s1"), 849);
 });
 
-test("hydration broadcasts cannot paint the log's start while an opening window is in flight", () => {
-  const store = new Store();
-  message(store, {
-    type: "snapshot",
-    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
-  });
-  store.navigate({ name: "session", id: "s1" });
-  const generation = store.getState().snapshotRevision;
-  store.beginEventHistoryLoad("s1", 0, -1, generation, true);
-
-  // The control plane hydrates forward from the runner and broadcasts each row exactly like a live
-  // event. Appending these would paint seq 1 first — the oldest-first open being removed.
-  for (let seq = 1; seq <= 5; seq++) message(store, { type: "session_event", event: event("s1", seq) });
-  assert.equal(store.getState().events.get("s1"), undefined,
-    "the reader keeps its loading state instead of the log's start");
-
-  store.loadEvents("s1", [event("s1", 4_801), event("s1", 4_802)], 0, undefined, true, generation, true);
-  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [4_801, 4_802]);
-
-  // Once the window has spoken, live delivery resumes immediately.
-  message(store, { type: "session_event", event: event("s1", 4_803) });
-  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [4_801, 4_802, 4_803]);
-});
-
-test("an event published after the window's read survives the hold that hid hydration", () => {
-  const store = new Store();
-  message(store, {
-    type: "snapshot",
-    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
-  });
-  store.navigate({ name: "session", id: "s1" });
-  const generation = store.getState().snapshotRevision;
-  store.beginEventHistoryLoad("s1", 0, -1, generation, true);
-
-  // Hydration's prefix and a genuinely live event arrive on the same stream while the window is in
-  // flight. The window's point-in-time read through seq 4802 cannot contain seq 4803.
-  message(store, { type: "session_event", event: event("s1", 1) });
-  message(store, { type: "session_event", event: event("s1", 4_803) });
-  store.loadEvents("s1", [event("s1", 4_801), event("s1", 4_802)], 0, undefined, true, generation, true);
-
-  assert.deepEqual(
-    store.getState().events.get("s1")?.map((entry) => entry.seq),
-    [4_801, 4_802, 4_803],
-    "the live event is replayed; the hydration prefix stays out of the window",
-  );
-});
-
-test("a failed opening window releases its hold so live delivery is never stranded", () => {
-  const store = new Store();
-  message(store, {
-    type: "snapshot",
-    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
-  });
-  store.navigate({ name: "session", id: "s1" });
-  const generation = store.getState().snapshotRevision;
-  store.beginEventHistoryLoad("s1", 0, -1, generation, true);
-  store.failEventHistoryLoad("s1", "Could not load complete session activity.", 0, -1, generation);
-  message(store, { type: "session_event", event: event("s1", 9) });
-  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [9]);
-});
-
 test("entering a fleet view drops bounded windows so a member is not truncated forever", () => {
   const store = new Store();
   message(store, {
@@ -928,104 +864,6 @@ test("a bounded window preserves activity buckets it cannot account for", () => 
   assert.ok(afterWindow >= observed, "the heartbeat ring keeps pulses the window cannot explain");
 });
 
-test("a hold never outlives the window it belongs to", () => {
-  const seed = () => {
-    const store = new Store();
-    message(store, {
-      type: "snapshot",
-      capabilities: { sessionSubscriptions: true, boundedDelivery: true },
-      runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
-    });
-    store.navigate({ name: "session", id: "s1" });
-    const generation = store.getState().snapshotRevision;
-    store.beginEventHistoryLoad("s1", 0, -1, generation, true);
-    message(store, { type: "session_event", event: event("s1", 7) });
-    return { store, generation };
-  };
-
-  // A load of a different shape takes over: its live events must not be held behind a window that
-  // will never apply, so the held rows are released into the transcript.
-  const forward = seed();
-  forward.store.beginEventHistoryLoad("s1", 0, -1, forward.generation, false);
-  assert.deepEqual(forward.store.getState().events.get("s1")?.map((entry) => entry.seq), [7]);
-  message(forward.store, { type: "session_event", event: event("s1", 8) });
-  assert.deepEqual(forward.store.getState().events.get("s1")?.map((entry) => entry.seq), [7, 8]);
-
-  // A replaced log invalidates held rows: their seqs mean something else now.
-  const reset = seed();
-  message(reset.store, { type: "session_events_reset", sessionId: "s1", events: [], eventEpoch: 1 });
-  message(reset.store, { type: "session_event", event: { ...event("s1", 1), sessionId: "s1" } });
-  assert.deepEqual(reset.store.getState().events.get("s1")?.map((entry) => entry.seq), [1],
-    "live delivery resumes against the replacement log");
-
-  // A reconnect snapshot starts a new generation; no hold may survive it.
-  const reconnected = seed();
-  message(reconnected.store, {
-    type: "snapshot",
-    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
-  });
-  reconnected.store.navigate({ name: "session", id: "s1" });
-  message(reconnected.store, { type: "session_event", event: event("s1", 9) });
-  assert.deepEqual(reconnected.store.getState().events.get("s1")?.map((entry) => entry.seq), [9]);
-});
-
-test("a failed opening load hands back the live events it was holding", () => {
-  const store = new Store();
-  message(store, {
-    type: "snapshot",
-    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
-  });
-  store.navigate({ name: "session", id: "s1" });
-  const generation = store.getState().snapshotRevision;
-  store.beginEventHistoryLoad("s1", 0, -1, generation, true);
-  message(store, { type: "session_event", event: event("s1", 8) });
-
-  // No window is coming, so the rows withheld for it must reach the transcript rather than vanish.
-  store.failEventHistoryLoad("s1", "Could not load complete session activity.", 0, -1, generation);
-  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [8]);
-  message(store, { type: "session_event", event: event("s1", 9) });
-  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [8, 9]);
-});
-
-test("held rows cannot replay into the sequence space that replaced them", () => {
-  const store = new Store();
-  message(store, {
-    type: "snapshot",
-    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
-  });
-  store.navigate({ name: "session", id: "s1" });
-  const generation = store.getState().snapshotRevision;
-  store.beginEventHistoryLoad("s1", 0, -1, generation, true);
-  message(store, { type: "session_event", event: event("s1", 900) });
-
-  // Reprocess replaces the log: seq 900 now means something else entirely.
-  message(store, { type: "session_events_reset", sessionId: "s1", events: [], eventEpoch: 1 });
-  store.loadEvents("s1", [event("s1", 890), event("s1", 891)], 1, undefined, true, generation, true);
-  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [890, 891],
-    "the epoch-0 row is not replayed above the epoch-1 window base");
-});
-
-test("navigation releases an abandoned hold instead of retaining it indefinitely", () => {
-  const store = new Store();
-  message(store, {
-    type: "snapshot",
-    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
-    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
-  });
-  store.navigate({ name: "session", id: "s1" });
-  const generation = store.getState().snapshotRevision;
-  store.beginEventHistoryLoad("s1", 0, -1, generation, true);
-  message(store, { type: "session_event", event: event("s1", 7) });
-  assert.equal(store.getState().pendingOpeningWindows.has("s1"), true);
-
-  store.navigate({ name: "board" });
-  assert.equal(store.getState().pendingOpeningWindows.has("s1"), false,
-    "an unmounted session's buffer does not sit in memory until reload");
-});
-
 test("an incomplete window stays partial even when it reports no older rows", () => {
   const store = new Store();
   message(store, {
@@ -1043,4 +881,86 @@ test("an incomplete window stays partial even when it reports no older rows", ()
   // A later read that reaches the tail settles it.
   store.loadEvents("s1", [event("s1", 1), event("s1", 2), event("s1", 3)], 0, undefined, true, generation, false);
   assert.equal(isPartialHistory(store.getState().eventWindows.get("s1")), false);
+});
+
+
+test("an opening window defines its slice: hydration falls away, live events survive", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  store.beginEventHistoryLoad("s1", 0, -1, generation);
+
+  // A cold cache hydrates FORWARD and republishes those rows exactly like live ones, so the
+  // transcript fills from the start of the log while the window read is in flight.
+  for (let seq = 1; seq <= 3; seq++) message(store, { type: "session_event", event: event("s1", seq) });
+  // A genuinely live event lands too, after the point in time the window read captured.
+  message(store, { type: "session_event", event: event("s1", 4_803) });
+
+  store.loadEvents("s1", [event("s1", 4_801), event("s1", 4_802)], 0, undefined, true, generation, true);
+  assert.deepEqual(
+    store.getState().events.get("s1")?.map((entry) => entry.seq),
+    [4_801, 4_802, 4_803],
+    "the hydration prefix falls below the window; the live event above it is kept",
+  );
+
+  // Delivery continues normally afterwards, with no lifecycle to unwind.
+  message(store, { type: "session_event", event: event("s1", 4_804) });
+  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq),
+    [4_801, 4_802, 4_803, 4_804]);
+});
+
+test("a forward gap fill keeps everything it already had", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  store.loadEvents("s1", [event("s1", 1), event("s1", 2)], 0, undefined, true, generation);
+  // A gap-fill page carries no window meaning, so it must never discard events below its first row.
+  store.loadEvents("s1", [event("s1", 3)], 0, undefined, true, generation);
+  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [1, 2, 3]);
+});
+
+test("an empty retry that reaches the tail settles a window left partial", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  store.loadEvents("s1", [], 0, undefined, false, generation, false);
+  assert.equal(isPartialHistory(store.getState().eventWindows.get("s1")), true);
+  store.loadEvents("s1", [], 0, undefined, true, generation, false);
+  assert.equal(isPartialHistory(store.getState().eventWindows.get("s1")), false,
+    "an authoritative empty answer is not permanently partial");
+});
+
+test("a fleet view drops an incomplete prefix, not only a window reporting older rows", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [],
+    sessions: [session("s1")],
+    runs: [{ id: "run-1", sessionIds: ["s1"] } as never],
+    pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  // Budget expired over a short prefix: no older rows reported, but not the whole history either.
+  store.loadEvents("s1", [event("s1", 1), event("s1", 2)], 0, undefined, false, generation, false);
+  store.navigate({ name: "run", id: "run-1" });
+  assert.equal(store.getState().events.get("s1"), undefined,
+    "the column recovers the whole history instead of inheriting a truncated prefix");
+  assert.equal(store.getState().eventWindows.get("s1"), undefined);
 });

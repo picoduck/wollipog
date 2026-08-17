@@ -21,15 +21,13 @@ than the cap, an adopted transcript, or a resumed session with no anchor in reac
 boundary stands and the response reports `turnAligned: false` rather than growing without limit.
 Older pages stay count-bounded so their cursors remain exact and disjoint.
 
-While an opening window is in flight, hydration's own forward broadcasts are held — held, not
-dropped. The same stream carries genuinely live events, and the window's point-in-time read cannot
-contain one published after it, so held rows are replayed when the window lands: everything at or
-above its base is merged, and the hydration prefix below it stays in the cache, reachable through
-Load Earlier Activity. The control plane
-hydrates a cold cache forward from the runner and publishes those rows exactly like live ones, so
-appending them would paint the start of a long log behind the window's back. They are durable in the
-cache and the window's read supplies the tail, so the hold costs nothing and is released as soon as
-the load applies, fails, or its cache is dropped.
+A window defines the slice that is loaded. A cold cache hydrates forward from the runner and
+republishes those rows exactly like live events, so a transcript can fill from the start of the log
+while the window's read is in flight. Applying the window resolves it: rows below its base are
+history the reader did not ask for and fall away — still cached, still reachable through Load
+Earlier Activity — while rows at or above the base are kept, since they are either in the window
+already or newer than the point-in-time read that produced it. Nothing is buffered and nothing is
+dropped, so there is no hold whose lifecycle could strand a transcript.
 
 Recovery cursors stay contiguous *within* the loaded window. The events below its base are
 deliberately absent, so contiguity is measured from the window base; measuring from zero would

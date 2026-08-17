@@ -896,9 +896,7 @@ function SessionDetailLoaded({
       historyEverCompleted: everCompletedRef.current,
       hasSavedReadingPosition: hasSavedFollowTailAnchor(instanceScope, sessionId),
     });
-    // Registering the load AFTER the shape is known lets an opening window hold hydration's forward
-    // broadcasts, which would otherwise paint the log's start while the window is still in flight.
-    beginEventHistoryLoad(sessionId, epoch, recoveryRevision, generation, openWindow);
+    beginEventHistoryLoad(sessionId, epoch, recoveryRevision, generation);
     const load = openWindow
       ? recoverSessionHistoryWindow(
         { sessionId, eventEpoch: epoch, recoveryRevision },
