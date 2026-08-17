@@ -2,9 +2,25 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { Markdown, markdownCodeLanguage, markdownCodeText, markdownCodeWrapsByDefault } from "./Markdown.js";
+import {
+  Markdown,
+  markdownCodeBlockContinues,
+  markdownCodeLanguage,
+  markdownCodeText,
+  markdownCodeWrapsByDefault,
+} from "./Markdown.js";
 
 (globalThis as typeof globalThis & { React: typeof React }).React = React;
+
+test("block continuation is same-language prefix growth or shrinkage, never a replacement", () => {
+  const seen = { language: "text", text: "draft body" };
+  assert.equal(markdownCodeBlockContinues(seen, { language: "text", text: "draft body plus a streamed chunk" }), true);
+  assert.equal(markdownCodeBlockContinues(seen, { language: "text", text: "draft" }), true);
+  assert.equal(markdownCodeBlockContinues(seen, { language: "text", text: "draft body" }), true);
+  assert.equal(markdownCodeBlockContinues(seen, { language: "text", text: "another document entirely" }), false);
+  assert.equal(markdownCodeBlockContinues(seen, { language: "markdown", text: "draft body" }), false);
+  assert.equal(markdownCodeBlockContinues({ language: "js", text: "const a = 1;" }, { language: "python", text: "b = 2" }), false);
+});
 
 test("safe Markdown renders immediately without synchronous highlighting or active images", () => {
   const html = renderToStaticMarkup(React.createElement(Markdown, {

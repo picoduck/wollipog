@@ -101,6 +101,42 @@ test("a reused block re-derives its wrap default when the fence language changes
   }
 });
 
+test("a replacement block with the same boolean default still resets to its own default", async () => {
+  // js → python both default to non-wrapping, so tracking only the boolean default would let the
+  // user's js toggle leak onto an unrelated python block.
+  const { container, root } = await renderMarkdown(["```js", "const a = 1;", "```"].join("\n"));
+  try {
+    await act(async () => { wrapToggle(container).click(); });
+    assert.equal(container.querySelector(".md-code-block")!.classList.contains("md-code-wrap"), true);
+
+    await act(async () => {
+      root.render(<Markdown highlightEligible={false}>{["```python", "b = 2", "```"].join("\n")}</Markdown>);
+    });
+    const block = container.querySelector(".md-code-block")!;
+    assert.equal(block.classList.contains("md-code-wrap"), false, "an unrelated block must not inherit the toggle");
+    assert.equal(wrapToggle(container).textContent, "Wrap Lines");
+  } finally {
+    await cleanup(container, root);
+  }
+});
+
+test("a same-language document swap resets to the default", async () => {
+  const { container, root } = await renderMarkdown(["```text", "first draft body", "```"].join("\n"));
+  try {
+    await act(async () => { wrapToggle(container).click(); });
+    assert.equal(container.querySelector(".md-code-block")!.classList.contains("md-code-wrap"), false);
+
+    await act(async () => {
+      root.render(<Markdown highlightEligible={false}>{["```text", "an entirely unrelated replacement document", "```"].join("\n")}</Markdown>);
+    });
+    const block = container.querySelector(".md-code-block")!;
+    assert.equal(block.classList.contains("md-code-wrap"), true, "a replaced document returns to its prose default");
+    assert.equal(wrapToggle(container).textContent, "No Wrap");
+  } finally {
+    await cleanup(container, root);
+  }
+});
+
 test("an explicit wrap choice survives body streaming while the language is stable", async () => {
   const { container, root } = await renderMarkdown(["```text", "first chunk", "```"].join("\n"));
   try {

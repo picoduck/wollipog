@@ -56,19 +56,33 @@ export function markdownCodeWrapsByDefault(language: string): boolean {
   return PROSE_FENCE_LANGUAGES.has(language.toLowerCase());
 }
 
+/**
+ * A same-language text change reads as streaming when one text extends the other; anything else is
+ * a replacement (a different block now occupies this tree position), which must not inherit state.
+ */
+export function markdownCodeBlockContinues(
+  seen: { language: string; text: string },
+  next: { language: string; text: string },
+): boolean {
+  if (seen.language !== next.language) return false;
+  return next.text.startsWith(seen.text) || seen.text.startsWith(next.text);
+}
+
 function CodeBlockPre({ children, node: _node, ...props }: ComponentProps<"pre"> & { node?: unknown }) {
   const text = markdownCodeText(children);
-  const defaultWrap = markdownCodeWrapsByDefault(markdownCodeLanguage(children));
+  const language = markdownCodeLanguage(children);
+  const defaultWrap = markdownCodeWrapsByDefault(language);
   // React reuses this instance across content changes (a streamed info string growing `m` →
   // `markdown`, or a whole document swap), so the language-derived default cannot live in a state
-  // initializer. Keep only the user's explicit choice in state and drop it — during render, per
-  // React's state-adjustment pattern — whenever the block's computed default changes; an explicit
-  // toggle still survives ordinary body streaming, where the language is stable.
+  // initializer. Keep only the user's explicit choice in state, remember which block it belonged to
+  // as {language, text}, and — during render, per React's state-adjustment pattern (StrictMode's
+  // double render sees the updated state and takes the stable branch) — drop the choice whenever a
+  // different block replaces this one. Streaming growth of the same block keeps the toggle.
   const [userWrap, setUserWrap] = useState<boolean | null>(null);
-  const [seenDefaultWrap, setSeenDefaultWrap] = useState(defaultWrap);
-  if (seenDefaultWrap !== defaultWrap) {
-    setSeenDefaultWrap(defaultWrap);
-    setUserWrap(null);
+  const [seenBlock, setSeenBlock] = useState({ language, text });
+  if (seenBlock.language !== language || seenBlock.text !== text) {
+    if (!markdownCodeBlockContinues(seenBlock, { language, text })) setUserWrap(null);
+    setSeenBlock({ language, text });
   }
   const wrap = userWrap ?? defaultWrap;
   // Wrapping is presentation-only: `text` always carries the original characters, so copying a
