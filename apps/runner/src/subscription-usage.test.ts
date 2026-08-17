@@ -295,9 +295,9 @@ test("a successful refresh clears a prior fallback detail", async () => {
 });
 
 test("subscription inventories wait for discovery and negotiated protocol support", () => {
-  assert.equal(shouldPublishSubscriptionUsageInventory(false, 78), false);
-  assert.equal(shouldPublishSubscriptionUsageInventory(true, 77), false);
-  assert.equal(shouldPublishSubscriptionUsageInventory(true, 78), true);
+  assert.equal(shouldPublishSubscriptionUsageInventory(false, 79), false);
+  assert.equal(shouldPublishSubscriptionUsageInventory(true, 78), false);
+  assert.equal(shouldPublishSubscriptionUsageInventory(true, 79), true);
 });
 
 test("shutdown reaps an in-flight detached probe and refuses new refreshes", async () => {
