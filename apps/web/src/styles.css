@@ -3622,12 +3622,19 @@ textarea,
   padding: 0 2px;
 }
 .md-code-block { position: relative; }
-.md-code-copy {
-  /* Renders "Copy Code", so it de-emphasises by colour rather than by fading the label. */
-  position: absolute; top: 7px; right: 7px; z-index: 1; color: var(--text-dim);
+.md-code-actions {
+  /* Positioned boxes paint above the in-flow <pre> without a z-index. */
+  position: absolute; top: 7px; right: 7px;
+  display: flex; align-items: center; gap: 6px;
+}
+.md-code-copy,
+.md-code-wrap-toggle {
+  /* Renders "Copy Code" / "Wrap Lines", so it de-emphasises by colour rather than by fading the label. */
+  color: var(--text-dim);
   transition: color var(--dur-fast) var(--ease-out); margin: 0;
 }
-.md-code-block:hover .md-code-copy, .md-code-copy:focus-visible { color: var(--text); }
+.md-code-block:hover .md-code-copy, .md-code-copy:focus-visible,
+.md-code-block:hover .md-code-wrap-toggle, .md-code-wrap-toggle:focus-visible { color: var(--text); }
 .md .md-code-block pre { padding-top: 34px; }
 .tl-thought {
   font-size: 12.5px;
@@ -4266,6 +4273,12 @@ button.file-head.source-path-link {
   font-size: inherit;
   color: var(--code-text);
   white-space: pre;
+}
+/* Prose-oriented fences (and the per-block "Wrap Lines" toggle) wrap instead of scrolling
+   sideways, so long sentences stay readable at narrow widths. */
+.md .md-code-wrap pre code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 /* GFM tables */
 .md table {

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { Markdown, markdownCodeText } from "./Markdown.js";
+import { Markdown, markdownCodeLanguage, markdownCodeText, markdownCodeWrapsByDefault } from "./Markdown.js";
 
 (globalThis as typeof globalThis & { React: typeof React }).React = React;
 
@@ -32,6 +32,41 @@ test("inline code stays action-free", () => {
   const html = renderToStaticMarkup(React.createElement(Markdown, { children: "Use `const answer = 42` inline." }));
   assert.match(html, /<code>const answer = 42<\/code>/);
   assert.doesNotMatch(html, /Copy Code/);
+});
+
+test("prose-oriented fences wrap by default with a No Wrap escape hatch", () => {
+  const longProse =
+    "This fenced issue draft is one very long paragraph that would otherwise force horizontal scrolling in the transcript.";
+  for (const fence of ["```", "```text", "```markdown"]) {
+    const html = renderToStaticMarkup(React.createElement(Markdown, {
+      children: [fence, longProse, "```"].join("\n"),
+    }));
+    assert.match(html, /<div class="md-code-block md-code-wrap">/, fence);
+    assert.match(html, />No Wrap</, fence);
+    assert.doesNotMatch(html, />Wrap Lines</, fence);
+  }
+});
+
+test("source-code fences keep the non-wrapping default and offer Wrap Lines", () => {
+  const html = renderToStaticMarkup(React.createElement(Markdown, {
+    children: ["```js", "const answer = veryLongExpression(1, 2, 3);", "```"].join("\n"),
+  }));
+  assert.match(html, /<div class="md-code-block">/);
+  assert.doesNotMatch(html, /md-code-wrap"/);
+  assert.doesNotMatch(html, />No Wrap</);
+  assert.match(html, /<button type="button" class="copy-btn md-code-wrap-toggle">Wrap Lines<\/button>/);
+});
+
+test("fence language detection reads react-markdown and rehype-highlight class shapes", () => {
+  assert.equal(markdownCodeLanguage(React.createElement("code", { className: "language-js" }, "x")), "js");
+  assert.equal(markdownCodeLanguage(React.createElement("code", { className: "hljs language-TypeScript" }, "x")), "typescript");
+  assert.equal(markdownCodeLanguage([" ", React.createElement("code", { className: "language-md" }, "x")]), "md");
+  assert.equal(markdownCodeLanguage(React.createElement("code", null, "x")), "");
+  assert.equal(markdownCodeWrapsByDefault(""), true);
+  assert.equal(markdownCodeWrapsByDefault("plaintext"), true);
+  assert.equal(markdownCodeWrapsByDefault("Markdown"), true);
+  assert.equal(markdownCodeWrapsByDefault("js"), false);
+  assert.equal(markdownCodeWrapsByDefault("python"), false);
 });
 
 test("code-block copy reconstructs exact highlighted text without renderer newline", () => {

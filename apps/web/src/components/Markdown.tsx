@@ -38,11 +38,37 @@ export function markdownCodeText(children: ReactNode): string {
   return reactNodeText(children).replace(/\n$/, "");
 }
 
+/** Fence info-string language of a rendered block, read from react-markdown's `language-*` class. */
+export function markdownCodeLanguage(children: ReactNode): string {
+  if (Array.isArray(children)) return children.map(markdownCodeLanguage).find(Boolean) ?? "";
+  if (!isValidElement<{ className?: string; children?: ReactNode }>(children)) return "";
+  const match = /(?:^|\s)language-([^\s]+)/.exec(children.props.className ?? "");
+  return match ? match[1]!.toLowerCase() : markdownCodeLanguage(children.props.children);
+}
+
+const PROSE_FENCE_LANGUAGES = new Set(["", "text", "txt", "plain", "plaintext", "md", "markdown"]);
+
+/**
+ * Prose-oriented fences (no language tag, `text`, `markdown`, …) wrap by default so long sentences
+ * stay readable without a horizontal scrollbar; source-code fences keep `white-space: pre`.
+ */
+export function markdownCodeWrapsByDefault(language: string): boolean {
+  return PROSE_FENCE_LANGUAGES.has(language.toLowerCase());
+}
+
 function CodeBlockPre({ children, node: _node, ...props }: ComponentProps<"pre"> & { node?: unknown }) {
   const text = markdownCodeText(children);
+  const [wrap, setWrap] = useState(() => markdownCodeWrapsByDefault(markdownCodeLanguage(children)));
+  // Wrapping is presentation-only: `text` always carries the original characters, so copying a
+  // visually wrapped block still yields the exact fenced content.
   return (
-    <div className="md-code-block">
-      <CopyButton text={text} label="Copy Code" ariaLabel="Copy Code Block" className="copy-btn md-code-copy" />
+    <div className={wrap ? "md-code-block md-code-wrap" : "md-code-block"}>
+      <div className="md-code-actions">
+        <button type="button" className="copy-btn md-code-wrap-toggle" onClick={() => setWrap((current) => !current)}>
+          {wrap ? "No Wrap" : "Wrap Lines"}
+        </button>
+        <CopyButton text={text} label="Copy Code" ariaLabel="Copy Code Block" className="copy-btn md-code-copy" />
+      </div>
       <pre {...props}>{children}</pre>
     </div>
   );
