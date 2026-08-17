@@ -536,8 +536,13 @@ test("provider-authentication receipts are projected for the peer only at send t
     code: "PROVIDER_AUTHENTICATION_REQUIRED",
   };
   const oldPeer = projectRunnerMessageForProtocol(exact, 77);
-  const currentPeer = projectRunnerMessageForProtocol(exact, 78);
+  const queuedPromptPeer = projectRunnerMessageForProtocol(exact, 78);
+  const currentPeer = projectRunnerMessageForProtocol(exact, 79);
   assert.equal(oldPeer.type === "durable_session_command_update" ? oldPeer.code : undefined, "COMMAND_CANCELLED");
+  assert.equal(
+    queuedPromptPeer.type === "durable_session_command_update" ? queuedPromptPeer.code : undefined,
+    "COMMAND_CANCELLED",
+  );
   assert.equal(
     currentPeer.type === "durable_session_command_update" ? currentPeer.code : undefined,
     "PROVIDER_AUTHENTICATION_REQUIRED",
