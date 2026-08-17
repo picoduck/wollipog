@@ -15,7 +15,11 @@ This hotfix does not change runner protocol v77, require a data migration, or ch
 runner-ownership model. Install v0.19.2 over v0.19.1 and reconnect the local machine normally; no
 terminal or configuration-file repair should be required.
 
+The control plane continues to advertise the `wollipog-control-plane` service identity.
+Desktop v0.15.0 and later accept both the current and legacy service identities. Older clients may
+report `The address is not a Wollipog control plane.` and must be upgraded before connecting.
+
 The release workflow builds all six supported native targets. Its final verification fails unless
 the draft holds exactly 27 assets: 14 desktop bundles, 12 runner names, and `SHA256SUMS`, with
-canonical and compatibility runner names verified byte-identical. Publishing occurs only after the
-draft and checksums pass those release gates.
+canonical and compatibility runner names verified byte-identical. Publishing the verified draft remains a
+manual operator step.
