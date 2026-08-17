@@ -6,7 +6,6 @@ import { Window } from "happy-dom";
 import {
   FOLLOW_TAIL_LABELS,
   FOLLOW_TAIL_PROGRAMMATIC_SCROLL_SETTLE_MS,
-  FOLLOW_TAIL_READER_INTENT_WINDOW_MS,
   FOLLOW_TAIL_SCROLL_INTENT_DELAY_MS,
   followTailControlLabel,
   followTailControlTooltip,
@@ -706,7 +705,11 @@ test("composer growth and shrink are layout, never reader intent", async () => {
   assert.equal(transcript.dataset.state, "paused");
   assert.equal(scrollRequests.length, 0, "composer resizes must not move a paused reader's anchor");
 
-  // With geometry settled, a genuine reader scroll onto the bottom still resumes.
+  // Genuine reader movement deviates from the clamp prediction and still resumes at the bottom.
+  setScrollMetrics(transcript, { scrollTop: 650, scrollHeight: 1_000, clientHeight: 300 });
+  await act(async () => { transcript.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as never); });
+  assert.equal(transcript.dataset.state, "paused");
+  setScrollMetrics(transcript, { scrollTop: 700, scrollHeight: 1_000, clientHeight: 300 });
   await act(async () => { transcript.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as never); });
   assert.equal(transcript.dataset.state, "following", "an actual reader return to the tail resumes following");
 
@@ -714,16 +717,19 @@ test("composer growth and shrink are layout, never reader intent", async () => {
   container.remove();
 });
 
-test("a fresh downward gesture resumes at the streamed bottom; a stale one never validates a clamp", async () => {
+test("position accounting: deviating landings resume, predicted clamps never do, in either delivery order", async () => {
+  MockResizeObserver.instances.length = 0;
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
   await act(async () => {
-    root.render(<Harness sessionId="streaming-resume" revision={0} mode="expanded" scope="streaming-resume" />);
+    root.render(<Harness sessionId="position-accounting" revision={0} mode="expanded" scope="position-accounting" />);
   });
   const transcript = container.firstElementChild as HTMLElement;
   setScrollMetrics(transcript, { scrollTop: 700, scrollHeight: 1_000, clientHeight: 200 });
   transcript.scrollTo = (() => {}) as typeof transcript.scrollTo;
+  const viewportObserver = MockResizeObserver.instances.find((observer) => observer.observed.has(transcript));
+  assert.ok(viewportObserver);
 
   await act(async () => {
     transcript.dispatchEvent(new domWindow.WheelEvent("wheel", { deltaY: -1, bubbles: true }) as never);
@@ -732,17 +738,15 @@ test("a fresh downward gesture resumes at the streamed bottom; a stale one never
   await act(async () => { transcript.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as never); });
   assert.equal(transcript.dataset.state, "paused", "mid-transcript scrolls prime the geometry sample");
 
-  // The reader wheels down onto the live tail while a streamed chunk grows scrollHeight in the
-  // same turn; the landing's scroll event arrives before any resize delivery.
-  await act(async () => {
-    transcript.dispatchEvent(new domWindow.WheelEvent("wheel", { deltaY: 12, bubbles: true }) as never);
-  });
+  // A BARE landing on the live tail while a streamed chunk grew scrollHeight in the same turn:
+  // growth predicts an unchanged scrollTop of 700, so this deviates and is the reader's. No wheel,
+  // touch, or pointer event precedes it — the same shape as assistive-technology scrolling or a
+  // reading key's scrollBy, whose keydown is consumed elsewhere with preventDefault.
   setScrollMetrics(transcript, { scrollTop: 900, scrollHeight: 1_100, clientHeight: 200 });
   await act(async () => { transcript.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as never); });
   assert.equal(transcript.dataset.state, "following",
-    "a wheel-backed landing on the live tail must resume even while streaming grows the transcript");
+    "a bare reader landing on the streamed bottom must resume even though geometry moved in the same turn");
 
-  // The same gesture long before a composer clamp must not validate it.
   await act(async () => {
     transcript.dispatchEvent(new domWindow.WheelEvent("wheel", { deltaY: -1, bubbles: true }) as never);
   });
@@ -750,15 +754,44 @@ test("a fresh downward gesture resumes at the streamed bottom; a stale one never
   setScrollMetrics(transcript, { scrollTop: 855, scrollHeight: 1_100, clientHeight: 200 });
   await act(async () => { transcript.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as never); });
   assert.equal(transcript.dataset.state, "paused");
-  await act(async () => {
-    transcript.dispatchEvent(new domWindow.WheelEvent("wheel", { deltaY: 12, bubbles: true }) as never);
-    await new Promise<void>((resolve) => setTimeout(resolve, FOLLOW_TAIL_READER_INTENT_WINDOW_MS + 60));
-  });
-  // Composer shrink grows the viewport and clamps the reader onto the exact bottom.
+
+  // Chromium's real composer-shrink ordering: the ResizeObserver delivers the grown, already
+  // clamped viewport BEFORE the clamped scroll event. The prediction must be recorded at the
+  // resize delivery, or this scroll would compare against settled geometry and read as a landing.
   setScrollMetrics(transcript, { scrollTop: 800, scrollHeight: 1_100, clientHeight: 300 });
+  await act(async () => { viewportObserver.trigger(); });
   await act(async () => { transcript.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as never); });
   assert.equal(transcript.dataset.state, "paused",
-    "a stale downward gesture must not validate a later layout clamp onto the bottom");
+    "a clamp whose resize callback delivers before its scroll event must not resume a paused reader");
+
+  // The reader moves back up; virtualizer compensations then preserve the reading distance while
+  // rows above grow. Each deviates from the growth prediction (which forecasts an unchanged
+  // scrollTop), consumes it, and never lands at the bottom — no timing window is involved.
+  setScrollMetrics(transcript, { scrollTop: 700, scrollHeight: 1_100, clientHeight: 300 });
+  await act(async () => { transcript.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as never); });
+  assert.equal(transcript.dataset.state, "paused");
+  setScrollMetrics(transcript, { scrollTop: 730, scrollHeight: 1_130, clientHeight: 300 });
+  await act(async () => { transcript.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as never); });
+  assert.equal(transcript.dataset.state, "paused", "an above-viewport growth compensation is not a landing");
+  setScrollMetrics(transcript, { scrollTop: 760, scrollHeight: 1_160, clientHeight: 300 });
+  await act(async () => { transcript.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as never); });
+  assert.equal(transcript.dataset.state, "paused");
+
+  // A clamp immediately after those corrections still matches its own prediction (scroll event
+  // first, resize callback second this time): classification is positional, not timed.
+  setScrollMetrics(transcript, { scrollTop: 740, scrollHeight: 1_160, clientHeight: 420 });
+  await act(async () => {
+    transcript.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as never);
+    viewportObserver.trigger();
+  });
+  assert.equal(transcript.dataset.state, "paused",
+    "recent corrections must not let a scroll-first clamp read as a reader landing");
+
+  // And a further deviating landing on a freshly streamed bottom still resumes.
+  setScrollMetrics(transcript, { scrollTop: 780, scrollHeight: 1_200, clientHeight: 420 });
+  await act(async () => { transcript.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as never); });
+  assert.equal(transcript.dataset.state, "following",
+    "position accounting keeps genuine bottom landings resuming after any clamp history");
 
   await act(async () => { root.unmount(); });
   container.remove();

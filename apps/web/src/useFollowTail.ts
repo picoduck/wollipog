@@ -6,13 +6,8 @@ export const FOLLOW_TAIL_THRESHOLD_PX = 48;
 export const FOLLOW_TAIL_RESUME_THRESHOLD_PX = 2;
 export const FOLLOW_TAIL_SCROLL_INTENT_DELAY_MS = 120;
 export const FOLLOW_TAIL_PROGRAMMATIC_SCROLL_SETTLE_MS = 120;
-/**
- * How long a genuine downward gesture (wheel, touch, scrollbar drag, reading key) keeps validating
- * bottom landings whose scroll events coincide with streaming geometry growth. Each downward
- * momentum frame renews the window, so it only needs to cover input-to-scroll latency — not a
- * whole fling — while staying far too short for an old gesture to validate a later layout clamp.
- */
-export const FOLLOW_TAIL_READER_INTENT_WINDOW_MS = 400;
+/** Tolerance for matching a scroll event against the predicted layout-owned position. */
+export const FOLLOW_TAIL_LAYOUT_SCROLL_EPSILON_PX = 1;
 const FOLLOW_TAIL_PROGRAMMATIC_SCROLL_MAX_MS = 2_000;
 const FOLLOW_TAIL_SETTLE_FRAMES = 8;
 
@@ -147,12 +142,6 @@ function isUpwardReadingKey(event: FollowTailKey): boolean {
     event.key === "Home" || (event.key === " " && event.shiftKey);
 }
 
-function isDownwardReadingKey(event: FollowTailKey): boolean {
-  if (event.ctrlKey || event.metaKey || event.altKey) return false;
-  return event.key === "j" || event.key === "ArrowDown" || event.key === "PageDown" ||
-    (event.key === " " && !event.shiftKey);
-}
-
 export function isFollowTailResumeKey(event: FollowTailKey): boolean {
   if (event.ctrlKey || event.metaKey || event.altKey) return false;
   return event.key === "End" || (event.shiftKey && event.key.toLowerCase() === "g");
@@ -178,7 +167,7 @@ export function useFollowTail({
   const resizeFollowOwnsScrollRef = useRef(false);
   const scrollIntentTimerRef = useRef<number | null>(null);
   const viewportGeometryRef = useRef<{ scrollTop: number; scrollHeight: number; clientHeight: number } | null>(null);
-  const readerDownwardIntentAtRef = useRef<number | null>(null);
+  const layoutScrollPredictionRef = useRef<number | null>(null);
   const programmaticScrollRef = useRef<{
     direction: "next" | "previous";
     settleTimer: number | null;
@@ -206,23 +195,39 @@ export function useFollowTail({
   }, []);
 
   /**
-   * Samples viewport geometry and reports whether it changed since the previous sample. A scroll
-   * event that coincides with a geometry change is layout-driven — composer growth, a panel
-   * resize, or the browser clamping scrollTop after the viewport grew — never reader intent.
+   * Position accounting for layout-driven scrolls. When viewport geometry changes, the browser's
+   * own contribution to scrollTop is fully predictable: it clamps the previous position into the
+   * new scrollable range and does nothing else. Record that prediction at whichever observation
+   * sees the geometry delta first — the ResizeObserver callback or a scroll event's own sampling —
+   * so classification is independent of their delivery order, which differs across engines.
    */
-  const consumeViewportGeometryChange = useCallback((metrics: FollowTailMetrics): boolean => {
+  const observeViewportGeometry = useCallback((metrics: FollowTailMetrics): void => {
     const previous = viewportGeometryRef.current;
+    if (previous != null &&
+        (previous.scrollHeight !== metrics.scrollHeight || previous.clientHeight !== metrics.clientHeight)) {
+      const maxScrollTop = Math.max(0, metrics.scrollHeight - metrics.clientHeight);
+      layoutScrollPredictionRef.current = Math.min(previous.scrollTop, maxScrollTop);
+    }
     viewportGeometryRef.current = {
       scrollTop: metrics.scrollTop,
       scrollHeight: metrics.scrollHeight,
       clientHeight: metrics.clientHeight,
     };
-    return previous != null &&
-      (previous.scrollHeight !== metrics.scrollHeight || previous.clientHeight !== metrics.clientHeight);
   }, []);
 
-  const markReaderDownwardIntent = useCallback(() => {
-    readerDownwardIntentAtRef.current = Date.now();
+  /**
+   * True when this scroll event sits on the pending layout prediction: the browser's clamp, owned
+   * by layout, carrying no reader intent in either direction. Any deviating event is the reader's
+   * — wheel, touch, scrollbar, assistive technology, and the reading keys' scrollBy all move
+   * scrollTop away from the prediction, with no per-input-source bookkeeping — and consumes the
+   * prediction so a stale one can never reclassify later genuine movement.
+   */
+  const consumeLayoutScrollPrediction = useCallback((metrics: FollowTailMetrics): boolean => {
+    const prediction = layoutScrollPredictionRef.current;
+    if (prediction == null) return false;
+    if (Math.abs(metrics.scrollTop - prediction) <= FOLLOW_TAIL_LAYOUT_SCROLL_EPSILON_PX) return true;
+    layoutScrollPredictionRef.current = null;
+    return false;
   }, []);
 
   const scrollToBottom = useCallback(() => {
@@ -329,34 +334,17 @@ export function useFollowTail({
       pause();
       return;
     }
-    if (event.deltaY > 0) markReaderDownwardIntent();
     cancelProgrammaticScroll();
-  }, [cancelProgrammaticScroll, markReaderDownwardIntent, pause]);
+  }, [cancelProgrammaticScroll, pause]);
   const onPointerMove = useCallback((event: Pick<PointerEvent, "buttons">) => {
-    if ((event.buttons & 1) === 0) return;
-    // A scrollbar or selection drag can travel either way; the claim lets a drag that ends on the
-    // live tail resume even while streaming keeps the geometry unsettled.
-    markReaderDownwardIntent();
-    pause();
-  }, [markReaderDownwardIntent, pause]);
-  const onTouchStart = useCallback(() => {
-    markReaderDownwardIntent();
-    pause();
-  }, [markReaderDownwardIntent, pause]);
+    if ((event.buttons & 1) !== 0) pause();
+  }, [pause]);
 
   const onScroll = useCallback(() => {
     const element = scrollRef.current;
     if (!element) return;
-    const previousScrollTop = viewportGeometryRef.current?.scrollTop;
-    const layoutDriven = consumeViewportGeometryChange(element);
-    const intentAt = readerDownwardIntentAtRef.current;
-    const downwardIntentFresh = intentAt != null &&
-      Date.now() - intentAt <= FOLLOW_TAIL_READER_INTENT_WINDOW_MS;
-    // Wheel momentum and touch flings keep travelling without further input events; every downward
-    // frame renews the reader's claim. A layout clamp moves scrollTop UP, so it never renews.
-    if (downwardIntentFresh && previousScrollTop != null && element.scrollTop > previousScrollTop) {
-      markReaderDownwardIntent();
-    }
+    observeViewportGeometry(element);
+    const layoutOwned = consumeLayoutScrollPrediction(element);
     const ownership = programmaticScrollRef.current;
     if (ownership) {
       const atBottom = isAtFollowTailBottom(element, FOLLOW_TAIL_RESUME_THRESHOLD_PX);
@@ -375,11 +363,12 @@ export function useFollowTail({
     }
     if (stateRef.current !== "following") {
       cancelScheduledScrollIntent();
-      // A clamped scrollTop after the viewport grew (for example composer shrink) lands exactly on
-      // the bottom without any reader intent, so a BARE scroll with unsettled geometry must not
-      // resume. A landing backed by a fresh downward gesture is the reader's, even mid-stream.
-      if ((!layoutDriven || downwardIntentFresh) &&
-          isAtFollowTailBottom(element, FOLLOW_TAIL_RESUME_THRESHOLD_PX)) {
+      // A clamp landing on the exact bottom after the viewport grew (composer shrink) is the
+      // browser's, never the reader's. Any deviating landing — wheel, scrollbar, assistive
+      // technology, a reading key's scrollBy — resumes exactly as a bare scroll always has,
+      // including mid-stream: content growth predicts an UNCHANGED scrollTop, so a genuine
+      // downward landing deviates from the prediction even when geometry moved in the same turn.
+      if (!layoutOwned && isAtFollowTailBottom(element, FOLLOW_TAIL_RESUME_THRESHOLD_PX)) {
         transition("resume");
       }
       return;
@@ -389,7 +378,10 @@ export function useFollowTail({
       transition("resume");
       return;
     }
-    if (stateRef.current !== "following" || scrollIntentTimerRef.current != null) return;
+    // The clamp that this prediction describes already has a follow request from the viewport
+    // ResizeObserver; treating it as a bare scroll would start a pause countdown for layout.
+    if (layoutOwned) return;
+    if (scrollIntentTimerRef.current != null) return;
     // Variable-height virtualizer corrections can span several animation frames. Give their
     // ResizeObserver follow request a brief window to cancel this fallback; without one, a bare
     // reader scroll (for example a platform scrollbar or assistive technology) should pause.
@@ -400,7 +392,7 @@ export function useFollowTail({
         pause();
       }
     }, FOLLOW_TAIL_SCROLL_INTENT_DELAY_MS);
-  }, [cancelScheduledScrollIntent, consumeViewportGeometryChange, finishProgrammaticScroll, markReaderDownwardIntent, pause, scrollRef, transition]);
+  }, [cancelScheduledScrollIntent, consumeLayoutScrollPrediction, finishProgrammaticScroll, observeViewportGeometry, pause, scrollRef, transition]);
 
   const onKeyDown = useCallback((event: FollowTailKey) => {
     if (isFollowTailResumeKey(event)) {
@@ -408,9 +400,8 @@ export function useFollowTail({
       return true;
     }
     if (isUpwardReadingKey(event)) pause();
-    else if (isDownwardReadingKey(event)) markReaderDownwardIntent();
     return false;
-  }, [follow, markReaderDownwardIntent, pause]);
+  }, [follow, pause]);
 
   useLayoutEffect(() => {
     if (previousSessionIdRef.current === sessionId) return;
@@ -437,9 +428,11 @@ export function useFollowTail({
     if (!element || typeof ResizeObserver === "undefined") return;
     const observed = new Set<Element>();
     const resizeObserver = new ResizeObserver(() => {
-      // Refresh the geometry sample so the next bare scroll is judged against the settled layout.
+      // In engines where this callback delivers BEFORE the clamped scroll event, the geometry
+      // delta — and therefore the layout prediction — must be recorded here, or that scroll would
+      // compare against already-settled geometry and read as the reader's own bottom landing.
       const current = scrollRef.current;
-      if (current) consumeViewportGeometryChange(current);
+      if (current) observeViewportGeometry(current);
       // A measured geometry change explains an otherwise bare scroll event. It owns this one
       // correction; ordinary content-settle frames do not cancel reader intent.
       cancelScheduledScrollIntent();
@@ -470,7 +463,7 @@ export function useFollowTail({
       mutationObserver?.disconnect();
       resizeObserver.disconnect();
     };
-  }, [cancelScheduledScrollIntent, consumeViewportGeometryChange, scrollRef, scheduleFollow, scrollToBottom, sessionId]);
+  }, [cancelScheduledScrollIntent, observeViewportGeometry, scrollRef, scheduleFollow, scrollToBottom, sessionId]);
 
   useLayoutEffect(() => () => {
     persist();
@@ -509,7 +502,7 @@ export function useFollowTail({
     onScroll,
     onWheel,
     onPointerMove,
-    onTouchStart,
+    onTouchStart: pause,
     onKeyDown,
   };
 }
