@@ -161,7 +161,11 @@ interface Fixture {
 
 let fixtureSequence = 0;
 
-async function mountFixture(pages: ReturnType<typeof pageController>, turns = 12): Promise<Fixture> {
+async function mountFixture(
+  pages: ReturnType<typeof pageController>,
+  turns = 12,
+  { pinnedOpen = false }: { pinnedOpen?: boolean } = {},
+): Promise<Fixture> {
   fixtureSequence += 1;
   const currentSession = session(`transcript-recovery-${fixtureSequence}`);
   const socket = new FakeSocket();
@@ -210,7 +214,7 @@ async function mountFixture(pages: ReturnType<typeof pageController>, turns = 12
             sessionId={currentSession.id}
             rightPanel={rightPanel}
             onOpenTerminal={() => {}}
-            pinnedOpen={false}
+            pinnedOpen={pinnedOpen}
             composerDraftLoader={async () => null}
           />
         </StoreProvider>
@@ -267,9 +271,18 @@ function recoveryActive(fixture: Fixture): boolean {
 }
 
 function recoveryStatusText(fixture: Fixture): string {
-  const status = recoverySlot(fixture).querySelector('[role="status"]');
-  assert.ok(status, "the recovery slot owns a permanently-mounted live status region");
+  // The live region lives OUTSIDE the slot so the compact mode's `display: none` on the slot
+  // can never silence announcements; it is the slot's immediate sibling.
+  const status = recoverySlot(fixture).nextElementSibling;
+  assert.ok(status?.getAttribute("role") === "status" && status.classList.contains("sr-only"),
+    "the permanently-mounted sr-only live region sits beside the slot, not inside it");
   return status.textContent ?? "";
+}
+
+function recoveryStripEcho(fixture: Fixture): HTMLElement {
+  const echo = fixture.container.querySelector(".transcript-recovery-strip-echo") as HTMLElement | null;
+  assert.ok(echo, "the compact strip echo is permanently mounted inside the status strip");
+  return echo;
 }
 
 /** The pill markup must ALWAYS be present — it is what sizes the slot to the pill's real
@@ -302,10 +315,21 @@ test("recovery over a long cached transcript announces at the reader's lower edg
       "the live status region announces the active recovery");
     assert.equal(fixture.scroller.getAttribute("aria-busy"), "true");
 
-    // In normal flow at the LOWER edge: outside the scroller, immediately above the status strip.
-    assert.equal(fixture.scroller.contains(slot), false, "the slot must not live inside the scroller");
-    assert.equal(slot.previousElementSibling, fixture.scroller);
-    assert.ok(slot.nextElementSibling?.classList.contains("transcript-status-strip"));
+    // In normal flow at the LOWER edge: outside the reader region, immediately above the strip.
+    const reader = fixture.container.querySelector(".detail-reader") as HTMLElement;
+    assert.ok(reader, "the reader region wraps the scroller");
+    assert.ok(reader.contains(fixture.scroller), "the scroller lives inside the reader region");
+    assert.equal(reader.contains(slot), false, "the slot must not live inside the reader region");
+    assert.equal(slot.previousElementSibling, reader);
+    // slot → sr-only live region → status strip.
+    assert.ok(slot.nextElementSibling?.nextElementSibling?.classList.contains("transcript-status-strip"));
+
+    // The compact strip echo is mounted (CSS decides when it shows), decorative, and active.
+    const echo = recoveryStripEcho(fixture);
+    assert.ok(fixture.container.querySelector(".transcript-status-strip")!.contains(echo));
+    assert.equal(echo.getAttribute("aria-hidden"), "true");
+    assert.equal(echo.classList.contains("active"), true);
+    assert.ok(echo.textContent!.includes("Checking for Missed Activity…"));
 
     // The sticky-top pill no longer renders for active recovery.
     assert.equal(fixture.container.querySelector(".transcript-load-notice"), null);
@@ -326,8 +350,10 @@ test("successful recovery removes the notice promptly without disturbing a follo
     await flushAsyncWork();
     assert.equal(recoveryActive(fixture), false, "the pill deactivates once recovery completes");
     assert.equal(recoveryStatusText(fixture), "", "the live region clears so AT hears the stop");
-    // The slot and its sizing pill stay mounted: deactivation must not change layout.
+    // The slot, sizing pill, and strip echo stay mounted: deactivation only toggles their
+    // `active` class, so it cannot change layout in either pane mode.
     assertSizingPillMounted(fixture);
+    assert.equal(recoveryStripEcho(fixture).classList.contains("active"), false);
     assert.equal(fixture.scroller.getAttribute("aria-busy"), "false");
     assert.equal(followChipState(fixture), "following");
     assert.equal(fixture.container.querySelector(".transcript-load-notice"), null);
@@ -360,6 +386,25 @@ test("a reader away from the tail keeps their place through recovery and its com
     assertSizingPillMounted(fixture);
     assert.equal(fixture.scroller.scrollTop, 123, "hiding the pill does not move the reader");
     assert.equal(followChipState(fixture), "paused", "completion must not force the reader back to the tail");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("the pinned summary is contained by the reader region, which excludes the slot and strip", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages, 12, { pinnedOpen: true });
+  try {
+    assert.equal(recoveryActive(fixture), true);
+    const reader = fixture.container.querySelector(".detail-reader") as HTMLElement;
+    const summary = fixture.container.querySelector(".pinned-summary") as HTMLElement | null;
+    assert.ok(summary, "the pinned summary renders while pinned open");
+    // Structural exclusion: the summary's containing block is the reader region, and the reader
+    // region contains neither the recovery slot nor the status strip — so the summary's bounds
+    // can never intersect the pill regardless of the pill's rendered height.
+    assert.ok(reader.contains(summary), "the summary is anchored inside the reader region");
+    assert.equal(reader.contains(recoverySlot(fixture)), false);
+    assert.equal(reader.contains(fixture.container.querySelector(".transcript-status-strip")!), false);
   } finally {
     await unmountFixture(fixture);
   }

@@ -183,6 +183,51 @@ test("the recovery pill is a permanently-sized in-flow slot, never an overlay", 
   }
 });
 
+/**
+ * Two survival invariants a permanently-present slot must also honour (issue #56, round 3):
+ *
+ * STRIP SURVIVAL — an inbox preview pane can be arbitrarily short (a generous splitter position
+ * on a short viewport left ~99px), where slot + strip simply do not fit and the slot's
+ * unconditional height clipped the strip and its follow control out of the pane. The transcript
+ * pane is therefore a height-queried container: below the threshold the slot collapses entirely
+ * (independent of activity, so toggling recovery still cannot change layout) and active recovery
+ * is echoed inside the status strip — the persistent status surface that must always survive.
+ *
+ * SUMMARY EXCLUSION — the floating pinned summary used to reserve the strip with a hardcoded
+ * `calc(100% - 66px)`, which knew nothing of the dynamic-height slot beneath it. Its containing
+ * block is now the reader region (the scroller only), so its bounds end above the slot
+ * structurally rather than by a pixel constant.
+ */
+test("short panes keep the status strip, and the pinned summary is bounded by the reader", () => {
+  // The pane is a size container so the compact switch keys on the PANE's own height (set by a
+  // splitter position), which no viewport media query can observe.
+  assert.match(soleRuleBody(".detail-main"), /container:\s*transcript-pane \/ size;/);
+
+  // The compact switch: one height-conditioned container query must collapse the slot and
+  // surface the strip echo. Collapsing by pane mode (not by activity) keeps toggles layout-free.
+  const compact = /@container transcript-pane \(max-height:\s*\d+px\)\s*\{([\s\S]*?)\n\}/.exec(css);
+  assert.ok(compact, "the height-constrained compact mode must exist");
+  assert.match(compact![1]!, /\.transcript-recovery-slot\s*\{\s*display:\s*none;\s*\}/,
+    "compact mode must collapse the slot so the strip always fits");
+  assert.match(compact![1]!, /\.transcript-recovery-strip-echo\s*\{\s*display:\s*inline-flex;\s*\}/,
+    "compact mode must surface the in-strip echo in the slot's place");
+
+  // The echo's own activity toggle is visibility-only, like the pill's.
+  assert.equal(soleRuleBody(".transcript-recovery-strip-echo:not(.active)"), "visibility: hidden;");
+  // The strip itself never flexes away beneath the slot.
+  assert.match(soleRuleBody(".transcript-status-strip"), /flex:\s*none;/);
+
+  // The pinned summary's containing block is the reader region — which the DOM tests pin as
+  // containing the scroller and neither the slot nor the strip — so no pixel reservation for
+  // siblings may reappear in its max-height.
+  assert.match(soleRuleBody(".detail-reader"), /position:\s*relative;/);
+  const summary = soleRuleBody(".pinned-summary");
+  assert.match(summary, /max-height:\s*calc\(100% - 24px\);/,
+    "the summary reserves only its own top offset and bottom breathing room");
+  assert.doesNotMatch(summary, /66px/,
+    "the old strip-and-slot pixel reservation must not return");
+});
+
 /** Relative luminance per WCAG 2.1, from a `#rrggbb` token value. */
 function luminance(hex: string): number {
   const channel = (raw: number) => {
