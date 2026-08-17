@@ -1,6 +1,19 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -12,6 +25,7 @@ import {
   legacyRunnerDataDirOwnerHash,
   normalizeControlPlaneEndpoint,
   readV1RunnerCredentialForAttestation,
+  runnerDataDirFileSyncFlags,
   runnerDataDirOwnerHash,
   scopedRunnerCredentialFile,
   type RunnerDataDirIdentity,
@@ -29,8 +43,27 @@ const SECOND: RunnerDataDirIdentity = {
 };
 
 function tempRoot(): string {
-  return mkdtempSync(join(tmpdir(), "wollipog-runner-owner-"));
+  return realpathSync(mkdtempSync(join(tmpdir(), "wollipog-runner-owner-")));
 }
+
+test("runner data file fsync uses a write-capable handle on Windows", () => {
+  assert.notEqual(runnerDataDirFileSyncFlags("win32") & constants.O_RDWR, 0);
+  assert.equal(runnerDataDirFileSyncFlags("linux") & constants.O_RDWR, 0);
+
+  const root = tempRoot();
+  const path = join(root, "durability-probe");
+  try {
+    writeFileSync(path, "probe", { flag: "wx", mode: 0o600 });
+    const fd = openSync(path, runnerDataDirFileSyncFlags());
+    try {
+      assert.doesNotThrow(() => fsyncSync(fd));
+    } finally {
+      closeSync(fd);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 /** The owner and lease decisions performed by pinned base 79c0ea4 before stable CP identity
  * existed. These tests invoke the model only for a valid, matching root-owner marker, where it
