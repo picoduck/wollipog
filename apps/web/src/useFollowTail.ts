@@ -164,6 +164,7 @@ export function useFollowTail({
   const followFramesRemainingRef = useRef(0);
   const resizeFollowOwnsScrollRef = useRef(false);
   const scrollIntentTimerRef = useRef<number | null>(null);
+  const viewportGeometryRef = useRef<{ scrollHeight: number; clientHeight: number } | null>(null);
   const programmaticScrollRef = useRef<{
     direction: "next" | "previous";
     settleTimer: number | null;
@@ -188,6 +189,18 @@ export function useFollowTail({
     stateRef.current = next;
     setState(next);
     storeSnapshot(activeKeyRef.current, { state: next, anchor: anchorRef.current });
+  }, []);
+
+  /**
+   * Samples viewport geometry and reports whether it changed since the previous sample. A scroll
+   * event that coincides with a geometry change is layout-driven — composer growth, a panel
+   * resize, or the browser clamping scrollTop after the viewport grew — never reader intent.
+   */
+  const consumeViewportGeometryChange = useCallback((metrics: FollowTailMetrics): boolean => {
+    const previous = viewportGeometryRef.current;
+    viewportGeometryRef.current = { scrollHeight: metrics.scrollHeight, clientHeight: metrics.clientHeight };
+    return previous != null &&
+      (previous.scrollHeight !== metrics.scrollHeight || previous.clientHeight !== metrics.clientHeight);
   }, []);
 
   const scrollToBottom = useCallback(() => {
@@ -303,6 +316,7 @@ export function useFollowTail({
   const onScroll = useCallback(() => {
     const element = scrollRef.current;
     if (!element) return;
+    const layoutDriven = consumeViewportGeometryChange(element);
     const ownership = programmaticScrollRef.current;
     if (ownership) {
       const atBottom = isAtFollowTailBottom(element, FOLLOW_TAIL_RESUME_THRESHOLD_PX);
@@ -321,7 +335,9 @@ export function useFollowTail({
     }
     if (stateRef.current !== "following") {
       cancelScheduledScrollIntent();
-      if (isAtFollowTailBottom(element, FOLLOW_TAIL_RESUME_THRESHOLD_PX)) {
+      // A clamped scrollTop after the viewport grew (for example composer shrink) lands exactly on
+      // the bottom without any reader intent; only a scroll with settled geometry may resume.
+      if (!layoutDriven && isAtFollowTailBottom(element, FOLLOW_TAIL_RESUME_THRESHOLD_PX)) {
         transition("resume");
       }
       return;
@@ -342,7 +358,7 @@ export function useFollowTail({
         pause();
       }
     }, FOLLOW_TAIL_SCROLL_INTENT_DELAY_MS);
-  }, [cancelScheduledScrollIntent, finishProgrammaticScroll, pause, scrollRef, transition]);
+  }, [cancelScheduledScrollIntent, consumeViewportGeometryChange, finishProgrammaticScroll, pause, scrollRef, transition]);
 
   const onKeyDown = useCallback((event: FollowTailKey) => {
     if (isFollowTailResumeKey(event)) {
@@ -378,9 +394,15 @@ export function useFollowTail({
     if (!element || typeof ResizeObserver === "undefined") return;
     const observed = new Set<Element>();
     const resizeObserver = new ResizeObserver(() => {
+      // Refresh the geometry sample so the next bare scroll is judged against the settled layout.
+      const current = scrollRef.current;
+      if (current) consumeViewportGeometryChange(current);
       // A measured geometry change explains an otherwise bare scroll event. It owns this one
       // correction; ordinary content-settle frames do not cancel reader intent.
       cancelScheduledScrollIntent();
+      // Re-pin in this same pre-paint delivery: this frame's animation callbacks already ran, so
+      // deferring the first correction would paint one frame off the tail (the composer bounce).
+      if (stateRef.current === "following") scrollToBottom();
       scheduleFollow(true);
     });
     // Panel and window resizing changes the reader border box before every virtual row necessarily
@@ -405,7 +427,7 @@ export function useFollowTail({
       mutationObserver?.disconnect();
       resizeObserver.disconnect();
     };
-  }, [cancelScheduledScrollIntent, scrollRef, scheduleFollow, sessionId]);
+  }, [cancelScheduledScrollIntent, consumeViewportGeometryChange, scrollRef, scheduleFollow, scrollToBottom, sessionId]);
 
   useLayoutEffect(() => () => {
     persist();

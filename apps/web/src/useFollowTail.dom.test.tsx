@@ -633,6 +633,86 @@ test("losing the saved logical row clears the snapshot and recovers to the live 
   container.remove();
 });
 
+test("composer growth and shrink are layout, never reader intent", async () => {
+  MockResizeObserver.instances.length = 0;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<Harness sessionId="composer-resize" revision={0} mode="expanded" scope="composer-resize" />);
+  });
+  const transcript = container.firstElementChild as HTMLElement;
+  setScrollMetrics(transcript, { scrollTop: 800, scrollHeight: 1_000, clientHeight: 200 });
+  const scrollRequests: ScrollToOptions[] = [];
+  transcript.scrollTo = (({ top }: ScrollToOptions) => {
+    scrollRequests.push({ top });
+    const target = typeof top === "number" ? top : transcript.scrollTop;
+    setScrollMetrics(transcript, {
+      // A real browser clamps the request to the current maximum scroll offset.
+      scrollTop: Math.min(target, transcript.scrollHeight - transcript.clientHeight),
+      scrollHeight: transcript.scrollHeight,
+      clientHeight: transcript.clientHeight,
+    });
+  }) as typeof transcript.scrollTo;
+  const viewportObserver = MockResizeObserver.instances.find((observer) => observer.observed.has(transcript));
+  assert.ok(viewportObserver);
+
+  await act(async () => {
+    root.render(<Harness sessionId="composer-resize" revision={1} mode="expanded" scope="composer-resize" />);
+  });
+  assert.equal(transcript.dataset.state, "following");
+
+  // A wrapping draft grows the composer: the viewport shrinks without any scroll event.
+  setScrollMetrics(transcript, { scrollTop: 800, scrollHeight: 1_000, clientHeight: 120 });
+  scrollRequests.length = 0;
+  await act(async () => { viewportObserver.trigger(); });
+  assert.equal(scrollRequests.at(-1)?.top, 1_000,
+    "a shrinking viewport re-pins the tail in the same pre-paint resize delivery, not a frame later");
+  await act(async () => {
+    transcript.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as never);
+    await new Promise<void>((resolve) => setTimeout(resolve, FOLLOW_TAIL_SCROLL_INTENT_DELAY_MS + 25));
+  });
+  assert.equal(transcript.dataset.state, "following", "composer growth must never flip a follower to Paused");
+
+  // Deleting the draft shrinks the composer: the browser clamps scrollTop onto the new bottom and
+  // delivers that scroll event before the resize callback.
+  setScrollMetrics(transcript, { scrollTop: 760, scrollHeight: 1_000, clientHeight: 240 });
+  await act(async () => {
+    transcript.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as never);
+    viewportObserver.trigger();
+    await new Promise<void>((resolve) => setTimeout(resolve, FOLLOW_TAIL_SCROLL_INTENT_DELAY_MS + 25));
+  });
+  assert.equal(transcript.dataset.state, "following", "composer shrink keeps the tail followed");
+
+  // A reader paused just above the tail: composer shrink clamps its scrollTop exactly onto the
+  // bottom. That layout-driven scroll must not resume following or move the logical anchor.
+  await act(async () => {
+    transcript.dispatchEvent(new domWindow.WheelEvent("wheel", { deltaY: -1, bubbles: true }) as never);
+  });
+  assert.equal(transcript.dataset.state, "paused");
+  setScrollMetrics(transcript, { scrollTop: 755, scrollHeight: 1_000, clientHeight: 240 });
+  await act(async () => { transcript.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as never); });
+  assert.equal(transcript.dataset.state, "paused");
+  scrollRequests.length = 0;
+  setScrollMetrics(transcript, { scrollTop: 700, scrollHeight: 1_000, clientHeight: 300 });
+  await act(async () => { transcript.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as never); });
+  assert.equal(transcript.dataset.state, "paused",
+    "a clamped bottom landing during a viewport resize is layout, not reader intent");
+  await act(async () => {
+    viewportObserver.trigger();
+    await new Promise<void>((resolve) => domWindow.requestAnimationFrame(() => resolve()));
+  });
+  assert.equal(transcript.dataset.state, "paused");
+  assert.equal(scrollRequests.length, 0, "composer resizes must not move a paused reader's anchor");
+
+  // With geometry settled, a genuine reader scroll onto the bottom still resumes.
+  await act(async () => { transcript.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as never); });
+  assert.equal(transcript.dataset.state, "following", "an actual reader return to the tail resumes following");
+
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
 test("following tracks late virtual measurements while paused readers remain anchored", async () => {
   MockResizeObserver.instances.length = 0;
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
