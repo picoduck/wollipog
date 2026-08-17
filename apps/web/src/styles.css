@@ -391,6 +391,14 @@
   --radius-lg: 12px;
   --radius-pill: 999px;
 
+  /* --- Transcript recovery clearance (issue #56). The reconnect pill floats ABSOLUTELY over
+     the reader's lower edge, so the scroller permanently reserves this much bottom padding for
+     its band. The reservation is deliberately unconditional: it never changes with pill
+     visibility, so showing or hiding the pill cannot overlap the newest transcript row, shift
+     a scrolled-up reader's viewport, or flip follow state. Sized to cover the pill's 10px
+     bottom offset + 2×6px padding + 2×1px border + one --text-sm line (≈18px) ⇒ ≥42px. --- */
+  --transcript-recovery-clearance: 46px;
+
   /* --- Motion. Every transition in the app should draw from these; nothing else. --- */
   --dur-instant: 80ms;
   --dur-fast: 130ms;
@@ -1753,8 +1761,9 @@ textarea {
   min-height: 0;
   overflow-y: auto;
   /* Center the transcript at reading width (Codex-style): symmetric padding absorbs any
-     pane width beyond --chat-max, while the scrollbar stays at the pane edge. */
-  padding: 16px max(2px, calc((100% - var(--chat-max)) / 2));
+     pane width beyond --chat-max, while the scrollbar stays at the pane edge. The bottom edge
+     permanently reserves the recovery pill's band so it can never cover the newest row. */
+  padding: 16px max(2px, calc((100% - var(--chat-max)) / 2)) var(--transcript-recovery-clearance);
   transition: background-color var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out);
 }
 /* Chat column + right side panel */
@@ -8126,7 +8135,7 @@ body.shell-dock-dragging * {
 .session-detail.preview .detail-chat,
 .session-detail.preview .detail-main { min-height: 0; }
 .session-detail.preview .detail-scroll {
-  padding: 12px max(16px, calc((100% - var(--chat-max)) / 2));
+  padding: 12px max(16px, calc((100% - var(--chat-max)) / 2)) var(--transcript-recovery-clearance);
 }
 .session-detail.preview .approval-bar { margin: 8px 14px 0; }
 .session-preview-head {
@@ -9708,7 +9717,7 @@ body.shell-dock-dragging * {
     min-width: 44px;
   }
   .detail-scroll {
-    padding: 12px 0;
+    padding: 12px 0 var(--transcript-recovery-clearance);
   }
   .transcript-status-strip {
     min-height: 42px;
@@ -10029,8 +10038,9 @@ body.shell-dock-dragging * {
    above the transcript status strip, where users watching the newest activity actually look.
    The zero-height anchor sits BETWEEN the scroller and the strip — outside the scroll flow —
    so mounting/unmounting can never change layout or scroll position, and it can never cover
-   the follow-state control or composer. pointer-events: none keeps the last transcript rows
-   beneath the pill fully clickable. */
+   the follow-state control or composer. It floats inside the scroller's permanently reserved
+   bottom band (--transcript-recovery-clearance), so it never overlaps the newest transcript
+   row either; pointer-events: none keeps everything beneath it clickable regardless. */
 .transcript-recovery-anchor { position: relative; flex: none; height: 0; overflow: visible; z-index: var(--z-sticky); }
 .transcript-recovery-notice {
   position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%);

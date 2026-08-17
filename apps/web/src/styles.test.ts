@@ -140,6 +140,54 @@ test("the permission-mode popover gives visible descriptions readable inline spa
   assert.deepEqual(phoneRule.declarationsForSelector(".cbar-opt.permission-mode").get("flex-direction"), ["column"]);
 });
 
+/**
+ * The reconnect recovery pill (issue #56) floats absolutely over the transcript reader's lower
+ * edge. Its non-overlap guarantee is a RESERVATION, not a reaction: the scroller permanently pads
+ * its bottom by --transcript-recovery-clearance so the pill's band never covers the newest
+ * transcript row, and because that reservation is independent of pill visibility, showing or
+ * hiding the pill cannot shift a scrolled-up reader's viewport or flip follow state.
+ */
+test("the transcript reader permanently reserves the recovery pill's band", () => {
+  // The pill's band top, from its own declarations: bottom offset + vertical padding + borders +
+  // one --text-sm (12px) line, which at the browser default line-height is at most 18px tall and
+  // taller than the 7px pulse dot. Reading the geometry from the rule keeps this test honest if
+  // someone later moves or thickens the pill without growing the reservation.
+  const notice = soleRuleBody(".transcript-recovery-notice");
+  const bottom = Number(/bottom:\s*(\d+)px/.exec(notice)?.[1]);
+  const verticalPadding = Number(/padding:\s*(\d+)px\s+\d+px;/.exec(notice)?.[1]);
+  const borderWidth = Number(/border:\s*(\d+)px/.exec(notice)?.[1]);
+  assert.ok(Number.isFinite(bottom) && Number.isFinite(verticalPadding) && Number.isFinite(borderWidth),
+    "the pill must declare bottom, padding, and border in px so the band is computable");
+  const bandTop = bottom + 2 * verticalPadding + 2 * borderWidth + 18;
+
+  const clearanceValue = soleRuleProps(":root").get("--transcript-recovery-clearance")?.[0];
+  const clearance = Number(/^(\d+)px$/.exec(clearanceValue ?? "")?.[1]);
+  assert.ok(Number.isFinite(clearance),
+    "--transcript-recovery-clearance must be a px token in the shared :root scope");
+  assert.ok(clearance >= bandTop,
+    `--transcript-recovery-clearance is ${clearance}px but the pill band reaches ${bandTop}px — ` +
+    "the pill would cover the newest transcript row");
+
+  // Every padding context of the scroller must reserve through the token; any one of the base
+  // rule, the preview override, or the phone-width override alone would restore the overlap.
+  // In each, the token is the padding shorthand's LAST value — the bottom edge.
+  const endsWithToken = (padding: string | undefined, where: string) => {
+    assert.ok(padding?.endsWith("var(--transcript-recovery-clearance)"),
+      `${where} must reserve the pill band as its bottom padding, found: ${padding}`);
+  };
+  const paddingOf = (selector: string) => /padding:\s*([^;]+);/.exec(soleRuleBody(selector))?.[1]?.trim();
+  endsWithToken(paddingOf(".detail-scroll"), "the transcript scroller");
+  endsWithToken(paddingOf(".session-detail.preview .detail-scroll"), "the preview scroller");
+  const phone = mediaBlocks(css).filter((block) =>
+    block.maxWidths.includes(760) && block.declarationsForSelector(".detail-scroll").has("padding"));
+  assert.ok(phone.length > 0, "the phone-width scroller padding override must exist");
+  for (const block of phone) {
+    for (const padding of block.declarationsForSelector(".detail-scroll").get("padding")!) {
+      endsWithToken(padding, "the phone-width scroller");
+    }
+  }
+});
+
 /** Relative luminance per WCAG 2.1, from a `#rrggbb` token value. */
 function luminance(hex: string): number {
   const channel = (raw: number) => {
