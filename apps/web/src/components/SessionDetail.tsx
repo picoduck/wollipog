@@ -504,6 +504,7 @@ function SessionDetailLoaded({
   const pendingComposerFocusRestoreRef = useRef<ReturnType<typeof captureComposerFocus> | null>(null);
   const composerExplicitFocusTransferRef = useRef(false);
   const composerFocusRestoreFrameRef = useRef<number | null>(null);
+  const composerWindowTransferVersionRef = useRef(0);
   const composerInteractionVersionRef = useRef(0);
   const composerDraftVersionRef = useRef(0);
   const commandSubmissionRetryRef = useRef<ComposerCommandSubmission | null>(null);
@@ -600,16 +601,25 @@ function SessionDetailLoaded({
       if (composer && event.target instanceof Node && !composer.contains(event.target)) markExplicitTransfer();
     };
     const markExplicitKeyboardTransfer = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Tab" || event.key === "F6") markExplicitTransfer();
+      const plainEscape = event.key === "Escape"
+        && !event.ctrlKey
+        && !event.metaKey
+        && !event.shiftKey
+        && !event.altKey;
+      if (event.key === "Tab" || event.key === "F6" || plainEscape) markExplicitTransfer();
+    };
+    const markWindowTransfer = () => {
+      composerWindowTransferVersionRef.current += 1;
+      markExplicitTransfer();
     };
     document.addEventListener("pointerdown", markExplicitPointerTransfer, true);
     document.addEventListener("keydown", markExplicitKeyboardTransfer, true);
-    window.addEventListener("blur", markExplicitTransfer);
+    window.addEventListener("blur", markWindowTransfer);
     window.addEventListener("focus", clearExplicitTransfer);
     return () => {
       document.removeEventListener("pointerdown", markExplicitPointerTransfer, true);
       document.removeEventListener("keydown", markExplicitKeyboardTransfer, true);
-      window.removeEventListener("blur", markExplicitTransfer);
+      window.removeEventListener("blur", markWindowTransfer);
       window.removeEventListener("focus", clearExplicitTransfer);
       if (clearExplicitTransferTimer) clearTimeout(clearExplicitTransferTimer);
     };
@@ -618,6 +628,7 @@ function SessionDetailLoaded({
   const handleComposerBlur = useCallback((event: React.FocusEvent<HTMLTextAreaElement>) => {
     const element = event.currentTarget;
     const snapshot = captureComposerFocus(element);
+    const windowTransferVersion = composerWindowTransferVersionRef.current;
     reportComposerFocus(sessionId, "blur", element, composerComposingRef.current, event.relatedTarget);
     const relatedTarget = event.relatedTarget;
     const elementConstructor = element.ownerDocument.defaultView?.Element;
@@ -636,6 +647,7 @@ function SessionDetailLoaded({
     if (composerFocusRestoreFrameRef.current !== null) window.cancelAnimationFrame(composerFocusRestoreFrameRef.current);
     composerFocusRestoreFrameRef.current = window.requestAnimationFrame(() => {
       composerFocusRestoreFrameRef.current = null;
+      if (composerWindowTransferVersionRef.current !== windowTransferVersion) return;
       if (!element.isConnected || !restoreComposerFocus(element, snapshot, true)) return;
       reportComposerFocus(sessionId, "restore", element, false);
     });
@@ -711,7 +723,12 @@ function SessionDetailLoaded({
       ? current
       : { start, end });
   }, []);
-  const setProgrammaticComposerText = useCallback((next: string, caret = next.length) => {
+  const setProgrammaticComposerText = useCallback((
+    next: string,
+    caret = next.length,
+    preservePendingFocusRestore = false,
+  ) => {
+    if (!preservePendingFocusRestore) pendingComposerFocusRestoreRef.current = null;
     draftState.current = { ...draftState.current, text: next };
     setText(next);
     updateComposerSelection(caret);
@@ -828,12 +845,13 @@ function SessionDetailLoaded({
         suppressedDraftRef.current = { sessionId, revision: draft?.revision };
         draftHydratedSessionRef.current = sessionId;
         pendingHydrationCaretRef.current = null;
+        pendingComposerFocusRestoreRef.current = null;
       } else if (draft && !draftDirty.current) {
         // Defer completion until a layout effect observes the controlled textarea's committed
         // value. Promise settlement and animation-frame ordering cannot prove that React has
         // written the hydrated text to the DOM yet.
         pendingHydrationCommitRef.current = { sessionId, expectedText: draft.text };
-        setProgrammaticComposerText(draft.text);
+        setProgrammaticComposerText(draft.text, draft.text.length, true);
         replace(draft.images);
         commandSubmissionRetryRef.current = draft.commandSubmission ?? null;
         consumeComposerDraftHandoff(sessionId, draft, instanceScope);
@@ -841,6 +859,7 @@ function SessionDetailLoaded({
       } else {
         draftHydratedSessionRef.current = sessionId;
         pendingHydrationCaretRef.current = null;
+        pendingComposerFocusRestoreRef.current = null;
       }
     })();
     return () => {
@@ -872,6 +891,9 @@ function SessionDetailLoaded({
     ) {
       placeComposerCaretAtEnd(current);
     }
+    // A remount lease is valid only through initial draft hydration. If the persisted value did
+    // not match the remembered live value, do not let a later programmatic edit revive it.
+    pendingComposerFocusRestoreRef.current = null;
   }, [hydrationCommitRevision, sessionId]);
 
   useEffect(() => {
@@ -1497,6 +1519,7 @@ function SessionDetailLoaded({
     const replacement = replaceComposerCommandTrigger(text, slashTrigger, command);
     draftDirty.current = true;
     composerDraftVersionRef.current += 1;
+    pendingComposerFocusRestoreRef.current = null;
     draftState.current = { text: replacement.text, images };
     setText(replacement.text);
     setComposerCaret(replacement.caret);

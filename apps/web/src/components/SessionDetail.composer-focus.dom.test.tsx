@@ -832,6 +832,30 @@ test("focus recovery distinguishes background loss from explicit transfer and IM
 
     await act(async () => {
       fixture.composer.focus();
+      fixture.composer.dispatchEvent(new domWindow.KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }) as never);
+      fixture.composer.blur();
+      transcript.focus();
+      flushFrames();
+    });
+    assert.equal(fixture.composer.ownerDocument.activeElement, transcript,
+      "the shell Escape ladder must be allowed to transfer focus to the transcript");
+
+    await act(async () => {
+      fixture.composer.focus();
+      fixture.composer.blur();
+      domWindow.dispatchEvent(new domWindow.Event("blur"));
+      flushFrames();
+    });
+    assert.notEqual(fixture.composer.ownerDocument.activeElement, fixture.composer,
+      "window deactivation after focusout must cancel queued recovery");
+    domWindow.dispatchEvent(new domWindow.Event("focus"));
+
+    await act(async () => {
+      fixture.composer.focus();
       transcript.dispatchEvent(new domWindow.PointerEvent("pointerdown", { bubbles: true }) as never);
     });
     await flushAsyncWork();
@@ -890,6 +914,49 @@ test("an immediate same-session remount restores exact selection direction and t
       [3, 16, "backward"],
     );
     assert.equal(remounted.scrollTop, 61);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a mismatched hydration expires the remount lease before programmatic history recall", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const rememberedText = "history prompt";
+  const fixture = await mountFixture(draft, {
+    mainEventPayloads: [{ kind: "user_message", text: rememberedText, images: [] }],
+  });
+  try {
+    await act(async () => {
+      draft.resolve(null);
+      await draft.promise;
+      fixture.composer.value = rememberedText;
+      Simulate.change(fixture.composer);
+      fixture.composer.focus();
+      fixture.composer.setSelectionRange(2, 5, "backward");
+      fixture.composer.scrollTop = 37;
+      Simulate.select(fixture.composer);
+    });
+
+    const persisted = deferred<ComposerDraft | null>();
+    const remounted = await fixture.remountWithDraftLoader(() => persisted.promise);
+    await resolveComposerDraft(persisted, { text: "", images: [], updatedAt: 2 });
+    await flushAsyncWork();
+    await act(async () => {
+      remounted.dispatchEvent(new domWindow.KeyboardEvent("keydown", {
+        key: "ArrowUp",
+        bubbles: true,
+        cancelable: true,
+      }) as never);
+      await Promise.resolve();
+    });
+
+    assert.equal(remounted.value, rememberedText);
+    assert.deepEqual(
+      [remounted.selectionStart, remounted.selectionEnd],
+      [rememberedText.length, rememberedText.length],
+      "history recall must keep its end caret instead of reviving stale remount geometry",
+    );
+    assert.notEqual(remounted.scrollTop, 37);
   } finally {
     await unmountFixture(fixture);
   }

@@ -197,6 +197,7 @@ test("timed turn updates preserve composer focus, selection, scroll, IME ownersh
   expect(final.selection).toEqual([3, 14, "backward"]);
   expect(final.scrollTop).toBe(initial.scrollTop);
   expect(final.readerScrollTop).toBe(initial.readerScrollTop);
+  expect(final.diagnostics?.length).toBeGreaterThan(0);
   expect(JSON.stringify(final.diagnostics)).not.toContain("line 0");
 });
 
