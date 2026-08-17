@@ -153,6 +153,7 @@ test("Subscription Usage shows remaining allowance, local and relative resets, s
         resetsAt: now + 90 * 60_000,
         status,
       }],
+      spendControls: [{ id: "monthly", label: "Monthly Limit", limit: "$100" }],
     }],
   });
   let refreshes = 0;
@@ -183,6 +184,7 @@ test("Subscription Usage shows remaining allowance, local and relative resets, s
   assert.match(pageText(), /Resets in 2 hours/);
   assert.ok(pageText().includes(new Date(now + 90 * 60_000).toLocaleString()), "the exact reset uses the viewer's local time");
   assert.match(pageText(), /Machine Offline/);
+  assert.match(pageText(), /Monthly Limit: Usage Reported of \$100/);
 
   const refresh = [...container.querySelectorAll("button")]
     .find((button) => button.textContent?.trim() === "Refresh") as HTMLButtonElement;

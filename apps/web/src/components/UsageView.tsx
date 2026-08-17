@@ -295,7 +295,7 @@ export function UsageView() {
                 )}
                 {source.spendControls?.map((control) => (
                   <p className="subscription-detail" key={control.id}>
-                    {control.reached ? "⛔ " : ""}{control.label}: {control.used ?? "Usage reported"}{control.limit ? ` of ${control.limit}` : ""}
+                    {control.reached ? "⛔ " : ""}{control.label}: {control.used ?? "Usage Reported"}{control.limit ? ` of ${control.limit}` : ""}
                     {control.resetsAt ? ` · ${subscriptionResetLabel(control.resetsAt, subscriptionNow)}` : ""}
                   </p>
                 ))}
