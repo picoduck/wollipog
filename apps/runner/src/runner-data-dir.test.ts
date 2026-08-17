@@ -9,6 +9,7 @@ import {
   mkdtempSync,
   openSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -42,7 +43,7 @@ const SECOND: RunnerDataDirIdentity = {
 };
 
 function tempRoot(): string {
-  return mkdtempSync(join(tmpdir(), "wollipog-runner-owner-"));
+  return realpathSync(mkdtempSync(join(tmpdir(), "wollipog-runner-owner-")));
 }
 
 test("runner data file fsync uses a write-capable handle on Windows", () => {
