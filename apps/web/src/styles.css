@@ -10024,6 +10024,30 @@ body.shell-dock-dragging * {
   box-shadow: var(--shadow); font-size: 12px;
 }
 .transcript-load-notice.error { border-color: color-mix(in srgb, var(--red) 35%, var(--border)); }
+
+/* Reconnect recovery pill (issue #56): anchored at the LOWER edge of the reader, immediately
+   above the transcript status strip, where users watching the newest activity actually look.
+   The zero-height anchor sits BETWEEN the scroller and the strip — outside the scroll flow —
+   so mounting/unmounting can never change layout or scroll position, and it can never cover
+   the follow-state control or composer. pointer-events: none keeps the last transcript rows
+   beneath the pill fully clickable. */
+.transcript-recovery-anchor { position: relative; flex: none; height: 0; overflow: visible; z-index: var(--z-sticky); }
+.transcript-recovery-notice {
+  position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 8px; width: max-content; max-width: calc(100% - 24px);
+  padding: 6px 12px; border: 1px solid color-mix(in srgb, var(--accent) 50%, var(--border));
+  border-radius: var(--radius-pill); color: var(--text); font-size: var(--text-sm); font-weight: 600;
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg-elev));
+  box-shadow: var(--shadow); pointer-events: none;
+}
+.transcript-recovery-dot {
+  flex: none; width: 7px; height: 7px; border-radius: var(--radius-pill); background: var(--accent);
+  animation: transcript-recovery-pulse 1.2s ease-in-out infinite;
+}
+@keyframes transcript-recovery-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) {
+  .transcript-recovery-dot { animation: none; }
+}
 .transcript-skeleton { display: grid; gap: 20px; padding: 28px 20px; }
 .transcript-skeleton-row { display: grid; gap: 8px; width: min(68%, 620px); }
 .transcript-skeleton-row.user { justify-self: end; width: min(54%, 480px); }

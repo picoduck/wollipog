@@ -1949,7 +1949,7 @@ function SessionDetailLoaded({
                 event.preventDefault();
               }}
             >
-              {transcript.notice && (
+              {(transcript.notice === "stale" || transcript.notice === "error") && (
                 <TranscriptLoadNotice
                   kind={transcript.notice}
                   error={transcript.error}
@@ -2044,6 +2044,11 @@ function SessionDetailLoaded({
                 </>
               )}
             </div>
+            {/* Reconnect recovery indicator lives at the LOWER edge of the reader — where the
+                newest activity is — not sticky-top inside the scroller (issue #56: users watching
+                the tail read a top-only notice as "frozen" or "fully caught up"). It renders
+                OUTSIDE the scroll flow, so mounting/removing it can never shift scroll position. */}
+            {transcript.notice === "refreshing" && <TranscriptRecoveryNotice />}
             <div className="transcript-status-strip" aria-label="Transcript Status">
               <div className="transcript-status-context">
                 {mode === "expanded" && <ContextWindowMeter session={session} />}
@@ -3106,22 +3111,35 @@ function TranscriptLoadNotice({
   canRetry,
   onRetry,
 }: {
-  kind: "refreshing" | "stale" | "error";
+  kind: "stale" | "error";
   error: string | null;
   canRetry: boolean;
   onRetry: () => void;
 }) {
-  const message = kind === "refreshing"
-    ? "Checking for missed activity…"
-    : kind === "stale"
-      ? "Showing cached activity while disconnected."
-      : `Could not refresh activity${error ? `: ${error}` : "."}`;
+  const message = kind === "stale"
+    ? "Showing cached activity while disconnected."
+    : `Could not refresh activity${error ? `: ${error}` : "."}`;
   return (
     <div className={`transcript-load-notice ${kind}`} role="status">
       <span>{message}</span>
       {kind === "error" && (
         <button className="btn ghost sm" type="button" disabled={!canRetry} onClick={onRetry}>Retry</button>
       )}
+    </div>
+  );
+}
+
+/** Active reconnect/reopen recovery pill anchored immediately above the transcript status strip.
+ * The zero-height anchor keeps it out of the scroller's layout entirely: showing or removing it
+ * cannot change scroll position, and a reader away from the tail stays exactly where they were.
+ * `pointer-events` stays off so the newest transcript rows beneath it remain fully interactive. */
+function TranscriptRecoveryNotice() {
+  return (
+    <div className="transcript-recovery-anchor">
+      <div className="transcript-recovery-notice" role="status">
+        <span className="transcript-recovery-dot" aria-hidden="true" />
+        <span>Checking for Missed Activity…</span>
+      </div>
     </div>
   );
 }
