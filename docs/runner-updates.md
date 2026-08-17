@@ -109,7 +109,7 @@ history after reconnect/restart. Update runner, control plane, and dashboard tog
 on **Background Delivery** watchdog badges. A dashboard observation is not an OS push/display/click
 receipt; durable push dispatch and display acknowledgements remain a separate capability.
 
-Protocol v79 makes provider capability explicit: Claude sessions report managed background-work
+Protocol v83 makes provider capability explicit: Claude sessions report managed background-work
 tracking, while providers without a durable lifecycle signal report **Detached Work: Untracked**.
 Managed continuations carry bounded provider-neutral terminal summaries without provider paths or
 output references. The control plane now persists one background-notification outbox row per push
@@ -136,6 +136,7 @@ arbitrary detached side effects.
 | Report subscription allowance windows and refresh results | 80 |
 | Resume a parent after managed background-job completion | 81 |
 | Track managed background delivery projection and observation | 82 |
+| Classify provider background-work tracking explicitly | 83 |
 
 A missing protocol version is treated as **unknown**, not optimistically supported. Protocol
 metadata itself arrived in v15, so the dashboard cannot prove which earlier commands such a runner

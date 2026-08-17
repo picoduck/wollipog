@@ -323,11 +323,11 @@ test("v80 snapshots expose bounded background delivery facts without runner-priv
   assert.equal(serialized.includes("structuredDeliveryPublishedAt"), false);
 });
 
-test("v79 snapshots explicitly classify provider background tracking", () => {
-  assert.equal(metaToSnapshot(meta({ driver: "claude-code" }), 78).backgroundWorkTracking, undefined);
-  assert.equal(metaToSnapshot(meta({ driver: "claude-code" }), 79).backgroundWorkTracking, "managed");
+test("v81 snapshots explicitly classify provider background tracking", () => {
+  assert.equal(metaToSnapshot(meta({ driver: "claude-code" }), 80).backgroundWorkTracking, undefined);
+  assert.equal(metaToSnapshot(meta({ driver: "claude-code" }), 81).backgroundWorkTracking, "managed");
   for (const driver of ["acp", "codex", "codex-app-server"] as const) {
-    const snap = metaToSnapshot(meta({ driver }), 79);
+    const snap = metaToSnapshot(meta({ driver }), 81);
     assert.equal(snap.backgroundWorkTracking, "untracked", driver);
     assert.equal(snap.backgroundWorkState, undefined, "classification never invents active detached work");
   }
