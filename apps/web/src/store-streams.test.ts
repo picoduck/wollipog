@@ -684,3 +684,105 @@ test("a superseded recovery revision cannot merge pages or overwrite current loa
     error: null,
   });
 });
+
+test("an opening window publishes a cursor contiguous within itself, not from the start of the log", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  store.prepareSubscriptionRecovery(1, ["s1"]);
+  message(store, {
+    type: "session_subscriptions_applied", revision: 1, sessionIds: ["s1"], podIds: [],
+  });
+  store.beginEventHistoryLoad("s1", 0, 1);
+  // The window starts at seq 4801: everything below it is deliberately absent.
+  store.loadEvents("s1", [event("s1", 4_801), event("s1", 4_802)], 0, 1, true, generation, true);
+
+  assert.equal(store.eventWindowBase("s1"), 4_801);
+  assert.equal(store.getState().eventWindows.get("s1")?.hasOlder, true);
+  assert.equal(
+    store.recoveryAfter("s1"),
+    4_802,
+    "a later recovery resumes at the window's tail instead of restarting at the first event",
+  );
+  assert.equal(store.getState().eventHistory.get("s1")?.everComplete, true);
+});
+
+test("reader-driven older pages extend the window downward without touching recovery state", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  store.prepareSubscriptionRecovery(1, ["s1"]);
+  message(store, {
+    type: "session_subscriptions_applied", revision: 1, sessionIds: ["s1"], podIds: [],
+  });
+  store.beginEventHistoryLoad("s1", 0, 1);
+  store.loadEvents("s1", [event("s1", 10), event("s1", 11)], 0, 1, true, generation, true);
+  const cursorAfterOpen = store.recoveryAfter("s1");
+
+  store.beginOlderEventsLoad("s1", 0);
+  assert.equal(store.getState().eventWindows.get("s1")?.loadingOlder, true);
+  store.loadOlderEvents("s1", [event("s1", 8), event("s1", 9)], true, 0);
+
+  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [8, 9, 10, 11]);
+  assert.equal(store.eventWindowBase("s1"), 8);
+  assert.equal(store.getState().eventWindows.get("s1")?.loadingOlder, false);
+  assert.equal(store.recoveryAfter("s1"), cursorAfterOpen, "a prepend is not recovery progress");
+
+  store.loadOlderEvents("s1", [event("s1", 7)], false, 0);
+  assert.equal(store.getState().eventWindows.get("s1")?.hasOlder, false);
+  // A later re-read of the tail answers for its own boundary; the reader is already below it.
+  store.loadEvents("s1", [event("s1", 10), event("s1", 11)], 0, 1, true, generation, true);
+  assert.equal(store.getState().eventWindows.get("s1")?.hasOlder, false);
+  assert.equal(store.eventWindowBase("s1"), 7);
+});
+
+test("a replaced event log drops the window that described the previous sequence space", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  store.loadEvents("s1", [event("s1", 40), event("s1", 41)], 0, undefined, true, generation, true);
+  assert.equal(store.eventWindowBase("s1"), 40);
+
+  message(store, { type: "session_events_reset", sessionId: "s1", events: [], eventEpoch: 1 });
+  assert.equal(store.eventWindowBase("s1"), 0, "the replacement log is windowed from its own tail");
+  assert.equal(store.getState().eventWindows.get("s1"), undefined);
+
+  // Navigating away drops the window with the transcript it described.
+  store.loadEvents("s1", [event("s1", 3)], 1, undefined, true, generation, false);
+  assert.equal(store.eventWindowBase("s1"), 3);
+  store.navigate({ name: "inbox" });
+  assert.equal(store.getState().eventWindows.get("s1"), undefined);
+});
+
+test("forward gap recovery leaves the loaded window boundary untouched", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  store.loadEvents("s1", [event("s1", 20), event("s1", 21)], 0, undefined, true, generation, true);
+
+  // A reconnect gap-fill carries no window meaning: it must not claim the transcript now starts
+  // at the gap page's first event.
+  store.loadEvents("s1", [event("s1", 22), event("s1", 23)], 0, undefined, true, generation);
+  assert.equal(store.eventWindowBase("s1"), 20);
+  assert.equal(store.getState().eventWindows.get("s1")?.hasOlder, true);
+});

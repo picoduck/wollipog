@@ -69,7 +69,11 @@ import {
   type ComposerDraft,
 } from "../composer-drafts.js";
 import { sessionAgentLabel } from "./agent-options.js";
-import { recoverSessionHistory } from "../history-recovery.js";
+import {
+  loadOlderSessionEvents,
+  recoverSessionHistory,
+  recoverSessionHistoryWindow,
+} from "../history-recovery.js";
 import {
   routedSessionPlaceholder,
   shouldHydrateRoutedSession,
@@ -95,6 +99,7 @@ import {
   followTailControlLabel,
   followTailControlTooltip,
   followTailSurfaceLabel,
+  hasSavedFollowTailAnchor,
   isFollowTailResumeKey,
   type FollowTailState,
   useFollowTail,
@@ -415,7 +420,18 @@ function SessionDetailLoaded({
   const { confirm } = useFeedback();
   // Narrow selector subscriptions: this component must re-render for ITS session's events and
   // row, not for every token-usage upsert of every other session on the board.
-  const { loadEvents, loadSession, navigate, recoveryAfter, beginEventHistoryLoad, failEventHistoryLoad } = useStoreActions();
+  const {
+    loadEvents,
+    loadOlderEvents,
+    beginOlderEventsLoad,
+    failOlderEventsLoad,
+    eventWindowBase,
+    loadSession,
+    navigate,
+    recoveryAfter,
+    beginEventHistoryLoad,
+    failEventHistoryLoad,
+  } = useStoreActions();
   const openSourceLocation = useCallback((location: SourceLocation) => {
     navigate({ name: "session", id: sessionId, location });
   }, [navigate, sessionId]);
@@ -425,9 +441,18 @@ function SessionDetailLoaded({
   const recoveryEventEpoch = useStoreSelector((s) => s.sessions.get(sessionId)?.eventEpoch ?? 0);
   const recoveryGeneration = useStoreSelector((s) => s.snapshotRevision);
   const evs = useStoreSelector((s) => s.events.get(sessionId));
+  // Read inside the recovery effect without becoming one of its dependencies: that effect must run
+  // once per open, not once per streamed event.
+  const evsRef = useRef(evs);
+  evsRef.current = evs;
+  const olderInFlightRef = useRef(false);
   const eventHistory = useStoreSelector((s) => {
     const history = s.eventHistory.get(sessionId);
     return history?.eventEpoch === (s.sessions.get(sessionId)?.eventEpoch ?? 0) ? history : undefined;
+  });
+  const eventWindow = useStoreSelector((s) => {
+    const window = s.eventWindows.get(sessionId);
+    return window?.eventEpoch === (s.sessions.get(sessionId)?.eventEpoch ?? 0) ? window : undefined;
   });
   const runner = useStoreSelector((s) => s.runners.get(session.runnerId));
   const runnerOnline = runner?.status === "online";
@@ -818,11 +843,13 @@ function SessionDetailLoaded({
     saveSeen(markSeen(loadSeen(instanceScope), sessionId, ts), instanceScope);
   }, [instanceScope, mode, sessionId, session?.lastEventAt]);
 
-  // Backfill only the gap since what we already have (loadEvents is stable, so this runs once
-  // per session, not on every streamed event). Also re-runs when the socket comes back ONLINE:
-  // events broadcast during the outage never arrived, and without this re-fetch the timeline
-  // silently misses them until the user navigates away and back. The cursor is frozen when the
-  // requested subscription revision is sent, so live events cannot move it past an outage gap.
+  // Opening a session reads a bounded window at the TAIL: one request paints the newest activity
+  // no matter how long the session is. Reopening after an outage instead backfills only the gap
+  // since what we already have (loadEvents is stable, so this runs once per session, not on every
+  // streamed event). Also re-runs when the socket comes back ONLINE: events broadcast during the
+  // outage never arrived, and without this re-fetch the timeline silently misses them until the
+  // user navigates away and back. The cursor is frozen when the requested subscription revision is
+  // sent, so live events cannot move it past an outage gap.
   useEffect(() => {
     if (conn !== "online" || recoveryRevision == null) return;
     let cancelled = false;
@@ -834,17 +861,42 @@ function SessionDetailLoaded({
     const after = recoveryAfter(sessionId);
     const epoch = recoveryEventEpoch;
     const generation = recoveryGeneration;
+    const isCurrent = () => !cancelled;
     beginEventHistoryLoad(sessionId, epoch, recoveryRevision, generation);
-    void recoverSessionHistory(
+    const forwardRecovery = () => recoverSessionHistory(
       { sessionId, after, eventEpoch: epoch, recoveryRevision },
       {
         fetchPage: api.getSessionEventPage,
         applyPage: (id, events, pageEpoch, revision, complete) =>
           loadEvents(id, events, pageEpoch, revision, complete, generation),
-        isCurrent: () => !cancelled,
+        isCurrent,
         retryOnIdleTimeout: true,
       },
-    ).then((complete) => {
+    );
+    // Nothing cached and no gap to close: this is an open, so read the window instead of walking
+    // the log forward from its first event. Any other cursor means a reconnect gap the forward
+    // chain owns. A control plane without backward reads answers `supported: false`, and the
+    // forward chain runs exactly as before.
+    //
+    // A reader with a saved position is deliberately excluded: that position can sit below the
+    // window, and restoring it depends on those rows arriving in this same load. Reading only the
+    // tail would strand them away from where they stopped, so those loads keep the full chain until
+    // the list can restore an anchor against a windowed history.
+    const openWindow = after === 0 &&
+      (evsRef.current?.length ?? 0) === 0 &&
+      !hasSavedFollowTailAnchor(instanceScope, sessionId);
+    const load = openWindow
+      ? recoverSessionHistoryWindow(
+        { sessionId, eventEpoch: epoch, recoveryRevision },
+        {
+          fetchTailPage: api.getSessionEventTailPage,
+          applyWindow: (id, events, pageEpoch, revision, complete, hasOlder) =>
+            loadEvents(id, events, pageEpoch, revision, complete, generation, hasOlder),
+          isCurrent,
+        },
+      ).then((result) => (result.supported ? result.complete : forwardRecovery()))
+      : forwardRecovery();
+    void load.then((complete) => {
       if (!cancelled && !complete) {
         failEventHistoryLoad(sessionId, "Timeline recovery ended before the complete history was available.", epoch, recoveryRevision, generation);
       }
@@ -858,6 +910,26 @@ function SessionDetailLoaded({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api, sessionId, loadEvents, conn, recoveryRevision, recoveryAfter, recoveryEventEpoch, recoveryGeneration, historyRetry, beginEventHistoryLoad, failEventHistoryLoad]);
+
+  // Reader-driven only: older turns load when someone scrolls back to the top of the window, never
+  // on open and never in the background, so the transcript cannot shift under a reader who did not
+  // ask for it. `preserveAnchor` keeps their row fixed while the prepend re-measures.
+  const loadOlder = useCallback(() => {
+    const base = eventWindowBase(sessionId);
+    if (base <= 1 || olderInFlightRef.current) return;
+    const epoch = recoveryEventEpoch;
+    olderInFlightRef.current = true;
+    beginOlderEventsLoad(sessionId, epoch);
+    void loadOlderSessionEvents(sessionId, base, epoch, api.getSessionEventTailPage)
+      .then((page) => {
+        if (page) loadOlderEvents(sessionId, page.events, page.hasOlder, page.eventEpoch);
+        else failOlderEventsLoad(sessionId, "Earlier activity is unavailable from this control plane.", epoch);
+      })
+      .catch(() => failOlderEventsLoad(sessionId, "Could not load earlier activity.", epoch))
+      .finally(() => {
+        olderInFlightRef.current = false;
+      });
+  }, [api, sessionId, recoveryEventEpoch, eventWindowBase, beginOlderEventsLoad, loadOlderEvents, failOlderEventsLoad]);
 
   // Incremental derivation: streamed chunks push only the NEW events into a per-session
   // builder instead of re-folding the whole array (O(n²) over a long session).
@@ -1087,6 +1159,7 @@ function SessionDetailLoaded({
     sessionId,
     persistenceScope: instanceScope,
   });
+
   useEffect(() => {
     timelineRevealRequestRef.current = null;
     timelineRevealRestoreState.current = null;
@@ -1955,6 +2028,13 @@ function SessionDetailLoaded({
                   error={transcript.error}
                   canRetry={conn === "online" && !transcript.busy}
                   onRetry={() => setHistoryRetry((value) => value + 1)}
+                />
+              )}
+              {eventWindow?.hasOlder === true && items.length > 0 && (
+                <EarlierActivityControl
+                  loading={eventWindow.loadingOlder}
+                  error={eventWindow.error}
+                  onLoad={loadOlder}
                 />
               )}
               {transcript.body === "skeleton" ? (
@@ -3096,6 +3176,27 @@ function TranscriptSkeleton() {
       <div className="transcript-skeleton-row user" aria-hidden="true"><span /><span /></div>
       <div className="transcript-skeleton-row agent" aria-hidden="true"><span /><span /><span /></div>
       <div className="transcript-skeleton-row agent short" aria-hidden="true"><span /><span /></div>
+    </div>
+  );
+}
+
+/** Head of a bounded window: the transcript continues above, but only on request. Rendering it as a
+ * real button keeps the reach-back available without a pointer scroll. */
+function EarlierActivityControl({
+  loading,
+  error,
+  onLoad,
+}: {
+  loading: boolean;
+  error: string | null;
+  onLoad: () => void;
+}) {
+  return (
+    <div className="transcript-earlier-activity">
+      <button className="btn ghost sm" type="button" disabled={loading} onClick={onLoad}>
+        {loading ? "Loading Earlier Activity…" : "Load Earlier Activity"}
+      </button>
+      {error && <span role="status">{error}</span>}
     </div>
   );
 }

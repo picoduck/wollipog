@@ -2579,6 +2579,40 @@ test("listCachedEventPage uses a limit-plus-one boundary and stable CP cursors",
   assert.throws(() => db.listCachedEventPage("paged-cache", 0, 0), /positive safe integer/);
 });
 
+test("listCachedEventTailPage reads the newest rows first and pages older below a cursor", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "windowed-cache" }));
+  for (let index = 1; index <= 5; index++) {
+    db.appendEvent("windowed-cache", { kind: "agent_message", text: String(index) }, index);
+  }
+  // The opening window is the TAIL, whatever the session's length: never seq 1 first.
+  const newest = db.listCachedEventTailPage("windowed-cache", undefined, 2);
+  assert.deepEqual(newest.events.map((event) => event.seq), [4, 5]);
+  assert.equal(newest.nextBeforeSeq, 4);
+  assert.equal(newest.hasMoreOlder, true);
+  const older = db.listCachedEventTailPage("windowed-cache", newest.nextBeforeSeq, 2);
+  assert.deepEqual(older.events.map((event) => event.seq), [2, 3]);
+  assert.equal(older.nextBeforeSeq, 2);
+  assert.equal(older.hasMoreOlder, true);
+  const oldest = db.listCachedEventTailPage("windowed-cache", older.nextBeforeSeq, 2);
+  assert.deepEqual(oldest.events.map((event) => event.seq), [1]);
+  assert.equal(oldest.nextBeforeSeq, 1);
+  assert.equal(oldest.hasMoreOlder, false);
+  // Paging below the first event yields an empty page with no cursor to follow.
+  assert.deepEqual(db.listCachedEventTailPage("windowed-cache", 1, 2), {
+    events: [], hasMoreOlder: false,
+  });
+  // A window wider than the log reports no older rows rather than an unreachable cursor.
+  const whole = db.listCachedEventTailPage("windowed-cache", undefined, 200);
+  assert.deepEqual(whole.events.map((event) => event.seq), [1, 2, 3, 4, 5]);
+  assert.equal(whole.hasMoreOlder, false);
+  assert.deepEqual(db.listCachedEventTailPage("no-such-session", undefined, 5), {
+    events: [], hasMoreOlder: false,
+  });
+  assert.throws(() => db.listCachedEventTailPage("windowed-cache", undefined, 0), /positive safe integer/);
+  assert.throws(() => db.listCachedEventTailPage("windowed-cache", -1, 2), /non-negative safe integer/);
+});
+
 test("history columns/index migrate additively and an unknown epoch adopts without clearing", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-history-v54-migration-"));
   const path = join(root, "control-plane.db");

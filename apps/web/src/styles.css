@@ -10024,6 +10024,10 @@ body.shell-dock-dragging * {
   box-shadow: var(--shadow); font-size: 12px;
 }
 .transcript-load-notice.error { border-color: color-mix(in srgb, var(--red) 35%, var(--border)); }
+.transcript-earlier-activity {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 10px 12px 2px; color: var(--text-dim); font-size: var(--text-sm);
+}
 .transcript-skeleton { display: grid; gap: 20px; padding: 28px 20px; }
 .transcript-skeleton-row { display: grid; gap: 8px; width: min(68%, 620px); }
 .transcript-skeleton-row.user { justify-self: end; width: min(54%, 480px); }

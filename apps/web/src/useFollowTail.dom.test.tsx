@@ -11,6 +11,7 @@ import {
   followTailControlTooltip,
   followTailSurfaceLabel,
   isAtFollowTailBottom,
+  hasSavedFollowTailAnchor,
   isFollowTailResumeKey,
   nextFollowTailState,
   useFollowTail,
@@ -698,4 +699,44 @@ test("following tracks late virtual measurements while paused readers remain anc
 
   await act(async () => { root.unmount(); });
   container.remove();
+});
+
+test("a saved reading position is reported for load-shape decisions without disturbing it", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  let api!: FollowTailApi;
+  try {
+    // Following the tail is not a saved position: there is nothing below an opening window that a
+    // restore would depend on, so opening this session may read only its tail.
+    assert.equal(hasSavedFollowTailAnchor("window-scope", "windowed-session"), false);
+    await act(async () => {
+      root.render(
+        <Harness
+          sessionId="windowed-session"
+          revision={0}
+          mode="preview"
+          scope="window-scope"
+          onApi={(next) => { api = next; }}
+        />,
+      );
+    });
+    assert.equal(hasSavedFollowTailAnchor("window-scope", "windowed-session"), false);
+
+    await act(async () => {
+      api.onVisibleAnchorChange({ key: "item:agent_message:46", offset: -9, index: 45 });
+      api.pause();
+    });
+    assert.equal(hasSavedFollowTailAnchor("window-scope", "windowed-session"), true);
+    assert.equal(
+      hasSavedFollowTailAnchor("other-scope", "windowed-session"),
+      false,
+      "instances keep independent reading positions",
+    );
+    // Reading it must not consume it: the reader stays paused where they were.
+    assert.equal(api.getInitialAnchor()?.key, "item:agent_message:46");
+    assert.equal(api.state, "paused");
+  } finally {
+    await act(async () => { root.unmount(); });
+  }
 });

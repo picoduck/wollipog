@@ -44,5 +44,8 @@ does not create an unrequested replacement shell. An explicitly closing shell is
 until unmount so a registry row awaiting its exit echo cannot resurrect the tab, and reconciliation
 clears input from the actual removed active shell before choosing a fallback. Completed tails remain
 exact and are not relabeled.
-Initial snapshot and history pagination remain separate follow-on slices; a single frame above the
-hard delivery ceiling fails closed until those bounded pagination paths land.
+History pagination has landed for the session reader: opening a session reads a bounded window at
+the cached tail and pages older turns on request (see
+[transcript readability](./transcript-readability.md)). The initial metadata snapshot remains a
+separate follow-on slice; a single frame above the hard delivery ceiling fails closed until that
+bounded path lands.

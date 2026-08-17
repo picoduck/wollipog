@@ -294,7 +294,7 @@ const steeringResolutionRequests: Array<{
 let deferredSteeringResolutionCount = 0;
 const pendingSteeringResolutionSettlements = new Map<string, () => void>();
 const sessionEvents = new Map<string, SessionEvent[]>();
-const sessionEventPageRequests: Array<{ sessionId: string; after: number }> = [];
+const sessionEventPageRequests: Array<{ sessionId: string; after: number; direction?: "backward" }> = [];
 if (SCENARIO === "preview-follow" || SCENARIO === "scroll-restore") {
   const sessionIds = SCENARIO === "scroll-restore"
     ? ["session-alpha", "session-no-project"]
@@ -820,6 +820,26 @@ const client = {
       cacheComplete: !hasMoreCached,
     };
   },
+  getSessionEventTailPage: async (sessionId: string, before?: number) => {
+    sessionEventPageRequests.push({ sessionId, after: before ?? 0, direction: "backward" });
+    const all = sessionEvents.get(sessionId) ?? [];
+    const available = before === undefined ? all : all.filter((event) => event.seq < before);
+    // A bounded opening window over a much longer log: tall enough to scroll and pause inside,
+    // with older turns still only reachable by paging below it.
+    const windowed = SCENARIO === "scroll-restore"
+      ? available.slice(before === undefined ? -24 : -12)
+      : available;
+    if (SCENARIO === "scroll-restore" && before !== undefined) {
+      await new Promise((resolve) => window.setTimeout(resolve, HISTORY_PAGE_DELAY_MS));
+    }
+    return {
+      events: structuredClone(windowed),
+      eventEpoch: model.sessions.find((candidate) => candidate.id === sessionId)?.eventEpoch ?? 0,
+      ...(windowed[0] ? { nextBefore: windowed[0].seq } : {}),
+      hasMoreOlder: windowed.length < available.length,
+      cacheComplete: true,
+    };
+  },
   podContext: async () => ({ entries: [] }),
   archiveProjectSessions: async (projectId: string) => {
     const owningProject = model.projects.find((candidate) => candidate.id === projectId);
@@ -1065,7 +1085,7 @@ declare global {
       ): void;
       emitUserMessage(id: string, text: string, turnId: string): void;
       emitAgentMessage(id: string, text: string): void;
-      sessionEventPageRequests(): Array<{ sessionId: string; after: number }>;
+      sessionEventPageRequests(): Array<{ sessionId: string; after: number; direction?: "backward" }>;
       emitCanonicalSteeredMessage(id: string, text: string, turnId: string, submissionId: string): void;
       emitSteeringReceipt(id: string, attempt: SteeringAttemptView): void;
       setNextSteeringResult(result: SteeringFixtureResult): void;

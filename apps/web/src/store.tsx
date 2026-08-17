@@ -158,6 +158,18 @@ export interface EventHistoryState {
   error: string | null;
 }
 
+/** The loaded slice of a session's history. Opening a session reads a bounded window at the tail
+ * rather than the whole log, so the transcript below `baseSeq` is deliberately absent until the
+ * reader asks for it. Recovery cursors are contiguous within this window, never from seq 0. */
+export interface EventWindowState {
+  eventEpoch: number;
+  /** Oldest seq loaded for this epoch. Older cached events exist below it when `hasOlder`. */
+  baseSeq: number;
+  hasOlder: boolean;
+  loadingOlder: boolean;
+  error: string | null;
+}
+
 export interface State {
   conn: ConnState;
   /** Latched by a policy-closed (1008) /ui socket; cleared only by a successful connect. Keeps
@@ -201,6 +213,8 @@ export interface State {
   /** Recovery presentation state is separate from `events`: an incomplete empty page is not an
    * authoritative empty transcript, and reconnect refresh must not replace cached content. */
   eventHistory: Map<string, EventHistoryState>;
+  /** Which slice of each cached timeline is loaded, and whether older turns remain fetchable. */
+  eventWindows: Map<string, EventWindowState>;
   /** Hydrated bounded shell scrollback keyed by shellId; kept only for on-screen sessions. */
   shellOutput: Map<string, ShellScrollback>;
   /** Per-session durable registry generation; docks reload metadata/history when it advances. */
@@ -229,6 +243,18 @@ type Action =
       recoveryGeneration: number;
       /** Bounded page chains consume the frozen reconnect cursor only after the final page. */
       recoveryComplete: boolean;
+      /** Present only for a bounded opening-window read: whether older cached events remain below
+       * this page. Absent marks a forward gap-fill, which never redefines the loaded window. */
+      windowHasOlder?: boolean;
+    }
+  | { type: "events_older_loading"; sessionId: string; eventEpoch: number }
+  | { type: "events_older_failed"; sessionId: string; eventEpoch: number; error: string }
+  | {
+      type: "events_older_loaded";
+      sessionId: string;
+      events: SessionEvent[];
+      eventEpoch: number;
+      hasOlder: boolean;
     }
   | { type: "subscription_requested"; revision: number; sessionIds: string[] }
   | { type: "event_history_loading"; sessionId: string; eventEpoch: number; recoveryRevision: number; recoveryGeneration: number }
@@ -389,6 +415,60 @@ function captureRecoveryCursors(state: State, sessionIds: Iterable<string>): Map
   return new Map([...sessionIds].map((sessionId) => [sessionId, eventHighWater(state.events.get(sessionId))]));
 }
 
+/** Record which slice a bounded opening-window page loaded. Forward gap-fill pages carry no window
+ * meaning and leave the map untouched. */
+function applyWindowBase(
+  state: State,
+  action: Extract<Action, { type: "events_loaded" }>,
+): Map<string, EventWindowState> {
+  if (action.windowHasOlder === undefined) return state.eventWindows;
+  const prior = state.eventWindows.get(action.sessionId);
+  const priorValid = prior?.eventEpoch === action.eventEpoch ? prior : undefined;
+  const pageBase = action.events[0]?.seq;
+  // An empty window (a session with no cached events yet) still records the epoch, so a later
+  // reader-driven page has a window to attach to.
+  if (pageBase === undefined) {
+    if (priorValid) return state.eventWindows;
+    const eventWindows = new Map(state.eventWindows);
+    eventWindows.set(action.sessionId, {
+      eventEpoch: action.eventEpoch,
+      baseSeq: 0,
+      hasOlder: action.windowHasOlder,
+      loadingOlder: false,
+      error: null,
+    });
+    return eventWindows;
+  }
+  const priorBase = priorValid && priorValid.baseSeq > 0 ? priorValid.baseSeq : pageBase;
+  const baseSeq = Math.min(priorBase, pageBase);
+  const eventWindows = new Map(state.eventWindows);
+  eventWindows.set(action.sessionId, {
+    eventEpoch: action.eventEpoch,
+    baseSeq,
+    // A re-read of the tail answers for the boundary below ITS OWN page. Once the reader has paged
+    // below that boundary, our oldest loaded seq is authoritative and the page's answer is stale.
+    hasOlder: baseSeq < pageBase ? (priorValid?.hasOlder ?? action.windowHasOlder) : action.windowHasOlder,
+    loadingOlder: priorValid?.loadingOlder ?? false,
+    error: priorValid?.error ?? null,
+  });
+  return eventWindows;
+}
+
+/** Where contiguity may start when publishing a recovery cursor. A bounded window deliberately
+ * omits everything below its base, so contiguity is measured from the base rather than from the
+ * frozen cursor — otherwise the published cursor collapses to 0 and the next recovery would
+ * restart at the beginning of the log. Forward gap-fill keeps the frozen cursor exactly. */
+function windowContiguityStart(
+  eventWindows: Map<string, EventWindowState>,
+  sessionId: string,
+  eventEpoch: number,
+  frozen: number,
+): number {
+  const window = eventWindows.get(sessionId);
+  if (!window || window.eventEpoch !== eventEpoch || window.baseSeq <= 0) return frozen;
+  return Math.max(frozen, window.baseSeq - 1);
+}
+
 function withLegacyRecovery(state: State): State {
   if (state.streamSubscriptions.mode !== "legacy") return state;
   return { ...state, streamRecoveryCursors: captureRecoveryCursors(state, relevantSessions(state)) };
@@ -399,11 +479,13 @@ function pruneViewStreams(state: State): State {
   const events = new Map([...state.events].filter(([id]) => keep.has(id)));
   const eventEpochs = new Map([...state.eventEpochs].filter(([id]) => keep.has(id)));
   const eventHistory = new Map([...state.eventHistory].filter(([id]) => keep.has(id)));
+  const eventWindows = new Map([...state.eventWindows].filter(([id]) => keep.has(id)));
   const shellOutput = new Map([...state.shellOutput].filter(([, scrollback]) => keep.has(scrollback.sessionId)));
   if (events.size === state.events.size && eventEpochs.size === state.eventEpochs.size &&
       eventHistory.size === state.eventHistory.size &&
+      eventWindows.size === state.eventWindows.size &&
       shellOutput.size === state.shellOutput.size) return state;
-  return { ...state, events, eventEpochs, eventHistory, shellOutput };
+  return { ...state, events, eventEpochs, eventHistory, eventWindows, shellOutput };
 }
 
 function reducer(state: State, action: Action): State {
@@ -454,6 +536,7 @@ function reducer(state: State, action: Action): State {
       next.events = pruned.events;
       next.eventEpochs = pruned.eventEpochs;
       next.eventHistory = pruned.eventHistory;
+      next.eventWindows = pruned.eventWindows;
       next.shellOutput = pruned.shellOutput;
       if (action.view.name === "pod") {
         const podId = action.view.id;
@@ -541,6 +624,7 @@ function reducer(state: State, action: Action): State {
           error: null,
         });
       }
+      const eventWindows = applyWindowBase(state, action);
       const targetedRecovery = state.streamSubscriptions.mode === "targeted" &&
         action.recoveryRevision === state.streamSubscriptions.appliedRevision &&
         state.streamSubscriptions.appliedRevision === state.streamSubscriptions.requestedRevision;
@@ -549,10 +633,47 @@ function reducer(state: State, action: Action): State {
           state.streamRecoveryCursors.has(action.sessionId)) {
         const streamRecoveryCursors = new Map(state.streamRecoveryCursors);
         const frozen = streamRecoveryCursors.get(action.sessionId) ?? 0;
-        streamRecoveryCursors.set(action.sessionId, contiguousEventHighWater(merged, frozen));
-        return updateSessionStall({ ...state, events, eventEpochs, eventHistory, streamRecoveryCursors }, action.sessionId);
+        streamRecoveryCursors.set(
+          action.sessionId,
+          contiguousEventHighWater(merged, windowContiguityStart(eventWindows, action.sessionId, action.eventEpoch, frozen)),
+        );
+        return updateSessionStall({ ...state, events, eventEpochs, eventHistory, eventWindows, streamRecoveryCursors }, action.sessionId);
       }
-      return updateSessionStall({ ...state, events, eventEpochs, eventHistory }, action.sessionId);
+      return updateSessionStall({ ...state, events, eventEpochs, eventHistory, eventWindows }, action.sessionId);
+    }
+    case "events_older_loading": {
+      const window = state.eventWindows.get(action.sessionId);
+      if (!window || window.eventEpoch !== action.eventEpoch || window.loadingOlder) return state;
+      const eventWindows = new Map(state.eventWindows);
+      eventWindows.set(action.sessionId, { ...window, loadingOlder: true, error: null });
+      return { ...state, eventWindows };
+    }
+    case "events_older_failed": {
+      const window = state.eventWindows.get(action.sessionId);
+      if (!window || window.eventEpoch !== action.eventEpoch) return state;
+      const eventWindows = new Map(state.eventWindows);
+      eventWindows.set(action.sessionId, { ...window, loadingOlder: false, error: action.error });
+      return { ...state, eventWindows };
+    }
+    case "events_older_loaded": {
+      // Reader-driven prepend. Unlike recovery it carries no completion or cursor meaning: the
+      // window only grows downward, so neither history state nor the forward gap cursor moves.
+      if (!relevantSessions(state).has(action.sessionId)) return state;
+      if (action.eventEpoch !== sessionEventEpoch(state.sessions.get(action.sessionId))) return state;
+      const window = state.eventWindows.get(action.sessionId);
+      if (!window || window.eventEpoch !== action.eventEpoch) return state;
+      const events = new Map(state.events);
+      const merged = mergeEvents(events.get(action.sessionId), action.events);
+      events.set(action.sessionId, merged);
+      const eventWindows = new Map(state.eventWindows);
+      eventWindows.set(action.sessionId, {
+        ...window,
+        baseSeq: Math.min(window.baseSeq, action.events[0]?.seq ?? window.baseSeq),
+        hasOlder: action.hasOlder,
+        loadingOlder: false,
+        error: null,
+      });
+      return { ...state, events, eventWindows };
     }
     case "event_history_loading": {
       if (!relevantSessions(state).has(action.sessionId) ||
@@ -700,6 +821,10 @@ function reducer(state: State, action: Action): State {
             }
             eventEpochs.set(sessionId, nextEpoch);
           }
+          // A window describes a slice of one exact cached timeline. Wherever this snapshot dropped
+          // or re-epoched that cache, the slice it described no longer exists.
+          const eventWindows = new Map([...state.eventWindows].filter(([sessionId, window]) =>
+            events.has(sessionId) && window.eventEpoch === eventEpochs.get(sessionId)));
           const next = pruneViewStreams({
             ...state,
             streamSubscriptions: {
@@ -733,6 +858,7 @@ function reducer(state: State, action: Action): State {
             activity,
             eventEpochs,
             eventHistory,
+            eventWindows,
             // A missed pod_removed during an outage must not retain a potentially large context
             // cache after the reconnect snapshot proves that pod no longer exists.
             podContext: new Map([...state.podContext].filter(([podId]) => pods.has(podId))),
@@ -819,7 +945,9 @@ function reducer(state: State, action: Action): State {
           eventEpochs.set(msg.session.id, nextEpoch);
           const eventHistory = new Map(state.eventHistory);
           eventHistory.delete(msg.session.id);
-          return updateSessionStall({ ...state, sessions, events, eventEpochs, eventHistory }, msg.session.id);
+          const eventWindows = new Map(state.eventWindows);
+          eventWindows.delete(msg.session.id);
+          return updateSessionStall({ ...state, sessions, events, eventEpochs, eventHistory, eventWindows }, msg.session.id);
         }
         case "session_removed": {
           const sessions = new Map(state.sessions);
@@ -833,6 +961,8 @@ function reducer(state: State, action: Action): State {
           eventEpochs.delete(msg.sessionId);
           const eventHistory = new Map(state.eventHistory);
           eventHistory.delete(msg.sessionId);
+          const eventWindows = new Map(state.eventWindows);
+          eventWindows.delete(msg.sessionId);
           const shellOutput = new Map([...state.shellOutput].filter(([, scrollback]) =>
             scrollback.sessionId !== msg.sessionId));
           const selectedBySplit = new Map(state.inbox.selectedBySplit);
@@ -847,7 +977,7 @@ function reducer(state: State, action: Action): State {
               }
             : state.inbox;
           return clearSessionStall({
-            ...state, sessions, events, activityObservationStartedAt, eventEpochs, eventHistory, shellOutput, inbox,
+            ...state, sessions, events, activityObservationStartedAt, eventEpochs, eventHistory, eventWindows, shellOutput, inbox,
           }, msg.sessionId);
         }
         case "session_event": {
@@ -915,14 +1045,18 @@ function reducer(state: State, action: Action): State {
           eventEpochs.set(msg.sessionId, eventEpoch);
           const eventHistory = new Map(state.eventHistory);
           eventHistory.delete(msg.sessionId);
+          // The replacement log has its own sequence space, so the previous window's base describes
+          // a timeline that no longer exists. The next open reads a fresh window at the new tail.
+          const eventWindows = new Map(state.eventWindows);
+          eventWindows.delete(msg.sessionId);
           if (sessionEventEpoch(currentSession) === eventEpoch) {
-            return updateSessionStall({ ...state, events, eventEpochs, eventHistory }, msg.sessionId);
+            return updateSessionStall({ ...state, events, eventEpochs, eventHistory, eventWindows }, msg.sessionId);
           }
           // Writer coalescing may move the matching metadata upsert after this durable reset. Move
           // the local row to the reset generation now so stale in-flight history cannot land first.
           const sessions = new Map(state.sessions);
           sessions.set(msg.sessionId, { ...currentSession, eventEpoch });
-          return updateSessionStall({ ...state, sessions, events, eventEpochs, eventHistory }, msg.sessionId);
+          return updateSessionStall({ ...state, sessions, events, eventEpochs, eventHistory, eventWindows }, msg.sessionId);
         }
         case "shell_output": {
           // Ephemeral console stream — only buffered for sessions the current view shows.
@@ -1032,6 +1166,7 @@ function initialState(view: View = { name: "inbox" }, inbox = loadInboxState()):
     stalledCount: 0,
     eventEpochs: new Map(),
     eventHistory: new Map(),
+    eventWindows: new Map(),
     shellOutput: new Map(),
     shellRegistryRevision: new Map(),
     streamSubscriptions: EMPTY_UI_SUBSCRIPTION_DELIVERY,
@@ -1060,7 +1195,12 @@ interface StoreValue extends State {
     recoveryRevision?: number,
     recoveryComplete?: boolean,
     recoveryGeneration?: number,
+    windowHasOlder?: boolean,
   ) => void;
+  loadOlderEvents: (sessionId: string, events: SessionEvent[], hasOlder: boolean, eventEpoch?: number) => void;
+  beginOlderEventsLoad: (sessionId: string, eventEpoch?: number) => void;
+  failOlderEventsLoad: (sessionId: string, error: string, eventEpoch?: number) => void;
+  eventWindowBase: (sessionId: string) => number;
   loadSession: (session: SessionView) => void;
   beginEventHistoryLoad: (sessionId: string, eventEpoch?: number, recoveryRevision?: number, recoveryGeneration?: number) => void;
   failEventHistoryLoad: (sessionId: string, error: string, eventEpoch?: number, recoveryRevision?: number, recoveryGeneration?: number) => void;
@@ -1160,9 +1300,31 @@ export class Store {
     recoveryRevision?: number,
     recoveryComplete = true,
     recoveryGeneration = this.state.snapshotRevision,
+    windowHasOlder?: boolean,
   ): void => this.dispatch({
     type: "events_loaded", sessionId, events, eventEpoch, recoveryRevision, recoveryComplete, recoveryGeneration,
+    ...(windowHasOlder === undefined ? {} : { windowHasOlder }),
   });
+  beginOlderEventsLoad = (
+    sessionId: string,
+    eventEpoch = sessionEventEpoch(this.state.sessions.get(sessionId)),
+  ): void => this.dispatch({ type: "events_older_loading", sessionId, eventEpoch });
+  failOlderEventsLoad = (
+    sessionId: string,
+    error: string,
+    eventEpoch = sessionEventEpoch(this.state.sessions.get(sessionId)),
+  ): void => this.dispatch({ type: "events_older_failed", sessionId, eventEpoch, error });
+  loadOlderEvents = (
+    sessionId: string,
+    events: SessionEvent[],
+    hasOlder: boolean,
+    eventEpoch = sessionEventEpoch(this.state.sessions.get(sessionId)),
+  ): void => this.dispatch({ type: "events_older_loaded", sessionId, events, hasOlder, eventEpoch });
+  /** Oldest loaded seq for the session's current epoch, or 0 when no window is loaded. */
+  eventWindowBase = (sessionId: string): number => {
+    const window = this.state.eventWindows.get(sessionId);
+    return window && window.eventEpoch === this.eventEpoch(sessionId) ? window.baseSeq : 0;
+  };
   loadSession = (session: SessionView): void =>
     this.dispatch({ type: "msg", msg: { type: "session_upsert", session } });
   beginEventHistoryLoad = (
@@ -1415,7 +1577,7 @@ function useStoreHandle(): Store {
 }
 
 /** Stable action handles (never cause re-renders). */
-export function useStoreActions(): Pick<Store, "dispatch" | "navigate" | "setInboxPersistenceEnabled" | "setInboxSelection" | "setInboxSplit" | "setInboxRatio" | "setFilters" | "loadEvents" | "loadSession" | "beginEventHistoryLoad" | "failEventHistoryLoad" | "loadPodContext" | "eventHighWater" | "recoveryAfter" | "eventEpoch" | "reconcileShellOutputs" | "loadShellHistory" | "removeShellOutput"> {
+export function useStoreActions(): Pick<Store, "dispatch" | "navigate" | "setInboxPersistenceEnabled" | "setInboxSelection" | "setInboxSplit" | "setInboxRatio" | "setFilters" | "loadEvents" | "loadOlderEvents" | "beginOlderEventsLoad" | "failOlderEventsLoad" | "eventWindowBase" | "loadSession" | "beginEventHistoryLoad" | "failEventHistoryLoad" | "loadPodContext" | "eventHighWater" | "recoveryAfter" | "eventEpoch" | "reconcileShellOutputs" | "loadShellHistory" | "removeShellOutput"> {
   return useStoreHandle();
 }
 
@@ -1452,6 +1614,10 @@ export function useStore(): StoreValue {
     setInboxRatio: store.setInboxRatio,
     setFilters: store.setFilters,
     loadEvents: store.loadEvents,
+    loadOlderEvents: store.loadOlderEvents,
+    beginOlderEventsLoad: store.beginOlderEventsLoad,
+    failOlderEventsLoad: store.failOlderEventsLoad,
+    eventWindowBase: store.eventWindowBase,
     loadSession: store.loadSession,
     beginEventHistoryLoad: store.beginEventHistoryLoad,
     failEventHistoryLoad: store.failEventHistoryLoad,

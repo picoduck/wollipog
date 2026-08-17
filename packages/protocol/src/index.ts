@@ -4814,6 +4814,11 @@ export interface SessionEventsResponse {
   hasMoreCached?: boolean;
   /** The contiguous runner cursor reached the last runner tail known for this generation. */
   cacheComplete?: boolean;
+  /** Backward reads only: CP event seq to pass as `before` for the next older page. Absent when
+   * no rows were returned, since an empty page carries no cursor to page below. */
+  nextBefore?: number;
+  /** Backward reads only: older cached rows exist below this page's oldest returned seq. */
+  hasMoreOlder?: boolean;
 }
 
 export interface RunsResponse {

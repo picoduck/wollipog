@@ -4,6 +4,25 @@ The authenticated dashboard treats transcript presentation as a projection of tw
 the bounded event cache and the recovery state for that cache's current event epoch. An empty array
 is not proof of an empty transcript while the control plane is still hydrating runner-owned history.
 
+## Opening window
+
+Opening a session reads a bounded window at the **tail** of its cached history — one request for the
+newest events, whatever the session's length — rather than walking the log forward from its first
+event. `GET /api/sessions/:id/events?direction=backward` serves that window and its older pages;
+`before` carries the reader's cursor and `hasMoreOlder` reports whether older cached rows remain.
+Older turns load only when the reader asks for them through **Load Earlier Activity**, never in the
+background, so a transcript cannot shift under someone who did not reach for it.
+
+Recovery cursors stay contiguous *within* the loaded window. The events below its base are
+deliberately absent, so contiguity is measured from the window base; measuring from zero would
+collapse the published cursor and send the next recovery back to the start of the log.
+
+Two loads keep the forward chain. A reconnect gap is owned by the forward cursor frozen at
+subscription time, and a session whose reader has a saved position keeps loading the history that
+restoring that position depends on — the position can sit below the window, and the transcript list
+cannot yet restore an anchor against a windowed history. A control plane without backward reads is
+detected from the response shape and falls back to the forward chain unchanged.
+
 ## Recorded timestamps and duration
 
 Session events already carry a runner-recorded timestamp. User and assistant timeline items retain

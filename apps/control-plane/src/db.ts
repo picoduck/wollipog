@@ -1935,6 +1935,16 @@ export interface CachedEventPage {
   hasMore: boolean;
 }
 
+/** One bounded page read backwards from the cached tail. `events` stay ascending by seq so a
+ * client merges them exactly like a forward page; only the cursor direction differs. */
+export interface CachedEventTailPage {
+  events: SessionEvent[];
+  /** Oldest returned seq — the cursor for the next older page. Undefined when the page is empty. */
+  nextBeforeSeq?: number;
+  /** Older cached rows exist below `nextBeforeSeq`. */
+  hasMoreOlder: boolean;
+}
+
 interface ReviewFindingRow {
   finding_id: string;
   session_id: string;
@@ -10668,6 +10678,45 @@ export class ControlPlaneDb {
       events,
       nextAfterSeq: events.at(-1)?.seq ?? afterSeq,
       hasMore: rows.length > limit,
+    };
+  }
+
+  /** One bounded page ending at the cached tail (`beforeSeq` absent) or immediately below
+   * `beforeSeq`. Reads descending so the newest rows cost one indexed seek regardless of how long
+   * the session is, then returns them ascending. The extra row only computes `hasMoreOlder`. */
+  listCachedEventTailPage(sessionId: string, beforeSeq: number | undefined, limit: number): CachedEventTailPage {
+    if (beforeSeq !== undefined && (!Number.isSafeInteger(beforeSeq) || beforeSeq < 0)) {
+      throw new RangeError("beforeSeq must be a non-negative safe integer");
+    }
+    if (!Number.isSafeInteger(limit) || limit < 1) {
+      throw new RangeError("limit must be a positive safe integer");
+    }
+    const rows = (beforeSeq === undefined
+      ? this.stmt(
+        `SELECT id, session_id, seq, ts, payload FROM session_events
+          WHERE session_id=? ORDER BY seq DESC LIMIT ?`,
+      ).all(sessionId, limit + 1)
+      : this.stmt(
+        `SELECT id, session_id, seq, ts, payload FROM session_events
+          WHERE session_id=? AND seq<? ORDER BY seq DESC LIMIT ?`,
+      ).all(sessionId, beforeSeq, limit + 1)) as unknown as Array<{
+        id: number;
+        session_id: string;
+        seq: number;
+        ts: number;
+        payload: string;
+      }>;
+    const events = rows.slice(0, limit).map((row) => ({
+      id: row.id,
+      sessionId: row.session_id,
+      seq: row.seq,
+      ts: row.ts,
+      payload: JSON.parse(row.payload) as SessionEventPayload,
+    })).reverse();
+    return {
+      events,
+      ...(events[0] ? { nextBeforeSeq: events[0].seq } : {}),
+      hasMoreOlder: rows.length > limit,
     };
   }
 
