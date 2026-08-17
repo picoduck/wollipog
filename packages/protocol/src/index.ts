@@ -4819,6 +4819,9 @@ export interface SessionEventsResponse {
   nextBefore?: number;
   /** Backward reads only: older cached rows exist below this page's oldest returned seq. */
   hasMoreOlder?: boolean;
+  /** Backward reads that requested turn alignment: whether the page begins at a user-anchored turn
+   * start. False when no anchor was within the extension cap, so the page begins mid-turn. */
+  turnAligned?: boolean;
 }
 
 export interface RunsResponse {

@@ -2376,6 +2376,7 @@ app.get("/api/sessions/:id/events", async (req, reply) => {
     after?: string;
     before?: string;
     direction?: string;
+    align?: string;
     limit?: string;
     eventEpoch?: string;
   };
@@ -2408,6 +2409,21 @@ app.get("/api/sessions/:id/events", async (req, reply) => {
       code: "invalid_history_page",
     });
   }
+  // Opt-in: the opening window asks to begin at a turn boundary; older pages stay count-bounded so
+  // their cursors remain exact and disjoint.
+  const alignToTurn = query.align === "turn";
+  if (query.align !== undefined && !alignToTurn) {
+    return reply.code(400).send({
+      error: "align must be turn when present",
+      code: "invalid_history_page",
+    });
+  }
+  if (alignToTurn && !backward) {
+    return reply.code(400).send({
+      error: "align requires direction=backward",
+      code: "invalid_history_page",
+    });
+  }
   const before = query.before === undefined ? undefined : Number(query.before);
   if (before !== undefined && (!Number.isSafeInteger(before) || before < 0)) {
     return reply.code(400).send({
@@ -2435,7 +2451,7 @@ app.get("/api/sessions/:id/events", async (req, reply) => {
   const indexed = runnerSupportsProtocol(db.getRunner(session.runnerId)?.protocolVersion, "indexedHistory");
   const cacheComplete = indexed ? state.complete : state.hydratedSeq >= state.tailSeq;
   if (backward) {
-    const tail = db.listCachedEventTailPage(id, before, limit);
+    const tail = db.listCachedEventTailPage(id, before, limit, { alignToTurn });
     // Hydration still runs forward from the runner. An incomplete cache means this window is not
     // yet the true tail, which `cacheComplete` reports so the client can re-read instead of
     // presenting a stale newest event as current.
@@ -2445,6 +2461,7 @@ app.get("/api/sessions/:id/events", async (req, reply) => {
       eventEpoch: state.eventEpoch,
       ...(tail.nextBeforeSeq !== undefined ? { nextBefore: tail.nextBeforeSeq } : {}),
       hasMoreOlder: tail.hasMoreOlder,
+      ...(tail.turnAligned !== undefined ? { turnAligned: tail.turnAligned } : {}),
       cacheComplete,
     };
   }

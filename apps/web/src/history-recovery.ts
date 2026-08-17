@@ -213,6 +213,7 @@ export interface SessionHistoryWindowOptions {
     before: number | undefined,
     eventEpoch: number,
     limit: number,
+    alignToTurn?: boolean,
   ) => Promise<SessionEventsResponse>;
   applyWindow: (
     sessionId: string,
@@ -256,11 +257,15 @@ export async function recoverSessionHistoryWindow(
   let idlePolls = 0;
 
   while (options.isCurrent()) {
+    // The opening window is the page whose first row the reader lands on, so it asks to begin at a
+    // turn boundary: a mid-turn cut orphans tool updates from the invocation that explains them and
+    // leaves an active turn with no derivable start.
     const page = await options.fetchTailPage(
       request.sessionId,
       undefined,
       request.eventEpoch,
       SESSION_EVENT_WINDOW_LIMIT,
+      true,
     );
     if (!options.isCurrent()) return { supported: true, complete: false };
     if (!supportsBackwardRead(page)) return { supported: false, complete: false };

@@ -392,13 +392,21 @@ export function createApiClient(transport: ApiTransport) {
 
   /** The bounded opening window and its older pages. `before` omitted reads the cached tail, so
    * first paint costs one request no matter how long the session already is. */
-  getSessionEventTailPage: (id: string, before: number | undefined, eventEpoch: number, limit = 200) => {
+  getSessionEventTailPage: (
+    id: string,
+    before: number | undefined,
+    eventEpoch: number,
+    limit = 200,
+    alignToTurn = false,
+  ) => {
     const query = new URLSearchParams({
       direction: "backward",
       limit: String(limit),
       eventEpoch: String(eventEpoch),
     });
     if (before !== undefined) query.set("before", String(before));
+    // Only the opening window aligns: it is the one page whose first row the reader lands on.
+    if (alignToTurn) query.set("align", "turn");
     return req<SessionEventsResponse>(`/api/sessions/${encodeURIComponent(id)}/events?${query}`);
   },
 

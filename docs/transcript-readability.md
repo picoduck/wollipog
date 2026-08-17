@@ -13,9 +13,29 @@ event. `GET /api/sessions/:id/events?direction=backward` serves that window and 
 Older turns load only when the reader asks for them through **Load Earlier Activity**, never in the
 background, so a transcript cannot shift under someone who did not reach for it.
 
+The window is anchored to a turn, not to a raw count. `align=turn` extends the newest `limit` rows
+down to the user message that started the turn they land inside, so the reader's first rows are an
+invocation and its updates rather than orphaned updates whose active turn has no derivable start.
+Alignment is bounded: past `TAIL_TURN_ALIGNMENT_MAX_EVENTS` below the count boundary — a turn longer
+than the cap, an adopted transcript, or a resumed session with no anchor in reach — the count
+boundary stands and the response reports `turnAligned: false` rather than growing without limit.
+Older pages stay count-bounded so their cursors remain exact and disjoint.
+
+While an opening window is in flight, hydration's own forward broadcasts are held. The control plane
+hydrates a cold cache forward from the runner and publishes those rows exactly like live ones, so
+appending them would paint the start of a long log behind the window's back. They are durable in the
+cache and the window's read supplies the tail, so the hold costs nothing and is released as soon as
+the load applies, fails, or its cache is dropped.
+
 Recovery cursors stay contiguous *within* the loaded window. The events below its base are
 deliberately absent, so contiguity is measured from the window base; measuring from zero would
 collapse the published cursor and send the next recovery back to the start of the log.
+
+A bounded window belongs to the session reader alone. Run and Pod comparison columns render whole
+histories and offer no reach-back control, so entering one drops any partial cache rather than
+letting fleet recovery page only above the cursor that window published. Derived state follows the
+same rule: a windowed load does not rebuild the heartbeat ring, whose buckets can predate it, and the
+Subagents panel reports earlier activity as unloaded instead of claiming none was recorded.
 
 Two loads keep the forward chain. A reconnect gap is owned by the forward cursor frozen at
 subscription time, and a session whose reader has a saved position keeps loading the history that

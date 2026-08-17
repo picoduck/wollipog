@@ -23,6 +23,7 @@ import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import {
   ControlPlaneDb,
   GOVERNANCE_AUDIT_RETENTION_MS,
+  TAIL_TURN_ALIGNMENT_MAX_EVENTS,
   type NewSessionInput,
 } from "./db.js";
 import type { HumanPrincipal } from "./identity.js";
@@ -2611,6 +2612,59 @@ test("listCachedEventTailPage reads the newest rows first and pages older below 
   });
   assert.throws(() => db.listCachedEventTailPage("windowed-cache", undefined, 0), /positive safe integer/);
   assert.throws(() => db.listCachedEventTailPage("windowed-cache", -1, 2), /non-negative safe integer/);
+});
+
+test("a turn-aligned tail page begins at an invocation rather than orphaned updates", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "aligned-cache" }));
+  db.appendEvent("aligned-cache", { kind: "user_message", text: "first" }, 1);
+  db.appendEvent("aligned-cache", { kind: "user_message", text: "second" }, 2);
+  for (let index = 3; index <= 6; index++) {
+    db.appendEvent("aligned-cache", { kind: "agent_message", text: String(index) }, index);
+  }
+  // A count-bounded window of 2 starts at seq 5 — mid-turn, with updates whose invocation is gone.
+  const unaligned = db.listCachedEventTailPage("aligned-cache", undefined, 2);
+  assert.deepEqual(unaligned.events.map((event) => event.seq), [5, 6]);
+  assert.equal(unaligned.turnAligned, undefined, "alignment is opt-in");
+
+  const aligned = db.listCachedEventTailPage("aligned-cache", undefined, 2, { alignToTurn: true });
+  assert.deepEqual(aligned.events.map((event) => event.seq), [2, 3, 4, 5, 6],
+    "the page extends down to its own turn's user message");
+  assert.equal(aligned.turnAligned, true);
+  assert.equal(aligned.nextBeforeSeq, 2);
+  assert.equal(aligned.hasMoreOlder, true, "seq 1 remains below the aligned page");
+
+  // Aligning at the session's first turn leaves nothing older to reach for.
+  const whole = db.listCachedEventTailPage("aligned-cache", undefined, 5, { alignToTurn: true });
+  assert.deepEqual(whole.events.map((event) => event.seq), [1, 2, 3, 4, 5, 6]);
+  assert.equal(whole.hasMoreOlder, false);
+});
+
+test("turn alignment stops at its cap and never extends a page without bound", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "verbose-turn" }));
+  db.appendEvent("verbose-turn", { kind: "user_message", text: "go" }, 1);
+  const total = TAIL_TURN_ALIGNMENT_MAX_EVENTS + 60;
+  for (let seq = 2; seq <= total; seq++) {
+    db.appendEvent("verbose-turn", { kind: "agent_message", text: String(seq) }, seq);
+  }
+  // The invocation is beyond the cap, so the count boundary stands rather than the page growing to
+  // swallow an arbitrarily long turn.
+  const page = db.listCachedEventTailPage("verbose-turn", undefined, 10, { alignToTurn: true });
+  assert.equal(page.events.length, 10);
+  assert.equal(page.turnAligned, false);
+  assert.equal(page.hasMoreOlder, true);
+});
+
+test("a transcript with no user message keeps its count boundary and reports it unaligned", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "adopted-cache" }));
+  for (let seq = 1; seq <= 6; seq++) {
+    db.appendEvent("adopted-cache", { kind: "agent_message", text: String(seq) }, seq);
+  }
+  const page = db.listCachedEventTailPage("adopted-cache", undefined, 2, { alignToTurn: true });
+  assert.deepEqual(page.events.map((event) => event.seq), [5, 6]);
+  assert.equal(page.turnAligned, false);
 });
 
 test("history columns/index migrate additively and an unknown epoch adopts without clearing", () => {

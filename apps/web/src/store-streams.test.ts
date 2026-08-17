@@ -818,3 +818,88 @@ test("an older page that outlived its window is dropped instead of leaving an un
   assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [849, 850, 851, 852]);
   assert.equal(store.eventWindowBase("s1"), 849);
 });
+
+test("hydration broadcasts cannot paint the log's start while an opening window is in flight", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  store.beginEventHistoryLoad("s1", 0, -1, generation, true);
+
+  // The control plane hydrates forward from the runner and broadcasts each row exactly like a live
+  // event. Appending these would paint seq 1 first — the oldest-first open being removed.
+  for (let seq = 1; seq <= 5; seq++) message(store, { type: "session_event", event: event("s1", seq) });
+  assert.equal(store.getState().events.get("s1"), undefined,
+    "the reader keeps its loading state instead of the log's start");
+
+  store.loadEvents("s1", [event("s1", 4_801), event("s1", 4_802)], 0, undefined, true, generation, true);
+  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [4_801, 4_802]);
+
+  // Once the window has spoken, live delivery resumes immediately.
+  message(store, { type: "session_event", event: event("s1", 4_803) });
+  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [4_801, 4_802, 4_803]);
+});
+
+test("a failed opening window releases its hold so live delivery is never stranded", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  store.beginEventHistoryLoad("s1", 0, -1, generation, true);
+  store.failEventHistoryLoad("s1", "Could not load complete session activity.", 0, -1, generation);
+  message(store, { type: "session_event", event: event("s1", 9) });
+  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [9]);
+});
+
+test("entering a fleet view drops bounded windows so a member is not truncated forever", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [],
+    sessions: [session("s1")],
+    runs: [{ id: "run-1", sessionIds: ["s1"] } as never],
+    pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  store.loadEvents("s1", [event("s1", 900), event("s1", 901)], 0, undefined, true, generation, true);
+  assert.equal(store.eventWindowBase("s1"), 900);
+
+  // Run and Pod columns page only ABOVE the cursor a window published and offer no reach-back, so
+  // carrying one in would omit everything below seq 900 for as long as the cache survives.
+  store.navigate({ name: "run", id: "run-1" });
+  assert.equal(store.getState().events.get("s1"), undefined);
+  assert.equal(store.getState().eventWindows.get("s1"), undefined);
+  assert.equal(store.recoveryAfter("s1"), 0, "fleet recovery starts from the beginning again");
+});
+
+test("a bounded window preserves activity buckets it cannot account for", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  // Live observation records a pulse from a turn far below the window that will be loaded.
+  message(store, { type: "session_event", event: { ...event("s1", 10), ts: Date.now() - ACTIVITY_BUCKET_MS * 3 } });
+  const observed = activitySeries(store.getState().activity.get("s1")!, Date.now())
+    .reduce((total, count) => total + count, 0);
+  assert.ok(observed > 0, "live observation recorded a pulse below the window");
+
+  // Folding a ring from a window that starts at seq 900 would erase what was already observed.
+  store.loadEvents("s1", [event("s1", 900), event("s1", 901)], 0, undefined, true, generation, true);
+  const afterWindow = activitySeries(store.getState().activity.get("s1")!, Date.now())
+    .reduce((total, count) => total + count, 0);
+  assert.ok(afterWindow >= observed, "the heartbeat ring keeps pulses the window cannot explain");
+});

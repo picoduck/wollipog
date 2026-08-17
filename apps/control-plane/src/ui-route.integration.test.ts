@@ -842,6 +842,20 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   assert.equal((await ownerFetch(
     "/api/sessions/session-target/events?direction=backward&limit=1&eventEpoch=99",
   )).status, 409);
+  // Turn alignment is opt-in and belongs to backward reads. This session's cache holds no user
+  // message, so the page keeps its count boundary and says it is unaligned rather than guessing.
+  const alignedPage = await (await ownerFetch(
+    "/api/sessions/session-target/events?direction=backward&align=turn&limit=1&eventEpoch=0",
+  )).json() as { events: Array<{ seq: number }>; hasMoreOlder: boolean; turnAligned: boolean };
+  assert.deepEqual(alignedPage.events.map((event) => event.seq), [2]);
+  assert.equal(alignedPage.turnAligned, false);
+  assert.equal(alignedPage.hasMoreOlder, true);
+  assert.equal((await ownerFetch(
+    "/api/sessions/session-target/events?direction=backward&align=sentence&limit=1&eventEpoch=0",
+  )).status, 400);
+  assert.equal((await ownerFetch(
+    "/api/sessions/session-target/events?align=turn&after=0&limit=1&eventEpoch=0",
+  )).status, 400);
 
   const createProjectResponse = await ownerFetch("/api/projects", {
     method: "POST",
