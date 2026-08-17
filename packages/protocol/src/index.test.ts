@@ -10,6 +10,7 @@ import {
   POLICY_HOOK_POLL_CAPABILITY_HEADER,
   PROTOCOL_VERSION,
   providerAuthenticationReceiptCode,
+  projectRunnerMessageForProtocol,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   WOLLIPOG_CONTROL_PLANE_SERVICE,
   WOLLIPOG_POLICY_HOOK_POLL_CAPABILITY_HEADER,
@@ -523,6 +524,26 @@ test("runner command capability gates fail closed for unknown/old protocols", ()
   assert.match(runnerCapabilityRequirement(null, "sessionFiles", "Files"), /unknown.*requires protocol v16/i);
   assert.match(runnerCapabilityRequirement(15, "sessionFiles", "Files"), /protocol is v15.*v16/i);
   assert.match(runnerCapabilityRequirement(Number.NaN, "sessionFiles", "Files"), /unknown.*v16/i);
+});
+
+test("provider-authentication receipts are projected for the peer only at send time", () => {
+  const exact: RunnerToControlPlane = {
+    type: "durable_session_command_update",
+    commandId: "command-1",
+    sessionId: "session-1",
+    state: "rejected",
+    revision: 2,
+    code: "PROVIDER_AUTHENTICATION_REQUIRED",
+  };
+  const oldPeer = projectRunnerMessageForProtocol(exact, 77);
+  const currentPeer = projectRunnerMessageForProtocol(exact, 78);
+  assert.equal(oldPeer.type === "durable_session_command_update" ? oldPeer.code : undefined, "COMMAND_CANCELLED");
+  assert.equal(
+    currentPeer.type === "durable_session_command_update" ? currentPeer.code : undefined,
+    "PROVIDER_AUTHENTICATION_REQUIRED",
+  );
+  assert.equal(exact.type === "durable_session_command_update" ? exact.code : undefined,
+    "PROVIDER_AUTHENTICATION_REQUIRED", "the buffered runner message retains exact local truth");
 });
 
 test("source locations normalize canonical root-relative paths and reject escapes", () => {

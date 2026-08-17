@@ -12,7 +12,7 @@ import WebSocket from "ws";
 import {
   parseMessage,
   PROTOCOL_VERSION,
-  providerAuthenticationReceiptCode,
+  projectRunnerMessageForProtocol,
   validatePromptImageInputs,
   type AdoptSessionMessage,
   type AcpRuntimeCapabilities,
@@ -340,20 +340,10 @@ function updateAgentAuthStatus(agentId: string, update: AcpAuthRuntime): void {
     (update.capabilities === undefined || sameAcpCapabilities(prior.capabilities, update.capabilities))
   ) return;
   acpAuthStatus.set(agentId, { ...prior, ...update });
-  metadata.agents = overlayAcpAuthStatus(metadata.agents, acpAuthStatus).map((agent) =>
-    agent.id === agentId && update.status !== undefined
-      ? {
-          ...agent,
-          authStatus: update.status,
-          ...((agent.driver ?? "acp") === "acp"
-            ? {}
-            : update.status === "unauthenticated"
-              ? { available: false }
-              : update.status === "authenticated"
-                ? { available: true }
-                : {}),
-        }
-      : agent);
+  // Native provider status is credential-scope specific (custom homes/env and execution context);
+  // it must not disable or enable the runner-wide agent catalog. ACP status is agent-global and is
+  // the only runtime status projected by overlayAcpAuthStatus.
+  metadata.agents = overlayAcpAuthStatus(metadata.agents, acpAuthStatus);
   sendUp({
     type: "agents_updated",
     runnerId: config.runnerId,
@@ -487,7 +477,7 @@ const MAX_OUTBOX = 1000;
 
 function sendUp(msg: RunnerToControlPlane): void {
   if (ws && ws.readyState === WebSocket.OPEN && registered) {
-    ws.send(JSON.stringify(msg));
+    ws.send(JSON.stringify(projectRunnerMessageForProtocol(msg, controlPlaneProtocolVersion)));
     return;
   }
   // Coalesce redundant session_status / session_queue for the same session to bound growth —
@@ -504,13 +494,12 @@ function sendUp(msg: RunnerToControlPlane): void {
 
 function flushOutbox(): void {
   if (!ws || ws.readyState !== WebSocket.OPEN || !registered) return;
-  for (const m of outbox.splice(0)) ws.send(JSON.stringify(m));
+  for (const m of outbox.splice(0)) {
+    ws.send(JSON.stringify(projectRunnerMessageForProtocol(m, controlPlaneProtocolVersion)));
+  }
 }
 
 function sendDurableUpdate(receipt: DurableCommandReceipt): void {
-  const code = receipt.code === "PROVIDER_AUTHENTICATION_REQUIRED"
-    ? providerAuthenticationReceiptCode(controlPlaneProtocolVersion)
-    : receipt.code;
   const update: DurableSessionCommandUpdateMessage = {
     type: "durable_session_command_update",
     commandId: receipt.commandId,
@@ -518,7 +507,7 @@ function sendDurableUpdate(receipt: DurableCommandReceipt): void {
     state: receipt.state,
     revision: receipt.revision,
     ...(receipt.error ? { error: receipt.error } : {}),
-    ...(code ? { code } : {}),
+    ...(receipt.code ? { code: receipt.code } : {}),
     ...(receipt.userEventSeq !== undefined ? { userEventSeq: receipt.userEventSeq } : {}),
   };
   sendUp(update);
@@ -544,9 +533,6 @@ function durableLifecycle(handle: DurableCommandHandle): DurableCommandLifecycle
 }
 
 function sendSessionCommandUpdate(receipt: SessionCommandInvocationReceipt): void {
-  const code = receipt.code === "PROVIDER_AUTHENTICATION_REQUIRED"
-    ? providerAuthenticationReceiptCode(controlPlaneProtocolVersion)
-    : receipt.code;
   const update: SessionCommandInvocationUpdateMessage = {
     type: "session_command_invocation_update",
     invocationId: receipt.invocationId,
@@ -555,7 +541,7 @@ function sendSessionCommandUpdate(receipt: SessionCommandInvocationReceipt): voi
     state: receipt.state,
     revision: receipt.revision,
     ...(receipt.error ? { error: receipt.error } : {}),
-    ...(code ? { code } : {}),
+    ...(receipt.code ? { code: receipt.code } : {}),
     ...(receipt.userEventSeq !== undefined ? { userEventSeq: receipt.userEventSeq } : {}),
   };
   sendUp(update);
@@ -695,21 +681,7 @@ async function runDiscovery(refreshModels = false): Promise<void> {
       if (runtime.capabilities) acpAuthStatus.set(agent.id, { capabilities: runtime.capabilities });
       else acpAuthStatus.delete(agent.id);
     }
-    metadata.agents = overlayAcpAuthStatus(metadata.agents, acpAuthStatus).map((agent) => {
-      const runtime = acpAuthStatus.get(agent.id);
-      if (!runtime?.status) return agent;
-      return {
-        ...agent,
-        authStatus: runtime.status,
-        ...((agent.driver ?? "acp") === "acp"
-          ? {}
-          : runtime.status === "unauthenticated"
-            ? { available: false }
-            : runtime.status === "authenticated"
-              ? { available: true }
-              : {}),
-      };
-    });
+    metadata.agents = overlayAcpAuthStatus(metadata.agents, acpAuthStatus);
     metadata.editors = editors;
     discoveryDone = true;
     const extra = metadata.agents.length - configAgents.length;
@@ -920,11 +892,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         revision: claim.receipt.revision,
         duplicate: claim.receipt.duplicate,
         ...(claim.receipt.error ? { error: claim.receipt.error } : {}),
-        ...(claim.receipt.code ? {
-          code: claim.receipt.code === "PROVIDER_AUTHENTICATION_REQUIRED"
-            ? providerAuthenticationReceiptCode(controlPlaneProtocolVersion)
-            : claim.receipt.code,
-        } : {}),
+        ...(claim.receipt.code ? { code: claim.receipt.code } : {}),
       };
       sendUp(response);
       if (!("handle" in claim)) break;
@@ -964,11 +932,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         revision: claim.receipt.revision,
         duplicate: claim.receipt.duplicate,
         ...(claim.receipt.error ? { error: claim.receipt.error } : {}),
-        ...(claim.receipt.code ? {
-          code: claim.receipt.code === "PROVIDER_AUTHENTICATION_REQUIRED"
-            ? providerAuthenticationReceiptCode(controlPlaneProtocolVersion)
-            : claim.receipt.code,
-        } : {}),
+        ...(claim.receipt.code ? { code: claim.receipt.code } : {}),
       };
       sendUp(response);
       if (!("handle" in claim)) break;

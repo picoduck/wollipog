@@ -176,6 +176,21 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
         includeUserCommands: true,
         handoffManifestDigest: null,
       },
+      providerCredentialScopeId: "scope-a",
+      providerCredentialIdentityId: "account-a",
+      providerAuthBlock: {
+        version: 1,
+        recoveryId: "source-recovery",
+        credentialScopeId: "scope-a",
+        detectedAt: 1,
+        phase: "launch",
+        delivery: "not_delivered",
+        canStartLogin: false,
+        configuredCredential: false,
+        expectedIdentityId: "account-a",
+        retry: { text: "must stay with source", images: [] },
+      },
+      providerAuthRetryAttemptedRecoveryId: "prior-recovery",
       turnCount: 2,
       forkPoints: {
         "1": { agentTurnId: "claude-source-uuid", tree, baseCommit, eventSeq: 2 },
@@ -200,6 +215,10 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
     assert.equal(claudeTarget.agentSessionId, "thread-forked");
     assert.equal(claudeTarget.sessionSlashCommands, undefined);
     assert.equal(claudeTarget.sessionSlashCommandProvenance, undefined);
+    assert.equal(claudeTarget.providerCredentialScopeId, undefined);
+    assert.equal(claudeTarget.providerCredentialIdentityId, undefined);
+    assert.equal(claudeTarget.providerAuthBlock, undefined);
+    assert.equal(claudeTarget.providerAuthRetryAttemptedRecoveryId, undefined);
     assert.equal(forkSources.at(-1), "claude-source-uuid");
     assert.deepEqual(claudeFork.events?.map((event) => event.payload.kind), [
       "user_message",

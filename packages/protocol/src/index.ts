@@ -468,6 +468,24 @@ export function providerAuthenticationReceiptCode(
     : "COMMAND_CANCELLED";
 }
 
+/** Project additive receipt codes at the actual socket-send boundary. Keeping buffered messages
+ * exact until then makes reconnecting to an older control plane safe. */
+export function projectRunnerMessageForProtocol(
+  message: RunnerToControlPlane,
+  protocolVersion: number | null | undefined,
+): RunnerToControlPlane {
+  if (
+    (message.type === "durable_session_command_result" ||
+      message.type === "durable_session_command_update" ||
+      message.type === "session_command_invocation_result" ||
+      message.type === "session_command_invocation_update") &&
+    message.code === "PROVIDER_AUTHENTICATION_REQUIRED"
+  ) {
+    return { ...message, code: providerAuthenticationReceiptCode(protocolVersion) };
+  }
+  return message;
+}
+
 /** Shared actionable copy for HTTP errors and disabled UI affordances. */
 export function runnerCapabilityRequirement(
   protocolVersion: number | null | undefined,

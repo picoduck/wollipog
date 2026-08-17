@@ -247,7 +247,7 @@ test("provider auth failure stops the turn, parks exact recovery context, and ho
     assert.equal(h.cancelCalls(), 1, "the provider retry loop is cancelled immediately");
     assert.equal(blocked.status, "input_required");
     assert.equal(blocked.pendingApproval?.kind, "authentication");
-    assert.deepEqual(blocked.pendingApproval?.options, []);
+    assert.deepEqual(blocked.pendingApproval?.options.map((option) => option.name), ["Dismiss Recovery"]);
     assert.equal(blocked.pendingApproval?.title, "Authentication Required — Claude Code");
     assert.match(blocked.pendingApproval?.context?.input ?? "", /Provider: Claude Code/);
     assert.match(blocked.pendingApproval?.context?.input ?? "", /Machine: WSL distribution Ubuntu/);
@@ -485,7 +485,7 @@ test("startup reconciliation restores a durable authentication card and suppress
     assert.equal(restored.pendingApproval?.title, "Authentication Required — Claude Code");
     assert.deepEqual(
       restored.pendingApproval?.options.map((option) => option.name),
-      ["Start Sign-In", "Recheck Authentication"],
+      ["Start Sign-In", "Recheck Authentication", "Dismiss Recovery"],
     );
     assert.equal(h.manager.sessionSnapshots()[0]?.status, "input_required");
     assert.equal(h.manager.sessionSnapshots()[0]?.pendingApproval?.kind, "authentication");
@@ -528,6 +528,7 @@ test("provider-native revalidation retries a proven-not-delivered prompt once ac
     assert.deepEqual(blocked.pendingApproval?.options.map((option) => option.name), [
       "Start Sign-In",
       "Recheck Authentication",
+      "Dismiss Recovery",
     ]);
     const requestId = blocked.pendingApproval!.requestId;
 
@@ -606,7 +607,10 @@ test("fresh-start authentication failure preserves its worktree and ordinary ini
     assert.equal(blocked.providerAuthBlock?.retry?.text, "initial work retained before provider submission");
     assert.ok(blocked.worktreePath);
     assert.equal(statSync(blocked.worktreePath!).isDirectory(), true, "recoverable auth must not reap the worktree");
-    assert.deepEqual(blocked.pendingApproval?.options.map((option) => option.name), ["Recheck Authentication"]);
+    assert.deepEqual(
+      blocked.pendingApproval?.options.map((option) => option.name),
+      ["Recheck Authentication", "Dismiss Recovery"],
+    );
   } finally {
     h.manager.shutdownAll();
     h.cleanup();
@@ -689,28 +693,47 @@ test("authentication recovery fans out only to matching credential scopes", asyn
       pendingApproval: { ...target.pendingApproval!, requestId: "provider-auth:other-recovery" },
       status: "input_required",
     });
+    const stopped = stored(h.root, {
+      sessionId: "stopped-scope",
+      providerCredentialScopeId: "scope-a",
+      providerCredentialIdentityId: "account-a",
+      providerAuthBlock: {
+        ...target.providerAuthBlock!,
+        recoveryId: "stopped-recovery",
+        retry: { text: "never submit after Stop", images: [] },
+      },
+      pendingApproval: { ...target.pendingApproval!, requestId: "provider-auth:stopped-recovery" },
+      status: "stopped",
+    });
     h.store.create(shared);
     h.store.create(other);
+    h.store.create(stopped);
     h.manager.resolvePermission("resume-session", target.pendingApproval!.requestId, "auth:revalidate");
     for (let index = 0; index < 5; index += 1) await tick();
     assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
     assert.equal(h.store.readMeta("shared-scope")?.providerAuthBlock, undefined);
     assert.equal(h.store.readMeta("other-scope")?.providerAuthBlock?.credentialScopeId, "scope-b");
+    assert.equal(h.store.readMeta("stopped-scope")?.status, "stopped");
+    assert.equal(h.store.readMeta("stopped-scope")?.providerAuthBlock, undefined);
+    assert.equal(h.prompts.includes("never submit after Stop"), false);
   } finally {
     h.manager.shutdownAll();
     h.cleanup();
   }
 });
 
-test("cancelled sign-in and changed credential context leave the block intact", async () => {
+test("cancelled sign-in stays blocked while changed credential context can be explicitly dismissed", async () => {
   const login = deferred<"completed" | "cancelled" | "failed">();
   let scopeId = "scope-a";
   let revalidations = 0;
+  let authenticated = false;
   const controller: ProviderAuthRecoveryController = {
     describe: () => ({ id: scopeId, provider: "claude", canStartLogin: true, configuredCredential: false }),
     revalidate: async () => {
       revalidations += 1;
-      return { status: "unauthenticated" };
+      return authenticated
+        ? { status: "authenticated", identityId: "account-a" }
+        : { status: "unauthenticated" };
     },
     startLogin: () => login.promise,
     cancel: () => { login.resolve("cancelled"); return true; },
@@ -741,6 +764,79 @@ test("cancelled sign-in and changed credential context leave the block intact", 
     for (let index = 0; index < 4; index += 1) await tick();
     assert.equal(revalidations, before, "wrong-context request is rejected before provider status");
     assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock?.credentialScopeId, "scope-a");
+
+    assert.equal(
+      h.store.readMeta("resume-session")?.pendingApproval?.options.at(-1)?.name,
+      "Dismiss Recovery",
+    );
+    h.manager.resolvePermission("resume-session", requestId, "auth:dismiss");
+    for (let index = 0; index < 4; index += 1) await tick();
+    assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
+    assert.equal(h.store.readMeta("resume-session")?.pendingApproval, null);
+    assert.equal(h.store.readMeta("resume-session")?.status, "idle");
+
+    authenticated = true;
+    h.manager.prompt("resume-session", "new context prompt");
+    for (let index = 0; index < 6; index += 1) await tick();
+    assert.deepEqual(h.prompts, ["new context prompt"]);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("Stop clears durable authentication recovery and restart reconciliation preserves terminal state", async () => {
+  const controller: ProviderAuthRecoveryController = {
+    describe: () => ({ id: "scope-a", provider: "claude", canStartLogin: false, configuredCredential: false }),
+    revalidate: async () => ({ status: "unauthenticated" }),
+    startLogin: async () => "failed",
+    cancel: () => false,
+  };
+  const h = harness({
+    driver: "claude-code",
+    command: "claude",
+    agentId: "claude-native",
+  }, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, undefined, controller);
+  try {
+    h.manager.prompt("resume-session", "retained before Stop");
+    for (let index = 0; index < 4; index += 1) await tick();
+    assert.ok(h.store.readMeta("resume-session")?.providerAuthBlock);
+
+    h.manager.stop("resume-session");
+    assert.equal(h.store.readMeta("resume-session")?.status, "stopped");
+    assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
+    assert.equal(h.store.readMeta("resume-session")?.pendingApproval, null);
+
+    h.manager.reconcileStore();
+    assert.equal(h.store.readMeta("resume-session")?.status, "stopped");
+    assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
+    assert.deepEqual(h.prompts, []);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("scope-less provider authentication cards can be explicitly dismissed", async () => {
+  let h!: ReturnType<typeof harness>;
+  h = harness({
+    driver: "claude-code",
+    command: "claude",
+    agentId: "claude-native",
+  }, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, async () => {
+    h.callbacks().onAuthenticationFailure?.();
+  });
+  try {
+    h.manager.prompt("resume-session", "legacy auth failure");
+    for (let index = 0; index < 5; index += 1) await tick();
+    const blocked = h.store.readMeta("resume-session")!;
+    assert.equal(blocked.providerAuthBlock, undefined);
+    assert.deepEqual(blocked.pendingApproval?.options.map((option) => option.name), ["Dismiss Recovery"]);
+
+    h.manager.resolvePermission("resume-session", blocked.pendingApproval!.requestId, "auth:dismiss");
+    for (let index = 0; index < 4; index += 1) await tick();
+    assert.equal(h.store.readMeta("resume-session")?.pendingApproval, null);
+    assert.equal(h.store.readMeta("resume-session")?.status, "idle");
   } finally {
     h.manager.shutdownAll();
     h.cleanup();
