@@ -166,8 +166,17 @@ export interface EventWindowState {
   /** Oldest seq loaded for this epoch. Older cached events exist below it when `hasOlder`. */
   baseSeq: number;
   hasOlder: boolean;
+  /** The read that produced this window reached the runner's tail. A budget-expired window reports
+   * no older rows while still being a prefix, so completeness is tracked separately. */
+  complete: boolean;
   loadingOlder: boolean;
   error: string | null;
+}
+
+/** Whether the loaded events are known NOT to be the session's whole history. Consumers that treat
+ * absence as evidence — receipts, whole-session inventories — must ask this, not `hasOlder`. */
+export function isPartialHistory(window: EventWindowState | undefined): boolean {
+  return window !== undefined && (window.hasOlder || !window.complete);
 }
 
 export interface State {
@@ -450,6 +459,7 @@ function applyWindowBase(
       eventEpoch: action.eventEpoch,
       baseSeq: 0,
       hasOlder: action.windowHasOlder,
+      complete: action.recoveryComplete,
       loadingOlder: false,
       error: null,
     });
@@ -464,6 +474,9 @@ function applyWindowBase(
     // A re-read of the tail answers for the boundary below ITS OWN page. Once the reader has paged
     // below that boundary, our oldest loaded seq is authoritative and the page's answer is stale.
     hasOlder: baseSeq < pageBase ? (priorValid?.hasOlder ?? action.windowHasOlder) : action.windowHasOlder,
+    // Completeness is monotonic within an epoch: a re-read that reaches the tail settles it, and a
+    // later partial read cannot unsettle what was already proven complete.
+    complete: action.recoveryComplete || (priorValid?.complete ?? false),
     loadingOlder: priorValid?.loadingOlder ?? false,
     error: priorValid?.error ?? null,
   });
@@ -610,6 +623,7 @@ function reducer(state: State, action: Action): State {
       next.eventEpochs = pruned.eventEpochs;
       next.eventHistory = pruned.eventHistory;
       next.eventWindows = pruned.eventWindows;
+      next.pendingOpeningWindows = pruned.pendingOpeningWindows;
       next.shellOutput = pruned.shellOutput;
       if (action.view.name === "pod") {
         const podId = action.view.id;
@@ -783,10 +797,22 @@ function reducer(state: State, action: Action): State {
       if (!relevantSessions(state).has(action.sessionId) ||
           action.recoveryGeneration !== state.snapshotRevision ||
           action.eventEpoch !== sessionEventEpoch(state.sessions.get(action.sessionId))) return state;
-      const pendingOpeningWindows = action.openingWindow === true &&
-        !state.pendingOpeningWindows.has(action.sessionId)
-        ? new Map(state.pendingOpeningWindows).set(action.sessionId, [])
-        : state.pendingOpeningWindows;
+      // A hold belongs to an opening window. A load of any other shape — a forward gap chain, a
+      // retry after the window was abandoned — must not inherit it, or its live events would be
+      // held forever behind a window that is never going to apply. Those rows are released into
+      // the transcript rather than dropped.
+      const held = state.pendingOpeningWindows.get(action.sessionId);
+      let releasedEvents: Map<string, SessionEvent[]> | null = null;
+      let pendingOpeningWindows = state.pendingOpeningWindows;
+      if (action.openingWindow === true) {
+        if (!held) pendingOpeningWindows = new Map(state.pendingOpeningWindows).set(action.sessionId, []);
+      } else if (held) {
+        pendingOpeningWindows = releaseOpeningWindow(state, action.sessionId);
+        if (held.length) {
+          releasedEvents = new Map(state.events);
+          releasedEvents.set(action.sessionId, mergeEvents(releasedEvents.get(action.sessionId), held));
+        }
+      }
       const eventHistory = new Map(state.eventHistory);
       const prior = eventHistory.get(action.sessionId);
       eventHistory.set(action.sessionId, {
@@ -797,7 +823,12 @@ function reducer(state: State, action: Action): State {
         refreshing: true,
         error: null,
       });
-      return { ...state, eventHistory, pendingOpeningWindows };
+      return {
+        ...state,
+        ...(releasedEvents ? { events: releasedEvents } : {}),
+        eventHistory,
+        pendingOpeningWindows,
+      };
     }
     case "event_history_failed": {
       if (!relevantSessions(state).has(action.sessionId) ||
@@ -815,7 +846,23 @@ function reducer(state: State, action: Action): State {
         refreshing: false,
         error: action.error,
       });
-      return { ...state, eventHistory, pendingOpeningWindows: releaseOpeningWindow(state, action.sessionId) };
+      // The load that justified holding these rows is over. They were withheld only so a hydrating
+      // cache could not paint its prefix first; with no window coming, showing what arrived beats
+      // dropping live events on the floor.
+      const heldOnFailure = state.pendingOpeningWindows.get(action.sessionId);
+      const failureEvents = heldOnFailure?.length ? new Map(state.events) : null;
+      if (failureEvents && heldOnFailure) {
+        failureEvents.set(
+          action.sessionId,
+          mergeEvents(failureEvents.get(action.sessionId), heldOnFailure),
+        );
+      }
+      return {
+        ...state,
+        ...(failureEvents ? { events: failureEvents } : {}),
+        eventHistory,
+        pendingOpeningWindows: releaseOpeningWindow(state, action.sessionId),
+      };
     }
     case "subscription_requested": {
       const cursors = captureRecoveryCursors(state, action.sessionIds);
@@ -948,6 +995,9 @@ function reducer(state: State, action: Action): State {
             activityObservationStartedAt: new Map<string, number>(),
             streamRecoveryCursors: new Map(),
             pendingStreamRecovery: null,
+            // Loads from the previous generation are fenced and will re-register under this one, so
+            // no hold may outlive the snapshot and keep holding a transcript closed.
+            pendingOpeningWindows: new Map<string, SessionEvent[]>(),
             snapshotLoaded: true,
             snapshotRevision: state.snapshotRevision + 1,
             projectsSupported: msg.capabilities?.projects === true || msg.projects !== undefined,
@@ -1055,7 +1105,15 @@ function reducer(state: State, action: Action): State {
           eventHistory.delete(msg.session.id);
           const eventWindows = new Map(state.eventWindows);
           eventWindows.delete(msg.session.id);
-          return updateSessionStall({ ...state, sessions, events, eventEpochs, eventHistory, eventWindows }, msg.session.id);
+          return updateSessionStall({
+            ...state,
+            sessions,
+            events,
+            eventEpochs,
+            eventHistory,
+            eventWindows,
+            pendingOpeningWindows: releaseOpeningWindow(state, msg.session.id),
+          }, msg.session.id);
         }
         case "session_removed": {
           const sessions = new Map(state.sessions);
@@ -1181,14 +1239,21 @@ function reducer(state: State, action: Action): State {
           // a timeline that no longer exists. The next open reads a fresh window at the new tail.
           const eventWindows = new Map(state.eventWindows);
           eventWindows.delete(msg.sessionId);
+          // Held rows describe the log this reset replaced, so they are dropped rather than
+          // replayed into a sequence space where their seqs mean something else.
+          const pendingOpeningWindows = releaseOpeningWindow(state, msg.sessionId);
           if (sessionEventEpoch(currentSession) === eventEpoch) {
-            return updateSessionStall({ ...state, events, eventEpochs, eventHistory, eventWindows }, msg.sessionId);
+            return updateSessionStall({
+              ...state, events, eventEpochs, eventHistory, eventWindows, pendingOpeningWindows,
+            }, msg.sessionId);
           }
           // Writer coalescing may move the matching metadata upsert after this durable reset. Move
           // the local row to the reset generation now so stale in-flight history cannot land first.
           const sessions = new Map(state.sessions);
           sessions.set(msg.sessionId, { ...currentSession, eventEpoch });
-          return updateSessionStall({ ...state, sessions, events, eventEpochs, eventHistory, eventWindows }, msg.sessionId);
+          return updateSessionStall({
+            ...state, sessions, events, eventEpochs, eventHistory, eventWindows, pendingOpeningWindows,
+          }, msg.sessionId);
         }
         case "shell_output": {
           // Ephemeral console stream — only buffered for sessions the current view shows.

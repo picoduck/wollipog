@@ -27,7 +27,7 @@ import {
 } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
-import { isRebuiltEventsArray, useStoreActions, useStoreSelector } from "../store.js";
+import { isPartialHistory, isRebuiltEventsArray, useStoreActions, useStoreSelector } from "../store.js";
 import { relativeTime, shortenPath } from "../format.js";
 import { runnerDisplay } from "../runners.js";
 import { DirectoryPicker } from "./DirectoryPicker.js";
@@ -2208,13 +2208,13 @@ function SessionDetailLoaded({
             <SessionCommandReceipts
               invocations={session.commandInvocations ?? []}
               timelineItems={items}
-              historyPartial={eventWindow?.hasOlder === true}
+              historyPartial={isPartialHistory(eventWindow)}
             />
             <SteeringReceipts
               attempts={session.steeringAttempts ?? []}
               timelineItems={items}
               activeTurnId={session.activeTurnId}
-              historyPartial={eventWindow?.hasOlder === true}
+              historyPartial={isPartialHistory(eventWindow)}
               pendingActions={steeringResolutionPending}
               onQueueAgain={(submissionId) => void resolveSteeringAttempt(submissionId, "queue_again")}
               onDismiss={(submissionId) => void resolveSteeringAttempt(submissionId, "dismiss")}
@@ -2478,7 +2478,7 @@ function SessionDetailLoaded({
         {mode === "expanded" && <RightPanel
           state={rightPanel}
           session={session}
-          earlierActivityUnloaded={eventWindow?.hasOlder === true}
+          earlierActivityUnloaded={isPartialHistory(eventWindow)}
           sourceLocation={sourceLocation}
           onOpenSourceLocation={openSourceLocation}
           onClearSourceLocation={clearSourceLocation}

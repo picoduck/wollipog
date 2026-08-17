@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ControlPlaneToUi, PodView, SessionEvent, SessionView, SteeringAttemptView } from "@wollipog/protocol";
-import { Store } from "./store.js";
+import { isPartialHistory, Store } from "./store.js";
 import { ACTIVITY_BUCKET_MS, activitySeries } from "./activity.js";
 
 const session = (id: string, eventEpoch = 0): SessionView => ({ id, eventEpoch } as SessionView);
@@ -926,4 +926,121 @@ test("a bounded window preserves activity buckets it cannot account for", () => 
   const afterWindow = activitySeries(store.getState().activity.get("s1")!, Date.now())
     .reduce((total, count) => total + count, 0);
   assert.ok(afterWindow >= observed, "the heartbeat ring keeps pulses the window cannot explain");
+});
+
+test("a hold never outlives the window it belongs to", () => {
+  const seed = () => {
+    const store = new Store();
+    message(store, {
+      type: "snapshot",
+      capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+      runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
+    });
+    store.navigate({ name: "session", id: "s1" });
+    const generation = store.getState().snapshotRevision;
+    store.beginEventHistoryLoad("s1", 0, -1, generation, true);
+    message(store, { type: "session_event", event: event("s1", 7) });
+    return { store, generation };
+  };
+
+  // A load of a different shape takes over: its live events must not be held behind a window that
+  // will never apply, so the held rows are released into the transcript.
+  const forward = seed();
+  forward.store.beginEventHistoryLoad("s1", 0, -1, forward.generation, false);
+  assert.deepEqual(forward.store.getState().events.get("s1")?.map((entry) => entry.seq), [7]);
+  message(forward.store, { type: "session_event", event: event("s1", 8) });
+  assert.deepEqual(forward.store.getState().events.get("s1")?.map((entry) => entry.seq), [7, 8]);
+
+  // A replaced log invalidates held rows: their seqs mean something else now.
+  const reset = seed();
+  message(reset.store, { type: "session_events_reset", sessionId: "s1", events: [], eventEpoch: 1 });
+  message(reset.store, { type: "session_event", event: { ...event("s1", 1), sessionId: "s1" } });
+  assert.deepEqual(reset.store.getState().events.get("s1")?.map((entry) => entry.seq), [1],
+    "live delivery resumes against the replacement log");
+
+  // A reconnect snapshot starts a new generation; no hold may survive it.
+  const reconnected = seed();
+  message(reconnected.store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
+  });
+  reconnected.store.navigate({ name: "session", id: "s1" });
+  message(reconnected.store, { type: "session_event", event: event("s1", 9) });
+  assert.deepEqual(reconnected.store.getState().events.get("s1")?.map((entry) => entry.seq), [9]);
+});
+
+test("a failed opening load hands back the live events it was holding", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  store.beginEventHistoryLoad("s1", 0, -1, generation, true);
+  message(store, { type: "session_event", event: event("s1", 8) });
+
+  // No window is coming, so the rows withheld for it must reach the transcript rather than vanish.
+  store.failEventHistoryLoad("s1", "Could not load complete session activity.", 0, -1, generation);
+  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [8]);
+  message(store, { type: "session_event", event: event("s1", 9) });
+  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [8, 9]);
+});
+
+test("held rows cannot replay into the sequence space that replaced them", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  store.beginEventHistoryLoad("s1", 0, -1, generation, true);
+  message(store, { type: "session_event", event: event("s1", 900) });
+
+  // Reprocess replaces the log: seq 900 now means something else entirely.
+  message(store, { type: "session_events_reset", sessionId: "s1", events: [], eventEpoch: 1 });
+  store.loadEvents("s1", [event("s1", 890), event("s1", 891)], 1, undefined, true, generation, true);
+  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [890, 891],
+    "the epoch-0 row is not replayed above the epoch-1 window base");
+});
+
+test("navigation releases an abandoned hold instead of retaining it indefinitely", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  store.beginEventHistoryLoad("s1", 0, -1, generation, true);
+  message(store, { type: "session_event", event: event("s1", 7) });
+  assert.equal(store.getState().pendingOpeningWindows.has("s1"), true);
+
+  store.navigate({ name: "board" });
+  assert.equal(store.getState().pendingOpeningWindows.has("s1"), false,
+    "an unmounted session's buffer does not sit in memory until reload");
+});
+
+test("an incomplete window stays partial even when it reports no older rows", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  // The poll budget expired over a short prefix: no older rows, but not the whole history either.
+  store.loadEvents("s1", [event("s1", 1), event("s1", 2)], 0, undefined, false, generation, false);
+  assert.equal(isPartialHistory(store.getState().eventWindows.get("s1")), true,
+    "receipts and inventories must not read absence as evidence here");
+
+  // A later read that reaches the tail settles it.
+  store.loadEvents("s1", [event("s1", 1), event("s1", 2), event("s1", 3)], 0, undefined, true, generation, false);
+  assert.equal(isPartialHistory(store.getState().eventWindows.get("s1")), false);
 });
