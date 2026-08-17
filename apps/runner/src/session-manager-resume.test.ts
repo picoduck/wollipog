@@ -595,6 +595,82 @@ test("provider-native revalidation retries a proven-not-delivered prompt once ac
   }
 });
 
+test("concurrent runner rechecks consume one durable retry under the session lock", async () => {
+  const recheckGate = deferred<void>();
+  let revalidations = 0;
+  const controller: ProviderAuthRecoveryController = {
+    describe: () => ({ id: "scope-a", provider: "claude", canStartLogin: false, configuredCredential: false }),
+    revalidate: async () => {
+      revalidations += 1;
+      if (revalidations === 1) return { status: "unauthenticated" };
+      await recheckGate.promise;
+      return { status: "authenticated", identityId: "account-a" };
+    },
+    startLogin: async () => "failed",
+    cancel: () => false,
+  };
+  const h = harness({
+    driver: "claude-code",
+    command: "claude",
+    agentId: "claude-native",
+    providerCredentialIdentityId: "account-a",
+  }, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, undefined, controller);
+  const makeReplacement = (runnerId: string) => new SessionManager(
+    (message) => h.sent.push(message),
+    () => {},
+    h.store,
+    runnerId,
+    undefined,
+    h.factory,
+    undefined,
+    4,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    [],
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    controller,
+  );
+  let first: SessionManager | undefined;
+  let second: SessionManager | undefined;
+  try {
+    h.manager.prompt("resume-session", "exactly once");
+    for (let index = 0; index < 8 && !h.store.readMeta("resume-session")?.providerAuthBlock; index += 1) await tick();
+    const blocked = h.store.readMeta("resume-session")!;
+    const requestId = blocked.pendingApproval!.requestId;
+    h.manager.shutdownAll();
+    first = makeReplacement("runner-a");
+    second = makeReplacement("runner-b");
+    first.resolvePermission("resume-session", requestId, "auth:revalidate");
+    second.resolvePermission("resume-session", requestId, "auth:revalidate");
+    for (let index = 0; index < 20 && revalidations < 3; index += 1) await tick();
+    assert.equal(revalidations, 3, "both read-only probes may overlap before durable consumption");
+    recheckGate.resolve(undefined);
+    for (let index = 0; index < 30 && h.prompts.length === 0; index += 1) await shortDelay();
+    assert.deepEqual(h.prompts, ["exactly once"]);
+    assert.equal(h.store.readMeta("resume-session")?.providerAuthRetryAttemptedRecoveryId,
+      blocked.providerAuthBlock?.recoveryId);
+    for (let index = 0; index < 5; index += 1) await tick();
+    assert.deepEqual(h.prompts, ["exactly once"], "the losing runner cannot enqueue after the block is consumed");
+  } finally {
+    first?.shutdownAll();
+    second?.shutdownAll();
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
 test("fresh-start authentication failure preserves its worktree and ordinary initial prompt", async () => {
   const controller: ProviderAuthRecoveryController = {
     describe: () => ({ id: "fresh-scope", provider: "claude", canStartLogin: false, configuredCredential: false }),
