@@ -2529,7 +2529,7 @@ export class SessionManager {
     return ordinal;
   }
 
-  private ensureQueueOrdinal(sessionId: string, prompt: QueuedPrompt): number {
+  private ensureQueueOrdinal(sessionId: string, prompt: Pick<QueuedPrompt, "ordinal">): number {
     if (typeof prompt.ordinal === "number" && Number.isSafeInteger(prompt.ordinal) && prompt.ordinal > 0) {
       const next = this.nextQueueOrdinalBySession.get(sessionId) ?? 1;
       if (prompt.ordinal >= next) this.nextQueueOrdinalBySession.set(sessionId, prompt.ordinal + 1);
@@ -2661,6 +2661,7 @@ export class SessionManager {
     durable?: DurableCommandLifecycle,
     syntheticRecovery = false,
     reservedOrdinal?: number,
+    queueBeforeLaunch = false,
   ): boolean {
     if (durable && this.store.readEvents(sessionId).some((event) =>
       event.payload.kind === "user_message" && event.payload.commandId === durable.commandId)) {
@@ -2778,7 +2779,17 @@ export class SessionManager {
     if (!entry) {
       // Not running in-process — try to RESUME it from the box store (Phase 2).
       const ordinal = reservedOrdinal ?? this.nextQueueOrdinal(sessionId);
-      void this.resumeAndPrompt(sessionId, text, images, slashCommand, effectiveConfig, durable, syntheticRecovery, ordinal);
+      void this.resumeAndPrompt(
+        sessionId,
+        text,
+        images,
+        slashCommand,
+        effectiveConfig,
+        durable,
+        syntheticRecovery,
+        ordinal,
+        queueBeforeLaunch,
+      );
       return true;
     }
     if (entry.historyIntegrityFailure) {
@@ -3832,6 +3843,7 @@ export class SessionManager {
     durable?: DurableCommandLifecycle,
     syntheticRecovery = false,
     reservedOrdinal?: number,
+    queueBeforeLaunch = false,
   ): Promise<void> {
     const meta = this.store.readMeta(sessionId);
     if (!meta) {
@@ -3918,14 +3930,40 @@ export class SessionManager {
       return;
     }
     const launchGeneration = this.beginLaunchGeneration(sessionId);
+    if (queueBeforeLaunch) {
+      this.preLaunchAdmissionGenerations.set(sessionId, launchGeneration);
+      const queue = this.preLaunchQueues.get(sessionId) ?? [];
+      this.insertQueuedPrompt(sessionId, queue, {
+        id: randomUUID(),
+        ordinal: reservedOrdinal ?? this.nextQueueOrdinal(sessionId),
+        text,
+        images,
+        slashCommand,
+        config: fresh.config,
+        durable,
+        syntheticRecovery,
+      });
+      this.preLaunchQueues.set(sessionId, queue);
+    }
+    const finishPreLaunch = (launched: boolean) => {
+      const ownsPreLaunch = this.preLaunchAdmissionGenerations.get(sessionId) === launchGeneration;
+      if (ownsPreLaunch) {
+        this.preLaunchAdmissionGenerations.delete(sessionId);
+      }
+      if (!launched && queueBeforeLaunch && ownsPreLaunch) {
+        this.rejectPreLaunchQueue(sessionId, "provider authentication retry failed before runner admission");
+      }
+    };
     if (!(await this.acquireAdmission(sessionId))) {
       const superseded = this.launchWasSuperseded(sessionId, launchGeneration);
       this.finishLaunchGeneration(sessionId, launchGeneration);
       if (superseded) {
+        finishPreLaunch(false);
         durable?.failed("session resume was superseded by a replacement", "COMMAND_CANCELLED");
         return;
       }
       if (resumeId) this.store.releaseLock(sessionId, this.lockOwner);
+      finishPreLaunch(false);
       durable?.failed("session resume was cancelled before runner admission", "COMMAND_CANCELLED");
       return;
     }
@@ -3933,6 +3971,7 @@ export class SessionManager {
       const superseded = this.launchWasSuperseded(sessionId, launchGeneration);
       this.finishLaunchGeneration(sessionId, launchGeneration);
       if (resumeId && !superseded) this.store.releaseLock(sessionId, this.lockOwner);
+      finishPreLaunch(false);
       durable?.failed(
         superseded
           ? "session resume was superseded by a replacement"
@@ -3956,6 +3995,7 @@ export class SessionManager {
     // preparation with no active entry yet, while already owning this same admission and lock.
     if (!stillOwnsLaunch) {
       if (resumeId && !superseded) this.store.releaseLock(sessionId, this.lockOwner);
+      finishPreLaunch(false);
       durable?.failed(
         superseded
           ? "session resume was superseded by a replacement"
@@ -3991,9 +4031,15 @@ export class SessionManager {
       } else {
         durable?.failed("provider session could not be resumed", "INVALID_COMMAND");
       }
+      finishPreLaunch(false);
       return;
     }
-    this.prompt(sessionId, text, images, slashCommand, config, durable, syntheticRecovery, reservedOrdinal);
+    if (queueBeforeLaunch) {
+      this.activatePreLaunchQueue(sessionId);
+      finishPreLaunch(true);
+    } else {
+      this.prompt(sessionId, text, images, slashCommand, config, durable, syntheticRecovery, reservedOrdinal);
+    }
   }
 
   /** Persist turn configuration without presenting a model resolved under an older alias. */
@@ -6609,6 +6655,11 @@ export class SessionManager {
         meta.providerAuthRetryAttemptedRecoveryId !== block.recoveryId
         ? block.retry
         : undefined;
+      // A persisted retry can carry an ordinal greater than this process's fresh in-memory
+      // high-water. Observe it before clearing the durable block: once prompts are admitted again,
+      // every newer prompt must sort after the retained pre-crash work even if it races this
+      // recovery continuation.
+      if (retry) this.ensureQueueOrdinal(meta.sessionId, retry);
       this.store.patchMeta(meta.sessionId, {
         providerCredentialScopeId: block.credentialScopeId,
         ...(observation.identityId ? { providerCredentialIdentityId: observation.identityId } : {}),
@@ -6628,7 +6679,10 @@ export class SessionManager {
         optionId: retry ? "auth:automatic-retry" : "auth:revalidated",
       });
       if (retry) {
-        setImmediate(() => this.prompt(
+        // Admit the retained prompt synchronously after its tombstone is durable. The provider
+        // launch remains asynchronous, but no newer prompt can win the admission boundary between
+        // clearing the block and restoring the older FIFO item.
+        this.prompt(
           meta.sessionId,
           retry.text,
           retry.images,
@@ -6637,7 +6691,8 @@ export class SessionManager {
           undefined,
           false,
           retry.ordinal,
-        ));
+          true,
+        );
       } else {
         if (block.delivery === "uncertain") {
           this.emitEvent(meta.sessionId, {
@@ -6646,7 +6701,11 @@ export class SessionManager {
           });
         }
         this.emitStatus(meta.sessionId, "idle");
-        if (entry?.queue.length) this.scheduleDrain(meta.sessionId);
+        if (this.recoveryQueues.has(meta.sessionId)) {
+          setImmediate(() => void this.recoverQueuedAppServer(meta.sessionId));
+        } else if (entry?.queue.length) {
+          this.scheduleDrain(meta.sessionId);
+        }
       }
     }
   }

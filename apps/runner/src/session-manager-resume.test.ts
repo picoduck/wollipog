@@ -271,16 +271,22 @@ test("provider auth failure stops the turn, parks exact recovery context, and ho
   }
 });
 
-test("app-server exit preserves the auth card and held FIFO until an explicit retry", async () => {
+test("app-server authentication recheck resumes the held FIFO without another prompt", async () => {
   let h!: ReturnType<typeof harness>;
   let attempts = 0;
+  const controller: ProviderAuthRecoveryController = {
+    describe: () => ({ id: "scope-a", provider: "codex", canStartLogin: false, configuredCredential: false }),
+    revalidate: async () => ({ status: "authenticated", identityId: "account-a" }),
+    startLogin: async () => "failed",
+    cancel: () => false,
+  };
   h = harness({}, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, async () => {
     attempts += 1;
     if (attempts === 1) {
       h.manager.prompt("resume-session", "held while signed out");
       h.callbacks().onAuthenticationFailure?.();
     }
-  });
+  }, controller);
   try {
     h.manager.prompt("resume-session", "first attempt");
     await tick();
@@ -293,13 +299,14 @@ test("app-server exit preserves the auth card and held FIFO until an explicit re
     assert.equal(h.store.readMeta("resume-session")?.pendingApproval?.kind, "authentication");
     assert.equal(h.launches.length, 1, "auth-blocked exit must not relaunch automatically");
     assert.deepEqual(h.prompts, ["first attempt"]);
+    assert.equal((h.manager as any).recoveryQueues.has("resume-session"), true);
 
-    h.manager.prompt("resume-session", "explicit retry");
-    await tick();
-    await tick();
-    await tick();
+    const requestId = h.store.readMeta("resume-session")!.pendingApproval!.requestId;
+    h.manager.resolvePermission("resume-session", requestId, "auth:revalidate");
+    for (let index = 0; index < 20 && h.prompts.length < 2; index += 1) await shortDelay();
     assert.equal(h.launches.length, 2);
-    assert.deepEqual(h.prompts, ["first attempt", "held while signed out", "explicit retry"]);
+    assert.deepEqual(h.prompts, ["first attempt", "held while signed out"]);
+    assert.equal((h.manager as any).recoveryQueues.has("resume-session"), false);
     assert.equal(h.store.readMeta("resume-session")?.pendingApproval, null);
   } finally {
     h.manager.shutdownAll();
@@ -561,15 +568,26 @@ test("provider-native revalidation retries a proven-not-delivered prompt once ac
       controller,
     );
     replacement.resolvePermission("resume-session", requestId, "auth:revalidate");
-    for (let index = 0; index < 20 && h.prompts.length === 0; index += 1) await shortDelay();
-    assert.deepEqual(h.prompts, ["retained before provider submission"]);
+    for (let index = 0; index < 20 && h.store.readMeta("resume-session")?.providerAuthBlock; index += 1) {
+      await Promise.resolve();
+    }
+    assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
+    replacement.prompt("resume-session", "newer prompt admitted after revalidation");
+    for (let index = 0; index < 20 && h.prompts.length < 2; index += 1) await shortDelay();
+    assert.deepEqual(h.prompts, [
+      "retained before provider submission",
+      "newer prompt admitted after revalidation",
+    ]);
     const recovered = h.store.readMeta("resume-session")!;
     assert.equal(recovered.providerAuthBlock, undefined);
     assert.equal(recovered.providerAuthRetryAttemptedRecoveryId, blocked.providerAuthBlock?.recoveryId);
 
     replacement.resolvePermission("resume-session", requestId, "auth:revalidate");
     for (let index = 0; index < 4; index += 1) await tick();
-    assert.deepEqual(h.prompts, ["retained before provider submission"], "reconnect/stale delivery cannot replay");
+    assert.deepEqual(h.prompts, [
+      "retained before provider submission",
+      "newer prompt admitted after revalidation",
+    ], "reconnect/stale delivery cannot replay");
   } finally {
     replacement?.shutdownAll();
     h.manager.shutdownAll();
