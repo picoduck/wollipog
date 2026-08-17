@@ -129,7 +129,15 @@ import {
   type ProviderComposerCommand,
 } from "../composer-commands.js";
 import { SlashCommandMenu, slashCommandOptionId } from "./SlashCommandMenu.js";
-import { focusComposerAtEnd, placeComposerCaretAtEnd } from "../composer-focus.js";
+import {
+  captureComposerFocus,
+  focusComposerAtEnd,
+  placeComposerCaretAtEnd,
+  rememberComposerFocusForRemount,
+  reportComposerFocus,
+  restoreComposerFocus,
+  restoreRememberedComposerFocus,
+} from "../composer-focus.js";
 import { IncrementalActiveTurnProgress } from "../turn-progress.js";
 import { WorkingIndicator } from "./WorkingIndicator.js";
 import {
@@ -493,6 +501,9 @@ function SessionDetailLoaded({
   const rightPanelRef = useRef(rightPanel);
   rightPanelRef.current = rightPanel;
   const composerComposingRef = useRef(false);
+  const pendingComposerFocusRestoreRef = useRef<ReturnType<typeof captureComposerFocus> | null>(null);
+  const composerExplicitFocusTransferRef = useRef(false);
+  const composerFocusRestoreFrameRef = useRef<number | null>(null);
   const composerInteractionVersionRef = useRef(0);
   const composerDraftVersionRef = useRef(0);
   const commandSubmissionRetryRef = useRef<ComposerCommandSubmission | null>(null);
@@ -516,6 +527,119 @@ function SessionDetailLoaded({
   const [hydrationCommitRevision, setHydrationCommitRevision] = useState(0);
   const focusComposerRequestedRef = useRef(focusComposer);
   focusComposerRequestedRef.current = focusComposer;
+
+  const composerFocusKey = `${instanceScope}\u0000${sessionId}`;
+
+  const snapshotComposerFocus = useCallback((kind: Parameters<typeof reportComposerFocus>[1]) => {
+    const element = inputRef.current;
+    if (!element) return;
+    reportComposerFocus(sessionId, kind, element, composerComposingRef.current);
+  }, [sessionId]);
+
+  useLayoutEffect(() => {
+    const element = inputRef.current;
+    if (!element) return;
+    pendingComposerFocusRestoreRef.current = null;
+    reportComposerFocus(sessionId, "mount", element, false);
+    const remembered = restoreRememberedComposerFocus(composerFocusKey, element);
+    if (remembered) {
+      const active = element.ownerDocument.activeElement;
+      if (active && active !== element.ownerDocument.body && active !== element) {
+        pendingComposerFocusRestoreRef.current = null;
+      } else {
+        pendingComposerFocusRestoreRef.current = remembered;
+        element.focus({ preventScroll: true });
+        if (restoreComposerFocus(element, remembered)) {
+          pendingComposerFocusRestoreRef.current = null;
+          reportComposerFocus(sessionId, "restore", element, false);
+        }
+      }
+    }
+    return () => {
+      if (composerFocusRestoreFrameRef.current !== null) {
+        window.cancelAnimationFrame(composerFocusRestoreFrameRef.current);
+        composerFocusRestoreFrameRef.current = null;
+      }
+      if (
+        element.ownerDocument.activeElement === element
+        && !composerComposingRef.current
+        && !composerExplicitFocusTransferRef.current
+      ) {
+        rememberComposerFocusForRemount(composerFocusKey, element);
+      }
+      reportComposerFocus(sessionId, "unmount", element, composerComposingRef.current);
+    };
+  }, [composerFocusKey, sessionId]);
+
+  useLayoutEffect(() => {
+    const pending = pendingComposerFocusRestoreRef.current;
+    const element = inputRef.current;
+    if (!pending || !element || composerComposingRef.current) return;
+    if (!restoreComposerFocus(element, pending)) return;
+    pendingComposerFocusRestoreRef.current = null;
+    reportComposerFocus(sessionId, "restore", element, false);
+  }, [sessionId, text]);
+
+  useEffect(() => {
+    let clearExplicitTransferTimer: ReturnType<typeof setTimeout> | null = null;
+    const markExplicitTransfer = () => {
+      composerExplicitFocusTransferRef.current = true;
+      if (clearExplicitTransferTimer) clearTimeout(clearExplicitTransferTimer);
+      clearExplicitTransferTimer = setTimeout(() => {
+        composerExplicitFocusTransferRef.current = false;
+        clearExplicitTransferTimer = null;
+      }, 0);
+    };
+    const clearExplicitTransfer = () => {
+      composerExplicitFocusTransferRef.current = false;
+      if (clearExplicitTransferTimer) clearTimeout(clearExplicitTransferTimer);
+      clearExplicitTransferTimer = null;
+    };
+    const markExplicitPointerTransfer = (event: PointerEvent) => {
+      const composer = inputRef.current;
+      if (composer && event.target instanceof Node && !composer.contains(event.target)) markExplicitTransfer();
+    };
+    const markExplicitKeyboardTransfer = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Tab" || event.key === "F6") markExplicitTransfer();
+    };
+    document.addEventListener("pointerdown", markExplicitPointerTransfer, true);
+    document.addEventListener("keydown", markExplicitKeyboardTransfer, true);
+    window.addEventListener("blur", markExplicitTransfer);
+    window.addEventListener("focus", clearExplicitTransfer);
+    return () => {
+      document.removeEventListener("pointerdown", markExplicitPointerTransfer, true);
+      document.removeEventListener("keydown", markExplicitKeyboardTransfer, true);
+      window.removeEventListener("blur", markExplicitTransfer);
+      window.removeEventListener("focus", clearExplicitTransfer);
+      if (clearExplicitTransferTimer) clearTimeout(clearExplicitTransferTimer);
+    };
+  }, []);
+
+  const handleComposerBlur = useCallback((event: React.FocusEvent<HTMLTextAreaElement>) => {
+    const element = event.currentTarget;
+    const snapshot = captureComposerFocus(element);
+    reportComposerFocus(sessionId, "blur", element, composerComposingRef.current, event.relatedTarget);
+    const relatedTarget = event.relatedTarget;
+    const elementConstructor = element.ownerDocument.defaultView?.Element;
+    const relatedElement = elementConstructor && relatedTarget instanceof elementConstructor
+      ? relatedTarget as Element
+      : null;
+    const backgroundTarget = relatedElement === null
+      || relatedElement === element.ownerDocument.body
+      || relatedElement.closest(".detail-main") !== null;
+    const explicit = composerExplicitFocusTransferRef.current;
+    composerExplicitFocusTransferRef.current = false;
+    if (explicit || composerComposingRef.current || !backgroundTarget) {
+      pendingComposerFocusRestoreRef.current = null;
+      return;
+    }
+    if (composerFocusRestoreFrameRef.current !== null) window.cancelAnimationFrame(composerFocusRestoreFrameRef.current);
+    composerFocusRestoreFrameRef.current = window.requestAnimationFrame(() => {
+      composerFocusRestoreFrameRef.current = null;
+      if (!element.isConnected || !restoreComposerFocus(element, snapshot, true)) return;
+      reportComposerFocus(sessionId, "restore", element, false);
+    });
+  }, [sessionId]);
 
   useEffect(() => {
     queueSteeringInFlightRef.current.clear();
@@ -2255,23 +2379,35 @@ function SessionDetailLoaded({
                   ? slashCommandOptionId(slashListboxId, selectedSlashCommandId)
                   : undefined}
                 value={text}
+                onFocus={(event) => {
+                  composerExplicitFocusTransferRef.current = false;
+                  reportComposerFocus(sessionId, "focus", event.currentTarget, composerComposingRef.current);
+                }}
+                onBlur={handleComposerBlur}
+                onScroll={() => snapshotComposerFocus("scroll")}
                 onPointerDown={() => {
+                  pendingComposerFocusRestoreRef.current = null;
                   composerInteractionVersionRef.current += 1;
                 }}
                 onCompositionStart={() => {
+                  pendingComposerFocusRestoreRef.current = null;
                   composerComposingRef.current = true;
                   composerInteractionVersionRef.current += 1;
+                  snapshotComposerFocus("composition-start");
                 }}
                 onCompositionEnd={() => {
                   composerComposingRef.current = false;
+                  snapshotComposerFocus("composition-end");
                 }}
                 onSelect={(e) => {
                   updateComposerSelection(
                     e.currentTarget.selectionStart,
                     e.currentTarget.selectionEnd,
                   );
+                  reportComposerFocus(sessionId, "selection", e.currentTarget, composerComposingRef.current);
                 }}
                 onChange={(e) => {
+                  pendingComposerFocusRestoreRef.current = null;
                   draftDirty.current = true;
                   composerInteractionVersionRef.current += 1;
                   composerDraftVersionRef.current += 1;

@@ -7,6 +7,7 @@ import { Window } from "happy-dom";
 import type { ControlPlaneToUi, RunnerView, SessionEvent, SessionView, SideChatView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
+import { COMPOSER_FOCUS_DIAGNOSTIC_EVENT } from "../composer-focus.js";
 import {
   deleteComposerDraftIfMatches,
   loadComposerDraft,
@@ -160,6 +161,8 @@ interface Fixture {
   rerenderSessionWithDraftLoader: (sessionId: string, loader: ComposerDraftLoader) => Promise<void>;
   remountWithDraftLoader: (loader: ComposerDraftLoader) => Promise<HTMLTextAreaElement>;
   alternateSessionId: string;
+  pushSession: (patch: Partial<SessionView>) => Promise<void>;
+  pushEvent: (payload: SessionEvent["payload"]) => Promise<void>;
 }
 
 type ComposerDraftLoader = (sessionId: string, instanceScope: string) => Promise<ComposerDraft | null>;
@@ -320,6 +323,20 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
     rerenderSessionWithDraftLoader,
     remountWithDraftLoader,
     alternateSessionId: alternateSession.id,
+    pushSession: async (patch) => {
+      Object.assign(currentSession, patch);
+      await act(async () => { socket.push({ type: "session_upsert", session: { ...currentSession } }); });
+    },
+    pushEvent: async (payload) => {
+      currentSession.messageCount += 1;
+      const seq = currentSession.messageCount;
+      await act(async () => {
+        socket.push({
+          type: "session_event",
+          event: { id: seq, sessionId: currentSession.id, seq, ts: seq + 1, payload },
+        });
+      });
+    },
   };
 }
 
@@ -727,6 +744,152 @@ test("SessionDetail invalidates deferred caret restoration after pointer interac
 
     assert.equal(fixture.composer.value, "saved after pointer interaction");
     assert.equal(selections.length, selectionCount);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("live turn updates preserve the focused composer, exact draft geometry, and content-free diagnostics", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft, {
+    sessionPatch: { status: "running", activeTurnId: "turn-1" },
+    runnerProtocolVersion: 72,
+  });
+  const diagnostics: unknown[] = [];
+  const onDiagnostic = (event: unknown) => {
+    diagnostics.push((event as { detail: unknown }).detail);
+  };
+  domWindow.addEventListener(COMPOSER_FOCUS_DIAGNOSTIC_EVENT, onDiagnostic);
+  try {
+    await resolveComposerDraft(draft, { text: "", images: [], updatedAt: 1 });
+    await focusRequestedComposer(fixture);
+    assert.ok(fixture.container.querySelector('button[aria-label="Stop Turn"]'));
+    await act(async () => {
+      fixture.composer.value = "alpha\nbeta\ngamma";
+      Simulate.change(fixture.composer);
+    });
+    fixture.composer.setSelectionRange(2, 11, "backward");
+    fixture.composer.scrollTop = 47;
+    await act(async () => { Simulate.select(fixture.composer); });
+    const original = fixture.composer;
+
+    assert.ok(fixture.container.querySelector('button[aria-label="Send"]'),
+      "the first character swaps Stop for Send without replacing the composer");
+    await act(async () => { Simulate.compositionStart(fixture.composer); });
+    await fixture.pushEvent({ kind: "agent_message", text: "streamed update", messageId: "m-1" });
+    await fixture.pushEvent({ kind: "tool_call", toolCallId: "tool-1", title: "Background Tool", status: "running" });
+    await fixture.pushSession({ updatedAt: 5, status: "idle", activeTurnId: undefined });
+    await act(async () => { Simulate.compositionEnd(fixture.composer); });
+
+    assert.equal(fixture.container.querySelector(".composer-input"), original, "live updates must not remount the textarea");
+    assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer);
+    assert.equal(fixture.composer.value, "alpha\nbeta\ngamma");
+    assert.deepEqual(
+      [fixture.composer.selectionStart, fixture.composer.selectionEnd, fixture.composer.selectionDirection],
+      [2, 11, "backward"],
+    );
+    assert.equal(fixture.composer.scrollTop, 47);
+    assert.ok(fixture.container.querySelector('button[aria-label="Send"]'), "Stop-to-Send transition keeps the composer");
+    assert.ok(diagnostics.length > 0);
+    assert.equal(JSON.stringify(diagnostics).includes("alpha"), false, "diagnostics must never include draft content");
+  } finally {
+    domWindow.removeEventListener(COMPOSER_FOCUS_DIAGNOSTIC_EVENT, onDiagnostic);
+    await unmountFixture(fixture);
+  }
+});
+
+test("focus recovery distinguishes background loss from explicit transfer and IME ownership", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await resolveComposerDraft(draft, { text: "selection survives", images: [], updatedAt: 1 });
+    await focusRequestedComposer(fixture);
+    fixture.composer.setSelectionRange(1, 9, "forward");
+    fixture.composer.scrollTop = 23;
+
+    await act(async () => {
+      fixture.composer.blur();
+      flushFrames();
+    });
+    assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer);
+    assert.deepEqual([fixture.composer.selectionStart, fixture.composer.selectionEnd], [1, 9]);
+    assert.equal(fixture.composer.scrollTop, 23);
+
+    const transcript = fixture.container.querySelector('[aria-label="Session Activity"]') as HTMLElement;
+    await act(async () => {
+      transcript.focus();
+      flushFrames();
+    });
+    assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer,
+      "background transcript focus must be reclaimed");
+
+    await act(async () => {
+      transcript.dispatchEvent(new domWindow.PointerEvent("pointerdown", { bubbles: true }) as never);
+      transcript.focus();
+      flushFrames();
+    });
+    assert.equal(fixture.composer.ownerDocument.activeElement, transcript, "explicit control focus must not be reclaimed");
+
+    await act(async () => {
+      fixture.composer.focus();
+      transcript.dispatchEvent(new domWindow.PointerEvent("pointerdown", { bubbles: true }) as never);
+    });
+    await flushAsyncWork();
+    await act(async () => {
+      fixture.composer.blur();
+      flushFrames();
+    });
+    assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer,
+      "an old pointer intent must not suppress a later background-loss recovery");
+
+    await act(async () => {
+      fixture.composer.focus();
+      Simulate.compositionStart(fixture.composer);
+      fixture.composer.blur();
+      flushFrames();
+      Simulate.compositionEnd(fixture.composer);
+      flushFrames();
+    });
+    assert.notEqual(fixture.composer.ownerDocument.activeElement, fixture.composer,
+      "focus recovery must not interrupt or resurrect an ended IME composition");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("an immediate same-session remount restores exact selection direction and textarea scroll after hydration", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await act(async () => {
+      draft.resolve(null);
+      await draft.promise;
+      fixture.composer.value = "multiline remount draft";
+      Simulate.change(fixture.composer);
+    });
+    await act(async () => {
+      fixture.composer.focus();
+      fixture.composer.setSelectionRange(3, 16, "backward");
+      fixture.composer.scrollTop = 61;
+      Simulate.select(fixture.composer);
+    });
+
+    const persisted = deferred<ComposerDraft | null>();
+    const remounted = await fixture.remountWithDraftLoader(() => persisted.promise);
+    await resolveComposerDraft(persisted, {
+      text: "multiline remount draft",
+      images: [],
+      updatedAt: 2,
+    });
+    await flushAsyncWork();
+    await act(async () => { flushFrames(); });
+
+    assert.equal(remounted.ownerDocument.activeElement, remounted);
+    assert.deepEqual(
+      [remounted.selectionStart, remounted.selectionEnd, remounted.selectionDirection],
+      [3, 16, "backward"],
+    );
+    assert.equal(remounted.scrollTop, 61);
   } finally {
     await unmountFixture(fixture);
   }
