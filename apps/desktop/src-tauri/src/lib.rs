@@ -2975,6 +2975,75 @@ fn local_runner_status_value(
     )
 }
 
+fn external_url_has_userinfo(url: &str) -> bool {
+    let authority = url
+        .split_once("://")
+        .map(|(_, authority)| authority)
+        .unwrap_or("");
+    let end = authority
+        .find(|character: char| matches!(character, '/' | '?' | '#'))
+        .unwrap_or(authority.len());
+    authority[..end].contains('@')
+}
+
+fn validate_external_url(url: &str) -> Result<(), String> {
+    if url.is_empty() || url.trim() != url || url.chars().any(char::is_control) {
+        return Err(
+            "Wollipog can open only complete HTTP or HTTPS links in your system browser.".into(),
+        );
+    }
+    let Some((raw_scheme, _)) = url.split_once("://") else {
+        return Err(
+            "Wollipog can open only complete HTTP or HTTPS links in your system browser.".into(),
+        );
+    };
+    if !raw_scheme.eq_ignore_ascii_case("http") && !raw_scheme.eq_ignore_ascii_case("https") {
+        return Err("Wollipog can open only HTTP and HTTPS links in your system browser.".into());
+    }
+    let parsed = url::Url::parse(url).map_err(|_| {
+        "Wollipog can open only complete HTTP or HTTPS links in your system browser.".to_string()
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(format!(
+            "Wollipog can open only HTTP and HTTPS links in your system browser; {} links are blocked.",
+            parsed.scheme()
+        ));
+    }
+    if parsed.host_str().is_none() {
+        return Err("This HTTP or HTTPS link does not include a valid host.".into());
+    }
+    if external_url_has_userinfo(url)
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return Err(
+            "Remove the embedded username or password before opening this link in your system browser."
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn open_external_url_with(
+    url: String,
+    opener: impl FnOnce(String) -> Result<(), String>,
+) -> Result<(), String> {
+    validate_external_url(&url)?;
+    opener(url)
+}
+
+/// The only page-accessible route to the OS opener. The caller cannot select a program, execute a
+/// command, or open a local path; validation happens again here at the native trust boundary.
+#[tauri::command]
+fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    open_external_url_with(url, |url| {
+        #[allow(deprecated)]
+        app.shell()
+            .open(url, None)
+            .map_err(|error| format!("The system browser could not open this link: {error}"))
+    })
+}
+
 #[tauri::command]
 fn local_runner_status(
     app: tauri::AppHandle,
@@ -3448,7 +3517,8 @@ pub fn run() {
             remote_transport_close,
             remote_ui_open,
             remote_ui_send,
-            remote_ui_close
+            remote_ui_close,
+            open_external_url
         ])
         .on_window_event(|window, event| {
             // §23.1. `RunEvent::Exit` kills the sidecar and the local runner, so closing the window
@@ -3510,6 +3580,66 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_url_validation_allows_only_complete_credential_free_http_links() {
+        for allowed in [
+            "https://example.com/a%2Fb?q=x%20y#fragment",
+            "http://localhost:4317/docs",
+            "HTTPS://github.com/picoduck/wollipog",
+        ] {
+            assert_eq!(validate_external_url(allowed), Ok(()), "{allowed}");
+        }
+        for blocked in [
+            "mailto:person@example.com",
+            "file:///tmp/report.txt",
+            "wollipog://session/123",
+            "javascript:alert(1)",
+            "https://user:password@example.com/private",
+            "https://@example.com/empty-user",
+            "https://?query",
+            "https:example.com/no-authority",
+            "/relative/path",
+            " https://example.com",
+            "https://example.com\n",
+        ] {
+            assert!(validate_external_url(blocked).is_err(), "{blocked}");
+        }
+    }
+
+    #[test]
+    fn external_url_opener_receives_the_exact_valid_url_once() {
+        use std::cell::RefCell;
+
+        let calls = RefCell::new(Vec::new());
+        let url = "https://example.com/a%2Fb?q=x%20y#Case".to_string();
+        open_external_url_with(url.clone(), |opened| {
+            calls.borrow_mut().push(opened);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(calls.into_inner(), vec![url]);
+    }
+
+    #[test]
+    fn external_url_opener_is_not_called_for_blocked_input_and_propagates_failure() {
+        use std::cell::Cell;
+
+        let calls = Cell::new(0);
+        let blocked = open_external_url_with("file:///tmp/private".into(), |_| {
+            calls.set(calls.get() + 1);
+            Ok(())
+        });
+        assert!(blocked.is_err());
+        assert_eq!(calls.get(), 0);
+
+        let failure = open_external_url_with("https://example.com".into(), |_| {
+            calls.set(calls.get() + 1);
+            Err("mocked opener failure".into())
+        });
+        assert_eq!(failure.unwrap_err(), "mocked opener failure");
+        assert_eq!(calls.get(), 1);
+    }
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     const OWNERSHIP_HELPER_MODE: &str = "WOLLIPOG_OWNERSHIP_HELPER_MODE";
