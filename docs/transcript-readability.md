@@ -21,7 +21,11 @@ than the cap, an adopted transcript, or a resumed session with no anchor in reac
 boundary stands and the response reports `turnAligned: false` rather than growing without limit.
 Older pages stay count-bounded so their cursors remain exact and disjoint.
 
-While an opening window is in flight, hydration's own forward broadcasts are held. The control plane
+While an opening window is in flight, hydration's own forward broadcasts are held — held, not
+dropped. The same stream carries genuinely live events, and the window's point-in-time read cannot
+contain one published after it, so held rows are replayed when the window lands: everything at or
+above its base is merged, and the hydration prefix below it stays in the cache, reachable through
+Load Earlier Activity. The control plane
 hydrates a cold cache forward from the runner and publishes those rows exactly like live ones, so
 appending them would paint the start of a long log behind the window's back. They are durable in the
 cache and the window's read supplies the tail, so the hold costs nothing and is released as soon as
@@ -34,8 +38,11 @@ collapse the published cursor and send the next recovery back to the start of th
 A bounded window belongs to the session reader alone. Run and Pod comparison columns render whole
 histories and offer no reach-back control, so entering one drops any partial cache rather than
 letting fleet recovery page only above the cursor that window published. Derived state follows the
-same rule: a windowed load does not rebuild the heartbeat ring, whose buckets can predate it, and the
-Subagents panel reports earlier activity as unloaded instead of claiming none was recorded.
+same rule. A partial load does not rebuild the heartbeat ring, whose buckets can predate it. The
+Subagents panel says earlier activity is unloaded rather than presenting its list as an inventory.
+And absence stops being evidence: a completed provider command or an accepted steer whose canonical
+message sits in an unloaded turn no longer resurrects a recovery receipt beside the composer, since
+against a bounded window that absence proves nothing.
 
 Two loads keep the forward chain. A reconnect gap is owned by the forward cursor frozen at
 subscription time, and a session whose reader has a saved position keeps loading the history that

@@ -2205,11 +2205,16 @@ function SessionDetailLoaded({
             {error && <div className="composer-error">{error}</div>}
             {/* Active-turn progress renders in the transcript's Working row, not as a card here —
                 the composer area keeps only composer concerns (receipts, queue, input). */}
-            <SessionCommandReceipts invocations={session.commandInvocations ?? []} timelineItems={items} />
+            <SessionCommandReceipts
+              invocations={session.commandInvocations ?? []}
+              timelineItems={items}
+              historyPartial={eventWindow?.hasOlder === true}
+            />
             <SteeringReceipts
               attempts={session.steeringAttempts ?? []}
               timelineItems={items}
               activeTurnId={session.activeTurnId}
+              historyPartial={eventWindow?.hasOlder === true}
               pendingActions={steeringResolutionPending}
               onQueueAgain={(submissionId) => void resolveSteeringAttempt(submissionId, "queue_again")}
               onDismiss={(submissionId) => void resolveSteeringAttempt(submissionId, "dismiss")}

@@ -10744,10 +10744,12 @@ export class ControlPlaneDb {
     page: CachedEventTailPage,
     windowStartSeq: number,
   ): CachedEventTailPage {
+    // The anchor search includes the page's own first row: a page that already begins at a user
+    // message is aligned, and reaching past it would drag in an entire extra turn.
     const floor = Math.max(0, windowStartSeq - TAIL_TURN_ALIGNMENT_MAX_EVENTS);
     const anchor = this.stmt(
       `SELECT seq FROM session_events
-        WHERE session_id=? AND kind='user_message' AND seq<? AND seq>=?
+        WHERE session_id=? AND kind='user_message' AND seq<=? AND seq>=?
         ORDER BY seq DESC LIMIT 1`,
     ).get(sessionId, windowStartSeq, floor) as { seq: number } | undefined;
     // No anchor within reach: an adopted transcript, a resumed session, or a turn longer than the

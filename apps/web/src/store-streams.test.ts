@@ -844,6 +844,30 @@ test("hydration broadcasts cannot paint the log's start while an opening window 
   assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [4_801, 4_802, 4_803]);
 });
 
+test("an event published after the window's read survives the hold that hid hydration", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  store.beginEventHistoryLoad("s1", 0, -1, generation, true);
+
+  // Hydration's prefix and a genuinely live event arrive on the same stream while the window is in
+  // flight. The window's point-in-time read through seq 4802 cannot contain seq 4803.
+  message(store, { type: "session_event", event: event("s1", 1) });
+  message(store, { type: "session_event", event: event("s1", 4_803) });
+  store.loadEvents("s1", [event("s1", 4_801), event("s1", 4_802)], 0, undefined, true, generation, true);
+
+  assert.deepEqual(
+    store.getState().events.get("s1")?.map((entry) => entry.seq),
+    [4_801, 4_802, 4_803],
+    "the live event is replayed; the hydration prefix stays out of the window",
+  );
+});
+
 test("a failed opening window releases its hold so live delivery is never stranded", () => {
   const store = new Store();
   message(store, {

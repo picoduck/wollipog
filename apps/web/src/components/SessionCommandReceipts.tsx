@@ -37,6 +37,8 @@ function commandInvocationIdentity(invocation: Pick<
 export function visibleSessionCommandReceipts(
   invocations: readonly SessionCommandInvocationView[],
   timelineItems: readonly TimelineItem[],
+  /** The timeline is a bounded window, so a canonical message may simply be below it. */
+  historyPartial = false,
 ): SessionCommandInvocationView[] {
   const canonical = new Set(timelineItems.flatMap((item) =>
     item.kind === "user_message" && item.commandInvocation
@@ -45,7 +47,12 @@ export function visibleSessionCommandReceipts(
   const terminalRecoveryIds = new Set(invocations
     .filter((invocation) =>
       invocation.state === "rejected" || invocation.state === "uncertain" ||
-      (invocation.state === "completed" && !canonical.has(commandInvocationIdentity(invocation))))
+      // A completed invocation retires into the canonical transcript, so its absence normally means
+      // the message never landed. Against a bounded window absence proves nothing: the message can
+      // be in an unloaded turn, and inferring recovery from it resurrects receipts for commands
+      // that completed cleanly turns ago.
+      (invocation.state === "completed" && !historyPartial &&
+        !canonical.has(commandInvocationIdentity(invocation))))
     .sort((left, right) =>
       right.updatedAt - left.updatedAt ||
       right.createdAt - left.createdAt ||
@@ -66,11 +73,14 @@ export function visibleSessionCommandReceipts(
 export function SessionCommandReceipts({
   invocations,
   timelineItems,
+  historyPartial = false,
 }: {
   invocations: readonly SessionCommandInvocationView[];
   timelineItems: readonly TimelineItem[];
+  /** The transcript is a bounded window, so a canonical message may sit in an unloaded turn. */
+  historyPartial?: boolean;
 }) {
-  const visible = visibleSessionCommandReceipts(invocations, timelineItems);
+  const visible = visibleSessionCommandReceipts(invocations, timelineItems, historyPartial);
   if (!visible.length) return null;
   return (
     <section className="steering-receipts" aria-label="Provider Command Receipts">

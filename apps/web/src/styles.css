@@ -10024,6 +10024,10 @@ body.shell-dock-dragging * {
   box-shadow: var(--shadow); font-size: 12px;
 }
 .transcript-load-notice.error { border-color: color-mix(in srgb, var(--red) 35%, var(--border)); }
+.subagents-partial {
+  margin: 0 0 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  color: var(--text-dim); background: var(--bg-elev); font-size: var(--text-sm);
+}
 .transcript-earlier-activity {
   display: flex; align-items: center; justify-content: center; gap: 8px;
   padding: 10px 12px 2px; color: var(--text-dim); font-size: var(--text-sm);

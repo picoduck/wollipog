@@ -138,6 +138,13 @@ export function SubagentsPanel({
 
   return (
     <div className="subagents-panel">
+      {/* A list drawn from a bounded window is a sample, not an inventory: subagents spawned in
+          unloaded turns are simply absent, so say so beside the ones that are here. */}
+      {earlierActivityUnloaded && (
+        <p className="subagents-partial" role="status">
+          Earlier activity in this session is not loaded, so subagents from those turns are not listed.
+        </p>
+      )}
       {session.status === "input_required" && (
         <div className="hint warn subagents-session-note" role="status">
           The parent session needs input. Current protocol data cannot attribute that request to a specific subagent.

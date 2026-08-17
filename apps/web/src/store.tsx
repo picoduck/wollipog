@@ -215,9 +215,11 @@ export interface State {
   eventHistory: Map<string, EventHistoryState>;
   /** Which slice of each cached timeline is loaded, and whether older turns remain fetchable. */
   eventWindows: Map<string, EventWindowState>;
-  /** Sessions whose opening window has been requested but not yet applied. Hydration broadcasts for
-   * these are held so a still-filling cache cannot paint its prefix before the tail arrives. */
-  pendingOpeningWindows: Set<string>;
+  /** Sessions whose opening window has been requested but not yet applied, each holding the events
+   * broadcast meanwhile. Hydration republishes a cold cache's forward rows exactly like live ones,
+   * so they are held rather than painted — but held, not dropped: the same stream carries genuinely
+   * live events, and the window's point-in-time read cannot contain one published after it. */
+  pendingOpeningWindows: Map<string, SessionEvent[]>;
   /** Hydrated bounded shell scrollback keyed by shellId; kept only for on-screen sessions. */
   shellOutput: Map<string, ShellScrollback>;
   /** Per-session durable registry generation; docks reload metadata/history when it advances. */
@@ -511,11 +513,30 @@ function dropBoundedWindowsForView(state: State): State {
   return { ...state, events, eventHistory, eventWindows, streamRecoveryCursors };
 }
 
-function releaseOpeningWindow(state: State, sessionId: string): Set<string> {
+/** How many broadcasts one pending window may hold before it stops holding and starts painting. */
+const MAX_HELD_OPENING_WINDOW_EVENTS = 2_000;
+
+function releaseOpeningWindow(state: State, sessionId: string): Map<string, SessionEvent[]> {
   if (!state.pendingOpeningWindows.has(sessionId)) return state.pendingOpeningWindows;
-  const next = new Set(state.pendingOpeningWindows);
+  const next = new Map(state.pendingOpeningWindows);
   next.delete(sessionId);
   return next;
+}
+
+/** Rows broadcast while a window was pending, replayed once it lands.
+ *
+ * Everything at or above the window's own base is kept: it is either already in the window (deduped
+ * by seq) or newer than the read that produced it, which is exactly the live event a plain hold
+ * would have lost. Rows below the base are the hydration prefix this window exists to avoid
+ * painting; they stay in the cache and are reachable through Load Earlier Activity. */
+function replayHeldOpeningWindowEvents(
+  held: readonly SessionEvent[] | undefined,
+  merged: SessionEvent[],
+  windowBaseSeq: number,
+): SessionEvent[] {
+  if (!held?.length) return merged;
+  const live = held.filter((event) => event.seq >= windowBaseSeq);
+  return live.length ? mergeEvents(merged, live) : merged;
 }
 
 function pruneViewStreams(state: State): State {
@@ -536,7 +557,7 @@ function pruneViewStreams(state: State): State {
     eventHistory,
     eventWindows,
     shellOutput,
-    pendingOpeningWindows: new Set([...state.pendingOpeningWindows].filter((id) => keep.has(id))),
+    pendingOpeningWindows: new Map([...state.pendingOpeningWindows].filter(([id]) => keep.has(id))),
   };
 }
 
@@ -648,15 +669,26 @@ function reducer(state: State, action: Action): State {
       if (activeHistory?.recoveryGeneration === action.recoveryGeneration &&
           activeHistory.recoveryRevision !== recoveryRevision) return state;
       const events = new Map(state.events);
-      const merged = mergeEvents(events.get(action.sessionId), action.events);
+      const applied = mergeEvents(events.get(action.sessionId), action.events);
+      // A window read is a point in time. Anything broadcast while it was in flight is replayed
+      // here, so a live event published after the server's read is never lost.
+      const merged = replayHeldOpeningWindowEvents(
+        state.pendingOpeningWindows.get(action.sessionId),
+        applied,
+        action.events[0]?.seq ?? 0,
+      );
       events.set(action.sessionId, merged);
       const session = state.sessions.get(action.sessionId);
       // A bounded window holds only the newest events, so folding a ring from it would erase
       // buckets this store already observed live from the turns below it. Only a load that speaks
       // for the whole history may rebuild; a windowed one leaves the ring to live observation.
       const priorActivity = state.activity.get(action.sessionId);
-      const windowed = action.windowHasOlder === true;
-      if (!windowed || !priorActivity) {
+      // Partial means "these events are not the whole history": older rows remain, or the read
+      // itself never reached the runner's tail. An incomplete prefix reports no older rows and is
+      // still no basis for rebuilding a ring that already saw the turns it omits.
+      const partialHistory = action.windowHasOlder === true ||
+        (action.windowHasOlder !== undefined && !action.recoveryComplete);
+      if (!partialHistory || !priorActivity) {
         const rebuiltActivity = rebuildSessionActivity(
           merged,
           action.eventEpoch,
@@ -753,7 +785,7 @@ function reducer(state: State, action: Action): State {
           action.eventEpoch !== sessionEventEpoch(state.sessions.get(action.sessionId))) return state;
       const pendingOpeningWindows = action.openingWindow === true &&
         !state.pendingOpeningWindows.has(action.sessionId)
-        ? new Set(state.pendingOpeningWindows).add(action.sessionId)
+        ? new Map(state.pendingOpeningWindows).set(action.sessionId, [])
         : state.pendingOpeningWindows;
       const eventHistory = new Map(state.eventHistory);
       const prior = eventHistory.get(action.sessionId);
@@ -1086,8 +1118,24 @@ function reducer(state: State, action: Action): State {
           // appending them here would paint the start of a long log — the oldest-first open the
           // window exists to remove — behind the window's back. They are durable in the cache and
           // the window's own read supplies the tail, so holding them costs nothing.
-          if (state.pendingOpeningWindows.has(msg.event.sessionId)) {
-            return heartbeatState;
+          const held = state.pendingOpeningWindows.get(msg.event.sessionId);
+          if (held) {
+            // Past the cap the hold gives up rather than growing without bound: a cache streaming
+            // this much is the cold hydration case, where painting as it arrives is the old
+            // behavior and still strictly better than losing rows.
+            if (held.length >= MAX_HELD_OPENING_WINDOW_EVENTS) {
+              const released = new Map(state.pendingOpeningWindows);
+              released.delete(msg.event.sessionId);
+              const events = new Map(state.events);
+              events.set(msg.event.sessionId, mergeEvents(events.get(msg.event.sessionId), [...held, msg.event]));
+              return updateSessionStall(
+                { ...heartbeatState, events, pendingOpeningWindows: released },
+                msg.event.sessionId,
+              );
+            }
+            const pendingOpeningWindows = new Map(state.pendingOpeningWindows);
+            pendingOpeningWindows.set(msg.event.sessionId, [...held, msg.event]);
+            return { ...heartbeatState, pendingOpeningWindows };
           }
           const events = new Map(state.events);
           const existing = (state.eventEpochs.get(msg.event.sessionId) ?? 0) === eventEpoch
@@ -1251,7 +1299,7 @@ function initialState(view: View = { name: "inbox" }, inbox = loadInboxState()):
     eventEpochs: new Map(),
     eventHistory: new Map(),
     eventWindows: new Map(),
-    pendingOpeningWindows: new Set(),
+    pendingOpeningWindows: new Map(),
     shellOutput: new Map(),
     shellRegistryRevision: new Map(),
     streamSubscriptions: EMPTY_UI_SUBSCRIPTION_DELIVERY,

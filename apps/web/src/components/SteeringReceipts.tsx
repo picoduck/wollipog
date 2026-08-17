@@ -11,6 +11,8 @@ export interface SteeringReceiptsProps {
   attempts: readonly SteeringAttemptView[];
   timelineItems: readonly TimelineItem[];
   activeTurnId?: string;
+  /** The transcript is a bounded window, so an accepted steer's message may be in an unloaded turn. */
+  historyPartial?: boolean;
   pendingActions?: ReadonlyMap<string, SteeringResolutionAction>;
   onQueueAgain: (submissionId: string) => void;
   onDismiss: (submissionId: string) => void;
@@ -59,14 +61,18 @@ export function deriveSteeringReceipts(
   attempts: readonly SteeringAttemptView[],
   timelineItems: readonly TimelineItem[],
   activeTurnId?: string,
+  /** The timeline is a bounded window, so an accepted steer's canonical message may be below it. */
+  historyPartial = false,
 ): SteeringReceiptPresentation[] {
   const canonicalAccepted = new Set(timelineItems.flatMap((item) =>
     item.kind === "user_message" && item.deliveryIntent === "steer" && item.submissionId
       ? [item.submissionId]
       : []
   ));
-  const eligible = attempts.filter(
-    (attempt) => attempt.state !== "accepted" || !canonicalAccepted.has(attempt.submissionId),
+  // An accepted steer retires into the canonical transcript. Against a bounded window its absence
+  // means only that its turn is unloaded, so it must not resurface as an unsettled receipt.
+  const eligible = attempts.filter((attempt) =>
+    attempt.state !== "accepted" || (!historyPartial && !canonicalAccepted.has(attempt.submissionId)),
   );
   const recentPreviousTurn = new Set(
     eligible
@@ -104,11 +110,12 @@ export function SteeringReceipts({
   attempts,
   timelineItems,
   activeTurnId,
+  historyPartial = false,
   pendingActions,
   onQueueAgain,
   onDismiss,
 }: SteeringReceiptsProps) {
-  const receipts = deriveSteeringReceipts(attempts, timelineItems, activeTurnId);
+  const receipts = deriveSteeringReceipts(attempts, timelineItems, activeTurnId, historyPartial);
   if (!receipts.length) return null;
 
   return (

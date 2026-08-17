@@ -2634,10 +2634,33 @@ test("a turn-aligned tail page begins at an invocation rather than orphaned upda
   assert.equal(aligned.nextBeforeSeq, 2);
   assert.equal(aligned.hasMoreOlder, true, "seq 1 remains below the aligned page");
 
-  // Aligning at the session's first turn leaves nothing older to reach for.
-  const whole = db.listCachedEventTailPage("aligned-cache", undefined, 5, { alignToTurn: true });
+  // A page whose own first row is a user message is already aligned: reaching past it would drag
+  // in the previous turn.
+  const atBoundary = db.listCachedEventTailPage("aligned-cache", undefined, 5, { alignToTurn: true });
+  assert.deepEqual(atBoundary.events.map((event) => event.seq), [2, 3, 4, 5, 6]);
+  assert.equal(atBoundary.turnAligned, true);
+  assert.equal(atBoundary.hasMoreOlder, true, "seq 1 is still below it");
+
+  // Reaching the session's first turn leaves nothing older to ask for.
+  const whole = db.listCachedEventTailPage("aligned-cache", undefined, 6, { alignToTurn: true });
   assert.deepEqual(whole.events.map((event) => event.seq), [1, 2, 3, 4, 5, 6]);
   assert.equal(whole.hasMoreOlder, false);
+});
+
+test("a page already starting at a user message is left as it is", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "boundary-cache" }));
+  db.appendEvent("boundary-cache", { kind: "user_message", text: "first" }, 1);
+  db.appendEvent("boundary-cache", { kind: "agent_message", text: "reply" }, 2);
+  db.appendEvent("boundary-cache", { kind: "user_message", text: "second" }, 3);
+  db.appendEvent("boundary-cache", { kind: "agent_message", text: "reply" }, 4);
+  // The count boundary already lands on seq 3, so alignment must not reach back to seq 1 and drag
+  // in a whole extra turn the reader did not ask for.
+  const page = db.listCachedEventTailPage("boundary-cache", undefined, 2, { alignToTurn: true });
+  assert.deepEqual(page.events.map((event) => event.seq), [3, 4]);
+  assert.equal(page.turnAligned, true);
+  assert.equal(page.nextBeforeSeq, 3);
+  assert.equal(page.hasMoreOlder, true);
 });
 
 test("turn alignment stops at its cap and never extends a page without bound", () => {
