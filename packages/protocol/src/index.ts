@@ -1944,7 +1944,13 @@ export type SessionEventPayload =
   | { kind: "plan"; entries: PlanEntry[]; parentToolUseId?: string }
   | { kind: "command_output"; text: string; textRefs?: EventPayloadReference[] }
   | { kind: "file_edit"; path: string; diff?: string; diffRefs?: EventPayloadReference[]; parentToolUseId?: string }
-  | { kind: "stderr"; text: string; textRefs?: EventPayloadReference[] }
+  | {
+      kind: "stderr";
+      text: string;
+      textRefs?: EventPayloadReference[];
+      /** Authenticated runner-only durable marker. Provider stderr can never set this field. */
+      runnerMarker?: "background_continuation_delivery";
+    }
   | { kind: "status"; status: SessionStatus }
   | { kind: "turn_interrupted" }
   | { kind: "error"; message: string }

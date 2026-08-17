@@ -842,7 +842,8 @@ export class SessionManager {
           pendingBackgroundTaskIds: [],
           orphanedWork: undefined,
         }) ?? m;
-      } else if (m.driver === "claude-code" && m.backgroundWorkState === "running") {
+      } else if (m.driver === "claude-code" &&
+          (m.backgroundWorkState === "running" || (m.pendingBackgroundTaskIds?.length ?? 0) > 0)) {
         const recovered = new Set(m.recoveredBackgroundTaskIds ?? []);
         const pendingTaskIds = (m.pendingBackgroundTaskIds?.length ? m.pendingBackgroundTaskIds : ["unknown"])
           .filter((id) => !recovered.has(id));
@@ -4367,6 +4368,10 @@ export class SessionManager {
       return;
     }
     const { text, images: imageInputs, slashCommand, durable, syntheticRecovery, backgroundJobIds } = queued;
+    // Reserve the continuation generation before the first await. Background lifecycle callbacks
+    // can arrive while images/worktree checkpoints are materialized; they must not enqueue a
+    // second prompt for the generation already owned by this dequeued turn.
+    if (backgroundJobIds?.length) entry.currentBackgroundJobIds = [...backgroundJobIds];
     let images: PromptImage[];
     try {
       const references = imageInputs.filter(isPromptImageReference);
@@ -6315,7 +6320,8 @@ export class SessionManager {
     // A persistent transport that is still running now owns the remaining work. A one-shot
     // transport exits after every turn, so its attempted orphan remains visible but is never
     // submitted automatically a second time.
-    if (hasPending && current.backgroundWorkState !== "running") return;
+    if (hasPending && current.backgroundWorkState !== "running" &&
+        current.backgroundWorkState !== "continuation_pending") return;
     const updated = this.store.patchMeta(sessionId, hasPending
       ? { pendingBackgroundTaskIds: pending, orphanedWork: undefined }
       : {
@@ -6448,7 +6454,8 @@ export class SessionManager {
     const jobIds = this.queuedBackgroundJobIds(meta);
     if (!meta || meta.status === "stopped" || !automaticClaudeRecoveryAllowed(meta) || jobIds.length === 0) return;
     const entry = this.active.get(sessionId);
-    if (entry?.queue.some((prompt) => prompt.backgroundJobIds?.some((id) => jobIds.includes(id)))) return;
+    if (entry?.currentBackgroundJobIds?.some((id) => jobIds.includes(id)) ||
+        entry?.queue.some((prompt) => prompt.backgroundJobIds?.some((id) => jobIds.includes(id)))) return;
     this.backgroundContinuationLaunching.add(sessionId);
     try {
       if (entry) {
@@ -6527,6 +6534,7 @@ export class SessionManager {
     if (!continuationId || !this.emitEvent(sessionId, {
       kind: "stderr",
       text: `${BACKGROUND_CONTINUATION_DELIVERED_PREFIX}${continuationId}`,
+      runnerMarker: "background_continuation_delivery",
     })) return;
     const persistedAt = Date.now();
     const backgroundJobs = current.backgroundJobs.map((job) => selected.has(job.id)
@@ -6549,7 +6557,9 @@ export class SessionManager {
   private reconcileDeliveredBackgroundContinuations(meta: SessionMeta): SessionMeta {
     if (!meta.backgroundJobs?.some((job) => job.continuationId && !job.assistantResultPersistedAt)) return meta;
     const delivered = new Set(this.store.readEvents(meta.sessionId).flatMap((event) =>
-      event.payload.kind === "stderr" && event.payload.text.startsWith(BACKGROUND_CONTINUATION_DELIVERED_PREFIX)
+      event.payload.kind === "stderr" &&
+        event.payload.runnerMarker === "background_continuation_delivery" &&
+        event.payload.text.startsWith(BACKGROUND_CONTINUATION_DELIVERED_PREFIX)
         ? [event.payload.text.slice(BACKGROUND_CONTINUATION_DELIVERED_PREFIX.length)]
         : []));
     if (delivered.size === 0) return meta;

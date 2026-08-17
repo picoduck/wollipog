@@ -291,8 +291,11 @@ export class ClaudeCodeDriver implements Driver {
   /** Claude's total_cost_usd is cumulative within one streaming-input process. */
   private persistentLastCostUsd = 0;
   private persistentBuffer = "";
-  private persistentTurnSeq = 0;
+  /** Monotonic across persistent and one-shot transports so late lifecycle events cannot alias a
+   * turn from the transport used before a circuit fallback. */
+  private providerTurnSeq = 0;
   private activePersistentTurn: PersistentTurn | null = null;
+  private activeOneShotTurnId: number | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingCeilingReached = false;
@@ -634,12 +637,15 @@ export class ClaudeCodeDriver implements Driver {
         return resolve("refusal");
       }
       this.child = child;
+      const turnId = ++this.providerTurnSeq;
+      this.activeOneShotTurnId = turnId;
 
       let stopReason: StopReason = "end_turn";
       let settled = false;
       const finish = (r: StopReason) => {
         if (settled) return;
         settled = true;
+        if (this.activeOneShotTurnId === turnId) this.activeOneShotTurnId = null;
         if (r !== "cancelled") this.preparedBaseArgs();
         // Only mark the session established (so the next turn uses --resume) once a
         // turn settles cleanly; a failed/cancelled first attempt must retry with
@@ -660,7 +666,10 @@ export class ClaudeCodeDriver implements Driver {
           return; // non-JSON noise
         }
         const r = this.handleEvent(msg);
-        if (r) stopReason = r;
+        if (r) {
+          stopReason = r;
+          if (this.activeOneShotTurnId === turnId) this.activeOneShotTurnId = null;
+        }
       };
 
       // A write to a dying process (mid-turn control_response, prompt delivery) does NOT throw
@@ -751,7 +760,7 @@ export class ClaudeCodeDriver implements Driver {
     const promptText = slashCommand ? `/${slashCommand}${text ? " " + text : ""}`.trim() : text;
     return new Promise<StopReason>((resolve) => {
       const turn: PersistentTurn = {
-        id: ++this.persistentTurnSeq,
+        id: ++this.providerTurnSeq,
         promptText,
         images: images ?? [],
         resolve,
@@ -997,7 +1006,7 @@ export class ClaudeCodeDriver implements Driver {
           true,
           true,
           undefined,
-          this.activePersistentTurn?.id,
+          this.activeProviderTurnId(),
         );
       } else if (msg.subtype === "task_notification" && taskId) {
         const status = typeof msg.status === "string" ? msg.status.toLowerCase() : "";
@@ -1026,7 +1035,7 @@ export class ClaudeCodeDriver implements Driver {
           false,
           true,
           backgroundLaunchType(name),
-          this.activePersistentTurn?.id,
+          this.activeProviderTurnId(),
         );
       }
       return;
@@ -1082,12 +1091,13 @@ export class ClaudeCodeDriver implements Driver {
     status: "completed" | "failed" | "killed" = "completed",
   ): void {
     const terminal = new Map<string, DriverBackgroundTerminalJob>();
+    const activeTurnId = this.activeProviderTurnId();
     const capture = (task: PendingBackgroundTask) => terminal.set(task.id, {
       ...driverBackgroundJob(task),
       status,
       terminalAt: this.deps.now(),
-      continuationRequired: this.activePersistentTurn == null ||
-        (task.parentPersistentTurnId != null && task.parentPersistentTurnId !== this.activePersistentTurn.id),
+      continuationRequired: activeTurnId == null ||
+        (task.parentPersistentTurnId != null && task.parentPersistentTurnId !== activeTurnId),
     });
     this.unverifiedBackgroundTaskIds.delete(id);
     const direct = this.pendingBackgroundTasks.get(id);
@@ -1123,6 +1133,10 @@ export class ClaudeCodeDriver implements Driver {
         status === "failed" || isError ? "failed" : status === "killed" ? "killed" : "completed",
       );
     }
+  }
+
+  private activeProviderTurnId(): number | undefined {
+    return this.activePersistentTurn?.id ?? this.activeOneShotTurnId ?? undefined;
   }
 
   /** A restart seed gets one recovery turn. If that live process did not re-observe the id, the
@@ -1539,6 +1553,7 @@ export class ClaudeCodeDriver implements Driver {
       return;
     }
     this.cancelled = true;
+    this.activeOneShotTurnId = null;
     this.pendingApprovals.clear();
     if (this.child) {
       if (this.pendingBackgroundTasks.size > 0) this.markOrphaned("process_exit");
@@ -1593,6 +1608,7 @@ export class ClaudeCodeDriver implements Driver {
     this.disposed = true;
     this.streamingMessageIds.clear();
     this.pendingApprovals.clear();
+    this.activeOneShotTurnId = null;
     if (this.activePersistentTurn && !this.activePersistentTurn.settled) {
       this.activePersistentTurn.settled = true;
       this.activePersistentTurn.resolve("cancelled");

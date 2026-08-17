@@ -140,10 +140,18 @@ test("turn interruption is a standalone non-error transcript outcome with record
 test("managed continuation delivery markers remain durable but hidden from the timeline", () => {
   const items = deriveTimeline([
     ev({ kind: "stderr", text: "before" }),
-    ev({ kind: "stderr", text: "Managed background continuation delivered: bgcont_hidden" }),
+    ev({
+      kind: "stderr",
+      text: "Managed background continuation delivered: bgcont_hidden",
+      runnerMarker: "background_continuation_delivery",
+    }),
+    ev({ kind: "stderr", text: "Managed background continuation delivered: bgcont_provider_text" }),
     ev({ kind: "stderr", text: "after" }),
   ]);
-  assert.deepEqual(items.map((item) => item.kind === "stderr" ? item.text : ""), ["before", "after"]);
+  assert.deepEqual(items.map((item) => item.kind === "stderr" ? item.text : ""), [
+    "before",
+    "Managed background continuation delivered: bgcont_provider_textafter",
+  ]);
 });
 
 test("timeline delta metadata retains only the immediate predecessor snapshot", () => {

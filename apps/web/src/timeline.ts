@@ -12,7 +12,6 @@ import type {
   SessionEvent,
 } from "@wollipog/protocol";
 
-const BACKGROUND_CONTINUATION_DELIVERED_PREFIX = "Managed background continuation delivered: bgcont_";
 
 export type TimelineItem =
   | {
@@ -595,7 +594,7 @@ export class TimelineBuilder {
         this.pushText("command_output", ev.seq, p.text, undefined, undefined, undefined, p.textRefs);
         break;
       case "stderr":
-        if (p.text.startsWith(BACKGROUND_CONTINUATION_DELIVERED_PREFIX)) {
+        if (p.runnerMarker === "background_continuation_delivery") {
           this.breakText();
           break;
         }

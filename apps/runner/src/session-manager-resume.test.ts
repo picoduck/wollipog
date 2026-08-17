@@ -2199,6 +2199,65 @@ test("a ready parent barrier stays continuation-pending while unrelated work run
   }
 });
 
+test("startup treats pending work masked by continuation-pending as orphaned after process loss", () => {
+  const h = harness({
+    driver: "claude-code",
+    agentId: "claude-code",
+    command: "claude",
+    agentSessionId: "claude-session",
+    backgroundWorkState: "continuation_pending",
+    pendingBackgroundTaskIds: ["still-running"],
+    backgroundJobs: [{
+      id: "ready-job", parentTurnId: "turn-ready", runnerId: "runner", workspaceId: "workspace",
+      context: { kind: "native" }, launchType: "agent", registeredAt: 1,
+      terminalStatus: "completed", terminalObservedAt: 2, continuationRequired: true,
+      continuationQueuedAt: 3, continuationId: "bgcont-ready",
+    }, {
+      id: "still-running", parentTurnId: "turn-running", runnerId: "runner", workspaceId: "workspace",
+      context: { kind: "native" }, launchType: "workflow", registeredAt: 4,
+    }],
+  });
+  try {
+    h.manager.reconcileStore();
+    const reconciled = h.store.readMeta("resume-session");
+    assert.equal(reconciled?.backgroundWorkState, "orphaned");
+    assert.deepEqual(reconciled?.orphanedWork?.pendingTaskIds, ["still-running"]);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("a running continuation generation cannot be queued again before provider submission", async () => {
+  const h = harness({
+    driver: "claude-code",
+    agentId: "claude-code",
+    command: "claude",
+    agentSessionId: "claude-session",
+    backgroundWorkState: "continuation_pending",
+    backgroundJobs: [{
+      id: "dedup-job", parentTurnId: "turn-a", runnerId: "runner", workspaceId: "workspace",
+      context: { kind: "native" }, launchType: "agent", registeredAt: 1,
+      terminalStatus: "completed", terminalObservedAt: 2, continuationRequired: true,
+      continuationQueuedAt: 3, continuationId: "bgcont-dedup",
+    }],
+  });
+  try {
+    h.manager.prompt("resume-session", "establish live driver");
+    for (let index = 0; index < 6 && h.prompts.length === 0; index += 1) await tick();
+    const entry = (h.manager as any).active.get("resume-session");
+    assert.ok(entry);
+    entry.currentBackgroundJobIds = ["dedup-job"];
+
+    await (h.manager as any).runBackgroundContinuation("resume-session");
+    assert.deepEqual(entry.queue, []);
+    assert.deepEqual(h.prompts, ["establish live driver"]);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
 test("durable job retention drops delivered history before unresolved obligations", () => {
   const unresolved = Array.from({ length: 128 }, (_, index) => ({
     id: `pending-${index}`,
@@ -2291,7 +2350,7 @@ test("a definite pre-acceptance continuation failure clears submission for a saf
     if (attempts === 1) throw new Error("definite pre-write failure");
     h.callbacks().onPromptAccepted?.();
     h.callbacks().onEvent({ kind: "agent_message", text: "Retry delivered." });
-  }, false);
+  }, undefined, false);
   try {
     h.manager.reconcileStore();
     await shortDelay();
@@ -2328,12 +2387,38 @@ test("startup reconciles a durable delivery marker written before the metadata a
     h.store.appendEvent("resume-session", {
       kind: "stderr",
       text: "Managed background continuation delivered: bgcont-crash-window",
+      runnerMarker: "background_continuation_delivery",
     });
     h.manager.reconcileStore();
     const reconciled = h.store.readMeta("resume-session");
     assert.ok(reconciled?.backgroundJobs?.[0]?.assistantResultPersistedAt);
     assert.equal(reconciled?.backgroundWorkState, "resumed");
     assert.deepEqual(h.prompts, [], "reconciliation never submits a second provider turn");
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("orphan recovery clears its marker while continuation-pending still represents live work", () => {
+  const h = harness({
+    driver: "claude-code",
+    backgroundWorkState: "continuation_pending",
+    pendingBackgroundTaskIds: ["still-running"],
+    orphanedWork: {
+      pendingTaskIds: ["still-running"],
+      markedAt: 1,
+      reason: "process_exit",
+      recoveryAttemptedAt: 2,
+      recoveryObservedTaskIds: ["still-running"],
+    },
+  });
+  try {
+    (h.manager as any).finishOrphanRecovery("resume-session");
+    const current = h.store.readMeta("resume-session");
+    assert.equal(current?.backgroundWorkState, "continuation_pending");
+    assert.deepEqual(current?.pendingBackgroundTaskIds, ["still-running"]);
+    assert.equal(current?.orphanedWork, undefined);
   } finally {
     h.manager.shutdownAll();
     h.cleanup();

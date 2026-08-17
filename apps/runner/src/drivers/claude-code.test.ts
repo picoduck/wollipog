@@ -1025,13 +1025,14 @@ test("one-shot task completion never arms persistent idle eviction during the li
   const child = fakeProcess();
   const killed: any[] = [];
   const activeTimers = new Set<object>();
+  const background: Parameters<NonNullable<DriverCallbacks["onBackgroundWork"]>>[0][] = [];
   const driver = new ClaudeCodeDriver(
     {
       ...baseOpts,
       env: { [CLAUDE_PERSISTENT_FLAG]: "0", [CLAUDE_PERSISTENT_IDLE_MS]: "30000" },
       config: { permissionMode: "default" },
     },
-    noopCb,
+    { ...noopCb, onBackgroundWork: (update) => background.push(update) },
     {
       spawn: () => child,
       kill: (process: any) => killed.push(process),
@@ -1057,6 +1058,11 @@ test("one-shot task completion never arms persistent idle eviction during the li
   assert.equal(activeTimers.size, 0);
   assert.deepEqual(killed, []);
   assert.equal(child.stdin.writableEnded, false);
+  assert.equal(
+    background.flatMap((update) => update.terminalJobs ?? []).at(-1)?.continuationRequired,
+    false,
+    "a Task completed inside a one-shot turn must not trigger a second provider turn",
+  );
   child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
   child.emit("exit", 0);
   assert.equal(await turn, "end_turn");
