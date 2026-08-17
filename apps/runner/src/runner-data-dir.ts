@@ -213,6 +213,11 @@ export function canIgnoreRunnerDataDirDirectorySyncError(
   return platform === "win32" && typeof error.code === "string" && WINDOWS_UNSUPPORTED_DIRECTORY_SYNC_ERRORS.has(error.code);
 }
 
+export function runnerDataDirFileSyncFlags(platform: NodeJS.Platform = process.platform): number {
+  // libuv maps fsync to FlushFileBuffers on Windows, which requires a write-capable handle.
+  return platform === "win32" ? constants.O_RDWR : constants.O_RDONLY;
+}
+
 function beforeDurabilityOperation(
   options: RunnerDataDirLeaseOptions,
   operation: RunnerDataDirDurabilityOperation,
@@ -274,7 +279,7 @@ function publishProtected(
     } catch {
       // Windows ACLs are managed by the owning account.
     }
-    const fd = openSync(temp, constants.O_RDONLY);
+    const fd = openSync(temp, runnerDataDirFileSyncFlags());
     try {
       beforeDurabilityOperation(options, "fsync-file", temp);
       fsyncSync(fd);
@@ -309,7 +314,7 @@ function replaceProtectedContents(
   writeFileSync(temp, contents, { flag: "wx", mode: 0o600 });
   try {
     try { chmodSync(temp, 0o600); } catch { /* Windows ACLs are managed by the owning account. */ }
-    const fd = openSync(temp, constants.O_RDONLY);
+    const fd = openSync(temp, runnerDataDirFileSyncFlags());
     try {
       beforeDurabilityOperation(options, "fsync-file", temp);
       fsyncSync(fd);
