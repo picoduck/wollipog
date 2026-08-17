@@ -77,6 +77,47 @@ test("the wrap toggle is a native focusable button whose accessible name is its 
   }
 });
 
+test("a reused block re-derives its wrap default when the fence language changes", async () => {
+  // While an info string streams in, the same component instance can first see `m` (source-like)
+  // and then `markdown` (prose). A default captured in a state initializer would go stale here and
+  // reproduce the original non-wrapping-prose bug.
+  const { container, root } = await renderMarkdown(["```m", "draft prose", "```"].join("\n"));
+  try {
+    assert.equal(container.querySelector(".md-code-block")!.classList.contains("md-code-wrap"), false);
+    await act(async () => {
+      root.render(<Markdown highlightEligible={false}>{["```markdown", "draft prose", "```"].join("\n")}</Markdown>);
+    });
+    const block = container.querySelector(".md-code-block")!;
+    assert.equal(block.classList.contains("md-code-wrap"), true, "the prose default must follow the corrected language");
+    assert.equal(wrapToggle(container).textContent, "No Wrap");
+
+    await act(async () => {
+      root.render(<Markdown highlightEligible={false}>{["```typescript", "const x = 1;", "```"].join("\n")}</Markdown>);
+    });
+    assert.equal(container.querySelector(".md-code-block")!.classList.contains("md-code-wrap"), false,
+      "swapping in a source-code document must drop the stale prose default");
+  } finally {
+    await cleanup(container, root);
+  }
+});
+
+test("an explicit wrap choice survives body streaming while the language is stable", async () => {
+  const { container, root } = await renderMarkdown(["```text", "first chunk", "```"].join("\n"));
+  try {
+    await act(async () => { wrapToggle(container).click(); });
+    assert.equal(container.querySelector(".md-code-block")!.classList.contains("md-code-wrap"), false);
+
+    await act(async () => {
+      root.render(<Markdown highlightEligible={false}>{["```text", "first chunk and a much longer second chunk", "```"].join("\n")}</Markdown>);
+    });
+    const block = container.querySelector(".md-code-block")!;
+    assert.equal(block.classList.contains("md-code-wrap"), false, "streamed body text must not revert the user's choice");
+    assert.equal(wrapToggle(container).textContent, "Wrap Lines");
+  } finally {
+    await cleanup(container, root);
+  }
+});
+
 test("copying a visually wrapped block yields the original fenced text", async () => {
   const proseLines = [
     "## Draft issue",

@@ -58,13 +58,25 @@ export function markdownCodeWrapsByDefault(language: string): boolean {
 
 function CodeBlockPre({ children, node: _node, ...props }: ComponentProps<"pre"> & { node?: unknown }) {
   const text = markdownCodeText(children);
-  const [wrap, setWrap] = useState(() => markdownCodeWrapsByDefault(markdownCodeLanguage(children)));
+  const defaultWrap = markdownCodeWrapsByDefault(markdownCodeLanguage(children));
+  // React reuses this instance across content changes (a streamed info string growing `m` →
+  // `markdown`, or a whole document swap), so the language-derived default cannot live in a state
+  // initializer. Keep only the user's explicit choice in state and drop it — during render, per
+  // React's state-adjustment pattern — whenever the block's computed default changes; an explicit
+  // toggle still survives ordinary body streaming, where the language is stable.
+  const [userWrap, setUserWrap] = useState<boolean | null>(null);
+  const [seenDefaultWrap, setSeenDefaultWrap] = useState(defaultWrap);
+  if (seenDefaultWrap !== defaultWrap) {
+    setSeenDefaultWrap(defaultWrap);
+    setUserWrap(null);
+  }
+  const wrap = userWrap ?? defaultWrap;
   // Wrapping is presentation-only: `text` always carries the original characters, so copying a
   // visually wrapped block still yields the exact fenced content.
   return (
     <div className={wrap ? "md-code-block md-code-wrap" : "md-code-block"}>
       <div className="md-code-actions">
-        <button type="button" className="copy-btn md-code-wrap-toggle" onClick={() => setWrap((current) => !current)}>
+        <button type="button" className="copy-btn md-code-wrap-toggle" onClick={() => setUserWrap(!wrap)}>
           {wrap ? "No Wrap" : "Wrap Lines"}
         </button>
         <CopyButton text={text} label="Copy Code" ariaLabel="Copy Code Block" className="copy-btn md-code-copy" />
