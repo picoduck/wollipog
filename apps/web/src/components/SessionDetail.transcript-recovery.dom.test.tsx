@@ -254,8 +254,31 @@ async function flushAsyncWork(delay = 0) {
   });
 }
 
-function recoveryNotice(fixture: Fixture): HTMLElement | null {
-  return fixture.container.querySelector(".transcript-recovery-notice");
+/** The slot is PERMANENTLY mounted between the scroller and the status strip; activity toggles
+ * only its `active` class and the live-region text, never the mounted markup. */
+function recoverySlot(fixture: Fixture): HTMLElement {
+  const slot = fixture.container.querySelector(".transcript-recovery-slot") as HTMLElement | null;
+  assert.ok(slot, "the recovery slot is permanently mounted");
+  return slot;
+}
+
+function recoveryActive(fixture: Fixture): boolean {
+  return recoverySlot(fixture).classList.contains("active");
+}
+
+function recoveryStatusText(fixture: Fixture): string {
+  const status = recoverySlot(fixture).querySelector('[role="status"]');
+  assert.ok(status, "the recovery slot owns a permanently-mounted live status region");
+  return status.textContent ?? "";
+}
+
+/** The pill markup must ALWAYS be present — it is what sizes the slot to the pill's real
+ * rendered height at the current pane width and font scale, active or not. */
+function assertSizingPillMounted(fixture: Fixture) {
+  const pill = recoverySlot(fixture).querySelector(".transcript-recovery-notice");
+  assert.ok(pill, "the sizing pill markup is always mounted inside the slot");
+  assert.ok(pill.textContent!.includes("Checking for Missed Activity…"),
+    "the sizing pill always carries the label that determines its height");
 }
 
 function followChipState(fixture: Fixture): string | null {
@@ -272,18 +295,17 @@ test("recovery over a long cached transcript announces at the reader's lower edg
     assert.equal(fixture.container.querySelector(".transcript-skeleton"), null);
     assert.equal(followChipState(fixture), "following");
 
-    const notice = recoveryNotice(fixture);
-    assert.ok(notice, "the recovery notice is shown while recovery is active");
-    assert.equal(notice.textContent, "Checking for Missed Activity…");
-    assert.equal(notice.getAttribute("role"), "status");
+    const slot = recoverySlot(fixture);
+    assert.equal(recoveryActive(fixture), true, "the slot is active while recovery is checking");
+    assertSizingPillMounted(fixture);
+    assert.equal(recoveryStatusText(fixture), "Checking for Missed Activity…",
+      "the live status region announces the active recovery");
     assert.equal(fixture.scroller.getAttribute("aria-busy"), "true");
 
-    // Anchored at the LOWER edge: outside the scroll flow, immediately above the status strip.
-    assert.equal(fixture.scroller.contains(notice), false, "the notice must not live inside the scroller");
-    const anchor = notice.closest(".transcript-recovery-anchor") as HTMLElement;
-    assert.ok(anchor, "the notice hangs from a zero-height anchor");
-    assert.equal(anchor.previousElementSibling, fixture.scroller);
-    assert.ok(anchor.nextElementSibling?.classList.contains("transcript-status-strip"));
+    // In normal flow at the LOWER edge: outside the scroller, immediately above the status strip.
+    assert.equal(fixture.scroller.contains(slot), false, "the slot must not live inside the scroller");
+    assert.equal(slot.previousElementSibling, fixture.scroller);
+    assert.ok(slot.nextElementSibling?.classList.contains("transcript-status-strip"));
 
     // The sticky-top pill no longer renders for active recovery.
     assert.equal(fixture.container.querySelector(".transcript-load-notice"), null);
@@ -296,13 +318,16 @@ test("successful recovery removes the notice promptly without disturbing a follo
   const pages = pageController();
   const fixture = await mountFixture(pages);
   try {
-    assert.ok(recoveryNotice(fixture));
+    assert.equal(recoveryActive(fixture), true);
     await act(async () => {
       // Legacy single-response shape: the completed compatibility path.
       pages.release({ events: [] });
     });
     await flushAsyncWork();
-    assert.equal(recoveryNotice(fixture), null, "the notice disappears once recovery completes");
+    assert.equal(recoveryActive(fixture), false, "the pill deactivates once recovery completes");
+    assert.equal(recoveryStatusText(fixture), "", "the live region clears so AT hears the stop");
+    // The slot and its sizing pill stay mounted: deactivation must not change layout.
+    assertSizingPillMounted(fixture);
     assert.equal(fixture.scroller.getAttribute("aria-busy"), "false");
     assert.equal(followChipState(fixture), "following");
     assert.equal(fixture.container.querySelector(".transcript-load-notice"), null);
@@ -323,17 +348,17 @@ test("a reader away from the tail keeps their place through recovery and its com
     assert.equal(followChipState(fixture), "paused");
     fixture.scroller.scrollTop = 123;
 
-    const notice = recoveryNotice(fixture);
-    assert.ok(notice, "the recovery notice is visible to a reader away from the tail");
-    assert.equal(fixture.scroller.contains(notice), false);
-    assert.equal(fixture.scroller.scrollTop, 123, "showing the notice does not move the reader");
+    assert.equal(recoveryActive(fixture), true, "the recovery pill is visible to a reader away from the tail");
+    assert.equal(fixture.scroller.contains(recoverySlot(fixture)), false);
+    assert.equal(fixture.scroller.scrollTop, 123, "showing the pill does not move the reader");
 
     await act(async () => {
       pages.release({ events: [] });
     });
     await flushAsyncWork();
-    assert.equal(recoveryNotice(fixture), null);
-    assert.equal(fixture.scroller.scrollTop, 123, "removing the notice does not move the reader");
+    assert.equal(recoveryActive(fixture), false);
+    assertSizingPillMounted(fixture);
+    assert.equal(fixture.scroller.scrollTop, 123, "hiding the pill does not move the reader");
     assert.equal(followChipState(fixture), "paused", "completion must not force the reader back to the tail");
   } finally {
     await unmountFixture(fixture);
@@ -344,14 +369,15 @@ test("recovery failure falls back to the existing error notice with its retry af
   const pages = pageController();
   const fixture = await mountFixture(pages);
   try {
-    assert.ok(recoveryNotice(fixture));
+    assert.equal(recoveryActive(fixture), true);
     await act(async () => {
       // A mismatched event epoch ends recovery before completion: the failure path.
       pages.release({ events: [], eventEpoch: 7, nextAfter: 0, hasMoreCached: false, cacheComplete: false });
     });
     await flushAsyncWork();
 
-    assert.equal(recoveryNotice(fixture), null, "the recovery pill yields to the failure state");
+    assert.equal(recoveryActive(fixture), false, "the recovery pill yields to the failure state");
+    assert.equal(recoveryStatusText(fixture), "");
     const errorNotice = fixture.container.querySelector(".transcript-load-notice.error");
     assert.ok(errorNotice, "the failure keeps its explanatory notice");
     const retry = errorNotice.querySelector("button");

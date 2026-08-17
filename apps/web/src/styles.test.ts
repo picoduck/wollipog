@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { customProperties, mediaBlocks, topLevelRule } from "./css-rules.js";
+import { customProperties, declarationsOf, mediaBlocks, topLevelRule } from "./css-rules.js";
 
 const raw = readFileSync(fileURLToPath(new URL("./styles.css", import.meta.url)), "utf8");
 /** Comments carry example declarations and prose; every check below reasons about real rules. */
@@ -141,50 +141,45 @@ test("the permission-mode popover gives visible descriptions readable inline spa
 });
 
 /**
- * The reconnect recovery pill (issue #56) floats absolutely over the transcript reader's lower
- * edge. Its non-overlap guarantee is a RESERVATION, not a reaction: the scroller permanently pads
- * its bottom by --transcript-recovery-clearance so the pill's band never covers the newest
- * transcript row, and because that reservation is independent of pill visibility, showing or
- * hiding the pill cannot shift a scrolled-up reader's viewport or flip follow state.
+ * The reconnect recovery pill (issue #56) sits in a permanently-present NORMAL-FLOW slot between
+ * the transcript scroller and the status strip. Its non-overlap guarantee is structural, not
+ * numeric: an earlier fixed-pixel reservation lost to label wrapping at narrow panes and to
+ * rem-scaled root fonts. With the pill markup always mounted, the slot is exactly as tall as the
+ * pill really renders at the current pane width and font scale, and activity may toggle only
+ * visibility — so recovery can never overlap transcript content, shift a reader's viewport, or
+ * flip follow state.
  */
-test("the transcript reader permanently reserves the recovery pill's band", () => {
-  // The pill's band top, from its own declarations: bottom offset + vertical padding + borders +
-  // one --text-sm (12px) line, which at the browser default line-height is at most 18px tall and
-  // taller than the 7px pulse dot. Reading the geometry from the rule keeps this test honest if
-  // someone later moves or thickens the pill without growing the reservation.
-  const notice = soleRuleBody(".transcript-recovery-notice");
-  const bottom = Number(/bottom:\s*(\d+)px/.exec(notice)?.[1]);
-  const verticalPadding = Number(/padding:\s*(\d+)px\s+\d+px;/.exec(notice)?.[1]);
-  const borderWidth = Number(/border:\s*(\d+)px/.exec(notice)?.[1]);
-  assert.ok(Number.isFinite(bottom) && Number.isFinite(verticalPadding) && Number.isFinite(borderWidth),
-    "the pill must declare bottom, padding, and border in px so the band is computable");
-  const bandTop = bottom + 2 * verticalPadding + 2 * borderWidth + 18;
+test("the recovery pill is a permanently-sized in-flow slot, never an overlay", () => {
+  // No overlay remains: nothing in the recovery family may leave normal flow. An absolutely (or
+  // sticky/fixed) positioned pill floating over the scroller is exactly the covered-newest-row
+  // bug this slot replaced.
+  const positioned = declarationsOf(css, "position")
+    .filter(({ selector }) => selector.includes("transcript-recovery"));
+  assert.deepEqual(positioned, [],
+    "recovery rules must stay in normal flow so the slot's height is the pill's real rendered height");
 
-  const clearanceValue = soleRuleProps(":root").get("--transcript-recovery-clearance")?.[0];
-  const clearance = Number(/^(\d+)px$/.exec(clearanceValue ?? "")?.[1]);
-  assert.ok(Number.isFinite(clearance),
-    "--transcript-recovery-clearance must be a px token in the shared :root scope");
-  assert.ok(clearance >= bandTop,
-    `--transcript-recovery-clearance is ${clearance}px but the pill band reaches ${bandTop}px — ` +
-    "the pill would cover the newest transcript row");
+  // The slot must not clamp its natural height: a wrapped label or rem-scaled text must be free
+  // to grow it. (Slot height then changes only on genuine pane/font reflows, which the follow
+  // logic already owns through its ResizeObserver on the reader.)
+  const slot = soleRuleBody(".transcript-recovery-slot");
+  assert.doesNotMatch(slot, /height|overflow/,
+    "the slot must size to the pill's rendered height, never clamp or clip it");
 
-  // Every padding context of the scroller must reserve through the token; any one of the base
-  // rule, the preview override, or the phone-width override alone would restore the overlap.
-  // In each, the token is the padding shorthand's LAST value — the bottom edge.
-  const endsWithToken = (padding: string | undefined, where: string) => {
-    assert.ok(padding?.endsWith("var(--transcript-recovery-clearance)"),
-      `${where} must reserve the pill band as its bottom padding, found: ${padding}`);
-  };
-  const paddingOf = (selector: string) => /padding:\s*([^;]+);/.exec(soleRuleBody(selector))?.[1]?.trim();
-  endsWithToken(paddingOf(".detail-scroll"), "the transcript scroller");
-  endsWithToken(paddingOf(".session-detail.preview .detail-scroll"), "the preview scroller");
-  const phone = mediaBlocks(css).filter((block) =>
-    block.maxWidths.includes(760) && block.declarationsForSelector(".detail-scroll").has("padding"));
-  assert.ok(phone.length > 0, "the phone-width scroller padding override must exist");
-  for (const block of phone) {
-    for (const padding of block.declarationsForSelector(".detail-scroll").get("padding")!) {
-      endsWithToken(padding, "the phone-width scroller");
-    }
+  // Inactivity hides through visibility ONLY. `display: none` — or any layout property — would
+  // collapse the slot on toggle and reintroduce the scroll shift the permanent slot prevents.
+  assert.equal(soleRuleBody(".transcript-recovery-slot:not(.active) .transcript-recovery-notice"),
+    "visibility: hidden;");
+
+  // Symmetrically, activation may only start the pulse animation. Every .active-conditioned
+  // recovery rule is checked so a future `display`, `margin`, or `height` cannot sneak a layout
+  // delta into the activity toggle.
+  const activeRules = [...css.matchAll(/([^{}]*transcript-recovery[^{}]*\.active[^{}]*)\{([^}]*)\}/g)]
+    .filter(([, selector]) => !selector!.includes(":not("));
+  assert.ok(activeRules.length > 0, "the active state must exist");
+  for (const [, selector, body] of activeRules) {
+    const props = [...body!.matchAll(/([a-z-]+)\s*:/g)].map((match) => match[1]);
+    assert.deepEqual(props.filter((prop) => prop !== "animation"), [],
+      `${selector!.trim()} may only toggle the pulse animation, found: ${props.join(", ")}`);
   }
 });
 

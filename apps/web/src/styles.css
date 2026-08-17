@@ -391,14 +391,6 @@
   --radius-lg: 12px;
   --radius-pill: 999px;
 
-  /* --- Transcript recovery clearance (issue #56). The reconnect pill floats ABSOLUTELY over
-     the reader's lower edge, so the scroller permanently reserves this much bottom padding for
-     its band. The reservation is deliberately unconditional: it never changes with pill
-     visibility, so showing or hiding the pill cannot overlap the newest transcript row, shift
-     a scrolled-up reader's viewport, or flip follow state. Sized to cover the pill's 10px
-     bottom offset + 2×6px padding + 2×1px border + one --text-sm line (≈18px) ⇒ ≥42px. --- */
-  --transcript-recovery-clearance: 46px;
-
   /* --- Motion. Every transition in the app should draw from these; nothing else. --- */
   --dur-instant: 80ms;
   --dur-fast: 130ms;
@@ -1761,9 +1753,8 @@ textarea {
   min-height: 0;
   overflow-y: auto;
   /* Center the transcript at reading width (Codex-style): symmetric padding absorbs any
-     pane width beyond --chat-max, while the scrollbar stays at the pane edge. The bottom edge
-     permanently reserves the recovery pill's band so it can never cover the newest row. */
-  padding: 16px max(2px, calc((100% - var(--chat-max)) / 2)) var(--transcript-recovery-clearance);
+     pane width beyond --chat-max, while the scrollbar stays at the pane edge. */
+  padding: 16px max(2px, calc((100% - var(--chat-max)) / 2));
   transition: background-color var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out);
 }
 /* Chat column + right side panel */
@@ -8135,7 +8126,7 @@ body.shell-dock-dragging * {
 .session-detail.preview .detail-chat,
 .session-detail.preview .detail-main { min-height: 0; }
 .session-detail.preview .detail-scroll {
-  padding: 12px max(16px, calc((100% - var(--chat-max)) / 2)) var(--transcript-recovery-clearance);
+  padding: 12px max(16px, calc((100% - var(--chat-max)) / 2));
 }
 .session-detail.preview .approval-bar { margin: 8px 14px 0; }
 .session-preview-head {
@@ -9717,7 +9708,7 @@ body.shell-dock-dragging * {
     min-width: 44px;
   }
   .detail-scroll {
-    padding: 12px 0 var(--transcript-recovery-clearance);
+    padding: 12px 0;
   }
   .transcript-status-strip {
     min-height: 42px;
@@ -10034,29 +10025,31 @@ body.shell-dock-dragging * {
 }
 .transcript-load-notice.error { border-color: color-mix(in srgb, var(--red) 35%, var(--border)); }
 
-/* Reconnect recovery pill (issue #56): anchored at the LOWER edge of the reader, immediately
-   above the transcript status strip, where users watching the newest activity actually look.
-   The zero-height anchor sits BETWEEN the scroller and the strip — outside the scroll flow —
-   so mounting/unmounting can never change layout or scroll position, and it can never cover
-   the follow-state control or composer. It floats inside the scroller's permanently reserved
-   bottom band (--transcript-recovery-clearance), so it never overlaps the newest transcript
-   row either; pointer-events: none keeps everything beneath it clickable regardless. */
-.transcript-recovery-anchor { position: relative; flex: none; height: 0; overflow: visible; z-index: var(--z-sticky); }
+/* Reconnect recovery pill (issue #56): a permanently-present normal-flow slot at the LOWER edge
+   of the reader, between the scroller and the status strip, where users watching the newest
+   activity actually look. The pill markup is always mounted, so the slot's height is the pill's
+   real rendered height at the current pane width and font scale — a wrapped label or rem-scaled
+   text simply makes the slot taller. Activity toggles ONLY visibility (never display or any
+   layout property), so showing/hiding recovery cannot shift scroll position or follow state,
+   and the pill cannot overlap transcript content because it is not an overlay. */
+.transcript-recovery-slot { display: flex; flex: none; justify-content: center; padding: 6px 12px 10px; }
+.transcript-recovery-slot:not(.active) .transcript-recovery-notice { visibility: hidden; }
 .transcript-recovery-notice {
-  position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%);
-  display: flex; align-items: center; gap: 8px; width: max-content; max-width: calc(100% - 24px);
+  display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%;
   padding: 6px 12px; border: 1px solid color-mix(in srgb, var(--accent) 50%, var(--border));
   border-radius: var(--radius-pill); color: var(--text); font-size: var(--text-sm); font-weight: 600;
   background: color-mix(in srgb, var(--accent) 14%, var(--bg-elev));
-  box-shadow: var(--shadow); pointer-events: none;
+  box-shadow: var(--shadow);
 }
 .transcript-recovery-dot {
   flex: none; width: 7px; height: 7px; border-radius: var(--radius-pill); background: var(--accent);
+}
+.transcript-recovery-slot.active .transcript-recovery-dot {
   animation: transcript-recovery-pulse 1.2s ease-in-out infinite;
 }
 @keyframes transcript-recovery-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 @media (prefers-reduced-motion: reduce) {
-  .transcript-recovery-dot { animation: none; }
+  .transcript-recovery-slot.active .transcript-recovery-dot { animation: none; }
 }
 .transcript-skeleton { display: grid; gap: 20px; padding: 28px 20px; }
 .transcript-skeleton-row { display: grid; gap: 8px; width: min(68%, 620px); }

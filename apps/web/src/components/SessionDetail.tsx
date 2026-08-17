@@ -2046,9 +2046,10 @@ function SessionDetailLoaded({
             </div>
             {/* Reconnect recovery indicator lives at the LOWER edge of the reader — where the
                 newest activity is — not sticky-top inside the scroller (issue #56: users watching
-                the tail read a top-only notice as "frozen" or "fully caught up"). It renders
-                OUTSIDE the scroll flow, so mounting/removing it can never shift scroll position. */}
-            {transcript.notice === "refreshing" && <TranscriptRecoveryNotice />}
+                the tail read a top-only notice as "frozen" or "fully caught up"). The slot is
+                ALWAYS mounted between the scroller and the status strip, so toggling recovery
+                can never change layout, scroll position, or follow state. */}
+            <TranscriptRecoveryNotice active={transcript.notice === "refreshing"} />
             <div className="transcript-status-strip" aria-label="Transcript Status">
               <div className="transcript-status-context">
                 {mode === "expanded" && <ContextWindowMeter session={session} />}
@@ -3129,17 +3130,22 @@ function TranscriptLoadNotice({
   );
 }
 
-/** Active reconnect/reopen recovery pill anchored immediately above the transcript status strip.
- * The zero-height anchor keeps it out of the scroller's layout entirely: showing or removing it
- * cannot change scroll position, and a reader away from the tail stays exactly where they were.
- * `pointer-events` stays off so the newest transcript rows beneath it remain fully interactive. */
-function TranscriptRecoveryNotice() {
+/** Reconnect/reopen recovery pill in a permanently-present normal-flow slot immediately above
+ * the transcript status strip. The pill markup is ALWAYS mounted so the slot's height is the
+ * pill's real rendered height at the current pane width and font scale — a wrapped label or a
+ * rem-scaled root font simply makes the slot taller. Activity toggles only visibility and the
+ * live-region text, never layout: showing or hiding recovery cannot shift scroll position or
+ * follow state by construction, and the pill can never overlap transcript content because it is
+ * not an overlay. The visual pill stays decorative; the sr-only sibling owns the live status
+ * semantics through a text swap, matching the follow chip's permanently-mounted live region. */
+function TranscriptRecoveryNotice({ active }: { active: boolean }) {
   return (
-    <div className="transcript-recovery-anchor">
-      <div className="transcript-recovery-notice" role="status">
-        <span className="transcript-recovery-dot" aria-hidden="true" />
+    <div className={`transcript-recovery-slot${active ? " active" : ""}`}>
+      <div className="transcript-recovery-notice" aria-hidden="true">
+        <span className="transcript-recovery-dot" />
         <span>Checking for Missed Activity…</span>
       </div>
+      <span className="sr-only" role="status">{active ? "Checking for Missed Activity…" : ""}</span>
     </div>
   );
 }
