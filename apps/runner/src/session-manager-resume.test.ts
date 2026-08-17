@@ -213,10 +213,11 @@ function harness(
 test("provider auth failure stops the turn, parks exact recovery context, and holds FIFO until explicit retry", async () => {
   let h!: ReturnType<typeof harness>;
   let attempts = 0;
+  let completions = 0;
   const failures: Array<[string, string | undefined]> = [];
   const durable: DurableCommandLifecycle = {
     commandId: "auth-blocked-command",
-    queued: () => {}, started: () => {}, completed: () => {}, uncertain: () => {},
+    queued: () => {}, started: () => {}, completed: () => { completions += 1; }, uncertain: () => {},
     failed: (error, code) => failures.push([error, code]),
   };
   h = harness({
@@ -255,7 +256,8 @@ test("provider auth failure stops the turn, parks exact recovery context, and ho
     assert.match(blocked.pendingApproval?.context?.input ?? "", /Run `claude auth login`/);
     assert.deepEqual(h.prompts, ["first attempt"], "known-unsubmitted FIFO work remains held");
     assert.deepEqual(h.authStatuses, [["claude-native", { status: "unauthenticated" }]]);
-    assert.deepEqual(failures, [["provider authentication is required", "PROVIDER_AUTHENTICATION_REQUIRED"]]);
+    assert.deepEqual(failures, []);
+    assert.equal(completions, 1, "a provider-completed turn is not rewritten as undelivered");
 
     h.manager.prompt("resume-session", "explicit retry after sign-in");
     await tick();
@@ -300,6 +302,48 @@ test("app-server exit preserves the auth card and held FIFO until an explicit re
     assert.deepEqual(h.prompts, ["first attempt", "held while signed out", "explicit retry"]);
     assert.equal(h.store.readMeta("resume-session")?.pendingApproval, null);
   } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("a non-app-server auth exit rejects held FIFO instead of entering Codex recovery", async () => {
+  const turn = deferred<void>();
+  const failures: Array<[string, string | undefined]> = [];
+  const h = harness({
+    driver: "claude-code",
+    agentId: "claude-native",
+    command: "claude",
+    agentSessionId: "claude-session",
+  }, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, async () => {
+    await turn.promise;
+  });
+  const queued: DurableCommandLifecycle = {
+    commandId: "held-behind-auth-exit",
+    queued: () => {},
+    started: () => {},
+    completed: () => {},
+    uncertain: () => {},
+    failed: (error, code) => failures.push([error, code]),
+  };
+  try {
+    h.manager.prompt("resume-session", "in flight");
+    await tick();
+    await tick();
+    h.manager.prompt("resume-session", "held", [], undefined, undefined, queued);
+    h.callbacks().onAuthenticationFailure?.();
+    h.callbacks().onExit(1);
+    await tick();
+
+    assert.equal((h.manager as any).recoveryQueues.has("resume-session"), false);
+    assert.deepEqual(failures, [[
+      "agent exited while authentication was blocked before queued work could start",
+      "COMMAND_CANCELLED",
+    ]]);
+    assert.equal(h.store.readMeta("resume-session")?.status, "input_required");
+  } finally {
+    turn.resolve();
+    await tick();
     h.manager.shutdownAll();
     h.cleanup();
   }
@@ -355,6 +399,99 @@ test("launch-time provider auth failure uses the distinct durable receipt code",
     assert.equal(meta.status, "input_required");
     assert.equal(meta.pendingApproval?.kind, "authentication");
     assert.equal(JSON.stringify(h.sent).includes("secret-value"), false);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("launch-time authentication cannot overwrite a history-integrity failure", async () => {
+  let h!: ReturnType<typeof harness>;
+  let rejectInitialize!: (error: Error) => void;
+  const gate = new Promise<void>((_resolve, reject) => { rejectInitialize = reject; });
+  h = harness({}, gate, Promise.resolve(), () => {}, undefined, undefined, 4, undefined, {
+    describe: () => ({ id: "scope-a", provider: "codex", canStartLogin: true, configuredCredential: false }),
+    revalidate: async () => ({ status: "authenticated" }),
+    startLogin: async () => "failed",
+    cancel: () => false,
+  });
+  const append = h.store.appendEvent.bind(h.store);
+  Object.assign(h.store, {
+    appendEvent: (sessionId: string, payload: Parameters<SessionStore["appendEvent"]>[1]) => {
+      if (payload.kind === "permission_request") throw new Error("history append failed");
+      return append(sessionId, payload);
+    },
+  });
+  try {
+    h.manager.prompt("resume-session", "retry launch");
+    for (let attempt = 0; attempt < 10 && h.launches.length === 0; attempt += 1) await tick();
+    assert.equal(h.launches.length, 1);
+    h.callbacks().onAuthenticationFailure?.();
+    rejectInitialize(new Error("authentication_failed secret-value"));
+    await tick();
+    await tick();
+
+    const meta = h.store.readMeta("resume-session")!;
+    assert.equal(meta.status, "failed");
+    assert.equal(meta.pendingApproval, null);
+    assert.equal(meta.providerAuthBlock, undefined);
+    assert.equal(JSON.stringify(h.sent).includes("Authentication Required"), false);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("startup reconciliation restores a durable authentication card and suppresses orphan replay", async () => {
+  const h = harness({
+    driver: "claude-code",
+    command: "claude",
+    agentId: "claude-native",
+    agentSessionId: "claude-session",
+    status: "input_required",
+    backgroundWorkState: "orphaned",
+    pendingBackgroundTaskIds: ["blocked-task"],
+    orphanedWork: { pendingTaskIds: ["blocked-task"], markedAt: 1, reason: "process_exit" },
+    providerCredentialScopeId: "scope-a",
+    providerCredentialIdentityId: "account-a",
+    providerAuthBlock: {
+      version: 1,
+      recoveryId: "recovery-a",
+      credentialScopeId: "scope-a",
+      detectedAt: 1,
+      phase: "turn",
+      delivery: "uncertain",
+      canStartLogin: true,
+      configuredCredential: false,
+      expectedIdentityId: "account-a",
+      loginOperationId: "dead-login-process",
+    },
+    pendingApproval: {
+      requestId: "provider-auth:recovery-a:dead-login-process",
+      title: "Signing In — Claude Code",
+      options: [{ optionId: "auth:cancel", name: "Cancel Sign-In", description: "stale", kind: "reject_once" }],
+      kind: "authentication",
+    },
+  });
+  try {
+    h.manager.reconcileStore();
+    await shortDelay();
+    await tick();
+
+    const restored = h.store.readMeta("resume-session")!;
+    assert.equal(restored.status, "input_required");
+    assert.equal(restored.providerAuthBlock?.loginOperationId, undefined);
+    assert.equal(restored.pendingApproval?.requestId, "provider-auth:recovery-a");
+    assert.equal(restored.pendingApproval?.title, "Authentication Required — Claude Code");
+    assert.deepEqual(
+      restored.pendingApproval?.options.map((option) => option.name),
+      ["Start Sign-In", "Recheck Authentication"],
+    );
+    assert.equal(h.manager.sessionSnapshots()[0]?.status, "input_required");
+    assert.equal(h.manager.sessionSnapshots()[0]?.pendingApproval?.kind, "authentication");
+    assert.equal(h.store.readEvents("resume-session").length, 0, "reconcile does not duplicate the transcript card");
+    assert.deepEqual(h.launches, [], "startup must not submit orphan recovery through an auth block");
+    assert.deepEqual(h.prompts, []);
   } finally {
     h.manager.shutdownAll();
     h.cleanup();

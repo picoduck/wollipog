@@ -22,6 +22,10 @@ test("classifies provider login failures without conflating other retry classes"
     "Wollipog account authentication failed",
     "subscription entitlement is unavailable",
     "MCP server returned 401 because its credentials expired",
+    "mcp_server foo: unexpected status 401 Unauthorized",
+    "mcp-server foo: unexpected status 401 Unauthorized",
+    "tool_call returned 401 Unauthorized",
+    "tool-call returned 401 Unauthorized",
     "the provider is temporarily overloaded",
   ]) assert.equal(isProviderAuthenticationFailure(message), false, message);
 });

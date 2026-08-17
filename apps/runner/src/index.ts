@@ -12,6 +12,7 @@ import WebSocket from "ws";
 import {
   parseMessage,
   PROTOCOL_VERSION,
+  providerAuthenticationReceiptCode,
   validatePromptImageInputs,
   type AdoptSessionMessage,
   type AcpRuntimeCapabilities,
@@ -507,6 +508,9 @@ function flushOutbox(): void {
 }
 
 function sendDurableUpdate(receipt: DurableCommandReceipt): void {
+  const code = receipt.code === "PROVIDER_AUTHENTICATION_REQUIRED"
+    ? providerAuthenticationReceiptCode(controlPlaneProtocolVersion)
+    : receipt.code;
   const update: DurableSessionCommandUpdateMessage = {
     type: "durable_session_command_update",
     commandId: receipt.commandId,
@@ -514,7 +518,7 @@ function sendDurableUpdate(receipt: DurableCommandReceipt): void {
     state: receipt.state,
     revision: receipt.revision,
     ...(receipt.error ? { error: receipt.error } : {}),
-    ...(receipt.code ? { code: receipt.code } : {}),
+    ...(code ? { code } : {}),
     ...(receipt.userEventSeq !== undefined ? { userEventSeq: receipt.userEventSeq } : {}),
   };
   sendUp(update);
@@ -540,6 +544,9 @@ function durableLifecycle(handle: DurableCommandHandle): DurableCommandLifecycle
 }
 
 function sendSessionCommandUpdate(receipt: SessionCommandInvocationReceipt): void {
+  const code = receipt.code === "PROVIDER_AUTHENTICATION_REQUIRED"
+    ? providerAuthenticationReceiptCode(controlPlaneProtocolVersion)
+    : receipt.code;
   const update: SessionCommandInvocationUpdateMessage = {
     type: "session_command_invocation_update",
     invocationId: receipt.invocationId,
@@ -548,7 +555,7 @@ function sendSessionCommandUpdate(receipt: SessionCommandInvocationReceipt): voi
     state: receipt.state,
     revision: receipt.revision,
     ...(receipt.error ? { error: receipt.error } : {}),
-    ...(receipt.code ? { code: receipt.code } : {}),
+    ...(code ? { code } : {}),
     ...(receipt.userEventSeq !== undefined ? { userEventSeq: receipt.userEventSeq } : {}),
   };
   sendUp(update);
@@ -913,7 +920,11 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         revision: claim.receipt.revision,
         duplicate: claim.receipt.duplicate,
         ...(claim.receipt.error ? { error: claim.receipt.error } : {}),
-        ...(claim.receipt.code ? { code: claim.receipt.code } : {}),
+        ...(claim.receipt.code ? {
+          code: claim.receipt.code === "PROVIDER_AUTHENTICATION_REQUIRED"
+            ? providerAuthenticationReceiptCode(controlPlaneProtocolVersion)
+            : claim.receipt.code,
+        } : {}),
       };
       sendUp(response);
       if (!("handle" in claim)) break;
@@ -953,7 +964,11 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         revision: claim.receipt.revision,
         duplicate: claim.receipt.duplicate,
         ...(claim.receipt.error ? { error: claim.receipt.error } : {}),
-        ...(claim.receipt.code ? { code: claim.receipt.code } : {}),
+        ...(claim.receipt.code ? {
+          code: claim.receipt.code === "PROVIDER_AUTHENTICATION_REQUIRED"
+            ? providerAuthenticationReceiptCode(controlPlaneProtocolVersion)
+            : claim.receipt.code,
+        } : {}),
       };
       sendUp(response);
       if (!("handle" in claim)) break;

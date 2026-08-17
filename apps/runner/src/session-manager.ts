@@ -790,13 +790,28 @@ export class SessionManager {
       } else {
         reconciled = this.discoverOrphanedClaudeWork(m);
       }
-      const automatic = automaticClaudeRecoveryAllowed(reconciled);
+      // A durable provider-auth block is authoritative across process restart. Read-only
+      // background discovery may still run, but it must not submit an unattended recovery turn.
+      const automatic = !reconciled.providerAuthBlock && automaticClaudeRecoveryAllowed(reconciled);
       if (reconciled.status !== "stopped" && automatic && reconciled.orphanedWork && !reconciled.orphanedWork.recoveryAttemptedAt) {
         this.scheduleOrphanRecovery(m.sessionId);
       } else if (reconciled.status !== "stopped") {
         this.scheduleContextOrphanDiscovery(reconciled, automatic);
       }
-      if (m.status === "starting" || m.status === "running" || m.status === "queued" || m.status === "input_required") {
+      if (m.providerAuthBlock) {
+        // A runner-owned sign-in subprocess cannot survive process restart. Clear only that stale
+        // operation generation, then reconstruct the bounded browser projection from durable,
+        // secret-free block metadata without appending a duplicate transcript event.
+        const block = m.providerAuthBlock.loginOperationId
+          ? { ...m.providerAuthBlock, loginOperationId: undefined }
+          : m.providerAuthBlock;
+        const projection = this.providerAuthenticationProjection(m, block);
+        this.store.patchMeta(m.sessionId, {
+          providerAuthBlock: block,
+          status: "input_required",
+          pendingApproval: projection,
+        });
+      } else if (m.status === "starting" || m.status === "running" || m.status === "queued" || m.status === "input_required") {
         // The process that owned any pending approval is gone — clear the stale card too.
         this.store.patchMeta(m.sessionId, { status: "idle", pendingApproval: null });
       }
@@ -2267,6 +2282,17 @@ export class SessionManager {
         client.dispose();
         if (this.active.get(sessionId) === entry) this.active.delete(sessionId);
         await this.cancelNewCloudHandoff(meta, hadCloudHandoffBeforeLaunch, "session launch was cancelled during driver initialization", launchGeneration);
+        return false;
+      }
+      if (entry.historyIntegrityFailure) {
+        client.dispose();
+        if (this.active.get(sessionId) === entry) this.active.delete(sessionId);
+        await this.cancelNewCloudHandoff(
+          meta,
+          hadCloudHandoffBeforeLaunch,
+          "session history integrity failed during provider initialization",
+          launchGeneration,
+        );
         return false;
       }
       if (entry.authenticationBlocked) {
@@ -4347,7 +4373,13 @@ export class SessionManager {
       if (entry.historyIntegrityFailure) return;
       if (entry.authenticationBlocked) {
         this.emitStatus(sessionId, "input_required", "Provider authentication is required");
-        durable?.failed("provider authentication is required", "PROVIDER_AUTHENTICATION_REQUIRED");
+        const block = this.store.readMeta(sessionId)?.providerAuthBlock;
+        if (stop !== "cancelled" && stop !== "refusal") durable?.completed();
+        else if (block?.delivery !== "not_delivered") {
+          durable?.uncertain("provider authentication failed after submission; delivery or completion is uncertain");
+        } else {
+          durable?.failed("provider authentication is required", "PROVIDER_AUTHENTICATION_REQUIRED");
+        }
         return;
       }
       const interrupted = !entry.governanceTripped && entry.interruptRequested && stop === "cancelled";
@@ -4386,7 +4418,7 @@ export class SessionManager {
       }
       if (entry.authenticationBlocked) {
         this.emitStatus(sessionId, "input_required", "Provider authentication is required");
-        durable?.failed("provider authentication is required", "PROVIDER_AUTHENTICATION_REQUIRED");
+        durable?.uncertain("provider authentication failed after submission; delivery or completion is uncertain");
         return;
       }
       this.emitEvent(sessionId, { kind: "error", message: `prompt failed: ${errText(err)}` }, durable);
@@ -4633,7 +4665,13 @@ export class SessionManager {
 
       if (entry.authenticationBlocked) {
         this.emitStatus(sessionId, "input_required", "Provider authentication is required");
-        lifecycle.failed("provider authentication is required", "PROVIDER_AUTHENTICATION_REQUIRED");
+        const block = this.store.readMeta(sessionId)?.providerAuthBlock;
+        if (stop !== "cancelled" && stop !== "refusal") lifecycle.completed();
+        else if (block?.delivery !== "not_delivered") {
+          lifecycle.uncertain("provider authentication failed after submission; delivery or completion is uncertain");
+        } else {
+          lifecycle.failed("provider authentication is required", "PROVIDER_AUTHENTICATION_REQUIRED");
+        }
         return;
       }
 
@@ -4673,7 +4711,7 @@ export class SessionManager {
       }
       if (entry.authenticationBlocked) {
         this.emitStatus(sessionId, "input_required", "Provider authentication is required");
-        lifecycle.failed("provider authentication is required", "PROVIDER_AUTHENTICATION_REQUIRED");
+        lifecycle.uncertain("provider authentication failed after submission; delivery or completion is uncertain");
         return;
       }
       this.emitEvent(sessionId, { kind: "error", message: `session command failed: ${errText(error)}` });
@@ -5548,8 +5586,15 @@ export class SessionManager {
       this.active.delete(sessionId);
       if (hadQueueProjection) this.emitQueue(sessionId);
       if (queued.length) {
-        this.stabilizeRecoveryQueue(sessionId, queued);
-        this.recoveryQueues.set(sessionId, queued);
+        if (meta?.driver === "codex-app-server" && meta.agentSessionId) {
+          this.stabilizeRecoveryQueue(sessionId, queued);
+          this.recoveryQueues.set(sessionId, queued);
+        } else {
+          this.rejectQueued(
+            queued,
+            "agent exited while authentication was blocked before queued work could start",
+          );
+        }
       }
       this.emitStatus(sessionId, "input_required", "Provider authentication is required");
       return;
@@ -5806,7 +5851,11 @@ export class SessionManager {
       `session history integrity failure: ${errText(error)}`;
     if (!entry) {
       durable?.failed(detail, "INVALID_COMMAND");
-      this.store.patchMeta(sessionId, { status: "failed", pendingApproval: null });
+      this.store.patchMeta(sessionId, {
+        status: "failed",
+        pendingApproval: null,
+        providerAuthBlock: undefined,
+      });
       this.send({ type: "session_status", sessionId, status: "failed", detail });
       return;
     }
@@ -5829,6 +5878,7 @@ export class SessionManager {
         `${detail}; provider command delivery or completion is uncertain`,
       );
     }
+    this.store.patchMeta(sessionId, { providerAuthBlock: undefined });
     this.emitStatus(sessionId, "failed", detail);
     try {
       entry.client.cancel();
@@ -6269,17 +6319,36 @@ export class SessionManager {
     detail?: string,
     inProgress = false,
   ): void {
-    const provider = providerDisplayName(meta.driver);
-    const guidance = providerAuthenticationGuidance(meta, block, detail);
+    const projection = this.providerAuthenticationProjection(meta, block, detail, inProgress);
     const emitted = this.emitEvent(meta.sessionId, {
       kind: "permission_request",
+      requestId: projection.requestId,
+      title: projection.title,
+      options: projection.options,
+      purpose: "authentication",
+      context: projection.context,
+    });
+    if (emitted) this.emitStatus(
+      meta.sessionId,
+      "input_required",
+      `${providerDisplayName(meta.driver)} authentication is required`,
+    );
+  }
+
+  private providerAuthenticationProjection(
+    meta: SessionMeta,
+    block: NonNullable<SessionMeta["providerAuthBlock"]>,
+    detail?: string,
+    inProgress = false,
+  ): NonNullable<SessionMeta["pendingApproval"]> {
+    const provider = providerDisplayName(meta.driver);
+    return {
       requestId: providerAuthenticationRequestId(block),
       title: inProgress ? `Signing In — ${provider}` : `Authentication Required — ${provider}`,
       options: this.providerAuthenticationOptions(block, inProgress),
-      purpose: "authentication",
-      context: { toolName: provider, input: guidance },
-    });
-    if (emitted) this.emitStatus(meta.sessionId, "input_required", `${provider} authentication is required`);
+      kind: "authentication",
+      context: { toolName: provider, input: providerAuthenticationGuidance(meta, block, detail) },
+    };
   }
 
   private parkProviderAuthentication(

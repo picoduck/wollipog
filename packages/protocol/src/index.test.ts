@@ -9,6 +9,7 @@ import {
   LEGACY_POLICY_HOOK_POLL_CAPABILITY_HEADER,
   POLICY_HOOK_POLL_CAPABILITY_HEADER,
   PROTOCOL_VERSION,
+  providerAuthenticationReceiptCode,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   WOLLIPOG_CONTROL_PLANE_SERVICE,
   WOLLIPOG_POLICY_HOOK_POLL_CAPABILITY_HEADER,
@@ -95,8 +96,8 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 78", () => {
-  assert.equal(PROTOCOL_VERSION, 78);
+test("PROTOCOL_VERSION is 79", () => {
+  assert.equal(PROTOCOL_VERSION, 79);
 });
 
 test("slash-command argument hints remain additive metadata", () => {
@@ -510,6 +511,13 @@ test("runner command capability gates fail closed for unknown/old protocols", ()
   assert.equal(runnerSupportsProtocol(71, "turnInterruption"), true);
   assert.equal(runnerSupportsProtocol(72, "conversationSteering"), false);
   assert.equal(runnerSupportsProtocol(73, "conversationSteering"), true);
+  assert.equal(runnerSupportsProtocol(77, "providerAuthenticationReceipts"), false);
+  assert.equal(runnerSupportsProtocol(78, "providerAuthenticationReceipts"), false);
+  assert.equal(runnerSupportsProtocol(79, "providerAuthenticationReceipts"), true);
+  assert.equal(providerAuthenticationReceiptCode(undefined), "COMMAND_CANCELLED");
+  assert.equal(providerAuthenticationReceiptCode(77), "COMMAND_CANCELLED");
+  assert.equal(providerAuthenticationReceiptCode(78), "COMMAND_CANCELLED");
+  assert.equal(providerAuthenticationReceiptCode(79), "PROVIDER_AUTHENTICATION_REQUIRED");
   assert.equal(runnerSupportsProtocol(Number.NaN, "externalSessions"), false);
   assert.equal(runnerSupportsProtocol(6.5, "externalSessions"), false);
   assert.match(runnerCapabilityRequirement(null, "sessionFiles", "Files"), /unknown.*requires protocol v16/i);
