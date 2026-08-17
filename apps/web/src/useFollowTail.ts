@@ -6,6 +6,13 @@ export const FOLLOW_TAIL_THRESHOLD_PX = 48;
 export const FOLLOW_TAIL_RESUME_THRESHOLD_PX = 2;
 export const FOLLOW_TAIL_SCROLL_INTENT_DELAY_MS = 120;
 export const FOLLOW_TAIL_PROGRAMMATIC_SCROLL_SETTLE_MS = 120;
+/**
+ * How long a genuine downward gesture (wheel, touch, scrollbar drag, reading key) keeps validating
+ * bottom landings whose scroll events coincide with streaming geometry growth. Each downward
+ * momentum frame renews the window, so it only needs to cover input-to-scroll latency — not a
+ * whole fling — while staying far too short for an old gesture to validate a later layout clamp.
+ */
+export const FOLLOW_TAIL_READER_INTENT_WINDOW_MS = 400;
 const FOLLOW_TAIL_PROGRAMMATIC_SCROLL_MAX_MS = 2_000;
 const FOLLOW_TAIL_SETTLE_FRAMES = 8;
 
@@ -140,6 +147,12 @@ function isUpwardReadingKey(event: FollowTailKey): boolean {
     event.key === "Home" || (event.key === " " && event.shiftKey);
 }
 
+function isDownwardReadingKey(event: FollowTailKey): boolean {
+  if (event.ctrlKey || event.metaKey || event.altKey) return false;
+  return event.key === "j" || event.key === "ArrowDown" || event.key === "PageDown" ||
+    (event.key === " " && !event.shiftKey);
+}
+
 export function isFollowTailResumeKey(event: FollowTailKey): boolean {
   if (event.ctrlKey || event.metaKey || event.altKey) return false;
   return event.key === "End" || (event.shiftKey && event.key.toLowerCase() === "g");
@@ -164,7 +177,8 @@ export function useFollowTail({
   const followFramesRemainingRef = useRef(0);
   const resizeFollowOwnsScrollRef = useRef(false);
   const scrollIntentTimerRef = useRef<number | null>(null);
-  const viewportGeometryRef = useRef<{ scrollHeight: number; clientHeight: number } | null>(null);
+  const viewportGeometryRef = useRef<{ scrollTop: number; scrollHeight: number; clientHeight: number } | null>(null);
+  const readerDownwardIntentAtRef = useRef<number | null>(null);
   const programmaticScrollRef = useRef<{
     direction: "next" | "previous";
     settleTimer: number | null;
@@ -198,9 +212,17 @@ export function useFollowTail({
    */
   const consumeViewportGeometryChange = useCallback((metrics: FollowTailMetrics): boolean => {
     const previous = viewportGeometryRef.current;
-    viewportGeometryRef.current = { scrollHeight: metrics.scrollHeight, clientHeight: metrics.clientHeight };
+    viewportGeometryRef.current = {
+      scrollTop: metrics.scrollTop,
+      scrollHeight: metrics.scrollHeight,
+      clientHeight: metrics.clientHeight,
+    };
     return previous != null &&
       (previous.scrollHeight !== metrics.scrollHeight || previous.clientHeight !== metrics.clientHeight);
+  }, []);
+
+  const markReaderDownwardIntent = useCallback(() => {
+    readerDownwardIntentAtRef.current = Date.now();
   }, []);
 
   const scrollToBottom = useCallback(() => {
@@ -307,16 +329,34 @@ export function useFollowTail({
       pause();
       return;
     }
+    if (event.deltaY > 0) markReaderDownwardIntent();
     cancelProgrammaticScroll();
-  }, [cancelProgrammaticScroll, pause]);
+  }, [cancelProgrammaticScroll, markReaderDownwardIntent, pause]);
   const onPointerMove = useCallback((event: Pick<PointerEvent, "buttons">) => {
-    if ((event.buttons & 1) !== 0) pause();
-  }, [pause]);
+    if ((event.buttons & 1) === 0) return;
+    // A scrollbar or selection drag can travel either way; the claim lets a drag that ends on the
+    // live tail resume even while streaming keeps the geometry unsettled.
+    markReaderDownwardIntent();
+    pause();
+  }, [markReaderDownwardIntent, pause]);
+  const onTouchStart = useCallback(() => {
+    markReaderDownwardIntent();
+    pause();
+  }, [markReaderDownwardIntent, pause]);
 
   const onScroll = useCallback(() => {
     const element = scrollRef.current;
     if (!element) return;
+    const previousScrollTop = viewportGeometryRef.current?.scrollTop;
     const layoutDriven = consumeViewportGeometryChange(element);
+    const intentAt = readerDownwardIntentAtRef.current;
+    const downwardIntentFresh = intentAt != null &&
+      Date.now() - intentAt <= FOLLOW_TAIL_READER_INTENT_WINDOW_MS;
+    // Wheel momentum and touch flings keep travelling without further input events; every downward
+    // frame renews the reader's claim. A layout clamp moves scrollTop UP, so it never renews.
+    if (downwardIntentFresh && previousScrollTop != null && element.scrollTop > previousScrollTop) {
+      markReaderDownwardIntent();
+    }
     const ownership = programmaticScrollRef.current;
     if (ownership) {
       const atBottom = isAtFollowTailBottom(element, FOLLOW_TAIL_RESUME_THRESHOLD_PX);
@@ -336,8 +376,10 @@ export function useFollowTail({
     if (stateRef.current !== "following") {
       cancelScheduledScrollIntent();
       // A clamped scrollTop after the viewport grew (for example composer shrink) lands exactly on
-      // the bottom without any reader intent; only a scroll with settled geometry may resume.
-      if (!layoutDriven && isAtFollowTailBottom(element, FOLLOW_TAIL_RESUME_THRESHOLD_PX)) {
+      // the bottom without any reader intent, so a BARE scroll with unsettled geometry must not
+      // resume. A landing backed by a fresh downward gesture is the reader's, even mid-stream.
+      if ((!layoutDriven || downwardIntentFresh) &&
+          isAtFollowTailBottom(element, FOLLOW_TAIL_RESUME_THRESHOLD_PX)) {
         transition("resume");
       }
       return;
@@ -358,7 +400,7 @@ export function useFollowTail({
         pause();
       }
     }, FOLLOW_TAIL_SCROLL_INTENT_DELAY_MS);
-  }, [cancelScheduledScrollIntent, consumeViewportGeometryChange, finishProgrammaticScroll, pause, scrollRef, transition]);
+  }, [cancelScheduledScrollIntent, consumeViewportGeometryChange, finishProgrammaticScroll, markReaderDownwardIntent, pause, scrollRef, transition]);
 
   const onKeyDown = useCallback((event: FollowTailKey) => {
     if (isFollowTailResumeKey(event)) {
@@ -366,8 +408,9 @@ export function useFollowTail({
       return true;
     }
     if (isUpwardReadingKey(event)) pause();
+    else if (isDownwardReadingKey(event)) markReaderDownwardIntent();
     return false;
-  }, [follow, pause]);
+  }, [follow, markReaderDownwardIntent, pause]);
 
   useLayoutEffect(() => {
     if (previousSessionIdRef.current === sessionId) return;
@@ -466,7 +509,7 @@ export function useFollowTail({
     onScroll,
     onWheel,
     onPointerMove,
-    onTouchStart: pause,
+    onTouchStart,
     onKeyDown,
   };
 }
