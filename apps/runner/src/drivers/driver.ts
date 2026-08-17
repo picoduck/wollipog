@@ -74,6 +74,9 @@ export interface DriverCallbacks {
   onBackgroundWork?: (update: DriverBackgroundWorkUpdate) => void;
   /** Provider-confirmed account readiness changes; credentials and identity never cross here. */
   onAuthStatus?: (status: "authenticated" | "unauthenticated") => void;
+  /** A harness request proved that its provider credentials need user action. Raw provider text
+   * stays inside the driver because it can contain secrets or authorization URLs. */
+  onAuthenticationFailure?: () => void;
   onAcpCapabilities?: (capabilities: AcpRuntimeCapabilities) => void;
   /** Session-scoped ACP controls/config; never merge these onto the agent row because two live
    * sessions may advertise different modes or commands. */

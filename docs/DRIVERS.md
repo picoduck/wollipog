@@ -374,7 +374,7 @@ that decision remains Phase 2.5.
 | `assistant` (complete) | `message.content[]` text blocks | authoritative `{kind:"agent_message", text}` (dedupe vs deltas) |
 | `assistant` (complete) | `message.content[]` `tool_use`, `parent_tool_use_id`, parented `message.usage` | `{kind:"tool_call", toolCallId:id, title:name, status:"in_progress", text:JSON(input), parentToolUseId?}` plus attributed subagent `token_usage` when supplied |
 | `user` | `message.content[]` `tool_result`, `parent_tool_use_id` | `{kind:"tool_call_update", toolCallId:tool_use_id, status: is_error?"failed":"completed", text:content, parentToolUseId?}` |
-| `system`/`api_retry` | `error`, `attempt` | `{kind:"stderr", text:"retry …"}` |
+| `system`/`api_retry` | `error`, `attempt` | non-auth failures → `{kind:"stderr", text:"retry …"}`; provider-auth failures → secret-free driver signal that cancels the retry loop and parks the session on **Authentication Required** |
 | `system`/`compact_boundary` | — | `{kind:"status", status:"running"}` (informational; or ignore) |
 | `result` | `subtype`, `result`, `modelUsage`, `total_cost_usd` | end turn → `StopReason` (`success`→`end_turn`, `error_max_turns`→`max_turn_requests`, else `refusal`); emit `{kind:"token_usage", …}` |
 | `control_request` (`subtype:"can_use_tool"`) | `request_id`, `request.tool_name`, `request.description`, `request.input` | `{kind:"permission_request", requestId, title:"<tool_name>: <description ≤80>", options:[allow_once,reject_once]}` (input stashed for the reply) |

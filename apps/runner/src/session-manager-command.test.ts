@@ -242,6 +242,7 @@ function harness(options: {
     boundary,
     preparedInputs,
     invoked,
+    callbacks: () => callbacks!,
     manager,
     start,
     cleanup: () => {
@@ -346,6 +347,40 @@ test("fresh v75 commands use a durable, provenance-preserving provider boundary 
     });
     assert.equal(h.store.readMeta("command-session")?.title, "");
     assert.equal(h.store.readMeta("command-session")?.titleSource, "generated");
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("provider authentication blocks manual commands with a distinct receipt", async () => {
+  const provider = deferred<"end_turn">();
+  const h = harness({ invokeGate: provider.promise });
+  try {
+    assert.equal(await h.start(), true);
+    const command = liveCommand(h.manager);
+    const receipts: Receipt[] = [];
+    assert.equal(h.manager.invokeSessionCommand(
+      message(command.invocation),
+      receiptLifecycle("invocation-one", receipts),
+    ), true);
+    await waitFor(() => h.invoked.length === 1);
+
+    h.callbacks().onAuthenticationFailure?.();
+    provider.resolve("end_turn");
+    await waitFor(() => receipts.at(-1)?.state === "rejected");
+    assert.equal(receipts.at(-1)?.code, "PROVIDER_AUTHENTICATION_REQUIRED");
+    assert.equal(h.store.readMeta("command-session")?.status, "input_required");
+    assert.equal(h.store.readMeta("command-session")?.pendingApproval?.kind, "authentication");
+
+    const blockedReceipts: Receipt[] = [];
+    assert.equal(h.manager.invokeSessionCommand(
+      message(command.invocation, {
+        invocationId: "invocation-blocked",
+        submissionId: "submission-blocked",
+      }),
+      receiptLifecycle("invocation-blocked", blockedReceipts),
+    ), false);
+    assert.equal(blockedReceipts[0]?.code, "PROVIDER_AUTHENTICATION_REQUIRED");
   } finally {
     h.cleanup();
   }

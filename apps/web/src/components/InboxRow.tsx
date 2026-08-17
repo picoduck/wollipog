@@ -79,7 +79,9 @@ function InboxRowInner({
           </span>
           <span className="inbox-row-signals">
             {blocked ? (
-              <span className="inbox-status-pill blocked">Approval</span>
+              <span className="inbox-status-pill blocked">
+                {session.pendingApproval?.kind === "authentication" ? "Authentication Required" : "Approval"}
+              </span>
             ) : status.busy ? (
               <span className="inbox-status-pill running">{status.label}</span>
             ) : diffReady ? (

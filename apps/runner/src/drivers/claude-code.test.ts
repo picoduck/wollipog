@@ -46,6 +46,7 @@ interface Harness {
   events: SessionEventPayload[];
   stderr: string[];
   resolvedModels: string[];
+  authenticationFailures: number;
   /** Invoke the private mapper and return its StopReason | null. */
   feed: (msg: unknown) => unknown;
 }
@@ -54,10 +55,12 @@ function makeHarness(): Harness {
   const events: SessionEventPayload[] = [];
   const stderr: string[] = [];
   const resolvedModels: string[] = [];
+  let authenticationFailures = 0;
   const cb: DriverCallbacks = {
     onEvent: (payload) => events.push(payload),
     onStderr: (text) => stderr.push(text),
     onModelResolved: (model) => resolvedModels.push(model),
+    onAuthenticationFailure: () => { authenticationFailures += 1; },
     onExit: () => {},
   };
   const opts: DriverOptions = {
@@ -72,7 +75,7 @@ function makeHarness(): Harness {
   const driver = new ClaudeCodeDriver(opts, cb);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const feed = (msg: unknown) => (driver as any).handleEvent(msg);
-  return { driver, events, stderr, resolvedModels, feed };
+  return { driver, events, stderr, resolvedModels, get authenticationFailures() { return authenticationFailures; }, feed };
 }
 
 const baseOpts: DriverOptions = {
@@ -127,6 +130,24 @@ test("provider commands are synchronously prepared, driver-bound, and single-use
     argumentText: "",
     executionMode: "passthrough",
   }), /invalid.*command name/i);
+});
+
+test("auth failures retain a secret-free diagnostic when no structured callback is installed", () => {
+  const stderr: string[] = [];
+  const driver = new ClaudeCodeDriver(baseOpts, {
+    onEvent: () => {},
+    onStderr: (text) => stderr.push(text),
+    onExit: () => {},
+  });
+  (driver as any).handleEvent({
+    type: "system",
+    subtype: "api_retry",
+    error: "authentication_failed secret-value",
+    attempt: 1,
+    max_retries: 5,
+  });
+  assert.deepEqual(stderr, ["provider authentication is required"]);
+  assert.equal(stderr.join(" ").includes("secret-value"), false);
 });
 
 test("persistent settings default on, accept zero/unbounded values, and reject footguns loudly", () => {
@@ -1966,6 +1987,21 @@ test("system/api_retry surfaces a stderr note (no onEvent)", () => {
   assert.equal(r, null);
   assert.equal(h.events.length, 0);
   assert.deepEqual(h.stderr, ["retry 2/5: overloaded"]);
+});
+
+test("system/api_retry converts authentication failures to a secret-free stop signal", () => {
+  const h = makeHarness();
+  const secretBearingError = "authentication_failed https://login.example/callback?token=secret";
+  assert.equal(h.feed({
+    type: "system",
+    subtype: "api_retry",
+    attempt: 1,
+    max_retries: 5,
+    error: secretBearingError,
+  }), null);
+  assert.equal(h.authenticationFailures, 1);
+  assert.deepEqual(h.stderr, []);
+  assert.equal(JSON.stringify(h.events).includes(secretBearingError), false);
 });
 
 test("stream_event text_delta -> agent_message", () => {

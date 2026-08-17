@@ -11,12 +11,14 @@ import type { DriverCallbacks, DriverOptions } from "./driver.js";
  * a fake callbacks object that records every onEvent payload.
  */
 
-function makeDriver(): { driver: CodexDriver; events: SessionEventPayload[]; stderr: string[] } {
+function makeDriver(): { driver: CodexDriver; events: SessionEventPayload[]; stderr: string[]; authenticationFailures: () => number } {
   const events: SessionEventPayload[] = [];
   const stderr: string[] = [];
+  let authenticationFailures = 0;
   const cb: DriverCallbacks = {
     onEvent: (payload) => events.push(payload),
     onStderr: (text) => stderr.push(text),
+    onAuthenticationFailure: () => { authenticationFailures += 1; },
     onExit: () => {},
   };
   const opts: DriverOptions = {
@@ -27,7 +29,7 @@ function makeDriver(): { driver: CodexDriver; events: SessionEventPayload[]; std
     config: {},
     context: { kind: "native" },
   };
-  return { driver: new CodexDriver(opts, cb), events, stderr };
+  return { driver: new CodexDriver(opts, cb), events, stderr, authenticationFailures: () => authenticationFailures };
 }
 
 // Convenience accessors for the private mappers.
@@ -41,6 +43,15 @@ test("thread.started sets the threadId and returns null", () => {
   const r = handleEvent(driver, { type: "thread.started", thread_id: "thread-abc" });
   assert.equal(r, null);
   assert.equal(threadIdOf(driver), "thread-abc");
+});
+
+test("provider 401 emits an auth signal without exposing the raw error", () => {
+  const h = makeDriver();
+  const raw = "401 Unauthorized: missing bearer token secret-value";
+  assert.equal(handleEvent(h.driver, { type: "error", message: raw }), "refusal");
+  assert.equal(h.authenticationFailures(), 1);
+  assert.deepEqual(h.events, []);
+  assert.equal(h.stderr.join("\n").includes(raw), false);
 });
 
 test("resumeId pre-seeds the threadId so the next turn resumes (Phase 2)", () => {

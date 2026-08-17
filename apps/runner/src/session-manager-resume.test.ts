@@ -113,6 +113,7 @@ function harness(
   const launches: Array<{ kind: AgentDriverKind; options: DriverOptions }> = [];
   const prompts: string[] = [];
   const disposals: Array<Parameters<Driver["dispose"]>[0]> = [];
+  let cancelCalls = 0;
   let closes = 0;
   const authStatuses: Array<[
     string,
@@ -156,7 +157,7 @@ function harness(
         return "end_turn";
       },
       setConfig,
-      cancel: () => {},
+      cancel: () => { cancelCalls += 1; },
       resolvePermission: () => false,
       ...(steer ? { steer } : {}),
       ...(kind === "acp" ? { close: async () => { closes += 1; await closeGate; return true; } } : {}),
@@ -191,6 +192,7 @@ function harness(
     launches,
     prompts,
     disposals,
+    cancelCalls: () => cancelCalls,
     closes: () => closes,
     authStatuses,
     manager,
@@ -199,6 +201,151 @@ function harness(
     cleanup: () => rmSync(root, { recursive: true, force: true }),
   };
 }
+
+test("provider auth failure stops the turn, parks exact recovery context, and holds FIFO until explicit retry", async () => {
+  let h!: ReturnType<typeof harness>;
+  let attempts = 0;
+  const failures: Array<[string, string | undefined]> = [];
+  const durable: DurableCommandLifecycle = {
+    commandId: "auth-blocked-command",
+    queued: () => {}, started: () => {}, completed: () => {}, uncertain: () => {},
+    failed: (error, code) => failures.push([error, code]),
+  };
+  h = harness({
+    driver: "claude-code",
+    agentId: "claude-native",
+    command: "claude",
+    context: { kind: "wsl", distro: "Ubuntu" },
+    agentSessionId: "claude-session",
+  }, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, async () => {
+    attempts += 1;
+    if (attempts === 1) {
+      h.manager.prompt("resume-session", "queued before sign-in");
+      h.callbacks().onAuthenticationFailure?.();
+    }
+  });
+  try {
+    h.manager.prompt("resume-session", "first attempt", [], undefined, undefined, durable);
+    await tick();
+    await tick();
+
+    const blocked = h.store.readMeta("resume-session")!;
+    assert.equal(h.cancelCalls(), 1, "the provider retry loop is cancelled immediately");
+    assert.equal(blocked.status, "input_required");
+    assert.equal(blocked.pendingApproval?.kind, "authentication");
+    assert.deepEqual(blocked.pendingApproval?.options, []);
+    assert.equal(blocked.pendingApproval?.title, "Authentication Required — Claude Code");
+    assert.match(blocked.pendingApproval?.context?.input ?? "", /Provider: Claude Code/);
+    assert.match(blocked.pendingApproval?.context?.input ?? "", /Machine: WSL distribution Ubuntu/);
+    assert.match(blocked.pendingApproval?.context?.input ?? "", /Location:/);
+    assert.match(blocked.pendingApproval?.context?.input ?? "", /Run `claude auth login`/);
+    assert.deepEqual(h.prompts, ["first attempt"], "known-unsubmitted FIFO work remains held");
+    assert.deepEqual(h.authStatuses, [["claude-native", { status: "unauthenticated" }]]);
+    assert.deepEqual(failures, [["provider authentication is required", "PROVIDER_AUTHENTICATION_REQUIRED"]]);
+
+    h.manager.prompt("resume-session", "explicit retry after sign-in");
+    await tick();
+    await tick();
+    assert.deepEqual(h.prompts, ["first attempt", "queued before sign-in", "explicit retry after sign-in"]);
+    assert.equal(h.store.readMeta("resume-session")?.status, "idle");
+    assert.equal(h.store.readMeta("resume-session")?.pendingApproval, null);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("app-server exit preserves the auth card and held FIFO until an explicit retry", async () => {
+  let h!: ReturnType<typeof harness>;
+  let attempts = 0;
+  h = harness({}, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, async () => {
+    attempts += 1;
+    if (attempts === 1) {
+      h.manager.prompt("resume-session", "held while signed out");
+      h.callbacks().onAuthenticationFailure?.();
+    }
+  });
+  try {
+    h.manager.prompt("resume-session", "first attempt");
+    await tick();
+    await tick();
+    h.callbacks().onExit(1);
+    await tick();
+    await tick();
+
+    assert.equal(h.store.readMeta("resume-session")?.status, "input_required");
+    assert.equal(h.store.readMeta("resume-session")?.pendingApproval?.kind, "authentication");
+    assert.equal(h.launches.length, 1, "auth-blocked exit must not relaunch automatically");
+    assert.deepEqual(h.prompts, ["first attempt"]);
+
+    h.manager.prompt("resume-session", "explicit retry");
+    await tick();
+    await tick();
+    await tick();
+    assert.equal(h.launches.length, 2);
+    assert.deepEqual(h.prompts, ["first attempt", "held while signed out", "explicit retry"]);
+    assert.equal(h.store.readMeta("resume-session")?.pendingApproval, null);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("a retry rejected by queue capacity does not clear the authentication block", async () => {
+  let h!: ReturnType<typeof harness>;
+  h = harness({
+    driver: "claude-code",
+    agentId: "claude-native",
+    command: "claude",
+    agentSessionId: "claude-session",
+  }, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, async () => {
+    for (let index = 0; index < 100; index += 1) {
+      h.manager.prompt("resume-session", `held ${index}`);
+    }
+    h.callbacks().onAuthenticationFailure?.();
+  });
+  try {
+    h.manager.prompt("resume-session", "first attempt");
+    await tick();
+    await tick();
+    assert.equal(h.manager.prompt("resume-session", "retry that cannot be admitted"), false);
+    assert.equal(h.store.readMeta("resume-session")?.status, "input_required");
+    assert.equal(h.store.readMeta("resume-session")?.pendingApproval?.kind, "authentication");
+    assert.equal(h.cancelCalls(), 1);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("launch-time provider auth failure uses the distinct durable receipt code", async () => {
+  let h!: ReturnType<typeof harness>;
+  const failures: Array<[string, string | undefined]> = [];
+  const gate = new Promise<void>((_resolve, reject) => setImmediate(() => {
+    h.callbacks().onAuthenticationFailure?.();
+    reject(new Error("authentication_failed secret-value"));
+  }));
+  h = harness({}, gate);
+  const durable: DurableCommandLifecycle = {
+    commandId: "launch-auth-command",
+    queued: () => {}, started: () => {}, completed: () => {}, uncertain: () => {},
+    failed: (error, code) => failures.push([error, code]),
+  };
+  try {
+    h.manager.prompt("resume-session", "retry launch", [], undefined, undefined, durable);
+    await tick();
+    await tick();
+    await tick();
+    assert.deepEqual(failures, [["provider authentication is required", "PROVIDER_AUTHENTICATION_REQUIRED"]]);
+    const meta = h.store.readMeta("resume-session")!;
+    assert.equal(meta.status, "input_required");
+    assert.equal(meta.pendingApproval?.kind, "authentication");
+    assert.equal(JSON.stringify(h.sent).includes("secret-value"), false);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
 
 test("resume refreshes and persists runner-local launch material before spawning", async () => {
   let prepared = 0;
