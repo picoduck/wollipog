@@ -140,6 +140,17 @@ test("the permission-mode popover gives visible descriptions readable inline spa
   assert.deepEqual(phoneRule.declarationsForSelector(".cbar-opt.permission-mode").get("flex-direction"), ["column"]);
 });
 
+test("wrapped code blocks break long prose instead of scrolling sideways", () => {
+  // The default stays non-wrapping for source code…
+  assert.match(soleRuleBody(".md pre code"), /white-space: pre;/);
+  assert.match(soleRuleBody(".md pre"), /overflow-x: auto;/);
+  // …and `.md-code-wrap` (prose default or the Wrap Lines toggle) must both wrap preserved
+  // newlines and break unbroken runs, or narrow viewports still get a horizontal scrollbar.
+  const wrapped = soleRuleBody(".md .md-code-wrap pre code");
+  assert.match(wrapped, /white-space: pre-wrap;/);
+  assert.match(wrapped, /overflow-wrap: anywhere;/);
+});
+
 /** Relative luminance per WCAG 2.1, from a `#rrggbb` token value. */
 function luminance(hex: string): number {
   const channel = (raw: number) => {
