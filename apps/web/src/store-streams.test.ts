@@ -1018,3 +1018,32 @@ test("a forward gap-fill over a partial window preserves the activity ring", () 
     .reduce((total, count) => total + count, 0);
   assert.ok(after >= observed, "buckets below the window base survive forward recovery");
 });
+
+test("a replacement window clears older-load state its fence is about to orphan", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  store.loadEvents("s1", [event("s1", 10), event("s1", 11)], 0, undefined, false, generation, true);
+  store.beginOlderEventsLoad("s1", 10, 0);
+  assert.equal(store.getState().eventWindows.get("s1")?.loadingOlder, true);
+
+  // Retry applies a newer tail with a different base while that older page is still in flight.
+  store.loadEvents("s1", [event("s1", 20), event("s1", 21)], 0, undefined, true, generation, true);
+  assert.equal(store.getState().eventWindows.get("s1")?.loadingOlder, false,
+    "the fence will reject the in-flight page, so nothing else would ever clear the flag");
+
+  // The orphaned page resolves and is rejected without re-disabling the control.
+  store.loadOlderEvents("s1", [event("s1", 8), event("s1", 9)], true, 10, 0);
+  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [20, 21]);
+  assert.equal(store.getState().eventWindows.get("s1")?.loadingOlder, false);
+
+  // Reach-back still works against the replacement window.
+  store.beginOlderEventsLoad("s1", 20, 0);
+  store.loadOlderEvents("s1", [event("s1", 18), event("s1", 19)], true, 20, 0);
+  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [18, 19, 20, 21]);
+});

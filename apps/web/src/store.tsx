@@ -476,7 +476,10 @@ function applyWindowBase(
     // Completeness is monotonic within an epoch: a re-read that reaches the tail settles it, and a
     // later partial read cannot unsettle what was already proven complete.
     complete: action.recoveryComplete || (priorValid?.complete ?? false),
-    loadingOlder: priorValid?.loadingOlder ?? false,
+    // An older load in flight against the SAME base is still valid — its page will pass the fence.
+    // A base change means the fence will reject that page, and nothing else would ever clear the
+    // flag, leaving Load Earlier Activity stuck disabled until remount.
+    loadingOlder: priorValid?.baseSeq === pageBase ? priorValid.loadingOlder : false,
     error: priorValid?.error ?? null,
   });
   return eventWindows;
