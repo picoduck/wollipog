@@ -315,3 +315,21 @@ test("transcript disclosure and Subagents panel action are separate accessible c
     container.remove();
   }
 });
+
+test("a bounded window explains unlisted subagents instead of claiming none were recorded", () => {
+  // The spawning tool call this panel matches on can sit below the loaded window, so the
+  // whole-session claim would be false while earlier turns are unloaded.
+  assert.match(
+    subagentEmptyMessage({ driver: "claude-code", status: "running" }, true, true),
+    /Earlier activity in this session is not loaded/,
+  );
+  assert.match(
+    subagentEmptyMessage({ driver: "codex", status: "completed" }, false, true),
+    /Earlier activity in this session is not loaded/,
+  );
+  // With the whole history loaded the driver-specific explanations are authoritative again.
+  assert.match(
+    subagentEmptyMessage({ driver: "claude-code", status: "running" }, true, false),
+    /No subagents have been recorded/,
+  );
+});

@@ -104,6 +104,104 @@ test("composer Stop Turn is stable, idempotent, recall-safe, and distinct from S
   await expect(moreActions).toBeFocused();
 });
 
+test("timed turn updates preserve composer focus, selection, scroll, IME ownership, and shortcut isolation", async ({ page }) => {
+  await openSession(page);
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
+    status: "running",
+    activeTurnId: "turn-focus",
+  }));
+
+  const composer = page.locator(".composer-input");
+  const draft = Array.from({ length: 20 }, (_, index) => `line ${index}`).join("\n");
+  await composer.fill(draft);
+  const initial = await composer.evaluate((element) => {
+    const input = element as HTMLTextAreaElement;
+    const targetWindow = window as typeof window & {
+      __issue14Composer?: HTMLTextAreaElement;
+      __issue14Diagnostics?: unknown[];
+    };
+    targetWindow.__issue14Composer = input;
+    targetWindow.__issue14Diagnostics = [];
+    window.addEventListener("wollipog:composer-focus", (event) => {
+      targetWindow.__issue14Diagnostics!.push((event as CustomEvent).detail);
+    });
+    input.focus();
+    input.setSelectionRange(3, 14, "backward");
+    input.scrollTop = 35;
+    input.dispatchEvent(new Event("select", { bubbles: true }));
+    input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true, data: "候" }));
+    const reader = document.querySelector<HTMLElement>(".detail-scroll")!;
+    return { scrollTop: input.scrollTop, readerScrollTop: reader.scrollTop };
+  });
+
+  await page.evaluate(() => {
+    for (let revision = 2; revision <= 8; revision += 1) {
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
+        status: "running",
+        activeTurnId: "turn-focus",
+        updatedAt: revision,
+        tokensOut: revision * 10,
+      });
+    }
+  });
+  await expect(page.getByRole("button", { name: "Send" })).toBeVisible();
+
+  await composer.evaluate((element) => {
+    for (const init of [
+      { key: " " },
+      { key: " ", shiftKey: true },
+      { key: "g" },
+      { key: "G", shiftKey: true },
+      { key: "r" },
+      { key: "h" },
+      { key: "/" },
+      { key: "ArrowUp" },
+      { key: "ArrowDown" },
+    ]) {
+      element.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init }));
+    }
+  });
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
+    status: "idle",
+    activeTurnId: undefined,
+    updatedAt: 9,
+  }));
+  await composer.evaluate((element) => {
+    element.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "候" }));
+  });
+
+  await page.evaluate(() => {
+    document.querySelector<HTMLElement>(".detail-scroll")!.focus();
+  });
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await expect(composer).toBeFocused();
+
+  const final = await composer.evaluate((element) => {
+    const input = element as HTMLTextAreaElement;
+    const targetWindow = window as typeof window & {
+      __issue14Composer?: HTMLTextAreaElement;
+      __issue14Diagnostics?: unknown[];
+    };
+    return {
+      sameNode: targetWindow.__issue14Composer === input,
+      focused: document.activeElement === input,
+      selection: [input.selectionStart, input.selectionEnd, input.selectionDirection],
+      scrollTop: input.scrollTop,
+      readerScrollTop: document.querySelector<HTMLElement>(".detail-scroll")!.scrollTop,
+      diagnostics: targetWindow.__issue14Diagnostics,
+    };
+  });
+
+  expect(final.sameNode).toBe(true);
+  expect(final.focused).toBe(true);
+  expect(final.selection).toEqual([3, 14, "backward"]);
+  expect(final.scrollTop).toBe(initial.scrollTop);
+  expect(final.readerScrollTop).toBe(initial.readerScrollTop);
+  expect(final.diagnostics?.length).toBeGreaterThan(0);
+  expect(JSON.stringify(final.diagnostics)).not.toContain("line 0");
+});
+
+
 test("an acknowledged stop that does not settle becomes retryable", async ({ page }) => {
   await openSession(page);
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {

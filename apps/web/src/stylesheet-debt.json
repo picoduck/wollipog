@@ -574,7 +574,6 @@
     "|.inbox-row-shell.stalled::before|z-index|1",
     "|.inbox-splitter|z-index|2",
     "|.instance-selector:has(.instance-selector-pop)|z-index|1",
-    "|.md-code-copy|z-index|1",
     "|.menu-pop|z-index|1",
     "|.plus-pop|z-index|1",
     "|.rail-more-sheet|z-index|1",

@@ -165,6 +165,126 @@ interface ReflowRecorder {
   finished: Promise<void>;
 }
 
+interface SessionReturnRecorder {
+  active: boolean;
+  frames: number;
+  returnedSessionFrames: number;
+  untrustedFrames: number;
+  exposedUntrustedFrames: number;
+  semanticUntrustedFrames: number;
+  untrustedScrollHeights: Set<number>;
+  untrustedClientHeights: Set<number>;
+  readyFrames: number;
+  busyReadyFrames: number;
+  maxReadyRows: number;
+  overlapFrames: number;
+  overlapExamples: Array<{
+    frame: number;
+    previous: string | undefined;
+    current: string | undefined;
+    pixels: number;
+  }>;
+  finished: Promise<void>;
+}
+
+async function startSessionReturnRecorder(page: Page, returnedSession: string) {
+  await page.evaluate((expectedSession) => {
+    const host = window as typeof window & { __sessionReturnRecorder?: SessionReturnRecorder };
+    let finish!: () => void;
+    const recorder: SessionReturnRecorder = {
+      active: true,
+      frames: 0,
+      returnedSessionFrames: 0,
+      untrustedFrames: 0,
+      exposedUntrustedFrames: 0,
+      semanticUntrustedFrames: 0,
+      untrustedScrollHeights: new Set<number>(),
+      untrustedClientHeights: new Set<number>(),
+      readyFrames: 0,
+      busyReadyFrames: 0,
+      maxReadyRows: 0,
+      overlapFrames: 0,
+      overlapExamples: [],
+      finished: new Promise<void>((resolve) => { finish = resolve; }),
+    };
+    host.__sessionReturnRecorder = recorder;
+    // ResizeObserver and its React commit run before paint. Sampling from a zero-delay timer after
+    // each animation frame records the geometry users could actually see, including the first
+    // returned-session frame rather than only the settled virtual layout.
+    const scheduleSample = () => requestAnimationFrame(() => setTimeout(sample, 0));
+    const sample = () => {
+      recorder.frames += 1;
+      const reader = document.querySelector<HTMLElement>("[data-testid='reader']");
+      if (reader?.dataset.sessionId === expectedSession) {
+        recorder.returnedSessionFrames += 1;
+        const root = reader.querySelector<HTMLElement>("[data-virtual-measurements]");
+        if (root?.dataset.virtualMeasurements === "pending") {
+          recorder.untrustedFrames += 1;
+          recorder.untrustedScrollHeights.add(reader.scrollHeight);
+          recorder.untrustedClientHeights.add(reader.clientHeight);
+          if (getComputedStyle(root).opacity !== "0") recorder.exposedUntrustedFrames += 1;
+          if (root.getAttribute("role") === "list" &&
+              root.getAttribute("aria-label") === "Session Activity" &&
+              root.getAttribute("aria-busy") === "true" &&
+              root.querySelectorAll("[data-virtual-row]").length > 1) {
+            recorder.semanticUntrustedFrames += 1;
+          }
+        } else if (root?.dataset.virtualMeasurements === "ready") {
+          recorder.readyFrames += 1;
+          if (root.hasAttribute("aria-busy")) recorder.busyReadyFrames += 1;
+          const rows = [...root.querySelectorAll<HTMLElement>("[data-virtual-row]")]
+            .map((row) => ({
+              index: Number(row.dataset.index),
+              key: row.dataset.virtualKey,
+              rect: row.getBoundingClientRect(),
+            }))
+            .sort((left, right) => left.index - right.index);
+          recorder.maxReadyRows = Math.max(recorder.maxReadyRows, rows.length);
+          const overlapIndex = rows.findIndex((row, index) =>
+            index > 0 && row.rect.top + 0.5 < rows[index - 1]!.rect.bottom);
+          if (overlapIndex > 0) {
+            recorder.overlapFrames += 1;
+            if (recorder.overlapExamples.length < 3) recorder.overlapExamples.push({
+              frame: recorder.frames,
+              previous: rows[overlapIndex - 1]!.key,
+              current: rows[overlapIndex]!.key,
+              pixels: rows[overlapIndex - 1]!.rect.bottom - rows[overlapIndex]!.rect.top,
+            });
+          }
+        }
+      }
+      if (recorder.active) scheduleSample();
+      else finish();
+    };
+    scheduleSample();
+  }, returnedSession);
+}
+
+async function stopSessionReturnRecorder(page: Page) {
+  await settleLayout(page, 12);
+  return page.evaluate(async () => {
+    const recorder = (window as typeof window & { __sessionReturnRecorder?: SessionReturnRecorder })
+      .__sessionReturnRecorder;
+    if (!recorder) throw new Error("Session return recorder is missing.");
+    recorder.active = false;
+    await recorder.finished;
+    return {
+      frames: recorder.frames,
+      returnedSessionFrames: recorder.returnedSessionFrames,
+      untrustedFrames: recorder.untrustedFrames,
+      exposedUntrustedFrames: recorder.exposedUntrustedFrames,
+      semanticUntrustedFrames: recorder.semanticUntrustedFrames,
+      untrustedScrollHeights: [...recorder.untrustedScrollHeights],
+      untrustedClientHeights: [...recorder.untrustedClientHeights],
+      readyFrames: recorder.readyFrames,
+      busyReadyFrames: recorder.busyReadyFrames,
+      maxReadyRows: recorder.maxReadyRows,
+      overlapFrames: recorder.overlapFrames,
+      overlapExamples: recorder.overlapExamples,
+    };
+  });
+}
+
 async function dragPanelResizer(page: Page) {
   const resizer = page.getByTestId("panel-resizer");
   await expect(resizer).toBeVisible();
@@ -646,6 +766,56 @@ test("timeline remount restores a persisted logical row anchor", async ({ page }
   await expect.poll(async () => (await visibleAnchor(page))?.key).toBe(before!.key);
   const restored = await visibleAnchor(page);
   expect(Math.abs(restored!.offset - before!.offset)).toBeLessThan(1);
+});
+
+test("returning to a narrowed session keeps untrusted rows unpainted and valid frames disjoint", async ({ page }) => {
+  await page.goto("/timeline-reflow-e2e.html?follow=1&defer=1");
+  const reader = page.getByTestId("reader");
+  await expect(page.locator("[data-virtual-row]").first()).toBeVisible();
+  await settleLayout(page);
+
+  await page.getByTestId("pause-follow").click();
+  await expect(reader).toHaveAttribute("data-follow-tail-state", "paused");
+  await reader.evaluate((element) => {
+    element.scrollTop = 0;
+    element.dispatchEvent(new Event("scroll"));
+  });
+  await settleLayout(page);
+  const alphaAnchor = await alignRowToViewport(page, "item:user_message:2");
+  await expect(reader).toHaveAttribute("data-anchor-key", alphaAnchor.key!);
+
+  await page.getByTestId("session-beta").click();
+  await expect(reader).toHaveAttribute("data-session-id", "beta");
+  await page.getByTestId("wide-panel").click();
+  await expect(page.getByTestId("panel")).toHaveAttribute("data-width", "540");
+  const streamTicks = Number(await reader.getAttribute("data-tail-stream-ticks"));
+  await page.getByTestId("stream-tail").click();
+  await expect(reader).toHaveAttribute("data-tail-stream-ticks", String(streamTicks + 1));
+  await settleLayout(page);
+
+  await startSessionReturnRecorder(page, "alpha");
+  await page.getByTestId("session-alpha").click();
+  await expect(reader).toHaveAttribute("data-session-id", "alpha");
+  const sampled = await stopSessionReturnRecorder(page);
+
+  expect(sampled.frames).toBeGreaterThan(8);
+  expect(sampled.returnedSessionFrames).toBeGreaterThan(8);
+  expect(sampled.untrustedFrames).toBeGreaterThan(0);
+  expect(sampled.exposedUntrustedFrames, "estimate-backed geometry must remain unpainted").toBe(0);
+  expect(sampled.semanticUntrustedFrames, "the busy semantic list must remain populated")
+    .toBe(sampled.untrustedFrames);
+  expect(sampled.untrustedScrollHeights).toHaveLength(1);
+  expect(sampled.untrustedClientHeights).toHaveLength(1);
+  expect(sampled.untrustedScrollHeights[0]!).toBeGreaterThan(sampled.untrustedClientHeights[0]!);
+  expect(sampled.readyFrames).toBeGreaterThan(4);
+  expect(sampled.busyReadyFrames).toBe(0);
+  expect(sampled.maxReadyRows).toBeGreaterThan(1);
+  expect(sampled.overlapFrames, JSON.stringify(sampled.overlapExamples)).toBe(0);
+  await expectNoOverlap(page);
+  await expect(reader).toHaveAttribute("data-follow-tail-state", "paused");
+  await expect.poll(async () => (await visibleAnchor(page))?.key).toBe(alphaAnchor.key);
+  const restored = await visibleAnchor(page);
+  expect(Math.abs(restored!.offset - alphaAnchor.offset)).toBeLessThan(1);
 });
 
 test("width reflow and tail streaming honor following, paused, and previewing states", async ({ page }) => {

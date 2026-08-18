@@ -220,3 +220,17 @@ test("uncertain receipt actions call the matching callback and local pending sta
   await act(async () => root.unmount());
   container.remove();
 });
+
+test("a bounded window is not evidence that an accepted steer never landed", () => {
+  const accepted: SteeringAttemptView = {
+    submissionId: "submission-accepted",
+    turnId: "turn-1",
+    state: "accepted",
+    createdAt: 1,
+    updatedAt: 2,
+  } as SteeringAttemptView;
+  // Its canonical steer message sits in an unloaded turn; inferring from that absence would show an
+  // unsettled receipt for a steer the provider already applied.
+  assert.deepEqual(deriveSteeringReceipts([accepted], [], undefined, true), []);
+  assert.equal(deriveSteeringReceipts([accepted], [], undefined, false).length, 1);
+});
