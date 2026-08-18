@@ -24,6 +24,7 @@ function Fixture() {
   const offsetFixtureEnabled = useMemo(() => new URLSearchParams(window.location.search).get("offset") === "1", []);
   const deferredMeasurementFixture = useMemo(() => new URLSearchParams(window.location.search).get("defer") === "1", []);
   const [panelWidth, setPanelWidth] = useState(0);
+  const [composerHeight, setComposerHeight] = useState(0);
   const [noticeMounted, setNoticeMounted] = useState(true);
   const [noticeExpanded, setNoticeExpanded] = useState(false);
   const [headStreamTicks, setHeadStreamTicks] = useState(0);
@@ -179,6 +180,15 @@ function Fixture() {
             />
           </VirtualMeasurementCommitTestProvider>
         </div>
+        {/* Stands in for the auto-growing composer: a sibling below the reader in the same flex
+            column, so its height changes resize the transcript viewport exactly like a draft
+            wrapping onto more lines (and shrinking back) does in SessionDetail. */}
+        {composerHeight > 0 && (
+          <div
+            data-testid="composer-spacer"
+            style={{ flex: "none", height: composerHeight, borderTop: "1px solid var(--border)" }}
+          />
+        )}
       </section>
       <nav style={{ position: "fixed", zIndex: 2, top: 4, right: 4 }}>
         <button type="button" data-testid="close-panel" onClick={() => setPanelWidth(0)}>Close Panel</button>
@@ -249,6 +259,8 @@ function Fixture() {
           setHistoryLimit((current) => ({ ...current, [sessionId]: 3 }));
           setHistoryEpoch((epoch) => epoch + 1);
         }}>Replace History</button>
+        <button type="button" data-testid="grow-composer" onClick={() => setComposerHeight((height) => height + 72)}>Grow Composer</button>
+        <button type="button" data-testid="shrink-composer" onClick={() => setComposerHeight(0)}>Shrink Composer</button>
         {followTailEnabled && <button type="button" data-testid="pause-follow" onClick={followTail.pause}>Pause</button>}
         {followTailEnabled && <button type="button" data-testid="preview-follow" onClick={followTail.preview}>Preview</button>}
         {followTailEnabled && <button type="button" data-testid="resume-follow" onClick={followTail.follow}>Follow Live Output</button>}

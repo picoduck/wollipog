@@ -144,6 +144,7 @@ import {
   restoreComposerFocus,
   restoreRememberedComposerFocus,
 } from "../composer-focus.js";
+import { resizeComposerToContent } from "../composer-autogrow.js";
 import { IncrementalActiveTurnProgress } from "../turn-progress.js";
 import { WorkingIndicator } from "./WorkingIndicator.js";
 import {
@@ -1153,15 +1154,13 @@ function SessionDetailLoaded({
     [timelineUserPrompts, session.queued, session.steeringAttempts],
   );
 
-  // Auto-grow the composer to its content, up to the CSS max-height (then it scrolls internally).
-  // Skip while the element has no laid-out width (e.g. a hidden/collapsed column): a scrollHeight
-  // read at zero width returns a garbage-tall value; the next keystroke recomputes once visible.
+  // Auto-grow the composer to its content. The probe is confined to the composer box so a draft
+  // keystroke can never reflow — and scroll-clamp — the transcript above it (BUG-017).
   useLayoutEffect(() => {
     if (mode !== "expanded") return;
     const el = inputRef.current;
-    if (!el || el.clientWidth === 0) return;
-    el.style.height = "auto";
-    el.style.height = `${el.scrollHeight}px`;
+    if (!el) return;
+    resizeComposerToContent(el);
   }, [mode, text]);
 
   // Once the runner echoes the real user_message (count rises past the send baseline), drop the
