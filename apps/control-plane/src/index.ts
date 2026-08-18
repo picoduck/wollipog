@@ -2372,7 +2372,14 @@ app.post("/api/sessions/:id/side-chat", async (req, reply) =>
 
 app.get("/api/sessions/:id/events", async (req, reply) => {
   const id = (req.params as { id: string }).id;
-  const query = req.query as { after?: string; limit?: string; eventEpoch?: string };
+  const query = req.query as {
+    after?: string;
+    before?: string;
+    direction?: string;
+    align?: string;
+    limit?: string;
+    eventEpoch?: string;
+  };
   const after = Number(query.after ?? 0);
   if (query.limit === undefined) {
     await svc.hydrateHistory(id);
@@ -2380,6 +2387,50 @@ app.get("/api/sessions/:id/events", async (req, reply) => {
   }
   const limit = Number(query.limit);
   const requestedEpoch = Number(query.eventEpoch);
+  // A backward read serves the bounded opening window: the newest `limit` rows, then older pages
+  // below an explicit cursor. Combining it with the forward gap-fill cursor is always a client bug,
+  // so it fails closed rather than silently ignoring one of the two.
+  const backward = query.direction === "backward";
+  if (query.direction !== undefined && !backward) {
+    return reply.code(400).send({
+      error: "direction must be backward when present",
+      code: "invalid_history_page",
+    });
+  }
+  if (!backward && query.before !== undefined) {
+    return reply.code(400).send({
+      error: "before requires direction=backward",
+      code: "invalid_history_page",
+    });
+  }
+  if (backward && query.after !== undefined) {
+    return reply.code(400).send({
+      error: "after cannot be combined with direction=backward",
+      code: "invalid_history_page",
+    });
+  }
+  // Opt-in: the opening window asks to begin at a turn boundary; older pages stay count-bounded so
+  // their cursors remain exact and disjoint.
+  const alignToTurn = query.align === "turn";
+  if (query.align !== undefined && !alignToTurn) {
+    return reply.code(400).send({
+      error: "align must be turn when present",
+      code: "invalid_history_page",
+    });
+  }
+  if (alignToTurn && !backward) {
+    return reply.code(400).send({
+      error: "align requires direction=backward",
+      code: "invalid_history_page",
+    });
+  }
+  const before = query.before === undefined ? undefined : Number(query.before);
+  if (before !== undefined && (!Number.isSafeInteger(before) || before < 0)) {
+    return reply.code(400).send({
+      error: "before must be a bounded non-negative integer",
+      code: "invalid_history_page",
+    });
+  }
   if (!Number.isSafeInteger(after) || after < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 200 ||
       !Number.isSafeInteger(requestedEpoch) || requestedEpoch < 0) {
     return reply.code(400).send({
@@ -2397,10 +2448,25 @@ app.get("/api/sessions/:id/events", async (req, reply) => {
       eventEpoch: state.eventEpoch,
     });
   }
-  const page = db.listCachedEventPage(id, after, limit);
-  void svc.hydrateHistory(id);
   const indexed = runnerSupportsProtocol(db.getRunner(session.runnerId)?.protocolVersion, "indexedHistory");
   const cacheComplete = indexed ? state.complete : state.hydratedSeq >= state.tailSeq;
+  if (backward) {
+    const tail = db.listCachedEventTailPage(id, before, limit, { alignToTurn });
+    // Hydration still runs forward from the runner. An incomplete cache means this window is not
+    // yet the true tail, which `cacheComplete` reports so the client can re-read instead of
+    // presenting a stale newest event as current.
+    void svc.hydrateHistory(id);
+    return {
+      events: tail.events,
+      eventEpoch: state.eventEpoch,
+      ...(tail.nextBeforeSeq !== undefined ? { nextBefore: tail.nextBeforeSeq } : {}),
+      hasMoreOlder: tail.hasMoreOlder,
+      ...(tail.turnAligned !== undefined ? { turnAligned: tail.turnAligned } : {}),
+      cacheComplete,
+    };
+  }
+  const page = db.listCachedEventPage(id, after, limit);
+  void svc.hydrateHistory(id);
   return {
     events: page.events,
     eventEpoch: state.eventEpoch,

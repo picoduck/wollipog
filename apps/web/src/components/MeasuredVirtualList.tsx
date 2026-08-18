@@ -16,15 +16,45 @@ import { defaultRangeExtractor, type Range, useVirtualizer } from "@tanstack/rea
 import { flushSync } from "react-dom";
 import { VIRTUAL_VIEWPORT_INTENT_EVENT } from "../viewport-intent.js";
 
-type VirtualMeasurementCommit = (commit: () => void) => void;
+type CancelVirtualMeasurementCommit = () => void;
+type VirtualMeasurementCommit = (commit: () => void) => CancelVirtualMeasurementCommit | void;
+
 const commitVirtualMeasurementsSynchronously: VirtualMeasurementCommit = (commit) => flushSync(commit);
 const deferVirtualMeasurementsForTest: VirtualMeasurementCommit = (commit) => {
-  // Cross one paint boundary so rendered negative controls can observe the stale geometry that an
-  // asynchronous production commit would expose.
-  requestAnimationFrame(() => requestAnimationFrame(commit));
+  // Cross multiple paint boundaries so rendered negative controls sample an untrusted frame even
+  // when the initiating Playwright action consumes one browser frame for actionability checks.
+  let frame: number | null = null;
+  let framesRemaining = 3;
+  const advance = () => {
+    if (framesRemaining <= 0) {
+      frame = null;
+      commit();
+      return;
+    }
+    framesRemaining -= 1;
+    frame = requestAnimationFrame(advance);
+  };
+  frame = requestAnimationFrame(advance);
+  return () => {
+    if (frame != null) cancelAnimationFrame(frame);
+  };
 };
-const VirtualMeasurementCommitContext = createContext<VirtualMeasurementCommit>(
-  commitVirtualMeasurementsSynchronously,
+
+interface VirtualMeasurementCommitController {
+  commit: VirtualMeasurementCommit;
+  deferInitialMeasurements: boolean;
+}
+
+const synchronousMeasurementController: VirtualMeasurementCommitController = {
+  commit: commitVirtualMeasurementsSynchronously,
+  deferInitialMeasurements: false,
+};
+const deferredMeasurementController: VirtualMeasurementCommitController = {
+  commit: deferVirtualMeasurementsForTest,
+  deferInitialMeasurements: true,
+};
+const VirtualMeasurementCommitContext = createContext<VirtualMeasurementCommitController>(
+  synchronousMeasurementController,
 );
 
 /** Fault-injection seam for rendered behavior tests. Production must use the synchronous default. */
@@ -34,7 +64,7 @@ export function VirtualMeasurementCommitTestProvider({ deferred, children }: {
 }) {
   return (
     <VirtualMeasurementCommitContext.Provider
-      value={deferred ? deferVirtualMeasurementsForTest : commitVirtualMeasurementsSynchronously}
+      value={deferred ? deferredMeasurementController : synchronousMeasurementController}
     >
       {children}
     </VirtualMeasurementCommitContext.Provider>
@@ -287,12 +317,19 @@ function VirtualList<T>({
   revealRequest = null,
   onRevealHandled,
 }: MeasuredVirtualListProps<T>) {
-  const commitVirtualMeasurements = useContext(VirtualMeasurementCommitContext);
+  const {
+    commit: commitVirtualMeasurements,
+    deferInitialMeasurements,
+  } = useContext(VirtualMeasurementCommitContext);
   const rootRef = useRef<HTMLDivElement>(null);
   const [scrollMargin, setScrollMargin] = useState(0);
   const scrollMarginRef = useRef(0);
   const viewportWidthRef = useRef(0);
   const [measurementEpoch, setMeasurementEpoch] = useState(0);
+  const [initialMeasurementsReady, setInitialMeasurementsReady] = useState(false);
+  const initialMeasurementsReadyRef = useRef(initialMeasurementsReady);
+  initialMeasurementsReadyRef.current = initialMeasurementsReady;
+  const initialTotalHeightRef = useRef<number | null>(null);
   const [, forceAnchorRetry] = useState(0);
   const [focusedKey, setFocusedKey] = useState<string | null>(null);
   const [draggedKey, setDraggedKey] = useState<string | null>(null);
@@ -426,6 +463,8 @@ function VirtualList<T>({
     initialRect: { width: 800, height: 600 },
     useAnimationFrameWithResizeObserver: true,
   });
+  const initialMeasurementVirtualizerRef = useRef(virtualizer);
+  initialMeasurementVirtualizerRef.current = virtualizer;
   // Our logical-key anchor correction owns structural/width changes while pending. Otherwise,
   // retain TanStack's positional rule: only measurements above the viewport may compensate the
   // scroll offset. Returning true for a late below-viewport resize moves paused readers.
@@ -441,7 +480,60 @@ function VirtualList<T>({
       anchorPending: pendingAnchorRef.current != null,
     });
 
+  useEffect(() => {
+    const root = rootRef.current;
+    const scroll = scrollRef.current;
+    if (!root || !scroll) return;
+
+    let cancelPendingCommit: CancelVirtualMeasurementCommit | null = null;
+    let widthObserver: ResizeObserver | null = null;
+    const seedMountedRows = () => {
+      const width = Math.round(scroll.getBoundingClientRect().width);
+      if (width <= 0) return false;
+      // The first real viewport width owns every cached size. Capture it before the passive
+      // observer setup, invalidate estimate-backed geometry, and synchronously restore mounted DOM
+      // heights. Dependent absolute rows stay hidden until the render using that cache commits.
+      viewportWidthRef.current = width;
+      reseedMountedVirtualRows(root, initialMeasurementVirtualizerRef.current);
+      setInitialMeasurementsReady(true);
+      return true;
+    };
+    const scheduleSeed = (observerDelivery: boolean) => {
+      const seed = () => {
+        cancelPendingCommit = null;
+        seedMountedRows();
+      };
+      if (deferInitialMeasurements || observerDelivery) {
+        cancelPendingCommit?.();
+        cancelPendingCommit = commitVirtualMeasurements(seed) ?? null;
+      } else {
+        seed();
+      }
+    };
+
+    if (Math.round(scroll.getBoundingClientRect().width) > 0) {
+      scheduleSeed(false);
+    } else {
+      // A virtual surface can mount inside a temporarily collapsed panel. A zero-width layout
+      // cannot produce trustworthy wrapped heights, so keep it unpainted until its first real
+      // ResizeObserver delivery can seed and reveal it in the same pre-paint commit.
+      widthObserver = new ResizeObserver(() => {
+        if (Math.round(scroll.getBoundingClientRect().width) <= 0) return;
+        widthObserver?.disconnect();
+        widthObserver = null;
+        scheduleSeed(true);
+      });
+      widthObserver.observe(scroll);
+    }
+
+    return () => {
+      cancelPendingCommit?.();
+      widthObserver?.disconnect();
+    };
+  }, [commitVirtualMeasurements, deferInitialMeasurements, scrollRef]);
+
   useLayoutEffect(() => {
+    if (!initialMeasurementsReady) return;
     if (revealKey == null || revealRequestId == null) {
       pendingRevealOutcomeRef.current = null;
       handledRevealRef.current = null;
@@ -530,7 +622,7 @@ function VirtualList<T>({
       }
     };
     revealFrameRef.current = requestAnimationFrame(settle);
-  }, [indexByKey, items.length, itemsVersion, onRevealHandled, revealAlign, revealFocus, revealKey, revealRequestId, scrollRef, virtualizer]);
+  }, [indexByKey, initialMeasurementsReady, items.length, itemsVersion, onRevealHandled, revealAlign, revealFocus, revealKey, revealRequestId, scrollRef, virtualizer]);
 
   useEffect(() => {
     if (revealedLocationKey != null && !indexByKey.has(revealedLocationKey)) setRevealedLocationKey(null);
@@ -622,7 +714,7 @@ function VirtualList<T>({
       const marginChanged = Math.abs(scrollMarginRef.current - next) >= 0.5;
       const width = Math.round(scrollRect.width);
       const widthChanged = viewportWidthRef.current !== 0 && viewportWidthRef.current !== width;
-      if (marginChanged || widthChanged) {
+      if (initialMeasurementsReadyRef.current && (marginChanged || widthChanged)) {
         if (preserveAnchorRef.current) {
           if (pendingAnchorRef.current == null && lostAnchorRef.current == null) {
             pendingAnchorRef.current = visibleAnchorRef.current ?? captureAnchor();
@@ -667,7 +759,7 @@ function VirtualList<T>({
     };
     update(false);
     const recordVisibleAnchor = () => {
-      if (pendingAnchorRef.current != null) return;
+      if (!initialMeasurementsReadyRef.current || pendingAnchorRef.current != null) return;
       const lostIntent = lostAnchorIntentVersionRef.current;
       if (lostAnchorRef.current != null &&
           (lostIntent == null || lostIntent === viewportIntentVersionRef.current)) return;
@@ -780,6 +872,7 @@ function VirtualList<T>({
   }, [draggedKey]);
 
   useLayoutEffect(() => {
+    if (!initialMeasurementsReady) return;
     const root = rootRef.current;
     const scroll = scrollRef.current;
     if (!root || !scroll) return;
@@ -1032,6 +1125,8 @@ function VirtualList<T>({
   };
 
   const totalHeight = virtualizer.getTotalSize();
+  initialTotalHeightRef.current ??= totalHeight;
+  const renderedTotalHeight = initialMeasurementsReady ? totalHeight : initialTotalHeightRef.current;
   const visibleRange = virtualizer.range;
   return (
     <div
@@ -1039,17 +1134,25 @@ function VirtualList<T>({
       className={className}
       role={rootRole}
       aria-label={ariaLabel}
+      aria-busy={initialMeasurementsReady ? undefined : true}
       data-virtual-kind={dataKind}
       data-virtual-total={items.length}
+      data-virtual-measurements={initialMeasurementsReady ? "ready" : "pending"}
       onFocusCapture={onFocusCapture}
       onBlurCapture={onBlurCapture}
       onDragStartCapture={pinDraggedRow ? (event) => setDraggedKey(keyFromTarget(event.target)) : undefined}
       onDragEndCapture={pinDraggedRow ? () => setDraggedKey(null) : undefined}
-      style={{ height: totalHeight, position: "relative", width: "100%" }}
+      style={{
+        height: renderedTotalHeight,
+        opacity: initialMeasurementsReady ? undefined : 0,
+        pointerEvents: initialMeasurementsReady ? undefined : "none",
+        position: "relative",
+        width: "100%",
+      }}
     >
       {virtualizer.getVirtualItems().map((virtualRow) => {
         const item = items[virtualRow.index]!;
-        const visible = visibleRange != null &&
+        const visible = initialMeasurementsReady && visibleRange != null &&
           virtualRow.index >= visibleRange.startIndex && virtualRow.index <= visibleRange.endIndex;
         const style: CSSProperties = {
           position: "absolute",

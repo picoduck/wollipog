@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { SessionEvent, SessionEventsResponse } from "@wollipog/protocol";
 import {
+  loadOlderSessionEvents,
   recoverSessionHistories,
   recoverSessionHistory,
+  recoverSessionHistoryWindow,
   sessionHistoryEpochKey,
+  shouldReadOpeningWindow,
 } from "./history-recovery.js";
 
 const event = (seq: number): SessionEvent => ({
@@ -479,4 +482,192 @@ test("fleet recovery does not report an obsolete failure after its view is cance
     },
   );
   assert.equal(failures, 0);
+});
+
+test("the opening window paints the newest events in one request, whatever the session's length", async () => {
+  const requested: Array<number | undefined> = [];
+  const applied: Array<{ seqs: number[]; complete: boolean; hasOlder: boolean }> = [];
+  const result = await recoverSessionHistoryWindow(
+    { sessionId: "s1", eventEpoch: 3, recoveryRevision: 7 },
+    {
+      fetchTailPage: async (_id, before) => {
+        requested.push(before);
+        return {
+          events: [event(4_801), event(4_802)],
+          eventEpoch: 3,
+          nextBefore: 4_801,
+          hasMoreOlder: true,
+          cacheComplete: true,
+        };
+      },
+      applyWindow: (_id, events, _epoch, _revision, complete, hasOlder) =>
+        applied.push({ seqs: events.map((entry) => entry.seq), complete, hasOlder }),
+      isCurrent: () => true,
+      wait: async () => {},
+    },
+  );
+  assert.deepEqual(result, { supported: true, complete: true });
+  // One request, no cursor: a 4,800-event history costs exactly the same open as an empty one.
+  assert.deepEqual(requested, [undefined]);
+  assert.deepEqual(applied, [{ seqs: [4_801, 4_802], complete: true, hasOlder: true }]);
+});
+
+test("a hydrating cache is never painted: its newest cached row is still an old prefix", async () => {
+  // The control plane hydrates FORWARD from the runner, so an incomplete cache's "tail" can be the
+  // START of a long log. Painting it would reproduce the oldest-first open this window removes.
+  const pages: SessionEventsResponse[] = [
+    { events: [event(1), event(2)], eventEpoch: 1, nextBefore: 1, hasMoreOlder: false, cacheComplete: false },
+    { events: [event(4_801), event(4_802)], eventEpoch: 1, nextBefore: 4_801, hasMoreOlder: true, cacheComplete: true },
+  ];
+  const applied: Array<{ seqs: number[]; complete: boolean }> = [];
+  const result = await recoverSessionHistoryWindow(
+    { sessionId: "s1", eventEpoch: 1, recoveryRevision: 0 },
+    {
+      fetchTailPage: async () => pages.shift()!,
+      applyWindow: (_id, events, _epoch, _revision, complete) =>
+        applied.push({ seqs: events.map((entry) => entry.seq), complete }),
+      isCurrent: () => true,
+      wait: async () => {},
+    },
+  );
+  assert.deepEqual(result, { supported: true, complete: true });
+  assert.deepEqual(applied, [{ seqs: [4_801, 4_802], complete: true }],
+    "only the complete tail reaches the transcript");
+});
+
+test("a cache that never catches up shows what it has rather than an empty reader", async () => {
+  const applied: Array<{ seqs: number[]; complete: boolean }> = [];
+  const result = await recoverSessionHistoryWindow(
+    { sessionId: "s1", eventEpoch: 1, recoveryRevision: 0 },
+    {
+      fetchTailPage: async () => ({
+        events: [event(1)], eventEpoch: 1, nextBefore: 1, hasMoreOlder: false, cacheComplete: false,
+      }),
+      applyWindow: (_id, events, _epoch, _revision, complete) =>
+        applied.push({ seqs: events.map((entry) => entry.seq), complete }),
+      isCurrent: () => true,
+      wait: async () => {},
+      maxIdlePolls: 3,
+    },
+  );
+  assert.deepEqual(result, { supported: true, complete: false });
+  assert.deepEqual(applied, [{ seqs: [1], complete: false }],
+    "the budget expires into a visible, explicitly incomplete transcript");
+});
+
+test("a re-read window keeps polling the tail instead of walking the log forward", async () => {
+  const pages: SessionEventsResponse[] = [
+    { events: [event(1)], eventEpoch: 1, nextBefore: 1, hasMoreOlder: false, cacheComplete: false },
+    { events: [event(1), event(2)], eventEpoch: 1, nextBefore: 1, hasMoreOlder: false, cacheComplete: false },
+    { events: [event(2), event(3)], eventEpoch: 1, nextBefore: 2, hasMoreOlder: true, cacheComplete: true },
+  ];
+  const requested: Array<number | undefined> = [];
+  const applied: Array<{ seqs: number[]; complete: boolean }> = [];
+  const result = await recoverSessionHistoryWindow(
+    { sessionId: "s1", eventEpoch: 1, recoveryRevision: 0 },
+    {
+      fetchTailPage: async (_id, before) => {
+        requested.push(before);
+        return pages.shift()!;
+      },
+      applyWindow: (_id, events, _epoch, _revision, complete) =>
+        applied.push({ seqs: events.map((entry) => entry.seq), complete }),
+      isCurrent: () => true,
+      wait: async () => {},
+    },
+  );
+  assert.deepEqual(result, { supported: true, complete: true });
+  assert.deepEqual(requested, [undefined, undefined, undefined], "every re-read asks for the tail");
+  assert.deepEqual(applied, [{ seqs: [2, 3], complete: true }]);
+});
+
+test("a control plane without backward reads is detected before its forward page is applied", async () => {
+  const applied: number[][] = [];
+  const result = await recoverSessionHistoryWindow(
+    { sessionId: "s1", eventEpoch: 0, recoveryRevision: 0 },
+    {
+      // An older control plane ignores `direction` and answers with the START of the log — exactly
+      // the content the window exists to avoid painting.
+      fetchTailPage: async () => ({
+        events: [event(1), event(2)],
+        eventEpoch: 0,
+        nextAfter: 2,
+        hasMoreCached: true,
+        cacheComplete: false,
+      }),
+      applyWindow: (_id, events) => applied.push(events.map((entry) => entry.seq)),
+      isCurrent: () => true,
+      wait: async () => {},
+    },
+  );
+  assert.deepEqual(result, { supported: false, complete: false });
+  assert.deepEqual(applied, [], "an unsupported response must not reach the transcript");
+});
+
+test("a replaced event epoch abandons the window without applying its stale page", async () => {
+  const applied: number[][] = [];
+  const result = await recoverSessionHistoryWindow(
+    { sessionId: "s1", eventEpoch: 4, recoveryRevision: 1 },
+    {
+      fetchTailPage: async () => ({
+        events: [event(9)],
+        eventEpoch: 5,
+        nextBefore: 9,
+        hasMoreOlder: false,
+        cacheComplete: true,
+      }),
+      applyWindow: (_id, events) => applied.push(events.map((entry) => entry.seq)),
+      isCurrent: () => true,
+      wait: async () => {},
+    },
+  );
+  assert.deepEqual(result, { supported: true, complete: false });
+  assert.deepEqual(applied, []);
+});
+
+test("older pages carry the reader's cursor and stop at the start of the log", async () => {
+  const requested: Array<number | undefined> = [];
+  const page = await loadOlderSessionEvents("s1", 4_801, 3, async (_id, before) => {
+    requested.push(before);
+    return {
+      events: [event(4_601), event(4_602)],
+      eventEpoch: 3,
+      nextBefore: 4_601,
+      hasMoreOlder: false,
+      cacheComplete: true,
+    };
+  });
+  assert.deepEqual(requested, [4_801]);
+  assert.deepEqual(page, {
+    events: [event(4_601), event(4_602)],
+    hasOlder: false,
+    eventEpoch: 3,
+  });
+  // A stale epoch or an unsupporting control plane yields nothing to prepend.
+  assert.equal(
+    await loadOlderSessionEvents("s1", 10, 3, async () => ({
+      events: [event(1)], eventEpoch: 4, nextBefore: 1, hasMoreOlder: false, cacheComplete: true,
+    })),
+    null,
+  );
+  assert.equal(
+    await loadOlderSessionEvents("s1", 10, 3, async () => ({
+      events: [event(1)], eventEpoch: 3, nextAfter: 1, hasMoreCached: false, cacheComplete: true,
+    })),
+    null,
+  );
+});
+
+test("the opening window survives a live event that lands before the load starts", () => {
+  const cold = { recoveryAfter: 0, historyEverCompleted: false, hasSavedReadingPosition: false };
+  assert.equal(shouldReadOpeningWindow(cold), true);
+  // A live event delivered between the subscription acknowledgement and the load populates the
+  // event array but completes no history. An active long session must still open at its tail.
+  assert.equal(shouldReadOpeningWindow({ ...cold, historyEverCompleted: false }), true);
+  // A reconnect gap belongs to the forward chain, whose frozen cursor cannot skip outage events.
+  assert.equal(shouldReadOpeningWindow({ ...cold, recoveryAfter: 4_800 }), false);
+  // A transcript already loaded for this epoch is gap-filled, not re-windowed.
+  assert.equal(shouldReadOpeningWindow({ ...cold, historyEverCompleted: true }), false);
+  // A reader paused somewhere keeps the history their restore depends on.
+  assert.equal(shouldReadOpeningWindow({ ...cold, hasSavedReadingPosition: true }), false);
 });

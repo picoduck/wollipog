@@ -172,6 +172,7 @@ export function RightPanel({
   onOpenTerminal,
   onInsertSideChatDraft,
   items,
+  earlierActivityUnloaded = false,
 }: {
   state: RightPanelState;
   session: SessionView;
@@ -186,6 +187,8 @@ export function RightPanel({
   /** Explicitly prepares the primary composer; never sends it. */
   onInsertSideChatDraft: (text: string) => void;
   items: TimelineItem[];
+  /** The transcript is showing a bounded window with older turns still unloaded. */
+  earlierActivityUnloaded?: boolean;
 }) {
   const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const filesSupported = runnerSupportsProtocol(runnerProtocolVersion, "sessionFiles");
@@ -370,6 +373,7 @@ export function RightPanel({
                 session={session}
                 items={items}
                 runnerOnline={runnerOnline}
+                earlierActivityUnloaded={earlierActivityUnloaded}
                 requestedId={state.subagentTarget?.sessionId === session.id &&
                   state.subagentTarget.eventEpoch === sessionEventEpoch
                   ? state.subagentTarget.subagentId

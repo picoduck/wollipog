@@ -38,11 +38,63 @@ export function markdownCodeText(children: ReactNode): string {
   return reactNodeText(children).replace(/\n$/, "");
 }
 
+/** Fence info-string language of a rendered block, read from react-markdown's `language-*` class. */
+export function markdownCodeLanguage(children: ReactNode): string {
+  if (Array.isArray(children)) return children.map(markdownCodeLanguage).find(Boolean) ?? "";
+  if (!isValidElement<{ className?: string; children?: ReactNode }>(children)) return "";
+  const match = /(?:^|\s)language-([^\s]+)/.exec(children.props.className ?? "");
+  return match ? match[1]!.toLowerCase() : markdownCodeLanguage(children.props.children);
+}
+
+const PROSE_FENCE_LANGUAGES = new Set(["", "text", "txt", "plain", "plaintext", "md", "markdown"]);
+
+/**
+ * Prose-oriented fences (no language tag, `text`, `markdown`, …) wrap by default so long sentences
+ * stay readable without a horizontal scrollbar; source-code fences keep `white-space: pre`.
+ */
+export function markdownCodeWrapsByDefault(language: string): boolean {
+  return PROSE_FENCE_LANGUAGES.has(language.toLowerCase());
+}
+
+/**
+ * A same-language text change reads as streaming when one text extends the other; anything else is
+ * a replacement (a different block now occupies this tree position), which must not inherit state.
+ */
+export function markdownCodeBlockContinues(
+  seen: { language: string; text: string },
+  next: { language: string; text: string },
+): boolean {
+  if (seen.language !== next.language) return false;
+  return next.text.startsWith(seen.text) || seen.text.startsWith(next.text);
+}
+
 function CodeBlockPre({ children, node: _node, ...props }: ComponentProps<"pre"> & { node?: unknown }) {
   const text = markdownCodeText(children);
+  const language = markdownCodeLanguage(children);
+  const defaultWrap = markdownCodeWrapsByDefault(language);
+  // React reuses this instance across content changes (a streamed info string growing `m` →
+  // `markdown`, or a whole document swap), so the language-derived default cannot live in a state
+  // initializer. Keep only the user's explicit choice in state, remember which block it belonged to
+  // as {language, text}, and — during render, per React's state-adjustment pattern (StrictMode's
+  // double render sees the updated state and takes the stable branch) — drop the choice whenever a
+  // different block replaces this one. Streaming growth of the same block keeps the toggle.
+  const [userWrap, setUserWrap] = useState<boolean | null>(null);
+  const [seenBlock, setSeenBlock] = useState({ language, text });
+  if (seenBlock.language !== language || seenBlock.text !== text) {
+    if (!markdownCodeBlockContinues(seenBlock, { language, text })) setUserWrap(null);
+    setSeenBlock({ language, text });
+  }
+  const wrap = userWrap ?? defaultWrap;
+  // Wrapping is presentation-only: `text` always carries the original characters, so copying a
+  // visually wrapped block still yields the exact fenced content.
   return (
-    <div className="md-code-block">
-      <CopyButton text={text} label="Copy Code" ariaLabel="Copy Code Block" className="copy-btn md-code-copy" />
+    <div className={wrap ? "md-code-block md-code-wrap" : "md-code-block"}>
+      <div className="md-code-actions">
+        <button type="button" className="copy-btn md-code-wrap-toggle" onClick={() => setUserWrap(!wrap)}>
+          {wrap ? "No Wrap" : "Wrap Lines"}
+        </button>
+        <CopyButton text={text} label="Copy Code" ariaLabel="Copy Code Block" className="copy-btn md-code-copy" />
+      </div>
       <pre {...props}>{children}</pre>
     </div>
   );

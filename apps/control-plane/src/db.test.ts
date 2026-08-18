@@ -23,6 +23,7 @@ import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import {
   ControlPlaneDb,
   GOVERNANCE_AUDIT_RETENTION_MS,
+  TAIL_TURN_ALIGNMENT_MAX_EVENTS,
   type NewSessionInput,
 } from "./db.js";
 import type { HumanPrincipal } from "./identity.js";
@@ -2577,6 +2578,116 @@ test("listCachedEventPage uses a limit-plus-one boundary and stable CP cursors",
     events: [], nextAfterSeq: 5, hasMore: false,
   });
   assert.throws(() => db.listCachedEventPage("paged-cache", 0, 0), /positive safe integer/);
+});
+
+test("listCachedEventTailPage reads the newest rows first and pages older below a cursor", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "windowed-cache" }));
+  for (let index = 1; index <= 5; index++) {
+    db.appendEvent("windowed-cache", { kind: "agent_message", text: String(index) }, index);
+  }
+  // The opening window is the TAIL, whatever the session's length: never seq 1 first.
+  const newest = db.listCachedEventTailPage("windowed-cache", undefined, 2);
+  assert.deepEqual(newest.events.map((event) => event.seq), [4, 5]);
+  assert.equal(newest.nextBeforeSeq, 4);
+  assert.equal(newest.hasMoreOlder, true);
+  const older = db.listCachedEventTailPage("windowed-cache", newest.nextBeforeSeq, 2);
+  assert.deepEqual(older.events.map((event) => event.seq), [2, 3]);
+  assert.equal(older.nextBeforeSeq, 2);
+  assert.equal(older.hasMoreOlder, true);
+  const oldest = db.listCachedEventTailPage("windowed-cache", older.nextBeforeSeq, 2);
+  assert.deepEqual(oldest.events.map((event) => event.seq), [1]);
+  assert.equal(oldest.nextBeforeSeq, 1);
+  assert.equal(oldest.hasMoreOlder, false);
+  // Paging below the first event yields an empty page with no cursor to follow.
+  assert.deepEqual(db.listCachedEventTailPage("windowed-cache", 1, 2), {
+    events: [], hasMoreOlder: false,
+  });
+  // A window wider than the log reports no older rows rather than an unreachable cursor.
+  const whole = db.listCachedEventTailPage("windowed-cache", undefined, 200);
+  assert.deepEqual(whole.events.map((event) => event.seq), [1, 2, 3, 4, 5]);
+  assert.equal(whole.hasMoreOlder, false);
+  assert.deepEqual(db.listCachedEventTailPage("no-such-session", undefined, 5), {
+    events: [], hasMoreOlder: false,
+  });
+  assert.throws(() => db.listCachedEventTailPage("windowed-cache", undefined, 0), /positive safe integer/);
+  assert.throws(() => db.listCachedEventTailPage("windowed-cache", -1, 2), /non-negative safe integer/);
+});
+
+test("a turn-aligned tail page begins at an invocation rather than orphaned updates", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "aligned-cache" }));
+  db.appendEvent("aligned-cache", { kind: "user_message", text: "first" }, 1);
+  db.appendEvent("aligned-cache", { kind: "user_message", text: "second" }, 2);
+  for (let index = 3; index <= 6; index++) {
+    db.appendEvent("aligned-cache", { kind: "agent_message", text: String(index) }, index);
+  }
+  // A count-bounded window of 2 starts at seq 5 — mid-turn, with updates whose invocation is gone.
+  const unaligned = db.listCachedEventTailPage("aligned-cache", undefined, 2);
+  assert.deepEqual(unaligned.events.map((event) => event.seq), [5, 6]);
+  assert.equal(unaligned.turnAligned, undefined, "alignment is opt-in");
+
+  const aligned = db.listCachedEventTailPage("aligned-cache", undefined, 2, { alignToTurn: true });
+  assert.deepEqual(aligned.events.map((event) => event.seq), [2, 3, 4, 5, 6],
+    "the page extends down to its own turn's user message");
+  assert.equal(aligned.turnAligned, true);
+  assert.equal(aligned.nextBeforeSeq, 2);
+  assert.equal(aligned.hasMoreOlder, true, "seq 1 remains below the aligned page");
+
+  // A page whose own first row is a user message is already aligned: reaching past it would drag
+  // in the previous turn.
+  const atBoundary = db.listCachedEventTailPage("aligned-cache", undefined, 5, { alignToTurn: true });
+  assert.deepEqual(atBoundary.events.map((event) => event.seq), [2, 3, 4, 5, 6]);
+  assert.equal(atBoundary.turnAligned, true);
+  assert.equal(atBoundary.hasMoreOlder, true, "seq 1 is still below it");
+
+  // Reaching the session's first turn leaves nothing older to ask for.
+  const whole = db.listCachedEventTailPage("aligned-cache", undefined, 6, { alignToTurn: true });
+  assert.deepEqual(whole.events.map((event) => event.seq), [1, 2, 3, 4, 5, 6]);
+  assert.equal(whole.hasMoreOlder, false);
+});
+
+test("a page already starting at a user message is left as it is", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "boundary-cache" }));
+  db.appendEvent("boundary-cache", { kind: "user_message", text: "first" }, 1);
+  db.appendEvent("boundary-cache", { kind: "agent_message", text: "reply" }, 2);
+  db.appendEvent("boundary-cache", { kind: "user_message", text: "second" }, 3);
+  db.appendEvent("boundary-cache", { kind: "agent_message", text: "reply" }, 4);
+  // The count boundary already lands on seq 3, so alignment must not reach back to seq 1 and drag
+  // in a whole extra turn the reader did not ask for.
+  const page = db.listCachedEventTailPage("boundary-cache", undefined, 2, { alignToTurn: true });
+  assert.deepEqual(page.events.map((event) => event.seq), [3, 4]);
+  assert.equal(page.turnAligned, true);
+  assert.equal(page.nextBeforeSeq, 3);
+  assert.equal(page.hasMoreOlder, true);
+});
+
+test("turn alignment stops at its cap and never extends a page without bound", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "verbose-turn" }));
+  db.appendEvent("verbose-turn", { kind: "user_message", text: "go" }, 1);
+  const total = TAIL_TURN_ALIGNMENT_MAX_EVENTS + 60;
+  for (let seq = 2; seq <= total; seq++) {
+    db.appendEvent("verbose-turn", { kind: "agent_message", text: String(seq) }, seq);
+  }
+  // The invocation is beyond the cap, so the count boundary stands rather than the page growing to
+  // swallow an arbitrarily long turn.
+  const page = db.listCachedEventTailPage("verbose-turn", undefined, 10, { alignToTurn: true });
+  assert.equal(page.events.length, 10);
+  assert.equal(page.turnAligned, false);
+  assert.equal(page.hasMoreOlder, true);
+});
+
+test("a transcript with no user message keeps its count boundary and reports it unaligned", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "adopted-cache" }));
+  for (let seq = 1; seq <= 6; seq++) {
+    db.appendEvent("adopted-cache", { kind: "agent_message", text: String(seq) }, seq);
+  }
+  const page = db.listCachedEventTailPage("adopted-cache", undefined, 2, { alignToTurn: true });
+  assert.deepEqual(page.events.map((event) => event.seq), [5, 6]);
+  assert.equal(page.turnAligned, false);
 });
 
 test("history columns/index migrate additively and an unknown epoch adopts without clearing", () => {
