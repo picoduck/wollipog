@@ -72,6 +72,9 @@ const session: SessionView = {
   tokensOut: 1337,
   costUsd: 0.42,
   adopted: false,
+  // A known context window makes the ContextWindowMeter render in the strip's leading cell,
+  // so the specs can prove the active recovery echo wins that cell in compact mode.
+  contextWindow: 200_000,
 };
 
 const snapshotMessage: ControlPlaneToUi = {

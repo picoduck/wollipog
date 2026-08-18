@@ -82,6 +82,40 @@ test("a compressed expanded pane hides the pinned summary instead of letting it 
   await page.locator(".follow-tail-chip").click();
 });
 
+test("in a narrow compact expanded pane the active echo wins the leading cell over the meter", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 720 });
+  await page.goto("/recovery-notice-e2e.html?mode=expanded&height=250&width=320");
+  const echo = page.locator(".transcript-recovery-strip-echo");
+  await expect(echo).toBeVisible();
+
+  // The context meter (fixed width, wider than the whole leading track at this width) yields
+  // while recovery is active — otherwise it starved the echo's label to zero visible width.
+  await expect(page.locator(".context-meter")).toBeHidden();
+
+  // The label keeps genuinely readable width and truncates rather than vanishing.
+  const label = echo.locator("span").last();
+  const geometry = await label.evaluate((el) => ({
+    visible: el.clientWidth,
+    full: el.scrollWidth,
+    textOverflow: getComputedStyle(el).textOverflow,
+  }));
+  expect(geometry.visible).toBeGreaterThan(0);
+  expect(geometry.full).toBeGreaterThanOrEqual(geometry.visible);
+  expect(geometry.textOverflow).toBe("ellipsis");
+});
+
+test("growing the pane past the compact threshold never re-hides the pinned summary", async ({ page }) => {
+  await page.setViewportSize({ width: 800, height: 720 });
+  // Just below the pane's compact switch, at the first non-compact pane (the slot returns and
+  // shrinks the reader), and comfortably above it: disclosure must be monotonic — the summary
+  // stays visible at every step of a splitter drag upward. Before the threshold coordination,
+  // the middle height hid the card until the pane out-grew the returning slot by ~30px.
+  for (const height of [439, 439.5, 469]) {
+    await page.goto(`/recovery-notice-e2e.html?mode=expanded&height=${height}&pinned=1`);
+    await expect(page.locator(".pinned-summary"), `pinned summary at harness height ${height}`).toBeVisible();
+  }
+});
+
 test("a 320px-wide compact pane keeps the echo inside the viewport, truncating in place", async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 720 });
   await page.goto("/recovery-notice-e2e.html?mode=preview&height=150&width=320");

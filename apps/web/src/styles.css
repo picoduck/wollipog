@@ -2304,8 +2304,14 @@ textarea {
 /* A reader this short cannot CONTAIN the floating card (a max-height cap cannot shrink it
    below its own offset + padding floor, so it escaped over the compact status strip), nor show
    meaningful content inside it: hide it entirely. AFTER the base rule on purpose — the display
-   toggle ties on specificity, so source order must let the compact mode win. */
-@container transcript-reader (max-height: 179px) {
+   toggle ties on specificity, so source order must let the compact mode win.
+   The threshold is COORDINATED with the pane's 239px compact switch so growing the pane can
+   never reduce disclosure: at the first non-compact pane height (240px) the slot (nominally
+   48px: 16px slot padding + 14px pill box + one 18px --text-sm line) and the 42px strip leave
+   the reader 240 − 42 − 48 = 150px, so this hide threshold must sit at or below 149px —
+   otherwise dragging a splitter taller would re-add the slot and re-hide the card until the
+   pane grew another ~30px. The styles test pins the relationship. */
+@container transcript-reader (max-height: 149px) {
   .pinned-summary { display: none; }
 }
 .ps-section {
@@ -10110,6 +10116,11 @@ body.shell-dock-dragging * {
 @container transcript-pane (max-height: 239px) {
   .transcript-recovery-slot { display: none; }
   .transcript-recovery-strip-echo { display: inline-flex; }
+  /* The context meter is a fixed-width neighbour that can be wider than the whole leading
+     track at phone widths, which starved the shrinkable echo down to zero visible label. While
+     recovery is ACTIVE the echo is the one thing this compact geometry exists to preserve —
+     the meter yields until recovery completes. */
+  .transcript-status-context:has(> .transcript-recovery-strip-echo.active) > .context-meter { display: none; }
 }
 /* Inbox PREVIEW panes always use the compact presentation, whatever their height. A preview is
    a secondary, splitter-resizable reading surface: the pill band would permanently spend ~47px

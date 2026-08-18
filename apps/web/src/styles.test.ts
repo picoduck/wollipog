@@ -172,9 +172,11 @@ test("the recovery pill is a permanently-sized in-flow slot, never an overlay", 
 
   // Symmetrically, activation may only start the pulse animation. Every .active-conditioned
   // recovery rule is checked so a future `display`, `margin`, or `height` cannot sneak a layout
-  // delta into the activity toggle.
+  // delta into the activity toggle. The one deliberate exception is the compact-mode meter
+  // yield (`:has(...)`): it toggles display INSIDE the fixed-height status strip only — reader
+  // geometry and scroll position cannot move — and it is pinned by its own assertion below.
   const activeRules = [...css.matchAll(/([^{}]*transcript-recovery[^{}]*\.active[^{}]*)\{([^}]*)\}/g)]
-    .filter(([, selector]) => !selector!.includes(":not("));
+    .filter(([, selector]) => !selector!.includes(":not(") && !selector!.includes(":has("));
   assert.ok(activeRules.length > 0, "the active state must exist");
   for (const [, selector, body] of activeRules) {
     const props = [...body!.matchAll(/([a-z-]+)\s*:/g)].map((match) => match[1]);
@@ -211,6 +213,11 @@ test("short panes keep the status strip, and the pinned summary is bounded by th
     "compact mode must collapse the slot so the strip always fits");
   assert.match(compact![1]!, /\.transcript-recovery-strip-echo\s*\{\s*display:\s*inline-flex;\s*\}/,
     "compact mode must surface the in-strip echo in the slot's place");
+  // While recovery is active, the fixed-width context meter yields the leading cell: at phone
+  // widths it is wider than the whole track and would starve the echo to zero visible label.
+  assert.match(compact![1]!,
+    /\.transcript-status-context:has\(> \.transcript-recovery-strip-echo\.active\) > \.context-meter\s*\{\s*display:\s*none;\s*\}/,
+    "the meter must yield to the active recovery echo in compact mode");
 
   // The echo's own activity toggle is visibility-only, like the pill's.
   assert.equal(soleRuleBody(".transcript-recovery-strip-echo:not(.active)"), "visibility: hidden;");
@@ -242,10 +249,31 @@ test("short panes keep the status strip, and the pinned summary is bounded by th
   // A reader too short to CONTAIN the summary must hide it: a max-height cap cannot shrink the
   // card below its own offset + padding floor, so an escaped card covered the compact strip.
   assert.match(soleRuleBody(".detail-reader"), /container:\s*transcript-reader \/ size;/);
-  const shortReader = /@container transcript-reader \(max-height:\s*\d+px\)\s*\{([\s\S]*?)\n\}/.exec(css);
+  const shortReader = /@container transcript-reader \(max-height:\s*(\d+)px\)\s*\{([\s\S]*?)\n\}/.exec(css);
   assert.ok(shortReader, "the short-reader mode must exist");
-  assert.match(shortReader![1]!, /\.pinned-summary\s*\{\s*display:\s*none;\s*\}/,
+  assert.match(shortReader![2]!, /\.pinned-summary\s*\{\s*display:\s*none;\s*\}/,
     "a reader that cannot contain the summary must hide it, not let it escape over the strip");
+
+  // Threshold COORDINATION, so growing the pane never reduces disclosure: at the first
+  // non-compact pane height the slot returns and shrinks the reader — if the summary's hide
+  // threshold reached that reader height, dragging a splitter taller would hide the card at
+  // the mode switch and only reshow it once the pane out-grew the slot. Derived from the
+  // rules' own declarations: nominal slot = slot vertical padding + pill vertical box + one
+  // 18px --text-sm line (the pill band's long-documented single-line allowance).
+  const paneThreshold = Number(/@container transcript-pane \(max-height:\s*(\d+)px\)/.exec(css)![1]);
+  const readerThreshold = Number(shortReader![1]);
+  const slotPad = /padding:\s*(\d+)px\s+\d+px\s+(\d+)px;/.exec(soleRuleBody(".transcript-recovery-slot"));
+  const pill = soleRuleBody(".transcript-recovery-notice");
+  const pillPad = Number(/padding:\s*(\d+)px/.exec(pill)?.[1]);
+  const pillBorder = Number(/border:\s*(\d+)px/.exec(pill)?.[1]);
+  assert.ok(slotPad && Number.isFinite(pillPad) && Number.isFinite(pillBorder),
+    "slot and pill must declare px paddings/borders so the nominal slot height is derivable");
+  const nominalSlot = Number(slotPad![1]) + Number(slotPad![2]) + 2 * pillPad + 2 * pillBorder + 18;
+  const stripMin = Number(/min-height:\s*(\d+)px/.exec(soleRuleBody(".transcript-status-strip"))![1]);
+  const readerAtModeSwitch = paneThreshold + 1 - stripMin - nominalSlot;
+  assert.ok(readerThreshold < readerAtModeSwitch,
+    `the summary hides at ${readerThreshold}px of reader or less, but the first non-compact ` +
+    `pane leaves only ${readerAtModeSwitch}px — growing the pane would re-hide the card`);
 
   // The compact echo truncates IN PLACE: its grid cell is pinned to its track and the echo to
   // its cell, so a phone-width strip ellipsizes the label instead of pushing it off-screen.
