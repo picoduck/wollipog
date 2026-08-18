@@ -13,10 +13,12 @@ import {
   parseMessage,
   PROTOCOL_VERSION,
   projectRunnerMessageForProtocol,
+  runnerSupportsProtocol,
   validatePromptImageInputs,
   type AdoptSessionMessage,
   type AcpRuntimeCapabilities,
   type AgentDriverKind,
+  type AgentDefinition,
   type AgentContext,
   type AgentsUpdatedMessage,
   type ControlPlaneToRunner,
@@ -139,6 +141,11 @@ import {
   type RunnerDataDirLease,
 } from "./runner-data-dir.js";
 import { waitForRunnerControlPlaneAttestation } from "./control-plane-attestation.js";
+import {
+  shouldPublishSubscriptionUsageInventory,
+  SubscriptionUsageManager,
+  type SubscriptionUsageManagerOptions,
+} from "./subscription-usage.js";
 
 const INITIAL_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 30_000;
@@ -333,6 +340,27 @@ function runnerLocalAgentEnv(agentId: string | null, driver: AgentDriverKind, co
   return { ...(exact?.env ?? resolveLaunchForDriver(metadata.agents, driver, context)?.env ?? {}) };
 }
 
+let authorizeSubscriptionUsageProbe: SubscriptionUsageManagerOptions["authorizeProbe"];
+
+const subscriptionUsage = new SubscriptionUsageManager({
+  runnerId: config.runnerId,
+  agents: () => metadata.agents,
+  resolveEnv: (agentId, driver, context) =>
+    runnerLocalAgentEnv(agentId, driver ?? "acp", context),
+  authorizeProbe: (agent, env, sourceId) => {
+    if (!authorizeSubscriptionUsageProbe) {
+      throw new Error("subscription usage probe authorization is not initialized");
+    }
+    return authorizeSubscriptionUsageProbe(agent, env, sourceId);
+  },
+  publish: (snapshot) => {
+    if (runnerSupportsProtocol(controlPlaneProtocolVersion, "subscriptionUsage")) {
+      sendUp({ type: "subscription_usage_updated", snapshot });
+    }
+  },
+  log,
+});
+
 function updateAgentAuthStatus(agentId: string, update: AcpAuthRuntime): void {
   const prior = acpAuthStatus.get(agentId) ?? {};
   if (
@@ -452,7 +480,12 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
   // The existing runner credential is already staged in a protected local file. Reuse it only as
   // an HMAC key so structural scope/account equality cannot be dictionary-tested from meta.json.
   new NativeProviderAuthRecovery(undefined, config.token),
+  (agentId, driver, context, update) => {
+    subscriptionUsage.observe(agentId, driver, context, update);
+  },
 );
+authorizeSubscriptionUsageProbe = (agent, env, sourceId) =>
+  sessions.prepareSubscriptionUsageProbe(agent, env, sourceId);
 const sessionStarts = new SessionStartFence();
 const pendingShellOpenCancellations = new PendingShellOpenCancellations();
 sessions.reconcileStore(); // demote any sessions left mid-flight by a previous run to idle
@@ -625,18 +658,40 @@ function startTrackedSession(
 let discovering = false;
 let rediscoverPending = false;
 let rediscoverRefreshModels = false;
+let rediscoverRefreshSubscriptionUsage = false;
 /** At least one discovery pass has completed — its result is baked into metadata.agents. */
 let discoveryDone = false;
 const DISCOVERY_REFRESH_MS = 5 * 60_000;
 let discoveryTimer: ReturnType<typeof setInterval> | null = null;
 
+function publishSubscriptionUsageInventory(refreshCodex: boolean): void {
+  if (!shouldPublishSubscriptionUsageInventory(discoveryDone, controlPlaneProtocolVersion)) return;
+  sendUp({
+    type: "subscription_usage_inventory",
+    runnerId: config.runnerId,
+    snapshots: subscriptionUsage.syncSources(),
+  });
+  if (!refreshCodex) return;
+  void subscriptionUsage.refreshAll()
+    .then((snapshots) => {
+      if (!shouldPublishSubscriptionUsageInventory(discoveryDone, controlPlaneProtocolVersion)) return;
+      sendUp({
+        type: "subscription_usage_inventory",
+        runnerId: config.runnerId,
+        snapshots,
+      });
+    })
+    .catch((error) => log(`subscription usage refresh failed: ${errText(error)}`));
+}
+
 /** Probe installed agents, merge into the advertised list, and push to the control
  * plane if already registered. Safe to call repeatedly (e.g. on a rediscover) — a
  * call made while a pass is in flight is coalesced into a single trailing rerun. */
-async function runDiscovery(refreshModels = false): Promise<void> {
+async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = true): Promise<void> {
   if (discovering) {
     rediscoverPending = true;
     rediscoverRefreshModels ||= refreshModels;
+    rediscoverRefreshSubscriptionUsage ||= refreshSubscriptionUsage;
     return;
   }
   discovering = true;
@@ -701,6 +756,7 @@ async function runDiscovery(refreshModels = false): Promise<void> {
       editors,
     };
     sendUp(update);
+    if (registered) publishSubscriptionUsageInventory(refreshSubscriptionUsage);
   } catch (err) {
     log(`discovery failed: ${(err as Error).message}`);
   } finally {
@@ -708,8 +764,10 @@ async function runDiscovery(refreshModels = false): Promise<void> {
     if (rediscoverPending) {
       rediscoverPending = false;
       const refresh = rediscoverRefreshModels;
+      const refreshUsage = rediscoverRefreshSubscriptionUsage;
       rediscoverRefreshModels = false;
-      void runDiscovery(refresh);
+      rediscoverRefreshSubscriptionUsage = false;
+      void runDiscovery(refresh, refreshUsage);
     }
   }
 }
@@ -779,6 +837,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       if (discoveryDone) {
         sendUp({ type: "agents_updated", runnerId: config.runnerId, agents: agentsForControlPlane(), editors: metadata.editors });
       }
+      publishSubscriptionUsageInventory(true);
       // The CP dropped this runner's queue overlays on register (in-memory queues are assumed
       // dead), but OURS survived the socket blip — re-report every non-empty queue or those
       // prompts stay invisible and uncancelable until the queue next changes.
@@ -1082,6 +1141,30 @@ function handleCommand(msg: ControlPlaneToRunner): void {
     case "rediscover":
       log("rediscover requested");
       void runDiscovery(true);
+      break;
+    case "refresh_subscription_usage":
+      if (!shouldPublishSubscriptionUsageInventory(discoveryDone, controlPlaneProtocolVersion)) {
+        sendUp({
+          type: "subscription_usage_refresh_result",
+          requestId: msg.requestId,
+          ok: false,
+          error: "subscription usage refresh is unavailable until agent discovery completes",
+        });
+        break;
+      }
+      void subscriptionUsage.refreshAll()
+        .then((snapshots) => sendUp({
+          type: "subscription_usage_refresh_result",
+          requestId: msg.requestId,
+          ok: true,
+          snapshots,
+        }))
+        .catch((error) => sendUp({
+          type: "subscription_usage_refresh_result",
+          requestId: msg.requestId,
+          ok: false,
+          error: `subscription usage refresh failed: ${errText(error)}`,
+        }));
       break;
     case "logout_agent":
       void sessions.logoutAgent(msg.sessionId).then((result) =>
@@ -1616,6 +1699,7 @@ function shutdown(): void {
   clearInterval(sessionCommandRecoveryTimer);
   if (discoveryTimer) clearInterval(discoveryTimer);
   if (reconnectTimer) clearTimeout(reconnectTimer);
+  subscriptionUsage.shutdown();
   sessions.shutdownAll();
   shells.dispose();
   log("shutting down");
@@ -1649,7 +1733,7 @@ void runDiscovery();
 // Claude Code can update itself while the runner remains connected. A bounded periodic pass
 // notices the new version and refreshes its flags/auth/slash commands; model discovery is already
 // keyed by version, so a changed binary automatically bypasses the prior version's cache entry.
-discoveryTimer = setInterval(() => void runDiscovery(), DISCOVERY_REFRESH_MS);
+discoveryTimer = setInterval(() => void runDiscovery(false, false), DISCOVERY_REFRESH_MS);
 discoveryTimer.unref?.();
 // Registration waits for deterministic runner-owned target checks. Missing adapters/images/checks
 // stay visible as unavailable; only an unexpected registry failure aborts startup.

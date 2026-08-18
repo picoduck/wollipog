@@ -3,7 +3,7 @@ import test from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { UsageAggregationResponse } from "@wollipog/protocol";
+import type { SubscriptionUsageResponse, UsageAggregationResponse } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { bucketLabel, UsageView } from "./UsageView.js";
@@ -73,6 +73,8 @@ test("UsageView keeps the control-plane newest-first order after a refresh", asy
   const requestedRanges: number[] = [];
   const client = {
     ...api,
+    subscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    refreshSubscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
     usage: async (query: { days: number }) => {
       requestedRanges.push(query.days);
       return responses[calls++]!;
@@ -122,6 +124,79 @@ test("UsageView keeps the control-plane newest-first order after a refresh", asy
   assert.deepEqual(requestedRanges, [30, 30, 7, 90, 365]);
   assert.equal(calls, 5, "refresh and each period selector load exactly once");
 
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+test("Subscription Usage shows remaining allowance, local and relative resets, stale state, and text warnings", async () => {
+  const now = Date.now();
+  const subscription = (status: "warning" | "exhausted", remainingPercent: number): SubscriptionUsageResponse => ({
+    staleAfterMs: 600_000,
+    generatedAt: now,
+    sources: [{
+      sourceId: "a".repeat(32),
+      runnerId: "runner-1",
+      agentId: "codex",
+      provider: "codex",
+      state: "available",
+      fetchedAt: now - 700_000,
+      freshness: "stale",
+      runnerStatus: "offline",
+      runnerName: "Build Machine",
+      agentName: "Codex",
+      plan: "plus",
+      buckets: [{
+        id: "future_lane",
+        label: "Future Lane",
+        usedPercent: 100 - remainingPercent,
+        remainingPercent,
+        resetsAt: now + 90 * 60_000,
+        status,
+      }],
+      spendControls: [{ id: "monthly", label: "Monthly Limit", limit: "$100" }],
+    }],
+  });
+  let refreshes = 0;
+  const client = {
+    ...api,
+    usage: async () => response([]),
+    subscriptionUsage: async () => subscription("warning", 15),
+    refreshSubscriptionUsage: async () => {
+      refreshes++;
+      return subscription("exhausted", 0);
+    },
+  } as unknown as ApiClient;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<ApiProvider client={client}><UsageView /></ApiProvider>);
+  });
+  await act(async () => {
+    await settleLoad();
+    await Promise.resolve();
+  });
+  const pageText = () => container.textContent ?? "";
+  assert.match(pageText(), /Subscription Usage/);
+  assert.match(pageText(), /15% Remaining/);
+  assert.match(pageText(), /⚠ Approaching Limit/);
+  assert.match(pageText(), /Last Known — Stale/);
+  assert.match(pageText(), /Resets in 2 hours/);
+  assert.ok(pageText().includes(new Date(now + 90 * 60_000).toLocaleString()), "the exact reset uses the viewer's local time");
+  assert.match(pageText(), /Machine Offline/);
+  assert.match(pageText(), /Monthly Limit: Usage Reported of \$100/);
+
+  const refresh = [...container.querySelectorAll("button")]
+    .find((button) => button.textContent?.trim() === "Refresh") as HTMLButtonElement;
+  await act(async () => {
+    refresh.click();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  assert.equal(refreshes, 1);
+  assert.match(pageText(), /0% Remaining/);
+  assert.match(pageText(), /⛔ Exhausted/);
+  assert.match(pageText(), /Subscription usage refreshed/);
   await act(async () => root.unmount());
   container.remove();
 });

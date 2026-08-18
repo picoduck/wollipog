@@ -97,8 +97,8 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 79", () => {
-  assert.equal(PROTOCOL_VERSION, 79);
+test("PROTOCOL_VERSION is 80", () => {
+  assert.equal(PROTOCOL_VERSION, 80);
 });
 
 test("slash-command argument hints remain additive metadata", () => {
@@ -519,6 +519,9 @@ test("runner command capability gates fail closed for unknown/old protocols", ()
   assert.equal(providerAuthenticationReceiptCode(77), "COMMAND_CANCELLED");
   assert.equal(providerAuthenticationReceiptCode(78), "COMMAND_CANCELLED");
   assert.equal(providerAuthenticationReceiptCode(79), "PROVIDER_AUTHENTICATION_REQUIRED");
+  assert.equal(runnerSupportsProtocol(78, "subscriptionUsage"), false);
+  assert.equal(runnerSupportsProtocol(79, "subscriptionUsage"), false);
+  assert.equal(runnerSupportsProtocol(80, "subscriptionUsage"), true);
   assert.equal(runnerSupportsProtocol(Number.NaN, "externalSessions"), false);
   assert.equal(runnerSupportsProtocol(6.5, "externalSessions"), false);
   assert.match(runnerCapabilityRequirement(null, "sessionFiles", "Files"), /unknown.*requires protocol v16/i);

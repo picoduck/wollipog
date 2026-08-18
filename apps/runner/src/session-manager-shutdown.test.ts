@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import type { AgentDefinition } from "@wollipog/protocol";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore } from "./session-store.js";
 import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
@@ -63,4 +64,81 @@ test("provider-home ownership is released only after shutdown process trees are 
     env: { HOME: providerHome },
   });
   restarted.releaseAll();
+});
+
+test("subscription probes resolve runner isolation before acquiring provider-HOME ownership", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-subscription-probe-isolation-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const manager = new SessionManager(
+    () => {},
+    () => {},
+    new SessionStore(join(root, "sessions")),
+    "runner",
+    undefined,
+    undefined,
+    root,
+  );
+  const isolation = { backend: "bwrap" as const, command: "bwrap", args: [], network: "deny" as const };
+  let resolvedState: unknown;
+  let leaseRequest: unknown;
+  (manager as unknown as { resolveIsolation: (...args: unknown[]) => Promise<typeof isolation> }).resolveIsolation =
+    async (...args: unknown[]) => {
+      resolvedState = args[3];
+      return isolation;
+    };
+  (manager as unknown as { providerHomeLeases: { acquire(request: unknown): void } }).providerHomeLeases = {
+    acquire: (request) => { leaseRequest = request; },
+  };
+  const agent: AgentDefinition = {
+    id: "codex", name: "Codex", command: "codex", args: [], env: {},
+    driver: "codex-app-server", context: { kind: "wsl", distro: "Ubuntu" },
+  };
+  assert.deepEqual(
+    await manager.prepareSubscriptionUsageProbe(agent, { HOME: "/home/alice" }, "a".repeat(32)),
+    { cwd: "/tmp", isolation },
+  );
+  assert.deepEqual(resolvedState, {
+    driver: "codex-app-server",
+    dataDir: root,
+    env: { HOME: "/home/alice" },
+    sessionId: `subscription-usage:${"a".repeat(32)}`,
+    cwd: "/tmp",
+  });
+  assert.deepEqual(leaseRequest, {
+    driver: "codex-app-server",
+    command: "codex",
+    context: { kind: "wsl", distro: "Ubuntu" },
+    env: { HOME: "/home/alice" },
+    isolation,
+  });
+  manager.shutdownAll();
+});
+
+test("native subscription probes create their narrow cwd before isolation resolves it", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-subscription-probe-cwd-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const manager = new SessionManager(
+    () => {},
+    () => {},
+    new SessionStore(join(root, "sessions")),
+    "runner",
+    undefined,
+    undefined,
+    root,
+  );
+  let cwdExistedDuringResolution = false;
+  (manager as unknown as { resolveIsolation: (...args: unknown[]) => Promise<undefined> }).resolveIsolation =
+    async (...args: unknown[]) => {
+      const state = args[3] as { cwd: string };
+      cwdExistedDuringResolution = existsSync(state.cwd);
+      return undefined;
+    };
+  const sourceId = "b".repeat(32);
+  const result = await manager.prepareSubscriptionUsageProbe({
+    id: "codex", name: "Codex", command: "codex", args: [], env: {},
+    driver: "codex-app-server", context: { kind: "native" },
+  }, {}, sourceId);
+  assert.equal(cwdExistedDuringResolution, true);
+  assert.equal(result.cwd, join(root, "subscription-usage-probes", sourceId));
+  manager.shutdownAll();
 });

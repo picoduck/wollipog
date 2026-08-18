@@ -66,6 +66,14 @@ export interface DriverBackgroundWorkUpdate {
   reason?: "ceiling" | "shutdown" | "process_exit";
 }
 
+/** Runner-local provider payload. It is normalized and stripped of account identity before any
+ * control-plane transport; drivers intentionally do not know the source/runner wire identity. */
+export interface DriverSubscriptionUsageUpdate {
+  provider: "codex" | "claude";
+  kind: "full" | "sparse";
+  payload: unknown;
+}
+
 export interface DriverCallbacks {
   onEvent: (payload: SessionEventPayload) => void;
   onStderr: (text: string) => void;
@@ -87,6 +95,8 @@ export interface DriverCallbacks {
   onAcpSessionInfo?: (info: { title?: string | null; providerUpdatedAt?: string }) => void;
   /** Exact provider model resolved from a selected alias for the active native session. */
   onModelResolved?: (model: string) => void;
+  /** Provider-owned account usage observed on an already-running process. */
+  onSubscriptionUsage?: (update: DriverSubscriptionUsageUpdate) => void;
 }
 
 export interface DriverOptions {

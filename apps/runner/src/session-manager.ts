@@ -16,6 +16,7 @@
 import type {
   AgentCapabilities,
   AgentContext,
+  AgentDefinition,
   AgentDriverKind,
   AgentSlashCommand,
   AcpRuntimeCapabilities,
@@ -40,9 +41,15 @@ import type {
 } from "@wollipog/protocol";
 import { isPromptImageReference, PROTOCOL_VERSION, providerSupportsConversationFork } from "@wollipog/protocol";
 import { createHash, randomUUID } from "node:crypto";
+import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { makeDriver, type Driver } from "./drivers/factory.js";
-import type { DriverBackgroundWorkUpdate, DriverSteerResult, StopReason } from "./drivers/driver.js";
+import type {
+  DriverBackgroundWorkUpdate,
+  DriverSteerResult,
+  DriverSubscriptionUsageUpdate,
+  StopReason,
+} from "./drivers/driver.js";
 import { CodexAppServerResumeError } from "./drivers/codex-app-server.js";
 import { BoxAdmission, type AdmissionRequest } from "./box-admission.js";
 import { discoverIncompleteClaudeTasks, discoverIncompleteClaudeTasksInContext } from "./claude-background-work.js";
@@ -60,6 +67,7 @@ import {
   verifyExecutionIsolationForkState,
 } from "./execution-isolation.js";
 import type { SpawnIsolation } from "./spawn.js";
+import type { SubscriptionUsageProbeAuthorization } from "./subscription-usage.js";
 import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
 import {
   ProviderStateCleanupJournal,
@@ -620,6 +628,12 @@ export class SessionManager {
     private readonly controlPlaneProtocolVersion: () => number | null = () => PROTOCOL_VERSION,
     private readonly runnerOwnerHash?: string,
     private readonly providerAuthRecovery?: ProviderAuthRecoveryController,
+    private readonly onSubscriptionUsageUpdate?: (
+      agentId: string,
+      driver: AgentDriverKind,
+      context: AgentContext,
+      update: DriverSubscriptionUsageUpdate,
+    ) => void,
   ) {
     this.lockOwner = `${runnerId}#${randomUUID()}`;
     this.providerHomeLeases = runnerOwnerHash ? new ProviderHomeLeaseRegistry(runnerOwnerHash) : undefined;
@@ -664,6 +678,38 @@ export class SessionManager {
       context: meta.context,
       env: meta.env,
     });
+  }
+
+  /** Account probes are no-turn provider launches, but the provider may still mutate its effective
+   * HOME while initializing. Bind them to the same attested owner lease as sessions and TUIs. */
+  async prepareSubscriptionUsageProbe(
+    agent: AgentDefinition,
+    env: Record<string, string>,
+    sourceId: string,
+  ): Promise<SubscriptionUsageProbeAuthorization> {
+    const context = agent.context ?? { kind: "native" as const };
+    const cwd = context.kind === "wsl"
+      ? "/tmp"
+      : join(this.stateDir, "subscription-usage-probes", sourceId);
+    if (context.kind === "native") {
+      await mkdir(cwd, { recursive: true, mode: 0o700 });
+    }
+    const isolation = await this.resolveIsolation(this.executionIsolation, context, {}, {
+      driver: agent.driver ?? "acp",
+      dataDir: this.stateDir,
+      env,
+      sessionId: `subscription-usage:${sourceId}`,
+      cwd,
+      ...(this.runnerOwnerHash ? { ownerHash: this.runnerOwnerHash } : {}),
+    });
+    this.providerHomeLeases?.acquire({
+      driver: agent.driver ?? "acp",
+      command: agent.command,
+      context,
+      env,
+      isolation,
+    });
+    return { cwd, ...(isolation ? { isolation } : {}) };
   }
 
   /** Re-scan durable Claude work after each successful control-plane registration/reconnect. */
@@ -2084,6 +2130,11 @@ export class SessionManager {
           const live = this.active.get(sessionId);
           if (!live || live.client !== client || live.launchGeneration !== launchGeneration) return;
           this.onProviderAuthenticationFailure(sessionId, meta);
+        },
+        onSubscriptionUsage: (update) => {
+          if (meta.agentId) {
+            this.onSubscriptionUsageUpdate?.(meta.agentId, meta.driver, meta.context, update);
+          }
         },
         onAcpCapabilities: (capabilities) => {
           meta.acpCapabilities = capabilities;

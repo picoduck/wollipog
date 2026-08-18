@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { UsageAggregationResponse, UsageRetentionPolicy } from "@wollipog/protocol";
+import type {
+  SubscriptionUsageBucket,
+  SubscriptionUsageResponse,
+  SubscriptionUsageSourceView,
+  UsageAggregationResponse,
+  UsageRetentionPolicy,
+} from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { formatTokens } from "../format.js";
 import { SegmentedControl } from "./ui/ChoiceControls.js";
@@ -18,6 +24,32 @@ export function bucketLabel(timestamp: number, granularity: "hour" | "day"): str
     : date.toLocaleDateString(undefined, { timeZone: "UTC", year: "numeric", month: "short", day: "numeric" });
 }
 
+export function subscriptionResetLabel(timestamp: number, now = Date.now()): string {
+  const difference = timestamp - now;
+  if (difference <= 0) return "Reset time has passed";
+  const minutes = Math.ceil(difference / 60_000);
+  if (minutes < 60) return `Resets in ${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
+  const hours = Math.ceil(minutes / 60);
+  if (hours < 48) return `Resets in ${hours} ${hours === 1 ? "hour" : "hours"}`;
+  const days = Math.ceil(hours / 24);
+  return `Resets in ${days} days`;
+}
+
+function sourceStateLabel(source: SubscriptionUsageSourceView): string {
+  if (source.freshness === "stale" && source.state === "available") return "Last Known — Stale";
+  return {
+    available: "Available",
+    unavailable: "Temporarily Unavailable",
+    unsupported: "Unsupported",
+    unauthenticated: "Sign-In Required",
+    not_applicable: "Not Applicable",
+  }[source.state];
+}
+
+function remainingFor(bucket: SubscriptionUsageBucket): number | undefined {
+  return bucket.remainingPercent ?? (bucket.usedPercent === undefined ? undefined : Math.max(0, 100 - bucket.usedPercent));
+}
+
 export function UsageView() {
   const api = useApi();
   const [days, setDays] = useState(30);
@@ -32,6 +64,12 @@ export function UsageView() {
   const requestGeneration = useRef(0);
   const daysRef = useRef(days);
   const [knownRetention, setKnownRetention] = useState<UsageRetentionPolicy | null>(null);
+  const [subscriptionData, setSubscriptionData] = useState<SubscriptionUsageResponse | null>(null);
+  const [subscriptionLoading, setSubscriptionLoading] = useState(true);
+  const [subscriptionError, setSubscriptionError] = useState<string | null>(null);
+  const [subscriptionRefreshing, setSubscriptionRefreshing] = useState(false);
+  const [subscriptionRefreshStatus, setSubscriptionRefreshStatus] = useState<string | null>(null);
+  const [subscriptionNow, setSubscriptionNow] = useState(Date.now());
   // Which operation is actually in flight. `saving` spans the PUT and the refresh that follows it,
   // and the ranges are unavailable throughout — but the REASON differs, and a version that said
   // "saving retention" during the refresh described work that had already completed.
@@ -68,6 +106,49 @@ export function UsageView() {
     const timer = window.setTimeout(() => void load(days), 120);
     return () => window.clearTimeout(timer);
   }, [days, load]);
+
+  const loadSubscriptions = useCallback(async () => {
+    setSubscriptionLoading(true);
+    setSubscriptionError(null);
+    try {
+      setSubscriptionData(await api.subscriptionUsage());
+    } catch (cause) {
+      setSubscriptionError(cause instanceof Error ? cause.message : "Unable to load subscription usage");
+    } finally {
+      setSubscriptionLoading(false);
+    }
+  }, [api]);
+
+  useEffect(() => {
+    void loadSubscriptions();
+  }, [loadSubscriptions]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setSubscriptionNow(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const refreshSubscriptions = async () => {
+    setSubscriptionRefreshing(true);
+    setSubscriptionError(null);
+    setSubscriptionRefreshStatus(null);
+    try {
+      const refreshed = await api.refreshSubscriptionUsage();
+      setSubscriptionData(refreshed);
+      setSubscriptionNow(Date.now());
+      setSubscriptionRefreshStatus(
+        refreshed.refresh?.attempted === 0
+          ? "No online supported Machines were available to refresh. Last-known values are unchanged."
+          : refreshed.refresh?.failed
+            ? `${refreshed.refresh.failed} of ${refreshed.refresh.attempted} Machine refreshes failed. Last-known values remain visible.`
+            : "Subscription usage refreshed.",
+      );
+    } catch (cause) {
+      setSubscriptionError(cause instanceof Error ? cause.message : "Unable to refresh subscription usage");
+    } finally {
+      setSubscriptionRefreshing(false);
+    }
+  };
 
   const maxCost = useMemo(() => Math.max(0, ...(data?.series.map((bucket) => bucket.costUsd) ?? [])), [data]);
   const saveRetention = async () => {
@@ -139,6 +220,94 @@ export function UsageView() {
           }}
         />
       </div>
+
+      <section className="subscription-usage" aria-labelledby="subscription-usage-heading">
+        <div className="subscription-usage-heading">
+          <div>
+            <h3 id="subscription-usage-heading">Subscription Usage</h3>
+            <p>Provider allowance windows for signed-in Codex and Claude subscriptions. This does not include API-key billing.</p>
+          </div>
+          <button
+            type="button"
+            className="btn ghost"
+            disabled={subscriptionRefreshing}
+            onClick={() => void refreshSubscriptions()}
+          >
+            {subscriptionRefreshing ? "Refreshing…" : "Refresh"}
+          </button>
+        </div>
+        {subscriptionLoading && !subscriptionData && <div className="usage-state" role="status">Loading subscription usage…</div>}
+        {subscriptionError && <div className="usage-state error" role="alert">{subscriptionError}</div>}
+        {subscriptionRefreshStatus && <div className="subscription-usage-status" role="status">{subscriptionRefreshStatus}</div>}
+        {subscriptionData && subscriptionData.sources.length === 0 && (
+          <div className="usage-state">No Codex or Claude subscription sources are configured on the Machines you can access.</div>
+        )}
+        {subscriptionData && subscriptionData.sources.length > 0 && (
+          <div className="subscription-source-grid">
+            {subscriptionData.sources.map((source) => (
+              <article className="runner-card subscription-source" key={`${source.runnerId}:${source.sourceId}`}>
+                <header>
+                  <div>
+                    <h4>{source.provider === "codex" ? "Codex" : "Claude"}{source.plan ? ` — ${source.plan}` : ""}</h4>
+                    <p>{source.agentName} on {source.runnerName}</p>
+                  </div>
+                  <span
+                    className="subscription-state"
+                    data-state={source.state}
+                    data-freshness={source.freshness}
+                  >
+                    {source.freshness === "stale" ? "⚠ " : ""}{sourceStateLabel(source)}
+                  </span>
+                </header>
+                {source.detail && <p className="subscription-detail">{source.detail}</p>}
+                {source.buckets.length > 0 && (
+                  <dl className="subscription-buckets">
+                    {source.buckets.map((bucket) => {
+                      const remaining = remainingFor(bucket);
+                      const warning = bucket.status === "warning";
+                      const exhausted = bucket.status === "exhausted" || remaining === 0;
+                      return (
+                        <div className={`subscription-bucket ${exhausted ? "exhausted" : warning ? "warning" : ""}`} key={bucket.id}>
+                          <dt>{bucket.label}</dt>
+                          <dd>
+                            {remaining === undefined ? (
+                              <strong>Allowance Reported</strong>
+                            ) : (
+                              <><strong>{Math.round(remaining)}% Remaining</strong><span>{Math.round(bucket.usedPercent ?? 100 - remaining)}% Used</span></>
+                            )}
+                            {exhausted && <span className="subscription-warning">⛔ Exhausted</span>}
+                            {!exhausted && warning && <span className="subscription-warning">⚠ Approaching Limit</span>}
+                            {bucket.resetsAt && (
+                              <span title={new Date(bucket.resetsAt).toLocaleString()}>
+                                {subscriptionResetLabel(bucket.resetsAt, subscriptionNow)} · {new Date(bucket.resetsAt).toLocaleString()}
+                              </span>
+                            )}
+                          </dd>
+                        </div>
+                      );
+                    })}
+                  </dl>
+                )}
+                {source.credits && (
+                  <p className="subscription-detail">
+                    Credits: {source.credits.unlimited ? "Unlimited" : source.credits.balance ?? (source.credits.hasCredits ? "Available" : "None")}
+                  </p>
+                )}
+                {source.spendControls?.map((control) => (
+                  <p className="subscription-detail" key={control.id}>
+                    {control.reached ? "⛔ " : ""}{control.label}: {control.used ?? "Usage Reported"}{control.limit ? ` of ${control.limit}` : ""}
+                    {control.resetsAt ? ` · ${subscriptionResetLabel(control.resetsAt, subscriptionNow)}` : ""}
+                  </p>
+                ))}
+                <footer>
+                  Last provider update: {new Date(source.fetchedAt).toLocaleString()}
+                  {source.runnerStatus === "offline" ? " · Machine Offline" : ""}
+                </footer>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
 
       {loading && !data && <div className="usage-state" role="status">Loading usage…</div>}
       {error && <div className="usage-state error" role="alert">{error}</div>}
