@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -57,20 +58,32 @@ test("provider-home leases are process-reentrant and reject a live competing own
   second.releaseAll();
 });
 
-test("provider-home leases require manual quarantine for a validated stale same-owner record", (t) => {
+function leaseRoot(home: string): string {
+  return join(home, ".agent-manager", "provider-home-leases-v1");
+}
+
+function readLease(home: string) {
+  return JSON.parse(readFileSync(join(leaseRoot(home), "mutable-home.lock", "lease.json"), "utf8"));
+}
+
+test("a crashed runner's own stale lease is reclaimed without manual filesystem recovery", (t) => {
   const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-stale-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
-  const stale = new ProviderHomeLeaseRegistry("a".repeat(64), { pid: 101, hostname: "host-a" });
-  stale.acquire(request(home));
-  const replacement = new ProviderHomeLeaseRegistry("a".repeat(64), {
+  const crashed = new ProviderHomeLeaseRegistry("a".repeat(64), { pid: 101, hostname: "host-a" });
+  crashed.acquire(request(home));
+  const restarted = new ProviderHomeLeaseRegistry("a".repeat(64), {
     pid: 202,
     hostname: "host-a",
     isProcessAlive: () => false,
   });
-  assert.throws(() => replacement.acquire(request(home)), /stale lease.*proving no provider process.*manually quarantine/);
-  stale.releaseAll();
-  replacement.acquire(request(home));
-  replacement.releaseAll();
+  restarted.acquire(request(home));
+  assert.equal(readLease(home).pid, 202);
+  assert.deepEqual(readdirSync(leaseRoot(home)), ["mutable-home.lock"], "reclaim leaves no residue behind");
+  // A late release from the crashed instance must never delete the live replacement's lock.
+  crashed.releaseAll();
+  assert.equal(readLease(home).pid, 202);
+  restarted.releaseAll();
+  assert.equal(existsSync(join(leaseRoot(home), "mutable-home.lock")), false);
 });
 
 test("provider-home leases never automatically recover a foreign owner's stale record", (t) => {
@@ -83,8 +96,44 @@ test("provider-home leases never automatically recover a foreign owner's stale r
     hostname: "host-a",
     isProcessAlive: () => false,
   });
-  assert.throws(() => foreign.acquire(request(home)), /stale lease.*manual.*quarantine/);
+  assert.throws(() => foreign.acquire(request(home)), /stale lease.*another attested owner.*manually quarantine/);
+  assert.equal(readLease(home).pid, 101, "the foreign record is left exactly as found");
   stale.releaseAll();
+});
+
+test("provider-home leases never reclaim a record written by another host", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-other-host-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const stale = new ProviderHomeLeaseRegistry("a".repeat(64), { pid: 101, hostname: "host-a" });
+  stale.acquire(request(home));
+  const elsewhere = new ProviderHomeLeaseRegistry("a".repeat(64), {
+    pid: 202,
+    hostname: "host-b",
+    isProcessAlive: () => false,
+  });
+  assert.throws(() => elsewhere.acquire(request(home)), /leased by host host-a.*isolated OS account/);
+  assert.equal(readLease(home).pid, 101, "the remote host's record is left exactly as found");
+  stale.releaseAll();
+});
+
+test("a reclaim that finds the record replaced restores the lock instead of stealing it", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-reclaim-race-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const stale = new ProviderHomeLeaseRegistry("a".repeat(64), { pid: 101, hostname: "host-a" });
+  stale.acquire(request(home));
+  // Stand in for a competing runner that reclaimed the dead lease between inspection and rename.
+  const live = { ...readLease(home), leaseId: randomUUID(), pid: 999 };
+  const loser = new ProviderHomeLeaseRegistry("a".repeat(64), {
+    pid: 202,
+    hostname: "host-a",
+    isProcessAlive: (pid) => pid === 999,
+    beforeReclaimConfirmForTest: (quarantine) => {
+      writeFileSync(join(quarantine, "lease.json"), `${JSON.stringify(live)}\n`);
+    },
+  });
+  assert.throws(() => loser.acquire(request(home)), /already in use by process 999/);
+  assert.deepEqual(readdirSync(leaseRoot(home)), ["mutable-home.lock"], "the lock is put back where it was");
+  assert.equal(readLease(home).pid, 999, "the competing runner keeps its lease");
 });
 
 test("provider-home leases fail closed for WSL direct mode and bypass redirected bwrap homes", (t) => {

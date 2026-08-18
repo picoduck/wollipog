@@ -8,6 +8,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmdirSync,
   rmSync,
   writeFileSync,
@@ -19,8 +20,13 @@ import type { SpawnIsolation } from "./spawn.js";
 
 const OWNER_HASH = /^[a-f0-9]{64}$/u;
 const PROVIDER_KEY = /^[a-z0-9][a-z0-9-]{0,63}$/u;
+const LEASE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 const MAX_RECORD_BYTES = 4_096;
 const MARKER = "lease.json";
+const RECLAIM_PREFIX = "mutable-home.reclaimed-";
+/** Publication retries allowed after a reclaim hands the lock back unheld. Bounded so a stream
+ * of competing runners cannot spin here forever. */
+const RECLAIM_ATTEMPTS = 2;
 
 interface ProviderHomeLeaseRecord {
   version: 1;
@@ -37,6 +43,7 @@ export interface ProviderHomeLeaseOptions {
   hostname?: string;
   isProcessAlive?: (pid: number) => boolean;
   beforeMarkerWriteForTest?: () => void;
+  beforeReclaimConfirmForTest?: (quarantine: string) => void;
 }
 
 export interface ProviderHomeLeaseRequest {
@@ -75,7 +82,7 @@ function readRecord(path: string): ProviderHomeLeaseRecord {
     if (!stat.isFile() || stat.size > MAX_RECORD_BYTES) throw new Error("provider-home lease metadata is unsafe");
     const value = JSON.parse(readFileSync(fd, "utf8")) as Partial<ProviderHomeLeaseRecord>;
     if (value.version !== 1 || !OWNER_HASH.test(value.ownerHash ?? "") ||
-        typeof value.leaseId !== "string" || !Number.isSafeInteger(value.pid) || (value.pid ?? 0) <= 0 ||
+        !LEASE_ID.test(value.leaseId ?? "") || !Number.isSafeInteger(value.pid) || (value.pid ?? 0) <= 0 ||
         typeof value.hostname !== "string" || !PROVIDER_KEY.test(value.provider ?? "") ||
         typeof value.createdAt !== "string") {
       throw new Error("provider-home lease metadata is invalid");
@@ -97,6 +104,7 @@ export class ProviderHomeLeaseRegistry {
   private readonly hostname: string;
   private readonly isProcessAlive: (pid: number) => boolean;
   private readonly beforeMarkerWriteForTest?: () => void;
+  private readonly beforeReclaimConfirmForTest?: (quarantine: string) => void;
 
   constructor(private readonly ownerHash: string, options: ProviderHomeLeaseOptions = {}) {
     if (!OWNER_HASH.test(ownerHash)) throw new Error("provider-home lease requires an attested owner hash");
@@ -104,6 +112,7 @@ export class ProviderHomeLeaseRegistry {
     this.hostname = options.hostname ?? systemHostname();
     this.isProcessAlive = options.isProcessAlive ?? defaultProcessAlive;
     this.beforeMarkerWriteForTest = options.beforeMarkerWriteForTest;
+    this.beforeReclaimConfirmForTest = options.beforeReclaimConfirmForTest;
   }
 
   acquire(request: ProviderHomeLeaseRequest): void {
@@ -134,28 +143,97 @@ export class ProviderHomeLeaseRegistry {
       provider,
       createdAt: new Date().toISOString(),
     };
-    let lockCreated = false;
-    try {
-      mkdirSync(lockDir, { mode: 0o700 });
-      lockCreated = true;
-      this.beforeMarkerWriteForTest?.();
-      writeFileSync(join(lockDir, MARKER), `${JSON.stringify(record)}\n`, { flag: "wx", mode: 0o600 });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-        // No provider has launched yet, so this call can safely unwind only the lock it created.
-        if (lockCreated) {
-          rmSync(join(lockDir, MARKER), { force: true });
-          try {
-            rmdirSync(lockDir);
-          } catch {
-            // Unexpected concurrent entries remain fail-closed and available for inspection.
+    for (let attempt = 0; attempt <= RECLAIM_ATTEMPTS; attempt++) {
+      let lockCreated = false;
+      try {
+        mkdirSync(lockDir, { mode: 0o700 });
+        lockCreated = true;
+        this.beforeMarkerWriteForTest?.();
+        writeFileSync(join(lockDir, MARKER), `${JSON.stringify(record)}\n`, { flag: "wx", mode: 0o600 });
+        this.held.set(key, { leaseId, lockDir });
+        return;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+          // No provider has launched yet, so this call can safely unwind only the lock it created.
+          if (lockCreated) {
+            rmSync(join(lockDir, MARKER), { force: true });
+            try {
+              rmdirSync(lockDir);
+            } catch {
+              // Unexpected concurrent entries remain fail-closed and available for inspection.
+            }
           }
+          throw error;
         }
-        throw error;
+        if (attempt === RECLAIM_ATTEMPTS) break;
+        // Reclaiming leaves the lock unheld, so publication is retried rather than resolved here.
+        this.reclaimAbandonedLease(root, lockDir, leaseId);
       }
+    }
+    this.rejectExistingLease(lockDir);
+  }
+
+  /** True only for a record this same runner identity abandoned on this host. A different attested
+   * owner, a different host, or a live process is never reclaimed automatically: those are the
+   * cases where a second control plane could still be mutating auth, config, caches or transcripts
+   * under the shared HOME. */
+  private isAbandonedByThisOwner(record: ProviderHomeLeaseRecord): boolean {
+    return record.hostname === this.hostname && record.ownerHash === this.ownerHash &&
+      !this.isProcessAlive(record.pid);
+  }
+
+  /**
+   * Move an abandoned lock aside so the caller can publish a fresh one, restoring the previous
+   * requirement that a crashed runner recovers without hand-editing the filesystem.
+   *
+   * The rename is the mutual exclusion: it is atomic, the destination is unique to this attempt,
+   * and every loser observes ENOENT and retries against whichever lock exists next. The record is
+   * re-read afterwards because a competing reclaim can replace a dead lease with a live one between
+   * the inspection and the move; that lock is put back untouched and left to manual recovery.
+   */
+  private reclaimAbandonedLease(root: string, lockDir: string, attemptId: string): void {
+    const entries = readdirSync(lockDir);
+    if (entries.length !== 1 || entries[0] !== MARKER) this.rejectExistingLease(lockDir);
+    if (!this.isAbandonedByThisOwner(readRecord(join(lockDir, MARKER)))) this.rejectExistingLease(lockDir);
+    const quarantine = join(root, `${RECLAIM_PREFIX}${attemptId}`);
+    try {
+      renameSync(lockDir, quarantine);
+    } catch (error) {
+      // A competing reclaim already moved this lock; retry against the current holder.
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    let confirmed: ProviderHomeLeaseRecord;
+    try {
+      this.beforeReclaimConfirmForTest?.(quarantine);
+      confirmed = readRecord(join(quarantine, MARKER));
+    } catch (error) {
+      this.restoreReclaimedLease(quarantine, lockDir);
+      throw error;
+    }
+    if (!this.isAbandonedByThisOwner(confirmed)) {
+      this.restoreReclaimedLease(quarantine, lockDir);
       this.rejectExistingLease(lockDir);
     }
-    this.held.set(key, { leaseId, lockDir });
+    // The record is proven to name this owner's dead process, so its evidence is ours to discard.
+    rmSync(join(quarantine, MARKER), { force: true });
+    try {
+      rmdirSync(quarantine);
+    } catch {
+      // Unexpected concurrent entries remain fail-closed and available for inspection.
+    }
+  }
+
+  private restoreReclaimedLease(quarantine: string, lockDir: string): void {
+    try {
+      renameSync(quarantine, lockDir);
+    } catch (error) {
+      throw new Error(
+        `provider home lease could not be restored to ${lockDir} after an aborted reclaim; the ` +
+          `record is preserved at ${quarantine} and requires manual recovery`,
+        { cause: error },
+      );
+    }
   }
 
   private rejectExistingLease(lockDir: string): never {
@@ -175,6 +253,11 @@ export class ProviderHomeLeaseRegistry {
     }
     if (this.isProcessAlive(existing.pid)) {
       throw new Error(`provider home is already in use by process ${existing.pid}; use bwrap or an isolated OS account`);
+    }
+    if (existing.ownerHash !== this.ownerHash) {
+      throw new Error(
+        `provider home has a stale lease from process ${existing.pid} held by another attested owner; after proving no provider process uses this HOME, manually quarantine ${lockDir} and retry`,
+      );
     }
     throw new Error(
       `provider home has a stale lease from process ${existing.pid}; after proving no provider process uses this HOME, manually quarantine ${lockDir} and retry`,

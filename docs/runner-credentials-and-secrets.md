@@ -171,6 +171,8 @@ other mutable state cannot prove that an old process has stopped.
 An abandoned same-host process lease is reclaimed only after its recorded process is no longer
 alive. A separate atomic recovery guard serializes stale reapers; if recovery itself is interrupted,
 startup fails closed until an operator verifies no runner is active and removes the named guard.
+The provider-home lease below serializes its own reclaim with an atomic rename instead, so an
+interrupted reclaim cannot leave a guard that blocks every later recovery.
 Leases from another host and malformed lease metadata fail closed. Owner, lease, recovery-guard,
 and migrated credential publication is crash-durable on platforms that support directory flushes:
 new directory entries are flushed in order, file contents are flushed before the exclusive hard
@@ -200,9 +202,17 @@ roots aside. Mutations require `--ack-all-legacy-runners-stopped` and refuse an 
 Quarantining those whole roots also makes any stored legacy WSL session that names one of their
 worktrees unavailable until the root is restored or the session is explicitly migrated; inventory
 and back up the shared roots before acknowledging that operation.
-An incomplete or stale provider-home lease fails closed with manual quarantine guidance; even a
-same-owner restart cannot reclaim it automatically because a detached provider tree may have
-survived the runner. Remove it only after proving no provider process is using that HOME.
+A stale provider-home lease is reclaimed automatically only when the record names this same
+attested owner on this same hostname and its recorded process is no longer alive. The reclaim
+renames the lock aside under a name unique to the attempt, so exactly one contender wins and the
+losers retry; the record is re-read after the move and the lock is restored untouched if a competing
+runner replaced it in the meantime. A record from another attested owner, another host, a live
+process, an incomplete lock, or unexpected directory entries still fails closed with manual
+quarantine guidance. Remove one of those only after proving no provider process is using that HOME.
+
+Automatic same-owner reclaim does not prove that a detached provider tree from the crashed instance
+has exited, only that the runner that recorded the lease is gone. That residual exposure is confined
+to a single attested owner on one host, which is the trust domain that already shares the HOME.
 
 ## Backup and operational boundary
 

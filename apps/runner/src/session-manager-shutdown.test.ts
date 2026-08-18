@@ -44,25 +44,34 @@ test("provider-home ownership is released only after shutdown process trees are 
   assert.equal(releases, 0, "shutdown initiation must retain ownership while process kills drain");
   assert.equal(manager.releaseProviderHomeLeasesAfterShutdown(false), false);
   assert.equal(releases, 0, "a reap deadline retains the durable lease for fail-closed recovery");
+  // The retained lease still guards the HOME against a different attested owner.
+  const foreign = new ProviderHomeLeaseRegistry("b".repeat(64), {
+    pid: 303,
+    hostname: "host-a",
+    isProcessAlive: () => false,
+  });
+  assert.throws(() => foreign.acquire({
+    driver: "claude-code",
+    command: "claude",
+    context: { kind: "native" },
+    env: { HOME: providerHome },
+  }), /stale lease.*another attested owner.*manually quarantine/);
+  // This owner's own restart recovers the abandoned lease without operator intervention.
   const restarted = new ProviderHomeLeaseRegistry(ownerHash, {
     pid: 202,
     hostname: "host-a",
     isProcessAlive: () => false,
   });
-  assert.throws(() => restarted.acquire({
-    driver: "claude-code",
-    command: "claude",
-    context: { kind: "native" },
-    env: { HOME: providerHome },
-  }), /stale lease.*manually quarantine/);
-  assert.equal(manager.releaseProviderHomeLeasesAfterShutdown(true), true);
-  assert.equal(releases, 1);
   restarted.acquire({
     driver: "claude-code",
     command: "claude",
     context: { kind: "native" },
     env: { HOME: providerHome },
   });
+  assert.equal(manager.releaseProviderHomeLeasesAfterShutdown(true), true);
+  assert.equal(releases, 1);
+  assert.equal(existsSync(join(providerHome, ".agent-manager", "provider-home-leases-v1", "mutable-home.lock")), true,
+    "the drained instance must not delete the restarted instance's lease");
   restarted.releaseAll();
 });
 
