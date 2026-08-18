@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ControlPlaneToUi, PodView, SessionEvent, SessionView, SteeringAttemptView } from "@wollipog/protocol";
-import { Store } from "./store.js";
+import { isPartialHistory, Store } from "./store.js";
 import { ACTIVITY_BUCKET_MS, activitySeries } from "./activity.js";
 
 const session = (id: string, eventEpoch = 0): SessionView => ({ id, eventEpoch } as SessionView);
@@ -683,4 +683,367 @@ test("a superseded recovery revision cannot merge pages or overwrite current loa
     refreshing: true,
     error: null,
   });
+});
+
+test("an opening window publishes a cursor contiguous within itself, not from the start of the log", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  store.prepareSubscriptionRecovery(1, ["s1"]);
+  message(store, {
+    type: "session_subscriptions_applied", revision: 1, sessionIds: ["s1"], podIds: [],
+  });
+  store.beginEventHistoryLoad("s1", 0, 1);
+  // The window starts at seq 4801: everything below it is deliberately absent.
+  store.loadEvents("s1", [event("s1", 4_801), event("s1", 4_802)], 0, 1, true, generation, true);
+
+  assert.equal(store.eventWindowBase("s1"), 4_801);
+  assert.equal(store.getState().eventWindows.get("s1")?.hasOlder, true);
+  assert.equal(
+    store.recoveryAfter("s1"),
+    4_802,
+    "a later recovery resumes at the window's tail instead of restarting at the first event",
+  );
+  assert.equal(store.getState().eventHistory.get("s1")?.everComplete, true);
+});
+
+test("reader-driven older pages extend the window downward without touching recovery state", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  store.prepareSubscriptionRecovery(1, ["s1"]);
+  message(store, {
+    type: "session_subscriptions_applied", revision: 1, sessionIds: ["s1"], podIds: [],
+  });
+  store.beginEventHistoryLoad("s1", 0, 1);
+  store.loadEvents("s1", [event("s1", 10), event("s1", 11)], 0, 1, true, generation, true);
+  const cursorAfterOpen = store.recoveryAfter("s1");
+
+  store.beginOlderEventsLoad("s1", 10, 0);
+  assert.equal(store.getState().eventWindows.get("s1")?.loadingOlder, true);
+  store.loadOlderEvents("s1", [event("s1", 8), event("s1", 9)], true, 10, 0);
+
+  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [8, 9, 10, 11]);
+  assert.equal(store.eventWindowBase("s1"), 8);
+  assert.equal(store.getState().eventWindows.get("s1")?.loadingOlder, false);
+  assert.equal(store.recoveryAfter("s1"), cursorAfterOpen, "a prepend is not recovery progress");
+
+  store.loadOlderEvents("s1", [event("s1", 7)], false, 8, 0);
+  assert.equal(store.getState().eventWindows.get("s1")?.hasOlder, false);
+  // A later window re-read redefines the slice wholesale: stored rows below its base are dropped,
+  // so the recorded base and the reach-back cursor must follow it — a stale lower base would send
+  // the next older page below rows the store no longer holds and leave a gap between the two.
+  store.loadEvents("s1", [event("s1", 10), event("s1", 11)], 0, 1, true, generation, true);
+  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [10, 11]);
+  assert.equal(store.eventWindowBase("s1"), 10);
+  assert.equal(store.getState().eventWindows.get("s1")?.hasOlder, true,
+    "the reach-back reopens because rows 7-9 are fetchable again");
+});
+
+test("a replaced event log drops the window that described the previous sequence space", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  store.loadEvents("s1", [event("s1", 40), event("s1", 41)], 0, undefined, true, generation, true);
+  assert.equal(store.eventWindowBase("s1"), 40);
+
+  message(store, { type: "session_events_reset", sessionId: "s1", events: [], eventEpoch: 1 });
+  assert.equal(store.eventWindowBase("s1"), 0, "the replacement log is windowed from its own tail");
+  assert.equal(store.getState().eventWindows.get("s1"), undefined);
+
+  // Navigating away drops the window with the transcript it described.
+  store.loadEvents("s1", [event("s1", 3)], 1, undefined, true, generation, false);
+  assert.equal(store.eventWindowBase("s1"), 3);
+  store.navigate({ name: "inbox" });
+  assert.equal(store.getState().eventWindows.get("s1"), undefined);
+});
+
+test("forward gap recovery leaves the loaded window boundary untouched", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  store.loadEvents("s1", [event("s1", 20), event("s1", 21)], 0, undefined, true, generation, true);
+
+  // A reconnect gap-fill carries no window meaning: it must not claim the transcript now starts
+  // at the gap page's first event.
+  store.loadEvents("s1", [event("s1", 22), event("s1", 23)], 0, undefined, true, generation);
+  assert.equal(store.eventWindowBase("s1"), 20);
+  assert.equal(store.getState().eventWindows.get("s1")?.hasOlder, true);
+});
+
+test("an older page that outlived its window is dropped instead of leaving an unreachable hole", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  store.loadEvents("s1", [event("s1", 801), event("s1", 802)], 0, undefined, true, generation, true);
+  store.beginOlderEventsLoad("s1", 801, 0);
+
+  // The reader leaves and comes back: the reopen re-reads a tail that has since advanced.
+  store.navigate({ name: "inbox" });
+  store.navigate({ name: "session", id: "s1" });
+  store.loadEvents("s1", [event("s1", 851), event("s1", 852)], 0, undefined, true, generation, true);
+  assert.equal(store.eventWindowBase("s1"), 851);
+
+  // The page requested below 801 finally resolves. Prepending it would strand 803-850 between the
+  // two, with no cursor able to ask for them.
+  store.loadOlderEvents("s1", [event("s1", 799), event("s1", 800)], false, 801, 0);
+  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [851, 852]);
+  assert.equal(store.eventWindowBase("s1"), 851);
+  assert.equal(store.getState().eventWindows.get("s1")?.hasOlder, true,
+    "the stale page cannot declare the log exhausted for a window it never described");
+
+  // A page requested below the CURRENT base still lands.
+  store.loadOlderEvents("s1", [event("s1", 849), event("s1", 850)], true, 851, 0);
+  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [849, 850, 851, 852]);
+  assert.equal(store.eventWindowBase("s1"), 849);
+});
+
+test("entering a fleet view drops bounded windows so a member is not truncated forever", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [],
+    sessions: [session("s1")],
+    runs: [{ id: "run-1", sessionIds: ["s1"] } as never],
+    pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  store.loadEvents("s1", [event("s1", 900), event("s1", 901)], 0, undefined, true, generation, true);
+  assert.equal(store.eventWindowBase("s1"), 900);
+
+  // Run and Pod columns page only ABOVE the cursor a window published and offer no reach-back, so
+  // carrying one in would omit everything below seq 900 for as long as the cache survives.
+  store.navigate({ name: "run", id: "run-1" });
+  assert.equal(store.getState().events.get("s1"), undefined);
+  assert.equal(store.getState().eventWindows.get("s1"), undefined);
+  assert.equal(store.recoveryAfter("s1"), 0, "fleet recovery starts from the beginning again");
+});
+
+test("a bounded window preserves activity buckets it cannot account for", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  // Live observation records a pulse from a turn far below the window that will be loaded.
+  message(store, { type: "session_event", event: { ...event("s1", 10), ts: Date.now() - ACTIVITY_BUCKET_MS * 3 } });
+  const observed = activitySeries(store.getState().activity.get("s1")!, Date.now())
+    .reduce((total, count) => total + count, 0);
+  assert.ok(observed > 0, "live observation recorded a pulse below the window");
+
+  // Folding a ring from a window that starts at seq 900 would erase what was already observed.
+  store.loadEvents("s1", [event("s1", 900), event("s1", 901)], 0, undefined, true, generation, true);
+  const afterWindow = activitySeries(store.getState().activity.get("s1")!, Date.now())
+    .reduce((total, count) => total + count, 0);
+  assert.ok(afterWindow >= observed, "the heartbeat ring keeps pulses the window cannot explain");
+});
+
+test("an incomplete window stays partial even when it reports no older rows", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  // The poll budget expired over a short prefix: no older rows, but not the whole history either.
+  store.loadEvents("s1", [event("s1", 1), event("s1", 2)], 0, undefined, false, generation, false);
+  assert.equal(isPartialHistory(store.getState().eventWindows.get("s1")), true,
+    "receipts and inventories must not read absence as evidence here");
+
+  // A later read that reaches the tail settles it.
+  store.loadEvents("s1", [event("s1", 1), event("s1", 2), event("s1", 3)], 0, undefined, true, generation, false);
+  assert.equal(isPartialHistory(store.getState().eventWindows.get("s1")), false);
+});
+
+
+test("an opening window defines its slice: hydration falls away, live events survive", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  store.beginEventHistoryLoad("s1", 0, -1, generation);
+
+  // A cold cache hydrates FORWARD and republishes those rows exactly like live ones, so the
+  // transcript fills from the start of the log while the window read is in flight.
+  for (let seq = 1; seq <= 3; seq++) message(store, { type: "session_event", event: event("s1", seq) });
+  // A genuinely live event lands too, after the point in time the window read captured.
+  message(store, { type: "session_event", event: event("s1", 4_803) });
+
+  store.loadEvents("s1", [event("s1", 4_801), event("s1", 4_802)], 0, undefined, true, generation, true);
+  assert.deepEqual(
+    store.getState().events.get("s1")?.map((entry) => entry.seq),
+    [4_801, 4_802, 4_803],
+    "the hydration prefix falls below the window; the live event above it is kept",
+  );
+
+  // Delivery continues normally afterwards, with no lifecycle to unwind.
+  message(store, { type: "session_event", event: event("s1", 4_804) });
+  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq),
+    [4_801, 4_802, 4_803, 4_804]);
+});
+
+test("a forward gap fill keeps everything it already had", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  store.loadEvents("s1", [event("s1", 1), event("s1", 2)], 0, undefined, true, generation);
+  // A gap-fill page carries no window meaning, so it must never discard events below its first row.
+  store.loadEvents("s1", [event("s1", 3)], 0, undefined, true, generation);
+  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [1, 2, 3]);
+});
+
+test("an empty retry that reaches the tail settles a window left partial", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  store.loadEvents("s1", [], 0, undefined, false, generation, false);
+  assert.equal(isPartialHistory(store.getState().eventWindows.get("s1")), true);
+  store.loadEvents("s1", [], 0, undefined, true, generation, false);
+  assert.equal(isPartialHistory(store.getState().eventWindows.get("s1")), false,
+    "an authoritative empty answer is not permanently partial");
+});
+
+test("a fleet view drops an incomplete prefix, not only a window reporting older rows", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [],
+    sessions: [session("s1")],
+    runs: [{ id: "run-1", sessionIds: ["s1"] } as never],
+    pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  // Budget expired over a short prefix: no older rows reported, but not the whole history either.
+  store.loadEvents("s1", [event("s1", 1), event("s1", 2)], 0, undefined, false, generation, false);
+  store.navigate({ name: "run", id: "run-1" });
+  assert.equal(store.getState().events.get("s1"), undefined,
+    "the column recovers the whole history instead of inheriting a truncated prefix");
+  assert.equal(store.getState().eventWindows.get("s1"), undefined);
+});
+
+test("a hydration frame delayed past the window's apply cannot rebuild the prefix", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  store.loadEvents("s1", [event("s1", 4_801), event("s1", 4_802)], 0, undefined, true, generation, true);
+
+  // HTTP and WebSocket delivery race: a hydration broadcast can land AFTER the tail response it
+  // predates. Appending it would put the log's start above a silent gap the reader cannot see.
+  message(store, { type: "session_event", event: event("s1", 1) });
+  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [4_801, 4_802]);
+
+  // Genuinely live traffic sits at the tail and is untouched by the rule.
+  message(store, { type: "session_event", event: event("s1", 4_803) });
+  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [4_801, 4_802, 4_803]);
+
+  // Once the reader pages older, the base follows and previously below-base rows become loadable.
+  store.loadOlderEvents("s1", [event("s1", 4_799), event("s1", 4_800)], true, 4_801, 0);
+  message(store, { type: "session_event", event: event("s1", 4_799) });
+  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq),
+    [4_799, 4_800, 4_801, 4_802, 4_803]);
+});
+
+test("a forward gap-fill over a partial window preserves the activity ring", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  message(store, { type: "session_event", event: { ...event("s1", 10), ts: Date.now() - ACTIVITY_BUCKET_MS * 3 } });
+  const observed = activitySeries(store.getState().activity.get("s1")!, Date.now())
+    .reduce((total, count) => total + count, 0);
+  assert.ok(observed > 0);
+
+  store.loadEvents("s1", [event("s1", 900), event("s1", 901)], 0, undefined, true, generation, true);
+  // The gap-fill page carries no window meaning; the WINDOW is still partial, so the ring must not
+  // be rebuilt from an array that omits the turns those buckets came from.
+  store.loadEvents("s1", [event("s1", 902)], 0, undefined, true, generation);
+  const after = activitySeries(store.getState().activity.get("s1")!, Date.now())
+    .reduce((total, count) => total + count, 0);
+  assert.ok(after >= observed, "buckets below the window base survive forward recovery");
+});
+
+test("a replacement window clears older-load state its fence is about to orphan", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  store.loadEvents("s1", [event("s1", 10), event("s1", 11)], 0, undefined, false, generation, true);
+  store.beginOlderEventsLoad("s1", 10, 0);
+  assert.equal(store.getState().eventWindows.get("s1")?.loadingOlder, true);
+
+  // Retry applies a newer tail with a different base while that older page is still in flight.
+  store.loadEvents("s1", [event("s1", 20), event("s1", 21)], 0, undefined, true, generation, true);
+  assert.equal(store.getState().eventWindows.get("s1")?.loadingOlder, false,
+    "the fence will reject the in-flight page, so nothing else would ever clear the flag");
+
+  // The orphaned page resolves and is rejected without re-disabling the control.
+  store.loadOlderEvents("s1", [event("s1", 8), event("s1", 9)], true, 10, 0);
+  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [20, 21]);
+  assert.equal(store.getState().eventWindows.get("s1")?.loadingOlder, false);
+
+  // Reach-back still works against the replacement window.
+  store.beginOlderEventsLoad("s1", 20, 0);
+  store.loadOlderEvents("s1", [event("s1", 18), event("s1", 19)], true, 20, 0);
+  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [18, 19, 20, 21]);
 });

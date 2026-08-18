@@ -4,6 +4,11 @@ export const SESSION_EVENT_PAGE_LIMIT = 200;
 export const SESSION_HISTORY_RECOVERY_CONCURRENCY = 6;
 export const SESSION_HISTORY_FLEET_TURN_PAGES = 8;
 
+/** Events the opening window reads in its single round trip. Sized to fill a tall transcript
+ * viewport well past its first screen, so a reader who opens a session and scrolls a little never
+ * waits on a second request. Older turns load only when they actually scroll back to them. */
+export const SESSION_EVENT_WINDOW_LIMIT = 200;
+
 /** Stable scalar dependency for restarting a recovery when any selected timeline generation
  * changes in place. Length-prefix ids so arbitrary session names cannot collide. */
 export function sessionHistoryEpochKey(
@@ -175,6 +180,137 @@ export async function recoverSessionHistory(
   options: SessionHistoryRecoveryOptions,
 ): Promise<boolean> {
   return (await recoverSessionHistoryTurn(request, options)).complete;
+}
+
+/**
+ * Whether an open should read the bounded tail window rather than the forward gap chain.
+ *
+ * - `recoveryAfter` is the cursor frozen when the acknowledged subscription was sent. Anything
+ *   above zero is a reconnect gap the forward chain owns.
+ * - `historyEverCompleted` asks about fetched HISTORY, not about the event array: a live event
+ *   delivered between the acknowledgement and the load would otherwise send a long session back to
+ *   walking its log from seq 0. Live rows sit at the tail and merge into the window beside them.
+ * - `hasSavedReadingPosition` keeps the full chain for a reader who paused somewhere, since that
+ *   position can sit below the window and restoring it depends on those rows arriving.
+ */
+export function shouldReadOpeningWindow(input: {
+  recoveryAfter: number;
+  historyEverCompleted: boolean;
+  hasSavedReadingPosition: boolean;
+}): boolean {
+  return input.recoveryAfter === 0 && !input.historyEverCompleted && !input.hasSavedReadingPosition;
+}
+
+export interface SessionHistoryWindowRequest {
+  sessionId: string;
+  eventEpoch: number;
+  recoveryRevision: number;
+}
+
+export interface SessionHistoryWindowOptions {
+  fetchTailPage: (
+    sessionId: string,
+    before: number | undefined,
+    eventEpoch: number,
+    limit: number,
+    alignToTurn?: boolean,
+  ) => Promise<SessionEventsResponse>;
+  applyWindow: (
+    sessionId: string,
+    events: SessionEvent[],
+    eventEpoch: number,
+    recoveryRevision: number,
+    complete: boolean,
+    hasOlder: boolean,
+  ) => void;
+  isCurrent: () => boolean;
+  wait?: (ms: number) => Promise<void>;
+  idlePollMs?: number;
+  maxIdlePolls?: number;
+}
+
+/** A control plane that predates backward reads ignores the unknown `direction` and answers with a
+ * forward page from the start of the log — the exact content this window exists to avoid painting.
+ * Every backward response carries `hasMoreOlder`, so its absence identifies that older server. */
+function supportsBackwardRead(page: SessionEventsResponse): boolean {
+  return page.hasMoreOlder !== undefined;
+}
+
+/**
+ * Load the bounded window at the tail of a session's cached history.
+ *
+ * One request paints the newest events regardless of how long the session is. When the control
+ * plane's cache is still hydrating forward from the runner, its tail is not yet the true tail, so
+ * this re-reads the same bounded window until the cache reports itself complete instead of walking
+ * the log. Older turns stay reachable through `loadOlderSessionEvents`.
+ *
+ * Returns `supported: false` without applying anything when the control plane cannot serve a
+ * backward read, so the caller can fall back to the forward chain.
+ */
+export async function recoverSessionHistoryWindow(
+  request: SessionHistoryWindowRequest,
+  options: SessionHistoryWindowOptions,
+): Promise<{ supported: boolean; complete: boolean }> {
+  const wait = options.wait ?? defaultWait;
+  const idlePollMs = options.idlePollMs ?? 75;
+  const maxIdlePolls = options.maxIdlePolls ?? 160;
+  let idlePolls = 0;
+
+  while (options.isCurrent()) {
+    // The opening window is the page whose first row the reader lands on, so it asks to begin at a
+    // turn boundary: a mid-turn cut orphans tool updates from the invocation that explains them and
+    // leaves an active turn with no derivable start.
+    const page = await options.fetchTailPage(
+      request.sessionId,
+      undefined,
+      request.eventEpoch,
+      SESSION_EVENT_WINDOW_LIMIT,
+      true,
+    );
+    if (!options.isCurrent()) return { supported: true, complete: false };
+    if (!supportsBackwardRead(page)) return { supported: false, complete: false };
+    const responseEpoch = page.eventEpoch ?? request.eventEpoch;
+    if (responseEpoch !== request.eventEpoch) return { supported: true, complete: false };
+
+    const applyPage = (complete: boolean) => options.applyWindow(
+      request.sessionId,
+      page.events,
+      responseEpoch,
+      request.recoveryRevision,
+      complete,
+      page.hasMoreOlder === true,
+    );
+    if (page.cacheComplete === true) {
+      applyPage(true);
+      return { supported: true, complete: true };
+    }
+    // The cache is still hydrating FORWARD from the runner, so its newest cached row can still be
+    // an old prefix of the log. Painting that would reproduce the oldest-first open this window
+    // exists to remove, so re-read the same window instead of showing it. Targeted WebSocket
+    // delivery supplies live rows in the meantime, and the reader keeps its loading state.
+    if (++idlePolls > maxIdlePolls) {
+      // The cache never caught up. Show whatever it does hold rather than leaving the reader with
+      // nothing, still reporting the load as incomplete so the transcript says so.
+      applyPage(false);
+      return { supported: true, complete: false };
+    }
+    await wait(idlePollMs);
+  }
+  return { supported: true, complete: false };
+}
+
+/** Fetch one page of turns older than the loaded window. Reader-driven: never called on open. */
+export async function loadOlderSessionEvents(
+  sessionId: string,
+  before: number,
+  eventEpoch: number,
+  fetchTailPage: SessionHistoryWindowOptions["fetchTailPage"],
+): Promise<{ events: SessionEvent[]; hasOlder: boolean; eventEpoch: number } | null> {
+  const page = await fetchTailPage(sessionId, before, eventEpoch, SESSION_EVENT_WINDOW_LIMIT);
+  if (!supportsBackwardRead(page)) return null;
+  const responseEpoch = page.eventEpoch ?? eventEpoch;
+  if (responseEpoch !== eventEpoch) return null;
+  return { events: page.events, hasOlder: page.hasMoreOlder === true, eventEpoch: responseEpoch };
 }
 
 /** Recover a fleet view without launching one HTTP/page chain per member at once. */

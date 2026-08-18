@@ -124,3 +124,26 @@ test("provider command receipts expose Title Case state and failure detail", () 
   assert.match(html, /The command is unavailable\./);
   assert.match(html, /\/review storage/);
 });
+
+test("a bounded window is not evidence that a completed command lost its message", () => {
+  // Absence from a partial transcript means only that the turn is unloaded, so a command that
+  // completed cleanly turns ago must not resurrect a recovery receipt beside the composer.
+  assert.deepEqual(
+    visibleSessionCommandReceipts([invocation("completed")], [], true).map((item) => item.state),
+    [],
+  );
+  // Failures and ambiguity never depended on canonical presence, so they still surface.
+  assert.deepEqual(
+    visibleSessionCommandReceipts(
+      [invocation("completed"), invocation("rejected", { error: "catalog changed" })],
+      [],
+      true,
+    ).map((item) => item.state),
+    ["rejected"],
+  );
+  // With the whole history loaded, absence is authoritative again.
+  assert.deepEqual(
+    visibleSessionCommandReceipts([invocation("completed")], [], false).map((item) => item.state),
+    ["completed"],
+  );
+});

@@ -1935,6 +1935,25 @@ export interface CachedEventPage {
   hasMore: boolean;
 }
 
+/** One bounded page read backwards from the cached tail. `events` stay ascending by seq so a
+ * client merges them exactly like a forward page; only the cursor direction differs. */
+export interface CachedEventTailPage {
+  events: SessionEvent[];
+  /** Oldest returned seq — the cursor for the next older page. Undefined when the page is empty. */
+  nextBeforeSeq?: number;
+  /** Older cached rows exist below `nextBeforeSeq`. */
+  hasMoreOlder: boolean;
+  /** The page begins at a user-anchored turn start rather than mid-turn. False when no anchor was
+   * requested, none exists below the page, or reaching one would have exceeded the extension cap. */
+  turnAligned?: boolean;
+}
+
+/** How far below a count-bounded window the tail read may reach to include the whole turn it
+ * started inside. A turn is a semantic unit — splitting one orphans its tool updates from the
+ * invocation that explains them — but a single verbose turn is unbounded, so alignment stops here
+ * and the page keeps its count boundary rather than growing without limit. */
+export const TAIL_TURN_ALIGNMENT_MAX_EVENTS = 400;
+
 interface ReviewFindingRow {
   finding_id: string;
   session_id: string;
@@ -10668,6 +10687,100 @@ export class ControlPlaneDb {
       events,
       nextAfterSeq: events.at(-1)?.seq ?? afterSeq,
       hasMore: rows.length > limit,
+    };
+  }
+
+  /** One bounded page ending at the cached tail (`beforeSeq` absent) or immediately below
+   * `beforeSeq`. Reads descending so the newest rows cost one indexed seek regardless of how long
+   * the session is, then returns them ascending. The extra row only computes `hasMoreOlder`. */
+  listCachedEventTailPage(
+    sessionId: string,
+    beforeSeq: number | undefined,
+    limit: number,
+    options: { alignToTurn?: boolean } = {},
+  ): CachedEventTailPage {
+    if (beforeSeq !== undefined && (!Number.isSafeInteger(beforeSeq) || beforeSeq < 0)) {
+      throw new RangeError("beforeSeq must be a non-negative safe integer");
+    }
+    if (!Number.isSafeInteger(limit) || limit < 1) {
+      throw new RangeError("limit must be a positive safe integer");
+    }
+    const rows = (beforeSeq === undefined
+      ? this.stmt(
+        `SELECT id, session_id, seq, ts, payload FROM session_events
+          WHERE session_id=? ORDER BY seq DESC LIMIT ?`,
+      ).all(sessionId, limit + 1)
+      : this.stmt(
+        `SELECT id, session_id, seq, ts, payload FROM session_events
+          WHERE session_id=? AND seq<? ORDER BY seq DESC LIMIT ?`,
+      ).all(sessionId, beforeSeq, limit + 1)) as unknown as Array<{
+        id: number;
+        session_id: string;
+        seq: number;
+        ts: number;
+        payload: string;
+      }>;
+    const events = rows.slice(0, limit).map((row) => ({
+      id: row.id,
+      sessionId: row.session_id,
+      seq: row.seq,
+      ts: row.ts,
+      payload: JSON.parse(row.payload) as SessionEventPayload,
+    })).reverse();
+    const page: CachedEventTailPage = {
+      events,
+      ...(events[0] ? { nextBeforeSeq: events[0].seq } : {}),
+      hasMoreOlder: rows.length > limit,
+    };
+    if (options.alignToTurn !== true || !page.hasMoreOlder || events[0] === undefined) return page;
+    return this.alignTailPageToTurn(sessionId, page, events[0].seq);
+  }
+
+  /** Extend a count-bounded tail page down to the start of the turn it begins inside, so its first
+   * rows are an invocation and its updates rather than orphaned updates. Uses the same
+   * (session_id, seq) index as the page itself and stops at the alignment cap. */
+  private alignTailPageToTurn(
+    sessionId: string,
+    page: CachedEventTailPage,
+    windowStartSeq: number,
+  ): CachedEventTailPage {
+    // The anchor search includes the page's own first row: a page that already begins at a user
+    // message is aligned, and reaching past it would drag in an entire extra turn.
+    const floor = Math.max(0, windowStartSeq - TAIL_TURN_ALIGNMENT_MAX_EVENTS);
+    const anchor = this.stmt(
+      `SELECT seq FROM session_events
+        WHERE session_id=? AND kind='user_message' AND seq<=? AND seq>=?
+        ORDER BY seq DESC LIMIT 1`,
+    ).get(sessionId, windowStartSeq, floor) as { seq: number } | undefined;
+    // No anchor within reach: an adopted transcript, a resumed session, or a turn longer than the
+    // cap. The count boundary stands, and the page says it is unaligned.
+    if (!anchor) return { ...page, turnAligned: false };
+    const rows = this.stmt(
+      `SELECT id, session_id, seq, ts, payload FROM session_events
+        WHERE session_id=? AND seq>=? AND seq<? ORDER BY seq`,
+    ).all(sessionId, anchor.seq, windowStartSeq) as unknown as Array<{
+      id: number;
+      session_id: string;
+      seq: number;
+      ts: number;
+      payload: string;
+    }>;
+    const older = rows.map((row) => ({
+      id: row.id,
+      sessionId: row.session_id,
+      seq: row.seq,
+      ts: row.ts,
+      payload: JSON.parse(row.payload) as SessionEventPayload,
+    }));
+    const events = [...older, ...page.events];
+    const remaining = this.stmt(
+      "SELECT 1 FROM session_events WHERE session_id=? AND seq<? LIMIT 1",
+    ).get(sessionId, anchor.seq) as { 1: number } | undefined;
+    return {
+      events,
+      nextBeforeSeq: anchor.seq,
+      hasMoreOlder: remaining !== undefined,
+      turnAligned: true,
     };
   }
 

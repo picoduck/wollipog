@@ -134,6 +134,20 @@ function storeSnapshot(key: string, snapshot: FollowTailSnapshot): void {
   }
 }
 
+/** Whether a reader has a saved position for this session, without disturbing it.
+ *
+ * A saved position can sit anywhere in the history, including below a bounded opening window, and
+ * restoring it needs those rows to arrive. Callers use this to choose the load shape: a session
+ * nobody has paused in opens at its tail, while one with a saved position keeps loading the history
+ * the restore depends on. */
+export function hasSavedFollowTailAnchor(scope: string, sessionId: string): boolean {
+  const snapshot = followTailSnapshots.get(snapshotKey(scope, sessionId));
+  // Exactly what `getInitialAnchor` would hand back. A visible anchor is recorded continuously,
+  // including while following, so testing the anchor alone would report every session ever
+  // rendered as needing restoration.
+  return snapshot != null && snapshot.state !== "following" && snapshot.anchor != null;
+}
+
 function isUpwardReadingKey(event: FollowTailKey): boolean {
   if (event.ctrlKey || event.metaKey || event.altKey) return false;
   return event.key === "k" || event.key === "ArrowUp" || event.key === "PageUp" ||

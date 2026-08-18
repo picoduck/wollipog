@@ -797,6 +797,66 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     "/api/sessions/session-target/events?after=0&limit=201&eventEpoch=0",
   )).status, 400);
 
+  // The bounded opening window reads backwards: the newest rows first, then older pages below an
+  // explicit cursor. Opening a session must never start at the oldest cached event.
+  const windowPage = await (await ownerFetch(
+    "/api/sessions/session-target/events?direction=backward&limit=1&eventEpoch=0",
+  )).json() as {
+    events: Array<{ seq: number }>;
+    eventEpoch: number;
+    nextBefore: number;
+    hasMoreOlder: boolean;
+    cacheComplete: boolean;
+  };
+  assert.deepEqual(windowPage.events.map((event) => event.seq), [2]);
+  assert.equal(windowPage.eventEpoch, 0);
+  assert.equal(windowPage.nextBefore, 2);
+  assert.equal(windowPage.hasMoreOlder, true);
+  assert.equal(windowPage.cacheComplete, true);
+  const olderPage = await (await ownerFetch(
+    `/api/sessions/session-target/events?direction=backward&before=${windowPage.nextBefore}&limit=1&eventEpoch=0`,
+  )).json() as { events: Array<{ seq: number }>; nextBefore: number; hasMoreOlder: boolean };
+  assert.deepEqual(olderPage.events.map((event) => event.seq), [1]);
+  assert.equal(olderPage.nextBefore, 1);
+  assert.equal(olderPage.hasMoreOlder, false);
+  // A page whose window covers the whole log reports no older rows rather than a cursor to nowhere.
+  const wholeLog = await (await ownerFetch(
+    "/api/sessions/session-target/events?direction=backward&limit=200&eventEpoch=0",
+  )).json() as { events: Array<{ seq: number }>; hasMoreOlder: boolean };
+  assert.deepEqual(wholeLog.events.map((event) => event.seq), [1, 2]);
+  assert.equal(wholeLog.hasMoreOlder, false);
+  // Cursor directions are mutually exclusive, and an unknown direction fails closed rather than
+  // silently answering with a forward page from the start of the log.
+  assert.equal((await ownerFetch(
+    "/api/sessions/session-target/events?direction=backward&after=0&limit=1&eventEpoch=0",
+  )).status, 400);
+  assert.equal((await ownerFetch(
+    "/api/sessions/session-target/events?before=1&limit=1&eventEpoch=0",
+  )).status, 400);
+  assert.equal((await ownerFetch(
+    "/api/sessions/session-target/events?direction=forward&limit=1&eventEpoch=0",
+  )).status, 400);
+  assert.equal((await ownerFetch(
+    "/api/sessions/session-target/events?direction=backward&before=-1&limit=1&eventEpoch=0",
+  )).status, 400);
+  assert.equal((await ownerFetch(
+    "/api/sessions/session-target/events?direction=backward&limit=1&eventEpoch=99",
+  )).status, 409);
+  // Turn alignment is opt-in and belongs to backward reads. This session's cache holds no user
+  // message, so the page keeps its count boundary and says it is unaligned rather than guessing.
+  const alignedPage = await (await ownerFetch(
+    "/api/sessions/session-target/events?direction=backward&align=turn&limit=1&eventEpoch=0",
+  )).json() as { events: Array<{ seq: number }>; hasMoreOlder: boolean; turnAligned: boolean };
+  assert.deepEqual(alignedPage.events.map((event) => event.seq), [2]);
+  assert.equal(alignedPage.turnAligned, false);
+  assert.equal(alignedPage.hasMoreOlder, true);
+  assert.equal((await ownerFetch(
+    "/api/sessions/session-target/events?direction=backward&align=sentence&limit=1&eventEpoch=0",
+  )).status, 400);
+  assert.equal((await ownerFetch(
+    "/api/sessions/session-target/events?align=turn&after=0&limit=1&eventEpoch=0",
+  )).status, 400);
+
   const createProjectResponse = await ownerFetch("/api/projects", {
     method: "POST",
     headers: { "content-type": "application/json" },
