@@ -465,15 +465,14 @@ function applyWindowBase(
     });
     return eventWindows;
   }
-  const priorBase = priorValid && priorValid.baseSeq > 0 ? priorValid.baseSeq : pageBase;
-  const baseSeq = Math.min(priorBase, pageBase);
   const eventWindows = new Map(state.eventWindows);
+  // A window page redefines the slice wholesale: the reducer drops stored rows below its base, so
+  // the recorded base must be the page's own — keeping an older base would send the next
+  // Load Earlier Activity below rows the store no longer holds and leave a gap between the two.
   eventWindows.set(action.sessionId, {
     eventEpoch: action.eventEpoch,
-    baseSeq,
-    // A re-read of the tail answers for the boundary below ITS OWN page. Once the reader has paged
-    // below that boundary, our oldest loaded seq is authoritative and the page's answer is stale.
-    hasOlder: baseSeq < pageBase ? (priorValid?.hasOlder ?? action.windowHasOlder) : action.windowHasOlder,
+    baseSeq: pageBase,
+    hasOlder: action.windowHasOlder,
     // Completeness is monotonic within an epoch: a re-read that reaches the tail settles it, and a
     // later partial read cannot unsettle what was already proven complete.
     complete: action.recoveryComplete || (priorValid?.complete ?? false),
@@ -677,10 +676,16 @@ function reducer(state: State, action: Action): State {
       // for the whole history may rebuild; a windowed one leaves the ring to live observation.
       const priorActivity = state.activity.get(action.sessionId);
       // Partial means "these events are not the whole history": older rows remain, or the read
-      // itself never reached the runner's tail. An incomplete prefix reports no older rows and is
-      // still no basis for rebuilding a ring that already saw the turns it omits.
+      // never reached the runner's tail. That is a property of the loaded WINDOW, not of the page
+      // in hand — a forward gap-fill extending a partial window carries no window meaning of its
+      // own, yet folding a ring from the still-partial array would erase buckets below the base.
       const partialHistory = action.windowHasOlder === true ||
-        (action.windowHasOlder !== undefined && !action.recoveryComplete);
+        (action.windowHasOlder !== undefined && !action.recoveryComplete) ||
+        isPartialHistory(
+          state.eventWindows.get(action.sessionId)?.eventEpoch === action.eventEpoch
+            ? state.eventWindows.get(action.sessionId)
+            : undefined,
+        );
       if (!partialHistory || !priorActivity) {
         const rebuiltActivity = rebuildSessionActivity(
           merged,
@@ -1121,6 +1126,16 @@ function reducer(state: State, action: Action): State {
           // appending them here would paint the start of a long log — the oldest-first open the
           // window exists to remove — behind the window's back. They are durable in the cache and
           // the window's own read supplies the tail, so holding them costs nothing.
+          // The same rule the window's apply enforces, held on the live path: a frame below the
+          // loaded window's base is hydration replay arriving late, not tail traffic — a runner's
+          // live seqs are monotonic, so nothing genuinely new can sort below the base. Appending it
+          // would rebuild the prefix above a silent gap the reader cannot see. It stays in the
+          // control-plane cache, reachable through Load Earlier Activity.
+          const window = state.eventWindows.get(msg.event.sessionId);
+          if (window && window.eventEpoch === eventEpoch && window.baseSeq > 0 &&
+              msg.event.seq < window.baseSeq) {
+            return heartbeatState;
+          }
           const events = new Map(state.events);
           const existing = (state.eventEpochs.get(msg.event.sessionId) ?? 0) === eventEpoch
             ? events.get(msg.event.sessionId)

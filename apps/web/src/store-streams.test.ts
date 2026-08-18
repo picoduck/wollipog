@@ -740,10 +740,14 @@ test("reader-driven older pages extend the window downward without touching reco
 
   store.loadOlderEvents("s1", [event("s1", 7)], false, 8, 0);
   assert.equal(store.getState().eventWindows.get("s1")?.hasOlder, false);
-  // A later re-read of the tail answers for its own boundary; the reader is already below it.
+  // A later window re-read redefines the slice wholesale: stored rows below its base are dropped,
+  // so the recorded base and the reach-back cursor must follow it — a stale lower base would send
+  // the next older page below rows the store no longer holds and leave a gap between the two.
   store.loadEvents("s1", [event("s1", 10), event("s1", 11)], 0, 1, true, generation, true);
-  assert.equal(store.getState().eventWindows.get("s1")?.hasOlder, false);
-  assert.equal(store.eventWindowBase("s1"), 7);
+  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [10, 11]);
+  assert.equal(store.eventWindowBase("s1"), 10);
+  assert.equal(store.getState().eventWindows.get("s1")?.hasOlder, true,
+    "the reach-back reopens because rows 7-9 are fetchable again");
 });
 
 test("a replaced event log drops the window that described the previous sequence space", () => {
@@ -963,4 +967,54 @@ test("a fleet view drops an incomplete prefix, not only a window reporting older
   assert.equal(store.getState().events.get("s1"), undefined,
     "the column recovers the whole history instead of inheriting a truncated prefix");
   assert.equal(store.getState().eventWindows.get("s1"), undefined);
+});
+
+test("a hydration frame delayed past the window's apply cannot rebuild the prefix", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  store.loadEvents("s1", [event("s1", 4_801), event("s1", 4_802)], 0, undefined, true, generation, true);
+
+  // HTTP and WebSocket delivery race: a hydration broadcast can land AFTER the tail response it
+  // predates. Appending it would put the log's start above a silent gap the reader cannot see.
+  message(store, { type: "session_event", event: event("s1", 1) });
+  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [4_801, 4_802]);
+
+  // Genuinely live traffic sits at the tail and is untouched by the rule.
+  message(store, { type: "session_event", event: event("s1", 4_803) });
+  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [4_801, 4_802, 4_803]);
+
+  // Once the reader pages older, the base follows and previously below-base rows become loadable.
+  store.loadOlderEvents("s1", [event("s1", 4_799), event("s1", 4_800)], true, 4_801, 0);
+  message(store, { type: "session_event", event: event("s1", 4_799) });
+  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq),
+    [4_799, 4_800, 4_801, 4_802, 4_803]);
+});
+
+test("a forward gap-fill over a partial window preserves the activity ring", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  const generation = store.getState().snapshotRevision;
+  message(store, { type: "session_event", event: { ...event("s1", 10), ts: Date.now() - ACTIVITY_BUCKET_MS * 3 } });
+  const observed = activitySeries(store.getState().activity.get("s1")!, Date.now())
+    .reduce((total, count) => total + count, 0);
+  assert.ok(observed > 0);
+
+  store.loadEvents("s1", [event("s1", 900), event("s1", 901)], 0, undefined, true, generation, true);
+  // The gap-fill page carries no window meaning; the WINDOW is still partial, so the ring must not
+  // be rebuilt from an array that omits the turns those buckets came from.
+  store.loadEvents("s1", [event("s1", 902)], 0, undefined, true, generation);
+  const after = activitySeries(store.getState().activity.get("s1")!, Date.now())
+    .reduce((total, count) => total + count, 0);
+  assert.ok(after >= observed, "buckets below the window base survive forward recovery");
 });
