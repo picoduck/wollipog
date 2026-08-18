@@ -1181,6 +1181,10 @@ app.register(async (instance) => {
       socket.close(1007, "invalid UI subscription message");
       return;
     }
+    if (msg.type === "background_delivery_observed") {
+      hub.acknowledgeUiBackgroundDelivery(client, msg.sessionId, msg.continuationId);
+      return;
+    }
     const applied = hub.setUiSessionSubscriptions(client, msg.revision, msg.sessionIds, msg.podIds);
     if (!applied.ok && applied.reason !== "client_missing") {
       hub.removeUiClient(client);

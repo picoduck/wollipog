@@ -146,11 +146,17 @@ test("managed continuation delivery markers remain durable but hidden from the t
       runnerMarker: "background_continuation_delivery",
     }),
     ev({ kind: "stderr", text: "Managed background continuation delivered: bgcont_provider_text" }),
+    ev({
+      kind: "background_continuation_delivered",
+      continuationId: "bgcont_structured",
+      parentTurnId: "turn-1",
+    }),
     ev({ kind: "stderr", text: "after" }),
   ]);
   assert.deepEqual(items.map((item) => item.kind === "stderr" ? item.text : ""), [
     "before",
-    "Managed background continuation delivered: bgcont_provider_textafter",
+    "Managed background continuation delivered: bgcont_provider_text",
+    "after",
   ]);
 });
 

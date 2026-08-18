@@ -260,9 +260,24 @@ The lifetime policy is quiescence-aware and fail-safe:
   pre-acceptance failures remain retryable, while accepted or uncertain submissions are never
   replayed. Cancellation before the write callback is treated as uncertain rather than replayed,
   because the provider may have received the bytes before local acknowledgement. A stable
-  continuation id and durable terminal marker let startup reconcile a persisted assistant result
+  continuation id and durable structured delivery event let startup reconcile a persisted assistant result
   without submitting another provider turn; that bookkeeping marker is hidden from the rendered
-  timeline.
+  timeline. Protocol v78 also sends a projection-safe, bounded job inventory to the control plane;
+  provider context, local paths, and output references stay runner-local.
+- The control plane mirrors job facts monotonically and keeps separate durable timestamps for
+  runner result persistence, transcript projection, notification queueing, and authenticated
+  dashboard observation. Each job mirror retains the exact Machine, workspace, and control-plane
+  Location observed at registration without exposing its provider context or output reference.
+  A present v78 inventory is authoritative: jobs missing from a later inventory become inactive
+  audit tombstones, preventing stopped work from resurfacing as a watchdog after same-session
+  restart. An absent inventory still means an older runner and preserves the last known facts.
+  Structured delivery events are reconciled in the same transaction as
+  live or hydrated transcript events, so reconnect and control-plane restart converge without
+  resubmitting a provider continuation. Dashboard observation is only a receipt for the session
+  projection; it does not claim an OS notification was displayed or a human clicked it. Incomplete
+  required stages remain visible as **Background Delivery** watchdog badges. Dashboard observation
+  frames are admitted through a bounded per-connection rate window before authorization and
+  database work.
 - `WOLLIPOG_CLAUDE_PENDING_MAX_MS` is a leak backstop for pending work (default seven days; `0` means
   unlimited). Hitting it writes a durable orphan marker before eviction.
 - Eviction and runner-shutdown stops send EOF first and allow five seconds for a clean exit before

@@ -18,7 +18,7 @@ import type { GitStatus, GitSummary } from "./useGitStatus.js";
 import { GitPinnedSection } from "./GitVisibility.js";
 import { AgentIcon } from "./AgentIcon.js";
 import { BranchIcon, ComputerIcon, DialIcon, FolderOutlineIcon, GitHubIcon, GlobeIcon, NotesIcon, PullRequestIcon, TuningIcon } from "./Icons.js";
-import { BackgroundWorkBadge, Spinner, StatusBadge } from "./common.js";
+import { BackgroundDeliveryBadge, BackgroundWorkBadge, Spinner, StatusBadge } from "./common.js";
 import { relativeTime, resolvedModelLabel } from "../format.js";
 import { sessionAgentLabel } from "./agent-options.js";
 
@@ -114,6 +114,13 @@ export function PinnedSummary({
         {session.backgroundWorkState && (
           <div className="ps-row is-static">
             <BackgroundWorkBadge state={session.backgroundWorkState} />
+          </div>
+        )}
+        {session.backgroundDeliveries?.find((delivery) => delivery.watchdogState)?.watchdogState && (
+          <div className="ps-row is-static">
+            <BackgroundDeliveryBadge
+              state={session.backgroundDeliveries.find((delivery) => delivery.watchdogState)!.watchdogState!}
+            />
           </div>
         )}
       </div>

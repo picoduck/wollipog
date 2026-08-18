@@ -600,6 +600,11 @@ export class TimelineBuilder {
         }
         this.pushText("stderr", ev.seq, p.text, undefined, undefined, undefined, p.textRefs);
         break;
+      case "background_continuation_delivered":
+        // Durable control-plane evidence; the visible assistant result is represented by the
+        // preceding agent-message chunks.
+        this.breakText();
+        break;
       case "tool_call": {
         this.breakText();
         const existing = this.toolIndex.get(p.toolCallId);

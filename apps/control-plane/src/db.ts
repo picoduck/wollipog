@@ -44,7 +44,10 @@ import {
   type AutomationTriggerKind,
   type AutomationTriggerView,
   type AgentCapabilities,
+  type BackgroundDeliveryView,
+  type BackgroundDeliveryWatchdogState,
   type BackgroundWorkState,
+  type ManagedBackgroundJobSnapshot,
   type SessionCapabilities,
   type AcpSessionContextConfig,
   type ApprovalQueueProvenance,
@@ -466,6 +469,51 @@ CREATE TABLE IF NOT EXISTS session_prompt_command_attempts (
 );
 CREATE INDEX IF NOT EXISTS idx_session_prompt_command_attempts_command
   ON session_prompt_command_attempts(command_id, sent_at DESC);
+
+-- Runner facts and control-plane delivery stages are separate so reconnect snapshots can update
+-- provider-owned progress without regressing projection/observation acknowledgements.
+CREATE TABLE IF NOT EXISTS managed_background_jobs (
+  session_id                 TEXT NOT NULL,
+  job_id                     TEXT NOT NULL,
+  parent_turn_id             TEXT NOT NULL,
+  runner_id                  TEXT NOT NULL,
+  workspace_id               TEXT,
+  project_location_id        TEXT,
+  launch_type                TEXT NOT NULL,
+  registered_at              INTEGER NOT NULL,
+  terminal_status            TEXT,
+  terminal_observed_at       INTEGER,
+  continuation_required      INTEGER,
+  continuation_id            TEXT,
+  continuation_queued_at     INTEGER,
+  continuation_submitted_at  INTEGER,
+  continuation_accepted_at   INTEGER,
+  assistant_result_persisted_at INTEGER,
+  source_present             INTEGER NOT NULL DEFAULT 1 CHECK (source_present IN (0, 1)),
+  last_observed_at           INTEGER NOT NULL,
+  PRIMARY KEY (session_id, job_id),
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_managed_background_jobs_continuation
+  ON managed_background_jobs(session_id, continuation_id);
+
+CREATE TABLE IF NOT EXISTS managed_background_deliveries (
+  session_id                 TEXT NOT NULL,
+  continuation_id            TEXT NOT NULL,
+  parent_turn_id             TEXT NOT NULL,
+  queued_at                  INTEGER,
+  submitted_at               INTEGER,
+  accepted_at                INTEGER,
+  runner_result_persisted_at INTEGER,
+  transcript_projected_at    INTEGER,
+  projected_event_epoch      INTEGER,
+  projected_event_seq        INTEGER,
+  notification_queued_at     INTEGER,
+  dashboard_observed_at      INTEGER,
+  updated_at                 INTEGER NOT NULL,
+  PRIMARY KEY (session_id, continuation_id),
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
 
 -- Steering is intentionally a control-plane-owned outbox/receipt. The request snapshot is
 -- inserted before dispatch and retained while delivery is unresolved; terminal content is
@@ -2661,6 +2709,13 @@ export class ControlPlaneDb {
     db.exec("PRAGMA secure_delete = ON;");
     db.exec("PRAGMA foreign_keys = ON;");
     db.exec(SCHEMA);
+    try {
+      db.exec(
+        "ALTER TABLE managed_background_jobs ADD COLUMN source_present INTEGER NOT NULL DEFAULT 1 CHECK (source_present IN (0, 1))",
+      );
+    } catch {
+      /* column already present */
+    }
     for (const column of [
       "attempt_count INTEGER NOT NULL DEFAULT 0",
       "next_attempt_at INTEGER",
@@ -7596,6 +7651,7 @@ export class ControlPlaneDb {
         ).run(snap.id, fork.sourceSessionId, fork.sourceTurn, now);
       }
       this.reconcileUsageSnapshotInTransaction(snap.id, snap, now);
+      this.upsertManagedBackgroundJobsInTransaction(snap.id, snap.backgroundJobs, now);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -7763,12 +7819,264 @@ export class ControlPlaneDb {
           .run(JSON.stringify(request), JSON.stringify(handoff), id);
       }
       this.reconcileUsageSnapshotInTransaction(id, snap, now);
+      this.upsertManagedBackgroundJobsInTransaction(id, snap.backgroundJobs, now);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
     }
     this.maybeMaintainUsageAggregation();
+  }
+
+  /** Monotonic mirror of projection-safe runner facts. Absence means a pre-v78 runner and leaves
+   * prior evidence intact; a present array is authoritative, so missing jobs become inactive
+   * tombstones while their audit and delivery evidence remains durable. */
+  private upsertManagedBackgroundJobsInTransaction(
+    sessionId: string,
+    jobs: readonly ManagedBackgroundJobSnapshot[] | undefined,
+    now: number,
+  ): void {
+    if (!Array.isArray(jobs)) return;
+    this.stmt(
+      "UPDATE managed_background_jobs SET source_present=0, last_observed_at=MAX(last_observed_at, ?) WHERE session_id=?",
+    ).run(now, sessionId);
+    if (jobs.length === 0) return;
+    const placement = this.stmt(
+      "SELECT runner_id, project_location_id FROM sessions WHERE id=?",
+    ).get(sessionId) as {
+      runner_id: string;
+      project_location_id: string | null;
+    } | undefined;
+    if (!placement) return;
+    const upsertJob = this.stmt(
+      `INSERT INTO managed_background_jobs
+        (session_id, job_id, parent_turn_id, runner_id, workspace_id, project_location_id,
+         launch_type, registered_at, terminal_status,
+         terminal_observed_at, continuation_required, continuation_id, continuation_queued_at,
+         continuation_submitted_at, continuation_accepted_at, assistant_result_persisted_at,
+         source_present, last_observed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(session_id, job_id) DO UPDATE SET
+         parent_turn_id=managed_background_jobs.parent_turn_id,
+         runner_id=managed_background_jobs.runner_id,
+         workspace_id=managed_background_jobs.workspace_id,
+         project_location_id=COALESCE(managed_background_jobs.project_location_id, excluded.project_location_id),
+         launch_type=CASE WHEN managed_background_jobs.launch_type='unknown'
+                          THEN excluded.launch_type ELSE managed_background_jobs.launch_type END,
+         registered_at=MIN(managed_background_jobs.registered_at, excluded.registered_at),
+         terminal_status=COALESCE(managed_background_jobs.terminal_status, excluded.terminal_status),
+         terminal_observed_at=COALESCE(managed_background_jobs.terminal_observed_at, excluded.terminal_observed_at),
+         continuation_required=CASE
+           WHEN managed_background_jobs.continuation_required=1 OR excluded.continuation_required=1 THEN 1
+           WHEN managed_background_jobs.continuation_required=0 OR excluded.continuation_required=0 THEN 0
+           ELSE NULL END,
+         continuation_id=COALESCE(managed_background_jobs.continuation_id, excluded.continuation_id),
+         continuation_queued_at=COALESCE(managed_background_jobs.continuation_queued_at, excluded.continuation_queued_at),
+         continuation_submitted_at=COALESCE(managed_background_jobs.continuation_submitted_at, excluded.continuation_submitted_at),
+         continuation_accepted_at=COALESCE(managed_background_jobs.continuation_accepted_at, excluded.continuation_accepted_at),
+         assistant_result_persisted_at=COALESCE(managed_background_jobs.assistant_result_persisted_at, excluded.assistant_result_persisted_at),
+         source_present=1,
+         last_observed_at=MAX(managed_background_jobs.last_observed_at, excluded.last_observed_at)`,
+    );
+    const upsertDelivery = this.stmt(
+      `INSERT INTO managed_background_deliveries
+        (session_id, continuation_id, parent_turn_id, queued_at, submitted_at, accepted_at,
+         runner_result_persisted_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(session_id, continuation_id) DO UPDATE SET
+         parent_turn_id=managed_background_deliveries.parent_turn_id,
+         queued_at=COALESCE(managed_background_deliveries.queued_at, excluded.queued_at),
+         submitted_at=COALESCE(managed_background_deliveries.submitted_at, excluded.submitted_at),
+         accepted_at=COALESCE(managed_background_deliveries.accepted_at, excluded.accepted_at),
+         runner_result_persisted_at=COALESCE(managed_background_deliveries.runner_result_persisted_at, excluded.runner_result_persisted_at),
+         updated_at=MAX(managed_background_deliveries.updated_at, excluded.updated_at)`,
+    );
+    for (const candidate of jobs.slice(0, 512) as readonly unknown[]) {
+      if (!candidate || typeof candidate !== "object") continue;
+      const job = candidate as Partial<ManagedBackgroundJobSnapshot>;
+      if (!validBackgroundIdentity(job.id) || !validBackgroundIdentity(job.parentTurnId) ||
+          job.runnerId !== placement.runner_id ||
+          (job.workspaceId !== null && !validBackgroundIdentity(job.workspaceId)) ||
+          !validBackgroundLaunchType(job.launchType) ||
+          !validBackgroundTerminalStatus(job.terminalStatus) ||
+          !validOptionalBackgroundBoolean(job.continuationRequired) ||
+          !validOptionalBackgroundIdentity(job.continuationId) ||
+          !validBackgroundTimestamp(job.registeredAt) ||
+          !validOptionalBackgroundTimestamp(job.terminalObservedAt) ||
+          !validOptionalBackgroundTimestamp(job.continuationQueuedAt) ||
+          !validOptionalBackgroundTimestamp(job.continuationSubmittedAt) ||
+          !validOptionalBackgroundTimestamp(job.continuationAcceptedAt) ||
+          !validOptionalBackgroundTimestamp(job.assistantResultPersistedAt)) continue;
+      upsertJob.run(
+        sessionId,
+        job.id,
+        job.parentTurnId,
+        placement.runner_id,
+        job.workspaceId,
+        placement.project_location_id,
+        job.launchType,
+        job.registeredAt,
+        job.terminalStatus ?? null,
+        job.terminalObservedAt ?? null,
+        job.continuationRequired === undefined ? null : job.continuationRequired ? 1 : 0,
+        job.continuationId && validBackgroundIdentity(job.continuationId) ? job.continuationId : null,
+        job.continuationQueuedAt ?? null,
+        job.continuationSubmittedAt ?? null,
+        job.continuationAcceptedAt ?? null,
+        job.assistantResultPersistedAt ?? null,
+        1,
+        now,
+      );
+      if (job.continuationId && validBackgroundIdentity(job.continuationId)) {
+        upsertDelivery.run(
+          sessionId,
+          job.continuationId,
+          job.parentTurnId,
+          job.continuationQueuedAt ?? null,
+          job.continuationSubmittedAt ?? null,
+          job.continuationAcceptedAt ?? null,
+          job.assistantResultPersistedAt ?? null,
+          now,
+        );
+      }
+    }
+  }
+
+  /** Commit the structured runner proof and every control-plane-owned downstream stage in the
+   * same transaction as the transcript event. Replays converge on the same continuation key. */
+  private projectBackgroundContinuationInTransaction(
+    sessionId: string,
+    payload: SessionEventPayload,
+    ts: number,
+    eventEpoch: number,
+    eventSeq: number,
+  ): void {
+    if (payload.kind !== "background_continuation_delivered" ||
+        !validBackgroundIdentity(payload.continuationId) ||
+        !validBackgroundIdentity(payload.parentTurnId)) return;
+    this.stmt(
+      `INSERT INTO managed_background_deliveries
+        (session_id, continuation_id, parent_turn_id, runner_result_persisted_at,
+         transcript_projected_at, projected_event_epoch, projected_event_seq,
+         notification_queued_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(session_id, continuation_id) DO UPDATE SET
+         parent_turn_id=managed_background_deliveries.parent_turn_id,
+         runner_result_persisted_at=COALESCE(managed_background_deliveries.runner_result_persisted_at, excluded.runner_result_persisted_at),
+         transcript_projected_at=COALESCE(managed_background_deliveries.transcript_projected_at, excluded.transcript_projected_at),
+         projected_event_epoch=COALESCE(managed_background_deliveries.projected_event_epoch, excluded.projected_event_epoch),
+         projected_event_seq=COALESCE(managed_background_deliveries.projected_event_seq, excluded.projected_event_seq),
+         notification_queued_at=COALESCE(managed_background_deliveries.notification_queued_at, excluded.notification_queued_at),
+         updated_at=MAX(managed_background_deliveries.updated_at, excluded.updated_at)`,
+    ).run(
+      sessionId,
+      payload.continuationId,
+      payload.parentTurnId,
+      ts,
+      ts,
+      eventEpoch,
+      eventSeq,
+      ts,
+      ts,
+    );
+  }
+
+  acknowledgeBackgroundDelivery(sessionId: string, continuationId: string, now: number): boolean {
+    if (!validBackgroundIdentity(sessionId) || !validBackgroundIdentity(continuationId) ||
+        !Number.isSafeInteger(now) || now < 0) return false;
+    return Number(this.stmt(
+      `UPDATE managed_background_deliveries
+          SET dashboard_observed_at=COALESCE(dashboard_observed_at, ?), updated_at=MAX(updated_at, ?)
+        WHERE session_id=? AND continuation_id=? AND notification_queued_at IS NOT NULL
+          AND dashboard_observed_at IS NULL`,
+    ).run(now, now, sessionId, continuationId).changes) > 0;
+  }
+
+  listBackgroundDeliveries(sessionId: string, status?: SessionStatus): BackgroundDeliveryView[] {
+    const rows = this.stmt(
+      `SELECT delivery.continuation_id, delivery.parent_turn_id, delivery.queued_at,
+              delivery.submitted_at, delivery.accepted_at, delivery.runner_result_persisted_at,
+              delivery.transcript_projected_at, delivery.notification_queued_at,
+              delivery.dashboard_observed_at,
+              COUNT(job.job_id) AS job_count,
+              COALESCE(SUM(CASE WHEN job.terminal_observed_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS terminal_count,
+              COALESCE(SUM(job.source_present), 0) AS active_job_count
+         FROM managed_background_deliveries delivery
+         LEFT JOIN managed_background_jobs job
+           ON job.session_id=delivery.session_id AND job.continuation_id=delivery.continuation_id
+        WHERE delivery.session_id=?
+        GROUP BY delivery.session_id, delivery.continuation_id
+        ORDER BY CASE
+                   WHEN COALESCE(SUM(job.source_present), 0) > 0
+                     AND delivery.accepted_at IS NOT NULL AND delivery.runner_result_persisted_at IS NULL THEN 0
+                   WHEN COALESCE(SUM(job.source_present), 0) > 0
+                     AND delivery.runner_result_persisted_at IS NOT NULL AND delivery.transcript_projected_at IS NULL THEN 0
+                   WHEN delivery.notification_queued_at IS NOT NULL AND delivery.dashboard_observed_at IS NULL THEN 0
+                   ELSE 1
+                 END,
+                 COALESCE(delivery.notification_queued_at, delivery.updated_at) DESC,
+                 delivery.continuation_id
+        LIMIT 32`,
+    ).all(sessionId) as unknown as Array<{
+      continuation_id: string;
+      parent_turn_id: string;
+      queued_at: number | null;
+      submitted_at: number | null;
+      accepted_at: number | null;
+      runner_result_persisted_at: number | null;
+      transcript_projected_at: number | null;
+      notification_queued_at: number | null;
+      dashboard_observed_at: number | null;
+      job_count: number;
+      terminal_count: number;
+      active_job_count: number;
+    }>;
+    const views = rows.map((row): BackgroundDeliveryView => {
+      let watchdogState: BackgroundDeliveryWatchdogState | undefined;
+      if (status !== "stopped" && row.active_job_count > 0 &&
+          row.accepted_at != null && row.runner_result_persisted_at == null) {
+        watchdogState = "accepted_without_result";
+      } else if (status !== "stopped" && row.active_job_count > 0 &&
+                 row.runner_result_persisted_at != null && row.transcript_projected_at == null) {
+        watchdogState = "result_not_projected";
+      } else if (status !== "stopped" && row.notification_queued_at != null && row.dashboard_observed_at == null) {
+        watchdogState = "dashboard_observation_pending";
+      }
+      return {
+        continuationId: row.continuation_id,
+        parentTurnId: row.parent_turn_id,
+        jobCount: row.job_count,
+        terminalCount: row.terminal_count,
+        ...(row.queued_at != null ? { queuedAt: row.queued_at } : {}),
+        ...(row.submitted_at != null ? { submittedAt: row.submitted_at } : {}),
+        ...(row.accepted_at != null ? { acceptedAt: row.accepted_at } : {}),
+        ...(row.runner_result_persisted_at != null ? { runnerResultPersistedAt: row.runner_result_persisted_at } : {}),
+        ...(row.transcript_projected_at != null ? { transcriptProjectedAt: row.transcript_projected_at } : {}),
+        ...(row.notification_queued_at != null ? { notificationQueuedAt: row.notification_queued_at } : {}),
+        ...(row.dashboard_observed_at != null ? { dashboardObservedAt: row.dashboard_observed_at } : {}),
+        ...(watchdogState ? { watchdogState } : {}),
+      };
+    });
+    const pending = status === "stopped" ? [] : this.stmt(
+      `SELECT parent_turn_id, COUNT(*) AS job_count,
+              SUM(CASE WHEN terminal_observed_at IS NOT NULL THEN 1 ELSE 0 END) AS terminal_count
+         FROM managed_background_jobs
+        WHERE session_id=? AND source_present=1
+          AND continuation_required=1 AND terminal_observed_at IS NOT NULL
+          AND continuation_id IS NULL
+        GROUP BY parent_turn_id ORDER BY parent_turn_id
+        LIMIT 32`,
+    ).all(sessionId) as unknown as Array<{
+      parent_turn_id: string;
+      job_count: number;
+      terminal_count: number;
+    }>;
+    return views.concat(pending.map((row) => ({
+      parentTurnId: row.parent_turn_id,
+      jobCount: row.job_count,
+      terminalCount: row.terminal_count,
+      watchdogState: "terminal_without_continuation" as const,
+    })));
   }
 
   /** Highest runner-owned event seq this cache has ingested for a session. */
@@ -7826,6 +8134,11 @@ export class ControlPlaneDb {
         ).run(id);
         this.stmt("DELETE FROM session_events WHERE session_id=?").run(id);
         this.stmt("DELETE FROM session_events_fts WHERE session_id=?").run(id);
+        this.stmt(
+          `UPDATE managed_background_deliveries
+              SET transcript_projected_at=NULL, projected_event_epoch=NULL, projected_event_seq=NULL
+            WHERE session_id=? AND transcript_projected_at IS NOT NULL`,
+        ).run(id);
         this.stmt(
           `UPDATE sessions
               SET runner_history_epoch=?, runner_history_tail_seq=?, hydrated_seq=0,
@@ -7903,6 +8216,11 @@ export class ControlPlaneDb {
       ).run(id);
       this.stmt("DELETE FROM session_events WHERE session_id=?").run(id);
       this.stmt("DELETE FROM session_events_fts WHERE session_id=?").run(id);
+      this.stmt(
+        `UPDATE managed_background_deliveries
+            SET transcript_projected_at=NULL, projected_event_epoch=NULL, projected_event_seq=NULL
+          WHERE session_id=? AND transcript_projected_at IS NOT NULL`,
+      ).run(id);
       this.stmt(
         `UPDATE sessions SET hydrated_seq=0, message_count=0, last_event_at=NULL, preview=NULL,
             runner_history_epoch=NULL, runner_history_tail_seq=0, event_epoch=event_epoch+1 WHERE id=?`,
@@ -10375,6 +10693,10 @@ export class ControlPlaneDb {
       titleSource: (row.title_source as SessionTitleSource | null) ?? "generated",
       providerUpdatedAt: row.provider_updated_at ?? undefined,
       backgroundWorkState: parseBackgroundWorkState(row.background_work_state),
+      ...(() => {
+        const backgroundDeliveries = this.listBackgroundDeliveries(row.id, status);
+        return backgroundDeliveries.length ? { backgroundDeliveries } : {};
+      })(),
       status,
       column,
       runId: row.run_id,
@@ -10589,6 +10911,12 @@ export class ControlPlaneDb {
           "INSERT INTO session_events (session_id, seq, ts, kind, payload) VALUES (?, ?, ?, ?, ?)",
         )
         .run(sessionId, seq, ts, payload.kind, JSON.stringify(payload));
+      if (payload.kind === "background_continuation_delivered") {
+        const eventEpoch = (this.stmt("SELECT event_epoch FROM sessions WHERE id=?").get(sessionId) as
+          | { event_epoch: number }
+          | undefined)?.event_epoch ?? 0;
+        this.projectBackgroundContinuationInTransaction(sessionId, payload, ts, eventEpoch, seq);
+      }
       this.linkSessionEventArtifacts(
         Number(info.lastInsertRowid),
         options?.artifactIds ?? [],
@@ -10766,6 +11094,13 @@ export class ControlPlaneDb {
           ts: event.ts,
           payload: event.payload,
         });
+        this.projectBackgroundContinuationInTransaction(
+          sessionId,
+          event.payload,
+          event.ts,
+          state.event_epoch,
+          cpSeq,
+        );
         this.recordUsageEventInTransaction(
           sessionId,
           event.payload,
@@ -14472,4 +14807,38 @@ function parseBackgroundWorkState(raw: string | null): BackgroundWorkState | und
   return raw === "running" || raw === "continuation_pending" || raw === "orphaned" || raw === "resumed"
     ? raw
     : undefined;
+}
+
+function validBackgroundIdentity(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 256 &&
+    !/[\u0000-\u001f\u007f]/u.test(value);
+}
+
+function validOptionalBackgroundIdentity(value: unknown): value is string | undefined {
+  return value === undefined || validBackgroundIdentity(value);
+}
+
+function validBackgroundTimestamp(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+function validOptionalBackgroundTimestamp(value: unknown): value is number | undefined {
+  return value === undefined || validBackgroundTimestamp(value);
+}
+
+function validOptionalBackgroundBoolean(value: unknown): value is boolean | undefined {
+  return value === undefined || typeof value === "boolean";
+}
+
+function validBackgroundLaunchType(
+  value: unknown,
+): value is ManagedBackgroundJobSnapshot["launchType"] {
+  return value === "agent" || value === "shell" || value === "monitor" ||
+    value === "workflow" || value === "unknown";
+}
+
+function validBackgroundTerminalStatus(
+  value: unknown,
+): value is ManagedBackgroundJobSnapshot["terminalStatus"] {
+  return value === undefined || value === "completed" || value === "failed" || value === "killed";
 }

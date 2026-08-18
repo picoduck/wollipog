@@ -1,5 +1,9 @@
 import React, { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
-import type { BackgroundWorkState, SessionStatus } from "@wollipog/protocol";
+import type {
+  BackgroundDeliveryWatchdogState,
+  BackgroundWorkState,
+  SessionStatus,
+} from "@wollipog/protocol";
 import { statusMeta } from "../format.js";
 import { CheckIcon, CloseIcon, CopyIcon, WarningIcon } from "./Icons.js";
 
@@ -164,6 +168,23 @@ export function BackgroundWorkBadge({ state }: { state: BackgroundWorkState }) {
           : "background-work-resumed"}`}
       aria-label={label}
     >
+      <span className="background-work-dot" aria-hidden="true" />
+      {label}
+    </span>
+  );
+}
+
+const BACKGROUND_DELIVERY_LABELS: Record<BackgroundDeliveryWatchdogState, string> = {
+  terminal_without_continuation: "Terminal Result Awaiting Continuation",
+  accepted_without_result: "Accepted Continuation Awaiting Result",
+  result_not_projected: "Result Awaiting Transcript Projection",
+  dashboard_observation_pending: "Notification Awaiting Dashboard",
+};
+
+export function BackgroundDeliveryBadge({ state }: { state: BackgroundDeliveryWatchdogState }) {
+  const label = `Background Delivery: ${BACKGROUND_DELIVERY_LABELS[state]}`;
+  return (
+    <span className="background-work-badge background-work-orphaned" aria-label={label}>
       <span className="background-work-dot" aria-hidden="true" />
       {label}
     </span>

@@ -5688,7 +5688,10 @@ export class SessionsService {
         )
       : false;
     this.hub.sessionEvent(ev);
-    if (reconciledSteering || reconciledCommand) this.hub.sessionChangedById(sessionId);
+    if (reconciledSteering || reconciledCommand ||
+        payload.kind === "background_continuation_delivered") {
+      this.hub.sessionChangedById(sessionId);
+    }
     if (payload.kind === "policy_transport") {
       this.recordPolicyTransportAudit(session, payload, now);
     }
@@ -6264,14 +6267,17 @@ export class SessionsService {
           this.rehydrate.add(sessionId);
           return;
         }
+        let projectedBackgroundDelivery = false;
         for (let i = 0; i < applied.events.length; i++) {
           this.hub.sessionEvent(applied.events[i]!);
           trailingAsk = this.updateTrailingAsk(trailingAsk, applied.events[i]!.payload);
           const payload = applied.events[i]!.payload;
+          if (payload.kind === "background_continuation_delivered") projectedBackgroundDelivery = true;
           if (payload.kind === "policy_transport") {
             this.recordPolicyTransportAudit(session, payload, applied.events[i]!.ts);
           }
         }
+        if (projectedBackgroundDelivery) this.hub.sessionChangedById(sessionId);
         afterSeq = page.nextAfterSeq;
         if (!page.hasMore) break;
       }
@@ -6323,6 +6329,9 @@ export class SessionsService {
         this.hub.sessionEvent(ev);
         this.db.setHydratedSeq(sessionId, e.seq);
         trailingAsk = this.updateTrailingAsk(trailingAsk, ev.payload);
+        if (ev.payload.kind === "background_continuation_delivered") {
+          this.hub.sessionChangedById(sessionId);
+        }
         if (ev.payload.kind === "policy_transport") {
           this.recordPolicyTransportAudit(session, ev.payload, ev.ts);
         }

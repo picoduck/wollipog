@@ -23,7 +23,7 @@ function validSessionId(value: unknown): value is string {
     !/[\u0000-\u001f\u007f]/u.test(value);
 }
 
-/** The browser channel has one intentionally narrow client message. Reject unknown fields and
+/** The browser channel has two intentionally narrow client messages. Reject unknown fields and
  * duplicate ids so malformed/unbounded frames cannot become persistent per-socket state. */
 export function parseUiClientMessage(text: string): UiToControlPlane | null {
   if (Buffer.byteLength(text, "utf8") > MAX_UI_CLIENT_MESSAGE_BYTES) return null;
@@ -35,6 +35,15 @@ export function parseUiClientMessage(text: string): UiToControlPlane | null {
   }
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const raw = value as Record<string, unknown>;
+  if (raw.type === "background_delivery_observed") {
+    if (Object.keys(raw).some((key) => key !== "type" && key !== "sessionId" && key !== "continuationId") ||
+        !validSessionId(raw.sessionId) || !validSessionId(raw.continuationId)) return null;
+    return {
+      type: "background_delivery_observed",
+      sessionId: raw.sessionId,
+      continuationId: raw.continuationId,
+    };
+  }
   if (raw.type !== "session_subscriptions" || !Number.isSafeInteger(raw.revision) || Number(raw.revision) < 1 ||
       !Array.isArray(raw.sessionIds) || !Array.isArray(raw.podIds)) return null;
   if (Object.keys(raw).some((key) => key !== "type" && key !== "revision" && key !== "sessionIds" && key !== "podIds")) return null;

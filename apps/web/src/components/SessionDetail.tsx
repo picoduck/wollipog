@@ -33,7 +33,14 @@ import { runnerDisplay } from "../runners.js";
 import { DirectoryPicker } from "./DirectoryPicker.js";
 import { type TimelineItem } from "../timeline.js";
 import { useTimeline } from "./useTimeline.js";
-import { BackgroundWorkBadge, Empty, Modal, Spinner, StatusBadge } from "./common.js";
+import {
+  BackgroundDeliveryBadge,
+  BackgroundWorkBadge,
+  Empty,
+  Modal,
+  Spinner,
+  StatusBadge,
+} from "./common.js";
 import { EventTimeline, type TimelineRevealRequest } from "./EventTimeline.js";
 import { isTimelineSessionActive } from "../timeline-clock.js";
 import { RightPanel, type RightPanelState } from "./RightPanel.js";
@@ -2095,6 +2102,11 @@ function SessionDetailLoaded({
             <div className="session-preview-meta">
               <StatusBadge status={session.status} />
               {session.backgroundWorkState && <BackgroundWorkBadge state={session.backgroundWorkState} />}
+              {session.backgroundDeliveries?.find((delivery) => delivery.watchdogState)?.watchdogState && (
+                <BackgroundDeliveryBadge
+                  state={session.backgroundDeliveries.find((delivery) => delivery.watchdogState)!.watchdogState!}
+                />
+              )}
               <span className="tag tag-machine" title={session.runnerId}>{runnerDisp.name}</span>
               {session.agentName && (
                 <span className="tag tag-agent">{sessionAgentLabel(session.agentName, session.driver, session.agentId)}</span>

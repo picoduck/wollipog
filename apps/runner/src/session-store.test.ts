@@ -265,6 +265,64 @@ test("metaToSnapshot omits runner-only fields (agentSessionId, repoPath, command
   assert.equal(snap.resolvedModel, "claude-opus-5[1m]");
 });
 
+test("v80 snapshots expose bounded background delivery facts without runner-private context", () => {
+  assert.equal(
+    metaToSnapshot(meta({ backgroundJobs: undefined }), 80).backgroundJobs,
+    undefined,
+    "sessions without managed work do not trigger authoritative empty-inventory sweeps",
+  );
+  const backgroundJobs = [{
+    id: "task-1",
+    toolUseId: "tool-secret",
+    parentTurnId: "turn-1",
+    runnerId: "runner-1",
+    workspaceId: "repo",
+    context: { kind: "wsl" as const, distro: "Ubuntu" },
+    executionTarget: {
+      id: "local",
+      runnerId: "runner-1",
+      kind: "host" as const,
+      workspaceStrategy: "in_place" as const,
+      adapter: "host" as const,
+      boundaries: { filesystem: "host" as const, process: "host" as const },
+    },
+    launchType: "agent" as const,
+    registeredAt: 10,
+    outputReference: "/private/provider/artifact.jsonl",
+    terminalStatus: "completed" as const,
+    terminalObservedAt: 20,
+    continuationRequired: true,
+    continuationId: "bgcont-1",
+    continuationQueuedAt: 21,
+    continuationSubmittedAt: 22,
+    continuationAcceptedAt: 23,
+    assistantResultPersistedAt: 24,
+    structuredDeliveryPublishedAt: 25,
+  }];
+  assert.equal(metaToSnapshot(meta({ backgroundJobs }), 79).backgroundJobs, undefined);
+  assert.deepEqual(metaToSnapshot(meta({ backgroundJobs }), 80).backgroundJobs, [{
+    id: "task-1",
+    parentTurnId: "turn-1",
+    runnerId: "runner-1",
+    workspaceId: "repo",
+    launchType: "agent",
+    registeredAt: 10,
+    terminalStatus: "completed",
+    terminalObservedAt: 20,
+    continuationRequired: true,
+    continuationId: "bgcont-1",
+    continuationQueuedAt: 21,
+    continuationSubmittedAt: 22,
+    continuationAcceptedAt: 23,
+    assistantResultPersistedAt: 24,
+  }]);
+  const serialized = JSON.stringify(metaToSnapshot(meta({ backgroundJobs }), 80));
+  assert.equal(serialized.includes("tool-secret"), false);
+  assert.equal(serialized.includes("provider/artifact"), false);
+  assert.equal(serialized.includes("Ubuntu"), false);
+  assert.equal(serialized.includes("structuredDeliveryPublishedAt"), false);
+});
+
 test("native snapshots publish only the session-scoped elicitation overlay", () => {
   const capabilities = {
     models: [{ id: "frozen-model" }],
