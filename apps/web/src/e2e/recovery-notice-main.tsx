@@ -123,11 +123,13 @@ const navigation: ViewNavigation = {
 };
 
 /** Recovery must stay visibly active: the cached transcript is seeded over the socket while the
- * history endpoint below never answers, holding `refreshing` for the whole page life. */
+ * history endpoints below never answer — both the tail-first opening window and the forward
+ * fallback — holding `refreshing` for the whole page life. */
 const client = {
   ...api,
   session: () => new Promise<never>(() => {}),
   getSessionEventPage: () => new Promise<never>(() => {}),
+  getSessionEventTailPage: () => new Promise<never>(() => {}),
 } as unknown as ApiClient;
 
 const payloads: SessionEvent["payload"][] = [];

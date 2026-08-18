@@ -113,41 +113,44 @@ class FakeSocket implements UiSocket {
 }
 
 /** A long cached transcript: alternating user/agent turns already present before recovery. */
-function cachedTranscriptPayloads(turns: number): SessionEvent["payload"][] {
-  const payloads: SessionEvent["payload"][] = [];
+function cachedTranscriptEvents(sessionId: string, turns: number): SessionEvent[] {
+  const events: SessionEvent[] = [];
   for (let turn = 0; turn < turns; turn += 1) {
-    payloads.push({ kind: "user_message", text: `cached question ${turn + 1}`, images: [] });
-    payloads.push({ kind: "agent_message", text: `cached answer ${turn + 1}`, final: true });
+    for (const payload of [
+      { kind: "user_message", text: `cached question ${turn + 1}`, images: [] },
+      { kind: "agent_message", text: `cached answer ${turn + 1}`, final: true },
+    ] as SessionEvent["payload"][]) {
+      const seq = events.length + 1;
+      events.push({ id: seq, sessionId, seq, ts: seq, payload });
+    }
   }
-  return payloads;
+  return events;
 }
 
-function EventSeeder({ sessionId, payloads }: { sessionId: string; payloads: SessionEvent["payload"][] }) {
+function EventSeeder({ sessionId, events }: { sessionId: string; events: SessionEvent[] }) {
   const ready = useStoreSelector((state) => state.sessions.has(sessionId));
   const { dispatch } = useStoreActions();
   React.useEffect(() => {
     if (!ready) return;
-    payloads.forEach((payload, index) => {
-      dispatch({
-        type: "msg",
-        msg: {
-          type: "session_event",
-          event: { id: index + 1, sessionId, seq: index + 1, ts: index + 1, payload },
-        },
-      });
-    });
-  }, [dispatch, payloads, ready, sessionId]);
+    for (const event of events) {
+      dispatch({ type: "msg", msg: { type: "session_event", event } });
+    }
+  }, [dispatch, events, ready, sessionId]);
   return null;
 }
 
-/** Controllable history endpoint: recovery stays "refreshing" until a page is released. */
+/** Controllable history endpoints: recovery stays "refreshing" until a response is released.
+ * A fresh mount with no saved reading position takes the tail-first OPENING-WINDOW path
+ * (getSessionEventTailPage); the forward page endpoint remains stubbed for the fallback. */
 function pageController() {
-  const pending: Array<(value: SessionEventsResponse) => void> = [];
+  const forward: Array<(value: SessionEventsResponse) => void> = [];
+  const tail: Array<(value: SessionEventsResponse) => void> = [];
   return {
-    fetchPage: () => new Promise<SessionEventsResponse>((resolve) => { pending.push(resolve); }),
-    release(value: SessionEventsResponse) {
-      const resolve = pending.shift();
-      assert.ok(resolve, "a history page fetch is in flight");
+    fetchPage: () => new Promise<SessionEventsResponse>((resolve) => { forward.push(resolve); }),
+    fetchTailPage: () => new Promise<SessionEventsResponse>((resolve) => { tail.push(resolve); }),
+    releaseTail(value: SessionEventsResponse) {
+      const resolve = tail.shift();
+      assert.ok(resolve, "an opening-window tail fetch is in flight");
       resolve(value);
     },
   };
@@ -157,6 +160,7 @@ interface Fixture {
   container: HTMLDivElement;
   root: Root;
   scroller: HTMLElement;
+  events: SessionEvent[];
 }
 
 let fixtureSequence = 0;
@@ -184,6 +188,7 @@ async function mountFixture(
     ...api,
     session: () => new Promise<never>(() => {}),
     getSessionEventPage: pages.fetchPage,
+    getSessionEventTailPage: pages.fetchTailPage,
   } as unknown as ApiClient;
   const rightPanel = {
     open: false,
@@ -205,11 +210,12 @@ async function mountFixture(
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
+  const events = cachedTranscriptEvents(currentSession.id, turns);
   await act(async () => {
     root.render(
       <ApiProvider client={client}>
         <StoreProvider connection={connection} navigation={navigation}>
-          <EventSeeder sessionId={currentSession.id} payloads={cachedTranscriptPayloads(turns)} />
+          <EventSeeder sessionId={currentSession.id} events={events} />
           <SessionDetail
             sessionId={currentSession.id}
             rightPanel={rightPanel}
@@ -241,7 +247,7 @@ async function mountFixture(
   await flushAsyncWork();
   const scroller = container.querySelector(".detail-scroll") as HTMLElement | null;
   assert.ok(scroller, "the transcript reader is mounted");
-  return { container, root, scroller };
+  return { container, root, scroller, events };
 }
 
 async function unmountFixture(fixture: Fixture) {
@@ -344,8 +350,9 @@ test("successful recovery removes the notice promptly without disturbing a follo
   try {
     assert.equal(recoveryActive(fixture), true);
     await act(async () => {
-      // Legacy single-response shape: the completed compatibility path.
-      pages.release({ events: [] });
+      // The completed tail-first opening window: it defines the visible slice and reached the
+      // runner tail, so recovery is authoritatively done.
+      pages.releaseTail({ events: fixture.events, eventEpoch: 0, nextBefore: 0, hasMoreOlder: false, cacheComplete: true });
     });
     await flushAsyncWork();
     assert.equal(recoveryActive(fixture), false, "the pill deactivates once recovery completes");
@@ -379,7 +386,7 @@ test("a reader away from the tail keeps their place through recovery and its com
     assert.equal(fixture.scroller.scrollTop, 123, "showing the pill does not move the reader");
 
     await act(async () => {
-      pages.release({ events: [] });
+      pages.releaseTail({ events: fixture.events, eventEpoch: 0, nextBefore: 0, hasMoreOlder: false, cacheComplete: true });
     });
     await flushAsyncWork();
     assert.equal(recoveryActive(fixture), false);
@@ -416,8 +423,8 @@ test("recovery failure falls back to the existing error notice with its retry af
   try {
     assert.equal(recoveryActive(fixture), true);
     await act(async () => {
-      // A mismatched event epoch ends recovery before completion: the failure path.
-      pages.release({ events: [], eventEpoch: 7, nextAfter: 0, hasMoreCached: false, cacheComplete: false });
+      // A mismatched event epoch ends the opening-window read before completion: the failure path.
+      pages.releaseTail({ events: [], eventEpoch: 7, nextBefore: 0, hasMoreOlder: false, cacheComplete: true });
     });
     await flushAsyncWork();
 
