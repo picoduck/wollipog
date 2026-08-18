@@ -304,6 +304,14 @@ export class ProviderHomeLeaseRegistry {
         const current = readRecord(marker);
         if (current.leaseId !== leaseId) continue;
         rmSync(marker);
+        // A guard inside this lock belongs to a recovery of a record this lease already superseded,
+        // so its owner can no longer reclaim anything here. Left in place it would only block the
+        // rmdir below and strand an empty lock that every later acquire fails closed on. Other
+        // unexpected entries are still preserved: the rmdir then fails and the lock stays for
+        // inspection.
+        for (const entry of readdirSync(lockDir)) {
+          if (entry.startsWith(RECLAIM_GUARD_PREFIX)) rmSync(join(lockDir, entry), { recursive: true, force: true });
+        }
         rmdirSync(lockDir);
       } catch {
         // Never remove unreadable or replacement ownership evidence.

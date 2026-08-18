@@ -215,7 +215,10 @@ must still match the inspected lease id, because holding the guard does not excl
 already retired that record and released. The guard lives inside the lock so that an interrupted
 reclaim leaves an entry every acquirer already fails closed on, rather than inert litter beside a
 lock that would otherwise read as healthy; recovery then fails closed, naming the guard to remove,
-until an operator verifies no runner is active.
+until an operator verifies no runner is active. Releasing a lease sweeps any guard left inside the
+lock it is proven to hold, because such a guard can only belong to a recovery of a record that lease
+already superseded, and leaving it would strand an empty lock that every later acquire refuses.
+Entries a release cannot attribute are still preserved rather than removed.
 
 A symlinked lock is refused outright rather than followed out of the canonical HOME. A record from
 another attested owner, another host, a live process, an incomplete lock, or unexpected directory

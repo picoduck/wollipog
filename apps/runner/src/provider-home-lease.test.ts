@@ -282,6 +282,39 @@ test("a symlinked lock directory is never reclaimed through to its target", (t) 
   assert.equal(existsSync(join(target, "lease.json")), true, "the symlink target is left untouched");
 });
 
+test("an orderly release never strands an empty lock behind a delayed reclaimer's guard", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-release-guard-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const holder = new ProviderHomeLeaseRegistry("a".repeat(64), {
+    pid: 101, hostname: "host-a", isProcessAlive: () => true,
+  });
+  holder.acquire(request(home));
+  const lockDir = join(leaseRoot(home), "mutable-home.lock");
+  // A reclaimer that inspected the record this lease superseded, and resumed after it was retired.
+  mkdirSync(join(lockDir, `reclaim-${randomUUID()}`), { mode: 0o700 });
+  holder.releaseAll();
+  assert.equal(existsSync(lockDir), false, "the release must complete rather than strand the lock");
+  const next = new ProviderHomeLeaseRegistry("a".repeat(64), {
+    pid: 202, hostname: "host-a", isProcessAlive: () => false,
+  });
+  next.acquire(request(home));
+  assert.equal(readLease(home).pid, 202);
+  next.releaseAll();
+});
+
+test("a release still preserves a lock holding evidence it cannot attribute", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-release-evidence-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const holder = new ProviderHomeLeaseRegistry("a".repeat(64), {
+    pid: 101, hostname: "host-a", isProcessAlive: () => true,
+  });
+  holder.acquire(request(home));
+  const lockDir = join(leaseRoot(home), "mutable-home.lock");
+  writeFileSync(join(lockDir, "unexpected"), "x");
+  holder.releaseAll();
+  assert.deepEqual(readdirSync(lockDir), ["unexpected"], "unattributable evidence is kept for inspection");
+});
+
 test("provider-home leases fail closed for WSL direct mode and bypass redirected bwrap homes", (t) => {
   const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-wsl-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
