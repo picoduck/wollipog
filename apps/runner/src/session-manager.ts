@@ -81,7 +81,13 @@ import {
   type CheckpointRefOwnershipRecord,
 } from "./checkpoint-ref-ownership.js";
 import { anchorForkRef, anchorTurnRef, captureWorktreeTree, deleteTurnRef, deleteTurnRefs, isMissingGitRepositoryError, readTurnRef, resetWorktreeIndex, restoreWorktreeToTree, synchronizeCheckpointRefs, withGitExecutionContext } from "./git-ops.js";
-import { SessionStore, isAdoptedSession, metaToSnapshot, type SessionMeta } from "./session-store.js";
+import {
+  SessionStore,
+  isAdoptedSession,
+  metaToSnapshot,
+  type DurableBackgroundJob,
+  type SessionMeta,
+} from "./session-store.js";
 import { SessionCommandAuthorityRegistry } from "./session-command-authority.js";
 import type {
   ProviderAuthObservation,
@@ -220,6 +226,8 @@ interface QueuedPrompt {
   };
   /** Runner-owned continuation used only to consume orphaned Claude task notifications. */
   syntheticRecovery?: boolean;
+  /** Durable managed jobs whose barrier terminal observation caused this continuation. */
+  backgroundJobIds?: string[];
 }
 
 interface PreparedCommandCheckpoint {
@@ -295,6 +303,10 @@ interface ActiveSession {
   interruptRequested?: boolean;
   /** Runner-assigned id of the dequeued turn. A coordinated interrupt must match this exact id. */
   activeTurnId?: string;
+  /** Managed jobs owned by the currently dequeued runner continuation. */
+  currentBackgroundJobIds?: string[];
+  backgroundPromptAccepted?: boolean;
+  backgroundAssistantMessagePersisted?: boolean;
   /** A successful turn-only interruption preserves the remaining FIFO but does not run it until
    * a later explicit prompt unambiguously asks the session to continue. */
   holdQueuedPromptsAfterInterrupt?: boolean;
@@ -411,6 +423,11 @@ const ORPHAN_RECOVERY_RETRY_MS = 30_000;
 const ORPHAN_RECOVERY_SCAN_DEBOUNCE_MS = 30_000;
 const ORPHAN_RECOVERY_PROMPT =
   "Continue after runner restart: consume queued background-task notifications, reconcile every orphaned task, and resume or report unfinished work without waiting for another user message.";
+const BACKGROUND_CONTINUATION_PROMPT =
+  "Managed background jobs reached their terminal barrier. Consume every queued task notification and deliver the parent workflow's final user-visible result without waiting for another user message.";
+const MAX_RETAINED_DELIVERED_BACKGROUND_JOBS = 128;
+const MAX_BACKGROUND_OUTPUT_REFERENCE_CHARS = 4_096;
+const BACKGROUND_CONTINUATION_DELIVERED_PREFIX = "Managed background continuation delivered: ";
 
 function queuedPromptBytes(text: string, images: PromptImageInput[]): number {
   return text.length + images.reduce((n, image) => n + (
@@ -510,6 +527,8 @@ export class SessionManager {
   private readonly recoveryLaunching = new Set<string>();
   private readonly orphanRecoveryLaunching = new Set<string>();
   private readonly orphanRecoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly backgroundContinuationLaunching = new Set<string>();
+  private readonly backgroundContinuationTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly orphanDiscoveryLaunching = new Set<string>();
   private lastOrphanRecoveryScanAt = 0;
   private orphanRecoveryScanTimer: ReturnType<typeof setTimeout> | null = null;
@@ -819,10 +838,12 @@ export class SessionManager {
       if (m.driver === "claude-code" && m.status === "stopped") {
         reconciled = this.store.patchMeta(m.sessionId, {
           backgroundWorkState: undefined,
+          backgroundJobs: [],
           pendingBackgroundTaskIds: [],
           orphanedWork: undefined,
         }) ?? m;
-      } else if (m.driver === "claude-code" && m.backgroundWorkState === "running") {
+      } else if (m.driver === "claude-code" &&
+          (m.backgroundWorkState === "running" || (m.pendingBackgroundTaskIds?.length ?? 0) > 0)) {
         const recovered = new Set(m.recoveredBackgroundTaskIds ?? []);
         const pendingTaskIds = (m.pendingBackgroundTaskIds?.length ? m.pendingBackgroundTaskIds : ["unknown"])
           .filter((id) => !recovered.has(id));
@@ -838,32 +859,37 @@ export class SessionManager {
       }
       // A durable provider-auth block is authoritative across process restart. Read-only
       // background discovery may still run, but it must not submit an unattended recovery turn.
+      reconciled = this.reconcileDeliveredBackgroundContinuations(reconciled);
       const automatic = !reconciled.providerAuthBlock && automaticClaudeRecoveryAllowed(reconciled);
       if (reconciled.status !== "stopped" && automatic && reconciled.orphanedWork && !reconciled.orphanedWork.recoveryAttemptedAt) {
         this.scheduleOrphanRecovery(m.sessionId);
       } else if (reconciled.status !== "stopped") {
         this.scheduleContextOrphanDiscovery(reconciled, automatic);
       }
-      if (m.providerAuthBlock && m.status === "stopped") {
+      if (reconciled.status !== "stopped" && automatic && this.queuedBackgroundJobIds(reconciled).length) {
+        this.scheduleBackgroundContinuation(m.sessionId);
+      }
+      if (reconciled.providerAuthBlock && reconciled.status === "stopped") {
         // Terminal operator intent dominates a stale/incomplete recovery generation.
         this.store.patchMeta(m.sessionId, {
           providerAuthBlock: undefined,
           pendingApproval: null,
         });
-      } else if (m.providerAuthBlock) {
+      } else if (reconciled.providerAuthBlock) {
         // A runner-owned sign-in subprocess cannot survive process restart. Clear only that stale
         // operation generation, then reconstruct the bounded browser projection from durable,
         // secret-free block metadata without appending a duplicate transcript event.
-        const block = m.providerAuthBlock.loginOperationId
-          ? { ...m.providerAuthBlock, loginOperationId: undefined }
-          : m.providerAuthBlock;
-        const projection = this.providerAuthenticationProjection(m, block);
+        const block = reconciled.providerAuthBlock.loginOperationId
+          ? { ...reconciled.providerAuthBlock, loginOperationId: undefined }
+          : reconciled.providerAuthBlock;
+        const projection = this.providerAuthenticationProjection(reconciled, block);
         this.store.patchMeta(m.sessionId, {
           providerAuthBlock: block,
           status: "input_required",
           pendingApproval: projection,
         });
-      } else if (m.status === "starting" || m.status === "running" || m.status === "queued" || m.status === "input_required") {
+      } else if (reconciled.status === "starting" || reconciled.status === "running" ||
+          reconciled.status === "queued" || reconciled.status === "input_required") {
         // The process that owned any pending approval is gone — clear the stale card too.
         this.store.patchMeta(m.sessionId, { status: "idle", pendingApproval: null });
       }
@@ -2123,6 +2149,12 @@ export class SessionManager {
           if (this.active.get(sessionId)?.client !== client) return;
           this.onDriverBackgroundWork(sessionId, update);
         },
+        onPromptAccepted: () => {
+          const live = this.active.get(sessionId);
+          if (live?.client !== client || !live.currentBackgroundJobIds?.length) return;
+          live.backgroundPromptAccepted = true;
+          this.markBackgroundContinuationAccepted(sessionId, live.currentBackgroundJobIds);
+        },
         onAuthStatus: (status) => {
           if (meta.agentId) this.onAgentAuthUpdate?.(meta.agentId, { status });
         },
@@ -2713,6 +2745,7 @@ export class SessionManager {
     syntheticRecovery = false,
     reservedOrdinal?: number,
     queueBeforeLaunch = false,
+    backgroundJobIds?: string[],
   ): boolean {
     if (durable && this.store.readEvents(sessionId).some((event) =>
       event.payload.kind === "user_message" && event.payload.commandId === durable.commandId)) {
@@ -2804,7 +2837,7 @@ export class SessionManager {
         text,
         images,
         slashCommand,
-        config: effectiveConfig, durable, syntheticRecovery,
+        config: effectiveConfig, durable, syntheticRecovery, backgroundJobIds,
       });
       if (!this.recoveryLaunching.has(sessionId)) setImmediate(() => void this.recoverQueuedAppServer(sessionId));
       return true;
@@ -2821,7 +2854,7 @@ export class SessionManager {
       durable?.queued();
       this.insertQueuedPrompt(sessionId, queue, {
         id: durable?.commandId ?? randomUUID(), ordinal: this.nextQueueOrdinal(sessionId), text, images, slashCommand,
-        config: effectiveConfig, durable, syntheticRecovery,
+        config: effectiveConfig, durable, syntheticRecovery, backgroundJobIds,
       });
       this.preLaunchQueues.set(sessionId, queue);
       this.emitQueue(sessionId);
@@ -2840,6 +2873,7 @@ export class SessionManager {
         syntheticRecovery,
         ordinal,
         queueBeforeLaunch,
+        backgroundJobIds,
       );
       return true;
     }
@@ -2875,7 +2909,7 @@ export class SessionManager {
       text,
       images,
       slashCommand,
-      config: effectiveConfig, durable, syntheticRecovery,
+      config: effectiveConfig, durable, syntheticRecovery, backgroundJobIds,
     });
     this.emitQueue(sessionId);
     this.scheduleDrain(sessionId);
@@ -3895,6 +3929,7 @@ export class SessionManager {
     syntheticRecovery = false,
     reservedOrdinal?: number,
     queueBeforeLaunch = false,
+    backgroundJobIds?: string[],
   ): Promise<void> {
     const meta = this.store.readMeta(sessionId);
     if (!meta) {
@@ -3993,6 +4028,7 @@ export class SessionManager {
         config: fresh.config,
         durable,
         syntheticRecovery,
+        backgroundJobIds,
       });
       this.preLaunchQueues.set(sessionId, queue);
     }
@@ -4089,7 +4125,18 @@ export class SessionManager {
       this.activatePreLaunchQueue(sessionId);
       finishPreLaunch(true);
     } else {
-      this.prompt(sessionId, text, images, slashCommand, config, durable, syntheticRecovery, reservedOrdinal);
+      this.prompt(
+        sessionId,
+        text,
+        images,
+        slashCommand,
+        config,
+        durable,
+        syntheticRecovery,
+        reservedOrdinal,
+        false,
+        backgroundJobIds,
+      );
     }
   }
 
@@ -4187,6 +4234,9 @@ export class SessionManager {
           entry.currentDurable = undefined;
           entry.currentSessionCommand = undefined;
           entry.sessionCommandProviderStarted = false;
+          entry.currentBackgroundJobIds = undefined;
+          entry.backgroundPromptAccepted = undefined;
+          entry.backgroundAssistantMessagePersisted = undefined;
           entry.activeTurnId = undefined;
           entry.activeTurnConfig = undefined;
         }
@@ -4317,7 +4367,11 @@ export class SessionManager {
       queued.durable?.failed("session is not active on this runner", "SESSION_NOT_FOUND");
       return;
     }
-    const { text, images: imageInputs, slashCommand, durable, syntheticRecovery } = queued;
+    const { text, images: imageInputs, slashCommand, durable, syntheticRecovery, backgroundJobIds } = queued;
+    // Reserve the continuation generation before the first await. Background lifecycle callbacks
+    // can arrive while images/worktree checkpoints are materialized; they must not enqueue a
+    // second prompt for the generation already owned by this dequeued turn.
+    if (backgroundJobIds?.length) entry.currentBackgroundJobIds = [...backgroundJobIds];
     let images: PromptImage[];
     try {
       const references = imageInputs.filter(isPromptImageReference);
@@ -4349,7 +4403,9 @@ export class SessionManager {
     const userEvent = syntheticRecovery
       ? this.emitEvent(sessionId, {
           kind: "stderr",
-          text: "Runner resumed orphaned background work automatically.",
+          text: backgroundJobIds?.length
+            ? "Runner continued after managed background work completed."
+            : "Runner resumed orphaned background work automatically.",
         })
       : this.emitEvent(sessionId, {
           kind: "user_message",
@@ -4438,17 +4494,42 @@ export class SessionManager {
     }
     if (syntheticRecovery) {
       const current = this.store.readMeta(sessionId);
-      if (!current?.orphanedWork || current.status === "stopped" ||
-          current.orphanedWork.recoveryAttemptedAt) {
+      const managedJobs = backgroundJobIds?.length
+        ? (current?.backgroundJobs ?? []).filter((job) => backgroundJobIds.includes(job.id))
+        : [];
+      const managedContinuation = managedJobs.length === backgroundJobIds?.length &&
+        managedJobs.every((job) => job.continuationQueuedAt && !job.continuationSubmittedAt &&
+          !job.assistantResultPersistedAt);
+      if ((!current?.orphanedWork && !managedContinuation) || current?.status === "stopped" ||
+          (!managedContinuation && current?.orphanedWork?.recoveryAttemptedAt)) {
         this.emitStatus(sessionId, current?.status === "stopped" ? "stopped" : "idle");
         return;
       }
-      const attempted = this.store.patchMeta(sessionId, {
-        orphanedWork: { ...current.orphanedWork, recoveryAttemptedAt: Date.now() },
-      });
-      if (!attempted?.orphanedWork?.recoveryAttemptedAt) {
-        this.emitStatus(sessionId, "idle");
-        return;
+      const submittedAt = Date.now();
+      if (managedContinuation) {
+        const selected = new Set(backgroundJobIds);
+        const attempted = this.store.patchMeta(sessionId, {
+          backgroundWorkState: "continuation_pending",
+          backgroundJobs: (current?.backgroundJobs ?? []).map((job) => selected.has(job.id)
+            ? { ...job, continuationSubmittedAt: submittedAt }
+            : job),
+        });
+        if (!(attempted?.backgroundJobs ?? []).some((job) =>
+          selected.has(job.id) && job.continuationSubmittedAt === submittedAt)) {
+          this.emitStatus(sessionId, "idle");
+          return;
+        }
+        entry.currentBackgroundJobIds = [...selected];
+        entry.backgroundPromptAccepted = false;
+        entry.backgroundAssistantMessagePersisted = false;
+      } else if (current?.orphanedWork) {
+        const attempted = this.store.patchMeta(sessionId, {
+          orphanedWork: { ...current.orphanedWork, recoveryAttemptedAt: submittedAt },
+        });
+        if (!attempted?.orphanedWork?.recoveryAttemptedAt) {
+          this.emitStatus(sessionId, "idle");
+          return;
+        }
       }
       // At-most-once safety boundary: this is the last synchronous point before handing the
       // billable synthetic turn to the provider. Pre-launch failures remain safely retryable.
@@ -4459,8 +4540,20 @@ export class SessionManager {
       stop = await entry.client.prompt(text, images, slashCommand);
       if (entry.historyIntegrityFailure) return;
       this.captureAgentSessionId(sessionId, entry.client); // codex threadId becomes known after turn 1
+      if (backgroundJobIds?.length && stop === "refusal" && !entry.backgroundPromptAccepted) {
+        this.resetBackgroundContinuationSubmission(sessionId, backgroundJobIds);
+        this.scheduleBackgroundContinuation(sessionId, ORPHAN_RECOVERY_RETRY_MS);
+      }
       if (syntheticRecovery && stop !== "cancelled" && stop !== "refusal") {
-        this.finishOrphanRecovery(sessionId);
+        if (backgroundJobIds?.length) {
+          if (entry.backgroundPromptAccepted && entry.backgroundAssistantMessagePersisted) {
+            this.finishBackgroundContinuation(sessionId, backgroundJobIds);
+          }
+        }
+        else this.finishOrphanRecovery(sessionId);
+      }
+      if (stop !== "cancelled" && stop !== "refusal") {
+        this.finishParentTurnBackgroundJobs(sessionId, queued.id);
       }
       if (!this.active.has(sessionId)) {
         durable?.uncertain("session stopped while provider execution was in progress");
@@ -4508,7 +4601,12 @@ export class SessionManager {
       } else {
         durable?.completed();
       }
+      entry.currentBackgroundJobIds = undefined;
     } catch (err) {
+      if (backgroundJobIds?.length && !entry.backgroundPromptAccepted) {
+        this.resetBackgroundContinuationSubmission(sessionId, backgroundJobIds);
+        this.scheduleBackgroundContinuation(sessionId, ORPHAN_RECOVERY_RETRY_MS);
+      }
       if (entry.historyIntegrityFailure) return;
       if (!this.active.has(sessionId)) {
         durable?.uncertain("session stopped while provider execution was in progress");
@@ -5217,6 +5315,7 @@ export class SessionManager {
         this.store.patchMeta(sessionId, {
           status: "stopped",
           backgroundWorkState: undefined,
+          backgroundJobs: [],
           pendingBackgroundTaskIds: [],
           orphanedWork: undefined,
           providerAuthBlock: undefined,
@@ -5229,6 +5328,7 @@ export class SessionManager {
     this.store.patchMeta(sessionId, {
       status: "stopped",
       backgroundWorkState: undefined,
+      backgroundJobs: [],
       pendingBackgroundTaskIds: [],
       orphanedWork: undefined,
       providerAuthBlock: undefined,
@@ -5902,11 +6002,14 @@ export class SessionManager {
     this.preLaunchQueues.clear();
     this.recoveryLaunching.clear();
     this.orphanRecoveryLaunching.clear();
+    this.backgroundContinuationLaunching.clear();
     this.orphanDiscoveryLaunching.clear();
     if (this.orphanRecoveryScanTimer) clearTimeout(this.orphanRecoveryScanTimer);
     this.orphanRecoveryScanTimer = null;
     for (const timer of this.orphanRecoveryTimers.values()) clearTimeout(timer);
     this.orphanRecoveryTimers.clear();
+    for (const timer of this.backgroundContinuationTimers.values()) clearTimeout(timer);
+    this.backgroundContinuationTimers.clear();
     this.approvalStarted.clear();
     if (this.admissionRetryTimer) clearTimeout(this.admissionRetryTimer);
     this.admissionRetryTimer = null;
@@ -6037,6 +6140,11 @@ export class SessionManager {
   private onDriverBackgroundWork(sessionId: string, update: DriverBackgroundWorkUpdate): void {
     const current = this.store.readMeta(sessionId);
     if (!current || current.driver !== "claude-code") return;
+    const { jobs: backgroundJobs, queuedJobIds } = this.mergeDurableBackgroundJobs(
+      current,
+      update,
+      this.active.get(sessionId)?.activeTurnId,
+    );
     const observedTaskIds = update.observedTaskIds ?? [];
     const recoveredBackgroundTaskIds = withoutRecoveredBackgroundTaskIds(
       current.recoveredBackgroundTaskIds,
@@ -6057,14 +6165,16 @@ export class SessionManager {
       // Artifact-only evidence cannot revive a task whose unattended recovery was already handled.
       // A real provider stream event appears in observedTaskIds and removes its tombstone above.
       updated = this.store.patchMeta(sessionId, {
-        backgroundWorkState: "resumed",
+        backgroundWorkState: queuedJobIds.length > 0 ? "continuation_pending" : "resumed",
+        backgroundJobs,
         pendingBackgroundTaskIds: [],
         recoveredBackgroundTaskIds: durableRecoveredTaskIds,
         orphanedWork: undefined,
       });
     } else if (update.state === "running") {
       updated = this.store.patchMeta(sessionId, {
-        backgroundWorkState: "running",
+        backgroundWorkState: queuedJobIds.length > 0 ? "continuation_pending" : "running",
+        backgroundJobs,
         pendingBackgroundTaskIds: eligiblePendingTaskIds,
         recoveredBackgroundTaskIds: durableRecoveredTaskIds,
         ...(current.orphanedWork && observedTaskIds.length > 0
@@ -6084,7 +6194,8 @@ export class SessionManager {
       const sameRecovery = previousOrphan &&
         previousOrphan.pendingTaskIds.some((id) => eligiblePendingTaskIds.includes(id));
       updated = this.store.patchMeta(sessionId, {
-        backgroundWorkState: "orphaned",
+        backgroundWorkState: queuedJobIds.length > 0 ? "continuation_pending" : "orphaned",
+        backgroundJobs,
         pendingBackgroundTaskIds: eligiblePendingTaskIds,
         recoveredBackgroundTaskIds: durableRecoveredTaskIds,
         orphanedWork: {
@@ -6113,16 +6224,90 @@ export class SessionManager {
           )
         : durableRecoveredTaskIds;
       updated = this.store.patchMeta(sessionId, {
-        backgroundWorkState: current.orphanedWork ? "resumed" : undefined,
+        backgroundWorkState: queuedJobIds.length > 0
+          ? "continuation_pending"
+          : current.orphanedWork ? "resumed" : undefined,
+        backgroundJobs,
         pendingBackgroundTaskIds: [],
         recoveredBackgroundTaskIds: recovered,
         orphanedWork: undefined,
       });
     }
     if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+    if (queuedJobIds.length > 0) this.scheduleBackgroundContinuation(sessionId);
     if (updated?.orphanedWork && update.state === "orphaned" && automaticClaudeRecoveryAllowed(updated)) {
       this.scheduleOrphanRecovery(sessionId);
     }
+  }
+
+  private mergeDurableBackgroundJobs(
+    current: SessionMeta,
+    update: DriverBackgroundWorkUpdate,
+    activeTurnId: string | undefined,
+  ): { jobs: DurableBackgroundJob[]; queuedJobIds: string[] } {
+    const byId = new Map((current.backgroundJobs ?? []).map((job) => [job.id, { ...job }]));
+    const findAlias = (id: string, toolUseId?: string) => byId.get(id) ?? (toolUseId
+      ? [...byId.values()].find((job) => job.toolUseId === toolUseId)
+      : undefined);
+    const register = (job: NonNullable<DriverBackgroundWorkUpdate["jobs"]>[number]) => {
+      const prior = findAlias(job.id, job.toolUseId);
+      if (prior && prior.id !== job.id) byId.delete(prior.id);
+      const outputReference = job.outputFile?.slice(0, MAX_BACKGROUND_OUTPUT_REFERENCE_CHARS);
+      byId.set(job.id, {
+        ...(prior ?? {
+          id: job.id,
+          parentTurnId: activeTurnId ?? "unknown",
+          runnerId: this.runnerId,
+          workspaceId: current.workspaceId,
+          context: current.context,
+          ...(current.executionTarget ? { executionTarget: current.executionTarget } : {}),
+          registeredAt: job.startedAt,
+        }),
+        id: job.id,
+        ...(job.toolUseId ? { toolUseId: job.toolUseId } : {}),
+        launchType: job.launchType,
+        ...(outputReference ? { outputReference } : {}),
+      });
+    };
+    for (const job of update.jobs ?? []) register(job);
+
+    for (const terminal of update.terminalJobs ?? []) {
+      register(terminal);
+      const durable = findAlias(terminal.id, terminal.toolUseId);
+      if (!durable) continue;
+      durable.terminalStatus = terminal.status;
+      durable.terminalObservedAt = terminal.terminalAt;
+      durable.continuationRequired = terminal.continuationRequired;
+    }
+
+    const terminalCandidates = [...byId.values()].filter((job) => job.terminalObservedAt &&
+      job.continuationRequired && !job.continuationSubmittedAt && !job.assistantResultPersistedAt);
+    const readyParents = new Set(terminalCandidates.map((job) => job.parentTurnId).filter((parentTurnId) =>
+      ![...byId.values()].some((job) => job.parentTurnId === parentTurnId &&
+        !job.terminalObservedAt && !job.assistantResultPersistedAt)));
+    const queuedJobIds = terminalCandidates
+      .filter((job) => readyParents.has(job.parentTurnId))
+      .map((job) => job.id);
+    if (queuedJobIds.length > 0) {
+      const queuedAt = Date.now();
+      for (const parentTurnId of readyParents) {
+        const barrierJobs = queuedJobIds.map((id) => byId.get(id)!)
+          .filter((job) => job.parentTurnId === parentTurnId);
+        const continuationId = barrierJobs.find((job) => job.continuationId)?.continuationId ??
+          `bgcont_${randomUUID()}`;
+        for (const job of barrierJobs) {
+          job.continuationId = continuationId;
+          job.continuationQueuedAt ??= queuedAt;
+        }
+      }
+    }
+    const all = [...byId.values()].sort((left, right) => left.registeredAt - right.registeredAt);
+    const unresolved = all.filter((job) => !job.assistantResultPersistedAt);
+    const deliveredLimit = Math.max(0, MAX_RETAINED_DELIVERED_BACKGROUND_JOBS - unresolved.length);
+    const delivered = deliveredLimit === 0
+      ? []
+      : all.filter((job) => job.assistantResultPersistedAt).slice(-deliveredLimit);
+    return { jobs: [...unresolved, ...delivered], queuedJobIds };
   }
 
   private finishOrphanRecovery(sessionId: string): void {
@@ -6135,7 +6320,8 @@ export class SessionManager {
     // A persistent transport that is still running now owns the remaining work. A one-shot
     // transport exits after every turn, so its attempted orphan remains visible but is never
     // submitted automatically a second time.
-    if (hasPending && current.backgroundWorkState !== "running") return;
+    if (hasPending && current.backgroundWorkState !== "running" &&
+        current.backgroundWorkState !== "continuation_pending") return;
     const updated = this.store.patchMeta(sessionId, hasPending
       ? { pendingBackgroundTaskIds: pending, orphanedWork: undefined }
       : {
@@ -6242,6 +6428,175 @@ export class SessionManager {
     this.orphanRecoveryTimers.set(sessionId, timer);
   }
 
+  private queuedBackgroundJobIds(meta: SessionMeta | null): string[] {
+    const queued = (meta?.backgroundJobs ?? [])
+      .filter((job) => job.continuationQueuedAt && !job.continuationSubmittedAt &&
+        !job.assistantResultPersistedAt)
+      .sort((left, right) => left.continuationQueuedAt! - right.continuationQueuedAt!);
+    const continuationId = queued[0]?.continuationId;
+    if (!continuationId) return [];
+    return queued.filter((job) => job.continuationId === continuationId).map((job) => job.id);
+  }
+
+  private scheduleBackgroundContinuation(sessionId: string, delay = 0): void {
+    if (this.shuttingDown || this.backgroundContinuationTimers.has(sessionId)) return;
+    const timer = setTimeout(() => {
+      this.backgroundContinuationTimers.delete(sessionId);
+      void this.runBackgroundContinuation(sessionId);
+    }, delay);
+    timer.unref?.();
+    this.backgroundContinuationTimers.set(sessionId, timer);
+  }
+
+  private async runBackgroundContinuation(sessionId: string): Promise<void> {
+    if (this.shuttingDown || this.backgroundContinuationLaunching.has(sessionId)) return;
+    const meta = this.store.readMeta(sessionId);
+    const jobIds = this.queuedBackgroundJobIds(meta);
+    if (!meta || meta.status === "stopped" || !automaticClaudeRecoveryAllowed(meta) || jobIds.length === 0) return;
+    const entry = this.active.get(sessionId);
+    if (entry?.currentBackgroundJobIds?.some((id) => jobIds.includes(id)) ||
+        entry?.queue.some((prompt) => prompt.backgroundJobIds?.some((id) => jobIds.includes(id)))) return;
+    this.backgroundContinuationLaunching.add(sessionId);
+    try {
+      if (entry) {
+        this.prompt(
+          sessionId,
+          BACKGROUND_CONTINUATION_PROMPT,
+          [],
+          undefined,
+          undefined,
+          undefined,
+          true,
+          undefined,
+          false,
+          jobIds,
+        );
+      } else {
+        await this.resumeAndPrompt(
+          sessionId,
+          BACKGROUND_CONTINUATION_PROMPT,
+          [],
+          undefined,
+          undefined,
+          undefined,
+          true,
+          undefined,
+          false,
+          jobIds,
+        );
+      }
+    } finally {
+      this.backgroundContinuationLaunching.delete(sessionId);
+      const remaining = this.queuedBackgroundJobIds(this.store.readMeta(sessionId));
+      if (remaining.length > 0 && !this.active.get(sessionId)?.queue.some((prompt) =>
+        prompt.backgroundJobIds?.some((id) => remaining.includes(id)))) {
+        this.scheduleBackgroundContinuation(sessionId, ORPHAN_RECOVERY_RETRY_MS);
+      }
+    }
+  }
+
+  private markBackgroundContinuationAccepted(sessionId: string, jobIds: string[]): void {
+    const current = this.store.readMeta(sessionId);
+    if (!current?.backgroundJobs) return;
+    const selected = new Set(jobIds);
+    const acceptedAt = Date.now();
+    let changed = false;
+    const backgroundJobs = current.backgroundJobs.map((job) => {
+      if (!selected.has(job.id) || job.continuationAcceptedAt || job.assistantResultPersistedAt) return job;
+      changed = true;
+      return { ...job, continuationAcceptedAt: acceptedAt };
+    });
+    if (!changed) return;
+    const updated = this.store.patchMeta(sessionId, { backgroundJobs, backgroundWorkState: "continuation_pending" });
+    if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+  }
+
+  private resetBackgroundContinuationSubmission(sessionId: string, jobIds: string[]): void {
+    const current = this.store.readMeta(sessionId);
+    if (!current?.backgroundJobs) return;
+    const selected = new Set(jobIds);
+    const backgroundJobs = current.backgroundJobs.map((job) => selected.has(job.id) &&
+      !job.continuationAcceptedAt && !job.assistantResultPersistedAt
+      ? { ...job, continuationSubmittedAt: undefined }
+      : job);
+    const updated = this.store.patchMeta(sessionId, {
+      backgroundJobs,
+      backgroundWorkState: "continuation_pending",
+    });
+    if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+  }
+
+  private finishBackgroundContinuation(sessionId: string, jobIds: string[]): void {
+    const current = this.store.readMeta(sessionId);
+    if (!current?.backgroundJobs) return;
+    const selected = new Set(jobIds);
+    const continuationId = current.backgroundJobs.find((job) => selected.has(job.id))?.continuationId;
+    if (!continuationId || !this.emitEvent(sessionId, {
+      kind: "stderr",
+      text: `${BACKGROUND_CONTINUATION_DELIVERED_PREFIX}${continuationId}`,
+      runnerMarker: "background_continuation_delivery",
+    })) return;
+    const persistedAt = Date.now();
+    const backgroundJobs = current.backgroundJobs.map((job) => selected.has(job.id)
+      ? {
+          ...job,
+          continuationAcceptedAt: job.continuationAcceptedAt ?? persistedAt,
+          assistantResultPersistedAt: persistedAt,
+        }
+      : job);
+    const unresolved = backgroundJobs.some((job) => job.continuationRequired &&
+      !job.assistantResultPersistedAt);
+    const updated = this.store.patchMeta(sessionId, {
+      backgroundJobs,
+      backgroundWorkState: unresolved ? "continuation_pending" : "resumed",
+    });
+    if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+    if (this.queuedBackgroundJobIds(updated).length > 0) this.scheduleBackgroundContinuation(sessionId);
+  }
+
+  private reconcileDeliveredBackgroundContinuations(meta: SessionMeta): SessionMeta {
+    if (!meta.backgroundJobs?.some((job) => job.continuationId && !job.assistantResultPersistedAt)) return meta;
+    const delivered = new Set(this.store.readEvents(meta.sessionId).flatMap((event) =>
+      event.payload.kind === "stderr" &&
+        event.payload.runnerMarker === "background_continuation_delivery" &&
+        event.payload.text.startsWith(BACKGROUND_CONTINUATION_DELIVERED_PREFIX)
+        ? [event.payload.text.slice(BACKGROUND_CONTINUATION_DELIVERED_PREFIX.length)]
+        : []));
+    if (delivered.size === 0) return meta;
+    const persistedAt = Date.now();
+    let changed = false;
+    const backgroundJobs = meta.backgroundJobs.map((job) => {
+      if (!job.continuationId || !delivered.has(job.continuationId) || job.assistantResultPersistedAt) return job;
+      changed = true;
+      return {
+        ...job,
+        continuationAcceptedAt: job.continuationAcceptedAt ?? persistedAt,
+        assistantResultPersistedAt: persistedAt,
+      };
+    });
+    if (!changed) return meta;
+    const unresolved = backgroundJobs.some((job) => job.continuationRequired &&
+      !job.assistantResultPersistedAt);
+    return this.store.patchMeta(meta.sessionId, {
+      backgroundJobs,
+      backgroundWorkState: unresolved ? "continuation_pending" : "resumed",
+    }) ?? meta;
+  }
+
+  private finishParentTurnBackgroundJobs(sessionId: string, parentTurnId: string): void {
+    const current = this.store.readMeta(sessionId);
+    if (!current?.backgroundJobs) return;
+    const persistedAt = Date.now();
+    let changed = false;
+    const backgroundJobs = current.backgroundJobs.map((job) => {
+      if ((job.parentTurnId !== parentTurnId && job.parentTurnId !== "unknown") || !job.terminalObservedAt ||
+          job.continuationRequired || job.assistantResultPersistedAt) return job;
+      changed = true;
+      return { ...job, assistantResultPersistedAt: persistedAt };
+    });
+    if (changed) this.store.patchMeta(sessionId, { backgroundJobs });
+  }
+
   private async runOrphanRecovery(sessionId: string): Promise<void> {
     if (this.shuttingDown || this.orphanRecoveryLaunching.has(sessionId)) return;
     let meta = this.store.readMeta(sessionId);
@@ -6300,6 +6655,10 @@ export class SessionManager {
     const entry = this.active.get(sessionId);
     if (entry?.historyIntegrityFailure) return;
     if (!this.emitEvent(sessionId, payload)) return;
+    if (entry?.currentBackgroundJobIds?.length && payload.kind === "agent_message" &&
+        !payload.parentToolUseId) {
+      entry.backgroundAssistantMessagePersisted = true;
+    }
     if (payload.kind === "policy_transport") {
       const current = this.store.readMeta(sessionId);
       const capabilities = payload.state === "open"

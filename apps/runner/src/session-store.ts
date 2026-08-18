@@ -140,6 +140,8 @@ export interface SessionMeta {
   providerAuthRetryAttemptedRecoveryId?: string;
   /** Claude background work observed by the runner. Optional for older sessions and other drivers. */
   backgroundWorkState?: BackgroundWorkState;
+  /** Runner-authoritative durable records for structured provider-managed background jobs. */
+  backgroundJobs?: DurableBackgroundJob[];
   /** Provider task ids retained across runner restarts for automatic recovery. */
   pendingBackgroundTaskIds?: string[];
   /** Task ids whose latest orphan artifact already received one unattended recovery attempt.
@@ -194,6 +196,30 @@ export interface SessionMeta {
   logEpoch?: number;
   createdAt: number;
   updatedAt: number;
+}
+
+export interface DurableBackgroundJob {
+  /** Stable provider task identity after provisional tool-use promotion. */
+  id: string;
+  toolUseId?: string;
+  parentTurnId: string;
+  runnerId: string;
+  workspaceId: string | null;
+  context: AgentContext;
+  executionTarget?: ExecutionTargetRef;
+  launchType: "agent" | "shell" | "monitor" | "workflow" | "unknown";
+  registeredAt: number;
+  /** Bounded runner-local provider artifact reference; never projected to the dashboard. */
+  outputReference?: string;
+  terminalStatus?: "completed" | "failed" | "killed";
+  terminalObservedAt?: number;
+  continuationRequired?: boolean;
+  /** Stable identity shared by every job in one parent-turn barrier continuation. */
+  continuationId?: string;
+  continuationQueuedAt?: number;
+  continuationSubmittedAt?: number;
+  continuationAcceptedAt?: number;
+  assistantResultPersistedAt?: number;
 }
 
 export interface SessionSlashCommandProvenance {

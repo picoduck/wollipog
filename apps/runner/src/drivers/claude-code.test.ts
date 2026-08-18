@@ -369,12 +369,12 @@ test("initialize reconciles persisted task seeds before the first recovery turn"
   );
 
   await driver.initialize();
-  assert.deepEqual(background.at(-1), {
-    state: "running",
-    pendingTaskIds: ["still-live"],
-    observedTaskIds: [],
-    oldestPendingAt: background.at(-1)?.oldestPendingAt,
-  });
+  assert.equal(background.at(-1)?.state, "running");
+  assert.deepEqual(background.at(-1)?.pendingTaskIds, ["still-live"]);
+  assert.deepEqual(background.at(-1)?.observedTaskIds, []);
+  assert.deepEqual(background.at(-1)?.jobs?.map((job) => job.id), ["still-live"]);
+  assert.equal(background.at(-1)?.terminalJobs?.[0]?.id, "already-done");
+  assert.equal(background.at(-1)?.terminalJobs?.[0]?.continuationRequired, false);
   driver.dispose();
 });
 
@@ -835,6 +835,91 @@ test("a config change with pending work delivers the prompt and defers the resta
   driver.dispose();
 });
 
+test("an idle terminal notification preserves launch metadata and requests one continuation", async () => {
+  const child = fakeProcess();
+  const background: Parameters<NonNullable<DriverCallbacks["onBackgroundWork"]>>[0][] = [];
+  let acceptedPrompts = 0;
+  const driver = new ClaudeCodeDriver(
+    {
+      ...baseOpts,
+      env: { [CLAUDE_PERSISTENT_FLAG]: "1" },
+      config: { permissionMode: "acceptEdits" },
+    },
+    {
+      ...noopCb,
+      onBackgroundWork: (update) => background.push(update),
+      onPromptAccepted: () => { acceptedPrompts += 1; },
+    },
+    { spawn: () => child, kill: () => {}, now: () => 1234 } as any,
+  );
+  const turn = driver.prompt("launch an agent");
+  await nextTask();
+  assert.equal(acceptedPrompts, 1, "acceptance is emitted from the stdin write callback");
+  child.stdout.write(JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "tool_use", id: "spawn", name: "Task", input: { run_in_background: true } }] },
+  }) + "\n");
+  child.stdout.write(JSON.stringify({
+    type: "system", subtype: "task_started", task_id: "task-1", tool_use_id: "spawn",
+  }) + "\n");
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  assert.equal(await turn, "end_turn");
+  assert.deepEqual(background.at(-1)?.jobs, [{
+    id: "task-1", toolUseId: "spawn", launchType: "agent", startedAt: 1234,
+  }]);
+
+  child.stdout.write(JSON.stringify({
+    type: "system", subtype: "task_notification", task_id: "task-1", status: "completed",
+  }) + "\n");
+  await nextTask();
+  assert.deepEqual(background.at(-1), {
+    state: null,
+    pendingTaskIds: [],
+    terminalJobs: [{
+      id: "task-1",
+      toolUseId: "spawn",
+      launchType: "agent",
+      startedAt: 1234,
+      status: "completed",
+      terminalAt: 1234,
+      continuationRequired: true,
+    }],
+  });
+  driver.dispose();
+});
+
+test("a task finishing during an unrelated turn still requests its parent continuation", async () => {
+  const child = fakeProcess();
+  const background: Parameters<NonNullable<DriverCallbacks["onBackgroundWork"]>>[0][] = [];
+  const driver = new ClaudeCodeDriver(
+    { ...baseOpts, env: { [CLAUDE_PERSISTENT_FLAG]: "1" }, config: { permissionMode: "acceptEdits" } },
+    { ...noopCb, onBackgroundWork: (update) => background.push(update) },
+    { spawn: () => child, kill: () => {} } as any,
+  );
+  const parent = driver.prompt("launch");
+  await nextTask();
+  child.stdout.write(JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "tool_use", id: "spawn", name: "Task", input: {} }] },
+  }) + "\n");
+  child.stdout.write(JSON.stringify({
+    type: "system", subtype: "task_started", task_id: "task-a", tool_use_id: "spawn",
+  }) + "\n");
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  await parent;
+
+  const unrelated = driver.prompt("unrelated user turn");
+  await nextTask();
+  child.stdout.write(JSON.stringify({
+    type: "system", subtype: "task_notification", task_id: "task-a", status: "completed",
+  }) + "\n");
+  await nextTask();
+  assert.equal(background.at(-1)?.terminalJobs?.[0]?.continuationRequired, true);
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  await unrelated;
+  driver.dispose();
+});
+
 test("idle eviction reaps the transport and the next turn transparently resumes", async () => {
   const children: any[] = [];
   const launches: any[] = [];
@@ -940,13 +1025,14 @@ test("one-shot task completion never arms persistent idle eviction during the li
   const child = fakeProcess();
   const killed: any[] = [];
   const activeTimers = new Set<object>();
+  const background: Parameters<NonNullable<DriverCallbacks["onBackgroundWork"]>>[0][] = [];
   const driver = new ClaudeCodeDriver(
     {
       ...baseOpts,
       env: { [CLAUDE_PERSISTENT_FLAG]: "0", [CLAUDE_PERSISTENT_IDLE_MS]: "30000" },
       config: { permissionMode: "default" },
     },
-    noopCb,
+    { ...noopCb, onBackgroundWork: (update) => background.push(update) },
     {
       spawn: () => child,
       kill: (process: any) => killed.push(process),
@@ -972,6 +1058,11 @@ test("one-shot task completion never arms persistent idle eviction during the li
   assert.equal(activeTimers.size, 0);
   assert.deepEqual(killed, []);
   assert.equal(child.stdin.writableEnded, false);
+  assert.equal(
+    background.flatMap((update) => update.terminalJobs ?? []).at(-1)?.continuationRequired,
+    false,
+    "a Task completed inside a one-shot turn must not trigger a second provider turn",
+  );
   child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
   child.emit("exit", 0);
   assert.equal(await turn, "end_turn");
@@ -1060,12 +1151,10 @@ test("task lifecycle keeps a six-hour-silent session alive until out-of-turn com
   assert.equal(pendingDelay, 7 * 24 * 60 * 60_000);
   now += 6 * 60 * 60_000;
   assert.equal(killed.length, 0, "six hours of stream silence is not quiescence");
-  assert.deepEqual(background.at(-1), {
-    state: "running",
-    pendingTaskIds: ["task-1"],
-    observedTaskIds: ["task-1"],
-    oldestPendingAt: background.at(-1)?.oldestPendingAt,
-  });
+  assert.equal(background.at(-1)?.state, "running");
+  assert.deepEqual(background.at(-1)?.pendingTaskIds, ["task-1"]);
+  assert.deepEqual(background.at(-1)?.observedTaskIds, ["task-1"]);
+  assert.deepEqual(background.at(-1)?.jobs?.map((job) => job.id), ["task-1"]);
 
   child.stdout.write(JSON.stringify({
     type: "system",
@@ -1086,7 +1175,9 @@ test("task lifecycle keeps a six-hour-silent session alive until out-of-turn com
     output_file: "task-1.output",
   }) + "\n");
   await nextTask();
-  assert.deepEqual(background.at(-1), { state: null, pendingTaskIds: [] });
+  assert.equal(background.at(-1)?.state, null);
+  assert.deepEqual(background.at(-1)?.pendingTaskIds, []);
+  assert.equal(background.at(-1)?.terminalJobs?.[0]?.continuationRequired, true);
   assert.ok(idleCallback, "quiescence after completion re-arms idle eviction");
   (idleCallback as unknown as () => void)();
   assert.equal(killed.length, 0);
@@ -1153,7 +1244,9 @@ test("Agent, background shell, Monitor, and Workflow launches all participate in
     },
   }) + "\n");
   await nextTask();
-  assert.deepEqual(background.at(-1), { state: null, pendingTaskIds: [] });
+  assert.equal(background.at(-1)?.state, null);
+  assert.deepEqual(background.at(-1)?.pendingTaskIds, []);
+  assert.ok(background.at(-1)?.terminalJobs?.every((job) => job.continuationRequired));
   driver.dispose();
 });
 
@@ -1185,7 +1278,9 @@ test("provider lifecycle evidence promotes a provisional background shell until 
   }) + "\n");
   child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
   assert.equal(await turn, "end_turn");
-  assert.deepEqual(background.at(-1), { state: null, pendingTaskIds: [] });
+  assert.equal(background.at(-1)?.state, null);
+  assert.deepEqual(background.at(-1)?.pendingTaskIds, []);
+  assert.equal(background.at(-1)?.terminalJobs?.[0]?.launchType, "shell");
   driver.dispose();
 });
 
@@ -1212,7 +1307,9 @@ test("foreground Task results ignore nested status prose and complete normally",
     }] },
   }) + "\n");
   await nextTask();
-  assert.deepEqual(background.at(-1), { state: null, pendingTaskIds: [] });
+  assert.equal(background.at(-1)?.state, null);
+  assert.deepEqual(background.at(-1)?.pendingTaskIds, []);
+  assert.equal(background.at(-1)?.terminalJobs?.[0]?.launchType, "agent");
   child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
   assert.equal(await turn, "end_turn");
   driver.dispose();
@@ -1239,7 +1336,9 @@ test("task progress without tool_use_id preserves the original completion correl
     }] },
   }) + "\n");
   await nextTask();
-  assert.deepEqual(background.at(-1), { state: null, pendingTaskIds: [] });
+  assert.equal(background.at(-1)?.state, null);
+  assert.deepEqual(background.at(-1)?.pendingTaskIds, []);
+  assert.equal(background.at(-1)?.terminalJobs?.[0]?.toolUseId, "tool-1");
   child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
   assert.equal(await turn, "end_turn");
   driver.dispose();
@@ -1649,11 +1748,12 @@ test("cancel fences an idle persistent child before an immediate new prompt", as
 test("one-shot fixed-rule mode delivers multiline prompts through stdin, never argv", async () => {
   const child = fakeProcess();
   const writes: string[] = [];
+  let acceptedPrompts = 0;
   child.stdin.on("data", (chunk: Buffer) => writes.push(chunk.toString("utf8")));
   const launches: any[] = [];
   const driver = new ClaudeCodeDriver(
     { ...baseOpts, env: { [CLAUDE_PERSISTENT_FLAG]: "0" }, config: { permissionMode: "acceptEdits" } },
-    noopCb,
+    { ...noopCb, onPromptAccepted: () => { acceptedPrompts += 1; } },
     { spawn: (opts: any) => { launches.push(opts); return child; }, kill: () => {} } as any,
   );
   const prompt = "first line\r\nsecond line with %USERPROFILE% & more";
@@ -1665,6 +1765,7 @@ test("one-shot fixed-rule mode delivers multiline prompts through stdin, never a
   assert.equal(launches[0].args.includes(prompt), false, "user content must not reach cmd.exe argv");
   assert.equal(writes.join(""), prompt);
   assert.equal(child.stdin.writableEnded, true);
+  assert.equal(acceptedPrompts, 1, "one-shot acceptance is emitted from the stdin end callback");
 
   child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
   child.emit("exit", 0);

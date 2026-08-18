@@ -23,7 +23,8 @@ import { useFeedback } from "./FeedbackProvider.js";
 import { ChevronLeftIcon } from "./Icons.js";
 
 const BACKGROUND_WORK_DOT_LABELS: Record<BackgroundWorkState, string> = {
-  running: "Background Work: Running",
+  running: "Waiting on External Job",
+  continuation_pending: "Continuation Pending",
   orphaned: "Background Work: Orphaned",
   resumed: "Background Work: Resumed",
 };

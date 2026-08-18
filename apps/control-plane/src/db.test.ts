@@ -2031,6 +2031,13 @@ test("background work state round-trips through runner snapshot create and updat
 
   db.updateSessionFromSnapshot(
     "background-work",
+    snapshot({ id: "background-work", driver: "claude_code", backgroundWorkState: "continuation_pending" }),
+    2_500,
+  );
+  assert.equal(db.getSession("background-work")?.backgroundWorkState, "continuation_pending");
+
+  db.updateSessionFromSnapshot(
+    "background-work",
     snapshot({ id: "background-work", driver: "claude_code", backgroundWorkState: "orphaned" }),
     3_000,
   );

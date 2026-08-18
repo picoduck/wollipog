@@ -12,6 +12,7 @@ import type {
   SessionEvent,
 } from "@wollipog/protocol";
 
+
 export type TimelineItem =
   | {
       kind: "user_message";
@@ -593,6 +594,10 @@ export class TimelineBuilder {
         this.pushText("command_output", ev.seq, p.text, undefined, undefined, undefined, p.textRefs);
         break;
       case "stderr":
+        if (p.runnerMarker === "background_continuation_delivery") {
+          this.breakText();
+          break;
+        }
         this.pushText("stderr", ev.seq, p.text, undefined, undefined, undefined, p.textRefs);
         break;
       case "tool_call": {

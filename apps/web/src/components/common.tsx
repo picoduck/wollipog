@@ -147,7 +147,8 @@ export function StatusBadge({ status }: { status: SessionStatus }) {
 }
 
 const BACKGROUND_WORK_LABELS: Record<BackgroundWorkState, string> = {
-  running: "Running",
+  running: "Waiting on External Job",
+  continuation_pending: "Continuation Pending",
   orphaned: "Orphaned",
   resumed: "Resumed",
 };
@@ -156,7 +157,7 @@ export function BackgroundWorkBadge({ state }: { state: BackgroundWorkState }) {
   const label = `Background Work: ${BACKGROUND_WORK_LABELS[state]}`;
   return (
     <span
-      className={`background-work-badge ${state === "running"
+      className={`background-work-badge ${state === "running" || state === "continuation_pending"
         ? "background-work-running"
         : state === "orphaned"
           ? "background-work-orphaned"
