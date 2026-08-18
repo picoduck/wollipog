@@ -2423,9 +2423,9 @@ export interface SessionView {
   providerUpdatedAt?: string;
   /** Durable runner-observed Claude background-work lifecycle; absent when not applicable. */
   backgroundWorkState?: BackgroundWorkState;
-  /** Explicit provider capability boundary. Omitted by pre-v79 control planes. */
+  /** Explicit provider capability boundary. Omitted by pre-v83 control planes. */
   backgroundWorkTracking?: BackgroundWorkTracking;
-  /** Durable control-plane delivery stages. Omitted by pre-v78 control planes. */
+  /** Durable control-plane delivery stages. Omitted by pre-v82 control planes. */
   backgroundDeliveries?: BackgroundDeliveryView[];
   status: SessionStatus;
   column: BoardColumn;
@@ -2514,9 +2514,9 @@ export interface SessionSnapshot {
   providerUpdatedAt?: string;
   /** Durable runner-observed Claude background-work lifecycle; absent when not applicable. */
   backgroundWorkState?: BackgroundWorkState;
-  /** Explicit provider capability boundary. Omitted for pre-v79 control planes. */
+  /** Explicit provider capability boundary. Omitted for pre-v83 control planes. */
   backgroundWorkTracking?: BackgroundWorkTracking;
-  /** Bounded projection-safe managed-job inventory. Omitted for pre-v78 control planes. */
+  /** Bounded projection-safe managed-job inventory. Omitted for pre-v82 control planes. */
   backgroundJobs?: ManagedBackgroundJobSnapshot[];
   status: SessionStatus;
   driver: AgentDriverKind;

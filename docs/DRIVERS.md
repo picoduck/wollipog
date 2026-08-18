@@ -262,9 +262,9 @@ The lifetime policy is quiescence-aware and fail-safe:
   because the provider may have received the bytes before local acknowledgement. A stable
   continuation id and durable structured delivery event let startup reconcile a persisted assistant result
   without submitting another provider turn; that bookkeeping marker is hidden from the rendered
-  timeline. Protocol v78 also sends a projection-safe, bounded job inventory to the control plane;
+  timeline. Protocol v82 also sends a projection-safe, bounded job inventory to the control plane;
   provider context, local paths, and output references stay runner-local.
-- Protocol v79 sends bounded provider-neutral terminal summaries (`id`, launch type, status, and
+- Protocol v83 sends bounded provider-neutral terminal summaries (`id`, launch type, status, and
   terminal time) in both the synthetic continuation prompt and the structured delivery proof.
   It also explicitly classifies every provider as **Managed** or **Untracked**. Untracked is a
   capability warning, not evidence that a detached process exists: Wollipog does not invent a job,
@@ -276,7 +276,7 @@ The lifetime policy is quiescence-aware and fail-safe:
   separate receipts; retries resend only the encrypted notification and never replay a provider
   continuation or arbitrary side effect. Each job mirror retains the exact Machine, workspace, and control-plane
   Location observed at registration without exposing its provider context or output reference.
-  A present v78 inventory is authoritative: jobs missing from a later inventory become inactive
+  A present v82 inventory is authoritative: jobs missing from a later inventory become inactive
   audit tombstones, preventing stopped work from resurfacing as a watchdog after same-session
   restart. An absent inventory still means an older runner and preserves the last known facts.
   Structured delivery events are reconciled in the same transaction as

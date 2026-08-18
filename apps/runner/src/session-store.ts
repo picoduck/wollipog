@@ -33,7 +33,7 @@ import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { TextDecoder } from "node:util";
-import { PROTOCOL_VERSION } from "@wollipog/protocol";
+import { PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL } from "@wollipog/protocol";
 import type {
   AgentCapabilities,
   AgentSlashCommand,
@@ -220,7 +220,7 @@ export interface DurableBackgroundJob {
   continuationSubmittedAt?: number;
   continuationAcceptedAt?: number;
   assistantResultPersistedAt?: number;
-  /** Runner-private proof that v78 structured delivery evidence was durably published. */
+  /** Runner-private proof that v82 structured delivery evidence was durably published. */
   structuredDeliveryPublishedAt?: number;
 }
 
@@ -2234,8 +2234,8 @@ export class SessionStore {
 /** Map persisted metadata to the protocol snapshot the control plane hydrates from. */
 const NATIVE_ELICITATION_OVERLAY_PROTOCOL_VERSION = 66;
 const NATIVE_SLASH_COMMAND_OVERLAY_PROTOCOL_VERSION = 74;
-const MANAGED_BACKGROUND_JOBS_PROTOCOL_VERSION = 80;
-const BACKGROUND_WORK_TRACKING_PROTOCOL_VERSION = 81;
+const MANAGED_BACKGROUND_JOBS_PROTOCOL_VERSION = RUNNER_CAPABILITY_MIN_PROTOCOL.managedBackgroundDelivery;
+const BACKGROUND_WORK_TRACKING_PROTOCOL_VERSION = RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundWorkTracking;
 
 export function metaToSnapshot(
   m: SessionMeta,
