@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -116,24 +118,98 @@ test("provider-home leases never reclaim a record written by another host", (t) 
   stale.releaseAll();
 });
 
-test("a reclaim that finds the record replaced restores the lock instead of stealing it", (t) => {
+test("a reclaim never vacates the lock path a competing owner is excluded by", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-reclaim-window-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const crashed = new ProviderHomeLeaseRegistry("a".repeat(64), { pid: 101, hostname: "host-a" });
+  crashed.acquire(request(home));
+  let foreignError = "";
+  const reclaimer = new ProviderHomeLeaseRegistry("a".repeat(64), {
+    pid: 202,
+    hostname: "host-a",
+    isProcessAlive: () => false,
+    // Stand in for a different attested owner racing the reclaim at its most exposed moment.
+    beforeReclaimPublishForTest: () => {
+      const foreign = new ProviderHomeLeaseRegistry("b".repeat(64), {
+        pid: 303,
+        hostname: "host-a",
+        isProcessAlive: () => false,
+      });
+      try {
+        foreign.acquire(request(home));
+      } catch (error) {
+        foreignError = (error as Error).message;
+      }
+    },
+  });
+  reclaimer.acquire(request(home));
+  assert.match(foreignError, /incomplete.*quarantine/, "a foreign owner must never publish mid-reclaim");
+  assert.equal(readLease(home).pid, 202, "the reclaiming owner still ends up holding the lease");
+  reclaimer.releaseAll();
+});
+
+test("a same-owner reclaim loser reports against the winner instead of double-publishing", (t) => {
   const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-reclaim-race-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
-  const stale = new ProviderHomeLeaseRegistry("a".repeat(64), { pid: 101, hostname: "host-a" });
-  stale.acquire(request(home));
-  // Stand in for a competing runner that reclaimed the dead lease between inspection and rename.
-  const live = { ...readLease(home), leaseId: randomUUID(), pid: 999 };
+  const crashed = new ProviderHomeLeaseRegistry("a".repeat(64), { pid: 101, hostname: "host-a" });
+  crashed.acquire(request(home));
+  // Stand in for a second reclaimer that passed the same inspection and won the exclusive create.
+  const winner = { ...readLease(home), leaseId: randomUUID(), pid: 999 };
   const loser = new ProviderHomeLeaseRegistry("a".repeat(64), {
     pid: 202,
     hostname: "host-a",
     isProcessAlive: (pid) => pid === 999,
-    beforeReclaimConfirmForTest: (quarantine) => {
-      writeFileSync(join(quarantine, "lease.json"), `${JSON.stringify(live)}\n`);
+    beforeReclaimPublishForTest: (lockDir) => {
+      writeFileSync(join(lockDir, "lease.json"), `${JSON.stringify(winner)}\n`, { flag: "wx", mode: 0o600 });
     },
   });
   assert.throws(() => loser.acquire(request(home)), /already in use by process 999/);
-  assert.deepEqual(readdirSync(leaseRoot(home)), ["mutable-home.lock"], "the lock is put back where it was");
-  assert.equal(readLease(home).pid, 999, "the competing runner keeps its lease");
+  assert.equal(readLease(home).pid, 999, "the winner keeps the lease it published");
+  assert.deepEqual(readdirSync(leaseRoot(home)), ["mutable-home.lock"]);
+});
+
+test("an entry appearing during a reclaim surrenders the lease instead of launching beside it", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-reclaim-entry-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const crashed = new ProviderHomeLeaseRegistry("a".repeat(64), { pid: 101, hostname: "host-a" });
+  crashed.acquire(request(home));
+  const reclaimer = new ProviderHomeLeaseRegistry("a".repeat(64), {
+    pid: 202,
+    hostname: "host-a",
+    isProcessAlive: () => false,
+    beforeReclaimPublishForTest: (lockDir) => writeFileSync(join(lockDir, "unexpected"), "x"),
+  });
+  assert.throws(() => reclaimer.acquire(request(home)), /unexpected entries.*refusing unsafe recovery/);
+  assert.equal(existsSync(join(leaseRoot(home), "mutable-home.lock", "lease.json")), false,
+    "the surrendered marker must not stay behind as a lease this runner never held");
+  assert.deepEqual(readdirSync(leaseRoot(home)), ["mutable-home.lock"], "no reclaim residue is created");
+});
+
+test("a symlinked lock directory is never reclaimed through to its target", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-symlink-"));
+  const target = mkdtempSync(join(tmpdir(), "wollipog-provider-home-symlink-target-"));
+  t.after(() => {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(target, { recursive: true, force: true });
+  });
+  mkdirSync(leaseRoot(home), { recursive: true, mode: 0o700 });
+  writeFileSync(join(target, "lease.json"), `${JSON.stringify({
+    version: 1,
+    ownerHash: "a".repeat(64),
+    leaseId: randomUUID(),
+    pid: 101,
+    hostname: "host-a",
+    provider: "codex",
+    createdAt: new Date(0).toISOString(),
+  })}\n`);
+  symlinkSync(target, join(leaseRoot(home), "mutable-home.lock"));
+  const registry = new ProviderHomeLeaseRegistry("a".repeat(64), {
+    pid: 202,
+    hostname: "host-a",
+    isProcessAlive: () => false,
+  });
+  assert.throws(() => registry.acquire(request(home)), /is not a directory.*refusing unsafe recovery/);
+  assert.equal(existsSync(join(target, "lease.json")), true, "the symlink target is left untouched");
 });
 
 test("provider-home leases fail closed for WSL direct mode and bypass redirected bwrap homes", (t) => {

@@ -3,12 +3,12 @@ import {
   closeSync,
   constants,
   fstatSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
   readdirSync,
   realpathSync,
-  renameSync,
   rmdirSync,
   rmSync,
   writeFileSync,
@@ -23,10 +23,6 @@ const PROVIDER_KEY = /^[a-z0-9][a-z0-9-]{0,63}$/u;
 const LEASE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 const MAX_RECORD_BYTES = 4_096;
 const MARKER = "lease.json";
-const RECLAIM_PREFIX = "mutable-home.reclaimed-";
-/** Publication retries allowed after a reclaim hands the lock back unheld. Bounded so a stream
- * of competing runners cannot spin here forever. */
-const RECLAIM_ATTEMPTS = 2;
 
 interface ProviderHomeLeaseRecord {
   version: 1;
@@ -43,7 +39,7 @@ export interface ProviderHomeLeaseOptions {
   hostname?: string;
   isProcessAlive?: (pid: number) => boolean;
   beforeMarkerWriteForTest?: () => void;
-  beforeReclaimConfirmForTest?: (quarantine: string) => void;
+  beforeReclaimPublishForTest?: (lockDir: string) => void;
 }
 
 export interface ProviderHomeLeaseRequest {
@@ -104,7 +100,7 @@ export class ProviderHomeLeaseRegistry {
   private readonly hostname: string;
   private readonly isProcessAlive: (pid: number) => boolean;
   private readonly beforeMarkerWriteForTest?: () => void;
-  private readonly beforeReclaimConfirmForTest?: (quarantine: string) => void;
+  private readonly beforeReclaimPublishForTest?: (lockDir: string) => void;
 
   constructor(private readonly ownerHash: string, options: ProviderHomeLeaseOptions = {}) {
     if (!OWNER_HASH.test(ownerHash)) throw new Error("provider-home lease requires an attested owner hash");
@@ -112,7 +108,7 @@ export class ProviderHomeLeaseRegistry {
     this.hostname = options.hostname ?? systemHostname();
     this.isProcessAlive = options.isProcessAlive ?? defaultProcessAlive;
     this.beforeMarkerWriteForTest = options.beforeMarkerWriteForTest;
-    this.beforeReclaimConfirmForTest = options.beforeReclaimConfirmForTest;
+    this.beforeReclaimPublishForTest = options.beforeReclaimPublishForTest;
   }
 
   acquire(request: ProviderHomeLeaseRequest): void {
@@ -143,34 +139,28 @@ export class ProviderHomeLeaseRegistry {
       provider,
       createdAt: new Date().toISOString(),
     };
-    for (let attempt = 0; attempt <= RECLAIM_ATTEMPTS; attempt++) {
-      let lockCreated = false;
-      try {
-        mkdirSync(lockDir, { mode: 0o700 });
-        lockCreated = true;
-        this.beforeMarkerWriteForTest?.();
-        writeFileSync(join(lockDir, MARKER), `${JSON.stringify(record)}\n`, { flag: "wx", mode: 0o600 });
-        this.held.set(key, { leaseId, lockDir });
-        return;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-          // No provider has launched yet, so this call can safely unwind only the lock it created.
-          if (lockCreated) {
-            rmSync(join(lockDir, MARKER), { force: true });
-            try {
-              rmdirSync(lockDir);
-            } catch {
-              // Unexpected concurrent entries remain fail-closed and available for inspection.
-            }
+    let lockCreated = false;
+    try {
+      mkdirSync(lockDir, { mode: 0o700 });
+      lockCreated = true;
+      this.beforeMarkerWriteForTest?.();
+      writeFileSync(join(lockDir, MARKER), `${JSON.stringify(record)}\n`, { flag: "wx", mode: 0o600 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        // No provider has launched yet, so this call can safely unwind only the lock it created.
+        if (lockCreated) {
+          rmSync(join(lockDir, MARKER), { force: true });
+          try {
+            rmdirSync(lockDir);
+          } catch {
+            // Unexpected concurrent entries remain fail-closed and available for inspection.
           }
-          throw error;
         }
-        if (attempt === RECLAIM_ATTEMPTS) break;
-        // Reclaiming leaves the lock unheld, so publication is retried rather than resolved here.
-        this.reclaimAbandonedLease(root, lockDir, leaseId);
+        throw error;
       }
+      this.reclaimAbandonedLease(lockDir, record);
     }
-    this.rejectExistingLease(lockDir);
+    this.held.set(key, { leaseId, lockDir });
   }
 
   /** True only for a record this same runner identity abandoned on this host. A different attested
@@ -183,56 +173,51 @@ export class ProviderHomeLeaseRegistry {
   }
 
   /**
-   * Move an abandoned lock aside so the caller can publish a fresh one, restoring the previous
-   * requirement that a crashed runner recovers without hand-editing the filesystem.
+   * Republish this runner's record over a lease its own crashed instance abandoned, so a restart
+   * recovers without hand-editing the filesystem.
    *
-   * The rename is the mutual exclusion: it is atomic, the destination is unique to this attempt,
-   * and every loser observes ENOENT and retries against whichever lock exists next. The record is
-   * re-read afterwards because a competing reclaim can replace a dead lease with a live one between
-   * the inspection and the move; that lock is put back untouched and left to manual recovery.
+   * The lock directory is never moved or removed. Its continued existence is the whole exclusion
+   * mechanism, and any window where the canonical path is absent would let a different attested
+   * owner publish a lease without ever observing this record. Competing owners therefore keep
+   * seeing the directory throughout, and a same-owner competitor is resolved by the exclusive
+   * marker create: exactly one reclaimer can publish, and the loser reports against the winner.
+   * Only the brief moment with no marker is observable, and every acquirer already fails closed on
+   * that incomplete state.
    */
-  private reclaimAbandonedLease(root: string, lockDir: string, attemptId: string): void {
-    const entries = readdirSync(lockDir);
-    if (entries.length !== 1 || entries[0] !== MARKER) this.rejectExistingLease(lockDir);
-    if (!this.isAbandonedByThisOwner(readRecord(join(lockDir, MARKER)))) this.rejectExistingLease(lockDir);
-    const quarantine = join(root, `${RECLAIM_PREFIX}${attemptId}`);
+  private reclaimAbandonedLease(lockDir: string, record: ProviderHomeLeaseRecord): void {
+    // readdir and the marker write both follow a symlinked lock out of the canonical HOME, so a
+    // link is never a reclaimable lease no matter what the record inside it says.
+    const marker = join(lockDir, MARKER);
     try {
-      renameSync(lockDir, quarantine);
+      if (!lstatSync(lockDir).isDirectory()) {
+        throw new Error(`provider home lease path ${lockDir} is not a directory; refusing unsafe recovery`);
+      }
+      const entries = readdirSync(lockDir);
+      if (entries.length !== 1 || entries[0] !== MARKER) this.rejectExistingLease(lockDir);
+      if (!this.isAbandonedByThisOwner(readRecord(marker))) this.rejectExistingLease(lockDir);
     } catch (error) {
-      // A competing reclaim already moved this lock; retry against the current holder.
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      // The holder released between the failed publication and this inspection; nothing is proven
+      // about the lease that exists now, so re-run acquisition rather than assume it is reclaimable.
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        throw new Error(`provider home lease at ${lockDir} was released during recovery; retry the launch`);
+      }
       throw error;
     }
-    let confirmed: ProviderHomeLeaseRecord;
+    rmSync(marker, { force: true });
     try {
-      this.beforeReclaimConfirmForTest?.(quarantine);
-      confirmed = readRecord(join(quarantine, MARKER));
+      this.beforeReclaimPublishForTest?.(lockDir);
+      writeFileSync(marker, `${JSON.stringify(record)}\n`, { flag: "wx", mode: 0o600 });
     } catch (error) {
-      this.restoreReclaimedLease(quarantine, lockDir);
-      throw error;
-    }
-    if (!this.isAbandonedByThisOwner(confirmed)) {
-      this.restoreReclaimedLease(quarantine, lockDir);
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      // A competing reclaim published first; report against whichever record now holds the lease.
       this.rejectExistingLease(lockDir);
     }
-    // The record is proven to name this owner's dead process, so its evidence is ours to discard.
-    rmSync(join(quarantine, MARKER), { force: true });
-    try {
-      rmdirSync(quarantine);
-    } catch {
-      // Unexpected concurrent entries remain fail-closed and available for inspection.
-    }
-  }
-
-  private restoreReclaimedLease(quarantine: string, lockDir: string): void {
-    try {
-      renameSync(quarantine, lockDir);
-    } catch (error) {
-      throw new Error(
-        `provider home lease could not be restored to ${lockDir} after an aborted reclaim; the ` +
-          `record is preserved at ${quarantine} and requires manual recovery`,
-        { cause: error },
-      );
+    // An entry that appeared after the check above cannot be attributed, so surrender the lease
+    // rather than launch a provider beside it.
+    const settled = readdirSync(lockDir);
+    if (settled.length !== 1 || settled[0] !== MARKER) {
+      rmSync(marker, { force: true });
+      this.rejectExistingLease(lockDir);
     }
   }
 

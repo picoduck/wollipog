@@ -171,8 +171,8 @@ other mutable state cannot prove that an old process has stopped.
 An abandoned same-host process lease is reclaimed only after its recorded process is no longer
 alive. A separate atomic recovery guard serializes stale reapers; if recovery itself is interrupted,
 startup fails closed until an operator verifies no runner is active and removes the named guard.
-The provider-home lease below serializes its own reclaim with an atomic rename instead, so an
-interrupted reclaim cannot leave a guard that blocks every later recovery.
+The provider-home lease below needs no such guard: it reclaims in place, so an interrupted reclaim
+leaves at worst the already-handled incomplete-lock state rather than a new class of wedge.
 Leases from another host and malformed lease metadata fail closed. Owner, lease, recovery-guard,
 and migrated credential publication is crash-durable on platforms that support directory flushes:
 new directory entries are flushed in order, file contents are flushed before the exclusive hard
@@ -204,9 +204,11 @@ worktrees unavailable until the root is restored or the session is explicitly mi
 and back up the shared roots before acknowledging that operation.
 A stale provider-home lease is reclaimed automatically only when the record names this same
 attested owner on this same hostname and its recorded process is no longer alive. The reclaim
-renames the lock aside under a name unique to the attempt, so exactly one contender wins and the
-losers retry; the record is re-read after the move and the lock is restored untouched if a competing
-runner replaced it in the meantime. A record from another attested owner, another host, a live
+replaces only the marker and never moves or removes the lock directory itself, because the
+directory's continued existence is what excludes every other owner; a single exclusive marker create
+picks one winner among same-owner reclaimers, and the loser reports against the winner. A symlinked
+lock is refused outright rather than followed out of the canonical HOME. A record from another
+attested owner, another host, a live
 process, an incomplete lock, or unexpected directory entries still fails closed with manual
 quarantine guidance. Remove one of those only after proving no provider process is using that HOME.
 
