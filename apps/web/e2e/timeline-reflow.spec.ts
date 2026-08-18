@@ -1005,3 +1005,66 @@ test("a removed persisted anchor clamps to the nearest surviving ordinal", async
   await expect(reader).toHaveAttribute("data-follow-tail-state", "paused");
   await expect.poll(async () => (await visibleAnchor(page))?.key).toBe("item:agent_message:1003");
 });
+
+test("composer growth and shrink are layout-owned: following re-pins and a near-tail pause survives the clamp", async ({ page }) => {
+  await page.goto("/timeline-reflow-e2e.html?follow=1");
+  const reader = page.getByTestId("reader");
+  await expect(page.locator("[data-virtual-row]").first()).toBeVisible();
+  await expect(reader).toHaveAttribute("data-follow-tail-state", "following");
+  await expect.poll(() => distanceFromTail(page)).toBeLessThanOrEqual(2);
+
+  // A wrapping draft grows the composer: the viewport shrinks and following stays pinned.
+  await page.getByTestId("grow-composer").click();
+  await settleLayout(page);
+  await expect(reader).toHaveAttribute("data-follow-tail-state", "following");
+  await expect.poll(() => distanceFromTail(page)).toBeLessThanOrEqual(2);
+
+  // The reader pauses just above the tail, inside the delta the coming shrink will reclaim.
+  await page.getByTestId("pause-follow").click();
+  await reader.evaluate((element) => {
+    element.scrollTop -= 40;
+    element.dispatchEvent(new Event("scroll"));
+  });
+  await settleLayout(page, 6);
+  await expect(reader).toHaveAttribute("data-follow-tail-state", "paused");
+  const pausedDistance = await distanceFromTail(page);
+  expect(pausedDistance).toBeGreaterThan(2);
+  expect(pausedDistance).toBeLessThan(72);
+
+  // Deleting the draft shrinks the composer: Chromium grows the viewport and clamps scrollTop
+  // onto the new bottom with its native ResizeObserver/scroll delivery order. That landing is the
+  // browser's, not the reader's — the pause must survive it.
+  await page.getByTestId("shrink-composer").click();
+  await settleLayout(page, 16);
+  await expect.poll(() => distanceFromTail(page)).toBeLessThanOrEqual(2);
+  await expect(reader).toHaveAttribute("data-follow-tail-state", "paused");
+  await page.waitForTimeout(200);
+  await expect(reader).toHaveAttribute("data-follow-tail-state", "paused");
+});
+
+test("a reader-driven return to a streaming tail resumes following", async ({ page }) => {
+  await page.goto("/timeline-reflow-e2e.html?follow=1");
+  const reader = page.getByTestId("reader");
+  await expect(page.locator("[data-virtual-row]").first()).toBeVisible();
+  await expect(reader).toHaveAttribute("data-follow-tail-state", "following");
+  await expect.poll(() => distanceFromTail(page)).toBeLessThanOrEqual(2);
+
+  // A real upward wheel gesture pauses well above the tail.
+  const box = await reader.boundingBox();
+  expect(box).not.toBeNull();
+  await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+  await page.mouse.wheel(0, -600);
+  await expect(reader).toHaveAttribute("data-follow-tail-state", "paused");
+  await expect.poll(() => distanceFromTail(page)).toBeGreaterThan(48);
+
+  // A fresh chunk streams in, then the reader lands on the tail through a bare scrollBy — the
+  // reading keys' scroll path, with no wheel or pointer event attached — while the new row's
+  // measurements are still churning the geometry. The landing deviates from any layout
+  // prediction, so it is reader-owned and must resume live following.
+  await page.getByTestId("stream-tail").click();
+  await reader.evaluate((element) => {
+    element.scrollBy({ top: element.scrollHeight });
+  });
+  await expect(reader).toHaveAttribute("data-follow-tail-state", "following");
+  await expect.poll(() => distanceFromTail(page)).toBeLessThanOrEqual(2);
+});
