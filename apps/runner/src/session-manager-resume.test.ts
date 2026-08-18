@@ -1967,6 +1967,16 @@ test("two idle managed-job completions cross one durable barrier and resume the 
       1,
       "the continuation never impersonates a second user message",
     );
+    assert.deepEqual(
+      h.store.readEvents("resume-session").flatMap((event) =>
+        event.payload.kind === "background_continuation_delivered" ? [event.payload] : []),
+      [{
+        kind: "background_continuation_delivered",
+        continuationId: delivered[0]!.continuationId,
+        parentTurnId: delivered[0]!.parentTurnId,
+      }],
+      "v78 emits one structured, replayable delivery proof for the parent barrier",
+    );
     const stderr = h.store.readEvents("resume-session").flatMap((event) =>
       event.payload.kind === "stderr" ? [event.payload.text] : []);
     assert.ok(stderr.includes("Runner continued after managed background work completed."));
@@ -2104,8 +2114,10 @@ test("a partial assistant stream does not complete an accepted continuation", as
     assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, "continuation_pending");
     assert.equal(
       h.store.readEvents("resume-session").some((event) =>
-        event.payload.kind === "stderr" &&
-        event.payload.text === "Managed background continuation delivered: bgcont-partial"),
+        (event.payload.kind === "stderr" &&
+          event.payload.text === "Managed background continuation delivered: bgcont-partial") ||
+        (event.payload.kind === "background_continuation_delivered" &&
+          event.payload.continuationId === "bgcont-partial")),
       false,
     );
   } finally {
@@ -2371,7 +2383,7 @@ test("a definite pre-acceptance continuation failure clears submission for a saf
   }
 });
 
-test("startup reconciles a durable delivery marker written before the metadata acknowledgement", () => {
+test("startup reconciles structured delivery evidence written before the metadata acknowledgement", () => {
   const h = harness({
     driver: "claude-code",
     backgroundWorkState: "continuation_pending",
@@ -2387,13 +2399,92 @@ test("startup reconciles a durable delivery marker written before the metadata a
     h.store.appendEvent("resume-session", {
       kind: "stderr",
       text: "Managed background continuation delivered: bgcont-crash-window",
-      runnerMarker: "background_continuation_delivery",
+    });
+    h.manager.reconcileStore();
+    assert.equal(
+      h.store.readMeta("resume-session")?.backgroundJobs?.[0]?.assistantResultPersistedAt,
+      undefined,
+      "provider-authored stderr cannot impersonate runner delivery evidence",
+    );
+    h.store.appendEvent("resume-session", {
+      kind: "background_continuation_delivered",
+      continuationId: "bgcont-crash-window",
+      parentTurnId: "turn-a",
     });
     h.manager.reconcileStore();
     const reconciled = h.store.readMeta("resume-session");
     assert.ok(reconciled?.backgroundJobs?.[0]?.assistantResultPersistedAt);
     assert.equal(reconciled?.backgroundWorkState, "resumed");
     assert.deepEqual(h.prompts, [], "reconciliation never submits a second provider turn");
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("pre-v78 delivery emits authenticated legacy evidence", () => {
+  const h = harness({
+    driver: "claude-code",
+    backgroundWorkState: "continuation_pending",
+    backgroundJobs: [{
+      id: "legacy-job", parentTurnId: "turn-a", runnerId: "runner", workspaceId: "workspace",
+      context: { kind: "native" }, launchType: "agent", registeredAt: 1,
+      terminalStatus: "completed", terminalObservedAt: 2, continuationRequired: true,
+      continuationQueuedAt: 3, continuationId: "bgcont-legacy",
+      continuationSubmittedAt: 4, continuationAcceptedAt: 5,
+    }],
+  });
+  try {
+    Object.defineProperty(h.manager, "controlPlaneProtocolVersion", { value: () => 77 });
+    // Exercise the crash-sensitive finalization boundary directly: the delivery proof must be
+    // durable before the runner marks the job's assistant result persisted.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (h.manager as any).finishBackgroundContinuation("resume-session", ["legacy-job"]);
+    assert.deepEqual(
+      h.store.readEvents("resume-session").map((event) => event.payload),
+      [{
+        kind: "stderr",
+        text: "Managed background continuation delivered: bgcont-legacy",
+        runnerMarker: "background_continuation_delivery",
+      }],
+    );
+    assert.ok(h.store.readMeta("resume-session")?.backgroundJobs?.[0]?.assistantResultPersistedAt);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("v78 registration upgrades legacy delivery evidence exactly once, including stopped sessions", () => {
+  const h = harness({
+    driver: "claude-code",
+    status: "stopped",
+    backgroundWorkState: "resumed",
+    backgroundJobs: [{
+      id: "legacy-job", parentTurnId: "turn-a", runnerId: "runner", workspaceId: "workspace",
+      context: { kind: "native" }, launchType: "agent", registeredAt: 1,
+      terminalStatus: "completed", terminalObservedAt: 2, continuationRequired: true,
+      continuationQueuedAt: 3, continuationId: "bgcont-legacy",
+      continuationSubmittedAt: 4, continuationAcceptedAt: 5, assistantResultPersistedAt: 6,
+    }],
+  });
+  try {
+    h.store.appendEvent("resume-session", {
+      kind: "stderr",
+      text: "Managed background continuation delivered: bgcont-legacy",
+      runnerMarker: "background_continuation_delivery",
+    });
+    h.manager.recoverAllOrphanedWork();
+    const structured = () => h.store.readEvents("resume-session").filter((event) =>
+      event.payload.kind === "background_continuation_delivered");
+    assert.equal(structured().length, 1);
+    assert.equal(
+      h.store.readMeta("resume-session")?.backgroundJobs?.[0]?.structuredDeliveryPublishedAt,
+      structured()[0]!.ts,
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (h.manager as any).upgradeLegacyBackgroundDeliveryEvidence(h.store.readMeta("resume-session"));
+    assert.equal(structured().length, 1, "the durable publication marker prevents reconnect duplicates");
   } finally {
     h.manager.shutdownAll();
     h.cleanup();

@@ -6659,6 +6659,44 @@ test("onSessionEvent advances the hydration high-water only contiguously (gap-sa
   assert.equal(db.listEvents("s_box1", 0).length, 2);
 });
 
+test("live structured continuation evidence projects delivery stages and rebroadcasts the session", () => {
+  const { db, hub, svc } = makeHarness();
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+    driver: "claude_code",
+    historyEpoch: 7,
+    seq: 1,
+    backgroundWorkState: "resumed",
+    backgroundJobs: [{
+      id: "job-live",
+      parentTurnId: "turn-live",
+      runnerId: RUNNER_ID,
+      workspaceId: "workspace",
+      launchType: "agent",
+      registeredAt: 1_000,
+      terminalStatus: "completed",
+      terminalObservedAt: 1_100,
+      continuationRequired: true,
+      continuationId: "bgcont-live",
+      continuationQueuedAt: 1_200,
+      continuationSubmittedAt: 1_300,
+      continuationAcceptedAt: 1_400,
+      assistantResultPersistedAt: 1_500,
+    }],
+  })]);
+  hub.sessionChangedByIdCalls.length = 0;
+  svc.onSessionEvent("s_box1", {
+    kind: "background_continuation_delivered",
+    continuationId: "bgcont-live",
+    parentTurnId: "turn-live",
+  }, 1, 1_500, RUNNER_ID);
+
+  const delivery = db.getSession("s_box1")?.backgroundDeliveries?.[0];
+  assert.equal(delivery?.transcriptProjectedAt, 1_500);
+  assert.equal(delivery?.notificationQueuedAt, 1_500);
+  assert.equal(delivery?.watchdogState, "dashboard_observation_pending");
+  assert.ok(hub.sessionChangedByIdCalls.includes("s_box1"));
+});
+
 test("large live event payloads persist and broadcast only a bounded artifact-backed preview", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);

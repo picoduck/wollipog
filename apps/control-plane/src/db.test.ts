@@ -2051,6 +2051,254 @@ test("background work state round-trips through runner snapshot create and updat
   assert.equal(db.getSession("background-work")?.backgroundWorkState, "resumed");
 });
 
+test("managed background delivery stages survive reconnect, hydration, acknowledgement, and restart", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-background-delivery-"));
+  const dbPath = join(root, "control-plane.db");
+  try {
+    let db = ControlPlaneDb.open(dbPath);
+    db.registerRunner(meta(), 500, PROTOCOL_VERSION);
+    const baseJob = {
+      id: "job-1",
+      parentTurnId: "turn-1",
+      runnerId: "runner-1",
+      workspaceId: null,
+      launchType: "agent" as const,
+      registeredAt: 1_000,
+      terminalStatus: "completed" as const,
+      terminalObservedAt: 1_100,
+      continuationRequired: true,
+    };
+    db.createSessionFromSnapshot(snapshot({
+      id: "background-delivery",
+      driver: "claude_code",
+      historyEpoch: 4,
+      backgroundWorkState: "continuation_pending",
+      backgroundJobs: [baseJob],
+    }), "runner-1", 2_000);
+    assert.deepEqual({ ...db.raw().prepare(
+      `SELECT runner_id, workspace_id, project_location_id
+         FROM managed_background_jobs WHERE session_id=? AND job_id=?`,
+    ).get("background-delivery", "job-1") }, {
+      runner_id: "runner-1",
+      workspace_id: null,
+      project_location_id: null,
+    });
+    assert.deepEqual(db.getSession("background-delivery")?.backgroundDeliveries, [{
+      parentTurnId: "turn-1",
+      jobCount: 1,
+      terminalCount: 1,
+      watchdogState: "terminal_without_continuation",
+    }]);
+
+    db.updateSessionFromSnapshot("background-delivery", snapshot({
+      id: "background-delivery",
+      driver: "claude_code",
+      backgroundWorkState: "continuation_pending",
+      backgroundJobs: [{
+        ...baseJob,
+        continuationId: "bgcont-1",
+        continuationQueuedAt: 1_200,
+        continuationSubmittedAt: 1_300,
+        continuationAcceptedAt: 1_400,
+      }],
+    }), 2_100);
+    assert.equal(
+      db.getSession("background-delivery")?.backgroundDeliveries?.[0]?.watchdogState,
+      "accepted_without_result",
+    );
+
+    db.updateSessionFromSnapshot("background-delivery", snapshot({
+      id: "background-delivery",
+      driver: "claude_code",
+      backgroundWorkState: "resumed",
+      backgroundJobs: [{
+        ...baseJob,
+        continuationId: "bgcont-1",
+        continuationQueuedAt: 1_200,
+        continuationSubmittedAt: 1_300,
+        continuationAcceptedAt: 1_400,
+        assistantResultPersistedAt: 1_500,
+      }],
+    }), 2_200);
+    assert.equal(
+      db.getSession("background-delivery")?.backgroundDeliveries?.[0]?.watchdogState,
+      "result_not_projected",
+    );
+
+    db.appendEvent("background-delivery", {
+      kind: "background_continuation_delivered",
+      continuationId: "bgcont-1",
+      parentTurnId: "turn-1",
+    }, 1_500);
+    const projected = db.getSession("background-delivery")?.backgroundDeliveries?.[0];
+    assert.equal(projected?.transcriptProjectedAt, 1_500);
+    assert.equal(projected?.notificationQueuedAt, 1_500);
+    assert.equal(projected?.watchdogState, "dashboard_observation_pending");
+    assert.equal(db.acknowledgeBackgroundDelivery("background-delivery", "bgcont-1", 1_600), true);
+    assert.equal(db.acknowledgeBackgroundDelivery("background-delivery", "bgcont-1", 1_700), false);
+    assert.equal(db.getSession("background-delivery")?.backgroundDeliveries?.[0]?.watchdogState, undefined);
+
+    // A pre-v78 reconnect omits the inventory; it must not erase already-acknowledged evidence.
+    db.updateSessionFromSnapshot("background-delivery", snapshot({
+      id: "background-delivery",
+      driver: "claude_code",
+      backgroundWorkState: "resumed",
+    }), 2_300);
+    assert.equal(db.getSession("background-delivery")?.backgroundDeliveries?.[0]?.dashboardObservedAt, 1_600);
+
+    const reset = db.reconcileRunnerHistory("background-delivery", 5, 1);
+    assert.equal(reset?.reset, true);
+    assert.equal(
+      db.getSession("background-delivery")?.backgroundDeliveries?.[0]?.watchdogState,
+      "result_not_projected",
+    );
+    assert.equal(
+      db.getSession("background-delivery")?.backgroundDeliveries?.[0]?.dashboardObservedAt,
+      1_600,
+      "history replacement invalidates projection without inventing a second notification",
+    );
+    assert.equal(db.appendHydratedPage(
+      "background-delivery",
+      { afterSeq: 0, historyEpoch: 5, eventEpoch: reset!.eventEpoch },
+      [{
+        seq: 1,
+        ts: 1_500,
+        payload: {
+          kind: "background_continuation_delivered",
+          continuationId: "bgcont-1",
+          parentTurnId: "turn-1",
+        },
+      }],
+    ).applied, true);
+    assert.equal(db.getSession("background-delivery")?.backgroundDeliveries?.[0]?.watchdogState, undefined);
+
+    db.createSessionFromSnapshot(snapshot({
+      id: "background-required-promotion",
+      backgroundJobs: [{
+        id: "job-promote",
+        parentTurnId: "turn-promote",
+        runnerId: "runner-1",
+        workspaceId: null,
+        launchType: "unknown",
+        registeredAt: 10,
+        continuationRequired: false,
+      }],
+    }), "runner-1", 2_350);
+    db.updateSessionFromSnapshot("background-required-promotion", snapshot({
+      id: "background-required-promotion",
+      backgroundJobs: [{
+        id: "job-promote",
+        parentTurnId: "turn-promote",
+        runnerId: "runner-1",
+        workspaceId: null,
+        launchType: "agent",
+        registeredAt: 10,
+        terminalStatus: "completed",
+        terminalObservedAt: 20,
+        continuationRequired: true,
+        continuationId: "bgcont-promote",
+        continuationAcceptedAt: 30,
+      }],
+    }), 2_360);
+    assert.equal(
+      db.getSession("background-required-promotion")?.backgroundDeliveries?.[0]?.watchdogState,
+      "accepted_without_result",
+      "runner facts advance monotonically from provisional false/unknown values",
+    );
+
+    assert.doesNotThrow(() => db.createSessionFromSnapshot(snapshot({
+      id: "background-malformed",
+      backgroundJobs: [
+        null,
+        { ...baseJob, id: null },
+        { ...baseJob, workspaceId: undefined },
+        { ...baseJob, continuationAcceptedAt: "not-a-timestamp" },
+      ] as never,
+    }), "runner-1", 2_370));
+    assert.equal(Number(db.raw().prepare(
+      "SELECT COUNT(*) AS count FROM managed_background_jobs WHERE session_id=?",
+    ).get("background-malformed")?.count), 0, "malformed runtime JSON is ignored instead of throwing");
+
+    db.createSessionFromSnapshot(snapshot({
+      id: "background-stopped",
+      status: "running",
+      backgroundJobs: [{
+        ...baseJob,
+        id: "job-stopped",
+        continuationId: "bgcont-stopped",
+        continuationAcceptedAt: 40,
+      }],
+    }), "runner-1", 2_380);
+    assert.equal(
+      db.getSession("background-stopped")?.backgroundDeliveries?.[0]?.watchdogState,
+      "accepted_without_result",
+    );
+    db.updateSessionFromSnapshot("background-stopped", snapshot({
+      id: "background-stopped",
+      status: "stopped",
+      backgroundJobs: [],
+    }), 2_390);
+    assert.equal(
+      db.getSession("background-stopped")?.backgroundDeliveries?.[0]?.watchdogState,
+      undefined,
+      "a deliberately stopped session retains evidence without a permanent incomplete-stage alarm",
+    );
+    assert.equal(Number((db.raw().prepare(
+      "SELECT source_present FROM managed_background_jobs WHERE session_id=? AND job_id=?",
+    ).get("background-stopped", "job-stopped") as { source_present: number }).source_present), 0);
+    db.updateSessionFromSnapshot("background-stopped", snapshot({
+      id: "background-stopped",
+      status: "starting",
+      backgroundJobs: [],
+    }), 2_400);
+    assert.equal(
+      db.getSession("background-stopped")?.backgroundDeliveries?.[0]?.watchdogState,
+      undefined,
+      "same-session restart cannot resurrect evidence retired by the authoritative empty inventory",
+    );
+    db.close();
+
+    db = ControlPlaneDb.open(dbPath);
+    assert.equal(db.getSession("background-delivery")?.backgroundDeliveries?.[0]?.dashboardObservedAt, 1_600);
+
+    db.createSessionFromSnapshot(snapshot({
+      id: "background-indexed",
+      driver: "claude_code",
+      historyEpoch: 4,
+      seq: 1,
+      backgroundJobs: [{
+        ...baseJob,
+        id: "job-2",
+        parentTurnId: "turn-2",
+        continuationId: "bgcont-2",
+        continuationAcceptedAt: 2_400,
+        assistantResultPersistedAt: 2_500,
+      }],
+    }), "runner-1", 2_400);
+    const applied = db.appendHydratedPage(
+      "background-indexed",
+      { afterSeq: 0, historyEpoch: 4, eventEpoch: 0 },
+      [{
+        seq: 1,
+        ts: 2_500,
+        payload: {
+          kind: "background_continuation_delivered",
+          continuationId: "bgcont-2",
+          parentTurnId: "turn-2",
+        },
+      }],
+    );
+    assert.equal(applied.applied, true);
+    assert.equal(
+      db.getSession("background-indexed")?.backgroundDeliveries?.[0]?.watchdogState,
+      "dashboard_observation_pending",
+    );
+    db.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("secret-free ACP context hydrates from runner snapshots and survives an old-runner update", () => {
   const db = withRunner();
   const acpSessionContext = {

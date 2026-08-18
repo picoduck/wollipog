@@ -7,6 +7,9 @@ import {
   isRunnerRequestTimeoutError,
   MAX_UI_CLIENTS,
   MAX_UI_CLIENTS_PER_ADMISSION_KEY,
+  MAX_UI_BACKGROUND_OBSERVATIONS_PER_CONNECTION,
+  MAX_UI_BACKGROUND_OBSERVATIONS_PER_WINDOW,
+  UI_BACKGROUND_OBSERVATION_RATE_WINDOW_MS,
   UI_CONNECTION_RATE_WINDOW_MS,
   MAX_UI_BUFFERED_BYTES,
   MAX_UI_QUEUED_MESSAGES,
@@ -118,6 +121,89 @@ const snapshotDb = {
   listRuns: () => [],
   listPods: () => [],
 } as unknown as ControlPlaneDb;
+
+test("dashboard background delivery acknowledgements are session-authorized and idempotent", () => {
+  const acknowledged: string[] = [];
+  const db = {
+    ...snapshotDb,
+    canAccessSession: (_principal: unknown, sessionId: string) => sessionId === "allowed",
+    acknowledgeBackgroundDelivery: (sessionId: string, continuationId: string) => {
+      acknowledged.push(`${sessionId}:${continuationId}`);
+      return true;
+    },
+    getSession: () => null,
+  } as unknown as ControlPlaneDb;
+  const hub = new Hub(db);
+  const client = { send: () => {} };
+  hub.addUiClient(client, {
+    deviceId: "device-1",
+    principal: { kind: "human", organizationId: "org", userId: "user", deviceId: "device-1" },
+    close: () => {},
+  });
+  assert.equal(hub.acknowledgeUiBackgroundDelivery(client, "denied", "bgcont-1", 10), false);
+  assert.deepEqual(acknowledged, []);
+  assert.equal(hub.acknowledgeUiBackgroundDelivery(client, "allowed", "bgcont-1", 11), true);
+  assert.deepEqual(acknowledged, ["allowed:bgcont-1"]);
+  assert.equal(hub.acknowledgeUiBackgroundDelivery(client, "allowed", "bgcont-1", 12), false);
+  assert.deepEqual(acknowledged, ["allowed:bgcont-1"], "one connection cannot replay the same database write");
+  assert.equal(hub.acknowledgeUiBackgroundDelivery({ send: () => {} }, "allowed", "bgcont-1", 12), false);
+});
+
+test("background delivery acknowledgement retries after authorization and rotates its bounded cache", () => {
+  let authorized = false;
+  const acknowledged: string[] = [];
+  const db = {
+    ...snapshotDb,
+    canAccessSession: () => authorized,
+    acknowledgeBackgroundDelivery: (_sessionId: string, continuationId: string) => {
+      acknowledged.push(continuationId);
+      return true;
+    },
+    getSession: () => null,
+  } as unknown as ControlPlaneDb;
+  const hub = new Hub(db);
+  const client = { send: () => {} };
+  hub.addUiClient(client, {
+    deviceId: "device-retry",
+    principal: { kind: "human", organizationId: "org", userId: "user", deviceId: "device-retry" },
+    close: () => {},
+  });
+  assert.equal(hub.acknowledgeUiBackgroundDelivery(client, "session", "retry", 10), false);
+  authorized = true;
+  assert.equal(hub.acknowledgeUiBackgroundDelivery(client, "session", "retry", 11), true);
+
+  for (let i = 0; i <= MAX_UI_BACKGROUND_OBSERVATIONS_PER_CONNECTION; i++) {
+    assert.equal(hub.acknowledgeUiBackgroundDelivery(client, "session", `continuation-${i}`, 20 + i * 100), true);
+  }
+  assert.equal(
+    hub.acknowledgeUiBackgroundDelivery(client, "session", "continuation-0", 200_000),
+    true,
+    "the bounded dedupe cache evicts oldest keys instead of permanently disabling acknowledgements",
+  );
+
+  for (let i = 0; i < MAX_UI_BACKGROUND_OBSERVATIONS_PER_WINDOW; i++) {
+    assert.equal(
+      hub.acknowledgeUiBackgroundDelivery(client, "session", `rate-${i}`, 300_000),
+      true,
+    );
+  }
+  assert.equal(
+    hub.acknowledgeUiBackgroundDelivery(client, "session", "rate-over", 300_000),
+    false,
+    "the fixed-window admission limit blocks DB work after its bounded allowance",
+  );
+  assert.equal(
+    hub.acknowledgeUiBackgroundDelivery(
+      client,
+      "session",
+      "rate-next-window",
+      300_000 + UI_BACKGROUND_OBSERVATION_RATE_WINDOW_MS,
+    ),
+    true,
+    "a later window restores acknowledgement admission",
+  );
+  assert.ok(acknowledged.includes("retry"));
+});
 
 test("project upserts build only the changed principal-scoped Project view", () => {
   const globalProject: ProjectView = {

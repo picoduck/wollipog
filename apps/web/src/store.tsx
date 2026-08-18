@@ -29,7 +29,7 @@ import {
   type UiConnectionRuntime,
   type UiSocket,
 } from "./ui-transport.js";
-import { notifier, notifyDecision } from "./notify.js";
+import { backgroundDeliveryNotifyDecisions, notifier, notifyDecision, type NotifyPayload } from "./notify.js";
 import {
   ACTIVITY_BUCKET_MS,
   isSessionStalled,
@@ -86,6 +86,62 @@ export const INBOX_DEFAULT_SPLIT_RATIO = INBOX_DEFAULT_RATIO;
 export const INBOX_MIN_SPLIT_RATIO = INBOX_SPLIT_RATIO_MIN;
 export const INBOX_MAX_SPLIT_RATIO = INBOX_SPLIT_RATIO_MAX;
 export { clampInboxSplitRatio, parseInboxSplitRatio };
+
+/** Slightly exceeds the control plane's fixed 10-second admission window. */
+export const BACKGROUND_OBSERVATION_RETRY_MS = 10_500;
+
+interface BackgroundObservationAttempt {
+  sessionId: string;
+  continuationId: string;
+  attemptedAt: number;
+}
+
+/** Prevent each acknowledgement-triggered session upsert from replaying every still-pending
+ * acknowledgement. Failed/rate-limited sends remain recoverable on one bounded retry clock. */
+export class BackgroundDeliveryObservationTracker {
+  private readonly attempts = new Map<string, BackgroundObservationAttempt>();
+
+  due(sessions: readonly SessionView[], now: number, authoritative = false): UiToControlPlane[] {
+    const providedSessionIds = new Set(sessions.map((session) => session.id));
+    if (authoritative) {
+      for (const [key, attempt] of this.attempts) {
+        if (!providedSessionIds.has(attempt.sessionId)) this.attempts.delete(key);
+      }
+    }
+    const messages: UiToControlPlane[] = [];
+    for (const session of sessions) {
+      const pending = new Map((session.backgroundDeliveries ?? []).flatMap((delivery) =>
+        delivery.continuationId && delivery.notificationQueuedAt != null &&
+          delivery.dashboardObservedAt == null
+          ? [[JSON.stringify([session.id, delivery.continuationId]), delivery.continuationId] as const]
+          : []));
+      for (const [key, attempt] of this.attempts) {
+        if (attempt.sessionId === session.id && !pending.has(key)) this.attempts.delete(key);
+      }
+      for (const [key, continuationId] of pending) {
+        const prior = this.attempts.get(key);
+        if (prior && now >= prior.attemptedAt &&
+            now - prior.attemptedAt < BACKGROUND_OBSERVATION_RETRY_MS) continue;
+        this.attempts.set(key, { sessionId: session.id, continuationId, attemptedAt: now });
+        messages.push({ type: "background_delivery_observed", sessionId: session.id, continuationId });
+      }
+    }
+    return messages;
+  }
+
+  nextRetryAt(): number | undefined {
+    let next: number | undefined;
+    for (const attempt of this.attempts.values()) {
+      const candidate = attempt.attemptedAt + BACKGROUND_OBSERVATION_RETRY_MS;
+      next = next === undefined ? candidate : Math.min(next, candidate);
+    }
+    return next;
+  }
+
+  clear(): void {
+    this.attempts.clear();
+  }
+}
 
 export interface InboxState {
   selectedSessionId: string | null;
@@ -1562,6 +1618,7 @@ export function StoreProvider({
   useEffect(() => {
     const dispatch = store.dispatch;
     let closed = false;
+    let cancelBackgroundObservations = () => {};
     const subscriptionSync = new UiSubscriptionSynchronizer();
     const syncSubscriptions = () => {
       const ws = wsRef.current;
@@ -1571,7 +1628,7 @@ export function StoreProvider({
         state,
         state.streamSubscriptions.mode === "targeted",
       );
-      if (!msg) return;
+      if (!msg || msg.type !== "session_subscriptions") return;
       // Freeze the durable recovery cursor before the server can apply this replacement. A live
       // event delivered immediately after its acknowledgement must not advance us past older gaps.
       store.prepareSubscriptionRecovery(msg.revision, msg.sessionIds);
@@ -1582,10 +1639,44 @@ export function StoreProvider({
       }
     };
     const open = () => {
+      cancelBackgroundObservations();
       dispatch({ type: "conn", conn: "connecting" });
       // Browsers can't set headers on WS — a paired device authenticates via query param.
       const ws = connection.createSocket();
       wsRef.current = ws;
+      const backgroundObservations = new BackgroundDeliveryObservationTracker();
+      let backgroundObservationRetryTimer: number | null = null;
+      const cancelObservations = () => {
+        if (backgroundObservationRetryTimer != null) {
+          window.clearTimeout(backgroundObservationRetryTimer);
+          backgroundObservationRetryTimer = null;
+        }
+        backgroundObservations.clear();
+      };
+      cancelBackgroundObservations = cancelObservations;
+      const scheduleObservationRetry = () => {
+        if (backgroundObservationRetryTimer != null) window.clearTimeout(backgroundObservationRetryTimer);
+        const nextRetryAt = backgroundObservations.nextRetryAt();
+        if (nextRetryAt === undefined) {
+          backgroundObservationRetryTimer = null;
+          return;
+        }
+        backgroundObservationRetryTimer = window.setTimeout(() => {
+          backgroundObservationRetryTimer = null;
+          if (closed || wsRef.current !== ws) return;
+          sendDueBackgroundObservations([...store.getState().sessions.values()], true);
+        }, Math.max(0, nextRetryAt - Date.now()));
+      };
+      const sendDueBackgroundObservations = (sessions: readonly SessionView[], authoritative = false) => {
+        try {
+          for (const observed of backgroundObservations.due(sessions, Date.now(), authoritative)) {
+            ws.send(JSON.stringify(observed));
+          }
+          scheduleObservationRetry();
+        } catch {
+          ws.close();
+        }
+      };
       ws.onopen = () => {
         subscriptionSync.resetConnection();
         syncSubscriptions();
@@ -1604,13 +1695,21 @@ export function StoreProvider({
           dispatch({ type: "conn", conn: "online" });
         }
         try {
-          dispatch({ type: "msg", msg: JSON.parse(ev.data as string) as ControlPlaneToUi, now: Date.now() });
+          const msg = JSON.parse(ev.data as string) as ControlPlaneToUi;
+          dispatch({ type: "msg", msg, now: Date.now() });
+          const sessions: readonly SessionView[] = msg.type === "snapshot"
+            ? msg.sessions
+            : msg.type === "session_upsert"
+              ? [msg.session]
+              : [];
+          sendDueBackgroundObservations(sessions, msg.type === "snapshot");
         } catch {
           /* ignore malformed */
         }
       };
       ws.onclose = (ev) => {
         if (closed) return;
+        cancelObservations();
         subscriptionSync.resetConnection();
         if (shellStreamMayBeIncomplete(ev.code)) dispatch({ type: "shell_stream_incomplete" });
         // 1008 (policy violation) is what the CP sends for every auth rejection — no token,
@@ -1629,6 +1728,7 @@ export function StoreProvider({
     const onTokenChanged = () => {
       if (closed) return;
       if (reconnectRef.current) window.clearTimeout(reconnectRef.current);
+      cancelBackgroundObservations();
       const ws = wsRef.current;
       if (ws) {
         ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;
@@ -1643,6 +1743,7 @@ export function StoreProvider({
       closed = true;
       unsubscribeCredentialChanges?.();
       unsubscribeSubscriptions();
+      cancelBackgroundObservations();
       if (reconnectRef.current) window.clearTimeout(reconnectRef.current);
       const ws = wsRef.current;
       if (ws) {
@@ -1688,8 +1789,7 @@ export function StoreProvider({
       const cur = store.getState().sessions;
       if (cur === prev) return;
       for (const [id, s] of cur) {
-        const payload = notifyDecision(prev.get(id), s);
-        if (payload) notifier.show(payload, {
+        const show = (payload: NotifyPayload) => notifier.show(payload, {
           instanceId: connection.instanceId,
           onClick: (id) => {
             const view = { name: "session" as const, id };
@@ -1697,6 +1797,9 @@ export function StoreProvider({
             else store.navigate(view);
           },
         });
+        const statusPayload = notifyDecision(prev.get(id), s);
+        if (statusPayload) show(statusPayload);
+        for (const payload of backgroundDeliveryNotifyDecisions(prev.get(id), s)) show(payload);
       }
       prev = cur;
     });

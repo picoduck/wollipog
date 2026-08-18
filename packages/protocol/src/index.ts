@@ -228,7 +228,9 @@
 //     correlated refresh requests remain no-turn and preserve last-known control-plane snapshots.
 // 81: Claude managed background work distinguishes an external-job wait from the durable
 //     continuation-delivery barrier. Older peers continue to treat the optional state as absent.
-export const PROTOCOL_VERSION = 81;
+// 82: projection-safe managed background-job snapshots and structured continuation evidence let
+//     the control plane durably track transcript projection and dashboard observation.
+export const PROTOCOL_VERSION = 82;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
@@ -342,6 +344,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   durablePromptQueueIdentity: 78,
   providerAuthenticationReceipts: 79,
   subscriptionUsage: 80,
+  managedBackgroundDelivery: 82,
 } as const;
 
 /* ========================================================================== */
@@ -1951,6 +1954,11 @@ export type SessionEventPayload =
       /** Authenticated runner-only durable marker. Provider stderr can never set this field. */
       runnerMarker?: "background_continuation_delivery";
     }
+  | {
+      kind: "background_continuation_delivered";
+      continuationId: string;
+      parentTurnId: string;
+    }
   | { kind: "status"; status: SessionStatus }
   | { kind: "turn_interrupted" }
   | { kind: "error"; message: string }
@@ -2175,6 +2183,49 @@ export type SessionTitleSource = "generated" | "user" | "provider";
  * expose background work for this session (including older runners and non-Claude drivers). */
 export type BackgroundWorkState = "running" | "continuation_pending" | "orphaned" | "resumed";
 
+/** Projection-safe runner facts for one managed background job. Provider context, local paths,
+ * output references, and credentials deliberately never cross this boundary. */
+export interface ManagedBackgroundJobSnapshot {
+  id: string;
+  parentTurnId: string;
+  runnerId: string;
+  workspaceId: string | null;
+  launchType: "agent" | "shell" | "monitor" | "workflow" | "unknown";
+  registeredAt: number;
+  terminalStatus?: "completed" | "failed" | "killed";
+  terminalObservedAt?: number;
+  continuationRequired?: boolean;
+  continuationId?: string;
+  continuationQueuedAt?: number;
+  continuationSubmittedAt?: number;
+  continuationAcceptedAt?: number;
+  assistantResultPersistedAt?: number;
+}
+
+export type BackgroundDeliveryWatchdogState =
+  | "terminal_without_continuation"
+  | "accepted_without_result"
+  | "result_not_projected"
+  | "dashboard_observation_pending";
+
+/** Control-plane-owned durable projection of one parent continuation. `dashboardObservedAt`
+ * acknowledges receipt by an authenticated dashboard, not OS notification display or user click. */
+export interface BackgroundDeliveryView {
+  /** Absent while terminal required work has not acquired a continuation identity. */
+  continuationId?: string;
+  parentTurnId: string;
+  jobCount: number;
+  terminalCount: number;
+  queuedAt?: number;
+  submittedAt?: number;
+  acceptedAt?: number;
+  runnerResultPersistedAt?: number;
+  transcriptProjectedAt?: number;
+  notificationQueuedAt?: number;
+  dashboardObservedAt?: number;
+  watchdogState?: BackgroundDeliveryWatchdogState;
+}
+
 /** A prompt waiting behind the running turn (the runner serializes turns one at a time). Ephemeral
  * runner state surfaced to the UI so queued messages are visible + individually cancelable. */
 export interface QueuedPromptView {
@@ -2330,6 +2381,8 @@ export interface SessionView {
   providerUpdatedAt?: string;
   /** Durable runner-observed Claude background-work lifecycle; absent when not applicable. */
   backgroundWorkState?: BackgroundWorkState;
+  /** Durable control-plane delivery stages. Omitted by pre-v78 control planes. */
+  backgroundDeliveries?: BackgroundDeliveryView[];
   status: SessionStatus;
   column: BoardColumn;
   runId: string | null;
@@ -2417,6 +2470,8 @@ export interface SessionSnapshot {
   providerUpdatedAt?: string;
   /** Durable runner-observed Claude background-work lifecycle; absent when not applicable. */
   backgroundWorkState?: BackgroundWorkState;
+  /** Bounded projection-safe managed-job inventory. Omitted for pre-v78 control planes. */
+  backgroundJobs?: ManagedBackgroundJobSnapshot[];
   status: SessionStatus;
   driver: AgentDriverKind;
   useWorktree: boolean;
@@ -4650,7 +4705,15 @@ export interface UiSessionSubscriptionsMessage {
   podIds: string[];
 }
 
-export type UiToControlPlane = UiSessionSubscriptionsMessage;
+/** An authenticated dashboard confirms it received the durable continuation projection. This is
+ * deliberately narrower than claiming an OS notification was shown or a human saw it. */
+export interface UiBackgroundDeliveryObservedMessage {
+  type: "background_delivery_observed";
+  sessionId: string;
+  continuationId: string;
+}
+
+export type UiToControlPlane = UiSessionSubscriptionsMessage | UiBackgroundDeliveryObservedMessage;
 
 /* ========================================================================== */
 /* UI -> Control Plane (REST request/response bodies)                          */

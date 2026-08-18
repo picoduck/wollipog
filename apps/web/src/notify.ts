@@ -6,6 +6,8 @@ export interface NotifyPayload {
   title: string;
   body: string;
   sessionId: string;
+  /** Distinguishes simultaneous durable events for one session in the Notification API tag. */
+  notificationId?: string;
 }
 
 const BUSY = new Set<SessionView["status"]>(["queued", "starting", "running"]);
@@ -36,6 +38,38 @@ export function notifyDecision(prev: SessionView | undefined, next: SessionView)
     default:
       return null;
   }
+}
+
+/** A durable background continuation can complete without changing the session status. Unlike
+ * ordinary status notifications, an unobserved delivery from the initial snapshot is intentional:
+ * reconnect/restart is how a dashboard recovers a notification that was never acknowledged. */
+export function backgroundDeliveryNotifyDecision(
+  prev: SessionView | undefined,
+  next: SessionView,
+): NotifyPayload | null {
+  return backgroundDeliveryNotifyDecisions(prev, next)[0] ?? null;
+}
+
+/** Return one payload per newly visible durable delivery so a reconnect cannot collapse several
+ * completed parent continuations into one notification while acknowledging all of them. */
+export function backgroundDeliveryNotifyDecisions(
+  prev: SessionView | undefined,
+  next: SessionView,
+): NotifyPayload[] {
+  const previous = new Set((prev?.backgroundDeliveries ?? []).flatMap((delivery) =>
+    delivery.continuationId && delivery.notificationQueuedAt != null ? [delivery.continuationId] : []));
+  const deliveries = (next.backgroundDeliveries ?? []).filter((candidate) =>
+    candidate.continuationId &&
+    candidate.notificationQueuedAt != null &&
+    candidate.dashboardObservedAt == null &&
+    !previous.has(candidate.continuationId));
+  const name = next.title?.trim() || "Session";
+  return deliveries.map((delivery) => ({
+    title: `${name} resumed background work`,
+    body: "The parent workflow delivered its result.",
+    sessionId: next.id,
+    notificationId: delivery.continuationId,
+  }));
 }
 
 export interface NotificationTarget {
@@ -86,7 +120,8 @@ export class Notifier {
   show(p: NotifyPayload, target: NotificationTarget): void {
     if (!this.enabled || !this.supported || this.permission !== "granted") return;
     if (typeof document !== "undefined" && document.visibilityState === "visible") return;
-    const n = new Notification(p.title, { body: p.body, tag: `${target.instanceId}:${p.sessionId}` });
+    const tag = `${target.instanceId}:${p.sessionId}${p.notificationId ? `:${p.notificationId}` : ""}`;
+    const n = new Notification(p.title, { body: p.body, tag });
     n.onclick = () => {
       window.focus();
       target.onClick(p.sessionId);

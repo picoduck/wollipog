@@ -3,7 +3,7 @@ import { test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import { BackgroundWorkBadge, CopyButton } from "./common.js";
+import { BackgroundDeliveryBadge, BackgroundWorkBadge, CopyButton } from "./common.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 for (const [name, value] of Object.entries({
@@ -93,6 +93,37 @@ test("background-work badges expose every durable state with Title Case visible 
       ["background-work-running", "background-work-running", "background-work-orphaned", "background-work-resumed"],
     );
     assert.equal(container.querySelectorAll(".background-work-dot[aria-hidden='true']").length, 4);
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
+test("background-delivery watchdog badges use precise Title Case stage labels", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(
+        <>
+          <BackgroundDeliveryBadge state="terminal_without_continuation" />
+          <BackgroundDeliveryBadge state="accepted_without_result" />
+          <BackgroundDeliveryBadge state="result_not_projected" />
+          <BackgroundDeliveryBadge state="dashboard_observation_pending" />
+        </>,
+      );
+    });
+    assert.deepEqual(
+      [...container.querySelectorAll(".background-work-badge")].map((badge) => badge.textContent),
+      [
+        "Background Delivery: Terminal Result Awaiting Continuation",
+        "Background Delivery: Accepted Continuation Awaiting Result",
+        "Background Delivery: Result Awaiting Transcript Projection",
+        "Background Delivery: Notification Awaiting Dashboard",
+      ],
+    );
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();

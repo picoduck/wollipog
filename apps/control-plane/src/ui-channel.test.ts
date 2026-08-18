@@ -58,6 +58,22 @@ test("UI subscription messages are strict, unique, and bounded", () => {
   assert.equal(parseUiClientMessage(" ".repeat(MAX_UI_CLIENT_MESSAGE_BYTES + 1)), null);
 });
 
+test("background delivery observation messages are strict and bounded", () => {
+  assert.deepEqual(parseUiClientMessage(
+    '{"type":"background_delivery_observed","sessionId":"s1","continuationId":"bgcont-1"}',
+  ), {
+    type: "background_delivery_observed",
+    sessionId: "s1",
+    continuationId: "bgcont-1",
+  });
+  for (const invalid of [
+    '{"type":"background_delivery_observed","sessionId":"","continuationId":"bgcont-1"}',
+    '{"type":"background_delivery_observed","sessionId":"s1","continuationId":""}',
+    '{"type":"background_delivery_observed","sessionId":"s1","continuationId":"bad\\n"}',
+    '{"type":"background_delivery_observed","sessionId":"s1","continuationId":"bgcont-1","extra":true}',
+  ]) assert.equal(parseUiClientMessage(invalid), null, invalid);
+});
+
 test("UI websocket raw-data normalization preserves text across supported ws shapes", () => {
   const text = Buffer.from('{"type":"session_subscriptions"}');
   assert.equal(normalizeUiClientRawData(text)?.toString("utf8"), text.toString("utf8"));

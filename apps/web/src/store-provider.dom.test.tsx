@@ -3,7 +3,13 @@ import test from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import { StoreProvider, useStoreSelector } from "./store.js";
+import {
+  BACKGROUND_OBSERVATION_RETRY_MS,
+  BackgroundDeliveryObservationTracker,
+  StoreProvider,
+  useStoreSelector,
+} from "./store.js";
+import type { SessionView } from "@wollipog/protocol";
 import type { UiConnectionRuntime, UiSocket } from "./ui-transport.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -28,7 +34,8 @@ class FakeSocket implements UiSocket {
   onclose: ((event: { code: number }) => void) | null = null;
   onerror: (() => void) | null = null;
   closeCount = 0;
-  send() {}
+  readonly sent: string[] = [];
+  send(data: string) { this.sent.push(data); }
   close() { this.closeCount += 1; }
 }
 
@@ -100,6 +107,72 @@ test("changing instance runtimes closes the old socket before the replacement re
   await act(async () => { root.unmount(); });
   assert.equal(bSockets[0]!.closeCount, 1);
   container.remove();
+});
+
+test("initial and reconnect snapshots acknowledge unobserved background delivery projections", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const sockets: FakeSocket[] = [];
+  await act(async () => {
+    root.render(<StoreProvider connection={runtime("delivery", "delivery:1", sockets)}><div /></StoreProvider>);
+  });
+  const frame = JSON.parse(snapshot("session-1", "Background Delivery")) as {
+    sessions: Array<Record<string, unknown>>;
+  };
+  frame.sessions[0]!.backgroundDeliveries = [{
+    continuationId: "bgcont-1",
+    parentTurnId: "turn-1",
+    jobCount: 1,
+    terminalCount: 1,
+    notificationQueuedAt: 100,
+    watchdogState: "dashboard_observation_pending",
+  }];
+  await act(async () => {
+    sockets[0]!.onmessage?.({ data: JSON.stringify(frame) });
+  });
+  assert.deepEqual(sockets[0]!.sent.map((data) => JSON.parse(data)), [{
+    type: "background_delivery_observed",
+    sessionId: "session-1",
+    continuationId: "bgcont-1",
+  }]);
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("background delivery observation retries are deduplicated and self-healing", () => {
+  const tracker = new BackgroundDeliveryObservationTracker();
+  const pending = {
+    id: "session-1",
+    backgroundDeliveries: [{
+      continuationId: "bgcont-1",
+      parentTurnId: "turn-1",
+      jobCount: 1,
+      terminalCount: 1,
+      notificationQueuedAt: 100,
+    }],
+  } as SessionView;
+  const expected = [{
+    type: "background_delivery_observed",
+    sessionId: "session-1",
+    continuationId: "bgcont-1",
+  }];
+  assert.deepEqual(tracker.due([pending], 1_000, true), expected);
+  assert.deepEqual(tracker.due([pending], 1_001, true), [], "upserts do not amplify an in-flight receipt");
+  assert.equal(tracker.nextRetryAt(), 1_000 + BACKGROUND_OBSERVATION_RETRY_MS);
+  assert.deepEqual(
+    tracker.due([pending], 1_000 + BACKGROUND_OBSERVATION_RETRY_MS, true),
+    expected,
+    "a dropped or rate-limited receipt retries after the server admission window",
+  );
+  assert.deepEqual(tracker.due([{
+    ...pending,
+    backgroundDeliveries: [{
+      ...pending.backgroundDeliveries![0]!,
+      dashboardObservedAt: 2_000,
+    }],
+  }], 2_000 + BACKGROUND_OBSERVATION_RETRY_MS, true), []);
+  assert.equal(tracker.nextRetryAt(), undefined);
 });
 
 test("a new generation remounts the same profile while an equivalent runtime key stays connected", async () => {

@@ -87,6 +87,9 @@ export const MAX_UI_CLIENTS_PER_ADMISSION_KEY = 8;
 export const MAX_UI_CONNECTION_STARTS_PER_WINDOW = 16;
 export const MAX_UI_CONNECTION_STARTS_GLOBAL_PER_WINDOW = 256;
 export const UI_CONNECTION_RATE_WINDOW_MS = 10_000;
+export const MAX_UI_BACKGROUND_OBSERVATIONS_PER_CONNECTION = 1_024;
+export const MAX_UI_BACKGROUND_OBSERVATIONS_PER_WINDOW = 128;
+export const UI_BACKGROUND_OBSERVATION_RATE_WINDOW_MS = 10_000;
 
 interface OutboundFrame {
   data: string;
@@ -109,6 +112,9 @@ interface UiClientInfo {
   queuedBytes?: number;
   sending?: boolean;
   lastSubscriptionRevision?: number;
+  observedBackgroundDeliveryKeys?: Set<string>;
+  backgroundObservationWindowStartedAt?: number;
+  backgroundObservationsInWindow?: number;
 }
 
 interface UiSubscriptionAdmission {
@@ -396,6 +402,7 @@ export class Hub {
     info.visibleProjectIds?.clear();
     info.subscribedSessionIds?.clear();
     info.subscribedPodIds?.clear();
+    info.observedBackgroundDeliveryKeys?.clear();
   }
 
   /** Replace the high-volume live stream selection. Undefined means a pre-subscription dashboard
@@ -431,6 +438,40 @@ export class Hub {
       podIds: acceptedPodIds,
     });
     return { ok: true, sessionIds: acceptedSessionIds, podIds: acceptedPodIds };
+  }
+
+  /** Record receipt of a durable continuation projection by this authenticated dashboard. This
+   * does not claim an OS notification was displayed or that a human opened it. */
+  acknowledgeUiBackgroundDelivery(
+    client: Socket,
+    sessionId: string,
+    continuationId: string,
+    now = Date.now(),
+  ): boolean {
+    const info = this.uiClients.get(client);
+    if (!info) return false;
+    if (!Number.isSafeInteger(now) || now < 0) return false;
+    if (info.backgroundObservationWindowStartedAt === undefined ||
+        now < info.backgroundObservationWindowStartedAt ||
+        now - info.backgroundObservationWindowStartedAt >= UI_BACKGROUND_OBSERVATION_RATE_WINDOW_MS) {
+      info.backgroundObservationWindowStartedAt = now;
+      info.backgroundObservationsInWindow = 0;
+    }
+    if ((info.backgroundObservationsInWindow ?? 0) >=
+        MAX_UI_BACKGROUND_OBSERVATIONS_PER_WINDOW) return false;
+    info.backgroundObservationsInWindow = (info.backgroundObservationsInWindow ?? 0) + 1;
+    if (info.principal && !this.db.canAccessSession(info.principal, sessionId)) return false;
+    const key = `${sessionId}\u0000${continuationId}`;
+    const observed = info.observedBackgroundDeliveryKeys ??= new Set();
+    if (observed.has(key)) return false;
+    if (observed.size >= MAX_UI_BACKGROUND_OBSERVATIONS_PER_CONNECTION) {
+      const oldest = observed.values().next().value;
+      if (oldest !== undefined) observed.delete(oldest);
+    }
+    observed.add(key);
+    const changed = this.db.acknowledgeBackgroundDelivery(sessionId, continuationId, now);
+    if (changed) this.sessionChangedById(sessionId);
+    return changed;
   }
 
   private uiSubscriptionAdmissionKey(info: UiClientInfo): string {

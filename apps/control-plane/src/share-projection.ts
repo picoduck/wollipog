@@ -201,6 +201,7 @@ function publicMessages(
       case "command_output":
       case "file_edit":
       case "stderr":
+      case "background_continuation_delivered":
       case "status":
       case "error":
       case "policy_transport":
