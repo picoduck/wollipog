@@ -168,6 +168,72 @@ test("a same-owner reclaim loser reports against the winner instead of double-pu
   assert.deepEqual(readdirSync(leaseRoot(home)), ["mutable-home.lock"]);
 });
 
+test("a reclaimer holding a stale snapshot never unlinks a lease another reclaim published", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-stale-snapshot-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const crashed = new ProviderHomeLeaseRegistry("a".repeat(64), { pid: 101, hostname: "host-a" });
+  crashed.acquire(request(home));
+  const winner = new ProviderHomeLeaseRegistry("a".repeat(64), {
+    pid: 999,
+    hostname: "host-a",
+    isProcessAlive: (pid) => pid === 999,
+  });
+  // The first liveness probe runs during this registry's inspection, before it claims the record.
+  // Completing a rival reclaim there is the interleaving that leaves it holding a stale snapshot.
+  let probes = 0;
+  let winnerHeld = false;
+  const second = new ProviderHomeLeaseRegistry("a".repeat(64), {
+    pid: 202,
+    hostname: "host-a",
+    isProcessAlive: (pid) => {
+      if (++probes === 1) {
+        winner.acquire(request(home));
+        winnerHeld = true;
+      }
+      return pid === 999;
+    },
+  });
+  assert.throws(() => second.acquire(request(home)), /already in use by process 999/);
+  assert.equal(winnerHeld, true, "the rival reclaim must have completed for this to be the real race");
+  assert.equal(readLease(home).pid, 999, "the published lease survives the stale reclaimer");
+  assert.deepEqual(readdirSync(leaseRoot(home)), ["mutable-home.lock"], "the reclaim guard is always released");
+});
+
+test("a holder releasing during recovery reports retry guidance, not a filesystem error", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-released-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const holder = new ProviderHomeLeaseRegistry("a".repeat(64), { pid: 101, hostname: "host-a" });
+  holder.acquire(request(home));
+  const restarted = new ProviderHomeLeaseRegistry("a".repeat(64), {
+    pid: 202,
+    hostname: "host-a",
+    isProcessAlive: () => {
+      holder.releaseAll();
+      return false;
+    },
+  });
+  assert.throws(() => restarted.acquire(request(home)), (error: Error & { code?: string }) => {
+    assert.equal(error.code, undefined, "a raw errno must never reach the caller");
+    assert.match(error.message, /released during recovery; retry the launch/);
+    return true;
+  });
+});
+
+test("a reclaim already in progress for the same record fails closed and names the guard", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-guarded-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const crashed = new ProviderHomeLeaseRegistry("a".repeat(64), { pid: 101, hostname: "host-a" });
+  crashed.acquire(request(home));
+  mkdirSync(join(leaseRoot(home), `mutable-home.reclaim-${readLease(home).leaseId}`), { mode: 0o700 });
+  const restarted = new ProviderHomeLeaseRegistry("a".repeat(64), {
+    pid: 202,
+    hostname: "host-a",
+    isProcessAlive: () => false,
+  });
+  assert.throws(() => restarted.acquire(request(home)), /recovery.*already in progress.*remove .*mutable-home\.reclaim-/);
+  assert.equal(readLease(home).pid, 101, "the abandoned record is left intact for the reclaim that owns it");
+});
+
 test("an entry appearing during a reclaim surrenders the lease instead of launching beside it", (t) => {
   const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-reclaim-entry-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));

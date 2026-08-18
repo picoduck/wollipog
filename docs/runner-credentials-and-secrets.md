@@ -206,7 +206,10 @@ A stale provider-home lease is reclaimed automatically only when the record name
 attested owner on this same hostname and its recorded process is no longer alive. The reclaim
 replaces only the marker and never moves or removes the lock directory itself, because the
 directory's continued existence is what excludes every other owner; a single exclusive marker create
-picks one winner among same-owner reclaimers, and the loser reports against the winner. A symlinked
+is claimed through a guard directory named for the record being retired, so two reclaimers that
+inspected the same abandoned record cannot both retire it and the record is re-read under that guard
+before it is unlinked. An interrupted reclaim leaves that named guard behind and later recovery
+fails closed until an operator verifies no runner is active and removes it. A symlinked
 lock is refused outright rather than followed out of the canonical HOME. A record from another
 attested owner, another host, a live
 process, an incomplete lock, or unexpected directory entries still fails closed with manual
