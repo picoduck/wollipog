@@ -2983,7 +2983,7 @@ fn external_url_has_userinfo(url: &str) -> bool {
         .map(|(_, authority)| authority)
         .unwrap_or("");
     let end = authority
-        .find(|character: char| matches!(character, '/' | '?' | '#'))
+        .find(['/', '?', '#'])
         .unwrap_or(authority.len());
     authority[..end].contains('@')
 }
@@ -3057,7 +3057,9 @@ fn external_url_open_error_message(error: ExternalUrlOpenError) -> String {
 fn open_external_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
     open_external_url_with(url, |url| {
         #[allow(deprecated)]
-        app.shell().open(url, None).map_err(|error| error.to_string())
+        app.shell()
+            .open(url, None)
+            .map_err(|error| error.to_string())
     })
     .map_err(external_url_open_error_message)
 }
