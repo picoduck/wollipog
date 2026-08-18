@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Window } from "happy-dom";
-import { focusComposerAtEnd, placeComposerCaretAtEnd } from "./composer-focus.js";
+import {
+  captureComposerFocus,
+  focusComposerAtEnd,
+  placeComposerCaretAtEnd,
+  rememberComposerFocusForRemount,
+  restoreComposerFocus,
+  restoreRememberedComposerFocus,
+} from "./composer-focus.js";
 
 function setup(value: string) {
   const window = new Window();
@@ -52,4 +59,35 @@ test("composition prevents selection changes during focus and hydration restorat
   assert.equal(composer.ownerDocument.activeElement, composer);
   assert.equal(placeComposerCaretAtEnd(composer, true), false);
   assert.equal(selectionChanges, 0);
+});
+
+test("exact focus restoration rejects value drift and preserves saved geometry", () => {
+  const { transcript, composer } = setup("focus geometry");
+  composer.focus();
+  composer.setSelectionRange(2, 8, "backward");
+  composer.scrollTop = 41;
+  const snapshot = captureComposerFocus(composer);
+  transcript.focus();
+
+  assert.equal(restoreComposerFocus(composer, snapshot), false, "an active control owns focus");
+  assert.equal(restoreComposerFocus(composer, snapshot, true), true);
+  assert.deepEqual(
+    [composer.selectionStart, composer.selectionEnd, composer.selectionDirection, composer.scrollTop],
+    [2, 8, "backward", 41],
+  );
+
+  composer.value = "short";
+  assert.equal(restoreComposerFocus(composer, snapshot, true), false, "value drift invalidates the snapshot");
+});
+
+test("remount memory is one-shot, same-key, and evicts a different session", () => {
+  const first = setup("first").composer;
+  const replacement = setup("first").composer;
+  rememberComposerFocusForRemount("scope\u0000first", first);
+  assert.ok(restoreRememberedComposerFocus("scope\u0000first", replacement));
+  assert.equal(restoreRememberedComposerFocus("scope\u0000first", replacement), null);
+
+  rememberComposerFocusForRemount("scope\u0000first", first);
+  assert.equal(restoreRememberedComposerFocus("scope\u0000second", replacement), null);
+  assert.equal(restoreRememberedComposerFocus("scope\u0000first", replacement), null);
 });
