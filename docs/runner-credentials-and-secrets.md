@@ -171,8 +171,6 @@ other mutable state cannot prove that an old process has stopped.
 An abandoned same-host process lease is reclaimed only after its recorded process is no longer
 alive. A separate atomic recovery guard serializes stale reapers; if recovery itself is interrupted,
 startup fails closed until an operator verifies no runner is active and removes the named guard.
-The provider-home lease below needs no such guard: it reclaims in place, so an interrupted reclaim
-leaves at worst the already-handled incomplete-lock state rather than a new class of wedge.
 Leases from another host and malformed lease metadata fail closed. Owner, lease, recovery-guard,
 and migrated credential publication is crash-durable on platforms that support directory flushes:
 new directory entries are flushed in order, file contents are flushed before the exclusive hard
@@ -204,16 +202,25 @@ worktrees unavailable until the root is restored or the session is explicitly mi
 and back up the shared roots before acknowledging that operation.
 A stale provider-home lease is reclaimed automatically only when the record names this same
 attested owner on this same hostname and its recorded process is no longer alive. The reclaim
-replaces only the marker and never moves or removes the lock directory itself, because the
-directory's continued existence is what excludes every other owner; a single exclusive marker create
-is claimed through a guard directory named for the record being retired, so two reclaimers that
-inspected the same abandoned record cannot both retire it and the record is re-read under that guard
-before it is unlinked. An interrupted reclaim leaves that named guard behind and later recovery
-fails closed until an operator verifies no runner is active and removes it. A symlinked
-lock is refused outright rather than followed out of the canonical HOME. A record from another
-attested owner, another host, a live
-process, an incomplete lock, or unexpected directory entries still fails closed with manual
-quarantine guidance. Remove one of those only after proving no provider process is using that HOME.
+replaces only the marker and never moves or removes the lock directory itself, because that
+directory's continued existence is what excludes every other owner: no window may exist in which the
+canonical path is absent, or a different owner could publish a lease without ever observing the
+record it was supposed to fail closed on.
+
+The right to retire one specific record is claimed through a `reclaim-<lease-id>` guard directory
+created inside the lock. Unlinking the marker is a pathname operation, so without that claim a
+reclaimer still holding a stale snapshot would delete a marker a rival reclaim had already
+published and both would believe they hold the lease. The record is re-read under the guard and
+must still match the inspected lease id, because holding the guard does not exclude a reclaim that
+already retired that record and released. The guard lives inside the lock so that an interrupted
+reclaim leaves an entry every acquirer already fails closed on, rather than inert litter beside a
+lock that would otherwise read as healthy; recovery then fails closed, naming the guard to remove,
+until an operator verifies no runner is active.
+
+A symlinked lock is refused outright rather than followed out of the canonical HOME. A record from
+another attested owner, another host, a live process, an incomplete lock, or unexpected directory
+entries still fails closed with manual quarantine guidance. Remove one of those only after proving
+no provider process is using that HOME.
 
 Automatic same-owner reclaim does not prove that a detached provider tree from the crashed instance
 has exited, only that the runner that recorded the lease is gone. That residual exposure is confined

@@ -143,7 +143,7 @@ test("a reclaim never vacates the lock path a competing owner is excluded by", (
     },
   });
   reclaimer.acquire(request(home));
-  assert.match(foreignError, /incomplete.*quarantine/, "a foreign owner must never publish mid-reclaim");
+  assert.match(foreignError, /recovery.*in progress.*retry/, "a foreign owner must never publish mid-reclaim");
   assert.equal(readLease(home).pid, 202, "the reclaiming owner still ends up holding the lease");
   reclaimer.releaseAll();
 });
@@ -219,19 +219,23 @@ test("a holder releasing during recovery reports retry guidance, not a filesyste
   });
 });
 
-test("a reclaim already in progress for the same record fails closed and names the guard", (t) => {
+test("an interrupted reclaim leaves the lock fail-closed and names the guard to remove", (t) => {
   const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-guarded-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const crashed = new ProviderHomeLeaseRegistry("a".repeat(64), { pid: 101, hostname: "host-a" });
   crashed.acquire(request(home));
-  mkdirSync(join(leaseRoot(home), `mutable-home.reclaim-${readLease(home).leaseId}`), { mode: 0o700 });
+  const lockDir = join(leaseRoot(home), "mutable-home.lock");
+  // A reclaim that died before releasing its guard, whether before or after it republished: the
+  // guard names the record it was retiring, which is not necessarily the record present now.
+  mkdirSync(join(lockDir, `reclaim-${randomUUID()}`), { mode: 0o700 });
   const restarted = new ProviderHomeLeaseRegistry("a".repeat(64), {
     pid: 202,
     hostname: "host-a",
     isProcessAlive: () => false,
   });
-  assert.throws(() => restarted.acquire(request(home)), /recovery.*already in progress.*remove .*mutable-home\.reclaim-/);
-  assert.equal(readLease(home).pid, 101, "the abandoned record is left intact for the reclaim that owns it");
+  assert.throws(() => restarted.acquire(request(home)),
+    /recovery.*already in progress or was interrupted.*remove reclaim-/);
+  assert.equal(readLease(home).pid, 101, "the record is left intact for whoever resolves the guard");
 });
 
 test("an entry appearing during a reclaim surrenders the lease instead of launching beside it", (t) => {

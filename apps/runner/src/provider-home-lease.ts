@@ -23,9 +23,11 @@ const PROVIDER_KEY = /^[a-z0-9][a-z0-9-]{0,63}$/u;
 const LEASE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 const MAX_RECORD_BYTES = 4_096;
 const MARKER = "lease.json";
-/** Serializes replacement of one specific abandoned record, keyed by the lease id being
- * replaced, so a reclaim can never unlink a marker published by a competing reclaim. */
-const RECLAIM_GUARD_PREFIX = "mutable-home.reclaim-";
+/** Serializes replacement of one specific abandoned record, keyed by the lease id being replaced,
+ * so a reclaim can never unlink a marker published by a competing reclaim. It lives inside the lock
+ * directory: an interrupted reclaim then leaves an entry that every acquirer already fails closed
+ * on, instead of inert litter beside a lock that reads as healthy. */
+const RECLAIM_GUARD_PREFIX = "reclaim-";
 
 interface ProviderHomeLeaseRecord {
   version: 1;
@@ -161,7 +163,7 @@ export class ProviderHomeLeaseRegistry {
         }
         throw error;
       }
-      this.reclaimAbandonedLease(root, lockDir, record);
+      this.reclaimAbandonedLease(lockDir, record);
     }
     this.held.set(key, { leaseId, lockDir });
   }
@@ -187,7 +189,7 @@ export class ProviderHomeLeaseRegistry {
    * Only the brief moment with no marker is observable, and every acquirer already fails closed on
    * that incomplete state.
    */
-  private reclaimAbandonedLease(root: string, lockDir: string, record: ProviderHomeLeaseRecord): void {
+  private reclaimAbandonedLease(lockDir: string, record: ProviderHomeLeaseRecord): void {
     const marker = join(lockDir, MARKER);
     let existing: ProviderHomeLeaseRecord;
     try {
@@ -208,14 +210,15 @@ export class ProviderHomeLeaseRegistry {
     // same abandoned record would delete the marker the first one had already published and both
     // would believe they hold the lease. The guard is keyed to the record being replaced, so only
     // one reclaimer may ever retire it.
-    const guard = join(root, `${RECLAIM_GUARD_PREFIX}${existing.leaseId}`);
+    const guardName = `${RECLAIM_GUARD_PREFIX}${existing.leaseId}`;
+    const guard = join(lockDir, guardName);
     try {
       mkdirSync(guard, { mode: 0o700 });
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      throw new Error(
-        `provider home lease recovery for ${lockDir} is already in progress; if no runner is active, remove ${guard} and retry`,
-      );
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") this.rejectReleasedDuringRecovery(lockDir);
+      if (code !== "EEXIST") throw error;
+      this.rejectExistingLease(lockDir);
     }
     try {
       // Re-read under the guard. Holding it only serializes reclaims of this record; a reclaim that
@@ -223,7 +226,7 @@ export class ProviderHomeLeaseRegistry {
       // below would delete the marker that reclaim published.
       const confirmed = readRecord(marker);
       if (confirmed.leaseId !== existing.leaseId || !this.isAbandonedByThisOwner(confirmed)) {
-        this.rejectExistingLease(lockDir);
+        this.rejectExistingLease(lockDir, guardName);
       }
       rmSync(marker, { force: true });
       this.beforeReclaimPublishForTest?.(lockDir);
@@ -231,11 +234,16 @@ export class ProviderHomeLeaseRegistry {
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       // A foreign owner published between the holder's release and this write.
-      if (code === "EEXIST") this.rejectExistingLease(lockDir);
+      if (code === "EEXIST") this.rejectExistingLease(lockDir, guardName);
       if (code === "ENOENT") this.rejectReleasedDuringRecovery(lockDir);
       throw error;
     } finally {
-      rmdirSync(guard);
+      try {
+        rmdirSync(guard);
+      } catch {
+        // A guard left behind keeps the lock fail-closed, which is the intended recovery gate; it
+        // must never mask the error that is already unwinding.
+      }
     }
     // An entry that appeared after the inspection cannot be attributed, so surrender the lease
     // rather than launch a provider beside it.
@@ -252,7 +260,9 @@ export class ProviderHomeLeaseRegistry {
     throw new Error(`provider home lease at ${lockDir} was released during recovery; retry the launch`);
   }
 
-  private rejectExistingLease(lockDir: string): never {
+  /** `ownGuard` is this call's own in-flight claim, which must not be reported back to it as
+   * somebody else's interrupted recovery. */
+  private rejectExistingLease(lockDir: string, ownGuard?: string): never {
     const marker = join(lockDir, MARKER);
     const entries = readdirSync(lockDir);
     if (entries.length === 0) {
@@ -260,7 +270,14 @@ export class ProviderHomeLeaseRegistry {
         `provider home lease at ${lockDir} is incomplete; after proving no provider process uses this HOME, quarantine the empty directory and retry`,
       );
     }
-    if (entries.length !== 1 || entries[0] !== MARKER) {
+    const guards = entries.filter((entry) => entry.startsWith(RECLAIM_GUARD_PREFIX) && entry !== ownGuard);
+    if (guards.length > 0) {
+      throw new Error(
+        `provider home lease recovery at ${lockDir} is already in progress or was interrupted; after proving no provider process uses this HOME, remove ${guards.join(", ")} from it and retry`,
+      );
+    }
+    const unrelated = entries.filter((entry) => entry !== ownGuard);
+    if (unrelated.length !== 1 || unrelated[0] !== MARKER) {
       throw new Error(`provider home lease directory ${lockDir} contains unexpected entries; refusing unsafe recovery`);
     }
     const existing = readRecord(marker);
