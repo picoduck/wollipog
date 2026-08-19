@@ -1,0 +1,4 @@
+interface:
+  display_name: "Log GitHub Issue"
+  short_description: "Create consistent, sanitized GitHub issues"
+  default_prompt: "Use $log-github-issue to investigate and draft a sanitized GitHub issue for this repository."
