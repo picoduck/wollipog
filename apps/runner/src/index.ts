@@ -149,6 +149,12 @@ import {
 
 const INITIAL_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 30_000;
+// Half-open-socket liveness: after a laptop sleep / Wi-Fi drop / NAT rebind the control-plane socket
+// can sit readyState=OPEN with no FIN/RST, so frames written into it are silently lost until the OS
+// TCP timeout finally errors it (many minutes). Piggy-back a ws-level ping on every heartbeat and
+// terminate once this many consecutive pings go unanswered — at the ~10s heartbeat that surfaces a
+// dead peer in ~30s, dropping us straight into the existing reconnect/backoff/outbox path.
+const MAX_MISSED_HEARTBEAT_PONGS = 2;
 
 function detectOs(): OS {
   switch (process.platform) {
@@ -776,6 +782,9 @@ let backoff = INITIAL_BACKOFF_MS;
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let shuttingDown = false;
+// Consecutive heartbeat pings sent without a pong reply on the current socket. Reset by the 'pong'
+// handler attached in connect() and by startHeartbeat() when a fresh socket registers.
+let missedHeartbeatPongs = 0;
 const sessionCommandRecoveryTimer = setInterval(recoverStaleSessionCommands, 10_000);
 sessionCommandRecoveryTimer.unref?.();
 recoverStaleSessionCommands();
@@ -789,10 +798,24 @@ function stopHeartbeat(): void {
 
 function startHeartbeat(socket: WebSocket, intervalMs: number): void {
   stopHeartbeat();
+  missedHeartbeatPongs = 0;
   heartbeatTimer = setInterval(() => {
     if (socket.readyState !== WebSocket.OPEN) return;
+    // Half-open detection: the socket still reads OPEN, but if the last several ws-level pings went
+    // unanswered the peer is gone. Terminate now — ws emits 'close' immediately, so the close handler
+    // enters the reconnect/backoff/outbox path instead of us writing frames into a dead socket until
+    // the OS TCP timeout finally errors it (many minutes).
+    if (missedHeartbeatPongs >= MAX_MISSED_HEARTBEAT_PONGS) {
+      log(`control plane heartbeat unanswered (${missedHeartbeatPongs} missed pongs) — terminating socket to reconnect`);
+      socket.terminate();
+      return;
+    }
+    missedHeartbeatPongs++;
     const beat: HeartbeatMessage = { type: "heartbeat", runnerId: config.runnerId, ts: Date.now() };
     socket.send(JSON.stringify(beat));
+    // A pong resets missedHeartbeatPongs via the connect() handler; a live peer therefore never
+    // accumulates toward the terminate threshold.
+    socket.ping();
   }, intervalMs);
 }
 
@@ -1709,6 +1732,13 @@ function connect(): void {
 
   socket.on("error", (err: Error) => {
     log(`socket error: ${err.message}`);
+  });
+
+  // Liveness: every heartbeat sends a ws-level ping; a pong proves the peer is still reachable, so
+  // clear the missed-ping counter. Silence across MAX_MISSED_HEARTBEAT_PONGS pings terminates the
+  // socket in startHeartbeat.
+  socket.on("pong", () => {
+    missedHeartbeatPongs = 0;
   });
 }
 

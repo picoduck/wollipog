@@ -74,6 +74,10 @@ export interface Socket {
   /** Production ws sends complete asynchronously. Synchronous test doubles omit this. */
   readonly asyncDelivery?: boolean;
   close?(code?: number, reason?: string): void;
+  /** Force-drop the transport without a close handshake. Used to reap a half-open runner socket: a
+   * graceful close() waits on a peer reply that a dead connection never sends (~30s ws timeout),
+   * whereas terminate() emits 'close' at once so onGone marks the runner offline promptly. */
+  terminate?(): void;
 }
 
 export const MAX_UI_BUFFERED_BYTES = 8 * 1024 * 1024;
@@ -228,14 +232,17 @@ export class Hub {
     if (previous && previous !== socket) previous.close?.(1008, "runner credential replaced");
   }
 
-  /** Immediately sever the current connection after credential revocation. */
-  closeRunner(runnerId: string, reason = "runner credential revoked"): boolean {
+  /** Immediately sever the current connection — after credential revocation, or when a liveness
+   * sweep judges the socket dead (`terminate`). Either way the WebSocket close event reaches onGone,
+   * which does the offline/session/shell/box cleanup. */
+  closeRunner(runnerId: string, reason = "runner credential revoked", options: { terminate?: boolean } = {}): boolean {
     const socket = this.runnerSockets.get(runnerId);
     if (!socket) return false;
     // Preserve the current-socket identity until the WebSocket close event reaches onGone.
     // That shared path must detach it and perform offline/session/shell/box cleanup. Pre-deleting
     // here makes the close look stale and silently skips every durable disconnect side effect.
-    socket.close?.(1008, reason);
+    if (options.terminate && socket.terminate) socket.terminate();
+    else socket.close?.(1008, reason);
     return true;
   }
 
