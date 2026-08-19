@@ -22,6 +22,7 @@ for (const [name, value] of Object.entries({
 }
 
 const tick = () => new Promise<void>((resolve) => domWindow.setTimeout(resolve, 0));
+let finishPendingAction: (() => void) | undefined;
 
 function Harness() {
   const feedback = useFeedback();
@@ -59,6 +60,7 @@ function Harness() {
         }
       }}>Persistent burst</button>
       <button data-testid="double-action" onClick={() => feedback.showToast("Run once.", { action: { label: "Run", run: () => { setActionCount((count) => count + 1); } } })}>Double action</button>
+      <button data-testid="pending-action" onClick={() => feedback.showToast("Opening link.", { action: { label: "Retry", busyLabel: "Retrying…", run: () => new Promise<void>((resolve) => { finishPendingAction = resolve; }) } })}>Pending Action</button>
       <output data-testid="result">{result}</output>
       <output data-testid="undo-count">{undoCount}</output>
       <output data-testid="action-count">{actionCount}</output>
@@ -195,6 +197,19 @@ test("a synchronous double-click cannot run one toast action twice", async () =>
   const action = container.querySelector<HTMLButtonElement>('.toast .btn')!;
   await act(async () => { action.click(); action.click(); await tick(); });
   assert.equal(container.querySelector('[data-testid="action-count"]')?.textContent, "1");
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("non-undo actions show their own busy label", async () => {
+  const { container, root } = await renderHarness();
+  await act(async () => { container.querySelector<HTMLButtonElement>('[data-testid="pending-action"]')!.click(); });
+  const action = container.querySelector<HTMLButtonElement>(".toast .btn")!;
+  await act(async () => { action.click(); await Promise.resolve(); });
+  assert.equal(action.textContent, "Retrying…");
+  await act(async () => { finishPendingAction?.(); await tick(); });
+  assert.equal(container.querySelector(".toast"), null);
+  finishPendingAction = undefined;
   await act(async () => { root.unmount(); });
   container.remove();
 });

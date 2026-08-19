@@ -38,6 +38,7 @@ import { ShellDock } from "./components/ShellDock.js";
 import { useRightPanelState, type RightPanelState } from "./components/RightPanel.js";
 import { EditorSelect } from "./components/EditorSelect.js";
 import { DesktopCloseGuard } from "./components/DesktopCloseGuard.js";
+import { DesktopExternalLinkRouter } from "./components/DesktopExternalLinkRouter.js";
 import { ErrorBoundary } from "./components/ErrorBoundary.js";
 import { CommandPalette } from "./components/CommandPalette.js";
 import { ShortcutReference } from "./components/ShortcutReference.js";
@@ -122,6 +123,7 @@ function BrowserApp() {
   }));
   return (
     <FeedbackProvider>
+      <DesktopExternalLinkRouter />
       <InstanceRuntimeHost runtime={runtime} disposeOnUnmount>
         <ErrorBoundary label="App">
           <Shell />
@@ -134,6 +136,7 @@ function BrowserApp() {
 function DesktopApp() {
   return (
     <FeedbackProvider>
+      <DesktopExternalLinkRouter />
       {/* Renders nothing, and sits ABOVE everything that can be swapped out. §23.1's warning is
           emitted by the shell at close time, and it has to land somewhere: inside `Shell` this
           unmounted whenever the instance was opening, failed or missing — or whenever the error
