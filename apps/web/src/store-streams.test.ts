@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ControlPlaneToUi, PodView, SessionEvent, SessionView, SteeringAttemptView } from "@wollipog/protocol";
 import { isPartialHistory, Store } from "./store.js";
+import { shouldReadOpeningWindow } from "./history-recovery.js";
 import { ACTIVITY_BUCKET_MS, activitySeries } from "./activity.js";
 
 const session = (id: string, eventEpoch = 0): SessionView => ({ id, eventEpoch } as SessionView);
@@ -302,6 +303,126 @@ test("a reconnect snapshot invalidates cursors and stale history from an older e
   assert.equal(store.getState().events.has("s1"), false, "late old-generation response is ignored");
   store.loadEvents("s1", [event("s1", 1)], 1);
   assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [1]);
+});
+
+test("a mid-connection reset invalidates the frozen recovery cursor from the old epoch", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1", 0)], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  store.loadEvents("s1", [event("s1", 8)], 0);
+
+  // Freeze a targeted recovery cursor above zero for the OLD epoch's sequence space.
+  store.prepareSubscriptionRecovery(1, ["s1"]);
+  message(store, {
+    type: "session_subscriptions_applied", revision: 1, sessionIds: ["s1"], podIds: [],
+  });
+  assert.equal(store.recoveryAfter("s1"), 8, "the frozen cursor tracks the old epoch's tail");
+
+  // A runner history-epoch change replaces the log wholesale under a new epoch.
+  message(store, { type: "session_events_reset", sessionId: "s1", eventEpoch: 1, events: [] });
+  assert.equal(store.recoveryAfter("s1"), 0,
+    "the stale old-epoch cursor is dropped so recovery reads the opening tail window");
+  assert.equal(
+    shouldReadOpeningWindow({
+      recoveryAfter: store.recoveryAfter("s1"),
+      historyEverCompleted: store.getState().eventHistory.get("s1")?.everComplete ?? false,
+      hasSavedReadingPosition: false,
+    }),
+    true,
+    "SessionDetail takes the opening tail-window path rather than a forward gap-fill",
+  );
+
+  // The new epoch actually has events (seq 1..3). The opening tail-window read re-hydrates them
+  // instead of collapsing to an authoritative Empty the way a forward page above stale seq 8 would.
+  store.loadEvents("s1", [event("s1", 1), event("s1", 2), event("s1", 3)], 1, 1, true, undefined, false);
+  assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [1, 2, 3],
+    "the replacement log re-hydrates from its opening window");
+  assert.notEqual(store.getState().events.get("s1")?.length ?? 0, 0,
+    "a session that should re-hydrate is never left as an authoritative empty transcript");
+});
+
+test("a reset re-epochs a non-relevant (off-view) session and still drops its frozen cursor", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1", 0)], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  store.loadEvents("s1", [event("s1", 8)], 0);
+  store.prepareSubscriptionRecovery(1, ["s1"]);
+  message(store, {
+    type: "session_subscriptions_applied", revision: 1, sessionIds: ["s1"], podIds: [],
+  });
+  assert.equal(store.recoveryAfter("s1"), 8, "the frozen cursor tracks the old epoch's tail");
+
+  // Navigate to the Board: s1 stops being relevant but stays subscribed, and pruneViewStreams does
+  // not touch streamRecoveryCursors, so the frozen cursor survives off-view.
+  store.navigate({ name: "board" });
+  assert.equal(store.recoveryAfter("s1"), 8, "the frozen cursor survives navigating off-view");
+
+  // A history-epoch reset arrives while s1 is non-relevant (the early-return branch).
+  message(store, { type: "session_events_reset", sessionId: "s1", eventEpoch: 1, events: [] });
+  assert.equal(store.getState().sessions.get("s1")?.eventEpoch, 1,
+    "the non-relevant branch still adopts the new epoch");
+  assert.equal(store.recoveryAfter("s1"), 0,
+    "the stale old-epoch cursor is dropped even on the non-relevant reset path (issue #78)");
+
+  // Reopening now reads the opening tail-window rather than paging above stale seq 8.
+  store.navigate({ name: "session", id: "s1" });
+  assert.equal(
+    shouldReadOpeningWindow({
+      recoveryAfter: store.recoveryAfter("s1"),
+      historyEverCompleted: store.getState().eventHistory.get("s1")?.everComplete ?? false,
+      hasSavedReadingPosition: false,
+    }),
+    true,
+    "SessionDetail takes the opening tail-window path after reopening the re-epoched session",
+  );
+});
+
+test("a pending pre-ack recovery cursor is cleared when a reset re-epochs the session", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1", 0)], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  store.loadEvents("s1", [event("s1", 8)], 0);
+
+  // A subscription is requested but not yet acknowledged: the stale cursor lives in the pending set.
+  store.prepareSubscriptionRecovery(1, ["s1"]);
+  message(store, { type: "session_events_reset", sessionId: "s1", eventEpoch: 1, events: [] });
+  message(store, {
+    type: "session_subscriptions_applied", revision: 1, sessionIds: ["s1"], podIds: [],
+  });
+  assert.equal(store.recoveryAfter("s1"), 0,
+    "a stale cursor cannot be republished from the pending set after the ack lands");
+});
+
+test("a session_upsert epoch bump invalidates the frozen recovery cursor", () => {
+  const store = new Store();
+  message(store, {
+    type: "snapshot",
+    capabilities: { sessionSubscriptions: true, boundedDelivery: true },
+    runners: [], boxes: [], sessions: [session("s1", 0)], runs: [], pods: [],
+  });
+  store.navigate({ name: "session", id: "s1" });
+  store.loadEvents("s1", [event("s1", 8)], 0);
+  store.prepareSubscriptionRecovery(1, ["s1"]);
+  message(store, {
+    type: "session_subscriptions_applied", revision: 1, sessionIds: ["s1"], podIds: [],
+  });
+  assert.equal(store.recoveryAfter("s1"), 8);
+
+  message(store, { type: "session_upsert", session: session("s1", 1) });
+  assert.equal(store.recoveryAfter("s1"), 0,
+    "adopting a new epoch via upsert drops the old epoch's frozen cursor");
 });
 
 test("a reset carries its epoch even when a coalesced session upsert is delivered later", () => {

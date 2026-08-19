@@ -489,6 +489,26 @@ function captureRecoveryCursors(state: State, sessionIds: Iterable<string>): Map
   return new Map([...sessionIds].map((sessionId) => [sessionId, eventHighWater(state.events.get(sessionId))]));
 }
 
+/** Drop a session's frozen recovery cursor when its event log is replaced under a new epoch. The
+ * cursor is a seq from the OLD epoch's sequence space and is epoch-less, so carrying it into the
+ * new epoch makes the next recovery page ABOVE a stale seq instead of reading the opening tail
+ * window — silently truncating or emptying the replacement log. Also clears any not-yet-acked
+ * pending cursor so an in-flight subscription cannot republish the stale value. */
+function invalidateRecoveryCursor(
+  state: State,
+  sessionId: string,
+): Pick<State, "streamRecoveryCursors" | "pendingStreamRecovery"> {
+  const streamRecoveryCursors = new Map(state.streamRecoveryCursors);
+  streamRecoveryCursors.delete(sessionId);
+  let pendingStreamRecovery = state.pendingStreamRecovery;
+  if (pendingStreamRecovery?.cursors.has(sessionId)) {
+    const cursors = new Map(pendingStreamRecovery.cursors);
+    cursors.delete(sessionId);
+    pendingStreamRecovery = { ...pendingStreamRecovery, cursors };
+  }
+  return { streamRecoveryCursors, pendingStreamRecovery };
+}
+
 /** Record which slice a bounded opening-window page loaded. Forward gap-fill pages carry no window
  * meaning and leave the map untouched. */
 function applyWindowBase(
@@ -1114,6 +1134,7 @@ function reducer(state: State, action: Action): State {
             eventEpochs,
             eventHistory,
             eventWindows,
+            ...invalidateRecoveryCursor(state, msg.session.id),
           }, msg.session.id);
         }
         case "session_removed": {
@@ -1225,9 +1246,12 @@ function reducer(state: State, action: Action): State {
           ));
           if (!relevantSessions(state).has(msg.sessionId)) {
             if (sessionEventEpoch(currentSession) === eventEpoch) return updateSessionStall({ ...state }, msg.sessionId);
+            // pruneViewStreams does NOT clear streamRecoveryCursors, so a session viewed earlier can
+            // reach this non-relevant branch still holding a frozen cursor from the old epoch. Adopt
+            // the new epoch AND drop that cursor, else reopening pages above a stale seq (issue #78).
             const sessions = new Map(state.sessions);
             sessions.set(msg.sessionId, { ...currentSession, eventEpoch });
-            return updateSessionStall({ ...state, sessions }, msg.sessionId);
+            return updateSessionStall({ ...state, sessions, ...invalidateRecoveryCursor(state, msg.sessionId) }, msg.sessionId);
           }
           const events = new Map(state.events);
           events.set(msg.sessionId, tagRebuilt([...msg.events].sort((a, b) => a.seq - b.seq)));
@@ -1239,9 +1263,10 @@ function reducer(state: State, action: Action): State {
           // a timeline that no longer exists. The next open reads a fresh window at the new tail.
           const eventWindows = new Map(state.eventWindows);
           eventWindows.delete(msg.sessionId);
+          const recoveryReset = invalidateRecoveryCursor(state, msg.sessionId);
           if (sessionEventEpoch(currentSession) === eventEpoch) {
             return updateSessionStall({
-              ...state, events, eventEpochs, eventHistory, eventWindows,
+              ...state, events, eventEpochs, eventHistory, eventWindows, ...recoveryReset,
             }, msg.sessionId);
           }
           // Writer coalescing may move the matching metadata upsert after this durable reset. Move
@@ -1249,7 +1274,7 @@ function reducer(state: State, action: Action): State {
           const sessions = new Map(state.sessions);
           sessions.set(msg.sessionId, { ...currentSession, eventEpoch });
           return updateSessionStall({
-            ...state, sessions, events, eventEpochs, eventHistory, eventWindows,
+            ...state, sessions, events, eventEpochs, eventHistory, eventWindows, ...recoveryReset,
           }, msg.sessionId);
         }
         case "shell_output": {
