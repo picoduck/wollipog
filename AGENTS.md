@@ -10,3 +10,10 @@
 - Keep complete sentences, helper text, descriptions, warnings, validation messages, tooltips, and
   user-authored content in normal sentence case.
 - Accessible names for controls must match the visible convention even when the control is icon-only.
+
+## GitHub Issues
+
+- When asked to draft, report, log, file, or create a GitHub issue, read and follow
+  `.agents/skills/log-github-issue/SKILL.md` and `.github/ISSUE_REPORTING.md`.
+- Do not publish an issue until the user approves the exact sanitized repository, title, body, and
+  labels. After publication, read the issue back and return its verified link.

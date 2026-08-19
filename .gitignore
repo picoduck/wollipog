@@ -39,3 +39,6 @@ Thumbs.db
 
 dist-desktop-check/
 dist-web-check/
+
+# Local agent scratch space
+.agents/tmp/

@@ -19,6 +19,14 @@ body:
     validations:
       required: true
   - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: List the externally verifiable behavior required for completion.
+      placeholder: "- [ ] The requested outcome is available in the affected workflow."
+    validations:
+      required: true
+  - type: textarea
     id: alternatives
     attributes:
       label: Alternatives Considered
@@ -27,7 +35,7 @@ body:
     id: security
     attributes:
       label: Security and Compatibility
-      description: Note effects on credentials, shells, filesystems, networks, Git, providers, or stored data.
+      description: Note effects on credentials, authentication, networks, shells, filesystems, Git, providers, stored data, upgrades, or mixed-version deployments. Write None when no boundary changes.
   - type: checkboxes
     id: checks
     attributes:
