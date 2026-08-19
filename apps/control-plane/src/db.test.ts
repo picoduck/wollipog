@@ -719,6 +719,46 @@ test("independent control-plane databases receive distinct instance identities",
   }
 });
 
+test("startup settlement waits for explicit ownership and still settles a genuine cold start", () => {
+  const temp = mkdtempSync(join(tmpdir(), "wollipog-startup-settlement-"));
+  const location = join(temp, "control-plane.db");
+  let db: ControlPlaneDb | undefined;
+  try {
+    db = ControlPlaneDb.open(location);
+    db.createBox({
+      boxId: "box-1",
+      runnerId: "runner-1",
+      sshTarget: "test@host",
+      sshPort: 22,
+      workspaces: [],
+      autoReconnect: false,
+      runnerDataDir: null,
+      now: 900,
+    });
+    db.registerRunner(meta(), 1_000);
+    db.createSession(newSession());
+    db.setBoxStatus("box-1", "online", 1_001);
+    db.updateSessionStatus("sess-1", "running", 1_002);
+    db.close();
+    db = undefined;
+
+    db = ControlPlaneDb.open(location);
+    assert.equal(db.getRunner("runner-1")?.status, "online", "opening SQLite alone does not claim the instance");
+    assert.equal(db.getBox("box-1")?.status, "online");
+    assert.equal(db.getSession("sess-1")?.status, "running");
+
+    db.settleStartupState(2_000);
+    assert.equal(db.getRunner("runner-1")?.status, "offline");
+    assert.equal(db.getRunner("runner-1")?.connectedAt, null);
+    assert.equal(db.getBox("box-1")?.status, "offline");
+    assert.equal(db.getSession("sess-1")?.status, "stopped");
+    assert.equal(db.getSession("sess-1")?.updatedAt, 2_000);
+  } finally {
+    db?.close();
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
 /* ----------------------------- Runners --------------------------------- */
 
 test("registerRunner + getRunner round-trips driver/context/capabilities via JSON columns", () => {

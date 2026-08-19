@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
+import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -9,6 +10,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import {
   CONTROL_PLANE_API_VERSION,
+  PROTOCOL_VERSION,
   WOLLIPOG_CONTROL_PLANE_SERVICE,
   type ControlPlaneInstanceInfo,
   type RunnerView,
@@ -18,6 +20,7 @@ import { hashToken } from "./auth.js";
 import { ControlPlaneDb } from "./db.js";
 
 const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
+const CONTROL_PLANE_TOKEN = "instance-route-integration-token";
 const SHARED_RUNNER_ID = "runner_shared";
 const SHARED_WORKSPACE_ID = "workspace_shared";
 const SHARED_SESSION_ID = "session_shared";
@@ -29,10 +32,22 @@ interface SeededControlPlane {
   deviceToken: string;
 }
 
-function seedControlPlane(database: string, seed: SeededControlPlane): void {
+function seedControlPlane(database: string, seed: SeededControlPlane, includeBox = false): void {
   const db = ControlPlaneDb.open(database);
   try {
     const now = Date.now();
+    if (includeBox) {
+      db.createBox({
+        boxId: "box_shared",
+        runnerId: SHARED_RUNNER_ID,
+        sshTarget: "test@shared-host",
+        sshPort: 22,
+        workspaces: [{ id: SHARED_WORKSPACE_ID, name: seed.workspaceName, path: `/workspaces/${seed.workspaceName}` }],
+        autoReconnect: false,
+        runnerDataDir: null,
+        now: now - 1,
+      });
+    }
     db.registerRunner({
       runnerId: SHARED_RUNNER_ID,
       hostname: seed.hostname,
@@ -99,6 +114,7 @@ function startControlPlane(port: number, database: string): { child: ChildProces
       CONTROL_PLANE_HOST: "127.0.0.1",
       CONTROL_PLANE_PORT: String(port),
       CONTROL_PLANE_DB: database,
+      CONTROL_PLANE_TOKEN,
     },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
@@ -107,6 +123,99 @@ function startControlPlane(port: number, database: string): { child: ChildProces
   child.stdout?.on("data", capture);
   child.stderr?.on("data", capture);
   return { child, logs: () => output };
+}
+
+async function waitForChildExit(child: ChildProcess, timeoutMs = 10_000): Promise<number | null> {
+  if (child.exitCode !== null) return child.exitCode;
+  return await Promise.race([
+    new Promise<number | null>((resolvePromise) => child.once("exit", resolvePromise)),
+    delay(timeoutMs).then(() => { throw new Error("child did not exit in time"); }),
+  ]);
+}
+
+async function openWebSocket(url: string): Promise<WebSocket> {
+  const socket = new WebSocket(url);
+  await new Promise<void>((resolvePromise, reject) => {
+    socket.addEventListener("open", () => resolvePromise(), { once: true });
+    socket.addEventListener("error", () => reject(new Error(`websocket failed to open: ${url}`)), { once: true });
+  });
+  return socket;
+}
+
+function waitForSocketMessage(
+  socket: WebSocket,
+  predicate: (message: Record<string, unknown>) => boolean,
+  timeoutMs = 5_000,
+): Promise<Record<string, unknown>> {
+  return new Promise((resolvePromise, reject) => {
+    const timer = setTimeout(() => {
+      socket.removeEventListener("message", onMessage);
+      reject(new Error("timed out waiting for websocket message"));
+    }, timeoutMs);
+    const onMessage = (event: MessageEvent) => {
+      if (typeof event.data !== "string") return;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || !predicate(parsed as Record<string, unknown>)) return;
+      clearTimeout(timer);
+      socket.removeEventListener("message", onMessage);
+      resolvePromise(parsed as Record<string, unknown>);
+    };
+    socket.addEventListener("message", onMessage);
+  });
+}
+
+function sessionSnapshot(status: "running" | "idle" = "running") {
+  return {
+    id: SHARED_SESSION_ID,
+    workspaceId: SHARED_WORKSPACE_ID,
+    agentId: null,
+    title: "Live Shared Session",
+    status,
+    driver: "acp",
+    useWorktree: false,
+    worktreePath: null,
+    config: {},
+    preview: null,
+    pendingApproval: null,
+    tokensIn: 0,
+    tokensOut: 0,
+    costUsd: 0,
+    seq: 0,
+    historyEpoch: 0,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+}
+
+function sharedRows(database: string): Record<"runners" | "boxes" | "sessions", Array<Record<string, unknown>>> {
+  const raw = new DatabaseSync(database, { readOnly: true });
+  try {
+    const rows = (table: "runners" | "boxes" | "sessions", orderBy: string) =>
+      (raw.prepare(`SELECT * FROM ${table} ORDER BY ${orderBy}`).all() as Array<Record<string, unknown>>)
+        .map((row) => ({ ...row }));
+    return {
+      runners: rows("runners", "runner_id"),
+      boxes: rows("boxes", "box_id"),
+      sessions: rows("sessions", "id"),
+    };
+  } finally {
+    raw.close();
+  }
+}
+
+async function waitForLiveSharedRows(database: string): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt++) {
+    const state = sharedRows(database);
+    if (state.runners[0]?.status === "online" && state.boxes[0]?.status === "online" &&
+        state.sessions[0]?.status === "running") return;
+    await delay(25);
+  }
+  throw new Error(`shared state did not become live: ${JSON.stringify(sharedRows(database))}`);
 }
 
 async function printPairingUrl(
@@ -329,4 +438,87 @@ test("two real control planes isolate identical ids and persist identity and dat
 
   // The untouched second process still resolves the same shared ids to its own distinct data.
   await assertSeededPayload(secondPort, secondSeed);
+});
+
+test("a duplicate start leaves the live control plane's runner, box, and session untouched", { timeout: 60_000 }, async (t) => {
+  const temp = mkdtempSync(join(tmpdir(), "wollipog-duplicate-start-"));
+  const port = await reservePort();
+  const database = join(temp, "control-plane.db");
+  const seed: SeededControlPlane = {
+    hostname: "shared-host",
+    workspaceName: "Shared Workspace",
+    sessionTitle: "Live Shared Session",
+    deviceToken: "duplicate-start-device-token",
+  };
+  seedControlPlane(database, seed, true);
+
+  const children = new Set<ChildProcess>();
+  const sockets = new Set<WebSocket>();
+  t.after(async () => {
+    for (const socket of sockets) {
+      if (socket.readyState < WebSocket.CLOSING) socket.close();
+    }
+    await Promise.all([...children].map(stopChild));
+    rmSync(temp, { recursive: true, force: true });
+  });
+
+  const first = startControlPlane(port, database);
+  children.add(first.child);
+  await waitForInstance(port, seed.deviceToken, first.child, first.logs);
+
+  const runner = await openWebSocket(`ws://127.0.0.1:${port}/runner`);
+  sockets.add(runner);
+  const registered = waitForSocketMessage(runner, (message) => message.type === "registered");
+  runner.send(JSON.stringify({
+    type: "register",
+    token: CONTROL_PLANE_TOKEN,
+    protocolVersion: PROTOCOL_VERSION,
+    runner: {
+      runnerId: SHARED_RUNNER_ID,
+      hostname: seed.hostname,
+      os: "linux",
+      version: "integration",
+      agents: [],
+      workspaces: [{
+        id: SHARED_WORKSPACE_ID,
+        name: seed.workspaceName,
+        path: `/workspaces/${seed.workspaceName}`,
+      }],
+    },
+    sessionSnapshots: [sessionSnapshot()],
+  }));
+  await registered;
+  await waitForLiveSharedRows(database);
+
+  const beforeDuplicate = sharedRows(database);
+  const duplicate = startControlPlane(port, database);
+  children.add(duplicate.child);
+  const duplicateExit = await waitForChildExit(duplicate.child);
+  children.delete(duplicate.child);
+  assert.notEqual(duplicateExit, 0, duplicate.logs());
+  assert.match(duplicate.logs(), /EADDRINUSE/);
+
+  assert.deepEqual(
+    sharedRows(database),
+    beforeDuplicate,
+    "a process that never acquired the port must not mutate shared live-state rows",
+  );
+  assert.equal((await fetch(`http://127.0.0.1:${port}/healthz`)).status, 200);
+
+  const promptDelivery = waitForSocketMessage(
+    runner,
+    (message) => message.type === "prompt_session" && message.sessionId === SHARED_SESSION_ID,
+  );
+  const promptResponse = await fetch(`http://127.0.0.1:${port}/api/sessions/${SHARED_SESSION_ID}/prompt`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${seed.deviceToken}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ text: "Still connected after duplicate start" }),
+  });
+  const promptBody = await promptResponse.text();
+  assert.equal(promptResponse.status, 200, promptBody);
+  assert.doesNotMatch(promptBody, /runner is offline/i);
+  assert.equal((await promptDelivery).text, "Still connected after duplicate start");
 });

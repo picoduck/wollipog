@@ -11,6 +11,7 @@ import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import websocket from "@fastify/websocket";
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
+import { installStartupReadinessGate } from "./startup-readiness.js";
 import {
   AUTOMATION_TRIGGER_MAX_BODY_BYTES,
   registerAutomationTriggerContentTypeParser,
@@ -279,6 +280,7 @@ const app = Fastify({
     },
   },
 });
+const markStartupReady = installStartupReadinessGate(app);
 const warnedLegacyRunnerCredentialIds = new Set<string>();
 
 // The packaged desktop's "Enable Tailnet Access" setting binds the sidecar to IPv4 wildcard so
@@ -3828,6 +3830,8 @@ process.on("unhandledRejection", (reason) => {
 void (async () => {
   try {
     await app.listen({ port: PORT, host: HOST });
+    db.settleStartupState(Date.now());
+    markStartupReady();
     app.log.info(`control plane listening on http://${HOST}:${PORT}`);
     // Normal service stdout is commonly captured as a log. Reveal the credential automatically
     // only to an interactive terminal; `--print-pair-url` is the explicit non-interactive path.

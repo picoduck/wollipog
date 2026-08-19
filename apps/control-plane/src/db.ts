@@ -3495,17 +3495,6 @@ export class ControlPlaneDb {
         "ALTER TABLE session_tombstones ADD COLUMN prune_when_absent INTEGER NOT NULL DEFAULT 1 CHECK (prune_when_absent IN (0, 1))",
       );
     }
-    // Nothing is connected at startup — reset stale online flags.
-    db.exec("UPDATE runners SET status = 'offline', connected_at = NULL;");
-    // Boxes likewise start offline; the orchestrator re-bootstraps auto_reconnect ones.
-    db.exec("UPDATE boxes SET status = 'offline';");
-    // Sessions that were mid-flight when the control plane stopped are orphaned
-    // (we no longer have a live runner link to them) — mark them stopped, not
-    // failed: an interrupted connection isn't an agent error.
-    db.exec(
-      `UPDATE sessions SET status = 'stopped', updated_at = ${Date.now()}
-         WHERE status IN ('queued','starting','running','input_required','idle')`,
-    );
     const controlPlane = new ControlPlaneDb(db, artifactBlobs, instanceId);
     try {
       controlPlane.recoverPendingArtifactBlobs();
@@ -3526,6 +3515,27 @@ export class ControlPlaneDb {
   /** Stable identity of this database-backed control-plane installation. */
   instanceId(): string {
     return this.controlPlaneInstanceId;
+  }
+
+  /* ----------------------------- Startup -------------------------------- */
+
+  /** Settle connection-owned state only after the HTTP server has successfully acquired its
+   * listening socket. Opening a shared database is not proof that this process owns the instance:
+   * a duplicate process can open SQLite before its listen fails with EADDRINUSE. */
+  settleStartupState(now = Date.now()): void {
+    this.atomic(() => {
+      // Nothing is connected at startup — reset stale online flags.
+      this.stmt("UPDATE runners SET status = 'offline', connected_at = NULL").run();
+      // Boxes likewise start offline; the orchestrator re-bootstraps auto_reconnect ones.
+      this.stmt("UPDATE boxes SET status = 'offline'").run();
+      // Sessions that were mid-flight when the control plane stopped are orphaned
+      // (we no longer have a live runner link to them) — mark them stopped, not
+      // failed: an interrupted connection isn't an agent error.
+      this.stmt(
+        `UPDATE sessions SET status = 'stopped', updated_at = ?
+         WHERE status IN ('queued','starting','running','input_required','idle')`,
+      ).run(now);
+    });
   }
 
   /* ----------------------------- Runners --------------------------------- */
