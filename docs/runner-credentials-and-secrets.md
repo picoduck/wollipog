@@ -200,9 +200,29 @@ roots aside. Mutations require `--ack-all-legacy-runners-stopped` and refuse an 
 Quarantining those whole roots also makes any stored legacy WSL session that names one of their
 worktrees unavailable until the root is restored or the session is explicitly migrated; inventory
 and back up the shared roots before acknowledging that operation.
-An incomplete or stale provider-home lease fails closed with manual quarantine guidance; even a
-same-owner restart cannot reclaim it automatically because a detached provider tree may have
-survived the runner. Remove it only after proving no provider process is using that HOME.
+Provider-home leases use an immutable, append-only journal inside the canonical lock directory.
+Every transition is published through one exclusive successor path derived from the current lease
+id, so concurrent reclaimers and an orderly release contend on the same filesystem operation. The
+predecessor remains present, its content hash is recorded by the successor, and the directory is
+never emptied during recovery or release. A same-host runner automatically reclaims an active
+lease only when its attested owner hash matches and its recorded PID is dead. It re-reads the
+journal immediately before publishing and verifies the complete hash-linked chain afterward.
+
+The first current-format record is named `lease-<uuid>.json`; successors are named
+`next-<predecessor-uuid>.json`. Existing `lease.json` records are accepted as legacy genesis
+records and migrate by appending a current-format successor without removing the legacy evidence.
+Rollback binaries see the additional or renamed entries and fail closed, so current and rollback
+runners cannot both believe they own the HOME. Released records remain in the bounded-size-per-entry
+journal; its length grows with restarts and orderly handoffs, trading small linear metadata growth
+for a protocol that never deletes or renames live exclusion evidence.
+
+An empty lock, malformed or hash-inconsistent journal, unexpected entry, different host, different
+attested owner, or live PID continues to fail closed. After proving no provider process is using
+that HOME, quarantine the entire `mutable-home.lock` directory; never remove individual journal
+entries. Publication stages a complete record beside the lock and hard-links it to its exclusive
+successor name, keeping partial writes outside the protocol. The staging file and target are under
+the same lease root; a filesystem that does not support same-device hard links fails acquisition
+without changing the current journal.
 
 ## Backup and operational boundary
 

@@ -49,20 +49,14 @@ test("provider-home ownership is released only after shutdown process trees are 
     hostname: "host-a",
     isProcessAlive: () => false,
   });
-  assert.throws(() => restarted.acquire({
-    driver: "claude-code",
-    command: "claude",
-    context: { kind: "native" },
-    env: { HOME: providerHome },
-  }), /stale lease.*manually quarantine/);
-  assert.equal(manager.releaseProviderHomeLeasesAfterShutdown(true), true);
-  assert.equal(releases, 1);
   restarted.acquire({
     driver: "claude-code",
     command: "claude",
     context: { kind: "native" },
     env: { HOME: providerHome },
   });
+  assert.equal(manager.releaseProviderHomeLeasesAfterShutdown(true), true);
+  assert.equal(releases, 1);
   restarted.releaseAll();
 });
 
