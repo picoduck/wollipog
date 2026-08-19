@@ -851,6 +851,12 @@ app.register(async (instance) => {
     const msg = parseMessage<RunnerToControlPlane>(raw.toString());
     if (!msg) return;
 
+    // A malformed frame (missing/mistyped fields survive the cast-only parseMessage) or a
+    // transient persistence error must not escape this listener: an uncaught throw here becomes a
+    // fatal uncaughtException that drops EVERY runner/session/dashboard connection. Isolate the
+    // failure to the offending socket — log it, then close only this runner (the `register` case
+    // already handles its own rejections and returns, so it never reaches this catch).
+    try {
     // Nothing but `register` is accepted until this socket has authenticated — an
     // unregistered client must not be able to inject events, queue overlays, or
     // shell output for sessions it doesn't own. And once REPLACED by a reconnect,
@@ -1118,6 +1124,19 @@ app.register(async (instance) => {
         break;
       }
     }
+    } catch (error) {
+      app.log.error(
+        { err: error, runnerId, messageType: msg.type },
+        "runner frame handler threw — closing offending runner socket",
+      );
+      // ws close() is idempotent: if the register error path (or a prior throw) already closed
+      // this socket, this is a no-op and never double-fires the close handshake.
+      try {
+        socket.close(1008, "malformed runner frame");
+      } catch {
+        /* socket already tearing down */
+      }
+    }
   });
 
   const onGone = () => {
@@ -1130,24 +1149,37 @@ app.register(async (instance) => {
       runnerId = null;
       return;
     }
-    db.markOffline(runnerId, Date.now());
-    hub.clearRunnerQueues(runnerId); // in-memory queues die with the runner
-    svc.failRunnerSessions(runnerId);
-    // Preserve v57 shell rows while the runner transport reconnects. Older runners have no
-    // authoritative inventory and therefore resolve as exited at disconnect.
-    const reconnectingShells = shellRegistry.markReconnecting(runnerId, Date.now());
-    if (!runnerSupportsProtocol(db.getRunner(runnerId)?.protocolVersion, "durableSessionShells")) {
-      const exited = shellRegistry.inventoryComplete(runnerId, [], Date.now());
-      for (const shell of exited) hub.shellExit(shell.sessionId, shell.shellId, null, shell.outputEndSeq);
-    } else if (reconnectingShells.length > 0) {
-      hub.shellRegistryReconciled(runnerId, reconnectingShells.map((shell) => shell.sessionId));
+    // Disconnect cleanup touches the DB (markOffline / failRunnerSessions). If the very error that
+    // closed this socket persists (e.g. a full disk failing every write), those calls throw — and
+    // this runs on the socket 'close'/'error' event, OUTSIDE the message handler's try/catch, so an
+    // escape here becomes a process-fatal uncaughtException that drops the whole control plane. The
+    // runner is already detached from the hub; contain any cleanup failure to keep the CP alive.
+    try {
+      db.markOffline(runnerId, Date.now());
+      hub.clearRunnerQueues(runnerId); // in-memory queues die with the runner
+      svc.failRunnerSessions(runnerId);
+      // Preserve v57 shell rows while the runner transport reconnects. Older runners have no
+      // authoritative inventory and therefore resolve as exited at disconnect.
+      const reconnectingShells = shellRegistry.markReconnecting(runnerId, Date.now());
+      if (!runnerSupportsProtocol(db.getRunner(runnerId)?.protocolVersion, "durableSessionShells")) {
+        const exited = shellRegistry.inventoryComplete(runnerId, [], Date.now());
+        for (const shell of exited) hub.shellExit(shell.sessionId, shell.shellId, null, shell.outputEndSeq);
+      } else if (reconnectingShells.length > 0) {
+        hub.shellRegistryReconciled(runnerId, reconnectingShells.map((shell) => shell.sessionId));
+      }
+      hub.runnerChanged(runnerId);
+      for (const projectId of db.projectIdsForRunner(runnerId)) hub.projectChangedById(projectId);
+      // If this runner is a box's, mark the box offline too (the SSH child may still be alive).
+      orchestrator.onRunnerDisconnected(runnerId);
+      app.log.info(`runner offline: ${runnerId}`);
+    } catch (error) {
+      app.log.error(
+        { err: error, runnerId },
+        "runner disconnect cleanup threw — runner detached but offline/session state may be incomplete until it reconnects or the CP restarts",
+      );
+    } finally {
+      runnerId = null;
     }
-    hub.runnerChanged(runnerId);
-    for (const projectId of db.projectIdsForRunner(runnerId)) hub.projectChangedById(projectId);
-    // If this runner is a box's, mark the box offline too (the SSH child may still be alive).
-    orchestrator.onRunnerDisconnected(runnerId);
-    app.log.info(`runner offline: ${runnerId}`);
-    runnerId = null;
   };
   socket.on("close", onGone);
   socket.on("error", onGone);
@@ -3745,12 +3777,52 @@ app.addHook("onClose", async () => {
   clearInterval(artifactMaintenanceTimer);
   orchestrator.shutdown();
 });
-for (const sig of ["SIGINT", "SIGTERM"] as const) {
-  process.once(sig, () => {
-    app.log.info(`${sig} — shutting down`);
-    void app.close().finally(() => process.exit(0));
+// Re-entrancy guard: a second signal (or an uncaughtException raised WHILE app.close() drains)
+// must not kick off a second shutdown and race two process.exit() calls.
+let controlPlaneShuttingDown = false;
+function gracefulShutdown(exitCode: number, reason: string): void {
+  if (controlPlaneShuttingDown) return;
+  controlPlaneShuttingDown = true;
+  try {
+    app.log.info(`${reason} — shutting down`);
+  } catch {
+    /* a broken logger must never abort the shutdown */
+  }
+  // app.close() fires the onClose hook, which runs orchestrator.shutdown() to kill the box SSH
+  // children — the same path SIGINT/SIGTERM use. Force-exit on a bounded failsafe so a hung close
+  // (possible after an uncaughtException left state corrupt) can never wedge the process forever.
+  const failsafe = setTimeout(() => process.exit(exitCode), 5_000);
+  void app.close().finally(() => {
+    clearTimeout(failsafe);
+    process.exit(exitCode);
   });
 }
+for (const sig of ["SIGINT", "SIGTERM"] as const) {
+  process.once(sig, () => gracefulShutdown(0, sig));
+}
+// A synchronous uncaughtException leaves the process in an unknown, possibly corrupt state: run the
+// graceful shutdown (fires onClose -> orchestrator.shutdown(), killing box SSH children) before
+// exiting non-zero rather than letting Node's default crash orphan them.
+process.on("uncaughtException", (error) => {
+  try {
+    app.log.error({ err: error }, "uncaughtException — running graceful shutdown");
+  } catch {
+    /* logging must never mask the exit */
+  }
+  gracefulShutdown(1, "uncaughtException");
+});
+// An unhandled rejection is a LAST-RESORT net, NOT a shutdown trigger: the control plane is the
+// single point every runner and dashboard depends on, so one stray async fault must not drop all of
+// them. Node would otherwise terminate by default; log and keep serving. The /runner message handler
+// and onGone already contain their own throws at the source, so this only catches paths not
+// enumerated there.
+process.on("unhandledRejection", (reason) => {
+  try {
+    app.log.error({ err: reason }, "unhandledRejection (continuing)");
+  } catch {
+    /* logging must never mask survival */
+  }
+});
 
 // Wrapped in an async IIFE (not a top-level await) so the module bundles to CJS.
 void (async () => {

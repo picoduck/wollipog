@@ -2845,7 +2845,11 @@ export class SessionManager {
         slashCommand,
         config: effectiveConfig, durable, syntheticRecovery, backgroundJobIds,
       });
-      if (!this.recoveryLaunching.has(sessionId)) setImmediate(() => void this.recoverQueuedAppServer(sessionId));
+      if (!this.recoveryLaunching.has(sessionId)) {
+        setImmediate(() => void this.recoverQueuedAppServer(sessionId).catch((error) =>
+          this.log(`queued app-server recovery failed for ${sessionId}: ${errText(error)}`),
+        ));
+      }
       return true;
     }
     const entry = this.active.get(sessionId);
@@ -2880,7 +2884,20 @@ export class SessionManager {
         ordinal,
         queueBeforeLaunch,
         backgroundJobIds,
-      );
+      ).catch((error) => {
+        // resumeAndPrompt handles EXPECTED failures internally (durable.failed / error events). An
+        // UNEXPECTED throw (e.g. a JSON.stringify RangeError writing a pathological config) escapes
+        // as an unobserved rejection; prompt() has already returned. Surface it as a session error.
+        // Reporting is itself wrapped: emitEvent can reach failHistoryIntegrity whose metadata write
+        // can throw under the SAME fault, and that secondary throw must not escape this catch.
+        try {
+          this.log(`resume-and-prompt failed for ${sessionId}: ${errText(error)}`);
+          this.emitEvent(sessionId, { kind: "error", message: `resume failed: ${errText(error)}` });
+          durable?.failed(`resume failed: ${errText(error)}`, "INVALID_COMMAND");
+        } catch (reportError) {
+          this.log(`resume failure reporting also failed for ${sessionId}: ${errText(reportError)}`);
+        }
+      });
       return true;
     }
     if (entry.historyIntegrityFailure) {
@@ -5987,7 +6004,10 @@ export class SessionManager {
     this.recoveryLaunching.delete(sessionId);
   }
 
-  shutdownAll(): void {
+  /** Returns whether every provider driver was disposed cleanly. When false, some provider process
+   * may still be alive without a registered pending kill, so the caller MUST retain the provider-home
+   * lease (fail closed) — releasing it could let a replacement runner share the same HOME. */
+  shutdownAll(): boolean {
     this.shuttingDown = true;
     this.sessionCommandAuthority.clearAll();
     this.launchGenerations.clear();
@@ -5996,12 +6016,35 @@ export class SessionManager {
     clearInterval(this.historyMaintenanceTimer);
     if (this.historyMaintenanceKickoff) clearTimeout(this.historyMaintenanceKickoff);
     this.historyMaintenanceKickoff = null;
+    // Dispose EVERY driver even if one throws: aborting here would leave later drivers' provider
+    // processes alive AND unregistered for reaping, so waitForPendingKills would falsely report
+    // "reaped" and the caller would release the lease over a live provider. Track clean completion.
+    let clean = true;
     for (const entry of this.active.values()) {
-      entry.client.dispose();
-      this.clearLock(entry.sessionId);
+      try {
+        entry.client.dispose();
+      } catch (error) {
+        clean = false;
+        this.log(`shutdown dispose failed for ${entry.sessionId}: ${errText(error)}`);
+        // Its provider may still be alive; leave the session-store lock so no replacement runner
+        // adopts the session and writes concurrently.
+        continue;
+      }
+      try {
+        this.clearLock(entry.sessionId);
+      } catch (error) {
+        this.log(`shutdown clearLock failed for ${entry.sessionId}: ${errText(error)}`);
+      }
     }
     this.active.clear();
-    for (const { client } of this.closing.values()) client.dispose();
+    for (const { client } of this.closing.values()) {
+      try {
+        client.dispose();
+      } catch (error) {
+        clean = false;
+        this.log(`shutdown dispose failed for a closing session: ${errText(error)}`);
+      }
+    }
     this.closing.clear();
     this.deleting.clear();
     this.recoveryQueues.clear();
@@ -6029,8 +6072,15 @@ export class SessionManager {
     this.admitted.clear();
     this.boxAdmission.releaseAll();
     // Debounced meta writes (seq/preview/usage) must land before the process exits — a lost
-    // seq flush would only self-heal on the next append, and usage totals would be dropped.
-    this.store.flushAll();
+    // seq flush would only self-heal on the next append, and usage totals would be dropped. A flush
+    // fault must not abort the return: it does not by itself leave a provider alive, so it is logged
+    // rather than folded into `clean` (which gates lease release on provider-liveness only).
+    try {
+      this.store.flushAll();
+    } catch (error) {
+      this.log(`shutdown flushAll failed: ${errText(error)}`);
+    }
+    return clean;
   }
 
   /** Release mutable provider HOME ownership only after every spawned provider/TUI process tree
