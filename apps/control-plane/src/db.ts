@@ -7,7 +7,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import {
   FileArtifactBlobStore,
   MemoryArtifactBlobStore,
@@ -46,7 +46,10 @@ import {
   type AgentCapabilities,
   type BackgroundDeliveryView,
   type BackgroundDeliveryWatchdogState,
+  type BackgroundNotificationReceiptState,
+  type BackgroundNotificationReceiptView,
   type BackgroundWorkState,
+  type BackgroundWorkTracking,
   type ManagedBackgroundJobSnapshot,
   type SessionCapabilities,
   type AcpSessionContextConfig,
@@ -160,7 +163,7 @@ import {
   type AuthPrincipal,
   type HumanPrincipal,
 } from "./identity.js";
-import type { PushAudience } from "./web-push.js";
+import type { DurableBackgroundPushDelivery, PushAudience, PushServiceOutcome } from "./web-push.js";
 import { matchWorkspaceId, matchWorkspaceIds, workspacePathsEqual } from "./workspace-match.js";
 import {
   executionTargetsForHost,
@@ -395,6 +398,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   title_source   TEXT NOT NULL DEFAULT 'generated',
   provider_updated_at TEXT,
   background_work_state TEXT,
+  background_work_tracking TEXT,
   status         TEXT NOT NULL DEFAULT 'queued',
   board_column   TEXT,
   run_id         TEXT,
@@ -514,6 +518,41 @@ CREATE TABLE IF NOT EXISTS managed_background_deliveries (
   PRIMARY KEY (session_id, continuation_id),
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
+
+-- Durable per-subscription push outbox. Push-service acceptance, browser display, and user click
+-- are distinct receipts; none of them claims exactly-once execution of provider side effects.
+CREATE TABLE IF NOT EXISTS background_push_receipt_secret (
+  id     INTEGER PRIMARY KEY CHECK (id = 1),
+  secret TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS background_push_deliveries (
+  delivery_id        TEXT PRIMARY KEY,
+  session_id         TEXT NOT NULL,
+  continuation_id    TEXT NOT NULL,
+  endpoint           TEXT,
+  endpoint_key       TEXT NOT NULL,
+  payload_json       TEXT NOT NULL,
+  state              TEXT NOT NULL CHECK (state IN
+    ('pending','retry','service_accepted','shown','clicked','permanent_failure','expired')),
+  attempt_count      INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at    INTEGER,
+  lease_expires_at   INTEGER,
+  last_status        INTEGER,
+  last_error         TEXT,
+  service_accepted_at INTEGER,
+  shown_at           INTEGER,
+  clicked_at         INTEGER,
+  expires_at         INTEGER NOT NULL,
+  created_at         INTEGER NOT NULL,
+  updated_at         INTEGER NOT NULL,
+  UNIQUE (session_id, continuation_id, endpoint_key),
+  FOREIGN KEY (session_id, continuation_id)
+    REFERENCES managed_background_deliveries(session_id, continuation_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_background_push_due
+  ON background_push_deliveries(next_attempt_at, lease_expires_at)
+  WHERE state IN ('pending','retry');
 
 -- Steering is intentionally a control-plane-owned outbox/receipt. The request snapshot is
 -- inserted before dispatch and retained while delivery is unresolved; terminal content is
@@ -1689,6 +1728,7 @@ interface SessionRow {
   title_source: string | null;
   provider_updated_at: string | null;
   background_work_state: string | null;
+  background_work_tracking: string | null;
   status: string;
   board_column: string | null;
   run_id: string | null;
@@ -2709,6 +2749,8 @@ export class ControlPlaneDb {
     db.exec("PRAGMA secure_delete = ON;");
     db.exec("PRAGMA foreign_keys = ON;");
     db.exec(SCHEMA);
+    db.prepare("INSERT OR IGNORE INTO background_push_receipt_secret (id, secret) VALUES (1, ?)")
+      .run(randomBytes(32).toString("base64url"));
     try {
       db.exec(
         "ALTER TABLE managed_background_jobs ADD COLUMN source_present INTEGER NOT NULL DEFAULT 1 CHECK (source_present IN (0, 1))",
@@ -3292,6 +3334,7 @@ export class ControlPlaneDb {
       "title_source TEXT",
       "provider_updated_at TEXT",
       "background_work_state TEXT",
+      "background_work_tracking TEXT",
       // Secret-free ACP MCP environment references and explicit directory selections.
       "acp_session_context TEXT",
       // Protocol v60 immutable launch placement. NULL identifies legacy sessions.
@@ -6159,6 +6202,168 @@ export class ControlPlaneDb {
     ).run(keys.publicKey, keys.privateJwk, now);
   }
 
+  private backgroundPushReceiptToken(deliveryId: string): string {
+    const row = this.stmt("SELECT secret FROM background_push_receipt_secret WHERE id=1").get() as
+      | { secret: string }
+      | undefined;
+    if (!row) throw new Error("background push receipt secret is unavailable");
+    return createHmac("sha256", row.secret).update(deliveryId).digest("base64url");
+  }
+
+  claimDueBackgroundPushDeliveries(now: number, limit = 16): DurableBackgroundPushDelivery[] {
+    if (!Number.isSafeInteger(now) || now < 0 || !Number.isInteger(limit) || limit < 1 || limit > 64) return [];
+    return this.atomic(() => {
+      this.stmt(
+        `UPDATE background_push_deliveries
+            SET state='expired', endpoint=NULL, next_attempt_at=NULL, lease_expires_at=NULL, updated_at=?
+          WHERE state IN ('pending','retry') AND expires_at<=?`,
+      ).run(now, now);
+      const rows = this.stmt(
+        `SELECT delivery_id, session_id, continuation_id, endpoint, payload_json, attempt_count
+           FROM background_push_deliveries
+          WHERE state IN ('pending','retry') AND endpoint IS NOT NULL
+            AND next_attempt_at<=? AND expires_at>?
+            AND (lease_expires_at IS NULL OR lease_expires_at<=?)
+          ORDER BY next_attempt_at, created_at, delivery_id LIMIT ?`,
+      ).all(now, now, now, limit) as unknown as Array<{
+        delivery_id: string; session_id: string; continuation_id: string; endpoint: string;
+        payload_json: string; attempt_count: number;
+      }>;
+      const lease = this.stmt(
+        `UPDATE background_push_deliveries SET lease_expires_at=?, updated_at=?
+          WHERE delivery_id=? AND state IN ('pending','retry')
+            AND (lease_expires_at IS NULL OR lease_expires_at<=?)`,
+      );
+      const claimed: DurableBackgroundPushDelivery[] = [];
+      for (const row of rows) {
+        if (Number(lease.run(now + 30_000, now, row.delivery_id, now).changes) !== 1) continue;
+        const message = parseJson<import("./web-push.js").PushMessage>(row.payload_json);
+        if (!message) {
+          this.settleBackgroundPushDelivery(row.delivery_id, { kind: "permanent_failure", error: "invalid_payload" }, now);
+          continue;
+        }
+        claimed.push({
+          deliveryId: row.delivery_id,
+          sessionId: row.session_id,
+          continuationId: row.continuation_id,
+          endpoint: row.endpoint,
+          message,
+          ackToken: this.backgroundPushReceiptToken(row.delivery_id),
+          attemptCount: row.attempt_count,
+        });
+      }
+      return claimed;
+    });
+  }
+
+  settleBackgroundPushDelivery(deliveryId: string, outcome: PushServiceOutcome, now: number): boolean {
+    if (!validBackgroundIdentity(deliveryId) || !Number.isSafeInteger(now) || now < 0) return false;
+    if (outcome.kind === "service_accepted") {
+      return Number(this.stmt(
+        `UPDATE background_push_deliveries
+            SET state=CASE WHEN clicked_at IS NOT NULL THEN 'clicked'
+                           WHEN shown_at IS NOT NULL THEN 'shown' ELSE 'service_accepted' END,
+                attempt_count=attempt_count+1, last_status=?, last_error=NULL,
+                service_accepted_at=COALESCE(service_accepted_at, ?), next_attempt_at=NULL,
+                endpoint=NULL, lease_expires_at=NULL, updated_at=?
+          WHERE delivery_id=? AND state IN ('pending','retry')`,
+      ).run(outcome.status, now, now, deliveryId).changes) > 0;
+    }
+    if (outcome.kind === "permanent_failure") {
+      return Number(this.stmt(
+        `UPDATE background_push_deliveries SET
+            state=CASE WHEN clicked_at IS NOT NULL THEN 'clicked'
+                       WHEN shown_at IS NOT NULL THEN 'shown' ELSE 'permanent_failure' END,
+            attempt_count=attempt_count+1,
+            last_status=?, last_error=?, endpoint=NULL, next_attempt_at=NULL, lease_expires_at=NULL, updated_at=?
+          WHERE delivery_id=? AND state IN ('pending','retry')`,
+      ).run(outcome.status ?? null, (outcome.error ?? "permanent_failure").slice(0, 120), now, deliveryId).changes) > 0;
+    }
+    const row = this.stmt("SELECT attempt_count, expires_at FROM background_push_deliveries WHERE delivery_id=?")
+      .get(deliveryId) as { attempt_count: number; expires_at: number } | undefined;
+    if (!row) return false;
+    const attempts = row.attempt_count + 1;
+    const next = Math.min(row.expires_at, now + Math.min(60 * 60_000, 5_000 * 2 ** Math.min(attempts - 1, 8)));
+    return Number(this.stmt(
+      `UPDATE background_push_deliveries SET
+          state=CASE WHEN service_accepted_at IS NOT NULL THEN 'service_accepted'
+                     WHEN clicked_at IS NOT NULL THEN 'clicked'
+                     WHEN shown_at IS NOT NULL THEN 'shown'
+                     WHEN expires_at<=? THEN 'expired' ELSE 'retry' END,
+          attempt_count=?, last_status=?, last_error=?,
+          next_attempt_at=CASE WHEN service_accepted_at IS NOT NULL OR shown_at IS NOT NULL OR clicked_at IS NOT NULL OR expires_at<=?
+                               THEN NULL ELSE ? END,
+          endpoint=CASE WHEN service_accepted_at IS NOT NULL OR shown_at IS NOT NULL OR clicked_at IS NOT NULL OR expires_at<=?
+                        THEN NULL ELSE endpoint END,
+          lease_expires_at=NULL, updated_at=?
+        WHERE delivery_id=? AND state IN ('pending','retry')`,
+    ).run(now, attempts, outcome.status ?? null, (outcome.error ?? "transient_failure").slice(0, 120),
+      now, next, now, now, deliveryId).changes) > 0;
+  }
+
+  acknowledgeBackgroundPushReceipt(
+    deliveryId: string,
+    token: string,
+    stage: "shown" | "clicked",
+    now: number,
+  ): boolean {
+    if (!validBackgroundIdentity(deliveryId) || typeof token !== "string" || token.length > 128 ||
+        !Number.isSafeInteger(now) || now < 0) return false;
+    const expected = Buffer.from(this.backgroundPushReceiptToken(deliveryId));
+    const presented = Buffer.from(token);
+    if (expected.length !== presented.length || !timingSafeEqual(expected, presented)) return false;
+    const result = stage === "shown"
+      ? this.stmt(
+        `UPDATE background_push_deliveries SET shown_at=COALESCE(shown_at, ?),
+            state=CASE WHEN clicked_at IS NOT NULL THEN 'clicked' ELSE 'shown' END,
+            endpoint=NULL, next_attempt_at=NULL, lease_expires_at=NULL, updated_at=MAX(updated_at, ?) WHERE delivery_id=?`,
+      ).run(now, now, deliveryId)
+      : this.stmt(
+        `UPDATE background_push_deliveries SET shown_at=COALESCE(shown_at, ?),
+            clicked_at=COALESCE(clicked_at, ?), state='clicked', endpoint=NULL, next_attempt_at=NULL,
+            lease_expires_at=NULL, updated_at=MAX(updated_at, ?) WHERE delivery_id=?`,
+      ).run(now, now, now, deliveryId);
+    return Number(result.changes) > 0;
+  }
+
+  private listBackgroundNotificationReceipts(
+    sessionId: string,
+    continuationIds: string[],
+  ): Map<string, BackgroundNotificationReceiptView[]> {
+    const grouped = new Map<string, BackgroundNotificationReceiptView[]>();
+    if (continuationIds.length === 0) return grouped;
+    const placeholders = continuationIds.map(() => "?").join(",");
+    const rows = this.stmt(
+      `SELECT continuation_id, delivery_id, endpoint_key, state, attempt_count, service_accepted_at,
+              shown_at, clicked_at, last_status, last_error
+         FROM background_push_deliveries
+        WHERE session_id=? AND continuation_id IN (${placeholders})
+        ORDER BY continuation_id, endpoint_key LIMIT 2048`,
+    ).all(sessionId, ...continuationIds) as unknown as Array<{
+      continuation_id: string; delivery_id: string; endpoint_key: string;
+      state: BackgroundNotificationReceiptState;
+      attempt_count: number; service_accepted_at: number | null; shown_at: number | null;
+      clicked_at: number | null; last_status: number | null; last_error: string | null;
+    }>;
+    for (const row of rows) {
+      const receipts = grouped.get(row.continuation_id) ?? [];
+      if (receipts.length >= 64) continue;
+      receipts.push({
+        deliveryId: row.delivery_id,
+        endpointKey: row.endpoint_key.slice(0, 16),
+        state: row.state,
+        attemptCount: row.attempt_count,
+        ...(row.service_accepted_at != null ? { serviceAcceptedAt: row.service_accepted_at } : {}),
+        ...(row.shown_at != null ? { shownAt: row.shown_at } : {}),
+        ...(row.clicked_at != null ? { clickedAt: row.clicked_at } : {}),
+        ...(row.last_status != null ? { lastStatus: row.last_status } : {}),
+        ...(row.last_error ? { lastError: row.last_error } : {}),
+      });
+      grouped.set(row.continuation_id, receipts);
+    }
+    return grouped;
+  }
+
   /* ------------------------------- Boxes --------------------------------- */
 
   createBox(input: NewBoxInput): void {
@@ -7590,10 +7795,10 @@ export class ControlPlaneDb {
     try {
       this.stmt(
          `INSERT INTO sessions
-           (id, runner_id, workspace_id, project_id, project_location_id, agent_id, title, title_source, provider_updated_at, background_work_state, status, use_worktree, worktree_path, workspace_path, archived,
+           (id, runner_id, workspace_id, project_id, project_location_id, agent_id, title, title_source, provider_updated_at, background_work_state, background_work_tracking, status, use_worktree, worktree_path, workspace_path, archived,
              driver, model, resolved_model, effort, permission_mode, agent_capabilities, preview, pending_approval, input_tokens, output_tokens, context_tokens_used, context_window, cost_usd,
               acp_session_context, created_at, updated_at, last_event_at, hydrated_seq, runner_history_epoch, runner_history_tail_seq, adopted)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
       )
       .run(
         snap.id,
@@ -7606,6 +7811,7 @@ export class ControlPlaneDb {
         snap.titleSource ?? "generated",
         snap.providerUpdatedAt ?? null,
         snap.backgroundWorkState ?? null,
+        snap.backgroundWorkTracking ?? null,
         snap.status,
         snap.useWorktree ? 1 : 0,
         snap.worktreePath,
@@ -7769,7 +7975,7 @@ export class ControlPlaneDb {
         );
       }
       this.stmt(
-        `UPDATE sessions SET status=?, title=?, title_source=?, provider_updated_at=?, background_work_state=?, preview=?, pending_approval=?, worktree_path=?, workspace_path=?, use_worktree=?,
+        `UPDATE sessions SET status=?, title=?, title_source=?, provider_updated_at=?, background_work_state=?, background_work_tracking=COALESCE(?, background_work_tracking), preview=?, pending_approval=?, worktree_path=?, workspace_path=?, use_worktree=?,
             model=?, resolved_model=?, effort=?, permission_mode=?, agent_capabilities=?, input_tokens=?, output_tokens=?, context_tokens_used=?, context_window=?, cost_usd=?, adopted=?,
             acp_session_context=COALESCE(?, acp_session_context),
             updated_at=? WHERE id=?`,
@@ -7780,6 +7986,7 @@ export class ControlPlaneDb {
         titleSource,
         snap.providerUpdatedAt ?? null,
         snap.backgroundWorkState ?? null,
+        snap.backgroundWorkTracking ?? null,
         snap.preview,
         pendingJson,
         snap.worktreePath,
@@ -7979,6 +8186,52 @@ export class ControlPlaneDb {
       ts,
       ts,
     );
+    this.stageBackgroundPushDeliveriesInTransaction(
+      sessionId,
+      payload.continuationId,
+      ts,
+      Date.now(),
+    );
+  }
+
+  private stageBackgroundPushDeliveriesInTransaction(
+    sessionId: string,
+    continuationId: string,
+    eventTs: number,
+    observedAt: number,
+  ): void {
+    const message = JSON.stringify({
+      title: "Managed Background Work Completed",
+      body: "The parent session resumed and its result is ready.",
+      sessionId,
+      notificationKey: `background-continuation:${continuationId}`,
+      urgency: "normal",
+      ts: eventTs,
+    });
+    const insert = this.stmt(
+      `INSERT OR IGNORE INTO background_push_deliveries
+        (delivery_id, session_id, continuation_id, endpoint, endpoint_key, payload_json,
+         state, next_attempt_at, expires_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
+    );
+    for (const sub of this.listPushSubscriptions({ kind: "session", sessionId })) {
+      const endpointHash = createHash("sha256").update(sub.endpoint).digest("hex");
+      const deliveryId = `bgpush_${createHash("sha256")
+        .update(`${sessionId}\0${continuationId}\0${endpointHash}`)
+        .digest("hex")}`;
+      insert.run(
+        deliveryId,
+        sessionId,
+        continuationId,
+        sub.endpoint,
+        endpointHash,
+        message,
+        observedAt,
+        observedAt + 7 * 24 * 60 * 60_000,
+        observedAt,
+        observedAt,
+      );
+    }
   }
 
   acknowledgeBackgroundDelivery(sessionId: string, continuationId: string, now: number): boolean {
@@ -8031,6 +8284,10 @@ export class ControlPlaneDb {
       terminal_count: number;
       active_job_count: number;
     }>;
+    const notificationsByContinuation = this.listBackgroundNotificationReceipts(
+      sessionId,
+      rows.map((row) => row.continuation_id),
+    );
     const views = rows.map((row): BackgroundDeliveryView => {
       let watchdogState: BackgroundDeliveryWatchdogState | undefined;
       if (status !== "stopped" && row.active_job_count > 0 &&
@@ -8054,6 +8311,9 @@ export class ControlPlaneDb {
         ...(row.transcript_projected_at != null ? { transcriptProjectedAt: row.transcript_projected_at } : {}),
         ...(row.notification_queued_at != null ? { notificationQueuedAt: row.notification_queued_at } : {}),
         ...(row.dashboard_observed_at != null ? { dashboardObservedAt: row.dashboard_observed_at } : {}),
+        ...(notificationsByContinuation.get(row.continuation_id)?.length
+          ? { notifications: notificationsByContinuation.get(row.continuation_id)! }
+          : {}),
         ...(watchdogState ? { watchdogState } : {}),
       };
     });
@@ -10693,6 +10953,7 @@ export class ControlPlaneDb {
       titleSource: (row.title_source as SessionTitleSource | null) ?? "generated",
       providerUpdatedAt: row.provider_updated_at ?? undefined,
       backgroundWorkState: parseBackgroundWorkState(row.background_work_state),
+      backgroundWorkTracking: parseBackgroundWorkTracking(row.background_work_tracking),
       ...(() => {
         const backgroundDeliveries = this.listBackgroundDeliveries(row.id, status);
         return backgroundDeliveries.length ? { backgroundDeliveries } : {};
@@ -14807,6 +15068,10 @@ function parseBackgroundWorkState(raw: string | null): BackgroundWorkState | und
   return raw === "running" || raw === "continuation_pending" || raw === "orphaned" || raw === "resumed"
     ? raw
     : undefined;
+}
+
+function parseBackgroundWorkTracking(raw: string | null): BackgroundWorkTracking | undefined {
+  return raw === "managed" || raw === "untracked" ? raw : undefined;
 }
 
 function validBackgroundIdentity(value: unknown): value is string {

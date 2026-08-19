@@ -109,6 +109,14 @@ history after reconnect/restart. Update runner, control plane, and dashboard tog
 on **Background Delivery** watchdog badges. A dashboard observation is not an OS push/display/click
 receipt; durable push dispatch and display acknowledgements remain a separate capability.
 
+Protocol v83 makes provider capability explicit: Claude sessions report managed background-work
+tracking, while providers without a durable lifecycle signal report **Detached Work: Untracked**.
+Managed continuations carry bounded provider-neutral terminal summaries without provider paths or
+output references. The control plane now persists one background-notification outbox row per push
+subscription and distinguishes push-service acceptance, browser display, and user click. Retry is
+notification-only; it never resubmits an accepted continuation or claims exactly-once behavior for
+arbitrary detached side effects.
+
 | Capability | Minimum protocol |
 | --- | ---: |
 | Find/adopt unmanaged agent sessions | 6 |
@@ -128,6 +136,7 @@ receipt; durable push dispatch and display acknowledgements remain a separate ca
 | Report subscription allowance windows and refresh results | 80 |
 | Resume a parent after managed background-job completion | 81 |
 | Track managed background delivery projection and observation | 82 |
+| Classify provider background-work tracking explicitly | 83 |
 
 A missing protocol version is treated as **unknown**, not optimistically supported. Protocol
 metadata itself arrived in v15, so the dashboard cannot prove which earlier commands such a runner

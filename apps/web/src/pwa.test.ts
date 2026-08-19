@@ -52,13 +52,15 @@ test("the service worker uses only the Wollipog generic notification tag", () =>
 });
 
 type WorkerHandler = (event: {
-  notification: { close(): void; data: { sessionId?: string | null; view?: string | null } };
+  notification: { close(): void; data: { sessionId?: string | null; view?: string | null;
+    receipt?: { deliveryId: string; token: string } | null } };
   waitUntil(promise: Promise<unknown>): void;
 }) => void;
 
 function notificationClickHarness(openClients: Array<{ focus(): Promise<void>; postMessage(message: unknown): void }> = []) {
   const handlers = new Map<string, WorkerHandler>();
   const opened: string[] = [];
+  const acknowledgements: unknown[] = [];
   const self = {
     addEventListener(type: string, handler: WorkerHandler) { handlers.set(type, handler); },
     skipWaiting() {},
@@ -70,15 +72,20 @@ function notificationClickHarness(openClients: Array<{ focus(): Promise<void>; p
     registration: { getNotifications: async () => [], showNotification: async () => {} },
   };
   const src = readFileSync(fileURLToPath(new URL("../public/sw.js", import.meta.url)), "utf8");
-  runInNewContext(src, { self, btoa });
+  const fetch = async (_url: string, init: { body: string }) => {
+    acknowledgements.push(JSON.parse(init.body));
+    return { status: 204 };
+  };
+  runInNewContext(src, { self, btoa, fetch });
   const click = handlers.get("notificationclick");
   assert.ok(click, "notificationclick handler registered");
-  const dispatch = async (data: { sessionId?: string | null; view?: string | null }) => {
+  const dispatch = async (data: { sessionId?: string | null; view?: string | null;
+    receipt?: { deliveryId: string; token: string } | null }) => {
     let settled: Promise<unknown> | null = null;
     click({ notification: { close() {}, data }, waitUntil: (promise) => { settled = promise; } });
     await settled;
   };
-  return { dispatch, opened };
+  return { dispatch, opened, acknowledgements };
 }
 
 test("closed-PWA notification clicks open canonical encoded destinations", async () => {
@@ -110,4 +117,38 @@ test("live-PWA notification clicks focus and message the existing client", async
   assert.equal(JSON.stringify(messages).includes("mam:open-"), false,
     "the post-release service worker must emit only Wollipog messages");
   assert.deepEqual(harness.opened, []);
+});
+
+test("notification display and click acknowledge distinct receipt stages", async () => {
+  const handlers = new Map<string, (event: any) => void>();
+  const acknowledgements: unknown[] = [];
+  let shown: { data?: Record<string, unknown> } | null = null;
+  const self = {
+    addEventListener(type: string, handler: (event: any) => void) { handlers.set(type, handler); },
+    skipWaiting() {},
+    clients: { claim: async () => {}, matchAll: async () => [], openWindow: async () => {} },
+    registration: {
+      getNotifications: async () => [],
+      showNotification: async (_title: string, options: { data?: Record<string, unknown> }) => { shown = options; },
+    },
+  };
+  const fetch = async (_url: string, init: { body: string }) => {
+    acknowledgements.push(JSON.parse(init.body));
+    return { status: 204 };
+  };
+  const src = readFileSync(fileURLToPath(new URL("../public/sw.js", import.meta.url)), "utf8");
+  runInNewContext(src, { self, btoa, fetch });
+  const receipt = { deliveryId: "bgpush_1", token: "receipt-token" };
+  let pushed: Promise<unknown> | null = null;
+  handlers.get("push")!({
+    data: { json: () => ({ title: "Done", body: "Ready", sessionId: "s_1", ts: 10, receipt }) },
+    waitUntil: (promise: Promise<unknown>) => { pushed = promise; },
+  });
+  await pushed;
+  assert.deepEqual(acknowledgements, [{ ...receipt, stage: "shown" }]);
+  assert.deepEqual((shown as { data: { receipt: unknown } } | null)?.data.receipt, receipt);
+
+  const click = notificationClickHarness();
+  await click.dispatch({ sessionId: "s_1", receipt });
+  assert.deepEqual(click.acknowledgements, [{ ...receipt, stage: "clicked" }]);
 });

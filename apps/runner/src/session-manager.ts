@@ -6464,10 +6464,18 @@ export class SessionManager {
         entry?.queue.some((prompt) => prompt.backgroundJobIds?.some((id) => jobIds.includes(id)))) return;
     this.backgroundContinuationLaunching.add(sessionId);
     try {
+      const selected = (meta.backgroundJobs ?? []).filter((job) => jobIds.includes(job.id));
+      const resultSummary = selected.filter((job) => job.terminalStatus && job.terminalObservedAt).slice(0, 128).map((job) => ({
+        id: job.id,
+        launchType: job.launchType,
+        status: job.terminalStatus!,
+        terminalAt: job.terminalObservedAt!,
+      }));
+      const prompt = `${BACKGROUND_CONTINUATION_PROMPT}\n\nRunner-managed terminal results:\n${JSON.stringify(resultSummary)}`;
       if (entry) {
         this.prompt(
           sessionId,
-          BACKGROUND_CONTINUATION_PROMPT,
+          prompt,
           [],
           undefined,
           undefined,
@@ -6480,7 +6488,7 @@ export class SessionManager {
       } else {
         await this.resumeAndPrompt(
           sessionId,
-          BACKGROUND_CONTINUATION_PROMPT,
+          prompt,
           [],
           undefined,
           undefined,
@@ -6540,8 +6548,20 @@ export class SessionManager {
     const parentTurnId = current.backgroundJobs.find((job) => selected.has(job.id))?.parentTurnId;
     if (!continuationId || !parentTurnId) return;
     const peerProtocol = this.controlPlaneProtocolVersion();
+    const results = current.backgroundJobs.filter((job) => selected.has(job.id) &&
+      job.terminalStatus && job.terminalObservedAt).slice(0, 128).map((job) => ({
+        id: job.id,
+        launchType: job.launchType,
+        status: job.terminalStatus!,
+        terminalAt: job.terminalObservedAt!,
+      }));
     const deliveryEvent = runnerSupportsProtocol(peerProtocol, "managedBackgroundDelivery")
-      ? this.emitEvent(sessionId, { kind: "background_continuation_delivered", continuationId, parentTurnId })
+      ? this.emitEvent(sessionId, {
+          kind: "background_continuation_delivered",
+          continuationId,
+          parentTurnId,
+          ...(runnerSupportsProtocol(peerProtocol, "backgroundWorkTracking") ? { results } : {}),
+        })
       : this.emitEvent(sessionId, {
           kind: "stderr",
           text: `${BACKGROUND_CONTINUATION_DELIVERED_PREFIX}${continuationId}`,
@@ -6571,7 +6591,7 @@ export class SessionManager {
   }
 
   /** A legacy peer or a disconnected socket can make the durable delivery proof use the
-   * authenticated stderr fallback. Once a v78+ registration succeeds, publish one structured
+   * authenticated stderr fallback. Once a v82+ registration succeeds, publish one structured
    * proof per continuation before recording the runner-private publication marker. A crash
    * between those operations can duplicate the event, but control-plane projection is keyed and
    * idempotent; it can never lose the notification or leave a permanent projection watchdog. */
@@ -6606,24 +6626,35 @@ export class SessionManager {
 
   private reconcileDeliveredBackgroundContinuations(meta: SessionMeta): SessionMeta {
     if (!meta.backgroundJobs?.some((job) => job.continuationId && !job.assistantResultPersistedAt)) return meta;
-    const delivered = new Set(this.store.readEvents(meta.sessionId).flatMap((event) => {
-      if (event.payload.kind === "background_continuation_delivered") return [event.payload.continuationId];
-      return event.payload.kind === "stderr" &&
-        event.payload.runnerMarker === "background_continuation_delivery" &&
-        event.payload.text.startsWith(BACKGROUND_CONTINUATION_DELIVERED_PREFIX)
-        ? [event.payload.text.slice(BACKGROUND_CONTINUATION_DELIVERED_PREFIX.length)]
-        : [];
-    }));
+    const delivered = new Map<string, number | undefined>();
+    for (const event of this.store.readEvents(meta.sessionId)) {
+      if (event.payload.kind === "background_continuation_delivered") {
+        const existing = delivered.get(event.payload.continuationId);
+        delivered.set(
+          event.payload.continuationId,
+          existing === undefined ? event.ts : Math.min(existing, event.ts),
+        );
+      } else if (event.payload.kind === "stderr" &&
+          event.payload.runnerMarker === "background_continuation_delivery" &&
+          event.payload.text.startsWith(BACKGROUND_CONTINUATION_DELIVERED_PREFIX)) {
+        const continuationId = event.payload.text.slice(BACKGROUND_CONTINUATION_DELIVERED_PREFIX.length);
+        if (!delivered.has(continuationId)) delivered.set(continuationId, undefined);
+      }
+    }
     if (delivered.size === 0) return meta;
     const persistedAt = Date.now();
     let changed = false;
     const backgroundJobs = meta.backgroundJobs.map((job) => {
       if (!job.continuationId || !delivered.has(job.continuationId) || job.assistantResultPersistedAt) return job;
+      const structuredDeliveryPublishedAt = delivered.get(job.continuationId);
       changed = true;
       return {
         ...job,
         continuationAcceptedAt: job.continuationAcceptedAt ?? persistedAt,
         assistantResultPersistedAt: persistedAt,
+        ...(structuredDeliveryPublishedAt !== undefined && job.structuredDeliveryPublishedAt === undefined
+          ? { structuredDeliveryPublishedAt }
+          : {}),
       };
     });
     if (!changed) return meta;

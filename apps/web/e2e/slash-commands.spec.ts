@@ -121,10 +121,12 @@ test("a pending composer config survives a durable command and applies to the ne
   await page.getByRole("button", { name: "Approve for Me" }).click();
   await page.getByRole("menuitemradio", { name: "Ask for Approval" }).click();
   await expect(page.getByRole("button", { name: "Ask for Approval" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("button", { name: "Ask for Approval" })).toHaveAttribute("aria-expanded", "false");
 
   const composer = page.locator(".composer-input");
   await composer.fill("/deploy production");
-  await page.keyboard.press("Enter");
+  await page.getByRole("button", { name: "Send" }).click();
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.sessionCommandRequests()))
     .toEqual([{
       sessionId: "session-alpha",
@@ -138,7 +140,7 @@ test("a pending composer config survives a durable command and applies to the ne
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests())).toEqual([]);
 
   await composer.fill("continue with the selected approval mode");
-  await page.keyboard.press("Enter");
+  await page.getByRole("button", { name: "Send" }).click();
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests()))
     .toEqual([{
       sessionId: "session-alpha",

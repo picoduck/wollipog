@@ -14,6 +14,8 @@ import {
   vapidAuthHeader,
   WebPushSender,
   type StoredPushSubscription,
+  type DurableBackgroundPushDelivery,
+  type PushServiceOutcome,
   type VapidKeys,
 } from "./web-push.js";
 import { pushDecision } from "./push-decision.js";
@@ -190,7 +192,12 @@ test("redactEndpoint keeps the origin, drops the capability path", () => {
 function senderHarness(
   subs: StoredPushSubscription[],
   statuses: Record<string, number>,
-  opts: { delayMs?: number; throwFor?: Record<string, Error>; throwingLog?: boolean } = {},
+  opts: {
+    delayMs?: number;
+    throwFor?: Record<string, Error>;
+    throwingLog?: boolean;
+    durableDeliveries?: DurableBackgroundPushDelivery[];
+  } = {},
 ) {
   const state = {
     subs: [...subs],
@@ -201,6 +208,9 @@ function senderHarness(
     vapidWrites: 0,
     inFlight: 0,
     maxInFlight: 0,
+    durable: [...(opts.durableDeliveries ?? [])],
+    durableClaims: 0,
+    settled: [] as Array<{ deliveryId: string; outcome: PushServiceOutcome }>,
   };
   const matches = (s: StoredPushSubscription, sub: StoredPushSubscription) =>
     s.endpoint === sub.endpoint && s.p256dh === sub.p256dh && s.auth === sub.auth;
@@ -218,6 +228,14 @@ function senderHarness(
     setVapidKeys: (k: VapidKeys) => {
       state.vapid = k;
       state.vapidWrites++;
+    },
+    claimDueBackgroundPushDeliveries: () => {
+      state.durableClaims++;
+      return state.durable.splice(0);
+    },
+    settleBackgroundPushDelivery: (deliveryId: string, outcome: PushServiceOutcome) => {
+      state.settled.push({ deliveryId, outcome });
+      return true;
     },
   };
   const record = (m: string) => {
@@ -358,7 +376,8 @@ test("send: a throwing fetch never leaks the endpoint path into logs", async () 
 function decryptBody(
   body: Uint8Array,
   authSecret: string = V.authSecret,
-): { title: string; body: string; sessionId?: string; view?: "automations"; notificationKey?: string; ts: number } {
+): { title: string; body: string; sessionId?: string; view?: "automations"; notificationKey?: string; ts: number;
+  receipt?: { deliveryId: string; token: string } } {
   const buf = Buffer.from(body);
   const salt = buf.subarray(0, 16);
   const asPublic = buf.subarray(21, 86);
@@ -375,6 +394,91 @@ function decryptBody(
   const record = Buffer.concat([d.update(sealed.subarray(0, sealed.length - 16)), d.final()]);
   return JSON.parse(record.subarray(0, record.length - 1).toString("utf8"));
 }
+
+test("durable background pushes carry one receipt capability and settle only the push-service boundary", async () => {
+  const delivery: DurableBackgroundPushDelivery = {
+    deliveryId: "bgpush_test",
+    sessionId: "s_1",
+    continuationId: "bgcont_1",
+    endpoint: SUB(1).endpoint,
+    message: {
+      title: "Managed Background Work Completed",
+      body: "The result is ready.",
+      sessionId: "s_1",
+      notificationKey: "background-continuation:bgcont_1",
+      urgency: "normal",
+      ts: 10,
+    },
+    ackToken: "high-entropy-capability",
+    attemptCount: 0,
+  };
+  const { state, sender } = senderHarness([SUB(1)], { [SUB(1).endpoint]: 201 }, {
+    durableDeliveries: [delivery],
+  });
+  assert.equal(await sender.retryDurableBackground(10), 1);
+  assert.equal(state.requests.length, 1);
+  assert.deepEqual(decryptBody(state.requests[0]!.body).receipt, {
+    deliveryId: delivery.deliveryId,
+    token: delivery.ackToken,
+  });
+  assert.deepEqual(state.settled, [{
+    deliveryId: delivery.deliveryId,
+    outcome: { kind: "service_accepted", status: 201 },
+  }]);
+});
+
+test("durable background push retries never overlap one sender drain", async () => {
+  const delivery: DurableBackgroundPushDelivery = {
+    deliveryId: "bgpush_serial",
+    sessionId: "s_1",
+    continuationId: "bgcont_1",
+    endpoint: SUB(1).endpoint,
+    message: {
+      title: "Managed Background Work Completed",
+      body: "The result is ready.",
+      sessionId: "s_1",
+      notificationKey: "background-continuation:bgcont_1",
+      urgency: "normal",
+      ts: 10,
+    },
+    ackToken: "high-entropy-capability",
+    attemptCount: 0,
+  };
+  const { state, sender } = senderHarness([SUB(1)], { [SUB(1).endpoint]: 201 }, {
+    durableDeliveries: [delivery],
+    delayMs: 30,
+  });
+  const first = sender.retryDurableBackground(10);
+  await waitFor(() => state.inFlight === 1);
+  assert.equal(await sender.retryDurableBackground(20), 0);
+  assert.equal(state.durableClaims, 1, "the overlapping timer never reclaims leased rows");
+  assert.equal(await first, 1);
+});
+
+test("durable background pushes retry transient service failures and terminalize revoked endpoints", async () => {
+  const base: DurableBackgroundPushDelivery = {
+    deliveryId: "bgpush_retry",
+    sessionId: "s_1",
+    continuationId: "bgcont_1",
+    endpoint: SUB(1).endpoint,
+    message: { title: "Done", body: "Ready", sessionId: "s_1", urgency: "normal" },
+    ackToken: "capability",
+    attemptCount: 0,
+  };
+  const transient = senderHarness([SUB(1)], { [SUB(1).endpoint]: 503 }, { durableDeliveries: [base] });
+  await transient.sender.retryDurableBackground(10);
+  assert.deepEqual(transient.state.settled[0], {
+    deliveryId: base.deliveryId,
+    outcome: { kind: "retry", status: 503, error: "push_service_rejected" },
+  });
+
+  const revoked = senderHarness([], {}, { durableDeliveries: [{ ...base, deliveryId: "bgpush_revoked" }] });
+  await revoked.sender.retryDurableBackground(10);
+  assert.deepEqual(revoked.state.settled[0], {
+    deliveryId: "bgpush_revoked",
+    outcome: { kind: "permanent_failure", error: "subscription_revoked" },
+  });
+});
 
 // REGRESSION (round 2): a burst of transitions for one session coalesces to its NEWEST
 // state instead of queueing unbounded closures.

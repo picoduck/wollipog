@@ -35,7 +35,9 @@ import { type TimelineItem } from "../timeline.js";
 import { useTimeline } from "./useTimeline.js";
 import {
   BackgroundDeliveryBadge,
+  BackgroundNotificationBadge,
   BackgroundWorkBadge,
+  UntrackedBackgroundWorkBadge,
   Empty,
   Modal,
   Spinner,
@@ -2102,11 +2104,17 @@ function SessionDetailLoaded({
             <div className="session-preview-meta">
               <StatusBadge status={session.status} />
               {session.backgroundWorkState && <BackgroundWorkBadge state={session.backgroundWorkState} />}
+              {!session.backgroundWorkState && session.backgroundWorkTracking === "untracked" && (
+                <UntrackedBackgroundWorkBadge />
+              )}
               {session.backgroundDeliveries?.find((delivery) => delivery.watchdogState)?.watchdogState && (
                 <BackgroundDeliveryBadge
                   state={session.backgroundDeliveries.find((delivery) => delivery.watchdogState)!.watchdogState!}
                 />
               )}
+              {session.backgroundDeliveries?.flatMap((delivery) => delivery.notifications ?? []).slice(-2).map((receipt) => (
+                <BackgroundNotificationBadge key={receipt.deliveryId} state={receipt.state} />
+              ))}
               <span className="tag tag-machine" title={session.runnerId}>{runnerDisp.name}</span>
               {session.agentName && (
                 <span className="tag tag-agent">{sessionAgentLabel(session.agentName, session.driver, session.agentId)}</span>

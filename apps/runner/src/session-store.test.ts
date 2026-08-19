@@ -265,9 +265,9 @@ test("metaToSnapshot omits runner-only fields (agentSessionId, repoPath, command
   assert.equal(snap.resolvedModel, "claude-opus-5[1m]");
 });
 
-test("v80 snapshots expose bounded background delivery facts without runner-private context", () => {
+test("v82 snapshots expose bounded background delivery facts without runner-private context", () => {
   assert.equal(
-    metaToSnapshot(meta({ backgroundJobs: undefined }), 80).backgroundJobs,
+    metaToSnapshot(meta({ backgroundJobs: undefined }), 82).backgroundJobs,
     undefined,
     "sessions without managed work do not trigger authoritative empty-inventory sweeps",
   );
@@ -299,8 +299,8 @@ test("v80 snapshots expose bounded background delivery facts without runner-priv
     assistantResultPersistedAt: 24,
     structuredDeliveryPublishedAt: 25,
   }];
-  assert.equal(metaToSnapshot(meta({ backgroundJobs }), 79).backgroundJobs, undefined);
-  assert.deepEqual(metaToSnapshot(meta({ backgroundJobs }), 80).backgroundJobs, [{
+  assert.equal(metaToSnapshot(meta({ backgroundJobs }), 81).backgroundJobs, undefined);
+  assert.deepEqual(metaToSnapshot(meta({ backgroundJobs }), 82).backgroundJobs, [{
     id: "task-1",
     parentTurnId: "turn-1",
     runnerId: "runner-1",
@@ -316,11 +316,21 @@ test("v80 snapshots expose bounded background delivery facts without runner-priv
     continuationAcceptedAt: 23,
     assistantResultPersistedAt: 24,
   }]);
-  const serialized = JSON.stringify(metaToSnapshot(meta({ backgroundJobs }), 80));
+  const serialized = JSON.stringify(metaToSnapshot(meta({ backgroundJobs }), 82));
   assert.equal(serialized.includes("tool-secret"), false);
   assert.equal(serialized.includes("provider/artifact"), false);
   assert.equal(serialized.includes("Ubuntu"), false);
   assert.equal(serialized.includes("structuredDeliveryPublishedAt"), false);
+});
+
+test("v83 snapshots explicitly classify provider background tracking", () => {
+  assert.equal(metaToSnapshot(meta({ driver: "claude-code" }), 82).backgroundWorkTracking, undefined);
+  assert.equal(metaToSnapshot(meta({ driver: "claude-code" }), 83).backgroundWorkTracking, "managed");
+  for (const driver of ["acp", "codex", "codex-app-server"] as const) {
+    const snap = metaToSnapshot(meta({ driver }), 83);
+    assert.equal(snap.backgroundWorkTracking, "untracked", driver);
+    assert.equal(snap.backgroundWorkState, undefined, "classification never invents active detached work");
+  }
 });
 
 test("native snapshots publish only the session-scoped elicitation overlay", () => {

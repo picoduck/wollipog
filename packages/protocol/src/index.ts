@@ -230,7 +230,10 @@
 //     continuation-delivery barrier. Older peers continue to treat the optional state as absent.
 // 82: projection-safe managed background-job snapshots and structured continuation evidence let
 //     the control plane durably track transcript projection and dashboard observation.
-export const PROTOCOL_VERSION = 82;
+// 83: runners explicitly classify provider background-work tracking. Providers without a
+//     lifecycle signal report `untracked` instead of letting an absent field imply safety.
+//     Structured continuation evidence carries bounded provider-neutral terminal summaries.
+export const PROTOCOL_VERSION = 83;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
@@ -345,6 +348,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   providerAuthenticationReceipts: 79,
   subscriptionUsage: 80,
   managedBackgroundDelivery: 82,
+  backgroundWorkTracking: 83,
 } as const;
 
 /* ========================================================================== */
@@ -1958,6 +1962,8 @@ export type SessionEventPayload =
       kind: "background_continuation_delivered";
       continuationId: string;
       parentTurnId: string;
+      /** Bounded terminal evidence only; provider output references remain runner-local. */
+      results?: ManagedBackgroundResult[];
     }
   | { kind: "status"; status: SessionStatus }
   | { kind: "turn_interrupted" }
@@ -2183,6 +2189,10 @@ export type SessionTitleSource = "generated" | "user" | "provider";
  * expose background work for this session (including older runners and non-Claude drivers). */
 export type BackgroundWorkState = "running" | "continuation_pending" | "orphaned" | "resumed";
 
+/** Whether the runner can durably observe detached work for this provider. `untracked` is a
+ * capability boundary, not proof that detached work currently exists. */
+export type BackgroundWorkTracking = "managed" | "untracked";
+
 /** Projection-safe runner facts for one managed background job. Provider context, local paths,
  * output references, and credentials deliberately never cross this boundary. */
 export interface ManagedBackgroundJobSnapshot {
@@ -2202,11 +2212,41 @@ export interface ManagedBackgroundJobSnapshot {
   assistantResultPersistedAt?: number;
 }
 
+/** Provider-neutral terminal evidence safe to project across runner/control-plane boundaries. */
+export interface ManagedBackgroundResult {
+  id: string;
+  launchType: ManagedBackgroundJobSnapshot["launchType"];
+  status: NonNullable<ManagedBackgroundJobSnapshot["terminalStatus"]>;
+  terminalAt: number;
+}
+
 export type BackgroundDeliveryWatchdogState =
   | "terminal_without_continuation"
   | "accepted_without_result"
   | "result_not_projected"
   | "dashboard_observation_pending";
+
+export type BackgroundNotificationReceiptState =
+  | "pending"
+  | "retry"
+  | "service_accepted"
+  | "shown"
+  | "clicked"
+  | "permanent_failure"
+  | "expired";
+
+/** Per-subscription receipt without exposing the capability-bearing push endpoint. */
+export interface BackgroundNotificationReceiptView {
+  deliveryId: string;
+  endpointKey: string;
+  state: BackgroundNotificationReceiptState;
+  attemptCount: number;
+  serviceAcceptedAt?: number;
+  shownAt?: number;
+  clickedAt?: number;
+  lastStatus?: number;
+  lastError?: string;
+}
 
 /** Control-plane-owned durable projection of one parent continuation. `dashboardObservedAt`
  * acknowledges receipt by an authenticated dashboard, not OS notification display or user click. */
@@ -2223,6 +2263,8 @@ export interface BackgroundDeliveryView {
   transcriptProjectedAt?: number;
   notificationQueuedAt?: number;
   dashboardObservedAt?: number;
+  /** Separate service, display, and click acknowledgements for each push subscription. */
+  notifications?: BackgroundNotificationReceiptView[];
   watchdogState?: BackgroundDeliveryWatchdogState;
 }
 
@@ -2381,7 +2423,9 @@ export interface SessionView {
   providerUpdatedAt?: string;
   /** Durable runner-observed Claude background-work lifecycle; absent when not applicable. */
   backgroundWorkState?: BackgroundWorkState;
-  /** Durable control-plane delivery stages. Omitted by pre-v78 control planes. */
+  /** Explicit provider capability boundary. Omitted by pre-v83 control planes. */
+  backgroundWorkTracking?: BackgroundWorkTracking;
+  /** Durable control-plane delivery stages. Omitted by pre-v82 control planes. */
   backgroundDeliveries?: BackgroundDeliveryView[];
   status: SessionStatus;
   column: BoardColumn;
@@ -2470,7 +2514,9 @@ export interface SessionSnapshot {
   providerUpdatedAt?: string;
   /** Durable runner-observed Claude background-work lifecycle; absent when not applicable. */
   backgroundWorkState?: BackgroundWorkState;
-  /** Bounded projection-safe managed-job inventory. Omitted for pre-v78 control planes. */
+  /** Explicit provider capability boundary. Omitted for pre-v83 control planes. */
+  backgroundWorkTracking?: BackgroundWorkTracking;
+  /** Bounded projection-safe managed-job inventory. Omitted for pre-v82 control planes. */
   backgroundJobs?: ManagedBackgroundJobSnapshot[];
   status: SessionStatus;
   driver: AgentDriverKind;

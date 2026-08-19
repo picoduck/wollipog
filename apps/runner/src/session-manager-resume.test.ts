@@ -1955,6 +1955,9 @@ test("two idle managed-job completions cross one durable barrier and resume the 
     await tick();
     assert.equal(h.prompts.length, 2);
     assert.match(h.prompts[1] ?? "", /deliver the parent workflow's final user-visible result/i);
+    assert.match(h.prompts[1] ?? "", /"id":"task-1","launchType":"agent","status":"completed","terminalAt":20/);
+    assert.match(h.prompts[1] ?? "", /"id":"task-2","launchType":"workflow","status":"failed","terminalAt":21/);
+    assert.equal(h.prompts[1]?.includes("outputReference"), false, "provider-local output references stay private");
     const delivered = h.store.readMeta("resume-session")?.backgroundJobs ?? [];
     assert.ok(delivered.every((job) => job.continuationQueuedAt));
     assert.equal(new Set(delivered.map((job) => job.continuationId)).size, 1);
@@ -1974,8 +1977,12 @@ test("two idle managed-job completions cross one durable barrier and resume the 
         kind: "background_continuation_delivered",
         continuationId: delivered[0]!.continuationId,
         parentTurnId: delivered[0]!.parentTurnId,
+        results: [
+          { id: "task-1", launchType: "agent", status: "completed", terminalAt: 20 },
+          { id: "task-2", launchType: "workflow", status: "failed", terminalAt: 21 },
+        ],
       }],
-      "v78 emits one structured, replayable delivery proof for the parent barrier",
+      "v83 emits one structured, replayable delivery proof with provider-neutral terminal evidence",
     );
     const stderr = h.store.readEvents("resume-session").flatMap((event) =>
       event.payload.kind === "stderr" ? [event.payload.text] : []);
@@ -2406,23 +2413,36 @@ test("startup reconciles structured delivery evidence written before the metadat
       undefined,
       "provider-authored stderr cannot impersonate runner delivery evidence",
     );
-    h.store.appendEvent("resume-session", {
+    const structuredEvent = h.store.appendEvent("resume-session", {
       kind: "background_continuation_delivered",
       continuationId: "bgcont-crash-window",
       parentTurnId: "turn-a",
     });
+    assert.ok(structuredEvent);
     h.manager.reconcileStore();
     const reconciled = h.store.readMeta("resume-session");
     assert.ok(reconciled?.backgroundJobs?.[0]?.assistantResultPersistedAt);
+    assert.equal(
+      reconciled?.backgroundJobs?.[0]?.structuredDeliveryPublishedAt,
+      structuredEvent.ts,
+      "reconciliation preserves the original structured publication timestamp",
+    );
     assert.equal(reconciled?.backgroundWorkState, "resumed");
     assert.deepEqual(h.prompts, [], "reconciliation never submits a second provider turn");
+    h.manager.recoverAllOrphanedWork();
+    assert.equal(
+      h.store.readEvents("resume-session").filter((event) =>
+        event.payload.kind === "background_continuation_delivered").length,
+      1,
+      "the reconciled publication marker prevents a duplicate structured event",
+    );
   } finally {
     h.manager.shutdownAll();
     h.cleanup();
   }
 });
 
-test("pre-v78 delivery emits authenticated legacy evidence", () => {
+test("pre-v82 delivery emits authenticated legacy evidence", () => {
   const h = harness({
     driver: "claude-code",
     backgroundWorkState: "continuation_pending",
@@ -2435,7 +2455,7 @@ test("pre-v78 delivery emits authenticated legacy evidence", () => {
     }],
   });
   try {
-    Object.defineProperty(h.manager, "controlPlaneProtocolVersion", { value: () => 77 });
+    Object.defineProperty(h.manager, "controlPlaneProtocolVersion", { value: () => 81 });
     // Exercise the crash-sensitive finalization boundary directly: the delivery proof must be
     // durable before the runner marks the job's assistant result persisted.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2455,7 +2475,7 @@ test("pre-v78 delivery emits authenticated legacy evidence", () => {
   }
 });
 
-test("v78 registration upgrades legacy delivery evidence exactly once, including stopped sessions", () => {
+test("v82 registration upgrades legacy delivery evidence exactly once, including stopped sessions", () => {
   const h = harness({
     driver: "claude-code",
     status: "stopped",

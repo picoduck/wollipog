@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { extractBearer } from "./auth.js";
-import { isApiRoute, isPublicTranscriptShareRead, registerAuthGate } from "./http-auth.js";
+import { isApiRoute, isPublicPushReceiptAck, isPublicTranscriptShareRead, registerAuthGate } from "./http-auth.js";
 import { isAllowedOrigin } from "./net.js";
 import { mutationAuthorizationError, type HumanPrincipal } from "./identity.js";
 
@@ -38,6 +38,7 @@ async function buildTestApp(onAuthorize?: () => void): Promise<FastifyInstance> 
   app.get("/api/public/transcript-share", async () => ({ shared: true }));
   app.get("/api/public/transcript-share/extra", async () => ({ shared: false }));
   app.post("/api/public/transcript-share", async () => ({ mutated: true }));
+  app.post("/api/public/push-receipt", async () => ({ acknowledged: true }));
   app.post("/api/sessions/:id/stop", async () => ({ stopped: true }));
   app.get("/runner", async () => ({ runner: true }));
   // Stand-in for @fastify/static's catch-all.
@@ -231,6 +232,21 @@ test("exempt routes stay open: /healthz and /runner (own token) need no device",
   t.after(() => app.close());
   assert.equal((await app.inject({ method: "GET", url: "/healthz", remoteAddress: REMOTE })).statusCode, 200);
   assert.equal((await app.inject({ method: "GET", url: "/runner", remoteAddress: REMOTE })).statusCode, 200);
+});
+
+test("only the exact POST push receipt capability route bypasses device authentication", async (t) => {
+  const app = await buildTestApp();
+  t.after(() => app.close());
+  assert.equal((await app.inject({
+    method: "POST",
+    url: "/api/public/push-receipt",
+    remoteAddress: REMOTE,
+    headers: { origin: "https://box.tail1234.ts.net", "content-type": "application/json" },
+    body: {},
+  })).statusCode, 200);
+  assert.equal(isPublicPushReceiptAck("POST", "/api/public/push-receipt"), true);
+  assert.equal(isPublicPushReceiptAck("GET", "/api/public/push-receipt"), false);
+  assert.equal(isPublicPushReceiptAck("POST", "/api/public/push-receipt/extra"), false);
 });
 
 // Fastify auto-registers HEAD for GET routes; the gate must cover it, or `HEAD /api/...` would

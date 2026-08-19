@@ -53,10 +53,16 @@ export function isPublicTranscriptShareRead(method: string, routePath: string): 
   return method === "GET" && routePath === "/api/public/transcript-share";
 }
 
+/** Service workers acknowledge an encrypted push through a high-entropy per-delivery capability. */
+export function isPublicPushReceiptAck(method: string, routePath: string): boolean {
+  return method === "POST" && routePath === "/api/public/push-receipt";
+}
+
 export function registerAuthGate(app: FastifyInstance, deps: AuthGateDeps): void {
   app.addHook("onRequest", async (req, reply) => {
     const routePath = req.routeOptions?.url ?? req.url.split("?")[0] ?? "";
-    if (requiresDeviceAuth(routePath) && !isPublicTranscriptShareRead(req.method, routePath)) {
+    if (requiresDeviceAuth(routePath) && !isPublicTranscriptShareRead(req.method, routePath) &&
+        !isPublicPushReceiptAck(req.method, routePath)) {
       if (routePath === "/ui") return; // authenticated inside the /ui upgrade handler
       const principal = deps.authenticate(req);
       if (!principal) return reply.code(401).send({ error: UNAUTHORIZED });
@@ -64,8 +70,11 @@ export function registerAuthGate(app: FastifyInstance, deps: AuthGateDeps): void
     }
 
     // Independently protect the capability-authenticated public transcript route from a foreign
-    // browser Origin. Device-authenticated API calls returned above: possession beats Origin.
-    if (isApiRoute(routePath)) {
+    // browser Origin. The push-receipt route is different: its HMAC is scoped to one delivery,
+    // its response is non-oracular, and a service worker legitimately posts through a same-origin
+    // reverse-proxy hostname (for example Tailscale Serve) that is not in the loopback allowlist.
+    // Device-authenticated API calls returned above: possession beats Origin.
+    if (isApiRoute(routePath) && !isPublicPushReceiptAck(req.method, routePath)) {
       const origin = req.headers.origin;
       if (origin && !deps.isAllowedOrigin(origin) && !deps.authenticate(req)) {
         return reply.code(403).send({ error: CROSS_ORIGIN_BLOCKED });
