@@ -2982,9 +2982,7 @@ fn external_url_has_userinfo(url: &str) -> bool {
         .split_once("://")
         .map(|(_, authority)| authority)
         .unwrap_or("");
-    let end = authority
-        .find(['/', '?', '#'])
-        .unwrap_or(authority.len());
+    let end = authority.find(['/', '?', '#']).unwrap_or(authority.len());
     authority[..end].contains('@')
 }
 
