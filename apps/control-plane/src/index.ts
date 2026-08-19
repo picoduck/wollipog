@@ -222,6 +222,11 @@ const TOKEN = process.env.CONTROL_PLANE_TOKEN ?? "dev-local-token";
 const DB_PATH = process.env.CONTROL_PLANE_DB ?? "data/control-plane.db";
 const ARTIFACT_BLOB_DIR = process.env.CONTROL_PLANE_ARTIFACT_DIR;
 const HEARTBEAT_INTERVAL_MS = Number(process.env.CONTROL_PLANE_HEARTBEAT_MS ?? 10_000);
+// A runner heartbeat every HEARTBEAT_INTERVAL_MS refreshes last_seen. If none lands within three
+// intervals the socket is presumed half-open (laptop sleep / Wi-Fi drop / NAT rebind leaves it
+// readyState=OPEN with no FIN/RST): the liveness sweep terminates it so the normal onGone cleanup
+// runs, instead of keeping the runner "online" with lost prompts until the OS TCP timeout fires.
+const RUNNER_HEARTBEAT_TIMEOUT_MS = HEARTBEAT_INTERVAL_MS * 3;
 const LOCAL_DEVICE_TOKEN_PATH = localDeviceTokenPath(DB_PATH);
 
 // Recovery is read-only: wrong coordinates must fail loudly instead of minting a plausible but
@@ -845,6 +850,8 @@ app.register(async (instance) => {
   const runnerClient = {
     send: (d: string) => socket.send(d),
     close: (code?: number, reason?: string) => socket.close(code, reason),
+    // Force-drop for the liveness sweep: a half-open socket never completes a graceful close.
+    terminate: () => socket.terminate(),
   };
 
   socket.on("message", (raw: Buffer) => {
@@ -3768,6 +3775,48 @@ const artifactMaintenanceTimer = setInterval(() => {
   }
 }, 60_000);
 artifactMaintenanceTimer.unref();
+// Half-open-socket liveness sweep. A runner whose socket silently died (sleep / Wi-Fi drop / NAT
+// rebind) stays readyState=OPEN with no FIN/RST, so onGone never fires: the runner reads 'online'
+// and its sessions 'running' forever, and prompts written to the dead socket are lost. The app-level
+// heartbeat refreshes last_seen; here we act on it. Any online runner whose socket the hub still
+// holds but whose last_seen is older than RUNNER_HEARTBEAT_TIMEOUT_MS is presumed dead — terminate it
+// so the EXISTING onGone path (markOffline / failRunnerSessions / shell + box cleanup) runs exactly
+// as for a clean disconnect. pendingStaleClose stops a second terminate before onGone detaches the
+// socket; onGone's own stale-socket guard (detachRunner returning false) keeps cleanup single-shot.
+const pendingStaleClose = new Set<string>();
+const runnerLivenessTimer = setInterval(() => {
+  try {
+    const now = Date.now();
+    for (const runner of db.listRunners()) {
+      const runnerId = runner.runnerId;
+      // Only sweep sockets the hub actually holds: a runner left 'online' in the DB from a prior
+      // process (no live socket) must not be terminated here — there is nothing to close, and
+      // hub.closeRunner would no-op anyway.
+      if (runner.status !== "online" || !hub.isRunnerOnline(runnerId)) {
+        pendingStaleClose.delete(runnerId);
+        continue;
+      }
+      // connected_at seeds last_seen at registration, so lastSeen is always populated for an online
+      // runner; fall back defensively so a null can never read as "infinitely fresh".
+      const lastSeen = runner.lastSeen ?? runner.connectedAt ?? 0;
+      if (now - lastSeen <= RUNNER_HEARTBEAT_TIMEOUT_MS) {
+        pendingStaleClose.delete(runnerId);
+        continue;
+      }
+      if (pendingStaleClose.has(runnerId)) continue;
+      pendingStaleClose.add(runnerId);
+      app.log.warn(
+        { runnerId, lastSeen, staleForMs: now - lastSeen },
+        "runner heartbeat timed out — terminating presumed half-open socket",
+      );
+      hub.closeRunner(runnerId, "runner heartbeat timed out", { terminate: true });
+    }
+  } catch (error) {
+    app.log.warn({ error: error instanceof Error ? error.message : String(error) },
+      "runner liveness sweep deferred");
+  }
+}, HEARTBEAT_INTERVAL_MS);
+runnerLivenessTimer.unref();
 app.addHook("onClose", async () => {
   clearInterval(workflowRecoveryTimer);
   clearInterval(automationTimer);
@@ -3775,6 +3824,7 @@ app.addHook("onClose", async () => {
   clearInterval(backgroundPushRetryTimer);
   clearInterval(policyHookApprovalTimer);
   clearInterval(artifactMaintenanceTimer);
+  clearInterval(runnerLivenessTimer);
   orchestrator.shutdown();
 });
 // Re-entrancy guard: a second signal (or an uncaughtException raised WHILE app.close() drains)
