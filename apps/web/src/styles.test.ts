@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { customProperties, mediaBlocks, topLevelRule } from "./css-rules.js";
+import { customProperties, declarationsOf, mediaBlocks, topLevelRule } from "./css-rules.js";
 
 const raw = readFileSync(fileURLToPath(new URL("./styles.css", import.meta.url)), "utf8");
 /** Comments carry example declarations and prose; every check below reasons about real rules. */
@@ -138,6 +138,150 @@ test("the permission-mode popover gives visible descriptions readable inline spa
     block.maxWidths.includes(760) && block.containsSelector(".cbar-opt.permission-mode"));
   assert.ok(phoneRule, "the permission-mode row must stack inside the 760px phone query");
   assert.deepEqual(phoneRule.declarationsForSelector(".cbar-opt.permission-mode").get("flex-direction"), ["column"]);
+});
+
+/**
+ * The reconnect recovery pill (issue #56) sits in a permanently-present NORMAL-FLOW slot between
+ * the transcript scroller and the status strip. Its non-overlap guarantee is structural, not
+ * numeric: an earlier fixed-pixel reservation lost to label wrapping at narrow panes and to
+ * rem-scaled root fonts. With the pill markup always mounted, the slot is exactly as tall as the
+ * pill really renders at the current pane width and font scale, and activity may toggle only
+ * visibility — so recovery can never overlap transcript content, shift a reader's viewport, or
+ * flip follow state.
+ */
+test("the recovery pill is a permanently-sized in-flow slot, never an overlay", () => {
+  // No overlay remains: nothing in the recovery family may leave normal flow. An absolutely (or
+  // sticky/fixed) positioned pill floating over the scroller is exactly the covered-newest-row
+  // bug this slot replaced.
+  const positioned = declarationsOf(css, "position")
+    .filter(({ selector }) => selector.includes("transcript-recovery"));
+  assert.deepEqual(positioned, [],
+    "recovery rules must stay in normal flow so the slot's height is the pill's real rendered height");
+
+  // The slot must not clamp its natural height: a wrapped label or rem-scaled text must be free
+  // to grow it. (Slot height then changes only on genuine pane/font reflows, which the follow
+  // logic already owns through its ResizeObserver on the reader.)
+  const slot = soleRuleBody(".transcript-recovery-slot");
+  assert.doesNotMatch(slot, /height|overflow/,
+    "the slot must size to the pill's rendered height, never clamp or clip it");
+
+  // Inactivity hides through visibility ONLY. `display: none` — or any layout property — would
+  // collapse the slot on toggle and reintroduce the scroll shift the permanent slot prevents.
+  assert.equal(soleRuleBody(".transcript-recovery-slot:not(.active) .transcript-recovery-notice"),
+    "visibility: hidden;");
+
+  // Symmetrically, activation may only start the pulse animation. Every .active-conditioned
+  // recovery rule is checked so a future `display`, `margin`, or `height` cannot sneak a layout
+  // delta into the activity toggle. The one deliberate exception is the compact-mode meter
+  // yield (`:has(...)`): it toggles display INSIDE the fixed-height status strip only — reader
+  // geometry and scroll position cannot move — and it is pinned by its own assertion below.
+  const activeRules = [...css.matchAll(/([^{}]*transcript-recovery[^{}]*\.active[^{}]*)\{([^}]*)\}/g)]
+    .filter(([, selector]) => !selector!.includes(":not(") && !selector!.includes(":has("));
+  assert.ok(activeRules.length > 0, "the active state must exist");
+  for (const [, selector, body] of activeRules) {
+    const props = [...body!.matchAll(/([a-z-]+)\s*:/g)].map((match) => match[1]);
+    assert.deepEqual(props.filter((prop) => prop !== "animation"), [],
+      `${selector!.trim()} may only toggle the pulse animation, found: ${props.join(", ")}`);
+  }
+});
+
+/**
+ * Two survival invariants a permanently-present slot must also honour (issue #56, round 3):
+ *
+ * STRIP SURVIVAL — an inbox preview pane can be arbitrarily short (a generous splitter position
+ * on a short viewport left ~99px), where slot + strip simply do not fit and the slot's
+ * unconditional height clipped the strip and its follow control out of the pane. The transcript
+ * pane is therefore a height-queried container: below the threshold the slot collapses entirely
+ * (independent of activity, so toggling recovery still cannot change layout) and active recovery
+ * is echoed inside the status strip — the persistent status surface that must always survive.
+ *
+ * SUMMARY EXCLUSION — the floating pinned summary used to reserve the strip with a hardcoded
+ * `calc(100% - 66px)`, which knew nothing of the dynamic-height slot beneath it. Its containing
+ * block is now the reader region (the scroller only), so its bounds end above the slot
+ * structurally rather than by a pixel constant.
+ */
+test("short panes keep the status strip, and the pinned summary is bounded by the reader", () => {
+  // The pane is a size container so the compact switch keys on the PANE's own height (set by a
+  // splitter position), which no viewport media query can observe.
+  assert.match(soleRuleBody(".detail-main"), /container:\s*transcript-pane \/ size;/);
+
+  // The compact switch: one height-conditioned container query must collapse the slot and
+  // surface the strip echo. Collapsing by pane mode (not by activity) keeps toggles layout-free.
+  const compact = /@container transcript-pane \(max-height:\s*\d+px\)\s*\{([\s\S]*?)\n\}/.exec(css);
+  assert.ok(compact, "the height-constrained compact mode must exist");
+  assert.match(compact![1]!, /\.transcript-recovery-slot\s*\{\s*display:\s*none;\s*\}/,
+    "compact mode must collapse the slot so the strip always fits");
+  assert.match(compact![1]!, /\.transcript-recovery-strip-echo\s*\{\s*display:\s*inline-flex;\s*\}/,
+    "compact mode must surface the in-strip echo in the slot's place");
+  // While recovery is active, the fixed-width context meter yields the leading cell: at phone
+  // widths it is wider than the whole track and would starve the echo to zero visible label.
+  assert.match(compact![1]!,
+    /\.transcript-status-context:has\(> \.transcript-recovery-strip-echo\.active\) > \.context-meter\s*\{\s*display:\s*none;\s*\}/,
+    "the meter must yield to the active recovery echo in compact mode");
+
+  // The echo's own activity toggle is visibility-only, like the pill's.
+  assert.equal(soleRuleBody(".transcript-recovery-strip-echo:not(.active)"), "visibility: hidden;");
+  // The strip itself never flexes away beneath the slot.
+  assert.match(soleRuleBody(".transcript-status-strip"), /flex:\s*none;/);
+
+  // Inbox preview panes always use the compact presentation: the pill band would permanently
+  // spend ~47px of a splitter-resizable reader, and shrinking the preview viewport measurably
+  // degrades virtualizer paging while freshly streamed rows are still measuring. Mode-based,
+  // not activity-based, so recovery toggles stay layout-free in previews too.
+  assert.match(soleRuleBody(".session-detail.preview .transcript-recovery-slot"), /display:\s*none;/);
+  assert.match(soleRuleBody(".session-detail.preview .transcript-recovery-strip-echo"), /display:\s*inline-flex;/);
+
+  // The pinned summary's containing block is the reader region — which the DOM tests pin as
+  // containing the scroller and neither the slot nor the strip — so no pixel reservation for
+  // siblings may reappear in its max-height.
+  assert.match(soleRuleBody(".detail-reader"), /position:\s*relative;/);
+  const summary = soleRuleBody(".pinned-summary");
+  assert.match(summary, /max-height:\s*calc\(100% - 24px\);/,
+    "the summary reserves only its own top offset and bottom breathing room");
+  assert.doesNotMatch(summary, /66px/,
+    "the old strip-and-slot pixel reservation must not return");
+
+  // The reader region clips: in panes shorter than the scroller's own padding floor, the
+  // scroller would otherwise overflow the reader down over the strip and swallow its clicks.
+  assert.match(soleRuleBody(".detail-reader"), /overflow:\s*clip;/,
+    "nothing inside the reader may paint or intercept below its bounds");
+
+  // A reader too short to CONTAIN the summary must hide it: a max-height cap cannot shrink the
+  // card below its own offset + padding floor, so an escaped card covered the compact strip.
+  assert.match(soleRuleBody(".detail-reader"), /container:\s*transcript-reader \/ size;/);
+  const shortReader = /@container transcript-reader \(max-height:\s*(\d+)px\)\s*\{([\s\S]*?)\n\}/.exec(css);
+  assert.ok(shortReader, "the short-reader mode must exist");
+  assert.match(shortReader![2]!, /\.pinned-summary\s*\{\s*display:\s*none;\s*\}/,
+    "a reader that cannot contain the summary must hide it, not let it escape over the strip");
+
+  // Threshold COORDINATION, so growing the pane never reduces disclosure: at the first
+  // non-compact pane height the slot returns and shrinks the reader — if the summary's hide
+  // threshold reached that reader height, dragging a splitter taller would hide the card at
+  // the mode switch and only reshow it once the pane out-grew the slot. Derived from the
+  // rules' own declarations: nominal slot = slot vertical padding + pill vertical box + one
+  // 18px --text-sm line (the pill band's long-documented single-line allowance).
+  const paneThreshold = Number(/@container transcript-pane \(max-height:\s*(\d+)px\)/.exec(css)![1]);
+  const readerThreshold = Number(shortReader![1]);
+  const slotPad = /padding:\s*(\d+)px\s+\d+px\s+(\d+)px;/.exec(soleRuleBody(".transcript-recovery-slot"));
+  const pill = soleRuleBody(".transcript-recovery-notice");
+  const pillPad = Number(/padding:\s*(\d+)px/.exec(pill)?.[1]);
+  const pillBorder = Number(/border:\s*(\d+)px/.exec(pill)?.[1]);
+  assert.ok(slotPad && Number.isFinite(pillPad) && Number.isFinite(pillBorder),
+    "slot and pill must declare px paddings/borders so the nominal slot height is derivable");
+  const nominalSlot = Number(slotPad![1]) + Number(slotPad![2]) + 2 * pillPad + 2 * pillBorder + 18;
+  const stripMin = Number(/min-height:\s*(\d+)px/.exec(soleRuleBody(".transcript-status-strip"))![1]);
+  const readerAtModeSwitch = paneThreshold + 1 - stripMin - nominalSlot;
+  assert.ok(readerThreshold < readerAtModeSwitch,
+    `the summary hides at ${readerThreshold}px of reader or less, but the first non-compact ` +
+    `pane leaves only ${readerAtModeSwitch}px — growing the pane would re-hide the card`);
+
+  // The compact echo truncates IN PLACE: its grid cell is pinned to its track and the echo to
+  // its cell, so a phone-width strip ellipsizes the label instead of pushing it off-screen.
+  assert.match(soleRuleBody(".transcript-status-context"), /max-width:\s*100%;/,
+    "the strip's leading cell must not outgrow its grid track");
+  assert.match(soleRuleBody(".transcript-recovery-strip-echo"), /max-width:\s*100%;/,
+    "the echo must not outgrow the strip's leading cell");
+  assert.match(soleRuleBody(".transcript-recovery-strip-echo > span:last-child"), /text-overflow:\s*ellipsis;/);
 });
 
 test("wrapped code blocks break long prose instead of scrolling sideways", () => {

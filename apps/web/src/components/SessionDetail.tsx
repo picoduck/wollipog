@@ -2160,10 +2160,15 @@ function SessionDetailLoaded({
             onFocusCapture={() => setActivePane("reader")}
             onPointerDownCapture={() => setActivePane("reader")}
           >
+            {/* The reader region: the scroller and its floating pinned summary, and NOTHING
+                below them. It is the summary's containing block, so the card's bounds can never
+                reach the recovery slot or the status strip regardless of the pill's rendered
+                height — a structural exclusion, not a pixel reservation. */}
+            <div className="detail-reader">
             {/* Floating pinned summary overlays the TRANSCRIPT's top-right (Codex behavior);
                 the timeline does not reflow around it, and it shifts with the right panel.
-                Anchored inside detail-main — not the whole chat column — so its max-height
-                can never extend down over the composer. */}
+                Anchored inside detail-reader — not the whole chat column — so its max-height
+                can never extend down over the recovery slot, status strip, or composer. */}
             {mode === "expanded" && pinnedOpen && (
               <PinnedSummary
                 session={session}
@@ -2194,7 +2199,7 @@ function SessionDetailLoaded({
                 event.preventDefault();
               }}
             >
-              {transcript.notice && (
+              {(transcript.notice === "stale" || transcript.notice === "error") && (
                 <TranscriptLoadNotice
                   kind={transcript.notice}
                   error={transcript.error}
@@ -2296,9 +2301,18 @@ function SessionDetailLoaded({
                 </>
               )}
             </div>
+            </div>
+            {/* Reconnect recovery indicator lives at the LOWER edge of the reader — where the
+                newest activity is — not sticky-top inside the scroller (issue #56: users watching
+                the tail read a top-only notice as "frozen" or "fully caught up"). The slot is
+                ALWAYS mounted between the reader and the status strip, so toggling recovery
+                can never change layout, scroll position, or follow state. In height-constrained
+                panes CSS collapses the slot and surfaces the echo inside the status strip. */}
+            <TranscriptRecoveryNotice active={transcript.notice === "refreshing"} />
             <div className="transcript-status-strip" aria-label="Transcript Status">
               <div className="transcript-status-context">
                 {mode === "expanded" && <ContextWindowMeter session={session} />}
+                <TranscriptRecoveryStripEcho active={transcript.notice === "refreshing"} />
               </div>
               {/* One compact centered cluster: Page Up · follow-state control (with its resume
                   keycap inside) · Page Down. The pager hints sit directly beside the badge at the
@@ -3397,16 +3411,14 @@ function TranscriptLoadNotice({
   canRetry,
   onRetry,
 }: {
-  kind: "refreshing" | "stale" | "error";
+  kind: "stale" | "error";
   error: string | null;
   canRetry: boolean;
   onRetry: () => void;
 }) {
-  const message = kind === "refreshing"
-    ? "Checking for missed activity…"
-    : kind === "stale"
-      ? "Showing cached activity while disconnected."
-      : `Could not refresh activity${error ? `: ${error}` : "."}`;
+  const message = kind === "stale"
+    ? "Showing cached activity while disconnected."
+    : `Could not refresh activity${error ? `: ${error}` : "."}`;
   return (
     <div className={`transcript-load-notice ${kind}`} role="status">
       <span>{message}</span>
@@ -3414,5 +3426,45 @@ function TranscriptLoadNotice({
         <button className="btn ghost sm" type="button" disabled={!canRetry} onClick={onRetry}>Retry</button>
       )}
     </div>
+  );
+}
+
+/** Reconnect/reopen recovery pill in a permanently-present normal-flow slot immediately above
+ * the transcript status strip. The pill markup is ALWAYS mounted so the slot's height is the
+ * pill's real rendered height at the current pane width and font scale — a wrapped label or a
+ * rem-scaled root font simply makes the slot taller. Activity toggles only visibility and the
+ * live-region text, never layout: showing or hiding recovery cannot shift scroll position or
+ * follow state by construction, and the pill can never overlap transcript content because it is
+ * not an overlay. The visual pill stays decorative; the sr-only sibling owns the live status
+ * semantics through a text swap, matching the follow chip's permanently-mounted live region.
+ * The sr-only region deliberately lives OUTSIDE the slot: height-constrained panes collapse the
+ * slot with `display: none` (see the transcript-pane container query), and the live region must
+ * keep announcing identically in that compact mode. */
+function TranscriptRecoveryNotice({ active }: { active: boolean }) {
+  return (
+    <>
+      <div className={`transcript-recovery-slot${active ? " active" : ""}`}>
+        <div className="transcript-recovery-notice" aria-hidden="true">
+          <span className="transcript-recovery-dot" />
+          <span>Checking for Missed Activity…</span>
+        </div>
+      </div>
+      <span className="sr-only" role="status">{active ? "Checking for Missed Activity…" : ""}</span>
+    </>
+  );
+}
+
+/** Compact-mode echo of the recovery notice inside the status strip's leading cell. Hidden in
+ * normal panes; a height-constrained transcript pane swaps it in for the collapsed slot via CSS
+ * (the strip is a persistent status surface and the only non-overlapping placement left in a
+ * pane too short for the pill band). Decorative like the pill — the sr-only live region in
+ * TranscriptRecoveryNotice owns the announcements in both modes — and its activity toggle is
+ * visibility-only, so neither mode ever changes layout when recovery starts or stops. */
+function TranscriptRecoveryStripEcho({ active }: { active: boolean }) {
+  return (
+    <span className={`transcript-recovery-strip-echo${active ? " active" : ""}`} aria-hidden="true">
+      <span className="transcript-recovery-dot" />
+      <span>Checking for Missed Activity…</span>
+    </span>
   );
 }
