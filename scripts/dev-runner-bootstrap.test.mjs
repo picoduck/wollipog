@@ -13,7 +13,9 @@ import {
   developmentDataDir,
   isControlPlaneService,
   isRunnerCredentialToken,
+  developmentRunnerWatch,
   developmentStartTimeout,
+  runnerLaunchArgs,
   localDeviceTokenPath,
   provisionDevelopmentCredential,
   readLocalDeviceToken,
@@ -275,4 +277,51 @@ test("development bootstrap aliases prefer Wollipog names and warn only on legac
     controlPlaneHttp({ WOLLIPOG_DEV_CONTROL_PLANE_HTTP: "", MAM_DEV_CONTROL_PLANE_HTTP: "http://legacy:5555" }),
     "http://127.0.0.1:4317",
   );
+});
+
+test("runner watch mode defaults on and can be disabled by argv or environment", () => {
+  assert.equal(developmentRunnerWatch({}, ["node", "bootstrap.mjs"]), true);
+  assert.equal(developmentRunnerWatch({}, ["node", "bootstrap.mjs", "--no-watch"]), false);
+  assert.equal(developmentRunnerWatch({ WOLLIPOG_DEV_RUNNER_WATCH: "0" }, []), false);
+  assert.equal(developmentRunnerWatch({ WOLLIPOG_DEV_RUNNER_WATCH: " 0 " }, []), false);
+  // Only an exact opt-out disables it: an unrecognized value must not silently drop the watcher
+  // that ordinary development depends on.
+  assert.equal(developmentRunnerWatch({ WOLLIPOG_DEV_RUNNER_WATCH: "1" }, []), true);
+  assert.equal(developmentRunnerWatch({ WOLLIPOG_DEV_RUNNER_WATCH: "false" }, []), true);
+  // argv wins over an environment that leaves watching enabled.
+  assert.equal(developmentRunnerWatch({ WOLLIPOG_DEV_RUNNER_WATCH: "1" }, ["--no-watch"]), false);
+});
+
+test("runner watch mode honors the legacy alias and warns only on that fallback", () => {
+  const warnings = [];
+  assert.equal(developmentRunnerWatch({ MAM_DEV_RUNNER_WATCH: "0" }, [], (w) => warnings.push(w)), false);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /MAM_DEV_RUNNER_WATCH is deprecated; use WOLLIPOG_DEV_RUNNER_WATCH/u);
+
+  const quiet = [];
+  assert.equal(
+    developmentRunnerWatch(
+      { WOLLIPOG_DEV_RUNNER_WATCH: "0", MAM_DEV_RUNNER_WATCH: "1" },
+      [],
+      (w) => quiet.push(w),
+    ),
+    false,
+  );
+  assert.deepEqual(quiet, []);
+});
+
+test("runner launch argv drops only the watcher and keeps the config pairing intact", () => {
+  const watched = runnerLaunchArgs("/tsx/cli.mjs", "/repo/runner.config.json", true);
+  assert.deepEqual(watched, [
+    "/tsx/cli.mjs", "watch", "apps/runner/src/cli.ts", "--config", "/repo/runner.config.json",
+  ]);
+
+  const unwatched = runnerLaunchArgs("/tsx/cli.mjs", "/repo/runner.config.json", false);
+  assert.deepEqual(unwatched, [
+    "/tsx/cli.mjs", "apps/runner/src/cli.ts", "--config", "/repo/runner.config.json",
+  ]);
+  assert.ok(!unwatched.includes("watch"));
+  // The config path must stay adjacent to its flag, and must never be parsed as the entrypoint.
+  assert.equal(unwatched[unwatched.indexOf("--config") + 1], "/repo/runner.config.json");
+  assert.equal(unwatched[1], "apps/runner/src/cli.ts");
 });

@@ -193,11 +193,37 @@ export async function configuredRunnerId(configPath) {
   return (await configuredRunnerSettings(configPath)).runnerId;
 }
 
-function startRunner(token, baseUrl, configPath, dataDir) {
+/**
+ * Watch mode is the development default, but a long-lived dogfooding stack wants it off: with a
+ * watcher attached, an ordinary `git pull` that touches runner sources recycles the runner child
+ * seconds later, killing live provider sessions that the stack is actively being used to run.
+ *
+ * `--no-watch` is the package-script path because npm scripts cannot set an environment variable
+ * inline on every supported platform. The environment variable is the launcher path, for wrappers
+ * that start the stack through `pnpm dev:all` and cannot inject argv.
+ */
+export function developmentRunnerWatch(env = process.env, argv = process.argv, warn) {
+  if (argv.includes("--no-watch")) return false;
+  const configured = readCompatibleEnv(
+    env,
+    "WOLLIPOG_DEV_RUNNER_WATCH",
+    "MAM_DEV_RUNNER_WATCH",
+    warn,
+  )?.trim();
+  return configured !== "0";
+}
+
+/** Runner argv for tsx, with or without the watcher. Split out so the shape stays testable. */
+export function runnerLaunchArgs(tsxCli, configPath, watch) {
+  const runner = ["apps/runner/src/cli.ts", "--config", configPath];
+  return watch ? [tsxCli, "watch", ...runner] : [tsxCli, ...runner];
+}
+
+function startRunner(token, baseUrl, configPath, dataDir, watch) {
   const tsxCli = fileURLToPath(import.meta.resolve("tsx/cli"));
   // Invoke Node + tsx by argv so config paths remain inert on every platform. The credential stays
   // exclusively in the child environment, never in argv or a shell command.
-  return spawn(process.execPath, [tsxCli, "watch", "apps/runner/src/cli.ts", "--config", configPath], {
+  return spawn(process.execPath, runnerLaunchArgs(tsxCli, configPath, watch), {
     cwd: repoRoot,
     env: {
       ...process.env,
@@ -221,8 +247,10 @@ export async function main() {
   const localDeviceToken = await readLocalDeviceToken(localDeviceTokenPath());
   const token = await provisionDevelopmentCredential(baseUrl, runnerId, localDeviceToken);
   const dataDir = developmentDataDir(repoRoot, process.env, configured.dataDir);
+  const watch = developmentRunnerWatch(process.env, process.argv, warnLegacyEnvironment);
   console.log(`[dev-runner] starting ${runnerId} with an ephemeral exact-id credential and isolated state at ${dataDir}`);
-  const child = startRunner(token, baseUrl, configPath, dataDir);
+  if (!watch) console.log("[dev-runner] watch mode disabled; restart manually to pick up source changes");
+  const child = startRunner(token, baseUrl, configPath, dataDir, watch);
   const forward = (signal) => {
     if (!child.killed) child.kill(signal);
   };
