@@ -327,12 +327,20 @@ test("a stale background continuation racing recovery admission must not drop th
     startLogin: async () => "completed",
     cancel: () => false,
   };
+  let holdAdmission = false;
+  let releaseAdmission!: () => void;
+  const admissionGate = new Promise<void>((resolve) => { releaseAdmission = resolve; });
   const h = harness({
     driver: "claude-code",
     command: "claude",
     agentId: "claude-native",
     providerCredentialIdentityId: "account-a",
-  }, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, undefined, controller);
+  }, Promise.resolve(), Promise.resolve(), () => {}, async () => {
+    // Holds the retained retry's launch inside its pre-active admission window (before
+    // active.set). The recheck relaunch that clears the block still has the block present at
+    // prepareLaunch time and must pass through, or recovery itself would deadlock.
+    if (holdAdmission && !h.store.readMeta("resume-session")?.providerAuthBlock) await admissionGate;
+  }, undefined, 4, undefined, controller);
   try {
     h.manager.prompt("resume-session", "retained before provider submission");
     await tick();
@@ -352,43 +360,112 @@ test("a stale background continuation racing recovery admission must not drop th
       }],
     });
 
+    holdAdmission = true;
     const requestId = blocked.pendingApproval!.requestId;
     h.manager.resolvePermission("resume-session", requestId, "auth:revalidate");
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const internals = h.manager as any;
-    let windowObserved = false;
-    for (let index = 0; index < 4000; index += 1) {
-      if (internals.preLaunchAdmissionGenerations.has("resume-session") &&
-          !internals.active.has("resume-session")) {
-        windowObserved = true;
-        break;
-      }
-      if (h.prompts.includes("retained before provider submission")) break;
-      // Microtask-granularity yield: the pre-active launch window spans awaits that resolve
-      // without reaching the macrotask queue in this harness.
-      await Promise.resolve();
-    }
-    assert.ok(windowObserved, "the pre-active admission window is reachable in-process");
-    // The stale timer body fires inside the retained retry's pre-active admission window.
-    void internals.runBackgroundContinuation("resume-session");
-    for (let index = 0; index < 200 && !h.prompts.includes("retained before provider submission"); index += 1) {
+    for (let index = 0; index < 200 && !(internals.preLaunchAdmissionGenerations.has("resume-session") &&
+        !internals.active.has("resume-session")); index += 1) {
       await shortDelay();
     }
-    assert.ok(h.prompts.includes("retained before provider submission"),
-      "the retained foreground retry survives a stale continuation racing its admission");
+    assert.ok(internals.preLaunchAdmissionGenerations.has("resume-session") &&
+      !internals.active.has("resume-session"), "the pre-active admission window is held open");
+
+    // The stale timer body fires inside the retained retry's held admission window.
+    await internals.runBackgroundContinuation("resume-session");
+    const queued = () => (internals.preLaunchQueues.get("resume-session") ?? []) as Array<{ text: string }>;
+    assert.equal(queued().filter((prompt) => /background/i.test(prompt.text)).length, 1,
+      "the continuation merged into the pre-launch queue instead of competing");
+    // A retry-interval refiring while the merged prompt still sits pre-launch must dedup, not
+    // stack. Mutate the job summary first so the refired prompt TEXT differs — dedup must key on
+    // the job ids, not on an identical prompt string.
+    h.store.patchMeta("resume-session", {
+      backgroundJobs: [{
+        id: "job-1", parentTurnId: "turn-1", runnerId: "runner", workspaceId: null,
+        context: { kind: "native" }, launchType: "agent", registeredAt: 1,
+        terminalStatus: "completed", terminalObservedAt: 99,
+        continuationRequired: true, continuationQueuedAt: 3, continuationId: "bgcont-1",
+      }],
+    });
+    await internals.runBackgroundContinuation("resume-session");
+    assert.equal(queued().filter((prompt) => /background/i.test(prompt.text)).length, 1,
+      "a refired continuation deduplicates against the pre-launch queue");
+
+    releaseAdmission();
     for (let index = 0; index < 200 && !h.prompts.some((text) => /background/i.test(text)); index += 1) {
       await shortDelay();
     }
     const retryIndex = h.prompts.indexOf("retained before provider submission");
     const continuationIndex = h.prompts.findIndex((text) => /background/i.test(text));
+    assert.notEqual(retryIndex, -1,
+      "the retained foreground retry survives a stale continuation racing its admission");
     assert.notEqual(continuationIndex, -1, "the merged continuation is still delivered, not dropped");
     assert.ok(retryIndex < continuationIndex,
       "the retained retry keeps its FIFO ordinal ahead of the continuation");
-    // A retry-interval refiring while the merged prompt sits pre-launch must dedup, not stack.
-    void internals.runBackgroundContinuation("resume-session");
-    for (let index = 0; index < 10; index += 1) await shortDelay();
-    assert.equal(h.prompts.filter((text) => /background/i.test(text)).length, 1,
-      "a refired continuation deduplicates against the already-queued jobs");
+    assert.equal(h.prompts.filter((text) => /background/i.test(text)).length, 1);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+test("a continuation dropped with a rejected admission re-arms its retry timer", async () => {
+  const observations = [
+    { status: "unauthenticated" as const },
+    { status: "authenticated" as const, identityId: "account-a" },
+  ];
+  const controller: ProviderAuthRecoveryController = {
+    describe: () => ({ id: "scope-a", provider: "claude", canStartLogin: true, configuredCredential: false }),
+    revalidate: async () => observations.shift() ?? { status: "authenticated", identityId: "account-a" },
+    startLogin: async () => "completed",
+    cancel: () => false,
+  };
+  let failAdmission = false;
+  let rejectAdmission!: (error: Error) => void;
+  const admissionGate = new Promise<void>((_resolve, reject) => { rejectAdmission = reject; });
+  const h = harness({
+    driver: "claude-code",
+    command: "claude",
+    agentId: "claude-native",
+    providerCredentialIdentityId: "account-a",
+  }, Promise.resolve(), Promise.resolve(), () => {}, async () => {
+    // Fail only the retained retry's admission launch; the block-clearing recheck relaunch
+    // (block still present at prepareLaunch time) must pass through.
+    if (failAdmission && !h.store.readMeta("resume-session")?.providerAuthBlock) await admissionGate;
+  }, undefined, 4, undefined, controller);
+  try {
+    h.manager.prompt("resume-session", "retained before provider submission");
+    await tick();
+    await tick();
+    h.store.patchMeta("resume-session", {
+      backgroundJobs: [{
+        id: "job-1", parentTurnId: "turn-1", runnerId: "runner", workspaceId: null,
+        context: { kind: "native" }, launchType: "agent", registeredAt: 1,
+        terminalStatus: "completed", terminalObservedAt: 2,
+        continuationRequired: true, continuationQueuedAt: 3, continuationId: "bgcont-1",
+      }],
+    });
+    failAdmission = true;
+    const requestId = h.store.readMeta("resume-session")!.pendingApproval!.requestId;
+    h.manager.resolvePermission("resume-session", requestId, "auth:revalidate");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = h.manager as any;
+    for (let index = 0; index < 200 && !(internals.preLaunchAdmissionGenerations.has("resume-session") &&
+        !internals.active.has("resume-session")); index += 1) {
+      await shortDelay();
+    }
+    await internals.runBackgroundContinuation("resume-session");
+    assert.equal(((internals.preLaunchQueues.get("resume-session") ?? []) as Array<{ text: string }>)
+      .filter((prompt) => /background/i.test(prompt.text)).length, 1, "continuation merged pre-launch");
+
+    rejectAdmission(new Error("launch preparation failed"));
+    for (let index = 0; index < 200 && internals.preLaunchQueues.has("resume-session"); index += 1) {
+      await shortDelay();
+    }
+    assert.equal(internals.preLaunchQueues.has("resume-session"), false, "the rejected admission cleared its queue");
+    assert.equal(internals.backgroundContinuationTimers.has("resume-session"), true,
+      "the dropped continuation re-armed its retry timer instead of being stranded");
   } finally {
     h.manager.shutdownAll();
     h.cleanup();

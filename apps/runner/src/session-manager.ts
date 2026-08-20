@@ -3902,9 +3902,16 @@ export class SessionManager {
   private rejectPreLaunchQueue(sessionId: string, error: string): boolean {
     const queue = this.preLaunchQueues.get(sessionId);
     if (!queue) return false;
+    const droppedContinuation = queue.some((prompt) => prompt.backgroundJobIds?.length);
     this.rejectQueued(queue, error);
     this.preLaunchQueues.delete(sessionId);
     this.emitQueue(sessionId);
+    // A continuation merged into this admission was dropped with it; its durable jobs are still
+    // queued, and dedup suppressed the retry timer while the prompt sat here — re-arm it.
+    if (droppedContinuation &&
+        this.queuedBackgroundJobIds(this.store.readMeta(sessionId)).length > 0) {
+      this.scheduleBackgroundContinuation(sessionId, ORPHAN_RECOVERY_RETRY_MS);
+    }
     return true;
   }
 
