@@ -6838,6 +6838,100 @@ test("legacy history hydration externalizes large payloads before cache persiste
   assert.equal(JSON.stringify(event).includes(original), false);
 });
 
+test("indexed history hydration preserves runner-owned authentication recovery semantics", async () => {
+  const { db, hub, svc } = makeHarness();
+  const requestId = "provider-auth:indexed-recovery";
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+    status: "input_required",
+    pendingApproval: null,
+    seq: 1,
+    historyEpoch: 7,
+  })]);
+  hub.requestHandler = (msg) => {
+    assert.equal(msg.type, "session_history_page");
+    if (msg.type !== "session_history_page") throw new Error("unexpected request");
+    return {
+      type: "session_history_page_result",
+      requestId: msg.requestId,
+      sessionId: msg.sessionId,
+      ok: true,
+      events: [{
+        seq: 1,
+        ts: 100,
+        payload: {
+          kind: "permission_request",
+          requestId,
+          title: "Authentication Required — Claude",
+          options: [{ optionId: "auth:revalidate", name: "Recheck", kind: "allow_once" }],
+          purpose: "authentication",
+        },
+      }],
+      page: { logEpoch: 7, throughSeq: 1, nextAfterSeq: 1, hasMore: false },
+    };
+  };
+
+  await svc.hydrateHistory("s_box1");
+
+  assert.equal(db.getSession("s_box1")?.pendingApproval?.kind, "authentication");
+  const approved = svc.approve("s_box1", requestId, "auth:revalidate");
+  assert.equal(approved.ok, true, approved.error);
+  assert.equal(db.getSession("s_box1")?.status, "input_required");
+  assert.equal(db.getSession("s_box1")?.pendingApproval?.requestId, requestId);
+  assert.deepEqual(hub.sentOfType("resolve_permission").at(-1), {
+    type: "resolve_permission",
+    sessionId: "s_box1",
+    requestId,
+    optionId: "auth:revalidate",
+  });
+});
+
+test("legacy history hydration preserves runner-owned authentication recovery semantics", async () => {
+  const { db, hub, svc } = makeHarness();
+  const requestId = "provider-auth:legacy-recovery";
+  db.registerRunner(runnerMeta(), Date.now(), 53);
+  hub.requestHandler = (msg) => {
+    assert.equal(msg.type, "session_history");
+    if (msg.type !== "session_history") throw new Error("unexpected request");
+    return {
+      type: "session_history_result",
+      requestId: msg.requestId,
+      sessionId: msg.sessionId,
+      ok: true,
+      events: [{
+        seq: 1,
+        ts: 100,
+        payload: {
+          kind: "permission_request",
+          requestId,
+          title: "Authentication Required — Claude",
+          options: [{ optionId: "auth:revalidate", name: "Recheck", kind: "allow_once" }],
+          purpose: "authentication",
+        },
+      }],
+    };
+  };
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+    status: "input_required",
+    pendingApproval: null,
+    seq: 1,
+    historyEpoch: undefined,
+  })]);
+
+  await svc.hydrateHistory("s_box1");
+
+  assert.equal(db.getSession("s_box1")?.pendingApproval?.kind, "authentication");
+  const approved = svc.approve("s_box1", requestId, "auth:revalidate");
+  assert.equal(approved.ok, true, approved.error);
+  assert.equal(db.getSession("s_box1")?.status, "input_required");
+  assert.equal(db.getSession("s_box1")?.pendingApproval?.requestId, requestId);
+  assert.deepEqual(hub.sentOfType("resolve_permission").at(-1), {
+    type: "resolve_permission",
+    sessionId: "s_box1",
+    requestId,
+    optionId: "auth:revalidate",
+  });
+});
+
 test("delete tombstones the session so a later snapshot cannot resurrect it (H2)", () => {
   const { db, hub, svc } = makeHarness();
   svc.hydrateRunnerSessions(RUNNER_ID, [snapshot()]);

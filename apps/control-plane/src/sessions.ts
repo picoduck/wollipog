@@ -6143,6 +6143,7 @@ export class SessionsService {
         requestId: payload.requestId,
         title: payload.title,
         options: payload.options,
+        ...(payload.purpose === "authentication" ? { kind: "authentication" as const } : {}),
         ...(payload.context ? { context: payload.context } : {}),
       };
     }
