@@ -201,6 +201,11 @@ export async function configuredRunnerId(configPath) {
  * `--no-watch` is the package-script path because npm scripts cannot set an environment variable
  * inline on every supported platform. The environment variable is the launcher path, for wrappers
  * that start the stack through `pnpm dev:all` and cannot inject argv.
+ *
+ * Only the value `0` opts out, read the same way every other development variable in this file is
+ * read: surrounding whitespace is trimmed first, so `" 0 "` from an env file still means `0`. An
+ * operator who wrote `0` gets what they asked for, while an unrecognized value such as `false` or
+ * `off` leaves the watcher on rather than silently dropping it.
  */
 export function developmentRunnerWatch(env = process.env, argv = process.argv, warn) {
   if (argv.includes("--no-watch")) return false;
@@ -219,7 +224,7 @@ export function runnerLaunchArgs(tsxCli, configPath, watch) {
   return watch ? [tsxCli, "watch", ...runner] : [tsxCli, ...runner];
 }
 
-function startRunner(token, baseUrl, configPath, dataDir, watch) {
+function startRunner(token, baseUrl, configPath, dataDir, watch = true) {
   const tsxCli = fileURLToPath(import.meta.resolve("tsx/cli"));
   // Invoke Node + tsx by argv so config paths remain inert on every platform. The credential stays
   // exclusively in the child environment, never in argv or a shell command.

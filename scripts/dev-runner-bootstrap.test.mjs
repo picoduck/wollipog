@@ -283,6 +283,9 @@ test("runner watch mode defaults on and can be disabled by argv or environment",
   assert.equal(developmentRunnerWatch({}, ["node", "bootstrap.mjs"]), true);
   assert.equal(developmentRunnerWatch({}, ["node", "bootstrap.mjs", "--no-watch"]), false);
   assert.equal(developmentRunnerWatch({ WOLLIPOG_DEV_RUNNER_WATCH: "0" }, []), false);
+  // Padding is trimmed on purpose, matching how every other development variable here is read:
+  // an operator who wrote 0 in an env file meant 0, and ignoring them would leave a watcher
+  // running that they explicitly asked to turn off.
   assert.equal(developmentRunnerWatch({ WOLLIPOG_DEV_RUNNER_WATCH: " 0 " }, []), false);
   // Only an exact opt-out disables it: an unrecognized value must not silently drop the watcher
   // that ordinary development depends on.
