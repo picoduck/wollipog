@@ -376,12 +376,19 @@ test("a stale background continuation racing recovery admission must not drop th
     }
     assert.ok(h.prompts.includes("retained before provider submission"),
       "the retained foreground retry survives a stale continuation racing its admission");
+    for (let index = 0; index < 200 && !h.prompts.some((text) => /background/i.test(text)); index += 1) {
+      await shortDelay();
+    }
     const retryIndex = h.prompts.indexOf("retained before provider submission");
     const continuationIndex = h.prompts.findIndex((text) => /background/i.test(text));
-    if (continuationIndex !== -1) {
-      assert.ok(retryIndex < continuationIndex,
-        "the retained retry keeps its FIFO ordinal ahead of the continuation");
-    }
+    assert.notEqual(continuationIndex, -1, "the merged continuation is still delivered, not dropped");
+    assert.ok(retryIndex < continuationIndex,
+      "the retained retry keeps its FIFO ordinal ahead of the continuation");
+    // A retry-interval refiring while the merged prompt sits pre-launch must dedup, not stack.
+    void internals.runBackgroundContinuation("resume-session");
+    for (let index = 0; index < 10; index += 1) await shortDelay();
+    assert.equal(h.prompts.filter((text) => /background/i.test(text)).length, 1,
+      "a refired continuation deduplicates against the already-queued jobs");
   } finally {
     h.manager.shutdownAll();
     h.cleanup();

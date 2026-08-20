@@ -6511,7 +6511,9 @@ export class SessionManager {
     if (!meta || meta.status === "stopped" || !automaticClaudeRecoveryAllowed(meta) || jobIds.length === 0) return;
     const entry = this.active.get(sessionId);
     if (entry?.currentBackgroundJobIds?.some((id) => jobIds.includes(id)) ||
-        entry?.queue.some((prompt) => prompt.backgroundJobIds?.some((id) => jobIds.includes(id)))) return;
+        entry?.queue.some((prompt) => prompt.backgroundJobIds?.some((id) => jobIds.includes(id))) ||
+        this.preLaunchQueues.get(sessionId)?.some((prompt) =>
+          prompt.backgroundJobIds?.some((id) => jobIds.includes(id)))) return;
     this.backgroundContinuationLaunching.add(sessionId);
     try {
       const selected = (meta.backgroundJobs ?? []).filter((job) => jobIds.includes(job.id));
@@ -6558,8 +6560,10 @@ export class SessionManager {
     } finally {
       this.backgroundContinuationLaunching.delete(sessionId);
       const remaining = this.queuedBackgroundJobIds(this.store.readMeta(sessionId));
-      if (remaining.length > 0 && !this.active.get(sessionId)?.queue.some((prompt) =>
-        prompt.backgroundJobIds?.some((id) => remaining.includes(id)))) {
+      const alreadyQueued = (prompt: { backgroundJobIds?: string[] }) =>
+        prompt.backgroundJobIds?.some((id) => remaining.includes(id));
+      if (remaining.length > 0 && !this.active.get(sessionId)?.queue.some(alreadyQueued) &&
+          !this.preLaunchQueues.get(sessionId)?.some(alreadyQueued)) {
         this.scheduleBackgroundContinuation(sessionId, ORPHAN_RECOVERY_RETRY_MS);
       }
     }
