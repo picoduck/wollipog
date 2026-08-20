@@ -2263,6 +2263,8 @@ export interface BackgroundDeliveryView {
   transcriptProjectedAt?: number;
   notificationQueuedAt?: number;
   dashboardObservedAt?: number;
+  /** Durable proof that this delivery consumed its correlated trailing busy-to-idle status. */
+  statusSettledAt?: number;
   /** Separate service, display, and click acknowledgements for each push subscription. */
   notifications?: BackgroundNotificationReceiptView[];
   watchdogState?: BackgroundDeliveryWatchdogState;

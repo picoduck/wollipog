@@ -5472,6 +5472,12 @@ export class SessionsService {
       this.abortPolicyHookApprovals(session, Date.now(), "provider-session-ended");
     }
     this.db.updateSessionStatus(sessionId, status, Date.now());
+    // Consume an armed background-delivery settlement on the idle that is actually projected as a
+    // status transition. The policy-swallowed idle above deliberately does not settle: no busy→idle
+    // is projected there, so the marker stays armed for the genuine trailing idle.
+    if (status === "idle") {
+      this.db.settleManagedBackgroundDeliveryStatus(sessionId, Date.now());
+    }
     // If the session ended while an approval was pending, clear the stale card.
     if (isTerminal(status) && session.pendingApproval) {
       this.db.setPendingApproval(sessionId, null);
@@ -5638,6 +5644,7 @@ export class SessionsService {
             searchPayload: payload,
             artifactIds: externalized.artifactIds,
           }],
+          { armBackgroundStatusSettlement: true },
         );
       } catch (error) {
         cleanupEventPayloadArtifacts(this.db, externalized.artifactIds);
@@ -5656,6 +5663,7 @@ export class SessionsService {
           accrueUsage: true,
           ...(runnerSeq !== undefined ? { runnerSeq, historyEpoch: history?.historyEpoch ?? null } : {}),
           searchPayload: payload,
+          armBackgroundStatusSettlement: true,
           artifactIds: externalized.artifactIds,
         });
       } catch (error) {

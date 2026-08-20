@@ -6721,6 +6721,61 @@ test("live structured continuation evidence projects delivery stages and rebroad
   assert.ok(hub.sessionChangedByIdCalls.includes("s_box1"));
 });
 
+test("only live continuation provenance suppresses its trailing Ready across restart", async () => {
+  const db = ControlPlaneDb.open(":memory:");
+  db.registerRunner(runnerMeta(), Date.now());
+  const hub = new FakeHub();
+  const sent: string[] = [];
+  const notify = (prev: SessionView, view: SessionView) => {
+    const message = pushDecision(prev, view);
+    if (message) sent.push(message.title);
+  };
+  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG, notify);
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+    status: "running",
+    seq: 1,
+    historyEpoch: 7,
+    backgroundJobs: [{
+      id: "old-job", parentTurnId: "old-turn", runnerId: RUNNER_ID, workspaceId: "workspace",
+      launchType: "agent", registeredAt: 1, terminalStatus: "completed", terminalObservedAt: 2,
+      continuationRequired: true, continuationQueuedAt: 3, continuationId: "bgcont-old",
+    }],
+  })]);
+  hub.requestHandler = (message) => {
+    assert.equal(message.type, "session_history_page");
+    return {
+      type: "session_history_page_result",
+      requestId: message.requestId,
+      sessionId: message.sessionId,
+      ok: true,
+      events: [{
+        seq: 1,
+        ts: 100,
+        payload: { kind: "background_continuation_delivered", continuationId: "bgcont-old", parentTurnId: "old-turn" },
+      }],
+      page: { logEpoch: 7, throughSeq: 1, nextAfterSeq: 1, hasMore: false },
+    };
+  };
+  await svc.hydrateHistory("s_box1");
+  assert.equal(db.getSession("s_box1")?.backgroundDeliveries?.[0]?.statusSettledAt, undefined,
+    "historical delivery replay cannot arm the currently running foreground turn");
+  svc.onSessionStatus("s_box1", "idle");
+  assert.match(sent.at(-1) ?? "", /is ready/, "the unrelated later foreground idle still notifies");
+
+  db.updateSessionStatus("s_box1", "running", Date.now());
+  svc.onSessionEvent("s_box1", {
+    kind: "background_continuation_delivered",
+    continuationId: "bgcont-live-restart",
+    parentTurnId: "live-turn",
+  });
+  const restarted = new SessionsService(db, hub as unknown as Hub, NOOP_LOG, notify);
+  const before = sent.length;
+  restarted.onSessionStatus("s_box1", "idle");
+  assert.equal(sent.length, before, "durable live correlation suppresses the duplicate Ready after CP restart");
+  assert.ok(db.getSession("s_box1")?.backgroundDeliveries?.some((delivery) =>
+    delivery.continuationId === "bgcont-live-restart" && delivery.statusSettledAt != null));
+});
+
 test("large live event payloads persist and broadcast only a bounded artifact-backed preview", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);
