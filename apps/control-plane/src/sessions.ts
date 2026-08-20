@@ -5944,7 +5944,9 @@ export class SessionsService {
     for (const s of this.db.listSessions({ includeArchived: true })) {
       if (s.runnerId === runnerId && !isTerminal(s.status)) {
         this.abortPolicyHookApprovals(s, now, "runner-disconnected");
-        this.db.updateSessionStatus(s.id, "stopped", now);
+        // A disconnect stop is provisional — reconnect hydration can restore this exact run, and
+        // an armed delivery-settlement marker must survive to suppress its trailing Ready.
+        this.db.updateSessionStatus(s.id, "stopped", now, true);
         const ev = this.db.appendEvent(
           s.id,
           { kind: "stderr", text: "runner disconnected — session interrupted" },

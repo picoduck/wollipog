@@ -6907,6 +6907,57 @@ test("a terminal transition orphans an armed settlement so a later run's Ready i
     "the orphaned delivery is never marked settled");
 });
 
+test("an armed settlement survives a runner disconnect and still suppresses after reconnect", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);
+  const hub = new FakeHub();
+  const sent: string[] = [];
+  const notify = (prev: SessionView, view: SessionView) => {
+    const message = pushDecision(prev, view);
+    if (message) sent.push(message.title);
+  };
+  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG, notify);
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ status: "running" })]);
+  db.updateSessionStatus("s_box1", "running", Date.now());
+  svc.onSessionEvent("s_box1", {
+    kind: "background_continuation_delivered", continuationId: "bgcont-flap", parentTurnId: "turn-f",
+  });
+
+  // Transient disconnect: the stop is provisional and reconnect hydration restores the same run.
+  svc.failRunnerSessions(RUNNER_ID);
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ status: "running" })]);
+  const before = sent.filter((title) => /is ready/.test(title)).length;
+  svc.onSessionStatus("s_box1", "idle");
+  assert.equal(sent.filter((title) => /is ready/.test(title)).length, before,
+    "the delivery's trailing Ready stays suppressed across the disconnect flap");
+  assert.ok(db.getSession("s_box1")?.backgroundDeliveries?.some((d) =>
+    d.continuationId === "bgcont-flap" && d.statusSettledAt != null));
+});
+
+test("a terminal snapshot orphans an armed settlement like a terminal status event", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);
+  const hub = new FakeHub();
+  const sent: string[] = [];
+  const notify = (prev: SessionView, view: SessionView) => {
+    const message = pushDecision(prev, view);
+    if (message) sent.push(message.title);
+  };
+  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG, notify);
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ status: "running" })]);
+  db.updateSessionStatus("s_box1", "running", Date.now());
+  svc.onSessionEvent("s_box1", {
+    kind: "background_continuation_delivered", continuationId: "bgcont-snap", parentTurnId: "turn-s",
+  });
+
+  // The run's death arrives as an authoritative terminal snapshot rather than a status event.
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ status: "failed" })]);
+  db.updateSessionStatus("s_box1", "running", Date.now());
+  svc.onSessionStatus("s_box1", "idle");
+  assert.equal(sent.filter((title) => /is ready/.test(title)).length, 1,
+    "a later run's Ready is emitted; the terminal snapshot orphaned the stale marker");
+});
+
 test("large live event payloads persist and broadcast only a bounded artifact-backed preview", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);

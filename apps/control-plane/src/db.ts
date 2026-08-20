@@ -8066,12 +8066,20 @@ export class ControlPlaneDb {
       // Session terminality is the retry fence regardless of which service path observed it;
       // snapshots (hydration and runtime updates) must fence in the same transaction so a pending
       // durable prompt can never be re-delivered into a session this snapshot terminalized.
+      // The same authority orphans any armed settlement marker: a post-restart hydration of a
+      // dead run must not leave it to suppress a later run's Ready.
       if (isTerminal(status)) {
         this.cancelSessionPromptCommands(
           id,
           `session became ${status} before durable prompt delivery completed`,
           now,
         );
+        this.stmt(
+          `UPDATE managed_background_deliveries
+              SET status_settlement_pending_at=NULL, updated_at=MAX(updated_at, ?)
+            WHERE session_id=? AND status_settlement_pending_at IS NOT NULL
+              AND status_settled_at IS NULL`,
+        ).run(now, id);
       }
       this.db.exec("COMMIT");
     } catch (error) {
@@ -8599,7 +8607,10 @@ export class ControlPlaneDb {
     }
   }
 
-  updateSessionStatus(id: string, status: SessionStatus, now: number): void {
+  updateSessionStatus(id: string, status: SessionStatus, now: number, provisionalStop = false): void {
+    // Terminality couples the status write to its fences below; commit them together so a crash
+    // between statements cannot persist a terminal status with a stale armed marker.
+    this.atomic(() => {
     this.stmt("UPDATE sessions SET status=?, updated_at=? WHERE id=?")
       .run(status, now, id);
     if (status === "completed" || status === "failed" || status === "stopped") {
@@ -8609,15 +8620,17 @@ export class ControlPlaneDb {
       this.cancelSessionPromptCommands(id, `session became ${status} before durable prompt delivery completed`, now);
       // An authoritative terminal transition orphans any armed-but-unsettled delivery marker: the
       // trailing idle it awaited will never belong to this run, and leaving it pending would
-      // suppress the Ready of an unrelated later run. (Startup settlement deliberately does NOT
-      // clear these — its stop is provisional and the delivery's idle still arrives after the
-      // runner reconnects; that restart survival is the feature's core case.)
-      this.stmt(
-        `UPDATE managed_background_deliveries
-            SET status_settlement_pending_at=NULL, updated_at=MAX(updated_at, ?)
-          WHERE session_id=? AND status_settlement_pending_at IS NOT NULL
-            AND status_settled_at IS NULL`,
-      ).run(now, id);
+      // suppress the Ready of an unrelated later run. Provisional stops (runner disconnect,
+      // startup settlement) deliberately do NOT clear it — the delivery's idle still arrives
+      // after reconnect, and that restart survival is the feature's core case.
+      if (!provisionalStop) {
+        this.stmt(
+          `UPDATE managed_background_deliveries
+              SET status_settlement_pending_at=NULL, updated_at=MAX(updated_at, ?)
+            WHERE session_id=? AND status_settlement_pending_at IS NOT NULL
+              AND status_settled_at IS NULL`,
+        ).run(now, id);
+      }
     }
     // Swallowed idle belongs only to the CP-owned pause that observed it. Any local or runner
     // transition back into execution (or into a terminal state) invalidates that settle proof,
@@ -8635,6 +8648,7 @@ export class ControlPlaneDb {
     if (status !== "input_required") {
       this.stmt("UPDATE sessions SET pending_approval=NULL WHERE id=?").run(id);
     }
+    });
   }
 
   setSessionColumn(id: string, column: BoardColumn | null, now: number): void {
