@@ -1,10 +1,113 @@
 import { expect, test } from "@playwright/test";
 
+const recoveryGeometry = (notice: HTMLElement) => {
+  const message = notice.firstElementChild as HTMLElement;
+  const button = notice.querySelector("button");
+  const noticeRect = notice.getBoundingClientRect();
+  const messageRect = message.getBoundingClientRect();
+  const buttonRect = button?.getBoundingClientRect() ?? null;
+  return {
+    notice: { left: noticeRect.left, right: noticeRect.right, width: noticeRect.width },
+    message: { left: messageRect.left, right: messageRect.right, bottom: messageRect.bottom, width: messageRect.width },
+    button: buttonRect && {
+      left: buttonRect.left,
+      right: buttonRect.right,
+      top: buttonRect.top,
+      width: buttonRect.width,
+      height: buttonRect.height,
+      clientWidth: button!.clientWidth,
+      scrollWidth: button!.scrollWidth,
+      clientHeight: button!.clientHeight,
+      scrollHeight: button!.scrollHeight,
+      whiteSpace: getComputedStyle(button!).whiteSpace,
+    },
+  };
+};
+
+const setOffline = (page: import("@playwright/test").Page) =>
+  page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setRunnerStatus("offline"));
+
 test.beforeEach(async ({ page }) => {
   await page.goto("/machine-management-e2e.html");
   await expect(page.getByRole("heading", { name: "Design Workstation" })).toBeVisible();
 });
 
+test("offline recovery stays stacked and usable in a narrow card on a desktop viewport", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await setOffline(page);
+  await page.locator(".runner-grid").evaluate((grid) => { (grid as HTMLElement).style.width = "260px"; });
+
+  const card = page.locator(".runner-card");
+  await expect.poll(() => card.evaluate((element) => element.getBoundingClientRect().width)).toBeLessThan(280);
+  expect(await page.evaluate(() => window.innerWidth)).toBe(1280);
+
+  const repair = page.getByRole("button", { name: "Repair Credentials", exact: true });
+  await expect(repair).toHaveText("Repair Credentials");
+  const geometry = await page.locator(".connection-recovery").evaluate(recoveryGeometry);
+  expect(geometry.button).not.toBeNull();
+  expect(geometry.button!.top).toBeGreaterThanOrEqual(geometry.message.bottom + 11);
+  expect(Math.abs(geometry.button!.left - geometry.message.left)).toBeLessThanOrEqual(0.5);
+  expect(Math.abs(geometry.button!.width - geometry.message.width)).toBeLessThanOrEqual(0.5);
+  expect(geometry.button!.right).toBeLessThanOrEqual(geometry.notice.right + 0.5);
+  expect(geometry.button!.height).toBeGreaterThanOrEqual(44);
+  expect(geometry.button!.whiteSpace).toBe("nowrap");
+  expect(geometry.button!.scrollWidth).toBeLessThanOrEqual(geometry.button!.clientWidth);
+  expect(geometry.button!.scrollHeight).toBeLessThanOrEqual(geometry.button!.clientHeight);
+
+  await repair.click();
+  await expect(page.getByRole("dialog", { name: "Repair Runner Connection" })).toBeVisible();
+});
+
+test("offline recovery stays stacked and usable on a narrow mobile viewport", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 720 });
+  await setOffline(page);
+
+  const repair = page.getByRole("button", { name: "Repair Credentials", exact: true });
+  await expect(repair).toBeVisible();
+  const geometry = await page.locator(".connection-recovery").evaluate(recoveryGeometry);
+  expect(geometry.button).not.toBeNull();
+  expect(geometry.button!.top).toBeGreaterThanOrEqual(geometry.message.bottom + 11);
+  expect(Math.abs(geometry.button!.left - geometry.message.left)).toBeLessThanOrEqual(0.5);
+  expect(Math.abs(geometry.button!.width - geometry.message.width)).toBeLessThanOrEqual(0.5);
+  expect(geometry.button!.height).toBeGreaterThanOrEqual(44);
+  expect(geometry.button!.whiteSpace).toBe("nowrap");
+  expect(geometry.button!.scrollWidth).toBeLessThanOrEqual(geometry.button!.clientWidth);
+  expect(geometry.notice.left).toBeGreaterThanOrEqual(-0.5);
+  expect(geometry.notice.right).toBeLessThanOrEqual(320.5);
+});
+
+test("non-admin recovery guidance wraps inside a narrow mobile card", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 720 });
+  await page.goto("/machine-management-e2e.html?role=viewer");
+  await expect(page.getByRole("heading", { name: "Design Workstation" })).toBeVisible();
+  await setOffline(page);
+
+  await expect(page.getByRole("button", { name: "Repair Credentials", exact: true })).toHaveCount(0);
+  const guidance = page.getByText("Ask an organization owner or admin to repair this connection.", { exact: true });
+  await expect(guidance).toBeVisible();
+  const geometry = await guidance.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    const notice = element.parentElement!.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    return {
+      left: rect.left,
+      right: rect.right,
+      width: rect.width,
+      height: rect.height,
+      lineHeight: Number.parseFloat(style.lineHeight),
+      noticeLeft: notice.left,
+      noticeRight: notice.right,
+      scrollWidth: element.scrollWidth,
+      clientWidth: element.clientWidth,
+    };
+  });
+  expect(geometry.width).toBeGreaterThan(0);
+  expect(geometry.height).toBeGreaterThan(geometry.lineHeight);
+  expect(geometry.left).toBeGreaterThanOrEqual(geometry.noticeLeft - 0.5);
+  expect(geometry.right).toBeLessThanOrEqual(geometry.noticeRight + 0.5);
+  expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth);
+
+});
 test("Machine settings rename the Machine and register a Workspace without creating a Project", async ({ page }) => {
   await page.getByRole("button", { name: "Manage" }).click();
   const dialog = page.getByRole("dialog", { name: "Manage Design Workstation" });

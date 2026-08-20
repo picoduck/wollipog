@@ -483,7 +483,7 @@ function NativeRunnerHealth({
           <strong>Connection is offline.</strong> The runner process may be stopped or its saved credential may no longer be active.
         </div>
         {canRepair ? (
-          <button className="btn sm" type="button" onClick={onRepair}>Repair Credential…</button>
+          <button className="btn sm" type="button" onClick={onRepair}>Repair Credentials</button>
         ) : (
           <span>Ask an organization owner or admin to repair this connection.</span>
         )}

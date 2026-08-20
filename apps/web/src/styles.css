@@ -5153,10 +5153,18 @@ button.file-head.source-path-link {
 }
 .connection-recovery {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  align-items: stretch;
+  flex-direction: column;
   gap: 12px;
   margin-top: 12px;
+}
+.connection-recovery > * {
+  min-width: 0;
+}
+.connection-recovery .btn {
+  width: 100%;
+  min-height: 44px;
+  white-space: nowrap;
 }
 .update-runner.needs-update {
   border-color: color-mix(in srgb, var(--amber) 55%, transparent);
@@ -9639,15 +9647,13 @@ body.shell-dock-dragging * {
     padding: 14px;
   }
   .connections-toolbar,
-  .connection-access-error,
-  .connection-recovery {
+  .connection-access-error {
     align-items: stretch;
     flex-direction: column;
   }
   .connections-toolbar .toolbar-actions,
   .connections-toolbar .toolbar-actions .btn,
-  .connection-access-error .btn,
-  .connection-recovery .btn {
+  .connection-access-error .btn {
     width: 100%;
     min-height: 44px;
   }

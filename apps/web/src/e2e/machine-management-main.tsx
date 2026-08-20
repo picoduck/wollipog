@@ -11,6 +11,10 @@ import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import "../styles.css";
 
+const identityRole = new URLSearchParams(window.location.search).get("role") === "viewer"
+  ? "viewer" as const
+  : "owner" as const;
+
 let runner: RunnerView | null = {
   runnerId: "native-t14s",
   displayName: "Design Workstation",
@@ -111,7 +115,7 @@ const client = {
       userName: "Owner",
       organizationId: "org",
       organizationName: "Organization",
-      role: "owner",
+      role: identityRole,
       deviceId: null,
       localBootstrap: true,
     },
