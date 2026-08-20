@@ -19,6 +19,8 @@
     "dev": "concurrently -k -n cp,web -c blue,green \"pnpm --filter @wollipog/control-plane dev\" \"pnpm --filter @wollipog/web dev\"",
     "predev:all": "pnpm --filter @wollipog/web build",
     "dev:all": "concurrently -k -n cp,runner,web,web-dist -c blue,magenta,green,cyan \"pnpm --filter @wollipog/control-plane dev\" \"node scripts/dev-runner-bootstrap.mjs\" \"pnpm --filter @wollipog/web dev\" \"pnpm --filter @wollipog/web dev:same-origin\"",
+    "predev:all:no-watch": "pnpm --filter @wollipog/web build",
+    "dev:all:no-watch": "concurrently -k -n cp,runner,web,web-dist -c blue,magenta,green,cyan \"pnpm --filter @wollipog/control-plane start\" \"node scripts/dev-runner-bootstrap.mjs --no-watch\" \"pnpm --filter @wollipog/web dev\" \"pnpm --filter @wollipog/web dev:same-origin\"",
     "dev:control-plane": "pnpm --filter @wollipog/control-plane dev",
     "dev:web": "pnpm --filter @wollipog/web dev",
     "runner": "tsx apps/runner/src/cli.ts",
