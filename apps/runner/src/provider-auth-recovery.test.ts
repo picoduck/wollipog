@@ -123,7 +123,8 @@ test("only structured provider denial is unauthenticated while exit and context 
 });
 
 test("in-app login is fail-closed and remote targets do not claim runner-owned recovery", () => {
-  assert.equal(describeProviderCredentialScope(meta())?.canStartLogin, false, "awaits the issue #17 provider-home lease");
+  assert.equal(describeProviderCredentialScope(meta())?.canStartLogin, false,
+    "login still needs exact-isolation lease acquisition and child supervision");
   assert.equal(describeProviderCredentialScope(meta({ context: { kind: "wsl", distro: "Ubuntu" } }))?.canStartLogin, false);
   assert.equal(describeProviderCredentialScope(meta({ env: { OPENAI_API_KEY: "secret" } }))?.canStartLogin, false);
   assert.equal(describeProviderCredentialScope(meta({
