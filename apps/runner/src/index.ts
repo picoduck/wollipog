@@ -803,6 +803,14 @@ function scheduleReconnect(): void {
   backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
 }
 
+// Contain a fire-and-forget async command handler. A malformed frame that reaches one of these
+// (e.g. `git_action` with no `action`) rejects AFTER handleCommand's synchronous try/catch has
+// returned, so without this the rejection reaches the process-level unhandledRejection net and
+// shuts the runner down — defeating the whole point of isolating a bad frame. Log and drop instead.
+function runCommandTask(kind: string, task: Promise<void>): void {
+  void task.catch((error) => log(`dropping unhandled control-plane frame (${kind}): ${errText(error)}`));
+}
+
 function handleCommand(msg: ControlPlaneToRunner): void {
   switch (msg.type) {
     case "registered":
@@ -1115,9 +1123,14 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         sendUp({ type: "rewind_result", requestId: msg.requestId, ok: r.ok, error: r.error });
       });
       gitActionQueues.set(msg.sessionId, run);
-      void run.finally(() => {
-        if (gitActionQueues.get(msg.sessionId) === run) gitActionQueues.delete(msg.sessionId);
-      });
+      void run
+        // A rewind that rejects (an I/O fault in rewind(), or a malformed frame that slipped past
+        // the fenceRewind guard) must not reach the process unhandledRejection net. Contain it on
+        // the void-discarded branch; the stored `run` used for queue chaining is left untouched.
+        .catch((error) => log(`dropping unhandled control-plane frame (rewind_session): ${errText(error)}`))
+        .finally(() => {
+          if (gitActionQueues.get(msg.sessionId) === run) gitActionQueues.delete(msg.sessionId);
+        });
       break;
     }
     case "fork_session": {
@@ -1167,14 +1180,14 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         }));
       break;
     case "logout_agent":
-      void sessions.logoutAgent(msg.sessionId).then((result) =>
+      runCommandTask("logout_agent", sessions.logoutAgent(msg.sessionId).then((result) =>
         sendUp({
           type: "logout_agent_result",
           requestId: msg.requestId,
           ok: result.ok,
           error: result.error,
         }),
-      );
+      ));
       break;
     case "acp_registry_approval":
       void (async () => {
@@ -1212,7 +1225,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       })();
       break;
     case "git_action":
-      void handleGitAction(msg);
+      runCommandTask("git_action", handleGitAction(msg));
       break;
     case "session_history": {
       // Reply with the session's event log from the box store (control plane lazy-hydration).
@@ -1247,25 +1260,25 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       break;
     }
     case "list_external_sessions":
-      void handleListExternal(msg.requestId, msg.agentId);
+      runCommandTask("list_external_sessions", handleListExternal(msg.requestId, msg.agentId));
       break;
     case "adopt_session":
-      void handleAdopt(msg);
+      runCommandTask("adopt_session", handleAdopt(msg));
       break;
     case "reprocess_session":
-      void handleReprocess(msg);
+      runCommandTask("reprocess_session", handleReprocess(msg));
       break;
     case "list_directory":
-      void handleListDirectory(msg);
+      runCommandTask("list_directory", handleListDirectory(msg));
       break;
     case "list_session_files":
-      void handleListSessionFiles(msg);
+      runCommandTask("list_session_files", handleListSessionFiles(msg));
       break;
     case "read_session_file":
-      void handleReadSessionFile(msg);
+      runCommandTask("read_session_file", handleReadSessionFile(msg));
       break;
     case "shell_open": {
-      void handleShellOpenCommand(msg, {
+      runCommandTask("shell_open", handleShellOpenCommand(msg, {
         waitForSessionStart: (sessionId) => sessionStarts.wait(sessionId),
         registerPending: (shellId) => pendingShellOpenCancellations.register(shellId),
         unregisterPending: (shellId) => pendingShellOpenCancellations.unregister(shellId),
@@ -1287,7 +1300,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         ),
         send: (result) => sendUp(result),
         errorText: (error) => errText(error),
-      });
+      }));
       break;
     }
     case "shell_resize":
@@ -1305,7 +1318,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       shells.close(msg.shellId);
       break;
     case "host_action":
-      void handleHostAction(msg);
+      runCommandTask("host_action", handleHostAction(msg));
       break;
   }
 }
@@ -1671,7 +1684,16 @@ function connect(): void {
 
   socket.on("message", (raw: Buffer) => {
     const msg = parseMessage<ControlPlaneToRunner>(raw.toString());
-    if (msg) handleCommand(msg);
+    if (!msg) return;
+    // A malformed frame (missing/mistyped fields survive the cast-only parseMessage) must not
+    // throw out of this listener: an uncaught throw here becomes a fatal uncaughtException that
+    // bypasses the graceful shutdown/lease-release path and strands the provider-home lease.
+    // Drop the bad frame instead — one poisoned command can't take the runner down.
+    try {
+      handleCommand(msg);
+    } catch (error) {
+      log(`dropping unhandled control-plane frame (${msg.type}): ${errText(error)}`);
+    }
   });
 
   socket.on("close", () => {
@@ -1690,18 +1712,38 @@ function connect(): void {
   });
 }
 
-function shutdown(): void {
+function shutdown(exitCode = 0): void {
   // Second signal while draining = the user really means it — exit hard.
   if (shuttingDown) process.exit(1);
   shuttingDown = true;
-  stagedRunnerCredential.discard();
-  stopHeartbeat();
-  clearInterval(sessionCommandRecoveryTimer);
-  if (discoveryTimer) clearInterval(discoveryTimer);
-  if (reconnectTimer) clearTimeout(reconnectTimer);
-  subscriptionUsage.shutdown();
-  sessions.shutdownAll();
-  shells.dispose();
+  // shutdown() is also the uncaughtException path, so the triggering fault (e.g. a storage failure)
+  // can make one of these cleanup steps throw. NONE of them may abort before the pending-kill drain
+  // and provider-home lease release run: a throw out of the uncaughtException listener makes Node
+  // exit IMMEDIATELY, stranding the lease and orphaning agent process trees — the exact failure this
+  // path exists to prevent. Run each best-effort so control always reaches waitForPendingKills below.
+  const bestEffort = (label: string, fn: () => void): void => {
+    try {
+      fn();
+    } catch (error) {
+      log(`shutdown step '${label}' failed: ${errText(error)}`);
+    }
+  };
+  bestEffort("discard staged credential", () => stagedRunnerCredential.discard());
+  bestEffort("stop heartbeat", () => stopHeartbeat());
+  bestEffort("clear timers", () => {
+    clearInterval(sessionCommandRecoveryTimer);
+    if (discoveryTimer) clearInterval(discoveryTimer);
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+  });
+  bestEffort("stop subscription usage", () => subscriptionUsage.shutdown());
+  // Track whether every provider driver was disposed. If not (a dispose threw), a provider may still
+  // be alive with no registered kill, so we must NOT release its provider-home lease below even if
+  // waitForPendingKills reports "reaped" — releasing it could let a replacement runner share the HOME.
+  let sessionsCleanlyShutDown = false;
+  bestEffort("shut down sessions", () => {
+    sessionsCleanlyShutDown = sessions.shutdownAll();
+  });
+  bestEffort("dispose shells", () => shells.dispose());
   log("shutting down");
   // process.exit() cancels pending timers/exec callbacks — exiting immediately would drop
   // the SIGKILL escalation and the WSL in-distro reap, letting TERM-ignoring agents survive
@@ -1709,18 +1751,55 @@ function shutdown(): void {
   // sequence is pidfile retries + TERM + 2s + KILL. The deadline covers Claude's 5s clean-exit
   // interval plus the reap's 6s safety cap.
   // No active sessions ⇒ zero pending kills ⇒ instant exit (dev restarts stay snappy).
-  void waitForPendingKills(CLAUDE_GRACEFUL_STOP_BUDGET_MS + 500).then((processTreesReaped) => {
-    try {
-      sessions.releaseProviderHomeLeasesAfterShutdown(processTreesReaped);
-    } finally {
-      process.exit(0);
-    }
-  });
+  void waitForPendingKills(CLAUDE_GRACEFUL_STOP_BUDGET_MS + 500)
+    .then((processTreesReaped) => {
+      // Never let a throw here skip the exit. Only release the lease when session cleanup completed
+      // cleanly AND every tracked process tree was reaped; otherwise retain it (fail closed) so a
+      // possibly-still-alive provider cannot share its HOME with a replacement runner.
+      try {
+        if (sessionsCleanlyShutDown) {
+          sessions.releaseProviderHomeLeasesAfterShutdown(processTreesReaped);
+        } else {
+          log("session cleanup was incomplete — retaining provider-home lease to avoid concurrent HOME use");
+        }
+      } catch (error) {
+        log(`provider-home lease release failed: ${errText(error)}`);
+      }
+    })
+    .catch((error) => log(`pending-kill drain failed: ${errText(error)}`))
+    .finally(() => process.exit(exitCode));
 }
 
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
-process.on("SIGHUP", shutdown);
+// Wrapped so the signal name Node passes as the listener's first argument is never mistaken for
+// shutdown()'s exitCode.
+process.on("SIGINT", () => shutdown());
+process.on("SIGTERM", () => shutdown());
+process.on("SIGHUP", () => shutdown());
+// A synchronous uncaughtException leaves the process in an unknown, possibly corrupt state, so run
+// the graceful shutdown() (waits for pending kills, releases provider-home leases) before exiting —
+// a hard crash would strand the lease and block every future agent. shutdown()'s own `shuttingDown`
+// flag makes re-entry safe; a second fault exits immediately.
+process.on("uncaughtException", (error) => {
+  try {
+    log(`uncaughtException — shutting down: ${errText(error)}`);
+  } catch {
+    /* logging must never mask the exit */
+  }
+  shutdown(1);
+});
+// An unhandled rejection is a LAST-RESORT net, NOT a shutdown trigger: this daemon supervises every
+// session on the box, and one session's stray async fault (an unobserved rejection in a fire-and-
+// forget command handler this file cannot enumerate exhaustively) must not tear down all the others.
+// Node would otherwise terminate by default; log and keep running instead. Frame-dispatched handlers
+// still contain their own errors at the source (runCommandTask / per-dispatch .catch) so expected
+// failures surface as proper session errors rather than a bare log here.
+process.on("unhandledRejection", (reason) => {
+  try {
+    log(`unhandledRejection (continuing) — ${errText(reason)}`);
+  } catch {
+    /* logging must never mask survival */
+  }
+});
 
 log(
   `starting v${VERSION} — host=${metadata.hostname} os=${metadata.os} ` +
