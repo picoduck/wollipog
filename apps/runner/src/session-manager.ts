@@ -3902,9 +3902,16 @@ export class SessionManager {
   private rejectPreLaunchQueue(sessionId: string, error: string): boolean {
     const queue = this.preLaunchQueues.get(sessionId);
     if (!queue) return false;
+    const droppedContinuation = queue.some((prompt) => prompt.backgroundJobIds?.length);
     this.rejectQueued(queue, error);
     this.preLaunchQueues.delete(sessionId);
     this.emitQueue(sessionId);
+    // A continuation merged into this admission was dropped with it; its durable jobs are still
+    // queued, and dedup suppressed the retry timer while the prompt sat here — re-arm it.
+    if (droppedContinuation &&
+        this.queuedBackgroundJobIds(this.store.readMeta(sessionId)).length > 0) {
+      this.scheduleBackgroundContinuation(sessionId, ORPHAN_RECOVERY_RETRY_MS);
+    }
     return true;
   }
 
@@ -5322,6 +5329,7 @@ export class SessionManager {
 
   stop(sessionId: string): void {
     this.revokeSessionCommandAuthority(sessionId);
+    this.cancelBackgroundContinuationTimer(sessionId);
     this.discardRecovery(sessionId);
     this.cancelApprovalTelemetry(sessionId);
     this.clearSteeringState(sessionId, "session stopped before steering settled");
@@ -5332,6 +5340,8 @@ export class SessionManager {
     const entry = this.active.get(sessionId);
     if (!entry) {
       this.rejectPreLaunchQueue(sessionId, "session stopped before runner admission");
+      // The rejection re-arm is for failed admissions; this stop is a lifecycle end, so drop it.
+      this.cancelBackgroundContinuationTimer(sessionId);
       this.cancelAdmissionWait(sessionId);
       // Not in-process but may exist in the store — record the stop there too.
       if (this.store.has(sessionId)) {
@@ -5416,6 +5426,7 @@ export class SessionManager {
 
       this.beginLaunchGeneration(sessionId);
       this.rejectPreLaunchQueue(sessionId, "session deleted before runner admission");
+      this.cancelBackgroundContinuationTimer(sessionId);
       // Deletion is terminal, not a replacement launch. Stale continuations may perform only
       // idempotent lock/admission release; the deletion journal exclusively owns destructive
       // worktree/provider cleanup.
@@ -6494,6 +6505,15 @@ export class SessionManager {
     return queued.filter((job) => job.continuationId === continuationId).map((job) => job.id);
   }
 
+  /** Lifecycle rejection (Stop/delete) must also drop any pending continuation timer: a stale
+   * timer entry would suppress scheduling for a restarted session's fresh background work. */
+  private cancelBackgroundContinuationTimer(sessionId: string): void {
+    const timer = this.backgroundContinuationTimers.get(sessionId);
+    if (!timer) return;
+    clearTimeout(timer);
+    this.backgroundContinuationTimers.delete(sessionId);
+  }
+
   private scheduleBackgroundContinuation(sessionId: string, delay = 0): void {
     if (this.shuttingDown || this.backgroundContinuationTimers.has(sessionId)) return;
     const timer = setTimeout(() => {
@@ -6511,7 +6531,9 @@ export class SessionManager {
     if (!meta || meta.status === "stopped" || !automaticClaudeRecoveryAllowed(meta) || jobIds.length === 0) return;
     const entry = this.active.get(sessionId);
     if (entry?.currentBackgroundJobIds?.some((id) => jobIds.includes(id)) ||
-        entry?.queue.some((prompt) => prompt.backgroundJobIds?.some((id) => jobIds.includes(id)))) return;
+        entry?.queue.some((prompt) => prompt.backgroundJobIds?.some((id) => jobIds.includes(id))) ||
+        this.preLaunchQueues.get(sessionId)?.some((prompt) =>
+          prompt.backgroundJobIds?.some((id) => jobIds.includes(id)))) return;
     this.backgroundContinuationLaunching.add(sessionId);
     try {
       const selected = (meta.backgroundJobs ?? []).filter((job) => jobIds.includes(job.id));
@@ -6522,7 +6544,13 @@ export class SessionManager {
         terminalAt: job.terminalObservedAt!,
       }));
       const prompt = `${BACKGROUND_CONTINUATION_PROMPT}\n\nRunner-managed terminal results:\n${JSON.stringify(resultSummary)}`;
-      if (entry) {
+      const currentGeneration = this.launchGenerations.get(sessionId);
+      const admissionInFlight = !entry && currentGeneration !== undefined &&
+        this.preLaunchAdmissionGenerations.get(sessionId) === currentGeneration;
+      if (entry || admissionInFlight) {
+        // With a launch mid-admission (e.g. a retained authentication retry between clearing the
+        // block and reaching the provider), prompt() merges into its pre-launch queue. Calling
+        // resumeAndPrompt here instead would begin a competing generation and drop that retry.
         this.prompt(
           sessionId,
           prompt,
@@ -6552,8 +6580,10 @@ export class SessionManager {
     } finally {
       this.backgroundContinuationLaunching.delete(sessionId);
       const remaining = this.queuedBackgroundJobIds(this.store.readMeta(sessionId));
-      if (remaining.length > 0 && !this.active.get(sessionId)?.queue.some((prompt) =>
-        prompt.backgroundJobIds?.some((id) => remaining.includes(id)))) {
+      const alreadyQueued = (prompt: { backgroundJobIds?: string[] }) =>
+        prompt.backgroundJobIds?.some((id) => remaining.includes(id));
+      if (remaining.length > 0 && !this.active.get(sessionId)?.queue.some(alreadyQueued) &&
+          !this.preLaunchQueues.get(sessionId)?.some(alreadyQueued)) {
         this.scheduleBackgroundContinuation(sessionId, ORPHAN_RECOVERY_RETRY_MS);
       }
     }
