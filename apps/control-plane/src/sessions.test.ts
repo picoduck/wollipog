@@ -6801,9 +6801,13 @@ test("a live delivery diverted through gap hydration still settles its trailing 
   await svc.hydrateHistory("s_box1");
 
   // The live delivery frame arrives ahead of the hydrated cursor (seq 3 over a cursor of 1), so
-  // it is diverted through catch-up hydration instead of the contiguous live path.
-  hub.requestHandler = (message) => {
+  // it is diverted through catch-up hydration. The runner's trailing idle races that round-trip:
+  // hold the page response until AFTER the idle is projected, mirroring production ordering.
+  let releasePage!: () => void;
+  const pageGate = new Promise<void>((resolve) => { releasePage = resolve; });
+  hub.requestHandler = async (message) => {
     assert.equal(message.type, "session_history_page");
+    await pageGate;
     return {
       type: "session_history_page_result",
       requestId: message.requestId,
@@ -6821,18 +6825,25 @@ test("a live delivery diverted through gap hydration still settles its trailing 
   svc.onSessionEvent("s_box1", {
     kind: "background_continuation_delivered", continuationId: "bgcont-gap", parentTurnId: "turn-gap",
   }, 3, 102);
-  for (let index = 0; index < 200; index += 1) {
-    if (db.getSession("s_box1")?.backgroundDeliveries?.some((d) => d.continuationId === "bgcont-gap")) break;
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-  assert.ok(db.getSession("s_box1")?.backgroundDeliveries?.some((d) => d.continuationId === "bgcont-gap"),
-    "the catch-up page projected the diverted live delivery");
 
   const before = sent.length;
   svc.onSessionStatus("s_box1", "idle");
-  assert.equal(sent.length, before, "the diverted live delivery still suppresses its trailing Ready");
+  assert.equal(sent.length, before,
+    "the trailing idle that beat the hydration round-trip is still suppressed");
   assert.ok(db.getSession("s_box1")?.backgroundDeliveries?.some((d) =>
-    d.continuationId === "bgcont-gap" && d.statusSettledAt != null));
+    d.continuationId === "bgcont-gap" && d.statusSettledAt != null),
+    "the diverted live delivery armed durably before hydration completed");
+
+  releasePage();
+  for (let index = 0; index < 200; index += 1) {
+    if (db.getSession("s_box1")?.backgroundDeliveries?.some((d) =>
+      d.continuationId === "bgcont-gap" && d.transcriptProjectedAt != null)) break;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  const projected = db.getSession("s_box1")?.backgroundDeliveries?.find((d) => d.continuationId === "bgcont-gap");
+  assert.ok(projected?.transcriptProjectedAt != null, "hydration still projects the full delivery stages");
+  assert.ok(projected?.statusSettledAt != null, "idle-time projection does not disturb the settled marker");
+  assert.equal(sent.length, before, "no additional notification was emitted by the catch-up projection");
 });
 
 test("a restoration-replayed idle consumes the armed settlement instead of duplicating Ready", () => {

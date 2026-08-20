@@ -8303,6 +8303,38 @@ export class ControlPlaneDb {
     ).run(now, now, sessionId, continuationId).changes) > 0;
   }
 
+  /** A live delivery frame diverted through catch-up hydration by a sequence gap must arm its
+   * settlement BEFORE the hydration round-trip: the runner's trailing idle can arrive first, and
+   * once the session is idle the projection-time arming would refuse. Creates the durable row
+   * early with only identity and the pending marker; the later projection fills every other
+   * stage via its COALESCE upsert. */
+  armBackgroundDeliverySettlementEarly(
+    sessionId: string,
+    continuationId: string,
+    parentTurnId: string,
+    now: number,
+  ): void {
+    if (!validBackgroundIdentity(continuationId) || !validBackgroundIdentity(parentTurnId)) return;
+    const busy = ["queued", "starting", "running"].includes(
+      (this.stmt("SELECT status FROM sessions WHERE id=?").get(sessionId) as
+        | { status: SessionStatus }
+        | undefined)?.status ?? "",
+    );
+    if (!busy) return;
+    this.stmt(
+      `INSERT INTO managed_background_deliveries
+        (session_id, continuation_id, parent_turn_id, status_settlement_pending_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(session_id, continuation_id) DO UPDATE SET
+         status_settlement_pending_at=CASE
+           WHEN managed_background_deliveries.status_settled_at IS NULL
+             THEN COALESCE(managed_background_deliveries.status_settlement_pending_at, excluded.status_settlement_pending_at)
+           ELSE managed_background_deliveries.status_settlement_pending_at
+         END,
+         updated_at=MAX(managed_background_deliveries.updated_at, excluded.updated_at)`,
+    ).run(sessionId, continuationId, parentTurnId, now, now);
+  }
+
   /** Consume live-event provenance for exactly one semantic busy-to-idle completion. Historical
    * replay never arms this marker, even when the session happens to be running during hydration. */
   settleManagedBackgroundDeliveryStatus(sessionId: string, now: number): boolean {
@@ -11341,11 +11373,7 @@ export class ControlPlaneDb {
     sessionId: string,
     expected: { afterSeq: number; historyEpoch: number; eventEpoch: number },
     events: readonly HydratedRunnerEvent[],
-    options: {
-      armBackgroundStatusSettlement?: boolean;
-      /** Arm settlement for exactly these live-provenance continuation ids within the page. */
-      armLiveContinuationIds?: ReadonlySet<string>;
-    } = {},
+    options: { armBackgroundStatusSettlement?: boolean } = {},
   ): AppendHydratedPageResult {
     for (const [name, value] of Object.entries(expected)) {
       if (!Number.isSafeInteger(value) || value < 0) {
@@ -11449,9 +11477,7 @@ export class ControlPlaneDb {
           event.ts,
           state.event_epoch,
           cpSeq,
-          options.armBackgroundStatusSettlement === true ||
-            (event.payload.kind === "background_continuation_delivered" &&
-              options.armLiveContinuationIds?.has(event.payload.continuationId) === true),
+          options.armBackgroundStatusSettlement === true,
         );
         this.recordUsageEventInTransaction(
           sessionId,
