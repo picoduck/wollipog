@@ -5329,6 +5329,7 @@ export class SessionManager {
 
   stop(sessionId: string): void {
     this.revokeSessionCommandAuthority(sessionId);
+    this.cancelBackgroundContinuationTimer(sessionId);
     this.discardRecovery(sessionId);
     this.cancelApprovalTelemetry(sessionId);
     this.clearSteeringState(sessionId, "session stopped before steering settled");
@@ -5339,6 +5340,8 @@ export class SessionManager {
     const entry = this.active.get(sessionId);
     if (!entry) {
       this.rejectPreLaunchQueue(sessionId, "session stopped before runner admission");
+      // The rejection re-arm is for failed admissions; this stop is a lifecycle end, so drop it.
+      this.cancelBackgroundContinuationTimer(sessionId);
       this.cancelAdmissionWait(sessionId);
       // Not in-process but may exist in the store — record the stop there too.
       if (this.store.has(sessionId)) {
@@ -5423,6 +5426,7 @@ export class SessionManager {
 
       this.beginLaunchGeneration(sessionId);
       this.rejectPreLaunchQueue(sessionId, "session deleted before runner admission");
+      this.cancelBackgroundContinuationTimer(sessionId);
       // Deletion is terminal, not a replacement launch. Stale continuations may perform only
       // idempotent lock/admission release; the deletion journal exclusively owns destructive
       // worktree/provider cleanup.
@@ -6499,6 +6503,15 @@ export class SessionManager {
     const continuationId = queued[0]?.continuationId;
     if (!continuationId) return [];
     return queued.filter((job) => job.continuationId === continuationId).map((job) => job.id);
+  }
+
+  /** Lifecycle rejection (Stop/delete) must also drop any pending continuation timer: a stale
+   * timer entry would suppress scheduling for a restarted session's fresh background work. */
+  private cancelBackgroundContinuationTimer(sessionId: string): void {
+    const timer = this.backgroundContinuationTimers.get(sessionId);
+    if (!timer) return;
+    clearTimeout(timer);
+    this.backgroundContinuationTimers.delete(sessionId);
   }
 
   private scheduleBackgroundContinuation(sessionId: string, delay = 0): void {

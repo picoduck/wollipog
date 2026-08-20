@@ -466,6 +466,12 @@ test("a continuation dropped with a rejected admission re-arms its retry timer",
     assert.equal(internals.preLaunchQueues.has("resume-session"), false, "the rejected admission cleared its queue");
     assert.equal(internals.backgroundContinuationTimers.has("resume-session"), true,
       "the dropped continuation re-armed its retry timer instead of being stranded");
+
+    // An intentional Stop is a lifecycle end, not a failed admission: it must drop the timer so
+    // a restarted session's fresh background work is not suppressed for a retry interval.
+    h.manager.stop("resume-session");
+    assert.equal(internals.backgroundContinuationTimers.has("resume-session"), false,
+      "Stop cancels the re-armed continuation timer");
   } finally {
     h.manager.shutdownAll();
     h.cleanup();
