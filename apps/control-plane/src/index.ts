@@ -266,7 +266,6 @@ if (legacyCredentialMigration.blocked > 0) {
 db.scrubLegacyAgentSecrets(Date.now());
 const hub = new Hub(db);
 const shellRegistry = new ShellRegistry(db);
-shellRegistry.reconcileStartup(Date.now());
 // Larger body limit so pasted screenshots (base64) fit comfortably.
 const app = Fastify({
   bodyLimit: 32 * 1024 * 1024,
@@ -3830,7 +3829,10 @@ process.on("unhandledRejection", (reason) => {
 void (async () => {
   try {
     await app.listen({ port: PORT, host: HOST });
+    // Shell reconciliation is connection-owned state like the reset above: a duplicate process
+    // that loses the port race must not flip the survivor's running shells to reconnecting.
     db.settleStartupState(Date.now());
+    shellRegistry.reconcileStartup(Date.now());
     markStartupReady();
     app.log.info(`control plane listening on http://${HOST}:${PORT}`);
     // Normal service stdout is commonly captured as a log. Reveal the credential automatically

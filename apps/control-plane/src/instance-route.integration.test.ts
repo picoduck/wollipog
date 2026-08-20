@@ -192,16 +192,19 @@ function sessionSnapshot(status: "running" | "idle" = "running") {
   };
 }
 
-function sharedRows(database: string): Record<"runners" | "boxes" | "sessions", Array<Record<string, unknown>>> {
+function sharedRows(
+  database: string,
+): Record<"runners" | "boxes" | "sessions" | "session_shells", Array<Record<string, unknown>>> {
   const raw = new DatabaseSync(database, { readOnly: true });
   try {
-    const rows = (table: "runners" | "boxes" | "sessions", orderBy: string) =>
+    const rows = (table: "runners" | "boxes" | "sessions" | "session_shells", orderBy: string) =>
       (raw.prepare(`SELECT * FROM ${table} ORDER BY ${orderBy}`).all() as Array<Record<string, unknown>>)
         .map((row) => ({ ...row }));
     return {
       runners: rows("runners", "runner_id"),
       boxes: rows("boxes", "box_id"),
       sessions: rows("sessions", "id"),
+      session_shells: rows("session_shells", "shell_id"),
     };
   } finally {
     raw.close();
@@ -440,7 +443,7 @@ test("two real control planes isolate identical ids and persist identity and dat
   await assertSeededPayload(secondPort, secondSeed);
 });
 
-test("a duplicate start leaves the live control plane's runner, box, and session untouched", { timeout: 60_000 }, async (t) => {
+test("a duplicate start leaves the live control plane's runner, box, session, and shells untouched", { timeout: 60_000 }, async (t) => {
   const temp = mkdtempSync(join(tmpdir(), "wollipog-duplicate-start-"));
   const port = await reservePort();
   const database = join(temp, "control-plane.db");
@@ -490,7 +493,20 @@ test("a duplicate start leaves the live control plane's runner, box, and session
   await registered;
   await waitForLiveSharedRows(database);
 
+  // A running shell is connection-owned state too: the duplicate's startup shell reconciliation
+  // must not flip it to `reconnecting`.
+  const rawDb = new DatabaseSync(database);
+  try {
+    rawDb.prepare(
+      `INSERT INTO session_shells (shell_id, session_id, runner_id, name, created_at, updated_at)
+       VALUES ('shell_shared', ?, ?, 'Shell 1', 1, 1)`,
+    ).run(SHARED_SESSION_ID, SHARED_RUNNER_ID);
+  } finally {
+    rawDb.close();
+  }
+
   const beforeDuplicate = sharedRows(database);
+  assert.equal(beforeDuplicate.session_shells[0]?.status, "running");
   const duplicate = startControlPlane(port, database);
   children.add(duplicate.child);
   const duplicateExit = await waitForChildExit(duplicate.child);
