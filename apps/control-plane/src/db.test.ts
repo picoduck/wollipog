@@ -739,6 +739,15 @@ test("startup settlement waits for explicit ownership and still settles a genuin
     db.createSession(newSession());
     db.setBoxStatus("box-1", "online", 1_001);
     db.updateSessionStatus("sess-1", "running", 1_002);
+    db.stageSessionPromptCommand({
+      commandId: "cmd-startup-fence",
+      sessionId: "sess-1",
+      runnerId: "runner-1",
+      payloadJson: JSON.stringify({ text: "undelivered" }),
+      payloadSha256: "0".repeat(64),
+      expiresAt: 100_000,
+      now: 1_003,
+    });
     db.close();
     db = undefined;
 
@@ -753,6 +762,10 @@ test("startup settlement waits for explicit ownership and still settles a genuin
     assert.equal(db.getBox("box-1")?.status, "offline");
     assert.equal(db.getSession("sess-1")?.status, "stopped");
     assert.equal(db.getSession("sess-1")?.updatedAt, 2_000);
+    const fenced = db.getSessionPromptCommand("cmd-startup-fence")!;
+    assert.equal(fenced.state, "failed", "a never-sent prompt is fenced when settlement stops its session");
+    assert.equal(fenced.errorCode, "COMMAND_CANCELLED");
+    assert.deepEqual(db.dueSessionPromptCommands(100_000, "runner-1"), []);
   } finally {
     db?.close();
     rmSync(temp, { recursive: true, force: true });

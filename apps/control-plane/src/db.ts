@@ -3531,10 +3531,24 @@ export class ControlPlaneDb {
       // Sessions that were mid-flight when the control plane stopped are orphaned
       // (we no longer have a live runner link to them) — mark them stopped, not
       // failed: an interrupted connection isn't an agent error.
+      const midFlight = this.stmt(
+        `SELECT id FROM sessions
+         WHERE status IN ('queued','starting','running','input_required','idle')`,
+      ).all() as Array<{ id: string }>;
       this.stmt(
         `UPDATE sessions SET status = 'stopped', updated_at = ?
          WHERE status IN ('queued','starting','running','input_required','idle')`,
       ).run(now);
+      // Terminality is the retry fence on every path: a runner disconnect already fences these
+      // commands, and a control-plane restart is no less disruptive — without this the outbox
+      // re-delivers into sessions this settlement just stopped.
+      for (const { id } of midFlight) {
+        this.cancelSessionPromptCommands(
+          id,
+          "session became stopped before durable prompt delivery completed",
+          now,
+        );
+      }
     });
   }
 
@@ -8037,6 +8051,16 @@ export class ControlPlaneDb {
       }
       this.reconcileUsageSnapshotInTransaction(id, snap, now);
       this.upsertManagedBackgroundJobsInTransaction(id, snap.backgroundJobs, now);
+      // Session terminality is the retry fence regardless of which service path observed it;
+      // snapshots (hydration and runtime updates) must fence in the same transaction so a pending
+      // durable prompt can never be re-delivered into a session this snapshot terminalized.
+      if (isTerminal(status)) {
+        this.cancelSessionPromptCommands(
+          id,
+          `session became ${status} before durable prompt delivery completed`,
+          now,
+        );
+      }
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
