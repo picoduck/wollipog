@@ -77,6 +77,7 @@ import {
   validatePodReconciliationMetadata,
   withGitExecutionContext,
 } from "./git-ops.js";
+import { Outbox } from "./outbox.js";
 import { SessionManager } from "./session-manager.js";
 import { NativeProviderAuthRecovery } from "./provider-auth-recovery.js";
 import { handleResolveSteeringAttemptMessage, handleSteerSessionMessage } from "./steering-handler.js";
@@ -509,31 +510,22 @@ const shells = new ShellManager({
     sendUp({ type: "shell_exit", sessionId, shellId, code, outputSeq }),
 });
 
-// Buffer outbound events while the control-plane socket is down or mid-reconnect
-// so a terminal status or permission request produced during a blip is not lost.
-const outbox: RunnerToControlPlane[] = [];
-const MAX_OUTBOX = 1000;
+// Buffer outbound events while the control-plane socket is down or mid-reconnect so a terminal
+// status or permission request produced during a blip is not lost. The buffering/coalescing/overflow
+// policy lives in outbox.ts; the online-decision and the actual protocol-projected send stay here.
+const outbox = new Outbox<RunnerToControlPlane>();
 
 function sendUp(msg: RunnerToControlPlane): void {
   if (ws && ws.readyState === WebSocket.OPEN && registered) {
     ws.send(JSON.stringify(projectRunnerMessageForProtocol(msg, controlPlaneProtocolVersion)));
     return;
   }
-  // Coalesce redundant session_status / session_queue for the same session to bound growth —
-  // only the LATEST of either matters (a queue snapshot fully replaces the previous one), and
-  // queue snapshots carry prompt previews, so letting them stack during a blip wastes the
-  // outbox on payloads the flush would immediately supersede.
-  if (msg.type === "session_status" || msg.type === "session_queue") {
-    const i = outbox.findIndex((m) => m.type === msg.type && m.sessionId === msg.sessionId);
-    if (i !== -1) outbox.splice(i, 1);
-  }
-  outbox.push(msg);
-  if (outbox.length > MAX_OUTBOX) outbox.splice(0, outbox.length - MAX_OUTBOX);
+  outbox.enqueue(msg);
 }
 
 function flushOutbox(): void {
   if (!ws || ws.readyState !== WebSocket.OPEN || !registered) return;
-  for (const m of outbox.splice(0)) {
+  for (const m of outbox.drain()) {
     ws.send(JSON.stringify(projectRunnerMessageForProtocol(m, controlPlaneProtocolVersion)));
   }
 }
