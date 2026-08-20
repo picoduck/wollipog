@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   existsSync,
   linkSync,
@@ -141,6 +142,111 @@ test("stale leases with a foreign owner or host and live leases all fail closed"
       scenario === "host" ? /leased by host host-b/ : /already in use by process 101/;
     assert.throws(() => registry.acquire(request(home)), expected);
     assert.deepEqual(readdirSync(leasePaths(home).lock), ["lease.json"]);
+  }
+});
+
+test("a same-owner lease with an unprobeable pid fails closed instead of reading as dead", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-badpid-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  // Number.MAX_SAFE_INTEGER passes the record shape check but makes process.kill throw
+  // ERR_OUT_OF_RANGE; the default liveness probe must treat that as malformed state, not death.
+  writeLegacyLease(home, { pid: Number.MAX_SAFE_INTEGER });
+  const registry = new ProviderHomeLeaseRegistry(OWNER_A, { pid: 202, hostname: "host-a" });
+  assert.throws(() => registry.acquire(request(home)), /already in use/);
+  assert.deepEqual(readdirSync(leasePaths(home).lock), ["lease.json"]);
+});
+
+test("a released genesis record is rejected as fabricated handoff state", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-released-genesis-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  // A genesis is only ever published `active` (release appends a `next-*` record), so a lone
+  // released genesis would skip every hostname/owner/liveness check if it were trusted.
+  const { lock } = leasePaths(home);
+  mkdirSync(lock, { recursive: true });
+  writeFileSync(join(lock, `lease-${LEGACY_ID}.json`), `${JSON.stringify({
+    version: 2,
+    state: "released",
+    ownerHash: OWNER_B,
+    leaseId: LEGACY_ID,
+    previousLeaseId: null,
+    previousRecordHash: null,
+    pid: 101,
+    hostname: "host-b",
+    provider: "claude",
+    createdAt: "2026-08-19T00:00:00.000Z",
+  })}\n`, { mode: 0o600 });
+  const registry = new ProviderHomeLeaseRegistry(OWNER_A, {
+    pid: 202, hostname: "host-a", isProcessAlive: () => false,
+  });
+  assert.throws(() => registry.acquire(request(home)), /unexpected entries/);
+  assert.deepEqual(readdirSync(lock), [`lease-${LEGACY_ID}.json`]);
+});
+
+test("a released successor that rewrites the releasing lease's identity is rejected", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-forged-release-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const holder = new ProviderHomeLeaseRegistry(OWNER_A, { pid: 101, hostname: "host-a" });
+  holder.acquire(request(home));
+  // Forge a hash-linked "released" successor that swaps in a foreign owner, host, and pid.
+  // releaseAll copies the active record's identity verbatim, so this transition is impossible.
+  const { lock } = leasePaths(home);
+  const genesisName = readdirSync(lock)[0]!;
+  const genesisBytes = readFileSync(join(lock, genesisName));
+  const genesis = JSON.parse(genesisBytes.toString("utf8")) as Record<string, unknown>;
+  writeFileSync(join(lock, `next-${genesis.leaseId}.json`), `${JSON.stringify({
+    ...genesis,
+    state: "released",
+    leaseId: LEGACY_ID,
+    previousLeaseId: genesis.leaseId,
+    previousRecordHash: createHash("sha256").update(genesisBytes).digest("hex"),
+    ownerHash: OWNER_B,
+    hostname: "host-b",
+    pid: 303,
+  })}\n`, { mode: 0o600 });
+  const contender = new ProviderHomeLeaseRegistry("c".repeat(64), {
+    pid: 404, hostname: "host-c", isProcessAlive: () => true,
+  });
+  assert.throws(() => contender.acquire(request(home)), /unexpected entries/);
+  assert.equal(readdirSync(lock).length, 2, "the forged journal gains no successor");
+});
+
+test("an active successor that rewrites owner or host over an unreleased record is rejected", (t) => {
+  // One rewritten field per scenario, so each readChain comparison is pinned independently.
+  for (const forgery of [{ ownerHash: OWNER_B }, { hostname: "host-b" }]) {
+    const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-forged-reclaim-"));
+    t.after(() => rmSync(home, { recursive: true, force: true }));
+    const holder = new ProviderHomeLeaseRegistry(OWNER_A, { pid: 101, hostname: "host-a" });
+    holder.acquire(request(home));
+    // Forge active(forged identity) over the live active(A) genesis, then a clean release of the
+    // forgery — reclaim can only append an active successor with the SAME owner and host, so this
+    // chain is impossible; trusting its released tip would hand the HOME to any contender.
+    const { lock } = leasePaths(home);
+    const genesisName = readdirSync(lock)[0]!;
+    const genesisBytes = readFileSync(join(lock, genesisName));
+    const genesis = JSON.parse(genesisBytes.toString("utf8")) as Record<string, unknown>;
+    const FORGED_ID = "22222222-2222-4222-8222-222222222222";
+    const forgedActive = `${JSON.stringify({
+      ...genesis,
+      state: "active",
+      leaseId: FORGED_ID,
+      previousLeaseId: genesis.leaseId,
+      previousRecordHash: createHash("sha256").update(genesisBytes).digest("hex"),
+      pid: 303,
+      ...forgery,
+    })}\n`;
+    writeFileSync(join(lock, `next-${genesis.leaseId}.json`), forgedActive, { mode: 0o600 });
+    writeFileSync(join(lock, `next-${FORGED_ID}.json`), `${JSON.stringify({
+      ...JSON.parse(forgedActive) as Record<string, unknown>,
+      state: "released",
+      leaseId: LEGACY_ID,
+      previousLeaseId: FORGED_ID,
+      previousRecordHash: createHash("sha256").update(Buffer.from(forgedActive)).digest("hex"),
+    })}\n`, { mode: 0o600 });
+    const contender = new ProviderHomeLeaseRegistry("c".repeat(64), {
+      pid: 404, hostname: "host-c", isProcessAlive: () => true,
+    });
+    assert.throws(() => contender.acquire(request(home)), /unexpected entries/);
+    assert.equal(readdirSync(lock).length, 3, "the forged journal gains no successor");
   }
 });
 

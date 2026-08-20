@@ -82,7 +82,9 @@ function defaultProcessAlive(pid: number): boolean {
     process.kill(pid, 0);
     return true;
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
+    // Only ESRCH proves death. EPERM means alive, and any other error (out-of-range or otherwise
+    // unprobeable PID) is malformed state that must fail closed rather than authorize reclaim.
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
   }
 }
 
@@ -161,7 +163,10 @@ function readChain(lockDir: string): LeaseChain {
     marker = genesis[0]!;
     current = readRecord(join(lockDir, marker));
     const match = GENESIS_MARKER.exec(marker);
-    if (current.record.version !== 2 || current.record.previousLeaseId !== null ||
+    // A genesis is only ever published `active` (release appends a `next-*` record), so a released
+    // genesis is fabricated or corrupted state — never an explicit handoff to trust.
+    if (current.record.version !== 2 || current.record.state !== "active" ||
+        current.record.previousLeaseId !== null ||
         current.record.previousRecordHash !== null || match?.[1] !== current.record.leaseId) {
       throw unexpectedEntries(lockDir);
     }
@@ -177,6 +182,26 @@ function readChain(lockDir: string): LeaseChain {
     const next = readRecord(join(lockDir, nextMarker));
     if (next.record.version !== 2 || next.record.previousLeaseId !== current.record.leaseId ||
         next.record.previousRecordHash !== current.hash) {
+      throw unexpectedEntries(lockDir);
+    }
+    // Only two transitions are ever published, and both constrain the successor: reclaim appends
+    // an active record over an unreleased (v1 or active-v2) predecessor after proving the same
+    // owner and host, and releaseAll releases a v2 active tip copying its identity verbatim. Any
+    // other link is fabricated or corrupted state; trusting it would let a "released" tip skip
+    // every hostname/owner/liveness check. Only an authentic handoff (an active successor over a
+    // released record) may change identity.
+    if (next.record.state === "released" &&
+        (current.record.version !== 2 || current.record.state !== "active" ||
+          next.record.ownerHash !== current.record.ownerHash ||
+          next.record.hostname !== current.record.hostname ||
+          next.record.pid !== current.record.pid ||
+          next.record.provider !== current.record.provider)) {
+      throw unexpectedEntries(lockDir);
+    }
+    if (next.record.state === "active" &&
+        (current.record.version === 1 || current.record.state === "active") &&
+        (next.record.ownerHash !== current.record.ownerHash ||
+          next.record.hostname !== current.record.hostname)) {
       throw unexpectedEntries(lockDir);
     }
     consumed.add(nextMarker);
