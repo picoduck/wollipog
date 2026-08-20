@@ -433,8 +433,10 @@ may retry once only when failure occurred before provider creation; the retry to
 before enqueue. Uncertain turns and terminalized durable commands are never retried automatically.
 
 Use **Recheck Authentication** after completing `claude auth login` or `codex login` in the exact
-Machine and provider context described on the card. **Start Sign-In** remains fail-closed until
-issue #17/PR42's cross-process provider-home ownership lease is available on this branch. Configured
+Machine and provider context described on the card. **Start Sign-In** remains fail-closed even though the
+cross-process provider-home lease is available: the login path does not yet acquire that lease for
+its freshly resolved isolation, supervise and cancel a correlated provider child, or protect
+credential roots overridden outside HOME. Configured
 environment credentials and WSL remain revalidation/manual-login only. Container/cloud adapters do
 not yet expose an exact-context status probe, so they keep the process-local fail-closed behavior and
 do not claim durable recovery.

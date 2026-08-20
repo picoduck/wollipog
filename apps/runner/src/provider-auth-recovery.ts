@@ -114,8 +114,9 @@ export function describeProviderCredentialScope(meta: SessionMeta, digestKey?: s
     id,
     provider,
     configuredCredential,
-    // Enabling provider-home mutation requires the cross-process home lease delivered by issue
-    // #17/PR42. Until that dependency lands, recovery is intentionally revalidation-only.
+    // The shared provider-home lease now exists, but login remains revalidation-only until this
+    // path acquires that lease for the exact freshly resolved isolation, supervises a cancellable
+    // provider child, and either leases or rejects credential roots overridden outside HOME.
     canStartLogin: false,
   };
 }
