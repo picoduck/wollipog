@@ -11,6 +11,7 @@ import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import websocket from "@fastify/websocket";
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
+import { installStartupReadinessGate } from "./startup-readiness.js";
 import {
   AUTOMATION_TRIGGER_MAX_BODY_BYTES,
   registerAutomationTriggerContentTypeParser,
@@ -270,7 +271,6 @@ if (legacyCredentialMigration.blocked > 0) {
 db.scrubLegacyAgentSecrets(Date.now());
 const hub = new Hub(db);
 const shellRegistry = new ShellRegistry(db);
-shellRegistry.reconcileStartup(Date.now());
 // Larger body limit so pasted screenshots (base64) fit comfortably.
 const app = Fastify({
   bodyLimit: 32 * 1024 * 1024,
@@ -284,6 +284,7 @@ const app = Fastify({
     },
   },
 });
+const markStartupReady = installStartupReadinessGate(app);
 const warnedLegacyRunnerCredentialIds = new Set<string>();
 
 // The packaged desktop's "Enable Tailnet Access" setting binds the sidecar to IPv4 wildcard so
@@ -3878,6 +3879,11 @@ process.on("unhandledRejection", (reason) => {
 void (async () => {
   try {
     await app.listen({ port: PORT, host: HOST });
+    // Shell reconciliation is connection-owned state like the reset above: a duplicate process
+    // that loses the port race must not flip the survivor's running shells to reconnecting.
+    db.settleStartupState(Date.now());
+    shellRegistry.reconcileStartup(Date.now());
+    markStartupReady();
     app.log.info(`control plane listening on http://${HOST}:${PORT}`);
     // Normal service stdout is commonly captured as a log. Reveal the credential automatically
     // only to an interactive terminal; `--print-pair-url` is the explicit non-interactive path.
