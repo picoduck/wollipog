@@ -11341,7 +11341,11 @@ export class ControlPlaneDb {
     sessionId: string,
     expected: { afterSeq: number; historyEpoch: number; eventEpoch: number },
     events: readonly HydratedRunnerEvent[],
-    options: { armBackgroundStatusSettlement?: boolean } = {},
+    options: {
+      armBackgroundStatusSettlement?: boolean;
+      /** Arm settlement for exactly these live-provenance continuation ids within the page. */
+      armLiveContinuationIds?: ReadonlySet<string>;
+    } = {},
   ): AppendHydratedPageResult {
     for (const [name, value] of Object.entries(expected)) {
       if (!Number.isSafeInteger(value) || value < 0) {
@@ -11445,7 +11449,9 @@ export class ControlPlaneDb {
           event.ts,
           state.event_epoch,
           cpSeq,
-          options.armBackgroundStatusSettlement === true,
+          options.armBackgroundStatusSettlement === true ||
+            (event.payload.kind === "background_continuation_delivered" &&
+              options.armLiveContinuationIds?.has(event.payload.continuationId) === true),
         );
         this.recordUsageEventInTransaction(
           sessionId,

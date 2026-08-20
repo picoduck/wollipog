@@ -6723,7 +6723,7 @@ test("live structured continuation evidence projects delivery stages and rebroad
 
 test("only live continuation provenance suppresses its trailing Ready across restart", async () => {
   const db = ControlPlaneDb.open(":memory:");
-  db.registerRunner(runnerMeta(), Date.now());
+  db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);
   const hub = new FakeHub();
   const sent: string[] = [];
   const notify = (prev: SessionView, view: SessionView) => {
@@ -6774,6 +6774,98 @@ test("only live continuation provenance suppresses its trailing Ready across res
   assert.equal(sent.length, before, "durable live correlation suppresses the duplicate Ready after CP restart");
   assert.ok(db.getSession("s_box1")?.backgroundDeliveries?.some((delivery) =>
     delivery.continuationId === "bgcont-live-restart" && delivery.statusSettledAt != null));
+});
+
+test("a live delivery diverted through gap hydration still settles its trailing Ready", async () => {
+  const db = ControlPlaneDb.open(":memory:");
+  db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);
+  const hub = new FakeHub();
+  const sent: string[] = [];
+  const notify = (prev: SessionView, view: SessionView) => {
+    const message = pushDecision(prev, view);
+    if (message) sent.push(message.title);
+  };
+  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG, notify);
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ status: "running", seq: 1, historyEpoch: 7 })]);
+  hub.requestHandler = (message) => {
+    assert.equal(message.type, "session_history_page");
+    return {
+      type: "session_history_page_result",
+      requestId: message.requestId,
+      sessionId: message.sessionId,
+      ok: true,
+      events: [{ seq: 1, ts: 100, payload: { kind: "agent_message", text: "one" } }],
+      page: { logEpoch: 7, throughSeq: 1, nextAfterSeq: 1, hasMore: false },
+    };
+  };
+  await svc.hydrateHistory("s_box1");
+
+  // The live delivery frame arrives ahead of the hydrated cursor (seq 3 over a cursor of 1), so
+  // it is diverted through catch-up hydration instead of the contiguous live path.
+  hub.requestHandler = (message) => {
+    assert.equal(message.type, "session_history_page");
+    return {
+      type: "session_history_page_result",
+      requestId: message.requestId,
+      sessionId: message.sessionId,
+      ok: true,
+      events: [
+        { seq: 2, ts: 101, payload: { kind: "agent_message", text: "two" } },
+        { seq: 3, ts: 102, payload: {
+          kind: "background_continuation_delivered", continuationId: "bgcont-gap", parentTurnId: "turn-gap",
+        } },
+      ],
+      page: { logEpoch: 7, throughSeq: 3, nextAfterSeq: 3, hasMore: false },
+    };
+  };
+  svc.onSessionEvent("s_box1", {
+    kind: "background_continuation_delivered", continuationId: "bgcont-gap", parentTurnId: "turn-gap",
+  }, 3, 102);
+  for (let index = 0; index < 200; index += 1) {
+    if (db.getSession("s_box1")?.backgroundDeliveries?.some((d) => d.continuationId === "bgcont-gap")) break;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.ok(db.getSession("s_box1")?.backgroundDeliveries?.some((d) => d.continuationId === "bgcont-gap"),
+    "the catch-up page projected the diverted live delivery");
+
+  const before = sent.length;
+  svc.onSessionStatus("s_box1", "idle");
+  assert.equal(sent.length, before, "the diverted live delivery still suppresses its trailing Ready");
+  assert.ok(db.getSession("s_box1")?.backgroundDeliveries?.some((d) =>
+    d.continuationId === "bgcont-gap" && d.statusSettledAt != null));
+});
+
+test("a restoration-replayed idle consumes the armed settlement instead of duplicating Ready", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);
+  const hub = new FakeHub();
+  const sent: string[] = [];
+  const notify = (prev: SessionView, view: SessionView) => {
+    const message = pushDecision(prev, view);
+    if (message) sent.push(message.title);
+  };
+  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG, notify);
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ status: "running" })]);
+  db.updateSessionStatus("s_box1", "running", Date.now());
+  svc.onSessionEvent("s_box1", {
+    kind: "background_continuation_delivered", continuationId: "bgcont-restored", parentTurnId: "turn-r",
+  });
+  const previous = db.getSession("s_box1")!;
+
+  // Policy restoration replays the swallowed running -> idle edge through notifyTransition without
+  // passing onSessionStatus (see replayRestoredPolicyHookIdle); the settle must still happen there.
+  db.updateSessionStatus("s_box1", "idle", Date.now());
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (svc as any).notifyTransition({ ...previous, status: "running" }, "s_box1");
+  assert.equal(sent.filter((title) => /is ready/.test(title)).length, 0,
+    "the restoration replay consumes the settlement instead of emitting the duplicate Ready");
+  assert.ok(db.getSession("s_box1")?.backgroundDeliveries?.some((d) =>
+    d.continuationId === "bgcont-restored" && d.statusSettledAt != null));
+
+  // The next genuine busy -> idle is unrelated and must notify again.
+  db.updateSessionStatus("s_box1", "running", Date.now());
+  svc.onSessionStatus("s_box1", "idle");
+  assert.equal(sent.filter((title) => /is ready/.test(title)).length, 1);
 });
 
 test("large live event payloads persist and broadcast only a bounded artifact-backed preview", () => {

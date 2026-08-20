@@ -620,6 +620,10 @@ export class SessionsService {
   /** Sessions that saw another gap WHILE a fetch was in flight — forces one more pass afterward so a
    * mid-fetch event (not in the in-flight reply) is never dropped. */
   private readonly rehydrate = new Set<string>();
+  /** Live-provenance continuation ids whose delivery event was routed through history hydration
+   * (sequence gap / stale page): the catch-up page must still arm status settlement for exactly
+   * these deliveries, while genuinely historical replay stays unarmed. */
+  private readonly pendingLiveSettlementArms = new Map<string, Set<string>>();
   /** Bound v54 history/index work to one page chain per runner. */
   private readonly runnerHydrationTails = new Map<string, Promise<void>>();
   /** Concurrent dashboard refreshes share one bounded runner fanout. */
@@ -657,7 +661,16 @@ export class SessionsService {
    * state the user would actually see; the pure decision drops non-transitions. */
   private notifyTransition(prev: SessionView, sessionId: string): void {
     if (!this.notify) return;
-    const view = this.db.getSession(sessionId);
+    let view = this.db.getSession(sessionId);
+    // Every Ready-capable projected idle consumes an armed background-delivery settlement HERE —
+    // this is the one choke point all of them share, including policy-restoration replays that
+    // never pass through onSessionStatus — so the decision functions compare a pre-settlement
+    // prev against a post-settlement next and suppress exactly the correlated trailing Ready.
+    if (view?.status === "idle" && ["queued", "starting", "running"].includes(prev.status) &&
+        this.db.settleManagedBackgroundDeliveryStatus(sessionId, Date.now())) {
+      this.pendingLiveSettlementArms.delete(sessionId);
+      view = this.db.getSession(sessionId);
+    }
     if (view) this.notify(prev, view);
   }
 
@@ -5472,12 +5485,7 @@ export class SessionsService {
       this.abortPolicyHookApprovals(session, Date.now(), "provider-session-ended");
     }
     this.db.updateSessionStatus(sessionId, status, Date.now());
-    // Consume an armed background-delivery settlement on the idle that is actually projected as a
-    // status transition. The policy-swallowed idle above deliberately does not settle: no busy→idle
-    // is projected there, so the marker stays armed for the genuine trailing idle.
-    if (status === "idle") {
-      this.db.settleManagedBackgroundDeliveryStatus(sessionId, Date.now());
-    }
+    if (isTerminal(status)) this.pendingLiveSettlementArms.delete(sessionId);
     // If the session ended while an approval was pending, clear the stale card.
     if (isTerminal(status) && session.pendingApproval) {
       this.db.setPendingApproval(sessionId, null);
@@ -5537,6 +5545,15 @@ export class SessionsService {
 
   /** A durable hook resolution that restores a swallowed runner idle must replay the same
    * settlement consumers as a live idle frame before broadcasting the final state. */
+  private noteLiveContinuationArm(sessionId: string, payload: SessionEventPayload): void {
+    if (payload.kind !== "background_continuation_delivered" ||
+        typeof payload.continuationId !== "string") return;
+    const pending = this.pendingLiveSettlementArms.get(sessionId) ?? new Set<string>();
+    if (pending.size >= 32) return; // bounded; an overflow just falls back to unarmed replay
+    pending.add(payload.continuationId);
+    this.pendingLiveSettlementArms.set(sessionId, pending);
+  }
+
   private replayRestoredPolicyHookIdle(previous: SessionView, sessionId: string, now: number): void {
     this.gateOnPolicy(sessionId, now);
     this.reconcileWorkflowSessionStatus(sessionId, "idle", now);
@@ -5623,6 +5640,7 @@ export class SessionsService {
       if (runnerSeq <= cursor) return; // already ingested (duplicate live frame / replay)
       if (runnerSeq !== cursor + 1) {
         if (indexedHistory) this.db.reconcileRunnerHistory(sessionId, history.historyEpoch!, runnerSeq);
+        this.noteLiveContinuationArm(sessionId, payload);
         this.rehydrate.add(sessionId);
         void this.hydrateHistory(sessionId);
         return;
@@ -5652,6 +5670,7 @@ export class SessionsService {
       }
       if (!applied.applied || !applied.events[0]) {
         cleanupEventPayloadArtifacts(this.db, externalized.artifactIds);
+        this.noteLiveContinuationArm(sessionId, payload);
         this.rehydrate.add(sessionId);
         void this.hydrateHistory(sessionId);
         return;
@@ -6266,6 +6285,9 @@ export class SessionsService {
             sessionId,
             { afterSeq, historyEpoch: activeLogEpoch, eventEpoch },
             preparedEvents,
+            // A catch-up page may carry a delivery whose live frame was diverted here by a
+            // sequence gap; arm settlement for exactly those, never for historical replay.
+            { armLiveContinuationIds: this.pendingLiveSettlementArms.get(sessionId) },
           );
         } catch (error) {
           cleanupEventPayloadArtifacts(this.db, artifactIds);
