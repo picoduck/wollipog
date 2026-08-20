@@ -6879,6 +6879,34 @@ test("a restoration-replayed idle consumes the armed settlement instead of dupli
   assert.equal(sent.filter((title) => /is ready/.test(title)).length, 1);
 });
 
+test("a terminal transition orphans an armed settlement so a later run's Ready is not suppressed", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);
+  const hub = new FakeHub();
+  const sent: string[] = [];
+  const notify = (prev: SessionView, view: SessionView) => {
+    const message = pushDecision(prev, view);
+    if (message) sent.push(message.title);
+  };
+  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG, notify);
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ status: "running" })]);
+  db.updateSessionStatus("s_box1", "running", Date.now());
+  svc.onSessionEvent("s_box1", {
+    kind: "background_continuation_delivered", continuationId: "bgcont-orphaned", parentTurnId: "turn-o",
+  });
+
+  // The run dies before its trailing idle: the armed marker must not survive to suppress the
+  // Ready of a later, unrelated run after restart.
+  svc.onSessionStatus("s_box1", "failed");
+  db.updateSessionStatus("s_box1", "running", Date.now());
+  svc.onSessionStatus("s_box1", "idle");
+  assert.equal(sent.filter((title) => /is ready/.test(title)).length, 1,
+    "the later run's Ready is emitted; the stale marker was cleared at terminality");
+  assert.ok(db.getSession("s_box1")?.backgroundDeliveries?.every((d) =>
+    d.continuationId !== "bgcont-orphaned" || d.statusSettledAt == null),
+    "the orphaned delivery is never marked settled");
+});
+
 test("large live event payloads persist and broadcast only a bounded artifact-backed preview", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);

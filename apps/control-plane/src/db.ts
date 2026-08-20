@@ -8607,6 +8607,17 @@ export class ControlPlaneDb {
       // A never-sent prompt is definitely failed; anything marked before send may have reached
       // the runner and is conservatively uncertain until a later receipt narrows the outcome.
       this.cancelSessionPromptCommands(id, `session became ${status} before durable prompt delivery completed`, now);
+      // An authoritative terminal transition orphans any armed-but-unsettled delivery marker: the
+      // trailing idle it awaited will never belong to this run, and leaving it pending would
+      // suppress the Ready of an unrelated later run. (Startup settlement deliberately does NOT
+      // clear these — its stop is provisional and the delivery's idle still arrives after the
+      // runner reconnects; that restart survival is the feature's core case.)
+      this.stmt(
+        `UPDATE managed_background_deliveries
+            SET status_settlement_pending_at=NULL, updated_at=MAX(updated_at, ?)
+          WHERE session_id=? AND status_settlement_pending_at IS NOT NULL
+            AND status_settled_at IS NULL`,
+      ).run(now, id);
     }
     // Swallowed idle belongs only to the CP-owned pause that observed it. Any local or runner
     // transition back into execution (or into a terminal state) invalidates that settle proof,
