@@ -2311,6 +2311,30 @@ test("admission-queued prompts persist before success, survive service restart, 
     "stopped sessions never replay retained prompts");
 });
 
+test("terminal hydration and runtime snapshots fence every durable prompt from replay", () => {
+  for (const source of ["hydration", "runtime"] as const) {
+    const { db, hub, svc } = makeHarness();
+    const id = seedSession(svc, hub);
+    hub.sentToRunner.length = 0;
+    assert.equal(svc.prompt(id, `${source} terminal prompt`).ok, true);
+    const command = hub.sentOfType("durable_session_command")[0]!;
+    assert.equal(db.getSessionPromptCommand(command.commandId)?.state, "sent");
+
+    const terminal = snapshot({
+      id,
+      status: source === "hydration" ? "failed" : "completed",
+    });
+    if (source === "hydration") svc.hydrateRunnerSessions(RUNNER_ID, [terminal]);
+    else svc.applySessionRuntimeUpdate(RUNNER_ID, terminal);
+
+    const fenced = db.getSessionPromptCommand(command.commandId)!;
+    assert.equal(fenced.state, "uncertain", source);
+    assert.equal(fenced.errorCode, "COMMAND_CANCELLED", source);
+    assert.match(fenced.error ?? "", /session became (failed|completed)/u, source);
+    assert.deepEqual(db.dueSessionPromptCommands(Date.now() + 60_000, RUNNER_ID), [], source);
+  }
+});
+
 test("a staged admission prompt fails closed instead of replaying after runner downgrade", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub, { prompt: "initial" });
