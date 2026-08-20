@@ -22,7 +22,14 @@ function clamp(s: string, max: number): string {
 const TITLE_MAX = 120;
 const BODY_MAX = 400;
 
-export type PushDecisionPrev = Pick<SessionView, "status" | "pendingApproval">;
+export type PushDecisionPrev = Pick<SessionView, "status" | "pendingApproval" | "backgroundDeliveries">;
+
+function newlySettledBackgroundDelivery(prev: PushDecisionPrev, next: SessionView): boolean {
+  const settled = new Set((prev.backgroundDeliveries ?? []).flatMap((delivery) =>
+    delivery.statusSettledAt != null ? [delivery.continuationId] : []));
+  return (next.backgroundDeliveries ?? []).some((delivery) =>
+    delivery.statusSettledAt != null && !settled.has(delivery.continuationId));
+}
 
 export function pushDecision(prev: PushDecisionPrev, next: SessionView): PushMessage | null {
   const name = clamp(next.title?.trim() || "Session", 60);
@@ -51,6 +58,7 @@ export function pushDecision(prev: PushDecisionPrev, next: SessionView): PushMes
     case "idle":
       // Turn settled: the agent is waiting on the next prompt / review.
       if (BUSY.includes(prev.status)) {
+        if (newlySettledBackgroundDelivery(prev, next)) return null;
         return { title: clamp(`${name} is ready`, TITLE_MAX), body: "The agent finished a turn and is ready for review.", sessionId: next.id, urgency: "normal" };
       }
       return null;

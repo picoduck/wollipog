@@ -657,7 +657,15 @@ export class SessionsService {
    * state the user would actually see; the pure decision drops non-transitions. */
   private notifyTransition(prev: SessionView, sessionId: string): void {
     if (!this.notify) return;
-    const view = this.db.getSession(sessionId);
+    let view = this.db.getSession(sessionId);
+    // Every Ready-capable projected idle consumes an armed background-delivery settlement HERE —
+    // this is the one choke point all of them share, including policy-restoration replays that
+    // never pass through onSessionStatus — so the decision functions compare a pre-settlement
+    // prev against a post-settlement next and suppress exactly the correlated trailing Ready.
+    if (view?.status === "idle" && ["queued", "starting", "running"].includes(prev.status) &&
+        this.db.settleManagedBackgroundDeliveryStatus(sessionId, Date.now())) {
+      view = this.db.getSession(sessionId);
+    }
     if (view) this.notify(prev, view);
   }
 
@@ -5531,6 +5539,18 @@ export class SessionsService {
 
   /** A durable hook resolution that restores a swallowed runner idle must replay the same
    * settlement consumers as a live idle frame before broadcasting the final state. */
+  /** A live delivery frame diverted into history hydration must arm settlement durably NOW —
+   * the runner's trailing idle can beat the hydration round-trip to notifyTransition. */
+  private noteLiveContinuationArm(sessionId: string, payload: SessionEventPayload): void {
+    if (payload.kind !== "background_continuation_delivered") return;
+    this.db.armBackgroundDeliverySettlementEarly(
+      sessionId,
+      payload.continuationId,
+      payload.parentTurnId,
+      Date.now(),
+    );
+  }
+
   private replayRestoredPolicyHookIdle(previous: SessionView, sessionId: string, now: number): void {
     this.gateOnPolicy(sessionId, now);
     this.reconcileWorkflowSessionStatus(sessionId, "idle", now);
@@ -5617,6 +5637,7 @@ export class SessionsService {
       if (runnerSeq <= cursor) return; // already ingested (duplicate live frame / replay)
       if (runnerSeq !== cursor + 1) {
         if (indexedHistory) this.db.reconcileRunnerHistory(sessionId, history.historyEpoch!, runnerSeq);
+        this.noteLiveContinuationArm(sessionId, payload);
         this.rehydrate.add(sessionId);
         void this.hydrateHistory(sessionId);
         return;
@@ -5638,6 +5659,7 @@ export class SessionsService {
             searchPayload: payload,
             artifactIds: externalized.artifactIds,
           }],
+          { armBackgroundStatusSettlement: true },
         );
       } catch (error) {
         cleanupEventPayloadArtifacts(this.db, externalized.artifactIds);
@@ -5645,6 +5667,7 @@ export class SessionsService {
       }
       if (!applied.applied || !applied.events[0]) {
         cleanupEventPayloadArtifacts(this.db, externalized.artifactIds);
+        this.noteLiveContinuationArm(sessionId, payload);
         this.rehydrate.add(sessionId);
         void this.hydrateHistory(sessionId);
         return;
@@ -5656,6 +5679,7 @@ export class SessionsService {
           accrueUsage: true,
           ...(runnerSeq !== undefined ? { runnerSeq, historyEpoch: history?.historyEpoch ?? null } : {}),
           searchPayload: payload,
+          armBackgroundStatusSettlement: true,
           artifactIds: externalized.artifactIds,
         });
       } catch (error) {
@@ -5920,7 +5944,9 @@ export class SessionsService {
     for (const s of this.db.listSessions({ includeArchived: true })) {
       if (s.runnerId === runnerId && !isTerminal(s.status)) {
         this.abortPolicyHookApprovals(s, now, "runner-disconnected");
-        this.db.updateSessionStatus(s.id, "stopped", now);
+        // A disconnect stop is provisional — reconnect hydration can restore this exact run, and
+        // an armed delivery-settlement marker must survive to suppress its trailing Ready.
+        this.db.updateSessionStatus(s.id, "stopped", now, true);
         const ev = this.db.appendEvent(
           s.id,
           { kind: "stderr", text: "runner disconnected — session interrupted" },

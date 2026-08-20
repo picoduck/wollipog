@@ -43,6 +43,23 @@ test("running -> completed / failed / idle each notify", () => {
   assert.match(notifyDecision(session({ status: "running" }), session({ status: "idle" }))!.title, /ready/);
 });
 
+test("only a newly settled live background delivery suppresses the trailing Ready", () => {
+  const delivery = {
+    continuationId: "bgcont-1",
+    parentTurnId: "turn-1",
+    jobCount: 1,
+    terminalCount: 1,
+    notificationQueuedAt: 100,
+  };
+  const historical = session({ status: "running", backgroundDeliveries: [delivery] });
+  assert.match(notifyDecision(historical, session({ status: "idle", backgroundDeliveries: [delivery] }))!.title, /ready/,
+    "an old replayed delivery cannot suppress an unrelated foreground completion");
+  assert.equal(notifyDecision(historical, session({
+    status: "idle",
+    backgroundDeliveries: [{ ...delivery, statusSettledAt: 200 }],
+  })), null);
+});
+
 test("completed/idle only notify when coming from a busy state (not from input_required)", () => {
   // input_required -> idle (e.g. user denied) shouldn't fire a 'ready' buzz
   assert.equal(notifyDecision(session({ status: "input_required" }), session({ status: "idle" })), null);

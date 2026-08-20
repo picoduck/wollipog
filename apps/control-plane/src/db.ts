@@ -514,6 +514,8 @@ CREATE TABLE IF NOT EXISTS managed_background_deliveries (
   projected_event_seq        INTEGER,
   notification_queued_at     INTEGER,
   dashboard_observed_at      INTEGER,
+  status_settlement_pending_at INTEGER,
+  status_settled_at           INTEGER,
   updated_at                 INTEGER NOT NULL,
   PRIMARY KEY (session_id, continuation_id),
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
@@ -2757,6 +2759,16 @@ export class ControlPlaneDb {
       );
     } catch {
       /* column already present */
+    }
+    for (const column of [
+      "status_settlement_pending_at INTEGER",
+      "status_settled_at INTEGER",
+    ]) {
+      try {
+        db.exec(`ALTER TABLE managed_background_deliveries ADD COLUMN ${column}`);
+      } catch {
+        /* column already present */
+      }
     }
     for (const column of [
       "attempt_count INTEGER NOT NULL DEFAULT 0",
@@ -8054,12 +8066,20 @@ export class ControlPlaneDb {
       // Session terminality is the retry fence regardless of which service path observed it;
       // snapshots (hydration and runtime updates) must fence in the same transaction so a pending
       // durable prompt can never be re-delivered into a session this snapshot terminalized.
+      // The same authority orphans any armed settlement marker: a post-restart hydration of a
+      // dead run must not leave it to suppress a later run's Ready.
       if (isTerminal(status)) {
         this.cancelSessionPromptCommands(
           id,
           `session became ${status} before durable prompt delivery completed`,
           now,
         );
+        this.stmt(
+          `UPDATE managed_background_deliveries
+              SET status_settlement_pending_at=NULL, updated_at=MAX(updated_at, ?)
+            WHERE session_id=? AND status_settlement_pending_at IS NOT NULL
+              AND status_settled_at IS NULL`,
+        ).run(now, id);
       }
       this.db.exec("COMMIT");
     } catch (error) {
@@ -8191,6 +8211,7 @@ export class ControlPlaneDb {
     ts: number,
     eventEpoch: number,
     eventSeq: number,
+    armStatusSettlement: boolean,
   ): void {
     if (payload.kind !== "background_continuation_delivered" ||
         !validBackgroundIdentity(payload.continuationId) ||
@@ -8199,8 +8220,8 @@ export class ControlPlaneDb {
       `INSERT INTO managed_background_deliveries
         (session_id, continuation_id, parent_turn_id, runner_result_persisted_at,
          transcript_projected_at, projected_event_epoch, projected_event_seq,
-         notification_queued_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         notification_queued_at, status_settlement_pending_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(session_id, continuation_id) DO UPDATE SET
          parent_turn_id=managed_background_deliveries.parent_turn_id,
          runner_result_persisted_at=COALESCE(managed_background_deliveries.runner_result_persisted_at, excluded.runner_result_persisted_at),
@@ -8208,6 +8229,11 @@ export class ControlPlaneDb {
          projected_event_epoch=COALESCE(managed_background_deliveries.projected_event_epoch, excluded.projected_event_epoch),
          projected_event_seq=COALESCE(managed_background_deliveries.projected_event_seq, excluded.projected_event_seq),
          notification_queued_at=COALESCE(managed_background_deliveries.notification_queued_at, excluded.notification_queued_at),
+         status_settlement_pending_at=CASE
+           WHEN managed_background_deliveries.status_settled_at IS NULL
+             THEN COALESCE(managed_background_deliveries.status_settlement_pending_at, excluded.status_settlement_pending_at)
+           ELSE managed_background_deliveries.status_settlement_pending_at
+         END,
          updated_at=MAX(managed_background_deliveries.updated_at, excluded.updated_at)`,
     ).run(
       sessionId,
@@ -8218,6 +8244,12 @@ export class ControlPlaneDb {
       eventEpoch,
       eventSeq,
       ts,
+      armStatusSettlement &&
+        ["queued", "starting", "running"].includes(
+          (this.stmt("SELECT status FROM sessions WHERE id=?").get(sessionId) as
+            | { status: SessionStatus }
+            | undefined)?.status ?? "",
+        ) ? ts : null,
       ts,
     );
     this.stageBackgroundPushDeliveriesInTransaction(
@@ -8279,12 +8311,58 @@ export class ControlPlaneDb {
     ).run(now, now, sessionId, continuationId).changes) > 0;
   }
 
+  /** A live delivery frame diverted through catch-up hydration by a sequence gap must arm its
+   * settlement BEFORE the hydration round-trip: the runner's trailing idle can arrive first, and
+   * once the session is idle the projection-time arming would refuse. Creates the durable row
+   * early with only identity and the pending marker; the later projection fills every other
+   * stage via its COALESCE upsert. */
+  armBackgroundDeliverySettlementEarly(
+    sessionId: string,
+    continuationId: string,
+    parentTurnId: string,
+    now: number,
+  ): void {
+    if (!validBackgroundIdentity(continuationId) || !validBackgroundIdentity(parentTurnId)) return;
+    const busy = ["queued", "starting", "running"].includes(
+      (this.stmt("SELECT status FROM sessions WHERE id=?").get(sessionId) as
+        | { status: SessionStatus }
+        | undefined)?.status ?? "",
+    );
+    if (!busy) return;
+    this.stmt(
+      `INSERT INTO managed_background_deliveries
+        (session_id, continuation_id, parent_turn_id, status_settlement_pending_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(session_id, continuation_id) DO UPDATE SET
+         status_settlement_pending_at=CASE
+           WHEN managed_background_deliveries.status_settled_at IS NULL
+             THEN COALESCE(managed_background_deliveries.status_settlement_pending_at, excluded.status_settlement_pending_at)
+           ELSE managed_background_deliveries.status_settlement_pending_at
+         END,
+         updated_at=MAX(managed_background_deliveries.updated_at, excluded.updated_at)`,
+    ).run(sessionId, continuationId, parentTurnId, now, now);
+  }
+
+  /** Consume live-event provenance for exactly one semantic busy-to-idle completion. Historical
+   * replay never arms this marker, even when the session happens to be running during hydration. */
+  settleManagedBackgroundDeliveryStatus(sessionId: string, now: number): boolean {
+    const result = this.stmt(
+      `UPDATE managed_background_deliveries
+          SET status_settled_at=COALESCE(status_settled_at, ?),
+              status_settlement_pending_at=NULL,
+              updated_at=MAX(updated_at, ?)
+        WHERE session_id=? AND status_settlement_pending_at IS NOT NULL
+          AND status_settled_at IS NULL`,
+    ).run(now, now, sessionId);
+    return Number(result.changes) > 0;
+  }
+
   listBackgroundDeliveries(sessionId: string, status?: SessionStatus): BackgroundDeliveryView[] {
     const rows = this.stmt(
       `SELECT delivery.continuation_id, delivery.parent_turn_id, delivery.queued_at,
               delivery.submitted_at, delivery.accepted_at, delivery.runner_result_persisted_at,
               delivery.transcript_projected_at, delivery.notification_queued_at,
-              delivery.dashboard_observed_at,
+              delivery.dashboard_observed_at, delivery.status_settled_at,
               COUNT(job.job_id) AS job_count,
               COALESCE(SUM(CASE WHEN job.terminal_observed_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS terminal_count,
               COALESCE(SUM(job.source_present), 0) AS active_job_count
@@ -8314,6 +8392,7 @@ export class ControlPlaneDb {
       transcript_projected_at: number | null;
       notification_queued_at: number | null;
       dashboard_observed_at: number | null;
+      status_settled_at: number | null;
       job_count: number;
       terminal_count: number;
       active_job_count: number;
@@ -8345,6 +8424,7 @@ export class ControlPlaneDb {
         ...(row.transcript_projected_at != null ? { transcriptProjectedAt: row.transcript_projected_at } : {}),
         ...(row.notification_queued_at != null ? { notificationQueuedAt: row.notification_queued_at } : {}),
         ...(row.dashboard_observed_at != null ? { dashboardObservedAt: row.dashboard_observed_at } : {}),
+        ...(row.status_settled_at != null ? { statusSettledAt: row.status_settled_at } : {}),
         ...(notificationsByContinuation.get(row.continuation_id)?.length
           ? { notifications: notificationsByContinuation.get(row.continuation_id)! }
           : {}),
@@ -8527,7 +8607,10 @@ export class ControlPlaneDb {
     }
   }
 
-  updateSessionStatus(id: string, status: SessionStatus, now: number): void {
+  updateSessionStatus(id: string, status: SessionStatus, now: number, provisionalStop = false): void {
+    // Terminality couples the status write to its fences below; commit them together so a crash
+    // between statements cannot persist a terminal status with a stale armed marker.
+    this.atomic(() => {
     this.stmt("UPDATE sessions SET status=?, updated_at=? WHERE id=?")
       .run(status, now, id);
     if (status === "completed" || status === "failed" || status === "stopped") {
@@ -8535,6 +8618,19 @@ export class ControlPlaneDb {
       // A never-sent prompt is definitely failed; anything marked before send may have reached
       // the runner and is conservatively uncertain until a later receipt narrows the outcome.
       this.cancelSessionPromptCommands(id, `session became ${status} before durable prompt delivery completed`, now);
+      // An authoritative terminal transition orphans any armed-but-unsettled delivery marker: the
+      // trailing idle it awaited will never belong to this run, and leaving it pending would
+      // suppress the Ready of an unrelated later run. Provisional stops (runner disconnect,
+      // startup settlement) deliberately do NOT clear it — the delivery's idle still arrives
+      // after reconnect, and that restart survival is the feature's core case.
+      if (!provisionalStop) {
+        this.stmt(
+          `UPDATE managed_background_deliveries
+              SET status_settlement_pending_at=NULL, updated_at=MAX(updated_at, ?)
+            WHERE session_id=? AND status_settlement_pending_at IS NOT NULL
+              AND status_settled_at IS NULL`,
+        ).run(now, id);
+      }
     }
     // Swallowed idle belongs only to the CP-owned pause that observed it. Any local or runner
     // transition back into execution (or into a terminal state) invalidates that settle proof,
@@ -8552,6 +8648,7 @@ export class ControlPlaneDb {
     if (status !== "input_required") {
       this.stmt("UPDATE sessions SET pending_approval=NULL WHERE id=?").run(id);
     }
+    });
   }
 
   setSessionColumn(id: string, column: BoardColumn | null, now: number): void {
@@ -11188,6 +11285,8 @@ export class ControlPlaneDb {
       searchPayload?: SessionEventPayload;
       /** Event-only artifact chunks committed atomically with this cached event row. */
       artifactIds?: readonly string[];
+      /** Only a live runner event may correlate this delivery with a future trailing idle. */
+      armBackgroundStatusSettlement?: boolean;
     },
   ): SessionEvent {
     // One transaction for the seq read + insert + session-row maintenance: this is the hottest
@@ -11210,7 +11309,14 @@ export class ControlPlaneDb {
         const eventEpoch = (this.stmt("SELECT event_epoch FROM sessions WHERE id=?").get(sessionId) as
           | { event_epoch: number }
           | undefined)?.event_epoch ?? 0;
-        this.projectBackgroundContinuationInTransaction(sessionId, payload, ts, eventEpoch, seq);
+        this.projectBackgroundContinuationInTransaction(
+          sessionId,
+          payload,
+          ts,
+          eventEpoch,
+          seq,
+          options?.armBackgroundStatusSettlement === true,
+        );
       }
       this.linkSessionEventArtifacts(
         Number(info.lastInsertRowid),
@@ -11292,6 +11398,7 @@ export class ControlPlaneDb {
     sessionId: string,
     expected: { afterSeq: number; historyEpoch: number; eventEpoch: number },
     events: readonly HydratedRunnerEvent[],
+    options: { armBackgroundStatusSettlement?: boolean } = {},
   ): AppendHydratedPageResult {
     for (const [name, value] of Object.entries(expected)) {
       if (!Number.isSafeInteger(value) || value < 0) {
@@ -11395,6 +11502,7 @@ export class ControlPlaneDb {
           event.ts,
           state.event_epoch,
           cpSeq,
+          options.armBackgroundStatusSettlement === true,
         );
         this.recordUsageEventInTransaction(
           sessionId,

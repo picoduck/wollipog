@@ -12,6 +12,13 @@ export interface NotifyPayload {
 
 const BUSY = new Set<SessionView["status"]>(["queued", "starting", "running"]);
 
+function newlySettledBackgroundDelivery(prev: SessionView, next: SessionView): boolean {
+  const settled = new Set((prev.backgroundDeliveries ?? []).flatMap((delivery) =>
+    delivery.statusSettledAt != null ? [delivery.continuationId] : []));
+  return (next.backgroundDeliveries ?? []).some((delivery) =>
+    delivery.statusSettledAt != null && !settled.has(delivery.continuationId));
+}
+
 /**
  * Decide whether a session status TRANSITION deserves a desktop notification. Pure:
  * returns the payload, or null. Requires a known previous status (so the initial
@@ -33,7 +40,10 @@ export function notifyDecision(prev: SessionView | undefined, next: SessionView)
       return { title: `${name} failed`, body: "The agent run failed — open it to see why.", sessionId: next.id };
     case "idle":
       // A turn finished and the agent is waiting for the next prompt / review.
-      if (BUSY.has(prev.status)) return { title: `${name} is ready`, body: "The agent finished a turn and is ready for review.", sessionId: next.id };
+      if (BUSY.has(prev.status)) {
+        if (newlySettledBackgroundDelivery(prev, next)) return null;
+        return { title: `${name} is ready`, body: "The agent finished a turn and is ready for review.", sessionId: next.id };
+      }
       return null;
     default:
       return null;
