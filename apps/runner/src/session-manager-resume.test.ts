@@ -316,6 +316,78 @@ test("app-server authentication recheck resumes the held FIFO without another pr
   }
 });
 
+test("a stale background continuation racing recovery admission must not drop the retained retry", async () => {
+  const observations = [
+    { status: "unauthenticated" as const },
+    { status: "authenticated" as const, identityId: "account-a" },
+  ];
+  const controller: ProviderAuthRecoveryController = {
+    describe: () => ({ id: "scope-a", provider: "claude", canStartLogin: true, configuredCredential: false }),
+    revalidate: async () => observations.shift() ?? { status: "authenticated", identityId: "account-a" },
+    startLogin: async () => "completed",
+    cancel: () => false,
+  };
+  const h = harness({
+    driver: "claude-code",
+    command: "claude",
+    agentId: "claude-native",
+    providerCredentialIdentityId: "account-a",
+  }, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, undefined, controller);
+  try {
+    h.manager.prompt("resume-session", "retained before provider submission");
+    await tick();
+    await tick();
+    const blocked = h.store.readMeta("resume-session")!;
+    assert.equal(blocked.providerAuthBlock?.delivery, "not_delivered");
+    assert.equal(blocked.providerAuthBlock?.retry?.text, "retained before provider submission");
+
+    // A continuation queued before the auth block: its ORPHAN_RECOVERY_RETRY_MS timer survives
+    // the block, so the equivalent of a stale firing can land inside the recovery window.
+    h.store.patchMeta("resume-session", {
+      backgroundJobs: [{
+        id: "job-1", parentTurnId: "turn-1", runnerId: "runner", workspaceId: null,
+        context: { kind: "native" }, launchType: "agent", registeredAt: 1,
+        terminalStatus: "completed", terminalObservedAt: 2,
+        continuationRequired: true, continuationQueuedAt: 3, continuationId: "bgcont-1",
+      }],
+    });
+
+    const requestId = blocked.pendingApproval!.requestId;
+    h.manager.resolvePermission("resume-session", requestId, "auth:revalidate");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const internals = h.manager as any;
+    let windowObserved = false;
+    for (let index = 0; index < 4000; index += 1) {
+      if (internals.preLaunchAdmissionGenerations.has("resume-session") &&
+          !internals.active.has("resume-session")) {
+        windowObserved = true;
+        break;
+      }
+      if (h.prompts.includes("retained before provider submission")) break;
+      // Microtask-granularity yield: the pre-active launch window spans awaits that resolve
+      // without reaching the macrotask queue in this harness.
+      await Promise.resolve();
+    }
+    assert.ok(windowObserved, "the pre-active admission window is reachable in-process");
+    // The stale timer body fires inside the retained retry's pre-active admission window.
+    void internals.runBackgroundContinuation("resume-session");
+    for (let index = 0; index < 200 && !h.prompts.includes("retained before provider submission"); index += 1) {
+      await shortDelay();
+    }
+    assert.ok(h.prompts.includes("retained before provider submission"),
+      "the retained foreground retry survives a stale continuation racing its admission");
+    const retryIndex = h.prompts.indexOf("retained before provider submission");
+    const continuationIndex = h.prompts.findIndex((text) => /background/i.test(text));
+    if (continuationIndex !== -1) {
+      assert.ok(retryIndex < continuationIndex,
+        "the retained retry keeps its FIFO ordinal ahead of the continuation");
+    }
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
 test("a non-app-server auth exit rejects held FIFO instead of entering Codex recovery", async () => {
   const turn = deferred<void>();
   const failures: Array<[string, string | undefined]> = [];

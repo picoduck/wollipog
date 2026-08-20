@@ -6522,7 +6522,13 @@ export class SessionManager {
         terminalAt: job.terminalObservedAt!,
       }));
       const prompt = `${BACKGROUND_CONTINUATION_PROMPT}\n\nRunner-managed terminal results:\n${JSON.stringify(resultSummary)}`;
-      if (entry) {
+      const currentGeneration = this.launchGenerations.get(sessionId);
+      const admissionInFlight = !entry && currentGeneration !== undefined &&
+        this.preLaunchAdmissionGenerations.get(sessionId) === currentGeneration;
+      if (entry || admissionInFlight) {
+        // With a launch mid-admission (e.g. a retained authentication retry between clearing the
+        // block and reaching the provider), prompt() merges into its pre-launch queue. Calling
+        // resumeAndPrompt here instead would begin a competing generation and drop that retry.
         this.prompt(
           sessionId,
           prompt,
