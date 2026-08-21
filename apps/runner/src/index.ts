@@ -93,6 +93,7 @@ import {
   listExternalSessions,
   readExternalTranscript,
   retargetExternalSession,
+  resolveLaunchForAgent,
   resolveLaunchForDriver,
 } from "./external/sources.js";
 import {
@@ -412,8 +413,10 @@ sessionCommandReceipts.prune();
 // metadata.agents). It's the same shared resolver as the `resumable` flag and handleAdopt — resume,
 // listing, and adoption can never disagree — and it lets a read-only adopt heal once the box gains
 // a matching agent (discovery finished after the adopt, or the user installed the CLI later).
-const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driver, context) =>
-  resolveLaunchForDriver(metadata.agents, driver, context),
+const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driver, context, agentId) =>
+  agentId
+    ? resolveLaunchForAgent(metadata.agents, agentId, driver, context)
+    : resolveLaunchForDriver(metadata.agents, driver, context),
   undefined,
   config.dataDir,
   config.maxConcurrentSessions,
