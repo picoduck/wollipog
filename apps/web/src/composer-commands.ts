@@ -41,6 +41,8 @@ export interface ComposerCommand {
   name: string;
   /** User-visible invocation label, including the leading slash. */
   label: string;
+  /** Optional Title Case action name shown in the command menu. */
+  displayName?: string;
   /** Durable token inserted after the slash. Collisions use an explicit namespace. */
   invocationAlias: string;
   description?: string;
@@ -147,8 +149,9 @@ function appCommands(context: ComposerCommandContext): ComposerCommand[] {
       id: "app:rename-session",
       name: "rename-session",
       label: commandLabel("rename-session"),
+      displayName: "Rename Session",
       invocationAlias: "rename-session",
-      description: "Rename Session",
+      description: "Rename this session from its conversation.",
       source: "app",
       sourceLabel: "App",
       executionMode: "app",

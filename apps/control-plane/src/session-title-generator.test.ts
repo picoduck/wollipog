@@ -39,8 +39,23 @@ test("title context includes the original objective and recent completed semanti
   ]);
 });
 
+test("title context transforms sensitive text before applying its character bound", () => {
+  const secret = `token=${"s".repeat(2_000)}`;
+  let transformedInput = "";
+  const context = boundedSessionTitleContext([
+    event(1, { kind: "user_message", text: secret, final: true }),
+  ], (text) => {
+    transformedInput = text;
+    return "token=[REDACTED]";
+  });
+  assert.equal(transformedInput, secret, "the redactor receives the complete value");
+  assert.deepEqual(context, [{ role: "user", text: "token=[REDACTED]" }]);
+});
+
 test("title generation is opt-in and requires an explicit endpoint and model", () => {
   assert.equal(sessionTitleGeneratorFromEnv({}).generator, undefined);
+  assert.equal(sessionTitleGeneratorFromEnv({}).timeoutMs, 5_000);
+  assert.equal(sessionTitleGeneratorFromEnv({ WOLLIPOG_TITLE_MODEL_TIMEOUT_MS: "" }).timeoutMs, 5_000);
   assert.equal(sessionTitleGeneratorFromEnv({
     WOLLIPOG_TITLE_MODEL_URL: "https://models.example/v1/chat/completions",
     WOLLIPOG_TITLE_MODEL: "cheap-model",

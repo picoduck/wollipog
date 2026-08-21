@@ -33,8 +33,9 @@ test("the registry exposes stable typed app commands and explicit gate reasons",
     { id: "app", label: "App Commands", order: 0 },
     { id: "provider", label: "Harness Commands", order: 1 },
   ]);
-  assert.equal(command(enabled, "app:rename-session").description, "Rename Session");
+  assert.equal(command(enabled, "app:rename-session").description, "Rename this session from its conversation.");
   assert.equal(command(enabled, "app:rename-session").label, "/rename-session");
+  assert.equal(command(enabled, "app:rename-session").displayName, "Rename Session");
   assert.deepEqual(command(enabled, "app:plan"), {
     id: "app:plan",
     name: "plan",
@@ -204,6 +205,16 @@ test("provider-provider collisions are source-qualified and deterministic", () =
     ],
   );
   assert.deepEqual(reverse, forward);
+});
+
+test("the reserved rename command keeps the bare alias when a provider uses the same name", () => {
+  const commands = registry([{ name: "rename-session", providerSource: "user" }]);
+  const app = resolveComposerCommandInvocation("/rename-session", commands);
+  assert.equal(app.kind, "command");
+  if (app.kind === "command") assert.equal(app.command.id, "app:rename-session");
+  const provider = resolveComposerCommandInvocation("/provider:rename-session", commands);
+  assert.equal(provider.kind, "command");
+  if (provider.kind === "command") assert.equal(provider.command.id, "provider:user:rename-session");
 });
 
 test("a stored bare provider alias remains resolvable when a same-name command appears", () => {
@@ -493,7 +504,7 @@ test("ranking is exact then prefix then boundary then substring then fuzzy", () 
 
 test("description-only fuzzy matches do not capture literal slash text", () => {
   const commands = registry([], { planSupported: true, canStopTurn: false });
-  assert.deepEqual(rankComposerCommands(commands, "zz"), []);
+  assert.deepEqual(rankComposerCommands(commands, "gm"), []);
 });
 
 test("available commands rank ahead of unavailable commands at the same match score", () => {

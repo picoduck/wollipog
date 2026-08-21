@@ -345,7 +345,7 @@ function runnerMeta(): RunnerMetadata {
 }
 
 /** Fresh in-memory DB seeded with one online-capable runner + its agent/workspace. */
-function makeHarness(titleGenerator?: SessionTitleGenerator) {
+function makeHarness(titleGenerator?: SessionTitleGenerator, titleGenerationTimeoutMs = 1_000) {
   const db = ControlPlaneDb.open(":memory:");
   db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);
   const hub = new FakeHub();
@@ -384,7 +384,7 @@ function makeHarness(titleGenerator?: SessionTitleGenerator) {
       }),
     };
   };
-  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG, undefined, undefined, titleGenerator, 1_000);
+  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG, undefined, undefined, titleGenerator, titleGenerationTimeoutMs);
   return { db, hub, svc };
 }
 
@@ -3100,6 +3100,18 @@ test("semantic naming keeps the fallback immediate and applies an isolated resul
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(db.getSession(id)?.title, "Investigate Pasted Context");
   assert.equal(db.getSession(id)?.titleSource, "generated");
+
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+    id, title: "Investigate this long pasted context", titleSource: "generated",
+  })]);
+  assert.equal(db.getSession(id)?.title, "Investigate Pasted Context",
+    "stale runner fallback does not revert a CP semantic title");
+
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+    id, title: "Provider Semantic Title", titleSource: "provider",
+  })]);
+  assert.equal(db.getSession(id)?.title, "Provider Semantic Title", "provider title metadata remains authoritative");
+  assert.equal(db.getSession(id)?.titleSource, "provider");
 });
 
 test("a prompt-created fallback also schedules semantic naming on its first durable message", async () => {
@@ -3120,12 +3132,17 @@ test("a prompt-created fallback also schedules semantic naming on its first dura
 
 test("a manual rename fences late initial and explicit semantic title results", async () => {
   const pending: Array<(value: string) => void> = [];
-  const generator: SessionTitleGenerator = () => new Promise((resolve) => pending.push(resolve));
+  const signals: AbortSignal[] = [];
+  const generator: SessionTitleGenerator = ({ signal }) => {
+    signals.push(signal);
+    return new Promise((resolve) => pending.push(resolve));
+  };
   const { db, hub, svc } = makeHarness(generator);
   const id = seedSession(svc, hub);
   svc.onSessionEvent(id, { kind: "user_message", text: "Initial task", final: true });
   assert.ok(svc.retitleSession(id).ok);
   assert.equal(pending.length, 2);
+  assert.equal(signals[0]?.aborted, true, "a newer request cancels the superseded model call");
 
   assert.ok(svc.setTitle(id, "Manual Name").ok);
   pending[1]!("Explicit Semantic Name");
@@ -3133,6 +3150,18 @@ test("a manual rename fences late initial and explicit semantic title results", 
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(db.getSession(id)?.title, "Manual Name");
   assert.equal(db.getSession(id)?.titleSource, "user");
+});
+
+test("a generator that ignores abort cannot apply a result after timeout", async () => {
+  let finish: ((value: string) => void) | undefined;
+  const generator: SessionTitleGenerator = () => new Promise((resolve) => { finish = resolve; });
+  const { db, hub, svc } = makeHarness(generator, 1);
+  const id = seedSession(svc, hub);
+  svc.onSessionEvent(id, { kind: "user_message", text: "Timeout task", final: true });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  finish!("Late Semantic Title");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(db.getSession(id)?.title, "Timeout task");
 });
 
 test("onSessionEvent does not title an Untitled session from a provider command", () => {

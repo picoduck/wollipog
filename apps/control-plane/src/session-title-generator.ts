@@ -38,14 +38,17 @@ export function normalizeGeneratedSessionTitle(value: unknown): string | null {
 
 /** Keep only completed semantic conversation messages. Images, thoughts, tools, command output,
  * partial streaming chunks, and queued submissions are excluded by construction. */
-export function boundedSessionTitleContext(events: readonly SessionEvent[]): SessionTitleMessage[] {
+export function boundedSessionTitleContext(
+  events: readonly SessionEvent[],
+  transformText: (text: string) => string = (text) => text,
+): SessionTitleMessage[] {
   const messages = events.flatMap((event): SessionTitleMessage[] => {
     const payload = event.payload;
     if (payload.kind === "user_message" && payload.final !== false && !payload.commandInvocation) {
-      return [{ role: "user", text: payload.text.trim() }];
+      return [{ role: "user", text: transformText(payload.text).trim() }];
     }
     if (payload.kind === "agent_message" && payload.final === true && !payload.parentToolUseId) {
-      return [{ role: "assistant", text: payload.text.trim() }];
+      return [{ role: "assistant", text: transformText(payload.text).trim() }];
     }
     return [];
   }).filter((message) => message.text);
@@ -108,7 +111,8 @@ export function sessionTitleGeneratorFromEnv(
 ): { generator?: SessionTitleGenerator; timeoutMs: number } {
   const endpoint = env.WOLLIPOG_TITLE_MODEL_URL?.trim();
   const model = env.WOLLIPOG_TITLE_MODEL?.trim();
-  const rawTimeout = Number(env.WOLLIPOG_TITLE_MODEL_TIMEOUT_MS ?? 5_000);
+  const configuredTimeout = env.WOLLIPOG_TITLE_MODEL_TIMEOUT_MS?.trim();
+  const rawTimeout = Number(configuredTimeout || 5_000);
   const timeoutMs = Number.isFinite(rawTimeout) ? Math.min(30_000, Math.max(250, Math.floor(rawTimeout))) : 5_000;
   if (!endpoint || !model || env.WOLLIPOG_TITLE_GENERATION?.trim().toLowerCase() === "disabled") {
     return { timeoutMs };

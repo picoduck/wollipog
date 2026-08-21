@@ -73,7 +73,7 @@ privacy boundary. The request has no tools, bounded completed user/assistant inp
 output limit, zero temperature, minimal reasoning, and a short timeout. It never enters the runner, transcript, agent
 context, prompt queue, or session lifecycle.
 
-The reserved `/rename-session` command is shown as **Rename Session**. It derives a title from the
+The reserved `/rename-session` command has the visible label **Rename Session**. It derives a title from the
 original objective and recent completed semantic context. Images, reasoning, tool and shell output,
 provider commands, partial messages, and queued prompts are excluded. Successful explicit results
 are user-owned; manual renames and newer requests fence stale results. Disabled, malformed, failed,
