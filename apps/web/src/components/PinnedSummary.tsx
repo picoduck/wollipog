@@ -21,6 +21,7 @@ import { BranchIcon, ComputerIcon, DialIcon, FolderOutlineIcon, GitHubIcon, Glob
 import { BackgroundDeliveryBadge, BackgroundNotificationBadge, BackgroundWorkBadge, Spinner, StatusBadge, UntrackedBackgroundWorkBadge } from "./common.js";
 import { relativeTime, resolvedModelLabel } from "../format.js";
 import { sessionAgentLabel } from "./agent-options.js";
+import { safeExternalHref } from "../external-href.js";
 
 const BUSY = ["queued", "starting", "running", "input_required"];
 
@@ -82,6 +83,7 @@ export function PinnedSummary({
   const branch = summary?.branch ?? git.status?.branch ?? (session.worktreePath ? `agent/${session.id}` : null);
   const pr = forgeFactsVisible ? summary?.pr ?? null : null;
   const checks = forgeFactsVisible ? summary?.checks ?? null : null;
+  const prHref = safeExternalHref(pr?.url);
   const canPrompt = runnerOnline && !isTerminal(session.status) && !isPolicyApproval(session.pendingApproval);
   const refreshGit = async () => {
     await Promise.all([git.refreshStatusOnly(), gitSummary.refresh()]);
@@ -194,8 +196,8 @@ export function PinnedSummary({
           </button>
         )}
 
-        {pr && (
-          <a className="ps-row ps-source" href={pr.url} target="_blank" rel="noreferrer" title={`#${pr.number} · ${pr.state}`}>
+        {pr && prHref && (
+          <a className="ps-row ps-source" href={prHref} target="_blank" rel="noreferrer" title={`#${pr.number} · ${pr.state}`}>
             <PullRequestIcon className="ps-icon" size={14} />
             <span className="ps-sub-title">{pr.title || `PR #${pr.number}`}</span>
           </a>
@@ -322,6 +324,7 @@ function ChecksRow({
         ? `${checks.pending} running check${checks.pending === 1 ? "" : "s"}`
         : "Checks passing";
   const dotClass = checks.failing > 0 ? "is-fail" : checks.pending > 0 ? "is-pending" : "is-pass";
+  const checksHref = safeExternalHref(checks.url);
   const body = (
     <>
       <span className={`ps-check-dot ${dotClass}`} aria-hidden="true" />
@@ -330,8 +333,8 @@ function ChecksRow({
   );
   return (
     <div className="ps-row is-static ps-checks">
-      {checks.url ? (
-        <a className="ps-checks-link" href={checks.url} target="_blank" rel="noreferrer" title="Open the checks tab">
+      {checksHref ? (
+        <a className="ps-checks-link" href={checksHref} target="_blank" rel="noreferrer" title="Open the checks tab">
           {body}
         </a>
       ) : (
