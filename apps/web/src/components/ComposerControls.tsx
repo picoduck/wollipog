@@ -201,8 +201,8 @@ export function permissionModeOutcome(
   return { label: "Blocked Instead of Asking", description: "Wollipog will not prompt in this mode.", warning: false };
 }
 
-export function defaultPermissionModeDisplayLabel(driver: AgentDriverKind, capabilities?: AgentCapabilities): string {
-  const resolved = defaultPermissionMode(driver, capabilities);
+export function defaultPermissionModeDisplayLabel(driver: AgentDriverKind): string {
+  const resolved = defaultPermissionMode(driver);
   return driver === "claude-code" && resolved
     ? `Default (${permissionModeLabel(resolved, driver)})`
     : "Default";
@@ -242,10 +242,9 @@ export function approvalControlLabel(
   driver: AgentDriverKind,
   permissionMode: string,
   _status: ElicitationAvailability,
-  capabilities?: AgentCapabilities,
 ): string {
   if (permissionMode) return permissionModeLabel(permissionMode, driver);
-  if (driver === "claude-code") return defaultPermissionModeDisplayLabel(driver, capabilities);
+  if (driver === "claude-code") return defaultPermissionModeDisplayLabel(driver);
   return permissionModeEmptyLabel(driver);
 }
 
@@ -268,8 +267,8 @@ export function ApprovalsMenuChoices({
   apply: Apply;
   close: () => void;
 }) {
-  const defaultStatus = elicitationAvailability(capabilities, defaultPermissionMode(driver, capabilities));
-  const defaultMode = defaultPermissionMode(driver, capabilities);
+  const defaultStatus = elicitationAvailability(capabilities, defaultPermissionMode(driver));
+  const defaultMode = defaultPermissionMode(driver);
   const defaultOutcome = permissionModeOutcome(defaultMode, defaultStatus);
   const defaultDescription = permissionModeOptionDescription(defaultMode, driver, defaultStatus, defaultOutcome);
   const unlistedMode = permVal && !permModes.includes(permVal) ? permVal : undefined;
@@ -326,15 +325,15 @@ export function ApprovalsMenuChoices({
 export function ApprovalsControl({ session, apply }: { session: SessionView; apply: Apply }) {
   const { caps, permModes, permVal } = useSessionConfig(session);
   if (permModes.length === 0) return null;
-  const currentStatus = elicitationAvailability(caps, permVal || defaultPermissionMode(session.driver, caps));
-  const currentOutcome = permissionModeOutcome(permVal || defaultPermissionMode(session.driver, caps), currentStatus);
+  const currentStatus = elicitationAvailability(caps, permVal || defaultPermissionMode(session.driver));
+  const currentOutcome = permissionModeOutcome(permVal || defaultPermissionMode(session.driver), currentStatus);
   return (
     <BarMenu
       permissionMode
       label={
         <span className="cbar-approvals">
           <ShieldIcon size={14} />
-          {approvalControlLabel(session.driver, permVal, currentStatus, caps)}
+          {approvalControlLabel(session.driver, permVal, currentStatus)}
         </span>
       }
       title={approvalOptionTitle("Permission mode (applies next turn).", currentOutcome)}

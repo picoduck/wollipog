@@ -117,10 +117,6 @@ test("an active Plan mode remains the one checked state while staying outside se
 
 test("the closed permission control identifies the resolved default instead of a transport warning", () => {
   assert.equal(defaultPermissionModeDisplayLabel("claude-code"), "Default (Auto-Accept Edits)");
-  assert.equal(defaultPermissionModeDisplayLabel("claude-code", {
-    models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
-    permissionModes: ["auto", "acceptEdits"],
-  }), "Default (Auto (AI-Reviewed))");
   assert.equal(
     approvalControlLabel("claude-code", "", "unavailable"),
     "Default (Auto-Accept Edits)",

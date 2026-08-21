@@ -1072,6 +1072,39 @@ test("createRun rejects member counts that cannot be represented by the live UI 
   assert.equal(hub.sentOfType("start_session").length, 0);
 });
 
+test("createSession persists and launches the capability-dependent Claude permission default", () => {
+  const { db, hub, svc } = makeHarness();
+  const updateModes = (permissionModes: string[]) => db.updateRunnerAgents(
+    RUNNER_ID,
+    runnerMeta().agents.map((agent) => agent.id === AGENT_ID ? {
+      ...agent,
+      capabilities: {
+        models: [], effortLevels: [], slashCommands: [], supportsImages: true,
+        supportsApprovals: true, permissionModes,
+      },
+    } : agent),
+    Date.now(),
+  );
+
+  updateModes(["default", "auto", "acceptEdits", "plan"]);
+  const supported = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
+  assert.ok(supported.ok && supported.data);
+  assert.equal(db.getSession(supported.data.id)!.permissionMode, "auto");
+  assert.equal(hub.sentOfType("start_session").at(-1)!.spec.config.permissionMode, "auto");
+
+  const explicit = svc.createSession({
+    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, config: { permissionMode: "plan" },
+  });
+  assert.ok(explicit.ok && explicit.data);
+  assert.equal(db.getSession(explicit.data.id)!.permissionMode, "plan");
+
+  updateModes(["default", "acceptEdits", "plan"]);
+  const unsupported = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
+  assert.ok(unsupported.ok && unsupported.data);
+  assert.equal(db.getSession(unsupported.data.id)!.permissionMode, "acceptEdits");
+  assert.equal(hub.sentOfType("start_session").at(-1)!.spec.config.permissionMode, "acceptEdits");
+});
+
 test("createSession online → 201 and sends start_session with the right launch spec", () => {
   const { hub, svc, db } = makeHarness();
 
