@@ -4282,8 +4282,13 @@ export class SessionManager {
       entry.activeTurnId = undefined;
       this.emitQueue(sessionId);
       clearInterval(refresh);
-      this.lockTimers.delete(sessionId);
-      this.store.releaseLock(sessionId, this.lockOwner);
+      // Restart can install a replacement drain under the same process-wide lock owner before this
+      // superseded drain settles. Only the drain whose timer is still current may tear down that
+      // generation's refresh interval and lock.
+      if (this.lockTimers.get(sessionId) === refresh) {
+        this.lockTimers.delete(sessionId);
+        this.store.releaseLock(sessionId, this.lockOwner);
+      }
       if (
         !entry.historyIntegrityFailure &&
         entry.governanceRearmPending &&

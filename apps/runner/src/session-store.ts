@@ -2209,11 +2209,15 @@ export class SessionStore {
     }
   }
 
-  refreshLock(id: string, owner: string): void {
+  /** Refresh only while `owner` still holds the lock. A stale holder must not overwrite a lock
+   * that another process legitimately stole after the stale window elapsed. */
+  refreshLock(id: string, owner: string): boolean {
     try {
+      if (readFileSync(this.lockPath(id), "utf8") !== owner) return false;
       writeFileSync(this.lockPath(id), owner);
+      return true;
     } catch {
-      /* ignore */
+      return false;
     }
   }
 
