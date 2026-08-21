@@ -125,6 +125,20 @@ test("the action follows composer availability while the menu is already open", 
   expect(opened).toBe(false);
 });
 
+test("a selection made after availability is lost never reaches the composer", async ({ page }) => {
+  await openSession(page);
+  await openPlusMenu(page);
+  const [chooser] = await Promise.all([page.waitForEvent("filechooser"), attachAction(page).click()]);
+
+  // The chooser is already up when the runner drops. Disabling the button cannot help here — only
+  // the change handler's own gate can, and a re-render has already installed it by now.
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerStatus("offline"));
+  await expect(page.locator(".composer-input")).toBeDisabled();
+
+  await chooser.setFiles([file("late.png", "image/png")]);
+  await expect(thumbnails(page)).toHaveCount(0);
+});
+
 test("rejected selections report accessibly and keep the valid ones", async ({ page }) => {
   await openSession(page);
   const composer = page.locator(".composer-input");
@@ -143,6 +157,37 @@ test("rejected selections report accessibly and keep the valid ones", async ({ p
   // The valid selection and the typed draft both survive a partly-invalid pick.
   await expect(thumbnails(page)).toHaveCount(1);
   await expect(composer).toHaveValue("look at these");
+});
+
+test("the combined-payload ceiling stops the pick without dropping what already fit", async ({ page }) => {
+  await openSession(page);
+  // 4 x 6 MiB is under the per-image and count limits but base64-expands past the 28 MiB total.
+  const chunk = Buffer.alloc(6 * 1024 * 1024);
+  await pickImages(page, Array.from({ length: 4 }, (_, i) => file(`bulk-${i}.png`, "image/png", chunk)));
+
+  await expect(page.getByRole("alert")).toContainText("Combined image payload exceeds the 28 MiB limit.");
+  const attached = await thumbnails(page).count();
+  expect(attached).toBeGreaterThan(0);
+  expect(attached).toBeLessThan(4);
+});
+
+test("a file the browser cannot read reports instead of attaching silently", async ({ page }) => {
+  await page.addInitScript(() => {
+    const read = FileReader.prototype.readAsDataURL;
+    FileReader.prototype.readAsDataURL = function (blob: Blob) {
+      if ((blob as File).name === "corrupt.png") {
+        setTimeout(() => this.dispatchEvent(new Event("error")), 0);
+        return;
+      }
+      return read.call(this, blob);
+    };
+  });
+  await openSession(page);
+  await pickImages(page, [file("corrupt.png", "image/png"), file("fine.png", "image/png")]);
+
+  await expect(page.getByRole("alert")).toContainText("An image could not be read.");
+  // The readable half of the pick still lands.
+  await expect(thumbnails(page)).toHaveCount(1);
 });
 
 test("the six-image cap holds and the same file can be chosen again after removal", async ({ page }) => {
@@ -182,6 +227,16 @@ test("picked images survive navigation and remount, then send through the prompt
   }]);
 });
 
+test("drag-and-drop still attaches on platforms that support it", async ({ page }) => {
+  await openSession(page);
+  await page.locator(".composer-box").evaluate((element) => {
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([new Uint8Array([137, 80, 78, 71])], "dropped.png", { type: "image/png" }));
+    element.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+  });
+  await expect(thumbnails(page)).toHaveCount(1);
+});
+
 test("paste still attaches on platforms that support it", async ({ page }) => {
   await openSession(page);
   await page.locator(".composer-input").evaluate((element) => {
@@ -190,6 +245,16 @@ test("paste still attaches on platforms that support it", async ({ page }) => {
     element.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: transfer }));
   });
   await expect(thumbnails(page)).toHaveCount(1);
+});
+
+test("a picked image can be removed with the keyboard", async ({ page }) => {
+  await openSession(page);
+  await pickImages(page, [file("remove-me.png", "image/png")]);
+  await expect(thumbnails(page)).toHaveCount(1);
+
+  await thumbnails(page).first().focus();
+  await page.keyboard.press("Enter");
+  await expect(thumbnails(page)).toHaveCount(0);
 });
 
 test.describe("on a phone", () => {
