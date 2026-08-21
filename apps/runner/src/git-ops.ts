@@ -1322,17 +1322,29 @@ async function ghPrSummary(cwd: string): Promise<{ pr: GitPrSummary | null; chec
       state?: string;
       statusCheckRollup?: unknown;
     };
-    if (typeof d.number === "number" && typeof d.url === "string") {
-      pr = { number: d.number, title: d.title ?? "", url: d.url, state: d.state ?? "OPEN" };
+    const url = safeHttpUrl(d.url);
+    if (typeof d.number === "number" && url) {
+      pr = { number: d.number, title: d.title ?? "", url, state: d.state ?? "OPEN" };
       const rollup = summarizeCheckRollup(d.statusCheckRollup);
       // No checks configured at all → omit the section rather than showing 0/0/0.
-      checks = rollup.failing + rollup.pending + rollup.passing > 0 ? { ...rollup, url: `${d.url}/checks` } : null;
+      checks = rollup.failing + rollup.pending + rollup.passing > 0 ? { ...rollup, url: `${url.replace(/\/$/, "")}/checks` } : null;
     }
   } catch {
     // gh absent/unauth/no PR — the card simply hides the PR/checks rows.
   }
   ghPrCache.set(cacheKey, { at: Date.now(), pr, checks });
   return { pr, checks };
+}
+
+/** Forge metadata is untrusted input. Only publish absolute web URLs to dashboard clients. */
+export function safeHttpUrl(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.href : null;
+  } catch {
+    return null;
+  }
 }
 
 /** One read powering the pinned summary card: status bits + behind-count + the gh PR/checks. */

@@ -157,6 +157,7 @@ import { registerAuthGate } from "./http-auth.js";
 import { pushDecision } from "./push-decision.js";
 import { validateSubscription, WebPushSender } from "./web-push.js";
 import {
+  appShellSecurityHeaders,
   injectSameOriginMarker,
   readWebIndexHtml,
   isIndexHtmlPath,
@@ -707,7 +708,7 @@ app.setNotFoundHandler((req, reply) => {
   // client-side navigation, and rendering the shell would leave that reusable credential in
   // history/referrers instead of taking the redacting 404 path below.
   if (html && !carriesTokenParam(rawUrl) && isSpaNavigation(req.method, pathname)) {
-    return reply.type("text/html; charset=utf-8").send(html);
+    return reply.headers(appShellSecurityHeaders(html)).type("text/html; charset=utf-8").send(html);
   }
   req.log.info({ url: redactTokenInUrl(rawUrl) }, "route not found");
   reply.code(404).send({ error: "not found" });
@@ -1297,7 +1298,7 @@ const serveShell = async (req: FastifyRequest, reply: FastifyReply) => {
   // so nothing functional is lost.
   const rawUrl = req.raw.url ?? "";
   if (carriesTokenParam(rawUrl)) return reply.redirect(rawUrl.split("?")[0] || "/", 303);
-  return reply.type("text/html; charset=utf-8").send(html);
+  return reply.headers(appShellSecurityHeaders(html)).type("text/html; charset=utf-8").send(html);
 };
 app.get("/", serveShell);
 app.get("/index.html", serveShell);

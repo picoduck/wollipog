@@ -11,6 +11,7 @@
  * `tauri.localhost` and talks to the sidecar's API over 127.0.0.1.
  */
 
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { readCompatibleEnv, type LegacyEnvironmentWarning } from "./env-compat.js";
@@ -176,6 +177,18 @@ export function injectSameOriginMarker(html: string): string {
   const tag = `<script>${assignments}</script>`;
   const i = html.indexOf("</head>");
   return i === -1 ? tag + html : html.slice(0, i) + tag + html.slice(i);
+}
+
+/** Security headers for the browser app shell, including hashes for its intentional inline scripts. */
+export function appShellSecurityHeaders(html: string): Record<string, string> {
+  const hashes = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)]
+    .filter((match) => !/\ssrc\s*=/i.test(match[0]))
+    .map((match) => `'sha256-${createHash("sha256").update(match[1] ?? "").digest("base64")}'`);
+  const scriptSrc = ["'self'", ...new Set(hashes)].join(" ");
+  return {
+    "Content-Security-Policy": `script-src ${scriptSrc}; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`,
+    "X-Content-Type-Options": "nosniff",
+  };
 }
 
 /** Read the current marked shell, retaining the last complete copy across watched-build races. */

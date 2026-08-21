@@ -6,7 +6,7 @@ import { join } from "node:path";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import fastifyStatic from "@fastify/static";
 import { carriesTokenParam, redactTokenInUrl } from "./auth.js";
-import { injectSameOriginMarker, isIndexHtmlPath, isSpaNavigation } from "./web-dist.js";
+import { appShellSecurityHeaders, injectSameOriginMarker, isIndexHtmlPath, isSpaNavigation } from "./web-dist.js";
 
 const INDEX = "<!doctype html><html><head><title>t</title></head><body><div id=root></div></body></html>";
 
@@ -42,7 +42,7 @@ function buildServingApp(t: { after: (fn: () => void) => void }): { app: Fastify
   const serveShell = async (req: FastifyRequest, reply: FastifyReply) => {
     const rawUrl = req.raw.url ?? "";
     if (carriesTokenParam(rawUrl)) return reply.redirect(rawUrl.split("?")[0] || "/", 303);
-    return reply.type("text/html; charset=utf-8").send(html);
+    return reply.headers(appShellSecurityHeaders(html)).type("text/html; charset=utf-8").send(html);
   };
   app.get("/", serveShell);
   app.get("/index.html", serveShell);
@@ -53,7 +53,7 @@ function buildServingApp(t: { after: (fn: () => void) => void }): { app: Fastify
     const rawUrl = req.raw.url ?? "";
     const pathname = rawUrl.split("?")[0] ?? "";
     if (!carriesTokenParam(rawUrl) && isSpaNavigation(req.method, pathname)) {
-      return reply.type("text/html; charset=utf-8").send(html);
+      return reply.headers(appShellSecurityHeaders(html)).type("text/html; charset=utf-8").send(html);
     }
     logged.push(redactTokenInUrl(rawUrl));
     reply.code(404).send({ error: "not found" });
@@ -78,6 +78,12 @@ test("every app-shell route carries the same-origin marker", async (t) => {
     const res = await app.inject({ method: "GET", url });
     assert.ok(isShell(res), `${url} should render the shell`);
     assert.ok(res.body.includes("window.__WOLLIPOG_SAME_ORIGIN__=1"), `${url} must carry the marker`);
+    assert.equal(res.headers["x-content-type-options"], "nosniff");
+    const csp = String(res.headers["content-security-policy"]);
+    assert.match(csp, /script-src 'self' 'sha256-[A-Za-z0-9+/=]+'/);
+    assert.match(csp, /object-src 'none'/);
+    assert.match(csp, /base-uri 'none'/);
+    assert.match(csp, /frame-ancestors 'none'/);
   }
 });
 

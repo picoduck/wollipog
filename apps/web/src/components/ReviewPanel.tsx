@@ -27,6 +27,7 @@ import type { GitStatus } from "./useGitStatus.js";
 import { handleRovingChoiceKeyDown } from "./interactions.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { sessionAgentLabel } from "./agent-options.js";
+import { safeExternalHref } from "../external-href.js";
 
 /**
  * Git / PR workflow for a worktree session: review the worktree status, commit the
@@ -765,10 +766,10 @@ export function ReviewPanel({
           </button>
         </div>
         <div className="hint">Commits any pending changes, pushes the branch, and opens a PR (falls back to a prefilled compare link if the runner has no authenticated <code>gh</code>). If you've staged hunks selectively, use Commit first — Push &amp; Open PR won't guess at a partial stage.</div>
-        {pr && (
+        {pr && safeExternalHref(pr.url) && (
           <div className="git-ok">
             ✓ {pr.createdWithGh ? "PR opened" : "Branch pushed — click to open the PR"}:{" "}
-            <a href={pr.url} target="_blank" rel="noreferrer">
+            <a href={safeExternalHref(pr.url)!} target="_blank" rel="noreferrer">
               {pr.url}
             </a>
           </div>
