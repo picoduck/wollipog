@@ -2,7 +2,7 @@ import {
   isControlPlaneService,
   type RunnerControlPlaneAttestation,
 } from "@wollipog/protocol";
-import { deriveCpHttpUrl } from "./conductor.js";
+import { deriveControlPlaneHttpUrl } from "./control-plane-transport.js";
 
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const MAX_RESPONSE_BYTES = 4_096;
@@ -22,6 +22,7 @@ export interface ControlPlaneAttestationOptions {
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
   priorCredentialHash?: string;
+  allowInsecureTransport?: boolean;
 }
 
 function validated(value: unknown): RunnerControlPlaneAttestation | null {
@@ -35,7 +36,11 @@ function validated(value: unknown): RunnerControlPlaneAttestation | null {
     : null;
 }
 
-function attestationUrl(controlPlaneUrl: string, runnerId: string): string {
+function attestationUrl(
+  controlPlaneUrl: string,
+  runnerId: string,
+  allowInsecureTransport = false,
+): string {
   if (runnerId.length < 1 || runnerId.length > 128 || runnerId.trim() !== runnerId
       || runnerId === "." || runnerId === ".." || /[\u0000-\u0020\u007f/\\?#]/u.test(runnerId)) {
     throw new ControlPlaneAttestationError(
@@ -43,28 +48,15 @@ function attestationUrl(controlPlaneUrl: string, runnerId: string): string {
       false,
     );
   }
-  let configured: URL;
+  let root: URL;
   try {
-    configured = new URL(controlPlaneUrl);
+    root = new URL(deriveControlPlaneHttpUrl(controlPlaneUrl, allowInsecureTransport));
   } catch (error) {
     throw new ControlPlaneAttestationError(
       `control-plane attestation configuration is invalid: ${(error as Error).message}`,
       false,
     );
   }
-  if (configured.protocol !== "ws:" && configured.protocol !== "wss:") {
-    throw new ControlPlaneAttestationError(
-      "control-plane attestation configuration must use a ws:// or wss:// URL",
-      false,
-    );
-  }
-  if (configured.username || configured.password) {
-    throw new ControlPlaneAttestationError(
-      "control-plane attestation configuration must not contain embedded credentials",
-      false,
-    );
-  }
-  const root = new URL(deriveCpHttpUrl(configured.toString()));
   root.pathname = `${root.pathname.replace(/\/+$/u, "")}/runner/attestation/${encodeURIComponent(runnerId)}`;
   root.hash = "";
   return root.toString();
@@ -100,7 +92,11 @@ function attestationHeaders(options: ControlPlaneAttestationOptions): Record<str
 export async function attestRunnerControlPlane(
   options: ControlPlaneAttestationOptions,
 ): Promise<RunnerControlPlaneAttestation> {
-  const url = attestationUrl(options.controlPlaneUrl, options.runnerId);
+  const url = attestationUrl(
+    options.controlPlaneUrl,
+    options.runnerId,
+    options.allowInsecureTransport,
+  );
   const headers = attestationHeaders(options);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 10_000);

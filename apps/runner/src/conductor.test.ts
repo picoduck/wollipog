@@ -31,6 +31,14 @@ test("deriveCpHttpUrl: ws->http, wss->https, /runner suffix stripped (local + bo
   assert.equal(deriveCpHttpUrl("ws://127.0.0.1:4317/runner"), "http://127.0.0.1:4317");
   assert.equal(deriveCpHttpUrl("ws://127.0.0.1:39201/runner"), "http://127.0.0.1:39201"); // box tunnel port
   assert.equal(deriveCpHttpUrl("wss://manager.example.com/runner"), "https://manager.example.com");
+  assert.throws(
+    () => deriveCpHttpUrl("ws://manager.example.com/runner"),
+    /--allow-insecure-transport/u,
+  );
+  assert.equal(
+    deriveCpHttpUrl("ws://manager.example.com/runner", true),
+    "http://manager.example.com",
+  );
 });
 
 /* -------------------------------------------------------------------------- */

@@ -110,6 +110,7 @@ import { ShellManager } from "./shell-manager.js";
 import { agentTuiLaunch } from "./agent-tui.js";
 import { capabilitiesFor } from "./catalog.js";
 import { createPromptImageFetcher } from "./prompt-image-fetch.js";
+import { validateControlPlaneUrl } from "./control-plane-transport.js";
 import { discoverAgents, enrichAgentModels, mergeAgents } from "./discovery/discover.js";
 import {
   prepareClaudeSlashCommandCatalog,
@@ -203,8 +204,9 @@ try {
   process.exit(1);
 }
 
-async function startRunner(config: RunnerConfig): Promise<void> {
+async function startRunner(config: RunnerConfig, allowInsecureTransport: boolean): Promise<void> {
 const log = (msg: string) => console.log(`[runner ${config.runnerId}] ${msg}`);
+validateControlPlaneUrl(config.controlPlaneUrl, allowInsecureTransport);
 const warnLegacyEnvironment = (message: string) => console.warn(`[runner ${config.runnerId}] ${message}`);
 const conductorFeatureEnabled = conductorEnabled(process.env, warnLegacyEnvironment);
 const claudeHookFeatureEnabled = claudeHooksEnabled(process.env, warnLegacyEnvironment);
@@ -220,6 +222,7 @@ const attestation = await waitForRunnerControlPlaneAttestation({
   controlPlaneUrl: config.controlPlaneUrl,
   runnerId: config.runnerId,
   token: config.token,
+  allowInsecureTransport,
   ...(v1CredentialHash
     ? { priorCredentialHash: v1CredentialHash }
     : {}),
@@ -450,6 +453,7 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
         controlPlaneUrl: config.controlPlaneUrl,
         tokenFile: runnerCredentialFile,
         enabled: conductorFeatureEnabled,
+        allowInsecureTransport,
       },
       log,
       conductorHost,
@@ -460,6 +464,7 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
         controlPlaneUrl: config.controlPlaneUrl,
         controlPlaneProtocolVersion,
         enabled: claudeHookFeatureEnabled,
+        allowInsecureTransport,
         registerCredential: registerPolicyHookCredential,
       },
       log,
@@ -482,6 +487,7 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
     controlPlaneUrl: config.controlPlaneUrl,
     runnerId: config.runnerId,
     tokenFile: runnerCredentialFile,
+    allowInsecureTransport,
   }),
   containerTargets,
   cloudTargets,
@@ -908,6 +914,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             controlPlaneUrl: config.controlPlaneUrl,
             tokenFile: runnerCredentialFile,
             enabled: conductorFeatureEnabled,
+            allowInsecureTransport,
           },
           log,
           conductorHost,
@@ -918,6 +925,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             controlPlaneUrl: config.controlPlaneUrl,
             controlPlaneProtocolVersion,
             enabled: claudeHookFeatureEnabled,
+            allowInsecureTransport,
             registerCredential: registerPolicyHookCredential,
           },
           log,
@@ -1030,6 +1038,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
               controlPlaneUrl: config.controlPlaneUrl,
               tokenFile: runnerCredentialFile,
               enabled: conductorFeatureEnabled,
+              allowInsecureTransport,
             },
             log,
             conductorHost,
@@ -1040,6 +1049,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
               controlPlaneUrl: config.controlPlaneUrl,
               controlPlaneProtocolVersion,
               enabled: claudeHookFeatureEnabled,
+              allowInsecureTransport,
               registerCredential: registerPolicyHookCredential,
             },
             log,
@@ -1681,7 +1691,7 @@ function connect(): void {
   log(`connecting to ${config.controlPlaneUrl}`);
   registered = false;
   controlPlaneProtocolVersion = null;
-  const socket = new WebSocket(config.controlPlaneUrl);
+  const socket = new WebSocket(validateControlPlaneUrl(config.controlPlaneUrl, allowInsecureTransport));
   ws = socket;
 
   socket.on("open", () => {
@@ -1852,7 +1862,7 @@ void Promise.all([containerTargets.initialize(), cloudTargets.initialize()]).the
 });
 }
 
-void startRunner(config).catch((error) => {
+void startRunner(config, parsed.allowInsecureTransport).catch((error) => {
   console.error(`[runner ${config.runnerId}] startup blocked: ${(error as Error).message}`);
   process.exit(1);
 });

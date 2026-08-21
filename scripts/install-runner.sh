@@ -6,7 +6,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/picoduck/wollipog/main/scripts/install-runner.sh | sh
 #
 # Usage (remote dashboard):
-#   curl -fsSL .../install-runner.sh | sh -s -- --url ws://HOST:4317/runner --token YOUR_TOKEN
+#   curl -fsSL .../install-runner.sh | sh -s -- --url wss://HOST:4317/runner --token YOUR_TOKEN
 set -eu
 
 repo="picoduck/wollipog"
