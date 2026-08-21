@@ -32,6 +32,131 @@ function launchSpec(root: string, sessionId: string): SessionLaunchSpec {
   };
 }
 
+test("native launches reject control-plane argv that differs from the exact runner-local agent", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-native-launch-allowlist-"));
+  try {
+    const sent: RunnerToControlPlane[] = [];
+    const store = new SessionStore(join(root, "sessions"));
+    let constructed = false;
+    const manager = new SessionManager(
+      (message) => sent.push(message),
+      () => {},
+      store,
+      "runner",
+      (driver, context, agentId) => {
+        assert.equal(driver, "claude-code");
+        assert.deepEqual(context, { kind: "native" });
+        assert.equal(agentId, "claude");
+        return { command: "claude", args: ["--safe"], env: {} };
+      },
+      () => {
+        constructed = true;
+        throw new Error("mismatched native argv reached driver construction");
+      },
+    );
+
+    assert.equal(await manager.start({ ...launchSpec(root, "mismatch"), args: ["--dangerous"] }), false);
+    assert.equal(constructed, false);
+    assert.equal(store.readMeta("mismatch")?.command, "claude", "only runner-local argv is persisted");
+    assert.deepEqual(store.readMeta("mismatch")?.args, ["--safe"]);
+    assert.equal(store.readEvents("mismatch").at(-1)?.payload.kind, "error", "rejection is durably audited");
+    const status = sent.find((message) =>
+      message.type === "session_status" && message.sessionId === "mismatch" && message.status === "failed");
+    assert.ok(status?.type === "session_status");
+    assert.match(status.detail ?? "", /does not match runner-local configuration/);
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("native launches reject an agent identity absent from runner-local discovery", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-native-launch-unknown-"));
+  try {
+    const sent: RunnerToControlPlane[] = [];
+    const store = new SessionStore(join(root, "sessions"));
+    const manager = new SessionManager(
+      (message) => sent.push(message),
+      () => {},
+      store,
+      "runner",
+      () => null,
+      () => { throw new Error("unknown agent reached driver construction"); },
+    );
+
+    assert.equal(await manager.start(launchSpec(root, "unknown")), false);
+    assert.equal(store.readMeta("unknown")?.command, "", "an unknown agent never persists wire argv");
+    assert.equal(store.readEvents("unknown").at(-1)?.payload.kind, "error", "rejection is durably audited");
+    const status = sent.find((message) =>
+      message.type === "session_status" && message.sessionId === "unknown" && message.status === "failed");
+    assert.ok(status?.type === "session_status");
+    assert.match(status.detail ?? "", /is not configured or available/);
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an explicit host target rejects mismatched argv without replacing its live session", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-native-launch-restart-"));
+  try {
+    const store = new SessionStore(join(root, "sessions"));
+    let disposals = 0;
+    const factory = () => ({
+      pid: 1,
+      initialize: async () => {},
+      newSession: async () => {},
+      prompt: async () => ({ stopReason: "end_turn" as const }),
+      cancel: () => {},
+      dispose: () => { disposals++; },
+      setConfig: () => {},
+      resolvePermission: () => false,
+      agentSessionId: () => null,
+    });
+    const manager = new SessionManager(
+      () => {},
+      () => {},
+      store,
+      "runner",
+      (_driver, _context, agentId) => agentId === "claude"
+        ? { command: "claude", args: ["s1"], env: {} }
+        : null,
+      factory as never,
+      root,
+    );
+    const target = {
+      id: "runner:runner:host:in_place",
+      runnerId: "runner",
+      kind: "local" as const,
+      workspaceStrategy: "in_place" as const,
+      adapter: "host" as const,
+      boundaries: {
+        filesystem: "host" as const,
+        network: "inherit" as const,
+        secrets: "runner_local" as const,
+        billing: "agent_account" as const,
+      },
+    };
+    const valid = { ...launchSpec(root, "s1"), executionTarget: target };
+    assert.equal(await manager.start(valid), true);
+    const before = store.readMeta("s1")!;
+
+    assert.equal(await manager.start({ ...valid, command: "/bin/sh", args: ["-c", "danger"] }), false);
+    const after = store.readMeta("s1")!;
+    assert.equal(disposals, 0, "the rejected restart did not dispose the live provider");
+    assert.deepEqual(manager.liveSessionIds(), ["s1"]);
+    assert.equal(after.command, before.command);
+    assert.deepEqual(after.args, before.args, "the rejected wire argv did not overwrite stored launch metadata");
+    assert.equal(after.status, before.status, "the rejected restart did not alter lifecycle state");
+    assert.equal(store.readEvents("s1").at(-1)?.payload.kind, "error", "the rejection remains durably audited");
+
+    manager.stop("s1");
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a denied weighted claim rolls back its provider slot", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-admission-rollback-"));
   try {

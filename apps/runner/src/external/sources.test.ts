@@ -8,6 +8,7 @@ import {
   externalSessionStoreDriver,
   readExternalTranscript,
   readSessionHead,
+  resolveLaunchForAgent,
   resolveLaunchForDriver,
   retargetExternalSession,
 } from "./sources.js";
@@ -161,4 +162,29 @@ test("missing args/env on the matched agent normalize to empty", () => {
     args: [],
     env: {},
   });
+});
+
+test("exact launch authorization preserves signed-out provider recovery but rejects unavailable rows", () => {
+  const signedOut = agent({
+    available: false,
+    authStatus: "unauthenticated",
+    claudeCode: { status: "unauthenticated" } as AgentDefinition["claudeCode"],
+  });
+  assert.deepEqual(
+    resolveLaunchForAgent([signedOut], "claude", "claude-code", { kind: "native" }),
+    { command: "claude", args: ["--flag"], env: { KEY: "v" } },
+    "the installed signed-out CLI reaches SessionManager authentication remediation",
+  );
+
+  const missing = agent({
+    available: false,
+    authStatus: "unknown",
+    claudeCode: { status: "unavailable" } as AgentDefinition["claudeCode"],
+  });
+  assert.equal(resolveLaunchForAgent([missing], "claude", "claude-code", { kind: "native" }), null);
+  assert.equal(
+    resolveLaunchForAgent([agent({ available: false })], "claude", "claude-code", { kind: "native" }),
+    null,
+    "a generic explicit disable is not mistaken for authentication recovery",
+  );
 });

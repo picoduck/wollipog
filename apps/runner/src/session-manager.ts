@@ -197,12 +197,13 @@ export interface SessionCommandInvocationLifecycle {
   uncertain(error: string): void;
 }
 
-/** Resolve the box's CURRENT launch params for a driver/context (null = no such agent). Injected by
+/** Resolve the box's CURRENT launch params for an exact agent/driver/context (null = no such agent). Injected by
  * the daemon (closing over its live agent list) so a read-only adopt can heal once the box gains a
  * matching agent — discovery finishing after the adopt, or the user installing the CLI later. */
 export type LaunchResolver = (
   driver: AgentDriverKind,
   context: AgentContext,
+  agentId?: string | null,
 ) => { command: string; args: string[]; env: Record<string, string> } | null;
 
 interface QueuedPrompt {
@@ -1285,6 +1286,35 @@ export class SessionManager {
     }
   }
 
+  private authorizeHostLaunch(spec: SessionLaunchSpec): {
+    spec: SessionLaunchSpec;
+    error?: string;
+  } {
+    if ((spec.executionTarget && spec.executionTarget.adapter !== "host") || !this.resolveLaunch) {
+      return { spec };
+    }
+    const context = spec.context ?? { kind: "native" as const };
+    const localLaunch = this.resolveLaunch(spec.driver ?? "acp", context, spec.agentId);
+    const mismatch = localLaunch && (localLaunch.command !== spec.command ||
+      localLaunch.args.length !== spec.args.length ||
+      localLaunch.args.some((arg, index) => arg !== spec.args[index]));
+    const authorized = localLaunch
+      ? { ...spec, command: localLaunch.command, args: [...localLaunch.args] }
+      : { ...spec, command: "", args: [] };
+    if (!localLaunch) {
+      return {
+        spec: authorized,
+        error: `agent ${spec.agentId ?? "(missing)"} is not configured or available in the requested context`,
+      };
+    }
+    return mismatch
+      ? {
+          spec: authorized,
+          error: `launch command for agent ${spec.agentId ?? "(missing)"} does not match runner-local configuration`,
+        }
+      : { spec: authorized };
+  }
+
   async start(
     spec: SessionLaunchSpec,
     initialPrompt?: string,
@@ -1318,6 +1348,16 @@ export class SessionManager {
         return false;
       }
     }
+    const authorization = this.authorizeHostLaunch(spec);
+    spec = authorization.spec;
+    if (authorization.error && this.store.has(spec.sessionId)) {
+      // Validate Restart before allocating a replacement generation: rejection cannot supersede
+      // the live provider or overwrite its known-good launch metadata.
+      this.emitEvent(spec.sessionId, { kind: "error", message: authorization.error });
+      durable?.failed(authorization.error, "INVALID_COMMAND");
+      reportMaterialized(false);
+      return false;
+    }
     const launchGeneration = this.beginLaunchGeneration(spec.sessionId);
     this.preLaunchAdmissionGenerations.set(spec.sessionId, launchGeneration);
     try {
@@ -1328,6 +1368,7 @@ export class SessionManager {
         durable,
         launchGeneration,
         reportMaterialized,
+        authorization.error,
       );
     } finally {
       reportMaterialized(false);
@@ -1348,6 +1389,7 @@ export class SessionManager {
     durable: DurableCommandLifecycle | undefined,
     launchGeneration: number,
     reportMaterialized: (ready: boolean) => void,
+    launchAssertionError?: string,
   ): Promise<boolean> {
     const targetError = executionTargetLaunchError(spec, this.runnerId, this.executionIsolation, this.containerTargets, this.cloudTargets);
     if (targetError) {
@@ -1356,6 +1398,7 @@ export class SessionManager {
       durable?.failed(targetError, "INVALID_COMMAND");
       return false;
     }
+    const context = spec.context ?? { kind: "native" as const };
     if (this.forking.has(spec.sessionId)) {
       this.emitEvent(spec.sessionId, { kind: "error", message: "conversation fork is in progress — wait before restarting" });
       this.emitStatus(spec.sessionId, "idle");
@@ -1393,7 +1436,6 @@ export class SessionManager {
       this.log(`restarting ${spec.sessionId} — replacing existing process`);
     }
 
-    const context = spec.context ?? { kind: "native" as const };
     const isWsl = context.kind === "wsl";
     const repoPath = isWsl ? spec.workspacePath : resolve(spec.workspacePath);
 
@@ -1505,6 +1547,12 @@ export class SessionManager {
     // so a restart keeps the timeline while re-spawning a fresh agent.
     this.store.create(meta);
     durable?.queued();
+    if (launchAssertionError) {
+      this.emitEvent(spec.sessionId, { kind: "error", message: launchAssertionError });
+      this.emitStatus(spec.sessionId, "failed", launchAssertionError);
+      durable?.failed(launchAssertionError, "INVALID_COMMAND");
+      return false;
+    }
     if (meta.driver === "codex") {
       this.emitTelemetry(meta, {
         metric: "fallback",

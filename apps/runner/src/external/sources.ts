@@ -195,6 +195,34 @@ export function resolveLaunchForDriver(
   return agent ? { command: agent.command, args: agent.args ?? [], env: agent.env ?? {} } : null;
 }
 
+/** Resolve one exact runner catalog identity for host launch authorization. A confirmed signed-out
+ * native provider remains launchable so SessionManager can enter its runner-owned authentication
+ * recovery flow; missing, unsupported, and otherwise disabled catalog rows stay fail-closed. */
+export function resolveLaunchForAgent(
+  agents: AgentDefinition[],
+  agentId: string | null | undefined,
+  driver: AgentDriverKind,
+  context: AgentContext,
+): { command: string; args: string[]; env: Record<string, string> } | null {
+  if (!agentId) return null;
+  const agent = agents.find((candidate) => {
+    if (candidate.id !== agentId || (candidate.driver ?? "acp") !== driver) return false;
+    const candidateContext = candidate.context ?? { kind: "native" as const };
+    if (candidateContext.kind !== context.kind ||
+        (context.kind === "wsl" &&
+          (candidateContext.kind !== "wsl" || candidateContext.distro !== context.distro))) return false;
+    if (candidate.available !== false) return true;
+    if (driver === "claude-code") return candidate.claudeCode?.status === "unauthenticated";
+    if (driver === "codex-app-server") {
+      return candidate.authStatus === "unauthenticated" && candidate.codexAppServer?.status === "supported";
+    }
+    return driver === "codex" && candidate.authStatus === "unauthenticated";
+  });
+  return agent
+    ? { command: agent.command, args: [...(agent.args ?? [])], env: { ...(agent.env ?? {}) } }
+    : null;
+}
+
 /** Enumerate external (CLI-started) sessions across the native host + every WSL distro, dedup against
  * sessions Wollipog already owns, sorted most-recent first. A selected agent narrows the scan
  * to one transcript store and execution context. */
