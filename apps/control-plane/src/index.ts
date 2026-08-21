@@ -992,7 +992,14 @@ app.register(async (instance) => {
         if (runnerId) db.touch(runnerId, Date.now());
         break;
       case "session_status":
-        svc.onSessionStatus(msg.sessionId, msg.status, msg.detail, msg.worktreePath, runnerId ?? undefined);
+        svc.onSessionStatus(
+          msg.sessionId,
+          msg.status,
+          msg.detail,
+          msg.worktreePath,
+          runnerId ?? undefined,
+          msg.controlPlaneLaunchId,
+        );
         break;
       case "policy_hook_credential":
         {

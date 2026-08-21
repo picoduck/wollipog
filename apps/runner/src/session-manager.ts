@@ -1441,6 +1441,7 @@ export class SessionManager {
     }
     const meta: SessionMeta = {
       sessionId: spec.sessionId,
+      controlPlaneLaunchId: spec.controlPlaneLaunchId,
       agentId: spec.agentId,
       agentVersion: spec.agentVersion ?? prior?.agentVersion,
       capabilities: spec.capabilities ?? prior?.capabilities,
@@ -6125,7 +6126,14 @@ export class SessionManager {
     // a shared box store). Mirrors the CP rule: LEAVING input_required clears the card.
     const settled = status !== "running" && status !== "starting" && status !== "input_required";
     this.store.patchMeta(sessionId, settled ? { status, pendingApproval: null } : { status });
-    this.send({ type: "session_status", sessionId, status, detail, worktreePath });
+    this.send({
+      type: "session_status",
+      sessionId,
+      status,
+      detail,
+      worktreePath,
+      controlPlaneLaunchId: this.store.readMeta(sessionId)?.controlPlaneLaunchId,
+    });
   }
 
   /** Contain authoritative history failures to one session. History itself remains strict: this
