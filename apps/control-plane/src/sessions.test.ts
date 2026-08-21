@@ -37,10 +37,18 @@ import {
   budgetDecision,
   capabilityConfigError,
   claudeModelConfigForValidation,
+  defaultPermissionModeForNewSession,
   normalizeClaudePersistedConfig,
   sessionBlocksConversationFork,
   type PreStagedDeliveryPlan,
 } from "./sessions.js";
+
+test("new Claude sessions choose Auto only when the connected installation advertises it", () => {
+  const base = { models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true };
+  assert.equal(defaultPermissionModeForNewSession("claude-code", { ...base, permissionModes: ["default", "auto", "acceptEdits"] }), "auto");
+  assert.equal(defaultPermissionModeForNewSession("claude-code", { ...base, permissionModes: ["default", "acceptEdits"] }), "acceptEdits");
+  assert.equal(defaultPermissionModeForNewSession("codex-app-server", { ...base, permissionModes: ["auto-review"] }), undefined);
+});
 
 test("conversation forks fail closed for every in-progress source lifecycle", () => {
   for (const status of ["queued", "starting", "running", "input_required"] as const) {

@@ -22,6 +22,7 @@ import {
   validatePromptImages,
   validateQuestionAnswers,
   type AgentContext,
+  type AgentDriverKind,
   type AcpSessionContextConfig,
   type AgentCapabilities,
   type ApprovalQueueItem,
@@ -480,6 +481,19 @@ export { budgetDecision } from "./policy-engine.js";
 /** The conductor's agent id — a contract constant shared with the runner's agent synthesis and
  * provisioning (apps/runner/src/conductor.ts). Renaming one side breaks the enforcement pairing. */
 const CONDUCTOR_AGENT_ID = "conductor";
+
+/** Persist the capability-dependent Claude default at creation time so the selector, stored
+ * session, and launch argv all describe the same mode. Older sessions with no stored mode keep
+ * the driver's compatibility fallback and are deliberately not migrated. */
+export function defaultPermissionModeForNewSession(
+  driver: AgentDriverKind,
+  capabilities: AgentCapabilities | undefined,
+): string | undefined {
+  if (driver === "claude-code") {
+    return capabilities?.permissionModes?.includes("auto") ? "auto" : "acceptEdits";
+  }
+  return undefined;
+}
 
 /** Conductor clamp: sessions of the "conductor" agent must stay in permissionMode "default" —
  * the only mode where every mcp__manager__ mutation parks on a human Allow/Reject card. Any other
@@ -2486,7 +2500,10 @@ export class SessionsService {
     }
     const agentCapabilities = snapshotSpec?.capabilities ??
       this.db.getRunner(req.runnerId)?.agents.find((agent) => agent.id === req.agentId)?.capabilities;
-    const requestedConfig = snapshotSpec?.config ?? req.config ?? {};
+    const requestedConfig = { ...(snapshotSpec?.config ?? req.config ?? {}) };
+    if (!snapshotSpec && req.agentId !== CONDUCTOR_AGENT_ID && requestedConfig.permissionMode === undefined) {
+      requestedConfig.permissionMode = defaultPermissionModeForNewSession(launch.driver, agentCapabilities);
+    }
     const validationConfig = claudeModelConfigForValidation(requestedConfig, agentCapabilities, launch.driver);
     const modelImageValidation = validateModelImageSupport(images, agentCapabilities, validationConfig.model);
     if (!modelImageValidation.ok) return fail(modelImageValidation.error ?? "model does not support image input", 400);

@@ -47,6 +47,7 @@ test("elicitation availability preserves unknown and distinguishes explicit unav
 
 test("default permission modes match the transport used by each fixed driver", () => {
   assert.equal(defaultPermissionMode("claude-code"), "acceptEdits");
+  assert.equal(defaultPermissionMode("claude-code", { permissionModes: ["auto", "acceptEdits"] }), "auto");
   assert.equal(defaultPermissionMode("codex"), "workspace-write");
   assert.equal(defaultPermissionMode("codex-app-server"), "auto-review");
   assert.equal(defaultPermissionMode("acp"), undefined);

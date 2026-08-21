@@ -196,8 +196,10 @@ claude -p \
   --effort <discovered-level> \                 # from DriverConfig.effort (omit if unset)
 ```
 
-plus per-mode flags (`claudePermissionArgs`; runtime default is `acceptEdits` when
-`permissionMode` is unset):
+plus per-mode flags (`claudePermissionArgs`). New non-conductor sessions persist `auto` when the
+connected installation advertises it, or `acceptEdits` as the compatibility fallback. Existing
+sessions whose persisted `permissionMode` is unset retain the driver's `acceptEdits` fallback and
+are not migrated automatically:
 
 | `permissionMode` | extra argv | prompt delivery |
 |---|---|---|
