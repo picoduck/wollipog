@@ -1,9 +1,10 @@
-// Runner frames can legitimately contain the protocol's 28 MiB combined base64 image payload.
-// Leave bounded JSON overhead while remaining far below ws's 100 MiB default.
-export const MAX_RUNNER_CLIENT_MESSAGE_BYTES = 32 * 1024 * 1024;
+// Runner frames can legitimately contain a 32 MiB externalizable event body. Leave bounded JSON
+// escaping/envelope headroom while remaining far below ws's 100 MiB default.
+export const MAX_RUNNER_CLIENT_MESSAGE_BYTES = 40 * 1024 * 1024;
 export const MAX_RUNNER_CONNECTIONS = 256;
 export const MAX_RUNNER_CONNECTIONS_PER_IP = 8;
 export const RUNNER_AUTH_TIMEOUT_MS = 10_000;
+export const MAX_RUNNER_AUTH_TIMEOUT_MS = 2_147_483_647;
 
 export interface RunnerConnectionLimitsOptions {
   maxConnections?: number;
@@ -62,7 +63,9 @@ export class RunnerConnectionLimits {
 export function runnerAuthTimeoutMs(raw: string | undefined): number {
   if (raw === undefined) return RUNNER_AUTH_TIMEOUT_MS;
   const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : RUNNER_AUTH_TIMEOUT_MS;
+  return Number.isFinite(parsed) && parsed > 0
+    ? Math.min(Math.floor(parsed), MAX_RUNNER_AUTH_TIMEOUT_MS)
+    : RUNNER_AUTH_TIMEOUT_MS;
 }
 
 function positiveInteger(value: number): number {

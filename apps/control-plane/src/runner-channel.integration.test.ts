@@ -149,7 +149,7 @@ test("the real /runner route bounds unauthenticated sockets and payloads", { tim
       CONTROL_PLANE_HOST: "127.0.0.1",
       CONTROL_PLANE_PORT: String(port),
       CONTROL_PLANE_DB: databasePath,
-      CONTROL_PLANE_RUNNER_AUTH_TIMEOUT_MS: "750",
+      CONTROL_PLANE_RUNNER_AUTH_TIMEOUT_MS: "2000",
     },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
@@ -181,9 +181,11 @@ test("the real /runner route bounds unauthenticated sockets and payloads", { tim
   for (let i = 0; i < MAX_RUNNER_CONNECTIONS_PER_IP; i++) {
     sockets.add(await openSocket(runnerUrl));
   }
+  const excessOpenedAt = Date.now();
   const excess = await openSocket(runnerUrl);
   const excessClosed = await waitForClose(excess);
   assert.deepEqual(excessClosed, { code: 1006, reason: "" }, "excess transport is force-dropped");
+  assert.ok(Date.now() - excessOpenedAt < 1_000, "cap rejection occurs well before the auth timeout");
 
   for (const socket of sockets) socket.close();
   sockets.clear();

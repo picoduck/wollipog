@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { EVENT_PAYLOAD_MAX_BYTES } from "@wollipog/protocol";
 import {
+  MAX_RUNNER_AUTH_TIMEOUT_MS,
   MAX_RUNNER_CLIENT_MESSAGE_BYTES,
   MAX_RUNNER_CONNECTIONS,
   MAX_RUNNER_CONNECTIONS_PER_IP,
@@ -10,7 +12,7 @@ import {
 } from "./runner-channel.js";
 
 test("runner channel production limits are finite and internally consistent", () => {
-  assert.ok(MAX_RUNNER_CLIENT_MESSAGE_BYTES > 0);
+  assert.ok(MAX_RUNNER_CLIENT_MESSAGE_BYTES > EVENT_PAYLOAD_MAX_BYTES);
   assert.ok(MAX_RUNNER_CONNECTIONS >= MAX_RUNNER_CONNECTIONS_PER_IP);
   assert.ok(MAX_RUNNER_CONNECTIONS_PER_IP > 0);
   assert.ok(RUNNER_AUTH_TIMEOUT_MS > 0);
@@ -34,6 +36,7 @@ test("runner connection admission bounds global and per-IP concurrency", () => {
   assert.equal(limits.acquire("192.0.2.1"), null, "global capacity remains authoritative");
 
   releaseA1.release();
+  assert.equal(limits.acquire("192.0.2.4"), null, "double release cannot restore global capacity twice");
   releaseA2.release();
   assert.ok(limits.acquire("192.0.2.1"), "release is idempotent and restores capacity once");
   releaseB.release();
@@ -63,4 +66,6 @@ test("runner auth timeout parsing rejects non-finite and non-positive overrides"
   assert.equal(runnerAuthTimeoutMs("Infinity"), RUNNER_AUTH_TIMEOUT_MS);
   assert.equal(runnerAuthTimeoutMs("0"), RUNNER_AUTH_TIMEOUT_MS);
   assert.equal(runnerAuthTimeoutMs("250.9"), 250);
+  assert.equal(runnerAuthTimeoutMs(String(MAX_RUNNER_AUTH_TIMEOUT_MS + 1)), MAX_RUNNER_AUTH_TIMEOUT_MS);
+  assert.equal(runnerAuthTimeoutMs("1e100"), MAX_RUNNER_AUTH_TIMEOUT_MS);
 });
