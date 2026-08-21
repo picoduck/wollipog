@@ -254,14 +254,14 @@ export function SessionQuestionBanner({
   showKeyHints?: boolean;
 }) {
   const api = useApi();
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<"submit" | "dismiss" | null>(null);
   const [selection, setSelection] = useState<QuestionSelectionState>({ requestId, picked: {} });
   const [error, setError] = useState<string | null>(null);
   const labelPrefix = useId();
 
   useEffect(() => {
     setSelection({ requestId, picked: {} });
-    setBusy(false);
+    setBusy(null);
     setError(null);
   }, [requestId]);
 
@@ -288,7 +288,7 @@ export function SessionQuestionBanner({
   const complete = questions.every((question) => (picked[question.id] ?? []).length > 0);
 
   const submit = async () => {
-    setBusy(true);
+    setBusy("submit");
     setError(null);
     try {
       const answers: Record<string, string | string[]> = {};
@@ -301,12 +301,12 @@ export function SessionQuestionBanner({
     } catch (cause) {
       setError((cause as Error).message);
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   };
 
   const dismiss = async () => {
-    setBusy(true);
+    setBusy("dismiss");
     setError(null);
     try {
       const updated = await api.answerQuestion(sessionId, { requestId, answers: {} });
@@ -314,12 +314,12 @@ export function SessionQuestionBanner({
     } catch (cause) {
       setError((cause as Error).message);
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   };
 
   return (
-    <section className="approval-bar question-bar" aria-label="Agent Questions">
+    <section className="approval-bar question-bar" aria-label="Agent Questions" aria-busy={busy !== null}>
       <div className="approval-main">
         <span className="approval-icon" aria-hidden="true">❓</span>
         <span className="approval-text">
@@ -327,12 +327,12 @@ export function SessionQuestionBanner({
           {!runnerOnline && <span className="muted"> · Runner Offline</span>}
         </span>
         <div className="approval-actions">
-          <button className="btn ghost sm" type="button" disabled={busy || !runnerOnline} onClick={() => void dismiss()}>
-            Dismiss {showKeyHints && <kbd className="inbox-key-hint">D</kbd>}
+          <button className="btn ghost sm" type="button" disabled={busy !== null || !runnerOnline} onClick={() => void dismiss()}>
+            {busy === "dismiss" ? "Dismissing…" : "Dismiss"} {showKeyHints && busy === null && <kbd className="inbox-key-hint">D</kbd>}
           </button>
           {questions.length > 0 && (
-            <button className="btn sm primary" type="button" disabled={busy || !runnerOnline || !complete} onClick={() => void submit()}>
-              Submit
+            <button className="btn sm primary" type="button" disabled={busy !== null || !runnerOnline || !complete} onClick={() => void submit()}>
+              {busy === "submit" ? "Submitting…" : "Submit"}
             </button>
           )}
         </div>
