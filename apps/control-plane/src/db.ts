@@ -3522,6 +3522,9 @@ export class ControlPlaneDb {
     if (!stopIntentColumns.some((column) => column.name === "restart_launch_id")) {
       db.exec("ALTER TABLE session_stop_intents ADD COLUMN restart_launch_id TEXT");
     }
+    if (!stopIntentColumns.some((column) => column.name === "archive_after_stop")) {
+      db.exec("ALTER TABLE session_stop_intents ADD COLUMN archive_after_stop INTEGER NOT NULL DEFAULT 0 CHECK (archive_after_stop IN (0, 1))");
+    }
     db.exec(
       "CREATE INDEX IF NOT EXISTS idx_session_stop_intents_runner ON session_stop_intents(runner_id, created_at, session_id)",
     );
@@ -9708,14 +9711,15 @@ export class ControlPlaneDb {
 
   /* ---- Phase 2: tombstones so the runner store can't resurrect a UI-deleted session ---- */
 
-  addSessionStopIntent(sessionId: string, runnerId: string, now: number): void {
+  addSessionStopIntent(sessionId: string, runnerId: string, now: number, archiveAfterStop = false): void {
     this.stmt(
-      `INSERT INTO session_stop_intents (session_id, runner_id, created_at) VALUES (?, ?, ?)
+      `INSERT INTO session_stop_intents (session_id, runner_id, created_at, archive_after_stop) VALUES (?, ?, ?, ?)
        ON CONFLICT(session_id) DO UPDATE SET
          runner_id=excluded.runner_id,
          created_at=excluded.created_at,
-         restart_launch_id=NULL`,
-    ).run(sessionId, runnerId, now);
+         restart_launch_id=NULL,
+         archive_after_stop=MAX(session_stop_intents.archive_after_stop, excluded.archive_after_stop)`,
+    ).run(sessionId, runnerId, now, archiveAfterStop ? 1 : 0);
   }
 
   hasSessionStopIntent(sessionId: string): boolean {
@@ -9724,6 +9728,36 @@ export class ControlPlaneDb {
 
   removeSessionStopIntent(sessionId: string): void {
     this.stmt("DELETE FROM session_stop_intents WHERE session_id=?").run(sessionId);
+  }
+
+  sessionArchiveStatus(sessionId: string): "stop_pending" | undefined {
+    const row = this.stmt(
+      "SELECT archive_after_stop FROM session_stop_intents WHERE session_id=?",
+    ).get(sessionId) as { archive_after_stop: number } | undefined;
+    return row?.archive_after_stop === 1 ? "stop_pending" : undefined;
+  }
+
+  /** Undo/unarchive cancels only the follow-up filing action. The durable Stop remains armed and
+   * cannot silently restart runtime work. */
+  cancelSessionArchiveAfterStop(sessionId: string): void {
+    this.stmt("UPDATE session_stop_intents SET archive_after_stop=0 WHERE session_id=?").run(sessionId);
+  }
+
+  /** Terminal/absence evidence settles the stop fence and, in the same transaction, performs the
+   * requested archive mutation. This is the only path that hides an active archive request. */
+  settleSessionStopIntent(sessionId: string, now: number): { archived: boolean } {
+    return this.atomic(() => {
+      const row = this.stmt(
+        "SELECT archive_after_stop FROM session_stop_intents WHERE session_id=?",
+      ).get(sessionId) as { archive_after_stop: number } | undefined;
+      if (!row) return { archived: false };
+      this.stmt("DELETE FROM session_stop_intents WHERE session_id=?").run(sessionId);
+      if (row.archive_after_stop === 1) {
+        this.stmt("UPDATE sessions SET archived=1, updated_at=? WHERE id=?").run(now, sessionId);
+        return { archived: true };
+      }
+      return { archived: false };
+    });
   }
 
   setSessionStopRestartLaunchId(sessionId: string, launchId: string): void {
@@ -10988,7 +11022,7 @@ export class ControlPlaneDb {
     const row = this.stmt("SELECT * FROM sessions WHERE id=?").get(id) as unknown as
       | SessionRow
       | undefined;
-    return row ? this.sessionView(row) : null;
+    return row ? this.sessionView(row, undefined, this.sessionArchiveStatus(id)) : null;
   }
 
   recordSideChat(parentSessionId: string, childSessionId: string, now: number): void {
@@ -11056,7 +11090,10 @@ export class ControlPlaneDb {
     const rows = this.stmt(`SELECT * FROM sessions ${where} ORDER BY created_at DESC`)
       .all() as unknown as SessionRow[];
     const legacyTargets = new Map<string, ExecutionTargetDefinition[] | undefined>();
-    return rows.map((r) => this.sessionView(r, legacyTargets));
+    const archivePendingIds = new Set((this.stmt(
+      "SELECT session_id FROM session_stop_intents WHERE archive_after_stop=1",
+    ).all() as unknown as Array<{ session_id: string }>).map((row) => row.session_id));
+    return rows.map((r) => this.sessionView(r, legacyTargets, archivePendingIds.has(r.id) ? "stop_pending" : undefined));
   }
 
   private legacyExecutionTargets(runnerId: string): ExecutionTargetDefinition[] | undefined {
@@ -11079,6 +11116,7 @@ export class ControlPlaneDb {
   private sessionView(
     row: SessionRow,
     legacyTargetCache?: Map<string, ExecutionTargetDefinition[] | undefined>,
+    archiveStatus?: "stop_pending",
   ): SessionView {
     const agentName = row.agent_id
       ? ((this.stmt("SELECT name FROM agent_definitions WHERE id=?").get(row.agent_id) as
@@ -11171,6 +11209,7 @@ export class ControlPlaneDb {
         }
       })(),
       archived: row.archived === 1,
+      archiveStatus,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       lastEventAt: row.last_event_at,

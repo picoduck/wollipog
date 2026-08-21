@@ -1,5 +1,6 @@
 import React, { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import type {
+  ArchiveStatus,
   BackgroundDeliveryWatchdogState,
   BackgroundNotificationReceiptState,
   BackgroundWorkState,
@@ -141,8 +142,10 @@ export function CopyButton({
   );
 }
 
-export function StatusBadge({ status }: { status: SessionStatus }) {
-  const m = statusMeta(status);
+export function StatusBadge({ status, archiveStatus }: { status: SessionStatus; archiveStatus?: ArchiveStatus }) {
+  const m = archiveStatus === "stop_pending"
+    ? { label: "Stop Pending", className: "st-running", busy: true }
+    : statusMeta(status);
   return (
     <span className={`status-badge ${m.className}`}>
       <span className={`status-dot2 ${m.busy ? "pulse" : ""}`} />

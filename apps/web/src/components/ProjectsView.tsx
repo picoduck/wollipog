@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
+  archiveRequiresStop,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
   type BoxView,
@@ -83,6 +84,7 @@ export function ProjectsView({
   const { confirm, showToast, showUndo } = useFeedback();
   const { navigate } = useStoreActions();
   const storedProjects = useStoreSelector((state) => state.projects);
+  const sessions = useStoreSelector((state) => state.sessions);
   const projectsSupported = useStoreSelector((state) => state.projectsSupported);
   const projectLocationCreationSupported = useStoreSelector((state) => state.projectLocationCreationSupported);
   const accessScopeManagementSupported = useStoreSelector((state) => state.accessScopeManagementSupported);
@@ -177,10 +179,16 @@ export function ProjectsView({
   };
   const archiveSessions = async () => {
     if (!selected || selected.unarchivedSessionCount === 0) return;
+    const stopsRuntime = [...sessions.values()].some((session) =>
+      session.projectId === selected.id && !session.archived && archiveRequiresStop(session.status)
+    );
     const accepted = await confirm({
-      title: `Archive ${selected.unarchivedSessionCount} Session${selected.unarchivedSessionCount === 1 ? "" : "s"}?`,
-      message: `Archive every unarchived session in “${selected.name}”? The Project and its Locations will remain.`,
-      confirmLabel: "Archive Sessions",
+      title: `${stopsRuntime ? "Archive and stop" : "Archive"} ${selected.unarchivedSessionCount} session${selected.unarchivedSessionCount === 1 ? "" : "s"}?`,
+      message: stopsRuntime
+        ? `Sessions will move to Archived Sessions after their runtimes stop. Queued work will be canceled and runtime capacity will be released. To keep work running outside the Inbox, use Snooze instead. The “${selected.name}” Project and its Locations will remain.`
+        : `Archive every unarchived session in “${selected.name}”? The Project and its Locations will remain.`,
+      confirmLabel: stopsRuntime ? "Archive and Stop" : "Archive Sessions",
+      ...(stopsRuntime ? { tone: "danger" as const } : {}),
     });
     if (!accepted) return;
     setBusy("archive");

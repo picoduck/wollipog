@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState, type ReactNode } from "react";
 import {
+  archiveRequiresStop,
   isTerminal,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
@@ -193,7 +194,7 @@ export function SessionHeader({
           {session.title}
         </h1>
       </div>
-      <StatusBadge status={session.status} />
+      <StatusBadge status={session.status} archiveStatus={session.archiveStatus} />
       {session.backgroundWorkState && (
         <span
           className={session.backgroundWorkState === "orphaned"
@@ -268,8 +269,20 @@ export function SessionHeader({
                       }
                       void run(async () => {
                         const nextArchived = !session.archived;
-                        await api.setArchived(session.id, nextArchived);
-                        showUndo(nextArchived ? "Session archived." : "Session restored.", async () => {
+                        if (nextArchived && session.archiveStatus !== "stop_pending" && archiveRequiresStop(session.status)) {
+                          const accepted = await confirm({
+                            title: "Archive and stop this session?",
+                            message: "The session will move to Archived Sessions after its runtime stops. Queued work will be canceled and runtime capacity will be released. To keep work running outside the Inbox, use Snooze instead.",
+                            confirmLabel: "Archive and Stop",
+                            tone: "danger",
+                          });
+                          if (!accepted) return;
+                        }
+                        const updated = await api.setArchived(session.id, nextArchived);
+                        const message = updated.archiveStatus === "stop_pending"
+                          ? "Archive requested. Stop is pending until runtime capacity is released."
+                          : nextArchived ? "Session archived." : "Session restored.";
+                        showUndo(message, async () => {
                           await api.setArchived(session.id, !nextArchived);
                         });
                       });

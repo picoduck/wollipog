@@ -43,7 +43,9 @@ function InboxRowInner({
   onSelect,
   onExpand,
 }: InboxRowProps) {
-  const status = statusMeta(session.status);
+  const status = session.archiveStatus === "stop_pending"
+    ? { label: "Stop Pending", className: "st-running", busy: true }
+    : statusMeta(session.status);
   const blocked = session.pendingApproval != null || session.status === "input_required";
   const active = isHeartbeatBusy(session.status);
   const diffReady = session.column === "review" && !blocked && !status.busy;
