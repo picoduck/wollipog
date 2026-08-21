@@ -3,9 +3,9 @@ import type { OnboardingInfo, RunnerCredentialSecret } from "@wollipog/protocol"
 import { useApi } from "../api-context.js";
 import {
   buildRunnerConfigJson,
+  buildRunnerStartCommand,
   localRunnerReadiness,
   onboardingHealth,
-  RUNNER_START_COMMAND,
   RUNNER_TOKEN_FILE,
   suggestRunnerId,
   withHost,
@@ -141,6 +141,8 @@ export function OnboardRunnerDialog({
   const hostOptions = useMemo(() => ["127.0.0.1", ...(info?.lanIps ?? [])], [info]);
   const isRemote = host !== "127.0.0.1";
   const wsUrl = info ? withHost(info.runnerWsUrl, host) : "";
+  const insecureRemoteTransport = isRemote && wsUrl.startsWith("ws://");
+  const startCommand = buildRunnerStartCommand(insecureRemoteTransport);
   const credentialMatches = secret?.credential.runnerId === runnerId.trim();
   const config =
     info && runnerId.trim() && credentialMatches
@@ -160,6 +162,7 @@ export function OnboardRunnerDialog({
     workspaceId: wsId,
     runner: liveRunner,
     runnerIdCollision,
+    startCommand,
   }) : [];
   const localRunnerId = localStatus && info
     ? selectLocalRunnerId(localStatus, info.existingRunnerIds)
@@ -327,6 +330,11 @@ export function OnboardRunnerDialog({
                 <p className="hint warn">
                   Remote machine selected. Start the control plane with <code>CONTROL_PLANE_HOST=0.0.0.0</code> and make sure
                   port <code>{info.port}</code> is reachable through the firewall.
+                  {insecureRemoteTransport && <>
+                    {" "}This generated <code>ws://</code> connection sends the runner credential in plaintext. Prefer a TLS
+                    reverse proxy with <code>wss://</code> on untrusted networks. The start command below includes
+                    {" "}<code>--allow-insecure-transport</code> as an explicit acknowledgement.
+                  </>}
                 </p>
               )}
             </li>
@@ -394,9 +402,9 @@ export function OnboardRunnerDialog({
 
             <li>
               <div className="step-head">
-                Start the Runner <CopyButton text={RUNNER_START_COMMAND} />
+                Start the Runner <CopyButton text={startCommand} />
               </div>
-              <pre className="code-block">{RUNNER_START_COMMAND}</pre>
+              <pre className="code-block">{startCommand}</pre>
               <p className="hint">It should appear in this list within a second or two.</p>
             </li>
             </>}

@@ -22,6 +22,8 @@ test("credential transport refuses plaintext non-loopback hosts without the exac
   for (const url of [
     "ws://manager.example.test/runner",
     "ws://localhost.example.test/runner",
+    "ws://127.0.0.1.attacker.example/runner",
+    "ws://127.manager.attacker.example/runner",
     "ws://192.168.1.4/runner",
     "ws://0.0.0.0/runner",
   ]) {

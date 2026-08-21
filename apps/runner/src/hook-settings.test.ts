@@ -222,6 +222,27 @@ test("provisioning writes protected composable settings and reuses generic runne
   });
 });
 
+test("policy-hook HTTP transport requires the propagated remote plaintext acknowledgement", () => {
+  temp((dir) => {
+    const remote = { ...config, controlPlaneUrl: "ws://manager.example.test/runner" };
+    assert.throws(
+      () => provisionClaudeHooks(spec(), remote, () => {}, host(dir)),
+      /--allow-insecure-transport/u,
+    );
+
+    const allowed = spec({ sessionId: "sess_hook_insecure_ack" });
+    provisionClaudeHooks(
+      allowed,
+      { ...remote, allowInsecureTransport: true },
+      () => {},
+      host(dir),
+    );
+    const settings = JSON.parse(readFileSync(claudeHookSettingsPath(dir, allowed.sessionId), "utf8"));
+    assert.equal(settings.env[POLICY_HOOK_ENV.cpUrl], "http://manager.example.test");
+    assert.equal(settings.env[LEGACY_POLICY_HOOK_ENV.cpUrl], "http://manager.example.test");
+  });
+});
+
 test("policy-hook credential migration preserves exact legacy and Wollipog token files", () => {
   for (const token of [`mamh_${"a".repeat(43)}`, `wollipogh_${"b".repeat(43)}`]) {
     temp((dir) => {

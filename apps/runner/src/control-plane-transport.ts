@@ -1,9 +1,11 @@
 /** Shared transport policy for every runner connection that carries a control-plane credential. */
 
+import { isIP } from "node:net";
+
 function isLoopbackHostname(hostname: string): boolean {
   const normalized = hostname.toLowerCase().replace(/^\[|\]$/gu, "");
   return normalized === "localhost" || normalized.endsWith(".localhost") ||
-    normalized === "::1" || /^127(?:\.|$)/u.test(normalized);
+    normalized === "::1" || (isIP(normalized) === 4 && normalized.startsWith("127."));
 }
 
 /** Parse and enforce the runner's credential-bearing control-plane transport policy. */
