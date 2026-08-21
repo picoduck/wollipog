@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { join } from "node:path";
 import {
+  appShellSecurityHeaders,
   injectSameOriginMarker,
   isIndexHtmlPath,
   isPackagedExec,
@@ -239,4 +241,14 @@ test("readWebIndexHtml retains the last complete shell across watched-build race
   assert.match(fresh!, /__WOLLIPOG_SAME_ORIGIN__/u);
   assert.equal(readWebIndexHtml("/web", fresh, () => { throw new Error("ENOENT"); }), fresh);
   assert.equal(readWebIndexHtml("/web", null, () => { throw new Error("ENOENT"); }), null);
+});
+
+test("appShellSecurityHeaders hashes inline script bodies and ignores external script tags", () => {
+  const inline = 'document.createElement("img").src = "/x.png";';
+  const html = `<head><script>${inline}</script><script type="module" src="/assets/app.js"></script></head>`;
+  const csp = appShellSecurityHeaders(html)["Content-Security-Policy"]!;
+  const expected = createHash("sha256").update(inline).digest("base64");
+  assert.ok(csp.includes(`'sha256-${expected}'`), "inline body containing src= remains hash-authorized");
+  const empty = createHash("sha256").update("").digest("base64");
+  assert.ok(!csp.includes(`'sha256-${empty}'`), "external src script is not treated as an empty inline script");
 });

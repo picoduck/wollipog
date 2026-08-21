@@ -419,6 +419,7 @@ export function ReviewPanel({
   // stage (the runner queues mutations) and silently become a staged-only commit under a
   // plain "Commit" label.
   const disabled = !!busy || git.busy || hunkBusy !== null || !runnerOnline;
+  const prHref = safeExternalHref(pr?.url);
 
   // Never render a diff under the wrong tab: a scope switch keeps the previous response in state
   // until the new one lands, so gate the viewer on the response's own scope. A same-scope refresh
@@ -766,12 +767,14 @@ export function ReviewPanel({
           </button>
         </div>
         <div className="hint">Commits any pending changes, pushes the branch, and opens a PR (falls back to a prefilled compare link if the runner has no authenticated <code>gh</code>). If you've staged hunks selectively, use Commit first — Push &amp; Open PR won't guess at a partial stage.</div>
-        {pr && safeExternalHref(pr.url) && (
+        {pr && (
           <div className="git-ok">
             ✓ {pr.createdWithGh ? "PR opened" : "Branch pushed — click to open the PR"}:{" "}
-            <a href={safeExternalHref(pr.url)!} target="_blank" rel="noreferrer">
-              {pr.url}
-            </a>
+            {prHref ? (
+              <a href={prHref} target="_blank" rel="noreferrer">{pr.url}</a>
+            ) : (
+              <code>{pr.url}</code>
+            )}
           </div>
         )}
       </div>

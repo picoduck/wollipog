@@ -182,7 +182,7 @@ export function injectSameOriginMarker(html: string): string {
 /** Security headers for the browser app shell, including hashes for its intentional inline scripts. */
 export function appShellSecurityHeaders(html: string): Record<string, string> {
   const hashes = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)]
-    .filter((match) => !/\ssrc\s*=/i.test(match[0]))
+    .filter((match) => !/\ssrc\s*=/i.test(match[0].slice(0, match[0].indexOf(">") + 1)))
     .map((match) => `'sha256-${createHash("sha256").update(match[1] ?? "").digest("base64")}'`);
   const scriptSrc = ["'self'", ...new Set(hashes)].join(" ");
   return {
