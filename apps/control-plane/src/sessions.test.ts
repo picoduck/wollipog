@@ -1083,6 +1083,32 @@ test("createRun rejects member counts that cannot be represented by the live UI 
   assert.equal(hub.sentOfType("start_session").length, 0);
 });
 
+test("createSession persists and launches the resolved concrete model and effort", () => {
+  const { db, hub, svc } = makeHarness();
+  db.updateRunnerAgents(
+    RUNNER_ID,
+    runnerMeta().agents.map((agent) => agent.id === AGENT_ID ? {
+      ...agent,
+      capabilities: {
+        models: [
+          { id: "default", displayName: "Default (Sonnet)", default: true },
+          { id: "opus", displayName: "Opus 5", efforts: ["low", "high"] },
+        ],
+        effortLevels: ["low", "high"], slashCommands: [], supportsImages: true,
+        supportsApprovals: true, permissionModes: ["acceptEdits"],
+      },
+    } : agent),
+    Date.now(),
+  );
+
+  const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
+  assert.ok(created.ok && created.data, created.error);
+  assert.equal(db.getSession(created.data.id)?.model, "opus");
+  assert.equal(db.getSession(created.data.id)?.effort, "high");
+  assert.equal(hub.sentOfType("start_session").at(-1)?.spec.config.model, "opus");
+  assert.equal(hub.sentOfType("start_session").at(-1)?.spec.config.effort, "high");
+});
+
 test("createSession online → 201 and sends start_session with the right launch spec", () => {
   const { hub, svc, db } = makeHarness();
 

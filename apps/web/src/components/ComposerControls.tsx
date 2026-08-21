@@ -30,7 +30,7 @@ function useSessionConfig(session: SessionView) {
   const models = (caps?.models ?? []).filter((model) => !model.hidden || model.id === session.model);
   const permModes = (caps?.permissionModes ?? []).filter((p) => p !== "plan");
 
-  const effective = effectiveModelEffortForDisplay(effectiveCaps, session.driver, session.model, session.effort);
+  const effective = effectiveModelEffortForDisplay(effectiveCaps, session.driver, session.model, session.effort, caps);
   const modelVal = effective.model?.id ?? "";
   const selectedModel = effective.model;
   const modelEfforts = effective.efforts;

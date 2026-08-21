@@ -42,6 +42,23 @@ test("effective display resolution matches deterministic server fallback semanti
     { ...modelCaps, effortLevels: [], models: [{ id: "opus" }] },
     "claude-code",
   ), { model: undefined, efforts: [], effort: undefined });
+
+  const persisted = effectiveModelEffortForDisplay(undefined, "claude-code", "opus[1m]", "high", modelCaps);
+  assert.equal(persisted.model?.id, "opus[1m]");
+  assert.equal(persisted.effort, "high");
+  assert.deepEqual(persisted.efforts, modelCaps.effortLevels);
+
+  const familyCaps: AgentCapabilities = {
+    ...modelCaps,
+    models: [
+      { id: "default", default: true },
+      { id: "claude-opus-5-20260801", efforts: ["high"] },
+      { id: "claude-sonnet-4-5-20250929", efforts: ["medium"] },
+    ],
+  };
+  assert.equal(effectiveModelEffortForDisplay(
+    familyCaps, "claude-code", "claude-sonnet-4-20250514",
+  ).model?.id, "claude-sonnet-4-5-20250929");
 });
 
 test("effective capability resolution does not claim built-in fallbacks as runner metadata", () => {
