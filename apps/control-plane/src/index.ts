@@ -11,6 +11,13 @@ import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import websocket from "@fastify/websocket";
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
+import {
+  MAX_RUNNER_CLIENT_MESSAGE_BYTES,
+  MAX_RUNNER_CONNECTIONS,
+  MAX_RUNNER_CONNECTIONS_PER_IP,
+  RUNNER_AUTH_TIMEOUT_MS,
+  RunnerConnectionLimits,
+} from "./runner-channel.js";
 import { installStartupReadinessGate } from "./startup-readiness.js";
 import {
   AUTOMATION_TRIGGER_MAX_BODY_BYTES,
@@ -223,6 +230,10 @@ const TOKEN = process.env.CONTROL_PLANE_TOKEN ?? "dev-local-token";
 const DB_PATH = process.env.CONTROL_PLANE_DB ?? "data/control-plane.db";
 const ARTIFACT_BLOB_DIR = process.env.CONTROL_PLANE_ARTIFACT_DIR;
 const HEARTBEAT_INTERVAL_MS = Number(process.env.CONTROL_PLANE_HEARTBEAT_MS ?? 10_000);
+const RUNNER_PRE_AUTH_TIMEOUT_MS = Math.max(
+  1,
+  Number(process.env.CONTROL_PLANE_RUNNER_AUTH_TIMEOUT_MS ?? RUNNER_AUTH_TIMEOUT_MS),
+);
 // A runner heartbeat every HEARTBEAT_INTERVAL_MS refreshes last_seen. If none lands within three
 // intervals the socket is presumed half-open (laptop sleep / Wi-Fi drop / NAT rebind leaves it
 // readyState=OPEN with no FIN/RST): the liveness sweep terminates it so the normal onGone cleanup
@@ -842,12 +853,29 @@ app.register(cors, { origin: isLocalOrigin });
 // guaranteed, and the await is not module-level (keeps the CP bundlable as a CJS single
 // executable for the Tauri sidecar — see the cors note above).
 app.register(async (instance) => {
-  await instance.register(websocket);
+  await instance.register(websocket, { options: { maxPayload: MAX_RUNNER_CLIENT_MESSAGE_BYTES } });
+
+  const runnerConnectionLimits = new RunnerConnectionLimits({
+    maxConnections: MAX_RUNNER_CONNECTIONS,
+    maxConnectionsPerIp: MAX_RUNNER_CONNECTIONS_PER_IP,
+  });
 
   /* ----------------------------- Runner channel ---------------------------- */
-  instance.get("/runner", { websocket: true }, (socket) => {
+  instance.get("/runner", { websocket: true }, (socket, req) => {
+  const releaseConnection = runnerConnectionLimits.acquire(req.ip);
+  if (!releaseConnection) {
+    // Do not wait for a hostile peer to acknowledge a close handshake: rejected transports are
+    // deliberately untracked, so retaining them for ws's close timeout would bypass this cap.
+    socket.terminate();
+    return;
+  }
   let runnerId: string | null = null;
   let credentialId: string | null = null;
+  let authenticationTimer: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
+    authenticationTimer = undefined;
+    // A silent unauthenticated peer cannot be trusted to complete a graceful close handshake.
+    socket.terminate();
+  }, RUNNER_PRE_AUTH_TIMEOUT_MS);
   const runnerClient = {
     send: (d: string) => socket.send(d),
     close: (code?: number, reason?: string) => socket.close(code, reason),
@@ -916,6 +944,10 @@ app.register(async (instance) => {
         }
         runnerId = msg.runner.runnerId;
         credentialId = credential.credentialId;
+        if (authenticationTimer) {
+          clearTimeout(authenticationTimer);
+          authenticationTimer = undefined;
+        }
         hub.attachRunner(runnerId, runnerClient);
         hub.clearRunnerQueues(runnerId); // a fresh connection has no in-flight queues — drop stale ones
         send(socket, {
@@ -1148,6 +1180,11 @@ app.register(async (instance) => {
   });
 
   const onGone = () => {
+    if (authenticationTimer) {
+      clearTimeout(authenticationTimer);
+      authenticationTimer = undefined;
+    }
+    releaseConnection();
     if (!runnerId) return;
     // A stale close (the runner already reconnected on a NEW socket) must be a no-op:
     // marking offline / clearing queues / failing sessions here would clobber the live
@@ -1194,9 +1231,9 @@ app.register(async (instance) => {
 });
 });
 
-// Register the browser channel in a separate encapsulated plugin so ws enforces its small payload
-// cap while assembling fragments. The runner sibling intentionally retains the default larger
-// allowance for images and history frames.
+// Register the browser channel in a separate encapsulated plugin so ws enforces its much smaller
+// payload cap while assembling fragments. The runner sibling has its own bounded allowance for
+// image and history frames.
 app.register(async (instance) => {
   await instance.register(websocket, { options: { maxPayload: MAX_UI_CLIENT_MESSAGE_BYTES } });
 
