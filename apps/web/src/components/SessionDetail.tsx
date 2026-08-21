@@ -116,6 +116,7 @@ import {
   useFollowTail,
 } from "../useFollowTail.js";
 import { useSessionReadingKeys, type SessionReadingKeyActions } from "../useSessionReadingKeys.js";
+import { VIRTUAL_VIEWPORT_INTENT_EVENT } from "../viewport-intent.js";
 import { matchesShortcut, shortcutDisplay, shortcutLayerActive } from "../shortcuts.js";
 import { useIsMobile } from "./useIsMobile.js";
 import {
@@ -171,6 +172,7 @@ const NO_IMAGE_MIME_TYPES: readonly string[] = [];
 const STOP_TURN_RETRY_MS = 8_000;
 const EARLIER_ACTIVITY_TRIGGER_PX = 160;
 const EARLIER_ACTIVITY_REARM_DISTANCE_PX = 32;
+const EARLIER_ACTIVITY_REARM_FRAMES = 8;
 
 type ComposerMutationKind = "send" | "steer" | "promote" | "stop";
 type ComposerMutationEntry = {
@@ -534,6 +536,8 @@ function SessionDetailLoaded({
     requestedBase: null as number | null,
     nextTriggerTop: null as number | null,
     readerStarted: false,
+    settling: false,
+    settleFrame: null as number | null,
   });
   const [composerSelection, setComposerSelection] = useState({ start: 0, end: 0 });
   const [slashDismissedFor, setSlashDismissedFor] = useState<string | null>(null);
@@ -1113,16 +1117,55 @@ function SessionDetailLoaded({
     return true;
   }, [api, sessionId, recoveryEventEpoch, eventWindowBase, beginOlderEventsLoad, loadOlderEvents, failOlderEventsLoad]);
 
+  const cancelEarlierActivitySettle = useCallback(() => {
+    const state = automaticEarlierLoadRef.current;
+    if (state.settleFrame !== null) window.cancelAnimationFrame(state.settleFrame);
+    state.settleFrame = null;
+    state.settling = false;
+  }, []);
+
+  const markEarlierActivityIntent = useCallback(() => {
+    cancelEarlierActivitySettle();
+  }, [cancelEarlierActivitySettle]);
+
+  const rearmEarlierActivityAfterMeasurements = useCallback(() => {
+    cancelEarlierActivitySettle();
+    const state = automaticEarlierLoadRef.current;
+    state.settling = true;
+    const settle = (frames: number) => {
+      state.settleFrame = window.requestAnimationFrame(() => {
+        if (state.historyKey !== timelineHistoryKey) {
+          state.settleFrame = null;
+          state.settling = false;
+          return;
+        }
+        const scroll = scrollRef.current;
+        if (scroll) {
+          state.nextTriggerTop = Math.max(0, scroll.scrollTop - EARLIER_ACTIVITY_REARM_DISTANCE_PX);
+        }
+        if (frames > 1) settle(frames - 1);
+        else {
+          state.settleFrame = null;
+          state.settling = false;
+        }
+      });
+    };
+    settle(EARLIER_ACTIVITY_REARM_FRAMES);
+  }, [cancelEarlierActivitySettle, timelineHistoryKey]);
+
+  useEffect(() => cancelEarlierActivitySettle, [cancelEarlierActivitySettle, timelineHistoryKey]);
+
   const maybeLoadEarlier = useCallback((scroll: HTMLElement) => {
     const state = automaticEarlierLoadRef.current;
     if (state.historyKey !== timelineHistoryKey) {
+      cancelEarlierActivitySettle();
       state.historyKey = timelineHistoryKey;
       state.requestedBase = null;
       state.nextTriggerTop = null;
       state.readerStarted = false;
     }
     if (eventWindow?.hasOlder !== true || eventWindow.loadingOlder || eventWindow.error ||
-        eventWindow.baseSeq <= 1 || state.requestedBase !== null) return;
+        eventWindow.baseSeq <= 1 || state.requestedBase !== null || state.settling) return;
 
     // A short-but-scrollable transcript should wait until the reader is genuinely near its head,
     // rather than treating every follow-tail scroll as a request for history. An unscrollable
@@ -1135,7 +1178,7 @@ function SessionDetailLoaded({
     state.readerStarted = true;
     state.nextTriggerTop = null;
     if (loadOlder()) state.requestedBase = eventWindow.baseSeq;
-  }, [eventWindow, loadOlder, timelineHistoryKey]);
+  }, [cancelEarlierActivitySettle, eventWindow, loadOlder, timelineHistoryKey]);
 
   // Once a prepend settles, require a fresh upward traversal before requesting another page. The
   // only exception is a reader-initiated window that still cannot scroll at all: keep filling that
@@ -1143,6 +1186,7 @@ function SessionDetailLoaded({
   useEffect(() => {
     const state = automaticEarlierLoadRef.current;
     if (state.historyKey !== timelineHistoryKey) {
+      cancelEarlierActivitySettle();
       state.historyKey = timelineHistoryKey;
       state.requestedBase = null;
       state.nextTriggerTop = null;
@@ -1150,18 +1194,37 @@ function SessionDetailLoaded({
       return;
     }
     if (state.requestedBase === null || eventWindow?.loadingOlder ||
-        eventWindow?.baseSeq === undefined || eventWindow.baseSeq >= state.requestedBase) return;
+        eventWindow?.baseSeq === undefined || olderInFlightRef.current) return;
 
     const scroll = scrollRef.current;
     if (!scroll) return;
-    const cannotScroll = scroll.scrollHeight <= scroll.clientHeight + 1;
-    if (state.readerStarted && cannotScroll && eventWindow.hasOlder && !eventWindow.error) {
+    const madeProgress = eventWindow.baseSeq < state.requestedBase;
+    const hasUsableGeometry = scroll.clientHeight > 0 && scroll.scrollHeight > 0;
+    const cannotScroll = hasUsableGeometry && scroll.scrollHeight <= scroll.clientHeight + 1;
+    if (madeProgress && state.readerStarted && cannotScroll && eventWindow.hasOlder && !eventWindow.error) {
       if (loadOlder()) state.requestedBase = eventWindow.baseSeq;
       return;
     }
+    // A failed or empty page still settles this exact request. Release the base gate so a manual
+    // retry or later reader traversal can try again instead of wedging automatic pagination.
     state.nextTriggerTop = Math.max(0, scroll.scrollTop - EARLIER_ACTIVITY_REARM_DISTANCE_PX);
     state.requestedBase = null;
-  }, [eventWindow, loadOlder, olderRequestSettled, timelineHistoryKey]);
+    if (!eventWindow.error) rearmEarlierActivityAfterMeasurements();
+  }, [
+    cancelEarlierActivitySettle,
+    eventWindow,
+    loadOlder,
+    olderRequestSettled,
+    rearmEarlierActivityAfterMeasurements,
+    timelineHistoryKey,
+  ]);
+
+  useEffect(() => {
+    const scroll = scrollRef.current;
+    if (!scroll) return;
+    scroll.addEventListener(VIRTUAL_VIEWPORT_INTENT_EVENT, markEarlierActivityIntent);
+    return () => scroll.removeEventListener(VIRTUAL_VIEWPORT_INTENT_EVENT, markEarlierActivityIntent);
+  }, [markEarlierActivityIntent]);
 
   // Incremental derivation: streamed chunks push only the NEW events into a per-session
   // builder instead of re-folding the whole array (O(n²) over a long session).
@@ -2271,9 +2334,16 @@ function SessionDetailLoaded({
                 followTail.onScroll();
                 maybeLoadEarlier(event.currentTarget);
               }}
-              onWheel={followTail.onWheel}
+              onWheel={(event) => {
+                markEarlierActivityIntent();
+                followTail.onWheel(event);
+              }}
+              onPointerDown={markEarlierActivityIntent}
               onPointerMove={followTail.onPointerMove}
-              onTouchStart={followTail.onTouchStart}
+              onTouchStart={() => {
+                markEarlierActivityIntent();
+                followTail.onTouchStart();
+              }}
               onKeyDown={(event) => {
                 if (event.defaultPrevented) return;
                 if (mode !== "expanded" && !isFollowTailResumeKey(event)) return;

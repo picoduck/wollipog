@@ -16,6 +16,7 @@ import { ApiProvider } from "../api-context.js";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreActions, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
+import { VIRTUAL_VIEWPORT_INTENT_EVENT } from "../viewport-intent.js";
 import { SessionDetail } from "./SessionDetail.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -510,9 +511,12 @@ test("scrolling near the partial window head loads one earlier page and requires
         cacheComplete: true,
       });
     });
-    await flushAsyncWork();
+    const correctionStart = fixture.scroller.scrollTop;
+    await scrollReader(fixture.scroller, Math.max(0, correctionStart - 40));
     assert.equal(pages.tailCalls.length, 2, "a prepend does not cascade into an uncontrolled request loop");
 
+    await flushAsyncWork(10);
+    fixture.scroller.dispatchEvent(new domWindow.Event(VIRTUAL_VIEWPORT_INTENT_EVENT) as never);
     await scrollReader(fixture.scroller, 400);
     await scrollReader(fixture.scroller, 0);
     assert.equal(pages.tailCalls.length, 3, "further upward navigation requests the next page");
@@ -537,11 +541,12 @@ test("reader-initiated paging fills an unscrollable viewport but never starts on
       });
     });
     await flushAsyncWork();
-    setScrollerMetrics(fixture.scroller, { clientHeight: 500, scrollHeight: 300, scrollTop: 0 });
+    setScrollerMetrics(fixture.scroller, { clientHeight: 500, scrollHeight: 800, scrollTop: 300 });
     assert.equal(pages.tailCalls.length, 1, "an underfilled opening still stops after its bounded tail read");
 
     await scrollReader(fixture.scroller, 0);
     assert.equal(pages.tailCalls.length, 2, "reader navigation starts pagination");
+    setScrollerMetrics(fixture.scroller, { clientHeight: 500, scrollHeight: 300, scrollTop: 0 });
     const earlierPage = fixture.events.slice(-8, -4);
     await act(async () => {
       pages.releaseTail({
@@ -554,6 +559,79 @@ test("reader-initiated paging fills an unscrollable viewport but never starts on
     });
     await flushAsyncWork(10);
     assert.equal(pages.tailCalls.length, 3, "paging continues only to make the initiated viewport scrollable");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("zero-sized reader geometry never drains remaining history in the background", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages);
+  try {
+    const openingWindow = fixture.events.slice(-8);
+    await act(async () => {
+      pages.releaseTail({
+        events: openingWindow,
+        eventEpoch: 0,
+        nextBefore: openingWindow[0]!.seq,
+        hasMoreOlder: true,
+        cacheComplete: true,
+      });
+    });
+    await flushAsyncWork();
+    setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 1_600, scrollTop: 120 });
+    await scrollReader(fixture.scroller, 120);
+    setScrollerMetrics(fixture.scroller, { clientHeight: 0, scrollHeight: 0, scrollTop: 0 });
+
+    const earlierPage = fixture.events.slice(-16, -8);
+    await act(async () => {
+      pages.releaseTail({
+        events: earlierPage,
+        eventEpoch: 0,
+        nextBefore: earlierPage[0]!.seq,
+        hasMoreOlder: true,
+        cacheComplete: true,
+      });
+    });
+    await flushAsyncWork(10);
+    assert.equal(pages.tailCalls.length, 2, "hidden geometry does not continue pagination");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a no-progress page releases the automatic gate for later reader navigation", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages);
+  try {
+    const openingWindow = fixture.events.slice(-8);
+    await act(async () => {
+      pages.releaseTail({
+        events: openingWindow,
+        eventEpoch: 0,
+        nextBefore: openingWindow[0]!.seq,
+        hasMoreOlder: true,
+        cacheComplete: true,
+      });
+    });
+    await flushAsyncWork();
+    setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 1_600, scrollTop: 120 });
+    await scrollReader(fixture.scroller, 120);
+    await act(async () => {
+      pages.releaseTail({
+        events: [],
+        eventEpoch: 0,
+        nextBefore: openingWindow[0]!.seq,
+        hasMoreOlder: true,
+        cacheComplete: true,
+      });
+    });
+    await flushAsyncWork(10);
+
+    fixture.scroller.dispatchEvent(new domWindow.Event(VIRTUAL_VIEWPORT_INTENT_EVENT) as never);
+    await scrollReader(fixture.scroller, 0);
+    assert.equal(pages.tailCalls.length, 3, "reader navigation can retry a settled no-progress base");
+    assert.equal(pages.tailCalls[2]!.before, openingWindow[0]!.seq);
   } finally {
     await unmountFixture(fixture);
   }
