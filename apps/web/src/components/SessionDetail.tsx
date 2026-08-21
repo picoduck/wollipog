@@ -1167,18 +1167,43 @@ function SessionDetailLoaded({
     if (eventWindow?.hasOlder !== true || eventWindow.loadingOlder || eventWindow.error ||
         eventWindow.baseSeq <= 1 || state.requestedBase !== null || state.settling) return;
 
-    // A short-but-scrollable transcript should wait until the reader is genuinely near its head,
-    // rather than treating every follow-tail scroll as a request for history. An unscrollable
-    // viewport has a zero boundary and can start paging after an equivalent reader scroll event.
+    // A transcript waits until the reader is genuinely near its head, rather than treating every
+    // follow-tail scroll as a request for history. A zero-range viewport cannot produce real
+    // reader scrolling, so it remains bounded until the explicit control starts paging.
     const maxScrollTop = Math.max(0, scroll.scrollHeight - scroll.clientHeight);
+    // A zero-range scroll event can be a browser layout clamp, but cannot be produced by reader
+    // navigation. Keep a bounded opening inert until the reader has started from scrollable
+    // geometry (or used the explicit control).
+    if (!state.readerStarted && maxScrollTop <= 1) return;
     const initialTriggerTop = Math.min(EARLIER_ACTIVITY_TRIGGER_PX, maxScrollTop * 0.25);
-    const triggerTop = state.nextTriggerTop ?? initialTriggerTop;
+    // Rearming proves fresh upward traversal; it never replaces the requirement to remain near
+    // the newly loaded window head after an anchor-preserved prepend.
+    const triggerTop = Math.min(
+      state.nextTriggerTop ?? Number.POSITIVE_INFINITY,
+      initialTriggerTop,
+    );
     if (scroll.scrollTop > triggerTop) return;
 
     state.readerStarted = true;
     state.nextTriggerTop = null;
     if (loadOlder()) state.requestedBase = eventWindow.baseSeq;
   }, [cancelEarlierActivitySettle, eventWindow, loadOlder, timelineHistoryKey]);
+
+  const loadEarlierFromControl = useCallback(() => {
+    const state = automaticEarlierLoadRef.current;
+    if (state.historyKey !== timelineHistoryKey) {
+      cancelEarlierActivitySettle();
+      state.historyKey = timelineHistoryKey;
+      state.requestedBase = null;
+      state.nextTriggerTop = null;
+      state.readerStarted = false;
+    }
+    const base = eventWindow?.baseSeq;
+    if (base === undefined || !loadOlder()) return;
+    state.readerStarted = true;
+    state.nextTriggerTop = null;
+    state.requestedBase = base;
+  }, [cancelEarlierActivitySettle, eventWindow?.baseSeq, loadOlder, timelineHistoryKey]);
 
   // Once a prepend settles, require a fresh upward traversal before requesting another page. The
   // only exception is a reader-initiated window that still cannot scroll at all: keep filling that
@@ -1202,8 +1227,10 @@ function SessionDetailLoaded({
     const hasUsableGeometry = scroll.clientHeight > 0 && scroll.scrollHeight > 0;
     const cannotScroll = hasUsableGeometry && scroll.scrollHeight <= scroll.clientHeight + 1;
     if (madeProgress && state.readerStarted && cannotScroll && eventWindow.hasOlder && !eventWindow.error) {
-      if (loadOlder()) state.requestedBase = eventWindow.baseSeq;
-      return;
+      if (loadOlder()) {
+        state.requestedBase = eventWindow.baseSeq;
+        return;
+      }
     }
     // A failed or empty page still settles this exact request. Release the base gate so a manual
     // retry or later reader traversal can try again instead of wedging automatic pagination.
@@ -2363,7 +2390,7 @@ function SessionDetailLoaded({
                 <EarlierActivityControl
                   loading={eventWindow.loadingOlder}
                   error={eventWindow.error}
-                  onLoad={loadOlder}
+                  onLoad={loadEarlierFromControl}
                 />
               )}
               {transcript.body === "skeleton" ? (

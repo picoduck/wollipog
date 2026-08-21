@@ -511,15 +511,17 @@ test("scrolling near the partial window head loads one earlier page and requires
         cacheComplete: true,
       });
     });
-    const correctionStart = fixture.scroller.scrollTop;
-    await scrollReader(fixture.scroller, Math.max(0, correctionStart - 40));
+    setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 3_200, scrollTop: 1_600 });
+    await scrollReader(fixture.scroller, 1_560);
     assert.equal(pages.tailCalls.length, 2, "a prepend does not cascade into an uncontrolled request loop");
 
     await flushAsyncWork(10);
     fixture.scroller.dispatchEvent(new domWindow.Event(VIRTUAL_VIEWPORT_INTENT_EVENT) as never);
-    await scrollReader(fixture.scroller, 400);
-    await scrollReader(fixture.scroller, 0);
-    assert.equal(pages.tailCalls.length, 3, "further upward navigation requests the next page");
+    await scrollReader(fixture.scroller, 1_560);
+    assert.equal(pages.tailCalls.length, 2, "fresh upward travel far from the new head does not page");
+
+    await scrollReader(fixture.scroller, 120);
+    assert.equal(pages.tailCalls.length, 3, "further near-head navigation requests the next page");
     assert.equal(pages.tailCalls[2]!.before, earlierPage[0]!.seq);
   } finally {
     await unmountFixture(fixture);
@@ -542,8 +544,14 @@ test("reader-initiated paging fills an unscrollable viewport but never starts on
     });
     await flushAsyncWork();
     setScrollerMetrics(fixture.scroller, { clientHeight: 500, scrollHeight: 800, scrollTop: 300 });
-    assert.equal(pages.tailCalls.length, 1, "an underfilled opening still stops after its bounded tail read");
+    setScrollerMetrics(fixture.scroller, { clientHeight: 500, scrollHeight: 300, scrollTop: 0 });
+    await act(async () => {
+      fixture.scroller.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as never);
+    });
+    await flushAsyncWork();
+    assert.equal(pages.tailCalls.length, 1, "a layout clamp cannot start paging an underfilled opening");
 
+    setScrollerMetrics(fixture.scroller, { clientHeight: 500, scrollHeight: 800, scrollTop: 300 });
     await scrollReader(fixture.scroller, 0);
     assert.equal(pages.tailCalls.length, 2, "reader navigation starts pagination");
     setScrollerMetrics(fixture.scroller, { clientHeight: 500, scrollHeight: 300, scrollTop: 0 });
@@ -663,6 +671,20 @@ test("an automatic load failure keeps an understandable manual retry path", asyn
     assert.equal(retry.disabled, false);
     await act(async () => retry.click());
     assert.equal(pages.tailCalls.length, 3, "the fallback control retries the failed page");
+
+    const earlierPage = fixture.events.slice(-16, -8);
+    await act(async () => {
+      pages.releaseTail({
+        events: earlierPage,
+        eventEpoch: 0,
+        nextBefore: earlierPage[0]!.seq,
+        hasMoreOlder: true,
+        cacheComplete: true,
+      });
+    });
+    setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 3_200, scrollTop: 1_600 });
+    await scrollReader(fixture.scroller, 1_560);
+    assert.equal(pages.tailCalls.length, 3, "a manual prepend uses the same settle gate");
   } finally {
     await unmountFixture(fixture);
   }
