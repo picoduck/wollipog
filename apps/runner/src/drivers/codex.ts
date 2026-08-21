@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentContext, PlanEntry, PromptImage, SessionConfig } from "@wollipog/protocol";
 import { killTree, spawnAgent, type AgentProcess } from "../spawn.js";
+import { BoundedNdjsonBuffer } from "../bounded-ndjson.js";
 import type { Driver, DriverCallbacks, DriverOptions, StopReason } from "./driver.js";
 import { isProviderAuthenticationFailure } from "./provider-auth-failure.js";
 
@@ -194,7 +195,6 @@ export class CodexDriver implements Driver {
         }
       };
 
-      let buf = "";
       const processLine = (raw: string) => {
         const line = raw.trim();
         if (!line) return;
@@ -207,16 +207,14 @@ export class CodexDriver implements Driver {
         const r = this.handleEvent(msg);
         if (r) stopReason = r;
       };
+      const stdout = new BoundedNdjsonBuffer(processLine, () => {
+        this.cb.onStderr("discarded oversized NDJSON record from Codex stdout");
+      });
 
       child.stdout.setEncoding("utf8");
       child.stdout.on("data", (chunk: string) => {
         if (this.disposed || this.cancelled) return;
-        buf += chunk;
-        let nl: number;
-        while ((nl = buf.indexOf("\n")) >= 0) {
-          processLine(buf.slice(0, nl));
-          buf = buf.slice(nl + 1);
-        }
+        stdout.push(chunk);
       });
 
       child.stderr.setEncoding("utf8");
@@ -242,8 +240,7 @@ export class CodexDriver implements Driver {
         if (this.disposed || this.cancelled) return finish("cancelled");
         // Flush a trailing partial line — `turn.completed` (token_usage) may arrive
         // without a trailing newline.
-        processLine(buf);
-        buf = "";
+        processLine(stdout.takeTrailing());
         if (code && code !== 0 && !settled) {
           this.cb.onEvent({ kind: "error", message: `codex exited with code ${code}` });
           return finish("refusal");
