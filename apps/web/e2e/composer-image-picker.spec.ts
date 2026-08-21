@@ -105,6 +105,26 @@ test("a text-only model explains itself instead of opening a picker", async ({ p
   expect(opened).toBe(false);
 });
 
+test("the action follows composer availability while the menu is already open", async ({ page }) => {
+  await openSession(page);
+  await openPlusMenu(page);
+  await expect(attachAction(page)).toBeEnabled();
+
+  // The trigger is gated on `canPrompt`, so the only way into this state is availability changing
+  // under an already-open panel — which is exactly when a stale enabled action does damage.
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerStatus("offline"));
+
+  const action = attachAction(page);
+  await expect(action).toBeDisabled();
+  await expect(page.getByText("This session cannot accept a prompt right now.")).toBeVisible();
+
+  let opened = false;
+  page.on("filechooser", () => { opened = true; });
+  await action.click({ force: true });
+  await expect(thumbnails(page)).toHaveCount(0);
+  expect(opened).toBe(false);
+});
+
 test("rejected selections report accessibly and keep the valid ones", async ({ page }) => {
   await openSession(page);
   const composer = page.locator(".composer-input");

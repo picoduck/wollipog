@@ -3264,6 +3264,10 @@ function ComposerPlusMenu({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const attachDescriptionId = useId();
   const imagesSupported = imageMimeTypes.length > 0;
+  // Attachment follows the composer, exactly as paste (a disabled textarea) and drop (its own
+  // `canPrompt` guard) already do. `disabled` can flip while the panel — or the native chooser —
+  // is already open, so the item and the change handler are gated separately.
+  const canAttach = !disabled && imagesSupported;
   return (
     <div className="plus-menu">
       {/*
@@ -3289,7 +3293,10 @@ function ComposerPlusMenu({
           // Clear before dispatching so re-picking the same file after removing it still fires
           // `change`; a cancelled picker fires nothing and leaves the draft untouched.
           input.value = "";
-          if (files.length) void onAttachImages(files);
+          // The runner can go offline, or the session end, while the chooser is up: a re-render
+          // has already installed this handler with the new `canAttach`, so the late selection is
+          // dropped rather than landing in a composer that cannot send it.
+          if (canAttach && files.length) void onAttachImages(files);
         }}
       />
       <button
@@ -3326,7 +3333,7 @@ function ComposerPlusMenu({
               // computed from the row's text.
               aria-label="Attach Image"
               aria-describedby={attachDescriptionId}
-              disabled={!imagesSupported}
+              disabled={!canAttach}
               onClick={() => {
                 fileInputRef.current?.click();
                 popover.close(true);
@@ -3336,9 +3343,11 @@ function ComposerPlusMenu({
               <span className="plus-item-body">
                 <span className="plus-item-title">Attach Image</span>
                 <span className="plus-item-desc" id={attachDescriptionId}>
-                  {imagesSupported
-                    ? `Photos, camera, or files · up to ${MAX_PROMPT_IMAGES}`
-                    : "The selected model does not support image input."}
+                  {!imagesSupported
+                    ? "The selected model does not support image input."
+                    : disabled
+                      ? "This session cannot accept a prompt right now."
+                      : `Photos, camera, or files · up to ${MAX_PROMPT_IMAGES}`}
                 </span>
               </span>
             </button>
