@@ -63,7 +63,7 @@ export class RunnerConnectionLimits {
 export function runnerAuthTimeoutMs(raw: string | undefined): number {
   if (raw === undefined) return RUNNER_AUTH_TIMEOUT_MS;
   const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed > 0
+  return Number.isFinite(parsed) && parsed >= 1
     ? Math.min(Math.floor(parsed), MAX_RUNNER_AUTH_TIMEOUT_MS)
     : RUNNER_AUTH_TIMEOUT_MS;
 }

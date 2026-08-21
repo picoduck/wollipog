@@ -65,6 +65,7 @@ test("runner auth timeout parsing rejects non-finite and non-positive overrides"
   assert.equal(runnerAuthTimeoutMs("not-a-number"), RUNNER_AUTH_TIMEOUT_MS);
   assert.equal(runnerAuthTimeoutMs("Infinity"), RUNNER_AUTH_TIMEOUT_MS);
   assert.equal(runnerAuthTimeoutMs("0"), RUNNER_AUTH_TIMEOUT_MS);
+  assert.equal(runnerAuthTimeoutMs("0.5"), RUNNER_AUTH_TIMEOUT_MS);
   assert.equal(runnerAuthTimeoutMs("250.9"), 250);
   assert.equal(runnerAuthTimeoutMs(String(MAX_RUNNER_AUTH_TIMEOUT_MS + 1)), MAX_RUNNER_AUTH_TIMEOUT_MS);
   assert.equal(runnerAuthTimeoutMs("1e100"), MAX_RUNNER_AUTH_TIMEOUT_MS);
