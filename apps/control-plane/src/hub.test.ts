@@ -938,6 +938,46 @@ test("closeRunner preserves current identity until the shared close teardown run
   assert.equal(hub.closeRunner("r1"), false);
 });
 
+test("sendToRunner failure closes through the shared current-socket teardown", async () => {
+  const closed: Array<[number | undefined, string | undefined]> = [];
+  const hub = new Hub(fakeDb);
+  let teardowns = 0;
+  let socket!: Socket;
+  socket = {
+    send: () => { throw new Error("serialize or transport failure"); },
+    close: (code, reason) => {
+      closed.push([code, reason]);
+      // Faithfully model index.ts onGone: durable teardown only runs for the current socket.
+      if (hub.detachRunner("r1", socket)) teardowns += 1;
+    },
+  };
+  hub.attachRunner("r1", socket);
+
+  const pending = hub.requestFromRunner("r1", "req-send-failed", gitReq("req-send-failed"), 30_000);
+
+  assert.equal(await pending.then(() => true, () => false), false);
+  assert.deepEqual(closed, [[1011, "runner send failed"]]);
+  assert.equal(teardowns, 1, "send failure must reach ordinary disconnect cleanup exactly once");
+  assert.equal(hub.isRunnerOnline("r1"), false);
+  assert.equal(hub.detachRunner("r1", socket), false, "a later close/error event is stale");
+});
+
+test("sendToRunner failure terminates a runner socket that has no graceful close", () => {
+  const hub = new Hub(fakeDb);
+  let terminated = 0;
+  const socket: Socket = {
+    send: () => { throw new Error("send failed"); },
+    terminate: () => { terminated += 1; },
+  };
+  hub.attachRunner("r1", socket);
+
+  assert.equal(hub.sendToRunner("r1", { type: "rediscover", runnerId: "r1" }), false);
+  assert.equal(terminated, 1);
+  assert.equal(hub.isCurrentRunnerSocket("r1", socket), true,
+    "identity stays current until terminate emits the ordinary close event");
+  assert.equal(hub.detachRunner("r1", socket), true);
+});
+
 test("a stale socket detach does not reject in-flight requests riding the replacement", async () => {
   const oldSock: Socket = { send: () => {} };
   const newSock: Socket = { send: () => {} };
