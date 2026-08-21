@@ -20,6 +20,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentQuestion, PlanEntry, PromptImage, SessionConfig } from "@wollipog/protocol";
 import { approvalScopeContext } from "../approval-scope.js";
+import { BoundedNdjsonBuffer } from "../bounded-ndjson.js";
 import { inspectClaudeBackgroundWork, inspectClaudeBackgroundWorkInContext, type ClaudeBackgroundWorkInspection } from "../claude-background-work.js";
 import { effectiveClaudePermissionMode } from "../claude-permission.js";
 import { prepareClaudeHookArgs } from "../hook-settings.js";
@@ -290,7 +291,7 @@ export class ClaudeCodeDriver implements Driver {
   private persistentGeneration = 0;
   /** Claude's total_cost_usd is cumulative within one streaming-input process. */
   private persistentLastCostUsd = 0;
-  private persistentBuffer = "";
+  private persistentBuffer: BoundedNdjsonBuffer | null = null;
   /** Monotonic across persistent and one-shot transports so late lifecycle events cannot alias a
    * turn from the transport used before a circuit fallback. */
   private providerTurnSeq = 0;
@@ -444,7 +445,6 @@ export class ClaudeCodeDriver implements Driver {
     this.auxiliaryChildren.add(child);
 
     return new Promise<string>((resolve, reject) => {
-      let buffer = "";
       let initSeen = false;
       let resultSeen = false;
       let settled = false;
@@ -494,17 +494,15 @@ export class ClaudeCodeDriver implements Driver {
           }
         }
       };
+      const stdout = new BoundedNdjsonBuffer(processLine, () => {
+        fail(new Error("Claude fork emitted an oversized NDJSON record"));
+      });
 
       child.stdin.on("error", () => {});
       child.stdout.setEncoding("utf8");
       child.stdout.on("data", (chunk: string) => {
         if (settled) return;
-        buffer += chunk;
-        let nl: number;
-        while ((nl = buffer.indexOf("\n")) >= 0) {
-          processLine(buffer.slice(0, nl));
-          buffer = buffer.slice(nl + 1);
-        }
+        stdout.push(chunk);
       });
       child.stderr.setEncoding("utf8");
       child.stderr.on("data", (chunk: string) => {
@@ -514,7 +512,8 @@ export class ClaudeCodeDriver implements Driver {
       child.on("error", (err: Error) => fail(new Error(`Claude fork spawn error: ${err.message}`)));
       child.on("exit", (code) => {
         if (settled) return;
-        if (buffer.trim()) processLine(buffer);
+        const trailing = stdout.takeTrailing();
+        if (trailing.trim()) processLine(trailing);
         if (settled) return;
         cleanup();
         settled = true;
@@ -655,7 +654,6 @@ export class ClaudeCodeDriver implements Driver {
         resolve(r);
       };
 
-      let buf = "";
       const processLine = (raw: string) => {
         const line = raw.trim();
         if (!line) return;
@@ -671,6 +669,9 @@ export class ClaudeCodeDriver implements Driver {
           if (this.activeOneShotTurnId === turnId) this.activeOneShotTurnId = null;
         }
       };
+      const stdout = new BoundedNdjsonBuffer(processLine, () => {
+        this.cb.onStderr("discarded oversized NDJSON record from Claude stdout");
+      });
 
       // A write to a dying process (mid-turn control_response, prompt delivery) does NOT throw
       // synchronously — Node emits an async 'error' (EPIPE/ERR_STREAM_DESTROYED) on the stream,
@@ -681,12 +682,7 @@ export class ClaudeCodeDriver implements Driver {
       child.stdout.setEncoding("utf8");
       child.stdout.on("data", (chunk: string) => {
         if (this.disposed || this.cancelled) return;
-        buf += chunk;
-        let nl: number;
-        while ((nl = buf.indexOf("\n")) >= 0) {
-          processLine(buf.slice(0, nl));
-          buf = buf.slice(nl + 1);
-        }
+        stdout.push(chunk);
       });
 
       child.stderr.setEncoding("utf8");
@@ -711,8 +707,7 @@ export class ClaudeCodeDriver implements Driver {
         if (this.disposed || this.cancelled) return finish("cancelled");
         // Flush a trailing partial line — the final `result` event (token_usage +
         // terminal stopReason) can arrive without a trailing newline.
-        processLine(buf);
-        buf = "";
+        processLine(stdout.takeTrailing());
         // Successful one-shot recovery gets exactly one chance to re-observe restart seeds.
         // Settle unseen seeds before publishing the dead process's authoritative orphan set;
         // otherwise settleUnverifiedBackgroundTasks() can emit a later, false `running` state.
@@ -855,7 +850,10 @@ export class ClaudeCodeDriver implements Driver {
       this.child = child;
       this.persistentTransport = true;
       this.persistentFingerprint = fingerprint;
-      this.persistentBuffer = "";
+      this.persistentBuffer = new BoundedNdjsonBuffer(
+        (line) => this.processPersistentLine(line),
+        () => this.cb.onStderr("discarded oversized NDJSON record from persistent Claude stdout"),
+      );
       this.persistentLastCostUsd = 0;
       this.intentionalPersistentStop = false;
       this.attachPersistentTransport(child, ++this.persistentGeneration);
@@ -897,12 +895,7 @@ export class ClaudeCodeDriver implements Driver {
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
       if (this.disposed || generation !== this.persistentGeneration) return;
-      this.persistentBuffer += chunk;
-      let nl: number;
-      while ((nl = this.persistentBuffer.indexOf("\n")) >= 0) {
-        this.processPersistentLine(this.persistentBuffer.slice(0, nl));
-        this.persistentBuffer = this.persistentBuffer.slice(nl + 1);
-      }
+      this.persistentBuffer?.push(chunk);
     });
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => {
@@ -923,8 +916,9 @@ export class ClaudeCodeDriver implements Driver {
       // process that is already dead and must not mint an approval card nobody can answer.
       if (this.child === child) this.child = null;
       this.pendingApprovals.clear();
-      if (this.persistentBuffer.trim()) this.processPersistentLine(this.persistentBuffer, true);
-      this.persistentBuffer = "";
+      const trailing = this.persistentBuffer?.takeTrailing() ?? "";
+      if (trailing.trim()) this.processPersistentLine(trailing, true);
+      this.persistentBuffer = null;
       this.persistentTransport = false;
       this.persistentFingerprint = null;
       if (this.disposed || this.intentionalPersistentStop) return;

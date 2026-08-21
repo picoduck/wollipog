@@ -7,6 +7,7 @@
  */
 
 import type { Readable, Writable } from "node:stream";
+import { BoundedNdjsonBuffer } from "./bounded-ndjson.js";
 
 type Params = unknown;
 
@@ -43,16 +44,22 @@ export class JsonRpcPeer {
   private readonly pending = new Map<number | string, Pending>();
   private readonly requestHandlers = new Map<string, RequestHandler>();
   private readonly notificationHandlers = new Map<string, NotificationHandler>();
-  private buffer = "";
+  private readonly input: BoundedNdjsonBuffer;
   private closed = false;
 
   constructor(
     private readonly stdin: Writable,
     stdout: Readable,
     private readonly onTransportError?: (err: Error) => void,
+    maxLineBytes?: number,
   ) {
+    this.input = new BoundedNdjsonBuffer(
+      (line) => this.processLine(line),
+      () => this.onTransportError?.(new Error("discarded oversized JSON-RPC stdout record")),
+      maxLineBytes,
+    );
     stdout.setEncoding("utf8");
-    stdout.on("data", (chunk: string) => this.onData(chunk));
+    stdout.on("data", (chunk: string) => this.input.push(chunk));
     // A write after the child closes stdin emits an async 'error' (EPIPE) on the
     // stream; without a listener Node would crash the runner. Route it instead.
     stdin.on("error", (err: Error) => {
@@ -155,21 +162,16 @@ export class JsonRpcPeer {
     this.onTransportError?.(err);
   }
 
-  private onData(chunk: string): void {
-    this.buffer += chunk;
-    let idx: number;
-    while ((idx = this.buffer.indexOf("\n")) !== -1) {
-      const line = this.buffer.slice(0, idx).trim();
-      this.buffer = this.buffer.slice(idx + 1);
-      if (!line) continue;
-      let msg: RpcMessage;
-      try {
-        msg = JSON.parse(line) as RpcMessage;
-      } catch {
-        continue; // skip non-JSON noise (some agents print logs to stdout)
-      }
-      this.dispatch(msg);
+  private processLine(raw: string): void {
+    const line = raw.trim();
+    if (!line) return;
+    let msg: RpcMessage;
+    try {
+      msg = JSON.parse(line) as RpcMessage;
+    } catch {
+      return; // skip non-JSON noise (some agents print logs to stdout)
     }
+    this.dispatch(msg);
   }
 
   private dispatch(msg: RpcMessage): void {
