@@ -145,6 +145,44 @@ test("the Codex refresh probe uses only account APIs, never starts a turn, and a
   assert.equal(result.state, "available");
 });
 
+test("the Codex refresh probe accepts its final response between exit and close", async () => {
+  const requestStream = new PassThrough();
+  const responseStream = new PassThrough();
+  const child = new EventEmitter() as AgentProcess;
+  Object.assign(child, {
+    pid: 123,
+    stdin: requestStream,
+    stdout: responseStream,
+    stderr: new PassThrough(),
+  });
+  let buffered = "";
+  requestStream.setEncoding("utf8");
+  requestStream.on("data", (chunk: string) => {
+    buffered += chunk;
+    while (buffered.includes("\n")) {
+      const index = buffered.indexOf("\n");
+      const line = buffered.slice(0, index);
+      buffered = buffered.slice(index + 1);
+      const message = JSON.parse(line) as { id?: number; method: string };
+      if (message.id === undefined) continue;
+      if (message.method === "account/rateLimits/read") child.emit("exit", 0, null);
+      const result = message.method === "account/read"
+        ? { account: { type: "chatgpt", planType: "plus" } }
+        : message.method === "account/rateLimits/read"
+          ? { rateLimits: { limitId: "codex", primary: { usedPercent: 12 } } }
+          : {};
+      responseStream.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }) + "\n");
+      if (message.method === "account/rateLimits/read") child.emit("close", 0, null);
+    }
+  });
+
+  const result = await probeCodexSubscriptionUsage(agent(), {}, 1_000, {
+    spawn: (() => child) as never,
+    kill: (() => {}) as never,
+  }, { cwd: "/safe/subscription-probe" });
+  assert.equal(result.state, "available");
+});
+
 test("a probe spawn error rejects through the refresh path and still reaps", async () => {
   const child = new EventEmitter() as AgentProcess;
   Object.assign(child, {

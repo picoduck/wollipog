@@ -60,7 +60,7 @@ function runWslImageCommand(args: string[], input?: Buffer): Promise<CommandResu
     child.stderr.on("data", collect(stderr));
     child.on("error", finishReject);
     child.stdin.on("error", finishReject);
-    child.on("exit", (code) => {
+    child.on("close", (code) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);

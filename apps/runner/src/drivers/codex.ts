@@ -27,6 +27,11 @@ import { isProviderAuthenticationFailure } from "./provider-auth-failure.js";
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Json = any;
 
+interface CodexDriverDeps {
+  spawn: typeof spawnAgent;
+  kill: typeof killTree;
+}
+
 const SANDBOX_MODES = new Set(["read-only", "workspace-write", "danger-full-access"]);
 const MIME_EXT: Record<string, string> = {
   "image/png": "png",
@@ -83,6 +88,7 @@ export class CodexDriver implements Driver {
   private disposed = false;
   private cancelled = false;
   private config: SessionConfig;
+  private readonly deps: CodexDriverDeps;
   /** track tool items we've announced so updates map to the same toolCallId */
   private readonly seenItems = new Set<string>();
   /** temp image files staged for the in-flight turn, removed when it ends. */
@@ -103,9 +109,14 @@ export class CodexDriver implements Driver {
   constructor(
     private readonly opts: DriverOptions,
     private readonly cb: DriverCallbacks,
+    deps: Partial<CodexDriverDeps> = {},
   ) {
     this.cwd = opts.cwd;
     this.config = opts.config;
+    this.deps = {
+      spawn: deps.spawn ?? spawnAgent,
+      kill: deps.kill ?? killTree,
+    };
     // Phase 2 resume: a persisted threadId makes the first turn use `codex resume <id>`.
     if (opts.resumeId) this.threadId = opts.resumeId;
   }
@@ -168,7 +179,7 @@ export class CodexDriver implements Driver {
         // Subscription auth comes from ~/.codex/auth.json; a stray OPENAI_API_KEY in the
         // daemon's environment would silently switch billing to the API. An explicit
         // agent-config env entry still wins (a deliberately API-keyed agent keeps working).
-        child = spawnAgent({
+        child = this.deps.spawn({
           command: this.opts.command,
           args,
           cwd: this.cwd,
@@ -234,7 +245,9 @@ export class CodexDriver implements Driver {
         finish("refusal");
       });
 
-      child.on("exit", (code) => {
+      // `close`, not `exit`: stdout can still deliver the final NDJSON record after
+      // the process exits. Finalize only once every stdio stream has drained.
+      child.on("close", (code) => {
         this.child = null;
         this.cleanupImages();
         if (this.disposed || this.cancelled) return finish("cancelled");
@@ -260,7 +273,7 @@ export class CodexDriver implements Driver {
 
   cancel(): void {
     this.cancelled = true;
-    if (this.child) killTree(this.child);
+    if (this.child) this.deps.kill(this.child);
     this.cleanupImages();
   }
 
@@ -271,7 +284,7 @@ export class CodexDriver implements Driver {
 
   dispose(): void {
     this.disposed = true;
-    if (this.child) killTree(this.child);
+    if (this.child) this.deps.kill(this.child);
     this.child = null;
     // Synchronous cleanup so files are gone before a shutdown process.exit().
     this.cleanupImages();

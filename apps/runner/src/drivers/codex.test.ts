@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import type { SessionEventPayload } from "@wollipog/protocol";
+import type { AgentProcess } from "../spawn.js";
 import { CodexDriver } from "./codex.js";
 import type { DriverCallbacks, DriverOptions } from "./driver.js";
 
@@ -36,6 +39,19 @@ function makeDriver(): { driver: CodexDriver; events: SessionEventPayload[]; std
 const handleEvent = (d: CodexDriver, msg: unknown) => (d as any).handleEvent(msg) as string | null;
 const handleItem = (d: CodexDriver, phase: string, item: unknown) => (d as any).handleItem(phase, item);
 const threadIdOf = (d: CodexDriver) => (d as any).threadId as string | null;
+
+function fakeAgentProcess(): AgentProcess {
+  return Object.assign(new EventEmitter(), {
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    pid: 12345,
+  }) as unknown as AgentProcess;
+}
+
+function nextTask(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
 
 test("thread.started sets the threadId and returns null", () => {
   const { driver } = makeDriver();
@@ -110,6 +126,49 @@ test("Codex exec cancel settles an active child as cancelled", async () => {
   } finally {
     driver.dispose();
   }
+});
+
+test("Codex exec drains final message and usage records after process exit", async () => {
+  const child = fakeAgentProcess();
+  const events: SessionEventPayload[] = [];
+  const driver = new CodexDriver({
+    command: "codex",
+    args: [],
+    cwd: "/tmp/work",
+    env: {},
+    config: {},
+    context: { kind: "native" },
+  }, {
+    onEvent: (payload) => events.push(payload),
+    onStderr: () => {},
+    onExit: () => {},
+  }, {
+    spawn: () => child,
+    kill: () => {},
+  });
+
+  const turn = driver.prompt("finish after exit");
+  let settled = false;
+  void turn.then(() => { settled = true; }, () => { settled = true; });
+  child.emit("exit", 0, null);
+  await nextTask();
+  assert.equal(settled, false, "exit must not settle while stdout can still deliver data");
+  child.stdout.write(JSON.stringify({
+    type: "item.completed",
+    item: { id: "final-message", type: "agent_message", text: "complete answer" },
+  }) + "\n");
+  child.stdout.write(JSON.stringify({
+    type: "turn.completed",
+    usage: { input_tokens: 12, output_tokens: 7, cached_input_tokens: 3 },
+  }));
+  child.emit("close", 0, null);
+
+  assert.equal(await turn, "end_turn");
+  assert.deepEqual(events, [
+    { kind: "agent_message", text: "complete answer", messageId: "final-message", final: true },
+    { kind: "token_usage", inputTokens: 12, outputTokens: 7, cachedInputTokens: 3 },
+  ]);
+  driver.dispose();
 });
 
 test("item.completed agent_message -> agent_message event", () => {

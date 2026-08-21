@@ -154,10 +154,17 @@ function codexIdentity(meta: SessionMeta, digestKey?: string): string | undefine
 }
 
 export class NativeProviderAuthRecovery implements ProviderAuthRecoveryController {
+  private readonly spawn: typeof spawnAgent;
+  private readonly kill: typeof killTree;
+
   constructor(
     private readonly injectedRun?: CommandRunner,
     private readonly digestKey?: string,
-  ) {}
+    deps: Partial<{ spawn: typeof spawnAgent; kill: typeof killTree }> = {},
+  ) {
+    this.spawn = deps.spawn ?? spawnAgent;
+    this.kill = deps.kill ?? killTree;
+  }
 
   private scrubInheritedEnv(meta: SessionMeta): string[] {
     return providerFamily(meta.driver) === "claude"
@@ -187,7 +194,7 @@ export class NativeProviderAuthRecovery implements ProviderAuthRecoveryControlle
     return new Promise((resolve, reject) => {
       let child: AgentProcess;
       try {
-        child = spawnAgent({
+        child = this.spawn({
           command,
           args,
           cwd: this.stableCwd(meta),
@@ -216,7 +223,7 @@ export class NativeProviderAuthRecovery implements ProviderAuthRecoveryControlle
       const capture = (target: Buffer[]) => (chunk: Buffer) => {
         bytes += chunk.length;
         if (bytes > maxBuffer) {
-          killTree(child);
+          this.kill(child);
           finish("MAX_BUFFER");
           return;
         }
@@ -225,10 +232,10 @@ export class NativeProviderAuthRecovery implements ProviderAuthRecoveryControlle
       child.stdout.on("data", capture(stdout));
       child.stderr.on("data", capture(stderr));
       child.once("error", () => finish("SPAWN_FAILED"));
-      child.once("exit", (code) => finish(code === 0 ? undefined : code ?? "NO_EXIT_CODE"));
+      child.once("close", (code) => finish(code === 0 ? undefined : code ?? "NO_EXIT_CODE"));
       child.stdin.end();
       timer = setTimeout(() => {
-        killTree(child);
+        this.kill(child);
         finish("TIMEOUT");
       }, timeoutMs);
       timer.unref?.();

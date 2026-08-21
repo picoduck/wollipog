@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import type { SessionConfig, SessionEventPayload } from "@wollipog/protocol";
@@ -13,6 +15,20 @@ import {
 } from "./codex-app-server.js";
 import type { DriverCallbacks, DriverOptions } from "./driver.js";
 import type { StagedPromptImages } from "./prompt-images.js";
+import type { AgentProcess } from "../spawn.js";
+
+function fakeAgentProcess(): AgentProcess {
+  return Object.assign(new EventEmitter(), {
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    pid: 12345,
+  }) as unknown as AgentProcess;
+}
+
+function nextTask(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
 
 /**
  * Unit tests for the app-server item -> SessionEventPayload mapping and the
@@ -56,6 +72,43 @@ test("app-server auth errors emit a secret-free auth signal", () => {
   (h.driver as any).emitDriverError(raw);
   assert.equal(h.authenticationFailures(), 1);
   assert.deepEqual(h.events, []);
+});
+
+test("Codex app-server accepts a final JSON-RPC response delivered after exit", async () => {
+  const child = fakeAgentProcess();
+  const writes: string[] = [];
+  const exits: Array<number | null> = [];
+  child.stdin.on("data", (chunk: Buffer) => writes.push(chunk.toString("utf8")));
+  const driver = new CodexAppServerDriver({
+    command: "codex",
+    args: [],
+    cwd: "/tmp/work",
+    env: {},
+    config: {},
+    context: { kind: "native" },
+  }, {
+    onEvent: () => {},
+    onStderr: () => {},
+    onExit: (code) => exits.push(code),
+  }, undefined, {
+    spawn: () => child,
+    kill: () => {},
+  });
+
+  const initialized = driver.initialize();
+  const request = JSON.parse(writes.join("").trim()) as { id: number };
+  let settled = false;
+  void initialized.then(() => { settled = true; }, () => { settled = true; });
+  child.emit("exit", 0, null);
+  await nextTask();
+  assert.equal(settled, false, "exit must not dispose a response still buffered in stdout");
+  assert.deepEqual(exits, []);
+  child.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: {} }) + "\n");
+  child.emit("close", 0, null);
+
+  await initialized;
+  assert.deepEqual(exits, [0]);
+  driver.dispose();
 });
 
 function activateSteer(

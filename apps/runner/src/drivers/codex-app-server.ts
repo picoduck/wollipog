@@ -174,14 +174,19 @@ export class CodexAppServerDriver implements Driver {
   private readonly steerClientIds = new Set<string>();
   private promptGeneration = 0;
   private promptBusy = false;
+  private readonly spawn: typeof spawnAgent;
+  private readonly kill: typeof killTree;
 
   constructor(
     private readonly opts: DriverOptions,
     private readonly cb: DriverCallbacks,
     private readonly imageStager: typeof stagePromptImages = stagePromptImages,
+    deps: Partial<{ spawn: typeof spawnAgent; kill: typeof killTree }> = {},
   ) {
     this.cwd = opts.cwd;
     this.config = opts.config;
+    this.spawn = deps.spawn ?? spawnAgent;
+    this.kill = deps.kill ?? killTree;
   }
 
   get pid(): number | undefined {
@@ -214,7 +219,7 @@ export class CodexAppServerDriver implements Driver {
   }
 
   async initialize(): Promise<void> {
-    const child = spawnAgent({
+    const child = this.spawn({
       command: this.opts.command,
       args: [...this.opts.args, "app-server"],
       cwd: this.cwd,
@@ -240,7 +245,9 @@ export class CodexAppServerDriver implements Driver {
         else this.cb.onStderr(s);
       }
     });
-    child.on("exit", (code) => {
+    // JSON-RPC stdout may still contain a response or final notification when
+    // `exit` fires. Tear the peer down only at the post-stdio `close` boundary.
+    child.on("close", (code) => {
       peer.dispose("codex app-server exited");
       // The persistent server is gone: drop our handles so a later prompt() fails fast
       // instead of parking a turn/start request that never settles.
@@ -468,7 +475,7 @@ export class CodexAppServerDriver implements Driver {
     this.settleTurn("cancelled");
     void this.cleanupStagedImages();
     this.peer?.dispose("disposed");
-    if (this.child) killTree(this.child);
+    if (this.child) this.kill(this.child);
     this.child = null;
   }
 
