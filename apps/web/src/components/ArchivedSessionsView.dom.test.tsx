@@ -27,6 +27,8 @@ for (const [name, value] of Object.entries({
   Event: domWindow.Event,
   MouseEvent: domWindow.MouseEvent,
   KeyboardEvent: domWindow.KeyboardEvent,
+  requestAnimationFrame: domWindow.requestAnimationFrame.bind(domWindow),
+  cancelAnimationFrame: domWindow.cancelAnimationFrame.bind(domWindow),
   React,
   IS_REACT_ACT_ENVIRONMENT: true,
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
@@ -145,15 +147,16 @@ function button(container: HTMLElement, label: string): HTMLButtonElement {
   return result;
 }
 
-test("empty archives expose labelled native filters and a screen-reader status", async () => {
+test("empty archives expose labelled choice filters and a screen-reader status", async () => {
   const fixture = await mount([]);
   assert.match(fixture.container.textContent ?? "", /No Archived Sessions/);
   assert.equal(fixture.container.querySelector('[role="status"]')?.textContent?.trim(), "0 Sessions");
-  const labels = [...fixture.container.querySelectorAll("label")].map((label) => label.textContent?.trim() ?? "");
-  for (const expected of ["Search Sessions and Transcripts", "Project", "Location", "Agent", "Archive State", "Lifecycle State"]) {
-    assert.ok(labels.some((label) => label.startsWith(expected)), `${expected} labels its control`);
+  assert.ok([...fixture.container.querySelectorAll("label")]
+    .some((label) => label.textContent?.trim().startsWith("Search Sessions and Transcripts")));
+  for (const expected of ["Project", "Location", "Agent", "Archive State", "Lifecycle State"]) {
+    assert.ok(fixture.container.querySelector(`button[aria-label^="${expected}:"]`), `${expected} labels its control`);
   }
-  assert.equal(fixture.container.querySelectorAll("select").length, 5);
+  assert.equal(fixture.container.querySelectorAll("select").length, 0);
   await fixture.unmount();
 });
 
@@ -161,9 +164,11 @@ test("large archives paginate, deep-link, filter, and accept live lifecycle upda
   const sessions = Array.from({ length: 55 }, (_, index) => session(index));
   const fixture = await mount(sessions);
   assert.equal(fixture.container.querySelectorAll("tbody tr").length, 50);
-  assert.match(fixture.container.textContent ?? "", /Archived.*Input Required/s,
+  assert.match(fixture.container.textContent ?? "", /Archived.*Idle/s,
     "archive and canonical lifecycle labels are both text-backed");
   assert.equal(fixture.container.querySelector('nav[aria-label="Archived Sessions Pagination"]')?.textContent?.includes("Page 1 of 2"), true);
+  assert.ok([...fixture.container.querySelectorAll("button")].some((candidate) => candidate.textContent?.trim() === "Stop"),
+    "ordinary nonterminal archived sessions retain the Stop action");
 
   const firstLink = fixture.container.querySelector<HTMLAnchorElement>('tbody a[href^="/sessions/"]');
   assert.ok(firstLink, "session titles are direct links");
@@ -174,16 +179,13 @@ test("large archives paginate, deep-link, filter, and accept live lifecycle upda
   assert.equal(fixture.container.querySelectorAll("tbody tr").length, 5);
   assert.match(fixture.container.textContent ?? "", /Page 2 of 2/);
 
-  const lifecycle = [...fixture.container.querySelectorAll("label")]
-    .find((label) => label.textContent?.startsWith("Lifecycle State"))
-    ?.querySelector("select");
+  const lifecycle = fixture.container.querySelector<HTMLButtonElement>('button[aria-label^="Lifecycle State:"]');
   assert.ok(lifecycle);
-  await act(async () => {
-    const setter = Object.getOwnPropertyDescriptor(domWindow.HTMLSelectElement.prototype, "value")?.set;
-    assert.ok(setter);
-    setter.call(lifecycle, "input_required");
-    lifecycle.dispatchEvent(new domWindow.Event("change", { bubbles: true }) as never);
-  });
+  await act(async () => { lifecycle.click(); });
+  const inputRequired = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+    .find((option) => option.textContent?.trim() === "Input Required");
+  assert.ok(inputRequired);
+  await act(async () => { inputRequired.click(); });
   assert.equal(fixture.container.querySelectorAll("tbody tr").length, 1);
   assert.match(fixture.container.textContent ?? "", /Input Required/);
 
@@ -208,5 +210,30 @@ test("unarchive uses the existing authorized mutation and removes the row from t
   await act(async () => { Simulate.click(button(fixture.container, "Unarchive")); await Promise.resolve(); });
   assert.deepEqual(calls, [[archived.id, false]]);
   assert.match(fixture.container.textContent ?? "", /No Archived Sessions/);
+  await fixture.unmount();
+});
+
+test("Stop Pending sessions expose an idempotent Retry Stop recovery action", async () => {
+  const calls: Array<[string, boolean]> = [];
+  const pending = session(2, {
+    status: "stopped",
+    archiveStatus: "stop_pending",
+  } as Partial<SessionView>);
+  const fixture = await mount([pending], {
+    setArchived: async (id, value) => {
+      calls.push([id, value]);
+      return pending;
+    },
+  });
+
+  assert.match(fixture.container.textContent ?? "", /Stop Pending/);
+  const retry = button(fixture.container, "Retry Stop");
+  assert.equal([...fixture.container.querySelectorAll("button")].some((candidate) => candidate.textContent?.trim() === "Stop"), false,
+    "pending recovery replaces the ordinary Stop action even for a terminal lifecycle");
+  await act(async () => { Simulate.click(retry); await Promise.resolve(); });
+
+  assert.deepEqual(calls, [[pending.id, true]], "retry preserves and reissues archive intent");
+  assert.equal(fixture.container.querySelector('.toast-region[aria-live="polite"] [role="status"]')?.textContent?.includes("Stop retry requested."), true,
+    "success is announced in the accessible live toast region");
   await fixture.unmount();
 });

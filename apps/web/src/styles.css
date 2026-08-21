@@ -10810,6 +10810,159 @@ body.shell-dock-dragging * {
 
 
 
+/* Archived Sessions ------------------------------------------------------- */
+.archive-view {
+  min-width: 0;
+  min-height: 100%;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow: auto;
+}
+.archive-toolbar {
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elev);
+  display: grid;
+  gap: 12px;
+}
+.archive-search {
+  display: grid;
+  gap: 6px;
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+  font-weight: 650;
+}
+.archive-search > div {
+  height: 38px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.archive-search:focus-within > div {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+.archive-search input {
+  min-width: 0;
+  width: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+}
+.archive-filters {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(130px, 1fr)) auto;
+  align-items: end;
+  gap: 10px;
+}
+.archive-filter {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+  color: var(--text-dim);
+  font-size: var(--text-xs);
+  font-weight: 650;
+}
+.archive-filter .ui-select,
+.archive-filter .ui-select-trigger {
+  min-width: 0;
+  width: 100%;
+}
+.archive-results-summary,
+.archive-loading {
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+}
+.archive-loading { display: flex; align-items: center; gap: 8px; }
+.archive-error { color: var(--danger-text); font-size: var(--text-sm); }
+.archive-table-wrap {
+  min-width: 0;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elev);
+}
+.archive-table {
+  width: 100%;
+  min-width: 980px;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+.archive-table th {
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--border-strong);
+  color: var(--text-dim);
+  text-align: left;
+  font-size: var(--text-2xs);
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.archive-table td {
+  padding: 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-dim);
+  vertical-align: middle;
+}
+.archive-table tbody tr:last-child td { border-bottom: 0; }
+.archive-table tbody tr:hover { background: var(--bg-elev-2); }
+.archive-session-cell { min-width: 220px; }
+.archive-session-cell > a {
+  display: block;
+  color: var(--text);
+  font-weight: 680;
+  text-decoration: none;
+}
+.archive-session-cell > a:hover { color: var(--accent); text-decoration: underline; }
+.archive-session-cell small {
+  margin-top: 4px;
+  max-width: 44ch;
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--text-faint);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.archive-state-badges,
+.archive-row-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.archive-badge {
+  padding: 3px 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-elev-2);
+  color: var(--text-dim);
+  font-size: var(--text-2xs);
+  font-weight: 700;
+}
+.archive-badge.is-archived { border-color: var(--control-outline); color: var(--text); }
+.archive-pagination {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+}
+@media (max-width: 1120px) {
+  .archive-filters { grid-template-columns: repeat(3, minmax(130px, 1fr)); }
+}
+@media (max-width: 760px) {
+  .archive-view { padding: 12px; }
+  .archive-filters { grid-template-columns: 1fr; }
+  .archive-filters .btn { min-height: 44px; }
+  .archive-pagination { justify-content: space-between; }
+}
+
 /* --- COLOUR SCHEMES, GENERATED --- */
 /* ------------------------------------------------------------------------------------------------
  * Colour schemes (§6.5).
@@ -11368,164 +11521,6 @@ body.shell-dock-dragging * {
   --diff-delete-bg: #f3d9dd;
   --modal-backdrop: rgba(40, 40, 34, 0.32);
   --primary-hover-inset: rgb(0 0 0 / 0.12);
-}
-
-/* Archived Sessions ------------------------------------------------------- */
-.archive-view {
-  min-width: 0;
-  min-height: 100%;
-  padding: 18px;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  overflow: auto;
-}
-.archive-toolbar {
-  padding: 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--bg-elev);
-  display: grid;
-  gap: 12px;
-}
-.archive-search {
-  display: grid;
-  gap: 6px;
-  color: var(--text-dim);
-  font-size: var(--text-sm);
-  font-weight: 650;
-}
-.archive-search > div {
-  height: 38px;
-  padding: 0 10px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-md);
-  background: var(--bg);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.archive-search:focus-within > div {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent);
-}
-.archive-search input {
-  min-width: 0;
-  width: 100%;
-  border: 0;
-  outline: 0;
-  background: transparent;
-  color: var(--text);
-}
-.archive-filters {
-  margin: 0;
-  padding: 0;
-  border: 0;
-  display: grid;
-  grid-template-columns: repeat(5, minmax(130px, 1fr)) auto;
-  align-items: end;
-  gap: 10px;
-}
-.archive-filters label {
-  min-width: 0;
-  display: grid;
-  gap: 5px;
-  color: var(--text-dim);
-  font-size: var(--text-xs);
-  font-weight: 650;
-}
-.archive-filters select {
-  min-width: 0;
-  width: 100%;
-  height: 34px;
-  padding: 0 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg);
-  color: var(--text);
-}
-.archive-results-summary,
-.archive-loading {
-  color: var(--text-dim);
-  font-size: var(--text-sm);
-}
-.archive-loading { display: flex; align-items: center; gap: 8px; }
-.archive-error { color: var(--danger-text); font-size: var(--text-sm); }
-.archive-table-wrap {
-  min-width: 0;
-  overflow-x: auto;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--bg-elev);
-}
-.archive-table {
-  width: 100%;
-  min-width: 980px;
-  border-collapse: collapse;
-  font-size: var(--text-sm);
-}
-.archive-table th {
-  padding: 9px 10px;
-  border-bottom: 1px solid var(--border-strong);
-  color: var(--text-dim);
-  text-align: left;
-  font-size: var(--text-2xs);
-  letter-spacing: .04em;
-  text-transform: uppercase;
-}
-.archive-table td {
-  padding: 10px;
-  border-bottom: 1px solid var(--border);
-  color: var(--text-dim);
-  vertical-align: middle;
-}
-.archive-table tbody tr:last-child td { border-bottom: 0; }
-.archive-table tbody tr:hover { background: var(--bg-elev-2); }
-.archive-session-cell { min-width: 220px; }
-.archive-session-cell > a {
-  display: block;
-  color: var(--text);
-  font-weight: 680;
-  text-decoration: none;
-}
-.archive-session-cell > a:hover { color: var(--accent); text-decoration: underline; }
-.archive-session-cell small {
-  margin-top: 4px;
-  max-width: 44ch;
-  display: -webkit-box;
-  overflow: hidden;
-  color: var(--text-faint);
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-}
-.archive-state-badges,
-.archive-row-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.archive-badge {
-  padding: 3px 7px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
-  background: var(--bg-elev-2);
-  color: var(--text-dim);
-  font-size: var(--text-2xs);
-  font-weight: 700;
-}
-.archive-badge.is-archived { border-color: var(--control-outline); color: var(--text); }
-.archive-pagination {
-  display: flex;
-  justify-content: flex-end;
-  align-items: center;
-  gap: 10px;
-  color: var(--text-dim);
-  font-size: var(--text-sm);
-}
-@media (max-width: 1120px) {
-  .archive-filters { grid-template-columns: repeat(3, minmax(130px, 1fr)); }
-}
-@media (max-width: 760px) {
-  .archive-view { padding: 12px; }
-  .archive-filters { grid-template-columns: 1fr; }
-  .archive-filters .btn { min-height: 44px; }
-  .archive-pagination { justify-content: space-between; }
 }
 
 /* ---------------------------------------------------------------------------

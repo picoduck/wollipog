@@ -17,8 +17,9 @@ import { viewPath } from "../navigation.js";
 import { removeFromInstanceKeySet, SESSION_PIN_KEY } from "../pins.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { useFeedback } from "./FeedbackProvider.js";
-import { SearchIcon } from "./Icons.js";
+import { InboxIcon, SearchIcon } from "./Icons.js";
 import { Empty, Spinner } from "./common.js";
+import { Select } from "./ui/ChoiceControls.js";
 
 const DEFAULT_FILTERS: ArchiveBrowserFilters = {
   query: "",
@@ -149,6 +150,8 @@ export function ArchivedSessionsView() {
     transcriptSessionIds: new Set(transcriptHits.keys()),
   }), [catalog, filters, locationNames, transcriptHits]);
   const pageResult = useMemo(() => pageArchiveSessions(filtered, page), [filtered, page]);
+  const hasActiveFilters = Boolean(filters.query) || filters.project !== "all" || filters.location !== "all" ||
+    filters.agent !== "all" || filters.lifecycle !== "all" || filters.archive !== "archived";
 
   useEffect(() => {
     if (pageResult.page !== page) setPage(pageResult.page);
@@ -179,6 +182,18 @@ export function ArchivedSessionsView() {
       showUndo("Session restored.", async () => updateSession(await api.setArchived(session.id, true)));
     } catch (cause) {
       showToast(`Could not unarchive session: ${(cause as Error).message}`, { tone: "error" });
+    } finally {
+      setBusy(session.id, false);
+    }
+  };
+
+  const retryStop = async (session: SessionView) => {
+    setBusy(session.id, true);
+    try {
+      updateSession(await api.setArchived(session.id, true));
+      showToast("Stop retry requested.");
+    } catch (cause) {
+      showToast(`Could not retry stopping session: ${(cause as Error).message}`, { tone: "error" });
     } finally {
       setBusy(session.id, false);
     }
@@ -246,27 +261,43 @@ export function ArchivedSessionsView() {
         </label>
         <fieldset className="archive-filters">
           <legend className="sr-only">Archived Session Filters</legend>
-          <label><span>Project</span><select value={filters.project} onChange={(event) => changeFilter("project", event.target.value)}>
-            <option value="all">All Projects</option>
-            {projectOptions.map((value) => <option key={value} value={value}>{value}</option>)}
-          </select></label>
-          <label><span>Location</span><select value={filters.location} onChange={(event) => changeFilter("location", event.target.value)}>
-            <option value="all">All Locations</option>
-            {locationOptions.map((value) => <option key={value} value={value}>{value}</option>)}
-          </select></label>
-          <label><span>Agent</span><select value={filters.agent} onChange={(event) => changeFilter("agent", event.target.value)}>
-            <option value="all">All Agents</option>
-            {agentOptions.map((value) => <option key={value} value={value}>{value}</option>)}
-          </select></label>
-          <label><span>Archive State</span><select value={filters.archive} onChange={(event) => changeFilter("archive", event.target.value as ArchiveBrowserFilters["archive"])}>
-            <option value="archived">Archived</option>
-            <option value="unarchived">Not Archived</option>
-            <option value="all">All Sessions</option>
-          </select></label>
-          <label><span>Lifecycle State</span><select value={filters.lifecycle} onChange={(event) => changeFilter("lifecycle", event.target.value as ArchiveBrowserFilters["lifecycle"])}>
-            <option value="all">All Lifecycle States</option>
-            {SESSION_LIFECYCLE_STATES.map((status) => <option key={status} value={status}>{canonicalLifecycleLabel(status)}</option>)}
-          </select></label>
+          <div className="archive-filter"><span className="field-label">Project</span><Select
+            label="Project"
+            value={filters.project}
+            options={[{ value: "all", label: "All Projects" }, ...projectOptions.map((value) => ({ value, label: value }))]}
+            onChange={(value) => changeFilter("project", value)}
+          /></div>
+          <div className="archive-filter"><span className="field-label">Location</span><Select
+            label="Location"
+            value={filters.location}
+            options={[{ value: "all", label: "All Locations" }, ...locationOptions.map((value) => ({ value, label: value }))]}
+            onChange={(value) => changeFilter("location", value)}
+          /></div>
+          <div className="archive-filter"><span className="field-label">Agent</span><Select
+            label="Agent"
+            value={filters.agent}
+            options={[{ value: "all", label: "All Agents" }, ...agentOptions.map((value) => ({ value, label: value }))]}
+            onChange={(value) => changeFilter("agent", value)}
+          /></div>
+          <div className="archive-filter"><span className="field-label">Archive State</span><Select<ArchiveBrowserFilters["archive"]>
+            label="Archive State"
+            value={filters.archive}
+            options={[
+              { value: "archived", label: "Archived" },
+              { value: "unarchived", label: "Not Archived" },
+              { value: "all", label: "All Sessions" },
+            ]}
+            onChange={(value) => changeFilter("archive", value)}
+          /></div>
+          <div className="archive-filter"><span className="field-label">Lifecycle State</span><Select<ArchiveBrowserFilters["lifecycle"]>
+            label="Lifecycle State"
+            value={filters.lifecycle}
+            options={[
+              { value: "all", label: "All Lifecycle States" },
+              ...SESSION_LIFECYCLE_STATES.map((status) => ({ value: status, label: canonicalLifecycleLabel(status) })),
+            ]}
+            onChange={(value) => changeFilter("lifecycle", value)}
+          /></div>
           <button type="button" className="btn ghost sm" onClick={() => { setFilters(DEFAULT_FILTERS); setPage(1); }}>
             Reset Filters
           </button>
@@ -283,12 +314,17 @@ export function ArchivedSessionsView() {
         <div className="archive-loading" role="status"><Spinner /> Loading Archived Sessions…</div>
       ) : pageResult.total === 0 ? (
         <Empty
-          title={filters.query || filters.project !== "all" || filters.location !== "all" || filters.agent !== "all" || filters.lifecycle !== "all" || filters.archive !== "archived"
+          title={hasActiveFilters
             ? "No Matching Sessions"
             : "No Archived Sessions"}
-          hint={filters.query || filters.project !== "all" || filters.location !== "all" || filters.agent !== "all" || filters.lifecycle !== "all" || filters.archive !== "archived"
+          hint={hasActiveFilters
             ? "Try clearing search text or changing a filter."
             : "Archived sessions will appear here with their lifecycle state and transcript."}
+          icon={<InboxIcon size={28} />}
+          action={<button type="button" className="btn primary" onClick={() => {
+            if (hasActiveFilters) { setFilters(DEFAULT_FILTERS); setPage(1); }
+            else navigate({ name: "inbox" });
+          }}>{hasActiveFilters ? "Reset Filters" : "Go to Inbox"}</button>}
         />
       ) : (
         <div className="archive-table-wrap">
@@ -325,7 +361,9 @@ export function ArchivedSessionsView() {
                     <td><div className="archive-row-actions">
                       <button type="button" className="btn ghost sm" disabled={busy} onClick={() => { loadSession(session); navigate(target); }}>Open</button>
                       {session.archived && <button type="button" className="btn ghost sm" disabled={busy} onClick={() => void unarchive(session)}>Unarchive</button>}
-                      {!isTerminal(session.status) && <button type="button" className="btn ghost sm" disabled={busy} onClick={() => void stop(session)}>Stop</button>}
+                      {stopPending
+                        ? <button type="button" className="btn ghost sm" disabled={busy} onClick={() => void retryStop(session)}>Retry Stop</button>
+                        : !isTerminal(session.status) && <button type="button" className="btn ghost sm" disabled={busy} onClick={() => void stop(session)}>Stop</button>}
                       {session.archived && <button type="button" className="btn danger sm" disabled={busy} onClick={() => void deleteSession(session)}>Delete</button>}
                     </div></td>
                   </tr>
