@@ -156,6 +156,16 @@ test("model probe lifecycle turns a child spawn error into a disposed RPC transp
   assert.deepEqual(reasons, ["codex app-server model probe spawn failed: spawn codex ENOENT"]);
 });
 
+test("model probe lifecycle preserves final stdout between exit and close", () => {
+  const child = new EventEmitter();
+  const reasons: string[] = [];
+  attachModelProbeLifecycle(child as AgentProcess, { dispose: (reason) => void reasons.push(reason) });
+  child.emit("exit", 0, null);
+  assert.deepEqual(reasons, [], "exit can precede buffered JSON-RPC stdout");
+  child.emit("close", 0, null);
+  assert.deepEqual(reasons, ["codex app-server model probe exited (0)"]);
+});
+
 test("app-server discovery caches per version/context, refreshes, and only falls back for method-not-found", async () => {
   const agent = {
     id: "codex-app",

@@ -84,6 +84,11 @@ export interface AcpEvents {
   onAcpSessionInfo?: (info: { title?: string | null; providerUpdatedAt?: string }) => void;
 }
 
+interface AcpClientDeps {
+  spawn: typeof spawnAgent;
+  kill: typeof killTree;
+}
+
 export interface AcpListedSession {
   sessionId: string;
   cwd: string;
@@ -113,6 +118,7 @@ export class AcpClient {
   private readonly filesystem: AcpFilesystemService;
   private readonly terminals: AcpTerminalService;
   private readonly terminalEventOutput = new Map<string, { cursor: number }>();
+  private readonly kill: typeof killTree;
 
   constructor(
     opts: {
@@ -128,6 +134,7 @@ export class AcpClient {
       cloudAgentLaunch?: boolean;
     },
     private readonly ev: AcpEvents,
+    deps: Partial<AcpClientDeps> = {},
   ) {
     this.commands = normalizeAcpCommands(opts.initialCommands);
     this.sessionContext = opts.sessionContext;
@@ -135,7 +142,8 @@ export class AcpClient {
     const context = opts.context ?? { kind: "native" as const };
     this.filesystem = new AcpFilesystemService(opts.cwd, context);
     this.terminals = new AcpTerminalService(this.filesystem, context, opts.isolation);
-    this.child = spawnAgent(opts);
+    this.kill = deps.kill ?? killTree;
+    this.child = (deps.spawn ?? spawnAgent)(opts);
     this.peer = new JsonRpcPeer(this.child.stdin, this.child.stdout, (err) =>
       this.ev.onStderr(`transport: ${err.message}`),
     );
@@ -146,7 +154,9 @@ export class AcpClient {
       const text = String(t).trim();
       if (text) this.ev.onStderr(text);
     });
-    this.child.on("exit", (code) => {
+    // Dispose JSON-RPC only after stdout has drained. `exit` can precede a final
+    // response/notification still buffered in the child pipe.
+    this.child.on("close", (code) => {
       this.transportClosed = true;
       this.terminals.dispose();
       this.peer.dispose("agent process exited");
@@ -155,7 +165,7 @@ export class AcpClient {
     });
     this.child.on("error", (err) => {
       this.ev.onStderr(`spawn error: ${err.message}`);
-      // On POSIX a spawn failure (ENOENT/EACCES) emits 'error' but never 'exit',
+      // On POSIX a spawn failure (ENOENT/EACCES) emits 'error' but never 'close',
       // so settle in-flight requests here or initialize()/prompt() would hang.
       if (this.disposed) return;
       this.disposed = true;
@@ -581,7 +591,7 @@ export class AcpClient {
     this.terminals.dispose();
     this.settlePendingPermissions();
     this.peer.dispose("client disposed");
-    killTree(this.child);
+    this.kill(this.child);
   }
 
   private settlePendingPermissions(): void {

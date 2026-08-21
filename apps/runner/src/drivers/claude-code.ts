@@ -510,7 +510,7 @@ export class ClaudeCodeDriver implements Driver {
         if (text) this.cb.onStderr(`Claude fork: ${text}`);
       });
       child.on("error", (err: Error) => fail(new Error(`Claude fork spawn error: ${err.message}`)));
-      child.on("exit", (code) => {
+      child.on("close", (code) => {
         if (settled) return;
         const trailing = stdout.takeTrailing();
         if (trailing.trim()) processLine(trailing);
@@ -675,7 +675,7 @@ export class ClaudeCodeDriver implements Driver {
 
       // A write to a dying process (mid-turn control_response, prompt delivery) does NOT throw
       // synchronously — Node emits an async 'error' (EPIPE/ERR_STREAM_DESTROYED) on the stream,
-      // which is FATAL to the whole runner process if unhandled. Swallow it; the child 'exit'
+      // which is FATAL to the whole runner process if unhandled. Swallow it; the child 'close'
       // handler owns the failure path. (Same guard jsonrpc.ts and git-ops.ts already carry.)
       child.stdin.on("error", () => {});
 
@@ -699,7 +699,9 @@ export class ClaudeCodeDriver implements Driver {
         finish("refusal");
       });
 
-      child.on("exit", (code) => {
+      // `close`, not `exit`: the final result frame may still be buffered in stdout
+      // after process exit. Close is the boundary after every stdio stream drains.
+      child.on("close", (code) => {
         this.child = null;
         // A naturally-exited process can no longer answer its asks — clear them so a stale
         // requestId is never "found" later and phantom-resolved into thin air.
@@ -910,7 +912,7 @@ export class ClaudeCodeDriver implements Driver {
       const turn = this.activePersistentTurn;
       if (turn && !turn.settled) this.handlePersistentFailure(`persistent claude spawn error: ${err.message}`, turn);
     });
-    child.on("exit", (code) => {
+    child.on("close", (code) => {
       if (generation !== this.persistentGeneration) return;
       // Mirror the one-shot ordering: a trailing, unterminated control_request belongs to a
       // process that is already dead and must not mint an approval card nobody can answer.
@@ -1378,7 +1380,7 @@ export class ClaudeCodeDriver implements Driver {
     const child = this.child;
     // Fence handlers even when the exit path already nulled child before flushing a trailing
     // frame. Otherwise a malformed trailing frame can schedule a retry, fall through the same
-    // exit handler, and schedule the identical prompt a second time before either microtask runs.
+    // close handler, and schedule the identical prompt a second time before either microtask runs.
     this.intentionalPersistentStop = true;
     this.child = null;
     this.persistentTransport = false;
@@ -1423,7 +1425,7 @@ export class ClaudeCodeDriver implements Driver {
     const clear = () => {
       if (settled) return;
       settled = true;
-      child.off("exit", clear);
+      child.off("close", clear);
       const timer = this.gracefulStopTimers.get(child);
       if (timer) this.deps.clearTimer(timer);
       this.gracefulStopTimers.delete(child);
@@ -1432,7 +1434,7 @@ export class ClaudeCodeDriver implements Driver {
       if (this.retiringPersistentChild === child) this.retiringPersistentChild = null;
       resolveStop();
     };
-    child.once("exit", clear);
+    child.once("close", clear);
     const force = () => {
       if (settled || forced) return;
       forced = true;
@@ -1663,7 +1665,7 @@ export class ClaudeCodeDriver implements Driver {
         // Interactive permission ask (--permission-prompt-tool stdio). Surface it to the
         // UI as a permission_request; resolvePermission answers with a control_response.
         // A dead process can't receive a response, so an ask surfacing after exit (the
-        // trailing-line flush runs AFTER the exit handler cleared pendingApprovals) must
+        // trailing-line flush runs AFTER the close handler cleared pendingApprovals) must
         // not mint a phantom card for a process that no longer exists.
         if (!this.child) return null;
         const req = msg.request;
