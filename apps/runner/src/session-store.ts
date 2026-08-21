@@ -59,6 +59,8 @@ import type {
 /** A session's persisted metadata (superset of the protocol SessionSnapshot with runner-only fields). */
 export interface SessionMeta {
   sessionId: string;
+  /** Opaque control-plane identity of the start command that created or replaced this runtime. */
+  controlPlaneLaunchId?: string;
   agentId: string | null;
   /** Discovered adapter/CLI version; telemetry dimension only, never an auth source. */
   agentVersion?: string;
@@ -2263,6 +2265,7 @@ export function metaToSnapshot(
   }
   return {
     id: m.sessionId,
+    controlPlaneLaunchId: m.controlPlaneLaunchId,
     workspaceId: m.workspaceId,
     agentId: m.agentId,
     title: m.title,

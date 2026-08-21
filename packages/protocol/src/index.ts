@@ -233,7 +233,9 @@
 // 83: runners explicitly classify provider background-work tracking. Providers without a
 //     lifecycle signal report `untracked` instead of letting an absent field imply safety.
 //     Structured continuation evidence carries bounded provider-neutral terminal summaries.
-export const PROTOCOL_VERSION = 83;
+// 84: replacement starts carry a control-plane launch identity that runners persist and echo in
+//     live status and reconnect snapshots, proving which runtime crossed a durable Stop fence.
+export const PROTOCOL_VERSION = 84;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
@@ -349,6 +351,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   subscriptionUsage: 80,
   managedBackgroundDelivery: 82,
   backgroundWorkTracking: 83,
+  correlatedRestartEcho: 84,
 } as const;
 
 /* ========================================================================== */
@@ -2509,6 +2512,8 @@ export interface SideChatView {
  */
 export interface SessionSnapshot {
   id: string;
+  /** Opaque CP launch identity echoed by runners that accepted a replacement start. */
+  controlPlaneLaunchId?: string;
   workspaceId: string | null;
   agentId: string | null;
   title: string;
@@ -3264,6 +3269,8 @@ export interface SessionStatusMessage {
   detail?: string;
   /** Set once when the runner creates an isolated worktree for the session. */
   worktreePath?: string | null;
+  /** Opaque identity of the accepted start_session command that owns this lifecycle. */
+  controlPlaneLaunchId?: string;
 }
 
 /** Hash-only binding for one per-session Claude policy-hook credential. The plaintext remains in a
@@ -3532,6 +3539,8 @@ export interface RegisterRejectedMessage {
 /** Everything the runner needs to launch an agent session locally. */
 export interface SessionLaunchSpec {
   sessionId: string;
+  /** Opaque identity used to prove that an ambiguous replacement start reached the runner. */
+  controlPlaneLaunchId?: string;
   workspaceId: string | null;
   workspacePath: string;
   agentId: string;

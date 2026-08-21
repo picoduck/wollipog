@@ -3507,6 +3507,24 @@ export class ControlPlaneDb {
         "ALTER TABLE session_tombstones ADD COLUMN prune_when_absent INTEGER NOT NULL DEFAULT 1 CHECK (prune_when_absent IN (0, 1))",
       );
     }
+    // User stops are durable commands: a socket write is not delivery proof, so retain the
+    // intent until runner inventory or status proves that the provider session is terminal/gone.
+    db.exec(
+      `CREATE TABLE IF NOT EXISTS session_stop_intents (
+         session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+         runner_id  TEXT NOT NULL,
+         created_at INTEGER NOT NULL,
+         restart_launch_id TEXT
+       )`,
+    );
+    const stopIntentColumns = db.prepare("PRAGMA table_info(session_stop_intents)")
+      .all() as unknown as Array<{ name: string }>;
+    if (!stopIntentColumns.some((column) => column.name === "restart_launch_id")) {
+      db.exec("ALTER TABLE session_stop_intents ADD COLUMN restart_launch_id TEXT");
+    }
+    db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_session_stop_intents_runner ON session_stop_intents(runner_id, created_at, session_id)",
+    );
     const controlPlane = new ControlPlaneDb(db, artifactBlobs, instanceId);
     try {
       controlPlane.recoverPendingArtifactBlobs();
@@ -9689,6 +9707,47 @@ export class ControlPlaneDb {
   }
 
   /* ---- Phase 2: tombstones so the runner store can't resurrect a UI-deleted session ---- */
+
+  addSessionStopIntent(sessionId: string, runnerId: string, now: number): void {
+    this.stmt(
+      `INSERT INTO session_stop_intents (session_id, runner_id, created_at) VALUES (?, ?, ?)
+       ON CONFLICT(session_id) DO UPDATE SET
+         runner_id=excluded.runner_id,
+         created_at=excluded.created_at,
+         restart_launch_id=NULL`,
+    ).run(sessionId, runnerId, now);
+  }
+
+  hasSessionStopIntent(sessionId: string): boolean {
+    return this.stmt("SELECT 1 FROM session_stop_intents WHERE session_id=?").get(sessionId) != null;
+  }
+
+  removeSessionStopIntent(sessionId: string): void {
+    this.stmt("DELETE FROM session_stop_intents WHERE session_id=?").run(sessionId);
+  }
+
+  setSessionStopRestartLaunchId(sessionId: string, launchId: string): void {
+    this.stmt("UPDATE session_stop_intents SET restart_launch_id=? WHERE session_id=?")
+      .run(launchId, sessionId);
+  }
+
+  clearSessionStopRestartLaunchId(sessionId: string): void {
+    this.stmt("UPDATE session_stop_intents SET restart_launch_id=NULL WHERE session_id=?")
+      .run(sessionId);
+  }
+
+  sessionStopRestartLaunchId(sessionId: string): string | null {
+    const row = this.stmt("SELECT restart_launch_id FROM session_stop_intents WHERE session_id=?")
+      .get(sessionId) as { restart_launch_id: string | null } | undefined;
+    return row?.restart_launch_id ?? null;
+  }
+
+  sessionStopIntentIds(runnerId: string): string[] {
+    const rows = this.stmt(
+      "SELECT session_id FROM session_stop_intents WHERE runner_id=? ORDER BY created_at, session_id",
+    ).all(runnerId) as unknown as Array<{ session_id: string }>;
+    return rows.map((row) => row.session_id);
+  }
 
   addTombstone(
     sessionId: string,

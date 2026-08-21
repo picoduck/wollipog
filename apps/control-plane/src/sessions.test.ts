@@ -5920,6 +5920,171 @@ test("stop sends stop_session and marks the session stopped", () => {
   assert.ok(hub.sessionChangedByIdCalls.includes(id));
 });
 
+test("stop persists an offline intent and reconnect reissues it without resurrecting the session", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  hub.online = false;
+  hub.sentToRunner.length = 0;
+  hub.sessionChangedByIdCalls.length = 0;
+
+  const res = svc.stop(id);
+
+  assert.equal(res.ok, true);
+  assert.equal(db.hasSessionStopIntent(id), true);
+  assert.equal(db.getSession(id)!.status, "stopped");
+  assert.equal(hub.sentOfType("stop_session").length, 1, "the best-effort initial send remains harmless offline");
+
+  hub.online = true;
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, status: "running" })]);
+  assert.equal(hub.sentOfType("stop_session").length, 2, "reconnect retries the durable intent");
+  assert.equal(db.getSession(id)!.status, "stopped");
+  assert.equal(db.hasSessionStopIntent(id), true);
+});
+
+test("half-open accepted-but-lost stop remains fenced until terminal runner evidence", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  hub.online = true;
+  hub.deliver = false;
+  hub.sentToRunner.length = 0;
+  hub.sessionChangedByIdCalls.length = 0;
+
+  const res = svc.stop(id);
+
+  assert.equal(res.ok, true);
+  assert.equal(hub.sentOfType("stop_session").length, 1, "delivery was attempted before the socket failed");
+  assert.equal(db.hasSessionStopIntent(id), true);
+
+  hub.deliver = true;
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, status: "running" })]);
+  assert.equal(db.getSession(id)!.status, "stopped", "a stale live snapshot cannot resurrect the stop");
+  assert.equal(hub.sentOfType("stop_session").length, 2);
+  svc.onSessionStatus(id, "stopped", undefined, undefined, RUNNER_ID);
+  assert.equal(db.hasSessionStopIntent(id), false);
+  assert.equal(db.getSession(id)!.status, "stopped");
+});
+
+test("legacy reconnect inventory retries a durable stop and clears it only when absent", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  svc.stop(id);
+  hub.sentToRunner.length = 0;
+
+  svc.reconcileRunnerSessions(RUNNER_ID, [id]);
+  assert.equal(hub.sentOfType("stop_session").length, 1);
+  assert.equal(db.hasSessionStopIntent(id), true);
+  assert.equal(db.getSession(id)!.status, "stopped");
+
+  svc.reconcileRunnerSessions(RUNNER_ID, []);
+  assert.equal(db.hasSessionStopIntent(id), false);
+});
+
+test("restart retains a durable stop until correlated runner evidence proves replacement", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  svc.stop(id);
+  assert.equal(db.hasSessionStopIntent(id), true);
+
+  hub.online = true;
+  hub.deliver = false;
+  assert.equal(svc.restart(id).ok, false);
+  assert.equal(db.hasSessionStopIntent(id), true, "a rejected restart cannot discard the stop fence");
+  assert.equal(db.sessionStopRestartLaunchId(id), null, "a definitive write failure cannot leave ambiguous proof");
+  assert.equal(db.getSession(id)!.status, "stopped", "a failed write cannot publish a starting lifecycle");
+  svc.onSessionStatus(id, "stopped", undefined, undefined, RUNNER_ID);
+  assert.equal(db.hasSessionStopIntent(id), false, "terminal evidence settles the ordinary Stop fence");
+
+  hub.deliver = true;
+  svc.stop(id);
+  assert.equal(svc.restart(id).ok, true);
+  const launchId = hub.sentOfType("start_session").at(-1)!.spec.controlPlaneLaunchId;
+  assert.ok(launchId);
+  assert.equal(db.hasSessionStopIntent(id), true, "an accepted socket write is not delivery proof");
+  assert.equal(db.getSession(id)!.status, "starting");
+
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, status: "running" })]);
+  assert.equal(db.hasSessionStopIntent(id), true);
+  assert.equal(db.getSession(id)!.status, "stopped", "the old runtime cannot cross the restart fence");
+  assert.ok(hub.sentOfType("stop_session").length >= 2);
+
+  svc.hydrateRunnerSessions(RUNNER_ID, [
+    snapshot({ id, status: "running", controlPlaneLaunchId: launchId }),
+  ]);
+  assert.equal(db.hasSessionStopIntent(id), false, "matching runner evidence admits the replacement");
+  assert.equal(db.getSession(id)!.status, "running");
+});
+
+test("a new explicit Stop invalidates an ambiguous restart proof", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  svc.stop(id);
+  assert.equal(svc.restart(id).ok, true);
+  const staleLaunchId = hub.sentOfType("start_session").at(-1)!.spec.controlPlaneLaunchId;
+  assert.ok(staleLaunchId);
+
+  svc.stop(id);
+  assert.equal(db.sessionStopRestartLaunchId(id), null);
+  svc.onSessionStatus(id, "starting", undefined, undefined, RUNNER_ID, staleLaunchId);
+  assert.equal(db.hasSessionStopIntent(id), true, "proof from before the new Stop is stale");
+  assert.equal(db.getSession(id)!.status, "stopped");
+  assert.equal(hub.sentOfType("stop_session").at(-1)?.sessionId, id);
+});
+
+test("late approval events remain historical but cannot cross a durable Stop fence", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  svc.stop(id);
+  hub.sentToRunner.length = 0;
+
+  svc.onSessionEvent(id, {
+    kind: "permission_request",
+    requestId: "late-permission",
+    title: "Run a dangerous tool?",
+    options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+  });
+
+  assert.equal(db.getSession(id)!.status, "stopped");
+  assert.equal(db.getSession(id)!.pendingApproval, null);
+  assert.equal(db.listEvents(id).at(-1)?.payload.kind, "permission_request");
+  assert.deepEqual(hub.sentOfType("stop_session"), [{ type: "stop_session", sessionId: id }]);
+});
+
+test("restart-after-stop requires correlated restart echo support before mutation or send", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  svc.stop(id);
+  hub.sentToRunner.length = 0;
+  hub.sessionChangedByIdCalls.length = 0;
+  db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION - 1);
+
+  const result = svc.restart(id);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, 409);
+  assert.match(result.error ?? "", /requires protocol v84.*Update and restart the runner/i);
+  assert.equal(db.sessionStopRestartLaunchId(id), null);
+  assert.equal(db.getSession(id)!.status, "stopped");
+  assert.equal(hub.sentOfType("start_session").length, 0);
+  assert.equal(hub.sessionChangedByIdCalls.length, 0);
+});
+
+test("a stale terminal update cannot clear a pending correlated restart fence", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  svc.stop(id);
+  assert.equal(svc.restart(id).ok, true);
+  const launchId = hub.sentOfType("start_session").at(-1)!.spec.controlPlaneLaunchId;
+  assert.ok(launchId);
+
+  svc.onSessionStatus(id, "stopped", undefined, undefined, RUNNER_ID);
+  assert.equal(db.hasSessionStopIntent(id), true);
+  assert.equal(db.getSession(id)!.status, "stopped");
+
+  svc.onSessionStatus(id, "starting", undefined, undefined, RUNNER_ID, launchId);
+  assert.equal(db.hasSessionStopIntent(id), false);
+  assert.equal(db.getSession(id)!.status, "starting");
+});
+
 test("stop fails 404 for an unknown session", () => {
   const { svc } = makeHarness();
   const res = svc.stop("nope");

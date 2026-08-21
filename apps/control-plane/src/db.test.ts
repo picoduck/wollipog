@@ -675,6 +675,33 @@ test("legacy session tombstones migrate to the durable pruning policy", () => {
   }
 });
 
+test("session stop intents survive control-plane restart and cascade with their session", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-session-stop-intent-"));
+  const path = join(root, "control-plane.db");
+  try {
+    const initial = ControlPlaneDb.open(path);
+    initial.registerRunner(meta(), 500);
+    initial.createSession(newSession());
+    initial.addSessionStopIntent("sess-1", "runner-1", 1_100);
+    initial.setSessionStopRestartLaunchId("sess-1", "launch-proof-1");
+    initial.addSessionStopIntent("sess-1", "runner-1", 1_200);
+    assert.equal(initial.sessionStopRestartLaunchId("sess-1"), null);
+    initial.setSessionStopRestartLaunchId("sess-1", "launch-proof-2");
+    assert.deepEqual(initial.sessionStopIntentIds("runner-1"), ["sess-1"]);
+    initial.close();
+
+    const reopened = ControlPlaneDb.open(path);
+    assert.equal(reopened.hasSessionStopIntent("sess-1"), true);
+    assert.equal(reopened.sessionStopRestartLaunchId("sess-1"), "launch-proof-2");
+    assert.deepEqual(reopened.sessionStopIntentIds("runner-1"), ["sess-1"]);
+    reopened.deleteSession("sess-1");
+    assert.equal(reopened.hasSessionStopIntent("sess-1"), false);
+    reopened.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 function localOwner(): HumanPrincipal {
   return {
     kind: "human",

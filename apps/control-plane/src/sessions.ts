@@ -3563,11 +3563,14 @@ export class SessionsService {
   stop(sessionId: string): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
-    this.hub.sendToRunner(session.runnerId, { type: "stop_session", sessionId });
     const now = Date.now();
+    // Persist before touching the socket: ws.send acceptance is not delivery proof on a half-open
+    // connection. Reconnect inventory/status reconciliation owns retry and final clearance.
+    this.db.addSessionStopIntent(sessionId, session.runnerId, now);
     this.promptOutbox.stopSession(sessionId, now);
     this.abortPolicyHookApprovals(session, now, "session-stopped");
     this.db.updateSessionStatus(sessionId, "stopped", now);
+    this.hub.sendToRunner(session.runnerId, { type: "stop_session", sessionId });
     this.hub.sessionChangedById(sessionId);
     return ok(this.db.getSession(sessionId)!);
   }
@@ -3653,12 +3656,23 @@ export class SessionsService {
       (session.workspaceId ? this.db.getWorkspacePath(session.runnerId, session.workspaceId) : null);
     if (!workspacePath) return fail("session has no resolvable workspace directory to restart from", 400);
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
+    const hasStopIntent = this.db.hasSessionStopIntent(sessionId);
+    if (hasStopIntent) {
+      const capabilityFailure = this.capabilityFailure(
+        session.runnerId,
+        "correlatedRestartEcho",
+        "Restarting a stopped session",
+      );
+      if (capabilityFailure) return capabilityFailure;
+    }
 
     this.reviewQueueNoRepository.delete(sessionId);
 
     const now = Date.now();
+    const restartLaunchId = hasStopIntent ? randomUUID() : undefined;
     const spec: SessionLaunchSpec = {
       sessionId,
+      controlPlaneLaunchId: restartLaunchId,
       workspaceId: session.workspaceId,
       workspacePath,
       agentId: session.agentId,
@@ -3687,12 +3701,19 @@ export class SessionsService {
       },
       acpSessionContext: this.db.getAcpSessionContext(sessionId),
     };
+    // Persist replacement identity before the ambiguous socket write. A false send leaves the
+    // Stop fence and stopped lifecycle intact; a true/half-open send remains fenced until the
+    // runner echoes this exact identity in status or snapshot evidence.
+    if (restartLaunchId) this.db.setSessionStopRestartLaunchId(sessionId, restartLaunchId);
+    if (!this.hub.sendToRunner(session.runnerId, { type: "start_session", spec })) {
+      if (restartLaunchId) this.db.clearSessionStopRestartLaunchId(sessionId);
+      return fail("runner is offline", 409);
+    }
     this.abortPolicyHookApprovals(session, now, "session-restarted");
     this.db.setPendingApproval(sessionId, null);
     this.db.updateSessionStatus(sessionId, "starting", now);
     // The runner replaces any existing process for this sessionId (no separate
     // stop_session, which would emit a terminal 'stopped' that blocks the restart).
-    this.hub.sendToRunner(session.runnerId, { type: "start_session", spec });
     this.hub.sessionChangedById(sessionId);
     this.log.info(`session restarted ${sessionId}`);
     return ok(this.db.getSession(sessionId)!);
@@ -5451,6 +5472,7 @@ export class SessionsService {
     detail?: string,
     worktreePath?: string | null,
     fromRunnerId?: string,
+    controlPlaneLaunchId?: string,
   ): void {
     const session = this.db.getSession(sessionId);
     if (!session) return;
@@ -5458,10 +5480,28 @@ export class SessionsService {
       this.log.warn(`ignoring session_status for ${sessionId} from ${fromRunnerId} (owned by ${session.runnerId})`);
       return;
     }
+    let admittedReplacement = false;
+    if (this.db.hasSessionStopIntent(sessionId)) {
+      const restartLaunchId = this.db.sessionStopRestartLaunchId(sessionId);
+      if (restartLaunchId && controlPlaneLaunchId === restartLaunchId) {
+        this.db.removeSessionStopIntent(sessionId);
+        admittedReplacement = true;
+      } else if (!restartLaunchId && isTerminal(status)) {
+        this.db.removeSessionStopIntent(sessionId);
+      } else {
+        // A late/nonterminal status is evidence that the accepted stop frame did not take.
+        this.db.updateSessionStatus(sessionId, "stopped", Date.now());
+        if (!isTerminal(status)) {
+          this.hub.sendToRunner(session.runnerId, { type: "stop_session", sessionId });
+        }
+        this.hub.sessionChangedById(sessionId);
+        return;
+      }
+    }
     if (worktreePath !== undefined) this.db.setWorktreePath(sessionId, worktreePath);
     // A control-plane terminal decision must not be resurrected by a stale or
     // in-flight runner status event.
-    if (isTerminal(session.status)) {
+    if (isTerminal(session.status) && !admittedReplacement) {
       this.hub.sessionChangedById(sessionId);
       return;
     }
@@ -5715,6 +5755,15 @@ export class SessionsService {
         payload.kind === "background_continuation_delivered") {
       this.hub.sessionChangedById(sessionId);
     }
+    // A durable Stop fences lifecycle side effects as well as status/snapshot resurrection.
+    // Preserve the authoritative history event, but never let a late permission/question/policy
+    // event recreate an approval card or move the control-plane session out of stopped.
+    if (this.db.hasSessionStopIntent(sessionId)) {
+      this.db.updateSessionStatus(sessionId, "stopped", now);
+      this.hub.sendToRunner(session.runnerId, { type: "stop_session", sessionId });
+      this.hub.sessionChangedById(sessionId);
+      return;
+    }
     if (payload.kind === "policy_transport") {
       this.recordPolicyTransportAudit(session, payload, now);
     }
@@ -5967,6 +6016,14 @@ export class SessionsService {
     const liveSet = new Set(live);
     for (const s of this.db.listSessions({ includeArchived: true })) {
       if (s.runnerId !== runnerId) continue;
+      if (this.db.hasSessionStopIntent(s.id)) {
+        if (liveSet.has(s.id)) {
+          this.hub.sendToRunner(runnerId, { type: "stop_session", sessionId: s.id });
+        } else {
+          this.db.removeSessionStopIntent(s.id);
+        }
+        continue;
+      }
       if (liveSet.has(s.id) && s.status === "stopped") {
         this.db.updateSessionStatus(s.id, "idle", now);
         // Same flap-recovery rule as hydrateRunnerSessions: re-derive a policy pause the
@@ -5997,12 +6054,30 @@ export class SessionsService {
   hydrateRunnerSessions(runnerId: string, snapshots: SessionSnapshot[]): void {
     const now = Date.now();
     const byId = new Set(snapshots.map((s) => s.id));
+    const stopIntentIds = new Set(this.db.sessionStopIntentIds(runnerId));
     for (const snap of snapshots) {
       // A session the user deleted must not be recreated — re-issue the delete to the (now online)
       // runner and skip it. The tombstone is pruned below once the box stops reporting the id.
       if (this.db.isTombstoned(snap.id)) {
         this.hub.sendToRunner(runnerId, { type: "delete_session", sessionId: snap.id });
         continue;
+      }
+      if (stopIntentIds.has(snap.id)) {
+        const restartLaunchId = this.db.sessionStopRestartLaunchId(snap.id);
+        if (restartLaunchId && snap.controlPlaneLaunchId === restartLaunchId) {
+          this.db.removeSessionStopIntent(snap.id);
+        } else if (!restartLaunchId && isTerminal(snap.status)) {
+          this.db.removeSessionStopIntent(snap.id);
+        } else {
+          // Fence runner-authoritative hydration until the durable stop is re-applied. In
+          // particular, never replace the CP's stopped status with this still-live snapshot.
+          this.db.updateSessionStatus(snap.id, "stopped", now);
+          if (!isTerminal(snap.status)) {
+            this.hub.sendToRunner(runnerId, { type: "stop_session", sessionId: snap.id });
+          }
+          this.hub.sessionChangedById(snap.id);
+          continue;
+        }
       }
       const existing = this.db.getSession(snap.id);
       if (!existing && snap.agentId === CONDUCTOR_AGENT_ID) {
@@ -6047,6 +6122,7 @@ export class SessionsService {
     }
     for (const s of this.db.listSessions({ includeArchived: true })) {
       if (s.runnerId === runnerId && !byId.has(s.id)) {
+        if (stopIntentIds.has(s.id)) this.db.removeSessionStopIntent(s.id);
         const hadOpenHookApproval = this.db.listOpenPolicyHookApprovals(s.id).length > 0;
         if (hadOpenHookApproval) {
           this.abortPolicyHookApprovals(s, now, "provider-session-absent");
@@ -6089,6 +6165,21 @@ export class SessionsService {
   applySessionRuntimeUpdate(runnerId: string, snapshot: SessionSnapshot): void {
     const existing = this.db.getSession(snapshot.id);
     if (!existing || existing.runnerId !== runnerId || this.db.isTombstoned(snapshot.id)) return;
+    if (this.db.hasSessionStopIntent(snapshot.id)) {
+      const restartLaunchId = this.db.sessionStopRestartLaunchId(snapshot.id);
+      if (restartLaunchId && snapshot.controlPlaneLaunchId === restartLaunchId) {
+        this.db.removeSessionStopIntent(snapshot.id);
+      } else if (!restartLaunchId && isTerminal(snapshot.status)) {
+        this.db.removeSessionStopIntent(snapshot.id);
+      } else {
+        this.db.updateSessionStatus(snapshot.id, "stopped", Date.now());
+        if (!isTerminal(snapshot.status)) {
+          this.hub.sendToRunner(runnerId, { type: "stop_session", sessionId: snapshot.id });
+        }
+        this.hub.sessionChangedById(snapshot.id);
+        return;
+      }
+    }
     const now = Date.now();
     const runtimeSnapshot = snapshot.costUsd < existing.costUsd
       ? { ...snapshot, costUsd: existing.costUsd }
