@@ -13,8 +13,9 @@
   },
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13"
   },
+  "packageManager": "pnpm@11.9.0",
   "scripts": {
     "dev": "concurrently -k -n cp,web -c blue,green \"pnpm --filter @wollipog/control-plane dev\" \"pnpm --filter @wollipog/web dev\"",
     "predev:all": "pnpm --filter @wollipog/web build",
