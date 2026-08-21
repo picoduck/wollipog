@@ -504,7 +504,7 @@ test("ranking is exact then prefix then boundary then substring then fuzzy", () 
 
 test("description-only fuzzy matches do not capture literal slash text", () => {
   const commands = registry([], { planSupported: true, canStopTurn: false });
-  assert.deepEqual(rankComposerCommands(commands, "gm"), []);
+  assert.deepEqual(rankComposerCommands(commands, "no"), []);
 });
 
 test("available commands rank ahead of unavailable commands at the same match score", () => {

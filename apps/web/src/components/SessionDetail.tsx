@@ -1657,7 +1657,7 @@ function SessionDetailLoaded({
       const args = invocation.arguments.trim().toLowerCase();
       const validArguments = invocation.command.name === "plan"
         ? !args || args === "on" || args === "off"
-        : invocation.command.name === "stop"
+        : invocation.command.name === "stop" || invocation.command.name === "rename-session"
           ? !args
           : true;
       if (!validArguments) invocation = { kind: "plaintext", text: outgoing };
@@ -1679,10 +1679,6 @@ function SessionDetailLoaded({
           return;
         }
         if (invocation.command.name === "rename-session") {
-          if (invocation.arguments.trim()) {
-            setError("/rename-session does not accept arguments.");
-            return;
-          }
           try {
             await api.retitleSession(sessionId);
             clearAppCommandText();

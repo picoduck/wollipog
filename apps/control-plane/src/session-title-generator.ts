@@ -3,6 +3,7 @@ import type { SessionEvent } from "@wollipog/protocol";
 export const SESSION_TITLE_MAX_LENGTH = 120;
 export const TITLE_CONTEXT_MAX_MESSAGES = 9;
 export const TITLE_CONTEXT_MAX_CHARS = 12_000;
+export const TITLE_CONTEXT_REDACTION_MAX_CHARS = 64 * 1_024;
 
 export interface SessionTitleMessage {
   role: "user" | "assistant";
@@ -45,10 +46,16 @@ export function boundedSessionTitleContext(
   const messages = events.flatMap((event): SessionTitleMessage[] => {
     const payload = event.payload;
     if (payload.kind === "user_message" && payload.final !== false && !payload.commandInvocation) {
-      return [{ role: "user", text: transformText(payload.text).trim() }];
+      return [{
+        role: "user",
+        text: transformText(payload.text.slice(0, TITLE_CONTEXT_REDACTION_MAX_CHARS)).trim(),
+      }];
     }
     if (payload.kind === "agent_message" && payload.final === true && !payload.parentToolUseId) {
-      return [{ role: "assistant", text: transformText(payload.text).trim() }];
+      return [{
+        role: "assistant",
+        text: transformText(payload.text.slice(0, TITLE_CONTEXT_REDACTION_MAX_CHARS)).trim(),
+      }];
     }
     return [];
   }).filter((message) => message.text);

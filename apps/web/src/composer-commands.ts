@@ -458,9 +458,10 @@ export function rankComposerCommands(
   const normalizedQuery = query.trim().toLowerCase();
   const ranked = commands.flatMap((command): RankedComposerCommand[] => {
     if (!normalizedQuery) return [{ command, matchKind: "none", score: MATCH_ORDER.none * 100 }];
+    const allowCommandFuzzy = command.source === "provider";
     const fields = [
-      { value: command.invocationAlias, allowFuzzy: true },
-      { value: command.name, allowFuzzy: true },
+      { value: command.invocationAlias, allowFuzzy: allowCommandFuzzy },
+      { value: command.name, allowFuzzy: allowCommandFuzzy },
       { value: command.description, allowFuzzy: false },
       { value: command.argumentHint, allowFuzzy: false },
     ].filter((field): field is { value: string; allowFuzzy: boolean } => Boolean(field.value));

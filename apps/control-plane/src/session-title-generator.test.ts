@@ -5,6 +5,7 @@ import {
   boundedSessionTitleContext,
   normalizeGeneratedSessionTitle,
   sessionTitleGeneratorFromEnv,
+  TITLE_CONTEXT_REDACTION_MAX_CHARS,
 } from "./session-title-generator.js";
 
 function event(seq: number, payload: SessionEvent["payload"]): SessionEvent {
@@ -50,6 +51,21 @@ test("title context transforms sensitive text before applying its character boun
   });
   assert.equal(transformedInput, secret, "the redactor receives the complete value");
   assert.deepEqual(context, [{ role: "user", text: "token=[REDACTED]" }]);
+});
+
+test("title context bounds each raw message before synchronous redaction", () => {
+  let transformedLength = 0;
+  boundedSessionTitleContext([
+    event(1, {
+      kind: "agent_message",
+      text: "x".repeat(TITLE_CONTEXT_REDACTION_MAX_CHARS * 2),
+      final: true,
+    }),
+  ], (text) => {
+    transformedLength = text.length;
+    return text;
+  });
+  assert.equal(transformedLength, TITLE_CONTEXT_REDACTION_MAX_CHARS);
 });
 
 test("title generation is opt-in and requires an explicit endpoint and model", () => {
