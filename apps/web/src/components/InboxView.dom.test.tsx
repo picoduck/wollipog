@@ -149,7 +149,7 @@ function rowTitles(container: HTMLDivElement): string[] {
   return [...container.querySelectorAll(".inbox-row-title")].map((row) => row.textContent ?? "");
 }
 
-test("InboxView holds live activity order through mouse and touch, then reconciles canonically", async () => {
+test("InboxView keeps mobile browsing order stable before and through a touch", async () => {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
@@ -195,7 +195,8 @@ test("InboxView holds live activity order through mouse and touch, then reconcil
 
   await act(async () => { pointer("pointerout", 1, "mouse"); });
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 550)); });
-  assert.deepEqual(rowTitles(container), ["Session C", "Session B"]);
+  assert.deepEqual(rowTitles(container), ["Session B", "Session C"],
+    "a phone has no pre-contact hover signal, so visual targeting must remain safe between taps");
   const selectedAfterReorder = [...container.querySelectorAll<HTMLElement>(".inbox-row-shell")]
     .find((row) => row.getAttribute("aria-selected") === "true");
   assert.match(selectedAfterReorder?.textContent ?? "", /Session B/);
@@ -205,7 +206,7 @@ test("InboxView holds live activity order through mouse and touch, then reconcil
     pointer("pointerdown", 7, "touch");
     socket.push({ type: "session_upsert", session: session("B", 60, { preview: "Tap target updated." }) });
   });
-  assert.deepEqual(rowTitles(container), ["Session C", "Session B"]);
+  assert.deepEqual(rowTitles(container), ["Session B", "Session C"]);
   const visibleTarget = [...container.querySelectorAll<HTMLButtonElement>(".inbox-row")]
     .find((row) => row.textContent?.includes("Session B"));
   assert.ok(visibleTarget);

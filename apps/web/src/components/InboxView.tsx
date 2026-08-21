@@ -132,6 +132,8 @@ export function InboxView({
   } = useStoreActions();
   const instanceScope = useInstanceScope();
   const isMobile = useIsMobile();
+  const mobileOrderLeaseRef = useRef(false);
+  mobileOrderLeaseRef.current = isMobile && expandedSessionId === null;
   const [seen, setSeen] = useState(() => loadSeen(instanceScope));
   const [pinnedProjects, setPinnedProjects] = useState(() => loadKeySet(PROJECT_PIN_KEY, instanceScope));
   const [pinnedSessions, setPinnedSessions] = useState(() => loadKeySet(SESSION_PIN_KEY, instanceScope));
@@ -367,18 +369,23 @@ export function InboxView({
     structuralOrderKeyRef.current = structuralOrderKey;
     if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
     settleTimerRef.current = null;
-    setHeldOrder(targetPointerIdsRef.current.size > 0 || activePointerIdsRef.current.size > 0
+    setHeldOrder((isMobile && expandedSessionIdRef.current === null)
+      || targetPointerIdsRef.current.size > 0 || activePointerIdsRef.current.size > 0
       ? liveIdsRef.current
       : null);
-  }, [structuralOrderKey]);
+  }, [isMobile, structuralOrderKey]);
 
   useLayoutEffect(() => {
     setHeldOrder((current) => {
-      if (!current) return current;
+      // Touch has no hover phase: if rows keep following canonical recency until pointerdown, a
+      // session can move after the user has visually targeted it but before their finger lands.
+      // Keep the collapsed phone Inbox stable for the whole browsing interval. Deliberate group,
+      // filter, and pin changes still replace the lease through structuralOrderKey above.
+      if (!current) return isMobile && expandedSessionIdRef.current === null ? liveIds : current;
       const extended = extendInboxHeldOrder(current, liveIds);
       return extended.length === current.length ? current : extended;
     });
-  }, [liveIds]);
+  }, [expandedSessionId, isMobile, liveIds]);
 
   const entries = useMemo(() => {
     if (!heldOrder) return liveEntries;
@@ -419,6 +426,10 @@ export function InboxView({
   const scheduleOrderRelease = useCallback(() => {
     if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
     settleTimerRef.current = window.setTimeout(() => {
+      if (mobileOrderLeaseRef.current) {
+        settleTimerRef.current = null;
+        return;
+      }
       if (targetPointerIdsRef.current.size > 0 || activePointerIdsRef.current.size > 0) {
         settleTimerRef.current = null;
         return;
