@@ -1,3 +1,18 @@
+import { archiveRequiresStop, type SessionView } from "@wollipog/protocol";
+
+type ArchiveActionSession = Pick<SessionView, "archiveStatus" | "archived" | "status">;
+
+export function sessionArchiveRequiresStop(
+  session: Pick<ArchiveActionSession, "archiveStatus" | "status">,
+): boolean {
+  return session.archiveStatus === "stop_pending" || archiveRequiresStop(session.status);
+}
+
+export function sessionArchiveActionLabel(session: ArchiveActionSession): "Archive" | "Archive and Stop" | "Unarchive" {
+  if (session.archived) return "Unarchive";
+  return sessionArchiveRequiresStop(session) ? "Archive and Stop" : "Archive";
+}
+
 export type SetSessionArchived = (sessionId: string, archived: boolean) => Promise<unknown>;
 
 /** Apply an idempotent archive state to every exact id and report every rejected response. */

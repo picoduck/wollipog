@@ -6,7 +6,11 @@ import {
   type RunnerView,
 } from "@wollipog/protocol";
 import type { InboxSplit } from "../inbox.js";
-import { archiveSessionsWithCompensation, setArchivedForSessions } from "../archive-actions.js";
+import {
+  archiveSessionsWithCompensation,
+  sessionArchiveRequiresStop,
+  setArchivedForSessions,
+} from "../archive-actions.js";
 import { archiveProjectWithFeedback } from "../project-actions.js";
 import { useApi } from "../api-context.js";
 import { useFeedback } from "./FeedbackProvider.js";
@@ -58,6 +62,7 @@ export function ProjectSplitMenu({
   if (!durableProject && !legacyLocation) return null;
   const entityLabel = durableProject ? "Project" : "Workspace";
   const actionsLabel = `${entityLabel} Actions for ${split.name}`;
+  const archiveStopsRuntime = split.sessions.some(sessionArchiveRequiresStop);
   const runnerId = durableLocation?.runnerId ?? legacyLocation?.runnerId ?? null;
   const workspaceId = durableLocation?.workspaceId ?? legacyLocation?.workspaceId ?? null;
   const canManageProject = durableProject?.canManage !== false;
@@ -160,9 +165,12 @@ export function ProjectSplitMenu({
     const sessionCount = durableProject ? split.count : sessionIds.length;
     if (sessionCount === 0) return;
     const accepted = await confirm({
-      title: `Archive ${sessionCount} Session${sessionCount === 1 ? "" : "s"}?`,
-      message: `Move every session in “${split.name}” to Archived?`,
-      confirmLabel: "Archive Sessions",
+      title: `${archiveStopsRuntime ? "Archive and stop" : "Archive"} ${sessionCount} session${sessionCount === 1 ? "" : "s"}?`,
+      message: archiveStopsRuntime
+        ? `Sessions will move to Archived Sessions after their runtimes stop. Queued work will be canceled and runtime capacity will be released.${durableProject ? " The server applies the same stop-before-archive rule to Project sessions that are not currently loaded." : ""} To keep work running outside the Inbox, use Snooze instead.`
+        : `Move every session in “${split.name}” to Archived. The server will still stop any session that can hold runtime capacity before archiving it.`,
+      confirmLabel: archiveStopsRuntime ? "Archive and Stop" : "Archive Sessions",
+      ...(archiveStopsRuntime ? { tone: "danger" as const } : {}),
     });
     if (!accepted) return;
     try {
@@ -334,7 +342,7 @@ export function ProjectSplitMenu({
               title={archiveUnavailableReason ?? undefined}
               onClick={() => void archiveAll()}
             >
-              Archive All Sessions
+              {archiveStopsRuntime ? "Archive and Stop All Sessions" : "Archive All Sessions"}
             </button>
             {hasActionStatus && (
               <div id={statusId} className="inbox-project-location-status" role="note">

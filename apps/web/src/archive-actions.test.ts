@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { archiveSessionsWithCompensation, setArchivedForSessions } from "./archive-actions.js";
+import type { SessionStatus } from "@wollipog/protocol";
+import {
+  archiveSessionsWithCompensation,
+  sessionArchiveActionLabel,
+  sessionArchiveRequiresStop,
+  setArchivedForSessions,
+} from "./archive-actions.js";
 
 test("bulk archive applies every id and needs no compensation on success", async () => {
   const calls: Array<[string, boolean]> = [];
@@ -31,4 +37,34 @@ test("idempotent restore attempts every id and returns the exact failure count",
   });
   assert.equal(failures, 2);
   assert.deepEqual(attempted, ["a", "b", "c"]);
+});
+
+test("archive action labels disclose when archiving will stop runtime work", () => {
+  const statuses: SessionStatus[] = [
+    "queued",
+    "starting",
+    "running",
+    "input_required",
+    "idle",
+    "completed",
+    "failed",
+    "stopped",
+  ];
+  for (const status of statuses) {
+    const requiresStop = !["completed", "failed", "stopped"].includes(status);
+    const session = { archived: false, status };
+    assert.equal(sessionArchiveRequiresStop(session), requiresStop, status);
+    assert.equal(sessionArchiveActionLabel(session), requiresStop ? "Archive and Stop" : "Archive", status);
+  }
+});
+
+test("stop-pending and archived sessions retain truthful action labels", () => {
+  assert.equal(
+    sessionArchiveActionLabel({ archived: false, status: "stopped", archiveStatus: "stop_pending" }),
+    "Archive and Stop",
+  );
+  assert.equal(
+    sessionArchiveActionLabel({ archived: true, status: "running", archiveStatus: "stop_pending" }),
+    "Unarchive",
+  );
 });

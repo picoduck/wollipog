@@ -9,6 +9,7 @@ import {
   type TranscriptShareView,
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
+import { sessionArchiveActionLabel } from "../archive-actions.js";
 import { titleCaseLabel } from "../format.js";
 import { removeFromInstanceKeySet, SESSION_PIN_KEY } from "../pins.js";
 import { discardComposerDraft } from "../composer-drafts.js";
@@ -288,7 +289,7 @@ export function SessionHeader({
                       });
                     }}
                   >
-                    {session.archived ? "Unarchive" : "Archive"}
+                    {sessionArchiveActionLabel(session)}
                   </button>
                   <div className="menu-label" id="transcript-export-warning" role="presentation">Operational Transcript</div>
                   <div className="menu-caution" id="transcript-export-caution" role="presentation">
