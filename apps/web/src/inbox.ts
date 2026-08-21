@@ -402,7 +402,10 @@ export function repairInboxSelectionForHeldOrder(
   const nextSet = new Set(nextIds);
   const survivors = heldIds.filter((id) => nextSet.has(id));
   if (survivors.length === 0) return nextIds[0]!;
-  const removedIndex = selectedId ? heldIds.indexOf(selectedId) : -1;
+  const priorVisibleSet = new Set(nextIds);
+  if (selectedId) priorVisibleSet.add(selectedId);
+  const priorVisibleIds = heldIds.filter((id) => priorVisibleSet.has(id));
+  const removedIndex = selectedId ? priorVisibleIds.indexOf(selectedId) : -1;
   if (removedIndex < 0) return survivors[0]!;
   return survivors[Math.min(removedIndex, survivors.length - 1)]!;
 }

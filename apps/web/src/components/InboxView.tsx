@@ -132,8 +132,9 @@ export function InboxView({
   } = useStoreActions();
   const instanceScope = useInstanceScope();
   const isMobile = useIsMobile();
-  const mobileOrderLeaseRef = useRef(false);
-  mobileOrderLeaseRef.current = isMobile && expandedSessionId === null;
+  const mobileOrderLease = isMobile && expandedSessionId === null;
+  const mobileOrderLeaseRef = useRef(mobileOrderLease);
+  mobileOrderLeaseRef.current = mobileOrderLease;
   const [seen, setSeen] = useState(() => loadSeen(instanceScope));
   const [pinnedProjects, setPinnedProjects] = useState(() => loadKeySet(PROJECT_PIN_KEY, instanceScope));
   const [pinnedSessions, setPinnedSessions] = useState(() => loadKeySet(SESSION_PIN_KEY, instanceScope));
@@ -369,11 +370,11 @@ export function InboxView({
     structuralOrderKeyRef.current = structuralOrderKey;
     if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
     settleTimerRef.current = null;
-    setHeldOrder((isMobile && expandedSessionIdRef.current === null)
+    setHeldOrder(mobileOrderLease
       || targetPointerIdsRef.current.size > 0 || activePointerIdsRef.current.size > 0
       ? liveIdsRef.current
       : null);
-  }, [isMobile, structuralOrderKey]);
+  }, [mobileOrderLease, structuralOrderKey]);
 
   useLayoutEffect(() => {
     setHeldOrder((current) => {
@@ -381,11 +382,11 @@ export function InboxView({
       // session can move after the user has visually targeted it but before their finger lands.
       // Keep the collapsed phone Inbox stable for the whole browsing interval. Deliberate group,
       // filter, and pin changes still replace the lease through structuralOrderKey above.
-      if (!current) return isMobile && expandedSessionIdRef.current === null ? liveIds : current;
+      if (!current) return mobileOrderLease ? liveIds : current;
       const extended = extendInboxHeldOrder(current, liveIds);
       return extended.length === current.length ? current : extended;
     });
-  }, [expandedSessionId, isMobile, liveIds]);
+  }, [liveIds, mobileOrderLease]);
 
   const entries = useMemo(() => {
     if (!heldOrder) return liveEntries;
@@ -438,6 +439,13 @@ export function InboxView({
       settleTimerRef.current = null;
     }, INBOX_REORDER_SETTLE_MS);
   }, []);
+
+  useLayoutEffect(() => {
+    if (mobileOrderLease) return;
+    if (targetPointerIdsRef.current.size > 0 || activePointerIdsRef.current.size > 0) return;
+    clearHeldOrder();
+  }, [clearHeldOrder, mobileOrderLease]);
+
 
   const holdDisplayedOrder = useCallback(() => {
     if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);

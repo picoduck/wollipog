@@ -11,10 +11,11 @@ import { InboxView } from "./InboxView.js";
 import type { RightPanelState } from "./RightPanel.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
+let mobileViewport = true;
 Object.defineProperty(domWindow, "matchMedia", {
   configurable: true,
   value: () => ({
-    matches: true,
+    get matches() { return mobileViewport; },
     media: "(max-width: 760px)",
     onchange: null,
     addEventListener() {},
@@ -217,7 +218,17 @@ test("InboxView keeps mobile browsing order stable before and through a touch", 
   assert.match(container.querySelector<HTMLElement>('.inbox-row-shell[aria-selected="true"]')?.textContent ?? "", /Session B/);
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 550)); });
   assert.deepEqual(rowTitles(container), ["Session B", "Session C"]);
+  await act(async () => {
+    socket.push({ type: "session_upsert", session: session("C", 70) });
+  });
+  assert.deepEqual(rowTitles(container), ["Session B", "Session C"]);
+  await act(async () => {
+    mobileViewport = false;
+    domWindow.dispatchEvent(new domWindow.Event("resize"));
+  });
+  assert.deepEqual(rowTitles(container), ["Session C", "Session B"]);
 
   await act(async () => { root.unmount(); });
   container.remove();
+  mobileViewport = true;
 });
