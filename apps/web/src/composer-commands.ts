@@ -144,6 +144,20 @@ function appCommands(context: ComposerCommandContext): ComposerCommand[] {
   const appGroup = GROUP_BY_ID.get("app")!;
   return [
     {
+      id: "app:rename-session",
+      name: "rename-session",
+      label: commandLabel("rename-session"),
+      invocationAlias: "rename-session",
+      description: "Rename Session",
+      source: "app",
+      sourceLabel: "App",
+      executionMode: "app",
+      available: true,
+      attachmentPolicy: "preserve",
+      groupId: appGroup.id,
+      groupLabel: appGroup.label,
+    },
+    {
       id: "app:plan",
       name: "plan",
       label: commandLabel("plan"),

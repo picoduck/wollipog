@@ -33,6 +33,8 @@ test("the registry exposes stable typed app commands and explicit gate reasons",
     { id: "app", label: "App Commands", order: 0 },
     { id: "provider", label: "Harness Commands", order: 1 },
   ]);
+  assert.equal(command(enabled, "app:rename-session").description, "Rename Session");
+  assert.equal(command(enabled, "app:rename-session").label, "/rename-session");
   assert.deepEqual(command(enabled, "app:plan"), {
     id: "app:plan",
     name: "plan",
@@ -55,6 +57,7 @@ test("the registry exposes stable typed app commands and explicit gate reasons",
   assert.deepEqual(
     disabled.map(({ id, available, disabledReason }) => ({ id, available, disabledReason })),
     [
+      { id: "app:rename-session", available: true, disabledReason: undefined },
       { id: "app:plan", available: false, disabledReason: "Plan mode is unavailable for this provider." },
       { id: "app:stop", available: false, disabledReason: "There is no active turn to stop." },
     ],
@@ -490,7 +493,7 @@ test("ranking is exact then prefix then boundary then substring then fuzzy", () 
 
 test("description-only fuzzy matches do not capture literal slash text", () => {
   const commands = registry([], { planSupported: true, canStopTurn: false });
-  assert.deepEqual(rankComposerCommands(commands, "no"), []);
+  assert.deepEqual(rankComposerCommands(commands, "zz"), []);
 });
 
 test("available commands rank ahead of unavailable commands at the same match score", () => {
@@ -516,7 +519,7 @@ test("grouping and active-id retention preserve stable ranked selection", () => 
       commands: grouped.map((candidate) => candidate.id),
     })),
     [
-      { id: "app", label: "App Commands", order: 0, commands: ["app:plan", "app:stop"] },
+      { id: "app", label: "App Commands", order: 0, commands: ["app:rename-session", "app:plan", "app:stop"] },
       {
         id: "provider",
         label: "Harness Commands",
@@ -527,7 +530,7 @@ test("grouping and active-id retention preserve stable ranked selection", () => 
   );
   assert.equal(retainActiveComposerCommandId("provider:plugin:deploy", ranked), "provider:plugin:deploy",
     "a disabled row may remain active so its reason is readable");
-  assert.equal(retainActiveComposerCommandId("removed", ranked), "provider:builtin:review",
+  assert.equal(retainActiveComposerCommandId("removed", ranked), "app:rename-session",
     "fallback chooses the first available ranked row while unavailable rows remain selectable");
   assert.equal(retainActiveComposerCommandId(null, []), null);
 });

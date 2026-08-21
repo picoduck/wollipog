@@ -1678,6 +1678,19 @@ function SessionDetailLoaded({
           clearAppCommandText();
           return;
         }
+        if (invocation.command.name === "rename-session") {
+          if (invocation.arguments.trim()) {
+            setError("/rename-session does not accept arguments.");
+            return;
+          }
+          try {
+            await api.retitleSession(sessionId);
+            clearAppCommandText();
+          } catch (cause) {
+            setError((cause as Error).message);
+          }
+          return;
+        }
         if (invocation.command.name === "plan") {
           togglePlan(args === "off" ? false : args === "on" ? true : !planActive);
           clearAppCommandText();
