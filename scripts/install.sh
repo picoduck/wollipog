@@ -92,7 +92,7 @@ download() {
   partial="${download_dest}.download.$$"
   rm -f "$partial"
   if [ "$use_gh" -eq 1 ]; then
-    if ! gh release download --repo "$repo" --pattern "$download_asset" --output "$partial"; then
+    if ! gh release download "$release_tag" --repo "$repo" --pattern "$download_asset" --output "$partial"; then
       rm -f "$partial"; return 1
     fi
   else
@@ -131,12 +131,14 @@ case "$os" in
     printf '%s\n' "$publisher_digest" | grep -Eq '^sha256:[0-9a-f]{64}$' || { echo "Desktop asset $asset_name has no valid GitHub SHA-256 digest; refusing an unverified install." >&2; exit 1; }
     mkdir -p "$HOME/.local/bin"
     dest="$HOME/.local/bin/wollipog.AppImage"
-    tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+    staged="${dest}.download.$$"
+    trap 'rm -f "$staged"' EXIT
+    rm -f "$staged"
     echo "Downloading $(basename "$url")..."
-    download "$url" "$tmp/app.AppImage"
-    verify_sha256 "$tmp/app.AppImage" "${publisher_digest#sha256:}" "$asset_name"
-    chmod +x "$tmp/app.AppImage"
-    mv -f "$tmp/app.AppImage" "$dest"
+    download "$url" "$staged"
+    verify_sha256 "$staged" "${publisher_digest#sha256:}" "$asset_name"
+    chmod +x "$staged"
+    mv -f "$staged" "$dest"
     # A previous install under the old name would otherwise linger as a stale duplicate.
     rm -f "$HOME/.local/bin/agent-manager.AppImage"
     echo "Installed to $dest"

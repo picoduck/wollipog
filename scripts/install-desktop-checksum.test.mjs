@@ -18,7 +18,7 @@ function executable(path, body) {
   chmodSync(path, 0o755);
 }
 
-function makeHarness({ advertisedDigest = digest, privateRelease = false } = {}) {
+function makeHarness({ publisherDigest = `sha256:${digest}`, privateRelease = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), "wollipog-desktop-installer-"));
   const home = join(root, "home");
   const fakeBin = join(root, "bin");
@@ -35,21 +35,30 @@ while [ "$#" -gt 0 ]; do
 done
 if echo "$url" | grep -q '/releases/latest$'; then
   [ "$TEST_PRIVATE" = 0 ] || exit 22
-  printf '%s' '{"tag_name":"v1.2.3","assets":[{"name":"other_x64.AppImage","digest":"sha256:${"b".repeat(64)}","browser_download_url":"https://example.test/other_x64.AppImage"},{"name":"${assetName}","digest":"sha256:'"$TEST_DIGEST"'","browser_download_url":"https://example.test/${assetName}"}]}'
+  printf '%s' '{"tag_name":"v1.2.3","assets":[{"name":"other_x64.AppImage","digest":"sha256:${"b".repeat(64)}","browser_download_url":"https://example.test/other_x64.AppImage"},{"name":"${assetName}","digest":'"$TEST_DIGEST_JSON"',"browser_download_url":"https://example.test/${assetName}"}]}'
 else cp "$TEST_PAYLOAD" "$out"
 fi`);
   executable(join(fakeBin, "gh"), `
 printf '%s\\n' "$*" >> "$TEST_GH_LOG"
 if [ "$1" = api ]; then
   printf '%s\\n' v1.2.3
-  printf '%s\\tsha256:%s\\thttps://example.test/%s\\n' '${assetName}' "$TEST_DIGEST" '${assetName}'
+  printf '%s\\t%s\\thttps://example.test/%s\\n' '${assetName}' "$TEST_DIGEST_FIELD" '${assetName}'
 elif [ "$1" = release ] && [ "$2" = download ]; then
   while [ "$#" -gt 0 ]; do [ "$1" != --output ] || { cp "$TEST_PAYLOAD" "$2"; exit; }; shift; done
 fi`);
   const live = join(home, ".local", "bin", "wollipog.AppImage");
   const run = () => spawnSync("sh", [installer], {
     encoding: "utf8",
-    env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, HOME: home, TEST_PRIVATE: privateRelease ? "1" : "0", TEST_DIGEST: advertisedDigest, TEST_PAYLOAD: payload, TEST_GH_LOG: ghLog },
+    env: {
+      ...process.env,
+      PATH: `${fakeBin}:${process.env.PATH}`,
+      HOME: home,
+      TEST_PRIVATE: privateRelease ? "1" : "0",
+      TEST_DIGEST_JSON: JSON.stringify(publisherDigest),
+      TEST_DIGEST_FIELD: publisherDigest ?? "",
+      TEST_PAYLOAD: payload,
+      TEST_GH_LOG: ghLog,
+    },
   });
   return { root, home, live, ghLog, run };
 }
@@ -64,7 +73,7 @@ test("POSIX desktop installer verifies the publisher digest before promotion", (
 });
 
 test("POSIX desktop installer rejects a mismatch and preserves an existing install", () => {
-  const harness = makeHarness({ advertisedDigest: "0".repeat(64) });
+  const harness = makeHarness({ publisherDigest: `sha256:${"0".repeat(64)}` });
   try {
     mkdirSync(join(harness.home, ".local", "bin"), { recursive: true });
     writeFileSync(harness.live, "known-good");
@@ -76,8 +85,8 @@ test("POSIX desktop installer rejects a mismatch and preserves an existing insta
 });
 
 test("POSIX desktop installer rejects a missing or malformed publisher digest", () => {
-  for (const advertisedDigest of ["", "ABC", `SHA256:${digest}`, `sha256:${"A".repeat(64)}`]) {
-    const harness = makeHarness({ advertisedDigest });
+  for (const publisherDigest of [null, "", "ABC", `SHA256:${digest}`, `sha256:${"A".repeat(64)}`]) {
+    const harness = makeHarness({ publisherDigest });
     try {
       const result = harness.run();
       assert.notEqual(result.status, 0);
@@ -95,8 +104,16 @@ test("authenticated POSIX installs fetch raw digest metadata and verify the sele
     assert.deepEqual(readFileSync(harness.live), bytes);
     const log = readFileSync(harness.ghLog, "utf8");
     assert.match(log, /api repos\/picoduck\/wollipog\/releases\/latest/u);
-    assert.match(log, new RegExp(`release download .*--pattern ${assetName}`));
+    assert.match(log, new RegExp(`release download v1\\.2\\.3 .*--pattern ${assetName}`));
   } finally { rmSync(harness.root, { recursive: true, force: true }); }
+});
+
+test("macOS installer verifies the publisher digest before mounting the DMG", () => {
+  const source = readFileSync(installer, "utf8");
+  const darwin = source.slice(source.indexOf("  Darwin)"), source.indexOf("  Linux)"));
+  const digestCheck = darwin.indexOf("verify_sha256");
+  const mount = darwin.indexOf("hdiutil attach");
+  assert.ok(digestCheck >= 0 && mount > digestCheck);
 });
 
 test("Windows installer validates raw REST digest before invoking msiexec", () => {
