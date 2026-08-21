@@ -752,6 +752,70 @@ test("each queued prompt runs under the config it was SENT with, in order", asyn
   }
 });
 
+test("a superseded drain cannot release a same-owner replacement drain's lock", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-sm-drain-lock-generation-"));
+  const store = new SessionStore(root);
+  store.create(meta());
+  const sm = new SessionManager(() => {}, () => {}, store, "test-runner");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const lockOwner = (sm as any).lockOwner as string;
+  let promptStarted!: () => void;
+  const started = new Promise<void>((resolve) => { promptStarted = resolve; });
+  let finishPrompt!: () => void;
+  const pendingPrompt = new Promise<"end_turn">((resolve) => { finishPrompt = () => resolve("end_turn"); });
+  const stub = {
+    resolvePermission: () => false,
+    cancel: () => {},
+    dispose: () => {},
+    prompt: () => {
+      promptStarted();
+      return pendingPrompt;
+    },
+    setConfig: () => {},
+    agentSessionId: () => "agent-1",
+  };
+  const oldEntry = {
+    sessionId: "s_q",
+    client: stub,
+    repoPath: "/home/me/repo",
+    cwd: "/home/me/repo",
+    worktree: null,
+    status: "running",
+    running: true,
+    queue: [],
+  };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (sm as any).active.set("s_q", oldEntry);
+  let replacementRefresh: ReturnType<typeof setInterval> | undefined;
+  try {
+    sm.prompt("s_q", "old generation");
+    oldEntry.running = false;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const oldDrain = (sm as any).drain("s_q") as Promise<void>;
+    await started;
+
+    // Restart replaces the active entry and re-acquires the process-wide owner's existing lock.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (sm as any).active.set("s_q", { ...oldEntry, running: true, queue: [] });
+    assert.equal(store.acquireLock("s_q", lockOwner), true);
+    replacementRefresh = setInterval(() => {}, 60_000);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (sm as any).lockTimers.set("s_q", replacementRefresh);
+
+    finishPrompt();
+    await oldDrain;
+    assert.equal(store.ownsLock("s_q", lockOwner), true, "the replacement must retain its lock");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    assert.equal((sm as any).lockTimers.get("s_q"), replacementRefresh,
+      "the replacement must retain its refresh timer");
+  } finally {
+    finishPrompt();
+    if (replacementRefresh) clearInterval(replacementRefresh);
+    store.releaseLock("s_q", lockOwner);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("the queue byte budget rejects an oversized prompt with an error event", () => {
   const { sm, queues, cleanup } = harness();
   try {

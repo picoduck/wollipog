@@ -561,6 +561,23 @@ test("releaseLock is owner-aware: a stale ex-holder cannot delete the new owner'
   }
 });
 
+test("refreshLock is owner-aware: a stale ex-holder cannot overwrite the new owner's lock", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-store-lockrefresh-"));
+  try {
+    const store = new SessionStore(root);
+    store.create(meta());
+    assert.equal(store.acquireLock("s_abc", "runner-A"), true);
+    // Simulate B legitimately taking A's lock after the stale window.
+    store.releaseLock("s_abc", "runner-A");
+    assert.equal(store.acquireLock("s_abc", "runner-B"), true);
+    assert.equal(store.refreshLock("s_abc", "runner-A"), false);
+    assert.equal(store.ownsLock("s_abc", "runner-B"), true, "A's stale refresh must preserve B's lock");
+    assert.equal(store.refreshLock("s_abc", "runner-B"), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("indexed history pages are contiguous, bounded, and freeze the durable tail across appends", () => {
   const { store, root } = tmpStore();
   try {
