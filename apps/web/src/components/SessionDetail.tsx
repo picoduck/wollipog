@@ -169,6 +169,8 @@ import { ChoiceCards, type ChoiceCardOption } from "./ui/ChoiceControls.js";
 
 const NO_IMAGE_MIME_TYPES: readonly string[] = [];
 const STOP_TURN_RETRY_MS = 8_000;
+const EARLIER_ACTIVITY_TRIGGER_PX = 160;
+const EARLIER_ACTIVITY_REARM_DISTANCE_PX = 32;
 
 type ComposerMutationKind = "send" | "steer" | "promote" | "stop";
 type ComposerMutationEntry = {
@@ -519,6 +521,7 @@ function SessionDetailLoaded({
   const forkInFlightRef = useRef(false);
   const viewGenerationRef = useRef(0);
   const [historyRetry, setHistoryRetry] = useState(0);
+  const [olderRequestSettled, setOlderRequestSettled] = useState(0);
   const [optimisticModel, setOptimisticModel] = useState<string | undefined>();
   const [activeSlashCommandId, setActiveSlashCommandId] = useState<string | null>(null);
   const [timelineRevealRequest, setTimelineRevealRequest] = useState<TimelineRevealRequest | null>(null);
@@ -526,6 +529,12 @@ function SessionDetailLoaded({
   const timelineRevealRestoreState = useRef<{ requestId: number; state: FollowTailState } | null>(null);
   const timelineRevealRequestId = useRef(0);
   const timelineHistoryKey = `${session.id}:${session.eventEpoch ?? 0}`;
+  const automaticEarlierLoadRef = useRef({
+    historyKey: timelineHistoryKey,
+    requestedBase: null as number | null,
+    nextTriggerTop: null as number | null,
+    readerStarted: false,
+  });
   const [composerSelection, setComposerSelection] = useState({ start: 0, end: 0 });
   const [slashDismissedFor, setSlashDismissedFor] = useState<string | null>(null);
   const slashListboxId = `session-slash-${useId().replace(/:/g, "")}`;
@@ -1085,7 +1094,7 @@ function SessionDetailLoaded({
   // ask for it. `preserveAnchor` keeps their row fixed while the prepend re-measures.
   const loadOlder = useCallback(() => {
     const base = eventWindowBase(sessionId);
-    if (base <= 1 || olderInFlightRef.current) return;
+    if (base <= 1 || olderInFlightRef.current) return false;
     const epoch = recoveryEventEpoch;
     olderInFlightRef.current = true;
     // Every dispatch carries the base this page was requested below. A reopen re-reads the tail,
@@ -1099,8 +1108,60 @@ function SessionDetailLoaded({
       .catch(() => failOlderEventsLoad(sessionId, "Could not load earlier activity.", base, epoch))
       .finally(() => {
         olderInFlightRef.current = false;
+        setOlderRequestSettled((version) => version + 1);
       });
+    return true;
   }, [api, sessionId, recoveryEventEpoch, eventWindowBase, beginOlderEventsLoad, loadOlderEvents, failOlderEventsLoad]);
+
+  const maybeLoadEarlier = useCallback((scroll: HTMLElement) => {
+    const state = automaticEarlierLoadRef.current;
+    if (state.historyKey !== timelineHistoryKey) {
+      state.historyKey = timelineHistoryKey;
+      state.requestedBase = null;
+      state.nextTriggerTop = null;
+      state.readerStarted = false;
+    }
+    if (eventWindow?.hasOlder !== true || eventWindow.loadingOlder || eventWindow.error ||
+        eventWindow.baseSeq <= 1 || state.requestedBase !== null) return;
+
+    // A short-but-scrollable transcript should wait until the reader is genuinely near its head,
+    // rather than treating every follow-tail scroll as a request for history. An unscrollable
+    // viewport has a zero boundary and can start paging after an equivalent reader scroll event.
+    const maxScrollTop = Math.max(0, scroll.scrollHeight - scroll.clientHeight);
+    const initialTriggerTop = Math.min(EARLIER_ACTIVITY_TRIGGER_PX, maxScrollTop * 0.25);
+    const triggerTop = state.nextTriggerTop ?? initialTriggerTop;
+    if (scroll.scrollTop > triggerTop) return;
+
+    state.readerStarted = true;
+    state.nextTriggerTop = null;
+    if (loadOlder()) state.requestedBase = eventWindow.baseSeq;
+  }, [eventWindow, loadOlder, timelineHistoryKey]);
+
+  // Once a prepend settles, require a fresh upward traversal before requesting another page. The
+  // only exception is a reader-initiated window that still cannot scroll at all: keep filling that
+  // viewport until navigation becomes possible or history is exhausted.
+  useEffect(() => {
+    const state = automaticEarlierLoadRef.current;
+    if (state.historyKey !== timelineHistoryKey) {
+      state.historyKey = timelineHistoryKey;
+      state.requestedBase = null;
+      state.nextTriggerTop = null;
+      state.readerStarted = false;
+      return;
+    }
+    if (state.requestedBase === null || eventWindow?.loadingOlder ||
+        eventWindow?.baseSeq === undefined || eventWindow.baseSeq >= state.requestedBase) return;
+
+    const scroll = scrollRef.current;
+    if (!scroll) return;
+    const cannotScroll = scroll.scrollHeight <= scroll.clientHeight + 1;
+    if (state.readerStarted && cannotScroll && eventWindow.hasOlder && !eventWindow.error) {
+      if (loadOlder()) state.requestedBase = eventWindow.baseSeq;
+      return;
+    }
+    state.nextTriggerTop = Math.max(0, scroll.scrollTop - EARLIER_ACTIVITY_REARM_DISTANCE_PX);
+    state.requestedBase = null;
+  }, [eventWindow, loadOlder, olderRequestSettled, timelineHistoryKey]);
 
   // Incremental derivation: streamed chunks push only the NEW events into a per-session
   // builder instead of re-folding the whole array (O(n²) over a long session).
@@ -2206,7 +2267,10 @@ function SessionDetailLoaded({
               aria-label={mode === "expanded" ? "Session Activity" : "Session Preview Activity"}
               aria-busy={transcript.busy}
               tabIndex={0}
-              onScroll={followTail.onScroll}
+              onScroll={(event) => {
+                followTail.onScroll();
+                maybeLoadEarlier(event.currentTarget);
+              }}
               onWheel={followTail.onWheel}
               onPointerMove={followTail.onPointerMove}
               onTouchStart={followTail.onTouchStart}
