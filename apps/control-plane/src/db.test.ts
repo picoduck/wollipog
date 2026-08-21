@@ -2875,6 +2875,49 @@ test("appendEvent seq is per-session", () => {
   assert.equal(db.listEvents("sess-2").length, 1);
 });
 
+test("legacy runner event append atomically persists provenance and advances hydration", () => {
+  const db = withRunner();
+  db.createSession(newSession());
+
+  db.appendEvent(
+    "sess-1",
+    { kind: "agent_message", text: "committed once" },
+    100,
+    { runnerSeq: 1, historyEpoch: null },
+  );
+
+  assert.equal(db.getHydratedSeq("sess-1"), 1);
+  const persisted = db.raw().prepare(
+    "SELECT seq, runner_seq FROM session_events WHERE session_id=?",
+  ).get("sess-1") as unknown as { seq: number; runner_seq: number | null };
+  assert.equal(persisted.seq, 1);
+  assert.equal(persisted.runner_seq, 1);
+
+  db.raw().exec(
+    `CREATE TRIGGER fail_legacy_cursor_update BEFORE UPDATE OF hydrated_seq ON sessions
+     WHEN NEW.id='sess-1' AND NEW.hydrated_seq=2
+     BEGIN SELECT RAISE(ABORT, 'simulated cursor failure'); END;`,
+  );
+  assert.throws(() => db.appendEvent(
+    "sess-1",
+    { kind: "agent_message", text: "must roll back" },
+    200,
+    { runnerSeq: 2, historyEpoch: null },
+  ), /simulated cursor failure/);
+  assert.equal(db.getHydratedSeq("sess-1"), 1);
+  assert.equal(db.listEvents("sess-1").length, 1, "cursor failure rolls back the event row");
+
+  db.raw().exec("DROP TRIGGER fail_legacy_cursor_update");
+  db.raw().prepare("UPDATE sessions SET hydrated_seq=0 WHERE id=?").run("sess-1");
+  assert.throws(() => db.appendEvent(
+    "sess-1",
+    { kind: "agent_message", text: "replayed after crash" },
+    300,
+    { runnerSeq: 1, historyEpoch: null },
+  ), /UNIQUE/);
+  assert.equal(db.listEvents("sess-1").length, 1, "runner provenance rejects a replay despite a stale cursor");
+});
+
 test("runner history snapshots persist epoch/tail and replace cache only on a known epoch change", () => {
   const db = withRunner();
   db.createSessionFromSnapshot(snapshot({ id: "history", historyEpoch: 4, seq: 2 }), "runner-1", 2_000);

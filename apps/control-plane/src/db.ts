@@ -11289,6 +11289,10 @@ export class ControlPlaneDb {
       armBackgroundStatusSettlement?: boolean;
     },
   ): SessionEvent {
+    if (options?.runnerSeq !== undefined &&
+        (!Number.isSafeInteger(options.runnerSeq) || options.runnerSeq < 0)) {
+      throw new RangeError("runnerSeq must be a non-negative safe integer when present");
+    }
     // One transaction for the seq read + insert + session-row maintenance: this is the hottest
     // write path (one call per streamed delta) and was previously 5 separate auto-commit
     // statements — 5 WAL commits per token chunk, and a torn crash could desync seq/counters.
@@ -11302,9 +11306,10 @@ export class ControlPlaneDb {
         ).m ?? 0) + 1;
 
       const info = this.stmt(
-          "INSERT INTO session_events (session_id, seq, ts, kind, payload) VALUES (?, ?, ?, ?, ?)",
+          `INSERT INTO session_events (session_id, seq, runner_seq, ts, kind, payload)
+           VALUES (?, ?, ?, ?, ?, ?)`,
         )
-        .run(sessionId, seq, ts, payload.kind, JSON.stringify(payload));
+        .run(sessionId, seq, options?.runnerSeq ?? null, ts, payload.kind, JSON.stringify(payload));
       if (payload.kind === "background_continuation_delivered") {
         const eventEpoch = (this.stmt("SELECT event_epoch FROM sessions WHERE id=?").get(sessionId) as
           | { event_epoch: number }
@@ -11363,6 +11368,11 @@ export class ControlPlaneDb {
             "UPDATE sessions SET last_event_at=?, message_count=COALESCE(message_count,0)+1 WHERE id=?",
           )
           .run(ts, sessionId);
+      }
+
+      if (options?.runnerSeq !== undefined) {
+        this.stmt("UPDATE sessions SET hydrated_seq=? WHERE id=? AND hydrated_seq < ?")
+          .run(options.runnerSeq, sessionId, options.runnerSeq);
       }
 
       if (options?.accrueUsage) {
