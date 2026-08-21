@@ -15,8 +15,8 @@ import {
   MAX_RUNNER_CLIENT_MESSAGE_BYTES,
   MAX_RUNNER_CONNECTIONS,
   MAX_RUNNER_CONNECTIONS_PER_IP,
-  RUNNER_AUTH_TIMEOUT_MS,
   RunnerConnectionLimits,
+  runnerAuthTimeoutMs,
 } from "./runner-channel.js";
 import { installStartupReadinessGate } from "./startup-readiness.js";
 import {
@@ -230,10 +230,7 @@ const TOKEN = process.env.CONTROL_PLANE_TOKEN ?? "dev-local-token";
 const DB_PATH = process.env.CONTROL_PLANE_DB ?? "data/control-plane.db";
 const ARTIFACT_BLOB_DIR = process.env.CONTROL_PLANE_ARTIFACT_DIR;
 const HEARTBEAT_INTERVAL_MS = Number(process.env.CONTROL_PLANE_HEARTBEAT_MS ?? 10_000);
-const RUNNER_PRE_AUTH_TIMEOUT_MS = Math.max(
-  1,
-  Number(process.env.CONTROL_PLANE_RUNNER_AUTH_TIMEOUT_MS ?? RUNNER_AUTH_TIMEOUT_MS),
-);
+const RUNNER_PRE_AUTH_TIMEOUT_MS = runnerAuthTimeoutMs(process.env.CONTROL_PLANE_RUNNER_AUTH_TIMEOUT_MS);
 // A runner heartbeat every HEARTBEAT_INTERVAL_MS refreshes last_seen. If none lands within three
 // intervals the socket is presumed half-open (laptop sleep / Wi-Fi drop / NAT rebind leaves it
 // readyState=OPEN with no FIN/RST): the liveness sweep terminates it so the normal onGone cleanup
@@ -862,8 +859,8 @@ app.register(async (instance) => {
 
   /* ----------------------------- Runner channel ---------------------------- */
   instance.get("/runner", { websocket: true }, (socket, req) => {
-  const releaseConnection = runnerConnectionLimits.acquire(req.ip);
-  if (!releaseConnection) {
+  const connectionAdmission = runnerConnectionLimits.acquire(req.ip);
+  if (!connectionAdmission) {
     // Do not wait for a hostile peer to acknowledge a close handshake: rejected transports are
     // deliberately untracked, so retaining them for ws's close timeout would bypass this cap.
     socket.terminate();
@@ -948,6 +945,7 @@ app.register(async (instance) => {
           clearTimeout(authenticationTimer);
           authenticationTimer = undefined;
         }
+        connectionAdmission.authenticated();
         hub.attachRunner(runnerId, runnerClient);
         hub.clearRunnerQueues(runnerId); // a fresh connection has no in-flight queues — drop stale ones
         send(socket, {
@@ -1184,7 +1182,7 @@ app.register(async (instance) => {
       clearTimeout(authenticationTimer);
       authenticationTimer = undefined;
     }
-    releaseConnection();
+    connectionAdmission.release();
     if (!runnerId) return;
     // A stale close (the runner already reconnected on a NEW socket) must be a no-op:
     // marking offline / clearing queues / failing sessions here would clobber the live

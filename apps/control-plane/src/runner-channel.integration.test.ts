@@ -8,6 +8,9 @@ import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { PROTOCOL_VERSION } from "@wollipog/protocol";
+import { hashToken } from "./auth.js";
+import { ControlPlaneDb } from "./db.js";
 import { MAX_RUNNER_CLIENT_MESSAGE_BYTES, MAX_RUNNER_CONNECTIONS_PER_IP } from "./runner-channel.js";
 
 const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
@@ -19,6 +22,7 @@ interface StrictSocket {
   readyState: number;
   send(data: string | Buffer): void;
   close(): void;
+  on(event: "message", listener: (data: Buffer) => void): void;
   once(event: "open", listener: () => void): void;
   once(event: "error", listener: (error: Error) => void): void;
   once(event: "close", listener: (code: number, reason: Buffer) => void): void;
@@ -42,6 +46,43 @@ async function openSocket(url: string): Promise<StrictSocket> {
     socket.once("open", resolvePromise);
     socket.once("error", reject);
   });
+  return socket;
+}
+
+function runnerToken(index: number): string {
+  return `wollipogr_${String(index).padStart(43, "a")}`;
+}
+
+function registerFrame(index: number): string {
+  return JSON.stringify({
+    type: "register",
+    token: runnerToken(index),
+    protocolVersion: PROTOCOL_VERSION,
+    runner: {
+      runnerId: `runner-limits-${index}`,
+      hostname: `runner-limits-${index}`,
+      os: "linux",
+      version: "integration",
+      workspaces: [],
+      agents: [],
+    },
+    sessionSnapshots: [],
+  });
+}
+
+async function openRegisteredSocket(url: string, index: number): Promise<StrictSocket> {
+  const socket = await openSocket(url);
+  const registered = new Promise<void>((resolvePromise, reject) => {
+    const timer = setTimeout(() => reject(new Error("timed out waiting for runner registration")), 5_000);
+    socket.on("message", (data) => {
+      const message = JSON.parse(data.toString()) as { type?: unknown };
+      if (message.type !== "registered") return;
+      clearTimeout(timer);
+      resolvePromise();
+    });
+  });
+  socket.send(registerFrame(index));
+  await registered;
   return socket;
 }
 
@@ -81,6 +122,25 @@ async function waitForHealth(baseUrl: string, child: ChildProcess, logs: () => s
 test("the real /runner route bounds unauthenticated sockets and payloads", { timeout: 45_000 }, async (t) => {
   const port = await reservePort();
   const temp = mkdtempSync(join(tmpdir(), "wollipog-runner-limits-"));
+  const databasePath = join(temp, "control-plane.db");
+  const seed = ControlPlaneDb.open(databasePath);
+  const identity = seed.localIdentityContext();
+  for (let index = 0; index <= MAX_RUNNER_CONNECTIONS_PER_IP; index++) {
+    const now = Date.now();
+    seed.issueRunnerCredential({
+      credentialId: `rcred_runner_limits_${String(index).padStart(20, "0")}`,
+      runnerId: `runner-limits-${index}`,
+      organizationId: identity.organizationId,
+      ownerKind: "organization",
+      ownerId: identity.organizationId,
+      label: `Runner limits ${index}`,
+      tokenHash: hashToken(runnerToken(index)),
+      createdByUserId: identity.userId,
+      now,
+      expiresAt: now + 60_000,
+    });
+  }
+  seed.close();
   let output = "";
   const child = spawn(process.execPath, ["--import", "tsx", "apps/control-plane/src/index.ts"], {
     cwd: REPO_ROOT,
@@ -88,7 +148,7 @@ test("the real /runner route bounds unauthenticated sockets and payloads", { tim
       ...process.env,
       CONTROL_PLANE_HOST: "127.0.0.1",
       CONTROL_PLANE_PORT: String(port),
-      CONTROL_PLANE_DB: join(temp, "control-plane.db"),
+      CONTROL_PLANE_DB: databasePath,
       CONTROL_PLANE_RUNNER_AUTH_TIMEOUT_MS: "750",
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -107,6 +167,16 @@ test("the real /runner route bounds unauthenticated sockets and payloads", { tim
   const httpBase = `http://127.0.0.1:${port}`;
   const runnerUrl = `ws://127.0.0.1:${port}/runner`;
   await waitForHealth(httpBase, child, () => output);
+
+  // Managed SSH runners reverse-tunnel into the control plane and therefore share loopback as
+  // their transport source. Successful authentication must release only that pre-auth IP slot.
+  for (let index = 0; index <= MAX_RUNNER_CONNECTIONS_PER_IP; index++) {
+    sockets.add(await openRegisteredSocket(runnerUrl, index));
+  }
+  assert.equal(sockets.size, MAX_RUNNER_CONNECTIONS_PER_IP + 1);
+  for (const socket of sockets) socket.close();
+  sockets.clear();
+  await delay(100);
 
   for (let i = 0; i < MAX_RUNNER_CONNECTIONS_PER_IP; i++) {
     sockets.add(await openSocket(runnerUrl));
