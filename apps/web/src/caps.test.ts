@@ -3,6 +3,7 @@ import { test } from "node:test";
 import type { AgentCapabilities, RunnerView, SessionView } from "@wollipog/protocol";
 import {
   defaultPermissionMode,
+  effectiveModelEffortForDisplay,
   elicitationAvailability,
   modelSupportsImages,
   resolveCaps,
@@ -19,6 +20,21 @@ const caps: AgentCapabilities = {
   supportsImages: true,
   supportsApprovals: true,
 };
+
+test("effective display resolution matches deterministic server fallback semantics", () => {
+  const modelCaps: AgentCapabilities = {
+    models: [
+      { id: "default", displayName: "Default (Sonnet)", default: true },
+      { id: "hidden", hidden: true, efforts: ["xhigh"] },
+      { id: "opus", displayName: "Opus 5", efforts: ["low", "medium"] },
+    ],
+    effortLevels: ["low", "medium", "xhigh"], slashCommands: [], supportsImages: true, supportsApprovals: true,
+  };
+  const resolved = effectiveModelEffortForDisplay(modelCaps, "claude-code");
+  assert.equal(resolved.model?.id, "opus");
+  assert.equal(resolved.effort, "medium");
+  assert.equal(effectiveModelEffortForDisplay(modelCaps, "claude-code", "hidden", "xhigh").model?.id, "hidden");
+});
 
 test("modelSupportsImages follows selected-model modalities and falls back for old runners", () => {
   assert.equal(modelSupportsImages(caps, "image-model"), true);

@@ -9,6 +9,7 @@ import {
 } from "../format.js";
 import {
   defaultPermissionMode,
+  effectiveModelEffortForDisplay,
   elicitationAvailability,
   resolveCaps,
   type ElicitationAvailability,
@@ -27,16 +28,11 @@ function useSessionConfig(session: SessionView) {
   const models = (caps?.models ?? []).filter((model) => !model.hidden || model.id === session.model);
   const permModes = (caps?.permissionModes ?? []).filter((p) => p !== "plan");
 
-  const modelVal = models.some((m) => m.id === session.model)
-    ? session.model!
-    : models.find((m) => m.default)?.id ?? models[0]?.id ?? "";
-  const selectedModel = models.find((m) => m.id === modelVal);
-  const modelEfforts = (selectedModel?.efforts?.length ? selectedModel.efforts : caps?.effortLevels) ?? [];
-  const effortVal = session.effort && modelEfforts.includes(session.effort)
-    ? session.effort
-    : selectedModel?.defaultEffort && modelEfforts.includes(selectedModel.defaultEffort)
-      ? selectedModel.defaultEffort
-      : modelEfforts.includes("high") ? "high" : [...modelEfforts].sort()[0] ?? "";
+  const effective = effectiveModelEffortForDisplay(caps, session.driver, session.model, session.effort);
+  const modelVal = effective.model?.id ?? "";
+  const selectedModel = effective.model;
+  const modelEfforts = effective.efforts;
+  const effortVal = effective.effort ?? "";
   const permVal = permissionModeForDisplay(session.permissionMode, permModes, session.driver);
   return {
     caps,

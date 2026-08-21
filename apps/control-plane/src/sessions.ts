@@ -450,15 +450,17 @@ export function resolveEffectiveModelEffort(
   driver: AgentDriverKind,
 ): { value?: EffectiveModelEffort; error?: string } {
   if (!capabilities?.models?.length) return {};
-  const selectable = capabilities.models.filter((model) => model.id !== "default");
+  const concrete = capabilities.models.filter((model) => model.id !== "default");
+  const selectable = concrete.filter((model) => !model.hidden);
   const effortsFor = (model: AgentCapabilities["models"][number]) =>
     (model.efforts?.length ? model.efforts : capabilities.effortLevels) ?? [];
-  if (!selectable.length || !selectable.some((model) => effortsFor(model).length)) return {};
+  if (!concrete.some((model) => effortsFor(model).length)) return {};
+  if (!selectable.length) return { error: "No visible concrete model is advertised. Rediscover the runner or choose a compatible agent." };
 
   const explicitModel = config.model && config.model !== "default"
-    ? selectable.find((model) => model.id === config.model)
+    ? concrete.find((model) => model.id === config.model)
       ?? (driver === "claude-code"
-        ? selectable.find((model) => claudeCatalogFamily(model.id) === claudeCatalogFamily(config.model!))
+        ? concrete.find((model) => claudeCatalogFamily(model.id) === claudeCatalogFamily(config.model!))
         : undefined)
     : undefined;
   const advertised = selectable.find((model) => model.default);
@@ -467,7 +469,7 @@ export function resolveEffectiveModelEffort(
     ?? selectable.find((model) => preferredPattern.test(model.displayName ?? ""));
   const compatible = [...selectable]
     .filter((model) => effortsFor(model).length)
-    .sort((a, b) => a.id.localeCompare(b.id));
+    .sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
   const model = explicitModel ?? advertised ?? preferred ?? compatible[0];
   if (!model) return { error: "No concrete supported model and reasoning effort are advertised. Rediscover the runner or choose a compatible agent." };
   const efforts = effortsFor(model);
@@ -476,7 +478,7 @@ export function resolveEffectiveModelEffort(
   const advertisedEffort = model.defaultEffort && efforts.includes(model.defaultEffort) ? model.defaultEffort : undefined;
   const preferredEffort = efforts.includes("high") ? "high" : undefined;
   const fallbackEffort = EFFORT_FALLBACK_ORDER.find((effort) => efforts.includes(effort))
-    ?? [...efforts].sort((a, b) => a.localeCompare(b))[0];
+    ?? [...efforts].sort()[0];
   const effort = explicitEffort ?? advertisedEffort ?? preferredEffort ?? fallbackEffort;
   const resolvedModel = explicitModel && config.model ? config.model : model.id;
   return effort ? { value: { model: resolvedModel, effort } }

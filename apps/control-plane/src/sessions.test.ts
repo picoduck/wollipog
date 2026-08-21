@@ -56,7 +56,7 @@ test("effective model and effort resolution follows explicit, advertised, prefer
   assert.deepEqual(resolveEffectiveModelEffort({}, caps, "codex-app-server").value, { model: "gpt-5.6-sol", effort: "medium" });
   const noAdvertisedDefault = { ...caps, models: caps.models.map((model) => ({ ...model, default: false })) };
   assert.deepEqual(resolveEffectiveModelEffort({}, noAdvertisedDefault, "codex-app-server").value, { model: "gpt-5.6-sol", effort: "medium" });
-  const noPreferred = { ...caps, models: [{ id: "zeta", efforts: ["low"] }, { id: "alpha", efforts: ["medium"] }] };
+  const noPreferred = { ...caps, models: [{ id: "hidden", hidden: true, efforts: ["high"] }, { id: "zeta", efforts: ["low"] }, { id: "alpha", efforts: ["medium"] }] };
   assert.deepEqual(resolveEffectiveModelEffort({}, noPreferred, "codex-app-server").value, { model: "alpha", effort: "medium" });
   assert.deepEqual(resolveEffectiveModelEffort({ model: "missing", effort: "xhigh" }, noPreferred, "codex-app-server").value, { model: "alpha", effort: "medium" });
 });

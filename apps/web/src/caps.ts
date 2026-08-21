@@ -49,6 +49,35 @@ export function defaultPermissionMode(driver: AgentDriverKind): string | undefin
   return undefined;
 }
 
+const EFFORT_FALLBACK_ORDER = ["high", "medium", "low", "xhigh", "max", "minimal"] as const;
+
+export function effectiveModelEffortForDisplay(
+  capabilities: AgentCapabilities | undefined,
+  driver: AgentDriverKind,
+  modelId?: string | null,
+  effortId?: string | null,
+) {
+  const models = capabilities?.models ?? [];
+  const concrete = models.filter((model) => model.id !== "default");
+  const visible = concrete.filter((model) => !model.hidden);
+  const effortsFor = (model: AgentCapabilities["models"][number] | undefined) =>
+    model ? ((model.efforts?.length ? model.efforts : capabilities?.effortLevels) ?? []) : [];
+  const explicit = modelId && modelId !== "default" ? concrete.find((model) => model.id === modelId) : undefined;
+  const advertised = visible.find((model) => model.default);
+  const preferredPattern = driver === "claude-code" ? /(?:^|[-_])opus(?:$|[-_\[])/i : /gpt[-_.]?5\.6[-_.]?sol/i;
+  const preferred = visible.find((model) => preferredPattern.test(model.id))
+    ?? visible.find((model) => preferredPattern.test(model.displayName ?? ""));
+  const compatible = [...visible].filter((model) => effortsFor(model).length)
+    .sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  const model = explicit ?? advertised ?? preferred ?? compatible[0];
+  const efforts = effortsFor(model);
+  const effort = effortId && efforts.includes(effortId) ? effortId
+    : model?.defaultEffort && efforts.includes(model.defaultEffort) ? model.defaultEffort
+      : EFFORT_FALLBACK_ORDER.find((candidate) => efforts.includes(candidate))
+        ?? [...efforts].sort()[0];
+  return { model, efforts, effort };
+}
+
 /** Last-resort controls for adopted Claude sessions with no capability-bearing runner agent.
  * Version-neutral aliases remain usable; the authenticated runner catalog wins whenever present. */
 const CLAUDE_DEFAULT_CAPS: AgentCapabilities = {

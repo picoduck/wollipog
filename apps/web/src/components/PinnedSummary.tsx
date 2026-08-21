@@ -20,7 +20,7 @@ import { AgentIcon } from "./AgentIcon.js";
 import { BranchIcon, ComputerIcon, DialIcon, FolderOutlineIcon, GitHubIcon, GlobeIcon, NotesIcon, PullRequestIcon, TuningIcon } from "./Icons.js";
 import { BackgroundDeliveryBadge, BackgroundNotificationBadge, BackgroundWorkBadge, Spinner, StatusBadge, UntrackedBackgroundWorkBadge } from "./common.js";
 import { effortLabel, relativeTime, resolvedModelLabel } from "../format.js";
-import { resolveCaps } from "../caps.js";
+import { effectiveModelEffortForDisplay, resolveCaps } from "../caps.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { safeExternalHref } from "../external-href.js";
 
@@ -60,15 +60,9 @@ export function PinnedSummary({
   const runner = runners.get(session.runnerId);
   const runnerOnline = runner?.status === "online";
   const effectiveCaps = resolveCaps(runner, session);
-  const effectiveModel = effectiveCaps?.models.find((model) => model.id === (session.model ?? ""))
-    ?? effectiveCaps?.models.find((model) => model.default)
-    ?? effectiveCaps?.models.find((model) => !model.hidden);
-  const effectiveEfforts = (effectiveModel?.efforts?.length ? effectiveModel.efforts : effectiveCaps?.effortLevels) ?? [];
-  const effectiveEffort = session.effort && effectiveEfforts.includes(session.effort)
-    ? session.effort
-    : effectiveModel?.defaultEffort && effectiveEfforts.includes(effectiveModel.defaultEffort)
-      ? effectiveModel.defaultEffort
-      : effectiveEfforts.includes("high") ? "high" : [...effectiveEfforts].sort()[0];
+  const effective = effectiveModelEffortForDisplay(effectiveCaps, session.driver, session.model, session.effort);
+  const effectiveModel = effective.model;
+  const effectiveEffort = effective.effort;
   // SessionDetail owns both reads so compact and pinned presentations share one
   // session-tagged snapshot while status and summary keep independent refresh cycles.
   const summary = gitSummary.summary;
