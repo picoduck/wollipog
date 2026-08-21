@@ -13,6 +13,7 @@ import {
 } from "react";
 import {
   CODEX_APP_SERVER_IMAGE_MIME_TYPES,
+  MAX_PROMPT_IMAGES,
   PROMPT_IMAGE_MIME_TYPES,
   isPolicyApproval,
   isTerminal,
@@ -129,7 +130,7 @@ import {
 } from "../conversation-steering.js";
 import { SteeringReceipts } from "./SteeringReceipts.js";
 import { SessionCommandReceipts } from "./SessionCommandReceipts.js";
-import { ArrowUpIcon, ChevronLeftIcon, FolderSolidIcon, MicIcon, MoreHorizontalIcon, StopTurnIcon } from "./Icons.js";
+import { ArrowUpIcon, ChevronLeftIcon, FolderSolidIcon, ImageIcon, MicIcon, MoreHorizontalIcon, StopTurnIcon } from "./Icons.js";
 import {
   DURABLE_COMMAND_ATTACHMENT_NOTICE,
   buildComposerCommandRegistry,
@@ -2380,7 +2381,7 @@ function SessionDetailLoaded({
               onFocusCapture={() => setActivePane("composer")}
               onPointerDownCapture={() => setActivePane("composer")}
             >
-            {error && <div className="composer-error">{error}</div>}
+            {error && <div className="composer-error" role="alert">{error}</div>}
             {/* Active-turn progress renders in the transcript's Working row, not as a card here —
                 the composer area keeps only composer concerns (receipts, queue, input). */}
             <SessionCommandReceipts
@@ -2590,6 +2591,8 @@ function SessionDetailLoaded({
                     onTogglePlan={togglePlan}
                     onApply={applyConfig}
                     disabled={!canPrompt}
+                    imageMimeTypes={allowedImageMimeTypes}
+                    onAttachImages={addFiles}
                   />
                   <ApprovalsControl session={session} apply={applyConfig} />
                   {planActive && (
@@ -3235,7 +3238,7 @@ function LegacyWorkspaceChip({ session }: { session: SessionView }) {
   );
 }
 
-/** Codex-style "+" menu in the composer: Plan mode + the cost budget; home for future modes/attach. */
+/** Codex-style "+" menu in the composer: Attach Image, Plan mode, and the cost budget. */
 function ComposerPlusMenu({
   session,
   planActive,
@@ -3243,6 +3246,8 @@ function ComposerPlusMenu({
   onTogglePlan,
   onApply,
   disabled,
+  imageMimeTypes,
+  onAttachImages,
 }: {
   session: SessionView;
   planActive: boolean;
@@ -3250,11 +3255,50 @@ function ComposerPlusMenu({
   onTogglePlan: (on?: boolean) => void;
   onApply: (patch: Partial<SessionConfig>) => void;
   disabled: boolean;
+  /** Exactly the types the connected runner and selected model accept; empty when images cannot be sent. */
+  imageMimeTypes: readonly string[];
+  onAttachImages: (files: File[]) => void | Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
   const popover = useDismissiblePopover(open, setOpen, "composer-modes-popover");
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const attachDescriptionId = useId();
+  const imagesSupported = imageMimeTypes.length > 0;
+  // Attachment follows the composer, exactly as paste (a disabled textarea) and drop (its own
+  // `canPrompt` guard) already do. `disabled` can flip while the panel — or the native chooser —
+  // is already open, so the item and the change handler are gated separately.
+  const canAttach = !disabled && imagesSupported;
   return (
     <div className="plus-menu">
+      {/*
+        The one image ingress that works on a phone: paste and drag-and-drop have no reliable
+        mobile equivalent. Mounted OUTSIDE the `open &&` panel so activating the item can close the
+        menu without unmounting the input the native chooser is attached to, and clipped rather
+        than `display: none`, which some browsers refuse to open a picker for.
+      */}
+      <input
+        ref={fileInputRef}
+        className="composer-attach-input"
+        type="file"
+        multiple
+        tabIndex={-1}
+        aria-hidden="true"
+        // No `capture`: it would force the camera and hide the photo library and file browser.
+        // `accept` mirrors the session capability, so the chooser cannot offer a type that
+        // validation would reject downstream.
+        accept={imageMimeTypes.join(",")}
+        onChange={(event) => {
+          const input = event.currentTarget;
+          const files = Array.from(input.files ?? []);
+          // Clear before dispatching so re-picking the same file after removing it still fires
+          // `change`; a cancelled picker fires nothing and leaves the draft untouched.
+          input.value = "";
+          // The runner can go offline, or the session end, while the chooser is up: a re-render
+          // has already installed this handler with the new `canAttach`, so the late selection is
+          // dropped rather than landing in a composer that cannot send it.
+          if (canAttach && files.length) void onAttachImages(files);
+        }}
+      />
       <button
         ref={popover.triggerRef}
         type="button"
@@ -3264,7 +3308,7 @@ function ComposerPlusMenu({
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-controls={popover.panelId}
-        title="Modes & Budget"
+        title="Attach, Modes & Budget"
         onClick={popover.toggle}
         onKeyDown={popover.onTriggerKeyDown}
       >
@@ -3278,9 +3322,36 @@ function ComposerPlusMenu({
             id={popover.panelId}
             ref={popover.panelRef}
             role="dialog"
-            aria-label="Session Modes and Guardrails"
+            aria-label="Session Attachments, Modes, and Guardrails"
             onKeyDown={popover.onPanelKeyDown}
           >
+            <div className="plus-section">Attach</div>
+            <button
+              type="button"
+              className="plus-item"
+              // The item carries its own explanation, so the name is set explicitly rather than
+              // computed from the row's text.
+              aria-label="Attach Image"
+              aria-describedby={attachDescriptionId}
+              disabled={!canAttach}
+              onClick={() => {
+                fileInputRef.current?.click();
+                popover.close(true);
+              }}
+            >
+              <span className="plus-check"><ImageIcon size={14} /></span>
+              <span className="plus-item-body">
+                <span className="plus-item-title">Attach Image</span>
+                <span className="plus-item-desc" id={attachDescriptionId}>
+                  {!imagesSupported
+                    ? "The selected model does not support image input."
+                    : disabled
+                      ? "This session cannot accept a prompt right now."
+                      : `Photos, camera, or files · up to ${MAX_PROMPT_IMAGES}`}
+                </span>
+              </span>
+            </button>
+
             {planSupported && (
               <>
                 <div className="plus-section">Modes</div>

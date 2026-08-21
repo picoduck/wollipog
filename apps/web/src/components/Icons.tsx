@@ -414,6 +414,17 @@ export function MicIcon(props: IconProps) {
   );
 }
 
+/** A framed photo — the composer's image attachment action. */
+export function ImageIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <rect x="3" y="4.5" width="18" height="15" rx="2.25" />
+      <circle cx="8.75" cy="10" r="1.6" />
+      <path d="M3.5 16.5 8.5 12l4 3.5 3-2.5 4.5 4" />
+    </IconBase>
+  );
+}
+
 /** Two nodes on a line — the session's context chain. */
 export function ChainIcon(props: IconProps) {
   return (
