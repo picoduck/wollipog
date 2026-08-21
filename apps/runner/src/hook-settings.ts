@@ -398,6 +398,7 @@ export function provisionClaudeHooks(
     controlPlaneUrl: string;
     controlPlaneProtocolVersion: number | null;
     enabled: boolean;
+    allowInsecureTransport?: boolean;
     registerCredential?: (sessionId: string, tokenHash: string) => void;
   },
   log: (message: string) => void,
@@ -458,7 +459,7 @@ export function provisionClaudeHooks(
       writeClaudeHookSettings(file, {
         sessionId: spec.sessionId,
         launch: runnerReentryCommand(host, "--policy-hook"),
-        cpHttpUrl: deriveCpHttpUrl(config.controlPlaneUrl),
+        cpHttpUrl: deriveCpHttpUrl(config.controlPlaneUrl, config.allowInsecureTransport),
         tokenFile: claudeHookTokenPath(file),
         askCapable: config.controlPlaneProtocolVersion >= 66,
       });
@@ -496,7 +497,7 @@ export function provisionClaudeHooks(
   writeClaudeHookSettings(file, {
     sessionId: spec.sessionId,
     launch: runnerReentryCommand(host, "--policy-hook"),
-    cpHttpUrl: deriveCpHttpUrl(config.controlPlaneUrl),
+    cpHttpUrl: deriveCpHttpUrl(config.controlPlaneUrl, config.allowInsecureTransport),
     tokenFile,
     askCapable: config.controlPlaneProtocolVersion >= 66,
   });

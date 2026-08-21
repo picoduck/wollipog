@@ -71,3 +71,37 @@ test("runner rejects prompt image MIME, length, and digest mismatches", async ()
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("runner never sends a prompt-image credential over remote plaintext without opt-in", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-prompt-image-transport-"));
+  try {
+    const tokenFile = join(root, "credential");
+    writeFileSync(tokenFile, "opaque-runner-token", { mode: 0o600 });
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls++;
+      return new Response(PNG, {
+        headers: { "content-type": "image/png", "content-length": String(PNG.length) },
+      });
+    }) as typeof fetch;
+    const config = {
+      controlPlaneUrl: "ws://manager.example.test/runner",
+      runnerId: "runner-one",
+      tokenFile,
+      fetchImpl,
+    };
+    await assert.rejects(
+      () => fetchPromptImageReference(config, "session-one", reference()),
+      /--allow-insecure-transport/u,
+    );
+    assert.equal(calls, 0);
+    await assert.doesNotReject(() => fetchPromptImageReference(
+      { ...config, allowInsecureTransport: true },
+      "session-one",
+      reference(),
+    ));
+    assert.equal(calls, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

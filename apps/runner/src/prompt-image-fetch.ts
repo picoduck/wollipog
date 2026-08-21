@@ -14,6 +14,7 @@ export interface PromptImageFetchConfig {
   tokenFile: string;
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
+  allowInsecureTransport?: boolean;
 }
 
 async function boundedBody(response: Response, expectedBytes: number): Promise<Buffer> {
@@ -52,7 +53,7 @@ export async function fetchPromptImageReference(
   }
   const token = readFileSync(config.tokenFile, "utf8").trim();
   if (!token) throw new Error("runner credential file is empty");
-  const root = deriveCpHttpUrl(config.controlPlaneUrl);
+  const root = deriveCpHttpUrl(config.controlPlaneUrl, config.allowInsecureTransport);
   const url = new URL(
     `/runner/${encodeURIComponent(config.runnerId)}/sessions/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(reference.artifactId)}`,
     `${root}/`,

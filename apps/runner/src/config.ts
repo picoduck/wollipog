@@ -149,6 +149,8 @@ export interface ParsedArgs {
   showVersion: boolean;
   /** Explicit one-time acknowledgement for claiming a populated pre-ownership data root. */
   adoptLegacyDataDir: boolean;
+  /** Explicit acknowledgement that a remote ws:// connection exposes the runner credential. */
+  allowInsecureTransport: boolean;
 }
 
 /**
@@ -164,6 +166,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let tokenFile: string | undefined;
   let showVersion = false;
   let adoptLegacyDataDir = false;
+  let allowInsecureTransport = false;
   const overrides: Partial<RunnerConfig> = {};
   const workspaces: RunnerConfigWorkspace[] = [];
 
@@ -177,6 +180,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       showVersion = true;
     } else if (arg === "--adopt-legacy-data-dir") {
       adoptLegacyDataDir = true;
+    } else if (arg === "--allow-insecure-transport") {
+      allowInsecureTransport = true;
     } else if (arg === "--config" || arg === "-c" || arg.startsWith("--config=")) {
       const [v, ni] = valueOf(arg, i);
       if (v) { configPath = v; explicitConfig = true; i = ni; }
@@ -212,6 +217,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     tokenFile,
     showVersion,
     adoptLegacyDataDir,
+    allowInsecureTransport,
   };
 }
 

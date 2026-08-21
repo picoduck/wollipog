@@ -3,6 +3,7 @@ import { test } from "node:test";
 import type { RunnerView } from "@wollipog/protocol";
 import {
   buildRunnerConfigJson,
+  buildRunnerStartCommand,
   localRunnerReadiness,
   onboardingHealth,
   RUNNER_START_COMMAND,
@@ -33,6 +34,11 @@ test("buildRunnerConfigJson produces valid JSON wired to the given control plane
   assert.ok(json.includes("\n  "));
   assert.equal(RUNNER_TOKEN_FILE, ".agent-manager/runner.token");
   assert.equal(RUNNER_START_COMMAND, "pnpm runner --config runner.config.json --token-file .agent-manager/runner.token");
+  assert.equal(buildRunnerStartCommand(), RUNNER_START_COMMAND);
+  assert.equal(
+    buildRunnerStartCommand(true),
+    `${RUNNER_START_COMMAND} --allow-insecure-transport`,
+  );
 });
 
 function runner(overrides: Partial<RunnerView> = {}): RunnerView {
@@ -56,6 +62,17 @@ test("onboarding health stays pending until the configured runner connects", () 
   assert.deepEqual(checks.map((check) => check.status), ["pass", "pass", "pending", "pending", "pending"]);
   assert.match(checks.find((check) => check.id === "credentials")?.detail ?? "", /runner\.token/);
   assert.equal(checks.find((check) => check.id === "runner")?.command, RUNNER_START_COMMAND);
+});
+
+test("remote onboarding keeps the explicit insecure transport acknowledgement in recovery commands", () => {
+  const startCommand = buildRunnerStartCommand(true);
+  const checks = onboardingHealth({
+    credentialAvailable: true,
+    runnerId: "laptop",
+    workspaceId: "repo",
+    startCommand,
+  });
+  assert.equal(checks.find((check) => check.id === "runner")?.command, startCommand);
 });
 
 test("onboarding health verifies online runner, workspace, and a friendly ready agent", () => {

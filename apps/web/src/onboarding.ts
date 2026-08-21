@@ -51,6 +51,13 @@ export function withHost(wsUrl: string, host: string): string {
 export const RUNNER_TOKEN_FILE = ".agent-manager/runner.token";
 export const RUNNER_START_COMMAND = `pnpm runner --config runner.config.json --token-file ${RUNNER_TOKEN_FILE}`;
 
+/** Add the runner's explicit plaintext opt-in only for a deliberately selected remote ws:// URL. */
+export function buildRunnerStartCommand(allowInsecureTransport = false): string {
+  return allowInsecureTransport
+    ? `${RUNNER_START_COMMAND} --allow-insecure-transport`
+    : RUNNER_START_COMMAND;
+}
+
 export type OnboardingHealthStatus = "pass" | "pending" | "warning" | "fail";
 
 export interface OnboardingHealthCheck {
@@ -160,10 +167,12 @@ export function onboardingHealth(input: {
   workspaceId: string;
   runner?: RunnerView;
   runnerIdCollision?: boolean;
+  startCommand?: string;
 }): OnboardingHealthCheck[] {
   const runnerId = input.runnerId.trim() || "runner";
   const workspaceId = input.workspaceId.trim() || "my-repo";
   const runner = input.runner;
+  const startCommand = input.startCommand ?? RUNNER_START_COMMAND;
   const checks: OnboardingHealthCheck[] = [
     {
       id: "control-plane",
@@ -187,7 +196,7 @@ export function onboardingHealth(input: {
 
   if (!runner) {
     checks.push(
-      { id: "runner", label: "Runner Connection", status: "pending", detail: `Waiting for “${runnerId}” to connect.`, command: RUNNER_START_COMMAND },
+      { id: "runner", label: "Runner Connection", status: "pending", detail: `Waiting for “${runnerId}” to connect.`, command: startCommand },
       { id: "workspace", label: "Workspace", status: "pending", detail: `Waiting for “${workspaceId}” to be advertised by the runner.` },
       { id: "agents", label: "Agent Readiness", status: "pending", detail: "Waiting for the runner to discover and verify agent CLIs." },
     );
@@ -197,7 +206,7 @@ export function onboardingHealth(input: {
   const online = runner.status === "online";
   checks.push(online
     ? { id: "runner", label: "Runner Connection", status: "pass", detail: `${runner.hostname} is online as “${runner.runnerId}”.` }
-    : { id: "runner", label: "Runner Connection", status: "fail", detail: `“${runner.runnerId}” is offline. Restart it with the generated config.`, command: RUNNER_START_COMMAND });
+    : { id: "runner", label: "Runner Connection", status: "fail", detail: `“${runner.runnerId}” is offline. Restart it with the generated config.`, command: startCommand });
 
   const workspace = runner.workspaces.find((candidate) => candidate.id === workspaceId);
   checks.push(workspace

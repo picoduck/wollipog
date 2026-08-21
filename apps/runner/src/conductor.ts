@@ -20,6 +20,7 @@ import type { AgentDefinition, SessionLaunchSpec } from "@wollipog/protocol";
 import { defaultRunnerReentryHost, runnerReentryCommand, type RunnerReentryHost } from "./runner-reentry.js";
 import { scopedRunnerCredentialFile, type RunnerDataDirIdentity } from "./runner-data-dir.js";
 import { winQuoteArg } from "./spawn.js";
+import { deriveControlPlaneHttpUrl } from "./control-plane-transport.js";
 
 export const CONDUCTOR_AGENT_ID = "conductor";
 
@@ -97,11 +98,8 @@ export function defaultConductorHost(): ConductorHost {
 
 /** ws->http / wss->https, and strip the /runner WS route — works both locally
  * (ws://127.0.0.1:4317/runner) and on boxes (ws://127.0.0.1:<tunnelPort>/runner). */
-export function deriveCpHttpUrl(controlPlaneUrl: string): string {
-  const u = new URL(controlPlaneUrl);
-  u.protocol = u.protocol === "wss:" ? "https:" : "http:";
-  u.pathname = u.pathname.replace(/\/runner\/?$/, "");
-  return u.toString().replace(/\/+$/, "");
+export function deriveCpHttpUrl(controlPlaneUrl: string, allowInsecureTransport = false): string {
+  return deriveControlPlaneHttpUrl(controlPlaneUrl, allowInsecureTransport);
 }
 
 /** Only cli.* dispatches --conductor-mcp. A daemon started the pre-dispatcher way
@@ -260,7 +258,12 @@ export function buildConductorArgs(mcpConfigPath: string, selfSessionId: string)
  */
 export function provisionConductor(
   spec: ConductorLaunchSpec,
-  config: { controlPlaneUrl: string; tokenFile: string; enabled?: boolean },
+  config: {
+    controlPlaneUrl: string;
+    tokenFile: string;
+    enabled?: boolean;
+    allowInsecureTransport?: boolean;
+  },
   log: (msg: string) => void,
   host: ConductorHost = defaultConductorHost(),
 ): void {
@@ -285,7 +288,7 @@ export function provisionConductor(
     writeConductorMcpConfig(file, {
       sessionId: spec.sessionId,
       launch: conductorMcpCommand(host),
-      cpHttpUrl: deriveCpHttpUrl(config.controlPlaneUrl),
+      cpHttpUrl: deriveCpHttpUrl(config.controlPlaneUrl, config.allowInsecureTransport),
       tokenFile: config.tokenFile,
     });
     spec.args[provisioned + 1] = file;
@@ -293,7 +296,7 @@ export function provisionConductor(
     return;
   }
 
-  const cpHttpUrl = deriveCpHttpUrl(config.controlPlaneUrl);
+  const cpHttpUrl = deriveCpHttpUrl(config.controlPlaneUrl, config.allowInsecureTransport);
   const launch = conductorMcpCommand(host);
   const file = conductorMcpConfigPath(host.configDir, spec.sessionId);
   writeConductorMcpConfig(file, { sessionId: spec.sessionId, launch, cpHttpUrl, tokenFile: config.tokenFile });
