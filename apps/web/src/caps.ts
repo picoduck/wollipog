@@ -95,7 +95,11 @@ export function effectiveModelEffortForDisplay(
   const effortsFor = (model: AgentCapabilities["models"][number] | undefined) =>
     model ? ((model.efforts?.length ? model.efforts : capabilities.effortLevels) ?? []) : [];
   if (!concrete.some((model) => effortsFor(model).length)) {
-    return persistedModelEffortForDisplay(pickerCapabilities ?? capabilities, modelId, effortId);
+    const persisted = persistedModelEffortForDisplay(pickerCapabilities ?? capabilities, modelId, effortId);
+    return persisted.model ? persisted : {
+      ...persisted,
+      model: models.find((model) => model.default && !model.hidden) ?? visible[0],
+    };
   }
   const explicitFamily = driver === "claude-code" && modelId ? claudeCatalogFamily(modelId) : null;
   const explicit = modelId && modelId !== "default"

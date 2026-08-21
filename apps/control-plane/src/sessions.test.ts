@@ -79,6 +79,12 @@ test("capability config validation rejects unverified effort and permission mode
   assert.match(capabilityConfigError({ model: "missing" }, { ...caps, models: [{ id: "known" }] })!, /model/);
   assert.match(capabilityConfigError({ permissionMode: "auto" }, caps)!, /permission mode/);
   assert.equal(capabilityConfigError({ effort: "low", permissionMode: "acceptEdits" }, caps), null);
+  const perModelCaps = {
+    ...caps,
+    models: [{ id: "visible", efforts: ["low"] }, { id: "legacy", hidden: true, efforts: ["minimal"] }],
+  };
+  assert.equal(capabilityConfigError({ model: "legacy", effort: "minimal" }, perModelCaps), null);
+  assert.match(capabilityConfigError({ model: "legacy", effort: "low" }, perModelCaps)!, /effort/);
 });
 
 test("persisted Claude config normalization drops stale knobs and preserves the conductor gate", () => {
@@ -2996,6 +3002,33 @@ test("fallback family compatibility never rewrites a persisted live Claude model
   assert.equal(result.ok, true, result.error);
   assert.equal(db.getSession(id)?.model, "opus[1m]");
   assert.equal(hub.sentOfType("prompt_session")[0]?.config?.model, "opus[1m]");
+});
+
+test("prompt accepts a persisted hidden model effort advertised by that model", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { config: { model: "legacy", effort: "minimal" } });
+  db.updateSessionStatus(id, "idle", Date.now());
+  db.updateRunnerAgents(
+    RUNNER_ID,
+    runnerMeta().agents.map((agent) => agent.id === AGENT_ID ? {
+      ...agent,
+      capabilities: {
+        models: [
+          { id: "visible", efforts: ["low", "high"] },
+          { id: "legacy", hidden: true, efforts: ["minimal"] },
+        ],
+        effortLevels: ["low", "high"], slashCommands: [], supportsImages: true,
+        supportsApprovals: true, permissionModes: ["acceptEdits"],
+      },
+    } : agent),
+    Date.now(),
+  );
+  hub.sentToRunner.length = 0;
+
+  const result = svc.prompt(id, "continue");
+  assert.equal(result.ok, true, result.error);
+  assert.equal(hub.sentOfType("prompt_session")[0]?.config?.model, "legacy");
+  assert.equal(hub.sentOfType("prompt_session")[0]?.config?.effort, "minimal");
 });
 
 test("stale Claude family ids heal to an advertised concrete model instead of stranding prompts", () => {

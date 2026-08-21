@@ -41,7 +41,7 @@ test("effective display resolution matches deterministic server fallback semanti
   assert.deepEqual(effectiveModelEffortForDisplay(
     { ...modelCaps, effortLevels: [], models: [{ id: "opus" }] },
     "claude-code",
-  ), { model: undefined, efforts: [], effort: undefined });
+  ), { model: { id: "opus" }, efforts: [], effort: undefined });
 
   const persisted = effectiveModelEffortForDisplay(undefined, "claude-code", "opus[1m]", "high", modelCaps);
   assert.equal(persisted.model?.id, "opus[1m]");

@@ -378,8 +378,16 @@ export function capabilityConfigError(
   if (config.model && capabilities.models.length && !capabilities.models.some((model) => model.id === config.model)) {
     return `model ${JSON.stringify(config.model)} is not supported by this agent installation`;
   }
-  if (config.effort && !capabilities.effortLevels.includes(config.effort)) {
-    return `effort ${JSON.stringify(config.effort)} is not supported by this agent installation`;
+  if (config.effort) {
+    const selectedModel = config.model
+      ? capabilities.models.find((model) => model.id === config.model)
+      : undefined;
+    const supportedEfforts = selectedModel?.efforts?.length
+      ? selectedModel.efforts
+      : capabilities.effortLevels;
+    if (!supportedEfforts.includes(config.effort)) {
+      return "effort " + JSON.stringify(config.effort) + " is not supported by this agent installation";
+    }
   }
   if (config.permissionMode && !(capabilities.permissionModes ?? []).includes(config.permissionMode)) {
     return `permission mode ${JSON.stringify(config.permissionMode)} is not supported by this agent installation`;
@@ -396,7 +404,13 @@ export function normalizeClaudePersistedConfig(
   driver: string,
 ): SessionConfig {
   if (driver !== "claude-code" || !capabilities) return config;
-  const effort = config.effort && capabilities.effortLevels.includes(config.effort) ? config.effort : undefined;
+  const selectedModel = config.model
+    ? capabilities.models.find((model) => model.id === config.model)
+    : undefined;
+  const supportedEfforts = selectedModel?.efforts?.length
+    ? selectedModel.efforts
+    : capabilities.effortLevels;
+  const effort = config.effort && supportedEfforts.includes(config.effort) ? config.effort : undefined;
   const configuredMode = config.permissionMode;
   const permissionMode = configuredMode && (capabilities.permissionModes ?? []).includes(configuredMode)
     ? configuredMode
