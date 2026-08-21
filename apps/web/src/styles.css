@@ -9297,7 +9297,6 @@ body.shell-dock-dragging * {
   flex-direction: column;
   align-items: stretch;
   min-height: 0;
-  max-height: min(560px, 60vh);
   max-height: min(560px, 60dvh);
   overflow: hidden;
 }
