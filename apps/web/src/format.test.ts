@@ -6,6 +6,7 @@ import {
   permissionModeDescription,
   permissionModeEmptyLabel,
   permissionModeForDisplay,
+  effortLabel,
   permissionModeLabel,
   resolvedModelLabel,
   sshErrorHint,

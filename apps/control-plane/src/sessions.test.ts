@@ -38,9 +38,28 @@ import {
   capabilityConfigError,
   claudeModelConfigForValidation,
   normalizeClaudePersistedConfig,
+  resolveEffectiveModelEffort,
   sessionBlocksConversationFork,
   type PreStagedDeliveryPlan,
 } from "./sessions.js";
+
+test("effective model and effort resolution follows explicit, advertised, preferred, and deterministic fallbacks", () => {
+  const caps = {
+    models: [
+      { id: "default", default: true },
+      { id: "zeta", efforts: ["low"] },
+      { id: "gpt-5.6-sol", efforts: ["medium", "high"], defaultEffort: "medium" },
+    ],
+    effortLevels: ["low", "medium", "high"], slashCommands: [], supportsImages: true, supportsApprovals: true,
+  };
+  assert.deepEqual(resolveEffectiveModelEffort({ model: "zeta", effort: "low" }, caps, "codex-app-server").value, { model: "zeta", effort: "low" });
+  assert.deepEqual(resolveEffectiveModelEffort({}, caps, "codex-app-server").value, { model: "gpt-5.6-sol", effort: "medium" });
+  const noAdvertisedDefault = { ...caps, models: caps.models.map((model) => ({ ...model, default: false })) };
+  assert.deepEqual(resolveEffectiveModelEffort({}, noAdvertisedDefault, "codex-app-server").value, { model: "gpt-5.6-sol", effort: "medium" });
+  const noPreferred = { ...caps, models: [{ id: "zeta", efforts: ["low"] }, { id: "alpha", efforts: ["medium"] }] };
+  assert.deepEqual(resolveEffectiveModelEffort({}, noPreferred, "codex-app-server").value, { model: "alpha", effort: "medium" });
+  assert.deepEqual(resolveEffectiveModelEffort({ model: "missing", effort: "xhigh" }, noPreferred, "codex-app-server").value, { model: "alpha", effort: "medium" });
+});
 
 test("conversation forks fail closed for every in-progress source lifecycle", () => {
   for (const status of ["queued", "starting", "running", "input_required"] as const) {
@@ -2880,9 +2899,9 @@ test("prompt heals persisted Claude knobs without rewriting a compatible model a
   const res = svc.prompt(id, "continue");
   assert.equal(res.ok, true);
   assert.equal(db.getSession(id)!.model, "opus");
-  assert.equal(db.getSession(id)!.effort, null);
+  assert.equal(db.getSession(id)!.effort, "low");
   assert.equal(db.getSession(id)!.permissionMode, null);
-  assert.deepEqual(sentPromptCommands(hub)[0]!.config, { model: "opus" });
+  assert.deepEqual(sentPromptCommands(hub)[0]!.config, { model: "opus", effort: "low" });
 });
 
 test("explicit unsupported Claude effort and permission values still fail capability validation", () => {

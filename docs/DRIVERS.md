@@ -183,6 +183,12 @@ a CLI self-update changes capabilities without a runner restart.
 Cloud-provider flags follow Claude's documented credential precedence ahead of direct API/OAuth
 configuration: [Claude Code authentication](https://code.claude.com/docs/en/team#authentication-precedence).
 
+### 2.2 Effective Model and Effort
+
+Before launching a session that advertises both model and reasoning-effort controls, Wollipog resolves and persists a concrete pair. Explicit selections win, followed by a concrete harness-advertised default, then the preferred driver pair (Claude Opus 5 with High effort or GPT-5.6 Sol with High effort), then a deterministic compatible advertised fallback. Unsupported persisted values are healed on the next configuration change or prompt. If no compatible concrete pair exists, submission is rejected with a rediscovery or selection hint instead of launching an ambiguous Default.
+
+The resolved values are passed explicitly to the driver and shown in both the composer control and pinned summary. Effort names use presentation labels such as **Extra High** rather than raw tokens such as `xhigh`.
+
 ### 2.2 Spawn command and persistent process
 
 The default is one persistent process per session. The `WOLLIPOG_CLAUDE_PERSISTENT=0` circuit breaker

@@ -19,7 +19,8 @@ import { GitPinnedSection } from "./GitVisibility.js";
 import { AgentIcon } from "./AgentIcon.js";
 import { BranchIcon, ComputerIcon, DialIcon, FolderOutlineIcon, GitHubIcon, GlobeIcon, NotesIcon, PullRequestIcon, TuningIcon } from "./Icons.js";
 import { BackgroundDeliveryBadge, BackgroundNotificationBadge, BackgroundWorkBadge, Spinner, StatusBadge, UntrackedBackgroundWorkBadge } from "./common.js";
-import { relativeTime, resolvedModelLabel } from "../format.js";
+import { effortLabel, relativeTime, resolvedModelLabel } from "../format.js";
+import { resolveCaps } from "../caps.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { safeExternalHref } from "../external-href.js";
 
@@ -56,7 +57,18 @@ export function PinnedSummary({
   const boxes = useStoreSelector((s) => s.boxes);
   const runs = useStoreSelector((s) => s.runs);
   const sessions = useStoreSelector((s) => s.sessions);
-  const runnerOnline = runners.get(session.runnerId)?.status === "online";
+  const runner = runners.get(session.runnerId);
+  const runnerOnline = runner?.status === "online";
+  const effectiveCaps = resolveCaps(runner, session);
+  const effectiveModel = effectiveCaps?.models.find((model) => model.id === (session.model ?? ""))
+    ?? effectiveCaps?.models.find((model) => model.default)
+    ?? effectiveCaps?.models.find((model) => !model.hidden);
+  const effectiveEfforts = (effectiveModel?.efforts?.length ? effectiveModel.efforts : effectiveCaps?.effortLevels) ?? [];
+  const effectiveEffort = session.effort && effectiveEfforts.includes(session.effort)
+    ? session.effort
+    : effectiveModel?.defaultEffort && effectiveEfforts.includes(effectiveModel.defaultEffort)
+      ? effectiveModel.defaultEffort
+      : effectiveEfforts.includes("high") ? "high" : [...effectiveEfforts].sort()[0];
   // SessionDetail owns both reads so compact and pinned presentations share one
   // session-tagged snapshot while status and summary keep independent refresh cycles.
   const summary = gitSummary.summary;
@@ -104,11 +116,11 @@ export function PinnedSummary({
         <div className="ps-row is-static">
           <AgentIcon driver={session.driver} agentName={session.agentName} size={13} />
           <span>{sessionAgentLabel(session.agentName, session.driver, session.agentId)}</span>
-          {(session.resolvedModel || session.model || session.effort) && (
+          {(session.resolvedModel || effectiveModel || effectiveEffort) && (
             <span className="ps-right ps-detail" title={session.resolvedModel ?? undefined}>
               {[
-                session.resolvedModel ? resolvedModelLabel(session.resolvedModel) : session.model,
-                session.effort,
+                session.resolvedModel ? resolvedModelLabel(session.resolvedModel) : (effectiveModel?.displayName ?? effectiveModel?.id),
+                effectiveEffort ? effortLabel(effectiveEffort) : undefined,
               ].filter(Boolean).join(" · ")}
             </span>
           )}
