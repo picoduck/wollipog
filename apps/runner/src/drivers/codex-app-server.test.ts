@@ -772,6 +772,51 @@ test("resolvePermission for an unknown id is a no-op", () => {
   assert.ok(true);
 });
 
+test("fallback approval ids remain unique after an earlier request is resolved", async () => {
+  const h = makeHarness();
+  const requests = new Map<string, (params: any) => Promise<any>>();
+  (h.driver as any).registerHandlers({
+    onRequest: (method: string, handler: (params: any) => Promise<any>) => requests.set(method, handler),
+    onNotification: () => {},
+  });
+  const approve = requests.get("item/commandExecution/requestApproval")!;
+
+  const first = approve({ turnId: "turn-fallback", command: "one" });
+  const second = approve({ turnId: "turn-fallback", command: "two" });
+  assert.deepEqual(h.events.map((event) => event.kind === "permission_request" && event.requestId), [
+    "turn-fallback:1",
+    "turn-fallback:2",
+  ]);
+
+  assert.equal(h.driver.resolvePermission("turn-fallback:1", "allow"), true);
+  const third = approve({ turnId: "turn-fallback", command: "three" });
+  assert.equal(h.events.at(-1)?.kind === "permission_request" && h.events.at(-1)?.requestId, "turn-fallback:3");
+  assert.equal(h.driver.resolvePermission("turn-fallback:2", "deny"), true);
+  assert.equal(h.driver.resolvePermission("turn-fallback:3", "allow"), true);
+
+  assert.deepEqual(await Promise.all([first, second, third]), [
+    { decision: "accept" },
+    { decision: "decline" },
+    { decision: "accept" },
+  ]);
+});
+
+test("a repeated provider approval id declines the replaced parked RPC", async () => {
+  const h = makeHarness();
+  const requests = new Map<string, (params: any) => Promise<any>>();
+  (h.driver as any).registerHandlers({
+    onRequest: (method: string, handler: (params: any) => Promise<any>) => requests.set(method, handler),
+    onNotification: () => {},
+  });
+  const approve = requests.get("item/commandExecution/requestApproval")!;
+
+  const replaced = approve({ approvalId: "duplicate", command: "old" });
+  const current = approve({ approvalId: "duplicate", command: "new" });
+  assert.deepEqual(await replaced, { decision: "decline" });
+  assert.equal(h.driver.resolvePermission("duplicate", "allow"), true);
+  assert.deepEqual(await current, { decision: "accept" });
+});
+
 const cfg = (permissionMode: string, extra: Partial<SessionConfig> = {}): SessionConfig =>
   ({ permissionMode, ...extra }) as SessionConfig;
 

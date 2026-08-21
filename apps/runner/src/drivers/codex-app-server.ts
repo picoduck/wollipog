@@ -164,6 +164,8 @@ export class CodexAppServerDriver implements Driver {
   private readonly emittedErrors = new Set<string>();
   /** approval correlation id -> the parked JSON-RPC approval request. */
   private readonly pendingApprovals = new Map<string, PendingApproval>();
+  /** Monotonic fallback correlation sequence for app-server schemas without approval ids. */
+  private approvalSeq = 0;
   private stagedImages: StagedPromptImages | null = null;
   /** Steering image paths must remain live until the active turn settles after accepted or
    * uncertain delivery. Keyed independently so one steer cannot overwrite another's cleanup. */
@@ -517,7 +519,11 @@ export class CodexAppServerDriver implements Driver {
     const makeApprover = (method: string) => (params: Json) =>
       new Promise<Json>((resolve) => {
         if (this.disposed || this.cancelled) return resolve(approvalResponse(method, params, false));
-        const id = String(params?.approvalId ?? params?.itemId ?? `${params?.turnId}:${this.pendingApprovals.size}`);
+        const id = String(params?.approvalId ?? params?.itemId ?? `${params?.turnId}:${++this.approvalSeq}`);
+        // Provider ids should be unique, but fail closed if schema drift repeats one: settle the
+        // older parked RPC before replacing its UI correlation entry so no resolver is orphaned.
+        const replaced = this.pendingApprovals.get(id);
+        if (replaced) replaced.resolve(approvalResponse(replaced.method, replaced.params, false));
         this.pendingApprovals.set(id, { method, params, resolve });
         this.cb.onEvent({
           kind: "permission_request",
