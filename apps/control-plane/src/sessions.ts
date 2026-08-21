@@ -5686,7 +5686,6 @@ export class SessionsService {
         cleanupEventPayloadArtifacts(this.db, externalized.artifactIds);
         throw error;
       }
-      if (runnerSeq != null) this.db.setHydratedSeq(sessionId, runnerSeq);
     }
     const steeringEvidence = payload.kind === "user_message" && payload.deliveryIntent === "steer" &&
       typeof payload.submissionId === "string" && typeof payload.turnId === "string"
@@ -6354,7 +6353,6 @@ export class SessionsService {
           throw error;
         }
         this.hub.sessionEvent(ev);
-        this.db.setHydratedSeq(sessionId, e.seq);
         trailingAsk = this.updateTrailingAsk(trailingAsk, ev.payload);
         if (ev.payload.kind === "background_continuation_delivered") {
           this.hub.sessionChangedById(sessionId);
