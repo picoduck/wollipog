@@ -18,6 +18,7 @@ import {
 
 const routes: Array<[View, string]> = [
   [{ name: "inbox" }, "/"],
+  [{ name: "archived" }, "/archived"],
   [{ name: "board" }, "/board"],
   [{ name: "runners", section: "machines" }, "/connections/machines"],
   [{ name: "runners", section: "instances" }, "/connections/instances"],
@@ -69,6 +70,12 @@ test("global destinations use the polished Connections vocabulary everywhere", (
     label: "Connections",
     title: "Connections",
     paletteLabel: "Connections",
+  });
+  assert.deepEqual(GLOBAL_VIEW_ITEMS.find((item) => item.name === "archived"), {
+    name: "archived",
+    label: "Archived",
+    title: "Archived Sessions",
+    paletteLabel: "Archived Sessions",
   });
   assert.equal(GLOBAL_VIEW_ITEMS.some((item) => /runner/i.test(`${item.label} ${item.title} ${item.paletteLabel}`)), false);
 });

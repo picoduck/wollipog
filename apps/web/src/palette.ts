@@ -1,5 +1,6 @@
 import type { SessionView } from "@wollipog/protocol";
 import { sessionAgentLabel } from "./components/agent-options.js";
+import { sessionArchiveSearchDetail } from "./archive-browser.js";
 import type { View } from "./store.js";
 
 /** One selectable palette row. `view` is the navigation target. */
@@ -22,7 +23,7 @@ export function matchSessions(sessions: SessionView[], q: string, limit: number)
   for (const s of sessions) {
     const title = s.title.toLowerCase();
     const agentLabel = sessionAgentLabel(s.agentName, s.driver, s.agentId);
-    const rest = `${s.workspaceName ?? ""} ${agentLabel} ${s.agentName ?? ""}`.toLowerCase();
+    const rest = `${s.projectName ?? ""} ${s.workspaceName ?? ""} ${agentLabel} ${s.agentName ?? ""} ${sessionArchiveSearchDetail(s)}`.toLowerCase();
     if (terms.length === 0) {
       scored.push({ score: 0, s });
       continue;
@@ -43,11 +44,7 @@ export function matchSessions(sessions: SessionView[], q: string, limit: number)
   return scored.slice(0, limit).map(({ s }) => ({
     kind: "session" as const,
     label: s.title || s.id,
-    detail: [
-      s.archived ? "Archived" : null,
-      s.workspaceName,
-      sessionAgentLabel(s.agentName, s.driver, s.agentId),
-    ].filter(Boolean).join(" · ") || undefined,
+    detail: sessionArchiveSearchDetail(s),
     view: { name: "session", id: s.id },
   }));
 }

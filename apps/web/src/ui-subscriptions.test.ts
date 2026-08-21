@@ -20,6 +20,7 @@ const sessions = new Map<string, SessionView>();
 test("UI session subscriptions follow Inbox, session, run, and pod navigation deterministically", () => {
   const state = { sessions, runs: new Map([[run.id, run]]), pods: new Map([[pod.id, pod]]) };
   assert.deepEqual(uiStreamSubscriptions({ ...state, view: { name: "board" } }), { sessionIds: [], podIds: [] });
+  assert.deepEqual(uiStreamSubscriptions({ ...state, view: { name: "archived" } }), { sessionIds: [], podIds: [] });
   assert.deepEqual(uiStreamSubscriptions({ ...state, view: { name: "projects" } }), { sessionIds: [], podIds: [] });
   assert.deepEqual(uiStreamSubscriptions({ ...state, view: { name: "projects", id: "project-1" } }), { sessionIds: [], podIds: [] });
   assert.deepEqual(uiStreamSubscriptions({

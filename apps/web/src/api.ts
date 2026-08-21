@@ -554,7 +554,12 @@ export function createApiClient(transport: ApiTransport) {
     }),
 
   search: (q: string) =>
-    req<{ results: { sessionId: string; seq: number; snippet: string; title: string; workspaceName?: string | null }[] }>(
+    req<{ results: Array<{
+      sessionId: string;
+      seq: number;
+      snippet: string;
+      title: string;
+    } & Pick<SessionView, "workspaceName" | "projectName" | "archived" | "status" | "agentId" | "agentName" | "driver">> }>(
       `/api/search?q=${encodeURIComponent(q)}`,
     ),
 

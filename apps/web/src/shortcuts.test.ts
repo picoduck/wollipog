@@ -203,6 +203,7 @@ test("PR4 rail, search, create, and focus-zone shortcuts replace the retired sid
     ["navigate-automations", "6"],
     ["navigate-usage", "7"],
     ["navigate-connections", "8"],
+    ["navigate-archived", "9"],
     ["focus-inbox-search", "/"],
     ["new-session", "c"],
     ["focus-next-zone", "F6"],
@@ -221,6 +222,7 @@ test("global rail numbering stays aligned with its navigation shortcuts", () => 
     automations: "navigate-automations",
     usage: "navigate-usage",
     runners: "navigate-connections",
+    archived: "navigate-archived",
   } as const;
   for (const [index, item] of GLOBAL_VIEW_ITEMS.entries()) {
     assert.equal(shortcut(shortcutIdByView[item.name]).binding.key, String(index + 1), item.name);

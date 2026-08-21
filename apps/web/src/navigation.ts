@@ -12,6 +12,7 @@ export type View =
   | { name: "pods" }
   | { name: "automations" }
   | { name: "usage" }
+  | { name: "archived" }
   | { name: "projects"; id?: string }
   | { name: "session"; id: string; location?: SourceLocation }
   | { name: "run"; id: string }
@@ -39,7 +40,7 @@ export const SETTINGS_SECTIONS: ReadonlyArray<{ id: SettingsSection; title: stri
 
 export type ConnectionSection = "instances" | "machines" | "people";
 
-export type GlobalViewName = Extract<View["name"], "inbox" | "projects" | "board" | "runs" | "pods" | "automations" | "usage" | "runners">;
+export type GlobalViewName = Extract<View["name"], "inbox" | "projects" | "board" | "runs" | "pods" | "automations" | "usage" | "runners" | "archived">;
 
 /** One vocabulary for every global destination, shared by the rail, header, and palette. */
 export const GLOBAL_VIEW_ITEMS: ReadonlyArray<{
@@ -56,6 +57,7 @@ export const GLOBAL_VIEW_ITEMS: ReadonlyArray<{
   { name: "automations", label: "Automations", title: "Automations", paletteLabel: "Automations" },
   { name: "usage", label: "Usage", title: "Usage & Cost", paletteLabel: "Usage & Cost" },
   { name: "runners", label: "Connections", title: "Connections", paletteLabel: "Connections" },
+  { name: "archived", label: "Archived", title: "Archived Sessions", paletteLabel: "Archived Sessions" },
 ];
 
 /**
@@ -76,6 +78,7 @@ export function viewTitle(view: View): string {
     case "automations":
     case "usage":
     case "runners":
+    case "archived":
       // Named once, in the list the rail and palette already read, so the three surfaces cannot
       // drift apart.
       return GLOBAL_VIEW_ITEMS.find((item) => item.name === view.name)!.title;
@@ -167,6 +170,7 @@ export function viewPath(view: View): string {
     case "pods": return "/pods";
     case "automations": return "/automations";
     case "usage": return "/usage";
+    case "archived": return "/archived";
     case "projects": return view.id ? `/projects/~${encodeResourceId(view.id)}` : "/projects";
     case "session": return view.location
       ? `/sessions/~${encodeResourceId(view.id)}/files/~${encodeOpaque(view.location.path)}${sourceLocationSearch(view.location)}`
@@ -225,6 +229,7 @@ export function viewFromPath(pathname: string, search = ""): View | null {
   if (path === "/pods") return { name: "pods" };
   if (path === "/automations") return { name: "automations" };
   if (path === "/usage") return { name: "usage" };
+  if (path === "/archived") return { name: "archived" };
   if (path === "/settings") return { name: "settings", section: "appearance" };
   const settingsMatch = /^\/settings\/(appearance|notifications|keyboard|behavior|network|about)$/.exec(path);
   if (settingsMatch) return { name: "settings", section: settingsMatch[1] as SettingsSection };

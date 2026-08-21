@@ -6,6 +6,7 @@ import {
   BoardIcon,
   ConnectionsIcon,
   InboxIcon,
+  FolderSolidIcon,
   MoreHorizontalIcon,
   PlusIcon,
   PodsIcon,
@@ -35,6 +36,7 @@ const VIEW_ICONS: Record<GlobalViewName, (props: { size?: number; className?: st
   automations: AutomationsIcon,
   usage: UsageIcon,
   runners: ConnectionsIcon,
+  archived: FolderSolidIcon,
 };
 
 const RAIL_ICON_SIZE = 26;

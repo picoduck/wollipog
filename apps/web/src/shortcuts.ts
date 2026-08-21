@@ -8,6 +8,7 @@ export type ShortcutId =
   | "navigate-automations"
   | "navigate-usage"
   | "navigate-connections"
+  | "navigate-archived"
   | "open-settings"
   | "focus-inbox-search"
   | "new-session"
@@ -149,6 +150,14 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     description: "Open Connections",
     scope: "Global",
     binding: { key: "8", bare: true },
+  },
+  {
+    id: "navigate-archived",
+    group: "Navigation",
+    label: "Archived Sessions",
+    description: "Open Archived Sessions",
+    scope: "Global",
+    binding: { key: "9", bare: true },
   },
   {
     id: "open-settings",

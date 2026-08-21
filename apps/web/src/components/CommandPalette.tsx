@@ -3,6 +3,7 @@ import { useApi } from "../api-context.js";
 import { useStoreActions, useStoreSelector, type View } from "../store.js";
 import { matchSessions, type PaletteEntry } from "../palette.js";
 import { EXTRA_PALETTE_DESTINATIONS, GLOBAL_VIEW_ITEMS } from "../navigation.js";
+import { sessionArchiveSearchDetail } from "../archive-browser.js";
 
 export function useCommandPaletteFocus(
   inputRef: RefObject<HTMLInputElement>,
@@ -103,6 +104,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
         kind: "transcript",
         label: h.title || h.sessionId,
         snippet: h.snippet,
+        detail: mergedSessions.get(h.sessionId) ? sessionArchiveSearchDetail(mergedSessions.get(h.sessionId)!) : "Session State Unavailable",
         view: { name: "session", id: h.sessionId },
       });
     }
