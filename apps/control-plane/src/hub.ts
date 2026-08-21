@@ -287,7 +287,21 @@ export class Hub {
       socket.send(JSON.stringify(msg));
       return true;
     } catch {
-      this.runnerSockets.delete(runnerId);
+      // Keep the current-socket identity until the ordinary close handler runs. Pre-deleting here
+      // makes onGone treat the close as stale and skips every durable disconnect side effect.
+      try {
+        if (socket.close) socket.close(1011, "runner send failed");
+        else socket.terminate?.();
+      } catch {
+        // A broken close implementation must not turn a best-effort send into a control-plane
+        // exception. Force-drop when possible; its close event still follows the shared teardown.
+        try {
+          socket.terminate?.();
+        } catch {
+          // The send already failed; callers receive false while teardown remains best-effort for
+          // malformed test doubles or nonstandard WebSocket implementations.
+        }
+      }
       return false;
     }
   }
