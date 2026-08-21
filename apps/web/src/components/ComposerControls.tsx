@@ -12,6 +12,7 @@ import {
   effectiveModelEffortForDisplay,
   elicitationAvailability,
   resolveCaps,
+  resolveEffectiveCaps,
   type ElicitationAvailability,
 } from "../caps.js";
 import { useStoreSelector } from "../store.js";
@@ -25,10 +26,11 @@ type Apply = (patch: Partial<SessionConfig>) => void;
 function useSessionConfig(session: SessionView) {
   const runner = useStoreSelector((s) => s.runners.get(session.runnerId));
   const caps = resolveCaps(runner, session);
+  const effectiveCaps = resolveEffectiveCaps(runner, session);
   const models = (caps?.models ?? []).filter((model) => !model.hidden || model.id === session.model);
   const permModes = (caps?.permissionModes ?? []).filter((p) => p !== "plan");
 
-  const effective = effectiveModelEffortForDisplay(caps, session.driver, session.model, session.effort);
+  const effective = effectiveModelEffortForDisplay(effectiveCaps, session.driver, session.model, session.effort);
   const modelVal = effective.model?.id ?? "";
   const selectedModel = effective.model;
   const modelEfforts = effective.efforts;

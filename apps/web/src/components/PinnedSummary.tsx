@@ -20,7 +20,7 @@ import { AgentIcon } from "./AgentIcon.js";
 import { BranchIcon, ComputerIcon, DialIcon, FolderOutlineIcon, GitHubIcon, GlobeIcon, NotesIcon, PullRequestIcon, TuningIcon } from "./Icons.js";
 import { BackgroundDeliveryBadge, BackgroundNotificationBadge, BackgroundWorkBadge, Spinner, StatusBadge, UntrackedBackgroundWorkBadge } from "./common.js";
 import { effortLabel, relativeTime, resolvedModelLabel } from "../format.js";
-import { effectiveModelEffortForDisplay, resolveCaps } from "../caps.js";
+import { effectiveModelEffortForDisplay, resolveEffectiveCaps } from "../caps.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { safeExternalHref } from "../external-href.js";
 
@@ -59,7 +59,7 @@ export function PinnedSummary({
   const sessions = useStoreSelector((s) => s.sessions);
   const runner = runners.get(session.runnerId);
   const runnerOnline = runner?.status === "online";
-  const effectiveCaps = resolveCaps(runner, session);
+  const effectiveCaps = resolveEffectiveCaps(runner, session);
   const effective = effectiveModelEffortForDisplay(effectiveCaps, session.driver, session.model, session.effort);
   const effectiveModel = effective.model;
   const effectiveEffort = effective.effort;

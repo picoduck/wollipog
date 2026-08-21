@@ -57,11 +57,15 @@ export function effectiveModelEffortForDisplay(
   modelId?: string | null,
   effortId?: string | null,
 ) {
-  const models = capabilities?.models ?? [];
+  if (!capabilities?.models?.length) return { model: undefined, efforts: [], effort: undefined };
+  const models = capabilities.models;
   const concrete = models.filter((model) => model.id !== "default");
   const visible = concrete.filter((model) => !model.hidden);
   const effortsFor = (model: AgentCapabilities["models"][number] | undefined) =>
-    model ? ((model.efforts?.length ? model.efforts : capabilities?.effortLevels) ?? []) : [];
+    model ? ((model.efforts?.length ? model.efforts : capabilities.effortLevels) ?? []) : [];
+  if (!concrete.some((model) => effortsFor(model).length)) {
+    return { model: undefined, efforts: [], effort: undefined };
+  }
   const explicit = modelId && modelId !== "default" ? concrete.find((model) => model.id === modelId) : undefined;
   const advertised = visible.find((model) => model.default);
   const preferredPattern = driver === "claude-code" ? /(?:^|[-_])opus(?:$|[-_\[])/i : /gpt[-_.]?5\.6[-_.]?sol/i;
@@ -97,12 +101,21 @@ const CLAUDE_DEFAULT_CAPS: AgentCapabilities = {
   permissionModes: ["default", "auto", "acceptEdits", "plan", "bypassPermissions"],
 };
 
-/**
- * Capabilities to drive a session's model / effort / approval controls. Adopted or ACP sessions
- * frequently don't resolve to a capability-bearing agent (their `agentId` matches nothing, or an
- * ACP agent with no advertised caps), which is why their controls looked empty. Fall back to another
- * agent on the same runner sharing this session's driver, then to built-in claude defaults.
- */
+/** Capability metadata the server can also use to resolve a concrete effective model and effort. */
+export function resolveEffectiveCaps(
+  runner: RunnerView | undefined,
+  session: SessionView,
+): AgentCapabilities | undefined {
+  const agents = runner?.agents ?? [];
+  const sessionCapabilities = session.driver === "acp"
+    ? session.agentCapabilities
+    : nativeSessionOverlay(session.agentCapabilities);
+  const exact = agents.find((a) => a.id === session.agentId)?.capabilities;
+  return mergeSessionCapabilities(exact, sessionCapabilities);
+}
+
+/** Capabilities that drive all session controls. Missing native metadata retains the historical
+ * same-driver and built-in Claude picker fallbacks without presenting them as effective values. */
 export function resolveCaps(runner: RunnerView | undefined, session: SessionView): AgentCapabilities | undefined {
   const agents = runner?.agents ?? [];
   const sessionCapabilities = session.driver === "acp"

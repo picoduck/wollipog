@@ -7,6 +7,7 @@ import {
   elicitationAvailability,
   modelSupportsImages,
   resolveCaps,
+  resolveEffectiveCaps,
 } from "./caps.js";
 
 const caps: AgentCapabilities = {
@@ -34,6 +35,22 @@ test("effective display resolution matches deterministic server fallback semanti
   assert.equal(resolved.model?.id, "opus");
   assert.equal(resolved.effort, "medium");
   assert.equal(effectiveModelEffortForDisplay(modelCaps, "claude-code", "hidden", "xhigh").model?.id, "hidden");
+  assert.deepEqual(effectiveModelEffortForDisplay(undefined, "claude-code"), {
+    model: undefined, efforts: [], effort: undefined,
+  });
+  assert.deepEqual(effectiveModelEffortForDisplay(
+    { ...modelCaps, effortLevels: [], models: [{ id: "opus" }] },
+    "claude-code",
+  ), { model: undefined, efforts: [], effort: undefined });
+});
+
+test("effective capability resolution does not claim built-in fallbacks as runner metadata", () => {
+  const session = { agentId: "missing", driver: "claude-code" } as SessionView;
+  assert.equal(resolveEffectiveCaps(undefined, session), undefined);
+  const otherCaps = { ...caps, models: [{ id: "opus" }], effortLevels: ["high"] };
+  const runner = { agents: [{ id: "other", driver: "claude-code", capabilities: otherCaps }] } as RunnerView;
+  assert.equal(resolveEffectiveCaps(runner, session), undefined);
+  assert.equal(resolveCaps(undefined, session)?.models.some((model) => model.id === "opus"), true);
 });
 
 test("modelSupportsImages follows selected-model modalities and falls back for old runners", () => {

@@ -457,10 +457,13 @@ export function resolveEffectiveModelEffort(
   if (!concrete.some((model) => effortsFor(model).length)) return {};
   if (!selectable.length) return { error: "No visible concrete model is advertised. Rediscover the runner or choose a compatible agent." };
 
+  const explicitFamily = driver === "claude-code" && config.model
+    ? claudeCatalogFamily(config.model)
+    : null;
   const explicitModel = config.model && config.model !== "default"
     ? concrete.find((model) => model.id === config.model)
-      ?? (driver === "claude-code"
-        ? concrete.find((model) => claudeCatalogFamily(model.id) === claudeCatalogFamily(config.model!))
+      ?? (explicitFamily
+        ? concrete.find((model) => claudeCatalogFamily(model.id) === explicitFamily)
         : undefined)
     : undefined;
   const advertised = selectable.find((model) => model.default);
@@ -480,7 +483,10 @@ export function resolveEffectiveModelEffort(
   const fallbackEffort = EFFORT_FALLBACK_ORDER.find((effort) => efforts.includes(effort))
     ?? [...efforts].sort()[0];
   const effort = explicitEffort ?? advertisedEffort ?? preferredEffort ?? fallbackEffort;
-  const resolvedModel = explicitModel && config.model ? config.model : model.id;
+  const preserveExplicitModel = explicitModel && config.model && (
+    explicitModel.id === config.model || claudeStableAliasFamily(config.model) !== null
+  );
+  const resolvedModel = preserveExplicitModel ? config.model! : model.id;
   return effort ? { value: { model: resolvedModel, effort } }
     : { error: `Model "${model.displayName ?? model.id}" has no concrete supported reasoning effort.` };
 }

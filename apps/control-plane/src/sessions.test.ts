@@ -2972,6 +2972,35 @@ test("fallback family compatibility never rewrites a persisted live Claude model
   assert.equal(hub.sentOfType("prompt_session")[0]?.config?.model, "opus[1m]");
 });
 
+test("stale Claude family ids heal to an advertised concrete model instead of stranding prompts", () => {
+  for (const [staleModel, advertisedModel] of [
+    ["claude-opus-4-20250514", "opus"],
+    ["opus-plan", "opus-fast"],
+  ] as const) {
+    const { db, hub, svc } = makeHarness();
+    const id = seedSession(svc, hub, { config: { model: staleModel } });
+    db.updateSessionStatus(id, "idle", Date.now());
+    db.updateRunnerAgents(
+      RUNNER_ID,
+      runnerMeta().agents.map((agent) => agent.id === AGENT_ID ? {
+        ...agent,
+        capabilities: {
+          models: [{ id: "default", default: true }, { id: advertisedModel }],
+          effortLevels: ["low"], slashCommands: [], supportsImages: true,
+          supportsApprovals: true, permissionModes: ["acceptEdits"],
+        },
+      } : agent),
+      Date.now(),
+    );
+    hub.sentToRunner.length = 0;
+
+    const result = svc.prompt(id, "continue");
+    assert.equal(result.ok, true, result.error);
+    assert.equal(db.getSession(id)?.model, advertisedModel);
+    assert.equal(hub.sentOfType("prompt_session")[0]?.config?.model, advertisedModel);
+  }
+});
+
 test("prompt is rejected while a cost-budget approval is pending (no bypass)", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);
