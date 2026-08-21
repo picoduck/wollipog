@@ -84,6 +84,8 @@ import {
   type SessionLaunchSpec,
   type SessionSnapshot,
   type SessionStatus,
+  type SessionReminderView,
+  type SetSessionReminderRequest,
   type SessionView,
   type SideChatView,
   type SteerRequest,
@@ -4067,6 +4069,59 @@ export class SessionsService {
     }
     if (previousProjectId && previousProjectId !== projectId) this.hub.projectChangedById(previousProjectId);
     return ok(updated);
+  }
+
+  setReminder(
+    sessionId: string,
+    userId: string,
+    request: Partial<SetSessionReminderRequest>,
+  ): ServiceResult<SessionReminderView> {
+    if (!this.db.getSession(sessionId)) return fail("session not found", 404);
+    const now = Date.now();
+    if (!Number.isSafeInteger(request.scheduledFor) || request.scheduledFor! <= now ||
+        request.scheduledFor! > now + 10 * 366 * 86_400_000) {
+      return fail("scheduledFor must be a future absolute instant within ten years", 400);
+    }
+    if (typeof request.timeZone !== "string" || !request.timeZone || request.timeZone.length > 128) {
+      return fail("timeZone must be a valid IANA time-zone identifier", 400);
+    }
+    try {
+      new Intl.DateTimeFormat("en", { timeZone: request.timeZone }).format(now);
+    } catch {
+      return fail("timeZone must be a valid IANA time-zone identifier", 400);
+    }
+    if (typeof request.originalExpression !== "string" || !request.originalExpression.trim() ||
+        request.originalExpression.length > 200 || /[\u0000-\u001f\u007f]/u.test(request.originalExpression)) {
+      return fail("originalExpression must contain 1 to 200 visible characters", 400);
+    }
+    if (request.wakePolicy !== "until_activity" && request.wakePolicy !== "regardless") {
+      return fail("wakePolicy must be until_activity or regardless", 400);
+    }
+    if (request.expectedRevision !== undefined &&
+        (!Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0)) {
+      return fail("expectedRevision must be a non-negative integer", 400);
+    }
+    const result = this.db.setSessionReminder({
+      sessionId,
+      userId,
+      scheduledFor: request.scheduledFor!,
+      timeZone: request.timeZone,
+      originalExpression: request.originalExpression.trim(),
+      wakePolicy: request.wakePolicy,
+      ...(request.expectedRevision === undefined ? {} : { expectedRevision: request.expectedRevision }),
+      now,
+    });
+    if (result.kind === "conflict") return fail("reminder changed in another client; reload and try again", 409);
+    if (result.kind === "missing") return fail("reminder was removed in another client", 409);
+    this.hub.sessionReminderChanged(userId, result.reminder);
+    return ok(result.reminder);
+  }
+
+  removeReminder(sessionId: string, userId: string, expectedRevision?: number): ServiceResult<{ removed: true }> {
+    const result = this.db.removeSessionReminder(sessionId, userId, expectedRevision);
+    if (result.kind === "conflict") return fail("reminder changed in another client; reload and try again", 409);
+    if (result.kind === "removed") this.hub.sessionReminderRemoved(userId, sessionId);
+    return ok({ removed: true });
   }
 
   setArchived(sessionId: string, archived: boolean, refreshProject = true): ServiceResult<SessionView> {

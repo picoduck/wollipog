@@ -44,6 +44,7 @@ export function SessionHeader({
   stopBeforeArchiveSupported,
   exportReady,
   onArchive,
+  onSnooze,
   projectCrumb,
   topbarControls,
   titleId,
@@ -56,6 +57,7 @@ export function SessionHeader({
   stopBeforeArchiveSupported: boolean;
   exportReady: boolean;
   onArchive?: () => void;
+  onSnooze?: () => void;
   /** The interactive Project chip, rendered as the breadcrumb's first segment. */
   projectCrumb?: ReactNode;
   /** App-shell control cluster (editor, pinned summary, terminal, side panel) when this bar
@@ -292,6 +294,20 @@ export function SessionHeader({
                   >
                     {sessionArchiveActionLabel(session, stopBeforeArchiveSupported)}
                   </button>
+                  {onSnooze && (
+                    <button
+                      className="menu-item"
+                      type="button"
+                      role="menuitem"
+                      disabled={busy}
+                      onClick={() => {
+                        closeMenu(false);
+                        onSnooze();
+                      }}
+                    >
+                      Snooze Session…
+                    </button>
+                  )}
                   <div className="menu-label" id="transcript-export-warning" role="presentation">Operational Transcript</div>
                   <div className="menu-caution" id="transcript-export-caution" role="presentation">
                     {exportReady ? "Cached and possibly partial. Message text is operationally redacted but may still contain secrets or source." : "Export becomes available after the initial timeline load."}

@@ -74,6 +74,7 @@ import {
   type RunnerProtocolCapability,
   type ResolveWorkflowGateRequest,
   type SetArchivedRequest,
+  type SetSessionReminderRequest,
   type SetColumnRequest,
   type SetSessionTitleRequest,
   type SetWorkspaceRequest,
@@ -3460,6 +3461,26 @@ app.post("/api/sessions/:id/workspace", async (req, reply) => {
   return respond(reply, svc.setWorkspace(id, body.workspaceId ?? null));
 });
 
+app.put("/api/sessions/:id/reminder", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const human = requestHuman(req);
+  if (!human) return reply.code(403).send({ error: "session reminders require a human user" });
+  return respond(reply, svc.setReminder(id, human.userId,
+    (req.body ?? {}) as Partial<SetSessionReminderRequest>));
+});
+
+app.delete("/api/sessions/:id/reminder", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const human = requestHuman(req);
+  if (!human) return reply.code(403).send({ error: "session reminders require a human user" });
+  const rawRevision = (req.query as { revision?: string }).revision;
+  const revision = rawRevision === undefined ? undefined : Number(rawRevision);
+  if (revision !== undefined && (!Number.isSafeInteger(revision) || revision < 0)) {
+    return reply.code(400).send({ error: "revision must be a non-negative integer" });
+  }
+  return respond(reply, svc.removeReminder(id, human.userId, revision));
+});
+
 app.post("/api/sessions/:id/archive", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const body = req.body as SetArchivedRequest;
@@ -3785,6 +3806,15 @@ const workflowRecoveryTimer = setInterval(() => svc.recoverExpiredWorkflowAttemp
 workflowRecoveryTimer.unref();
 const automationTimer = setInterval(() => automations.tick(Date.now()), 5_000);
 automationTimer.unref();
+hub.fireDueSessionReminders(Date.now());
+const sessionReminderTimer = setInterval(() => {
+  try {
+    hub.fireDueSessionReminders(Date.now());
+  } catch (error) {
+    app.log.warn({ error: error instanceof Error ? error.message : String(error) }, "session reminder sweep deferred");
+  }
+}, 1_000);
+sessionReminderTimer.unref();
 const sessionCommandRetryTimer = setInterval(() => {
   try {
     svc.retryDueSessionCommands(Date.now());
@@ -3874,6 +3904,7 @@ runnerLivenessTimer.unref();
 app.addHook("onClose", async () => {
   clearInterval(workflowRecoveryTimer);
   clearInterval(automationTimer);
+  clearInterval(sessionReminderTimer);
   clearInterval(sessionCommandRetryTimer);
   clearInterval(backgroundPushRetryTimer);
   clearInterval(policyHookApprovalTimer);

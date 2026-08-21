@@ -71,10 +71,12 @@ import type {
   SessionEventsResponse,
   SessionFileEntry,
   SessionView,
+  SessionReminderView,
   SessionCommandInvocationView,
   SteerRequest,
   SteeringAttemptView,
   SetProjectRequest,
+  SetSessionReminderRequest,
   SideChatResponse,
   SideChatView,
   ShellHistoryPage,
@@ -582,6 +584,17 @@ export function createApiClient(transport: ApiTransport) {
       method: "POST",
       body: JSON.stringify({ archived }),
     }),
+
+  setReminder: (id: string, body: SetSessionReminderRequest) =>
+    req<SessionReminderView>(`/api/sessions/${encodeURIComponent(id)}/reminder`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+
+  removeReminder: (id: string, revision?: number) =>
+    req<{ removed: true }>(`/api/sessions/${encodeURIComponent(id)}/reminder${
+      revision === undefined ? "" : `?revision=${encodeURIComponent(String(revision))}`
+    }`, { method: "DELETE" }),
 
   /** Legacy compatibility adapter: re-file by workspace identity (null means no workspace group). */
   setWorkspace: (id: string, workspaceId: string | null) =>

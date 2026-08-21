@@ -13,6 +13,7 @@ export interface InboxShortcutRailProps {
   onTogglePin: () => void;
   onMarkUnread: () => void;
   onArchive: () => void;
+  onSnooze?: () => void;
 }
 
 interface ShortcutButtonProps {
@@ -49,6 +50,7 @@ export function InboxShortcutRail({
   onTogglePin,
   onMarkUnread,
   onArchive,
+  onSnooze,
 }: InboxShortcutRailProps) {
   if (!session) {
     return <div className="inbox-shortcut-rail is-empty" aria-label="Selected Session Shortcuts" />;
@@ -68,6 +70,9 @@ export function InboxShortcutRail({
         <ShortcutButton label={pinned ? "Unpin" : "Pin"} shortcut="S" disabled={busy} onClick={onTogglePin} />
         <ShortcutButton label="Unread" shortcut="U" disabled={busy} onClick={onMarkUnread} />
         <ShortcutButton label={sessionArchiveActionLabel(session, stopBeforeArchiveSupported)} shortcut="E" disabled={busy} onClick={onArchive} />
+        {onSnooze && (
+          <ShortcutButton label="Snooze" shortcut="H" disabled={busy} onClick={onSnooze} />
+        )}
       </span>
     </div>
   );

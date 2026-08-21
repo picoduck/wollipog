@@ -126,6 +126,9 @@ import {
   type SessionEventPayload,
   type SessionSnapshot,
   type SessionStatus,
+  type SessionReminderView,
+  type SessionReminderWakePolicy,
+  type SessionReminderWakeReason,
   type SessionTitleSource,
   type SessionView,
   type QueuedPromptView,
@@ -435,6 +438,31 @@ CREATE TABLE IF NOT EXISTS sessions (
   FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
   FOREIGN KEY (project_location_id) REFERENCES project_locations(id) ON DELETE SET NULL
 );
+
+-- A reminder belongs to one human even when the underlying session is shared. The single row per
+-- (session,user) makes replacement atomic, while state+revision make firing and multi-client edits
+-- idempotent. Absolute instants drive scheduling; zone/expression retain the user's editing intent.
+CREATE TABLE IF NOT EXISTS session_reminders (
+  reminder_id         TEXT NOT NULL UNIQUE,
+  session_id          TEXT NOT NULL,
+  user_id             TEXT NOT NULL,
+  scheduled_for       INTEGER NOT NULL,
+  time_zone           TEXT NOT NULL,
+  original_expression TEXT NOT NULL,
+  wake_policy         TEXT NOT NULL CHECK (wake_policy IN ('until_activity','regardless')),
+  state               TEXT NOT NULL CHECK (state IN ('pending','fired')),
+  revision            INTEGER NOT NULL,
+  baseline_event_seq  INTEGER NOT NULL DEFAULT 0,
+  wake_reason         TEXT,
+  fired_at            INTEGER,
+  created_at          INTEGER NOT NULL,
+  updated_at          INTEGER NOT NULL,
+  PRIMARY KEY (session_id, user_id),
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+  FOREIGN KEY (user_id) REFERENCES identity_users(user_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_session_reminders_due
+  ON session_reminders(state, scheduled_for, session_id, user_id);
 
 -- User-submitted prompts use the runner's durable v53 receipt lane too. Unlike scheduler-owned
 -- automation commands these rows belong directly to a session and remain recoverable across a
@@ -1769,6 +1797,33 @@ interface SessionRow {
   runner_history_epoch: number | null;
   runner_history_tail_seq: number;
 }
+
+interface SessionReminderRow {
+  reminder_id: string;
+  session_id: string;
+  user_id: string;
+  scheduled_for: number;
+  time_zone: string;
+  original_expression: string;
+  wake_policy: SessionReminderWakePolicy;
+  state: "pending" | "fired";
+  revision: number;
+  baseline_event_seq: number;
+  wake_reason: SessionReminderWakeReason | null;
+  fired_at: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export type SessionReminderMutationResult =
+  | { kind: "updated"; reminder: SessionReminderView }
+  | { kind: "conflict"; reminder: SessionReminderView }
+  | { kind: "missing" };
+
+export type RemoveSessionReminderResult =
+  | { kind: "removed" }
+  | { kind: "conflict"; reminder: SessionReminderView }
+  | { kind: "missing" };
 
 interface SteeringAttemptRow {
   request_id: string;
@@ -8703,6 +8758,142 @@ export class ControlPlaneDb {
 
   setSessionTitle(id: string, title: string, now: number, source: SessionTitleSource = "generated"): void {
     this.stmt("UPDATE sessions SET title=?, title_source=?, updated_at=? WHERE id=?").run(title, source, now, id);
+  }
+
+  private sessionReminderView(row: SessionReminderRow): SessionReminderView {
+    return {
+      reminderId: row.reminder_id,
+      sessionId: row.session_id,
+      scheduledFor: row.scheduled_for,
+      timeZone: row.time_zone,
+      originalExpression: row.original_expression,
+      wakePolicy: row.wake_policy,
+      state: row.state,
+      revision: row.revision,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      ...(row.fired_at == null ? {} : { firedAt: row.fired_at }),
+      ...(row.wake_reason == null ? {} : { wakeReason: row.wake_reason }),
+    };
+  }
+
+  getSessionReminder(sessionId: string, userId: string): SessionReminderView | null {
+    const row = this.stmt(
+      "SELECT * FROM session_reminders WHERE session_id=? AND user_id=?",
+    ).get(sessionId, userId) as unknown as SessionReminderRow | undefined;
+    return row ? this.sessionReminderView(row) : null;
+  }
+
+  listSessionReminders(userId: string): SessionReminderView[] {
+    const rows = this.stmt(
+      `SELECT * FROM session_reminders WHERE user_id=?
+       ORDER BY CASE state WHEN 'pending' THEN 0 ELSE 1 END, scheduled_for, session_id`,
+    ).all(userId) as unknown as SessionReminderRow[];
+    return rows.map((row) => this.sessionReminderView(row));
+  }
+
+  setSessionReminder(input: {
+    sessionId: string;
+    userId: string;
+    scheduledFor: number;
+    timeZone: string;
+    originalExpression: string;
+    wakePolicy: SessionReminderWakePolicy;
+    expectedRevision?: number;
+    now: number;
+  }): SessionReminderMutationResult {
+    return this.atomic(() => {
+      const current = this.stmt(
+        "SELECT * FROM session_reminders WHERE session_id=? AND user_id=?",
+      ).get(input.sessionId, input.userId) as unknown as SessionReminderRow | undefined;
+      if (current && input.expectedRevision !== undefined && input.expectedRevision !== current.revision) {
+        return { kind: "conflict", reminder: this.sessionReminderView(current) };
+      }
+      if (!current && input.expectedRevision !== undefined && input.expectedRevision !== 0) return { kind: "missing" };
+      const session = this.stmt("SELECT 1 AS found FROM sessions WHERE id=?").get(input.sessionId) as
+        | { found: number } | undefined;
+      if (!session) return { kind: "missing" };
+      // Activity wake compares against the control-plane session_events sequence, not the
+      // runner-owned hydration sequence. Capture this baseline in the same transaction as write.
+      const baseline = this.stmt(
+        "SELECT COALESCE(MAX(seq),0) AS seq FROM session_events WHERE session_id=?",
+      ).get(input.sessionId) as { seq: number };
+
+      if (current) {
+        this.stmt(
+          `UPDATE session_reminders SET scheduled_for=?, time_zone=?, original_expression=?,
+             wake_policy=?, state='pending', revision=revision+1, baseline_event_seq=?,
+             wake_reason=NULL, fired_at=NULL, updated_at=? WHERE session_id=? AND user_id=?`,
+        ).run(input.scheduledFor, input.timeZone, input.originalExpression, input.wakePolicy,
+          baseline.seq, input.now, input.sessionId, input.userId);
+      } else {
+        this.stmt(
+          `INSERT INTO session_reminders
+           (reminder_id,session_id,user_id,scheduled_for,time_zone,original_expression,wake_policy,
+            state,revision,baseline_event_seq,created_at,updated_at)
+           VALUES (?,?,?,?,?,?,?,'pending',1,?,?,?)`,
+        ).run(`rem_${randomUUID().replace(/-/g, "")}`, input.sessionId, input.userId,
+          input.scheduledFor, input.timeZone, input.originalExpression, input.wakePolicy,
+          baseline.seq, input.now, input.now);
+      }
+      return { kind: "updated", reminder: this.getSessionReminder(input.sessionId, input.userId)! };
+    });
+  }
+
+  removeSessionReminder(sessionId: string, userId: string, expectedRevision?: number): RemoveSessionReminderResult {
+    return this.atomic(() => {
+      const current = this.stmt(
+        "SELECT * FROM session_reminders WHERE session_id=? AND user_id=?",
+      ).get(sessionId, userId) as unknown as SessionReminderRow | undefined;
+      if (!current) return { kind: "missing" };
+      if (expectedRevision !== undefined && expectedRevision !== current.revision) {
+        return { kind: "conflict", reminder: this.sessionReminderView(current) };
+      }
+      this.stmt("DELETE FROM session_reminders WHERE session_id=? AND user_id=?").run(sessionId, userId);
+      return { kind: "removed" };
+    });
+  }
+
+  private fireSessionReminderRows(
+    rows: SessionReminderRow[],
+    reason: SessionReminderWakeReason,
+    now: number,
+  ): Array<{ userId: string; reminder: SessionReminderView }> {
+    const fired: Array<{ userId: string; reminder: SessionReminderView }> = [];
+    for (const row of rows) {
+      const changed = this.stmt(
+        `UPDATE session_reminders SET state='fired', wake_reason=?, fired_at=?, updated_at=?, revision=revision+1
+         WHERE session_id=? AND user_id=? AND state='pending' AND revision=?`,
+      ).run(reason, now, now, row.session_id, row.user_id, row.revision);
+      if (!changed.changes) continue;
+      const reminder = this.getSessionReminder(row.session_id, row.user_id);
+      if (reminder) fired.push({ userId: row.user_id, reminder });
+    }
+    return fired;
+  }
+
+  fireDueSessionReminders(now: number): Array<{ userId: string; reminder: SessionReminderView }> {
+    return this.atomic(() => {
+      const rows = this.stmt(
+        "SELECT * FROM session_reminders WHERE state='pending' AND scheduled_for<=? ORDER BY scheduled_for,session_id,user_id",
+      ).all(now) as unknown as SessionReminderRow[];
+      return this.fireSessionReminderRows(rows, "scheduled", now);
+    });
+  }
+
+  fireSessionRemindersForActivity(
+    sessionId: string,
+    eventSeq: number,
+    reason: Exclude<SessionReminderWakeReason, "scheduled">,
+    now: number,
+  ): Array<{ userId: string; reminder: SessionReminderView }> {
+    return this.atomic(() => {
+      const rows = this.stmt(
+        `SELECT * FROM session_reminders WHERE session_id=? AND state='pending'
+           AND wake_policy='until_activity' AND baseline_event_seq<?`,
+      ).all(sessionId, eventSeq) as unknown as SessionReminderRow[];
+      return this.fireSessionReminderRows(rows, reason, now);
+    });
   }
 
   setSessionArchived(id: string, archived: boolean, now: number): void {

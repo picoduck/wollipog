@@ -2510,6 +2510,33 @@ export interface SessionView {
   commandInvocations?: SessionCommandInvocationView[];
 }
 
+/** Control-plane-owned, per-user inbox visibility and reminder state. This is deliberately
+ * orthogonal to session lifecycle and archive state: snoozing never stops or detaches work. */
+export type SessionReminderWakePolicy = "until_activity" | "regardless";
+export type SessionReminderState = "pending" | "fired";
+export type SessionReminderWakeReason =
+  | "scheduled"
+  | "agent_response"
+  | "approval"
+  | "question"
+  | "failure"
+  | "background_job";
+
+export interface SessionReminderView {
+  reminderId: string;
+  sessionId: string;
+  scheduledFor: number;
+  timeZone: string;
+  originalExpression: string;
+  wakePolicy: SessionReminderWakePolicy;
+  state: SessionReminderState;
+  revision: number;
+  createdAt: number;
+  updatedAt: number;
+  firedAt?: number;
+  wakeReason?: SessionReminderWakeReason;
+}
+
 /** A provider-neutral auxiliary conversation attached to one primary session. The child is a
  * separate session (and therefore has separate transcript, accounting, and worktree state); this
  * relationship deliberately does not confer provider-fork or artifact ancestry. */
@@ -4611,12 +4638,16 @@ export interface UiSnapshotMessage {
     nativeTuiLaunch?: boolean;
     /** Archive keeps nonterminal sessions visible until durable Stop evidence releases capacity. */
     stopBeforeArchive?: boolean;
+    /** Per-user durable session reminders and scoped live reminder events are available. */
+    sessionReminders?: boolean;
   };
   runners: RunnerView[];
   boxes: BoxView[];
   sessions: SessionView[];
   /** Optional for rolling compatibility with control planes predating durable Projects. */
   projects?: ProjectView[];
+  /** Current user's pending and recently fired reminders. Absent on older control planes. */
+  reminders?: SessionReminderView[];
   runs: RunView[];
   /** Optional only for compatibility with pre-pod control planes. */
   pods?: PodView[];
@@ -4649,6 +4680,16 @@ export interface UiSessionUpsertMessage {
 
 export interface UiSessionRemovedMessage {
   type: "session_removed";
+  sessionId: string;
+}
+
+export interface UiSessionReminderUpsertMessage {
+  type: "session_reminder_upsert";
+  reminder: SessionReminderView;
+}
+
+export interface UiSessionReminderRemovedMessage {
+  type: "session_reminder_removed";
   sessionId: string;
 }
 
@@ -4747,6 +4788,8 @@ export type ControlPlaneToUi =
   | UiBoxRemovedMessage
   | UiSessionUpsertMessage
   | UiSessionRemovedMessage
+  | UiSessionReminderUpsertMessage
+  | UiSessionReminderRemovedMessage
   | UiProjectUpsertMessage
   | UiProjectRemovedMessage
   | UiSessionEventMessage
@@ -4868,6 +4911,21 @@ export interface SetColumnRequest {
 
 export interface SetArchivedRequest {
   archived: boolean;
+}
+
+export interface SnoozeScheduleInput {
+  /** Absolute Unix time in milliseconds. The server never reparses the user's expression. */
+  scheduledFor: number;
+  /** IANA time-zone identifier used to explain the instant and preserve edit intent. */
+  timeZone: string;
+  /** The exact bounded expression or local datetime entered by the user. */
+  originalExpression: string;
+}
+
+export interface SetSessionReminderRequest extends SnoozeScheduleInput {
+  wakePolicy: SessionReminderWakePolicy;
+  /** Required when replacing an existing reminder; rejects stale multi-client edits. */
+  expectedRevision?: number;
 }
 
 /** Body for POST /api/sessions/:id/workspace — re-file a session under a workspace ("Move to

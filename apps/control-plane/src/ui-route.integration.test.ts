@@ -616,6 +616,7 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     accessScopeManagement: true,
     nativeTuiLaunch: true,
     stopBeforeArchive: true,
+    sessionReminders: true,
   });
   const initialProjects = snapshot.projects as Array<{
     id: string;

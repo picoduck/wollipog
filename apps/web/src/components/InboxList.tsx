@@ -1,5 +1,5 @@
 import { forwardRef, useCallback, useRef, type MutableRefObject } from "react";
-import type { SessionView } from "@wollipog/protocol";
+import type { SessionReminderView, SessionView } from "@wollipog/protocol";
 import { isHeartbeatBusy, type SessionActivity } from "../activity.js";
 import { encodeResourceId } from "../navigation.js";
 import { useStoreSelector } from "../store.js";
@@ -16,6 +16,7 @@ export interface InboxListEntry {
   session: SessionView;
   projectName: string;
   unread: boolean;
+  reminder?: SessionReminderView;
 }
 
 export interface InboxEmptyState {
@@ -143,7 +144,7 @@ export const InboxList = forwardRef<HTMLDivElement, {
         overscan={6}
         rootRole="rowgroup"
         rowRole="presentation"
-        renderItem={({ session, projectName, unread }, { index }) => {
+        renderItem={({ session, projectName, unread, reminder }, { index }) => {
           // The callbacks are passed THROUGH, not wrapped. `onSelect: () => onSelect(session.id)`
           // builds a new closure on every render, so every row's props differ by identity and the
           // memo compares unequal every time — the memoisation looked applied and did nothing.
@@ -154,6 +155,7 @@ export const InboxList = forwardRef<HTMLDivElement, {
             projectName,
             selected: session.id === selectedSessionId,
             unread,
+            reminder,
             pinned: pinnedSessionIds.has(session.id),
             stalled: stalledSessionIds.has(session.id),
             onSelect,

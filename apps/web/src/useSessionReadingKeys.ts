@@ -19,6 +19,7 @@ export interface SessionReadingKeyActions {
   approve: () => void;
   deny: () => void;
   archive: () => void;
+  snooze: () => void;
   reply: () => void;
   pauseFollow: () => void;
   resumeFollow: () => void;
@@ -44,6 +45,7 @@ const ACTION_BINDINGS: ReadonlyArray<[
   ["session-reading-approve", "approve"],
   ["session-reading-deny", "deny"],
   ["session-reading-archive", "archive"],
+  ["session-reading-snooze", "snooze"],
   ["session-reading-reply", "reply"],
 ];
 

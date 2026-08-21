@@ -32,15 +32,30 @@ import type {
   PodView,
   ProjectView,
   SessionEvent,
+  SessionEventPayload,
   SessionHistoryResultMessage,
   SessionHistoryPageResultMessage,
+  SessionReminderView,
+  SessionReminderWakeReason,
   SessionView,
   SubscriptionUsageRefreshResultMessage,
   SteerSessionResultMessage,
 } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import type { AuthPrincipal } from "./identity.js";
-import { PERSONAL_ORGANIZATION_ID } from "./identity.js";
+import { LOCAL_OWNER_USER_ID, PERSONAL_ORGANIZATION_ID } from "./identity.js";
+
+export function reminderWakeReasonForEvent(
+  payload: SessionEventPayload,
+): Exclude<SessionReminderWakeReason, "scheduled"> | null {
+  if (payload.kind === "permission_request" ||
+      (payload.kind === "status" && payload.status === "input_required")) return "approval";
+  if (payload.kind === "question_request") return "question";
+  if (payload.kind === "error" || (payload.kind === "status" && payload.status === "failed")) return "failure";
+  if (payload.kind === "background_continuation_delivered") return "background_job";
+  if (payload.kind === "agent_message" && payload.final === true) return "agent_response";
+  return null;
+}
 
 export class RunnerRequestTimeoutError extends Error {
   override readonly name = "RunnerRequestTimeoutError";
@@ -383,6 +398,10 @@ export class Hub {
     const sessions = info.principal ? this.db.listSessionsForPrincipal(info.principal) : this.db.listSessions();
     const projects = info.principal ? this.db.listProjectsForPrincipal(info.principal, true) : this.db.listProjects(true);
     const globalAdmin = info.principal === undefined || this.isGlobalAdmin(info.principal);
+    const reminderUserId = info.principal === undefined ? LOCAL_OWNER_USER_ID
+      : info.principal.kind === "human" ? info.principal.userId : null;
+    const reminders = reminderUserId === null ? [] : this.db.listSessionReminders(reminderUserId)
+      .filter((reminder) => info.principal === undefined || this.db.canAccessSession(info.principal, reminder.sessionId));
     info.visibleRunnerIds = new Set(runners.map((runner) => runner.runnerId));
     info.visibleSessionIds = new Set(sessions.map((session) => session.id));
     info.visibleProjectIds = new Set(projects.map((project) => project.id));
@@ -398,11 +417,13 @@ export class Hub {
         accessScopeManagement: true,
         nativeTuiLaunch: true,
         stopBeforeArchive: true,
+        sessionReminders: true,
       },
       runners,
       boxes: globalAdmin ? this.db.listBoxes() : [],
       sessions: sessions.map((s) => this.withQueue(s)),
       projects,
+      reminders,
       runs: globalAdmin ? this.db.listRuns() : [],
       pods: globalAdmin ? this.db.listPods() : [],
     };
@@ -779,6 +800,28 @@ export class Hub {
     }
   }
 
+  private reminderPrincipalMatches(userId: string, principal: AuthPrincipal | undefined): boolean {
+    return principal === undefined ? userId === LOCAL_OWNER_USER_ID
+      : principal.kind === "human" && principal.userId === userId;
+  }
+
+  sessionReminderChanged(userId: string, reminder: SessionReminderView): void {
+    this.broadcast({ type: "session_reminder_upsert", reminder }, (principal) =>
+      this.reminderPrincipalMatches(userId, principal) &&
+      (principal === undefined || this.db.canAccessSession(principal, reminder.sessionId)));
+  }
+
+  sessionReminderRemoved(userId: string, sessionId: string): void {
+    this.broadcast({ type: "session_reminder_removed", sessionId }, (principal) =>
+      this.reminderPrincipalMatches(userId, principal));
+  }
+
+  fireDueSessionReminders(now = Date.now()): number {
+    const fired = this.db.fireDueSessionReminders(now);
+    for (const item of fired) this.sessionReminderChanged(item.userId, item.reminder);
+    return fired.length;
+  }
+
   /** Relay already-persisted live shell output/exit to subscribed dashboards. */
   shellOutput(sessionId: string, shellId: string, stream: "stdout" | "stderr", data: string, seq?: number): void {
     this.broadcast({ type: "shell_output", sessionId, shellId, stream, data, seq });
@@ -796,6 +839,11 @@ export class Hub {
 
   sessionEvent(event: SessionEvent): void {
     this.broadcast({ type: "session_event", event });
+    const reason = reminderWakeReasonForEvent(event.payload);
+    if (!reason) return;
+    for (const item of this.db.fireSessionRemindersForActivity(event.sessionId, event.seq, reason, event.ts)) {
+      this.sessionReminderChanged(item.userId, item.reminder);
+    }
   }
 
   /** A session's whole event log was replaced (reprocess) — dashboards drop + adopt this set. */
@@ -840,6 +888,10 @@ export class Hub {
         return false;
       case "session_upsert":
         return this.db.canAccessSession(principal, msg.session.id);
+      case "session_reminder_upsert":
+        return principal.kind === "human" && this.db.canAccessSession(principal, msg.reminder.sessionId);
+      case "session_reminder_removed":
+        return principal.kind === "human" && this.db.canAccessSession(principal, msg.sessionId);
       case "project_upsert":
         return this.db.canAccessProject(principal, msg.project.id);
       case "project_removed":
@@ -926,6 +978,8 @@ export class Hub {
       case "runner_upsert": return `runner:${msg.runner.runnerId}`;
       case "box_upsert": return `box:${msg.box.boxId}`;
       case "session_upsert": return `session:${msg.session.id}`;
+      case "session_reminder_upsert": return `reminder:${msg.reminder.sessionId}`;
+      case "session_reminder_removed": return `reminder:${msg.sessionId}`;
       case "project_upsert": return `project:${msg.project.id}`;
       case "run_upsert": return `run:${msg.run.id}`;
       case "pod_upsert": return `pod:${msg.pod.id}`;

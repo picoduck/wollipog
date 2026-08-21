@@ -16,6 +16,7 @@ import type {
   RunnerView,
   RunView,
   SessionEvent,
+  SessionReminderView,
   SessionView,
   ShellOutputChunk,
   ShellStatus,
@@ -256,12 +257,15 @@ export interface State {
   nativeTuiLaunchSupported: boolean;
   /** False against older control planes that archive without first proving runtime Stop. */
   stopBeforeArchiveSupported: boolean;
+  /** True when the control plane provides durable, user-scoped reminder snapshots and deltas. */
+  sessionRemindersSupported: boolean;
   runners: Map<string, RunnerView>;
   boxes: Map<string, BoxView>;
   /** Authoritative when the snapshot advertises Project support; empty against legacy control
    * planes, whose exact workspace grouping remains a UI-level fallback. */
   projects: Map<string, ProjectView>;
   sessions: Map<string, SessionView>;
+  reminders: Map<string, SessionReminderView>;
   runs: Map<string, RunView>;
   pods: Map<string, PodView>;
   podContext: Map<string, PodContextEntry[]>;
@@ -1029,12 +1033,14 @@ function reducer(state: State, action: Action): State {
             accessScopeManagementSupported: msg.capabilities?.accessScopeManagement === true,
             nativeTuiLaunchSupported: msg.capabilities?.nativeTuiLaunch === true,
             stopBeforeArchiveSupported: msg.capabilities?.stopBeforeArchive === true,
+            sessionRemindersSupported: msg.capabilities?.sessionReminders === true,
             runners: new Map(msg.runners.map((r) => [r.runnerId, r])),
             // `boxes` may be absent from an older control plane's snapshot — tolerate it.
             boxes: new Map((msg.boxes ?? []).map((b) => [b.boxId, b])),
             // `projects` is additive: older control planes omit it and retain an empty inventory.
             projects: new Map((msg.projects ?? []).map((project) => [project.id, project])),
             sessions,
+            reminders: new Map((msg.reminders ?? []).map((reminder) => [reminder.sessionId, reminder])),
             runs: new Map(msg.runs.map((r) => [r.id, r])),
             pods,
             events,
@@ -1140,9 +1146,24 @@ function reducer(state: State, action: Action): State {
             ...invalidateRecoveryCursor(state, msg.session.id),
           }, msg.session.id);
         }
+        case "session_reminder_upsert": {
+          const current = state.reminders.get(msg.reminder.sessionId);
+          if (current && current.revision >= msg.reminder.revision) return state;
+          const reminders = new Map(state.reminders);
+          reminders.set(msg.reminder.sessionId, msg.reminder);
+          return { ...state, reminders };
+        }
+        case "session_reminder_removed": {
+          if (!state.reminders.has(msg.sessionId)) return state;
+          const reminders = new Map(state.reminders);
+          reminders.delete(msg.sessionId);
+          return { ...state, reminders };
+        }
         case "session_removed": {
           const sessions = new Map(state.sessions);
           sessions.delete(msg.sessionId);
+          const reminders = new Map(state.reminders);
+          reminders.delete(msg.sessionId);
           const events = new Map(state.events);
           events.delete(msg.sessionId);
           state.activity.delete(msg.sessionId);
@@ -1170,6 +1191,7 @@ function reducer(state: State, action: Action): State {
           return clearSessionStall({
             ...state,
             sessions,
+            reminders,
             events,
             activityObservationStartedAt,
             eventEpochs,
@@ -1373,10 +1395,12 @@ function initialState(view: View = { name: "inbox" }, inbox = loadInboxState()):
     accessScopeManagementSupported: false,
     nativeTuiLaunchSupported: false,
     stopBeforeArchiveSupported: false,
+    sessionRemindersSupported: false,
     runners: new Map(),
     boxes: new Map(),
     projects: new Map(),
     sessions: new Map(),
+    reminders: new Map(),
     runs: new Map(),
     pods: new Map(),
     podContext: new Map(),
