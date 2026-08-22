@@ -98,7 +98,7 @@ export function SessionApprovalRegion({
     setAnnouncement(requestId ? (hadRequest ? "Agent request updated" : "Agent response required") : "Agent request resolved");
     if (focusDestination === "request") {
       const target = regionRef.current?.querySelector<HTMLElement>(
-        'button:not(:disabled), [role="radio"][tabindex="0"], [role="checkbox"]:not([aria-disabled="true"]), input:not(:disabled)',
+        'button:not(:disabled), [role="radio"][tabindex="0"]:not(:disabled), [role="checkbox"]:not([aria-disabled="true"]), input:not(:disabled)',
       );
       if (target) {
         target.focus();

@@ -32,6 +32,7 @@ test("question choices expose labelled radio and checkbox semantics with one rad
     ],
   }));
   assert.match(html, /role="radiogroup" aria-labelledby=/);
+  assert.match(html, /role="radiogroup"[^>]*aria-describedby="[^"]+-requirement-0"[^>]*aria-required="true"/);
   assert.equal((html.match(/role="radio"/g) ?? []).length, 2);
   assert.equal((html.match(/role="checkbox"/g) ?? []).length, 2);
   assert.equal((html.match(/role="radio"[^>]*aria-checked="false"[^>]*tabindex="0"/g) ?? []).length, 1);

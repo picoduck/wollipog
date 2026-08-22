@@ -175,11 +175,11 @@ function approvalSession(requestId: string | null): SessionView {
   } as SessionView;
 }
 
-function ApprovalHarness({ requestId }: { requestId: string | null }) {
+function ApprovalHarness({ requestId, runnerOnline = true }: { requestId: string | null; runnerOnline?: boolean }) {
   const fallbackRef = useRef<HTMLTextAreaElement>(null);
   return (
     <>
-      <SessionApprovalRegion session={approvalSession(requestId)} runnerOnline fallbackFocusRef={fallbackRef} />
+      <SessionApprovalRegion session={approvalSession(requestId)} runnerOnline={runnerOnline} fallbackFocusRef={fallbackRef} />
       <textarea ref={fallbackRef} aria-label="Composer" />
     </>
   );
@@ -269,6 +269,20 @@ test("approval replacement and resolution preserve owned keyboard focus", async 
   assert.equal(domWindow.document.activeElement?.textContent?.replace(/\s+/g, " ").trim(), "Dismiss D");
 
   await act(async () => { root.render(<ApprovalHarness requestId={null} />); });
+  assert.equal(domWindow.document.activeElement?.getAttribute("aria-label"), "Composer");
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("offline question replacement falls back instead of targeting a disabled radio", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  await act(async () => { root.render(<ApprovalHarness requestId="ask-a" />); });
+  container.querySelector<HTMLElement>("[role=\"radio\"]")!.focus();
+
+  await act(async () => { root.render(<ApprovalHarness requestId="ask-b" runnerOnline={false} />); });
   assert.equal(domWindow.document.activeElement?.getAttribute("aria-label"), "Composer");
   await act(async () => { root.unmount(); });
   container.remove();
