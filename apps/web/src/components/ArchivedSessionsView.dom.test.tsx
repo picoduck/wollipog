@@ -217,7 +217,7 @@ test("unarchive uses the existing authorized mutation and removes the row from t
   await fixture.unmount();
 });
 
-test("Stop Pending sessions expose an idempotent Retry Stop recovery action", async () => {
+test("Stop Pending sessions fall back to the legacy idempotent archive mutation", async () => {
   const calls: Array<[string, boolean]> = [];
   const pending = session(2, {
     archived: false,
@@ -225,8 +225,11 @@ test("Stop Pending sessions expose an idempotent Retry Stop recovery action", as
     archiveStatus: "stop_pending",
   } as Partial<SessionView>);
   const fixture = await mount([pending], {
-    setArchived: async (id, value) => {
-      calls.push([id, value]);
+    retryStop: async () => {
+      throw new Error("the v85-only route must not be called");
+    },
+    setArchived: async (id, archived) => {
+      calls.push([id, archived]);
       return pending;
     },
   });
@@ -237,9 +240,44 @@ test("Stop Pending sessions expose an idempotent Retry Stop recovery action", as
     "pending recovery replaces the ordinary Stop action even for a terminal lifecycle");
   await act(async () => { Simulate.click(retry); await Promise.resolve(); });
 
-  assert.deepEqual(calls, [[pending.id, true]], "retry preserves and reissues archive intent");
+  assert.deepEqual(calls, [[pending.id, true]], "legacy retry reissues the archive intent");
   assert.equal(fixture.container.querySelector('.toast-region[aria-live="polite"] [role="status"]')?.textContent?.includes("Stop retry requested."), true,
     "success is announced in the accessible live toast region");
+  await fixture.unmount();
+});
+
+test("Stop Failed sessions disclose bounded failure detail and expose Retry Stop", async () => {
+  const calls: string[] = [];
+  const failed = session(3, {
+    archived: false,
+    status: "stopped",
+    archiveStatus: "stop_failed",
+    archiveOperation: {
+      operationId: "stop-operation",
+      status: "stop_failed",
+      requestedAt: 100,
+      lastAttemptAt: 200,
+      attemptCount: 3,
+      capacityReleased: false,
+      failure: { code: "retry_exhausted", message: "Automatic retries were exhausted.", failedAt: 300 },
+    },
+  });
+  const fixture = await mount([failed], {
+    retryStop: async (id) => {
+      calls.push(id);
+      return {
+        ...failed,
+        archiveStatus: "stop_pending",
+        archiveOperation: { ...failed.archiveOperation!, status: "stop_pending", failure: undefined },
+      };
+    },
+  });
+
+  const badge = [...fixture.container.querySelectorAll<HTMLElement>(".archive-badge")]
+    .find((candidate) => candidate.textContent?.trim() === "Stop Failed");
+  assert.equal(badge?.title, "Automatic retries were exhausted.");
+  await act(async () => { Simulate.click(button(fixture.container, "Retry Stop")); await Promise.resolve(); });
+  assert.deepEqual(calls, [failed.id]);
   await fixture.unmount();
 });
 

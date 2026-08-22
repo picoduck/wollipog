@@ -56,6 +56,7 @@ export function ArchivedSessionsView() {
   const liveSessions = useStoreSelector((state) => state.sessions);
   const projects = useStoreSelector((state) => state.projects);
   const conn = useStoreSelector((state) => state.conn);
+  const stopFailureRecoverySupported = useStoreSelector((state) => state.stopFailureRecoverySupported);
   const deletedSessionIdsRef = useRef(new Set<string>());
   const liveSessionsRef = useRef(liveSessions);
   liveSessionsRef.current = liveSessions;
@@ -205,7 +206,10 @@ export function ArchivedSessionsView() {
   const retryStop = async (session: SessionView) => {
     setBusy(session.id, true);
     try {
-      updateSession(await api.setArchived(session.id, true));
+      const updated = session.archiveStatus === "stop_failed" || stopFailureRecoverySupported
+        ? await api.retryStop(session.id)
+        : await api.setArchived(session.id, true);
+      updateSession(updated);
       showToast("Stop retry requested.");
     } catch (cause) {
       showToast(`Could not retry stopping session: ${(cause as Error).message}`, { tone: "error" });
@@ -356,6 +360,7 @@ export function ArchivedSessionsView() {
                 const snippet = plainSnippet(transcriptHits.get(session.id));
                 const target = { name: "session" as const, id: session.id };
                 const stopPending = (session as SessionView & { archiveStatus?: string }).archiveStatus === "stop_pending";
+                const stopFailed = session.archiveStatus === "stop_failed";
                 return (
                   <tr key={session.id}>
                     <td className="archive-session-cell">
@@ -370,6 +375,9 @@ export function ArchivedSessionsView() {
                     <td><div className="archive-state-badges">
                       <span className={`archive-badge${session.archived ? " is-archived" : ""}`}>{session.archived ? "Archived" : "Not Archived"}</span>
                       <LifecycleBadge status={session.status} />
+                      {stopFailed && <span className="archive-badge" title={session.archiveOperation?.failure?.message}>
+                        Stop Failed
+                      </span>}
                       {stopPending && <span className="archive-badge">Stop Pending</span>}
                     </div></td>
                     <td>{rowMetadata.project}</td>
@@ -379,7 +387,7 @@ export function ArchivedSessionsView() {
                     <td><div className="archive-row-actions">
                       <button type="button" className="btn ghost sm" disabled={busy} onClick={() => { loadSession(session); navigate(target); }}>Open</button>
                       {session.archived && <button type="button" className="btn ghost sm" disabled={busy} onClick={() => void unarchive(session)}>Unarchive</button>}
-                      {stopPending
+                      {stopPending || stopFailed
                         ? <button type="button" className="btn ghost sm" disabled={busy} onClick={() => void retryStop(session)}>Retry Stop</button>
                         : !isTerminal(session.status) && <button type="button" className="btn ghost sm" disabled={busy} onClick={() => void stop(session)}>Stop</button>}
                       {session.archived && <button type="button" className="btn danger sm" disabled={busy} onClick={() => void deleteSession(session)}>Delete</button>}

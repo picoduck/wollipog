@@ -46,12 +46,15 @@ function InboxRowInner({
   onSelect,
   onExpand,
 }: InboxRowProps) {
+  const stopFailed = session.archiveStatus === "stop_failed";
   const status = session.archiveStatus === "stop_pending"
     ? { label: "Stop Pending", className: "st-running", busy: true }
-    : statusMeta(session.status);
+    : stopFailed
+      ? { label: "Stop Failed", className: "st-failed", busy: false }
+      : statusMeta(session.status);
   const blocked = session.pendingApproval != null || session.status === "input_required";
   const active = isHeartbeatBusy(session.status);
-  const diffReady = session.column === "review" && !blocked && !status.busy;
+  const diffReady = session.column === "review" && !blocked && !status.busy && !stopFailed;
   const agent = sessionAgentLabel(session.agentName, session.driver, session.agentId);
   const lastActivityAt = Math.max(session.lastEventAt ?? 0, activity?.lastEventAt ?? 0) || null;
 
@@ -87,6 +90,8 @@ function InboxRowInner({
               <span className="inbox-status-pill blocked">
                 {session.pendingApproval?.kind === "authentication" ? "Authentication Required" : "Approval"}
               </span>
+            ) : stopFailed ? (
+              <span className="inbox-status-pill failed">{status.label}</span>
             ) : status.busy ? (
               <span className="inbox-status-pill running">{status.label}</span>
             ) : diffReady ? (

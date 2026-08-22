@@ -417,6 +417,7 @@ export class Hub {
         accessScopeManagement: true,
         nativeTuiLaunch: true,
         stopBeforeArchive: true,
+        stopFailureRecovery: true,
         sessionReminders: true,
       },
       runners,

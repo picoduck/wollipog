@@ -198,7 +198,7 @@ export function SessionHeader({
           {session.title}
         </h1>
       </div>
-      <StatusBadge status={session.status} archiveStatus={session.archiveStatus} />
+      <StatusBadge status={session.status} archiveStatus={session.archiveStatus} archiveOperation={session.archiveOperation} />
       {session.backgroundWorkState && (
         <span
           className={session.backgroundWorkState === "orphaned"
@@ -274,18 +274,27 @@ export function SessionHeader({
                       void run(async () => {
                         const nextArchived = !session.archived;
                         if (nextArchived && sessionArchiveRequiresStop(session, stopBeforeArchiveSupported)) {
+                          const retrying = session.archiveStatus === "stop_failed";
                           const accepted = await confirm({
-                            title: "Archive and stop this session?",
-                            message: "The session will move to Archived Sessions after its runtime stops. Queued work will be canceled and runtime capacity will be released. To keep work running outside the Inbox, use Snooze instead.",
-                            confirmLabel: "Archive and Stop",
+                            title: retrying ? "Retry stopping this session?" : "Archive and stop this session?",
+                            message: retrying
+                              ? "The previous Stop failed and runtime capacity may still be held. Retry the same archive operation?"
+                              : "The session will move to Archived Sessions after its runtime stops. Queued work will be canceled and runtime capacity will be released. To keep work running outside the Inbox, use Snooze instead.",
+                            confirmLabel: retrying ? "Retry Stop" : "Archive and Stop",
                             tone: "danger",
                           });
                           if (!accepted) return;
                         }
-                        const updated = await api.setArchived(session.id, nextArchived);
-                        const message = updated.archiveStatus === "stop_pending"
-                          ? "Archive requested. Stop is pending until runtime capacity is released."
-                          : nextArchived ? "Session archived." : "Session restored.";
+                        const updated = nextArchived && session.archiveStatus === "stop_failed"
+                          ? await api.retryStop(session.id)
+                          : await api.setArchived(session.id, nextArchived);
+                        const message = !nextArchived
+                          ? "Session restored."
+                          : updated.archiveStatus === "stop_pending"
+                            ? "Archive requested. Stop is pending until runtime capacity is released."
+                            : updated.archiveStatus === "stop_failed"
+                              ? "Stop failed. Runtime capacity may still be held."
+                              : "Session archived.";
                         showUndo(message, async () => {
                           await api.setArchived(session.id, !nextArchived);
                         });

@@ -8122,6 +8122,7 @@ body.shell-dock-dragging * {
 .inbox-status-pill { padding: 0 7px; }
 .inbox-status-pill.blocked { color: var(--accent-2-on-tint); background: color-mix(in srgb, var(--accent-2) 14%, transparent); }
 .inbox-status-pill.running { color: var(--teal-on-tint); background: color-mix(in srgb, var(--teal) 13%, transparent); }
+.inbox-status-pill.failed { color: var(--danger-text); background: color-mix(in srgb, var(--red) 16%, transparent); }
 .inbox-status-pill.stalled { color: var(--danger-text); background: color-mix(in srgb, var(--red) 16%, transparent); }
 .inbox-status-pill.reminder { color: var(--accent-on-tint); background: color-mix(in srgb, var(--accent) 15%, transparent); }
 .inbox-diff-chip { padding: 0 7px; border: 1px solid var(--border); color: var(--positive-text); background: var(--bg); }

@@ -88,6 +88,7 @@ import {
   type SessionReminderView,
   type SetSessionReminderRequest,
   type SessionView,
+  type StopSessionResultMessage,
   type SideChatView,
   type SteerRequest,
   type SteerSessionMessage,
@@ -159,6 +160,10 @@ export const SESSION_COMMAND_INVOCATION_EXPIRY_MS = 24 * 60 * 60_000;
 export const SESSION_COMMAND_INVOCATION_RETENTION_MS = 30 * 24 * 60 * 60_000;
 const SESSION_COMMAND_RETRY_MAX_MS = 30_000;
 const SESSION_COMMAND_RECEIPT_ERROR_MAX_CHARS = 512;
+export const SESSION_STOP_RETRY_INTERVAL_MS = 10_000;
+export const SESSION_STOP_TIMEOUT_MS = 45_000;
+export const SESSION_STOP_MAX_ATTEMPTS = 3;
+const SESSION_STOP_FAILURE_MESSAGE_MAX_CHARS = 240;
 // One invocation lives for at most 24 hours and has only a handful of defined lifecycle edges.
 // This generous ceiling preserves future expansion without letting an absurd but safe integer
 // permanently freeze monotonic receipt processing below Number.MAX_SAFE_INTEGER.
@@ -3693,6 +3698,88 @@ export class SessionsService {
     return true;
   }
 
+
+  private sendStopCommand(runnerId: string, sessionId: string): boolean {
+    const intent = this.db.sessionStopIntent(sessionId);
+    const protocolVersion = this.db.getRunner(runnerId)?.protocolVersion;
+    return this.hub.sendToRunner(runnerId, {
+      type: "stop_session",
+      sessionId,
+      ...(intent && runnerSupportsProtocol(protocolVersion, "stopFailureRecovery")
+        ? { operationId: intent.operation.operationId }
+        : {}),
+    });
+  }
+
+  /** Turn a supported Stop operation into a truthful failure without releasing its archive fence. */
+  private failStopOperation(
+    sessionId: string,
+    operationId: string,
+    code: "timeout" | "retry_exhausted" | "runner_rejected",
+    message: string,
+    now: number,
+  ): boolean {
+    const changed = this.db.failSessionStopIntent(
+      sessionId,
+      operationId,
+      code,
+      message.slice(0, SESSION_STOP_FAILURE_MESSAGE_MAX_CHARS),
+      now,
+    );
+    if (changed) this.hub.sessionChangedById(sessionId);
+    return changed;
+  }
+
+  /** Reconcile durable attempts on a bounded schedule. Older runners never enter Stop Failed
+   * because they cannot return correlated acceptance/rejection and must fail conservatively. */
+  maintainSessionStopIntents(now = Date.now()): number {
+    let changed = 0;
+    for (const intent of this.db.pendingSessionStopIntents()) {
+      const protocolVersion = this.db.getRunner(intent.runnerId)?.protocolVersion;
+      if (!runnerSupportsProtocol(protocolVersion, "stopFailureRecovery")) continue;
+      if (now - intent.operation.requestedAt >= SESSION_STOP_TIMEOUT_MS) {
+        changed += Number(this.failStopOperation(
+          intent.sessionId,
+          intent.operation.operationId,
+          "timeout",
+          "The runner did not confirm that runtime capacity was released before the Stop timeout.",
+          now,
+        ));
+        continue;
+      }
+      if (now - intent.operation.lastAttemptAt < SESSION_STOP_RETRY_INTERVAL_MS) continue;
+      if (intent.operation.attemptCount >= SESSION_STOP_MAX_ATTEMPTS) {
+        changed += Number(this.failStopOperation(
+          intent.sessionId,
+          intent.operation.operationId,
+          "retry_exhausted",
+          "The automatic Stop retry policy was exhausted without terminal runner evidence.",
+          now,
+        ));
+        continue;
+      }
+      this.db.recordSessionStopAttempt(intent.sessionId, now);
+      this.sendStopCommand(intent.runnerId, intent.sessionId);
+      this.hub.sessionChangedById(intent.sessionId);
+      changed++;
+    }
+    return changed;
+  }
+
+  onStopSessionResult(runnerId: string, result: StopSessionResultMessage): boolean {
+    const intent = this.db.sessionStopIntent(result.sessionId);
+    if (!intent || intent.runnerId !== runnerId ||
+        intent.operation.operationId !== result.operationId) return false;
+    if (result.accepted) return true;
+    return this.failStopOperation(
+      result.sessionId,
+      result.operationId,
+      "runner_rejected",
+      "The runner rejected the Stop request without confirming that runtime capacity was released.",
+      Date.now(),
+    );
+  }
+
   private requestStop(session: SessionView, now: number, archiveAfterStop = false, refreshProject = true): SessionView {
     // Persist before touching the socket: ws.send acceptance is not delivery proof on a half-open
     // connection. Reconnect inventory/status reconciliation owns retry and final clearance.
@@ -3700,7 +3787,7 @@ export class SessionsService {
     this.promptOutbox.stopSession(session.id, now);
     this.abortPolicyHookApprovals(session, now, "session-stopped");
     this.db.updateSessionStatus(session.id, "stopped", now);
-    this.hub.sendToRunner(session.runnerId, { type: "stop_session", sessionId: session.id });
+    this.sendStopCommand(session.runnerId, session.id);
     const stopped = this.db.getSession(session.id)!;
     if (refreshProject) this.hub.sessionChangedById(session.id);
     else this.hub.sessionChanged(stopped, false);
@@ -3720,6 +3807,24 @@ export class SessionsService {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
     return ok(this.requestStop(session, Date.now()));
+  }
+
+  /** Explicit recovery keeps the same operation identity. A duplicate request that races the
+   * first observes Stop Pending and merely re-sends the idempotent command. */
+  retryStop(sessionId: string): ServiceResult<SessionView> {
+    const session = this.db.getSession(sessionId);
+    if (!session) return fail("session not found", 404);
+    const existing = this.db.sessionStopIntent(sessionId);
+    if (!existing?.archiveAfterStop) return fail("there is no archive Stop operation to retry", 409);
+    if (isTerminal(session.status) && session.status !== "stopped") {
+      this.settleStopIntent(sessionId, Date.now());
+      return ok(this.db.getSession(sessionId)!, 200);
+    }
+    const rearmed = this.db.retrySessionStopIntent(sessionId, Date.now());
+    if (!rearmed) return fail("there is no archive Stop operation to retry", 409);
+    this.sendStopCommand(rearmed.runnerId, sessionId);
+    this.hub.sessionChangedById(sessionId);
+    return ok(this.db.getSession(sessionId)!, 202);
   }
 
   /** Request a non-terminal interruption of only the active turn. The v71 runner reports the
@@ -3791,7 +3896,7 @@ export class SessionsService {
   restart(sessionId: string): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
-    if (session.archiveStatus === "stop_pending") {
+    if (session.archiveStatus) {
       return fail("archive is waiting for runtime capacity to be released", 409);
     }
     if (session.archived) {
@@ -4037,7 +4142,7 @@ export class SessionsService {
       } else {
         this.abortPolicyHookApprovals(session, now, "guardrail-stopped");
         this.db.setPendingApproval(sessionId, null);
-        this.hub.sendToRunner(session.runnerId, { type: "stop_session", sessionId });
+        this.sendStopCommand(session.runnerId, sessionId);
         this.db.updateSessionStatus(sessionId, "stopped", now);
       }
       this.recordGovernanceAudit(
@@ -4353,6 +4458,9 @@ export class SessionsService {
       this.hub.sessionChanged(restored, refreshProject);
       return ok(restored);
     }
+    if (session.archiveStatus === "stop_failed") {
+      return ok(session, 202);
+    }
     if (archiveRequiresStop(session.status) || this.db.hasSessionStopIntent(sessionId)) {
       const pending = this.requestStop(session, now, true, refreshProject);
       return ok(pending, 202);
@@ -4370,6 +4478,7 @@ export class SessionsService {
     sessions: SessionView[];
     archivedSessionIds: string[];
     pendingSessionIds: string[];
+    failedSessionIds: string[];
   }> {
     const candidates = this.db.listSessions({ includeArchived: true })
       .filter((session) => session.projectId === projectId && !session.archived);
@@ -4383,6 +4492,8 @@ export class SessionsService {
       sessions,
       archivedSessionIds: sessions.filter((session) => session.archived).map((session) => session.id),
       pendingSessionIds: sessions.filter((session) => session.archiveStatus === "stop_pending")
+        .map((session) => session.id),
+      failedSessionIds: sessions.filter((session) => session.archiveStatus === "stop_failed")
         .map((session) => session.id),
     });
   }
@@ -5820,7 +5931,7 @@ export class SessionsService {
         // A late/nonterminal status is evidence that the accepted stop frame did not take.
         this.db.updateSessionStatus(sessionId, "stopped", Date.now());
         if (!isTerminal(status)) {
-          this.hub.sendToRunner(session.runnerId, { type: "stop_session", sessionId });
+          this.sendStopCommand(session.runnerId, sessionId);
         }
         this.hub.sessionChangedById(sessionId);
         return;
@@ -6093,7 +6204,7 @@ export class SessionsService {
     // event recreate an approval card or move the control-plane session out of stopped.
     if (this.db.hasSessionStopIntent(sessionId)) {
       this.db.updateSessionStatus(sessionId, "stopped", now);
-      this.hub.sendToRunner(session.runnerId, { type: "stop_session", sessionId });
+      this.sendStopCommand(session.runnerId, sessionId);
       this.hub.sessionChangedById(sessionId);
       return;
     }
@@ -6349,7 +6460,7 @@ export class SessionsService {
       if (s.runnerId !== runnerId) continue;
       if (this.db.hasSessionStopIntent(s.id)) {
         if (liveSet.has(s.id)) {
-          this.hub.sendToRunner(runnerId, { type: "stop_session", sessionId: s.id });
+          this.sendStopCommand(runnerId, s.id);
         } else {
           this.settleStopIntent(s.id, now);
         }
@@ -6413,7 +6524,7 @@ export class SessionsService {
           // particular, never replace the CP's stopped status with this still-live snapshot.
           this.db.updateSessionStatus(snap.id, "stopped", now);
           if (!isTerminal(snap.status)) {
-            this.hub.sendToRunner(runnerId, { type: "stop_session", sessionId: snap.id });
+            this.sendStopCommand(runnerId, snap.id);
           }
           this.hub.sessionChangedById(snap.id);
           continue;
@@ -6517,7 +6628,7 @@ export class SessionsService {
       } else {
         this.db.updateSessionStatus(snapshot.id, "stopped", Date.now());
         if (!isTerminal(snapshot.status)) {
-          this.hub.sendToRunner(runnerId, { type: "stop_session", sessionId: snapshot.id });
+          this.sendStopCommand(runnerId, snapshot.id);
         }
         this.hub.sessionChangedById(snapshot.id);
         return;
