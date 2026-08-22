@@ -102,6 +102,26 @@ test("archive filters combine Project, Location, agent, archive, lifecycle, and 
   assert.deepEqual(result.map((item) => item.id), ["match"]);
 });
 
+test("the default Archived filter includes Stop Pending recovery but excludes ordinary active rows", () => {
+  const archived = session({ id: "archived", updatedAt: 3 });
+  const pending = session({
+    id: "pending",
+    archived: false,
+    status: "stopped",
+    archiveStatus: "stop_pending",
+    updatedAt: 2,
+  });
+  const active = session({ id: "active", archived: false, status: "running", updatedAt: 1 });
+  assert.deepEqual(filterArchiveSessions({
+    sessions: [archived, pending, active],
+    filters: defaults,
+  }).map((item) => item.id), ["archived", "pending"]);
+  assert.deepEqual(filterArchiveSessions({
+    sessions: [archived, pending, active],
+    filters: { ...defaults, archive: "unarchived" },
+  }).map((item) => item.id), ["active"]);
+});
+
 test("transcript matches extend metadata search without bypassing the other filters", () => {
   const archived = session({ id: "archived", title: "Unrelated" });
   const visible = session({ id: "visible", archived: false, title: "Unrelated" });

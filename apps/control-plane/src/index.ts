@@ -520,7 +520,7 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
   const memberScopedRoute = routePath === "/api/instance" || routePath === "/api/identity" || routePath === "/api/runners" ||
     routePath === "/api/projects" || routePath.startsWith("/api/projects/") ||
     routePath === "/api/sessions" || routePath.startsWith("/api/sessions/") ||
-    routePath === "/api/usage" || routePath === "/api/usage/retention" ||
+    routePath === "/api/search" || routePath === "/api/usage" || routePath === "/api/usage/retention" ||
     routePath === "/api/push/vapid-public-key" || routePath === "/api/push/subscriptions" ||
     routePath === "/api/push/unsubscribe" ||
     routePath === "/api/artifacts/:artifactId/export" ||

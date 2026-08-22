@@ -169,6 +169,10 @@ test("large archives paginate, deep-link, filter, and accept live lifecycle upda
   assert.equal(fixture.container.querySelector('nav[aria-label="Archived Sessions Pagination"]')?.textContent?.includes("Page 1 of 2"), true);
   assert.ok([...fixture.container.querySelectorAll("button")].some((candidate) => candidate.textContent?.trim() === "Stop"),
     "ordinary nonterminal archived sessions retain the Stop action");
+  const tableRegion = fixture.container.querySelector<HTMLElement>('[role="region"][aria-label="Archived Sessions Table"]');
+  assert.equal(tableRegion?.tabIndex, 0, "the horizontally scrolling table is keyboard reachable");
+  assert.equal(fixture.container.querySelectorAll('th[scope="col"]').length, 7,
+    "every table header declares its column scope");
 
   const firstLink = fixture.container.querySelector<HTMLAnchorElement>('tbody a[href^="/sessions/"]');
   assert.ok(firstLink, "session titles are direct links");
@@ -216,6 +220,7 @@ test("unarchive uses the existing authorized mutation and removes the row from t
 test("Stop Pending sessions expose an idempotent Retry Stop recovery action", async () => {
   const calls: Array<[string, boolean]> = [];
   const pending = session(2, {
+    archived: false,
     status: "stopped",
     archiveStatus: "stop_pending",
   } as Partial<SessionView>);
@@ -235,5 +240,24 @@ test("Stop Pending sessions expose an idempotent Retry Stop recovery action", as
   assert.deepEqual(calls, [[pending.id, true]], "retry preserves and reissues archive intent");
   assert.equal(fixture.container.querySelector('.toast-region[aria-live="polite"] [role="status"]')?.textContent?.includes("Stop retry requested."), true,
     "success is announced in the accessible live toast region");
+  await fixture.unmount();
+});
+
+test("transcript search failures disclose the metadata-only fallback", async () => {
+  const archived = session(3, { title: "Metadata Match" });
+  const fixture = await mount([archived], {
+    search: async () => { throw new Error("search unavailable"); },
+  });
+  const input = fixture.container.querySelector<HTMLInputElement>('input[type="search"]');
+  assert.ok(input);
+  await act(async () => {
+    input.value = "metadata";
+    Simulate.change(input);
+  });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
+  assert.match(
+    fixture.container.querySelector('[role="status"]')?.textContent ?? "",
+    /Transcript search is unavailable; showing metadata matches\./,
+  );
   await fixture.unmount();
 });

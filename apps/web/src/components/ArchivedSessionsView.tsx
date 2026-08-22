@@ -67,6 +67,7 @@ export function ArchivedSessionsView() {
   const [busyIds, setBusyIds] = useState(() => new Set<string>());
   const [transcriptHits, setTranscriptHits] = useState(() => new Map<string, string>());
   const [transcriptSearching, setTranscriptSearching] = useState(false);
+  const [transcriptSearchFailed, setTranscriptSearchFailed] = useState(false);
 
   const refreshCatalog = useCallback(async () => {
     try {
@@ -109,10 +110,12 @@ export function ArchivedSessionsView() {
     if (query.length < 3) {
       setTranscriptHits(new Map());
       setTranscriptSearching(false);
+      setTranscriptSearchFailed(false);
       return;
     }
     let cancelled = false;
     setTranscriptSearching(true);
+    setTranscriptSearchFailed(false);
     const timer = window.setTimeout(() => {
       api.search(query).then((response) => {
         if (cancelled) return;
@@ -121,8 +124,11 @@ export function ArchivedSessionsView() {
           if (!next.has(hit.sessionId)) next.set(hit.sessionId, hit.snippet);
         }
         setTranscriptHits(next);
+        setTranscriptSearchFailed(false);
       }).catch(() => {
-        if (!cancelled) setTranscriptHits(new Map());
+        if (cancelled) return;
+        setTranscriptHits(new Map());
+        setTranscriptSearchFailed(true);
       }).finally(() => {
         if (!cancelled) setTranscriptSearching(false);
       });
@@ -307,10 +313,11 @@ export function ArchivedSessionsView() {
       <div className="archive-results-summary" role="status" aria-live="polite">
         {transcriptSearching ? "Searching transcripts… " : ""}
         {pageResult.total} Session{pageResult.total === 1 ? "" : "s"}
+        {transcriptSearchFailed ? ". Transcript search is unavailable; showing metadata matches." : ""}
       </div>
 
       {error && <div className="archive-error" role="alert">{error} <button className="link-button" type="button" onClick={() => void refreshCatalog()}>Try Again</button></div>}
-      {loading && catalog.size === 0 ? (
+      {loading && pageResult.total === 0 ? (
         <div className="archive-loading" role="status"><Spinner /> Loading Archived Sessions…</div>
       ) : pageResult.total === 0 ? (
         <Empty
@@ -327,9 +334,9 @@ export function ArchivedSessionsView() {
           }}>{hasActiveFilters ? "Reset Filters" : "Go to Inbox"}</button>}
         />
       ) : (
-        <div className="archive-table-wrap">
+        <div className="archive-table-wrap" role="region" aria-label="Archived Sessions Table" tabIndex={0}>
           <table className="archive-table">
-            <thead><tr><th>Session</th><th>State</th><th>Project</th><th>Location</th><th>Agent</th><th>Updated</th><th>Actions</th></tr></thead>
+            <thead><tr><th scope="col">Session</th><th scope="col">State</th><th scope="col">Project</th><th scope="col">Location</th><th scope="col">Agent</th><th scope="col">Updated</th><th scope="col">Actions</th></tr></thead>
             <tbody>
               {pageResult.sessions.map((session) => {
                 const rowMetadata = archiveSessionMetadata(session, locationNames);

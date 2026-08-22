@@ -72,8 +72,13 @@ export function filterArchiveSessions(input: {
   transcriptSessionIds?: ReadonlySet<string>;
 }): SessionView[] {
   const query = input.filters.query.trim().toLocaleLowerCase();
-  const matchesArchive = (session: SessionView) => input.filters.archive === "all" ||
-    (input.filters.archive === "archived" ? session.archived : !session.archived);
+  const matchesArchive = (session: SessionView) => {
+    if (input.filters.archive === "all") return true;
+    const pendingArchive = session.archiveStatus === "stop_pending";
+    return input.filters.archive === "archived"
+      ? session.archived || pendingArchive
+      : !session.archived && !pendingArchive;
+  };
 
   return [...input.sessions].filter((session) => {
     if (!matchesArchive(session) ||
