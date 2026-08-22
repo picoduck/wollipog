@@ -3409,6 +3409,9 @@ test("an unaligned opening window can split an older response and retain complet
   const page = db.listCachedEventTailPage(
     "older-split-cache", undefined, 200, { alignToTurn: true },
   );
+  const newestSeq = longResponseEvents + newerTurns.length + 1;
+  assert.equal(page.events.length, 200, "the unaligned page retains its count boundary");
+  assert.equal(page.events[0]?.seq, newestSeq - 199);
   assert.equal(page.events[0]?.payload.kind, "agent_message",
     "the count boundary splits the older exceptionally long response");
   assert.deepEqual(page.events.slice(-4).map((entry) => entry.payload.kind), [

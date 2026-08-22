@@ -27,11 +27,12 @@ That value describes only the leading edge of the loaded window: it may split an
 while newer complete turns remain visible. Older pages stay count-bounded so their cursors remain
 exact and disjoint.
 
-Reader-driven pagination keeps that partial state until an older page either contains a user-message
-boundary or reaches the start of history (`hasMoreOlder: false`); either condition proves the loaded
-head complete and clears the notice. An agent-only older page with more history still available
-preserves `turnAligned: false`. Older control planes omit `turnAligned`; the reader preserves that
-absence through pagination instead of inventing either a partial warning or alignment proof.
+Reader-driven pagination preserves `turnAligned: false` after an agent-only older page while more
+history remains. The reader switches it to true and clears the notice once an older page contains any
+user-message boundary or reaches the start of history (`hasMoreOlder: false`). Older pages remain
+count-bounded, so this is the reader's recovery-state rule rather than a claim that the newly loaded
+first row is itself a turn boundary. Older control planes omit `turnAligned`; the reader preserves
+that absence through pagination instead of inventing either a partial warning or alignment proof.
 
 A window defines the slice that is loaded. A cold cache hydrates forward from the runner and
 republishes those rows exactly like live events, so a transcript can fill from the start of the log
