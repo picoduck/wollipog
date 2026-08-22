@@ -225,15 +225,21 @@ test("turn boundaries and dashboard reconnect refresh both reads while active tu
   await resetFixture(page);
   await openSession(page, "Alpha Session");
   await showGitDetails(page);
-  await page.waitForTimeout(100);
+  await expect(gitRegion(page)).toHaveAttribute("aria-busy", "false");
   const baseline = await page.evaluate(() =>
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.gitRequestCounts("session-alpha"));
 
   await page.evaluate(() =>
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", { status: "running" }));
-  await page.waitForTimeout(150);
-  expect(await page.evaluate(() =>
-    window.__WOLLIPOG_PROJECT_INBOX_E2E__.gitRequestCounts("session-alpha"))).toEqual(baseline);
+  await expect(page.getByLabel("Pinned Summary").locator(".status-badge")).toHaveText("Running");
+  await expect.poll(async () => {
+    const before = await page.evaluate(() =>
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.gitRequestCounts("session-alpha"));
+    await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+    const after = await page.evaluate(() =>
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.gitRequestCounts("session-alpha"));
+    return { before, after };
+  }).toEqual({ before: baseline, after: baseline });
 
   const refresh = gitRegion(page).getByRole("button", { name: "Refresh Git Status" });
   await page.evaluate(() => {

@@ -210,7 +210,13 @@ test("an edit made during command delivery survives attachment preservation and 
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleDeferredSessionCommandResponse());
   await expect(composer).toHaveValue("newer draft while command is in flight");
   await expect(page.getByRole("button", { name: "Remove Image" })).toBeVisible();
-  await page.waitForTimeout(500);
+  await expect.poll(() => page.evaluate(async () => {
+    const draft = await window.__WOLLIPOG_PROJECT_INBOX_E2E__.composerDraft("session-alpha");
+    return draft && { text: draft.text, images: draft.images };
+  })).toEqual({
+    text: "newer draft while command is in flight",
+    images: [{ mimeType: "image/png", data: "iVBORw==" }],
+  });
 
   await page.reload();
   await page.getByRole("button", { name: /Alpha Session/ }).click();
