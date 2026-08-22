@@ -196,10 +196,10 @@ class FakeHub {
     else this.activeTurnIds.delete(sessionId);
   }
 
-  sessionChanged(session: SessionView): void {
-    this.calls.push({ method: "sessionChanged", args: [session] });
+  sessionChanged(session: SessionView, refreshProject = true): void {
+    this.calls.push({ method: "sessionChanged", args: [session, refreshProject] });
     this.sessionChangedCalls.push(session);
-    if (session.projectId) this.projectChangedById(session.projectId);
+    if (refreshProject && session.projectId) this.projectChangedById(session.projectId);
   }
 
   sessionChangedById(sessionId: string): void {
@@ -5925,6 +5925,23 @@ test("archive directly files terminal sessions without unnecessary lifecycle wor
   }
 });
 
+test("restart rejects an archived session before sending a replacement launch", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "completed", Date.now());
+  db.setSessionArchived(id, true, Date.now());
+  hub.sentToRunner.length = 0;
+
+  const result = svc.restart(id);
+
+  assert.equal(result.status, 409);
+  assert.match(result.error ?? "", /unarchive/u);
+  assert.equal(db.getSession(id)?.archived, true);
+  assert.equal(db.getSession(id)?.status, "completed");
+  assert.equal(hub.sentOfType("start_session").length, 0);
+  assert.equal(hub.sentOfType("stop_session").length, 0);
+});
+
 test("archive is idempotently stop-pending until terminal runner evidence confirms capacity release", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);
@@ -6027,6 +6044,7 @@ test("Project bulk archive uses the same stop-and-archive lifecycle for mixed st
   const projectId = db.getSession(running)?.projectId;
   assert.ok(projectId);
   hub.sentToRunner.length = 0;
+  hub.projectChangedByIdCalls.length = 0;
 
   const result = svc.archiveProjectSessions(projectId!);
 
@@ -6036,6 +6054,7 @@ test("Project bulk archive uses the same stop-and-archive lifecycle for mixed st
   assert.equal(db.getSession(completed)?.archived, true);
   assert.equal(db.getSession(running)?.archiveStatus, "stop_pending");
   assert.deepEqual(hub.sentOfType("stop_session").map((message) => message.sessionId), [running]);
+  assert.deepEqual(hub.projectChangedByIdCalls, [], "the route owns the one batched Project refresh");
 });
 
 test("stop sends stop_session and marks the session stopped", () => {

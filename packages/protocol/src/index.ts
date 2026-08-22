@@ -4609,6 +4609,8 @@ export interface UiSnapshotMessage {
     accessScopeManagement?: boolean;
     /** New Session can atomically create a session and open its separate provider TUI. */
     nativeTuiLaunch?: boolean;
+    /** Archive keeps nonterminal sessions visible until durable Stop evidence releases capacity. */
+    stopBeforeArchive?: boolean;
   };
   runners: RunnerView[];
   boxes: BoxView[];

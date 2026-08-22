@@ -157,7 +157,7 @@ test("project actions preserve presets, pin state, rename, reveal, and compensat
     },
     setArchived: async (sessionId: string, value: boolean) => {
       archived.push([sessionId, value]);
-      return session(sessionId);
+      return { ...session(sessionId), status: "stopped" as const, archiveStatus: "stop_pending" as const };
     },
   } as ApiClient;
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
@@ -213,7 +213,7 @@ test("project actions preserve presets, pin state, rename, reveal, and compensat
   assert.match(container.textContent ?? "", /use Snooze instead/);
   await act(async () => { button(container, "Archive and Stop").click(); await tick(); await tick(); });
   assert.deepEqual(archived, [["session-1", true], ["session-2", true]]);
-  assert.match(container.textContent ?? "", /2 sessions archived from Project One/);
+  assert.match(container.textContent ?? "", /2 sessions are waiting for runtime capacity to be released before archiving from Project One/);
 
   await act(async () => { root.unmount(); });
   container.remove();

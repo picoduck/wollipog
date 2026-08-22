@@ -1,5 +1,6 @@
 import { type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { archiveRequiresStop, type SessionView, type SourceLocation } from "@wollipog/protocol";
+import { type SessionView, type SourceLocation } from "@wollipog/protocol";
+import { sessionArchiveRequiresStop } from "../archive-actions.js";
 import {
   INBOX_REORDER_SETTLE_MS,
   approvalOptionForIntent,
@@ -117,6 +118,7 @@ export function InboxView({
   const projects = useStoreSelector((state) => state.projects);
   const projectsSupported = useStoreSelector((state) => state.projectsSupported);
   const accessScopeManagementSupported = useStoreSelector((state) => state.accessScopeManagementSupported);
+  const stopBeforeArchiveSupported = useStoreSelector((state) => state.stopBeforeArchiveSupported);
   const stalledIndex = useStoreSelector((state) => state.stalledSessionIds);
   const stalledRevision = useStoreSelector((state) => state.stalledRevision);
   const runners = useStoreSelector((state) => state.runners);
@@ -587,7 +589,7 @@ export function InboxView({
     if (!beginBusy(sessionId)) return;
     const selectionAtRequest = selectedSessionIdRef.current;
     try {
-      if (session.archiveStatus !== "stop_pending" && archiveRequiresStop(session.status)) {
+      if (sessionArchiveRequiresStop(session, stopBeforeArchiveSupported)) {
         const accepted = await confirm({
           title: "Archive and stop this session?",
           message: "The session will move to Archived Sessions after its runtime stops. Queued work will be canceled and runtime capacity will be released. To keep work running outside the Inbox, use Snooze instead.",
@@ -627,7 +629,7 @@ export function InboxView({
     } finally {
       endBusy(sessionId);
     }
-  }, [activeSplit?.key, api, beginBusy, confirm, displayedIds, endBusy, loadSession, onCollapse, onExpand, selectSession, sessions, showToast, showUndo]);
+  }, [activeSplit?.key, api, beginBusy, confirm, displayedIds, endBusy, loadSession, onCollapse, onExpand, selectSession, sessions, showToast, showUndo, stopBeforeArchiveSupported]);
 
   const decide = useCallback(async (sessionId: string, intent: InboxApprovalIntent) => {
     const targetSession = sessions.get(sessionId);
@@ -777,6 +779,7 @@ export function InboxView({
                           ? split.project.primaryLocation?.runnerId ?? ""
                           : split.project?.runnerId ?? "",
                       )}
+                      stopBeforeArchiveSupported={stopBeforeArchiveSupported}
                       pinned={pinned}
                       onPinnedChange={(enabled) => setProjectPinned(split, enabled)}
                       onNewSession={(preset) => onNewSession?.(preset)}
@@ -876,6 +879,7 @@ export function InboxView({
           <InboxShortcutRail
             session={displayedSelectedSession}
             pinned={displayedSelection ? pinnedSessions.has(displayedSelection) : false}
+            stopBeforeArchiveSupported={stopBeforeArchiveSupported}
             busy={displayedSelection ? busySessionIds.has(displayedSelection) : false}
             onApprove={() => {
               if (displayedSelection) void decide(displayedSelection, "approve")

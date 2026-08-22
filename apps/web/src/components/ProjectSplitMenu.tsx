@@ -23,6 +23,7 @@ export interface ProjectSplitMenuProps {
   split: InboxSplit;
   active?: boolean;
   runner: RunnerView | undefined;
+  stopBeforeArchiveSupported?: boolean;
   pinned: boolean;
   onPinnedChange: (pinned: boolean) => void;
   onNewSession: (preset: NewSessionPreset) => void;
@@ -34,6 +35,7 @@ export function ProjectSplitMenu({
   split,
   active = true,
   runner,
+  stopBeforeArchiveSupported = true,
   pinned,
   onPinnedChange,
   onNewSession,
@@ -62,7 +64,8 @@ export function ProjectSplitMenu({
   if (!durableProject && !legacyLocation) return null;
   const entityLabel = durableProject ? "Project" : "Workspace";
   const actionsLabel = `${entityLabel} Actions for ${split.name}`;
-  const archiveStopsRuntime = split.sessions.some(sessionArchiveRequiresStop);
+  const archiveStopsRuntime = split.sessions.some((session) =>
+    sessionArchiveRequiresStop(session, stopBeforeArchiveSupported));
   const runnerId = durableLocation?.runnerId ?? legacyLocation?.runnerId ?? null;
   const workspaceId = durableLocation?.workspaceId ?? legacyLocation?.workspaceId ?? null;
   const canManageProject = durableProject?.canManage !== false;
@@ -200,7 +203,10 @@ export function ProjectSplitMenu({
           `Could not archive ${outcome.archiveFailures} session${outcome.archiveFailures === 1 ? "" : "s"}; ${outcome.rollbackFailures > 0 ? `${outcome.rollbackFailures} still need recovery` : "successful changes were rolled back"}.`,
         );
       }
-      showUndo(`${sessionIds.length} session${sessionIds.length === 1 ? "" : "s"} archived from ${split.name}.`, async () => {
+      const pendingCount = outcome.pendingSessionIds.length;
+      showUndo(pendingCount > 0
+        ? `${pendingCount} session${pendingCount === 1 ? " is" : "s are"} waiting for runtime capacity to be released before archiving from ${split.name}.`
+        : `${sessionIds.length} session${sessionIds.length === 1 ? "" : "s"} archived from ${split.name}.`, async () => {
         const failures = await setArchivedForSessions(sessionIds, false, api.setArchived);
         if (failures > 0) throw new Error(`${failures} session${failures === 1 ? "" : "s"} could not be restored`);
       });

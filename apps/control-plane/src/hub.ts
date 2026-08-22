@@ -397,6 +397,7 @@ export class Hub {
         createProjectLocations: true,
         accessScopeManagement: true,
         nativeTuiLaunch: true,
+        stopBeforeArchive: true,
       },
       runners,
       boxes: globalAdmin ? this.db.listBoxes() : [],

@@ -35,6 +35,7 @@ test("the Inbox footer rail keeps standard shortcuts global and approval shortcu
   const root = createRoot(container);
   const invoked: string[] = [];
   const props: Omit<InboxShortcutRailProps, "session" | "pinned" | "busy"> = {
+    stopBeforeArchiveSupported: true,
     onApprove: () => invoked.push("approve"),
     onDeny: () => invoked.push("deny"),
     onReply: () => invoked.push("reply"),

@@ -1,6 +1,5 @@
 import React, { useEffect, useRef, useState, type ReactNode } from "react";
 import {
-  archiveRequiresStop,
   isTerminal,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
@@ -9,7 +8,7 @@ import {
   type TranscriptShareView,
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
-import { sessionArchiveActionLabel } from "../archive-actions.js";
+import { sessionArchiveActionLabel, sessionArchiveRequiresStop } from "../archive-actions.js";
 import { titleCaseLabel } from "../format.js";
 import { removeFromInstanceKeySet, SESSION_PIN_KEY } from "../pins.js";
 import { discardComposerDraft } from "../composer-drafts.js";
@@ -42,6 +41,7 @@ export function SessionHeader({
   runnerOnline,
   runnerProtocolVersion,
   providerLogoutSupported,
+  stopBeforeArchiveSupported,
   exportReady,
   onArchive,
   projectCrumb,
@@ -53,6 +53,7 @@ export function SessionHeader({
   runnerOnline: boolean;
   runnerProtocolVersion: number | null | undefined;
   providerLogoutSupported: boolean;
+  stopBeforeArchiveSupported: boolean;
   exportReady: boolean;
   onArchive?: () => void;
   /** The interactive Project chip, rendered as the breadcrumb's first segment. */
@@ -270,7 +271,7 @@ export function SessionHeader({
                       }
                       void run(async () => {
                         const nextArchived = !session.archived;
-                        if (nextArchived && session.archiveStatus !== "stop_pending" && archiveRequiresStop(session.status)) {
+                        if (nextArchived && sessionArchiveRequiresStop(session, stopBeforeArchiveSupported)) {
                           const accepted = await confirm({
                             title: "Archive and stop this session?",
                             message: "The session will move to Archived Sessions after its runtime stops. Queued work will be canceled and runtime capacity will be released. To keep work running outside the Inbox, use Snooze instead.",
@@ -289,7 +290,7 @@ export function SessionHeader({
                       });
                     }}
                   >
-                    {sessionArchiveActionLabel(session)}
+                    {sessionArchiveActionLabel(session, stopBeforeArchiveSupported)}
                   </button>
                   <div className="menu-label" id="transcript-export-warning" role="presentation">Operational Transcript</div>
                   <div className="menu-caution" id="transcript-export-caution" role="presentation">

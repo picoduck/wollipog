@@ -3561,7 +3561,7 @@ export class SessionsService {
     return true;
   }
 
-  private requestStop(session: SessionView, now: number, archiveAfterStop = false): SessionView {
+  private requestStop(session: SessionView, now: number, archiveAfterStop = false, refreshProject = true): SessionView {
     // Persist before touching the socket: ws.send acceptance is not delivery proof on a half-open
     // connection. Reconnect inventory/status reconciliation owns retry and final clearance.
     this.db.addSessionStopIntent(session.id, session.runnerId, now, archiveAfterStop);
@@ -3569,8 +3569,10 @@ export class SessionsService {
     this.abortPolicyHookApprovals(session, now, "session-stopped");
     this.db.updateSessionStatus(session.id, "stopped", now);
     this.hub.sendToRunner(session.runnerId, { type: "stop_session", sessionId: session.id });
-    this.hub.sessionChangedById(session.id);
-    return this.db.getSession(session.id)!;
+    const stopped = this.db.getSession(session.id)!;
+    if (refreshProject) this.hub.sessionChangedById(session.id);
+    else this.hub.sessionChanged(stopped, false);
+    return stopped;
   }
 
   /** Clear a durable stop only after terminal/absence evidence. Any attached archive mutation is
@@ -3659,6 +3661,9 @@ export class SessionsService {
     if (!session) return fail("session not found", 404);
     if (session.archiveStatus === "stop_pending") {
       return fail("archive is waiting for runtime capacity to be released", 409);
+    }
+    if (session.archived) {
+      return fail("unarchive the session before restarting it", 409);
     }
     const reconciliationBlock = this.podReconciliationMutationError(sessionId);
     if (reconciliationBlock) return fail(reconciliationBlock, 409);
@@ -4064,7 +4069,7 @@ export class SessionsService {
     return ok(updated);
   }
 
-  setArchived(sessionId: string, archived: boolean): ServiceResult<SessionView> {
+  setArchived(sessionId: string, archived: boolean, refreshProject = true): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
     const now = Date.now();
@@ -4075,17 +4080,17 @@ export class SessionsService {
       this.db.cancelSessionArchiveAfterStop(sessionId);
       if (session.archived) this.db.setSessionArchived(sessionId, false, now);
       const restored = this.db.getSession(sessionId)!;
-      this.hub.sessionChanged(restored);
+      this.hub.sessionChanged(restored, refreshProject);
       return ok(restored);
     }
     if (archiveRequiresStop(session.status) || this.db.hasSessionStopIntent(sessionId)) {
-      const pending = this.requestStop(session, now, true);
+      const pending = this.requestStop(session, now, true, refreshProject);
       return ok(pending, 202);
     }
     if (session.archived) return ok(session);
     this.db.setSessionArchived(sessionId, true, now);
     const updated = this.db.getSession(sessionId)!;
-    this.hub.sessionChanged(updated);
+    this.hub.sessionChanged(updated, refreshProject);
     return ok(updated);
   }
 
@@ -4100,7 +4105,7 @@ export class SessionsService {
       .filter((session) => session.projectId === projectId && !session.archived);
     const sessions: SessionView[] = [];
     for (const candidate of candidates) {
-      const result = this.setArchived(candidate.id, true);
+      const result = this.setArchived(candidate.id, true, false);
       if (!result.ok || !result.data) return fail(result.error ?? "session archive failed", result.status);
       sessions.push(result.data);
     }

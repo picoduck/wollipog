@@ -11,8 +11,17 @@ import {
 test("bulk archive applies every id and needs no compensation on success", async () => {
   const calls: Array<[string, boolean]> = [];
   const result = await archiveSessionsWithCompensation(["a", "b"], async (id, archived) => { calls.push([id, archived]); });
-  assert.deepEqual(result, { ok: true });
+  assert.deepEqual(result, { ok: true, pendingSessionIds: [] });
   assert.deepEqual(calls, [["a", true], ["b", true]]);
+});
+
+test("bulk archive reports exact sessions still waiting for Stop evidence", async () => {
+  const result = await archiveSessionsWithCompensation(["a", "b", "c"], async (id) => ({
+    archived: id === "a",
+    archiveStatus: id === "a" ? undefined : "stop_pending",
+  }));
+
+  assert.deepEqual(result, { ok: true, pendingSessionIds: ["b", "c"] });
 });
 
 test("bulk archive compensates every exact id after any rejected response", async () => {
@@ -53,18 +62,24 @@ test("archive action labels disclose when archiving will stop runtime work", () 
   for (const status of statuses) {
     const requiresStop = !["completed", "failed", "stopped"].includes(status);
     const session = { archived: false, status };
-    assert.equal(sessionArchiveRequiresStop(session), requiresStop, status);
-    assert.equal(sessionArchiveActionLabel(session), requiresStop ? "Archive and Stop" : "Archive", status);
+    assert.equal(sessionArchiveRequiresStop(session, true), requiresStop, status);
+    assert.equal(sessionArchiveActionLabel(session, true), requiresStop ? "Archive and Stop" : "Archive", status);
   }
+});
+
+test("older control planes do not receive unsupported Stop disclosure", () => {
+  const session = { archived: false, status: "running" as const };
+  assert.equal(sessionArchiveRequiresStop(session, false), false);
+  assert.equal(sessionArchiveActionLabel(session, false), "Archive");
 });
 
 test("stop-pending and archived sessions retain truthful action labels", () => {
   assert.equal(
-    sessionArchiveActionLabel({ archived: false, status: "stopped", archiveStatus: "stop_pending" }),
+    sessionArchiveActionLabel({ archived: false, status: "stopped", archiveStatus: "stop_pending" }, false),
     "Archive and Stop",
   );
   assert.equal(
-    sessionArchiveActionLabel({ archived: true, status: "running", archiveStatus: "stop_pending" }),
+    sessionArchiveActionLabel({ archived: true, status: "running", archiveStatus: "stop_pending" }, false),
     "Unarchive",
   );
 });

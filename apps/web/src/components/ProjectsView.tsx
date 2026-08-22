@@ -88,6 +88,7 @@ export function ProjectsView({
   const projectsSupported = useStoreSelector((state) => state.projectsSupported);
   const projectLocationCreationSupported = useStoreSelector((state) => state.projectLocationCreationSupported);
   const accessScopeManagementSupported = useStoreSelector((state) => state.accessScopeManagementSupported);
+  const stopBeforeArchiveSupported = useStoreSelector((state) => state.stopBeforeArchiveSupported);
   const snapshotLoaded = useStoreSelector((state) => state.snapshotLoaded);
   const runners = useStoreSelector((state) => state.runners);
   const boxes = useStoreSelector((state) => state.boxes);
@@ -113,7 +114,7 @@ export function ProjectsView({
   const selected = selectedProjectId ? projectMap.get(selectedProjectId) ?? null : null;
   const boxByRunner = useMemo(() => new Map([...boxes.values()].map((box: BoxView) => [box.runnerId, box])), [boxes]);
   const selectedStopsRuntime = selected ? [...sessions.values()].some((session) =>
-    session.projectId === selected.id && !session.archived && sessionArchiveRequiresStop(session)
+    session.projectId === selected.id && !session.archived && sessionArchiveRequiresStop(session, stopBeforeArchiveSupported)
   ) : false;
 
   useEffect(() => {
