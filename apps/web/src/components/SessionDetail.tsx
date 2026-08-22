@@ -2550,7 +2550,7 @@ function SessionDetailLoaded({
                 <EarlierActivityControl
                   loading={eventWindow.loadingOlder}
                   error={eventWindow.error}
-                  latestResponsePartial={eventWindow.turnAligned === false}
+                  leadingResponsePartial={eventWindow.turnAligned === false}
                   onLoad={loadEarlierFromControl}
                 />
               )}
@@ -3799,25 +3799,27 @@ function TranscriptSkeleton() {
 function EarlierActivityControl({
   loading,
   error,
-  latestResponsePartial,
+  leadingResponsePartial,
   onLoad,
 }: {
   loading: boolean;
   error: string | null;
-  latestResponsePartial: boolean;
+  leadingResponsePartial: boolean;
   onLoad: () => void;
 }) {
   const partialDescriptionId = useId();
   return (
     <div className="transcript-earlier-activity">
-      {latestResponsePartial && (
-        <span id={partialDescriptionId}>The beginning of the latest response may not be loaded.</span>
+      {leadingResponsePartial && (
+        <span id={partialDescriptionId}>
+          A response near the beginning of the loaded activity may be incomplete.
+        </span>
       )}
       <button
         className="btn ghost sm"
         type="button"
         disabled={loading}
-        aria-describedby={latestResponsePartial ? partialDescriptionId : undefined}
+        aria-describedby={leadingResponsePartial ? partialDescriptionId : undefined}
         onClick={onLoad}
       >
         {loading ? "Loading Earlier Activity…" : "Load Earlier Activity"}

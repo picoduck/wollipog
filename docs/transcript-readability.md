@@ -16,10 +16,22 @@ background, so a transcript cannot shift under someone who did not reach for it.
 The window is anchored to a turn, not to a raw count. `align=turn` extends the newest `limit` rows
 down to the user message that started the turn they land inside, so the reader's first rows are an
 invocation and its updates rather than orphaned updates whose active turn has no derivable start.
-Alignment is bounded: past `TAIL_TURN_ALIGNMENT_MAX_EVENTS` below the count boundary — a turn longer
-than the cap, an adopted transcript, or a resumed session with no anchor in reach — the count
-boundary stands and the response reports `turnAligned: false` rather than growing without limit.
-Older pages stay count-bounded so their cursors remain exact and disjoint.
+Alignment is bounded by two safety limits: the anchor search reaches at most 2,000 events below the
+count boundary (`TAIL_TURN_ALIGNMENT_MAX_EVENTS`), and the complete aligned page may contain at most
+4 MiB of serialized event payload (`TAIL_TURN_ALIGNMENT_MAX_PAYLOAD_BYTES`). The ordinary count-
+bounded page remains available even when its own payload already exceeds 4 MiB; the payload ceiling
+only prevents extending that page. When no anchor is in reach — because a turn is longer than the
+event cap, the transcript was adopted or resumed without an anchor, or extension would cross the
+payload ceiling — the count boundary stands and the response reports `turnAligned: false`.
+That value describes only the leading edge of the loaded window: it may split an older response
+while newer complete turns remain visible. Older pages stay count-bounded so their cursors remain
+exact and disjoint.
+
+Reader-driven pagination keeps that partial state until an older page either contains a user-message
+boundary or reaches the start of history (`hasMoreOlder: false`); either condition proves the loaded
+head complete and clears the notice. An agent-only older page with more history still available
+preserves `turnAligned: false`. Older control planes omit `turnAligned`; the reader preserves that
+absence through pagination instead of inventing either a partial warning or alignment proof.
 
 A window defines the slice that is loaded. A cold cache hydrates forward from the runner and
 republishes those rows exactly like live events, so a transcript can fill from the start of the log

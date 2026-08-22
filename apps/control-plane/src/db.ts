@@ -2138,7 +2138,8 @@ export interface CachedEventTailPage {
   /** Older cached rows exist below `nextBeforeSeq`. */
   hasMoreOlder: boolean;
   /** The page begins at a user-anchored turn start rather than mid-turn. False when no anchor was
-   * requested, none exists below the page, or reaching one would have exceeded the extension cap. */
+   * requested, none exists below the page, or reaching one would have exceeded the extension cap;
+   * it describes the page's leading edge, not necessarily the newest response. */
   turnAligned?: boolean;
 }
 
