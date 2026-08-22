@@ -3489,7 +3489,11 @@ app.delete("/api/sessions/:id/reminder", async (req, reply) => {
   if (revision !== undefined && (!Number.isSafeInteger(revision) || revision < 0)) {
     return reply.code(400).send({ error: "revision must be a non-negative integer" });
   }
-  return respond(reply, svc.removeReminder(id, human.userId, revision));
+  const rawReminderId = (req.query as { reminderId?: string }).reminderId;
+  if (rawReminderId !== undefined && (!rawReminderId || rawReminderId.length > 128 || revision === undefined)) {
+    return reply.code(400).send({ error: "reminderId must be a bounded string paired with revision" });
+  }
+  return respond(reply, svc.removeReminder(id, human.userId, revision, rawReminderId));
 });
 
 app.post("/api/sessions/:id/archive", async (req, reply) => {

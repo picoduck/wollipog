@@ -19,34 +19,46 @@ export function SnoozeDialog({
   reminder?: SessionReminderView;
   onClose: () => void;
   onSave: (request: SetSessionReminderRequest) => Promise<void>;
-  onRemove?: () => Promise<void>;
+  onRemove?: (expectedRevision: number, expectedReminderId: string) => Promise<void>;
 }) {
-  const existingExact = reminder && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(reminder.originalExpression)
-    ? reminder.originalExpression : "";
-  const [expression, setExpression] = useState(existingExact ? "" : reminder?.originalExpression ?? "tomorrow morning");
-  const [exact, setExact] = useState(existingExact);
-  const [wakePolicy, setWakePolicy] = useState<SessionReminderWakePolicy>(reminder?.wakePolicy ?? "until_activity");
+  const [loadedReminder, setLoadedReminder] = useState<SessionReminderView | undefined>(() => reminder);
+  const initialDraft = draftForReminder(loadedReminder);
+  const [expression, setExpression] = useState(initialDraft.expression);
+  const [exact, setExact] = useState(initialDraft.exact);
+  const [wakePolicy, setWakePolicy] = useState<SessionReminderWakePolicy>(initialDraft.wakePolicy);
   const [scheduleTouched, setScheduleTouched] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const localTimeZone = browserTimeZone();
-  const timeZone = reminder && !scheduleTouched ? reminder.timeZone : localTimeZone;
+  const timeZone = loadedReminder && !scheduleTouched ? loadedReminder.timeZone : localTimeZone;
+  const conflict = reminderConflict(loadedReminder, reminder);
   const parsed = useMemo(() => {
-    if (reminder && !scheduleTouched) return storedReminderSchedule(reminder);
+    if (loadedReminder && !scheduleTouched) return storedReminderSchedule(loadedReminder);
     return exact
       ? exactReminderSchedule(exact)
       : parseReminderExpression(expression, new Date());
-  }, [exact, expression, localTimeZone, reminder, scheduleTouched]);
+  }, [exact, expression, localTimeZone, loadedReminder, scheduleTouched]);
+
+  const reload = () => {
+    const next = draftForReminder(reminder);
+    setLoadedReminder(reminder);
+    setExpression(next.expression);
+    setExact(next.exact);
+    setWakePolicy(next.wakePolicy);
+    setScheduleTouched(false);
+    setError(null);
+  };
 
   const submit = async () => {
-    if (!parsed || submitting) return;
+    if (!parsed || submitting || conflict) return;
     setSubmitting(true);
     setError(null);
     try {
       await onSave({
         ...parsed,
         wakePolicy,
-        expectedRevision: reminder?.revision ?? 0,
+        expectedRevision: loadedReminder?.revision ?? 0,
+        ...(loadedReminder ? { expectedReminderId: loadedReminder.reminderId } : {}),
       });
       onClose();
     } catch (cause) {
@@ -57,11 +69,11 @@ export function SnoozeDialog({
   };
 
   const remove = async () => {
-    if (!onRemove || submitting) return;
+    if (!onRemove || !loadedReminder || submitting || conflict) return;
     setSubmitting(true);
     setError(null);
     try {
-      await onRemove();
+      await onRemove(loadedReminder.revision, loadedReminder.reminderId);
       onClose();
     } catch (cause) {
       setError((cause as Error).message);
@@ -72,22 +84,31 @@ export function SnoozeDialog({
 
   return (
     <Modal
-      title={reminder ? "Edit Reminder" : "Snooze Session"}
+      title={loadedReminder ? "Edit Reminder" : "Snooze Session"}
       onClose={onClose}
       describedBy="snooze-description"
       footer={<>
-        {reminder && <button className="btn ghost" type="button" onClick={() => void remove()} disabled={submitting}>
-          {reminder.state === "fired" ? "Dismiss Reminder" : "Remove Reminder"}
+        {loadedReminder && onRemove && <button className="btn ghost" type="button" onClick={() => void remove()} disabled={submitting || Boolean(conflict)}>
+          {loadedReminder.state === "fired" ? "Dismiss Reminder" : "Remove Reminder"}
         </button>}
         <span className="modal-foot-spacer" />
         <button className="btn ghost" type="button" onClick={onClose} disabled={submitting}>Cancel</button>
-        <button className="btn primary" type="submit" form="snooze-session-form" disabled={!parsed || submitting}>
-          {submitting ? "Saving…" : reminder ? "Update Reminder" : "Snooze Session"}
+        <button className="btn primary" type="submit" form="snooze-session-form" disabled={!parsed || submitting || Boolean(conflict)}>
+          {submitting ? "Saving…" : loadedReminder ? "Update Reminder" : "Snooze Session"}
         </button>
       </>}
     >
       <form id="snooze-session-form" className="snooze-form" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
         <p id="snooze-description">Snoozing changes Inbox visibility only. Running work and lifecycle state continue unchanged.</p>
+        {conflict && (
+          <div className="snooze-conflict" role="alert" aria-live="assertive">
+            <strong>Stored Reminder Changed</strong>
+            <span>{conflict} Your local draft is preserved. Continue reviewing it, or reload before saving.</span>
+            <button className="btn sm" type="button" onClick={reload}>
+              {reminder ? "Reload Reminder" : "Start New Reminder"}
+            </button>
+          </div>
+        )}
         <div className="snooze-presets" role="group" aria-label="Reminder Presets">
           {["later today", "tomorrow morning", "in 1 day", "in 7 days"].map((preset) => (
             <button key={preset} className="btn sm" type="button" onClick={() => { setScheduleTouched(true); setExact(""); setExpression(preset); }}>
@@ -125,4 +146,33 @@ export function SnoozeDialog({
       </form>
     </Modal>
   );
+}
+
+function draftForReminder(reminder?: SessionReminderView): {
+  expression: string;
+  exact: string;
+  wakePolicy: SessionReminderWakePolicy;
+} {
+  const exact = reminder && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(reminder.originalExpression)
+    ? reminder.originalExpression : "";
+  return {
+    expression: exact ? "" : reminder?.originalExpression ?? "tomorrow morning",
+    exact,
+    wakePolicy: reminder?.wakePolicy ?? "until_activity",
+  };
+}
+
+function reminderConflict(
+  loaded: SessionReminderView | undefined,
+  current: SessionReminderView | undefined,
+): string | null {
+  if (!loaded && !current) return null;
+  if (!loaded) return "A reminder was created in another client.";
+  if (!current) return "The reminder was removed in another client.";
+  if (loaded.reminderId !== current.reminderId) {
+    return "The reminder was removed and recreated in another client.";
+  }
+  if (loaded.revision === current.revision) return null;
+  if (loaded.state !== "fired" && current.state === "fired") return "The reminder fired in another client.";
+  return "The reminder was updated in another client.";
 }

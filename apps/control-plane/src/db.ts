@@ -8813,6 +8813,7 @@ export class ControlPlaneDb {
     originalExpression: string;
     wakePolicy: SessionReminderWakePolicy;
     expectedRevision?: number;
+    expectedReminderId?: string;
     restoreFired?: { firedAt: number; wakeReason: SessionReminderWakeReason };
     now: number;
   }): SessionReminderMutationResult {
@@ -8820,10 +8821,16 @@ export class ControlPlaneDb {
       const current = this.stmt(
         "SELECT * FROM session_reminders WHERE session_id=? AND user_id=?",
       ).get(input.sessionId, input.userId) as unknown as SessionReminderRow | undefined;
-      if (current && input.expectedRevision !== undefined && input.expectedRevision !== current.revision) {
+      if (current && (
+        (input.expectedReminderId !== undefined && input.expectedReminderId !== current.reminder_id) ||
+        (input.expectedRevision !== undefined && input.expectedRevision !== current.revision)
+      )) {
         return { kind: "conflict", reminder: this.sessionReminderView(current) };
       }
-      if (!current && input.expectedRevision !== undefined && input.expectedRevision !== 0) return { kind: "missing" };
+      if (!current && (
+        input.expectedReminderId !== undefined ||
+        (input.expectedRevision !== undefined && input.expectedRevision !== 0)
+      )) return { kind: "missing" };
       const session = this.stmt("SELECT 1 AS found FROM sessions WHERE id=?").get(input.sessionId) as
         | { found: number } | undefined;
       if (!session) return { kind: "missing" };
@@ -8871,13 +8878,19 @@ export class ControlPlaneDb {
     });
   }
 
-  removeSessionReminder(sessionId: string, userId: string, expectedRevision?: number): RemoveSessionReminderResult {
+  removeSessionReminder(
+    sessionId: string,
+    userId: string,
+    expectedRevision?: number,
+    expectedReminderId?: string,
+  ): RemoveSessionReminderResult {
     return this.atomic(() => {
       const current = this.stmt(
         "SELECT * FROM session_reminders WHERE session_id=? AND user_id=?",
       ).get(sessionId, userId) as unknown as SessionReminderRow | undefined;
       if (!current) return { kind: "missing" };
-      if (expectedRevision !== undefined && expectedRevision !== current.revision) {
+      if ((expectedReminderId !== undefined && expectedReminderId !== current.reminder_id) ||
+          (expectedRevision !== undefined && expectedRevision !== current.revision)) {
         return { kind: "conflict", reminder: this.sessionReminderView(current) };
       }
       this.stmt("DELETE FROM session_reminders WHERE session_id=? AND user_id=?").run(sessionId, userId);
