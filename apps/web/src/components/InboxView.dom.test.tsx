@@ -291,6 +291,75 @@ test("InboxView keeps mobile browsing order stable before and through a touch", 
   mobileViewport = true;
 });
 
+test("InboxView holds desktop browsing order until the user leaves the window", async () => {
+  mobileViewport = false;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "inbox-desktop-order-test",
+    runtimeKey: "inbox-desktop-order-test:1",
+    createSocket: () => socket,
+    close() {},
+  };
+
+  await act(async () => {
+    root.render(
+      <StoreProvider connection={connection} navigation={navigation}>
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+      </StoreProvider>,
+    );
+  });
+  await act(async () => { socket.push(snapshot([session("A", 30), session("B", 20)])); });
+  assert.deepEqual(rowTitles(container), ["Session A", "Session B"]);
+
+  // No pointer and no keystroke: a desktop user reading the list must not have rows move under
+  // them merely because they are not currently touching an input device.
+  await act(async () => {
+    socket.push({
+      type: "session_upsert",
+      session: session("B", 40, { preview: "Approval arrived.", status: "input_required" }),
+    });
+    socket.push({ type: "session_upsert", session: session("C", 50) });
+  });
+  assert.deepEqual(rowTitles(container), ["Session A", "Session B", "Session C"]);
+  assert.match(container.textContent ?? "", /Approval arrived/);
+
+  // Sustained concurrent activity, well past the interaction settle window.
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 550)); });
+  await act(async () => {
+    socket.push({ type: "session_upsert", session: session("C", 60) });
+    socket.push({ type: "session_upsert", session: session("B", 70, { preview: "Still running." }) });
+  });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 550)); });
+  assert.deepEqual(rowTitles(container), ["Session A", "Session B", "Session C"],
+    "desktop stability must not expire while the user is still browsing the Inbox");
+  assert.match(container.textContent ?? "", /Still running/);
+
+  await act(async () => { socket.push({ type: "session_removed", sessionId: "A" }); });
+  assert.deepEqual(rowTitles(container), ["Session B", "Session C"]);
+  assert.match(
+    container.querySelector<HTMLElement>('.inbox-row-shell[aria-selected="true"]')?.textContent ?? "",
+    /Session B/,
+  );
+
+  // Leaving the window is the safe boundary: canonical recency ordering is applied there.
+  await act(async () => { domWindow.dispatchEvent(new domWindow.Event("blur")); });
+  assert.deepEqual(rowTitles(container), ["Session B", "Session C"]);
+  await act(async () => { socket.push({ type: "session_upsert", session: session("C", 80) }); });
+  assert.deepEqual(rowTitles(container), ["Session C", "Session B"]);
+
+  // Returning re-establishes the hold from the freshly adopted order.
+  await act(async () => { domWindow.dispatchEvent(new domWindow.Event("focus")); });
+  await act(async () => { socket.push({ type: "session_upsert", session: session("B", 90) }); });
+  assert.deepEqual(rowTitles(container), ["Session C", "Session B"]);
+
+  await act(async () => { root.unmount(); });
+  container.remove();
+  mobileViewport = true;
+});
+
 test("a two-client reminder upsert preserves the open Inbox Snooze draft and focus", async () => {
   mobileViewport = false;
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;

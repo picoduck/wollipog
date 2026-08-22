@@ -144,9 +144,17 @@ export function InboxView({
   } = useStoreActions();
   const instanceScope = useInstanceScope();
   const isMobile = useIsMobile();
-  const mobileOrderLease = isMobile && expandedSessionId === null;
-  const mobileOrderLeaseRef = useRef(mobileOrderLease);
-  mobileOrderLeaseRef.current = mobileOrderLease;
+  // Rows must not move while the user is reading or aiming at the list, and neither breakpoint can
+  // key that on live input: touch has no pre-contact hover signal, and a desktop pointer rests
+  // still for long stretches while its owner scans the Inbox. So the collapsed Inbox holds its
+  // displayed order for the whole browsing interval on both. Canonical recency ordering is
+  // re-adopted only at boundaries where the user cannot be aiming at a row: leaving the tab or
+  // window (`inboxAway`), expanding a session, and the deliberate structural actions folded into
+  // structuralOrderKey below.
+  const [inboxAway, setInboxAway] = useState(false);
+  const browsingOrderLease = expandedSessionId === null && !inboxAway;
+  const browsingOrderLeaseRef = useRef(browsingOrderLease);
+  browsingOrderLeaseRef.current = browsingOrderLease;
   const [seen, setSeen] = useState(() => loadSeen(instanceScope));
   const [pinnedProjects, setPinnedProjects] = useState(() => loadKeySet(PROJECT_PIN_KEY, instanceScope));
   const [pinnedSessions, setPinnedSessions] = useState(() => loadKeySet(SESSION_PIN_KEY, instanceScope));
@@ -393,6 +401,7 @@ export function InboxView({
   liveIdsRef.current = liveIds;
   const structuralOrderKey = JSON.stringify([
     instanceScope,
+    isMobile,
     reminderMode,
     activeSplit?.key ?? null,
     normalizedQuery,
@@ -408,23 +417,22 @@ export function InboxView({
     structuralOrderKeyRef.current = structuralOrderKey;
     if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
     settleTimerRef.current = null;
-    setHeldOrder(mobileOrderLease
+    setHeldOrder(browsingOrderLease
       || targetPointerIdsRef.current.size > 0 || activePointerIdsRef.current.size > 0
       ? liveIdsRef.current
       : null);
-  }, [mobileOrderLease, structuralOrderKey]);
+  }, [browsingOrderLease, structuralOrderKey]);
 
   useLayoutEffect(() => {
     setHeldOrder((current) => {
-      // Touch has no hover phase: if rows keep following canonical recency until pointerdown, a
-      // session can move after the user has visually targeted it but before their finger lands.
-      // Keep the collapsed phone Inbox stable for the whole browsing interval. Deliberate group,
-      // filter, and pin changes still replace the lease through structuralOrderKey above.
-      if (!current) return mobileOrderLease ? liveIds : current;
+      // Capture the order the browsing interval starts with. Every later live update is projected
+      // through it, so incoming activity changes row content without moving rows. Deliberate
+      // group, filter, and pin changes still replace the lease through structuralOrderKey above.
+      if (!current) return browsingOrderLease ? liveIds : current;
       const extended = extendInboxHeldOrder(current, liveIds);
       return extended.length === current.length ? current : extended;
     });
-  }, [liveIds, mobileOrderLease]);
+  }, [liveIds, browsingOrderLease]);
 
   const entries = useMemo(() => {
     if (!heldOrder) return liveEntries;
@@ -465,7 +473,7 @@ export function InboxView({
   const scheduleOrderRelease = useCallback(() => {
     if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
     settleTimerRef.current = window.setTimeout(() => {
-      if (mobileOrderLeaseRef.current) {
+      if (browsingOrderLeaseRef.current) {
         settleTimerRef.current = null;
         return;
       }
@@ -479,10 +487,10 @@ export function InboxView({
   }, []);
 
   useLayoutEffect(() => {
-    if (mobileOrderLease) return;
+    if (browsingOrderLease) return;
     if (targetPointerIdsRef.current.size > 0 || activePointerIdsRef.current.size > 0) return;
     clearHeldOrder();
-  }, [clearHeldOrder, mobileOrderLease]);
+  }, [clearHeldOrder, browsingOrderLease]);
 
 
   const holdDisplayedOrder = useCallback(() => {
@@ -516,6 +524,24 @@ export function InboxView({
     if (pointerType === "touch") targetPointerIdsRef.current.delete(pointerId);
     if (targetPointerIdsRef.current.size === 0 && activePointerIdsRef.current.size === 0) scheduleOrderRelease();
   }, [holdDisplayedOrder, scheduleOrderRelease]);
+
+  // A hidden tab or an unfocused window is not a browsing interval, so it is the desktop Inbox's
+  // safe boundary: the hold is dropped there and re-established on return, which is when canonical
+  // recency ordering is re-adopted. Nothing snaps out from under a returning click, because a
+  // pointer entering the list re-holds the order at `pointerover`, before focus follows the press.
+  useEffect(() => {
+    const leaveInbox = () => setInboxAway(true);
+    const enterInbox = () => setInboxAway(false);
+    const trackVisibility = () => setInboxAway(document.visibilityState === "hidden");
+    window.addEventListener("blur", leaveInbox);
+    window.addEventListener("focus", enterInbox);
+    document.addEventListener("visibilitychange", trackVisibility);
+    return () => {
+      window.removeEventListener("blur", leaveInbox);
+      window.removeEventListener("focus", enterInbox);
+      document.removeEventListener("visibilitychange", trackVisibility);
+    };
+  }, []);
 
   useEffect(() => {
     const finishPointer = (event: PointerEvent) => {
