@@ -240,7 +240,10 @@
 // 86: structured questions may include provider-declared free-text input, optional fields,
 //     secret entry, primitive format/length/range constraints, and multi-select cardinality.
 //     All fields are additive; pre-v86 peers retain the original required-choice behavior.
-export const PROTOCOL_VERSION = 86;
+// 87: streamed agent responses gain a content-free completion event. New runners emit it only at
+//     an authoritative successful turn boundary; older runners omit it and reminders retain their
+//     scheduled fallback. The separate event avoids replaying message text for legacy consumers.
+export const PROTOCOL_VERSION = 87;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
@@ -2041,6 +2044,9 @@ export type SessionEventPayload =
       };
     }
   | { kind: "agent_message"; text: string; final?: boolean; messageId?: string; parentToolUseId?: string }
+  /** Content-free evidence that a response delivered as message chunks reached a successful turn
+   * boundary. Completion-only responses continue to use `agent_message.final` instead. */
+  | { kind: "agent_response_completed" }
   | { kind: "agent_thought"; text: string; final?: boolean; messageId?: string; parentToolUseId?: string }
   | {
       kind: "tool_call";

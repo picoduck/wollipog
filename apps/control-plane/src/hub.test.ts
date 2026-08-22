@@ -18,10 +18,21 @@ import {
   UI_SUBSCRIPTION_ADMISSION_TTL_MS,
   UI_SUBSCRIPTION_RATE_WINDOW_MS,
   type Socket,
+  reminderWakeReasonForEvent,
 } from "./hub.js";
 
 // The runner request/response methods don't touch the DB, so a bare stub is fine.
 const fakeDb = {} as ControlPlaneDb;
+
+test("reminder activity recognizes only authoritative agent response completion", () => {
+  assert.equal(reminderWakeReasonForEvent({ kind: "agent_message", text: "partial" }), null);
+  assert.equal(reminderWakeReasonForEvent({ kind: "agent_response_completed" }), "agent_response");
+  assert.equal(
+    reminderWakeReasonForEvent({ kind: "agent_message", text: "completion-only", final: true }),
+    "agent_response",
+  );
+  assert.equal(reminderWakeReasonForEvent({ kind: "turn_interrupted" }), null);
+});
 
 function gitReq(requestId: string): GitActionRequestMessage {
   return { type: "git_action", requestId, sessionId: "s", worktreePath: "/w", action: { kind: "status" } };

@@ -605,6 +605,10 @@ export class TimelineBuilder {
         // preceding agent-message chunks.
         this.breakText();
         break;
+      case "agent_response_completed":
+        // Completion evidence wakes reminders without replaying transcript content.
+        this.breakText();
+        break;
       case "tool_call": {
         this.breakText();
         const existing = this.toolIndex.get(p.toolCallId);

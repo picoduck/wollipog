@@ -137,6 +137,17 @@ test("turn interruption is a standalone non-error transcript outcome with record
   assert.deepEqual(groupTimeline(items).map((group) => group.kind), ["item", "item", "item"]);
 });
 
+test("streamed response completion evidence stays hidden and does not duplicate content", () => {
+  const items = deriveTimeline([
+    ev({ kind: "agent_message", text: "streamed answer" }),
+    ev({ kind: "agent_response_completed" }),
+    ev({ kind: "agent_message", text: "later response" }),
+  ]);
+  assert.deepEqual(items.map((item) => item.kind), ["agent_message", "agent_message"]);
+  assert.equal((items[0] as Extract<TimelineItem, { kind: "agent_message" }>).text, "streamed answer");
+  assert.equal((items[1] as Extract<TimelineItem, { kind: "agent_message" }>).text, "later response");
+});
+
 test("managed continuation delivery markers remain durable but hidden from the timeline", () => {
   const items = deriveTimeline([
     ev({ kind: "stderr", text: "before" }),

@@ -29,6 +29,7 @@ const EVERY_PAYLOAD = {
     commandId: "COMMAND_ID_LEAK",
   },
   agent_message: { kind: "agent_message", text: "visible assistant", final: true },
+  agent_response_completed: { kind: "agent_response_completed" },
   agent_thought: { kind: "agent_thought", text: "AGENT_THOUGHT_LEAK", final: true },
   tool_call: {
     kind: "tool_call",

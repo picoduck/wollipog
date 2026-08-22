@@ -53,7 +53,8 @@ export function reminderWakeReasonForEvent(
   if (payload.kind === "question_request") return "question";
   if (payload.kind === "error" || (payload.kind === "status" && payload.status === "failed")) return "failure";
   if (payload.kind === "background_continuation_delivered") return "background_job";
-  if (payload.kind === "agent_message" && payload.final === true) return "agent_response";
+  if (payload.kind === "agent_response_completed" ||
+      (payload.kind === "agent_message" && payload.final === true)) return "agent_response";
   return null;
 }
 

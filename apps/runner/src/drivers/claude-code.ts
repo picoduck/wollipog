@@ -320,6 +320,9 @@ export class ClaudeCodeDriver implements Driver {
   /** Claude's message_start id scoped by parent Task. Entries close on message_stop/result, so
    * provider block identity never becomes transcript-lifetime state. */
   private readonly streamingMessageIds = new Map<string, string>();
+  /** Whether the active turn delivered assistant text as deltas. A successful result consumes this
+   * flag into one content-free completion event; failures and interruptions never do. */
+  private streamedAgentResponse = false;
   private hookCircuitReported = false;
   private hookCircuitOpenedAt: number | null = null;
 
@@ -575,6 +578,7 @@ export class ClaudeCodeDriver implements Driver {
     return new Promise<StopReason>((resolve) => {
       this.cancelled = false;
       this.pendingApprovals.clear();
+      this.streamedAgentResponse = false;
       const promptText = slashCommand ? `/${slashCommand}${text ? " " + text : ""}`.trim() : text;
       const imgs = images ?? [];
 
@@ -754,6 +758,7 @@ export class ClaudeCodeDriver implements Driver {
     this.clearIdleTimer();
     this.cancelled = false;
     this.pendingApprovals.clear();
+    this.streamedAgentResponse = false;
     const promptText = slashCommand ? `/${slashCommand}${text ? " " + text : ""}`.trim() : text;
     return new Promise<StopReason>((resolve) => {
       const turn: PersistentTurn = {
@@ -1766,6 +1771,7 @@ export class ClaudeCodeDriver implements Driver {
             : undefined;
           if (d?.type === "text_delta" && d.text) {
             this.cb.onEvent({ kind: "agent_message", text: d.text, ...(messageId ? { messageId } : {}), ...pp });
+            if (!parentId) this.streamedAgentResponse = true;
           } else if (d?.type === "thinking_delta" && d.thinking) {
             this.cb.onEvent({ kind: "agent_thought", text: d.thinking, ...(messageId ? { messageId } : {}), ...pp });
           }
@@ -1862,8 +1868,18 @@ export class ClaudeCodeDriver implements Driver {
             /* ignore */
           }
         }
-        if (msg.is_error || msg.subtype === "error_during_execution") return "refusal";
-        if (msg.subtype === "error_max_turns") return "max_turn_requests";
+        if (msg.is_error || msg.subtype === "error_during_execution") {
+          if (!parentId) this.streamedAgentResponse = false;
+          return "refusal";
+        }
+        if (msg.subtype === "error_max_turns") {
+          if (!parentId) this.streamedAgentResponse = false;
+          return "max_turn_requests";
+        }
+        if (!parentId && this.streamedAgentResponse) {
+          this.streamedAgentResponse = false;
+          this.cb.onEvent({ kind: "agent_response_completed" });
+        }
         return "end_turn";
       }
 

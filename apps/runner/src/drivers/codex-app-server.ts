@@ -172,6 +172,9 @@ export class CodexAppServerDriver implements Driver {
   private turnUsageClosed = false;
   private readonly seenItems = new Set<string>();
   private readonly emittedErrors = new Set<string>();
+  /** True after the active turn emits agent-message deltas. Successful turn settlement consumes
+   * it into one content-free completion event; cancellation/failure clears it. */
+  private streamedAgentResponse = false;
   /** approval correlation id -> the parked JSON-RPC approval request. */
   private readonly pendingApprovals = new Map<string, PendingApproval>();
   /** question correlation id -> the parked provider request and native response mapper. */
@@ -354,6 +357,7 @@ export class CodexAppServerDriver implements Driver {
     return new Promise<StopReason>((resolve) => {
       this.seenItems.clear();
       this.emittedErrors.clear();
+      this.streamedAgentResponse = false;
       this.declinePendingRequests();
       this.pendingTurnUsage = null;
       this.turnUsageClosed = false;
@@ -652,6 +656,7 @@ export class CodexAppServerDriver implements Driver {
     peer.onNotification("item/agentMessage/delta", (p: Json) => {
       if (!p?.delta) return;
       const messageId = normalizedCodexItemId(p.itemId);
+      this.streamedAgentResponse = true;
       if (messageId) this.seenItems.add(`msg:${messageId}`);
       this.cb.onEvent({ kind: "agent_message", text: String(p.delta), ...(messageId ? { messageId } : {}) });
     });
@@ -697,16 +702,23 @@ export class CodexAppServerDriver implements Driver {
       this.closeTurnUsage();
       const status = p?.turn?.status;
       if (status === "failed") {
+        this.streamedAgentResponse = false;
         this.emitDriverError(p?.turn?.error);
         this.settleTurn("refusal");
       } else if (status === "interrupted") {
+        this.streamedAgentResponse = false;
         this.settleTurn("cancelled");
       } else {
+        if (status === "completed" && this.turnResolve && this.streamedAgentResponse) {
+          this.streamedAgentResponse = false;
+          this.cb.onEvent({ kind: "agent_response_completed" });
+        }
         this.settleTurn(this.turnStop);
       }
     });
     peer.onNotification("turn/failed", (p: Json) => {
       this.declinePendingRequests();
+      this.streamedAgentResponse = false;
       this.emitDriverError(p?.error);
       this.closeTurnUsage();
       this.settleTurn("refusal");
