@@ -16,9 +16,10 @@ import { useInstanceScope } from "../instance-scope.js";
 import { instancePublicOrigin, useInstances } from "../instances-context.js";
 import { absoluteViewUrl } from "../navigation.js";
 import { requestTranscriptDownload } from "../transcript-download.js";
+import type { SessionChangeStatus } from "../session-status.js";
 import { CONTROL_PLANE_HTTP, DASHBOARD_ORIGIN, hasSameOriginMarker } from "../config.js";
 import { reachableTranscriptShareOrigin, transcriptShareUrl } from "../transcript-share-client.js";
-import { StatusBadge, Modal, CopyButton } from "./common.js";
+import { ChangeStatusBadge, SessionStatusIndicators, Modal, CopyButton } from "./common.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { ChevronLeftIcon } from "./Icons.js";
@@ -47,6 +48,7 @@ export function SessionHeader({
   onSnooze,
   projectCrumb,
   topbarControls,
+  changeStatus,
   titleId,
 }: {
   session: SessionView;
@@ -63,6 +65,7 @@ export function SessionHeader({
   /** App-shell control cluster (editor, pinned summary, terminal, side panel) when this bar
    * replaces the top-level app bar on desktop. */
   topbarControls?: ReactNode;
+  changeStatus?: SessionChangeStatus | null;
   /** Set when this bar owns the page heading (`page-title` focus-rescue anchor). */
   titleId?: string;
 }) {
@@ -198,12 +201,8 @@ export function SessionHeader({
           {session.title}
         </h1>
       </div>
-      <StatusBadge
-        status={session.status}
-        archiveStatus={session.archiveStatus}
-        archiveOperation={session.archiveOperation}
-        stopOperation={session.stopOperation}
-      />
+      <SessionStatusIndicators session={session} disconnected={!runnerOnline} />
+      <ChangeStatusBadge change={changeStatus ?? null} />
       {session.backgroundWorkState && (
         <span
           className={session.backgroundWorkState === "orphaned"
@@ -223,7 +222,6 @@ export function SessionHeader({
           aria-label="Detached Work: Untracked"
         />
       )}
-      {!runnerOnline && <span className="tag tag-offline">Runner Offline</span>}
       <div className="detail-actions">
         {note && <span className="detail-note" role="status" aria-live="polite">{note}</span>}
         <div className="overflow-menu">

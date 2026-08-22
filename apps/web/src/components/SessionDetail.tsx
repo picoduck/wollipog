@@ -42,12 +42,13 @@ import {
   Empty,
   Modal,
   Spinner,
-  StatusBadge,
+  SessionStatusIndicators,
 } from "./common.js";
 import { EventTimeline, type TimelineRevealRequest } from "./EventTimeline.js";
 import { isTimelineSessionActive } from "../timeline-clock.js";
 import { RightPanel, type RightPanelState } from "./RightPanel.js";
 import { useGitStatus, useGitSummary } from "./useGitStatus.js";
+import { sessionChangeStatus } from "../session-status.js";
 import { ImageStrip, usePastedImages } from "./images.js";
 import { PromptImageView } from "./PromptImageView.js";
 import {
@@ -835,6 +836,11 @@ function SessionDetailLoaded({
     git.mutationRevision,
     recoveryGeneration,
   );
+  const changeStatus = sessionChangeStatus({
+    status: git.status,
+    summary: gitSummary.summary,
+    settled: git.settled || gitSummary.settled,
+  });
   const gitPresentation = useMemo(() => deriveGitPresentation({
     runnerOnline,
     worktreePath: session.worktreePath,
@@ -2389,6 +2395,7 @@ function SessionDetailLoaded({
           onSnooze={onSnooze}
           projectCrumb={<ProjectChip session={session} onOpenInbox={onBack ?? (() => navigate({ name: "inbox" }))} />}
           topbarControls={topbarControls}
+          changeStatus={changeStatus}
           // The unified bar replaces the app-level top bar on desktop, so it owns the page-title
           // focus-rescue anchor there; the mobile layout keeps the app bar and its own anchor.
           titleId={!isMobile ? "page-title" : undefined}
@@ -2398,12 +2405,7 @@ function SessionDetailLoaded({
           <div className="session-preview-heading">
             <h2 className="session-preview-title">{session.title}</h2>
             <div className="session-preview-meta">
-              <StatusBadge
-                status={session.status}
-                archiveStatus={session.archiveStatus}
-                archiveOperation={session.archiveOperation}
-                stopOperation={session.stopOperation}
-              />
+              <SessionStatusIndicators session={session} disconnected={!runnerOnline} />
               {session.backgroundWorkState && <BackgroundWorkBadge state={session.backgroundWorkState} />}
               {!session.backgroundWorkState && session.backgroundWorkTracking === "untracked" && (
                 <UntrackedBackgroundWorkBadge />
@@ -2423,7 +2425,6 @@ function SessionDetailLoaded({
               {session.workspaceName && <span className="tag tag-workspace">{session.workspaceName}</span>}
               <ContextWindowMeter session={session} />
               {usage && <span className="tag tag-usage" aria-label={`Usage: ${usage}`}>{usage}</span>}
-              {!runner || runner.status !== "online" ? <span className="tag tag-offline">Runner Offline</span> : null}
               {isHeartbeatBusy(session.status) && (
                 <ActivityStrip activity={activity} now={activityNow} />
               )}

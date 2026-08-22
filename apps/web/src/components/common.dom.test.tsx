@@ -8,6 +8,8 @@ import {
   BackgroundNotificationBadge,
   BackgroundWorkBadge,
   CopyButton,
+  ChangeStatusBadge,
+  SessionStatusIndicators,
   UntrackedBackgroundWorkBadge,
 } from "./common.js";
 
@@ -155,6 +157,44 @@ test("Untracked capability and push receipt badges expose honest Title Case boun
       ["Detached Work: Untracked", "Push Service Accepted", "Notification Displayed", "Notification Clicked"],
     );
     assert.match(container.querySelector(".background-work-untracked")?.getAttribute("title") ?? "", /cannot promise/i);
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
+
+test("session indicators preserve simultaneous lifecycle, attention, and change dimensions", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(<>
+        <SessionStatusIndicators disconnected session={{
+          status: "running",
+          pendingApproval: {
+            requestId: "question",
+            title: "Choose a database",
+            options: [],
+            kind: "question",
+          },
+        }} />
+        <ChangeStatusBadge change={{
+          kind: "changes_present",
+          label: "Changes Present",
+          description: "Git confirms a real change set.",
+        }} />
+      </>);
+    });
+    assert.match(container.textContent ?? "", /Running/);
+    assert.match(container.textContent ?? "", /Answer Required/);
+    assert.match(container.textContent ?? "", /Changes Present/);
+    assert.match(container.textContent ?? "", /Disconnected/);
+    assert.equal(container.querySelector('[aria-label="Answer Required"]')?.textContent?.trim(), "Answer Required");
+    assert.equal(container.querySelector('[aria-label="Changes Present"]')?.textContent?.trim(), "Changes Present");
+    assert.equal(container.querySelector('[aria-label="Disconnected"]')?.textContent?.trim(), "Disconnected");
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();

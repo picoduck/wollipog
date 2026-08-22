@@ -94,7 +94,7 @@ export function isInboxBlocked(session: Pick<SessionView, "status" | "pendingApp
 }
 
 export function isInboxRunning(session: Pick<SessionView, "status">): boolean {
-  return session.status === "queued" || session.status === "starting" || session.status === "running";
+  return session.status === "running";
 }
 
 /** Stable card ordering: pinned first, then latest event, with deterministic fallbacks. */

@@ -41,7 +41,7 @@ export function pushDecision(prev: PushDecisionPrev, next: SessionView): PushMes
     const what = next.pendingApproval?.title ? `: ${next.pendingApproval.title}` : "";
     return {
       title: `${name} needs your input`,
-      body: clamp(`${next.pendingApproval?.kind === "question" ? "Question" : next.pendingApproval?.kind === "authentication" ? "Sign-in required" : "Approval requested"}${what}`, BODY_MAX),
+      body: clamp(`${next.pendingApproval?.kind === "question" ? "Answer required" : next.pendingApproval?.kind === "authentication" ? "Authentication required" : "Approval required"}${what}`, BODY_MAX),
       sessionId: next.id,
       urgency: "high",
     };
@@ -59,7 +59,7 @@ export function pushDecision(prev: PushDecisionPrev, next: SessionView): PushMes
       // Turn settled: the agent is waiting on the next prompt / review.
       if (BUSY.includes(prev.status)) {
         if (newlySettledBackgroundDelivery(prev, next)) return null;
-        return { title: clamp(`${name} is ready`, TITLE_MAX), body: "The agent finished a turn and is ready for review.", sessionId: next.id, urgency: "normal" };
+        return { title: clamp(`${name} is awaiting a prompt`, TITLE_MAX), body: "The agent finished a turn and is awaiting another prompt.", sessionId: next.id, urgency: "normal" };
       }
       return null;
     default:

@@ -18,8 +18,9 @@ import type { GitStatus, GitSummary } from "./useGitStatus.js";
 import { GitPinnedSection } from "./GitVisibility.js";
 import { AgentIcon } from "./AgentIcon.js";
 import { BranchIcon, ComputerIcon, DialIcon, FolderOutlineIcon, GitHubIcon, GlobeIcon, NotesIcon, PullRequestIcon, TuningIcon } from "./Icons.js";
-import { BackgroundDeliveryBadge, BackgroundNotificationBadge, BackgroundWorkBadge, Spinner, StatusBadge, UntrackedBackgroundWorkBadge } from "./common.js";
+import { BackgroundDeliveryBadge, BackgroundNotificationBadge, BackgroundWorkBadge, ChangeStatusBadge, SessionStatusIndicators, Spinner, UntrackedBackgroundWorkBadge } from "./common.js";
 import { effortLabel, relativeTime, resolvedModelLabel } from "../format.js";
+import { sessionChangeStatus } from "../session-status.js";
 import { effectiveModelEffortForDisplay, resolveCaps, resolveEffectiveCaps } from "../caps.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { safeExternalHref } from "../external-href.js";
@@ -69,6 +70,11 @@ export function PinnedSummary({
   // SessionDetail owns both reads so compact and pinned presentations share one
   // session-tagged snapshot while status and summary keep independent refresh cycles.
   const summary = gitSummary.summary;
+  const changeStatus = sessionChangeStatus({
+    status: git.status,
+    summary,
+    settled: git.settled || gitSummary.settled,
+  });
 
   const host = deriveHost(session, runners.get(session.runnerId), boxes.values());
   const richFactsVisible = gitPresentation.state !== "offline" &&
@@ -107,7 +113,8 @@ export function PinnedSummary({
           <span>Session</span>
         </div>
         <div className="ps-row is-static">
-          <StatusBadge status={session.status} stopOperation={session.stopOperation} />
+          <SessionStatusIndicators session={session} disconnected={!runnerOnline} />
+          <ChangeStatusBadge change={changeStatus} />
           <span className="ps-right ps-detail">Updated {relativeTime(session.updatedAt)}</span>
         </div>
         <div className="ps-row is-static">

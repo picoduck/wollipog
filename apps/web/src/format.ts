@@ -133,7 +133,7 @@ export interface StatusMeta {
   busy: boolean;
 }
 
-export function statusMeta(status: SessionStatus): StatusMeta {
+export function statusMeta(status: SessionStatus | string): StatusMeta {
   switch (status) {
     case "queued":
       return { label: "Queued", className: "st-queued", busy: false };
@@ -142,15 +142,17 @@ export function statusMeta(status: SessionStatus): StatusMeta {
     case "running":
       return { label: "Running", className: "st-running", busy: true };
     case "input_required":
-      return { label: "Needs Input", className: "st-input", busy: false };
+      return { label: "Awaiting Input", className: "st-input", busy: false };
     case "idle":
-      return { label: "Ready for Review", className: "st-idle", busy: false };
+      return { label: "Awaiting Prompt", className: "st-idle", busy: false };
     case "completed":
       return { label: "Completed", className: "st-done", busy: false };
     case "failed":
       return { label: "Failed", className: "st-failed", busy: false };
     case "stopped":
       return { label: "Stopped", className: "st-stopped", busy: false };
+    default:
+      return { label: "Status Unavailable", className: "st-stopped", busy: false };
   }
 }
 

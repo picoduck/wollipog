@@ -1047,6 +1047,7 @@ pre {
 }
 
 /* ----------------------------- Status badges ---------------------------- */
+.session-status-indicators { display: inline-flex; min-width: 0; align-items: center; gap: 5px; flex-wrap: wrap; }
 .status-badge {
   display: inline-flex;
   align-items: center;
@@ -8120,6 +8121,7 @@ body.shell-dock-dragging * {
 .inbox-status-pill { padding: 0 7px; }
 .inbox-status-pill.blocked { color: var(--accent-2-on-tint); background: color-mix(in srgb, var(--accent-2) 14%, transparent); }
 .inbox-status-pill.running { color: var(--teal-on-tint); background: color-mix(in srgb, var(--teal) 13%, transparent); }
+.inbox-status-pill.activity { color: var(--text-dim); background: var(--bg-elev-2); border: 1px solid var(--border); }
 .inbox-status-pill.failed { color: var(--danger-text); background: color-mix(in srgb, var(--red) 16%, transparent); }
 .inbox-status-pill.stalled { color: var(--danger-text); background: color-mix(in srgb, var(--red) 16%, transparent); }
 .inbox-status-pill.reminder { color: var(--accent-on-tint); background: color-mix(in srgb, var(--accent) 15%, transparent); }

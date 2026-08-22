@@ -180,7 +180,7 @@ test("inbox list keeps live row content and the visible touch target while inter
     }));
   });
   assert.match(container.textContent ?? "", /Approval arrived while targeting/);
-  assert.match(container.textContent ?? "", /Approval/);
+  assert.match(container.textContent ?? "", /Input Required/);
 
   await act(async () => {
     pointer("pointerup", 7, "touch");
@@ -218,7 +218,7 @@ test("inbox zero reports running work and keeps a mouse path to New Session", as
     );
   });
   assert.match(container.textContent ?? "", /All Agents Unblocked/);
-  assert.match(container.textContent ?? "", /2 sessions are still running/);
+  assert.match(container.textContent ?? "", /Running: 2. Queued: 0. Starting: 0./);
   await act(async () => { container.querySelector<HTMLButtonElement>("button")!.click(); });
   assert.equal(created, 1);
   await act(async () => { root.unmount(); });
@@ -330,6 +330,11 @@ test("busy rows show activity while stalled approval remains distinct and access
   const rows = [...container.querySelectorAll<HTMLElement>('[role="row"]')];
   assert.equal(container.querySelectorAll(".activity-strip").length, 3, "idle sessions have no activity strip");
   assert.equal(rows[1]!.classList.contains("stalled"), true);
+  assert.match(rows[0]!.textContent ?? "", /Running/);
+  assert.match(rows[1]!.textContent ?? "", /Awaiting Input/);
+  assert.match(rows[1]!.textContent ?? "", /Approval Required/);
+  assert.match(rows[2]!.textContent ?? "", /Awaiting Prompt/);
+  assert.doesNotMatch(rows[2]!.textContent ?? "", /Diff Ready|Ready for Review/);
   assert.match(rows[1]!.textContent ?? "", /Approval/);
   assert.match(rows[1]!.textContent ?? "", /Stalled/);
   assert.equal(
@@ -337,6 +342,8 @@ test("busy rows show activity while stalled approval remains distinct and access
     "Stalled",
   );
   assert.match(rows[3]!.textContent ?? "", /Authentication Required/);
+  assert.equal(rows[3]!.querySelector("[aria-label=\"Attention: Authentication Required\"]")?.textContent?.trim(),
+    "Authentication Required");
 
   await act(async () => { root.unmount(); });
   container.remove();

@@ -45,7 +45,6 @@ import {
 } from "../session-reminders.js";
 import { SnoozeDialog } from "./SnoozeDialog.js";
 import type { NewSessionPreset } from "./NewSessionDialog.js";
-import { isHeartbeatBusy } from "../activity.js";
 import { SearchIcon } from "./Icons.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { dispatchVirtualViewportIntent } from "../viewport-intent.js";
@@ -969,6 +968,8 @@ export function InboxView({
           pinnedSessionIds={pinnedSessions}
           stalledSessionIds={stalledSessionIds}
           runningCount={(activeSplit?.sessions ?? []).filter(isInboxRunning).length}
+          queuedCount={(activeSplit?.sessions ?? []).filter((session) => session.status === "queued").length}
+          startingCount={(activeSplit?.sessions ?? []).filter((session) => session.status === "starting").length}
           filtered={normalizedQuery.length > 0}
           emptyState={reminderMode === "snoozed"
             ? {
@@ -1019,7 +1020,9 @@ export function InboxView({
         />
         <footer className="inbox-activity-footer" aria-label="Inbox Status and Shortcuts">
           <div className="inbox-activity-summary" aria-label="Inbox Activity Summary">
-            <span>{(activeSplit?.sessions ?? []).filter((session) => isHeartbeatBusy(session.status)).length} Active</span>
+            <span>{(activeSplit?.sessions ?? []).filter((session) => session.status === "running").length} Running</span>
+            <span>{(activeSplit?.sessions ?? []).filter((session) => session.status === "queued").length} Queued</span>
+            <span>{(activeSplit?.sessions ?? []).filter((session) => session.status === "starting").length} Starting</span>
             <span className="blocked">{activeSplit?.blockedCount ?? 0} Blocked</span>
             <span className="stalled" aria-live="polite">{activeSplit?.stalledCount ?? 0} Stalled</span>
           </div>

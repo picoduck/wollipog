@@ -24,8 +24,8 @@ export const CANONICAL_LIFECYCLE_LABELS: Readonly<Record<SessionStatus, string>>
   queued: "Queued",
   starting: "Starting",
   running: "Running",
-  input_required: "Input Required",
-  idle: "Idle",
+  input_required: "Awaiting Input",
+  idle: "Awaiting Prompt",
   completed: "Completed",
   failed: "Failed",
   stopped: "Stopped",
@@ -34,7 +34,7 @@ export const CANONICAL_LIFECYCLE_LABELS: Readonly<Record<SessionStatus, string>>
 export const SESSION_LIFECYCLE_STATES = Object.keys(CANONICAL_LIFECYCLE_LABELS) as SessionStatus[];
 
 export function canonicalLifecycleLabel(status: SessionStatus): string {
-  return CANONICAL_LIFECYCLE_LABELS[status];
+  return CANONICAL_LIFECYCLE_LABELS[status] ?? "Status Unavailable";
 }
 
 export function sessionArchiveSearchDetail(
