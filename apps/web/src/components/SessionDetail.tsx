@@ -547,6 +547,7 @@ function SessionDetailLoaded({
     readerIntent: null as EarlierActivityIntent | null,
     readerIntentTop: null as number | null,
     touchActive: false,
+    nativeTouchActive: false,
     touchInputY: null as number | null,
     touchTraversalStarted: false,
     touchEndTimer: null as number | null,
@@ -1145,6 +1146,7 @@ function SessionDetailLoaded({
     state.readerIntentTop = null;
     state.readerIntentMovedUp = false;
     state.touchActive = false;
+    state.nativeTouchActive = false;
     state.touchInputY = null;
     state.touchTraversalStarted = false;
   }, []);
@@ -1173,6 +1175,13 @@ function SessionDetailLoaded({
     markEarlierActivityIntent("touch-traversal", clientY);
   }, [markEarlierActivityIntent]);
 
+  const markNativeTouchEarlierActivityIntent = useCallback((clientY: number | null) => {
+    const state = automaticEarlierLoadRef.current;
+    if (state.nativeTouchActive) return;
+    markTouchEarlierActivityIntent(clientY);
+    state.nativeTouchActive = true;
+  }, [markTouchEarlierActivityIntent]);
+
   const markTouchEarlierActivityMovement = useCallback((clientY: number | null) => {
     const state = automaticEarlierLoadRef.current;
     if (state.readerIntent !== "touch-traversal" || clientY === null) return;
@@ -1200,6 +1209,17 @@ function SessionDetailLoaded({
     state.touchActive = false;
     deferTouchEarlierActivityEnd();
   }, [deferTouchEarlierActivityEnd]);
+
+  const finishPointerTouchEarlierActivityIntent = useCallback(() => {
+    if (automaticEarlierLoadRef.current.nativeTouchActive) return;
+    finishTouchEarlierActivityIntent();
+  }, [finishTouchEarlierActivityIntent]);
+
+  const finishNativeTouchEarlierActivityIntent = useCallback((remainingTouches: number) => {
+    if (remainingTouches > 0) return;
+    automaticEarlierLoadRef.current.nativeTouchActive = false;
+    finishTouchEarlierActivityIntent();
+  }, [finishTouchEarlierActivityIntent]);
 
   const rearmEarlierActivityAfterMeasurements = useCallback(() => {
     cancelEarlierActivitySettle();
@@ -2489,20 +2509,22 @@ function SessionDetailLoaded({
                 followTail.onPointerMove(event);
               }}
               onPointerUp={(event) => {
-                if (event.pointerType === "touch") finishTouchEarlierActivityIntent();
+                if (event.pointerType === "touch") finishPointerTouchEarlierActivityIntent();
               }}
               onPointerCancel={(event) => {
-                if (event.pointerType === "touch") finishTouchEarlierActivityIntent();
+                if (event.pointerType === "touch") finishPointerTouchEarlierActivityIntent();
               }}
               onTouchStart={(event) => {
-                markTouchEarlierActivityIntent(event.touches[0]?.clientY ?? null);
+                if (event.touches.length === 1) {
+                  markNativeTouchEarlierActivityIntent(event.touches[0]?.clientY ?? null);
+                }
                 followTail.onTouchStart();
               }}
               onTouchMove={(event) => {
                 markTouchEarlierActivityMovement(event.touches[0]?.clientY ?? null);
               }}
-              onTouchEnd={finishTouchEarlierActivityIntent}
-              onTouchCancel={finishTouchEarlierActivityIntent}
+              onTouchEnd={(event) => finishNativeTouchEarlierActivityIntent(event.touches.length)}
+              onTouchCancel={(event) => finishNativeTouchEarlierActivityIntent(event.touches.length)}
               onKeyDown={(event) => {
                 if (event.defaultPrevented) return;
                 if (mode !== "expanded" && !isFollowTailResumeKey(event)) return;

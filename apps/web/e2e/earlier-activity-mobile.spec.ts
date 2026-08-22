@@ -28,14 +28,22 @@ test("the first mobile touch traversal loads earlier activity", async ({ page })
   });
   await expect.poll(() => reader.evaluate((element) => element.scrollTop)).toBe(320);
 
-  await reader.dispatchEvent("touchstart");
   await reader.evaluate((element) => {
-    for (const scrollTop of [260, 0]) {
+    const dispatchTouch = (type: "touchstart" | "touchmove" | "touchend", clientY?: number) => {
+      const event = new Event(type, { bubbles: true });
+      Object.defineProperty(event, "touches", {
+        value: clientY === undefined ? [] : [{ clientY }],
+      });
+      element.dispatchEvent(event);
+    };
+    dispatchTouch("touchstart", 100);
+    for (const [scrollTop, clientY] of [[260, 200], [0, 300]]) {
+      dispatchTouch("touchmove", clientY);
       element.scrollTop = scrollTop;
       element.dispatchEvent(new Event("scroll", { bubbles: true }));
     }
+    dispatchTouch("touchend");
   });
-  await reader.dispatchEvent("touchend");
 
   await expect.poll(() => page.locator("body").getAttribute("data-tail-request-count")).toBe("2");
   await expect(control).toContainText("Loading Earlier Activity…");
