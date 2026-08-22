@@ -51,6 +51,10 @@ function setVisibility(value: "visible" | "hidden"): void {
   Object.defineProperty(domWindow.document, "visibilityState", { configurable: true, value });
 }
 
+function setWindowFocused(focused: boolean): void {
+  Object.defineProperty(domWindow.document, "hasFocus", { configurable: true, value: () => focused });
+}
+
 const VIEWPORT_HEIGHT = 2_000;
 const ROW_HEIGHT = 68;
 Object.defineProperty(domWindow.Element.prototype, "getBoundingClientRect", {
@@ -298,6 +302,7 @@ test("InboxView keeps mobile browsing order stable before and through a touch", 
 test("InboxView holds desktop browsing order until the user leaves the window", async () => {
   mobileViewport = false;
   setVisibility("visible");
+  setWindowFocused(true);
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
@@ -413,6 +418,44 @@ test("InboxView holds desktop browsing order until the user leaves the window", 
     container.querySelector<HTMLElement>('.inbox-row-shell[aria-selected="true"]')?.textContent ?? "",
     /Session A/,
   );
+
+  await act(async () => { root.unmount(); });
+  container.remove();
+  mobileViewport = true;
+});
+
+test("InboxView does not arm the order hold when it mounts in an unfocused window", async () => {
+  mobileViewport = false;
+  setVisibility("visible");
+  setWindowFocused(false);
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "inbox-unfocused-mount-test",
+    runtimeKey: "inbox-unfocused-mount-test:1",
+    createSocket: () => socket,
+    close() {},
+  };
+
+  await act(async () => {
+    root.render(
+      <StoreProvider connection={connection} navigation={navigation}>
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+      </StoreProvider>,
+    );
+  });
+  // A secondary window reloaded in the background receives no blur to announce that it is away.
+  await act(async () => { socket.push(snapshot([session("A", 30), session("B", 20)])); });
+  await act(async () => { socket.push({ type: "session_upsert", session: session("B", 40) }); });
+  await act(async () => { socket.push({ type: "session_upsert", session: session("C", 50) }); });
+  assert.deepEqual(rowTitles(container), ["Session C", "Session B", "Session A"]);
+
+  setWindowFocused(true);
+  await act(async () => { domWindow.dispatchEvent(new domWindow.Event("focus")); });
+  await act(async () => { socket.push({ type: "session_upsert", session: session("A", 60) }); });
+  assert.deepEqual(rowTitles(container), ["Session C", "Session B", "Session A"]);
 
   await act(async () => { root.unmount(); });
   container.remove();

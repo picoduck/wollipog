@@ -154,7 +154,7 @@ export function InboxView({
   // Focus and visibility are tracked apart, not folded into one flag: a page can be made visible
   // again while its window stays unfocused, and a shared flag would let that visibility event
   // re-arm the lease and turn the eventual focus into a no-op, stranding a stale order.
-  const [windowBlurred, setWindowBlurred] = useState(false);
+  const [windowBlurred, setWindowBlurred] = useState(() => !document.hasFocus());
   const [documentHidden, setDocumentHidden] = useState(() => document.visibilityState === "hidden");
   const inboxAway = windowBlurred || documentHidden;
   const browsingOrderLease = expandedSessionId === null && !inboxAway;
@@ -549,6 +549,9 @@ export function InboxView({
     const leaveInbox = () => setWindowBlurred(true);
     const enterInbox = () => setWindowBlurred(false);
     const trackVisibility = () => setDocumentHidden(document.visibilityState === "hidden");
+    // Seed from the document as well as the events: a window reloaded in the background, or one
+    // hidden before this mounted, gets no blur or hidden event to announce the state it is in.
+    setWindowBlurred(!document.hasFocus());
     trackVisibility();
     window.addEventListener("blur", leaveInbox);
     window.addEventListener("focus", enterInbox);
