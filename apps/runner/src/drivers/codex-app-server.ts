@@ -709,7 +709,7 @@ export class CodexAppServerDriver implements Driver {
         this.streamedAgentResponse = false;
         this.settleTurn("cancelled");
       } else {
-        if (this.turnResolve && this.streamedAgentResponse) {
+        if (status === "completed" && this.turnResolve && this.streamedAgentResponse) {
           this.streamedAgentResponse = false;
           this.cb.onEvent({ kind: "agent_response_completed" });
         }

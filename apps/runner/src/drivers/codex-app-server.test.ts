@@ -668,6 +668,21 @@ test("interrupted turn/completed maps to cancelled", async () => {
   assert.equal(h.events.some((event) => event.kind === "agent_response_completed"), false);
 });
 
+test("unknown Codex terminal status cannot complete a streamed response", async () => {
+  const h = makeHarness();
+  const notifications = notificationHandlers(h.driver);
+  const reason = new Promise<string>((resolve) => { (h.driver as any).turnResolve = resolve; });
+  notifications.get("item/agentMessage/delta")!({ itemId: "unknown-status", delta: "partial" });
+  notifications.get("turn/completed")!({ turn: { status: "aborted" } });
+
+  assert.equal(await reason, "end_turn", "unknown statuses retain the existing tolerant settlement");
+  assert.equal(
+    h.events.some((event) => event.kind === "agent_response_completed"),
+    false,
+    "only the explicit completed status is authoritative completion evidence",
+  );
+});
+
 test("turn settlement closes the active id but retains the provider turn used by conversation forks", () => {
   const h = makeHarness();
   const notifications = new Map<string, (params: any) => void>();
