@@ -49,6 +49,85 @@ export function defaultPermissionMode(driver: AgentDriverKind): string | undefin
   return undefined;
 }
 
+function claudeStableAliasFamily(value: string): string | null {
+  const normalized = value.trim().toLowerCase();
+  const base = normalized.endsWith("[1m]") ? normalized.slice(0, -4) : normalized;
+  return ["opus", "fable", "sonnet", "haiku"].includes(base) ? base : null;
+}
+
+function claudeCatalogFamily(value: string): string | null {
+  const normalized = value.trim().toLowerCase();
+  const stable = claudeStableAliasFamily(normalized);
+  if (stable) return stable;
+  const match = /^claude-(opus|fable|sonnet|haiku)-\d+(?:-\d+)?(?:-\d{8})?(?:\[1m\])?/.exec(normalized);
+  return match?.[0] === normalized ? match[1]! : null;
+}
+
+function persistedModelEffortForDisplay(
+  capabilities: AgentCapabilities | undefined,
+  modelId?: string | null,
+  effortId?: string | null,
+) {
+  const model = modelId
+    ? capabilities?.models.find((candidate) => candidate.id === modelId) ?? { id: modelId }
+    : undefined;
+  const efforts = model && "efforts" in model && model.efforts?.length
+    ? model.efforts
+    : capabilities?.effortLevels ?? [];
+  return { model, efforts, effort: effortId ?? undefined };
+}
+
+const EFFORT_FALLBACK_ORDER = ["high", "medium", "low", "xhigh", "max", "minimal"] as const;
+
+export function effectiveModelEffortForDisplay(
+  capabilities: AgentCapabilities | undefined,
+  driver: AgentDriverKind,
+  modelId?: string | null,
+  effortId?: string | null,
+  pickerCapabilities?: AgentCapabilities,
+) {
+  if (!capabilities?.models?.length) {
+    return persistedModelEffortForDisplay(pickerCapabilities, modelId, effortId);
+  }
+  const models = capabilities.models;
+  const concrete = models.filter((model) => model.id !== "default");
+  const visible = concrete.filter((model) => !model.hidden);
+  const effortsFor = (model: AgentCapabilities["models"][number] | undefined) =>
+    model ? ((model.efforts?.length ? model.efforts : capabilities.effortLevels) ?? []) : [];
+  if (!concrete.some((model) => effortsFor(model).length)) {
+    const persisted = persistedModelEffortForDisplay(pickerCapabilities ?? capabilities, modelId, effortId);
+    return persisted.model ? persisted : {
+      ...persisted,
+      model: models.find((model) => model.default && !model.hidden) ?? visible[0],
+    };
+  }
+  const explicitFamily = driver === "claude-code" && modelId ? claudeCatalogFamily(modelId) : null;
+  const explicit = modelId && modelId !== "default"
+    ? concrete.find((model) => model.id === modelId)
+      ?? (explicitFamily ? concrete.find((model) => claudeCatalogFamily(model.id) === explicitFamily) : undefined)
+    : undefined;
+  const advertised = visible.find((model) => model.default);
+  const preferredPattern = driver === "claude-code" ? /(?:^|[-_])opus(?:$|[-_\[])/i : /gpt[-_.]?5\.6[-_.]?sol/i;
+  const preferred = visible.find((model) => preferredPattern.test(model.id))
+    ?? visible.find((model) => preferredPattern.test(model.displayName ?? ""));
+  const compatible = [...visible].filter((model) => effortsFor(model).length)
+    .sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  const model = explicit ?? advertised ?? preferred ?? compatible[0];
+  const efforts = effortsFor(model);
+  const effort = effortId && efforts.includes(effortId) ? effortId
+    : model?.defaultEffort && efforts.includes(model.defaultEffort) ? model.defaultEffort
+      : EFFORT_FALLBACK_ORDER.find((candidate) => efforts.includes(candidate))
+        ?? [...efforts].sort()[0];
+  const preserveExplicitModel = explicit && modelId && (
+    explicit.id === modelId || claudeStableAliasFamily(modelId) !== null
+  );
+  return {
+    model: preserveExplicitModel ? { ...explicit, id: modelId } : model,
+    efforts,
+    effort,
+  };
+}
+
 /** Last-resort controls for adopted Claude sessions with no capability-bearing runner agent.
  * Version-neutral aliases remain usable; the authenticated runner catalog wins whenever present. */
 const CLAUDE_DEFAULT_CAPS: AgentCapabilities = {
@@ -68,12 +147,21 @@ const CLAUDE_DEFAULT_CAPS: AgentCapabilities = {
   permissionModes: ["default", "auto", "acceptEdits", "plan", "bypassPermissions"],
 };
 
-/**
- * Capabilities to drive a session's model / effort / approval controls. Adopted or ACP sessions
- * frequently don't resolve to a capability-bearing agent (their `agentId` matches nothing, or an
- * ACP agent with no advertised caps), which is why their controls looked empty. Fall back to another
- * agent on the same runner sharing this session's driver, then to built-in claude defaults.
- */
+/** Capability metadata the server can also use to resolve a concrete effective model and effort. */
+export function resolveEffectiveCaps(
+  runner: RunnerView | undefined,
+  session: SessionView,
+): AgentCapabilities | undefined {
+  const agents = runner?.agents ?? [];
+  const sessionCapabilities = session.driver === "acp"
+    ? session.agentCapabilities
+    : nativeSessionOverlay(session.agentCapabilities);
+  const exact = agents.find((a) => a.id === session.agentId)?.capabilities;
+  return mergeSessionCapabilities(exact, sessionCapabilities);
+}
+
+/** Capabilities that drive all session controls. Missing native metadata retains the historical
+ * same-driver and built-in Claude picker fallbacks without presenting them as effective values. */
 export function resolveCaps(runner: RunnerView | undefined, session: SessionView): AgentCapabilities | undefined {
   const agents = runner?.agents ?? [];
   const sessionCapabilities = session.driver === "acp"
