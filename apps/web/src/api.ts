@@ -540,7 +540,7 @@ export function createApiClient(transport: ApiTransport) {
       body: JSON.stringify(body),
     }),
 
-  answerQuestion: (id: string, body: { requestId: string; answers: Record<string, string | string[]> }) =>
+  answerQuestion: (id: string, body: { requestId: string; answers: Record<string, string | string[]>; action?: "submit" | "dismiss" }) =>
     req<SessionView>(`/api/sessions/${id}/answer`, {
       method: "POST",
       body: JSON.stringify(body),

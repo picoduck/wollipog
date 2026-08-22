@@ -131,3 +131,20 @@ test("an async writable error rejects every in-flight request", async () => {
     return true;
   });
 });
+
+test("incoming request handlers receive the provider correlation id", async () => {
+  const { peer, stdin, stdout } = makePeer();
+  let seen: unknown;
+  peer.onRequest("ask", (params, requestId) => {
+    seen = { params, requestId };
+    return { accepted: true };
+  });
+  stdout.write(JSON.stringify({ jsonrpc: "2.0", id: "provider-7", method: "ask", params: { value: 1 } }) + "\n");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(seen, { params: { value: 1 }, requestId: "provider-7" });
+  assert.deepEqual(JSON.parse(String(stdin.read()).trim()), {
+    jsonrpc: "2.0",
+    id: "provider-7",
+    result: { accepted: true },
+  });
+});

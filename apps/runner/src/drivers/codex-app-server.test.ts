@@ -584,7 +584,7 @@ test("resume id mismatch is non-retryable and never falls back to thread/start",
   assert.deepEqual(calls, ["thread/read"]);
 });
 
-test("dispose interrupts, declines parked approvals, then closes transport without deleting the thread", () => {
+test("dispose interrupts, cancels parked approvals, then closes transport without deleting the thread", () => {
   const h = makeHarness({ resumeId: "thread-1" });
   const order: string[] = [];
   (h.driver as any).threadId = "thread-1";
@@ -598,7 +598,7 @@ test("dispose interrupts, declines parked approvals, then closes transport witho
     resolve: (result: { decision: string }) => order.push(result.decision),
   });
   h.driver.dispose();
-  assert.deepEqual(order, ["turn/interrupt", "decline", "dispose"]);
+  assert.deepEqual(order, ["turn/interrupt", "cancel", "dispose"]);
 });
 
 test("cancel emits already-consumed per-turn usage once before settling", () => {
@@ -825,7 +825,7 @@ test("resolvePermission for an unknown id is a no-op", () => {
   assert.ok(true);
 });
 
-test("fallback approval ids remain unique after an earlier request is resolved", async () => {
+test("a newer provider request cancels the previous parked approval and keeps unique fallback ids", async () => {
   const h = makeHarness();
   const requests = new Map<string, (params: any) => Promise<any>>();
   (h.driver as any).registerHandlers({
@@ -836,25 +836,18 @@ test("fallback approval ids remain unique after an earlier request is resolved",
 
   const first = approve({ turnId: "turn-fallback", command: "one" });
   const second = approve({ turnId: "turn-fallback", command: "two" });
+  assert.deepEqual(await first, { decision: "cancel" });
   assert.deepEqual(h.events.map((event) => event.kind === "permission_request" && event.requestId), [
     "turn-fallback:1",
     "turn-fallback:2",
   ]);
 
-  assert.equal(h.driver.resolvePermission("turn-fallback:1", "allow"), true);
-  const third = approve({ turnId: "turn-fallback", command: "three" });
-  assert.equal(h.events.at(-1)?.kind === "permission_request" && h.events.at(-1)?.requestId, "turn-fallback:3");
-  assert.equal(h.driver.resolvePermission("turn-fallback:2", "deny"), true);
-  assert.equal(h.driver.resolvePermission("turn-fallback:3", "allow"), true);
-
-  assert.deepEqual(await Promise.all([first, second, third]), [
-    { decision: "accept" },
-    { decision: "decline" },
-    { decision: "accept" },
-  ]);
+  assert.equal(h.driver.resolvePermission("turn-fallback:1", "allow"), false);
+  assert.equal(h.driver.resolvePermission("turn-fallback:2", "allow"), true);
+  assert.deepEqual(await second, { decision: "accept" });
 });
 
-test("a repeated provider approval id declines the replaced parked RPC", async () => {
+test("a repeated provider approval id cancels the replaced parked RPC", async () => {
   const h = makeHarness();
   const requests = new Map<string, (params: any) => Promise<any>>();
   (h.driver as any).registerHandlers({
@@ -865,13 +858,306 @@ test("a repeated provider approval id declines the replaced parked RPC", async (
 
   const replaced = approve({ approvalId: "duplicate", command: "old" });
   const current = approve({ approvalId: "duplicate", command: "new" });
-  assert.deepEqual(await replaced, { decision: "decline" });
+  assert.deepEqual(await replaced, { decision: "cancel" });
   assert.equal(h.driver.resolvePermission("duplicate", "allow"), true);
   assert.deepEqual(await current, { decision: "accept" });
 });
 
 const cfg = (permissionMode: string, extra: Partial<SessionConfig> = {}): SessionConfig =>
   ({ permissionMode, ...extra }) as SessionConfig;
+
+test("command approvals expose and deliver every stable provider decision", async () => {
+  const h = makeHarness();
+  const requests = new Map<string, (params: any, requestId: number | string) => Promise<any>>();
+  (h.driver as any).registerHandlers({
+    onRequest: (method: string, handler: (params: any, requestId: number | string) => Promise<any>) => requests.set(method, handler),
+    onNotification: () => {},
+  });
+  const pending = requests.get("item/commandExecution/requestApproval")!({ command: "pnpm test" }, "command-choice");
+  const event = h.events.at(-1);
+  assert.equal(event?.kind, "permission_request");
+  if (event?.kind !== "permission_request") assert.fail("expected a permission request");
+  assert.deepEqual(event.options, [
+    { optionId: "accept", name: "Allow Once", kind: "allow_once" },
+    { optionId: "acceptForSession", name: "Allow for Session", kind: "allow_always" },
+    { optionId: "decline", name: "Reject", kind: "reject_once" },
+    { optionId: "cancel", name: "Cancel" },
+  ]);
+  assert.equal(h.driver.resolvePermission("command-choice", "acceptForSession"), true);
+  assert.deepEqual(await pending, { decision: "acceptForSession" });
+});
+
+test("Codex tool user input keeps the provider request id and returns native answers", async () => {
+  const h = makeHarness();
+  const requests = new Map<string, (params: any, requestId: number | string) => Promise<any>>();
+  (h.driver as any).registerHandlers({
+    onRequest: (method: string, handler: (params: any, requestId: number | string) => Promise<any>) => requests.set(method, handler),
+    onNotification: () => {},
+  });
+
+  const pending = requests.get("item/tool/requestUserInput")!({
+    threadId: "thread-1",
+    turnId: "turn-1",
+    itemId: "item-1",
+    isBlocking: true,
+    questions: [
+      {
+        id: "framework",
+        header: "Framework",
+        question: "Which framework should I use?",
+        isOther: true,
+        options: [{ label: "React", description: "Use React" }],
+      },
+      {
+        id: "token",
+        header: "Token",
+        question: "Enter the temporary token",
+        isOther: true,
+        isSecret: true,
+        options: null,
+      },
+    ],
+  }, 701);
+
+  assert.deepEqual(h.events.at(-1), {
+    kind: "question_request",
+    requestId: "701",
+    questions: [
+      {
+        id: "framework",
+        header: "Framework",
+        question: "Which framework should I use?",
+        options: [{ label: "React", description: "Use React" }],
+        allowOther: true,
+        inputFormat: "text",
+        maxLength: 4000,
+      },
+      {
+        id: "token",
+        header: "Token",
+        question: "Enter the temporary token",
+        options: [],
+        allowOther: true,
+        inputFormat: "text",
+        maxLength: 4000,
+        secret: true,
+      },
+    ],
+  });
+  assert.equal(h.driver.answerQuestion("provider-item-id", { framework: "React" }), false);
+  assert.equal(h.driver.answerQuestion("701", { framework: "React", token: "secret" }), true);
+  assert.deepEqual(await pending, {
+    answers: {
+      framework: { answers: ["React"] },
+      token: { answers: ["secret"] },
+    },
+  });
+
+  const freeText = requests.get("item/tool/requestUserInput")!({
+    questions: [{
+      id: "details",
+      header: "Details",
+      question: "Add details",
+      isOther: true,
+    }],
+  }, "free-text-without-options");
+  assert.equal(h.driver.answerQuestion("free-text-without-options", { details: "Ready" }), true);
+  assert.deepEqual(await freeText, { answers: { details: { answers: ["Ready"] } } });
+
+  const eventCount = h.events.length;
+  assert.deepEqual(await requests.get("item/tool/requestUserInput")!({
+    questions: [{
+      id: "malformed",
+      header: "Malformed",
+      question: "Missing the schema-required option description",
+      isOther: false,
+      options: [{ label: "A" }],
+    }],
+  }, 702), { answers: {} });
+  assert.equal(h.events.length, eventCount);
+});
+
+test("MCP form elicitation maps primitive controls and returns provider-native content", async () => {
+  const h = makeHarness();
+  const requests = new Map<string, (params: any, requestId: number | string) => Promise<any>>();
+  (h.driver as any).registerHandlers({
+    onRequest: (method: string, handler: (params: any, requestId: number | string) => Promise<any>) => requests.set(method, handler),
+    onNotification: () => {},
+  });
+
+  const pending = requests.get("mcpServer/elicitation/request")!({
+    mode: "form",
+    serverName: "Deploy MCP",
+    threadId: "thread-2",
+    turnId: "turn-2",
+    message: "Choose deployment settings",
+    requestedSchema: {
+      type: "object",
+      required: ["region", "confirm", "retries", "features"],
+      properties: {
+        region: { type: "string", title: "Region", enum: ["iad", "fra"], enumNames: ["US East", "Europe"] },
+        confirm: { type: "boolean", title: "Confirm" },
+        retries: { type: "integer", title: "Retries", minimum: 1, maximum: 5 },
+        features: { type: "array", title: "Features", items: { anyOf: [{ const: "audit", title: "Audit Trail" }, { const: "alerts", title: "Alerts" }] }, minItems: 1, maxItems: 2 },
+        note: { type: "string", title: "Note", maxLength: 120 },
+      },
+    },
+  }, "mcp-form-9");
+
+  const event = h.events.at(-1);
+  assert.equal(event?.kind, "question_request");
+  if (event?.kind !== "question_request") assert.fail("expected a structured question request");
+  assert.equal(event.requestId, "mcp-form-9");
+  assert.equal(event.questions[0]?.context, "Deploy MCP: Choose deployment settings");
+  assert.deepEqual(event.questions.map((question) => ({
+    id: question.id,
+    options: question.options.map((option) => option.label),
+    required: question.required,
+    multiSelect: question.multiSelect,
+    inputFormat: question.inputFormat,
+  })), [
+    { id: "region", options: ["US East", "Europe"], required: true, multiSelect: undefined, inputFormat: undefined },
+    { id: "confirm", options: ["True", "False"], required: true, multiSelect: undefined, inputFormat: undefined },
+    { id: "retries", options: [], required: true, multiSelect: undefined, inputFormat: "integer" },
+    { id: "features", options: ["Audit Trail", "Alerts"], required: true, multiSelect: true, inputFormat: undefined },
+    { id: "note", options: [], required: false, multiSelect: undefined, inputFormat: "text" },
+  ]);
+
+  assert.equal(h.driver.answerQuestion("mcp-form-9", {
+    region: "US East",
+    confirm: "True",
+    retries: "3",
+    features: ["Audit Trail", "Alerts"],
+  }), true);
+  assert.deepEqual(await pending, {
+    action: "accept",
+    content: { region: "iad", confirm: true, retries: 3, features: ["audit", "alerts"] },
+    _meta: null,
+  });
+});
+
+test("MCP all-optional forms distinguish accepting empty content from dismissal", async () => {
+  const h = makeHarness();
+  const requests = new Map<string, (params: any, requestId: number | string) => Promise<any>>();
+  (h.driver as any).registerHandlers({
+    onRequest: (method: string, handler: (params: any, requestId: number | string) => Promise<any>) => requests.set(method, handler),
+    onNotification: () => {},
+  });
+  const params = {
+    mode: "form",
+    serverName: "Optional MCP",
+    threadId: "thread-optional",
+    turnId: "turn-optional",
+    message: "Optional settings",
+    requestedSchema: {
+      type: "object",
+      properties: { note: { type: "string", title: "Note" } },
+    },
+  };
+
+  const submitted = requests.get("mcpServer/elicitation/request")!(params, "mcp-empty-submit");
+  assert.equal(h.driver.answerQuestion("mcp-empty-submit", {}, "submit"), true);
+  assert.deepEqual(await submitted, { action: "accept", content: {}, _meta: null });
+
+  const dismissed = requests.get("mcpServer/elicitation/request")!(params, "mcp-empty-dismiss");
+  assert.equal(h.driver.answerQuestion("mcp-empty-dismiss", {}, "dismiss"), true);
+  assert.deepEqual(await dismissed, { action: "cancel", content: null, _meta: null });
+});
+
+test("MCP required multi-select fields honor an explicit zero-item constraint", async () => {
+  const h = makeHarness();
+  const requests = new Map<string, (params: any, requestId: number | string) => Promise<any>>();
+  (h.driver as any).registerHandlers({
+    onRequest: (method: string, handler: (params: any, requestId: number | string) => Promise<any>) => requests.set(method, handler),
+    onNotification: () => {},
+  });
+
+  const pending = requests.get("mcpServer/elicitation/request")!({
+    mode: "form",
+    serverName: "Tags MCP",
+    message: "Choose no tags",
+    requestedSchema: {
+      type: "object",
+      properties: {
+        tags: { type: "array", items: { type: "string", enum: ["A"] }, minItems: 0, maxItems: 0 },
+      },
+      required: ["tags"],
+    },
+  }, "mcp-zero-items");
+  assert.equal(h.driver.answerQuestion("mcp-zero-items", { tags: [] }, "submit"), true);
+  assert.deepEqual(await pending, { action: "accept", content: { tags: [] }, _meta: null });
+});
+
+test("MCP URL elicitation exposes Accept, Decline, and Cancel and uses the selected native action", async () => {
+  const h = makeHarness();
+  const requests = new Map<string, (params: any, requestId: number | string) => Promise<any>>();
+  (h.driver as any).registerHandlers({
+    onRequest: (method: string, handler: (params: any, requestId: number | string) => Promise<any>) => requests.set(method, handler),
+    onNotification: () => {},
+  });
+
+  const pending = requests.get("mcpServer/elicitation/request")!({
+    mode: "url",
+    serverName: "Payments MCP",
+    threadId: "thread-3",
+    message: "Authorize access in your browser",
+    url: "https://example.test/authorize",
+    elicitationId: "provider-elicitation",
+  }, "mcp-url-5");
+  assert.deepEqual(h.events.at(-1), {
+    kind: "permission_request",
+    requestId: "mcp-url-5",
+    title: "Payments MCP requests a browser flow",
+    options: [
+      { optionId: "accept", name: "Accept", kind: "allow_once" },
+      { optionId: "decline", name: "Decline", kind: "reject_once" },
+      { optionId: "cancel", name: "Cancel" },
+    ],
+    context: {
+      toolName: "Payments MCP",
+      input: "Authorize access in your browser",
+      network: "https://example.test/authorize",
+    },
+  });
+  assert.equal(h.driver.resolvePermission("mcp-url-5", "decline"), true);
+  assert.deepEqual(await pending, { action: "decline", content: null, _meta: null });
+});
+
+test("unsupported MCP modes cancel safely and provider resolution clears a parked question", async () => {
+  const h = makeHarness();
+  const requests = new Map<string, (params: any, requestId: number | string) => Promise<any>>();
+  const notifications = new Map<string, (params: any) => void>();
+  (h.driver as any).registerHandlers({
+    onRequest: (method: string, handler: (params: any, requestId: number | string) => Promise<any>) => requests.set(method, handler),
+    onNotification: (method: string, handler: (params: any) => void) => notifications.set(method, handler),
+  });
+
+  assert.deepEqual(await requests.get("mcpServer/elicitation/request")!({
+    mode: "openai/form",
+    serverName: "Unsupported MCP",
+    message: "Extended schema",
+    requestedSchema: { type: "object", properties: { value: { type: "string" } } },
+  }, 800), { action: "cancel", content: null, _meta: null });
+
+  assert.deepEqual(await requests.get("mcpServer/elicitation/request")!({
+    mode: "form",
+    serverName: "Malformed MCP",
+    message: "Invalid constraints",
+    requestedSchema: {
+      type: "object",
+      properties: { retries: { type: "integer", minimum: "zero" } },
+      required: ["retries"],
+    },
+  }, "malformed-constraints"), { action: "cancel", content: null, _meta: null });
+
+  const pending = requests.get("item/tool/requestUserInput")!({
+    questions: [{ id: "choice", header: "Choice", question: "Choose", isOther: false, options: [{ label: "A", description: "A" }] }],
+  }, 801);
+  notifications.get("serverRequest/resolved")!({ threadId: "thread-4", requestId: 801 });
+  assert.deepEqual(await pending, { answers: {} });
+  assert.equal(h.driver.answerQuestion("801", { choice: "A" }), false);
+  assert.deepEqual(h.events.at(-1), { kind: "question_resolved", requestId: "801", answered: false });
+});
 
 test("buildCodexTurnParams: default and 'auto-review' use Guardian with an escapable workspace sandbox", () => {
   const p = buildCodexTurnParams(cfg("auto-review"), "t1", "/w", [{ type: "text", text: "hi" }]);

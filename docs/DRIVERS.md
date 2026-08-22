@@ -548,7 +548,7 @@ wire). It is the only surface with **interactive approvals**, so it is the defau
 
 Discovery runs `app-server --help` through the already-resolved native or WSL launch target and
 records an additive `AgentDefinition.codexAppServer` result. Supported means the CLI version is at
-least the repository's verified floor (`0.144.1`) and the bounded probe exposes app-server, stdio,
+least the repository's verified floor (`0.147.0`) and the bounded probe exposes app-server, stdio,
 and JSON-schema generation. Older, timed-out, missing, or contract-incompatible installations keep
 the exec driver and surface a structured fallback reason. Pre-v27 runners omit the result.
 
@@ -589,7 +589,7 @@ codex app-server          # stdio NDJSON; reuse JsonRpcPeer-style framing
    with mode 0600 and Linux paths—never through a Windows/UNC translation. Files survive until the
    turn request settles and are removed on completion, failure, cancellation, process exit, and
    dispose.
-4. `turn/interrupt` for `cancel`. Shutdown interrupts an active turn, declines parked approvals,
+4. `turn/interrupt` for `cancel`. Shutdown interrupts an active turn, safely cancels parked requests,
    then closes transport without archiving/deleting the thread. Runner/app-server restarts resume
    through the stored id. An ambiguously delivered in-flight prompt is never replayed; only prompts
    that were still queued before `turn/start` are safe to continue automatically.
@@ -617,21 +617,36 @@ their `supportedReasoningEfforts` come from the `model/list` request (also used 
 | `turn/completed {turn.status}` | end turn → `StopReason` (`completed`→`end_turn`, `interrupted`→`cancelled`, `failed`→`refusal`); `{kind:"status", status:"idle"}` |
 | `error {error:{message,codexErrorInfo?}}` | `{kind:"error", message}` |
 
-### 3.4 Approval server-requests → permission events
+### 3.4 Approval and elicitation server requests to pending actions
 
-When `approvalPolicy` is `on-request`/`untrusted`, codex sends **server→client JSON-RPC requests** the
-driver must answer (this is exactly what `JsonRpcPeer.onRequest` already supports):
+Codex 0.147.0's stable schema defines five interactive server-to-client JSON-RPC request methods.
+Wollipog correlates every pending action with the request envelope's exact string-or-integer `id`;
+item or turn ids are fallback display identifiers only for older malformed test clients. Replies settle
+that original request directly. The driver never converts arbitrary assistant text into authority and
+never injects an ordinary user message for a structured response.
 
-| server request | our `permission_request` options | reply on `resolvePermission` |
+| server request | actionable Wollipog control | native reply |
 |---|---|---|
-| `item/commandExecution/requestApproval {command,cwd,itemId}` | `[{optionId:"accept"},{optionId:"acceptForSession"},{optionId:"decline"}]` (title = command) | `{result:{decision: optionId ?? "cancel"}}` |
-| `item/fileChange/requestApproval {itemId,reason}` | accept / acceptForSession / decline | `{result:{decision}}` (optional `grantRoot`) |
-| `item/permissions/requestApproval {…}` | derived from requested perms | `{result:{scope:"session", permissions:{…granted subset…}}}` |
-| `mcpServer/elicitation/request {…}` | accept / decline | `{action: optionId, content?}` |
+| `item/commandExecution/requestApproval` | command, cwd, reason, and network context; **Allow Once** (`accept`), **Allow for Session** (`acceptForSession`), **Reject** (`decline`), **Cancel** (`cancel`) | `{decision}` |
+| `item/fileChange/requestApproval` | file/reason context with the same four exact stable decisions | `{decision}` |
+| `item/permissions/requestApproval` | requested filesystem/network profile with **Allow** or **Reject** | allow: `{permissions:<requested>,scope:"session"}`; reject: `{permissions:{},scope:"turn"}` |
+| `item/tool/requestUserInput` | up to three choice questions, optional **Other Response**, bounded free text, and secret entry when declared | `{answers:{<questionId>:{answers:[...]}}}` |
+| `mcpServer/elicitation/request` mode `form` | bounded string/number/integer/boolean/single-enum/multi-enum controls with required, length, range, and selection constraints | submit: `{action:"accept",content:{...},_meta:null}`; dismiss: `{action:"cancel",content:null,_meta:null}` |
+| `mcpServer/elicitation/request` mode `url` | server/message/URL context with **Accept**, **Decline**, and **Cancel** | `{action:"accept"|"decline"|"cancel",content:null,_meta:null}` |
 
-`optionId` from the UI maps to codex `decision`: `allow_once`→`accept`, `allow_always`→
-`acceptForSession`, `reject_*`/`null`→`decline`/`cancel`. After replying, expect
-`serverRequest/resolved` then `item/completed` (status `completed|failed|declined`).
+Wollipog supports the stable MCP `form` and `url` modes. It does not advertise the extended
+`openai/form` capability; extended or malformed schemas are canceled instead of being guessed.
+Enum display labels map back to their provider-native values, booleans remain booleans, and numeric
+text is converted back to a finite number only after shared validation succeeds. Secret answers live
+only in the request-keyed dashboard draft and the direct response path.
+
+Only one provider request can own the session's pending-action surface. A newer request cancels and
+settles the previous parked request before it is displayed. `serverRequest/resolved`, turn
+replacement/completion/failure, cancellation, provider shutdown, and driver disposal clear the exact
+pending id and settle it with the method's safe cancel/empty response. Resolved or stale ids return
+false from `resolvePermission`/`answerQuestion`, so the runner emits a delivery error instead of
+inventing a resolution. Runner-offline cards remain visible for context but their response controls
+are disabled until the authenticated runner is available.
 
 ### 3.5 `codex exec --json` fallback (no approvals)
 

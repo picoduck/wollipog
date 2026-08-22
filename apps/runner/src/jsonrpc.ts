@@ -21,7 +21,7 @@ export interface RpcError {
   requestTimeout?: true;
 }
 
-export type RequestHandler = (params: Params) => Promise<unknown> | unknown;
+export type RequestHandler = (params: Params, requestId: number | string) => Promise<unknown> | unknown;
 export type NotificationHandler = (params: Params) => void;
 
 interface Pending {
@@ -195,7 +195,7 @@ export class JsonRpcPeer {
         return;
       }
       Promise.resolve()
-        .then(() => handler(msg.params))
+        .then(() => handler(msg.params, reqId))
         .then((result) => this.write({ jsonrpc: "2.0", id: reqId, result: result ?? null }))
         .catch((err) =>
           this.write({

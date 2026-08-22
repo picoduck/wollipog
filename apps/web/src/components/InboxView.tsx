@@ -777,7 +777,7 @@ export function InboxView({
           showToast("Choose answers in the preview before submitting this request.");
           return;
         }
-        const updated = await api.answerQuestion(targetSession.id, { requestId: approval.requestId, answers: {} });
+        const updated = await api.answerQuestion(targetSession.id, { requestId: approval.requestId, answers: {}, action: "dismiss" });
         loadSession(updated);
         return;
       }

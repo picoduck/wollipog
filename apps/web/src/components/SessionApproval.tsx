@@ -1,6 +1,7 @@
 import React, { useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import {
   isPolicyApproval,
+  validateQuestionFreeText,
   type AgentQuestion,
   type ApprovalContext,
   type SessionView,
@@ -96,7 +97,7 @@ export function SessionApprovalRegion({
     setAnnouncement(requestId ? (hadRequest ? "Agent request updated" : "Agent response required") : "Agent request resolved");
     if (focusDestination === "request") {
       const target = regionRef.current?.querySelector<HTMLElement>(
-        'button:not(:disabled), [role="radio"][tabindex="0"], [role="checkbox"]:not([aria-disabled="true"])',
+        'button:not(:disabled), [role="radio"][tabindex="0"], [role="checkbox"]:not([aria-disabled="true"]), input:not(:disabled)',
       );
       if (target) {
         target.focus();
@@ -256,16 +257,19 @@ export function SessionQuestionBanner({
   const api = useApi();
   const [busy, setBusy] = useState<"submit" | "dismiss" | null>(null);
   const [selection, setSelection] = useState<QuestionSelectionState>({ requestId, picked: {} });
+  const [drafts, setDrafts] = useState<{ requestId: string; values: Record<string, string> }>({ requestId, values: {} });
   const [error, setError] = useState<string | null>(null);
   const labelPrefix = useId();
 
   useEffect(() => {
     setSelection({ requestId, picked: {} });
+    setDrafts({ requestId, values: {} });
     setBusy(null);
     setError(null);
   }, [requestId]);
 
   const picked = questionSelectionForRequest(selection, requestId);
+  const draftValues = drafts.requestId === requestId ? drafts.values : {};
 
   const toggle = (question: AgentQuestion, label: string) => {
     setSelection((current) => {
@@ -285,7 +289,32 @@ export function SessionQuestionBanner({
       return { requestId, picked: { ...currentPicked, [question.id]: [label] } };
     });
   };
-  const complete = questions.every((question) => (picked[question.id] ?? []).length > 0);
+
+  const updateDraft = (question: AgentQuestion, value: string) => {
+    setDrafts((current) => ({
+      requestId,
+      values: { ...(current.requestId === requestId ? current.values : {}), [question.id]: value },
+    }));
+    if (value && !question.multiSelect) {
+      setSelection((current) => {
+        const currentPicked = questionSelectionForRequest(current, requestId);
+        return { requestId, picked: { ...currentPicked, [question.id]: [] } };
+      });
+    }
+  };
+
+  const complete = questions.every((question) => {
+    const selected = picked[question.id] ?? [];
+    const draft = draftValues[question.id]?.trim() ?? "";
+    if (question.multiSelect) {
+      if (selected.length === 0 && question.required === false) return true;
+      const minimum = question.minSelections ?? (question.required === false ? 0 : 1);
+      return selected.length >= minimum && (question.maxSelections == null || selected.length <= question.maxSelections);
+    }
+    if (selected.length > 0) return true;
+    if (!draft) return question.required === false;
+    return question.allowOther === true && validateQuestionFreeText(question, draft) == null;
+  });
 
   const submit = async () => {
     setBusy("submit");
@@ -294,9 +323,12 @@ export function SessionQuestionBanner({
       const answers: Record<string, string | string[]> = {};
       for (const question of questions) {
         const selected = picked[question.id] ?? [];
-        answers[question.id] = question.multiSelect ? selected : (selected[0] ?? "");
+        const draft = draftValues[question.id]?.trim() ?? "";
+        if (selected.length > 0) answers[question.id] = question.multiSelect ? selected : selected[0]!;
+        else if (question.allowOther && draft) answers[question.id] = draft;
+        else if (question.required !== false) answers[question.id] = question.multiSelect ? [] : "";
       }
-      const updated = await api.answerQuestion(sessionId, { requestId, answers });
+      const updated = await api.answerQuestion(sessionId, { requestId, answers, action: "submit" });
       onSessionUpdate?.(updated);
     } catch (cause) {
       setError((cause as Error).message);
@@ -309,7 +341,7 @@ export function SessionQuestionBanner({
     setBusy("dismiss");
     setError(null);
     try {
-      const updated = await api.answerQuestion(sessionId, { requestId, answers: {} });
+      const updated = await api.answerQuestion(sessionId, { requestId, answers: {}, action: "dismiss" });
       onSessionUpdate?.(updated);
     } catch (cause) {
       setError((cause as Error).message);
@@ -337,6 +369,7 @@ export function SessionQuestionBanner({
           )}
         </div>
       </div>
+      {questions[0]?.context && <div className="question-context">{questions[0].context}</div>}
       <div className="question-list">
         {questions.map((question, questionIndex) => {
           const questionLabelId = `${labelPrefix}-question-${questionIndex}`;
@@ -348,34 +381,61 @@ export function SessionQuestionBanner({
                 {question.question}
                 {question.multiSelect && <span className="muted sm"> (select all that apply)</span>}
               </div>
-              <div
-                className="question-options"
-                role={question.multiSelect ? "group" : "radiogroup"}
-                aria-labelledby={questionLabelId}
-                onKeyDown={question.multiSelect ? undefined : (event) => handleRovingChoiceKeyDown(event, "radio")}
-              >
-                {question.options.map((option, optionIndex) => {
-                  const on = selected.includes(option.label);
-                  return (
-                    <button
-                      key={option.label}
-                      type="button"
-                      role={question.multiSelect ? "checkbox" : "radio"}
-                      aria-checked={on}
-                      tabIndex={question.multiSelect ? 0 : on || (selected.length === 0 && optionIndex === 0) ? 0 : -1}
-                      className={`question-option${on ? " on" : ""}`}
-                      title={option.description}
-                      onClick={() => toggle(question, option.label)}
-                    >
-                      <span className="question-mark" aria-hidden="true">{question.multiSelect ? (on ? "☑" : "☐") : on ? "●" : "○"}</span>
-                      <span>
-                        <span className="question-label">{option.label}</span>
-                        {option.description && <span className="question-desc">{option.description}</span>}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
+              {question.options.length > 0 && (
+                <div
+                  className="question-options"
+                  role={question.multiSelect ? "group" : "radiogroup"}
+                  aria-labelledby={questionLabelId}
+                  onKeyDown={question.multiSelect ? undefined : (event) => handleRovingChoiceKeyDown(event, "radio")}
+                >
+                  {question.options.map((option, optionIndex) => {
+                    const on = selected.includes(option.label);
+                    return (
+                      <button
+                        key={option.label}
+                        type="button"
+                        role={question.multiSelect ? "checkbox" : "radio"}
+                        aria-checked={on}
+                        tabIndex={question.multiSelect ? 0 : on || (selected.length === 0 && optionIndex === 0) ? 0 : -1}
+                        className={`question-option${on ? " on" : ""}`}
+                        title={option.description}
+                        onClick={() => toggle(question, option.label)}
+                      >
+                        <span className="question-mark" aria-hidden="true">{question.multiSelect ? (on ? "☑" : "☐") : on ? "●" : "○"}</span>
+                        <span>
+                          <span className="question-label">{option.label}</span>
+                          {option.description && <span className="question-desc">{option.description}</span>}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              {question.allowOther && (
+                <label className="question-input-label">
+                  <span>{question.options.length > 0 ? "Other Response" : "Response"}</span>
+                  {question.required === false && <span className="muted sm"> (optional)</span>}
+                  <input
+                    className="input question-input"
+                    type={question.secret
+                      ? "password"
+                      : question.inputFormat === "date-time"
+                        ? "datetime-local"
+                        : question.inputFormat === "integer" || question.inputFormat === "number"
+                          ? "number"
+                          : question.inputFormat ?? "text"}
+                    inputMode={question.inputFormat === "integer" ? "numeric" : question.inputFormat === "number" ? "decimal" : undefined}
+                    step={question.inputFormat === "integer" ? 1 : question.inputFormat === "number" ? "any" : undefined}
+                    min={question.minimum}
+                    max={question.maximum}
+                    minLength={question.minLength}
+                    maxLength={question.maxLength}
+                    value={draftValues[question.id] ?? ""}
+                    autoComplete="off"
+                    onChange={(event) => updateDraft(question, event.target.value)}
+                  />
+                </label>
+              )}
             </div>
           );
         })}

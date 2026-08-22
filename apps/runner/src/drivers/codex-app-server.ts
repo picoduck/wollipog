@@ -12,7 +12,7 @@
  * Approval decisions: "accept" (allow) / "decline" (deny).
  */
 
-import type { PlanEntry, PromptImage, ReviewDecision, SessionConfig } from "@wollipog/protocol";
+import type { AgentQuestion, PlanEntry, PromptImage, ReviewDecision, SessionConfig } from "@wollipog/protocol";
 import { JsonRpcPeer } from "../jsonrpc.js";
 import { killTree, spawnAgent, type AgentProcess } from "../spawn.js";
 import type {
@@ -52,6 +52,8 @@ function normalizedCodexItemId(value: unknown): string | undefined {
 const AUTO_REVIEW_MODE = "auto-review";
 const PERMISSIONS_METHOD = "item/permissions/requestApproval";
 const APPROVAL_METHODS = ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", PERMISSIONS_METHOD];
+const USER_INPUT_METHOD = "item/tool/requestUserInput";
+const MCP_ELICITATION_METHOD = "mcpServer/elicitation/request";
 
 /** A parked server->client approval request awaiting the UI's verdict. */
 interface PendingApproval {
@@ -70,13 +72,21 @@ interface PendingApproval {
  * with a `decision` would leave the grant unapplied even after the user clicks Allow.
  * Exported for tests.
  */
-export function approvalResponse(method: string, params: Json, allow: boolean): Json {
+export function approvalResponse(method: string, params: Json, choice: string | boolean | null): Json {
+  const allow = choice === true || choice === "allow" || choice === "accept" || choice === "acceptForSession";
   if (method === PERMISSIONS_METHOD) {
     // RequestPermissionProfile and GrantedPermissionProfile are structurally identical
     // ({fileSystem?, network?}), so on allow we grant exactly what was requested.
     return allow ? { permissions: params?.permissions ?? {}, scope: "session" } : { permissions: {}, scope: "turn" };
   }
-  return { decision: allow ? "accept" : "decline" };
+  const decision = choice === true || choice === "allow"
+    ? "accept"
+    : choice === false || choice === "deny"
+      ? "decline"
+      : choice === "accept" || choice === "acceptForSession" || choice === "decline" || choice === "cancel"
+        ? choice
+        : "cancel";
+  return { decision };
 }
 
 /**
@@ -164,6 +174,8 @@ export class CodexAppServerDriver implements Driver {
   private readonly emittedErrors = new Set<string>();
   /** approval correlation id -> the parked JSON-RPC approval request. */
   private readonly pendingApprovals = new Map<string, PendingApproval>();
+  /** question correlation id -> the parked provider request and native response mapper. */
+  private readonly pendingQuestions = new Map<string, PendingQuestion>();
   /** Monotonic fallback correlation sequence for app-server schemas without approval ids. */
   private approvalSeq = 0;
   private stagedImages: StagedPromptImages | null = null;
@@ -253,7 +265,7 @@ export class CodexAppServerDriver implements Driver {
       // instead of parking a turn/start request that never settles.
       if (this.peer === peer) this.peer = null;
       this.child = null;
-      this.pendingApprovals.clear();
+      this.declinePendingRequests();
       this.closeTurnUsage();
       this.settleTurn(this.cancelled ? "cancelled" : this.turnResolve ? "refusal" : this.turnStop);
       // Tell SessionManager the process died (it removes the session and marks it failed),
@@ -342,7 +354,7 @@ export class CodexAppServerDriver implements Driver {
     return new Promise<StopReason>((resolve) => {
       this.seenItems.clear();
       this.emittedErrors.clear();
-      this.pendingApprovals.clear();
+      this.declinePendingRequests();
       this.pendingTurnUsage = null;
       this.turnUsageClosed = false;
       this.turnResolve = resolve;
@@ -442,9 +454,9 @@ export class CodexAppServerDriver implements Driver {
         /* ignore */
       }
     }
-    // Decline any in-flight approvals (with the shape each method expects) so the
+    // Cancel any in-flight requests (with the shape each method expects) so the
     // server-side turn unblocks instead of waiting on a response we'll never send.
-    this.declinePendingApprovals();
+    this.declinePendingRequests();
     this.closeTurnUsage();
     this.settleTurn("cancelled");
   }
@@ -453,7 +465,17 @@ export class CodexAppServerDriver implements Driver {
     const pending = this.pendingApprovals.get(requestId);
     if (!pending) return false;
     this.pendingApprovals.delete(requestId);
-    pending.resolve(approvalResponse(pending.method, pending.params, optionId === "allow"));
+    pending.resolve(pending.method === MCP_ELICITATION_METHOD
+      ? mcpElicitationResponse(optionId === "accept" ? "accept" : optionId === "decline" ? "decline" : "cancel")
+      : approvalResponse(pending.method, pending.params, optionId));
+    return true;
+  }
+
+  answerQuestion(requestId: string, answers: Record<string, string | string[]>, action?: "submit" | "dismiss"): boolean {
+    const pending = this.pendingQuestions.get(requestId);
+    if (!pending) return false;
+    this.pendingQuestions.delete(requestId);
+    pending.resolve(pending.response(answers, action ?? (Object.keys(answers).length > 0 ? "submit" : "dismiss")));
     return true;
   }
 
@@ -470,7 +492,7 @@ export class CodexAppServerDriver implements Driver {
         /* ignore */
       }
     }
-    this.declinePendingApprovals();
+    this.declinePendingRequests();
     this.closeTurnUsage();
     this.settleTurn("cancelled");
     void this.cleanupStagedImages();
@@ -479,9 +501,13 @@ export class CodexAppServerDriver implements Driver {
     this.child = null;
   }
 
-  private declinePendingApprovals(): void {
-    for (const [, p] of this.pendingApprovals) p.resolve(approvalResponse(p.method, p.params, false));
+  private declinePendingRequests(): void {
+    for (const [, p] of this.pendingApprovals) {
+      p.resolve(p.method === MCP_ELICITATION_METHOD ? mcpElicitationResponse("cancel") : approvalResponse(p.method, p.params, null));
+    }
     this.pendingApprovals.clear();
+    for (const [, p] of this.pendingQuestions) p.resolve(p.response({}, "dismiss"));
+    this.pendingQuestions.clear();
   }
 
   private settleTurn(r: StopReason): void {
@@ -523,23 +549,27 @@ export class CodexAppServerDriver implements Driver {
     // Server -> client approval requests: park a promise until the UI answers. The
     // method is captured so the response is built in the shape that method expects
     // (command/file -> {decision}; permissions -> {permissions, scope}).
-    const makeApprover = (method: string) => (params: Json) =>
+    const makeApprover = (method: string) => (params: Json, rpcRequestId: number | string) =>
       new Promise<Json>((resolve) => {
-        if (this.disposed || this.cancelled) return resolve(approvalResponse(method, params, false));
-        const id = String(params?.approvalId ?? params?.itemId ?? `${params?.turnId}:${++this.approvalSeq}`);
-        // Provider ids should be unique, but fail closed if schema drift repeats one: settle the
-        // older parked RPC before replacing its UI correlation entry so no resolver is orphaned.
-        const replaced = this.pendingApprovals.get(id);
-        if (replaced) replaced.resolve(approvalResponse(replaced.method, replaced.params, false));
+        if (this.disposed || this.cancelled) return resolve(approvalResponse(method, params, null));
+        const id = String(rpcRequestId ?? params?.approvalId ?? params?.itemId ?? `${params?.turnId}:${++this.approvalSeq}`);
+        this.declinePendingRequests();
         this.pendingApprovals.set(id, { method, params, resolve });
         this.cb.onEvent({
           kind: "permission_request",
           requestId: id,
           title: approvalTitle(params),
-          options: [
-            { optionId: "allow", name: "Allow", kind: "allow_once" },
-            { optionId: "deny", name: "Reject", kind: "reject_once" },
-          ],
+          options: method === PERMISSIONS_METHOD
+            ? [
+                { optionId: "allow", name: "Allow", kind: "allow_once" },
+                { optionId: "deny", name: "Reject", kind: "reject_once" },
+              ]
+            : [
+                { optionId: "accept", name: "Allow Once", kind: "allow_once" },
+                { optionId: "acceptForSession", name: "Allow for Session", kind: "allow_always" },
+                { optionId: "decline", name: "Reject", kind: "reject_once" },
+                { optionId: "cancel", name: "Cancel" },
+              ],
           context: approvalContext(
             method,
             params,
@@ -548,6 +578,72 @@ export class CodexAppServerDriver implements Driver {
         });
       });
     for (const m of APPROVAL_METHODS) peer.onRequest(m, makeApprover(m));
+
+    peer.onRequest(USER_INPUT_METHOD, (params: Json, rpcRequestId: number | string) =>
+      new Promise<Json>((resolve) => {
+        if (this.disposed || this.cancelled) return resolve({ answers: {} });
+        const normalized = normalizeCodexUserInput(params);
+        if (!normalized) {
+          this.cb.onStderr("Codex requestUserInput arrived with no safely answerable questions — auto-dismissing");
+          return resolve({ answers: {} });
+        }
+        const id = String(rpcRequestId ?? params?.itemId ?? `${params?.turnId}:${++this.approvalSeq}`);
+        this.declinePendingRequests();
+        this.pendingQuestions.set(id, { resolve, response: normalized.response });
+        this.cb.onEvent({ kind: "question_request", requestId: id, questions: normalized.questions });
+      }));
+
+    peer.onRequest(MCP_ELICITATION_METHOD, (params: Json, rpcRequestId: number | string) =>
+      new Promise<Json>((resolve) => {
+        if (this.disposed || this.cancelled) return resolve(mcpElicitationResponse("cancel"));
+        const id = String(rpcRequestId ?? params?.elicitationId ?? `${params?.turnId}:${++this.approvalSeq}`);
+        this.declinePendingRequests();
+        if (params?.mode === "url") {
+          const message = boundedString(params?.message, MAX_QUESTION_TEXT);
+          const serverName = boundedString(params?.serverName, MAX_QUESTION_HEADER);
+          const url = boundedString(params?.url, MAX_QUESTION_TEXT);
+          if (!message || !serverName || !url) {
+            this.cb.onStderr("Codex MCP URL elicitation was malformed — cancelling it");
+            return resolve(mcpElicitationResponse("cancel"));
+          }
+          this.pendingApprovals.set(id, { method: MCP_ELICITATION_METHOD, params, resolve });
+          this.cb.onEvent({
+            kind: "permission_request",
+            requestId: id,
+            title: `${serverName} requests a browser flow`,
+            options: [
+              { optionId: "accept", name: "Accept", kind: "allow_once" },
+              { optionId: "decline", name: "Decline", kind: "reject_once" },
+              { optionId: "cancel", name: "Cancel" },
+            ],
+            context: { toolName: serverName, input: message, network: url },
+          });
+          return;
+        }
+        const normalized = normalizeMcpFormElicitation(params);
+        if (!normalized) {
+          this.cb.onStderr(`unsupported or malformed Codex MCP elicitation mode=${String(params?.mode ?? "?")} — cancelling it`);
+          return resolve(mcpElicitationResponse("cancel"));
+        }
+        this.pendingQuestions.set(id, { resolve, response: normalized.response });
+        this.cb.onEvent({ kind: "question_request", requestId: id, questions: normalized.questions });
+      }));
+
+    peer.onNotification("serverRequest/resolved", (params: Json) => {
+      const id = String(params?.requestId ?? "");
+      const question = this.pendingQuestions.get(id);
+      if (question) {
+        this.pendingQuestions.delete(id);
+        question.resolve(question.response({}, "dismiss"));
+        this.cb.onEvent({ kind: "question_resolved", requestId: id, answered: false });
+      }
+      const approval = this.pendingApprovals.get(id);
+      if (approval) {
+        this.pendingApprovals.delete(id);
+        approval.resolve(approval.method === MCP_ELICITATION_METHOD ? mcpElicitationResponse("cancel") : approvalResponse(approval.method, approval.params, null));
+        this.cb.onEvent({ kind: "permission_resolved", requestId: id, optionId: null });
+      }
+    });
 
     // Streamed turn events. Record the streamed item id so the matching item/completed
     // doesn't re-emit the same text (deltas are the source of truth; completed is the
@@ -576,6 +672,7 @@ export class CodexAppServerDriver implements Driver {
       if (decision) this.cb.onEvent({ kind: "review_decision", ...decision });
     });
     peer.onNotification("turn/started", (p: Json) => {
+      this.declinePendingRequests();
       const id = p?.turn?.id;
       if (typeof id === "string" && id) {
         this.turnId = id;
@@ -595,6 +692,7 @@ export class CodexAppServerDriver implements Driver {
       this.cb.onSubscriptionUsage?.({ provider: "codex", kind: "sparse", payload });
     });
     peer.onNotification("turn/completed", (p: Json) => {
+      this.declinePendingRequests();
       this.closeTurnUsage();
       const status = p?.turn?.status;
       if (status === "failed") {
@@ -607,6 +705,7 @@ export class CodexAppServerDriver implements Driver {
       }
     });
     peer.onNotification("turn/failed", (p: Json) => {
+      this.declinePendingRequests();
       this.emitDriverError(p?.error);
       this.closeTurnUsage();
       this.settleTurn("refusal");
@@ -812,4 +911,257 @@ function flattenUsage(tu: Json): { input?: number; output?: number; cached?: num
 
 function truncate(s: string, n: number): string {
   return s.length > n ? s.slice(0, n) + "..." : s;
+}
+
+/** A parked structured question awaiting the normalized answer_question route. */
+interface PendingQuestion {
+  resolve: (response: Json) => void;
+  response: (answers: Record<string, string | string[]>, action?: "submit" | "dismiss") => Json;
+}
+
+interface NormalizedQuestionRequest {
+  questions: AgentQuestion[];
+  response: (answers: Record<string, string | string[]>, action?: "submit" | "dismiss") => Json;
+}
+
+type McpElicitationAction = "accept" | "decline" | "cancel";
+const MAX_STRUCTURED_QUESTIONS = 20;
+const MAX_QUESTION_OPTIONS = 20;
+const MAX_QUESTION_ID = 256;
+const MAX_QUESTION_HEADER = 80;
+const MAX_QUESTION_TEXT = 2000;
+const MAX_FREE_TEXT = 4000;
+
+function boundedString(value: unknown, max: number): string | null {
+  return typeof value === "string" && value.length > 0 && value.length <= max ? value : null;
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function nonnegativeInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
+}
+
+function distinctQuestionIds(questions: AgentQuestion[]): boolean {
+  return new Set(questions.map((question) => question.id)).size === questions.length;
+}
+
+function normalizedOptions(raw: unknown): AgentQuestion["options"] | null {
+  if (!Array.isArray(raw) || raw.length > MAX_QUESTION_OPTIONS) return null;
+  const options = raw.map((option: Json) => {
+    const label = boundedString(option?.label, MAX_QUESTION_ID);
+    const description = boundedString(option?.description, MAX_QUESTION_TEXT);
+    if (!label || !description) return null;
+    return { label, description };
+  });
+  if (options.some((option) => option == null)) return null;
+  const valid = options as AgentQuestion["options"];
+  return new Set(valid.map((option) => option.label)).size === valid.length ? valid : null;
+}
+
+/** Normalize Codex's item/tool/requestUserInput request without synthesizing a user message. */
+export function normalizeCodexUserInput(params: Json): NormalizedQuestionRequest | null {
+  if (!Array.isArray(params?.questions) || params.questions.length === 0 || params.questions.length > 3) return null;
+  const questions: AgentQuestion[] = [];
+  for (const raw of params.questions) {
+    const id = boundedString(raw?.id, MAX_QUESTION_ID);
+    const question = boundedString(raw?.question, MAX_QUESTION_TEXT);
+    const header = boundedString(raw?.header, MAX_QUESTION_HEADER);
+    if (!id || !question || !header || (raw?.options != null && !Array.isArray(raw?.options))) return null;
+    const options = raw.options == null ? [] : normalizedOptions(raw.options);
+    if (!options || (options.length === 0 && raw?.isOther !== true)) return null;
+    questions.push({
+      id,
+      header,
+      question,
+      options,
+      ...(raw?.isOther === true ? { allowOther: true, inputFormat: "text" as const, maxLength: MAX_FREE_TEXT } : {}),
+      ...(raw?.isSecret === true ? { secret: true } : {}),
+    });
+  }
+  if (!distinctQuestionIds(questions)) return null;
+  return {
+    questions,
+    response: (answers) => ({
+      answers: Object.fromEntries(Object.entries(answers).map(([id, answer]) => [
+        id,
+        { answers: Array.isArray(answer) ? answer : [answer] },
+      ])),
+    }),
+  };
+}
+
+interface NativeChoice {
+  label: string;
+  value: Json;
+}
+
+function enumChoices(schema: Json): NativeChoice[] | null {
+  let choices: NativeChoice[];
+  const titled = Array.isArray(schema?.oneOf) ? schema.oneOf : Array.isArray(schema?.anyOf) ? schema.anyOf : null;
+  if (titled) {
+    choices = titled.map((entry: Json) => ({
+      label: boundedString(entry?.title, MAX_QUESTION_ID) ?? "",
+      value: entry?.const,
+    }));
+  } else if (Array.isArray(schema?.enum)) {
+    const names = Array.isArray(schema.enumNames) && schema.enumNames.length === schema.enum.length
+      ? schema.enumNames
+      : schema.enum;
+    choices = schema.enum.map((value: Json, index: number) => ({
+      label: boundedString(names[index], MAX_QUESTION_ID) ?? "",
+      value,
+    }));
+  } else {
+    return null;
+  }
+  if (
+    choices.length === 0 || choices.length > MAX_QUESTION_OPTIONS ||
+    choices.some((choice) => !choice.label || typeof choice.value !== "string") ||
+    new Set(choices.map((choice) => choice.label)).size !== choices.length
+  ) return null;
+  return choices;
+}
+
+function inputFormat(value: unknown): AgentQuestion["inputFormat"] | null {
+  if (value == null) return "text";
+  return value === "email" || value === "uri" || value === "date" || value === "date-time"
+    ? value === "uri" ? "url" : value
+    : null;
+}
+
+/** Normalize the stable MCP form elicitation schema into Wollipog's structured question surface. */
+export function normalizeMcpFormElicitation(params: Json): NormalizedQuestionRequest | null {
+  const schema = params?.requestedSchema;
+  const properties = schema?.properties;
+  if (params?.mode !== "form" || schema?.type !== "object" || !properties || typeof properties !== "object" || Array.isArray(properties)) {
+    return null;
+  }
+  const entries = Object.entries(properties);
+  if (entries.length === 0 || entries.length > MAX_STRUCTURED_QUESTIONS) return null;
+  if (schema.required != null && (!Array.isArray(schema.required) || schema.required.some((key: unknown) => typeof key !== "string"))) {
+    return null;
+  }
+  const requiredKeys = (schema.required ?? []) as string[];
+  const propertyKeys = new Set(entries.map(([key]) => key));
+  if (new Set(requiredKeys).size !== requiredKeys.length || requiredKeys.some((key) => !propertyKeys.has(key))) return null;
+  const required = new Set(requiredKeys);
+  const questions: AgentQuestion[] = [];
+  const nativeValues = new Map<string, Map<string, Json>>();
+  const message = boundedString(params?.message, MAX_QUESTION_TEXT);
+  const serverName = boundedString(params?.serverName, MAX_QUESTION_HEADER);
+  if (!message || !serverName) return null;
+
+  for (const [id, raw] of entries) {
+    if (!boundedString(id, MAX_QUESTION_ID) || !raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+    const property = raw as Json;
+    const title = property.title == null ? undefined : boundedString(property.title, MAX_QUESTION_HEADER);
+    const description = property.description == null ? undefined : boundedString(property.description, MAX_QUESTION_TEXT);
+    if ((property.title != null && !title) || (property.description != null && !description)) return null;
+    const base = {
+      id,
+      ...(title ? { header: title } : {}),
+      question: description ?? title ?? id,
+      options: [] as AgentQuestion["options"],
+      required: required.has(id),
+      ...(questions.length === 0 ? { context: `${serverName}: ${message}` } : {}),
+    };
+
+    if (property.type === "boolean") {
+      const choices = [{ label: "True", value: true }, { label: "False", value: false }];
+      nativeValues.set(id, new Map(choices.map((choice) => [choice.label, choice.value])));
+      questions.push({ ...base, options: choices.map(({ label }) => ({ label })) });
+      continue;
+    }
+
+    if (property.type === "array") {
+      const choices = enumChoices(property.items);
+      if (!choices) return null;
+      const minSelections = nonnegativeInteger(property.minItems) ?? 0;
+      const maxSelections = nonnegativeInteger(property.maxItems);
+      if (
+        (property.minItems != null && nonnegativeInteger(property.minItems) == null) ||
+        (property.maxItems != null && maxSelections == null) ||
+        (maxSelections != null && maxSelections < minSelections)
+      ) return null;
+      nativeValues.set(id, new Map(choices.map((choice) => [choice.label, choice.value])));
+      questions.push({
+        ...base,
+        multiSelect: true,
+        options: choices.map(({ label }) => ({ label })),
+        minSelections,
+        ...(maxSelections != null ? { maxSelections } : {}),
+      });
+      continue;
+    }
+
+    if (property.type === "string") {
+      const choices = enumChoices(property);
+      if (choices) {
+        nativeValues.set(id, new Map(choices.map((choice) => [choice.label, choice.value])));
+        questions.push({ ...base, options: choices.map(({ label }) => ({ label })) });
+        continue;
+      }
+      const minLength = nonnegativeInteger(property.minLength);
+      const providerMaxLength = nonnegativeInteger(property.maxLength);
+      if (
+        (property.minLength != null && minLength == null) ||
+        (property.maxLength != null && providerMaxLength == null)
+      ) return null;
+      const maxLength = Math.min(providerMaxLength ?? MAX_FREE_TEXT, MAX_FREE_TEXT);
+      if (minLength != null && minLength > maxLength) return null;
+      const format = inputFormat(property.format);
+      if (!format) return null;
+      questions.push({
+        ...base,
+        allowOther: true,
+        inputFormat: format,
+        ...(minLength != null ? { minLength } : {}),
+        maxLength,
+      });
+      continue;
+    }
+
+    if (property.type === "number" || property.type === "integer") {
+      const minimum = finiteNumber(property.minimum);
+      const maximum = finiteNumber(property.maximum);
+      if (
+        (property.minimum != null && minimum == null) ||
+        (property.maximum != null && maximum == null) ||
+        (minimum != null && maximum != null && minimum > maximum)
+      ) return null;
+      questions.push({
+        ...base,
+        allowOther: true,
+        inputFormat: property.type,
+        ...(minimum != null ? { minimum } : {}),
+        ...(maximum != null ? { maximum } : {}),
+      });
+      continue;
+    }
+    return null;
+  }
+
+  return {
+    questions,
+    response: (answers, action) => {
+      if (action === "dismiss" || (action == null && Object.keys(answers).length === 0)) {
+        return mcpElicitationResponse("cancel");
+      }
+      const content = Object.fromEntries(Object.entries(answers).map(([id, answer]) => {
+        const values = nativeValues.get(id);
+        if (Array.isArray(answer)) return [id, answer.map((label) => values?.get(label) ?? label)];
+        if (values) return [id, values.get(answer) ?? answer];
+        const question = questions.find((candidate) => candidate.id === id);
+        return [id, question?.inputFormat === "number" || question?.inputFormat === "integer" ? Number(answer) : answer];
+      }));
+      return mcpElicitationResponse("accept", content);
+    },
+  };
+}
+
+export function mcpElicitationResponse(action: McpElicitationAction, content: Json = null): Json {
+  return { action, content: action === "accept" ? content : null, _meta: null };
 }

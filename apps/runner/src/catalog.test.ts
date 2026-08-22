@@ -34,7 +34,7 @@ test("capabilitiesFor keeps Claude optional flags conservative until discovery",
     "read-only": ["app-server"],
     "on-request": ["app-server"],
     "auto-review": ["app-server"],
-    "danger-full-access": ["none"],
+    "danger-full-access": ["app-server"],
   });
   assert.equal(codexApp!.supportsConversationFork, true);
   assert.equal(codexApp!.supportsSteering, undefined, "steering requires a verified live app-server probe");

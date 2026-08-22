@@ -5793,9 +5793,9 @@ export class SessionManager {
     this.emitStatus(sessionId, status);
   }
 
-  answerQuestion(sessionId: string, requestId: string, answers: Record<string, string | string[]>): void {
+  answerQuestion(sessionId: string, requestId: string, answers: Record<string, string | string[]>, action?: "submit" | "dismiss"): void {
     const entry = this.active.get(sessionId);
-    const delivered = entry?.client.answerQuestion ? entry.client.answerQuestion(requestId, answers) : false;
+    const delivered = entry?.client.answerQuestion ? entry.client.answerQuestion(requestId, answers, action) : false;
     if (delivered) {
       const started = this.approvalStarted.get(`${sessionId}:${requestId}`);
       this.approvalStarted.delete(`${sessionId}:${requestId}`);
@@ -5803,11 +5803,11 @@ export class SessionManager {
       if (meta && started != null) {
         this.emitTelemetry(meta, {
           metric: "approval",
-          outcome: Object.keys(answers).length ? "allowed" : "cancelled",
+          outcome: action === "dismiss" || (action == null && Object.keys(answers).length === 0) ? "cancelled" : "allowed",
           durationMs: Date.now() - started,
         });
       }
-      this.emitEvent(sessionId, { kind: "question_resolved", requestId, answered: Object.keys(answers).length > 0 });
+      this.emitEvent(sessionId, { kind: "question_resolved", requestId, answered: action !== "dismiss" && (action === "submit" || Object.keys(answers).length > 0) });
       return;
     }
     this.approvalStarted.delete(`${sessionId}:${requestId}`);

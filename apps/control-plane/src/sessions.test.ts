@@ -26,6 +26,7 @@ import {
   MAX_UI_SESSION_SUBSCRIPTIONS,
   POLICY_HOOK_ABANDONMENT_MS,
   PROTOCOL_VERSION,
+  RUNNER_CAPABILITY_MIN_PROTOCOL,
 } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { automationCommandDigest, canonicalAutomationCommandJson } from "./automation-command-outbox.js";
@@ -5333,6 +5334,7 @@ test("a provider question cannot overwrite a parked policy-hook card", () => {
     sessionId: id,
     requestId: "parallel-question",
     answers: {},
+    action: "dismiss",
   });
   assert.ok(svc.governanceAudit(id).some((entry) =>
     entry.requestId === "parallel-question" &&
@@ -6305,6 +6307,47 @@ test("workflow artifact service rejects cross-run association, unknown owners, a
   assert.equal(svc.sessionWorkflowArtifacts("missing").status, 404);
 });
 
+test("an explicit empty question submission remains distinct from dismissal", () => {
+  const { hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  svc.onSessionEvent(id, {
+    kind: "question_request",
+    requestId: "optional-form",
+    questions: [{
+      id: "note",
+      question: "Optional note",
+      options: [],
+      allowOther: true,
+      required: false,
+    }],
+  });
+
+  const ambiguousDismissal = svc.answerQuestion(
+    id,
+    "optional-form",
+    { note: "must not ride with dismissal" },
+    { kind: "human", id: "device-empty-submit" },
+    "dismiss",
+  );
+  assert.equal(ambiguousDismissal.status, 400);
+
+  const result = svc.answerQuestion(
+    id,
+    "optional-form",
+    {},
+    { kind: "human", id: "device-empty-submit" },
+    "submit",
+  );
+  assert.ok(result.ok);
+  assert.deepEqual(hub.sentOfType("answer_question").at(-1), {
+    type: "answer_question",
+    sessionId: id,
+    requestId: "optional-form",
+    answers: {},
+    action: "submit",
+  });
+});
+
 test("governance audit distinguishes authentication, question answers, and policy decisions", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);
@@ -6322,9 +6365,17 @@ test("governance audit distinguishes authentication, question answers, and polic
   svc.onSessionEvent(id, {
     kind: "question_request",
     requestId: "question-1",
-    questions: [{ id: "color", question: "Choose a color", options: [{ label: "Blue" }] }],
+    questions: [
+      { id: "color", question: "Choose a color", options: [{ label: "Blue" }] },
+      { id: "token", question: "Enter a token", options: [], allowOther: true, secret: true },
+    ],
   });
-  svc.answerQuestion(id, "question-1", { color: "Blue" }, { kind: "human", id: "device-9" });
+  svc.answerQuestion(
+    id,
+    "question-1",
+    { color: "Blue", token: "low-entropy-secret" },
+    { kind: "human", id: "device-9" },
+  );
 
   svc.setConfig(id, { costBudgetUsd: 1 });
   db.updateSessionStatus(id, "running", Date.now());
@@ -6337,8 +6388,13 @@ test("governance audit distinguishes authentication, question answers, and polic
   assert.equal(authRequest.approvalKind, "authentication");
   const answer = entries.find((entry) => entry.requestId === "question-1" && entry.stage === "resolution")!;
   assert.equal(answer.outcome, "answered");
-  assert.match(answer.contentDigest ?? "", /^[a-f0-9]{64}$/);
+  assert.equal(
+    answer.contentDigest,
+    createHash("sha256").update(JSON.stringify({ color: "Blue" }), "utf8").digest("hex"),
+    "secret answers must not influence the durable audit hash",
+  );
   assert.equal(JSON.stringify(answer).includes("Blue"), false);
+  assert.equal(JSON.stringify(answer).includes("low-entropy-secret"), false);
   const policyAsk = entries.find((entry) => entry.stage === "policy_decision")!;
   assert.equal(policyAsk.outcome, "asked");
   assert.deepEqual(policyAsk.actor, { kind: "policy", id: "cost_budget" });
@@ -6840,7 +6896,7 @@ test("restart-after-stop requires correlated restart echo support before mutatio
   svc.stop(id);
   hub.sentToRunner.length = 0;
   hub.sessionChangedByIdCalls.length = 0;
-  db.registerRunner(runnerMeta(), Date.now(), 83);
+  db.registerRunner(runnerMeta(), Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.correlatedRestartEcho - 1);
 
   const result = svc.restart(id);
 
