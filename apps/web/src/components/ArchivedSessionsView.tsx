@@ -56,6 +56,7 @@ export function ArchivedSessionsView() {
   const liveSessions = useStoreSelector((state) => state.sessions);
   const projects = useStoreSelector((state) => state.projects);
   const conn = useStoreSelector((state) => state.conn);
+  const stopFailureRecoverySupported = useStoreSelector((state) => state.stopFailureRecoverySupported);
   const deletedSessionIdsRef = useRef(new Set<string>());
   const liveSessionsRef = useRef(liveSessions);
   liveSessionsRef.current = liveSessions;
@@ -205,7 +206,10 @@ export function ArchivedSessionsView() {
   const retryStop = async (session: SessionView) => {
     setBusy(session.id, true);
     try {
-      updateSession(await api.retryStop(session.id));
+      const updated = session.archiveStatus === "stop_failed" || stopFailureRecoverySupported
+        ? await api.retryStop(session.id)
+        : await api.setArchived(session.id, true);
+      updateSession(updated);
       showToast("Stop retry requested.");
     } catch (cause) {
       showToast(`Could not retry stopping session: ${(cause as Error).message}`, { tone: "error" });

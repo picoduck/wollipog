@@ -217,16 +217,19 @@ test("unarchive uses the existing authorized mutation and removes the row from t
   await fixture.unmount();
 });
 
-test("Stop Pending sessions expose an idempotent Retry Stop recovery action", async () => {
-  const calls: string[] = [];
+test("Stop Pending sessions fall back to the legacy idempotent archive mutation", async () => {
+  const calls: Array<[string, boolean]> = [];
   const pending = session(2, {
     archived: false,
     status: "stopped",
     archiveStatus: "stop_pending",
   } as Partial<SessionView>);
   const fixture = await mount([pending], {
-    retryStop: async (id) => {
-      calls.push(id);
+    retryStop: async () => {
+      throw new Error("the v85-only route must not be called");
+    },
+    setArchived: async (id, archived) => {
+      calls.push([id, archived]);
       return pending;
     },
   });
@@ -237,7 +240,7 @@ test("Stop Pending sessions expose an idempotent Retry Stop recovery action", as
     "pending recovery replaces the ordinary Stop action even for a terminal lifecycle");
   await act(async () => { Simulate.click(retry); await Promise.resolve(); });
 
-  assert.deepEqual(calls, [pending.id], "retry preserves and reissues archive intent");
+  assert.deepEqual(calls, [[pending.id, true]], "legacy retry reissues the archive intent");
   assert.equal(fixture.container.querySelector('.toast-region[aria-live="polite"] [role="status"]')?.textContent?.includes("Stop retry requested."), true,
     "success is announced in the accessible live toast region");
   await fixture.unmount();

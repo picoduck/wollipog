@@ -10053,6 +10053,15 @@ export class ControlPlaneDb {
       "VALUES (?, ?, ?, ?, ?, ?, 1) " +
       "ON CONFLICT(session_id) DO UPDATE SET " +
       "runner_id=excluded.runner_id, restart_launch_id=NULL, " +
+      "created_at=CASE WHEN session_stop_intents.archive_after_stop=0 " +
+        "AND excluded.archive_after_stop=1 AND session_stop_intents.failed_at IS NULL " +
+        "THEN excluded.created_at ELSE session_stop_intents.created_at END, " +
+      "last_attempt_at=CASE WHEN session_stop_intents.archive_after_stop=0 " +
+        "AND excluded.archive_after_stop=1 AND session_stop_intents.failed_at IS NULL " +
+        "THEN excluded.last_attempt_at ELSE session_stop_intents.last_attempt_at END, " +
+      "attempt_count=CASE WHEN session_stop_intents.archive_after_stop=0 " +
+        "AND excluded.archive_after_stop=1 AND session_stop_intents.failed_at IS NULL " +
+        "THEN 1 ELSE session_stop_intents.attempt_count END, " +
       "archive_after_stop=MAX(session_stop_intents.archive_after_stop, excluded.archive_after_stop)",
     ).run(sessionId, runnerId, now, archiveAfterStop ? 1 : 0, operationId, now);
     return this.sessionStopIntent(sessionId)!;

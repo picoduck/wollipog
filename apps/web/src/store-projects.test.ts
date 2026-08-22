@@ -35,7 +35,12 @@ function snapshot(projects?: ProjectView[]): UiSnapshotMessage {
     type: "snapshot",
     ...(projects === undefined
       ? {}
-      : { capabilities: { projects: true, createProjectLocations: true, stopBeforeArchive: true }, projects }),
+      : { capabilities: {
+        projects: true,
+        createProjectLocations: true,
+        stopBeforeArchive: true,
+        stopFailureRecovery: true,
+      }, projects }),
     runners: [],
     boxes: [],
     sessions: [],
@@ -50,6 +55,7 @@ test("Project inventory loads from snapshots and reconciles live upsert/removal 
   assert.equal(store.getState().projectsSupported, true);
   assert.equal(store.getState().projectLocationCreationSupported, true);
   assert.equal(store.getState().stopBeforeArchiveSupported, true);
+  assert.equal(store.getState().stopFailureRecoverySupported, true);
   assert.equal(store.getState().projects.get(initial.id), initial);
 
   const renamed = project({ name: "Renamed Project", updatedAt: 2 });
@@ -70,6 +76,7 @@ test("legacy snapshots without a Project inventory remain compatible and authori
   assert.equal(store.getState().projectsSupported, false);
   assert.equal(store.getState().projectLocationCreationSupported, false);
   assert.equal(store.getState().stopBeforeArchiveSupported, false);
+  assert.equal(store.getState().stopFailureRecoverySupported, false);
   assert.equal(store.getState().projects.size, 0);
 });
 

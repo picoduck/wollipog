@@ -257,6 +257,8 @@ export interface State {
   nativeTuiLaunchSupported: boolean;
   /** False against older control planes that archive without first proving runtime Stop. */
   stopBeforeArchiveSupported: boolean;
+  /** False against older control planes without the correlated Stop recovery route. */
+  stopFailureRecoverySupported: boolean;
   /** True when the control plane provides durable, user-scoped reminder snapshots and deltas. */
   sessionRemindersSupported: boolean;
   runners: Map<string, RunnerView>;
@@ -1033,6 +1035,7 @@ function reducer(state: State, action: Action): State {
             accessScopeManagementSupported: msg.capabilities?.accessScopeManagement === true,
             nativeTuiLaunchSupported: msg.capabilities?.nativeTuiLaunch === true,
             stopBeforeArchiveSupported: msg.capabilities?.stopBeforeArchive === true,
+            stopFailureRecoverySupported: msg.capabilities?.stopFailureRecovery === true,
             sessionRemindersSupported: msg.capabilities?.sessionReminders === true,
             runners: new Map(msg.runners.map((r) => [r.runnerId, r])),
             // `boxes` may be absent from an older control plane's snapshot — tolerate it.
@@ -1396,6 +1399,7 @@ function initialState(view: View = { name: "inbox" }, inbox = loadInboxState()):
     accessScopeManagementSupported: false,
     nativeTuiLaunchSupported: false,
     stopBeforeArchiveSupported: false,
+    stopFailureRecoverySupported: false,
     sessionRemindersSupported: false,
     runners: new Map(),
     boxes: new Map(),

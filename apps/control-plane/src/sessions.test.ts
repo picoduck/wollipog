@@ -6490,6 +6490,19 @@ test("supported Stop operations time out durably and retry the same operation id
   assert.equal(db.getSession(id)?.archiveOperation, undefined);
 });
 
+test("attaching archive to an older non-archive Stop intent opens a fresh recovery window", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "stopped", 1);
+  db.addSessionStopIntent(id, RUNNER_ID, 1, false);
+
+  const pending = svc.setArchived(id, true).data!;
+  assert.equal(pending.archiveStatus, "stop_pending");
+  assert.equal(pending.archiveOperation!.requestedAt > 1, true);
+  assert.equal(svc.maintainSessionStopIntents(pending.archiveOperation!.requestedAt + 1), 0);
+  assert.equal(db.getSession(id)?.archiveStatus, "stop_pending");
+});
+
 test("exhausted retries and explicit runner rejection become bounded Stop Failed states", () => {
   const exhaustedHarness = makeHarness();
   const exhaustedId = seedSession(exhaustedHarness.svc, exhaustedHarness.hub);
