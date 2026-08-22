@@ -60,6 +60,18 @@ function checkShape(node, expected, label, diffs) {
       checkVariant(variant, names, label, `${discriminator}=${value}`, diffs);
     }
   }
+  // Reachability, not just each definition's own shape: a control that is dropped from the union or
+  // property that makes it valid stops being reachable even though its definition survives verbatim.
+  const variantRefs = new Set([...(node.anyOf || []), ...variants].map((variant) => variant.$ref).filter(Boolean));
+  for (const name of expected.variantRefs || []) {
+    if (!variantRefs.has(`#/definitions/${name}`)) diffs.push(`- ${label}: variant reference removed: ${name}`);
+  }
+  for (const [property, name] of Object.entries(expected.propertyRefs || {})) {
+    const target = node.properties?.[property];
+    // Codex reaches a definition either directly, through a map value, or through array items.
+    const refs = [target?.$ref, target?.additionalProperties?.$ref, target?.items?.$ref];
+    if (!refs.includes(`#/definitions/${name}`)) diffs.push(`- ${label}: property reference removed: ${property} -> ${name}`);
+  }
   const variantEnumValues = new Set(variants.flatMap((variant) => variant.enum || []));
   for (const value of expected.enumValuesInVariants || []) {
     if (!variantEnumValues.has(value)) diffs.push(`- ${label}: enum variant removed: ${value}`);

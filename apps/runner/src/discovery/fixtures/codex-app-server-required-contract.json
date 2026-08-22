@@ -509,11 +509,41 @@
             "properties",
             "required",
             "type"
-          ]
+          ],
+          "propertyRefs": {
+            "properties": "McpElicitationPrimitiveSchema"
+          }
         },
         "McpElicitationObjectType": {
           "enumValues": [
             "object"
+          ]
+        },
+        "McpElicitationPrimitiveSchema": {
+          "variantRefs": [
+            "McpElicitationEnumSchema",
+            "McpElicitationStringSchema",
+            "McpElicitationNumberSchema",
+            "McpElicitationBooleanSchema"
+          ]
+        },
+        "McpElicitationEnumSchema": {
+          "variantRefs": [
+            "McpElicitationSingleSelectEnumSchema",
+            "McpElicitationMultiSelectEnumSchema",
+            "McpElicitationLegacyTitledEnumSchema"
+          ]
+        },
+        "McpElicitationSingleSelectEnumSchema": {
+          "variantRefs": [
+            "McpElicitationUntitledSingleSelectEnumSchema",
+            "McpElicitationTitledSingleSelectEnumSchema"
+          ]
+        },
+        "McpElicitationMultiSelectEnumSchema": {
+          "variantRefs": [
+            "McpElicitationUntitledMultiSelectEnumSchema",
+            "McpElicitationTitledMultiSelectEnumSchema"
           ]
         },
         "McpElicitationStringSchema": {
@@ -612,7 +642,10 @@
             "oneOf",
             "title",
             "type"
-          ]
+          ],
+          "propertyRefs": {
+            "oneOf": "McpElicitationConstOption"
+          }
         },
         "McpElicitationLegacyTitledEnumSchema": {
           "required": [
@@ -643,7 +676,10 @@
           ],
           "properties": [
             "anyOf"
-          ]
+          ],
+          "propertyRefs": {
+            "anyOf": "McpElicitationConstOption"
+          }
         },
         "McpElicitationUntitledMultiSelectEnumSchema": {
           "required": [
@@ -657,7 +693,10 @@
             "minItems",
             "title",
             "type"
-          ]
+          ],
+          "propertyRefs": {
+            "items": "McpElicitationUntitledEnumItems"
+          }
         },
         "McpElicitationTitledMultiSelectEnumSchema": {
           "required": [
@@ -671,7 +710,10 @@
             "minItems",
             "title",
             "type"
-          ]
+          ],
+          "propertyRefs": {
+            "items": "McpElicitationTitledEnumItems"
+          }
         }
       }
     },

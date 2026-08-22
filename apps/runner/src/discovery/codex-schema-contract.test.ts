@@ -20,6 +20,8 @@ interface ExpectedShape {
   propertyEnumValues?: Record<string, string[]>;
   variantRequiredProperties?: Record<string, string[]>;
   discriminatedVariants?: Record<string, Record<string, string[]>>;
+  variantRefs?: string[];
+  propertyRefs?: Record<string, string>;
   enumValues?: string[];
   enumValuesInVariants?: string[];
 }
@@ -30,7 +32,12 @@ interface ExpectedShape {
 function synthesizeShape(expected: ExpectedShape): Record<string, unknown> {
   return {
     required: expected.required ?? [],
-    properties: Object.fromEntries((expected.properties ?? []).map((name) => [name, {}])),
+    properties: {
+      ...Object.fromEntries((expected.properties ?? []).map((name) => [name, {}])),
+      ...Object.fromEntries(
+        Object.entries(expected.propertyRefs ?? {}).map(([property, name]) => [property, { $ref: `#/definitions/${name}` }]),
+      ),
+    },
     oneOf: [
       ...(expected.enumValuesInVariants ?? []).map((value) => ({ enum: [value] })),
       ...Object.entries(expected.propertyEnumValues ?? {}).flatMap(([property, values]) => values.map((value) => ({
@@ -51,6 +58,7 @@ function synthesizeShape(expected: ExpectedShape): Record<string, unknown> {
           },
         }))),
     ],
+    anyOf: (expected.variantRefs ?? []).map((name) => ({ $ref: `#/definitions/${name}` })),
     enum: expected.enumValues,
   };
 }
@@ -126,6 +134,30 @@ test("pinned schema fixture matches discovery metadata and reports a useful drif
     assert.notEqual(stringSchemaDrift.status, 0);
     assert.match(stringSchemaDrift.stderr, /McpElicitationStringSchema.*property removed: maxLength/);
     elicitation.definitions.McpElicitationStringSchema.properties.maxLength = {};
+
+    // Union membership: a control dropped from the union that makes it valid stops being reachable
+    // even though its own definition survives, so the driver's boolean branch would go dead.
+    elicitation.definitions.McpElicitationPrimitiveSchema.anyOf =
+      elicitation.definitions.McpElicitationPrimitiveSchema.anyOf.filter(
+        (variant: { $ref?: string }) => variant.$ref !== "#/definitions/McpElicitationBooleanSchema",
+      );
+    writeFileSync(elicitationPath, JSON.stringify(elicitation));
+    const unionDrift = spawnSync(process.execPath, [script], { encoding: "utf8", env: { ...process.env, CODEX_SCHEMA_DIR: dir } });
+    assert.notEqual(unionDrift.status, 0);
+    assert.match(unionDrift.stderr, /McpElicitationPrimitiveSchema.*variant reference removed: McpElicitationBooleanSchema/);
+    elicitation.definitions.McpElicitationPrimitiveSchema.anyOf.push({ $ref: "#/definitions/McpElicitationBooleanSchema" });
+
+    // Property reachability: repointing the form-control map leaves every definition intact but
+    // silently changes which controls a provider may send.
+    elicitation.definitions.McpElicitationSchema.properties.properties.$ref = "#/definitions/McpElicitationStringSchema";
+    writeFileSync(elicitationPath, JSON.stringify(elicitation));
+    const propertyRefDrift = spawnSync(process.execPath, [script], { encoding: "utf8", env: { ...process.env, CODEX_SCHEMA_DIR: dir } });
+    assert.notEqual(propertyRefDrift.status, 0);
+    assert.match(
+      propertyRefDrift.stderr,
+      /McpElicitationSchema: property reference removed: properties -> McpElicitationPrimitiveSchema/,
+    );
+    elicitation.definitions.McpElicitationSchema.properties.properties.$ref = "#/definitions/McpElicitationPrimitiveSchema";
 
     // A consumed string format the driver maps onto its own input formats.
     elicitation.definitions.McpElicitationStringFormat.enum =

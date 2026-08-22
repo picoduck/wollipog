@@ -562,8 +562,12 @@ The fixture pins the **consumed surface**, not the whole generated schema: every
 request variant, and enum value the driver reads or sends. That includes both supported
 `mcpServer/elicitation/request` modes (identified by their `mode` discriminator rather than a
 variant title), the nested `McpElicitation*` form-control schemas the normalizer reads, and the
-native decision/action/scope enums Wollipog sends back. A compatible-looking upgrade that renames a
-mode or drops a decision value therefore fails the check instead of silently losing structured
+native decision/action/scope enums Wollipog sends back. It also pins **reachability**, not only each
+definition's own shape: the unions and property references that make a form control valid under
+`requestedSchema`. Dropping `McpElicitationBooleanSchema` from the primitive union, or repointing
+that union elsewhere, leaves every definition intact while making boolean form fields unsendable, so
+those links are checked directly. A compatible-looking upgrade that renames a mode, drops a decision
+value, or disconnects a control therefore fails the check instead of silently losing structured
 interactions at runtime. Fields Wollipog never consumes are deliberately left unpinned so the
 contract stays a compatibility boundary rather than a change detector.
 
