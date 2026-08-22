@@ -131,8 +131,11 @@ test("live reminder changes preserve the complete draft and require an explicit 
 
   const reload = [...container.querySelectorAll<HTMLButtonElement>("button")]
     .find((button) => button.textContent === "Reload Reminder")!;
+  reload.focus();
+  assert.equal(domWindow.document.activeElement, reload);
   await act(async () => { reload.click(); });
   assert.equal(container.querySelector('[role="alert"]'), null);
+  assert.equal(domWindow.document.activeElement, expression, "reloading must restore focus inside the dialog");
   assert.equal(expression.value, "");
   assert.equal(exact.value, "2099-05-06T07:45");
   assert.equal(container.querySelector<HTMLButtonElement>('[role="radio"][aria-checked="true"]')?.textContent?.includes("Until Activity"), true);

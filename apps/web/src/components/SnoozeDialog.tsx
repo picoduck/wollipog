@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { SessionReminderView, SessionReminderWakePolicy, SetSessionReminderRequest } from "@wollipog/protocol";
 import {
   browserTimeZone,
@@ -29,6 +29,8 @@ export function SnoozeDialog({
   const [scheduleTouched, setScheduleTouched] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const expressionRef = useRef<HTMLInputElement>(null);
+  const focusExpressionAfterReloadRef = useRef(false);
   const localTimeZone = browserTimeZone();
   const timeZone = loadedReminder && !scheduleTouched ? loadedReminder.timeZone : localTimeZone;
   const conflict = submitting ? null : reminderConflict(loadedReminder, reminder);
@@ -39,8 +41,15 @@ export function SnoozeDialog({
       : parseReminderExpression(expression, new Date());
   }, [exact, expression, localTimeZone, loadedReminder, scheduleTouched]);
 
+  useLayoutEffect(() => {
+    if (!focusExpressionAfterReloadRef.current) return;
+    focusExpressionAfterReloadRef.current = false;
+    expressionRef.current?.focus();
+  }, [loadedReminder]);
+
   const reload = () => {
     const next = draftForReminder(reminder);
+    focusExpressionAfterReloadRef.current = true;
     setLoadedReminder(reminder);
     setExpression(next.expression);
     setExact(next.exact);
@@ -130,7 +139,7 @@ export function SnoozeDialog({
           ))}
         </div>
         <label className="field-label" htmlFor="snooze-expression">Natural Language</label>
-        <input id="snooze-expression" className="input" aria-describedby="snooze-expression-hint" value={expression} onChange={(event) => { setScheduleTouched(true); setExact(""); setExpression(event.target.value); }} placeholder="e.g. in 2 hours" autoFocus />
+        <input ref={expressionRef} id="snooze-expression" className="input" aria-describedby="snooze-expression-hint" value={expression} onChange={(event) => { setScheduleTouched(true); setExact(""); setExpression(event.target.value); }} placeholder="e.g. in 2 hours" autoFocus />
         <span className="field-hint" id="snooze-expression-hint">Supported phrases are shown by the presets, plus “in N minutes/hours/days” and “today/tomorrow at 3:30 pm.” Ambiguous numeric dates are not guessed.</span>
         <label className="field-label" htmlFor="snooze-exact">Exact Date and Time</label>
         <input id="snooze-exact" className="input" type="datetime-local" value={exact} onChange={(event) => { setScheduleTouched(true); setExact(event.target.value); }} />

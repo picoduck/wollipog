@@ -363,7 +363,7 @@ test("a two-client reminder upsert preserves the open Inbox Snooze draft and foc
   await act(async () => {
     socket.push({
       type: "session_reminder_upsert",
-      userId: "user",
+      userId: "usr_local_owner",
       reminder: {
         ...original,
         scheduledFor: Date.now() + 172_800_000,
