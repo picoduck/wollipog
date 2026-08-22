@@ -301,7 +301,10 @@ function touchInputEvent(type: "touchstart" | "touchmove" | "touchend", ...clien
   return event;
 }
 
-function pointerInputEvent(type: "pointerdown" | "pointermove" | "pointercancel", clientY: number) {
+function pointerInputEvent(
+  type: "pointerdown" | "pointermove" | "pointerup" | "pointercancel",
+  clientY: number,
+) {
   const event = new domWindow.Event(type, { bubbles: true });
   Object.defineProperties(event, {
     clientY: { value: clientY },
@@ -750,6 +753,49 @@ test("lifting one finger does not end a multi-touch traversal", async () => {
     });
 
     assert.equal(pages.tailCalls.length, 2, "remaining touch input keeps the traversal armed");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a two-finger touch start remains active after one pointer lifts", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages);
+  try {
+    const openingWindow = fixture.events.slice(-8);
+    await act(async () => {
+      pages.releaseTail({
+        events: openingWindow,
+        eventEpoch: 0,
+        nextBefore: openingWindow[0]!.seq,
+        hasMoreOlder: true,
+        cacheComplete: true,
+      });
+    });
+    await flushAsyncWork();
+    setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 1_600, scrollTop: 1_200 });
+
+    await act(async () => {
+      fixture.scroller.dispatchEvent(pointerInputEvent("pointerdown", 200) as never);
+      fixture.scroller.dispatchEvent(pointerInputEvent("pointerdown", 300) as never);
+      fixture.scroller.dispatchEvent(touchInputEvent("touchstart", 200, 300) as never);
+      fixture.scroller.dispatchEvent(touchInputEvent("touchmove", 400, 500) as never);
+    });
+    await scrollReader(fixture.scroller, 500, false);
+    await act(async () => {
+      fixture.scroller.dispatchEvent(pointerInputEvent("pointerup", 400) as never);
+      fixture.scroller.dispatchEvent(touchInputEvent("touchend", 500) as never);
+    });
+    await flushAsyncWork(250);
+    await act(async () => {
+      fixture.scroller.dispatchEvent(touchInputEvent("touchmove", 600) as never);
+    });
+    await scrollReader(fixture.scroller, 120, false);
+    await act(async () => {
+      fixture.scroller.dispatchEvent(touchInputEvent("touchend") as never);
+    });
+
+    assert.equal(pages.tailCalls.length, 2, "native ownership survives a partial two-finger lift");
   } finally {
     await unmountFixture(fixture);
   }

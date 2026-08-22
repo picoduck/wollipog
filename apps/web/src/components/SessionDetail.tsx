@@ -2515,9 +2515,7 @@ function SessionDetailLoaded({
                 if (event.pointerType === "touch") finishPointerTouchEarlierActivityIntent();
               }}
               onTouchStart={(event) => {
-                if (event.touches.length === 1) {
-                  markNativeTouchEarlierActivityIntent(event.touches[0]?.clientY ?? null);
-                }
+                markNativeTouchEarlierActivityIntent(event.touches[0]?.clientY ?? null);
                 followTail.onTouchStart();
               }}
               onTouchMove={(event) => {
