@@ -553,16 +553,7 @@ pre {
   left: -9px;
   background: var(--red);
 }
-/* The New Session control is an ACTION, not a destination. It had no rule of its own, so it looked
-   exactly like the eight navigation items above it. */
-.rail-item.rail-action {
-  color: var(--accent);
-}
-.rail-item.rail-action:hover {
-  color: var(--on-accent);
-  background: var(--accent);
-}
-/* --- Phone "More" sheet + floating New Session action (see MOBILE_PRIMARY_VIEWS) --- */
+/* --- Phone "More" sheet (see MOBILE_PRIMARY_VIEWS) --- */
 .rail-more { position: relative; display: none; }
 /* Keeps the shared .menu-backdrop class — that is what the shell's Escape ladder clicks — but
    raises it above the mobile right-panel overlay (35). At the inherited 30 a tap on the exposed
@@ -631,7 +622,7 @@ pre {
   }
 }
 
-/* The phone topbar carries New Session, the instance trigger, and Settings in one fixed-height
+/* The phone topbar carries the instance trigger and Settings in one fixed-height
    non-wrapping row. The instance trigger grew with the instance NAME, so a long name pushed
    Settings — and on session views the editor, pinned-summary, terminal and side-panel buttons —
    past the right edge with nothing to scroll them back into view.
@@ -7710,9 +7701,7 @@ body.shell-dock-dragging * {
 .project-location-actions .btn,
 .project-location-candidate .btn,
 .project-location-create-toggle,
-.project-location-create .btn,
-.inbox-create-project { min-height: 44px; }
-  .inbox-create-project { width: 44px; height: 44px; }
+.project-location-create .btn { min-height: 44px; }
 }
 
 /* Command Inbox --------------------------------------------------------- */
@@ -7762,7 +7751,11 @@ body.shell-dock-dragging * {
   align-items: center;
   gap: 8px;
 }
-.inbox-create-project {
+.inbox-create-menu {
+  position: relative;
+  display: flex;
+}
+.inbox-create-control {
   display: inline-flex;
   width: 34px;
   height: 34px;
@@ -7776,8 +7769,13 @@ body.shell-dock-dragging * {
   background: var(--bg);
   cursor: pointer;
 }
-.inbox-create-project:hover,
-.inbox-create-project:focus-visible { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); color: var(--accent); }
+.inbox-create-control:hover,
+.inbox-create-control:focus-visible,
+.inbox-create-control[aria-expanded="true"] {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  color: var(--accent);
+}
+.inbox-create-menu-pop { min-width: 180px; }
 .inbox-tab-group {
   position: relative;
   display: inline-flex;
@@ -7939,7 +7937,7 @@ body.shell-dock-dragging * {
 .inbox-search:focus-within .inbox-search-key,
 .inbox-search.has-query .inbox-search-key { display: inline-block; }
 @media (hover: none), (pointer: coarse) {
-  .inbox-create-project { width: 44px; height: 44px; }
+  .inbox-create-control { width: 44px; height: 44px; }
   .inbox-search { width: 44px; min-width: 44px; height: 44px; }
   .inbox-search:focus-within,
   .inbox-search.has-query { width: min(250px, 28vw); min-width: 150px; }

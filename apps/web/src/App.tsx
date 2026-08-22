@@ -65,7 +65,7 @@ import {
 } from "./instance-storage.js";
 import { FeedbackProvider } from "./components/FeedbackProvider.js";
 import { Modal } from "./components/common.js";
-import { DockBottomIcon, KeyboardIcon, LockIcon, PanelRightIcon, PinnedPanelIcon, PlusIcon, WarningTriangleIcon } from "./components/Icons.js";
+import { DockBottomIcon, KeyboardIcon, LockIcon, PanelRightIcon, PinnedPanelIcon, WarningTriangleIcon } from "./components/Icons.js";
 import { NavRow, SwitchRow } from "./components/ui/SettingsRows.js";
 import { viewPath, viewTitle } from "./navigation.js";
 import { handleSettingsNavigationKey } from "./settings-navigation.js";
@@ -368,7 +368,7 @@ function Shell() {
     navigate({ name: "session", id: sessionId });
   }, [navigate]);
   const isMobile = useIsMobile();
-  // The breakpoint-specific controls (the gear, the New Session button) are unmounted by a
+  // The breakpoint-specific controls (the instance selector and gear) are unmounted by a
   // crossing, and a keyboard user standing on one is left on <body>. Accessibility zoom crosses
   // 760px too, so this is not only a window-drag case.
   //
@@ -621,7 +621,6 @@ function Shell() {
         stalledCount={stalledSessions}
         onlineConnections={onlineRunners}
         onNavigate={navigate}
-        onNewSession={openContextualNewSession}
         {...(isMobile ? {} : {
           instanceControl: <InstanceSelector compact />,
           settingsControl: <SettingsTrigger active={view.name === "settings"} onOpen={() => navigate({ name: "settings" })} />,
@@ -636,15 +635,6 @@ function Shell() {
                  The topbar is fixed and uncontested — unlike the bottom band, which an open shell
                  dock and the toast stack both occupy. */
               <>
-                <button
-                  type="button"
-                  className="icon-btn"
-                  onClick={openContextualNewSession}
-                  title="New Session"
-                  aria-label="New Session"
-                >
-                  <PlusIcon size={18} />
-                </button>
                 <InstanceSelector compact />
                 <SettingsTrigger active={view.name === "settings"} onOpen={() => navigate({ name: "settings" })} />
               </>
@@ -823,7 +813,7 @@ function Header({
   sessionActions,
 }: {
   view: View;
-  /** Instance switcher, New Session, and Settings on phone widths, where the rail has no room. */
+  /** Instance switcher and Settings on phone widths, where the rail has no room. */
   mobileControls?: React.ReactNode;
   onNewRun: () => void;
   onNewPod: () => void;

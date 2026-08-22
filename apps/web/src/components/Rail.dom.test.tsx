@@ -50,7 +50,6 @@ test("rail exposes every destination, nested active states, live badges, and per
         stalledCount={stalledCount}
         onlineConnections={onlineConnections}
         onNavigate={(destination) => navigated.push(destination)}
-        onNewSession={() => navigated.push({ name: "session", id: "new" })}
         instanceControl={<button type="button">Switch Instance</button>}
         settingsControl={<button type="button">Settings</button>}
       />,
@@ -107,9 +106,8 @@ function stubPhoneWidth() {
 }
 
 test("the phone rail is destinations-only and hosts no nested layers", async () => {
-  // Eight destinations plus the instance, New Session and Settings controls measured 536px of
-  // content in a 375px viewport, so the last three sat entirely off-screen in a bar with hidden
-  // scrollbars — and the New Session shortcut is disabled on mobile, so nothing could reach them.
+  // The phone bar now carries only destinations. Creation lives in the Inbox toolbar, while
+  // Instance and Settings live in the top bar.
   //
   // The bar now carries four destinations plus More, and the sheet holds ONLY destinations. An
   // earlier revision put Instance and Settings inside the sheet; because those render their own
@@ -129,7 +127,6 @@ test("the phone rail is destinations-only and hosts no nested layers", async () 
         stalledCount={0}
         onlineConnections={1}
         onNavigate={(next) => navigated.push(next)}
-        onNewSession={() => undefined}
       />,
     );
   });
@@ -193,7 +190,6 @@ test("More closes when the viewport leaves the phone breakpoint", async () => {
         stalledCount={0}
         onlineConnections={0}
         onNavigate={() => undefined}
-        onNewSession={() => undefined}
       />,
     );
   });
@@ -240,7 +236,6 @@ test("More reports the current page when an overflow destination is selected", a
           stalledCount={0}
           onlineConnections={0}
           onNavigate={() => undefined}
-          onNewSession={() => undefined}
         />,
       );
     });
@@ -273,7 +268,6 @@ test("only one element claims the current page while More is open", async () => 
           stalledCount={0}
           onlineConnections={0}
           onNavigate={() => undefined}
-          onNewSession={() => undefined}
         />,
       );
     });

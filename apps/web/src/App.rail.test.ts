@@ -5,6 +5,7 @@ import { test } from "node:test";
 const app = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
 const rail = readFileSync(new URL("./components/Rail.tsx", import.meta.url), "utf8");
 const inbox = readFileSync(new URL("./components/InboxView.tsx", import.meta.url), "utf8");
+const inboxCreateMenu = readFileSync(new URL("./components/InboxCreateMenu.tsx", import.meta.url), "utf8");
 const inboxList = readFileSync(new URL("./components/InboxList.tsx", import.meta.url), "utf8");
 const inboxRow = readFileSync(new URL("./components/InboxRow.tsx", import.meta.url), "utf8");
 const inboxShortcutRail = readFileSync(new URL("./components/InboxShortcutRail.tsx", import.meta.url), "utf8");
@@ -38,10 +39,10 @@ test("the application shell is rail-first and the legacy sidebar is fully retire
   assert.match(rail, /visibleItems\.map/);
   assert.match(rail, /visibleItems = isMobile[\s\S]*?GLOBAL_VIEW_ITEMS/);
   assert.match(rail, /overflowItems = isMobile[\s\S]*?GLOBAL_VIEW_ITEMS/);
-  // Every rail control shares one icon size. On a phone the rail is destinations-only, so the
-  // New Session control does not render here at all — the topbar owns it (see App.tsx).
+  // Creation is an Inbox action, never a navigation destination or breakpoint-specific shell action.
   assert.match(rail, /const RAIL_ICON_SIZE = 26;[\s\S]*<Icon size=\{RAIL_ICON_SIZE\}/);
-  assert.match(rail, /<PlusIcon size=\{RAIL_ICON_SIZE\}/);
+  assert.doesNotMatch(rail, /onNewSession|rail-action|PlusIcon/);
+  assert.doesNotMatch(app, /title="New Session"[\s\S]*aria-label="New Session"/);
   assert.match(app, /mobileControls=\{isMobile \?/);
   assert.match(css, /\.app-rail\s*\{\s*width:\s*66px/);
   assert.match(css, /\.rail-brand img\s*\{[^}]*width:\s*39px;[^}]*height:\s*39px/);
@@ -192,21 +193,31 @@ test("Inbox project tabs stay balanced, hide overflow chrome, and reveal context
     "mobile overlays must stop above the enlarged bottom rail");
 });
 
-test("durable Project management is a first-class workspace with a compact Inbox creation action", () => {
+test("Inbox unifies Session and Project creation while the shell exposes no duplicate action", () => {
   assert.match(rail, /projects:\s*ProjectsIcon/);
   assert.match(rail, /if \(view\.name === "session"\) return "inbox"/,
     "session detail remains owned by Inbox");
   assert.doesNotMatch(rail, /view\.name === "projects"[\s\S]*return "inbox"/,
     "Projects owns its rail active state");
-  assert.match(inbox, /className="inbox-create-project"[\s\S]*aria-label="Create Project"[\s\S]*<PlusIcon/,
-    "Inbox exposes Project creation without spending space on a management label");
+  assert.doesNotMatch(rail, /onNewSession|rail-action|PlusIcon/,
+    "the desktop rail has no creation action");
+  assert.doesNotMatch(app, /title="New Session"[\s\S]*aria-label="New Session"/,
+    "the mobile top bar has no creation action");
+  assert.match(inbox, /<InboxCreateMenu[\s\S]*onNewSession=\{\(\) => onNewSession\?\.\(activeNewSessionPreset\)\}[\s\S]*onNewProject=\{projectsSupported \? \(\) => setCreatingProject\(true\) : undefined\}/,
+    "the Inbox menu routes each choice into its existing context-aware workflow");
+  assert.match(inboxCreateMenu, /aria-label="Create"[\s\S]*New Session[\s\S]*New Project/,
+    "the control and both visible choices use accessible Title Case names");
+  assert.match(inboxCreateMenu, /useAccessibleMenu[\s\S]*useAnchoredMenuStyle/,
+    "the same focus-managed, viewport-anchored menu works for desktop and touch layouts");
   assert.match(inbox, /creatingProject && \([\s\S]*<CreateProjectDialog/,
-    "the compact action opens Project creation directly");
+    "New Project opens the existing Project creation workflow");
   assert.doesNotMatch(inbox, /inbox-manage-projects|Manage Projects/,
     "Project management lives in the rail instead of the Project bar");
   assert.doesNotMatch(commandPalette, /views\.splice\([^;]*Manage Projects/,
     "the command palette derives its single Projects destination from the global rail vocabulary");
-  assert.match(css, /\.inbox-create-project\s*\{[^}]*width:\s*34px;[^}]*height:\s*34px;/);
+  assert.match(css, /\.inbox-create-control\s*\{[^}]*width:\s*34px;[^}]*height:\s*34px;/);
+  assert.match(css, /@media \(hover: none\), \(pointer: coarse\)[\s\S]*\.inbox-create-control\s*\{[^}]*width:\s*44px;[^}]*height:\s*44px;/,
+    "the shared creation control keeps a touch-sized target");
   assert.match(projectsView, /Projects organize related sessions\. Locations are folders on connected machines where sessions run\./);
   assert.match(projectsView, /className="muted project-detail-meta">Project ID:/);
   assert.match(projectsView, /className="muted project-detail-meta">\{projectAudienceVisibilitySummary/);
