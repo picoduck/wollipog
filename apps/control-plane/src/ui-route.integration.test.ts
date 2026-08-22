@@ -425,7 +425,7 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     sessionSnapshots: [
       sessionSnapshot("session-target"),
       sessionSnapshot("session-other"),
-      { ...sessionSnapshot("session-history"), seq: 3, historyEpoch: 9 },
+      { ...sessionSnapshot("session-history"), status: "stopped", seq: 3, historyEpoch: 9 },
     ],
   }));
   await runnerInbox.take((message) => message.type === "registered");
@@ -610,6 +610,7 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     createProjectLocations: true,
     accessScopeManagement: true,
     nativeTuiLaunch: true,
+    stopBeforeArchive: true,
   });
   const initialProjects = snapshot.projects as Array<{
     id: string;
@@ -1262,23 +1263,25 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   const archivePayload = (await archiveResponse.json() as {
     project: { id: string; unarchivedSessionCount: number; totalSessionCount: number };
     archivedSessionIds: string[];
+    pendingSessionIds: string[];
   });
   const archivedProject = archivePayload.project;
   assert.deepEqual(
     [archivedProject.id, archivedProject.unarchivedSessionCount, archivedProject.totalSessionCount],
-    [createdProject.id, 0, 1],
-    "archiving the Project's sessions leaves the durable Project in the inventory",
+    [createdProject.id, 1, 1],
+    "a Project session remains visible while its Stop is pending",
   );
   assert.deepEqual(
-    archivePayload.archivedSessionIds.sort(),
-    ["session-target"],
-    "the atomic response reports only sessions changed by this archive operation",
+    archivePayload.archivedSessionIds,
+    [],
+    "active sessions are not reported as archived before Stop evidence",
   );
-  for (const sessionId of ["session-target"]) {
-    await uiInbox.take((message) => message.type === "session_upsert" &&
-      (message.session as { id?: string; archived?: boolean } | undefined)?.id === sessionId &&
-      (message.session as { archived?: boolean } | undefined)?.archived === true);
-  }
+  assert.deepEqual(archivePayload.pendingSessionIds, ["session-target"]);
+  await runnerInbox.take((message) => message.type === "stop_session" && message.sessionId === "session-target");
+  await uiInbox.take((message) => message.type === "session_upsert" &&
+    (message.session as { id?: string; archived?: boolean; archiveStatus?: string } | undefined)?.id === "session-target" &&
+    (message.session as { archived?: boolean } | undefined)?.archived === false &&
+    (message.session as { archiveStatus?: string } | undefined)?.archiveStatus === "stop_pending");
   assert.equal(
     uiInbox.has((message) => message.type === "session_upsert" &&
       (message.session as { id?: string; archived?: boolean } | undefined)?.id === "session-history" &&

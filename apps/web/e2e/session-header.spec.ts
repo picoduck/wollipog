@@ -125,7 +125,7 @@ test("the unified session bar balances navigation, breadcrumb, status, and actio
   // The former standalone header actions live here now; the process-destructive item stays last
   // and visually distinct.
   await expect(menu.getByRole("menuitem", { name: "Rename Session…" })).toBeVisible();
-  await expect(menu.getByRole("menuitem", { name: "Archive" })).toBeVisible();
+  await expect(menu.getByRole("menuitem", { name: "Archive and Stop" })).toBeVisible();
   const stopSession = menu.getByRole("menuitem", { name: "Stop Session" });
   await expect(stopSession).toBeVisible();
   await expect(stopSession).toHaveClass(/menu-danger/);

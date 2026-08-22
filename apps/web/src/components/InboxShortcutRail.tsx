@@ -1,9 +1,11 @@
 import type { SessionView } from "@wollipog/protocol";
+import { sessionArchiveActionLabel } from "../archive-actions.js";
 
 export interface InboxShortcutRailProps {
   session: SessionView | null;
   pinned: boolean;
   busy: boolean;
+  stopBeforeArchiveSupported: boolean;
   onApprove: () => void;
   onDeny: () => void;
   onReply: () => void;
@@ -39,6 +41,7 @@ export function InboxShortcutRail({
   session,
   pinned,
   busy,
+  stopBeforeArchiveSupported,
   onApprove,
   onDeny,
   onReply,
@@ -64,7 +67,7 @@ export function InboxShortcutRail({
         <ShortcutButton label="Expand" shortcut="Enter" disabled={busy} onClick={onExpand} />
         <ShortcutButton label={pinned ? "Unpin" : "Pin"} shortcut="S" disabled={busy} onClick={onTogglePin} />
         <ShortcutButton label="Unread" shortcut="U" disabled={busy} onClick={onMarkUnread} />
-        <ShortcutButton label="Archive" shortcut="E" disabled={busy} onClick={onArchive} />
+        <ShortcutButton label={sessionArchiveActionLabel(session, stopBeforeArchiveSupported)} shortcut="E" disabled={busy} onClick={onArchive} />
       </span>
     </div>
   );

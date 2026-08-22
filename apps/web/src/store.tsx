@@ -254,6 +254,8 @@ export interface State {
   accessScopeManagementSupported: boolean;
   /** True only when New Session can atomically open the separate Native TUI process. */
   nativeTuiLaunchSupported: boolean;
+  /** False against older control planes that archive without first proving runtime Stop. */
+  stopBeforeArchiveSupported: boolean;
   runners: Map<string, RunnerView>;
   boxes: Map<string, BoxView>;
   /** Authoritative when the snapshot advertises Project support; empty against legacy control
@@ -1026,6 +1028,7 @@ function reducer(state: State, action: Action): State {
             projectLocationCreationSupported: msg.capabilities?.createProjectLocations === true,
             accessScopeManagementSupported: msg.capabilities?.accessScopeManagement === true,
             nativeTuiLaunchSupported: msg.capabilities?.nativeTuiLaunch === true,
+            stopBeforeArchiveSupported: msg.capabilities?.stopBeforeArchive === true,
             runners: new Map(msg.runners.map((r) => [r.runnerId, r])),
             // `boxes` may be absent from an older control plane's snapshot — tolerate it.
             boxes: new Map((msg.boxes ?? []).map((b) => [b.boxId, b])),
@@ -1369,6 +1372,7 @@ function initialState(view: View = { name: "inbox" }, inbox = loadInboxState()):
     projectLocationCreationSupported: false,
     accessScopeManagementSupported: false,
     nativeTuiLaunchSupported: false,
+    stopBeforeArchiveSupported: false,
     runners: new Map(),
     boxes: new Map(),
     projects: new Map(),

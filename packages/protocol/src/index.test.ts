@@ -19,6 +19,7 @@ import {
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
   BOARD_COLUMNS,
+  archiveRequiresStop,
   columnForStatus,
   isTerminal,
   TERMINAL_STATUSES,
@@ -659,6 +660,16 @@ test("isTerminal is true for terminal statuses", () => {
 test("isTerminal is false for non-terminal statuses", () => {
   for (const status of ["queued", "starting", "running", "input_required", "idle"] as SessionStatus[]) {
     assert.equal(isTerminal(status), false, `${status} should not be terminal`);
+  }
+});
+
+test("archive requires a confirmed stop for every non-terminal lifecycle", () => {
+  for (const status of ALL_STATUSES) {
+    assert.equal(
+      archiveRequiresStop(status),
+      ["queued", "starting", "running", "input_required", "idle"].includes(status),
+      status,
+    );
   }
 });
 

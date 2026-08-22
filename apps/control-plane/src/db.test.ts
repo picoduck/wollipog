@@ -683,8 +683,10 @@ test("session stop intents survive control-plane restart and cascade with their 
     initial.registerRunner(meta(), 500);
     initial.createSession(newSession());
     initial.addSessionStopIntent("sess-1", "runner-1", 1_100);
+    assert.equal(initial.sessionArchiveStatus("sess-1"), undefined);
     initial.setSessionStopRestartLaunchId("sess-1", "launch-proof-1");
-    initial.addSessionStopIntent("sess-1", "runner-1", 1_200);
+    initial.addSessionStopIntent("sess-1", "runner-1", 1_200, true);
+    assert.equal(initial.listSessions()[0]?.archiveStatus, "stop_pending");
     assert.equal(initial.sessionStopRestartLaunchId("sess-1"), null);
     initial.setSessionStopRestartLaunchId("sess-1", "launch-proof-2");
     assert.deepEqual(initial.sessionStopIntentIds("runner-1"), ["sess-1"]);
@@ -692,6 +694,9 @@ test("session stop intents survive control-plane restart and cascade with their 
 
     const reopened = ControlPlaneDb.open(path);
     assert.equal(reopened.hasSessionStopIntent("sess-1"), true);
+    assert.equal(reopened.getSession("sess-1")?.archiveStatus, "stop_pending");
+    reopened.cancelSessionArchiveAfterStop("sess-1");
+    assert.equal(reopened.getSession("sess-1")?.archiveStatus, undefined);
     assert.equal(reopened.sessionStopRestartLaunchId("sess-1"), "launch-proof-2");
     assert.deepEqual(reopened.sessionStopIntentIds("runner-1"), ["sess-1"]);
     reopened.deleteSession("sess-1");

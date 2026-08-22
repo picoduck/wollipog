@@ -484,6 +484,7 @@ function SessionDetailLoaded({
   });
   const runner = useStoreSelector((s) => s.runners.get(session.runnerId));
   const runnerOnline = runner?.status === "online";
+  const stopBeforeArchiveSupported = useStoreSelector((s) => s.stopBeforeArchiveSupported);
   const richGitSupported = runnerSupportsProtocol(runner?.protocolVersion, "gitVisibility");
   const box = useStoreSelector((s) => [...s.boxes.values()].find((candidate) => candidate.runnerId === session.runnerId));
   const conn = useStoreSelector((s) => s.conn);
@@ -2257,6 +2258,7 @@ function SessionDetailLoaded({
           session={session}
           runnerOnline={runnerOnline}
           runnerProtocolVersion={runner?.protocolVersion}
+          stopBeforeArchiveSupported={stopBeforeArchiveSupported}
           providerLogoutSupported={runner?.agents.find((agent) => agent.id === session.agentId)?.acp?.logout === true}
           exportReady={eventHistory?.everComplete === true}
           onBack={onBack ?? (() => navigate({ name: "inbox" }))}
@@ -2272,7 +2274,7 @@ function SessionDetailLoaded({
           <div className="session-preview-heading">
             <h2 className="session-preview-title">{session.title}</h2>
             <div className="session-preview-meta">
-              <StatusBadge status={session.status} />
+              <StatusBadge status={session.status} archiveStatus={session.archiveStatus} />
               {session.backgroundWorkState && <BackgroundWorkBadge state={session.backgroundWorkState} />}
               {!session.backgroundWorkState && session.backgroundWorkTracking === "untracked" && (
                 <UntrackedBackgroundWorkBadge />

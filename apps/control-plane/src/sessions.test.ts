@@ -233,10 +233,10 @@ class FakeHub {
     else this.activeTurnIds.delete(sessionId);
   }
 
-  sessionChanged(session: SessionView): void {
-    this.calls.push({ method: "sessionChanged", args: [session] });
+  sessionChanged(session: SessionView, refreshProject = true): void {
+    this.calls.push({ method: "sessionChanged", args: [session, refreshProject] });
     this.sessionChangedCalls.push(session);
-    if (session.projectId) this.projectChangedById(session.projectId);
+    if (refreshProject && session.projectId) this.projectChangedById(session.projectId);
   }
 
   sessionChangedById(sessionId: string): void {
@@ -2401,12 +2401,13 @@ test("admission-queued prompts persist before success, survive service restart, 
   }), true);
   assert.equal(db.getSessionPromptCommand(commandIds[0]!)?.state, "queued", "late retries cannot regress state");
 
-  assert.equal(svc.setArchived(id, true).ok, true);
-  assert.equal(db.getSessionPromptCommand(commandIds[1]!)?.state, "sent",
-    "archiving is display-only and preserves queued delivery");
-  assert.equal(restarted.stop(id).ok, true);
+  const archive = svc.setArchived(id, true);
+  assert.equal(archive.status, 202);
+  assert.equal(archive.data?.archiveStatus, "stop_pending");
+  assert.equal(archive.data?.archived, false, "queued work stays discoverable until stop confirmation");
   assert.equal(db.getSessionPromptCommand(commandIds[0]!)?.state, "uncertain");
   assert.equal(db.getSessionPromptCommand(commandIds[1]!)?.state, "uncertain");
+  assert.equal(hub.sentOfType("stop_session").at(-1)?.sessionId, id);
   hub.sentToRunner.length = 0;
   restarted.retryDuePrompts(Date.now() + 120_000);
   assert.equal(hub.sentOfType("durable_session_command").length, 0,
@@ -6143,6 +6144,155 @@ test("approve fails 409 when the requestId does not match the pending one", () =
 /* -------------------------------------------------------------------------- */
 /* stop / restart                                                            */
 /* -------------------------------------------------------------------------- */
+
+test("archive directly files terminal sessions without unnecessary lifecycle work", () => {
+  for (const status of ["completed", "failed", "stopped"] as const) {
+    const { db, hub, svc } = makeHarness();
+    const id = seedSession(svc, hub);
+    db.updateSessionStatus(id, status, Date.now());
+    hub.sentToRunner.length = 0;
+
+    const result = svc.setArchived(id, true);
+
+    assert.equal(result.status, 200, status);
+    assert.equal(result.data?.archived, true, status);
+    assert.equal(result.data?.archiveStatus, undefined, status);
+    assert.equal(db.hasSessionStopIntent(id), false, status);
+    assert.equal(hub.sentOfType("stop_session").length, 0, status);
+  }
+});
+
+test("restart rejects an archived session before sending a replacement launch", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "completed", Date.now());
+  db.setSessionArchived(id, true, Date.now());
+  hub.sentToRunner.length = 0;
+
+  const result = svc.restart(id);
+
+  assert.equal(result.status, 409);
+  assert.match(result.error ?? "", /unarchive/u);
+  assert.equal(db.getSession(id)?.archived, true);
+  assert.equal(db.getSession(id)?.status, "completed");
+  assert.equal(hub.sentOfType("start_session").length, 0);
+  assert.equal(hub.sentOfType("stop_session").length, 0);
+});
+
+test("archive is idempotently stop-pending until terminal runner evidence confirms capacity release", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.sentToRunner.length = 0;
+
+  const first = svc.setArchived(id, true);
+  const duplicate = svc.setArchived(id, true);
+
+  assert.equal(first.status, 202);
+  assert.equal(duplicate.status, 202);
+  assert.equal(db.getSession(id)?.archived, false);
+  assert.equal(db.getSession(id)?.archiveStatus, "stop_pending");
+  assert.equal(db.getSession(id)?.status, "stopped");
+  assert.equal(hub.sentOfType("stop_session").length, 2, "a retry reissues the idempotent stop");
+  assert.equal(svc.restart(id).status, 409, "pending archive cannot race a replacement launch");
+
+  svc.onSessionStatus(id, "stopped", undefined, undefined, RUNNER_ID);
+  assert.equal(db.hasSessionStopIntent(id), false);
+  assert.equal(db.getSession(id)?.archiveStatus, undefined);
+  assert.equal(db.getSession(id)?.archived, true);
+  assert.ok(hub.sessionChangedByIdCalls.includes(id));
+});
+
+test("repeated archive fences a legacy archived session that is still consuming capacity", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "running", Date.now());
+  db.setSessionArchived(id, true, Date.now());
+  hub.sentToRunner.length = 0;
+
+  const result = svc.setArchived(id, true);
+
+  assert.equal(result.status, 202);
+  assert.equal(result.data?.archived, true);
+  assert.equal(result.data?.archiveStatus, "stop_pending");
+  assert.equal(db.getSession(id)?.status, "stopped");
+  assert.equal(hub.sentOfType("stop_session").at(-1)?.sessionId, id);
+});
+
+test("runner reconciliation fences hidden legacy capacity consumers without a new client request", () => {
+  for (const source of ["legacy", "snapshot", "runtime"] as const) {
+    const { db, hub, svc } = makeHarness();
+    const id = seedSession(svc, hub);
+    db.updateSessionStatus(id, "stopped", Date.now());
+    db.setSessionArchived(id, true, Date.now());
+    hub.sentToRunner.length = 0;
+
+    if (source === "legacy") svc.reconcileRunnerSessions(RUNNER_ID, [id]);
+    else if (source === "snapshot") svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, status: "running" })]);
+    else svc.applySessionRuntimeUpdate(RUNNER_ID, snapshot({ id, status: "running" }));
+
+    assert.equal(db.getSession(id)?.archived, true, source);
+    assert.equal(db.getSession(id)?.archiveStatus, "stop_pending", source);
+    assert.equal(db.hasSessionStopIntent(id), true, source);
+    assert.equal(hub.sentOfType("stop_session").at(-1)?.sessionId, id, source);
+  }
+});
+
+test("unarchive cancels pending filing without restarting the durable stop", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "idle", Date.now());
+  assert.equal(svc.setArchived(id, true).data?.archiveStatus, "stop_pending");
+  hub.sentToRunner.length = 0;
+
+  const restored = svc.setArchived(id, false);
+
+  assert.equal(restored.data?.archived, false);
+  assert.equal(restored.data?.archiveStatus, undefined);
+  assert.equal(db.hasSessionStopIntent(id), true, "undo preserves the already-requested Stop");
+  assert.equal(hub.sentOfType("start_session").length, 0);
+  svc.onSessionStatus(id, "stopped", undefined, undefined, RUNNER_ID);
+  assert.equal(db.getSession(id)?.archived, false);
+});
+
+test("runner absence settles archive and broadcasts it for legacy and snapshot reconnect paths", () => {
+  for (const source of ["legacy", "snapshot"] as const) {
+    const { db, hub, svc } = makeHarness();
+    const id = seedSession(svc, hub);
+    db.updateSessionStatus(id, "running", Date.now());
+    assert.equal(svc.setArchived(id, true).data?.archiveStatus, "stop_pending");
+    hub.sessionChangedByIdCalls.length = 0;
+
+    if (source === "legacy") svc.reconcileRunnerSessions(RUNNER_ID, []);
+    else svc.hydrateRunnerSessions(RUNNER_ID, []);
+
+    assert.equal(db.getSession(id)?.archived, true, source);
+    assert.equal(db.getSession(id)?.archiveStatus, undefined, source);
+    assert.ok(hub.sessionChangedByIdCalls.includes(id), `${source} settlement is broadcast`);
+  }
+});
+
+test("Project bulk archive uses the same stop-and-archive lifecycle for mixed states", () => {
+  const { db, hub, svc } = makeHarness();
+  const running = seedSession(svc, hub);
+  const completed = seedSession(svc, hub);
+  db.updateSessionStatus(running, "running", Date.now());
+  db.updateSessionStatus(completed, "completed", Date.now());
+  const projectId = db.getSession(running)?.projectId;
+  assert.ok(projectId);
+  hub.sentToRunner.length = 0;
+  hub.projectChangedByIdCalls.length = 0;
+
+  const result = svc.archiveProjectSessions(projectId!);
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.data?.archivedSessionIds, [completed]);
+  assert.deepEqual(result.data?.pendingSessionIds, [running]);
+  assert.equal(db.getSession(completed)?.archived, true);
+  assert.equal(db.getSession(running)?.archiveStatus, "stop_pending");
+  assert.deepEqual(hub.sentOfType("stop_session").map((message) => message.sessionId), [running]);
+  assert.deepEqual(hub.projectChangedByIdCalls, [], "the route owns the one batched Project refresh");
+});
 
 test("stop sends stop_session and marks the session stopped", () => {
   const { db, hub, svc } = makeHarness();

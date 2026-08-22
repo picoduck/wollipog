@@ -8,6 +8,7 @@ import {
   type TranscriptShareView,
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
+import { sessionArchiveActionLabel, sessionArchiveRequiresStop } from "../archive-actions.js";
 import { titleCaseLabel } from "../format.js";
 import { removeFromInstanceKeySet, SESSION_PIN_KEY } from "../pins.js";
 import { discardComposerDraft } from "../composer-drafts.js";
@@ -40,6 +41,7 @@ export function SessionHeader({
   runnerOnline,
   runnerProtocolVersion,
   providerLogoutSupported,
+  stopBeforeArchiveSupported,
   exportReady,
   onArchive,
   projectCrumb,
@@ -51,6 +53,7 @@ export function SessionHeader({
   runnerOnline: boolean;
   runnerProtocolVersion: number | null | undefined;
   providerLogoutSupported: boolean;
+  stopBeforeArchiveSupported: boolean;
   exportReady: boolean;
   onArchive?: () => void;
   /** The interactive Project chip, rendered as the breadcrumb's first segment. */
@@ -193,7 +196,7 @@ export function SessionHeader({
           {session.title}
         </h1>
       </div>
-      <StatusBadge status={session.status} />
+      <StatusBadge status={session.status} archiveStatus={session.archiveStatus} />
       {session.backgroundWorkState && (
         <span
           className={session.backgroundWorkState === "orphaned"
@@ -268,14 +271,26 @@ export function SessionHeader({
                       }
                       void run(async () => {
                         const nextArchived = !session.archived;
-                        await api.setArchived(session.id, nextArchived);
-                        showUndo(nextArchived ? "Session archived." : "Session restored.", async () => {
+                        if (nextArchived && sessionArchiveRequiresStop(session, stopBeforeArchiveSupported)) {
+                          const accepted = await confirm({
+                            title: "Archive and stop this session?",
+                            message: "The session will move to Archived Sessions after its runtime stops. Queued work will be canceled and runtime capacity will be released. To keep work running outside the Inbox, use Snooze instead.",
+                            confirmLabel: "Archive and Stop",
+                            tone: "danger",
+                          });
+                          if (!accepted) return;
+                        }
+                        const updated = await api.setArchived(session.id, nextArchived);
+                        const message = updated.archiveStatus === "stop_pending"
+                          ? "Archive requested. Stop is pending until runtime capacity is released."
+                          : nextArchived ? "Session archived." : "Session restored.";
+                        showUndo(message, async () => {
                           await api.setArchived(session.id, !nextArchived);
                         });
                       });
                     }}
                   >
-                    {session.archived ? "Unarchive" : "Archive"}
+                    {sessionArchiveActionLabel(session, stopBeforeArchiveSupported)}
                   </button>
                   <div className="menu-label" id="transcript-export-warning" role="presentation">Operational Transcript</div>
                   <div className="menu-caution" id="transcript-export-caution" role="presentation">

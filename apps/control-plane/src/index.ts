@@ -1709,12 +1709,14 @@ app.post("/api/projects/:id/archive-sessions", async (req, reply) => {
   if (!canManageAffectedSessions(principal, (session) => session.projectId === id)) {
     return reply.code(409).send({ error: "project contains sessions you cannot manage" });
   }
-  const sessions = db.archiveProjectSessions(id, true);
-  const archivedSessionIds = sessions.map((session) => session.id);
-  for (const session of sessions) hub.sessionChanged(session, false);
+  const outcome = svc.archiveProjectSessions(id);
+  if (!outcome.ok || !outcome.data) return respond(reply, outcome);
   const project = db.getProject(id)!;
   hub.projectChanged(project);
-  return { project: db.getProjectForPrincipal(principal, id)!, sessions, archivedSessionIds };
+  return {
+    project: db.getProjectForPrincipal(principal, id)!,
+    ...outcome.data,
+  };
 });
 
 registerInstanceRoute(app, {

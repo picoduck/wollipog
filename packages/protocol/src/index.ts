@@ -1224,6 +1224,17 @@ export type SessionStatus =
   | "failed"
   | "stopped";
 
+/** Server-owned archive lifecycle. An active archive request stays visible until the runner
+ * proves that its provider process is terminal or absent. Omitted means no archive operation is
+ * pending (including older control planes). */
+export type ArchiveStatus = "stop_pending";
+
+/** Archive must release runtime capacity for every non-terminal provider lifecycle. Idle is
+ * intentionally included: it can retain a resident provider process and runner/target leases. */
+export function archiveRequiresStop(status: SessionStatus): boolean {
+  return !isTerminal(status);
+}
+
 /** Kanban board columns. A session's column is derived from status unless the
  * user has manually filed it (e.g. moved to "review" or archived). */
 export type BoardColumn = "queued" | "running" | "input_required" | "review" | "done";
@@ -2442,6 +2453,9 @@ export interface SessionView {
   /** Protocol-v62 cloud acceptance proof. Absent until the runner's adapter accepts the handoff. */
   executionHandoff?: ExecutionHandoffReceipt;
   archived: boolean;
+  /** Durable server-owned stop-and-archive state. While pending, `archived` remains false so the
+   * session cannot disappear from ordinary clients before capacity release is confirmed. */
+  archiveStatus?: ArchiveStatus;
   createdAt: number;
   updatedAt: number;
   lastEventAt: number | null;
@@ -4595,6 +4609,8 @@ export interface UiSnapshotMessage {
     accessScopeManagement?: boolean;
     /** New Session can atomically create a session and open its separate provider TUI. */
     nativeTuiLaunch?: boolean;
+    /** Archive keeps nonterminal sessions visible until durable Stop evidence releases capacity. */
+    stopBeforeArchive?: boolean;
   };
   runners: RunnerView[];
   boxes: BoxView[];
@@ -5041,6 +5057,8 @@ export interface ArchiveProjectSessionsResponse {
   /** Exact sessions changed from unarchived to archived by this atomic operation.
    * Absent on Project-capable control planes released before exact archive undo support. */
   archivedSessionIds?: string[];
+  /** Sessions whose provider stop must be confirmed before the server files them as archived. */
+  pendingSessionIds?: string[];
 }
 
 export interface SessionEventsResponse {

@@ -20,11 +20,12 @@ for (const [name, value] of Object.entries({
   IS_REACT_ACT_ENVIRONMENT: true,
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
 
-function session(pendingApproval: SessionView["pendingApproval"] = null): SessionView {
+function session(pendingApproval: SessionView["pendingApproval"] = null, status: SessionView["status"] = "running"): SessionView {
   return {
     id: "session-1",
     title: "Selected Session",
     pendingApproval,
+    status,
   } as SessionView;
 }
 
@@ -34,6 +35,7 @@ test("the Inbox footer rail keeps standard shortcuts global and approval shortcu
   const root = createRoot(container);
   const invoked: string[] = [];
   const props: Omit<InboxShortcutRailProps, "session" | "pinned" | "busy"> = {
+    stopBeforeArchiveSupported: true,
     onApprove: () => invoked.push("approve"),
     onDeny: () => invoked.push("deny"),
     onReply: () => invoked.push("reply"),
@@ -49,7 +51,7 @@ test("the Inbox footer rail keeps standard shortcuts global and approval shortcu
   const toolbar = container.querySelector<HTMLElement>('[aria-label="Shortcuts for Selected Session"]')!;
   assert.deepEqual(
     [...toolbar.querySelectorAll("button")].map((button) => button.getAttribute("aria-label")),
-    ["Reply", "Expand", "Pin", "Unread", "Archive"],
+    ["Reply", "Expand", "Pin", "Unread", "Archive and Stop"],
   );
   assert.equal(toolbar.querySelector('[aria-label="Approve"]'), null);
   assert.equal(toolbar.querySelector('[aria-label="Deny"]'), null);
@@ -67,12 +69,12 @@ test("the Inbox footer rail keeps standard shortcuts global and approval shortcu
   });
   assert.deepEqual(
     [...container.querySelectorAll("button")].map((button) => button.getAttribute("aria-label")),
-    ["Approve", "Deny", "Reply", "Expand", "Unpin", "Unread", "Archive"],
+    ["Approve", "Deny", "Reply", "Expand", "Unpin", "Unread", "Archive and Stop"],
   );
   await act(async () => {
     container.querySelector<HTMLButtonElement>('[aria-label="Approve"]')!.click();
     container.querySelector<HTMLButtonElement>('[aria-label="Reply"]')!.click();
-    container.querySelector<HTMLButtonElement>('[aria-label="Archive"]')!.click();
+    container.querySelector<HTMLButtonElement>('[aria-label="Archive and Stop"]')!.click();
   });
   assert.deepEqual(invoked, ["approve", "reply", "archive"]);
 
@@ -80,6 +82,17 @@ test("the Inbox footer rail keeps standard shortcuts global and approval shortcu
     root.render(<InboxShortcutRail {...props} session={session()} pinned={false} busy />);
   });
   assert.equal([...container.querySelectorAll<HTMLButtonElement>("button")].every((button) => button.disabled), true);
+
+  await act(async () => {
+    root.render(<InboxShortcutRail {...props} session={session(null, "completed")} pinned={false} busy={false} />);
+  });
+  assert.ok(container.querySelector('[aria-label="Archive"]'));
+  assert.equal(container.querySelector('[aria-label="Archive and Stop"]'), null);
+
+  await act(async () => {
+    root.render(<InboxShortcutRail {...props} session={{ ...session(null, "stopped"), archiveStatus: "stop_pending" }} pinned={false} busy={false} />);
+  });
+  assert.ok(container.querySelector('[aria-label="Archive and Stop"]'));
 
   await act(async () => { root.unmount(); });
   container.remove();
