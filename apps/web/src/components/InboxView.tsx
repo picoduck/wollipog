@@ -215,8 +215,8 @@ export function InboxView({
     setBusySessionIds(new Set(busySessionIdsRef.current));
   }, []);
 
-  const selectSession = useCallback((sessionId: string | null, splitKey: string | null) => {
-    setInboxSelection(sessionId, splitKey, !isMobile);
+  const selectSession = useCallback((sessionId: string | null, splitKey: string | null, repair = false) => {
+    setInboxSelection(sessionId, splitKey, !isMobile, repair);
   }, [isMobile, setInboxSelection]);
   const selectSplit = useCallback((splitKey: string | null) => {
     clearHeldOrder();
@@ -339,7 +339,9 @@ export function InboxView({
     [activeSplit?.sessions],
   );
   const repairedSelection = heldOrder
-    ? repairInboxSelectionForHeldOrder(snapshotLoaded, activeSessionIds, heldOrder, inbox.selectedSessionId)
+    ? repairInboxSelectionForHeldOrder(
+        snapshotLoaded, activeSessionIds, heldOrder, inbox.selectedSessionId, inbox.selectionCleared,
+      )
     : repairInboxSelectionAfterSnapshot(snapshotLoaded, activeSplit, inbox.selectedSessionId);
 
   useEffect(() => {
@@ -358,14 +360,14 @@ export function InboxView({
     }
     if (activeSplit?.key !== inbox.splitKey) {
       const shouldRestoreTabFocus = document.activeElement === document.body;
-      selectSession(repairedSelection, activeSplit?.key ?? null);
+      selectSession(repairedSelection, activeSplit?.key ?? null, true);
       if (shouldRestoreTabFocus) {
         window.requestAnimationFrame(() => tabRefs.current.get(activeSplit?.key ?? "all")?.focus());
       }
       return;
     }
     if (repairedSelection !== inbox.selectedSessionId) {
-      selectSession(repairedSelection, activeSplit?.key ?? null);
+      selectSession(repairedSelection, activeSplit?.key ?? null, true);
     }
   }, [activeSplit, expandedSessionId, inbox.selectedSessionId, inbox.splitKey, repairedSelection, selectSession, selectSplit, sessions, snapshotLoaded]);
 

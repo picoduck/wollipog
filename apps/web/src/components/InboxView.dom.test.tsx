@@ -159,6 +159,93 @@ function rowTitles(container: HTMLDivElement): string[] {
   return [...container.querySelectorAll(".inbox-row-title")].map((row) => row.textContent ?? "");
 }
 
+function selectedRowTitle(container: HTMLDivElement): string | null {
+  return container.querySelector<HTMLElement>('.inbox-row-shell[aria-selected="true"] .inbox-row-title')
+    ?.textContent ?? null;
+}
+
+for (const viewport of ["mobile", "desktop"] as const) {
+  for (const scenario of [
+    { selected: "A", remaining: ["B", "C"], expected: "B" },
+    { selected: "B", remaining: ["A", "C"], expected: "C" },
+    { selected: "C", remaining: ["A", "B"], expected: "B" },
+  ]) {
+    test(`InboxView repairs a deleted ${scenario.selected} row to its slot on ${viewport}`, async () => {
+      mobileViewport = viewport === "mobile";
+      const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+      domWindow.document.body.append(container as never);
+      const root = createRoot(container);
+      const socket = new FakeSocket();
+      const connection: UiConnectionRuntime = {
+        instanceId: `inbox-delete-${viewport}-${scenario.selected}`,
+        runtimeKey: `inbox-delete-${viewport}-${scenario.selected}:1`,
+        createSocket: () => socket,
+        close() {},
+      };
+
+      await act(async () => {
+        root.render(
+          <StoreProvider connection={connection} navigation={navigation}>
+            <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+          </StoreProvider>,
+        );
+      });
+      await act(async () => {
+        socket.push(snapshot([session("A", 30), session("B", 20), session("C", 10)]));
+      });
+      const selectedButton = [...container.querySelectorAll<HTMLButtonElement>(".inbox-row")]
+        .find((row) => row.textContent?.includes(`Session ${scenario.selected}`));
+      assert.ok(selectedButton);
+      await act(async () => { selectedButton.click(); });
+      assert.equal(selectedRowTitle(container), `Session ${scenario.selected}`);
+
+      await act(async () => {
+        socket.push({ type: "session_removed", sessionId: scenario.selected });
+      });
+      assert.deepEqual(rowTitles(container), scenario.remaining.map((id) => `Session ${id}`));
+      assert.equal(selectedRowTitle(container), `Session ${scenario.expected}`);
+
+      await act(async () => { root.unmount(); });
+      container.remove();
+      mobileViewport = true;
+    });
+  }
+}
+
+for (const viewport of ["mobile", "desktop"] as const) {
+  test(`InboxView clears selection when its only row is deleted on ${viewport}`, async () => {
+    mobileViewport = viewport === "mobile";
+    const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+    domWindow.document.body.append(container as never);
+    const root = createRoot(container);
+    const socket = new FakeSocket();
+    const connection: UiConnectionRuntime = {
+      instanceId: `inbox-delete-only-${viewport}`,
+      runtimeKey: `inbox-delete-only-${viewport}:1`,
+      createSocket: () => socket,
+      close() {},
+    };
+
+    await act(async () => {
+      root.render(
+        <StoreProvider connection={connection} navigation={navigation}>
+          <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+        </StoreProvider>,
+      );
+    });
+    await act(async () => { socket.push(snapshot([session("only", 10)])); });
+    assert.equal(selectedRowTitle(container), "Session only");
+    await act(async () => { socket.push({ type: "session_removed", sessionId: "only" }); });
+    assert.deepEqual(rowTitles(container), []);
+    assert.equal(selectedRowTitle(container), null);
+    assert.ok(container.querySelector(".inbox-zero"));
+
+    await act(async () => { root.unmount(); });
+    container.remove();
+    mobileViewport = true;
+  });
+}
+
 test("InboxView preserves the server-authoritative Project count when reminders hide no rows", async () => {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
