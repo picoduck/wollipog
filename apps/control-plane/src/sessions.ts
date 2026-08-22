@@ -4087,7 +4087,7 @@ export class SessionsService {
     if (!Number.isSafeInteger(request.scheduledFor) ||
         request.scheduledFor! < now - scheduleHorizon || request.scheduledFor! > now + scheduleHorizon ||
         (request.scheduledFor! <= now && !restoresPastInstant)) {
-      return fail("scheduledFor must be within ten years; past instants require an optimistic restoration", 400);
+      return fail("scheduledFor must be within ten years; past instants require an explicit optimistic revision", 400);
     }
     if (typeof request.timeZone !== "string" || !request.timeZone || request.timeZone.length > 128) {
       return fail("timeZone must be a valid IANA time-zone identifier", 400);
@@ -4108,6 +4108,13 @@ export class SessionsService {
         (!Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0)) {
       return fail("expectedRevision must be a non-negative integer", 400);
     }
+    const restoreFired = request.restoreFired;
+    const validWakeReasons = new Set(["scheduled", "agent_response", "approval", "question", "failure", "background_job"]);
+    if (restoreFired !== undefined && (request.expectedRevision === undefined ||
+        !Number.isSafeInteger(restoreFired.firedAt) || restoreFired.firedAt > now ||
+        restoreFired.firedAt < now - scheduleHorizon || !validWakeReasons.has(restoreFired.wakeReason))) {
+      return fail("restoreFired requires an optimistic revision and bounded fired reminder facts", 400);
+    }
     const result = this.db.setSessionReminder({
       sessionId,
       userId,
@@ -4116,6 +4123,7 @@ export class SessionsService {
       originalExpression: request.originalExpression.trim(),
       wakePolicy: request.wakePolicy,
       ...(request.expectedRevision === undefined ? {} : { expectedRevision: request.expectedRevision }),
+      ...(restoreFired === undefined ? {} : { restoreFired }),
       now,
     });
     if (result.kind === "conflict") return fail("reminder changed in another client; reload and try again", 409);

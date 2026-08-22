@@ -8800,6 +8800,7 @@ export class ControlPlaneDb {
     originalExpression: string;
     wakePolicy: SessionReminderWakePolicy;
     expectedRevision?: number;
+    restoreFired?: { firedAt: number; wakeReason: SessionReminderWakeReason };
     now: number;
   }): SessionReminderMutationResult {
     return this.atomic(() => {
@@ -8820,9 +8821,9 @@ export class ControlPlaneDb {
       ).get(input.sessionId) as { seq: number };
 
       if (current) {
-        const preservesFiredInstant = current.state === "fired" &&
-          input.scheduledFor === current.scheduled_for && input.scheduledFor <= input.now;
-        if (preservesFiredInstant) {
+        const preservesObservedFiredState = input.restoreFired === undefined &&
+          current.state === "fired" && input.scheduledFor === current.scheduled_for;
+        if (preservesObservedFiredState) {
           this.stmt(
             `UPDATE session_reminders SET time_zone=?, original_expression=?, wake_policy=?,
                revision=revision+1, baseline_event_seq=?, updated_at=?
@@ -8846,6 +8847,12 @@ export class ControlPlaneDb {
         ).run(`rem_${randomUUID().replace(/-/g, "")}`, input.sessionId, input.userId,
           input.scheduledFor, input.timeZone, input.originalExpression, input.wakePolicy,
           baseline.seq, input.now, input.now);
+      }
+      if (input.restoreFired) {
+        this.stmt(
+          `UPDATE session_reminders SET state='fired', wake_reason=?, fired_at=?
+           WHERE session_id=? AND user_id=?`,
+        ).run(input.restoreFired.wakeReason, input.restoreFired.firedAt, input.sessionId, input.userId);
       }
       return { kind: "updated", reminder: this.getSessionReminder(input.sessionId, input.userId)! };
     });

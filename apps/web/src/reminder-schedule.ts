@@ -1,4 +1,4 @@
-import type { SessionReminderView, SnoozeScheduleInput } from "@wollipog/protocol";
+import type { SessionReminderView } from "@wollipog/protocol";
 
 export interface ParsedReminderSchedule {
   scheduledFor: number;
@@ -76,10 +76,6 @@ export function storedReminderSchedule(reminder: SessionReminderView): ParsedRem
     timeZone: reminder.timeZone,
     originalExpression: reminder.originalExpression,
   };
-}
-
-export function toSnoozeScheduleInput(parsed: ParsedReminderSchedule): SnoozeScheduleInput {
-  return parsed;
 }
 
 export function formatReminderInstant(scheduledFor: number, timeZone: string): string {

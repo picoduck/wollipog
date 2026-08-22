@@ -629,6 +629,9 @@ export function InboxView({
           originalExpression: previous.originalExpression,
           wakePolicy: previous.wakePolicy,
           expectedRevision: updated.revision,
+          ...(previous.state === "fired" && previous.firedAt !== undefined && previous.wakeReason !== undefined
+            ? { restoreFired: { firedAt: previous.firedAt, wakeReason: previous.wakeReason } }
+            : {}),
         });
       } else {
         await api.removeReminder(sessionId, updated.revision);
@@ -647,6 +650,9 @@ export function InboxView({
         originalExpression: previous.originalExpression,
         wakePolicy: previous.wakePolicy,
         expectedRevision: 0,
+        ...(previous.state === "fired" && previous.firedAt !== undefined && previous.wakeReason !== undefined
+          ? { restoreFired: { firedAt: previous.firedAt, wakeReason: previous.wakeReason } }
+          : {}),
       });
     });
   }, [api, reminders, showUndo]);
