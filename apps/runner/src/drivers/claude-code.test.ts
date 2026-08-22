@@ -2158,6 +2158,71 @@ test("stream_event text_delta -> agent_message", () => {
   assert.deepEqual(h.events, [{ kind: "agent_message", text: "Hello" }]);
 });
 
+test("streamed Claude response completes only at one successful result boundary", () => {
+  const h = makeHarness();
+  h.feed({
+    type: "stream_event",
+    event: {
+      type: "content_block_delta",
+      delta: { type: "text_delta", text: "Hello" },
+    },
+  });
+  assert.equal(h.events.some((event) => event.kind === "agent_response_completed"), false);
+
+  assert.equal(h.feed({ type: "result", subtype: "success" }), "end_turn");
+  assert.equal(
+    h.events.filter((event) => event.kind === "agent_response_completed").length,
+    1,
+  );
+
+  h.feed({ type: "result", subtype: "success" });
+  assert.equal(
+    h.events.filter((event) => event.kind === "agent_response_completed").length,
+    1,
+    "duplicate terminal evidence cannot emit a second completion marker",
+  );
+});
+
+test("failed Claude result never completes a streamed response", () => {
+  const h = makeHarness();
+  h.feed({
+    type: "stream_event",
+    event: {
+      type: "content_block_delta",
+      delta: { type: "text_delta", text: "partial" },
+    },
+  });
+  assert.equal(h.feed({ type: "result", is_error: true }), "refusal");
+  assert.equal(h.events.some((event) => event.kind === "agent_response_completed"), false);
+});
+
+test("subagent results cannot complete or consume the top-level streamed response", () => {
+  const h = makeHarness();
+  h.feed({
+    type: "stream_event",
+    parent_tool_use_id: "task-1",
+    event: {
+      type: "content_block_delta",
+      delta: { type: "text_delta", text: "child" },
+    },
+  });
+  h.feed({
+    type: "stream_event",
+    event: {
+      type: "content_block_delta",
+      delta: { type: "text_delta", text: "top-level" },
+    },
+  });
+  h.feed({ type: "result", subtype: "success", parent_tool_use_id: "task-1" });
+  assert.equal(h.events.some((event) => event.kind === "agent_response_completed"), false);
+
+  h.feed({ type: "result", subtype: "success" });
+  assert.equal(
+    h.events.filter((event) => event.kind === "agent_response_completed").length,
+    1,
+  );
+});
+
 test("stream_event thinking_delta -> agent_thought", () => {
   const h = makeHarness();
   h.feed({

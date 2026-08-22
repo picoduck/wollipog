@@ -662,8 +662,10 @@ test("interrupted turn/completed maps to cancelled", async () => {
     onNotification: (method: string, handler: (params: any) => void) => notifications.set(method, handler),
   });
   const reason = new Promise<string>((resolve) => { (h.driver as any).turnResolve = resolve; });
+  notifications.get("item/agentMessage/delta")!({ itemId: "interrupted", delta: "partial" });
   notifications.get("turn/completed")!({ turn: { status: "interrupted" } });
   assert.equal(await reason, "cancelled");
+  assert.equal(h.events.some((event) => event.kind === "agent_response_completed"), false);
 });
 
 test("turn settlement closes the active id but retains the provider turn used by conversation forks", () => {
@@ -1376,6 +1378,31 @@ test("streamed text preserves provider ids and completion never adds an old-web 
     messageId: "m3",
     final: true,
   });
+});
+
+test("streamed Codex response emits one content-free completion at successful turn settlement", async () => {
+  const h = makeHarness();
+  const notifications = notificationHandlers(h.driver);
+  const reason = new Promise<string>((resolve) => { (h.driver as any).turnResolve = resolve; });
+  notifications.get("item/agentMessage/delta")!({ itemId: "m-streamed", delta: "answer" });
+  h.onItem({ type: "agentMessage", id: "m-streamed", text: "answer" }, true);
+  assert.deepEqual(h.events, [
+    { kind: "agent_message", text: "answer", messageId: "m-streamed" },
+  ], "chunks remain the only transcript content before turn completion");
+
+  notifications.get("turn/completed")!({ turn: { status: "completed" } });
+  assert.equal(await reason, "end_turn");
+  assert.deepEqual(h.events, [
+    { kind: "agent_message", text: "answer", messageId: "m-streamed" },
+    { kind: "agent_response_completed" },
+  ]);
+
+  notifications.get("turn/completed")!({ turn: { status: "completed" } });
+  assert.equal(
+    h.events.filter((event) => event.kind === "agent_response_completed").length,
+    1,
+    "duplicate or replayed terminal evidence cannot emit a second marker",
+  );
 });
 
 test("prompt() fails fast (refusal + error) when the app-server is not running", async () => {

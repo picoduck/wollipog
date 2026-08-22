@@ -81,7 +81,7 @@ test("reminder identity rejects stale edits and removals after recreation at the
   db.close();
 });
 
-test("activity wake compares only control-plane event sequences and fires once", () => {
+test("duplicate and reconnect-replayed activity evidence fires once after the baseline", () => {
   const db = fixture();
   db.appendEvent("session-1", { kind: "agent_message", text: "one" }, 1);
   db.appendEvent("session-1", { kind: "agent_message", text: "two" }, 2);
@@ -95,6 +95,7 @@ test("activity wake compares only control-plane event sequences and fires once",
   const third = db.appendEvent("session-1", { kind: "agent_message", text: "three" }, 3);
   assert.equal(third.seq, 3);
   assert.equal(db.fireSessionRemindersForActivity("session-1", third.seq, "agent_response", 20).length, 1);
+  assert.equal(db.fireSessionRemindersForActivity("session-1", third.seq, "agent_response", 20).length, 0);
   assert.equal(db.fireSessionRemindersForActivity("session-1", third.seq + 1, "agent_response", 21).length, 0);
   db.close();
 });
