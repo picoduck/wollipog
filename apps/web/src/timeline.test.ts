@@ -616,20 +616,21 @@ test("side pane collapses per-turn worktree deltas into one Files entry", () => 
   );
 });
 
-test("question_request renders a question item; question_resolved marks it answered", () => {
+test("question resolution projection preserves submitted and replacement outcomes", () => {
+  const questions = [{ id: "Which?", question: "Which?", options: [{ label: "A" }, { label: "B" }] }];
   const items = deriveTimeline([
-    ev({
-      kind: "question_request",
-      requestId: "q1",
-      questions: [{ id: "Which?", question: "Which?", options: [{ label: "A" }, { label: "B" }] }],
-    }),
-    ev({ kind: "question_resolved", requestId: "q1", answered: false, resolutionReason: "replaced" }),
+    ev({ kind: "question_request", requestId: "submitted", questions }),
+    ev({ kind: "question_resolved", requestId: "submitted", answered: true, resolutionReason: "submitted" }),
+    ev({ kind: "question_request", requestId: "replaced", questions }),
+    ev({ kind: "question_resolved", requestId: "replaced", answered: false, resolutionReason: "replaced" }),
   ]);
-  assert.equal(items.length, 1);
-  const q = items[0] as Extract<import("./timeline.js").TimelineItem, { kind: "question" }>;
-  assert.equal(q.kind, "question");
-  assert.equal(q.answered, false);
-  assert.equal(q.resolutionReason, "replaced");
+  assert.equal(items.length, 2);
+  const submitted = items[0] as Extract<import("./timeline.js").TimelineItem, { kind: "question" }>;
+  const replaced = items[1] as Extract<import("./timeline.js").TimelineItem, { kind: "question" }>;
+  assert.equal(submitted.answered, true);
+  assert.equal(submitted.resolutionReason, "submitted");
+  assert.equal(replaced.answered, false);
+  assert.equal(replaced.resolutionReason, "replaced");
 });
 
 test("permission resolution reasons survive timeline projection", () => {

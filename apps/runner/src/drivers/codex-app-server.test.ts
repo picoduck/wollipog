@@ -1246,6 +1246,30 @@ test("a newer structured request settles and resolves the displaced request exac
   assert.deepEqual(await replacementQuestion, { answers: { confirm: { answers: ["Yes"] } } });
 });
 
+test("re-entrant cancellation while resolving a replacement cannot strand the new provider request", async () => {
+  const h = makeHarness();
+  const requests = new Map<string, (params: any, requestId: number | string) => Promise<any>>();
+  (h.driver as any).registerHandlers({
+    onRequest: (method: string, handler: (params: any, requestId: number | string) => Promise<any>) => requests.set(method, handler),
+    onNotification: () => {},
+  });
+  const approve = requests.get("item/commandExecution/requestApproval")!;
+  const first = approve({ command: "first" }, "first-approval");
+  const originalOnEvent = (h.driver as any).cb.onEvent;
+  (h.driver as any).cb.onEvent = (event: SessionEventPayload) => {
+    originalOnEvent(event);
+    if (event.kind === "permission_resolved") h.driver.cancel();
+  };
+
+  const second = approve({ command: "second" }, "second-approval");
+  assert.deepEqual(await first, { decision: "cancel" });
+  assert.deepEqual(await Promise.race([
+    second,
+    new Promise((resolve) => setImmediate(() => resolve("still-pending"))),
+  ]), { decision: "cancel" });
+  assert.equal((h.driver as any).pendingApprovals.size, 0);
+});
+
 test("buildCodexTurnParams: default and 'auto-review' use Guardian with an escapable workspace sandbox", () => {
   const p = buildCodexTurnParams(cfg("auto-review"), "t1", "/w", [{ type: "text", text: "hi" }]);
   assert.equal(p.approvalPolicy, "on-request");

@@ -573,6 +573,9 @@ export class CodexAppServerDriver implements Driver {
         if (this.disposed || this.cancelled) return resolve(approvalResponse(method, params, null));
         const id = String(rpcRequestId ?? params?.approvalId ?? params?.itemId ?? `${params?.turnId}:${++this.approvalSeq}`);
         this.declinePendingRequests("replaced");
+        if (this.disposed || this.cancelled) {
+          return resolve(approvalResponse(method, params, null));
+        }
         this.pendingApprovals.set(id, { method, params, resolve });
         this.cb.onEvent({
           kind: "permission_request",
@@ -608,6 +611,9 @@ export class CodexAppServerDriver implements Driver {
         }
         const id = String(rpcRequestId ?? params?.itemId ?? `${params?.turnId}:${++this.approvalSeq}`);
         this.declinePendingRequests("replaced");
+        if (this.disposed || this.cancelled) {
+          return resolve(normalized.response({}, "dismiss"));
+        }
         this.pendingQuestions.set(id, { resolve, response: normalized.response });
         this.cb.onEvent({ kind: "question_request", requestId: id, questions: normalized.questions });
       }));
@@ -625,6 +631,7 @@ export class CodexAppServerDriver implements Driver {
             return resolve(mcpElicitationResponse("cancel"));
           }
           this.declinePendingRequests("replaced");
+          if (this.disposed || this.cancelled) return resolve(mcpElicitationResponse("cancel"));
           this.pendingApprovals.set(id, { method: MCP_ELICITATION_METHOD, params, resolve });
           this.cb.onEvent({
             kind: "permission_request",
@@ -645,6 +652,9 @@ export class CodexAppServerDriver implements Driver {
           return resolve(mcpElicitationResponse("cancel"));
         }
         this.declinePendingRequests("replaced");
+        if (this.disposed || this.cancelled) {
+          return resolve(normalized.response({}, "dismiss"));
+        }
         this.pendingQuestions.set(id, { resolve, response: normalized.response });
         this.cb.onEvent({ kind: "question_request", requestId: id, questions: normalized.questions });
       }));
