@@ -10101,7 +10101,7 @@ export class ControlPlaneDb {
         this.stmt(
           "UPDATE session_stop_intents " +
           "SET created_at=?, failed_at=NULL, failure_code=NULL, failure_message=NULL, " +
-          "last_attempt_at=?, attempt_count=attempt_count+1, restart_launch_id=NULL " +
+          "last_attempt_at=?, attempt_count=1, restart_launch_id=NULL " +
           "WHERE session_id=? AND failed_at IS NOT NULL",
         ).run(now, now, sessionId);
       }

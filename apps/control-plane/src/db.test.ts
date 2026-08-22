@@ -738,9 +738,9 @@ test("Stop Failed metadata and idempotent recovery survive control-plane restart
     const retried = reopened.retrySessionStopIntent("sess-1", 1_300);
     assert.equal(retried?.operation.operationId, intent.operation.operationId);
     assert.equal(retried?.operation.status, "stop_pending");
-    assert.equal(retried?.operation.attemptCount, 2);
+    assert.equal(retried?.operation.attemptCount, 1, "explicit recovery receives a fresh retry budget");
     assert.equal(retried?.operation.requestedAt, 1_300, "explicit recovery receives a fresh timeout window");
-    assert.equal(reopened.retrySessionStopIntent("sess-1", 1_400)?.operation.attemptCount, 2);
+    assert.equal(reopened.retrySessionStopIntent("sess-1", 1_400)?.operation.attemptCount, 1);
     reopened.close();
   } finally {
     rmSync(root, { recursive: true, force: true });

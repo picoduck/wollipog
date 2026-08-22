@@ -6470,13 +6470,22 @@ test("supported Stop operations time out durably and retry the same operation id
   assert.equal(firstRetry.archiveStatus, "stop_pending");
   assert.equal(firstRetry.archiveOperation?.operationId, operation.operationId);
   assert.equal(duplicateRetry.archiveOperation?.operationId, operation.operationId);
-  assert.equal(firstRetry.archiveOperation?.attemptCount, operation.attemptCount + 1);
+  assert.equal(firstRetry.archiveOperation?.attemptCount, 1,
+    "explicit recovery starts a fresh bounded attempt budget");
   assert.equal(duplicateRetry.archiveOperation?.attemptCount, firstRetry.archiveOperation?.attemptCount);
   assert.equal(hub.sentOfType("stop_session").at(-1)?.operationId, operation.operationId);
   assert.equal(svc.maintainSessionStopIntents(firstRetry.archiveOperation!.requestedAt + 1), 0,
     "explicit recovery must not inherit the expired timeout window");
   assert.equal(db.getSession(id)?.archiveStatus, "stop_pending");
 
+  assert.equal(svc.maintainSessionStopIntents(
+    firstRetry.archiveOperation!.requestedAt + SESSION_STOP_RETRY_INTERVAL_MS,
+  ), 1);
+  assert.equal(svc.maintainSessionStopIntents(
+    firstRetry.archiveOperation!.requestedAt + 2 * SESSION_STOP_RETRY_INTERVAL_MS,
+  ), 1);
+  assert.equal(db.getSession(id)?.archiveStatus, "stop_pending",
+    "manual recovery receives all three bounded deliveries before exhaustion");
   assert.equal(svc.onStopSessionResult(RUNNER_ID, {
     type: "stop_session_result",
     sessionId: id,

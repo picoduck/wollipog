@@ -285,14 +285,16 @@ export function SessionHeader({
                           });
                           if (!accepted) return;
                         }
-                        const updated = session.archiveStatus === "stop_failed"
+                        const updated = nextArchived && session.archiveStatus === "stop_failed"
                           ? await api.retryStop(session.id)
                           : await api.setArchived(session.id, nextArchived);
-                        const message = updated.archiveStatus === "stop_pending"
-                          ? "Archive requested. Stop is pending until runtime capacity is released."
-                          : updated.archiveStatus === "stop_failed"
-                            ? "Stop failed. Runtime capacity may still be held."
-                            : nextArchived ? "Session archived." : "Session restored.";
+                        const message = !nextArchived
+                          ? "Session restored."
+                          : updated.archiveStatus === "stop_pending"
+                            ? "Archive requested. Stop is pending until runtime capacity is released."
+                            : updated.archiveStatus === "stop_failed"
+                              ? "Stop failed. Runtime capacity may still be held."
+                              : "Session archived.";
                         showUndo(message, async () => {
                           await api.setArchived(session.id, !nextArchived);
                         });
