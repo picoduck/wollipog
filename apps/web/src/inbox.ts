@@ -335,14 +335,21 @@ export function nextInboxSplitKey(
 }
 
 /**
- * Accumulate arrivals in observed order. Missing ids remain as tombstones until lease release so a
- * removed selected row can still repair against the slot the user was actually seeing.
+ * Accumulate arrivals in observed order, keeping only ids the Inbox still holds. A vanished
+ * selection is retained through `keepId` so a removed selected row can still repair against the
+ * slot the user was actually seeing.
  */
 export function extendInboxHeldOrder(
   currentIds: readonly string[],
   nextIds: readonly string[],
+  keepId: string | null = null,
 ): string[] {
-  const extended = [...currentIds];
+  const nextSet = new Set(nextIds);
+  // Rows that have left the Inbox are dropped: a desktop lease can live for a whole working day,
+  // and retaining every departed id would grow the held order without bound. `keepId` holds the
+  // one exception — a selection that just vanished, which repairInboxSelectionForHeldOrder still
+  // needs in place to resolve the row that took its slot.
+  const extended = currentIds.filter((id) => nextSet.has(id) || id === keepId);
   const extendedSet = new Set(extended);
   for (const id of nextIds) {
     if (!extendedSet.has(id)) {

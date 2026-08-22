@@ -47,6 +47,14 @@ for (const [name, value] of Object.entries({
   ResizeObserver: class { observe() {} unobserve() {} disconnect() {} },
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
 
+function setVisibility(value: "visible" | "hidden"): void {
+  Object.defineProperty(domWindow.document, "visibilityState", { configurable: true, value });
+}
+
+function setWindowFocused(focused: boolean): void {
+  Object.defineProperty(domWindow.document, "hasFocus", { configurable: true, value: () => focused });
+}
+
 const VIEWPORT_HEIGHT = 2_000;
 const ROW_HEIGHT = 68;
 Object.defineProperty(domWindow.Element.prototype, "getBoundingClientRect", {
@@ -285,6 +293,169 @@ test("InboxView keeps mobile browsing order stable before and through a touch", 
     domWindow.dispatchEvent(new domWindow.Event("resize"));
   });
   assert.deepEqual(rowTitles(container), ["Session C", "Session B"]);
+
+  await act(async () => { root.unmount(); });
+  container.remove();
+  mobileViewport = true;
+});
+
+test("InboxView holds desktop browsing order until the user leaves the window", async () => {
+  mobileViewport = false;
+  setVisibility("visible");
+  setWindowFocused(true);
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "inbox-desktop-order-test",
+    runtimeKey: "inbox-desktop-order-test:1",
+    createSocket: () => socket,
+    close() {},
+  };
+
+  await act(async () => {
+    root.render(
+      <StoreProvider connection={connection} navigation={navigation}>
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+      </StoreProvider>,
+    );
+  });
+  await act(async () => { socket.push(snapshot([session("A", 30), session("B", 20)])); });
+  assert.deepEqual(rowTitles(container), ["Session A", "Session B"]);
+
+  // No pointer and no keystroke: a desktop user reading the list must not have rows move under
+  // them merely because they are not currently touching an input device.
+  await act(async () => {
+    socket.push({
+      type: "session_upsert",
+      session: session("B", 40, { preview: "Approval arrived.", status: "input_required" }),
+    });
+    socket.push({ type: "session_upsert", session: session("C", 50) });
+  });
+  assert.deepEqual(rowTitles(container), ["Session A", "Session B", "Session C"]);
+  assert.match(container.textContent ?? "", /Approval arrived/);
+
+  // Sustained concurrent activity, well past the interaction settle window.
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 550)); });
+  await act(async () => {
+    socket.push({ type: "session_upsert", session: session("C", 60) });
+    socket.push({ type: "session_upsert", session: session("B", 70, { preview: "Still running." }) });
+  });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 550)); });
+  assert.deepEqual(rowTitles(container), ["Session A", "Session B", "Session C"],
+    "desktop stability must not expire while the user is still browsing the Inbox");
+  assert.match(container.textContent ?? "", /Still running/);
+
+  await act(async () => { socket.push({ type: "session_removed", sessionId: "A" }); });
+  assert.deepEqual(rowTitles(container), ["Session B", "Session C"]);
+  assert.match(
+    container.querySelector<HTMLElement>('.inbox-row-shell[aria-selected="true"]')?.textContent ?? "",
+    /Session B/,
+  );
+
+  // Leaving the window is the safe boundary: canonical recency ordering is applied there.
+  await act(async () => { domWindow.dispatchEvent(new domWindow.Event("blur")); });
+  assert.deepEqual(rowTitles(container), ["Session B", "Session C"]);
+  await act(async () => { socket.push({ type: "session_upsert", session: session("C", 80) }); });
+  assert.deepEqual(rowTitles(container), ["Session C", "Session B"]);
+
+  // Returning re-establishes the hold from the freshly adopted order.
+  await act(async () => { domWindow.dispatchEvent(new domWindow.Event("focus")); });
+  await act(async () => { socket.push({ type: "session_upsert", session: session("B", 90) }); });
+  assert.deepEqual(rowTitles(container), ["Session C", "Session B"]);
+
+  // A page can be backgrounded with no window blur, and a pointer resting over the list gets no
+  // pointerout when that happens. The boundary has to hold anyway.
+  const grid = container.querySelector<HTMLElement>(".inbox-list")!;
+  await act(async () => {
+    grid.dispatchEvent(new domWindow.PointerEvent("pointerover", {
+      bubbles: true, pointerId: 3, pointerType: "mouse",
+    }) as unknown as Event);
+  });
+  setVisibility("hidden");
+  await act(async () => { domWindow.document.dispatchEvent(new domWindow.Event("visibilitychange")); });
+  await act(async () => { socket.push({ type: "session_upsert", session: session("B", 100) }); });
+  assert.deepEqual(rowTitles(container), ["Session B", "Session C"],
+    "a hidden page is not a browsing interval, whatever the pointer was last seen doing");
+  setVisibility("visible");
+  await act(async () => { domWindow.document.dispatchEvent(new domWindow.Event("visibilitychange")); });
+  await act(async () => { socket.push({ type: "session_upsert", session: session("C", 110) }); });
+  assert.deepEqual(rowTitles(container), ["Session B", "Session C"]);
+
+  // Becoming visible again inside a still-unfocused window is not a return: the lease must stay
+  // down until focus comes back, or activity between the two events is frozen into a stale order.
+  await act(async () => { domWindow.dispatchEvent(new domWindow.Event("blur")); });
+  setVisibility("hidden");
+  await act(async () => { domWindow.document.dispatchEvent(new domWindow.Event("visibilitychange")); });
+  setVisibility("visible");
+  await act(async () => { domWindow.document.dispatchEvent(new domWindow.Event("visibilitychange")); });
+  await act(async () => { socket.push({ type: "session_upsert", session: session("B", 120) }); });
+  assert.deepEqual(rowTitles(container), ["Session B", "Session C"],
+    "an unfocused window is still away, whatever the page's visibility did in the meantime");
+
+  // Focus is the return, and the hold re-arms from the order the user actually comes back to.
+  await act(async () => { domWindow.dispatchEvent(new domWindow.Event("focus")); });
+  await act(async () => { socket.push({ type: "session_upsert", session: session("C", 130) }); });
+  assert.deepEqual(rowTitles(container), ["Session B", "Session C"]);
+
+  // Archiving the selected middle row hands selection to the row that took its slot, without
+  // disturbing the held positions around it.
+  await act(async () => { socket.push({ type: "session_upsert", session: session("A", 140) }); });
+  assert.deepEqual(rowTitles(container), ["Session B", "Session C", "Session A"]);
+  const middleRow = [...container.querySelectorAll<HTMLButtonElement>(".inbox-row")]
+    .find((row) => row.textContent?.includes("Session C"));
+  await act(async () => { middleRow?.click(); });
+  assert.match(
+    container.querySelector<HTMLElement>('.inbox-row-shell[aria-selected="true"]')?.textContent ?? "",
+    /Session C/,
+  );
+  await act(async () => {
+    socket.push({ type: "session_upsert", session: session("C", 150, { archived: true }) });
+  });
+  assert.deepEqual(rowTitles(container), ["Session B", "Session A"]);
+  assert.match(
+    container.querySelector<HTMLElement>('.inbox-row-shell[aria-selected="true"]')?.textContent ?? "",
+    /Session A/,
+  );
+
+  await act(async () => { root.unmount(); });
+  container.remove();
+  mobileViewport = true;
+});
+
+test("InboxView does not arm the order hold when it mounts in an unfocused window", async () => {
+  mobileViewport = false;
+  setVisibility("visible");
+  setWindowFocused(false);
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "inbox-unfocused-mount-test",
+    runtimeKey: "inbox-unfocused-mount-test:1",
+    createSocket: () => socket,
+    close() {},
+  };
+
+  await act(async () => {
+    root.render(
+      <StoreProvider connection={connection} navigation={navigation}>
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+      </StoreProvider>,
+    );
+  });
+  // A secondary window reloaded in the background receives no blur to announce that it is away.
+  await act(async () => { socket.push(snapshot([session("A", 30), session("B", 20)])); });
+  await act(async () => { socket.push({ type: "session_upsert", session: session("B", 40) }); });
+  await act(async () => { socket.push({ type: "session_upsert", session: session("C", 50) }); });
+  assert.deepEqual(rowTitles(container), ["Session C", "Session B", "Session A"]);
+
+  setWindowFocused(true);
+  await act(async () => { domWindow.dispatchEvent(new domWindow.Event("focus")); });
+  await act(async () => { socket.push({ type: "session_upsert", session: session("A", 60) }); });
+  assert.deepEqual(rowTitles(container), ["Session C", "Session B", "Session A"]);
 
   await act(async () => { root.unmount(); });
   container.remove();
