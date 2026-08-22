@@ -74,6 +74,7 @@ export function PinnedSummary({
     status: git.status,
     summary,
     settled: git.settled || gitSummary.settled,
+    available: gitPresentation.state === "ready" || gitPresentation.state === "updating",
   });
 
   const host = deriveHost(session, runners.get(session.runnerId), boxes.values());

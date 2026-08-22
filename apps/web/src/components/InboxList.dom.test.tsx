@@ -103,6 +103,8 @@ test("inbox list exposes selection semantics and mouse select/expand paths", asy
         stalledSessionIds={new Set()}
         activityNow={60_000}
         runningCount={0}
+        queuedCount={0}
+        startingCount={0}
         filtered={false}
         onNewSession={() => undefined}
         onSelect={(id) => selected.push(id)}
@@ -154,6 +156,8 @@ test("inbox list keeps live row content and the visible touch target while inter
       stalledSessionIds={new Set()}
       activityNow={60_000}
       runningCount={0}
+      queuedCount={0}
+      startingCount={0}
       filtered={false}
       onNewSession={() => undefined}
       onSelect={(sessionId) => selected.push(sessionId)}
@@ -209,6 +213,8 @@ test("inbox zero reports running work and keeps a mouse path to New Session", as
         stalledSessionIds={new Set()}
         activityNow={60_000}
         runningCount={2}
+        queuedCount={0}
+        startingCount={0}
         filtered={false}
         onNewSession={() => { created += 1; }}
         onSelect={() => undefined}
@@ -237,6 +243,8 @@ test("inbox zero uses contextual Project copy and lets search-empty copy take pr
     stalledSessionIds: new Set<string>(),
     activityNow: 60_000,
     runningCount: 0,
+    queuedCount: 0,
+    startingCount: 0,
     onNewSession: () => undefined,
     onSelect: () => undefined,
     onExpand: () => undefined,
@@ -318,6 +326,8 @@ test("busy rows show activity while stalled approval remains distinct and access
         stalledSessionIds={new Set([stalled.id])}
         activityNow={now}
         runningCount={1}
+        queuedCount={0}
+        startingCount={0}
         filtered={false}
         onNewSession={() => undefined}
         onSelect={() => undefined}

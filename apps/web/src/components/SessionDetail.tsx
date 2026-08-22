@@ -836,11 +836,6 @@ function SessionDetailLoaded({
     git.mutationRevision,
     recoveryGeneration,
   );
-  const changeStatus = sessionChangeStatus({
-    status: git.status,
-    summary: gitSummary.summary,
-    settled: git.settled || gitSummary.settled,
-  });
   const gitPresentation = useMemo(() => deriveGitPresentation({
     runnerOnline,
     worktreePath: session.worktreePath,
@@ -861,6 +856,12 @@ function SessionDetailLoaded({
       errorCode: gitSummary.errorCode,
     },
   }), [git, gitSummary, runnerOnline, session.worktreePath]);
+  const changeStatus = sessionChangeStatus({
+    status: git.status,
+    summary: gitSummary.summary,
+    settled: git.settled || gitSummary.settled,
+    available: gitPresentation.state === "ready" || gitPresentation.state === "updating",
+  });
 
   useEffect(() => {
     const generation = ++viewGenerationRef.current;

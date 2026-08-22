@@ -617,6 +617,10 @@ test("pushDecision fires on the attention transitions and stays quiet otherwise"
   } as Partial<SessionView>));
   assert.equal(ask?.urgency, "high");
   assert.match(ask!.body, /Run npm install\?/);
+  assert.match(
+    pushDecision(prev("running"), view("input_required", { pendingApproval: null }))!.body,
+    /^Input required/,
+  );
   // Questions ask for an answer rather than approval.
   const q = pushDecision(prev("running"), view("input_required", {
     pendingApproval: { requestId: "r", title: "Which DB?", options: [], kind: "question" },

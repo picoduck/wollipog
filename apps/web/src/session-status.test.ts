@@ -97,22 +97,22 @@ function gitSummary(overrides: Partial<GitSummaryInfo> = {}): GitSummaryInfo {
 }
 
 test("change labels require settled Git evidence and never use workflow or lifecycle guesses", () => {
-  assert.equal(sessionChangeStatus({ settled: false, status: gitStatus({ hasChanges: true }) }), null);
-  assert.equal(sessionChangeStatus({ settled: true, status: null }), null);
+  assert.equal(sessionChangeStatus({ available: true, settled: false, status: gitStatus({ hasChanges: true }) }), null);
+  assert.equal(sessionChangeStatus({ available: true, settled: true, status: null }), null);
   const legacyClean = gitStatus();
   delete legacyClean.baseRef;
-  assert.equal(sessionChangeStatus({ settled: true, status: legacyClean }), null);
-  assert.equal(sessionChangeStatus({ settled: true, status: gitStatus() })?.label, "No Changes");
+  assert.equal(sessionChangeStatus({ available: true, settled: true, status: legacyClean }), null);
+  assert.equal(sessionChangeStatus({ available: true, settled: true, status: gitStatus() })?.label, "No Changes");
   assert.equal(
-    sessionChangeStatus({ settled: true, status: gitStatus({ hasChanges: true }) })?.label,
+    sessionChangeStatus({ available: true, settled: true, status: gitStatus({ hasChanges: true }) })?.label,
     "Changes Present",
   );
   assert.equal(
-    sessionChangeStatus({ settled: true, status: gitStatus({ ahead: 2 }) })?.label,
+    sessionChangeStatus({ available: true, settled: true, status: gitStatus({ ahead: 2 }) })?.label,
     "Changes Present",
   );
   assert.equal(
-    sessionChangeStatus({
+    sessionChangeStatus({ available: true,
       settled: true,
       summary: gitSummary({
         ahead: 2,
@@ -122,7 +122,7 @@ test("change labels require settled Git evidence and never use workflow or lifec
     "Ready for Review",
   );
   assert.equal(
-    sessionChangeStatus({
+    sessionChangeStatus({ available: true,
       settled: true,
       summary: gitSummary({
         pr: { number: 142, title: "Empty", url: "https://example.test/142", state: "OPEN" },
@@ -132,7 +132,7 @@ test("change labels require settled Git evidence and never use workflow or lifec
     "an open PR alone cannot prove that a reviewable diff exists",
   );
   assert.equal(
-    sessionChangeStatus({
+    sessionChangeStatus({ available: true,
       settled: true,
       summary: gitSummary({
         hasChanges: true,
@@ -142,6 +142,35 @@ test("change labels require settled Git evidence and never use workflow or lifec
     "Changes Present",
     "uncommitted files are not necessarily part of the open PR",
   );
+});
+
+test("change labels reject unavailable facts and prefer fresh status over a stale summary", () => {
+  assert.equal(sessionChangeStatus({
+    available: false,
+    settled: true,
+    status: gitStatus({ hasChanges: true }),
+    summary: gitSummary({ hasChanges: true }),
+  }), null);
+  assert.equal(sessionChangeStatus({
+    available: true,
+    settled: true,
+    status: gitStatus({ hasChanges: false, ahead: 0 }),
+    summary: gitSummary({
+      hasChanges: true,
+      ahead: 1,
+      pr: { number: 142, title: "Stale", url: "https://example.test/142", state: "OPEN" },
+    }),
+  })?.label, "No Changes");
+  assert.equal(sessionChangeStatus({
+    available: true,
+    settled: true,
+    status: gitStatus({ branch: "new-branch", ahead: 2 }),
+    summary: gitSummary({
+      branch: "old-branch",
+      ahead: 2,
+      pr: { number: 142, title: "Stale", url: "https://example.test/142", state: "OPEN" },
+    }),
+  })?.label, "Changes Present", "a stale PR cannot establish review readiness");
 });
 
 test("running and attention remain independent dimensions", () => {
