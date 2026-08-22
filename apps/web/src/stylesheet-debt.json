@@ -1,7 +1,5 @@
 {
   "shadowedDeclarations": [
-    "@media (hover: none), (pointer: coarse)|.inbox-create-project|height",
-    "@media (hover: none), (pointer: coarse)|.inbox-create-project|width",
     "|.access-secondary-badge|color",
     "|.access-secondary-badge|text-transform",
     "|.agent-session-error|color",
@@ -457,7 +455,7 @@
     "|.icon-btn|border-radius|6",
     "|.image-remove|border-radius|50",
     "|.image-thumb|border-radius|8",
-    "|.inbox-create-project|border-radius|7",
+    "|.inbox-create-control|border-radius|7",
     "|.inbox-project-menu-trigger|border-radius|6",
     "|.inbox-row-shell.stalled::before|border-radius|0",
     "|.inbox-row-shell.stalled::before|border-radius|0",

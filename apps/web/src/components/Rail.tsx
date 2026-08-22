@@ -8,7 +8,6 @@ import {
   InboxIcon,
   FolderSolidIcon,
   MoreHorizontalIcon,
-  PlusIcon,
   PodsIcon,
   ProjectsIcon,
   RunsIcon,
@@ -20,10 +19,8 @@ import { useIsMobile } from "./useIsMobile.js";
 /**
  * The four destinations that stay on the phone tab bar. Everything else moves behind "More".
  *
- * Eight destinations at 44px plus the instance, New Session, and Settings controls measured 536px
- * of content in a 375px viewport — so those last three sat entirely off-screen, in a bar whose
- * scrollbars are hidden, with the New Session keyboard shortcut disabled on mobile. There was no
- * discoverable way to start a session on a phone. Five items is the platform convention.
+ * Eight destinations at 44px plus the instance and Settings controls exceeded a 375px viewport.
+ * Five items is the platform convention; creation is owned by the Inbox toolbar.
  */
 export const MOBILE_PRIMARY_VIEWS: readonly GlobalViewName[] = ["inbox", "projects", "board", "runners"];
 
@@ -54,7 +51,6 @@ export function Rail({
   stalledCount,
   onlineConnections,
   onNavigate,
-  onNewSession,
   instanceControl,
   settingsControl,
 }: {
@@ -63,7 +59,6 @@ export function Rail({
   stalledCount: number;
   onlineConnections: number;
   onNavigate: (view: View) => void;
-  onNewSession: () => void;
   instanceControl?: ReactNode;
   /** Omitted on mobile, where the topbar owns these controls (see the note by .rail-spacer). */
   settingsControl?: ReactNode;
@@ -253,23 +248,15 @@ export function Rail({
         </span>
       </div>
       <div className="rail-spacer" />
-      {/* On a phone the instance switcher, New Session, and Settings move to the TOPBAR (see
-          App.tsx). They are not in the More sheet and not a floating button, both of which were
+      {/* On a phone the instance switcher and Settings move to the TOPBAR (see App.tsx).
+          They are not in the More sheet and not floating buttons, both of which were
           tried and reviewed out:
             - Nested inside a role="menu" sheet, InstanceSelector and SettingsDialog bubbled their
               own Tab/Escape into the outer roving controller, so one Tab tore down both layers and
               one Escape peeled two — and neither control was reachable by keyboard at all, since
               only the destination links carried a menuitem role.
-            - A floating action button lands in the 68-120px band above the bottom edge, which is
-              inside an open shell dock and underneath the phone toast stack, so a persistent toast
-              could indefinitely cover the only mobile way to start a session.
           The topbar is a fixed, uncontested strip that no overlay occupies. */}
       {!isMobile && instanceControl && <div className="rail-instance">{instanceControl}</div>}
-      {!isMobile && (
-        <button type="button" className="rail-item rail-action" onClick={onNewSession} title="New Session (C)" aria-label="New Session (C)">
-          <PlusIcon size={RAIL_ICON_SIZE} />
-        </button>
-      )}
       {!isMobile && <div className="rail-settings">{settingsControl}</div>}
     </nav>
   );

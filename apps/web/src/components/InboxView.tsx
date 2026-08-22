@@ -32,6 +32,7 @@ import { useFeedback } from "./FeedbackProvider.js";
 import { InboxList, type InboxListEntry } from "./InboxList.js";
 import { InboxShortcutRail } from "./InboxShortcutRail.js";
 import { CreateProjectDialog } from "./CreateProjectDialog.js";
+import { InboxCreateMenu } from "./InboxCreateMenu.js";
 import { ProjectSplitMenu } from "./ProjectSplitMenu.js";
 import { SessionDetail } from "./SessionDetail.js";
 import type { RightPanelState } from "./RightPanel.js";
@@ -45,7 +46,7 @@ import {
 import { SnoozeDialog } from "./SnoozeDialog.js";
 import type { NewSessionPreset } from "./NewSessionDialog.js";
 import { isHeartbeatBusy } from "../activity.js";
-import { PlusIcon, SearchIcon } from "./Icons.js";
+import { SearchIcon } from "./Icons.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { dispatchVirtualViewportIntent } from "../viewport-intent.js";
 import type { PreviewNavigationControls } from "./usePreviewNavigationRegistration.js";
@@ -877,17 +878,10 @@ export function InboxView({
                 onChange={setReminderMode}
               />
             )}
-            {projectsSupported && (
-              <button
-                type="button"
-                className="inbox-create-project"
-                onClick={() => setCreatingProject(true)}
-                aria-label="Create Project"
-                title="Create Project"
-              >
-                <PlusIcon size={16} />
-              </button>
-            )}
+            <InboxCreateMenu
+              onNewSession={() => onNewSession?.(activeNewSessionPreset)}
+              onNewProject={projectsSupported ? () => setCreatingProject(true) : undefined}
+            />
             <label className={`inbox-search${query ? " has-query" : ""}`}>
               <span className="sr-only">Search Sessions</span>
               <SearchIcon size={15} />

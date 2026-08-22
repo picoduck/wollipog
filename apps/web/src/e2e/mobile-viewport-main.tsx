@@ -83,10 +83,7 @@ function Topbar() {
     <header className="topbar">
       <h1>Inbox</h1>
       <div className="topbar-actions topbar-mobile-controls">
-        <button type="button" className="icon-btn" aria-label="New Session" title="New Session">
-          <PlusIcon size={18} />
-        </button>
-        {/* All three, because production renders all three, and class-for-class rather than
+        {/* Both controls, because production renders both, and class-for-class rather than
             approximately: with `class="icon-btn settings-trigger"` here against production's plain
             `class="settings-trigger"`, a rule keyed on `.settings-trigger:not(.icon-btn)` erased
             the production rail and matched nothing. InstanceSelector and SettingsTrigger both need
@@ -197,7 +194,6 @@ function Harness() {
         // Recorded, not discarded. With a no-op the suite proved a destination could be tapped and
         // nothing about where the tap went: pointing every primary link at Inbox left it green.
         onNavigate={(destination) => { window.navigations.push(destination.name); }}
-        onNewSession={() => undefined}
       />
       <main className="main">
         <Topbar />
