@@ -476,8 +476,38 @@ test("fired reminder policy edits and removal Undo can restore their observed pa
   assert.equal(policyEdit.ok, true);
   assert.equal(policyEdit.data?.scheduledFor, scheduledFor);
   assert.equal(policyEdit.data?.wakePolicy, "regardless");
+  assert.equal(policyEdit.data?.state, "fired");
+  assert.equal(db.fireDueSessionReminders(now + 1).length, 0,
+    "a policy-only edit must not reset an already-fired instant to pending");
 
-  const removed = svc.removeReminder(sessionId, userId, policyEdit.data!.revision);
+  const policyUndo = svc.setReminder(sessionId, userId, {
+    scheduledFor,
+    timeZone: "UTC",
+    originalExpression: "one second ago",
+    wakePolicy: "until_activity",
+    expectedRevision: policyEdit.data!.revision,
+  });
+  assert.equal(policyUndo.ok, true);
+  assert.equal(policyUndo.data?.state, "fired");
+
+  const futureEdit = svc.setReminder(sessionId, userId, {
+    scheduledFor: now + 60_000,
+    timeZone: "UTC",
+    originalExpression: "in one minute",
+    wakePolicy: "regardless",
+    expectedRevision: policyUndo.data!.revision,
+  });
+  assert.equal(futureEdit.ok, true);
+  const futureEditUndo = svc.setReminder(sessionId, userId, {
+    scheduledFor,
+    timeZone: "UTC",
+    originalExpression: "one second ago",
+    wakePolicy: "until_activity",
+    expectedRevision: futureEdit.data!.revision,
+  });
+  assert.equal(futureEditUndo.ok, true, "Undo may restore the prior fired instant after a future edit");
+
+  const removed = svc.removeReminder(sessionId, userId, futureEditUndo.data!.revision);
   assert.equal(removed.ok, true);
   const restored = svc.setReminder(sessionId, userId, {
     scheduledFor,

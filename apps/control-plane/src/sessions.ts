@@ -4080,11 +4080,10 @@ export class SessionsService {
     const current = this.db.getSessionReminder(sessionId, userId);
     const now = Date.now();
     const scheduleHorizon = 10 * 366 * 86_400_000;
-    const restoresCurrentInstant = current !== null &&
-      request.expectedRevision === current.revision && request.scheduledFor === current.scheduledFor;
+    const restoresCurrentRevision = current !== null && request.expectedRevision === current.revision;
     const restoresRemovedInstant = current === null && request.expectedRevision === 0;
     const restoresPastInstant = request.scheduledFor! <= now &&
-      (restoresCurrentInstant || restoresRemovedInstant);
+      (restoresCurrentRevision || restoresRemovedInstant);
     if (!Number.isSafeInteger(request.scheduledFor) ||
         request.scheduledFor! < now - scheduleHorizon || request.scheduledFor! > now + scheduleHorizon ||
         (request.scheduledFor! <= now && !restoresPastInstant)) {

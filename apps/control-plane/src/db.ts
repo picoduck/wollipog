@@ -8820,12 +8820,23 @@ export class ControlPlaneDb {
       ).get(input.sessionId) as { seq: number };
 
       if (current) {
-        this.stmt(
-          `UPDATE session_reminders SET scheduled_for=?, time_zone=?, original_expression=?,
-             wake_policy=?, state='pending', revision=revision+1, baseline_event_seq=?,
-             wake_reason=NULL, fired_at=NULL, updated_at=? WHERE session_id=? AND user_id=?`,
-        ).run(input.scheduledFor, input.timeZone, input.originalExpression, input.wakePolicy,
-          baseline.seq, input.now, input.sessionId, input.userId);
+        const preservesFiredInstant = current.state === "fired" &&
+          input.scheduledFor === current.scheduled_for && input.scheduledFor <= input.now;
+        if (preservesFiredInstant) {
+          this.stmt(
+            `UPDATE session_reminders SET time_zone=?, original_expression=?, wake_policy=?,
+               revision=revision+1, baseline_event_seq=?, updated_at=?
+             WHERE session_id=? AND user_id=?`,
+          ).run(input.timeZone, input.originalExpression, input.wakePolicy,
+            baseline.seq, input.now, input.sessionId, input.userId);
+        } else {
+          this.stmt(
+            `UPDATE session_reminders SET scheduled_for=?, time_zone=?, original_expression=?,
+               wake_policy=?, state='pending', revision=revision+1, baseline_event_seq=?,
+               wake_reason=NULL, fired_at=NULL, updated_at=? WHERE session_id=? AND user_id=?`,
+          ).run(input.scheduledFor, input.timeZone, input.originalExpression, input.wakePolicy,
+            baseline.seq, input.now, input.sessionId, input.userId);
+        }
       } else {
         this.stmt(
           `INSERT INTO session_reminders

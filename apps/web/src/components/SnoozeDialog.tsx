@@ -35,7 +35,7 @@ export function SnoozeDialog({
     if (reminder && !scheduleTouched) return storedReminderSchedule(reminder);
     return exact
       ? exactReminderSchedule(exact)
-      : parseReminderExpression(expression, new Date(), localTimeZone);
+      : parseReminderExpression(expression, new Date());
   }, [exact, expression, localTimeZone, reminder, scheduleTouched]);
 
   const submit = async () => {

@@ -5,13 +5,13 @@ import { exactReminderSchedule, parseReminderExpression, storedReminderSchedule 
 
 test("natural reminder expressions reject an explicitly past Today time", () => {
   const now = new Date(2026, 7, 21, 15, 0, 0, 0);
-  assert.equal(parseReminderExpression("today at 2 pm", now, "America/Chicago"), null);
-  assert.ok(parseReminderExpression("tomorrow at 2 pm", now, "America/Chicago"));
+  assert.equal(parseReminderExpression("today at 2 pm", now), null);
+  assert.ok(parseReminderExpression("tomorrow at 2 pm", now));
 });
 
 test("relative days are exact elapsed 24-hour periods", () => {
   const now = new Date("2026-03-08T07:30:00.000Z");
-  const parsed = parseReminderExpression("in 1 day", now, "America/Chicago");
+  const parsed = parseReminderExpression("in 1 day", now);
   assert.equal(parsed?.scheduledFor - now.getTime(), 86_400_000);
 });
 

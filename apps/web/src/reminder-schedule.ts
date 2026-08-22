@@ -15,7 +15,6 @@ export function browserTimeZone(): string {
 export function parseReminderExpression(
   expression: string,
   now = new Date(),
-  timeZone = browserTimeZone(),
 ): ParsedReminderSchedule | null {
   const originalExpression = expression.trim();
   const normalized = originalExpression.toLocaleLowerCase().replace(/\s+/g, " ");
@@ -54,7 +53,7 @@ export function parseReminderExpression(
     }
   }
   if (!scheduled || !Number.isFinite(scheduled.getTime()) || scheduled.getTime() <= now.getTime()) return null;
-  return { scheduledFor: scheduled.getTime(), timeZone, originalExpression };
+  return { scheduledFor: scheduled.getTime(), timeZone: browserTimeZone(), originalExpression };
 }
 
 /** A datetime-local control is interpreted by the browser runtime. Persist that runtime's zone
