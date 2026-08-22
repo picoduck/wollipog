@@ -1580,13 +1580,13 @@ export class ClaudeCodeDriver implements Driver {
   }
 
   /** Answer a pending AskUserQuestion: allow with `updatedInput = {questions, answers}` (the
-   * T3-proven wire shape — answers keyed by question TEXT; multiSelect ⇒ label array). Empty
-   * answers = dismiss (deny), so the agent knows the user declined rather than hanging. */
-  answerQuestion(requestId: string, answers: Record<string, string | string[]>): boolean {
+   * T3-proven wire shape — answers keyed by question TEXT; multiSelect ⇒ label array). An
+   * explicit dismiss, or a legacy empty answer map, denies the ask so the agent does not hang. */
+  answerQuestion(requestId: string, answers: Record<string, string | string[]>, action?: "submit" | "dismiss"): boolean {
     const original = this.pendingApprovals.get(requestId);
     if (original === undefined) return false;
     this.pendingApprovals.delete(requestId);
-    const response = Object.keys(answers).length
+    const response = action === "submit" || (action == null && Object.keys(answers).length > 0)
       ? { behavior: "allow", updatedInput: { ...(original as Json), answers } }
       : { behavior: "deny", message: "The user dismissed the question." };
     const msg = { type: "control_response", response: { subtype: "success", request_id: requestId, response } };

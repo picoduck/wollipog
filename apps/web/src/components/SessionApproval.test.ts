@@ -84,3 +84,49 @@ for (const selector of [
     assert.match(html, new RegExp(`<dt>${selector.label}</dt><dd>${selector.value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}</dd>`));
   });
 }
+
+test("provider form questions render context and constrained free-text controls", () => {
+  const html = renderToStaticMarkup(React.createElement(SessionQuestionBanner, {
+    sessionId: "s-form",
+    requestId: "ask-form",
+    runnerOnline: true,
+    questions: [
+      {
+        id: "token",
+        header: "Token",
+        question: "Enter the temporary token",
+        context: "Deploy MCP: Choose deployment settings",
+        options: [],
+        allowOther: true,
+        secret: true,
+        maxLength: 120,
+      },
+      {
+        id: "retries",
+        header: "Retries",
+        question: "How many retries?",
+        options: [],
+        allowOther: true,
+        inputFormat: "integer",
+        minimum: 1,
+        maximum: 5,
+      },
+      {
+        id: "note",
+        header: "Note",
+        question: "Optional note",
+        options: [],
+        allowOther: true,
+        required: false,
+      },
+    ],
+  }));
+  assert.match(html, /Deploy MCP: Choose deployment settings/);
+  assert.match(html, /<span[^>]*>Response<\/span>/);
+  assert.match(html, /type="password"[^>]*maxLength="120"/);
+  assert.match(html, /type="number"[^>]*inputMode="numeric"[^>]*step="1"[^>]*min="1"[^>]*max="5"/);
+  assert.match(html, /<span class="muted sm"> \(optional\)<\/span>/);
+  assert.match(html, /aria-labelledby="[^"]+-question-0 [^"]+-response-0"/);
+  assert.match(html, /aria-labelledby="[^"]+-question-1 [^"]+-response-1"/);
+  assert.match(html, /aria-labelledby="[^"]+-question-2 [^"]+-response-2"/);
+});

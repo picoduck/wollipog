@@ -18,6 +18,10 @@ const FAKE_CLAUDE = fileURLToPath(new URL(
   "../../runner/src/drivers/fixtures/fake-claude-code-question.mjs",
   import.meta.url,
 ));
+const FAKE_CODEX = fileURLToPath(new URL(
+  "../../runner/src/drivers/fixtures/fake-codex-app-server.mjs",
+  import.meta.url,
+));
 const RUNNER_ID = "agent-question-live-e2e-runner";
 const CONTROL_PLANE_TOKEN = "agent-question-live-e2e-control-plane-token";
 
@@ -90,7 +94,7 @@ async function fetchSession(stack: Pick<LiveStack, "httpBase" | "ownerToken" | "
   return ((await response.json()) as { session: SessionView }).session;
 }
 
-async function startLiveStack(): Promise<LiveStack> {
+async function startLiveStack(provider: "claude" | "codex" = "claude"): Promise<LiveStack> {
   const port = await reservePort();
   const httpBase = `http://127.0.0.1:${port}`;
   const wsBase = `ws://127.0.0.1:${port}`;
@@ -154,23 +158,34 @@ async function startLiveStack(): Promise<LiveStack> {
     }
     const runnerToken = ((await credentialResponse.json()) as { token: string }).token;
 
+    const agent = provider === "codex"
+      ? {
+          id: "codex-question",
+          name: "Codex Question E2E",
+          command: process.execPath,
+          args: [FAKE_CODEX, "question"],
+          driver: "codex-app-server",
+          context: { kind: "native" },
+          env: { WOLLIPOG_FAKE_CODEX_RECEIPT: receiptPath },
+        }
+      : {
+          id: "claude-question",
+          name: "Claude Question E2E",
+          command: fakeClaudeCommand,
+          driver: "claude-code",
+          context: { kind: "native" },
+          env: {
+            WOLLIPOG_CLAUDE_PERSISTENT: "1",
+            WOLLIPOG_FAKE_CLAUDE_RECEIPT: receiptPath,
+          },
+        };
     writeFileSync(configPath, JSON.stringify({
       runnerId: RUNNER_ID,
       controlPlaneUrl: `${wsBase}/runner`,
       token: runnerToken,
       dataDir: runnerDataDir,
       workspaces: [{ id: "repo", name: "Repo", path: workspaceDir }],
-      agents: [{
-        id: "claude-question",
-        name: "Claude Question E2E",
-        command: fakeClaudeCommand,
-        driver: "claude-code",
-        context: { kind: "native" },
-        env: {
-          WOLLIPOG_CLAUDE_PERSISTENT: "1",
-          WOLLIPOG_FAKE_CLAUDE_RECEIPT: receiptPath,
-        },
-      }],
+      agents: [agent],
     }));
 
     runner = spawn(process.execPath, ["--import", "tsx", "apps/runner/src/cli.ts", "--config", configPath], {
@@ -204,10 +219,10 @@ async function startLiveStack(): Promise<LiveStack> {
         body: JSON.stringify({
           runnerId: RUNNER_ID,
           workspaceId: "repo",
-          agentId: "claude-question",
-          prompt: "Ask the release questions",
+          agentId: provider === "codex" ? "codex-question" : "claude-question",
+          prompt: provider === "codex" ? "Ask the Codex release questions" : "Ask the release questions",
           useWorktree: false,
-          config: { permissionMode: "default" },
+          config: { permissionMode: provider === "codex" ? "on-request" : "default" },
         }),
       });
       if (created.status === 201) {
@@ -226,7 +241,7 @@ async function startLiveStack(): Promise<LiveStack> {
       if (session.status === "failed") throw new Error(`session failed before asking a question\n${logs()}`);
       await delay(100);
     }
-    throw new Error(`Claude question never reached the control plane\n${logs()}`);
+    throw new Error(`${provider === "codex" ? "Codex" : "Claude"} question never reached the control plane\n${logs()}`);
   } catch (error) {
     await stop();
     throw error;
@@ -285,6 +300,64 @@ test("Claude AskUserQuestion answers cross the live browser, control plane, runn
     await expect.poll(async () => (await fetchSession(stack)).preview, {
       timeout: 30_000,
     }).toContain("Question answers received by Claude Code.");
+  } catch (error) {
+    throw new Error(`${error instanceof Error ? error.stack : String(error)}\n${stack.logs()}`);
+  } finally {
+    await stack.stop();
+  }
+});
+
+test("Codex structured questions cross the live browser, control plane, runner, and provider", async ({ page }) => {
+  test.setTimeout(120_000);
+  const stack = await startLiveStack("codex");
+  try {
+    const pending = await fetchSession(stack);
+    expect(pending.pendingApproval).toMatchObject({
+      kind: "question",
+      requestId: "live-codex-question-1",
+    });
+
+    const fragment = new URLSearchParams({
+      origin: stack.httpBase,
+      token: stack.ownerToken,
+      sessionId: stack.sessionId,
+    });
+    await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
+
+    const submit = page.getByRole("button", { name: "Submit" });
+    await expect(page.getByRole("region", { name: "Agent Questions" })).toBeVisible();
+    await expect(submit).toBeDisabled();
+    await page.getByRole("radio", { name: /Staging/ }).click();
+    await page.getByLabel("Response").fill("Ship after checks pass");
+    await expect(submit).toBeEnabled();
+    await submit.click();
+    await expect(page.getByRole("status")).toHaveText("Question Answered");
+
+    await expect.poll(async () => {
+      try {
+        return JSON.parse(await readFile(stack.receiptPath, "utf8"));
+      } catch {
+        return null;
+      }
+    }, { timeout: 30_000 }).toEqual({
+      requestId: "live-codex-question-1",
+      result: {
+        answers: {
+          environment: { answers: ["Staging"] },
+          note: { answers: ["Ship after checks pass"] },
+        },
+      },
+    });
+
+    await expect.poll(async () => (await fetchSession(stack)).pendingApproval, {
+      timeout: 30_000,
+    }).toBeNull();
+    await expect.poll(async () => (await fetchSession(stack)).status, {
+      timeout: 30_000,
+    }).toBe("idle");
+    await expect.poll(async () => (await fetchSession(stack)).preview, {
+      timeout: 30_000,
+    }).toContain("Question answers received by Codex.");
   } catch (error) {
     throw new Error(`${error instanceof Error ? error.stack : String(error)}\n${stack.logs()}`);
   } finally {

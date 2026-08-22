@@ -9354,6 +9354,13 @@ body.shell-dock-dragging * {
 .question-bar > .form-error {
   flex: none;
 }
+.question-context {
+  margin-top: 10px;
+  color: var(--text-dim);
+  font-size: var(--text-base);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
 .question-list {
   display: flex;
   flex-direction: column;
@@ -9413,6 +9420,20 @@ body.shell-dock-dragging * {
   display: block;
   color: var(--text-dim);
   font-size: 12px;
+}
+.question-input-label {
+  display: block;
+  margin-top: 8px;
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+}
+.question-input {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  color: var(--text);
+  font-weight: var(--weight-normal);
 }
 .tl-question .question-recap {
   margin: 6px 0 0 26px;

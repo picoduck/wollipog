@@ -1136,7 +1136,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       sessions.resolvePermission(msg.sessionId, msg.requestId, msg.optionId);
       break;
     case "answer_question":
-      sessions.answerQuestion(msg.sessionId, msg.requestId, msg.answers);
+      sessions.answerQuestion(msg.sessionId, msg.requestId, msg.answers, msg.action);
       break;
     case "rewind_session": {
       // Serialize behind the same per-session queue as mutating git actions: a rewind

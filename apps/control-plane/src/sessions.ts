@@ -612,6 +612,15 @@ function auditDigest(value: unknown): string | undefined {
   return createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex");
 }
 
+function questionAuditContent(
+  pending: PendingApproval,
+  answers: Record<string, string | string[]>,
+): Record<string, string | string[]> {
+  const secretIds = new Set((pending.questions ?? []).filter((question) => question.secret).map((question) => question.id));
+  if (secretIds.size === 0) return answers;
+  return Object.fromEntries(Object.entries(answers).filter(([id]) => !secretIds.has(id)));
+}
+
 function sessionCommandPayloadDigest(input: {
   argumentText: string;
   catalogRevision: string;
@@ -3984,6 +3993,7 @@ export class SessionsService {
     requestId: string,
     answers: Record<string, string | string[]>,
     actor: GovernanceActor = { kind: "human", id: "local" },
+    action: "submit" | "dismiss" = Object.keys(answers).length > 0 ? "submit" : "dismiss",
   ): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
@@ -3995,13 +4005,14 @@ export class SessionsService {
     // Answers ride verbatim into the agent's updatedInput — reject anything the pending card
     // never offered (unknown keys, wrong select shape, un-offered labels) WITHOUT clearing the
     // pending state, so a bad client can't strand or spoof the ask.
-    const invalid = validateQuestionAnswers(pending.questions ?? [], answers);
+    const invalid = validateQuestionAnswers(pending.questions ?? [], answers, action);
     if (invalid) return fail(`invalid answers: ${invalid}`, 400);
+    const auditContent = questionAuditContent(pending, answers);
 
-    const sent = this.hub.sendToRunner(session.runnerId, { type: "answer_question", sessionId, requestId, answers });
+    const sent = this.hub.sendToRunner(session.runnerId, { type: "answer_question", sessionId, requestId, answers, action });
     if (!sent) {
       this.recordGovernanceAudit(session, pending, "resolution", "delivery_failed", actor, Date.now(), {
-        content: answers,
+        content: auditContent,
       });
       return fail("runner is offline", 409);
     }
@@ -4011,7 +4022,7 @@ export class SessionsService {
     // no-duplicate rule as permission_resolved); update local state for immediate feedback.
     this.db.setPendingApproval(sessionId, null);
     this.db.updateSessionStatus(sessionId, "running", now);
-    this.recordGovernanceAudit(session, pending, "resolution", "answered", actor, now, { content: answers });
+    this.recordGovernanceAudit(session, pending, "resolution", "answered", actor, now, { content: auditContent });
     this.gateOnPolicy(sessionId, now);
     this.reconcilePolicyHookTimeouts(now, sessionId);
     this.hub.sessionChangedById(sessionId);
@@ -4170,7 +4181,7 @@ export class SessionsService {
     const sent = this.hub.sendToRunner(
       session.runnerId,
       pending.kind === "question"
-        ? { type: "answer_question", sessionId, requestId, answers: {} } // empty answers = dismiss
+        ? { type: "answer_question", sessionId, requestId, answers: {}, action: "dismiss" }
         : { type: "resolve_permission", sessionId, requestId, optionId },
     );
     if (!sent) {
@@ -4191,9 +4202,11 @@ export class SessionsService {
       ? "dismissed"
       : optionId == null
         ? "dismissed"
-        : selected?.kind?.startsWith("reject")
-          ? "denied"
-          : "allowed";
+        : selected?.kind === "cancel"
+          ? "dismissed"
+          : selected?.kind?.startsWith("reject")
+            ? "denied"
+            : "allowed";
     this.recordGovernanceAudit(session, pending, "resolution", outcome, actor, now, { optionId });
     // A guardrail card displaced by this runner permission card must re-park immediately — the
     // acknowledgment the prompt() 409 guard enforces would otherwise be skipped until settle.
@@ -6396,6 +6409,7 @@ export class SessionsService {
           sessionId,
           requestId: approval.requestId,
           answers: {},
+          action: "dismiss",
         });
         this.recordGovernanceAudit(
           session,

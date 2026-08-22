@@ -3179,14 +3179,21 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
 // differ — N answers keyed by question id vs one optionId decision.
 app.post("/api/sessions/:id/answer", async (req, reply) => {
   const id = (req.params as { id: string }).id;
-  const body = req.body as { requestId?: string; answers?: Record<string, string | string[]> };
-  if (typeof body?.requestId !== "string" || body.answers == null || typeof body.answers !== "object") {
-    return reply.code(400).send({ error: "requestId and answers are required" });
+  const body = req.body as { requestId?: string; answers?: Record<string, string | string[]>; action?: "submit" | "dismiss" };
+  if (
+    typeof body?.requestId !== "string" ||
+    body.answers == null ||
+    typeof body.answers !== "object" ||
+    Array.isArray(body.answers) ||
+    (body.action != null && body.action !== "submit" && body.action !== "dismiss")
+  ) {
+    return reply.code(400).send({ error: "requestId and answers are required; action must be submit or dismiss" });
   }
+  const action = body.action ?? (Object.keys(body.answers).length > 0 ? "submit" : "dismiss");
   return respond(reply, svc.answerQuestion(id, body.requestId, body.answers, {
     kind: "human",
     id: humanActorId(req),
-  }));
+  }, action));
 });
 
 // Git/PR workflow: run a git action (status/commit/open_pr) in the session's

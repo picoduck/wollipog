@@ -237,7 +237,10 @@
 //     live status and reconnect snapshots, proving which runtime crossed a durable Stop fence.
 // 85: stop_session carries a durable operation identity and correlated acceptance or rejection.
 //     Older runners retain the conservative Stop Pending behavior.
-export const PROTOCOL_VERSION = 85;
+// 86: structured questions may include provider-declared free-text input, optional fields,
+//     secret entry, primitive format/length/range constraints, and multi-select cardinality.
+//     All fields are additive; pre-v86 peers retain the original required-choice behavior.
+export const PROTOCOL_VERSION = 86;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
@@ -1361,6 +1364,8 @@ export interface QuestionOption {
 }
 
 export interface AgentQuestion {
+  /** Provider-supplied request context shared by this question group. */
+  context?: string;
   /** Opaque answer key. For native Claude this is the question TEXT (the SDK looks answers up
    * by text) — the UI must treat it as opaque and key answers by it verbatim. */
   id: string;
@@ -1369,20 +1374,82 @@ export interface AgentQuestion {
   question: string;
   multiSelect?: boolean;
   options: QuestionOption[];
+  /** Whether the provider accepts a free-form string instead of one of options[]. */
+  allowOther?: boolean;
+  /** Optional provider form fields may be omitted. Absence keeps the legacy required behavior. */
+  required?: boolean;
+  /** Render free-form input without echoing its value on screen. Answers remain transient. */
+  secret?: boolean;
+  /** Provider primitive expected for free-form input. Values cross the normalized boundary as
+   * strings and the owning driver converts them back to its native wire type. */
+  inputFormat?: "text" | "email" | "url" | "date" | "date-time" | "number" | "integer";
+  minLength?: number;
+  maxLength?: number;
+  minimum?: number;
+  maximum?: number;
+  minSelections?: number;
+  maxSelections?: number;
+}
+
+/** Validate one provider-declared free-text value. Shared by the UI's submit gate and the
+ * control plane's authoritative answer validation so both layers enforce the same constraints. */
+export function validateQuestionFreeText(question: AgentQuestion, value: string): string | null {
+  if (!value.length) return "expects a non-empty response";
+  if (question.minLength != null && value.length < question.minLength) {
+    return `expects at least ${question.minLength} character(s)`;
+  }
+  if (question.maxLength != null && value.length > question.maxLength) {
+    return `expects at most ${question.maxLength} character(s)`;
+  }
+  if (question.inputFormat === "number" || question.inputFormat === "integer") {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || (question.inputFormat === "integer" && !Number.isInteger(parsed))) {
+      return `expects a valid ${question.inputFormat}`;
+    }
+    if (question.minimum != null && parsed < question.minimum) return "is below its minimum";
+    if (question.maximum != null && parsed > question.maximum) return "is above its maximum";
+  }
+  if (question.inputFormat === "email" && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
+    return "expects a valid email address";
+  }
+  if (question.inputFormat === "url" && !/^[A-Za-z][A-Za-z0-9+.-]*:[^\s]+$/.test(value)) {
+    return "expects a valid URI";
+  }
+  if (question.inputFormat === "date" && !isValidDate(value)) return "expects a valid date";
+  if (
+    question.inputFormat === "date-time" &&
+    (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(value) || !isValidDate(value.slice(0, 10)) || Number.isNaN(Date.parse(value)))
+  ) {
+    return "expects a valid date and time";
+  }
+  return null;
+}
+
+function isValidDate(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  return parsed.getUTCFullYear() === year && parsed.getUTCMonth() === month - 1 && parsed.getUTCDate() === day;
 }
 
 /**
  * Validate a submitted answer map against the questions it answers. Returns null when valid,
- * else a human-readable reason. An EMPTY map is valid — it means dismiss. Guards the /answer
- * route: answers ride verbatim into the agent's updatedInput, so unknown keys, wrong shapes
+ * else a human-readable reason. An EMPTY map is valid: legacy callers use it for dismissal,
+ * while an explicit submit action may accept an all-optional form. Guards the /answer route:
+ * answers ride verbatim into the agent's updatedInput, so unknown keys, wrong shapes
  * (array for single-select), or labels that were never offered must be rejected server-side.
  */
 export function validateQuestionAnswers(
   questions: AgentQuestion[],
   answers: Record<string, string | string[]>,
+  action?: "submit" | "dismiss",
 ): string | null {
   const keys = Object.keys(answers);
-  if (keys.length === 0) return null; // dismiss
+  if (action === "dismiss" && keys.length > 0) return "a dismissal cannot include answers";
+  if (keys.length === 0 && action !== "submit") return null; // legacy or explicit dismiss
   const byId = new Map(questions.map((q) => [q.id, q]));
   for (const key of keys) {
     const q = byId.get(key);
@@ -1390,8 +1457,8 @@ export function validateQuestionAnswers(
     const value = answers[key];
     const offered = new Set(q.options.map((o) => o.label));
     if (q.multiSelect) {
-      if (!Array.isArray(value) || value.length === 0) {
-        return `"${q.id.slice(0, 80)}" expects a non-empty array of labels`;
+      if (!Array.isArray(value)) {
+        return `"${q.id.slice(0, 80)}" expects an array of labels`;
       }
       if (value.some((v) => typeof v !== "string" || !offered.has(v))) {
         return `"${q.id.slice(0, 80)}" got a label that was not offered`;
@@ -1399,9 +1466,19 @@ export function validateQuestionAnswers(
       if (new Set(value).size !== value.length) {
         return `"${q.id.slice(0, 80)}" got duplicate labels`;
       }
+      const minimum = q.minSelections ?? (q.required === false ? 0 : 1);
+      if (value.length < minimum) return `"${q.id.slice(0, 80)}" expects at least ${minimum} selection(s)`;
+      if (q.maxSelections != null && value.length > q.maxSelections) {
+        return `"${q.id.slice(0, 80)}" expects at most ${q.maxSelections} selection(s)`;
+      }
     } else {
-      if (typeof value !== "string" || !offered.has(value)) {
+      if (typeof value !== "string") return `"${q.id.slice(0, 80)}" expects one offered label`;
+      if (!offered.has(value) && !q.allowOther) {
         return `"${q.id.slice(0, 80)}" expects one offered label`;
+      }
+      if (!offered.has(value)) {
+        const freeTextError = validateQuestionFreeText(q, value);
+        if (freeTextError) return `"${q.id.slice(0, 80)}" ${freeTextError}`;
       }
     }
   }
@@ -1409,7 +1486,7 @@ export function validateQuestionAnswers(
     // Object.hasOwn, not `in`: question ids come from agent-controlled text, and an id like
     // "constructor" would satisfy an `in` check via the prototype chain — passing validation
     // with no actual answer for that question.
-    if (!Object.hasOwn(answers, q.id)) return `missing answer for: ${q.id.slice(0, 80)}`;
+    if (q.required !== false && !Object.hasOwn(answers, q.id)) return `missing answer for: ${q.id.slice(0, 80)}`;
   }
   return null;
 }
@@ -3857,6 +3934,9 @@ export interface AnswerQuestionMessage {
   sessionId: string;
   requestId: string;
   answers: Record<string, string | string[]>;
+  /** Explicit UI intent distinguishes accepting an all-optional form from dismissing it.
+   * Optional for rolling compatibility; absent peers retain the legacy empty-map convention. */
+  action?: "submit" | "dismiss";
 }
 
 /** Restore a worktree session's FILES to the checkpoint taken before `turn` (T3-style rewind).

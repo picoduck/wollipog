@@ -175,7 +175,7 @@ test("app-server discovery caches per version/context, refreshes, and only falls
     env: {},
     driver: "codex-app-server" as const,
     context: { kind: "native" as const },
-    version: "0.144.1",
+    version: "0.147.0",
   };
   let queries = 0;
   let fallbacks = 0;

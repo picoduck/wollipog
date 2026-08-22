@@ -98,8 +98,8 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 85", () => {
-  assert.equal(PROTOCOL_VERSION, 85);
+test("PROTOCOL_VERSION is 86", () => {
+  assert.equal(PROTOCOL_VERSION, 86);
 });
 
 test("slash-command argument hints remain additive metadata", () => {
@@ -745,4 +745,51 @@ test("validateQuestionAnswers: duplicate multi-select labels + prototype-chain i
   ];
   assert.match(validateQuestionAnswers(proto, { "Lang?": "TS" })!, /missing answer/);
   assert.equal(validateQuestionAnswers(proto, { "Lang?": "TS", constructor: "X" }), null);
+});
+
+test("validateQuestionAnswers accepts bounded free text and optional provider form fields", () => {
+  const questions = [
+    { id: "name", question: "Name", options: [], allowOther: true, minLength: 2, maxLength: 8 },
+    { id: "count", question: "Count", options: [], allowOther: true, inputFormat: "integer" as const, minimum: 1, maximum: 4 },
+    { id: "note", question: "Note", options: [], allowOther: true, required: false },
+  ];
+  assert.equal(validateQuestionAnswers(questions, { name: "Ada", count: "3" }), null);
+  assert.match(validateQuestionAnswers(questions, {}, "submit")!, /missing answer/);
+  assert.equal(validateQuestionAnswers(questions, {}, "dismiss"), null);
+  assert.match(validateQuestionAnswers(questions, { name: "Ada", count: "3" }, "dismiss")!, /dismissal/);
+  assert.match(validateQuestionAnswers(questions, { name: "A", count: "3" })!, /at least 2/);
+  assert.match(validateQuestionAnswers(questions, { name: "Ada", count: "3.5" })!, /valid integer/);
+  assert.match(validateQuestionAnswers(questions, { name: "Ada", count: "5" })!, /above its maximum/);
+});
+
+test("validateQuestionAnswers enforces provider primitive formats", () => {
+  const question = (id: string, inputFormat: "email" | "url" | "date" | "date-time") => [{
+    id,
+    question: id,
+    options: [],
+    allowOther: true,
+    inputFormat,
+  }];
+  assert.equal(validateQuestionAnswers(question("email", "email"), { email: "ada@example.com" }), null);
+  assert.match(validateQuestionAnswers(question("email", "email"), { email: "not-an-email" })!, /email address/);
+  assert.equal(validateQuestionAnswers(question("url", "url"), { url: "urn:example:wollipog" }), null);
+  assert.match(validateQuestionAnswers(question("url", "url"), { url: "not a uri" })!, /valid URI/);
+  assert.equal(validateQuestionAnswers(question("date", "date"), { date: "2024-02-29" }), null);
+  assert.match(validateQuestionAnswers(question("date", "date"), { date: "2024-02-30" })!, /valid date/);
+  assert.equal(validateQuestionAnswers(question("date-time", "date-time"), { "date-time": "2026-08-22T12:30" }), null);
+  assert.match(validateQuestionAnswers(question("date-time", "date-time"), { "date-time": "tomorrowish" })!, /date and time/);
+});
+
+test("validateQuestionAnswers enforces provider multi-select cardinality", () => {
+  const questions = [{
+    id: "features",
+    question: "Features",
+    multiSelect: true,
+    options: [{ label: "A" }, { label: "B" }, { label: "C" }],
+    minSelections: 2,
+    maxSelections: 2,
+  }];
+  assert.equal(validateQuestionAnswers(questions, { features: ["A", "B"] }), null);
+  assert.match(validateQuestionAnswers(questions, { features: ["A"] })!, /at least 2/);
+  assert.match(validateQuestionAnswers(questions, { features: ["A", "B", "C"] })!, /at most 2/);
 });

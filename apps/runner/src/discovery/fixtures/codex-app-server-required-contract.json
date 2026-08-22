@@ -1,7 +1,7 @@
 {
-  "contractFingerprint": "codex-app-server-v2-steer-required-2026-08-05",
-  "generatedWith": "codex-cli 0.144.1",
-  "minimumVerifiedVersion": "0.144.1",
+  "contractFingerprint": "codex-app-server-v2-elicitations-required-2026-08-22",
+  "generatedWith": "codex-cli 0.147.0",
+  "minimumVerifiedVersion": "0.147.0",
   "files": {
     "v1/InitializeParams.json": {
       "required": ["clientInfo"],
@@ -140,6 +140,47 @@
     "PermissionsRequestApprovalParams.json": {
       "required": ["itemId", "permissions", "threadId", "turnId"],
       "properties": ["itemId", "permissions", "reason", "threadId", "turnId"]
+    },
+    "ToolRequestUserInputParams.json": {
+      "required": ["isBlocking", "itemId", "questions", "threadId", "turnId"],
+      "properties": ["autoResolutionMs", "isBlocking", "itemId", "questions", "threadId", "turnId"],
+      "definitions": {
+        "ToolRequestUserInputQuestion": {
+          "required": ["header", "id", "question"],
+          "properties": ["header", "id", "isOther", "isSecret", "options", "question"]
+        },
+        "ToolRequestUserInputOption": {
+          "required": ["description", "label"],
+          "properties": ["description", "label"]
+        }
+      }
+    },
+    "ToolRequestUserInputResponse.json": {
+      "required": ["answers"],
+      "properties": ["answers"],
+      "definitions": {
+        "ToolRequestUserInputAnswer": {
+          "required": ["answers"],
+          "properties": ["answers"]
+        }
+      }
+    },
+    "McpServerElicitationRequestParams.json": {
+      "required": ["serverName", "threadId"],
+      "properties": ["serverName", "threadId", "turnId"]
+    },
+    "McpServerElicitationRequestResponse.json": {
+      "required": ["action"],
+      "properties": ["_meta", "action", "content"],
+      "definitions": {
+        "McpServerElicitationAction": {
+          "enumValues": ["accept", "decline", "cancel"]
+        }
+      }
+    },
+    "v2/ServerRequestResolvedNotification.json": {
+      "required": ["requestId", "threadId"],
+      "properties": ["requestId", "threadId"]
     }
   }
 }
