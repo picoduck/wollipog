@@ -615,6 +615,7 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     createProjectLocations: true,
     accessScopeManagement: true,
     nativeTuiLaunch: true,
+    stopFailureRecovery: true,
     stopBeforeArchive: true,
     sessionReminders: true,
   });
@@ -1283,11 +1284,37 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     "active sessions are not reported as archived before Stop evidence",
   );
   assert.deepEqual(archivePayload.pendingSessionIds, ["session-target"]);
-  await runnerInbox.take((message) => message.type === "stop_session" && message.sessionId === "session-target");
+  const stopRequest = await runnerInbox.take((message) =>
+    message.type === "stop_session" && message.sessionId === "session-target");
+  assert.ok(stopRequest.type === "stop_session" && stopRequest.operationId);
   await uiInbox.take((message) => message.type === "session_upsert" &&
     (message.session as { id?: string; archived?: boolean; archiveStatus?: string } | undefined)?.id === "session-target" &&
     (message.session as { archived?: boolean } | undefined)?.archived === false &&
     (message.session as { archiveStatus?: string } | undefined)?.archiveStatus === "stop_pending");
+  runner.send(JSON.stringify({
+    type: "stop_session_result",
+    sessionId: "session-target",
+    operationId: stopRequest.operationId,
+    accepted: false,
+    error: "private runner detail",
+  }));
+  await uiInbox.take((message) => message.type === "session_upsert" &&
+    (message.session as { id?: string; archiveStatus?: string } | undefined)?.id === "session-target" &&
+    (message.session as { archiveStatus?: string } | undefined)?.archiveStatus === "stop_failed");
+  const retryStopResponse = await ownerFetch("/api/sessions/session-target/retry-stop", { method: "POST" });
+  assert.equal(retryStopResponse.status, 202);
+  const retryPayload = await retryStopResponse.json() as {
+    archived: boolean;
+    archiveStatus: string;
+    archiveOperation: { operationId: string; capacityReleased: boolean };
+  };
+  assert.equal(retryPayload.archived, false);
+  assert.equal(retryPayload.archiveStatus, "stop_pending");
+  assert.equal(retryPayload.archiveOperation.operationId, stopRequest.operationId);
+  assert.equal(retryPayload.archiveOperation.capacityReleased, false);
+  const retryCommand = await runnerInbox.take((message) =>
+    message.type === "stop_session" && message.sessionId === "session-target");
+  assert.equal(retryCommand.type === "stop_session" ? retryCommand.operationId : undefined, stopRequest.operationId);
   assert.equal(
     uiInbox.has((message) => message.type === "session_upsert" &&
       (message.session as { id?: string; archived?: boolean } | undefined)?.id === "session-history" &&

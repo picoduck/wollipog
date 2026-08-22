@@ -1,6 +1,7 @@
 import React, { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import type {
   ArchiveStatus,
+  ArchiveOperationView,
   BackgroundDeliveryWatchdogState,
   BackgroundNotificationReceiptState,
   BackgroundWorkState,
@@ -142,13 +143,19 @@ export function CopyButton({
   );
 }
 
-export function StatusBadge({ status, archiveStatus }: { status: SessionStatus; archiveStatus?: ArchiveStatus }) {
+export function StatusBadge({ status, archiveStatus, archiveOperation }: {
+  status: SessionStatus;
+  archiveStatus?: ArchiveStatus;
+  archiveOperation?: ArchiveOperationView;
+}) {
   const m = archiveStatus === "stop_pending"
     ? { label: "Stop Pending", className: "st-running", busy: true }
-    : statusMeta(status);
+    : archiveStatus === "stop_failed"
+      ? { label: "Stop Failed", className: "st-failed", busy: false }
+      : statusMeta(status);
   return (
-    <span className={`status-badge ${m.className}`}>
-      <span className={`status-dot2 ${m.busy ? "pulse" : ""}`} />
+    <span className={"status-badge " + m.className} title={archiveOperation?.failure?.message}>
+      <span className={"status-dot2 " + (m.busy ? "pulse" : "")} />
       {m.label}
     </span>
   );

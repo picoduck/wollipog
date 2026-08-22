@@ -48,6 +48,8 @@ function InboxRowInner({
 }: InboxRowProps) {
   const status = session.archiveStatus === "stop_pending"
     ? { label: "Stop Pending", className: "st-running", busy: true }
+    : session.archiveStatus === "stop_failed"
+      ? { label: "Stop Failed", className: "st-failed", busy: false }
     : statusMeta(session.status);
   const blocked = session.pendingApproval != null || session.status === "input_required";
   const active = isHeartbeatBusy(session.status);

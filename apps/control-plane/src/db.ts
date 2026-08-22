@@ -32,6 +32,9 @@ import {
   type AutomationAuditEvent,
   type AccessScopeChangePreview,
   type AccessScopeAuditView,
+  type ArchiveOperationView,
+  type ArchiveStatus,
+  type ArchiveStopFailureCode,
   type AutomationAuditEventKind,
   type AutomationCommandState,
   type AutomationCommandView,
@@ -1798,6 +1801,28 @@ interface SessionRow {
   event_epoch: number;
   runner_history_epoch: number | null;
   runner_history_tail_seq: number;
+}
+
+interface SessionStopIntentRow {
+  session_id: string;
+  runner_id: string;
+  created_at: number;
+  restart_launch_id: string | null;
+  archive_after_stop: number;
+  operation_id: string;
+  last_attempt_at: number;
+  attempt_count: number;
+  failed_at: number | null;
+  failure_code: string | null;
+  failure_message: string | null;
+}
+
+export interface SessionStopIntentRecord {
+  sessionId: string;
+  runnerId: string;
+  restartLaunchId: string | null;
+  archiveAfterStop: boolean;
+  operation: ArchiveOperationView;
 }
 
 interface SessionReminderRow {
@@ -3572,7 +3597,14 @@ export class ControlPlaneDb {
          session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
          runner_id  TEXT NOT NULL,
          created_at INTEGER NOT NULL,
-         restart_launch_id TEXT
+         restart_launch_id TEXT,
+         archive_after_stop INTEGER NOT NULL DEFAULT 0 CHECK (archive_after_stop IN (0, 1)),
+         operation_id TEXT,
+         last_attempt_at INTEGER,
+         attempt_count INTEGER NOT NULL DEFAULT 1 CHECK (attempt_count >= 1),
+         failed_at INTEGER,
+         failure_code TEXT,
+         failure_message TEXT
        )`,
     );
     const stopIntentColumns = db.prepare("PRAGMA table_info(session_stop_intents)")
@@ -3583,6 +3615,29 @@ export class ControlPlaneDb {
     if (!stopIntentColumns.some((column) => column.name === "archive_after_stop")) {
       db.exec("ALTER TABLE session_stop_intents ADD COLUMN archive_after_stop INTEGER NOT NULL DEFAULT 0 CHECK (archive_after_stop IN (0, 1))");
     }
+    if (!stopIntentColumns.some((column) => column.name === "operation_id")) {
+      db.exec("ALTER TABLE session_stop_intents ADD COLUMN operation_id TEXT");
+    }
+    if (!stopIntentColumns.some((column) => column.name === "last_attempt_at")) {
+      db.exec("ALTER TABLE session_stop_intents ADD COLUMN last_attempt_at INTEGER");
+    }
+    if (!stopIntentColumns.some((column) => column.name === "attempt_count")) {
+      db.exec("ALTER TABLE session_stop_intents ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 1 CHECK (attempt_count >= 1)");
+    }
+    if (!stopIntentColumns.some((column) => column.name === "failed_at")) {
+      db.exec("ALTER TABLE session_stop_intents ADD COLUMN failed_at INTEGER");
+    }
+    if (!stopIntentColumns.some((column) => column.name === "failure_code")) {
+      db.exec("ALTER TABLE session_stop_intents ADD COLUMN failure_code TEXT");
+    }
+    if (!stopIntentColumns.some((column) => column.name === "failure_message")) {
+      db.exec("ALTER TABLE session_stop_intents ADD COLUMN failure_message TEXT");
+    }
+    db.exec(
+      `UPDATE session_stop_intents
+       SET operation_id=COALESCE(operation_id, 'stop_' || lower(hex(randomblob(16)))),
+           last_attempt_at=COALESCE(last_attempt_at, created_at)`,
+    );
     db.exec(
       "CREATE INDEX IF NOT EXISTS idx_session_stop_intents_runner ON session_stop_intents(runner_id, created_at, session_id)",
     );
@@ -9955,15 +10010,52 @@ export class ControlPlaneDb {
 
   /* ---- Phase 2: tombstones so the runner store can't resurrect a UI-deleted session ---- */
 
-  addSessionStopIntent(sessionId: string, runnerId: string, now: number, archiveAfterStop = false): void {
+
+  private sessionStopIntentRecord(row: SessionStopIntentRow): SessionStopIntentRecord {
+    const failed = row.failed_at !== null;
+    const code = row.failure_code as ArchiveStopFailureCode | null;
+    const status: ArchiveStatus = failed ? "stop_failed" : "stop_pending";
+    return {
+      sessionId: row.session_id,
+      runnerId: row.runner_id,
+      restartLaunchId: row.restart_launch_id,
+      archiveAfterStop: row.archive_after_stop === 1,
+      operation: {
+        operationId: row.operation_id,
+        status,
+        requestedAt: row.created_at,
+        lastAttemptAt: row.last_attempt_at,
+        attemptCount: row.attempt_count,
+        capacityReleased: false,
+        ...(failed && code && row.failure_message
+          ? { failure: { code, message: row.failure_message, failedAt: row.failed_at! } }
+          : {}),
+      },
+    };
+  }
+
+  sessionStopIntent(sessionId: string): SessionStopIntentRecord | undefined {
+    const row = this.stmt("SELECT * FROM session_stop_intents WHERE session_id=?")
+      .get(sessionId) as unknown as SessionStopIntentRow | undefined;
+    return row ? this.sessionStopIntentRecord(row) : undefined;
+  }
+
+  addSessionStopIntent(
+    sessionId: string,
+    runnerId: string,
+    now: number,
+    archiveAfterStop = false,
+  ): SessionStopIntentRecord {
+    const operationId = "stop_" + randomUUID();
     this.stmt(
-      `INSERT INTO session_stop_intents (session_id, runner_id, created_at, archive_after_stop) VALUES (?, ?, ?, ?)
-       ON CONFLICT(session_id) DO UPDATE SET
-         runner_id=excluded.runner_id,
-         created_at=excluded.created_at,
-         restart_launch_id=NULL,
-         archive_after_stop=MAX(session_stop_intents.archive_after_stop, excluded.archive_after_stop)`,
-    ).run(sessionId, runnerId, now, archiveAfterStop ? 1 : 0);
+      "INSERT INTO session_stop_intents " +
+      "(session_id, runner_id, created_at, archive_after_stop, operation_id, last_attempt_at, attempt_count) " +
+      "VALUES (?, ?, ?, ?, ?, ?, 1) " +
+      "ON CONFLICT(session_id) DO UPDATE SET " +
+      "runner_id=excluded.runner_id, restart_launch_id=NULL, " +
+      "archive_after_stop=MAX(session_stop_intents.archive_after_stop, excluded.archive_after_stop)",
+    ).run(sessionId, runnerId, now, archiveAfterStop ? 1 : 0, operationId, now);
+    return this.sessionStopIntent(sessionId)!;
   }
 
   hasSessionStopIntent(sessionId: string): boolean {
@@ -9974,11 +10066,73 @@ export class ControlPlaneDb {
     this.stmt("DELETE FROM session_stop_intents WHERE session_id=?").run(sessionId);
   }
 
-  sessionArchiveStatus(sessionId: string): "stop_pending" | undefined {
-    const row = this.stmt(
-      "SELECT archive_after_stop FROM session_stop_intents WHERE session_id=?",
-    ).get(sessionId) as { archive_after_stop: number } | undefined;
-    return row?.archive_after_stop === 1 ? "stop_pending" : undefined;
+  sessionArchiveOperation(sessionId: string): ArchiveOperationView | undefined {
+    const intent = this.sessionStopIntent(sessionId);
+    return intent?.archiveAfterStop ? intent.operation : undefined;
+  }
+
+  private sessionArchiveOperations(): Map<string, ArchiveOperationView> {
+    const rows = this.stmt(
+      "SELECT * FROM session_stop_intents WHERE archive_after_stop=1",
+    ).all() as unknown as SessionStopIntentRow[];
+    return new Map(rows.map((row) => [row.session_id, this.sessionStopIntentRecord(row).operation]));
+  }
+
+  sessionArchiveStatus(sessionId: string): ArchiveStatus | undefined {
+    return this.sessionArchiveOperation(sessionId)?.status;
+  }
+
+  /** Re-arm one failed operation without changing its durable identity. Duplicate requests that
+   * observe it pending are no-ops, so concurrent clients cannot multiply attempts. */
+  retrySessionStopIntent(sessionId: string, now: number): SessionStopIntentRecord | undefined {
+    return this.atomic(() => {
+      const existing = this.sessionStopIntent(sessionId);
+      if (!existing?.archiveAfterStop) return undefined;
+      if (existing.operation.status === "stop_failed") {
+        this.stmt(
+          "UPDATE session_stop_intents " +
+          "SET created_at=?, failed_at=NULL, failure_code=NULL, failure_message=NULL, " +
+          "last_attempt_at=?, attempt_count=attempt_count+1, restart_launch_id=NULL " +
+          "WHERE session_id=? AND failed_at IS NOT NULL",
+        ).run(now, now, sessionId);
+      }
+      return this.sessionStopIntent(sessionId);
+    });
+  }
+
+  recordSessionStopAttempt(sessionId: string, now: number): SessionStopIntentRecord | undefined {
+    this.stmt(
+      "UPDATE session_stop_intents " +
+      "SET last_attempt_at=?, attempt_count=attempt_count+1 " +
+      "WHERE session_id=? AND failed_at IS NULL",
+    ).run(now, sessionId);
+    return this.sessionStopIntent(sessionId);
+  }
+
+  failSessionStopIntent(
+    sessionId: string,
+    operationId: string,
+    code: ArchiveStopFailureCode,
+    message: string,
+    now: number,
+  ): boolean {
+    if (!["timeout", "retry_exhausted", "runner_rejected"].includes(code)) return false;
+    const bounded = message.replace(/[\u0000-\u001f\u007f]/gu, " ").trim().slice(0, 240);
+    const changed = this.stmt(
+      "UPDATE session_stop_intents " +
+      "SET failed_at=?, failure_code=?, failure_message=? " +
+      "WHERE session_id=? AND operation_id=? AND archive_after_stop=1 AND failed_at IS NULL",
+    ).run(now, code, bounded || "The runner could not confirm that the session stopped.", sessionId, operationId);
+    return Number(changed.changes) === 1;
+  }
+
+  pendingSessionStopIntents(): SessionStopIntentRecord[] {
+    const rows = this.stmt(
+      "SELECT * FROM session_stop_intents " +
+      "WHERE archive_after_stop=1 AND failed_at IS NULL " +
+      "ORDER BY last_attempt_at, session_id",
+    ).all() as unknown as SessionStopIntentRow[];
+    return rows.map((row) => this.sessionStopIntentRecord(row));
   }
 
   /** Undo/unarchive cancels only the follow-up filing action. The durable Stop remains armed and
@@ -10015,9 +10169,7 @@ export class ControlPlaneDb {
   }
 
   sessionStopRestartLaunchId(sessionId: string): string | null {
-    const row = this.stmt("SELECT restart_launch_id FROM session_stop_intents WHERE session_id=?")
-      .get(sessionId) as { restart_launch_id: string | null } | undefined;
-    return row?.restart_launch_id ?? null;
+    return this.sessionStopIntent(sessionId)?.restartLaunchId ?? null;
   }
 
   sessionStopIntentIds(runnerId: string): string[] {
@@ -11266,7 +11418,7 @@ export class ControlPlaneDb {
     const row = this.stmt("SELECT * FROM sessions WHERE id=?").get(id) as unknown as
       | SessionRow
       | undefined;
-    return row ? this.sessionView(row, undefined, this.sessionArchiveStatus(id)) : null;
+    return row ? this.sessionView(row, undefined, this.sessionArchiveOperation(id)) : null;
   }
 
   recordSideChat(parentSessionId: string, childSessionId: string, now: number): void {
@@ -11334,10 +11486,8 @@ export class ControlPlaneDb {
     const rows = this.stmt(`SELECT * FROM sessions ${where} ORDER BY created_at DESC`)
       .all() as unknown as SessionRow[];
     const legacyTargets = new Map<string, ExecutionTargetDefinition[] | undefined>();
-    const archivePendingIds = new Set((this.stmt(
-      "SELECT session_id FROM session_stop_intents WHERE archive_after_stop=1",
-    ).all() as unknown as Array<{ session_id: string }>).map((row) => row.session_id));
-    return rows.map((r) => this.sessionView(r, legacyTargets, archivePendingIds.has(r.id) ? "stop_pending" : undefined));
+    const archiveOperations = this.sessionArchiveOperations();
+    return rows.map((r) => this.sessionView(r, legacyTargets, archiveOperations.get(r.id)));
   }
 
   private legacyExecutionTargets(runnerId: string): ExecutionTargetDefinition[] | undefined {
@@ -11360,7 +11510,7 @@ export class ControlPlaneDb {
   private sessionView(
     row: SessionRow,
     legacyTargetCache?: Map<string, ExecutionTargetDefinition[] | undefined>,
-    archiveStatus?: "stop_pending",
+    archiveOperation?: ArchiveOperationView,
   ): SessionView {
     const agentName = row.agent_id
       ? ((this.stmt("SELECT name FROM agent_definitions WHERE id=?").get(row.agent_id) as
@@ -11453,7 +11603,8 @@ export class ControlPlaneDb {
         }
       })(),
       archived: row.archived === 1,
-      archiveStatus,
+      archiveStatus: archiveOperation?.status,
+      archiveOperation,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       lastEventAt: row.last_event_at,

@@ -37,6 +37,9 @@ import {
   SessionsService,
   EXTERNAL_SESSION_ADOPTION_TIMEOUT_MS,
   EXTERNAL_SESSION_ENUMERATION_TIMEOUT_MS,
+  SESSION_STOP_MAX_ATTEMPTS,
+  SESSION_STOP_RETRY_INTERVAL_MS,
+  SESSION_STOP_TIMEOUT_MS,
   budgetDecision,
   capabilityConfigError,
   claudeModelConfigForValidation,
@@ -6435,6 +6438,134 @@ test("archive is idempotently stop-pending until terminal runner evidence confir
   assert.ok(hub.sessionChangedByIdCalls.includes(id));
 });
 
+test("supported Stop operations time out durably and retry the same operation idempotently", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "running", Date.now());
+
+  const pending = svc.setArchived(id, true).data!;
+  const operation = pending.archiveOperation!;
+  assert.equal(operation.status, "stop_pending");
+  assert.equal(operation.attemptCount, 1);
+  assert.equal(operation.capacityReleased, false);
+
+  hub.sessionChangedByIdCalls.length = 0;
+  assert.equal(svc.maintainSessionStopIntents(operation.requestedAt + SESSION_STOP_TIMEOUT_MS), 1);
+  const failed = db.getSession(id)!;
+  assert.equal(failed.archiveStatus, "stop_failed");
+  assert.equal(failed.archived, false);
+  assert.equal(failed.archiveOperation?.capacityReleased, false);
+  assert.equal(failed.archiveOperation?.failure?.code, "timeout");
+  assert.match(failed.archiveOperation?.failure?.message ?? "", /capacity was released/u);
+  assert.ok(hub.sessionChangedByIdCalls.includes(id), "every client receives the failed projection");
+
+  const hidden = svc.setArchived(id, false).data!;
+  assert.equal(hidden.archiveOperation, undefined);
+  assert.equal(db.hasSessionStopIntent(id), true, "unarchive keeps the underlying Stop intent");
+  assert.equal(svc.setArchived(id, true).data?.archiveStatus, "stop_failed",
+    "reattaching archive does not implicitly restart failed runtime work");
+
+  const firstRetry = svc.retryStop(id).data!;
+  const duplicateRetry = svc.retryStop(id).data!;
+  assert.equal(firstRetry.archiveStatus, "stop_pending");
+  assert.equal(firstRetry.archiveOperation?.operationId, operation.operationId);
+  assert.equal(duplicateRetry.archiveOperation?.operationId, operation.operationId);
+  assert.equal(firstRetry.archiveOperation?.attemptCount, operation.attemptCount + 1);
+  assert.equal(duplicateRetry.archiveOperation?.attemptCount, firstRetry.archiveOperation?.attemptCount);
+  assert.equal(hub.sentOfType("stop_session").at(-1)?.operationId, operation.operationId);
+  assert.equal(svc.maintainSessionStopIntents(firstRetry.archiveOperation!.requestedAt + 1), 0,
+    "explicit recovery must not inherit the expired timeout window");
+  assert.equal(db.getSession(id)?.archiveStatus, "stop_pending");
+
+  assert.equal(svc.onStopSessionResult(RUNNER_ID, {
+    type: "stop_session_result",
+    sessionId: id,
+    operationId: operation.operationId,
+    accepted: true,
+  }), true);
+  assert.equal(db.getSession(id)?.archiveStatus, "stop_pending", "acceptance is not capacity-release proof");
+
+  svc.onSessionStatus(id, "stopped", undefined, undefined, RUNNER_ID);
+  assert.equal(db.getSession(id)?.archived, true);
+  assert.equal(db.getSession(id)?.archiveOperation, undefined);
+});
+
+test("exhausted retries and explicit runner rejection become bounded Stop Failed states", () => {
+  const exhaustedHarness = makeHarness();
+  const exhaustedId = seedSession(exhaustedHarness.svc, exhaustedHarness.hub);
+  exhaustedHarness.db.updateSessionStatus(exhaustedId, "running", Date.now());
+  const exhaustedOperation = exhaustedHarness.svc.setArchived(exhaustedId, true).data!.archiveOperation!;
+
+  for (let attempt = 1; attempt < SESSION_STOP_MAX_ATTEMPTS; attempt++) {
+    exhaustedHarness.svc.maintainSessionStopIntents(
+      exhaustedOperation.requestedAt + attempt * SESSION_STOP_RETRY_INTERVAL_MS,
+    );
+  }
+  exhaustedHarness.svc.maintainSessionStopIntents(
+    exhaustedOperation.requestedAt + SESSION_STOP_MAX_ATTEMPTS * SESSION_STOP_RETRY_INTERVAL_MS,
+  );
+  assert.equal(exhaustedHarness.db.getSession(exhaustedId)?.archiveOperation?.failure?.code, "retry_exhausted");
+  assert.equal(exhaustedHarness.db.getSession(exhaustedId)?.archived, false);
+
+  const rejectedHarness = makeHarness();
+  const rejectedId = seedSession(rejectedHarness.svc, rejectedHarness.hub);
+  rejectedHarness.db.updateSessionStatus(rejectedId, "running", Date.now());
+  const rejectedOperation = rejectedHarness.svc.setArchived(rejectedId, true).data!.archiveOperation!;
+  assert.equal(rejectedHarness.svc.onStopSessionResult("intruder", {
+    type: "stop_session_result", sessionId: rejectedId,
+    operationId: rejectedOperation.operationId, accepted: false, error: "private output",
+  }), false);
+  assert.equal(rejectedHarness.svc.onStopSessionResult(RUNNER_ID, {
+    type: "stop_session_result", sessionId: rejectedId,
+    operationId: "stale-operation", accepted: false, error: "private output",
+  }), false);
+  assert.equal(rejectedHarness.svc.onStopSessionResult(RUNNER_ID, {
+    type: "stop_session_result", sessionId: rejectedId,
+    operationId: rejectedOperation.operationId, accepted: false,
+    error: "/private/provider/path and runtime output",
+  }), true);
+  const rejected = rejectedHarness.db.getSession(rejectedId)!;
+  assert.equal(rejected.archiveOperation?.failure?.code, "runner_rejected");
+  assert.doesNotMatch(rejected.archiveOperation?.failure?.message ?? "", /private|provider\/path/u);
+  assert.equal(rejected.archiveOperation?.failure?.message.length! <= 240, true);
+  assert.equal(rejected.archived, false);
+});
+
+test("offline v85 runners exhaust bounded automatic Stop recovery without hiding capacity", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.deliver = false;
+
+  const operation = svc.setArchived(id, true).data!.archiveOperation!;
+  db.markOffline(RUNNER_ID, operation.requestedAt + 1);
+  for (let attempt = 1; attempt <= SESSION_STOP_MAX_ATTEMPTS; attempt++) {
+    svc.maintainSessionStopIntents(
+      operation.requestedAt + attempt * SESSION_STOP_RETRY_INTERVAL_MS,
+    );
+  }
+
+  const failed = db.getSession(id)!;
+  assert.equal(failed.archiveOperation?.failure?.code, "retry_exhausted");
+  assert.equal(failed.archiveOperation?.capacityReleased, false);
+  assert.equal(failed.archived, false);
+});
+
+test("mixed-version runners remain conservatively Stop Pending after the v85 failure window", () => {
+  const { db, hub, svc } = makeHarness();
+  db.registerRunner(runnerMeta(), Date.now(), 84);
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "running", Date.now());
+
+  const pending = svc.setArchived(id, true).data!;
+  assert.equal(hub.sentOfType("stop_session").at(-1)?.operationId, undefined);
+  assert.equal(svc.maintainSessionStopIntents(
+    pending.archiveOperation!.requestedAt + SESSION_STOP_TIMEOUT_MS * 2,
+  ), 0);
+  assert.equal(db.getSession(id)?.archiveStatus, "stop_pending");
+  assert.equal(db.getSession(id)?.archived, false);
+});
+
 test("repeated archive fences a legacy archived session that is still consuming capacity", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);
@@ -6524,6 +6655,17 @@ test("Project bulk archive uses the same stop-and-archive lifecycle for mixed st
   assert.equal(db.getSession(running)?.archiveStatus, "stop_pending");
   assert.deepEqual(hub.sentOfType("stop_session").map((message) => message.sessionId), [running]);
   assert.deepEqual(hub.projectChangedByIdCalls, [], "the route owns the one batched Project refresh");
+
+  const operationId = db.getSession(running)?.archiveOperation?.operationId;
+  assert.ok(operationId);
+  svc.onStopSessionResult(RUNNER_ID, {
+    type: "stop_session_result", sessionId: running, operationId,
+    accepted: false, error: "runner rejection detail",
+  });
+  const failed = svc.archiveProjectSessions(projectId!);
+  assert.deepEqual(failed.data?.pendingSessionIds, []);
+  assert.deepEqual(failed.data?.failedSessionIds, [running]);
+  assert.equal(db.getSession(running)?.archived, false);
 });
 
 test("stop sends stop_session and marks the session stopped", () => {
@@ -6665,7 +6807,9 @@ test("late approval events remain historical but cannot cross a durable Stop fen
   assert.equal(db.getSession(id)!.status, "stopped");
   assert.equal(db.getSession(id)!.pendingApproval, null);
   assert.equal(db.listEvents(id).at(-1)?.payload.kind, "permission_request");
-  assert.deepEqual(hub.sentOfType("stop_session"), [{ type: "stop_session", sessionId: id }]);
+  const replay = hub.sentOfType("stop_session");
+  assert.equal(replay.length, 1);
+  assert.deepEqual({ type: replay[0]?.type, sessionId: replay[0]?.sessionId }, { type: "stop_session", sessionId: id });
 });
 
 test("restart-after-stop requires correlated restart echo support before mutation or send", () => {
@@ -6674,7 +6818,7 @@ test("restart-after-stop requires correlated restart echo support before mutatio
   svc.stop(id);
   hub.sentToRunner.length = 0;
   hub.sessionChangedByIdCalls.length = 0;
-  db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION - 1);
+  db.registerRunner(runnerMeta(), Date.now(), 83);
 
   const result = svc.restart(id);
 

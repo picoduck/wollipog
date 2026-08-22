@@ -111,13 +111,20 @@ test("the default Archived filter includes Stop Pending recovery but excludes or
     archiveStatus: "stop_pending",
     updatedAt: 2,
   });
+  const failed = session({
+    id: "failed-stop",
+    archived: false,
+    status: "stopped",
+    archiveStatus: "stop_failed",
+    updatedAt: 2.5,
+  });
   const active = session({ id: "active", archived: false, status: "running", updatedAt: 1 });
   assert.deepEqual(filterArchiveSessions({
-    sessions: [archived, pending, active],
+    sessions: [archived, pending, failed, active],
     filters: defaults,
-  }).map((item) => item.id), ["archived", "pending"]);
+  }).map((item) => item.id), ["archived", "failed-stop", "pending"]);
   assert.deepEqual(filterArchiveSessions({
-    sessions: [archived, pending, active],
+    sessions: [archived, pending, failed, active],
     filters: { ...defaults, archive: "unarchived" },
   }).map((item) => item.id), ["active"]);
 });

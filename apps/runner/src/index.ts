@@ -1098,7 +1098,25 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       sessions.removeQueuedPrompt(msg.sessionId, msg.promptId);
       break;
     case "stop_session":
-      sessions.stop(msg.sessionId);
+      try {
+        sessions.stop(msg.sessionId);
+        if (msg.operationId) {
+          sendUp({
+            type: "stop_session_result",
+            sessionId: msg.sessionId,
+            operationId: msg.operationId,
+            accepted: true,
+          });
+        }
+      } catch (error) {
+        const detail = errText(error).replace(/[\u0000-\u001f\u007f]/gu, " ").slice(0, 240);
+        if (msg.operationId) {
+          sendUp({
+            type: "stop_session_result", sessionId: msg.sessionId,
+            operationId: msg.operationId, accepted: false, error: detail,
+          });
+        } else log("session stop failed for " + msg.sessionId + ": " + detail);
+      }
       break;
     case "rearm_governance":
       sessions.rearmGovernance(msg.sessionId, msg.config, msg.holdFor);

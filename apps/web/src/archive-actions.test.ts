@@ -11,7 +11,7 @@ import {
 test("bulk archive applies every id and needs no compensation on success", async () => {
   const calls: Array<[string, boolean]> = [];
   const result = await archiveSessionsWithCompensation(["a", "b"], async (id, archived) => { calls.push([id, archived]); });
-  assert.deepEqual(result, { ok: true, pendingSessionIds: [] });
+  assert.deepEqual(result, { ok: true, pendingSessionIds: [], failedSessionIds: [] });
   assert.deepEqual(calls, [["a", true], ["b", true]]);
 });
 
@@ -21,7 +21,19 @@ test("bulk archive reports exact sessions still waiting for Stop evidence", asyn
     archiveStatus: id === "a" ? undefined : "stop_pending",
   }));
 
-  assert.deepEqual(result, { ok: true, pendingSessionIds: ["b", "c"] });
+  assert.deepEqual(result, { ok: true, pendingSessionIds: ["b", "c"], failedSessionIds: [] });
+});
+
+test("bulk archive distinguishes Stop Failed from Stop Pending", async () => {
+  const result = await archiveSessionsWithCompensation(["pending", "failed"], async (id) => ({
+    archived: false,
+    archiveStatus: id === "failed" ? "stop_failed" : "stop_pending",
+  }));
+  assert.deepEqual(result, {
+    ok: true,
+    pendingSessionIds: ["pending"],
+    failedSessionIds: ["failed"],
+  });
 });
 
 test("bulk archive compensates every exact id after any rejected response", async () => {
@@ -77,6 +89,10 @@ test("stop-pending and archived sessions retain truthful action labels", () => {
   assert.equal(
     sessionArchiveActionLabel({ archived: false, status: "stopped", archiveStatus: "stop_pending" }, false),
     "Archive and Stop",
+  );
+  assert.equal(
+    sessionArchiveActionLabel({ archived: false, status: "stopped", archiveStatus: "stop_failed" }, false),
+    "Retry Stop",
   );
   assert.equal(
     sessionArchiveActionLabel({ archived: true, status: "running", archiveStatus: "stop_pending" }, false),

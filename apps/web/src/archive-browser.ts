@@ -74,7 +74,7 @@ export function filterArchiveSessions(input: {
   const query = input.filters.query.trim().toLocaleLowerCase();
   const matchesArchive = (session: SessionView) => {
     if (input.filters.archive === "all") return true;
-    const pendingArchive = session.archiveStatus === "stop_pending";
+    const pendingArchive = session.archiveStatus === "stop_pending" || session.archiveStatus === "stop_failed";
     return input.filters.archive === "archived"
       ? session.archived || pendingArchive
       : !session.archived && !pendingArchive;

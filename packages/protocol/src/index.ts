@@ -235,7 +235,9 @@
 //     Structured continuation evidence carries bounded provider-neutral terminal summaries.
 // 84: replacement starts carry a control-plane launch identity that runners persist and echo in
 //     live status and reconnect snapshots, proving which runtime crossed a durable Stop fence.
-export const PROTOCOL_VERSION = 84;
+// 85: stop_session carries a durable operation identity and correlated acceptance or rejection.
+//     Older runners retain the conservative Stop Pending behavior.
+export const PROTOCOL_VERSION = 85;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
@@ -352,6 +354,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   managedBackgroundDelivery: 82,
   backgroundWorkTracking: 83,
   correlatedRestartEcho: 84,
+  stopFailureRecovery: 85,
 } as const;
 
 /* ========================================================================== */
@@ -1227,7 +1230,25 @@ export type SessionStatus =
 /** Server-owned archive lifecycle. An active archive request stays visible until the runner
  * proves that its provider process is terminal or absent. Omitted means no archive operation is
  * pending (including older control planes). */
-export type ArchiveStatus = "stop_pending";
+export type ArchiveStatus = "stop_pending" | "stop_failed";
+
+export type ArchiveStopFailureCode = "timeout" | "retry_exhausted" | "runner_rejected";
+
+/** Structured, server-owned Stop-before-archive operation. Failure never proves that runtime
+ * capacity was released, and the operation identity remains stable across idempotent retries. */
+export interface ArchiveOperationView {
+  operationId: string;
+  status: ArchiveStatus;
+  requestedAt: number;
+  lastAttemptAt: number;
+  attemptCount: number;
+  capacityReleased: false;
+  failure?: {
+    code: ArchiveStopFailureCode;
+    message: string;
+    failedAt: number;
+  };
+}
 
 /** Archive must release runtime capacity for every non-terminal provider lifecycle. Idle is
  * intentionally included: it can retain a resident provider process and runner/target leases. */
@@ -2456,6 +2477,9 @@ export interface SessionView {
   /** Durable server-owned stop-and-archive state. While pending, `archived` remains false so the
    * session cannot disappear from ordinary clients before capacity release is confirmed. */
   archiveStatus?: ArchiveStatus;
+  /** Structured operation state for clients that support Stop failure recovery. Omitted by older
+   * control planes and when no archive follow-up remains attached to the durable Stop intent. */
+  archiveOperation?: ArchiveOperationView;
   createdAt: number;
   updatedAt: number;
   lastEventAt: number | null;
@@ -3314,6 +3338,15 @@ export interface SessionStatusMessage {
   controlPlaneLaunchId?: string;
 }
 
+export interface StopSessionResultMessage {
+  type: "stop_session_result";
+  sessionId: string;
+  operationId: string;
+  accepted: boolean;
+  /** Bounded, provider-neutral rejection detail. Present only when accepted is false. */
+  error?: string;
+}
+
 /** Hash-only binding for one per-session Claude policy-hook credential. The plaintext remains in a
  * protected runner-local file and is never sent over the runner socket or persisted in commands. */
 export interface PolicyHookCredentialMessage {
@@ -3524,6 +3557,7 @@ export type RunnerToControlPlane =
   | RegisterMessage
   | HeartbeatMessage
   | SessionStatusMessage
+  | StopSessionResultMessage
   | PolicyHookCredentialMessage
   | SessionRuntimeUpdatedMessage
   | SessionEventMessage
@@ -3794,6 +3828,8 @@ export interface CancelQueuedPromptMessage {
 export interface StopSessionMessage {
   type: "stop_session";
   sessionId: string;
+  /** Added in v85. Older runners ignore this optional field and emit no correlated result. */
+  operationId?: string;
 }
 
 /** Re-arm runner-side governance after the user continues past a threshold. Values are absolute
@@ -4638,6 +4674,8 @@ export interface UiSnapshotMessage {
     nativeTuiLaunch?: boolean;
     /** Archive keeps nonterminal sessions visible until durable Stop evidence releases capacity. */
     stopBeforeArchive?: boolean;
+    /** Durable Stop operations expose bounded failure metadata and an idempotent recovery API. */
+    stopFailureRecovery?: boolean;
     /** Per-user durable session reminders and scoped live reminder events are available. */
     sessionReminders?: boolean;
   };
@@ -5130,6 +5168,8 @@ export interface ArchiveProjectSessionsResponse {
   archivedSessionIds?: string[];
   /** Sessions whose provider stop must be confirmed before the server files them as archived. */
   pendingSessionIds?: string[];
+  /** Sessions whose Stop operation failed without proving runtime capacity was released. */
+  failedSessionIds?: string[];
 }
 
 export interface SessionEventsResponse {

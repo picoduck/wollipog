@@ -690,17 +690,57 @@ test("session stop intents survive control-plane restart and cascade with their 
     assert.equal(initial.sessionStopRestartLaunchId("sess-1"), null);
     initial.setSessionStopRestartLaunchId("sess-1", "launch-proof-2");
     assert.deepEqual(initial.sessionStopIntentIds("runner-1"), ["sess-1"]);
+    const operation = initial.getSession("sess-1")?.archiveOperation;
+    assert.ok(operation?.operationId.startsWith("stop_"));
+    assert.equal(operation?.attemptCount, 1);
+    assert.equal(operation?.capacityReleased, false);
     initial.close();
 
     const reopened = ControlPlaneDb.open(path);
     assert.equal(reopened.hasSessionStopIntent("sess-1"), true);
     assert.equal(reopened.getSession("sess-1")?.archiveStatus, "stop_pending");
+    assert.deepEqual(reopened.getSession("sess-1")?.archiveOperation, operation);
     reopened.cancelSessionArchiveAfterStop("sess-1");
     assert.equal(reopened.getSession("sess-1")?.archiveStatus, undefined);
     assert.equal(reopened.sessionStopRestartLaunchId("sess-1"), "launch-proof-2");
     assert.deepEqual(reopened.sessionStopIntentIds("runner-1"), ["sess-1"]);
     reopened.deleteSession("sess-1");
     assert.equal(reopened.hasSessionStopIntent("sess-1"), false);
+    reopened.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Stop Failed metadata and idempotent recovery survive control-plane restart", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-session-stop-failure-"));
+  const path = join(root, "control-plane.db");
+  try {
+    const initial = ControlPlaneDb.open(path);
+    initial.registerRunner(meta(), 500, PROTOCOL_VERSION);
+    initial.createSession(newSession());
+    const intent = initial.addSessionStopIntent("sess-1", "runner-1", 1_100, true);
+    assert.equal(initial.failSessionStopIntent(
+      "sess-1",
+      intent.operation.operationId,
+      "runner_rejected",
+      "The runner rejected the Stop request.",
+      1_200,
+    ), true);
+    assert.equal(initial.getSession("sess-1")?.archiveStatus, "stop_failed");
+    initial.close();
+
+    const reopened = ControlPlaneDb.open(path);
+    const failed = reopened.getSession("sess-1")?.archiveOperation;
+    assert.equal(failed?.operationId, intent.operation.operationId);
+    assert.equal(failed?.failure?.code, "runner_rejected");
+    assert.equal(failed?.failure?.failedAt, 1_200);
+    const retried = reopened.retrySessionStopIntent("sess-1", 1_300);
+    assert.equal(retried?.operation.operationId, intent.operation.operationId);
+    assert.equal(retried?.operation.status, "stop_pending");
+    assert.equal(retried?.operation.attemptCount, 2);
+    assert.equal(retried?.operation.requestedAt, 1_300, "explicit recovery receives a fresh timeout window");
+    assert.equal(reopened.retrySessionStopIntent("sess-1", 1_400)?.operation.attemptCount, 2);
     reopened.close();
   } finally {
     rmSync(root, { recursive: true, force: true });

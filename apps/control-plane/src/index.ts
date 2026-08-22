@@ -1008,6 +1008,9 @@ app.register(async (instance) => {
           msg.controlPlaneLaunchId,
         );
         break;
+      case "stop_session_result":
+        if (runnerId) svc.onStopSessionResult(runnerId, msg);
+        break;
       case "policy_hook_credential":
         {
           const accepted = db.setPolicyHookCredential(msg.sessionId, runnerId!, msg.tokenHash, Date.now());
@@ -3504,6 +3507,11 @@ app.post("/api/sessions/:id/archive", async (req, reply) => {
   return respond(reply, svc.setArchived(id, body.archived));
 });
 
+app.post("/api/sessions/:id/retry-stop", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  return respond(reply, svc.retryStop(id));
+});
+
 app.post("/api/sessions/:id/config", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const body = (req.body ?? {}) as import("@wollipog/protocol").SessionConfig;
@@ -3843,6 +3851,15 @@ const sessionCommandRetryTimer = setInterval(() => {
   }
 }, 5_000);
 sessionCommandRetryTimer.unref();
+const sessionStopMaintenanceTimer = setInterval(() => {
+  try {
+    svc.maintainSessionStopIntents(Date.now());
+  } catch (error) {
+    app.log.warn({ error: error instanceof Error ? error.message : String(error) },
+      "session Stop recovery deferred");
+  }
+}, 1_000);
+sessionStopMaintenanceTimer.unref();
 void pushSender.retryDurableBackground().catch((error) => {
   app.log.warn({ error: error instanceof Error ? error.message : String(error) },
     "background push recovery deferred");
@@ -3924,6 +3941,7 @@ app.addHook("onClose", async () => {
   clearInterval(automationTimer);
   clearInterval(sessionReminderTimer);
   clearInterval(sessionCommandRetryTimer);
+  clearInterval(sessionStopMaintenanceTimer);
   clearInterval(backgroundPushRetryTimer);
   clearInterval(policyHookApprovalTimer);
   clearInterval(artifactMaintenanceTimer);

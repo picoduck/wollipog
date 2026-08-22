@@ -588,6 +588,9 @@ export function createApiClient(transport: ApiTransport) {
       body: JSON.stringify({ archived }),
     }),
 
+  retryStop: (id: string) =>
+    req<SessionView>(`/api/sessions/${id}/retry-stop`, { method: "POST" }),
+
   setReminder: (id: string, body: SetSessionReminderRequest) =>
     req<SessionReminderView>(`/api/sessions/${encodeURIComponent(id)}/reminder`, {
       method: "PUT",

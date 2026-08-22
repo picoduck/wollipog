@@ -204,8 +204,11 @@ export function ProjectSplitMenu({
         );
       }
       const pendingCount = outcome.pendingSessionIds.length;
-      showUndo(pendingCount > 0
-        ? `${pendingCount} session${pendingCount === 1 ? " is" : "s are"} waiting for runtime capacity to be released before archiving from ${split.name}.`
+      const failedCount = outcome.failedSessionIds.length;
+      showUndo(failedCount > 0
+        ? `${failedCount} session Stop${failedCount === 1 ? " has" : "s have"} failed in ${split.name}. Runtime capacity may still be held; use Retry Stop.`
+        : pendingCount > 0
+          ? `${pendingCount} session${pendingCount === 1 ? " is" : "s are"} waiting for runtime capacity to be released before archiving from ${split.name}.`
         : `${sessionIds.length} session${sessionIds.length === 1 ? "" : "s"} archived from ${split.name}.`, async () => {
         const failures = await setArchivedForSessions(sessionIds, false, api.setArchived);
         if (failures > 0) throw new Error(`${failures} session${failures === 1 ? "" : "s"} could not be restored`);

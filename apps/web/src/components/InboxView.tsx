@@ -669,21 +669,30 @@ export function InboxView({
     const selectionAtRequest = selectedSessionIdRef.current;
     try {
       if (sessionArchiveRequiresStop(session, stopBeforeArchiveSupported)) {
+        const retrying = session.archiveStatus === "stop_failed";
         const accepted = await confirm({
-          title: "Archive and stop this session?",
-          message: "The session will move to Archived Sessions after its runtime stops. Queued work will be canceled and runtime capacity will be released. To keep work running outside the Inbox, use Snooze instead.",
-          confirmLabel: "Archive and Stop",
+          title: retrying ? "Retry stopping this session?" : "Archive and stop this session?",
+          message: retrying
+            ? "The previous Stop failed and runtime capacity may still be held. Retry the same archive operation?"
+            : "The session will move to Archived Sessions after its runtime stops. Queued work will be canceled and runtime capacity will be released. To keep work running outside the Inbox, use Snooze instead.",
+          confirmLabel: retrying ? "Retry Stop" : "Archive and Stop",
           tone: "danger",
         });
         if (!accepted) return;
       }
-      const updated = await api.setArchived(sessionId, true);
+      const updated = session.archiveStatus === "stop_failed"
+        ? await api.retryStop(sessionId)
+        : await api.setArchived(sessionId, true);
       loadSession(updated);
       if (updated.archiveStatus === "stop_pending") {
         showUndo("Archive requested. Stop is pending until runtime capacity is released.", async () => {
           const restored = await api.setArchived(sessionId, false);
           loadSession(restored);
         });
+        return;
+      }
+      if (updated.archiveStatus === "stop_failed") {
+        showToast("Stop failed. Runtime capacity may still be held. Use Retry Stop.");
         return;
       }
       const archiveSelection = inboxSelectionAfterArchive(
