@@ -1747,7 +1747,8 @@ textarea {
 @media (max-width: 600px) {
   .detail-actions > .btn,
   .detail-actions .overflow-menu > .btn,
-  .menu-item {
+  .menu-item,
+  .plus-item {
     min-height: 44px;
   }
   .detail-actions .overflow-menu > .btn {
@@ -3188,8 +3189,26 @@ textarea,
   cursor: pointer;
   color: var(--text);
 }
-.plus-item:hover {
+.plus-item:hover:not(:disabled) {
   background: var(--bg-elev-3);
+}
+.plus-item:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+/*
+  Clipped, not `display: none` or `hidden`: the native chooser must be openable from script, and
+  browsers decline to open one for an input that was never laid out.
+*/
+.composer-attach-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
 }
 .plus-check {
   /* flex: none locks the 14px gutter so a long path can't shrink the check and drag its row's
@@ -9296,12 +9315,25 @@ body.shell-dock-dragging * {
 .question-bar {
   flex-direction: column;
   align-items: stretch;
+  min-height: 0;
+  max-height: min(560px, 60dvh);
+  overflow: hidden;
+}
+.question-bar .approval-main,
+.question-bar > .form-error {
+  flex: none;
 }
 .question-list {
   display: flex;
   flex-direction: column;
+  flex: 1 1 auto;
   gap: 10px;
+  min-height: 0;
   margin-top: 10px;
+  padding-right: 4px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   width: 100%;
 }
 .question-block .question-text {
