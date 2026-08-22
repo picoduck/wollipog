@@ -3,9 +3,11 @@ import { test } from "node:test";
 import type { AgentCapabilities, RunnerView, SessionView } from "@wollipog/protocol";
 import {
   defaultPermissionMode,
+  effectiveModelEffortForDisplay,
   elicitationAvailability,
   modelSupportsImages,
   resolveCaps,
+  resolveEffectiveCaps,
 } from "./caps.js";
 
 const caps: AgentCapabilities = {
@@ -19,6 +21,54 @@ const caps: AgentCapabilities = {
   supportsImages: true,
   supportsApprovals: true,
 };
+
+test("effective display resolution matches deterministic server fallback semantics", () => {
+  const modelCaps: AgentCapabilities = {
+    models: [
+      { id: "default", displayName: "Default (Sonnet)", default: true },
+      { id: "hidden", hidden: true, efforts: ["xhigh"] },
+      { id: "opus", displayName: "Opus 5", efforts: ["low", "medium"] },
+    ],
+    effortLevels: ["low", "medium", "xhigh"], slashCommands: [], supportsImages: true, supportsApprovals: true,
+  };
+  const resolved = effectiveModelEffortForDisplay(modelCaps, "claude-code");
+  assert.equal(resolved.model?.id, "opus");
+  assert.equal(resolved.effort, "medium");
+  assert.equal(effectiveModelEffortForDisplay(modelCaps, "claude-code", "hidden", "xhigh").model?.id, "hidden");
+  assert.deepEqual(effectiveModelEffortForDisplay(undefined, "claude-code"), {
+    model: undefined, efforts: [], effort: undefined,
+  });
+  assert.deepEqual(effectiveModelEffortForDisplay(
+    { ...modelCaps, effortLevels: [], models: [{ id: "opus" }] },
+    "claude-code",
+  ), { model: { id: "opus" }, efforts: [], effort: undefined });
+
+  const persisted = effectiveModelEffortForDisplay(undefined, "claude-code", "opus[1m]", "high", modelCaps);
+  assert.equal(persisted.model?.id, "opus[1m]");
+  assert.equal(persisted.effort, "high");
+  assert.deepEqual(persisted.efforts, modelCaps.effortLevels);
+
+  const familyCaps: AgentCapabilities = {
+    ...modelCaps,
+    models: [
+      { id: "default", default: true },
+      { id: "claude-opus-5-20260801", efforts: ["high"] },
+      { id: "claude-sonnet-4-5-20250929", efforts: ["medium"] },
+    ],
+  };
+  assert.equal(effectiveModelEffortForDisplay(
+    familyCaps, "claude-code", "claude-sonnet-4-20250514",
+  ).model?.id, "claude-sonnet-4-5-20250929");
+});
+
+test("effective capability resolution does not claim built-in fallbacks as runner metadata", () => {
+  const session = { agentId: "missing", driver: "claude-code" } as SessionView;
+  assert.equal(resolveEffectiveCaps(undefined, session), undefined);
+  const otherCaps = { ...caps, models: [{ id: "opus" }], effortLevels: ["high"] };
+  const runner = { agents: [{ id: "other", driver: "claude-code", capabilities: otherCaps }] } as RunnerView;
+  assert.equal(resolveEffectiveCaps(runner, session), undefined);
+  assert.equal(resolveCaps(undefined, session)?.models.some((model) => model.id === "opus"), true);
+});
 
 test("modelSupportsImages follows selected-model modalities and falls back for old runners", () => {
   assert.equal(modelSupportsImages(caps, "image-model"), true);

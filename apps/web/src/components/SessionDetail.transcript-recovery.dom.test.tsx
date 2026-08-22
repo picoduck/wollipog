@@ -16,6 +16,7 @@ import { ApiProvider } from "../api-context.js";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreActions, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
+import { VIRTUAL_VIEWPORT_INTENT_EVENT } from "../viewport-intent.js";
 import { SessionDetail } from "./SessionDetail.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -144,14 +145,27 @@ function EventSeeder({ sessionId, events }: { sessionId: string; events: Session
  * (getSessionEventTailPage); the forward page endpoint remains stubbed for the fallback. */
 function pageController() {
   const forward: Array<(value: SessionEventsResponse) => void> = [];
-  const tail: Array<(value: SessionEventsResponse) => void> = [];
+  const tail: Array<{
+    resolve: (value: SessionEventsResponse) => void;
+    reject: (reason: Error) => void;
+  }> = [];
+  const tailCalls: Array<{ id: string; before: number | undefined; eventEpoch: number }> = [];
   return {
+    tailCalls,
     fetchPage: () => new Promise<SessionEventsResponse>((resolve) => { forward.push(resolve); }),
-    fetchTailPage: () => new Promise<SessionEventsResponse>((resolve) => { tail.push(resolve); }),
+    fetchTailPage: (id: string, before: number | undefined, eventEpoch: number) => {
+      tailCalls.push({ id, before, eventEpoch });
+      return new Promise<SessionEventsResponse>((resolve, reject) => { tail.push({ resolve, reject }); });
+    },
     releaseTail(value: SessionEventsResponse) {
-      const resolve = tail.shift();
-      assert.ok(resolve, "an opening-window tail fetch is in flight");
-      resolve(value);
+      const pending = tail.shift();
+      assert.ok(pending, "a tail fetch is in flight");
+      pending.resolve(value);
+    },
+    rejectTail(reason = new Error("history request failed")) {
+      const pending = tail.shift();
+      assert.ok(pending, "a tail fetch is in flight");
+      pending.reject(reason);
     },
   };
 }
@@ -255,6 +269,28 @@ async function unmountFixture(fixture: Fixture) {
   await flushAsyncWork(1);
   await act(async () => fixture.root.unmount());
   fixture.container.remove();
+}
+
+function setScrollerMetrics(
+  scroller: HTMLElement,
+  metrics: { clientHeight: number; scrollHeight: number; scrollTop: number },
+) {
+  Object.defineProperties(scroller, {
+    clientHeight: { configurable: true, value: metrics.clientHeight },
+    scrollHeight: { configurable: true, value: metrics.scrollHeight },
+    scrollTop: { configurable: true, writable: true, value: metrics.scrollTop },
+  });
+}
+
+async function scrollReader(scroller: HTMLElement, scrollTop: number, readerIntent = true) {
+  await act(async () => {
+    if (readerIntent) {
+      scroller.dispatchEvent(new domWindow.Event(VIRTUAL_VIEWPORT_INTENT_EVENT) as never);
+    }
+    scroller.scrollTop = scrollTop;
+    scroller.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as never);
+  });
+  await flushAsyncWork();
 }
 
 async function flushAsyncWork(delay = 0) {
@@ -436,6 +472,224 @@ test("recovery failure falls back to the existing error notice with its retry af
     assert.ok(retry, "the failure keeps its retry affordance");
     assert.equal(retry.textContent, "Retry");
     assert.equal(fixture.scroller.getAttribute("aria-busy"), "false");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("scrolling near the partial window head loads one earlier page and requires further navigation", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages);
+  try {
+    const openingWindow = fixture.events.slice(-8);
+    await act(async () => {
+      pages.releaseTail({
+        events: openingWindow,
+        eventEpoch: 0,
+        nextBefore: openingWindow[0]!.seq,
+        hasMoreOlder: true,
+        cacheComplete: true,
+      });
+    });
+    await flushAsyncWork();
+    assert.equal(pages.tailCalls.length, 1, "opening reads only the bounded tail window");
+
+    setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 1_600, scrollTop: 1_200 });
+    await scrollReader(fixture.scroller, 500);
+    assert.equal(pages.tailCalls.length, 1, "scrolling away from the head does not page");
+
+    await scrollReader(fixture.scroller, 120, false);
+    assert.equal(pages.tailCalls.length, 1, "saved-anchor restoration cannot inherit earlier intent");
+
+    await scrollReader(fixture.scroller, 120);
+    assert.equal(pages.tailCalls.length, 2, "the near-head scroll requests an earlier page");
+    assert.equal(pages.tailCalls[1]!.before, openingWindow[0]!.seq);
+    await scrollReader(fixture.scroller, 0);
+    assert.equal(pages.tailCalls.length, 2, "the same window base is deduplicated while in flight");
+
+    const earlierPage = fixture.events.slice(-16, -8);
+    await act(async () => {
+      pages.releaseTail({
+        events: earlierPage,
+        eventEpoch: 0,
+        nextBefore: earlierPage[0]!.seq,
+        hasMoreOlder: true,
+        cacheComplete: true,
+      });
+    });
+    setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 3_200, scrollTop: 1_600 });
+    await scrollReader(fixture.scroller, 1_560, false);
+    assert.equal(pages.tailCalls.length, 2, "a prepend does not cascade into an uncontrolled request loop");
+
+    await flushAsyncWork(10);
+    await scrollReader(fixture.scroller, 1_560);
+    assert.equal(pages.tailCalls.length, 2, "fresh upward travel far from the new head does not page");
+
+    await scrollReader(fixture.scroller, 120);
+    assert.equal(pages.tailCalls.length, 3, "further near-head navigation requests the next page");
+    assert.equal(pages.tailCalls[2]!.before, earlierPage[0]!.seq);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("reader-initiated paging fills an unscrollable viewport but never starts on open", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages);
+  try {
+    const openingWindow = fixture.events.slice(-4);
+    await act(async () => {
+      pages.releaseTail({
+        events: openingWindow,
+        eventEpoch: 0,
+        nextBefore: openingWindow[0]!.seq,
+        hasMoreOlder: true,
+        cacheComplete: true,
+      });
+    });
+    await flushAsyncWork();
+    setScrollerMetrics(fixture.scroller, { clientHeight: 500, scrollHeight: 800, scrollTop: 300 });
+    setScrollerMetrics(fixture.scroller, { clientHeight: 500, scrollHeight: 300, scrollTop: 0 });
+    await act(async () => {
+      fixture.scroller.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as never);
+    });
+    await flushAsyncWork();
+    assert.equal(pages.tailCalls.length, 1, "a layout clamp cannot start paging an underfilled opening");
+
+    setScrollerMetrics(fixture.scroller, { clientHeight: 500, scrollHeight: 800, scrollTop: 300 });
+    await scrollReader(fixture.scroller, 0);
+    assert.equal(pages.tailCalls.length, 2, "reader navigation starts pagination");
+    setScrollerMetrics(fixture.scroller, { clientHeight: 500, scrollHeight: 300, scrollTop: 0 });
+    const earlierPage = fixture.events.slice(-8, -4);
+    await act(async () => {
+      pages.releaseTail({
+        events: earlierPage,
+        eventEpoch: 0,
+        nextBefore: earlierPage[0]!.seq,
+        hasMoreOlder: true,
+        cacheComplete: true,
+      });
+    });
+    await flushAsyncWork(10);
+    assert.equal(pages.tailCalls.length, 3, "paging continues only to make the initiated viewport scrollable");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("zero-sized reader geometry never drains remaining history in the background", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages);
+  try {
+    const openingWindow = fixture.events.slice(-8);
+    await act(async () => {
+      pages.releaseTail({
+        events: openingWindow,
+        eventEpoch: 0,
+        nextBefore: openingWindow[0]!.seq,
+        hasMoreOlder: true,
+        cacheComplete: true,
+      });
+    });
+    await flushAsyncWork();
+    setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 1_600, scrollTop: 120 });
+    await scrollReader(fixture.scroller, 120);
+    setScrollerMetrics(fixture.scroller, { clientHeight: 0, scrollHeight: 0, scrollTop: 0 });
+
+    const earlierPage = fixture.events.slice(-16, -8);
+    await act(async () => {
+      pages.releaseTail({
+        events: earlierPage,
+        eventEpoch: 0,
+        nextBefore: earlierPage[0]!.seq,
+        hasMoreOlder: true,
+        cacheComplete: true,
+      });
+    });
+    await flushAsyncWork(10);
+    assert.equal(pages.tailCalls.length, 2, "hidden geometry does not continue pagination");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a no-progress page releases the automatic gate for later reader navigation", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages);
+  try {
+    const openingWindow = fixture.events.slice(-8);
+    await act(async () => {
+      pages.releaseTail({
+        events: openingWindow,
+        eventEpoch: 0,
+        nextBefore: openingWindow[0]!.seq,
+        hasMoreOlder: true,
+        cacheComplete: true,
+      });
+    });
+    await flushAsyncWork();
+    setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 1_600, scrollTop: 120 });
+    await scrollReader(fixture.scroller, 120);
+    await act(async () => {
+      pages.releaseTail({
+        events: [],
+        eventEpoch: 0,
+        nextBefore: openingWindow[0]!.seq,
+        hasMoreOlder: true,
+        cacheComplete: true,
+      });
+    });
+    await flushAsyncWork(10);
+
+    fixture.scroller.dispatchEvent(new domWindow.Event(VIRTUAL_VIEWPORT_INTENT_EVENT) as never);
+    await scrollReader(fixture.scroller, 0);
+    assert.equal(pages.tailCalls.length, 3, "reader navigation can retry a settled no-progress base");
+    assert.equal(pages.tailCalls[2]!.before, openingWindow[0]!.seq);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("an automatic load failure keeps an understandable manual retry path", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages);
+  try {
+    const openingWindow = fixture.events.slice(-8);
+    await act(async () => {
+      pages.releaseTail({
+        events: openingWindow,
+        eventEpoch: 0,
+        nextBefore: openingWindow[0]!.seq,
+        hasMoreOlder: true,
+        cacheComplete: true,
+      });
+    });
+    await flushAsyncWork();
+    setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 1_600, scrollTop: 120 });
+    await scrollReader(fixture.scroller, 120);
+    await act(async () => pages.rejectTail());
+    await flushAsyncWork();
+
+    const control = fixture.container.querySelector(".transcript-earlier-activity") as HTMLElement;
+    assert.ok(control.textContent!.includes("Could not load earlier activity."));
+    const retry = control.querySelector("button") as HTMLButtonElement;
+    assert.equal(retry.disabled, false);
+    await act(async () => retry.click());
+    assert.equal(pages.tailCalls.length, 3, "the fallback control retries the failed page");
+
+    const earlierPage = fixture.events.slice(-16, -8);
+    await act(async () => {
+      pages.releaseTail({
+        events: earlierPage,
+        eventEpoch: 0,
+        nextBefore: earlierPage[0]!.seq,
+        hasMoreOlder: true,
+        cacheComplete: true,
+      });
+    });
+    setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 3_200, scrollTop: 1_600 });
+    await scrollReader(fixture.scroller, 1_560);
+    assert.equal(pages.tailCalls.length, 3, "a manual prepend uses the same settle gate");
   } finally {
     await unmountFixture(fixture);
   }

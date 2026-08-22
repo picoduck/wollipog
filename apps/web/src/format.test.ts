@@ -6,11 +6,17 @@ import {
   permissionModeDescription,
   permissionModeEmptyLabel,
   permissionModeForDisplay,
+  effortLabel,
   permissionModeLabel,
   resolvedModelLabel,
   sshErrorHint,
   titleCaseLabel,
 } from "./format.js";
+
+test("effortLabel formats provider tokens for visible UI copy", () => {
+  assert.equal(effortLabel("xhigh"), "Extra High");
+  assert.equal(effortLabel("max"), "Max");
+});
 
 test("titleCaseLabel formats trusted compact UI labels while preserving acronyms", () => {
   assert.equal(titleCaseLabel("open exact diff"), "Open Exact Diff");

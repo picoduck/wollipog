@@ -59,3 +59,22 @@ retry, and directs the user to wait and check the Board. A request that resolves
 view unmounts cannot hijack later navigation. Transcript history Retry remains safe because it
 performs only an idempotent history GET. Timeline error rows remain informational because they do
 not carry enough delivery correlation to identify a safe prompt retry.
+
+## Semantic Session Names
+
+The prompt-derived title remains the immediate fallback. Deployments opt into isolated semantic
+naming with `WOLLIPOG_TITLE_MODEL_URL` and `WOLLIPOG_TITLE_MODEL`. The URL must be an explicit
+OpenAI-compatible chat-completions endpoint. `WOLLIPOG_TITLE_MODEL_API_KEY` supplies an optional
+bearer credential, and `WOLLIPOG_TITLE_MODEL_TIMEOUT_MS` sets a 250–30,000 ms timeout (5,000 ms by
+default). `WOLLIPOG_TITLE_GENERATION=disabled` disables generation even when a model is configured.
+
+Both URL and model are required, so content is never silently routed across a new provider or
+privacy boundary. The request has no tools, bounded completed user/assistant input, a 40-token
+output limit, zero temperature, minimal reasoning, and a short timeout. It never enters the runner, transcript, agent
+context, prompt queue, or session lifecycle.
+
+The reserved `/rename-session` command has the visible label **Rename Session**. It derives a title from the
+original objective and recent completed semantic context. Images, reasoning, tool and shell output,
+provider commands, partial messages, and queued prompts are excluded. Successful explicit results
+are user-owned; manual renames and newer requests fence stale results. Disabled, malformed, failed,
+or timed-out generation leaves the current title unchanged.
