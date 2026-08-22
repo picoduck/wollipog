@@ -10,6 +10,7 @@ import {
   buildCodexTurnParams,
   CodexAppServerDriver,
   CodexAppServerResumeError,
+  diagnosticValue,
   parseReviewDecision,
   reviewSummary,
 } from "./codex-app-server.js";
@@ -40,11 +41,12 @@ function makeHarness(
   imageStager?: (images: any[], context: any) => Promise<StagedPromptImages>,
 ) {
   const events: SessionEventPayload[] = [];
+  const stderr: string[] = [];
   let authenticationFailures = 0;
   const subscriptionUsage: unknown[] = [];
   const cb: DriverCallbacks = {
     onEvent: (p) => events.push(p),
-    onStderr: () => {},
+    onStderr: (line) => stderr.push(line),
     onExit: () => {},
     onAuthenticationFailure: () => { authenticationFailures += 1; },
     onSubscriptionUsage: (update) => subscriptionUsage.push(update),
@@ -63,7 +65,7 @@ function makeHarness(
     : new CodexAppServerDriver(opts, cb);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const onItem = (item: unknown, completed: boolean) => (driver as any).onItem(item, completed);
-  return { driver, events, subscriptionUsage, onItem, authenticationFailures: () => authenticationFailures };
+  return { driver, events, stderr, subscriptionUsage, onItem, authenticationFailures: () => authenticationFailures };
 }
 
 test("app-server auth errors emit a secret-free auth signal", () => {
@@ -1428,4 +1430,48 @@ test("prompt() fails fast (refusal + error) when the app-server is not running",
     h.events.some((e) => (e as { kind: string }).kind === "error"),
     true,
   );
+});
+
+test("provider-controlled diagnostics are bounded before reaching stderr", async () => {
+  const h = makeHarness();
+  const requests = new Map<string, (params: any, requestId: number | string) => Promise<any>>();
+  (h.driver as any).registerHandlers({
+    onRequest: (method: string, handler: (params: any, requestId: number | string) => Promise<any>) => requests.set(method, handler),
+    onNotification: () => {},
+  });
+
+  const parkedApproval = requests.get("item/commandExecution/requestApproval")!({ command: "pnpm test" }, "parked");
+  const eventsBeforeOversizedMode = h.events.length;
+  assert.deepEqual(await requests.get("mcpServer/elicitation/request")!({
+    mode: "z".repeat(50_000),
+    serverName: "Oversized MCP",
+    threadId: "thread-diagnostic",
+    message: "Extended schema",
+    requestedSchema: { type: "object", properties: { value: { type: "string" } } },
+  }, "oversized-mode"), { action: "cancel", content: null, _meta: null });
+  const oversized = h.stderr.at(-1)!;
+  assert.match(oversized, /unsupported or malformed Codex MCP elicitation mode=z+…/);
+  assert.ok(oversized.length < 200, `diagnostic must stay bounded, got ${oversized.length} characters`);
+  assert.equal(h.events.length, eventsBeforeOversizedMode, "a malformed elicitation must not displace the parked approval");
+
+  // A non-primitive mode is never stringified in full: the provider controls its size.
+  assert.deepEqual(await requests.get("mcpServer/elicitation/request")!({
+    mode: { nested: "x".repeat(50_000) },
+    serverName: "Structured MCP",
+    threadId: "thread-diagnostic",
+    message: "Extended schema",
+  }, "object-mode"), { action: "cancel", content: null, _meta: null });
+  assert.equal(h.stderr.at(-1), "unsupported or malformed Codex MCP elicitation mode=[object] — cancelling it");
+
+  assert.equal(h.driver.resolvePermission("parked", "accept"), true);
+  assert.deepEqual(await parkedApproval, { decision: "accept" });
+});
+
+test("diagnosticValue bounds every provider-controlled shape", () => {
+  assert.equal(diagnosticValue(undefined), "?");
+  assert.equal(diagnosticValue(null), "?");
+  assert.equal(diagnosticValue("form"), "form");
+  assert.equal(diagnosticValue(7), "7");
+  assert.equal(diagnosticValue(["a".repeat(50_000)]), "[object]");
+  assert.equal(diagnosticValue("a".repeat(500)), `${"a".repeat(120)}…`);
 });

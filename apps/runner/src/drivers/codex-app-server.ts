@@ -12,7 +12,14 @@
  * Approval decisions: "accept" (allow) / "decline" (deny).
  */
 
-import type { AgentQuestion, PlanEntry, PromptImage, ReviewDecision, SessionConfig } from "@wollipog/protocol";
+import {
+  DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH,
+  type AgentQuestion,
+  type PlanEntry,
+  type PromptImage,
+  type ReviewDecision,
+  type SessionConfig,
+} from "@wollipog/protocol";
 import { JsonRpcPeer } from "../jsonrpc.js";
 import { killTree, spawnAgent, type AgentProcess } from "../spawn.js";
 import type {
@@ -626,7 +633,7 @@ export class CodexAppServerDriver implements Driver {
         }
         const normalized = normalizeMcpFormElicitation(params);
         if (!normalized) {
-          this.cb.onStderr(`unsupported or malformed Codex MCP elicitation mode=${String(params?.mode ?? "?")} — cancelling it`);
+          this.cb.onStderr(`unsupported or malformed Codex MCP elicitation mode=${diagnosticValue(params?.mode)} — cancelling it`);
           return resolve(mcpElicitationResponse("cancel"));
         }
         this.declinePendingRequests();
@@ -943,10 +950,21 @@ const MAX_QUESTION_OPTIONS = 20;
 const MAX_QUESTION_ID = 256;
 const MAX_QUESTION_HEADER = 80;
 const MAX_QUESTION_TEXT = 2000;
-const MAX_FREE_TEXT = 4000;
+/** Provider free-text bound. The shared protocol default keeps the driver, the dashboard's submit
+ * gate, and the control plane's authoritative validation on one number. */
+const MAX_FREE_TEXT = DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH;
+const MAX_DIAGNOSTIC_VALUE = 120;
 
 function boundedString(value: unknown, max: number): string | null {
   return typeof value === "string" && value.length > 0 && value.length <= max ? value : null;
+}
+
+/** Render a provider-controlled value for a diagnostic. The value reaches stderr and the durable
+ * runner log, so it is always bounded and objects are never stringified in full. */
+export function diagnosticValue(value: unknown): string {
+  if (value == null) return "?";
+  const text = typeof value === "string" ? value : typeof value === "object" ? "[object]" : String(value);
+  return text.length > MAX_DIAGNOSTIC_VALUE ? `${text.slice(0, MAX_DIAGNOSTIC_VALUE)}…` : text;
 }
 
 function finiteNumber(value: unknown): number | undefined {
