@@ -63,6 +63,19 @@ test("identity roles, teams, ownership, suspension, and audit fail closed", () =
   const viewerPrincipal = principal(db, "viewer-token");
   assert.equal(db.canAccessSession(operatorPrincipal, "s_operator"), true);
   assert.equal(db.canAccessSession(viewerPrincipal, "s_operator"), false);
+  db.appendEvent("s_operator", { kind: "agent_message", text: "principal scoped archive needle" }, 30);
+  const operatorArchive = db.archiveSessionCandidatePageForPrincipal(operatorPrincipal, { archive: "all", q: "needle" });
+  assert.ok(!("error" in operatorArchive));
+  if ("error" in operatorArchive) throw new Error(operatorArchive.error);
+  assert.deepEqual(operatorArchive.sessions.map((item) => item.id), ["s_operator"]);
+  assert.deepEqual(operatorArchive.transcriptSessionIds, ["s_operator"]);
+  assert.deepEqual(db.searchEventsForPrincipal("needle", 20, operatorPrincipal).map((hit) => hit.sessionId), ["s_operator"]);
+  const viewerArchive = db.archiveSessionCandidatePageForPrincipal(viewerPrincipal, { archive: "all", q: "needle" });
+  assert.ok(!("error" in viewerArchive));
+  if ("error" in viewerArchive) throw new Error(viewerArchive.error);
+  assert.deepEqual(viewerArchive.sessions, []);
+  assert.deepEqual(viewerArchive.facets, { projects: [], locations: [], agents: [] });
+  assert.deepEqual(db.searchEventsForPrincipal("needle", 20, viewerPrincipal), []);
   db.upsertPushSubscription({ endpoint: "https://push.example/operator", p256dh: "p", auth: "a", deviceId: "dev_operator", now: 31 });
   db.upsertPushSubscription({ endpoint: "https://push.example/viewer", p256dh: "p", auth: "a", deviceId: "dev_viewer", now: 32 });
   assert.deepEqual(
@@ -88,6 +101,10 @@ test("identity roles, teams, ownership, suspension, and audit fail closed", () =
     }, now: 41,
   }), true);
   assert.equal(db.canAccessSession(viewerPrincipal, "s_operator"), true);
+  const teamArchive = db.archiveSessionCandidatePageForPrincipal(viewerPrincipal, { archive: "all", q: "needle" });
+  assert.ok(!("error" in teamArchive));
+  if ("error" in teamArchive) throw new Error(teamArchive.error);
+  assert.deepEqual(teamArchive.sessions.map((item) => item.id), ["s_operator"]);
   assert.throws(() => db.deleteIdentityTeam(team.teamId, local.organizationId), /reassign resources/);
   assert.deepEqual(
     db.listPushSubscriptions({ kind: "session", sessionId: "s_operator" }).map((sub) => sub.endpoint),

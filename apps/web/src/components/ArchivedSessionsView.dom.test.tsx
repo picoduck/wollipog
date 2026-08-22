@@ -110,10 +110,45 @@ async function mount(sessions: SessionView[], overrides: Partial<ApiClient> = {}
     createSocket: () => socket,
     close() {},
   };
+  let archivePageCalls = 0;
+  const archiveInputs: Parameters<ApiClient["archiveSessionPage"]>[0][] = [];
   const client = {
     ...api,
     listAllSessions: async () => ({ sessions }),
     search: async () => ({ results: [] }),
+    archiveSessionPage: async (input) => {
+      archivePageCalls += 1;
+      archiveInputs.push(input);
+      const offset = Number(input.cursor ?? "0");
+      const ordered = [...sessions].filter((item) => {
+        const pendingArchive = item.archiveStatus === "stop_pending" || item.archiveStatus === "stop_failed";
+        if (input.archive === "archived" && !item.archived && !pendingArchive) return false;
+        if (input.archive === "unarchived" && (item.archived || pendingArchive)) return false;
+        if (input.lifecycle !== "all" && item.status !== input.lifecycle) return false;
+        if (input.project && item.projectName !== input.project) return false;
+        if (input.location && item.workspaceName !== input.location) return false;
+        if (input.agent && input.agent !== "Codex — Interactive") return false;
+        return !input.q || [item.id, item.title].join("\n").toLocaleLowerCase().includes(input.q.toLocaleLowerCase());
+      }).sort((left, right) => right.createdAt - left.createdAt || left.id.localeCompare(right.id));
+      const pageSessions = ordered.slice(offset, offset + 50);
+      const nextCursor = offset + pageSessions.length < ordered.length ? String(offset + pageSessions.length) : null;
+      return {
+        sessions: pageSessions,
+        snippets: {},
+        metadata: Object.fromEntries(pageSessions.map((item) => [item.id, {
+          project: item.projectName ?? "No Project",
+          location: item.workspaceName ?? "No Location",
+          agent: "Codex — Interactive",
+        }])),
+        nextCursor,
+        hasMore: nextCursor !== null,
+        facets: {
+          projects: [...new Set(sessions.map((item) => item.projectName ?? "No Project"))].sort(),
+          locations: [...new Set(sessions.map((item) => item.workspaceName ?? "No Location"))].sort(),
+          agents: ["Codex — Interactive"],
+        },
+      };
+    },
     ...overrides,
   } as ApiClient;
   await act(async () => {
@@ -134,6 +169,8 @@ async function mount(sessions: SessionView[], overrides: Partial<ApiClient> = {}
     root,
     socket,
     navigated,
+    archiveInputs,
+    archivePageCalls: () => archivePageCalls,
     unmount: async () => {
       await act(async () => root.unmount());
       container.remove();
@@ -150,7 +187,7 @@ function button(container: HTMLElement, label: string): HTMLButtonElement {
 test("empty archives expose labelled choice filters and a screen-reader status", async () => {
   const fixture = await mount([]);
   assert.match(fixture.container.textContent ?? "", /No Archived Sessions/);
-  assert.equal(fixture.container.querySelector('[role="status"]')?.textContent?.trim(), "0 Sessions");
+  assert.equal(fixture.container.querySelector('[role="status"]')?.textContent?.trim(), "Showing 0 Sessions");
   assert.ok([...fixture.container.querySelectorAll("label")]
     .some((label) => label.textContent?.trim().startsWith("Search Sessions and Transcripts")));
   for (const expected of ["Project", "Location", "Agent", "Archive State", "Lifecycle State"]) {
@@ -166,7 +203,7 @@ test("large archives paginate, deep-link, filter, and accept live lifecycle upda
   assert.equal(fixture.container.querySelectorAll("tbody tr").length, 50);
   assert.match(fixture.container.textContent ?? "", /Archived.*Idle/s,
     "archive and canonical lifecycle labels are both text-backed");
-  assert.equal(fixture.container.querySelector('nav[aria-label="Archived Sessions Pagination"]')?.textContent?.includes("Page 1 of 2"), true);
+  assert.equal(fixture.container.querySelector('nav[aria-label="Archived Sessions Pagination"]')?.textContent?.includes("Page 1"), true);
   assert.ok([...fixture.container.querySelectorAll("button")].some((candidate) => candidate.textContent?.trim() === "Stop"),
     "ordinary nonterminal archived sessions retain the Stop action");
   const tableRegion = fixture.container.querySelector<HTMLElement>('[role="region"][aria-label="Archived Sessions Table"]');
@@ -181,7 +218,7 @@ test("large archives paginate, deep-link, filter, and accept live lifecycle upda
 
   await act(async () => { Simulate.click(button(fixture.container, "Next Page")); });
   assert.equal(fixture.container.querySelectorAll("tbody tr").length, 5);
-  assert.match(fixture.container.textContent ?? "", /Page 2 of 2/);
+  assert.match(fixture.container.textContent ?? "", /Page 2/);
 
   const lifecycle = fixture.container.querySelector<HTMLButtonElement>('button[aria-label^="Lifecycle State:"]');
   assert.ok(lifecycle);
@@ -199,6 +236,42 @@ test("large archives paginate, deep-link, filter, and accept live lifecycle upda
   });
   assert.match(fixture.container.textContent ?? "", /No Matching Sessions/,
     "a second client's lifecycle change immediately re-evaluates the active filter");
+  await fixture.unmount();
+});
+
+test("search input debounces to one request and preserves server row order", async () => {
+  const fixture = await mount([
+    session(1, { id: "older", title: "Older", createdAt: 1, updatedAt: 999 }),
+    session(2, { id: "newer", title: "Newer", createdAt: 2, updatedAt: 1 }),
+  ]);
+  const initialCalls = fixture.archivePageCalls();
+  const links = [...fixture.container.querySelectorAll<HTMLAnchorElement>("tbody a")];
+  assert.deepEqual(links.map((link) => link.textContent), ["Newer", "Older"],
+    "the browser preserves the server's immutable createdAt cursor order");
+  const input = fixture.container.querySelector<HTMLInputElement>('input[type="search"]')!;
+  await act(async () => {
+    for (const value of ["n", "ne", "new", "newe", "newer"]) {
+      input.value = value;
+      Simulate.change(input);
+    }
+  });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
+  assert.equal(fixture.archivePageCalls(), initialCalls + 1);
+  await fixture.unmount();
+});
+
+test("a Project literally named all is encoded distinctly from All Projects", async () => {
+  const fixture = await mount([session(1, { projectName: "all" })]);
+  const project = fixture.container.querySelector<HTMLButtonElement>('button[aria-label^="Project:"]')!;
+  await act(async () => { project.click(); });
+  const namedAll = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+    .find((option) => option.textContent?.trim() === "all");
+  assert.ok(namedAll);
+  await act(async () => {
+    namedAll.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  assert.equal(fixture.archiveInputs.at(-1)?.project, "all");
   await fixture.unmount();
 });
 
@@ -310,14 +383,15 @@ test("a successful deletion cannot be resurrected by the live session overlay", 
   });
   assert.doesNotMatch(fixture.container.textContent ?? "", /Archived Session 4/,
     "an unrelated live update does not merge the deleted cached session back into the catalog");
-  assert.match(fixture.container.textContent ?? "", /Archived Session 5/);
+  assert.doesNotMatch(fixture.container.textContent ?? "", /Archived Session 5/,
+    "a bounded page does not expand based on websocket arrival order");
   await fixture.unmount();
 });
 
-test("transcript search failures disclose the metadata-only fallback", async () => {
+test("paged search failures expose a retryable load error", async () => {
   const archived = session(3, { title: "Metadata Match" });
   const fixture = await mount([archived], {
-    search: async () => { throw new Error("search unavailable"); },
+    archiveSessionPage: async () => { throw new Error("search unavailable"); },
   });
   const input = fixture.container.querySelector<HTMLInputElement>('input[type="search"]');
   assert.ok(input);
@@ -325,10 +399,10 @@ test("transcript search failures disclose the metadata-only fallback", async () 
     input.value = "metadata";
     Simulate.change(input);
   });
-  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
+  await act(async () => { await Promise.resolve(); });
   assert.match(
-    fixture.container.querySelector('[role="status"]')?.textContent ?? "",
-    /Transcript search is unavailable; showing metadata matches\./,
+    fixture.container.textContent ?? "",
+    /Could not load archived sessions: search unavailable/,
   );
   await fixture.unmount();
 });

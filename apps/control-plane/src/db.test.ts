@@ -20,6 +20,7 @@ import type {
   WorkflowArtifactView,
 } from "@wollipog/protocol";
 import { PROTOCOL_VERSION } from "@wollipog/protocol";
+import { archiveSessionPage } from "./archive-session-page.js";
 import {
   ControlPlaneDb,
   GOVERNANCE_AUDIT_RETENTION_MS,
@@ -4286,4 +4287,73 @@ test("searchEvents groups hits to distinct sessions and indexes stderr/thought t
   const sessions = new Set(hits.map((h) => h.sessionId));
   assert.equal(hits.length, sessions.size, "one hit per session");
   assert.ok(sessions.has("s_other"), "a chatty session must not crowd out other sessions");
+});
+
+test("searchEvents applies authorized session scope before its ranking window and limit", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "authorized" }));
+  db.createSession(newSession({ id: "inaccessible" }));
+  for (let i = 0; i < 30; i++) {
+    db.appendEvent("inaccessible", { kind: "agent_message", text: `needle inaccessible ${i}` }, i);
+  }
+  db.appendEvent("authorized", { kind: "agent_message", text: "needle authorized result" }, 100);
+
+  assert.deepEqual(
+    db.searchEvents("needle", 1, ["authorized"]).map((hit) => hit.sessionId),
+    ["authorized"],
+    "inaccessible higher-ranked rows cannot consume the authorized result bound",
+  );
+  assert.deepEqual(db.searchEvents("needle", 1, []), []);
+  assert.deepEqual(
+    new Set(db.searchEventsForPrincipal("needle", 20, localOwner()).map((hit) => hit.sessionId)),
+    new Set(["authorized", "inaccessible"]),
+    "principal authorization runs inside the ranked FTS query without a catalog-id materialization",
+  );
+});
+
+test("archive page SQL bounds candidate materialization before cursor hydration", () => {
+  const db = withRunner();
+  for (let index = 0; index < 60; index++) {
+    const id = `archive-${String(index).padStart(2, "0")}`;
+    db.createSession(newSession({ id, title: `Archive ${index}`, now: 1_000 + index }));
+    db.setSessionArchived(id, true, 2_000 + index);
+  }
+  const firstCandidates = db.archiveSessionCandidatePageForPrincipal(localOwner(), {});
+  assert.ok(!("error" in firstCandidates));
+  if ("error" in firstCandidates) throw new Error(firstCandidates.error);
+  assert.equal(firstCandidates.sessions.length, 51, "SQLite returns one bounded page plus lookahead");
+  const first = archiveSessionPage({ sessions: firstCandidates.sessions, query: {} });
+  assert.ok(!("error" in first));
+  if ("error" in first) throw new Error(first.error);
+  assert.equal(first.sessionIds.length, 50);
+  assert.ok(first.nextCursor);
+
+  const secondQuery = { cursor: first.nextCursor! };
+  const secondCandidates = db.archiveSessionCandidatePageForPrincipal(localOwner(), secondQuery);
+  assert.ok(!("error" in secondCandidates));
+  if ("error" in secondCandidates) throw new Error(secondCandidates.error);
+  assert.equal(secondCandidates.sessions.length, 10);
+  const second = archiveSessionPage({ sessions: secondCandidates.sessions, query: secondQuery });
+  assert.ok(!("error" in second));
+  if ("error" in second) throw new Error(second.error);
+  assert.equal(second.sessionIds.length, 10);
+  assert.equal(second.hasMore, false);
+  assert.equal(new Set([...first.sessionIds, ...second.sessionIds]).size, 60);
+});
+
+test("archive page SQL preserves Stop Failed recovery state", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "stop-failed" }));
+  const intent = db.addSessionStopIntent("stop-failed", "runner-1", 1_100, true);
+  assert.equal(db.failSessionStopIntent(
+    "stop-failed",
+    intent.operation.operationId,
+    "retry_exhausted",
+    "Automatic retries were exhausted.",
+    1_200,
+  ), true);
+  const candidates = db.archiveSessionCandidatePageForPrincipal(localOwner(), {});
+  assert.ok(!("error" in candidates));
+  if ("error" in candidates) throw new Error(candidates.error);
+  assert.equal(candidates.sessions[0]?.archiveStatus, "stop_failed");
 });

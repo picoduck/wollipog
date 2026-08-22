@@ -12,6 +12,11 @@ import websocket from "@fastify/websocket";
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import {
+  archiveSessionPage,
+  parseArchiveSessionPageQuery,
+  type ArchiveSessionPageQuery,
+} from "./archive-session-page.js";
+import {
   MAX_RUNNER_CLIENT_MESSAGE_BYTES,
   MAX_RUNNER_CONNECTIONS,
   MAX_RUNNER_CONNECTIONS_PER_IP,
@@ -2538,6 +2543,40 @@ app.get("/api/sessions", async (req) => {
   return { sessions: principal ? db.listSessionsForPrincipal(principal, includeArchived) : [] };
 });
 
+app.get("/api/sessions/archive-page", async (req, reply) => {
+  const raw = req.query as Record<string, unknown>;
+  const query = parseArchiveSessionPageQuery(raw);
+  if ("error" in query) return reply.code(400).send(query);
+  const q = (query.q ?? "").trim();
+  if (q.length > 256) return reply.code(400).send({ error: "q is too long (max 256 characters)" });
+  const principal = requestPrincipal(req);
+  const candidatePage = principal
+    ? db.archiveSessionCandidatePageForPrincipal(principal, query)
+    : { sessions: [], transcriptSessionIds: [], facets: { projects: [], locations: [], agents: [] } };
+  if ("error" in candidatePage) return reply.code(400).send(candidatePage);
+  const page = archiveSessionPage({
+    sessions: candidatePage.sessions,
+    query,
+    transcriptHits: new Map(candidatePage.transcriptSessionIds.map((sessionId) => [sessionId, ""])),
+  });
+  if ("error" in page) return reply.code(400).send(page);
+  const sessions = page.sessionIds.flatMap((sessionId) => {
+    const session = db.getSession(sessionId);
+    return session ? [session] : [];
+  });
+  const snippets = q.length >= 2
+    ? Object.fromEntries(db.searchEvents(q, Math.max(1, sessions.length), sessions.map((session) => session.id))
+      .map((hit) => [hit.sessionId, hit.snippet]))
+    : {};
+  const { sessionIds: _sessionIds, ...pagination } = page;
+  return {
+    ...pagination,
+    facets: candidatePage.facets,
+    sessions,
+    snippets,
+  };
+});
+
 registerSessionLookupRoute(app, { db, requestPrincipal });
 
 app.get("/api/sessions/:id", async (req, reply) => {
@@ -2963,11 +3002,11 @@ app.get("/api/search", async (req, reply) => {
   if (q.length < 2) return reply.code(400).send({ error: "q must be at least 2 characters" });
   // Bound the work: FTS parsing/ranking runs synchronously on this thread.
   if (q.length > 256) return reply.code(400).send({ error: "q is too long (max 256 characters)" });
-  const hits = db.searchEvents(q, 20);
   const principal = requestPrincipal(req);
+  const hits = principal ? db.searchEventsForPrincipal(q, 20, principal) : [];
   const results = hits.flatMap((h) => {
     const session = db.getSession(h.sessionId);
-    if (!session || (principal && !db.canAccessSession(principal, session.id))) return [];
+    if (!session) return [];
     return [{
       ...h,
       title: session.title,

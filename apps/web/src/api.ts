@@ -578,6 +578,33 @@ export function createApiClient(transport: ApiTransport) {
    * sessions, while archived sessions remain reachable through search and direct links. */
   listAllSessions: () => req<{ sessions: SessionView[] }>("/api/sessions?archived=true"),
 
+  archiveSessionPage: (input: {
+    cursor?: string;
+    project?: string;
+    location?: string;
+    agent?: string;
+    archive: "archived" | "unarchived" | "all";
+    lifecycle: SessionView["status"] | "all";
+    q?: string;
+  }) => {
+    const query = new URLSearchParams();
+    if (input.cursor !== undefined) query.set("cursor", input.cursor);
+    if (input.project !== undefined) query.set("project", input.project);
+    if (input.location !== undefined) query.set("location", input.location);
+    if (input.agent !== undefined) query.set("agent", input.agent);
+    query.set("archive", input.archive);
+    if (input.lifecycle !== "all") query.set("lifecycle", input.lifecycle);
+    if (input.q !== undefined) query.set("q", input.q);
+    return req<{
+      sessions: SessionView[];
+      snippets: Record<string, string>;
+      metadata: Record<string, { project: string; location: string; agent: string }>;
+      nextCursor: string | null;
+      hasMore: boolean;
+      facets: { projects: string[]; locations: string[]; agents: string[] };
+    }>(`/api/sessions/archive-page?${query.toString()}`);
+  },
+
   /** Exact authorized lookup used by direct links, including archived sessions omitted from the
    * live dashboard snapshot. */
   session: (id: string) => req<{ session: SessionView }>(sessionLookupPath(id)),
