@@ -29,10 +29,10 @@ test("a recreated reminder replaces a stale higher revision from the prior remin
     originalExpression: "test", wakePolicy: "until_activity", state: "pending",
     revision, createdAt: 1, updatedAt: revision,
   });
-  message(store, { type: "session_reminder_upsert", reminder: reminder("old", 3) });
-  message(store, { type: "session_reminder_upsert", reminder: reminder("new", 1) });
+  message(store, { type: "session_reminder_upsert", userId: "user", reminder: reminder("old", 3) });
+  message(store, { type: "session_reminder_upsert", userId: "user", reminder: reminder("new", 1) });
   assert.equal(store.getState().reminders.get("s1")?.reminderId, "new");
-  message(store, { type: "session_reminder_upsert", reminder: reminder("new", 1) });
+  message(store, { type: "session_reminder_upsert", userId: "user", reminder: reminder("new", 1) });
   assert.equal(store.getState().reminders.get("s1")?.revision, 1);
 });
 

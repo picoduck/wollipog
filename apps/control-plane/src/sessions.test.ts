@@ -14,6 +14,7 @@ import type {
   RunView,
   SessionEvent,
   SessionReminderView,
+  SetSessionReminderRequest,
   SessionSnapshot,
   SessionView,
   SteerRequest,
@@ -614,6 +615,56 @@ test("activity-fired reminder edits and Undo preserve their future fired state",
   assert.equal(removeUndo.ok, true);
   assert.equal(removeUndo.data?.state, "fired");
   assert.equal(removeUndo.data?.firedAt, fired.firedAt);
+  db.close();
+});
+
+test("malformed fired-reminder restore facts fail without mutation or broadcast", () => {
+  const { db, hub, svc } = makeHarness();
+  const sessionId = seedSession(svc, hub);
+  const userId = db.localIdentityContext().userId;
+  const now = Date.now();
+  const created = svc.setReminder(sessionId, userId, {
+    scheduledFor: now + 60_000,
+    timeZone: "UTC",
+    originalExpression: "in one minute",
+    wakePolicy: "until_activity",
+    expectedRevision: 0,
+  });
+  assert.equal(created.ok, true);
+  const before = db.getSessionReminder(sessionId, userId);
+  assert.ok(before);
+  const broadcastsBefore = hub.calls.filter((call) => call.method === "sessionReminderChanged").length;
+  const malformed: unknown[] = [
+    null,
+    [],
+    1,
+    "facts",
+    {},
+    { firedAt: now },
+    { wakeReason: "scheduled" },
+    { firedAt: Number.MAX_SAFE_INTEGER, wakeReason: "scheduled" },
+    { firedAt: now, wakeReason: "unknown" },
+  ];
+
+  for (const restoreFired of malformed) {
+    const result = svc.setReminder(sessionId, userId, {
+      scheduledFor: now + 120_000,
+      timeZone: "UTC",
+      originalExpression: "in two minutes",
+      wakePolicy: "regardless",
+      expectedRevision: before.revision,
+      restoreFired,
+    } as Partial<SetSessionReminderRequest>);
+    assert.equal(result.ok, false, "accepted malformed restoreFired");
+    assert.equal(result.status, 400);
+    assert.match(result.error ?? "", /restoreFired/);
+    assert.deepEqual(db.getSessionReminder(sessionId, userId), before);
+  }
+  assert.equal(
+    hub.calls.filter((call) => call.method === "sessionReminderChanged").length,
+    broadcastsBefore,
+    "rejected restore payloads emit no live update",
+  );
   db.close();
 });
 
