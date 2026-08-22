@@ -360,7 +360,11 @@
           "properties": [
             "fileSystem",
             "network"
-          ]
+          ],
+          "propertyRefs": {
+            "fileSystem": "AdditionalFileSystemPermissions",
+            "network": "AdditionalNetworkPermissions"
+          }
         }
       }
     },
@@ -419,7 +423,11 @@
           "properties": [
             "fileSystem",
             "network"
-          ]
+          ],
+          "propertyRefs": {
+            "fileSystem": "AdditionalFileSystemPermissions",
+            "network": "AdditionalNetworkPermissions"
+          }
         },
         "PermissionGrantScope": {
           "enumValues": [

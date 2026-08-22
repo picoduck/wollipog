@@ -229,7 +229,19 @@ test("pinned schema fixture matches discovery metadata and reports a useful drif
     const profileDrift = spawnSync(process.execPath, [script], { encoding: "utf8", env: { ...process.env, CODEX_SCHEMA_DIR: dir } });
     assert.notEqual(profileDrift.status, 0);
     assert.match(profileDrift.stderr, /RequestPermissionProfile: property removed: network/);
-    permissions.definitions.RequestPermissionProfile.properties.network = {};
+    // Retaining the field but repointing it is the same defect one level down: approvalResponse
+    // copies the requested profile verbatim into the granted slot, so a repoint yields an
+    // incompatible grant while every definition survives.
+    permissions.definitions.RequestPermissionProfile.properties.network = {
+      anyOf: [{ $ref: "#/definitions/FileSystemAccessMode" }, { type: "null" }],
+    };
+    writeFileSync(permissionsPath, JSON.stringify(permissions));
+    const profileRefDrift = spawnSync(process.execPath, [script], { encoding: "utf8", env: { ...process.env, CODEX_SCHEMA_DIR: dir } });
+    assert.notEqual(profileRefDrift.status, 0);
+    assert.match(profileRefDrift.stderr, /RequestPermissionProfile: property reference removed: network -> AdditionalNetworkPermissions/);
+    permissions.definitions.RequestPermissionProfile.properties.network = {
+      anyOf: [{ $ref: "#/definitions/AdditionalNetworkPermissions" }, { type: "null" }],
+    };
     writeFileSync(permissionsPath, JSON.stringify(permissions));
 
     // Native decision values Wollipog returns: dropping one would make an authorized choice unsendable.
