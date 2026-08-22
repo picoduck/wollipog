@@ -401,8 +401,10 @@ export function repairInboxSelectionForHeldOrder(
   nextIds: readonly string[],
   heldIds: readonly string[] | null,
   selectedId: string | null,
+  selectionCleared = false,
 ): string | null {
   if (!snapshotLoaded) return selectedId;
+  if (selectedId === null && selectionCleared) return null;
   if (selectedId && nextIds.includes(selectedId)) return selectedId;
   if (nextIds.length === 0) return null;
   if (!heldIds) return nextIds[0]!;

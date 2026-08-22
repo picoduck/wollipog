@@ -435,6 +435,8 @@ test("selection repair follows the held visual slot after external removal", () 
   assert.equal(repairInboxSelectionForHeldOrder(false, [], held, "selected"), "selected");
   assert.equal(repairInboxSelectionForHeldOrder(true, ["third", "fourth"],
     ["first-tombstone", "selected", "third", "fourth"], "selected"), "third");
+  assert.equal(repairInboxSelectionForHeldOrder(true, ["first", "last"], held, null, true), null,
+    "a deliberately cleared selection must stay cleared");
 });
 
 test("approval keyboard intents require one exact semantic option and never guess", () => {

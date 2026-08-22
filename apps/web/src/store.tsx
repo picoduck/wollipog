@@ -150,6 +150,8 @@ export interface InboxState {
   splitRatio: number;
   /** The last selected session in each split; `null` is the merged All split. */
   selectedBySplit: Map<string | null, string>;
+  /** Transient marker distinguishing an explicit clear from selection awaiting initial repair. */
+  selectionCleared?: boolean;
 }
 
 function parseNullableString(value: unknown): string | null {
@@ -362,7 +364,7 @@ type Action =
   | { type: "activity_tick"; now: number }
   | { type: "pod_context_loaded"; podId: string; entries: PodContextEntry[] }
   | { type: "navigate"; view: View }
-  | { type: "inbox_selection"; sessionId: string | null; splitKey: string | null; persist?: boolean }
+  | { type: "inbox_selection"; sessionId: string | null; splitKey: string | null; persist?: boolean; repair?: boolean }
   | { type: "inbox_split"; splitKey: string | null; persist?: boolean }
   | { type: "inbox_ratio"; ratio: number }
   | { type: "filters"; filters: Partial<Filters> };
@@ -708,6 +710,7 @@ function reducer(state: State, action: Action): State {
     case "inbox_selection": {
       if (state.inbox.splitKey === action.splitKey &&
           state.inbox.selectedSessionId === action.sessionId &&
+          state.inbox.selectionCleared === (action.sessionId === null && action.repair !== true) &&
           (action.sessionId === null
             ? !state.inbox.selectedBySplit.has(action.splitKey)
             : state.inbox.selectedBySplit.get(action.splitKey) === action.sessionId)) return state;
@@ -720,6 +723,7 @@ function reducer(state: State, action: Action): State {
           ...state.inbox,
           selectedSessionId: action.sessionId,
           splitKey: action.splitKey,
+          selectionCleared: action.sessionId === null && action.repair !== true,
           selectedBySplit,
         },
       };
@@ -1204,7 +1208,10 @@ function reducer(state: State, action: Action): State {
           const inbox = state.inbox.selectedSessionId === msg.sessionId || selectedBySplit.size !== state.inbox.selectedBySplit.size
             ? {
                 ...state.inbox,
-                selectedSessionId: state.inbox.selectedSessionId === msg.sessionId ? null : state.inbox.selectedSessionId,
+                // Keep the active selection as a short-lived tombstone. InboxView repairs a
+                // vanished selection against its held visual order, which requires the removed
+                // id to locate the vacated slot. The repair dispatch replaces it immediately.
+                selectedSessionId: state.inbox.selectedSessionId,
                 selectedBySplit,
               }
             : state.inbox;
@@ -1452,7 +1459,7 @@ interface StoreValue extends State {
   dispatch: Dispatch<Action>;
   navigate: (view: View) => void;
   setInboxPersistenceEnabled: (enabled: boolean) => void;
-  setInboxSelection: (sessionId: string | null, splitKey?: string | null, persist?: boolean) => void;
+  setInboxSelection: (sessionId: string | null, splitKey?: string | null, persist?: boolean, repair?: boolean) => void;
   setInboxSplit: (splitKey: string | null, persist?: boolean) => void;
   setInboxRatio: (ratio: number) => void;
   setFilters: (filters: Partial<Filters>) => void;
@@ -1567,7 +1574,8 @@ export class Store {
     sessionId: string | null,
     splitKey = this.state.inbox.splitKey,
     persist = true,
-  ): void => this.dispatch({ type: "inbox_selection", sessionId, splitKey, persist });
+    repair = false,
+  ): void => this.dispatch({ type: "inbox_selection", sessionId, splitKey, persist, repair });
   setInboxSplit = (splitKey: string | null, persist = true): void =>
     this.dispatch({ type: "inbox_split", splitKey, persist });
   setInboxRatio = (ratio: number): void => this.dispatch({ type: "inbox_ratio", ratio });
