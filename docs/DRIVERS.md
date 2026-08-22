@@ -183,7 +183,21 @@ a CLI self-update changes capabilities without a runner restart.
 Cloud-provider flags follow Claude's documented credential precedence ahead of direct API/OAuth
 configuration: [Claude Code authentication](https://code.claude.com/docs/en/team#authentication-precedence).
 
-### 2.2 Spawn command and persistent process
+### 2.2 Effective Model and Effort
+
+Before launching a session that advertises both model and reasoning-effort controls, Wollipog
+resolves and persists a concrete pair. Explicit selections win, followed by a concrete
+harness-advertised default, then the preferred driver pair (Claude Opus 5 with High effort or
+GPT-5.6 Sol with High effort), then a deterministic compatible advertised fallback. Unsupported
+persisted values are healed on the next configuration change or prompt. If no compatible concrete
+pair exists, submission is rejected with a rediscovery or selection hint instead of launching an
+ambiguous Default.
+
+The resolved values are passed explicitly to the driver and shown in both the composer control and
+pinned summary. Effort names use presentation labels such as **Extra High** rather than raw tokens
+such as `xhigh`.
+
+### 2.3 Spawn command and persistent process
 
 The default is one persistent process per session. The `WOLLIPOG_CLAUDE_PERSISTENT=0` circuit breaker
 uses one process per turn with this base argv:
@@ -196,8 +210,10 @@ claude -p \
   --effort <discovered-level> \                 # from DriverConfig.effort (omit if unset)
 ```
 
-plus per-mode flags (`claudePermissionArgs`; runtime default is `acceptEdits` when
-`permissionMode` is unset):
+plus per-mode flags (`claudePermissionArgs`). New non-conductor sessions persist `auto` when the
+connected installation advertises it, or `acceptEdits` as the compatibility fallback. Existing
+sessions whose persisted `permissionMode` is unset retain the driver's `acceptEdits` fallback and
+are not migrated automatically:
 
 | `permissionMode` | extra argv | prompt delivery |
 |---|---|---|
@@ -317,7 +333,7 @@ The lifetime policy is quiescence-aware and fail-safe:
 - All three lifetime controls are runner-only and are scrubbed from native, WSL, and standalone
   TUI child environments.
 
-### 2.2.1 Per-session policy hook transport
+### 2.3.1 Per-session policy hook transport
 
 `WOLLIPOG_CLAUDE_HOOKS=1` enables the default-off Phase 3 transport for native Claude Code agents in
 fixed-rule permission modes (`acceptEdits`, `plan`, and `bypassPermissions`) after the connected
@@ -387,7 +403,7 @@ This rollout follows Anthropic's documented Agent SDK streaming-input contract w
 CLI transport and subscription authentication unchanged. It does not migrate to the TypeScript SDK;
 that decision remains Phase 2.5.
 
-### 2.3 Turn I/O (stdin/stdout JSONL)
+### 2.4 Turn I/O (stdin/stdout JSONL)
 
 - In default mode, one process runs per turn (`--session-id` on turn 1, `--resume` after). In
   persistent mode the same input/output process spans result boundaries until eviction, config
@@ -400,7 +416,7 @@ that decision remains Phase 2.5.
 - **Slash commands**: include `/name [args]` directly in `content` — `-p` expands it before running.
 - Parse stdout line-by-line as JSONL (reuse the line-buffering approach from `jsonrpc.ts`'s `onData`).
 
-### 2.4 stream-json output → SessionEventPayload mapping
+### 2.5 stream-json output → SessionEventPayload mapping
 
 | claude stream-json event | fields read | → `SessionEventPayload` |
 |---|---|---|
@@ -418,7 +434,7 @@ that decision remains Phase 2.5.
 | `control_request` (`subtype:"can_use_tool"`) | `request_id`, `request.tool_name`, `request.description`, `request.input` | `{kind:"permission_request", requestId, title:"<tool_name>: <description ≤80>", options:[allow_once,reject_once]}` (input stashed for the reply) |
 | `control_request` (unrecognized subtype) | `request_id` | no event — stderr canary + auto-decline `subtype:"error"` control_response |
 
-### 2.4.1 Provider Authentication Recovery
+### 2.5.1 Provider Authentication Recovery
 
 Native Claude and Codex sessions run provider-native status checks in the runner's exact launch
 context. The runner strips daemon-only environment variables with the same policy as the provider
@@ -453,7 +469,7 @@ message, thought, tool/update, plan, file edit, and historical transcript record
 spawning `parentToolUseId`; the web resolves the full chain with orphan/cycle protection. Parented
 usage and provider duration are optional v31 fields. Tool timestamps provide a duration fallback.
 
-### 2.5 Approvals mapping
+### 2.6 Approvals mapping
 
 | our `optionId` | `control_response` written to stdin |
 |---|---|
@@ -487,7 +503,7 @@ Localhost works native and WSL-mirrored; on WSL-NAT the approver is disabled and
 fixed-rule `--permission-mode` (surfaced as a capabilities downgrade). Never a per-distro stdio MCP
 child — that needs a Linux-side node plus an env side channel `spawn.ts` cannot deliver.
 
-### 2.6 Model / effort / continuation
+### 2.7 Model / effort / continuation
 
 - **Model**: `--model` per spawn. Resolved model reported back in `result.modelUsage`.
 - **Effort**: `--effort` per spawn; availability is model-dependent (UI gates). Unsupported level
@@ -497,7 +513,7 @@ child — that needs a Linux-side node plus an env side channel `spawn.ts` canno
 - **Continuation across runner restarts**: persist the pinned `session_id`; resume with
   `--resume <id>` from the same cwd.
 
-### 2.7 Conversation fork and file rewind
+### 2.8 Conversation fork and file rewind
 
 Discovery exposes conversation fork only when the resolved Claude installation advertises
 `--fork-session`. The provider-neutral fork operation creates the target worktree from the exact

@@ -23,6 +23,7 @@ import {
   validatePromptImages,
   validateQuestionAnswers,
   type AgentContext,
+  type AgentDriverKind,
   type AcpSessionContextConfig,
   type AgentCapabilities,
   type ApprovalQueueItem,
@@ -111,6 +112,7 @@ import {
 } from "./db.js";
 import { isRunnerRequestNotSentError, isRunnerRequestTimeoutError, type Hub } from "./hub.js";
 import { SessionPromptOutbox } from "./session-prompt-outbox.js";
+import { redactOperationalTranscriptText } from "./share-projection.js";
 import {
   approvalForDecision,
   conductorSafetyPolicy,
@@ -140,6 +142,11 @@ import {
   composePodOrchestrationPrompt,
   normalizePodOutput,
 } from "./pod-orchestration.js";
+import {
+  boundedSessionTitleContext,
+  normalizeGeneratedSessionTitle,
+  type SessionTitleGenerator,
+} from "./session-title-generator.js";
 
 type Logger = { info: (m: string) => void; warn: (m: string) => void; error: (m: string) => void };
 
@@ -378,8 +385,16 @@ export function capabilityConfigError(
   if (config.model && capabilities.models.length && !capabilities.models.some((model) => model.id === config.model)) {
     return `model ${JSON.stringify(config.model)} is not supported by this agent installation`;
   }
-  if (config.effort && !capabilities.effortLevels.includes(config.effort)) {
-    return `effort ${JSON.stringify(config.effort)} is not supported by this agent installation`;
+  if (config.effort) {
+    const selectedModel = config.model
+      ? capabilities.models.find((model) => model.id === config.model)
+      : undefined;
+    const supportedEfforts = selectedModel?.efforts?.length
+      ? selectedModel.efforts
+      : capabilities.effortLevels;
+    if (!supportedEfforts.includes(config.effort)) {
+      return "effort " + JSON.stringify(config.effort) + " is not supported by this agent installation";
+    }
   }
   if (config.permissionMode && !(capabilities.permissionModes ?? []).includes(config.permissionMode)) {
     return `permission mode ${JSON.stringify(config.permissionMode)} is not supported by this agent installation`;
@@ -396,7 +411,13 @@ export function normalizeClaudePersistedConfig(
   driver: string,
 ): SessionConfig {
   if (driver !== "claude-code" || !capabilities) return config;
-  const effort = config.effort && capabilities.effortLevels.includes(config.effort) ? config.effort : undefined;
+  const selectedModel = config.model
+    ? capabilities.models.find((model) => model.id === config.model)
+    : undefined;
+  const supportedEfforts = selectedModel?.efforts?.length
+    ? selectedModel.efforts
+    : capabilities.effortLevels;
+  const effort = config.effort && supportedEfforts.includes(config.effort) ? config.effort : undefined;
   const configuredMode = config.permissionMode;
   const permissionMode = configuredMode && (capabilities.permissionModes ?? []).includes(configuredMode)
     ? configuredMode
@@ -437,6 +458,58 @@ function claudeCatalogFamily(value: string): string | null {
   return claudeStableAliasFamily(normalized)
     ?? /^claude-(opus|fable|sonnet|haiku)-\d+(?:-\d+)?(?:-\d{8})?(?:\[1m\])?$/.exec(normalized)?.[1]
     ?? null;
+}
+
+const EFFORT_FALLBACK_ORDER = ["high", "medium", "low", "xhigh", "max", "minimal"] as const;
+
+export type EffectiveModelEffort = { model: string; effort: string };
+
+/** Resolve provider defaults into an explicit, capability-compatible pair without relying on discovery order. */
+export function resolveEffectiveModelEffort(
+  config: Pick<SessionConfig, "model" | "effort">,
+  capabilities: AgentCapabilities | undefined,
+  driver: AgentDriverKind,
+): { value?: EffectiveModelEffort; error?: string } {
+  if (!capabilities?.models?.length) return {};
+  const concrete = capabilities.models.filter((model) => model.id !== "default");
+  const selectable = concrete.filter((model) => !model.hidden);
+  const effortsFor = (model: AgentCapabilities["models"][number]) =>
+    (model.efforts?.length ? model.efforts : capabilities.effortLevels) ?? [];
+  if (!concrete.some((model) => effortsFor(model).length)) return {};
+  if (!selectable.length) return { error: "No visible concrete model is advertised. Rediscover the runner or choose a compatible agent." };
+
+  const explicitFamily = driver === "claude-code" && config.model
+    ? claudeCatalogFamily(config.model)
+    : null;
+  const explicitModel = config.model && config.model !== "default"
+    ? concrete.find((model) => model.id === config.model)
+      ?? (explicitFamily
+        ? concrete.find((model) => claudeCatalogFamily(model.id) === explicitFamily)
+        : undefined)
+    : undefined;
+  const advertised = selectable.find((model) => model.default);
+  const preferredPattern = driver === "claude-code" ? /(?:^|[-_])opus(?:$|[-_\[])/i : /gpt[-_.]?5\.6[-_.]?sol/i;
+  const preferred = selectable.find((model) => preferredPattern.test(model.id))
+    ?? selectable.find((model) => preferredPattern.test(model.displayName ?? ""));
+  const compatible = [...selectable]
+    .filter((model) => effortsFor(model).length)
+    .sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  const model = explicitModel ?? advertised ?? preferred ?? compatible[0];
+  if (!model) return { error: "No concrete supported model and reasoning effort are advertised. Rediscover the runner or choose a compatible agent." };
+  const efforts = effortsFor(model);
+  if (!efforts.length) return { error: `Model "${model.displayName ?? model.id}" advertises no supported reasoning effort. Choose another model or rediscover the runner.` };
+  const explicitEffort = config.effort && efforts.includes(config.effort) ? config.effort : undefined;
+  const advertisedEffort = model.defaultEffort && efforts.includes(model.defaultEffort) ? model.defaultEffort : undefined;
+  const preferredEffort = efforts.includes("high") ? "high" : undefined;
+  const fallbackEffort = EFFORT_FALLBACK_ORDER.find((effort) => efforts.includes(effort))
+    ?? [...efforts].sort()[0];
+  const effort = explicitEffort ?? advertisedEffort ?? preferredEffort ?? fallbackEffort;
+  const preserveExplicitModel = explicitModel && config.model && (
+    explicitModel.id === config.model || claudeStableAliasFamily(config.model) !== null
+  );
+  const resolvedModel = preserveExplicitModel ? config.model! : model.id;
+  return effort ? { value: { model: resolvedModel, effort } }
+    : { error: `Model "${model.displayName ?? model.id}" has no concrete supported reasoning effort.` };
 }
 
 export function sessionBlocksConversationFork(status: SessionStatus): boolean {
@@ -481,6 +554,20 @@ export { budgetDecision } from "./policy-engine.js";
 /** The conductor's agent id — a contract constant shared with the runner's agent synthesis and
  * provisioning (apps/runner/src/conductor.ts). Renaming one side breaks the enforcement pairing. */
 const CONDUCTOR_AGENT_ID = "conductor";
+
+/** Persist the capability-dependent Claude default at creation time so the selector, stored
+ * session, and launch argv all describe the same mode. Older sessions with no stored mode keep
+ * the driver's compatibility fallback and are deliberately not migrated. */
+export function defaultPermissionModeForNewSession(
+  driver: AgentDriverKind,
+  capabilities: AgentCapabilities | undefined,
+): string | undefined {
+  if (driver !== "claude-code") return undefined;
+  const modes = capabilities?.permissionModes;
+  if (!modes?.length) return undefined;
+  if (modes.includes("auto")) return "auto";
+  return modes.includes("acceptEdits") ? "acceptEdits" : undefined;
+}
 
 /** Conductor clamp: sessions of the "conductor" agent must stay in permissionMode "default" —
  * the only mode where every mcp__manager__ mutation parks on a human Allow/Reject card. Any other
@@ -630,6 +717,10 @@ export class SessionsService {
   /** Remember authoritative no-repository results across refreshes and offline intervals. */
   private readonly reviewQueueNoRepository = new Set<string>();
   private readonly promptOutbox: SessionPromptOutbox;
+  /** Process-local epochs fence late initial/manual results. Durable title/source checks provide
+   * the cross-restart fence, so an abandoned request can never overwrite newer state. */
+  private readonly titleGenerationEpochs = new Map<string, number>();
+  private readonly titleGenerationControllers = new Map<string, AbortController>();
 
   constructor(
     private readonly db: ControlPlaneDb,
@@ -641,6 +732,8 @@ export class SessionsService {
      * view AFTER it; the decision policy lives with the sender. */
     private readonly notify?: (prev: SessionView, view: SessionView) => void,
     private readonly steeringRequestTimeoutMs = STEERING_REQUEST_TIMEOUT_MS,
+    private readonly titleGenerator?: SessionTitleGenerator,
+    private readonly titleGenerationTimeoutMs = 5_000,
   ) {
     this.promptOutbox = new SessionPromptOutbox(this.db, this.hub, this.log);
     // A restart can happen after a prompt reached a runner but before the delivery marker was
@@ -2487,7 +2580,19 @@ export class SessionsService {
     }
     const agentCapabilities = snapshotSpec?.capabilities ??
       this.db.getRunner(req.runnerId)?.agents.find((agent) => agent.id === req.agentId)?.capabilities;
-    const requestedConfig = snapshotSpec?.config ?? req.config ?? {};
+    const requestedConfig = { ...(snapshotSpec?.config ?? req.config ?? {}) };
+    if (!snapshotSpec) {
+      if (req.agentId !== CONDUCTOR_AGENT_ID && requestedConfig.permissionMode === undefined) {
+        requestedConfig.permissionMode = defaultPermissionModeForNewSession(launch.driver, agentCapabilities);
+      }
+      const explicitConfigError = capabilityConfigError(
+        claudeModelConfigForValidation(requestedConfig, agentCapabilities, launch.driver), agentCapabilities,
+      );
+      if (explicitConfigError) return fail(explicitConfigError, 409);
+      const resolved = resolveEffectiveModelEffort(requestedConfig, agentCapabilities, launch.driver);
+      if (resolved.error) return fail(resolved.error, 409);
+      if (resolved.value) Object.assign(requestedConfig, resolved.value);
+    }
     const validationConfig = claudeModelConfigForValidation(requestedConfig, agentCapabilities, launch.driver);
     const modelImageValidation = validateModelImageSupport(images, agentCapabilities, validationConfig.model);
     if (!modelImageValidation.ok) return fail(modelImageValidation.error ?? "model does not support image input", 400);
@@ -2747,8 +2852,23 @@ export class SessionsService {
           ? { elicitation: session.agentCapabilities.elicitation }
           : undefined,
     );
-    const validationConfig = effectiveConfig
-      ? claudeModelConfigForValidation(effectiveConfig, agentCapabilities, session.driver)
+    let resolvedEffectiveConfig = effectiveConfig;
+    if (!snapshotCommand) {
+      if (effectiveConfig) {
+        const explicitConfigError = capabilityConfigError(
+          claudeModelConfigForValidation(effectiveConfig, agentCapabilities, session.driver), agentCapabilities,
+        );
+        if (explicitConfigError) return fail(explicitConfigError, 409);
+      }
+      const resolved = resolveEffectiveModelEffort({
+        model: resolvedEffectiveConfig?.model ?? session.model ?? undefined,
+        effort: effectiveConfig?.effort ?? (effectiveConfig?.model ? undefined : session.effort ?? undefined),
+      }, agentCapabilities, session.driver);
+      if (resolved.error) return fail(resolved.error, 409);
+      if (resolved.value) resolvedEffectiveConfig = { ...effectiveConfig, ...resolved.value };
+    }
+    const validationConfig = resolvedEffectiveConfig
+      ? claudeModelConfigForValidation(resolvedEffectiveConfig, agentCapabilities, session.driver)
       : undefined;
     if (!snapshotCommand) {
       const modelImageValidation = validateModelImageSupport(
@@ -2773,8 +2893,8 @@ export class SessionsService {
       permissionMode: effectiveConfig?.permissionMode,
     } : normalizeClaudePersistedConfig(
       {
-        model: effectiveConfig?.model ?? session.model ?? undefined,
-        effort: effectiveConfig?.effort ?? session.effort ?? undefined,
+        model: resolvedEffectiveConfig?.model ?? session.model ?? undefined,
+        effort: resolvedEffectiveConfig?.effort ?? session.effort ?? undefined,
         permissionMode: effectiveConfig?.permissionMode ?? session.permissionMode ?? undefined,
       },
       agentCapabilities,
@@ -2928,6 +3048,16 @@ export class SessionsService {
           ? { elicitation: session.agentCapabilities.elicitation }
           : undefined,
     );
+    const explicitConfigError = capabilityConfigError(
+      claudeModelConfigForValidation(config, agentCapabilities, session.driver), agentCapabilities,
+    );
+    if (explicitConfigError) return fail(explicitConfigError, 409);
+    const resolvedModelEffort = resolveEffectiveModelEffort({
+      model: config.model ?? session.model ?? undefined,
+      effort: config.effort ?? (config.model ? undefined : session.effort ?? undefined),
+    }, agentCapabilities, session.driver);
+    if (resolvedModelEffort.error) return fail(resolvedModelEffort.error, 409);
+    if (resolvedModelEffort.value) config = { ...config, ...resolvedModelEffort.value };
     const validationConfig = claudeModelConfigForValidation(config, agentCapabilities, session.driver);
     const configCapabilityError = capabilityConfigError(validationConfig, agentCapabilities);
     if (configCapabilityError) return fail(configCapabilityError, 409);
@@ -3983,10 +4113,68 @@ export class SessionsService {
     const title = value.trim().replace(/\s+/g, " ");
     if (!title) return fail("title is required", 400);
     if (title.length > 120) return fail("title must be 120 characters or fewer", 400);
+    this.cancelTitleGeneration(sessionId);
     this.db.setSessionTitle(sessionId, title, Date.now(), "user");
     const updated = this.db.getSession(sessionId)!;
     this.hub.sessionChanged(updated);
     return ok(updated);
+  }
+
+  private cancelTitleGeneration(sessionId: string): void {
+    this.titleGenerationControllers.get(sessionId)?.abort();
+    this.titleGenerationControllers.delete(sessionId);
+    this.titleGenerationEpochs.delete(sessionId);
+  }
+
+  private bumpTitleGenerationEpoch(sessionId: string): number {
+    this.titleGenerationControllers.get(sessionId)?.abort();
+    const epoch = (this.titleGenerationEpochs.get(sessionId) ?? 0) + 1;
+    this.titleGenerationEpochs.set(sessionId, epoch);
+    return epoch;
+  }
+
+  private generateSessionTitle(
+    sessionId: string,
+    ownership: "generated" | "user",
+  ): ServiceResult<{ accepted: true }> {
+    if (!this.titleGenerator) return fail("semantic session naming is disabled or not configured", 409);
+    const session = this.db.getSession(sessionId);
+    if (!session) return fail("session not found", 404);
+    const sensitivePaths = this.db.sessionSensitivePaths(sessionId);
+    const messages = boundedSessionTitleContext(
+      this.db.listSessionTitleContextEvents(sessionId),
+      (text) => redactOperationalTranscriptText(text, sensitivePaths),
+    );
+    if (!messages.length) return fail("the session has no completed conversation context to name", 409);
+
+    const epoch = this.bumpTitleGenerationEpoch(sessionId);
+    const expectedTitle = session.title;
+    const expectedSource = session.titleSource ?? "generated";
+    const controller = new AbortController();
+    this.titleGenerationControllers.set(sessionId, controller);
+    const timeout = setTimeout(() => controller.abort(), this.titleGenerationTimeoutMs);
+    void this.titleGenerator({ messages, signal: controller.signal }).then((rawTitle) => {
+      const title = normalizeGeneratedSessionTitle(rawTitle);
+      if (!title || controller.signal.aborted || this.titleGenerationEpochs.get(sessionId) !== epoch) return;
+      const current = this.db.getSession(sessionId);
+      if (!current || current.title !== expectedTitle || (current.titleSource ?? "generated") !== expectedSource) return;
+      this.db.setSemanticSessionTitle(sessionId, title, Date.now(), ownership);
+      this.hub.sessionChangedById(sessionId);
+    }).catch((error: unknown) => {
+      if (!controller.signal.aborted) this.log.warn("semantic title generation failed: " + (error as Error).message);
+    }).finally(() => {
+      clearTimeout(timeout);
+      if (this.titleGenerationControllers.get(sessionId) === controller) {
+        this.titleGenerationControllers.delete(sessionId);
+        this.titleGenerationEpochs.delete(sessionId);
+      }
+    });
+    return ok({ accepted: true }, 202);
+  }
+
+  /** Explicit local retitle requests are metadata work and never enter runner lifecycle or queues. */
+  retitleSession(sessionId: string): ServiceResult<{ accepted: true }> {
+    return this.generateSessionTitle(sessionId, "user");
   }
 
   /** Legacy compatibility adapter for workspace grouping. Durable clients use setProject. This is
@@ -4194,6 +4382,7 @@ export class SessionsService {
   }
 
   private deleteMaterializedSession(session: SessionView): void {
+    this.cancelTitleGeneration(session.id);
     const pods = this.db.podsForSession(session.id);
     const now = Date.now();
     this.abortPolicyHookApprovals(session, now, "session-deleted");
@@ -5721,6 +5910,11 @@ export class SessionsService {
       this.onSessionStatus(sessionId, payload.status);
       return;
     }
+    const isCompletedUserMessage = payload.kind === "user_message" &&
+      payload.final !== false && !payload.commandInvocation;
+    const generatedOwnership = (session.titleSource ?? "generated") === "generated";
+    const shouldGenerateInitialTitle = Boolean(this.titleGenerator) && isCompletedUserMessage &&
+      generatedOwnership && !this.db.hasCompletedUserMessage(sessionId);
     // Keep the runner-seq cursor gap-free: if a live event is ahead of our high-water (we hydrated a
     // session whose earlier history we haven't pulled yet), don't append it out of order and skip
     // past the gap — pull the ordered history from the box (which includes this event) instead.
@@ -5826,17 +6020,15 @@ export class SessionsService {
     }
 
     // The first real user message names an untitled session (Codex-style) for immediate feedback.
-    // The runner also persists this into meta.title, so it survives re-hydration; both derive from
-    // the same prompt text and agree. Streamed chunks (final === false) are skipped.
-    if (
-      payload.kind === "user_message" &&
-      payload.final !== false &&
-      !payload.commandInvocation &&
-      (session.titleSource ?? "generated") === "generated" &&
-      session.title === UNTITLED
-    ) {
+    // The runner persists the same fallback into meta.title. A later CP semantic result is marked
+    // separately so stale non-provider hydration cannot revert it. Streamed chunks are skipped.
+    if (isCompletedUserMessage && generatedOwnership && session.title === UNTITLED) {
       const t = titleFromPrompt(payload.text);
       if (t) this.db.setSessionTitle(sessionId, t, now, "generated");
+    }
+    if (shouldGenerateInitialTitle) {
+      // Fire-and-forget: the normal turn has already entered the runner independently.
+      this.generateSessionTitle(sessionId, "generated");
     }
 
     // Parented usage is a display-only subagent breakdown. The provider's top-level result is the

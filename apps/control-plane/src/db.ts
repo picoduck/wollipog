@@ -396,6 +396,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   agent_id       TEXT,
   title          TEXT NOT NULL DEFAULT '',
   title_source   TEXT NOT NULL DEFAULT 'generated',
+  semantic_title INTEGER NOT NULL DEFAULT 0,
   provider_updated_at TEXT,
   background_work_state TEXT,
   background_work_tracking TEXT,
@@ -1728,6 +1729,7 @@ interface SessionRow {
   agent_id: string | null;
   title: string;
   title_source: string | null;
+  semantic_title: number;
   provider_updated_at: string | null;
   background_work_state: string | null;
   background_work_tracking: string | null;
@@ -3344,6 +3346,7 @@ export class ControlPlaneDb {
       // Nullable additive form lets the backfill below distinguish legacy rows. Fresh databases
       // use the CREATE TABLE default (`generated`). Existing names are preserved as user-owned.
       "title_source TEXT",
+      "semantic_title INTEGER NOT NULL DEFAULT 0",
       "provider_updated_at TEXT",
       "background_work_state TEXT",
       "background_work_tracking TEXT",
@@ -7936,7 +7939,7 @@ export class ControlPlaneDb {
     // runner's snapshot knows nothing of it, so we must not let it revert status→idle +
     // pending→null and resume over-limit work.
     const existing = this.stmt(
-      `SELECT runner_id, workspace_id, project_id, pending_approval, title, title_source,
+      `SELECT runner_id, workspace_id, project_id, pending_approval, title, title_source, semantic_title,
               cost_budget_usd, execution_handoff, adopted, workspace_path
        FROM sessions WHERE id=?`,
     ).get(id) as
@@ -7947,6 +7950,7 @@ export class ControlPlaneDb {
           pending_approval: string | null;
           title: string;
           title_source: string | null;
+          semantic_title: number;
           cost_budget_usd: number | null;
           execution_handoff: string | null;
           adopted: number;
@@ -8001,9 +8005,11 @@ export class ControlPlaneDb {
     // The control plane owns explicit rename order. A runner snapshot can carry an OLDER user
     // title (the runner learned the launch-time title but not a later CP-only rename), so even an
     // incoming `user` source must not replace the existing local user override.
-    const keepUserTitle = existing?.title_source === "user";
-    const title = keepUserTitle ? existing.title : snap.title;
-    const titleSource = keepUserTitle ? "user" : snapshotTitleSource;
+    const keepControlPlaneTitle = existing?.title_source === "user" ||
+      (existing?.semantic_title === 1 && snapshotTitleSource !== "provider");
+    const title = keepControlPlaneTitle ? existing!.title : snap.title;
+    const titleSource = keepControlPlaneTitle ? existing!.title_source ?? "generated" : snapshotTitleSource;
+    const semanticTitle = keepControlPlaneTitle && existing?.semantic_title === 1 ? 1 : 0;
     this.db.exec("BEGIN");
     try {
       if (authoritativeImportPath && authoritativeScope) {
@@ -8032,7 +8038,7 @@ export class ControlPlaneDb {
         );
       }
       this.stmt(
-        `UPDATE sessions SET status=?, title=?, title_source=?, provider_updated_at=?, background_work_state=?, background_work_tracking=COALESCE(?, background_work_tracking), preview=?, pending_approval=?, worktree_path=?, workspace_path=?, use_worktree=?,
+        `UPDATE sessions SET status=?, title=?, title_source=?, semantic_title=?, provider_updated_at=?, background_work_state=?, background_work_tracking=COALESCE(?, background_work_tracking), preview=?, pending_approval=?, worktree_path=?, workspace_path=?, use_worktree=?,
             model=?, resolved_model=?, effort=?, permission_mode=?, agent_capabilities=?, input_tokens=?, output_tokens=?, context_tokens_used=?, context_window=?, cost_usd=?, adopted=?,
             acp_session_context=COALESCE(?, acp_session_context),
             updated_at=? WHERE id=?`,
@@ -8041,6 +8047,7 @@ export class ControlPlaneDb {
         status,
         title,
         titleSource,
+        semanticTitle,
         snap.providerUpdatedAt ?? null,
         snap.backgroundWorkState ?? null,
         snap.backgroundWorkTracking ?? null,
@@ -8702,7 +8709,13 @@ export class ControlPlaneDb {
   }
 
   setSessionTitle(id: string, title: string, now: number, source: SessionTitleSource = "generated"): void {
-    this.stmt("UPDATE sessions SET title=?, title_source=?, updated_at=? WHERE id=?").run(title, source, now, id);
+    this.stmt("UPDATE sessions SET title=?, title_source=?, semantic_title=0, updated_at=? WHERE id=?").run(title, source, now, id);
+  }
+
+  /** CP task-model result. It remains generated-owned but survives stale non-provider runner state. */
+  setSemanticSessionTitle(id: string, title: string, now: number, source: SessionTitleSource): void {
+    this.stmt("UPDATE sessions SET title=?, title_source=?, semantic_title=1, updated_at=? WHERE id=?")
+      .run(title, source, now, id);
   }
 
   setSessionArchived(id: string, archived: boolean, now: number): void {
@@ -11657,6 +11670,38 @@ export class ControlPlaneDb {
       seq: r.seq,
       ts: r.ts,
       payload: JSON.parse(r.payload) as SessionEventPayload,
+    }));
+  }
+
+  hasCompletedUserMessage(sessionId: string): boolean {
+    return Boolean(this.stmt(
+      `SELECT 1 FROM session_events
+       WHERE session_id=? AND kind='user_message'
+         AND COALESCE(json_extract(payload, '$.final'), 1) != 0
+         AND json_type(payload, '$.commandInvocation') IS NULL
+       LIMIT 1`,
+    ).get(sessionId));
+  }
+
+  /** Original objective plus a bounded recent semantic tail, returned chronologically. */
+  listSessionTitleContextEvents(sessionId: string, recentLimit = 8): SessionEvent[] {
+    const predicate = `session_id=? AND (
+      (kind='user_message' AND COALESCE(json_extract(payload, '$.final'), 1) != 0
+        AND json_type(payload, '$.commandInvocation') IS NULL)
+      OR (kind='agent_message' AND json_extract(payload, '$.final') = 1
+        AND json_type(payload, '$.parentToolUseId') IS NULL))`;
+    type TitleEventRow = { id: number; session_id: string; seq: number; ts: number; payload: string };
+    const first = this.stmt(
+      `SELECT id, session_id, seq, ts, payload FROM session_events WHERE ${predicate} ORDER BY seq LIMIT 1`,
+    ).get(sessionId) as TitleEventRow | undefined;
+    const recent = this.stmt(
+      `SELECT id, session_id, seq, ts, payload FROM session_events WHERE ${predicate} ORDER BY seq DESC LIMIT ?`,
+    ).all(sessionId, recentLimit) as unknown as TitleEventRow[];
+    const rows = [...new Map([...(first ? [first] : []), ...recent].map((row) => [row.id, row])).values()]
+      .sort((left, right) => left.seq - right.seq);
+    return rows.map((row) => ({
+      id: row.id, sessionId: row.session_id, seq: row.seq, ts: row.ts,
+      payload: JSON.parse(row.payload) as SessionEventPayload,
     }));
   }
 

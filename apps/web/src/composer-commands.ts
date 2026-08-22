@@ -41,6 +41,8 @@ export interface ComposerCommand {
   name: string;
   /** User-visible invocation label, including the leading slash. */
   label: string;
+  /** Optional Title Case action name shown in the command menu. */
+  displayName?: string;
   /** Durable token inserted after the slash. Collisions use an explicit namespace. */
   invocationAlias: string;
   description?: string;
@@ -143,6 +145,21 @@ function commandLabel(invocationAlias: string): string {
 function appCommands(context: ComposerCommandContext): ComposerCommand[] {
   const appGroup = GROUP_BY_ID.get("app")!;
   return [
+    {
+      id: "app:rename-session",
+      name: "rename-session",
+      label: commandLabel("rename-session"),
+      displayName: "Rename Session",
+      invocationAlias: "rename-session",
+      description: "Rename this session from its conversation.",
+      source: "app",
+      sourceLabel: "App",
+      executionMode: "app",
+      available: true,
+      attachmentPolicy: "preserve",
+      groupId: appGroup.id,
+      groupLabel: appGroup.label,
+    },
     {
       id: "app:plan",
       name: "plan",
@@ -441,9 +458,10 @@ export function rankComposerCommands(
   const normalizedQuery = query.trim().toLowerCase();
   const ranked = commands.flatMap((command): RankedComposerCommand[] => {
     if (!normalizedQuery) return [{ command, matchKind: "none", score: MATCH_ORDER.none * 100 }];
+    const allowCommandFuzzy = command.source === "provider";
     const fields = [
-      { value: command.invocationAlias, allowFuzzy: true },
-      { value: command.name, allowFuzzy: true },
+      { value: command.invocationAlias, allowFuzzy: allowCommandFuzzy },
+      { value: command.name, allowFuzzy: allowCommandFuzzy },
       { value: command.description, allowFuzzy: false },
       { value: command.argumentHint, allowFuzzy: false },
     ].filter((field): field is { value: string; allowFuzzy: boolean } => Boolean(field.value));
