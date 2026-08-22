@@ -395,9 +395,9 @@ test("archiving the final session keeps its Project selected live and after relo
   const alpha = page.getByRole("tab", { name: /Alpha/ });
   await alpha.click();
   await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
-  await page.getByRole("menuitem", { name: "Archive All Sessions" }).click();
-  const confirmation = page.getByRole("dialog", { name: "Archive 1 Session?" });
-  await confirmation.getByRole("button", { name: "Archive Sessions" }).click();
+  await page.getByRole("menuitem", { name: "Archive and Stop All Sessions" }).click();
+  const confirmation = page.getByRole("dialog", { name: "Archive and stop 1 session?" });
+  await confirmation.getByRole("button", { name: "Archive and Stop" }).click();
 
   await expect(alpha).toHaveAttribute("aria-selected", "true");
   await expect(alpha).toContainText("0");
