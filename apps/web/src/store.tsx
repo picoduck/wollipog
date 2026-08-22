@@ -226,6 +226,9 @@ export interface EventWindowState {
   /** The read that produced this window reached the runner's tail. A budget-expired window reports
    * no older rows while still being a prefix, so completeness is tracked separately. */
   complete: boolean;
+  /** Opening-window alignment proves that the visible head is a semantic turn boundary. False
+   * means the bounded safety cap was reached and the latest response may begin above this slice. */
+  turnAligned?: boolean;
   loadingOlder: boolean;
   error: string | null;
 }
@@ -319,6 +322,9 @@ type Action =
       /** Present only for a bounded opening-window read: whether older cached events remain below
        * this page. Absent marks a forward gap-fill, which never redefines the loaded window. */
       windowHasOlder?: boolean;
+      /** Present only for an aligned opening-window read. False means the server kept its bounded
+       * count boundary because the turn start was beyond the supported extension. */
+      windowTurnAligned?: boolean;
     }
   | { type: "events_older_loading"; sessionId: string; eventEpoch: number; requestedBase: number }
   | { type: "events_older_failed"; sessionId: string; eventEpoch: number; requestedBase: number; error: string }
@@ -544,6 +550,7 @@ function applyWindowBase(
       baseSeq: 0,
       hasOlder: action.windowHasOlder,
       complete: action.recoveryComplete,
+      ...(action.windowTurnAligned === undefined ? {} : { turnAligned: action.windowTurnAligned }),
       loadingOlder: false,
       error: null,
     });
@@ -560,6 +567,9 @@ function applyWindowBase(
     // Completeness is monotonic within an epoch: a re-read that reaches the tail settles it, and a
     // later partial read cannot unsettle what was already proven complete.
     complete: action.recoveryComplete || (priorValid?.complete ?? false),
+    ...(action.windowTurnAligned === undefined
+      ? (priorValid?.turnAligned === undefined ? {} : { turnAligned: priorValid.turnAligned })
+      : { turnAligned: action.windowTurnAligned }),
     // An older load in flight against the SAME base is still valid — its page will pass the fence.
     // A base change means the fence will reject that page, and nothing else would ever clear the
     // flag, leaving Load Earlier Activity stuck disabled until remount.
@@ -858,6 +868,12 @@ function reducer(state: State, action: Action): State {
         ...window,
         baseSeq: Math.min(window.baseSeq, action.events[0]?.seq ?? window.baseSeq),
         hasOlder: action.hasOlder,
+        ...(window.turnAligned === undefined ? {} : {
+          turnAligned: window.turnAligned === false &&
+            (action.events.some((event) => event.payload.kind === "user_message") || !action.hasOlder)
+            ? true
+            : window.turnAligned,
+        }),
         loadingOlder: false,
         error: null,
       });
@@ -1448,6 +1464,7 @@ interface StoreValue extends State {
     recoveryComplete?: boolean,
     recoveryGeneration?: number,
     windowHasOlder?: boolean,
+    windowTurnAligned?: boolean,
   ) => void;
   loadOlderEvents: (
     sessionId: string,
@@ -1564,9 +1581,11 @@ export class Store {
     recoveryComplete = true,
     recoveryGeneration = this.state.snapshotRevision,
     windowHasOlder?: boolean,
+    windowTurnAligned?: boolean,
   ): void => this.dispatch({
     type: "events_loaded", sessionId, events, eventEpoch, recoveryRevision, recoveryComplete, recoveryGeneration,
     ...(windowHasOlder === undefined ? {} : { windowHasOlder }),
+    ...(windowTurnAligned === undefined ? {} : { windowTurnAligned }),
   });
   beginOlderEventsLoad = (
     sessionId: string,

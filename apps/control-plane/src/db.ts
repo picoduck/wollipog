@@ -2146,7 +2146,11 @@ export interface CachedEventTailPage {
  * started inside. A turn is a semantic unit — splitting one orphans its tool updates from the
  * invocation that explains them — but a single verbose turn is unbounded, so alignment stops here
  * and the page keeps its count boundary rather than growing without limit. */
-export const TAIL_TURN_ALIGNMENT_MAX_EVENTS = 400;
+export const TAIL_TURN_ALIGNMENT_MAX_EVENTS = 2_000;
+/** Serialized event-payload budget for the complete aligned opening page. The ordinary 200-row
+ * window remains available even if it is already large; alignment never amplifies it past this
+ * ceiling while reaching for a semantic turn boundary. */
+export const TAIL_TURN_ALIGNMENT_MAX_PAYLOAD_BYTES = 4 * 1024 * 1024;
 
 interface ReviewFindingRow {
   finding_id: string;
@@ -12379,7 +12383,8 @@ export class ControlPlaneDb {
         ts: number;
         payload: string;
       }>;
-    const events = rows.slice(0, limit).map((row) => ({
+    const pageRows = rows.slice(0, limit);
+    const events = pageRows.map((row) => ({
       id: row.id,
       sessionId: row.session_id,
       seq: row.seq,
@@ -12392,7 +12397,9 @@ export class ControlPlaneDb {
       hasMoreOlder: rows.length > limit,
     };
     if (options.alignToTurn !== true || !page.hasMoreOlder || events[0] === undefined) return page;
-    return this.alignTailPageToTurn(sessionId, page, events[0].seq);
+    const pagePayloadBytes = pageRows.reduce((total, row) =>
+      total + Buffer.byteLength(row.payload, "utf8"), 0);
+    return this.alignTailPageToTurn(sessionId, page, events[0].seq, pagePayloadBytes);
   }
 
   /** Extend a count-bounded tail page down to the start of the turn it begins inside, so its first
@@ -12402,6 +12409,7 @@ export class ControlPlaneDb {
     sessionId: string,
     page: CachedEventTailPage,
     windowStartSeq: number,
+    windowPayloadBytes: number,
   ): CachedEventTailPage {
     // The anchor search includes the page's own first row: a page that already begins at a user
     // message is aligned, and reaching past it would drag in an entire extra turn.
@@ -12414,6 +12422,16 @@ export class ControlPlaneDb {
     // No anchor within reach: an adopted transcript, a resumed session, or a turn longer than the
     // cap. The count boundary stands, and the page says it is unaligned.
     if (!anchor) return { ...page, turnAligned: false };
+    // The count boundary itself is already a semantic boundary, so no extension (or extension
+    // budget) is needed even when the requested page's own payload exceeds the safety ceiling.
+    if (anchor.seq === windowStartSeq) return { ...page, turnAligned: true };
+    const extension = this.stmt(
+      `SELECT COALESCE(SUM(LENGTH(CAST(payload AS BLOB))), 0) AS payload_bytes
+        FROM session_events WHERE session_id=? AND seq>=? AND seq<?`,
+    ).get(sessionId, anchor.seq, windowStartSeq) as { payload_bytes: number };
+    if (windowPayloadBytes + Number(extension.payload_bytes) > TAIL_TURN_ALIGNMENT_MAX_PAYLOAD_BYTES) {
+      return { ...page, turnAligned: false };
+    }
     const rows = this.stmt(
       `SELECT id, session_id, seq, ts, payload FROM session_events
         WHERE session_id=? AND seq>=? AND seq<? ORDER BY seq`,

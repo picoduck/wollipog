@@ -871,6 +871,8 @@ test("reader-driven older pages extend the window downward without touching reco
   assert.deepEqual(store.getState().events.get("s1")?.map((entry) => entry.seq), [8, 9, 10, 11]);
   assert.equal(store.eventWindowBase("s1"), 8);
   assert.equal(store.getState().eventWindows.get("s1")?.loadingOlder, false);
+  assert.equal(store.getState().eventWindows.get("s1")?.turnAligned, undefined,
+    "legacy opening windows keep absent alignment metadata absent through reach-back");
   assert.equal(store.recoveryAfter("s1"), cursorAfterOpen, "a prepend is not recovery progress");
 
   store.loadOlderEvents("s1", [event("s1", 7)], false, 8, 0);
@@ -883,6 +885,18 @@ test("reader-driven older pages extend the window downward without touching reco
   assert.equal(store.eventWindowBase("s1"), 10);
   assert.equal(store.getState().eventWindows.get("s1")?.hasOlder, true,
     "the reach-back reopens because rows 7-9 are fetchable again");
+
+  store.loadEvents("s1", [event("s1", 10), event("s1", 11)], 0, 1, true, generation, true, false);
+  assert.equal(store.getState().eventWindows.get("s1")?.turnAligned, false);
+  store.loadOlderEvents(
+    "s1",
+    Array.from({ length: 9 }, (_, index) => event("s1", index + 1)),
+    false,
+    10,
+    0,
+  );
+  assert.equal(store.getState().eventWindows.get("s1")?.turnAligned, true,
+    "reaching the start of a transcript without a user-message anchor completes the partial head");
 });
 
 test("a replaced event log drops the window that described the previous sequence space", () => {

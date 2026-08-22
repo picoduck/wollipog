@@ -25,6 +25,7 @@ import {
   ControlPlaneDb,
   GOVERNANCE_AUDIT_RETENTION_MS,
   TAIL_TURN_ALIGNMENT_MAX_EVENTS,
+  TAIL_TURN_ALIGNMENT_MAX_PAYLOAD_BYTES,
   type NewSessionInput,
 } from "./db.js";
 import type { HumanPrincipal } from "./identity.js";
@@ -3229,6 +3230,65 @@ test("a turn-aligned tail page begins at an invocation rather than orphaned upda
   assert.equal(whole.hasMoreOlder, false);
 });
 
+test("turn alignment includes a streamed Markdown response beyond the former opening bound", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "long-markdown-cache" }));
+  db.appendEvent("long-markdown-cache", { kind: "user_message", text: "Draft the issue" }, 1);
+  const markdownChunks = [
+    "## Summary\n\n",
+    "- [x] Complete\n\n",
+    "> Context\n\n",
+    "| Area | Status |\n| --- | --- |\n| History | Fixed |\n\n",
+    "```ts\n",
+    ...Array.from({ length: 644 }, (_, index) => `const line${index} = true;\n`),
+    "```\n",
+  ];
+  for (const [index, text] of markdownChunks.entries()) {
+    db.appendEvent("long-markdown-cache", {
+      kind: "agent_message",
+      text,
+      messageId: "formatted-draft",
+      final: false,
+    }, index + 2);
+  }
+
+  const page = db.listCachedEventTailPage("long-markdown-cache", undefined, 200, { alignToTurn: true });
+  assert.equal(markdownChunks.length, 650);
+  assert.equal(page.events.length, 651,
+    "one bounded response includes the whole semantic turn instead of a 200-event suffix");
+  assert.equal(page.events[0]!.payload.kind, "user_message");
+  assert.equal(page.turnAligned, true);
+  assert.equal(page.hasMoreOlder, false);
+  assert.equal(
+    page.events.slice(1).map((entry) =>
+      entry.payload.kind === "agent_message" ? entry.payload.text : "").join(""),
+    markdownChunks.join(""),
+    "Markdown delimiters on both sides of the former boundary remain in one response",
+  );
+});
+
+test("turn alignment keeps a payload-byte safety bound even within the event cap", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "large-turn-cache" }));
+  db.appendEvent("large-turn-cache", { kind: "user_message", text: "go" }, 1);
+  const chunk = "x".repeat(16 * 1024);
+  for (let index = 0; index < 300; index += 1) {
+    db.appendEvent("large-turn-cache", {
+      kind: "agent_message",
+      text: chunk,
+      messageId: "large-response",
+      final: false,
+    }, index + 2);
+  }
+  assert.ok(300 * Buffer.byteLength(chunk, "utf8") > TAIL_TURN_ALIGNMENT_MAX_PAYLOAD_BYTES);
+
+  const page = db.listCachedEventTailPage("large-turn-cache", undefined, 200, { alignToTurn: true });
+  assert.equal(page.events.length, 200, "the count-bounded page stands when extension is too large");
+  assert.equal(page.events[0]!.seq, 102);
+  assert.equal(page.turnAligned, false);
+  assert.equal(page.hasMoreOlder, true);
+});
+
 test("a page already starting at a user message is left as it is", () => {
   const db = withRunner();
   db.createSession(newSession({ id: "boundary-cache" }));
@@ -3242,6 +3302,31 @@ test("a page already starting at a user message is left as it is", () => {
   assert.deepEqual(page.events.map((event) => event.seq), [3, 4]);
   assert.equal(page.turnAligned, true);
   assert.equal(page.nextBeforeSeq, 3);
+  assert.equal(page.hasMoreOlder, true);
+});
+
+test("an oversized page already starting at a user message is still aligned", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "large-boundary-cache" }));
+  db.appendEvent("large-boundary-cache", { kind: "agent_message", text: "older turn" }, 1);
+  db.appendEvent("large-boundary-cache", { kind: "user_message", text: "second" }, 2);
+  const chunk = "x".repeat(22 * 1024);
+  for (let seq = 3; seq <= 201; seq += 1) {
+    db.appendEvent("large-boundary-cache", {
+      kind: "agent_message",
+      text: chunk,
+      messageId: "large-response",
+      final: false,
+    }, seq);
+  }
+  assert.ok(199 * Buffer.byteLength(chunk, "utf8") > TAIL_TURN_ALIGNMENT_MAX_PAYLOAD_BYTES);
+
+  const page = db.listCachedEventTailPage(
+    "large-boundary-cache", undefined, 200, { alignToTurn: true },
+  );
+  assert.equal(page.events.length, 200);
+  assert.equal(page.events[0]!.seq, 2);
+  assert.equal(page.turnAligned, true, "the byte cap only limits extension beyond the base page");
   assert.equal(page.hasMoreOlder, true);
 });
 

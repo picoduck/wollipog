@@ -1086,8 +1086,8 @@ function SessionDetailLoaded({
         { sessionId, eventEpoch: epoch, recoveryRevision },
         {
           fetchTailPage: api.getSessionEventTailPage,
-          applyWindow: (id, events, pageEpoch, revision, complete, hasOlder) =>
-            loadEvents(id, events, pageEpoch, revision, complete, generation, hasOlder),
+          applyWindow: (id, events, pageEpoch, revision, complete, hasOlder, turnAligned) =>
+            loadEvents(id, events, pageEpoch, revision, complete, generation, hasOlder, turnAligned),
           isCurrent,
         },
       ).then((result) => (result.supported ? result.complete : forwardRecovery()))
@@ -2542,6 +2542,7 @@ function SessionDetailLoaded({
                 <EarlierActivityControl
                   loading={eventWindow.loadingOlder}
                   error={eventWindow.error}
+                  latestResponsePartial={eventWindow.turnAligned === false}
                   onLoad={loadEarlierFromControl}
                 />
               )}
@@ -3790,15 +3791,27 @@ function TranscriptSkeleton() {
 function EarlierActivityControl({
   loading,
   error,
+  latestResponsePartial,
   onLoad,
 }: {
   loading: boolean;
   error: string | null;
+  latestResponsePartial: boolean;
   onLoad: () => void;
 }) {
+  const partialDescriptionId = useId();
   return (
     <div className="transcript-earlier-activity">
-      <button className="btn ghost sm" type="button" disabled={loading} onClick={onLoad}>
+      {latestResponsePartial && (
+        <span id={partialDescriptionId}>The beginning of the latest response may not be loaded.</span>
+      )}
+      <button
+        className="btn ghost sm"
+        type="button"
+        disabled={loading}
+        aria-describedby={latestResponsePartial ? partialDescriptionId : undefined}
+        onClick={onLoad}
+      >
         {loading ? "Loading Earlier Activity…" : "Load Earlier Activity"}
       </button>
       {error && <span role="status">{error}</span>}
