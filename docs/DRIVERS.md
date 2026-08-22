@@ -555,8 +555,17 @@ the exec driver and surface a structured fallback reason. Pre-v27 runners omit t
 The floor is deliberately a **verified floor**, not a claim that older Codex versions cannot run
 app-server: official docs publish the current protocol and per-version schema generator but no
 minimum CLI release. `pnpm check:codex-schema` generates the installed CLI's schema into a temporary
-directory and compares required stable request/notification properties against the pinned fixture.
-Additive fields are tolerated; removal or shape loss produces a focused drift report.
+directory and compares the pinned fixture against it. Additive fields are tolerated; removal or
+shape loss produces a focused drift report.
+
+The fixture pins the **consumed surface**, not the whole generated schema: every required property,
+request variant, and enum value the driver reads or sends. That includes both supported
+`mcpServer/elicitation/request` modes (identified by their `mode` discriminator rather than a
+variant title), the nested `McpElicitation*` form-control schemas the normalizer reads, and the
+native decision/action/scope enums Wollipog sends back. A compatible-looking upgrade that renames a
+mode or drops a decision value therefore fails the check instead of silently losing structured
+interactions at runtime. Fields Wollipog never consumes are deliberately left unpinned so the
+contract stays a compatibility boundary rather than a change detector.
 
 ### 3.1 Auth
 
@@ -638,7 +647,10 @@ Wollipog supports the stable MCP `form` and `url` modes. It does not advertise t
 `openai/form` capability; extended or malformed schemas are canceled instead of being guessed.
 Enum display labels map back to their provider-native values, booleans remain booleans, and numeric
 text is converted back to a finite number only after shared validation succeeds. Secret answers live
-only in the request-keyed dashboard draft and the direct response path.
+only in the request-keyed dashboard draft and the direct response path, and are excluded from the
+durable audit digest. Free text is bounded at 4000 characters
+(`DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH`) whenever a provider declares no smaller `maxLength`, and
+provider-controlled values are truncated before they reach a diagnostic.
 
 Only one provider request can own the session's pending-action surface. A newer request cancels and
 settles the previous parked request before it is displayed. `serverRequest/resolved`, turn

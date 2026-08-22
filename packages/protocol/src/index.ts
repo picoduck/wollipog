@@ -1390,12 +1390,19 @@ export interface AgentQuestion {
    * strings and the owning driver converts them back to its native wire type. */
   inputFormat?: "text" | "email" | "url" | "date" | "date-time" | "number" | "integer";
   minLength?: number;
+  /** Absent means the provider declared no bound; validators fall back to
+   * DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH rather than accepting an unbounded answer. */
   maxLength?: number;
   minimum?: number;
   maximum?: number;
   minSelections?: number;
   maxSelections?: number;
 }
+
+/** Upper bound applied to any provider free-text answer that declares no `maxLength`. Providers
+ * are not obliged to bound their own fields, and an unbounded answer rides verbatim into the
+ * provider response and the durable event log, so the shared validators impose this default. */
+export const DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH = 4000;
 
 /** Validate one provider-declared free-text value. Shared by the UI's submit gate and the
  * control plane's authoritative answer validation so both layers enforce the same constraints. */
@@ -1404,8 +1411,9 @@ export function validateQuestionFreeText(question: AgentQuestion, value: string)
   if (question.minLength != null && value.length < question.minLength) {
     return `expects at least ${question.minLength} character(s)`;
   }
-  if (question.maxLength != null && value.length > question.maxLength) {
-    return `expects at most ${question.maxLength} character(s)`;
+  const maxLength = question.maxLength ?? DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH;
+  if (value.length > maxLength) {
+    return `expects at most ${maxLength} character(s)`;
   }
   if (question.inputFormat === "number" || question.inputFormat === "integer") {
     const parsed = Number(value);

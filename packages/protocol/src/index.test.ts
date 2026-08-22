@@ -24,7 +24,9 @@ import {
   isTerminal,
   TERMINAL_STATUSES,
   parseMessage,
+  DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH,
   validateQuestionAnswers,
+  validateQuestionFreeText,
   validatePromptImageInputs,
   providerSupportsConversationFork,
   mergeSessionCapabilities,
@@ -760,6 +762,23 @@ test("validateQuestionAnswers accepts bounded free text and optional provider fo
   assert.match(validateQuestionAnswers(questions, { name: "A", count: "3" })!, /at least 2/);
   assert.match(validateQuestionAnswers(questions, { name: "Ada", count: "3.5" })!, /valid integer/);
   assert.match(validateQuestionAnswers(questions, { name: "Ada", count: "5" })!, /above its maximum/);
+});
+
+test("free-text validation bounds answers when the provider declares no maxLength", () => {
+  const question = { id: "note", question: "Note", options: [], allowOther: true };
+  const atLimit = "n".repeat(DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH);
+  assert.equal(validateQuestionFreeText(question, atLimit), null);
+  assert.match(
+    validateQuestionFreeText(question, `${atLimit}n`)!,
+    new RegExp(`at most ${DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH} character`),
+  );
+  assert.match(
+    validateQuestionAnswers([question], { note: `${atLimit}n` })!,
+    new RegExp(`at most ${DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH} character`),
+  );
+  // A provider-declared bound still wins when it is present.
+  const bounded = { ...question, maxLength: 8 };
+  assert.match(validateQuestionFreeText(bounded, "n".repeat(9))!, /at most 8 character/);
 });
 
 test("validateQuestionAnswers enforces provider primitive formats", () => {

@@ -15,6 +15,60 @@ function run(args) {
   return spawnSync(command, args, { encoding: "utf8", windowsHide: true, maxBuffer: 8 * 1024 * 1024 });
 }
 
+/** Check one named `oneOf` branch. A missing branch is a rename or a dropped variant: either way
+ * the consuming code stops recognizing requests it used to normalize. */
+function checkVariant(variant, names, label, title, diffs) {
+  if (!variant) {
+    diffs.push(`- ${label}: variant removed: ${title}`);
+    return;
+  }
+  const variantRequired = new Set(variant.required || []);
+  const variantProperties = new Set(Object.keys(variant.properties || {}));
+  for (const name of names) {
+    if (!variantRequired.has(name)) diffs.push(`- ${label}/${title}: required field removed: ${name}`);
+    if (!variantProperties.has(name)) diffs.push(`- ${label}/${title}: property removed: ${name}`);
+  }
+}
+
+/** Compare one schema node — a whole file or a single definition — against the curated subset the
+ * driver consumes. Additive fields are tolerated; removals and renames are reported. */
+function checkShape(node, expected, label, diffs) {
+  const required = new Set(node.required || []);
+  const properties = new Set(Object.keys(node.properties || {}));
+  const variants = node.oneOf || [];
+  for (const name of expected.required || []) if (!required.has(name)) diffs.push(`- ${label}: required field removed: ${name}`);
+  for (const name of expected.properties || []) if (!properties.has(name)) diffs.push(`- ${label}: property removed: ${name}`);
+  for (const name of expected.requiredInEveryVariant || []) {
+    if (!variants.length || variants.some((variant) => !(variant.required || []).includes(name))) {
+      diffs.push(`- ${label}: variant-required field removed: ${name}`);
+    }
+  }
+  for (const [name, expectedValues] of Object.entries(expected.propertyEnumValues || {})) {
+    const actualValues = new Set(variants.flatMap((variant) => variant.properties?.[name]?.enum || []));
+    for (const value of expectedValues) {
+      if (!actualValues.has(value)) diffs.push(`- ${label}: enum value removed from ${name}: ${value}`);
+    }
+  }
+  for (const [title, names] of Object.entries(expected.variantRequiredProperties || {})) {
+    checkVariant(variants.find((candidate) => candidate.title === title), names, label, title, diffs);
+  }
+  // The MCP elicitation request modes are untitled variants, so they are identified by the enum
+  // value of their discriminator property instead of by `title`.
+  for (const [discriminator, byValue] of Object.entries(expected.discriminatedVariants || {})) {
+    for (const [value, names] of Object.entries(byValue)) {
+      const variant = variants.find((candidate) => (candidate.properties?.[discriminator]?.enum || []).includes(value));
+      checkVariant(variant, names, label, `${discriminator}=${value}`, diffs);
+    }
+  }
+  const variantEnumValues = new Set(variants.flatMap((variant) => variant.enum || []));
+  for (const value of expected.enumValuesInVariants || []) {
+    if (!variantEnumValues.has(value)) diffs.push(`- ${label}: enum variant removed: ${value}`);
+  }
+  for (const value of expected.enumValues || []) {
+    if (!(node.enum || []).includes(value)) diffs.push(`- ${label}: enum value removed: ${value}`);
+  }
+}
+
 try {
   let actualVersion = "provided schema directory";
   if (!providedSchemaDir) {
@@ -40,62 +94,14 @@ try {
       diffs.push(`- missing or unreadable schema: ${relative} (${error.message})`);
       continue;
     }
-    const required = new Set(schema.required || []);
-    const properties = new Set(Object.keys(schema.properties || {}));
-    for (const name of expected.required || []) if (!required.has(name)) diffs.push(`- ${relative}: required field removed: ${name}`);
-    for (const name of expected.properties || []) if (!properties.has(name)) diffs.push(`- ${relative}: property removed: ${name}`);
+    checkShape(schema, expected, relative, diffs);
     for (const [definitionName, expectedDefinition] of Object.entries(expected.definitions || {})) {
       const definition = schema.definitions?.[definitionName];
       if (!definition) {
         diffs.push(`- ${relative}: definition removed: ${definitionName}`);
         continue;
       }
-      const definitionRequired = new Set(definition.required || []);
-      const definitionProperties = new Set(Object.keys(definition.properties || {}));
-      for (const name of expectedDefinition.required || []) {
-        if (!definitionRequired.has(name)) diffs.push(`- ${relative}#${definitionName}: required field removed: ${name}`);
-      }
-      for (const name of expectedDefinition.properties || []) {
-        if (!definitionProperties.has(name)) diffs.push(`- ${relative}#${definitionName}: property removed: ${name}`);
-      }
-      for (const name of expectedDefinition.requiredInEveryVariant || []) {
-        const variants = definition.oneOf || [];
-        if (!variants.length || variants.some((variant) => !(variant.required || []).includes(name))) {
-          diffs.push(`- ${relative}#${definitionName}: variant-required field removed: ${name}`);
-        }
-      }
-      for (const [name, expectedValues] of Object.entries(expectedDefinition.propertyEnumValues || {})) {
-        const actualValues = new Set(
-          (definition.oneOf || []).flatMap((variant) => variant.properties?.[name]?.enum || []),
-        );
-        for (const value of expectedValues) {
-          if (!actualValues.has(value)) diffs.push(`- ${relative}#${definitionName}: enum value removed from ${name}: ${value}`);
-        }
-      }
-      for (const [title, names] of Object.entries(expectedDefinition.variantRequiredProperties || {})) {
-        const variant = (definition.oneOf || []).find((candidate) => candidate.title === title);
-        if (!variant) {
-          diffs.push(`- ${relative}#${definitionName}: variant removed: ${title}`);
-          continue;
-        }
-        const variantRequired = new Set(variant.required || []);
-        const variantProperties = new Set(Object.keys(variant.properties || {}));
-        for (const name of names) {
-          if (!variantRequired.has(name)) diffs.push(`- ${relative}#${definitionName}/${title}: required field removed: ${name}`);
-          if (!variantProperties.has(name)) diffs.push(`- ${relative}#${definitionName}/${title}: property removed: ${name}`);
-        }
-      }
-      const variantEnumValues = new Set((definition.oneOf || []).flatMap((variant) => variant.enum || []));
-      for (const value of expectedDefinition.enumValuesInVariants || []) {
-        if (!variantEnumValues.has(value)) {
-          diffs.push(`- ${relative}#${definitionName}: enum variant removed: ${value}`);
-        }
-      }
-      for (const value of expectedDefinition.enumValues || []) {
-        if (!(definition.enum || []).includes(value)) {
-          diffs.push(`- ${relative}#${definitionName}: enum value removed: ${value}`);
-        }
-      }
+      checkShape(definition, expectedDefinition, `${relative}#${definitionName}`, diffs);
     }
   }
   if (diffs.length) {

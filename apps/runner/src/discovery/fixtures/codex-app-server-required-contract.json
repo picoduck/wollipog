@@ -1,186 +1,708 @@
 {
-  "contractFingerprint": "codex-app-server-v2-elicitations-required-2026-08-22",
+  "contractFingerprint": "codex-app-server-v2-elicitations-consumed-surface-2026-08-22",
   "generatedWith": "codex-cli 0.147.0",
   "minimumVerifiedVersion": "0.147.0",
   "files": {
     "v1/InitializeParams.json": {
-      "required": ["clientInfo"],
-      "properties": ["capabilities", "clientInfo"]
+      "required": [
+        "clientInfo"
+      ],
+      "properties": [
+        "capabilities",
+        "clientInfo"
+      ]
     },
     "v2/ThreadStartParams.json": {
-      "properties": ["cwd", "model", "approvalPolicy", "sandbox"]
+      "properties": [
+        "cwd",
+        "model",
+        "approvalPolicy",
+        "sandbox"
+      ]
     },
     "v2/ThreadStartResponse.json": {
-      "required": ["thread"],
-      "properties": ["thread"]
+      "required": [
+        "thread"
+      ],
+      "properties": [
+        "thread"
+      ]
     },
     "v2/ThreadResumeParams.json": {
-      "required": ["threadId"],
-      "properties": ["threadId"]
+      "required": [
+        "threadId"
+      ],
+      "properties": [
+        "threadId"
+      ]
     },
     "v2/ThreadResumeResponse.json": {
-      "required": ["thread"],
-      "properties": ["thread"]
+      "required": [
+        "thread"
+      ],
+      "properties": [
+        "thread"
+      ]
     },
     "v2/ThreadReadParams.json": {
-      "required": ["threadId"],
-      "properties": ["threadId", "includeTurns"]
+      "required": [
+        "threadId"
+      ],
+      "properties": [
+        "threadId",
+        "includeTurns"
+      ]
     },
     "v2/ThreadReadResponse.json": {
-      "required": ["thread"],
-      "properties": ["thread"],
+      "required": [
+        "thread"
+      ],
+      "properties": [
+        "thread"
+      ],
       "definitions": {
         "Thread": {
-          "required": ["id", "status", "turns"],
-          "properties": ["id", "status", "turns"]
+          "required": [
+            "id",
+            "status",
+            "turns"
+          ],
+          "properties": [
+            "id",
+            "status",
+            "turns"
+          ]
         },
         "ThreadStatus": {
-          "requiredInEveryVariant": ["type"],
+          "requiredInEveryVariant": [
+            "type"
+          ],
           "propertyEnumValues": {
-            "type": ["notLoaded", "idle", "systemError", "active"]
+            "type": [
+              "notLoaded",
+              "idle",
+              "systemError",
+              "active"
+            ]
           }
         }
       }
     },
     "v2/TurnStartParams.json": {
-      "required": ["threadId", "input"],
-      "properties": ["threadId", "input", "approvalPolicy", "approvalsReviewer", "cwd", "effort", "model", "sandboxPolicy"],
+      "required": [
+        "threadId",
+        "input"
+      ],
+      "properties": [
+        "threadId",
+        "input",
+        "approvalPolicy",
+        "approvalsReviewer",
+        "cwd",
+        "effort",
+        "model",
+        "sandboxPolicy"
+      ],
       "definitions": {
         "UserInput": {
           "propertyEnumValues": {
-            "type": ["localImage"]
+            "type": [
+              "localImage"
+            ]
           },
           "variantRequiredProperties": {
-            "LocalImageUserInput": ["type", "path"]
+            "LocalImageUserInput": [
+              "type",
+              "path"
+            ]
           }
         }
       }
     },
     "v2/TurnSteerParams.json": {
-      "required": ["threadId", "input", "expectedTurnId"],
-      "properties": ["threadId", "input", "expectedTurnId", "clientUserMessageId"],
+      "required": [
+        "threadId",
+        "input",
+        "expectedTurnId"
+      ],
+      "properties": [
+        "threadId",
+        "input",
+        "expectedTurnId",
+        "clientUserMessageId"
+      ],
       "definitions": {
         "UserInput": {
           "propertyEnumValues": {
-            "type": ["localImage"]
+            "type": [
+              "localImage"
+            ]
           },
           "variantRequiredProperties": {
-            "LocalImageUserInput": ["type", "path"]
+            "LocalImageUserInput": [
+              "type",
+              "path"
+            ]
           }
         }
       }
     },
     "v2/TurnSteerResponse.json": {
-      "required": ["turnId"],
-      "properties": ["turnId"]
+      "required": [
+        "turnId"
+      ],
+      "properties": [
+        "turnId"
+      ]
     },
     "v2/ModelListParams.json": {
-      "properties": ["cursor", "includeHidden", "limit"]
+      "properties": [
+        "cursor",
+        "includeHidden",
+        "limit"
+      ]
     },
     "v2/ModelListResponse.json": {
-      "required": ["data"],
-      "properties": ["data", "nextCursor"],
+      "required": [
+        "data"
+      ],
+      "properties": [
+        "data",
+        "nextCursor"
+      ],
       "definitions": {
         "Model": {
-          "required": ["defaultReasoningEffort", "description", "displayName", "hidden", "id", "isDefault", "model", "supportedReasoningEfforts"],
-          "properties": ["defaultReasoningEffort", "description", "displayName", "hidden", "id", "inputModalities", "isDefault", "model", "supportedReasoningEfforts"]
+          "required": [
+            "defaultReasoningEffort",
+            "description",
+            "displayName",
+            "hidden",
+            "id",
+            "isDefault",
+            "model",
+            "supportedReasoningEfforts"
+          ],
+          "properties": [
+            "defaultReasoningEffort",
+            "description",
+            "displayName",
+            "hidden",
+            "id",
+            "inputModalities",
+            "isDefault",
+            "model",
+            "supportedReasoningEfforts"
+          ]
         },
         "ReasoningEffortOption": {
-          "required": ["description", "reasoningEffort"],
-          "properties": ["description", "reasoningEffort"]
+          "required": [
+            "description",
+            "reasoningEffort"
+          ],
+          "properties": [
+            "description",
+            "reasoningEffort"
+          ]
         },
         "InputModality": {
-          "enumValuesInVariants": ["text", "image"]
+          "enumValuesInVariants": [
+            "text",
+            "image"
+          ]
         }
       }
     },
     "v2/AgentMessageDeltaNotification.json": {
-      "required": ["delta", "itemId", "threadId", "turnId"],
-      "properties": ["delta", "itemId", "threadId", "turnId"]
+      "required": [
+        "delta",
+        "itemId",
+        "threadId",
+        "turnId"
+      ],
+      "properties": [
+        "delta",
+        "itemId",
+        "threadId",
+        "turnId"
+      ]
     },
     "v2/TurnCompletedNotification.json": {
-      "required": ["threadId", "turn"],
-      "properties": ["threadId", "turn"],
+      "required": [
+        "threadId",
+        "turn"
+      ],
+      "properties": [
+        "threadId",
+        "turn"
+      ],
       "definitions": {
         "Turn": {
-          "required": ["id", "items", "status"],
-          "properties": ["error", "id", "items", "status"]
+          "required": [
+            "id",
+            "items",
+            "status"
+          ],
+          "properties": [
+            "error",
+            "id",
+            "items",
+            "status"
+          ]
         },
         "TurnStatus": {
-          "enumValues": ["completed", "interrupted", "failed", "inProgress"]
+          "enumValues": [
+            "completed",
+            "interrupted",
+            "failed",
+            "inProgress"
+          ]
         },
         "TurnError": {
-          "required": ["message"],
-          "properties": ["additionalDetails", "codexErrorInfo", "message"]
+          "required": [
+            "message"
+          ],
+          "properties": [
+            "additionalDetails",
+            "codexErrorInfo",
+            "message"
+          ]
         }
       }
     },
     "v2/ThreadTokenUsageUpdatedNotification.json": {
-      "required": ["threadId", "tokenUsage", "turnId"],
-      "properties": ["threadId", "tokenUsage", "turnId"],
+      "required": [
+        "threadId",
+        "tokenUsage",
+        "turnId"
+      ],
+      "properties": [
+        "threadId",
+        "tokenUsage",
+        "turnId"
+      ],
       "definitions": {
         "ThreadTokenUsage": {
-          "required": ["last", "total"],
-          "properties": ["last", "modelContextWindow", "total"]
+          "required": [
+            "last",
+            "total"
+          ],
+          "properties": [
+            "last",
+            "modelContextWindow",
+            "total"
+          ]
         },
         "TokenUsageBreakdown": {
-          "required": ["cachedInputTokens", "inputTokens", "outputTokens", "reasoningOutputTokens", "totalTokens"],
-          "properties": ["cachedInputTokens", "inputTokens", "outputTokens", "reasoningOutputTokens", "totalTokens"]
+          "required": [
+            "cachedInputTokens",
+            "inputTokens",
+            "outputTokens",
+            "reasoningOutputTokens",
+            "totalTokens"
+          ],
+          "properties": [
+            "cachedInputTokens",
+            "inputTokens",
+            "outputTokens",
+            "reasoningOutputTokens",
+            "totalTokens"
+          ]
         }
       }
     },
     "CommandExecutionRequestApprovalParams.json": {
-      "required": ["itemId", "threadId", "turnId"],
-      "properties": ["approvalId", "command", "itemId", "reason", "threadId", "turnId"]
+      "required": [
+        "itemId",
+        "threadId",
+        "turnId"
+      ],
+      "properties": [
+        "approvalId",
+        "command",
+        "itemId",
+        "reason",
+        "threadId",
+        "turnId"
+      ]
     },
     "FileChangeRequestApprovalParams.json": {
-      "required": ["itemId", "threadId", "turnId"],
-      "properties": ["itemId", "reason", "threadId", "turnId"]
+      "required": [
+        "itemId",
+        "threadId",
+        "turnId"
+      ],
+      "properties": [
+        "itemId",
+        "reason",
+        "threadId",
+        "turnId"
+      ]
     },
     "PermissionsRequestApprovalParams.json": {
-      "required": ["itemId", "permissions", "threadId", "turnId"],
-      "properties": ["itemId", "permissions", "reason", "threadId", "turnId"]
+      "required": [
+        "itemId",
+        "permissions",
+        "threadId",
+        "turnId"
+      ],
+      "properties": [
+        "itemId",
+        "permissions",
+        "reason",
+        "threadId",
+        "turnId"
+      ]
+    },
+    "CommandExecutionRequestApprovalResponse.json": {
+      "required": [
+        "decision"
+      ],
+      "properties": [
+        "decision"
+      ],
+      "definitions": {
+        "CommandExecutionApprovalDecision": {
+          "enumValuesInVariants": [
+            "accept",
+            "acceptForSession",
+            "decline",
+            "cancel"
+          ]
+        }
+      }
+    },
+    "FileChangeRequestApprovalResponse.json": {
+      "required": [
+        "decision"
+      ],
+      "properties": [
+        "decision"
+      ],
+      "definitions": {
+        "FileChangeApprovalDecision": {
+          "enumValuesInVariants": [
+            "accept",
+            "acceptForSession",
+            "decline",
+            "cancel"
+          ]
+        }
+      }
+    },
+    "PermissionsRequestApprovalResponse.json": {
+      "required": [
+        "permissions"
+      ],
+      "properties": [
+        "permissions",
+        "scope"
+      ],
+      "definitions": {
+        "GrantedPermissionProfile": {
+          "properties": [
+            "fileSystem",
+            "network"
+          ]
+        },
+        "PermissionGrantScope": {
+          "enumValues": [
+            "turn",
+            "session"
+          ]
+        }
+      }
     },
     "ToolRequestUserInputParams.json": {
-      "required": ["isBlocking", "itemId", "questions", "threadId", "turnId"],
-      "properties": ["autoResolutionMs", "isBlocking", "itemId", "questions", "threadId", "turnId"],
+      "required": [
+        "isBlocking",
+        "itemId",
+        "questions",
+        "threadId",
+        "turnId"
+      ],
+      "properties": [
+        "autoResolutionMs",
+        "isBlocking",
+        "itemId",
+        "questions",
+        "threadId",
+        "turnId"
+      ],
       "definitions": {
         "ToolRequestUserInputQuestion": {
-          "required": ["header", "id", "question"],
-          "properties": ["header", "id", "isOther", "isSecret", "options", "question"]
+          "required": [
+            "header",
+            "id",
+            "question"
+          ],
+          "properties": [
+            "header",
+            "id",
+            "isOther",
+            "isSecret",
+            "options",
+            "question"
+          ]
         },
         "ToolRequestUserInputOption": {
-          "required": ["description", "label"],
-          "properties": ["description", "label"]
+          "required": [
+            "description",
+            "label"
+          ],
+          "properties": [
+            "description",
+            "label"
+          ]
         }
       }
     },
     "ToolRequestUserInputResponse.json": {
-      "required": ["answers"],
-      "properties": ["answers"],
+      "required": [
+        "answers"
+      ],
+      "properties": [
+        "answers"
+      ],
       "definitions": {
         "ToolRequestUserInputAnswer": {
-          "required": ["answers"],
-          "properties": ["answers"]
+          "required": [
+            "answers"
+          ],
+          "properties": [
+            "answers"
+          ]
         }
       }
     },
     "McpServerElicitationRequestParams.json": {
-      "required": ["serverName", "threadId"],
-      "properties": ["serverName", "threadId", "turnId"]
+      "required": [
+        "serverName",
+        "threadId"
+      ],
+      "properties": [
+        "serverName",
+        "threadId",
+        "turnId"
+      ],
+      "discriminatedVariants": {
+        "mode": {
+          "form": [
+            "message",
+            "mode",
+            "requestedSchema"
+          ],
+          "url": [
+            "elicitationId",
+            "message",
+            "mode",
+            "url"
+          ]
+        }
+      },
+      "definitions": {
+        "McpElicitationSchema": {
+          "required": [
+            "properties",
+            "type"
+          ],
+          "properties": [
+            "properties",
+            "required",
+            "type"
+          ]
+        },
+        "McpElicitationObjectType": {
+          "enumValues": [
+            "object"
+          ]
+        },
+        "McpElicitationStringSchema": {
+          "required": [
+            "type"
+          ],
+          "properties": [
+            "description",
+            "format",
+            "maxLength",
+            "minLength",
+            "title",
+            "type"
+          ]
+        },
+        "McpElicitationStringType": {
+          "enumValues": [
+            "string"
+          ]
+        },
+        "McpElicitationStringFormat": {
+          "enumValues": [
+            "email",
+            "uri",
+            "date",
+            "date-time"
+          ]
+        },
+        "McpElicitationNumberSchema": {
+          "required": [
+            "type"
+          ],
+          "properties": [
+            "description",
+            "maximum",
+            "minimum",
+            "title",
+            "type"
+          ]
+        },
+        "McpElicitationNumberType": {
+          "enumValues": [
+            "number",
+            "integer"
+          ]
+        },
+        "McpElicitationBooleanSchema": {
+          "required": [
+            "type"
+          ],
+          "properties": [
+            "description",
+            "title",
+            "type"
+          ]
+        },
+        "McpElicitationBooleanType": {
+          "enumValues": [
+            "boolean"
+          ]
+        },
+        "McpElicitationArrayType": {
+          "enumValues": [
+            "array"
+          ]
+        },
+        "McpElicitationConstOption": {
+          "required": [
+            "const",
+            "title"
+          ],
+          "properties": [
+            "const",
+            "title"
+          ]
+        },
+        "McpElicitationUntitledSingleSelectEnumSchema": {
+          "required": [
+            "enum",
+            "type"
+          ],
+          "properties": [
+            "description",
+            "enum",
+            "title",
+            "type"
+          ]
+        },
+        "McpElicitationTitledSingleSelectEnumSchema": {
+          "required": [
+            "oneOf",
+            "type"
+          ],
+          "properties": [
+            "description",
+            "oneOf",
+            "title",
+            "type"
+          ]
+        },
+        "McpElicitationLegacyTitledEnumSchema": {
+          "required": [
+            "enum",
+            "type"
+          ],
+          "properties": [
+            "description",
+            "enum",
+            "enumNames",
+            "title",
+            "type"
+          ]
+        },
+        "McpElicitationUntitledEnumItems": {
+          "required": [
+            "enum",
+            "type"
+          ],
+          "properties": [
+            "enum",
+            "type"
+          ]
+        },
+        "McpElicitationTitledEnumItems": {
+          "required": [
+            "anyOf"
+          ],
+          "properties": [
+            "anyOf"
+          ]
+        },
+        "McpElicitationUntitledMultiSelectEnumSchema": {
+          "required": [
+            "items",
+            "type"
+          ],
+          "properties": [
+            "description",
+            "items",
+            "maxItems",
+            "minItems",
+            "title",
+            "type"
+          ]
+        },
+        "McpElicitationTitledMultiSelectEnumSchema": {
+          "required": [
+            "items",
+            "type"
+          ],
+          "properties": [
+            "description",
+            "items",
+            "maxItems",
+            "minItems",
+            "title",
+            "type"
+          ]
+        }
+      }
     },
     "McpServerElicitationRequestResponse.json": {
-      "required": ["action"],
-      "properties": ["_meta", "action", "content"],
+      "required": [
+        "action"
+      ],
+      "properties": [
+        "_meta",
+        "action",
+        "content"
+      ],
       "definitions": {
         "McpServerElicitationAction": {
-          "enumValues": ["accept", "decline", "cancel"]
+          "enumValues": [
+            "accept",
+            "decline",
+            "cancel"
+          ]
         }
       }
     },
     "v2/ServerRequestResolvedNotification.json": {
-      "required": ["requestId", "threadId"],
-      "properties": ["requestId", "threadId"]
+      "required": [
+        "requestId",
+        "threadId"
+      ],
+      "properties": [
+        "requestId",
+        "threadId"
+      ]
     }
   }
 }

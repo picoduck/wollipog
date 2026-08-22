@@ -1,5 +1,6 @@
 import React, { useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import {
+  DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH,
   isPolicyApproval,
   validateQuestionFreeText,
   type AgentQuestion,
@@ -431,7 +432,7 @@ export function SessionQuestionBanner({
                     min={question.minimum}
                     max={question.maximum}
                     minLength={question.minLength}
-                    maxLength={question.maxLength}
+                    maxLength={question.maxLength ?? DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH}
                     value={draftValues[question.id] ?? ""}
                     autoComplete="off"
                     onChange={(event) => updateDraft(question, event.target.value)}
