@@ -169,6 +169,11 @@ import {
   type AuthPrincipal,
   type HumanPrincipal,
 } from "./identity.js";
+import {
+  archiveSessionCursorWindow,
+  type ArchiveSessionCandidate,
+  type ArchiveSessionPageQuery,
+} from "./archive-session-page.js";
 import type { DurableBackgroundPushDelivery, PushAudience, PushServiceOutcome } from "./web-push.js";
 import { matchWorkspaceId, matchWorkspaceIds, workspacePathsEqual } from "./workspace-match.js";
 import {
@@ -5827,6 +5832,161 @@ export class ControlPlaneDb {
     return this.listSessions({ includeArchived }).filter((session) => this.canAccessSession(principal, session.id));
   }
 
+  private sessionAuthorizationSql(principal: AuthPrincipal): { sql: string; params: string[] } {
+    if (principal.kind === "human") {
+      if (principal.role === "owner" || principal.role === "admin") {
+        return { sql: "ownership.organization_id=?", params: [principal.organizationId] };
+      }
+      return {
+        sql: `ownership.organization_id=? AND (
+          (ownership.owner_kind='organization' AND ownership.owner_id=?) OR
+          (ownership.owner_kind='user' AND ownership.owner_id=?) OR
+          (ownership.owner_kind='team' AND EXISTS (
+            SELECT 1 FROM identity_teams team
+            JOIN identity_team_members member ON member.team_id=team.team_id
+            WHERE team.team_id=ownership.owner_id AND team.organization_id=ownership.organization_id
+              AND member.user_id=?
+          ))
+        )`,
+        params: [principal.organizationId, principal.organizationId, principal.userId, principal.userId],
+      };
+    }
+    if (principal.delegatedScope.organizationId !== principal.organizationId) {
+      return { sql: "0", params: [] };
+    }
+    const delegated = principal.delegatedScope.owner;
+    if (delegated.kind === "organization") {
+      return { sql: "ownership.organization_id=?", params: [principal.organizationId] };
+    }
+    return {
+      sql: "ownership.organization_id=? AND ownership.owner_kind=? AND ownership.owner_id=?",
+      params: [
+        principal.organizationId,
+        delegated.kind,
+        delegated.kind === "user" ? delegated.userId : delegated.teamId,
+      ],
+    };
+  }
+
+  /** Principal-scoped archive page candidates. Authorization, filters, transcript matching,
+   * cursor fences, and the page-plus-one bound all execute in SQLite before rows are hydrated. */
+  archiveSessionCandidatePageForPrincipal(
+    principal: AuthPrincipal,
+    query: ArchiveSessionPageQuery,
+  ): {
+    sessions: ArchiveSessionCandidate[];
+    transcriptSessionIds: string[];
+    facets: { projects: string[]; locations: string[]; agents: string[] };
+  } | { error: string } {
+    const window = archiveSessionCursorWindow(query);
+    if ("error" in window) return window;
+    const authorization = this.sessionAuthorizationSql(principal);
+    const projectSql = "COALESCE(project.name, CASE WHEN session.project_id IS NOT NULL THEN 'Unknown Project' ELSE 'No Project' END)";
+    const locationSql = `COALESCE(location.name, workspace_override.display_name, workspace.name,
+      workspace_extra.name, session.workspace_id, 'No Location')`;
+    const agentSql = `CASE
+      WHEN session.agent_id='conductor' OR COALESCE(agent.name, session.agent_id, '') IN
+        ('Conductor (Wollipog)', 'Conductor (Agent Manager)') THEN 'Conductor (Wollipog)'
+      WHEN session.driver='codex-app-server' THEN 'Codex — Interactive'
+      WHEN session.driver='codex' THEN 'Codex — Non-Interactive (codex exec)'
+      ELSE COALESCE(agent.name, session.agent_id, session.driver)
+    END`;
+    const stopPendingSql = `EXISTS(SELECT 1 FROM session_stop_intents intent
+      WHERE intent.session_id=session.id AND intent.archive_after_stop=1)`;
+    const joins = `FROM sessions session
+      JOIN session_ownership ownership ON ownership.session_id=session.id
+      LEFT JOIN projects project ON project.id=session.project_id
+      LEFT JOIN project_locations location ON location.id=session.project_location_id
+      LEFT JOIN workspace_overrides workspace_override
+        ON workspace_override.runner_id=session.runner_id
+       AND workspace_override.workspace_id=session.workspace_id
+      LEFT JOIN workspaces workspace
+        ON workspace.runner_id=session.runner_id AND workspace.id=session.workspace_id
+      LEFT JOIN workspace_extras workspace_extra
+        ON workspace_extra.runner_id=session.runner_id AND workspace_extra.id=session.workspace_id
+      LEFT JOIN agent_definitions agent ON agent.id=session.agent_id`;
+    const where = [authorization.sql];
+    const params: Array<string | number> = [...authorization.params];
+    if (window.archive === "archived") where.push(`(session.archived=1 OR ${stopPendingSql})`);
+    else if (window.archive === "unarchived") where.push(`session.archived=0 AND NOT ${stopPendingSql}`);
+    if (window.lifecycle !== "all") {
+      where.push("session.status=?");
+      params.push(window.lifecycle);
+    }
+    for (const [value, sql] of [[query.project, projectSql], [query.location, locationSql], [query.agent, agentSql]] as const) {
+      if (value) {
+        where.push(`${sql}=?`);
+        params.push(value);
+      }
+    }
+    if (window.cursor) {
+      where.push("(session.created_at<? OR (session.created_at=? AND session.id>?))");
+      params.push(window.cursor.afterCreatedAt, window.cursor.afterCreatedAt, window.cursor.afterId);
+      where.push("(session.created_at<? OR (session.created_at=? AND session.id>=?))");
+      params.push(window.cursor.anchorCreatedAt, window.cursor.anchorCreatedAt, window.cursor.anchorId);
+    }
+    const q = (query.q ?? "").trim().toLocaleLowerCase();
+    const match = q.length >= 2
+      ? q.split(/\s+/).filter(Boolean).slice(0, 16).map((term) => `"${term.replace(/"/g, '""')}"`).join(" ")
+      : "";
+    const transcriptSql = "session.id IN (SELECT session_id FROM session_events_fts WHERE session_events_fts MATCH ?)";
+    if (q) {
+      const escaped = `%${q.replace(/!/g, "!!").replace(/%/g, "!%").replace(/_/g, "!_")}%`;
+      const localSql = `LOWER(session.id || char(10) || session.title || char(10) || ${projectSql} || char(10) ||
+        ${locationSql} || char(10) || ${agentSql} || char(10) ||
+        CASE WHEN session.status='input_required' THEN 'Input Required'
+             ELSE UPPER(SUBSTR(session.status, 1, 1)) || SUBSTR(session.status, 2) END || char(10) ||
+        CASE WHEN session.archived=1 THEN 'Archived' ELSE 'Not Archived' END) LIKE ? ESCAPE '!'`;
+      where.push(match ? `(${localSql} OR ${transcriptSql})` : localSql);
+      params.push(escaped);
+      if (match) params.push(match);
+    }
+    const rows = this.stmt(
+      `SELECT session.id, session.title, session.project_id, project.name AS project_name,
+              session.workspace_id, ${locationSql} AS location_name,
+              session.agent_id, agent.name AS agent_name, session.driver, session.archived,
+              session.status, session.created_at, ${stopPendingSql} AS stop_pending,
+              ${match ? transcriptSql : "0"} AS transcript_match
+       ${joins}
+       WHERE ${where.join(" AND ")}
+       ORDER BY session.created_at DESC, session.id ASC
+       LIMIT 51`,
+    ).all(...(match ? [match, ...params] : params)) as unknown as Array<{
+      id: string; title: string; project_id: string | null; project_name: string | null;
+      workspace_id: string | null; location_name: string | null; agent_id: string | null;
+      agent_name: string | null; driver: SessionView["driver"]; archived: number;
+      status: SessionStatus; created_at: number; stop_pending: number; transcript_match: number;
+    }>;
+    const sessions = rows.map((row) => ({
+      id: row.id,
+      title: row.title,
+      projectId: row.project_id,
+      projectName: row.project_name,
+      workspaceId: row.workspace_id,
+      locationName: row.location_name,
+      agentId: row.agent_id,
+      agentName: row.agent_name ?? row.agent_id,
+      driver: row.driver,
+      archived: row.archived === 1,
+      ...(row.stop_pending === 1 ? { archiveStatus: "stop_pending" as const } : {}),
+      status: row.status,
+      createdAt: row.created_at,
+    }));
+    const facetValues = (expression: string): string[] => (this.stmt(
+      `SELECT DISTINCT ${expression} AS value ${joins}
+       WHERE ${authorization.sql} ORDER BY value LIMIT 500`,
+    ).all(...authorization.params) as unknown as Array<{ value: string }>).map((row) => row.value);
+    return {
+      sessions,
+      transcriptSessionIds: rows.filter((row) => row.transcript_match === 1).map((row) => row.id),
+      facets: {
+        projects: facetValues(projectSql),
+        locations: facetValues(locationSql),
+        agents: facetValues(agentSql),
+      },
+    };
+  }
+
   private accessScopeChangeToken(input: Omit<AccessScopeChangePreview, "confirmationToken">, evidence: unknown): string {
     return createHash("sha256").update(JSON.stringify({ input, evidence })).digest("hex");
   }
@@ -10010,6 +10170,42 @@ export class ControlPlaneDb {
       if (out.length >= limit) break;
     }
     return out;
+  }
+
+  /** Bounded transcript search with principal authorization inside the ranked FTS query. */
+  searchEventsForPrincipal(
+    q: string,
+    limit: number,
+    principal: AuthPrincipal,
+  ): { sessionId: string; seq: number; snippet: string }[] {
+    const match = q
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 16)
+      .map((term) => `"${term.replace(/"/g, '""')}"`)
+      .join(" ");
+    if (!match) return [];
+    const boundedLimit = Math.max(1, Math.min(50, Math.trunc(limit)));
+    const authorization = this.sessionAuthorizationSql(principal);
+    const rows = this.stmt(
+      `SELECT session_events_fts.session_id, session_events_fts.seq,
+              snippet(session_events_fts, 0, '⟪', '⟫', '…', 10) AS snip
+       FROM session_events_fts
+       JOIN session_ownership ownership ON ownership.session_id=session_events_fts.session_id
+       WHERE session_events_fts MATCH ? AND ${authorization.sql}
+       ORDER BY rank LIMIT ?`,
+    ).all(match, ...authorization.params, boundedLimit * 10) as unknown as Array<{
+      session_id: string; seq: number; snip: string;
+    }>;
+    const results: { sessionId: string; seq: number; snippet: string }[] = [];
+    const seen = new Set<string>();
+    for (const row of rows) {
+      if (seen.has(row.session_id)) continue;
+      seen.add(row.session_id);
+      results.push({ sessionId: row.session_id, seq: row.seq, snippet: row.snip });
+      if (results.length >= boundedLimit) break;
+    }
+    return results;
   }
 
   /* ---- Phase 2: tombstones so the runner store can't resurrect a UI-deleted session ---- */

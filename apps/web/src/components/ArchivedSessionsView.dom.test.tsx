@@ -12,7 +12,6 @@ import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { ArchivedSessionsView } from "./ArchivedSessionsView.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
-import { filterArchiveSessions, pageArchiveSessions } from "../archive-browser.js";
 
 const domWindow = new Window({ url: "http://localhost/archived" });
 for (const [name, value] of Object.entries({
@@ -111,32 +110,41 @@ async function mount(sessions: SessionView[], overrides: Partial<ApiClient> = {}
     createSocket: () => socket,
     close() {},
   };
+  let archivePageCalls = 0;
+  const archiveInputs: Parameters<ApiClient["archiveSessionPage"]>[0][] = [];
   const client = {
     ...api,
     listAllSessions: async () => ({ sessions }),
     search: async () => ({ results: [] }),
     archiveSessionPage: async (input) => {
-      const cursorPage = Number(input.cursor ?? "1");
-      const result = pageArchiveSessions(filterArchiveSessions({
-        sessions,
-        filters: {
-          query: input.q ?? "",
-          project: input.project ?? "all",
-          location: input.location ?? "all",
-          agent: input.agent ?? "all",
-          archive: input.archive,
-          lifecycle: input.lifecycle,
-        },
-      }), cursorPage);
-      const nextCursor = result.page < result.pageCount ? String(result.page + 1) : null;
+      archivePageCalls += 1;
+      archiveInputs.push(input);
+      const offset = Number(input.cursor ?? "0");
+      const ordered = [...sessions].filter((item) => {
+        const stopPending = item.archiveStatus === "stop_pending";
+        if (input.archive === "archived" && !item.archived && !stopPending) return false;
+        if (input.archive === "unarchived" && (item.archived || stopPending)) return false;
+        if (input.lifecycle !== "all" && item.status !== input.lifecycle) return false;
+        if (input.project && item.projectName !== input.project) return false;
+        if (input.location && item.workspaceName !== input.location) return false;
+        if (input.agent && input.agent !== "Codex — Interactive") return false;
+        return !input.q || [item.id, item.title].join("\n").toLocaleLowerCase().includes(input.q.toLocaleLowerCase());
+      }).sort((left, right) => right.createdAt - left.createdAt || left.id.localeCompare(right.id));
+      const pageSessions = ordered.slice(offset, offset + 50);
+      const nextCursor = offset + pageSessions.length < ordered.length ? String(offset + pageSessions.length) : null;
       return {
-        sessions: result.sessions,
+        sessions: pageSessions,
         snippets: {},
+        metadata: Object.fromEntries(pageSessions.map((item) => [item.id, {
+          project: item.projectName ?? "No Project",
+          location: item.workspaceName ?? "No Location",
+          agent: "Codex — Interactive",
+        }])),
         nextCursor,
         hasMore: nextCursor !== null,
         facets: {
-          projects: ["Wollipog"],
-          locations: ["Local Checkout"],
+          projects: [...new Set(sessions.map((item) => item.projectName ?? "No Project"))].sort(),
+          locations: [...new Set(sessions.map((item) => item.workspaceName ?? "No Location"))].sort(),
           agents: ["Codex — Interactive"],
         },
       };
@@ -161,6 +169,8 @@ async function mount(sessions: SessionView[], overrides: Partial<ApiClient> = {}
     root,
     socket,
     navigated,
+    archiveInputs,
+    archivePageCalls: () => archivePageCalls,
     unmount: async () => {
       await act(async () => root.unmount());
       container.remove();
@@ -226,6 +236,42 @@ test("large archives paginate, deep-link, filter, and accept live lifecycle upda
   });
   assert.match(fixture.container.textContent ?? "", /No Matching Sessions/,
     "a second client's lifecycle change immediately re-evaluates the active filter");
+  await fixture.unmount();
+});
+
+test("search input debounces to one request and preserves server row order", async () => {
+  const fixture = await mount([
+    session(1, { id: "older", title: "Older", createdAt: 1, updatedAt: 999 }),
+    session(2, { id: "newer", title: "Newer", createdAt: 2, updatedAt: 1 }),
+  ]);
+  const initialCalls = fixture.archivePageCalls();
+  const links = [...fixture.container.querySelectorAll<HTMLAnchorElement>("tbody a")];
+  assert.deepEqual(links.map((link) => link.textContent), ["Newer", "Older"],
+    "the browser preserves the server's immutable createdAt cursor order");
+  const input = fixture.container.querySelector<HTMLInputElement>('input[type="search"]')!;
+  await act(async () => {
+    for (const value of ["n", "ne", "new", "newe", "newer"]) {
+      input.value = value;
+      Simulate.change(input);
+    }
+  });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
+  assert.equal(fixture.archivePageCalls(), initialCalls + 1);
+  await fixture.unmount();
+});
+
+test("a Project literally named all is encoded distinctly from All Projects", async () => {
+  const fixture = await mount([session(1, { projectName: "all" })]);
+  const project = fixture.container.querySelector<HTMLButtonElement>('button[aria-label^="Project:"]')!;
+  await act(async () => { project.click(); });
+  const namedAll = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+    .find((option) => option.textContent?.trim() === "all");
+  assert.ok(namedAll);
+  await act(async () => {
+    namedAll.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  assert.equal(fixture.archiveInputs.at(-1)?.project, "all");
   await fixture.unmount();
 });
 

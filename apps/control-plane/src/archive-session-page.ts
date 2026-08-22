@@ -12,15 +12,43 @@ export interface ArchiveSessionPageQuery {
   q?: string;
 }
 
+export function parseArchiveSessionPageQuery(
+  raw: Record<string, unknown>,
+): ArchiveSessionPageQuery | { error: string } {
+  const query: Record<string, string> = {};
+  for (const key of ["cursor", "project", "location", "agent", "archive", "lifecycle", "q"]) {
+    const value = raw[key];
+    if (value === undefined) continue;
+    if (typeof value !== "string") return { error: `${key} must be specified at most once` };
+    query[key] = value;
+  }
+  return query as ArchiveSessionPageQuery;
+}
+
 export interface ArchiveSessionPage {
-  sessions: SessionView[];
+  sessionIds: string[];
   snippets: Record<string, string>;
+  metadata: Record<string, ArchiveSessionMetadata>;
   nextCursor: string | null;
   hasMore: boolean;
   facets: { projects: string[]; locations: string[]; agents: string[] };
 }
 
-interface Cursor {
+export type ArchiveSessionCandidate = Pick<SessionView,
+  "id" | "title" | "projectId" | "workspaceId" | "agentId" | "agentName" | "driver" |
+  "archived" | "archiveStatus" | "status" | "createdAt"
+> & {
+  projectName: string | null;
+  locationName: string | null;
+};
+
+export interface ArchiveSessionMetadata {
+  project: string;
+  location: string;
+  agent: string;
+}
+
+export interface ArchiveSessionCursor {
   version: 1;
   filterKey: string;
   anchorCreatedAt: number;
@@ -29,23 +57,30 @@ interface Cursor {
   afterId: string;
 }
 
+export interface ArchiveSessionCursorWindow {
+  archive: "archived" | "unarchived" | "all";
+  lifecycle: SessionStatus | "all";
+  filterKey: string;
+  cursor: ArchiveSessionCursor | null;
+}
+
 const STATUSES = new Set<SessionStatus>([
   "queued", "starting", "running", "input_required", "idle", "completed", "failed", "stopped",
 ]);
 
-function encodeCursor(cursor: Cursor): string {
+function encodeCursor(cursor: ArchiveSessionCursor): string {
   return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
 }
 
-export function decodeArchiveCursor(raw: string): Cursor | null {
+export function decodeArchiveCursor(raw: string): ArchiveSessionCursor | null {
   try {
-    const value = JSON.parse(Buffer.from(raw, "base64url").toString("utf8")) as Partial<Cursor>;
+    const value = JSON.parse(Buffer.from(raw, "base64url").toString("utf8")) as Partial<ArchiveSessionCursor>;
     if (value.version !== 1 || typeof value.filterKey !== "string" || value.filterKey.length > 2_048 ||
         !Number.isSafeInteger(value.anchorCreatedAt) || value.anchorCreatedAt! < 0 ||
         typeof value.anchorId !== "string" || !value.anchorId || value.anchorId.length > 512 ||
         !Number.isSafeInteger(value.afterCreatedAt) || value.afterCreatedAt! < 0 ||
         typeof value.afterId !== "string" || !value.afterId || value.afterId.length > 512) return null;
-    return value as Cursor;
+    return value as ArchiveSessionCursor;
   } catch {
     return null;
   }
@@ -57,49 +92,66 @@ function lifecycleLabel(status: SessionStatus): string {
     : status.slice(0, 1).toLocaleUpperCase() + status.slice(1);
 }
 
-function metadata(session: SessionView, locationNames?: ReadonlyMap<string, string>) {
-  const agent = session.driver === "codex-app-server"
+function metadata(session: ArchiveSessionCandidate): ArchiveSessionMetadata {
+  const conductor = session.agentId === "conductor" ||
+    /^Conductor \((?:Wollipog|Agent Manager)\)$/u.test(session.agentName ?? "");
+  const agent = conductor
+    ? "Conductor (Wollipog)"
+    : session.driver === "codex-app-server"
     ? "Codex — Interactive"
     : session.driver === "codex"
       ? "Codex — Non-Interactive (codex exec)"
       : session.agentName ?? session.agentId ?? session.driver;
   return {
     project: session.projectName ?? (session.projectId ? "Unknown Project" : "No Project"),
-    location: (session.projectLocationId ? locationNames?.get(session.projectLocationId) : undefined) ??
-      session.workspaceName ?? session.workspaceId ?? "No Location",
+    location: session.locationName ?? session.workspaceId ?? "No Location",
     agent,
   };
 }
 
-function order(left: SessionView, right: SessionView): number {
+function order(left: ArchiveSessionCandidate, right: ArchiveSessionCandidate): number {
   return right.createdAt - left.createdAt || left.id.localeCompare(right.id);
 }
 
-function tupleAtOrBelow(session: SessionView, createdAt: number, id: string): boolean {
+function tupleAtOrBelow(session: ArchiveSessionCandidate, createdAt: number, id: string): boolean {
   return session.createdAt < createdAt || (session.createdAt === createdAt && session.id.localeCompare(id) >= 0);
 }
 
-export function archiveSessionPage(input: {
-  sessions: SessionView[];
-  query: ArchiveSessionPageQuery;
-  transcriptHits?: ReadonlyMap<string, string>;
-  locationNames?: ReadonlyMap<string, string>;
-}): ArchiveSessionPage | { error: string } {
-  const archive = input.query.archive ?? "archived";
-  const lifecycle = input.query.lifecycle ?? "all";
-  if (!(["archived", "unarchived", "all"] as const).includes(archive)) return { error: "archive filter is invalid" };
-  if (lifecycle !== "all" && !STATUSES.has(lifecycle)) return { error: "lifecycle filter is invalid" };
-  const cursor = input.query.cursor ? decodeArchiveCursor(input.query.cursor) : null;
-  if (input.query.cursor && !cursor) return { error: "cursor is invalid" };
-  const filterKey = JSON.stringify({
-    project: input.query.project ?? "",
-    location: input.query.location ?? "",
-    agent: input.query.agent ?? "",
+function cursorFilterKey(query: ArchiveSessionPageQuery, archive: string, lifecycle: string): string {
+  return JSON.stringify({
+    project: query.project ?? "",
+    location: query.location ?? "",
+    agent: query.agent ?? "",
     archive,
     lifecycle,
-    q: (input.query.q ?? "").trim(),
+    q: (query.q ?? "").trim(),
   });
+}
+
+export function archiveSessionCursorWindow(
+  query: ArchiveSessionPageQuery,
+): ArchiveSessionCursorWindow | { error: string } {
+  const archive = query.archive ?? "archived";
+  const lifecycle = query.lifecycle ?? "all";
+  if (!(["archived", "unarchived", "all"] as const).includes(archive)) {
+    return { error: "archive filter is invalid" };
+  }
+  if (lifecycle !== "all" && !STATUSES.has(lifecycle)) return { error: "lifecycle filter is invalid" };
+  const cursor = query.cursor ? decodeArchiveCursor(query.cursor) : null;
+  if (query.cursor && !cursor) return { error: "cursor is invalid" };
+  const filterKey = cursorFilterKey(query, archive, lifecycle);
   if (cursor && cursor.filterKey !== filterKey) return { error: "cursor does not match filters" };
+  return { archive, lifecycle, filterKey, cursor };
+}
+
+export function archiveSessionPage(input: {
+  sessions: ArchiveSessionCandidate[];
+  query: ArchiveSessionPageQuery;
+  transcriptHits?: ReadonlyMap<string, string>;
+}): ArchiveSessionPage | { error: string } {
+  const window = archiveSessionCursorWindow(input.query);
+  if ("error" in window) return window;
+  const { archive, lifecycle, cursor, filterKey } = window;
 
   const ordered = [...input.sessions].sort(order);
   const anchor = cursor ?? (ordered[0] ? {
@@ -118,7 +170,7 @@ export function archiveSessionPage(input: {
     if (archive === "archived" && !session.archived && !stopPending) return false;
     if (archive === "unarchived" && (session.archived || stopPending)) return false;
     if (lifecycle !== "all" && session.status !== lifecycle) return false;
-    const item = metadata(session, input.locationNames);
+    const item = metadata(session);
     if (input.query.project && item.project !== input.query.project) return false;
     if (input.query.location && item.location !== input.query.location) return false;
     if (input.query.agent && item.agent !== input.query.agent) return false;
@@ -129,9 +181,9 @@ export function archiveSessionPage(input: {
   });
   const facetsSource = ordered;
   const facets = {
-    projects: [...new Set(facetsSource.map((session) => metadata(session, input.locationNames).project))].sort(),
-    locations: [...new Set(facetsSource.map((session) => metadata(session, input.locationNames).location))].sort(),
-    agents: [...new Set(facetsSource.map((session) => metadata(session, input.locationNames).agent))].sort(),
+    projects: [...new Set(facetsSource.map((session) => metadata(session).project))].sort(),
+    locations: [...new Set(facetsSource.map((session) => metadata(session).location))].sort(),
+    agents: [...new Set(facetsSource.map((session) => metadata(session).agent))].sort(),
   };
   const after = cursor
     ? scoped.filter((session) => session.createdAt < cursor.afterCreatedAt ||
@@ -146,11 +198,12 @@ export function archiveSessionPage(input: {
     afterId: last.id,
   }) : null;
   return {
-    sessions,
+    sessionIds: sessions.map((session) => session.id),
     snippets: Object.fromEntries(sessions.flatMap((session) => {
       const snippet = input.transcriptHits?.get(session.id);
       return snippet ? [[session.id, snippet]] : [];
     })),
+    metadata: Object.fromEntries(sessions.map((session) => [session.id, metadata(session)])),
     nextCursor,
     hasMore,
     facets,

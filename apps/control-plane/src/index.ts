@@ -13,6 +13,7 @@ import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import {
   archiveSessionPage,
+  parseArchiveSessionPageQuery,
   type ArchiveSessionPageQuery,
 } from "./archive-session-page.js";
 import {
@@ -2543,23 +2544,37 @@ app.get("/api/sessions", async (req) => {
 });
 
 app.get("/api/sessions/archive-page", async (req, reply) => {
-  const query = req.query as ArchiveSessionPageQuery;
-  const q = String(query.q ?? "").trim();
+  const raw = req.query as Record<string, unknown>;
+  const query = parseArchiveSessionPageQuery(raw);
+  if ("error" in query) return reply.code(400).send(query);
+  const q = (query.q ?? "").trim();
   if (q.length > 256) return reply.code(400).send({ error: "q is too long (max 256 characters)" });
   const principal = requestPrincipal(req);
-  const sessions = principal ? db.listSessionsForPrincipal(principal, true) : [];
-  const transcriptHits = q.length >= 2
-    ? new Map(db.searchEvents(q, Math.max(20, sessions.length), sessions.map((session) => session.id))
-      .map((hit) => [hit.sessionId, hit.snippet]))
-    : new Map<string, string>();
-  const locationNames = new Map(sessions.flatMap((session) => {
-    if (!session.projectLocationId) return [];
-    const location = db.getProjectLocation(session.projectLocationId);
-    return location ? [[location.id, location.name] as const] : [];
-  }));
-  const page = archiveSessionPage({ sessions, query, transcriptHits, locationNames });
+  const candidatePage = principal
+    ? db.archiveSessionCandidatePageForPrincipal(principal, query)
+    : { sessions: [], transcriptSessionIds: [], facets: { projects: [], locations: [], agents: [] } };
+  if ("error" in candidatePage) return reply.code(400).send(candidatePage);
+  const page = archiveSessionPage({
+    sessions: candidatePage.sessions,
+    query,
+    transcriptHits: new Map(candidatePage.transcriptSessionIds.map((sessionId) => [sessionId, ""])),
+  });
   if ("error" in page) return reply.code(400).send(page);
-  return page;
+  const sessions = page.sessionIds.flatMap((sessionId) => {
+    const session = db.getSession(sessionId);
+    return session ? [session] : [];
+  });
+  const snippets = q.length >= 2
+    ? Object.fromEntries(db.searchEvents(q, Math.max(1, sessions.length), sessions.map((session) => session.id))
+      .map((hit) => [hit.sessionId, hit.snippet]))
+    : {};
+  const { sessionIds: _sessionIds, ...pagination } = page;
+  return {
+    ...pagination,
+    facets: candidatePage.facets,
+    sessions,
+    snippets,
+  };
 });
 
 registerSessionLookupRoute(app, { db, requestPrincipal });
@@ -2988,8 +3003,7 @@ app.get("/api/search", async (req, reply) => {
   // Bound the work: FTS parsing/ranking runs synchronously on this thread.
   if (q.length > 256) return reply.code(400).send({ error: "q is too long (max 256 characters)" });
   const principal = requestPrincipal(req);
-  const authorizedSessions = principal ? db.listSessionsForPrincipal(principal, true) : [];
-  const hits = db.searchEvents(q, 20, authorizedSessions.map((session) => session.id));
+  const hits = principal ? db.searchEventsForPrincipal(q, 20, principal) : [];
   const results = hits.flatMap((h) => {
     const session = db.getSession(h.sessionId);
     if (!session) return [];

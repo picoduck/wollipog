@@ -20,6 +20,7 @@ import type {
   WorkflowArtifactView,
 } from "@wollipog/protocol";
 import { PROTOCOL_VERSION } from "@wollipog/protocol";
+import { archiveSessionPage } from "./archive-session-page.js";
 import {
   ControlPlaneDb,
   GOVERNANCE_AUDIT_RETENTION_MS,
@@ -4303,4 +4304,39 @@ test("searchEvents applies authorized session scope before its ranking window an
     "inaccessible higher-ranked rows cannot consume the authorized result bound",
   );
   assert.deepEqual(db.searchEvents("needle", 1, []), []);
+  assert.deepEqual(
+    new Set(db.searchEventsForPrincipal("needle", 20, localOwner()).map((hit) => hit.sessionId)),
+    new Set(["authorized", "inaccessible"]),
+    "principal authorization runs inside the ranked FTS query without a catalog-id materialization",
+  );
+});
+
+test("archive page SQL bounds candidate materialization before cursor hydration", () => {
+  const db = withRunner();
+  for (let index = 0; index < 60; index++) {
+    const id = `archive-${String(index).padStart(2, "0")}`;
+    db.createSession(newSession({ id, title: `Archive ${index}`, now: 1_000 + index }));
+    db.setSessionArchived(id, true, 2_000 + index);
+  }
+  const firstCandidates = db.archiveSessionCandidatePageForPrincipal(localOwner(), {});
+  assert.ok(!("error" in firstCandidates));
+  if ("error" in firstCandidates) throw new Error(firstCandidates.error);
+  assert.equal(firstCandidates.sessions.length, 51, "SQLite returns one bounded page plus lookahead");
+  const first = archiveSessionPage({ sessions: firstCandidates.sessions, query: {} });
+  assert.ok(!("error" in first));
+  if ("error" in first) throw new Error(first.error);
+  assert.equal(first.sessionIds.length, 50);
+  assert.ok(first.nextCursor);
+
+  const secondQuery = { cursor: first.nextCursor! };
+  const secondCandidates = db.archiveSessionCandidatePageForPrincipal(localOwner(), secondQuery);
+  assert.ok(!("error" in secondCandidates));
+  if ("error" in secondCandidates) throw new Error(secondCandidates.error);
+  assert.equal(secondCandidates.sessions.length, 10);
+  const second = archiveSessionPage({ sessions: secondCandidates.sessions, query: secondQuery });
+  assert.ok(!("error" in second));
+  if ("error" in second) throw new Error(second.error);
+  assert.equal(second.sessionIds.length, 10);
+  assert.equal(second.hasMore, false);
+  assert.equal(new Set([...first.sessionIds, ...second.sessionIds]).size, 60);
 });

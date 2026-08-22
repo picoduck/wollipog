@@ -588,13 +588,17 @@ export function createApiClient(transport: ApiTransport) {
     q?: string;
   }) => {
     const query = new URLSearchParams();
-    for (const [key, value] of Object.entries(input)) {
-      if (value && value !== "all") query.set(key, value);
-      else if (key === "archive" && value === "all") query.set(key, value);
-    }
+    if (input.cursor !== undefined) query.set("cursor", input.cursor);
+    if (input.project !== undefined) query.set("project", input.project);
+    if (input.location !== undefined) query.set("location", input.location);
+    if (input.agent !== undefined) query.set("agent", input.agent);
+    query.set("archive", input.archive);
+    if (input.lifecycle !== "all") query.set("lifecycle", input.lifecycle);
+    if (input.q !== undefined) query.set("q", input.q);
     return req<{
       sessions: SessionView[];
       snippets: Record<string, string>;
+      metadata: Record<string, { project: string; location: string; agent: string }>;
       nextCursor: string | null;
       hasMore: boolean;
       facets: { projects: string[]; locations: string[]; agents: string[] };

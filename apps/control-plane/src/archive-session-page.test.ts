@@ -1,51 +1,35 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { SessionView } from "@wollipog/protocol";
-import { ARCHIVE_SESSION_PAGE_SIZE, archiveSessionPage } from "./archive-session-page.js";
+import {
+  ARCHIVE_SESSION_PAGE_SIZE,
+  archiveSessionPage,
+  parseArchiveSessionPageQuery,
+  type ArchiveSessionCandidate,
+} from "./archive-session-page.js";
 
-function session(index: number, overrides: Partial<SessionView> = {}): SessionView {
+function session(index: number, overrides: Partial<ArchiveSessionCandidate> = {}): ArchiveSessionCandidate {
   return {
     id: `session-${String(index).padStart(3, "0")}`,
-    runnerId: "runner-1",
     workspaceId: "workspace-1",
-    workspaceName: "Chicago",
+    locationName: "Chicago",
     projectId: "project-1",
     projectName: "Wollipog",
-    projectLocationId: null,
     agentId: "codex",
     agentName: "Codex",
     title: `Archived Session ${index}`,
     status: "idle",
-    column: "review",
-    runId: null,
-    useWorktree: false,
-    worktreePath: null,
     archived: true,
     createdAt: 1_000 - index,
-    updatedAt: 1_000 - index,
-    lastEventAt: null,
-    messageCount: 0,
-    preview: null,
-    pendingApproval: null,
     driver: "codex-app-server",
-    model: null,
-    effort: null,
-    permissionMode: null,
-    tokensIn: 0,
-    tokensOut: 0,
-    costUsd: 0,
-    adopted: false,
-    costBudgetUsd: null,
-    maxToolCalls: null,
     ...overrides,
-  } as SessionView;
+  };
 }
 
 test("large authorized catalogs return bounded, complete cursor pages", () => {
   const sessions = Array.from({ length: 125 }, (_, index) => session(index));
   const first = archiveSessionPage({ sessions, query: {} });
   assert.ok(!("error" in first));
-  assert.equal(first.sessions.length, ARCHIVE_SESSION_PAGE_SIZE);
+  assert.equal(first.sessionIds.length, ARCHIVE_SESSION_PAGE_SIZE);
   assert.equal(first.hasMore, true);
   assert.ok(first.nextCursor);
 
@@ -53,9 +37,9 @@ test("large authorized catalogs return bounded, complete cursor pages", () => {
   assert.ok(!("error" in second));
   const third = archiveSessionPage({ sessions, query: { cursor: second.nextCursor! } });
   assert.ok(!("error" in third));
-  assert.equal(third.sessions.length, 25);
+  assert.equal(third.sessionIds.length, 25);
   assert.equal(third.nextCursor, null);
-  assert.equal(new Set([...first.sessions, ...second.sessions, ...third.sessions].map((item) => item.id)).size, 125);
+  assert.equal(new Set([...first.sessionIds, ...second.sessionIds, ...third.sessionIds]).size, 125);
 });
 
 test("cursor ordering is stable across live updates and excludes later inserts", () => {
@@ -63,13 +47,12 @@ test("cursor ordering is stable across live updates and excludes later inserts",
   const first = archiveSessionPage({ sessions, query: {} });
   assert.ok(!("error" in first) && first.nextCursor);
   const changed = sessions.map((item) => item.id === "session-060"
-    ? { ...item, updatedAt: 99_999, status: "stopped" as const }
+    ? { ...item, status: "stopped" as const }
     : item);
-  changed.push(session(999, { id: "newer", createdAt: 2_000, updatedAt: 2_000 }));
+  changed.push(session(999, { id: "newer", createdAt: 2_000 }));
   const second = archiveSessionPage({ sessions: changed, query: { cursor: first.nextCursor! } });
   assert.ok(!("error" in second));
-  assert.deepEqual(second.sessions.map((item) => item.id), sessions.slice(50).map((item) => item.id));
-  assert.equal(second.sessions.find((item) => item.id === "session-060")?.status, "stopped");
+  assert.deepEqual(second.sessionIds, sessions.slice(50).map((item) => item.id));
 });
 
 test("filters include Stop Pending and transcript matches without returning unscoped facets", () => {
@@ -82,12 +65,24 @@ test("filters include Stop Pending and transcript matches without returning unsc
     transcriptHits: new Map([[transcriptMatch.id, "a ⟪needle⟫ appeared"]]),
   });
   assert.ok(!("error" in page));
-  assert.deepEqual(page.sessions.map((item) => item.id), [metadataMatch.id, transcriptMatch.id]);
+  assert.deepEqual(page.sessionIds, [metadataMatch.id, transcriptMatch.id]);
   assert.equal(page.snippets[transcriptMatch.id], "a ⟪needle⟫ appeared");
   assert.ok(page.facets.projects.includes("Other"));
   const pendingPage = archiveSessionPage({ sessions: [pending], query: {} });
   assert.ok(!("error" in pendingPage));
-  assert.deepEqual(pendingPage.sessions.map((item) => item.id), [pending.id]);
+  assert.deepEqual(pendingPage.sessionIds, [pending.id]);
+});
+
+test("server metadata canonicalizes conductor labels and stays aligned with cursor order", () => {
+  const conductor = session(1, {
+    agentId: "conductor",
+    agentName: "Custom Conductor",
+    driver: "codex-app-server",
+  });
+  const page = archiveSessionPage({ sessions: [conductor], query: {} });
+  assert.ok(!("error" in page));
+  assert.equal(page.metadata[conductor.id]?.agent, "Conductor (Wollipog)");
+  assert.deepEqual(page.sessionIds, [conductor.id]);
 });
 
 test("malformed and mismatched cursors fail closed", () => {
@@ -105,4 +100,14 @@ test("malformed and mismatched cursors fail closed", () => {
     archiveSessionPage({ sessions, query: { cursor: first.nextCursor!, project: "Other" } }),
     { error: "cursor does not match filters" },
   );
+});
+
+test("repeated query parameters fail closed before filter evaluation", () => {
+  assert.deepEqual(parseArchiveSessionPageQuery({ q: ["one", "two"] }), {
+    error: "q must be specified at most once",
+  });
+  assert.deepEqual(parseArchiveSessionPageQuery({ q: "one", archive: "archived" }), {
+    q: "one",
+    archive: "archived",
+  });
 });
