@@ -568,7 +568,7 @@ export class CodexAppServerDriver implements Driver {
                 { optionId: "accept", name: "Allow Once", kind: "allow_once" },
                 { optionId: "acceptForSession", name: "Allow for Session", kind: "allow_always" },
                 { optionId: "decline", name: "Reject", kind: "reject_once" },
-                { optionId: "cancel", name: "Cancel" },
+                { optionId: "cancel", name: "Cancel", kind: "cancel" },
               ],
           context: approvalContext(
             method,
@@ -597,7 +597,6 @@ export class CodexAppServerDriver implements Driver {
       new Promise<Json>((resolve) => {
         if (this.disposed || this.cancelled) return resolve(mcpElicitationResponse("cancel"));
         const id = String(rpcRequestId ?? params?.elicitationId ?? `${params?.turnId}:${++this.approvalSeq}`);
-        this.declinePendingRequests();
         if (params?.mode === "url") {
           const message = boundedString(params?.message, MAX_QUESTION_TEXT);
           const serverName = boundedString(params?.serverName, MAX_QUESTION_HEADER);
@@ -606,6 +605,7 @@ export class CodexAppServerDriver implements Driver {
             this.cb.onStderr("Codex MCP URL elicitation was malformed — cancelling it");
             return resolve(mcpElicitationResponse("cancel"));
           }
+          this.declinePendingRequests();
           this.pendingApprovals.set(id, { method: MCP_ELICITATION_METHOD, params, resolve });
           this.cb.onEvent({
             kind: "permission_request",
@@ -614,7 +614,7 @@ export class CodexAppServerDriver implements Driver {
             options: [
               { optionId: "accept", name: "Accept", kind: "allow_once" },
               { optionId: "decline", name: "Decline", kind: "reject_once" },
-              { optionId: "cancel", name: "Cancel" },
+              { optionId: "cancel", name: "Cancel", kind: "cancel" },
             ],
             context: { toolName: serverName, input: message, network: url },
           });
@@ -625,6 +625,7 @@ export class CodexAppServerDriver implements Driver {
           this.cb.onStderr(`unsupported or malformed Codex MCP elicitation mode=${String(params?.mode ?? "?")} — cancelling it`);
           return resolve(mcpElicitationResponse("cancel"));
         }
+        this.declinePendingRequests();
         this.pendingQuestions.set(id, { resolve, response: normalized.response });
         this.cb.onEvent({ kind: "question_request", requestId: id, questions: normalized.questions });
       }));
@@ -1104,6 +1105,7 @@ export function normalizeMcpFormElicitation(params: Json): NormalizedQuestionReq
         questions.push({ ...base, options: choices.map(({ label }) => ({ label })) });
         continue;
       }
+      if (property.enum !== undefined || property.oneOf !== undefined || property.anyOf !== undefined) return null;
       const minLength = nonnegativeInteger(property.minLength);
       const providerMaxLength = nonnegativeInteger(property.maxLength);
       if (

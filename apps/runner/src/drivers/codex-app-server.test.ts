@@ -881,7 +881,7 @@ test("command approvals expose and deliver every stable provider decision", asyn
     { optionId: "accept", name: "Allow Once", kind: "allow_once" },
     { optionId: "acceptForSession", name: "Allow for Session", kind: "allow_always" },
     { optionId: "decline", name: "Reject", kind: "reject_once" },
-    { optionId: "cancel", name: "Cancel" },
+    { optionId: "cancel", name: "Cancel", kind: "cancel" },
   ]);
   assert.equal(h.driver.resolvePermission("command-choice", "acceptForSession"), true);
   assert.deepEqual(await pending, { decision: "acceptForSession" });
@@ -1111,7 +1111,7 @@ test("MCP URL elicitation exposes Accept, Decline, and Cancel and uses the selec
     options: [
       { optionId: "accept", name: "Accept", kind: "allow_once" },
       { optionId: "decline", name: "Decline", kind: "reject_once" },
-      { optionId: "cancel", name: "Cancel" },
+      { optionId: "cancel", name: "Cancel", kind: "cancel" },
     ],
     context: {
       toolName: "Payments MCP",
@@ -1132,12 +1132,30 @@ test("unsupported MCP modes cancel safely and provider resolution clears a parke
     onNotification: (method: string, handler: (params: any) => void) => notifications.set(method, handler),
   });
 
+  const parkedApproval = requests.get("item/commandExecution/requestApproval")!({ command: "pnpm test" }, "still-live");
+  const eventsBeforeUnsupported = h.events.length;
   assert.deepEqual(await requests.get("mcpServer/elicitation/request")!({
     mode: "openai/form",
     serverName: "Unsupported MCP",
     message: "Extended schema",
     requestedSchema: { type: "object", properties: { value: { type: "string" } } },
   }, 800), { action: "cancel", content: null, _meta: null });
+  assert.equal(h.events.length, eventsBeforeUnsupported, "invalid elicitation must not displace the parked approval");
+  assert.equal(h.driver.resolvePermission("still-live", "accept"), true);
+  assert.deepEqual(await parkedApproval, { decision: "accept" });
+
+  const eventsBeforeMalformedEnum = h.events.length;
+  assert.deepEqual(await requests.get("mcpServer/elicitation/request")!({
+    mode: "form",
+    serverName: "Oversized MCP",
+    message: "Choose a region",
+    requestedSchema: {
+      type: "object",
+      properties: { region: { type: "string", enum: Array.from({ length: 21 }, (_, index) => `region-${index}`) } },
+      required: ["region"],
+    },
+  }, "malformed-enum"), { action: "cancel", content: null, _meta: null });
+  assert.equal(h.events.length, eventsBeforeMalformedEnum, "malformed enum must not emit an unconstrained question");
 
   assert.deepEqual(await requests.get("mcpServer/elicitation/request")!({
     mode: "form",

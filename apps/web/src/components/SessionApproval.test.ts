@@ -122,8 +122,11 @@ test("provider form questions render context and constrained free-text controls"
     ],
   }));
   assert.match(html, /Deploy MCP: Choose deployment settings/);
-  assert.match(html, /<span>Response<\/span>/);
+  assert.match(html, /<span[^>]*>Response<\/span>/);
   assert.match(html, /type="password"[^>]*maxLength="120"/);
   assert.match(html, /type="number"[^>]*inputMode="numeric"[^>]*step="1"[^>]*min="1"[^>]*max="5"/);
   assert.match(html, /<span class="muted sm"> \(optional\)<\/span>/);
+  assert.match(html, /aria-labelledby="[^"]+-question-0 [^"]+-response-0"/);
+  assert.match(html, /aria-labelledby="[^"]+-question-1 [^"]+-response-1"/);
+  assert.match(html, /aria-labelledby="[^"]+-question-2 [^"]+-response-2"/);
 });

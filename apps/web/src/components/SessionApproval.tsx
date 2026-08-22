@@ -373,6 +373,7 @@ export function SessionQuestionBanner({
       <div className="question-list">
         {questions.map((question, questionIndex) => {
           const questionLabelId = `${labelPrefix}-question-${questionIndex}`;
+          const responseLabelId = `${labelPrefix}-response-${questionIndex}`;
           const selected = picked[question.id] ?? [];
           return (
             <div className="question-block" key={question.id}>
@@ -413,10 +414,11 @@ export function SessionQuestionBanner({
               )}
               {question.allowOther && (
                 <label className="question-input-label">
-                  <span>{question.options.length > 0 ? "Other Response" : "Response"}</span>
+                  <span id={responseLabelId}>{question.options.length > 0 ? "Other Response" : "Response"}</span>
                   {question.required === false && <span className="muted sm"> (optional)</span>}
                   <input
                     className="input question-input"
+                    aria-labelledby={`${questionLabelId} ${responseLabelId}`}
                     type={question.secret
                       ? "password"
                       : question.inputFormat === "date-time"

@@ -4202,9 +4202,11 @@ export class SessionsService {
       ? "dismissed"
       : optionId == null
         ? "dismissed"
-        : selected?.kind?.startsWith("reject")
-          ? "denied"
-          : "allowed";
+        : selected?.kind === "cancel"
+          ? "dismissed"
+          : selected?.kind?.startsWith("reject")
+            ? "denied"
+            : "allowed";
     this.recordGovernanceAudit(session, pending, "resolution", outcome, actor, now, { optionId });
     // A guardrail card displaced by this runner permission card must re-park immediately — the
     // acknowledgment the prompt() 409 guard enforces would otherwise be skipped until settle.

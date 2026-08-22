@@ -632,7 +632,7 @@ never injects an ordinary user message for a structured response.
 | `item/permissions/requestApproval` | requested filesystem/network profile with **Allow** or **Reject** | allow: `{permissions:<requested>,scope:"session"}`; reject: `{permissions:{},scope:"turn"}` |
 | `item/tool/requestUserInput` | up to three choice questions, optional **Other Response**, bounded free text, and secret entry when declared | `{answers:{<questionId>:{answers:[...]}}}` |
 | `mcpServer/elicitation/request` mode `form` | bounded string/number/integer/boolean/single-enum/multi-enum controls with required, length, range, and selection constraints | submit: `{action:"accept",content:{...},_meta:null}`; dismiss: `{action:"cancel",content:null,_meta:null}` |
-| `mcpServer/elicitation/request` mode `url` | server/message/URL context with **Accept**, **Decline**, and **Cancel** | `{action:"accept"|"decline"|"cancel",content:null,_meta:null}` |
+| `mcpServer/elicitation/request` mode `url` | server/message/URL context with **Accept**, **Decline**, and **Cancel** | `{action:"accept"\|"decline"\|"cancel",content:null,_meta:null}` |
 
 Wollipog supports the stable MCP `form` and `url` modes. It does not advertise the extended
 `openai/form` capability; extended or malformed schemas are canceled instead of being guessed.

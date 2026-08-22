@@ -4560,6 +4560,23 @@ test("governance audit records permission request and device resolution without 
   assert.equal(db.getSession(id)!.pendingApproval, null);
 });
 
+test("governance audit records explicit cancellation as dismissed", () => {
+  const { hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  svc.onSessionEvent(id, {
+    kind: "permission_request",
+    requestId: "perm-cancel",
+    title: "Run command?",
+    options: [{ optionId: "cancel", name: "Cancel", kind: "cancel" }],
+  });
+
+  assert.ok(svc.approve(id, "perm-cancel", "cancel").ok);
+  assert.deepEqual(
+    svc.governanceAudit(id).map((entry) => [entry.stage, entry.outcome]),
+    [["request", "pending"], ["resolution", "dismissed"]],
+  );
+});
+
 test("governance audit records reviewer decisions and human escalation provenance without rationale", () => {
   const { hub, svc } = makeHarness();
   const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
