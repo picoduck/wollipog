@@ -4033,7 +4033,15 @@ export class SessionsService {
     // no-duplicate rule as permission_resolved); update local state for immediate feedback.
     this.db.setPendingApproval(sessionId, null);
     this.db.updateSessionStatus(sessionId, "running", now);
-    this.recordGovernanceAudit(session, pending, "resolution", "answered", actor, now, { content: auditContent });
+    this.recordGovernanceAudit(
+      session,
+      pending,
+      "resolution",
+      action === "dismiss" ? "dismissed" : "answered",
+      actor,
+      now,
+      { content: auditContent },
+    );
     this.gateOnPolicy(sessionId, now);
     this.reconcilePolicyHookTimeouts(now, sessionId);
     this.hub.sessionChangedById(sessionId);

@@ -623,12 +623,33 @@ test("question_request renders a question item; question_resolved marks it answe
       requestId: "q1",
       questions: [{ id: "Which?", question: "Which?", options: [{ label: "A" }, { label: "B" }] }],
     }),
-    ev({ kind: "question_resolved", requestId: "q1", answered: true }),
+    ev({ kind: "question_resolved", requestId: "q1", answered: false, resolutionReason: "replaced" }),
   ]);
   assert.equal(items.length, 1);
   const q = items[0] as Extract<import("./timeline.js").TimelineItem, { kind: "question" }>;
   assert.equal(q.kind, "question");
-  assert.equal(q.answered, true);
+  assert.equal(q.answered, false);
+  assert.equal(q.resolutionReason, "replaced");
+});
+
+test("permission resolution reasons survive timeline projection", () => {
+  const items = deriveTimeline([
+    ev({
+      kind: "permission_request",
+      requestId: "p-provider",
+      title: "Approve command",
+      options: [{ optionId: "allow", name: "Allow" }],
+    }),
+    ev({
+      kind: "permission_resolved",
+      requestId: "p-provider",
+      optionId: null,
+      resolutionReason: "provider_resolved",
+    }),
+  ]);
+  const permission = items[0] as Extract<import("./timeline.js").TimelineItem, { kind: "permission" }>;
+  assert.equal(permission.resolvedOptionId, null);
+  assert.equal(permission.resolutionReason, "provider_resolved");
 });
 
 test("permission context rides into the timeline item", () => {

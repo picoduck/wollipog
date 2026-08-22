@@ -856,10 +856,10 @@ test("a newer provider request cancels the previous parked approval and keeps un
   const first = approve({ turnId: "turn-fallback", command: "one" });
   const second = approve({ turnId: "turn-fallback", command: "two" });
   assert.deepEqual(await first, { decision: "cancel" });
-  assert.deepEqual(h.events.map((event) => event.kind === "permission_request" && event.requestId), [
-    "turn-fallback:1",
-    "turn-fallback:2",
-  ]);
+  assert.deepEqual(
+    h.events.filter((event) => event.kind === "permission_request").map((event) => event.requestId),
+    ["turn-fallback:1", "turn-fallback:2"],
+  );
 
   assert.equal(h.driver.resolvePermission("turn-fallback:1", "allow"), false);
   assert.equal(h.driver.resolvePermission("turn-fallback:2", "allow"), true);
@@ -1193,7 +1193,57 @@ test("unsupported MCP modes cancel safely and provider resolution clears a parke
   notifications.get("serverRequest/resolved")!({ threadId: "thread-4", requestId: 801 });
   assert.deepEqual(await pending, { answers: {} });
   assert.equal(h.driver.answerQuestion("801", { choice: "A" }), false);
-  assert.deepEqual(h.events.at(-1), { kind: "question_resolved", requestId: "801", answered: false });
+  assert.deepEqual(h.events.at(-1), {
+    kind: "question_resolved",
+    requestId: "801",
+    answered: false,
+    resolutionReason: "provider_resolved",
+  });
+});
+
+test("a newer structured request settles and resolves the displaced request exactly once", async () => {
+  const h = makeHarness();
+  const requests = new Map<string, (params: any, requestId: number | string) => Promise<any>>();
+  const notifications = new Map<string, (params: any) => void>();
+  (h.driver as any).registerHandlers({
+    onRequest: (method: string, handler: (params: any, requestId: number | string) => Promise<any>) => requests.set(method, handler),
+    onNotification: (method: string, handler: (params: any) => void) => notifications.set(method, handler),
+  });
+
+  const oldQuestion = requests.get("item/tool/requestUserInput")!({
+    questions: [{ id: "choice", header: "Choice", question: "Choose", isOther: false, options: [{ label: "A", description: "A" }] }],
+  }, "old-question");
+  const replacementApproval = requests.get("item/commandExecution/requestApproval")!({ command: "pnpm test" }, "replacement-approval");
+  assert.deepEqual(await oldQuestion, { answers: {} });
+  assert.deepEqual(h.events.filter((event) => event.kind === "question_resolved"), [{
+    kind: "question_resolved",
+    requestId: "old-question",
+    answered: false,
+    resolutionReason: "replaced",
+  }]);
+
+  const replacementQuestion = requests.get("item/tool/requestUserInput")!({
+    questions: [{ id: "confirm", header: "Confirm", question: "Continue?", isOther: false, options: [{ label: "Yes", description: "Continue" }] }],
+  }, "replacement-question");
+  assert.deepEqual(await replacementApproval, { decision: "cancel" });
+  assert.deepEqual(h.events.filter((event) => event.kind === "permission_resolved"), [{
+    kind: "permission_resolved",
+    requestId: "replacement-approval",
+    optionId: null,
+    resolutionReason: "replaced",
+  }]);
+
+  const resolutionCount = h.events.filter(
+    (event) => event.kind === "question_resolved" || event.kind === "permission_resolved",
+  ).length;
+  notifications.get("serverRequest/resolved")!({ requestId: "old-question" });
+  notifications.get("serverRequest/resolved")!({ requestId: "replacement-approval" });
+  assert.equal(h.events.filter(
+    (event) => event.kind === "question_resolved" || event.kind === "permission_resolved",
+  ).length, resolutionCount, "late provider notifications must not duplicate replacement events");
+
+  assert.equal(h.driver.answerQuestion("replacement-question", { confirm: "Yes" }, "submit"), true);
+  assert.deepEqual(await replacementQuestion, { answers: { confirm: { answers: ["Yes"] } } });
 });
 
 test("buildCodexTurnParams: default and 'auto-review' use Guardian with an escapable workspace sandbox", () => {

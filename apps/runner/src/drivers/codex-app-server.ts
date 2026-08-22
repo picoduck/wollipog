@@ -512,12 +512,20 @@ export class CodexAppServerDriver implements Driver {
     this.child = null;
   }
 
-  private declinePendingRequests(): void {
-    for (const [, p] of this.pendingApprovals) {
+  private declinePendingRequests(resolutionReason?: "replaced"): void {
+    for (const [requestId, p] of this.pendingApprovals) {
       p.resolve(p.method === MCP_ELICITATION_METHOD ? mcpElicitationResponse("cancel") : approvalResponse(p.method, p.params, null));
+      if (resolutionReason) {
+        this.cb.onEvent({ kind: "permission_resolved", requestId, optionId: null, resolutionReason });
+      }
     }
     this.pendingApprovals.clear();
-    for (const [, p] of this.pendingQuestions) p.resolve(p.response({}, "dismiss"));
+    for (const [requestId, p] of this.pendingQuestions) {
+      p.resolve(p.response({}, "dismiss"));
+      if (resolutionReason) {
+        this.cb.onEvent({ kind: "question_resolved", requestId, answered: false, resolutionReason });
+      }
+    }
     this.pendingQuestions.clear();
   }
 
@@ -564,7 +572,7 @@ export class CodexAppServerDriver implements Driver {
       new Promise<Json>((resolve) => {
         if (this.disposed || this.cancelled) return resolve(approvalResponse(method, params, null));
         const id = String(rpcRequestId ?? params?.approvalId ?? params?.itemId ?? `${params?.turnId}:${++this.approvalSeq}`);
-        this.declinePendingRequests();
+        this.declinePendingRequests("replaced");
         this.pendingApprovals.set(id, { method, params, resolve });
         this.cb.onEvent({
           kind: "permission_request",
@@ -599,7 +607,7 @@ export class CodexAppServerDriver implements Driver {
           return resolve({ answers: {} });
         }
         const id = String(rpcRequestId ?? params?.itemId ?? `${params?.turnId}:${++this.approvalSeq}`);
-        this.declinePendingRequests();
+        this.declinePendingRequests("replaced");
         this.pendingQuestions.set(id, { resolve, response: normalized.response });
         this.cb.onEvent({ kind: "question_request", requestId: id, questions: normalized.questions });
       }));
@@ -616,7 +624,7 @@ export class CodexAppServerDriver implements Driver {
             this.cb.onStderr("Codex MCP URL elicitation was malformed — cancelling it");
             return resolve(mcpElicitationResponse("cancel"));
           }
-          this.declinePendingRequests();
+          this.declinePendingRequests("replaced");
           this.pendingApprovals.set(id, { method: MCP_ELICITATION_METHOD, params, resolve });
           this.cb.onEvent({
             kind: "permission_request",
@@ -636,7 +644,7 @@ export class CodexAppServerDriver implements Driver {
           this.cb.onStderr(`unsupported or malformed Codex MCP elicitation mode=${diagnosticValue(params?.mode)} — cancelling it`);
           return resolve(mcpElicitationResponse("cancel"));
         }
-        this.declinePendingRequests();
+        this.declinePendingRequests("replaced");
         this.pendingQuestions.set(id, { resolve, response: normalized.response });
         this.cb.onEvent({ kind: "question_request", requestId: id, questions: normalized.questions });
       }));
@@ -647,13 +655,23 @@ export class CodexAppServerDriver implements Driver {
       if (question) {
         this.pendingQuestions.delete(id);
         question.resolve(question.response({}, "dismiss"));
-        this.cb.onEvent({ kind: "question_resolved", requestId: id, answered: false });
+        this.cb.onEvent({
+          kind: "question_resolved",
+          requestId: id,
+          answered: false,
+          resolutionReason: "provider_resolved",
+        });
       }
       const approval = this.pendingApprovals.get(id);
       if (approval) {
         this.pendingApprovals.delete(id);
         approval.resolve(approval.method === MCP_ELICITATION_METHOD ? mcpElicitationResponse("cancel") : approvalResponse(approval.method, approval.params, null));
-        this.cb.onEvent({ kind: "permission_resolved", requestId: id, optionId: null });
+        this.cb.onEvent({
+          kind: "permission_resolved",
+          requestId: id,
+          optionId: null,
+          resolutionReason: "provider_resolved",
+        });
       }
     });
 

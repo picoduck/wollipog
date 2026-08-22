@@ -243,7 +243,10 @@
 // 87: streamed agent responses gain a content-free completion event. New runners emit it only at
 //     an authoritative successful turn boundary; older runners omit it and reminders retain their
 //     scheduled fallback. The separate event avoids replaying message text for legacy consumers.
-export const PROTOCOL_VERSION = 87;
+// 88: structured request resolution events gain an optional bounded reason so replacement,
+//     provider-side settlement, explicit submission, and dismissal remain distinguishable in
+//     durable history. Pre-v88 peers retain the existing optionId/answered presentation.
+export const PROTOCOL_VERSION = 88;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
@@ -1311,6 +1314,14 @@ export interface PermissionOption {
   kind?: string;
 }
 
+/** Bounded lifecycle reason shared by question and permission history. The selected option and
+ * answered flag retain provider-neutral decision detail; this field explains how the ask ended. */
+export type StructuredRequestResolutionReason =
+  | "submitted"
+  | "dismissed"
+  | "replaced"
+  | "provider_resolved";
+
 /** Bounded rendering of WHAT is being approved (tool name + its input) — the trust surface:
  * an Allow button without the command/diff it authorizes defeats confirm-before-apply. */
 export interface ApprovalContext {
@@ -2106,9 +2117,19 @@ export type SessionEventPayload =
     }
   | ({ kind: "review_decision" } & ReviewDecision)
   | { kind: "permission_request"; requestId: string; title: string; options: PermissionOption[]; context?: ApprovalContext; purpose?: "authentication" }
-  | { kind: "permission_resolved"; requestId: string; optionId: string | null }
+  | {
+      kind: "permission_resolved";
+      requestId: string;
+      optionId: string | null;
+      resolutionReason?: StructuredRequestResolutionReason;
+    }
   | { kind: "question_request"; requestId: string; questions: AgentQuestion[] }
-  | { kind: "question_resolved"; requestId: string; answered: boolean }
+  | {
+      kind: "question_resolved";
+      requestId: string;
+      answered: boolean;
+      resolutionReason?: StructuredRequestResolutionReason;
+    }
   | { kind: "checkpoint"; turn: number; tree: string }
   | { kind: "checkpoint_restored"; turn: number }
   | { kind: "conversation_checkpoint"; turn: number }

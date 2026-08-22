@@ -5769,14 +5769,21 @@ export class SessionManager {
             optionId == null
               ? "cancelled"
               : optionKind != null
-                ? optionKind.startsWith("allow") ? "allowed" : "denied"
+                ? optionKind === "cancel" ? "cancelled" : optionKind.startsWith("allow") ? "allowed" : "denied"
                 : optionId === "allow" ? "allowed" : optionId === "deny" ? "denied" : "observed",
           durationMs: Date.now() - started,
         });
       }
       // Record the resolution in the box log (the runner owns the timeline now) and clear the card
       // via accrueMeta, so a hydrating dashboard sees both the decision and an empty approval slot.
-      this.emitEvent(sessionId, { kind: "permission_resolved", requestId, optionId });
+      this.emitEvent(sessionId, {
+        kind: "permission_resolved",
+        requestId,
+        optionId,
+        resolutionReason: optionId == null || meta?.pendingApproval?.options.some(
+          (option) => option.optionId === optionId && option.kind === "cancel",
+        ) ? "dismissed" : "submitted",
+      });
       return;
     }
     this.approvalStarted.delete(`${sessionId}:${requestId}`);
@@ -5807,7 +5814,13 @@ export class SessionManager {
           durationMs: Date.now() - started,
         });
       }
-      this.emitEvent(sessionId, { kind: "question_resolved", requestId, answered: action !== "dismiss" && (action === "submit" || Object.keys(answers).length > 0) });
+      const answered = action !== "dismiss" && (action === "submit" || Object.keys(answers).length > 0);
+      this.emitEvent(sessionId, {
+        kind: "question_resolved",
+        requestId,
+        answered,
+        resolutionReason: answered ? "submitted" : "dismissed",
+      });
       return;
     }
     this.approvalStarted.delete(`${sessionId}:${requestId}`);
