@@ -528,8 +528,11 @@ test("an opening-window safety cut identifies the partial response and reach-bac
 
     const control = fixture.container.querySelector(".transcript-earlier-activity") as HTMLElement;
     assert.ok(control.textContent!.includes("The beginning of the latest response may not be loaded."));
+    const partialDescription = control.querySelector("span") as HTMLSpanElement;
     const load = control.querySelector("button") as HTMLButtonElement;
     assert.equal(load.textContent, "Load Earlier Activity");
+    assert.equal(load.getAttribute("aria-describedby"), partialDescription.id,
+      "the visible partial-response explanation directly describes the recovery control");
     await act(async () => load.click());
     assert.equal(pages.tailCalls.length, 2, "the partial-response notice keeps a reliable reach-back control");
 
@@ -550,6 +553,8 @@ test("an opening-window safety cut identifies the partial response and reach-bac
       false,
       "loading through the turn boundary removes the partial-response warning",
     );
+    assert.equal((fixture.container.querySelector(".transcript-earlier-activity button") as HTMLButtonElement)
+      .getAttribute("aria-describedby"), null);
   } finally {
     await unmountFixture(fixture);
   }

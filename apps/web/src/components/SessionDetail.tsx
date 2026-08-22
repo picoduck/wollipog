@@ -3799,12 +3799,19 @@ function EarlierActivityControl({
   latestResponsePartial: boolean;
   onLoad: () => void;
 }) {
+  const partialDescriptionId = useId();
   return (
     <div className="transcript-earlier-activity">
       {latestResponsePartial && (
-        <span role="status">The beginning of the latest response may not be loaded.</span>
+        <span id={partialDescriptionId}>The beginning of the latest response may not be loaded.</span>
       )}
-      <button className="btn ghost sm" type="button" disabled={loading} onClick={onLoad}>
+      <button
+        className="btn ghost sm"
+        type="button"
+        disabled={loading}
+        aria-describedby={latestResponsePartial ? partialDescriptionId : undefined}
+        onClick={onLoad}
+      >
         {loading ? "Loading Earlier Activity…" : "Load Earlier Activity"}
       </button>
       {error && <span role="status">{error}</span>}

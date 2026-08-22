@@ -25,6 +25,7 @@ import {
   ControlPlaneDb,
   GOVERNANCE_AUDIT_RETENTION_MS,
   TAIL_TURN_ALIGNMENT_MAX_EVENTS,
+  TAIL_TURN_ALIGNMENT_MAX_PAYLOAD_BYTES,
   type NewSessionInput,
 } from "./db.js";
 import type { HumanPrincipal } from "./identity.js";
@@ -3264,6 +3265,28 @@ test("turn alignment includes a streamed Markdown response beyond the former ope
     markdownChunks.join(""),
     "Markdown delimiters on both sides of the former boundary remain in one response",
   );
+});
+
+test("turn alignment keeps a payload-byte safety bound even within the event cap", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "large-turn-cache" }));
+  db.appendEvent("large-turn-cache", { kind: "user_message", text: "go" }, 1);
+  const chunk = "x".repeat(16 * 1024);
+  for (let index = 0; index < 300; index += 1) {
+    db.appendEvent("large-turn-cache", {
+      kind: "agent_message",
+      text: chunk,
+      messageId: "large-response",
+      final: false,
+    }, index + 2);
+  }
+  assert.ok(300 * Buffer.byteLength(chunk, "utf8") > TAIL_TURN_ALIGNMENT_MAX_PAYLOAD_BYTES);
+
+  const page = db.listCachedEventTailPage("large-turn-cache", undefined, 200, { alignToTurn: true });
+  assert.equal(page.events.length, 200, "the count-bounded page stands when extension is too large");
+  assert.equal(page.events[0]!.seq, 102);
+  assert.equal(page.turnAligned, false);
+  assert.equal(page.hasMoreOlder, true);
 });
 
 test("a page already starting at a user message is left as it is", () => {
