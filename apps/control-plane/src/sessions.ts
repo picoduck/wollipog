@@ -554,6 +554,20 @@ export { budgetDecision } from "./policy-engine.js";
  * provisioning (apps/runner/src/conductor.ts). Renaming one side breaks the enforcement pairing. */
 const CONDUCTOR_AGENT_ID = "conductor";
 
+/** Persist the capability-dependent Claude default at creation time so the selector, stored
+ * session, and launch argv all describe the same mode. Older sessions with no stored mode keep
+ * the driver's compatibility fallback and are deliberately not migrated. */
+export function defaultPermissionModeForNewSession(
+  driver: AgentDriverKind,
+  capabilities: AgentCapabilities | undefined,
+): string | undefined {
+  if (driver !== "claude-code") return undefined;
+  const modes = capabilities?.permissionModes;
+  if (!modes?.length) return undefined;
+  if (modes.includes("auto")) return "auto";
+  return modes.includes("acceptEdits") ? "acceptEdits" : undefined;
+}
+
 /** Conductor clamp: sessions of the "conductor" agent must stay in permissionMode "default" —
  * the only mode where every mcp__manager__ mutation parks on a human Allow/Reject card. Any other
  * mode (notably the driver's "acceptEdits" fallback) would let the conductor drive the manager
@@ -2567,6 +2581,9 @@ export class SessionsService {
       this.db.getRunner(req.runnerId)?.agents.find((agent) => agent.id === req.agentId)?.capabilities;
     const requestedConfig = { ...(snapshotSpec?.config ?? req.config ?? {}) };
     if (!snapshotSpec) {
+      if (req.agentId !== CONDUCTOR_AGENT_ID && requestedConfig.permissionMode === undefined) {
+        requestedConfig.permissionMode = defaultPermissionModeForNewSession(launch.driver, agentCapabilities);
+      }
       const explicitConfigError = capabilityConfigError(
         claudeModelConfigForValidation(requestedConfig, agentCapabilities, launch.driver), agentCapabilities,
       );

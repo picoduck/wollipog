@@ -38,11 +38,22 @@ import {
   budgetDecision,
   capabilityConfigError,
   claudeModelConfigForValidation,
+  defaultPermissionModeForNewSession,
   normalizeClaudePersistedConfig,
   resolveEffectiveModelEffort,
   sessionBlocksConversationFork,
   type PreStagedDeliveryPlan,
 } from "./sessions.js";
+
+test("new Claude sessions choose Auto only when the connected installation advertises it", () => {
+  const base = { models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true };
+  assert.equal(defaultPermissionModeForNewSession("claude-code", { ...base, permissionModes: ["default", "auto", "acceptEdits"] }), "auto");
+  assert.equal(defaultPermissionModeForNewSession("claude-code", { ...base, permissionModes: ["default", "acceptEdits"] }), "acceptEdits");
+  assert.equal(defaultPermissionModeForNewSession("claude-code", { ...base, permissionModes: ["default"] }), undefined);
+  assert.equal(defaultPermissionModeForNewSession("claude-code", { ...base, permissionModes: [] }), undefined);
+  assert.equal(defaultPermissionModeForNewSession("claude-code", undefined), undefined);
+  assert.equal(defaultPermissionModeForNewSession("codex-app-server", { ...base, permissionModes: ["auto-review"] }), undefined);
+});
 
 test("effective model and effort resolution follows explicit, advertised, preferred, and deterministic fallbacks", () => {
   const caps = {
@@ -1088,6 +1099,45 @@ test("createRun rejects member counts that cannot be represented by the live UI 
   assert.equal(db.listRuns().length, 0);
   assert.equal(db.listSessions({ includeArchived: true }).length, 0);
   assert.equal(hub.sentOfType("start_session").length, 0);
+});
+
+test("createSession persists and launches the capability-dependent Claude permission default", () => {
+  const { db, hub, svc } = makeHarness();
+  const updateModes = (permissionModes: string[]) => db.updateRunnerAgents(
+    RUNNER_ID,
+    runnerMeta().agents.map((agent) => agent.id === AGENT_ID ? {
+      ...agent,
+      capabilities: {
+        models: [], effortLevels: [], slashCommands: [], supportsImages: true,
+        supportsApprovals: true, permissionModes,
+      },
+    } : agent),
+    Date.now(),
+  );
+
+  updateModes(["default", "auto", "acceptEdits", "plan"]);
+  const supported = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
+  assert.ok(supported.ok && supported.data);
+  assert.equal(db.getSession(supported.data.id)!.permissionMode, "auto");
+  assert.equal(hub.sentOfType("start_session").at(-1)!.spec.config.permissionMode, "auto");
+
+  const explicit = svc.createSession({
+    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, config: { permissionMode: "plan" },
+  });
+  assert.ok(explicit.ok && explicit.data);
+  assert.equal(db.getSession(explicit.data.id)!.permissionMode, "plan");
+
+  updateModes(["default", "acceptEdits", "plan"]);
+  const unsupported = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
+  assert.ok(unsupported.ok && unsupported.data);
+  assert.equal(db.getSession(unsupported.data.id)!.permissionMode, "acceptEdits");
+  assert.equal(hub.sentOfType("start_session").at(-1)!.spec.config.permissionMode, "acceptEdits");
+
+  updateModes([]);
+  const undiscovered = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
+  assert.ok(undiscovered.ok && undiscovered.data);
+  assert.equal(db.getSession(undiscovered.data.id)!.permissionMode, null);
+  assert.equal(hub.sentOfType("start_session").at(-1)!.spec.config.permissionMode, undefined);
 });
 
 test("createSession persists and launches the resolved concrete model and effort", () => {
