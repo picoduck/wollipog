@@ -47,6 +47,40 @@ test("reminder create, edit, and remove use optimistic revisions", () => {
   db.close();
 });
 
+test("reminder identity rejects stale edits and removals after recreation at the same revision", () => {
+  const db = fixture();
+  const created = db.setSessionReminder({ ...schedule, expectedRevision: 0 });
+  assert.equal(created.kind, "updated");
+  if (created.kind !== "updated") throw new Error("reminder was not created");
+  assert.equal(db.removeSessionReminder(
+    "session-1",
+    LOCAL_OWNER_USER_ID,
+    created.reminder.revision,
+    created.reminder.reminderId,
+  ).kind, "removed");
+
+  const recreated = db.setSessionReminder({ ...schedule, expectedRevision: 0, now: 20 });
+  assert.equal(recreated.kind, "updated");
+  if (recreated.kind !== "updated") throw new Error("reminder was not recreated");
+  assert.equal(recreated.reminder.revision, created.reminder.revision);
+  assert.notEqual(recreated.reminder.reminderId, created.reminder.reminderId);
+
+  assert.equal(db.setSessionReminder({
+    ...schedule,
+    scheduledFor: 200_000,
+    expectedRevision: created.reminder.revision,
+    expectedReminderId: created.reminder.reminderId,
+  }).kind, "conflict");
+  assert.equal(db.removeSessionReminder(
+    "session-1",
+    LOCAL_OWNER_USER_ID,
+    created.reminder.revision,
+    created.reminder.reminderId,
+  ).kind, "conflict");
+  assert.equal(db.getSessionReminder("session-1", LOCAL_OWNER_USER_ID)?.reminderId, recreated.reminder.reminderId);
+  db.close();
+});
+
 test("activity wake compares only control-plane event sequences and fires once", () => {
   const db = fixture();
   db.appendEvent("session-1", { kind: "agent_message", text: "one" }, 1);

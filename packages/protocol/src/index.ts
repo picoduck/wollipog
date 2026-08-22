@@ -4930,6 +4930,9 @@ export interface SetSessionReminderRequest extends SnoozeScheduleInput {
   wakePolicy: SessionReminderWakePolicy;
   /** Required when replacing an existing reminder; rejects stale multi-client edits. */
   expectedRevision?: number;
+  /** Identity paired with expectedRevision so a removed-and-recreated reminder cannot be mistaken
+   * for the caller's prior reminder when both happen to have the same revision. */
+  expectedReminderId?: string;
   /** Fired-state facts copied from the caller's observed reminder only when Undo restores it.
    * The server requires an optimistic revision and validates both bounded fields. */
   restoreFired?: {

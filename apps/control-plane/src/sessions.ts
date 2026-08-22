@@ -4296,6 +4296,11 @@ export class SessionsService {
         (!Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0)) {
       return fail("expectedRevision must be a non-negative integer", 400);
     }
+    if (request.expectedReminderId !== undefined &&
+        (request.expectedRevision === undefined || typeof request.expectedReminderId !== "string" ||
+          !request.expectedReminderId || request.expectedReminderId.length > 128)) {
+      return fail("expectedReminderId must be a bounded string paired with expectedRevision", 400);
+    }
     const restoreFired = request.restoreFired;
     const validWakeReasons = new Set(["scheduled", "agent_response", "approval", "question", "failure", "background_job"]);
     if (restoreFired !== undefined && (restoreFired === null || typeof restoreFired !== "object" ||
@@ -4312,6 +4317,7 @@ export class SessionsService {
       originalExpression: request.originalExpression.trim(),
       wakePolicy: request.wakePolicy,
       ...(request.expectedRevision === undefined ? {} : { expectedRevision: request.expectedRevision }),
+      ...(request.expectedReminderId === undefined ? {} : { expectedReminderId: request.expectedReminderId }),
       ...(restoreFired === undefined ? {} : { restoreFired }),
       now,
     });
@@ -4321,8 +4327,13 @@ export class SessionsService {
     return ok(result.reminder);
   }
 
-  removeReminder(sessionId: string, userId: string, expectedRevision?: number): ServiceResult<{ removed: true }> {
-    const result = this.db.removeSessionReminder(sessionId, userId, expectedRevision);
+  removeReminder(
+    sessionId: string,
+    userId: string,
+    expectedRevision?: number,
+    expectedReminderId?: string,
+  ): ServiceResult<{ removed: true }> {
+    const result = this.db.removeSessionReminder(sessionId, userId, expectedRevision, expectedReminderId);
     if (result.kind === "conflict") return fail("reminder changed in another client; reload and try again", 409);
     if (result.kind === "removed") this.hub.sessionReminderRemoved(userId, sessionId);
     return ok({ removed: true });

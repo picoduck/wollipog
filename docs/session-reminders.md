@@ -16,6 +16,10 @@ pause, restart, archive, or otherwise change the runtime or lifecycle state of a
   sessions are omitted from both Inbox reminder views. Deleting a session cascades its reminders.
 - Shared sessions have independent schedules for each user. A reminder remains owned by its creating
   user across access-scope changes, but is returned only while that user can access the session.
+- If a stored reminder changes while its Snooze dialog is open, the local schedule and Wake Policy
+  draft stay intact and the dialog announces the conflict. Saving and removal remain unavailable
+  until the user deliberately reloads the stored reminder. Optimistic writes compare both revision
+  and reminder identity so a removed-and-recreated reminder cannot be mistaken for the prior row.
 - SQLite backup and restore include the `session_reminders` table. Cross-instance session transfer
   does not currently transfer reminders; this is intentionally deferred until session transfer has
   a user-identity mapping contract.

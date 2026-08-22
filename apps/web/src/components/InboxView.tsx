@@ -629,20 +629,25 @@ export function InboxView({
           originalExpression: previous.originalExpression,
           wakePolicy: previous.wakePolicy,
           expectedRevision: updated.revision,
+          expectedReminderId: updated.reminderId,
           ...(previous.state === "fired" && previous.firedAt !== undefined && previous.wakeReason !== undefined
             ? { restoreFired: { firedAt: previous.firedAt, wakeReason: previous.wakeReason } }
             : {}),
         });
       } else {
-        await api.removeReminder(sessionId, updated.revision);
+        await api.removeReminder(sessionId, updated.revision, updated.reminderId);
       }
     });
   }, [api, reminders, showUndo]);
 
-  const removeReminder = useCallback(async (sessionId: string) => {
+  const removeReminder = useCallback(async (
+    sessionId: string,
+    expectedRevision: number,
+    expectedReminderId: string,
+  ) => {
     const previous = reminders.get(sessionId);
     if (!previous) return;
-    await api.removeReminder(sessionId, previous.revision);
+    await api.removeReminder(sessionId, expectedRevision, expectedReminderId);
     showUndo("Reminder removed.", async () => {
       await api.setReminder(sessionId, {
         scheduledFor: previous.scheduledFor,
@@ -1065,11 +1070,12 @@ export function InboxView({
       )}
       {snoozeSessionId && sessionRemindersSupported && (
         <SnoozeDialog
-          key={`${snoozeSessionId}:${reminders.get(snoozeSessionId)?.revision ?? 0}`}
+          key={snoozeSessionId}
           reminder={reminders.get(snoozeSessionId)}
           onClose={() => setSnoozeSessionId(null)}
           onSave={(request) => saveReminder(snoozeSessionId, request)}
-          onRemove={reminders.has(snoozeSessionId) ? () => removeReminder(snoozeSessionId) : undefined}
+          onRemove={(expectedRevision, expectedReminderId) =>
+            removeReminder(snoozeSessionId, expectedRevision, expectedReminderId)}
         />
       )}
     </div>

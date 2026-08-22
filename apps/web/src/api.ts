@@ -594,10 +594,15 @@ export function createApiClient(transport: ApiTransport) {
       body: JSON.stringify(body),
     }),
 
-  removeReminder: (id: string, revision?: number) =>
-    req<{ removed: true }>(`/api/sessions/${encodeURIComponent(id)}/reminder${
-      revision === undefined ? "" : `?revision=${encodeURIComponent(String(revision))}`
-    }`, { method: "DELETE" }),
+  removeReminder: (id: string, revision?: number, reminderId?: string) => {
+    const query = new URLSearchParams();
+    if (revision !== undefined) query.set("revision", String(revision));
+    if (reminderId !== undefined) query.set("reminderId", reminderId);
+    const serialized = query.toString();
+    return req<{ removed: true }>(`/api/sessions/${encodeURIComponent(id)}/reminder${
+      serialized ? `?${serialized}` : ""
+    }`, { method: "DELETE" });
+  },
 
   /** Legacy compatibility adapter: re-file by workspace identity (null means no workspace group). */
   setWorkspace: (id: string, workspaceId: string | null) =>

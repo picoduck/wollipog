@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
+import { Simulate } from "react-dom/test-utils";
 import { Window } from "happy-dom";
-import type { ControlPlaneToUi, ProjectView, SessionView, UiSnapshotMessage } from "@wollipog/protocol";
+import type { ControlPlaneToUi, ProjectView, SessionReminderView, SessionView, UiSnapshotMessage } from "@wollipog/protocol";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
@@ -284,6 +285,113 @@ test("InboxView keeps mobile browsing order stable before and through a touch", 
     domWindow.dispatchEvent(new domWindow.Event("resize"));
   });
   assert.deepEqual(rowTitles(container), ["Session C", "Session B"]);
+
+  await act(async () => { root.unmount(); });
+  container.remove();
+  mobileViewport = true;
+});
+
+test("a two-client reminder upsert preserves the open Inbox Snooze draft and focus", async () => {
+  mobileViewport = false;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "inbox-reminder-conflict-test",
+    runtimeKey: "inbox-reminder-conflict-test:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  const original: SessionReminderView = {
+    reminderId: "reminder-original",
+    sessionId: "session-reminder",
+    scheduledFor: Date.now() + 86_400_000,
+    timeZone: "America/Chicago",
+    originalExpression: "tomorrow morning",
+    wakePolicy: "until_activity",
+    state: "pending",
+    revision: 1,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+
+  await act(async () => {
+    root.render(
+      <StoreProvider connection={connection} navigation={navigation}>
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+      </StoreProvider>,
+    );
+  });
+  await act(async () => {
+    socket.push({
+      type: "snapshot",
+      capabilities: {
+        sessionSubscriptions: false,
+        boundedDelivery: false,
+        paginatedSessionHistory: false,
+        projects: false,
+        sessionReminders: true,
+      },
+      runners: [],
+      boxes: [],
+      sessions: [session("session-reminder", 10, { status: "input_required" })],
+      reminders: [original],
+      runs: [],
+      pods: [],
+    });
+  });
+
+  await act(async () => { container.querySelector<HTMLButtonElement>(".inbox-row")!.click(); });
+  const snooze = [...container.querySelectorAll<HTMLButtonElement>('button[aria-label="Snooze"]')]
+    .at(0)!;
+  assert.ok(snooze);
+  await act(async () => { snooze.click(); });
+  const expression = container.querySelector<HTMLInputElement>("#snooze-expression")!;
+  const exact = container.querySelector<HTMLInputElement>("#snooze-exact")!;
+  await act(async () => {
+    expression.value = "today at 3:30 pm";
+    Simulate.change(expression);
+    exact.value = "2099-04-05T06:30";
+    Simulate.change(exact);
+    [...container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
+      .find((button) => button.textContent?.includes("Regardless"))!.click();
+    exact.focus();
+  });
+  const draftTimeZone = [...container.querySelectorAll(".snooze-preview span")].at(-1)?.textContent;
+
+  await act(async () => {
+    socket.push({
+      type: "session_reminder_upsert",
+      userId: "usr_local_owner",
+      reminder: {
+        ...original,
+        scheduledFor: Date.now() + 172_800_000,
+        timeZone: "Asia/Tokyo",
+        originalExpression: "2099-05-06T07:45",
+        revision: 2,
+        updatedAt: 2,
+      },
+    });
+  });
+
+  assert.equal(domWindow.document.activeElement, exact);
+  assert.equal(expression.value, "today at 3:30 pm");
+  assert.equal(exact.value, "2099-04-05T06:30");
+  assert.equal(container.querySelector<HTMLButtonElement>('.snooze-policy [role="radio"][aria-checked="true"]')?.textContent?.includes("Regardless"), true);
+  assert.equal([...container.querySelectorAll(".snooze-preview span")].at(-1)?.textContent, draftTimeZone);
+  assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /updated in another client/i);
+  const submit = container.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+  assert.equal(submit.disabled, false);
+  assert.equal(submit.getAttribute("aria-disabled"), "true");
+
+  const cancel = [...container.querySelectorAll<HTMLButtonElement>("button")]
+    .find((button) => button.textContent === "Cancel")!;
+  await act(async () => { cancel.click(); });
+  await act(async () => { snooze.click(); });
+  assert.equal(container.querySelector<HTMLInputElement>("#snooze-expression")?.value, "");
+  assert.equal(container.querySelector<HTMLInputElement>("#snooze-exact")?.value, "2099-05-06T07:45");
+  assert.equal(container.querySelector('[role="alert"]'), null, "closing still discards the local draft normally");
 
   await act(async () => { root.unmount(); });
   container.remove();

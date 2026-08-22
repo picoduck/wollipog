@@ -6292,6 +6292,20 @@ button.file-head.source-path-link {
 .snooze-presets { display: flex; flex-wrap: wrap; gap: 7px; }
 .snooze-form .field-label { margin: 4px 0 -4px; }
 .snooze-form .field-hint { color: var(--text-faint); font-size: var(--text-sm); line-height: 1.4; }
+.snooze-conflict {
+  display: grid;
+  justify-items: start;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--yellow) 45%, var(--border));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--yellow) 8%, var(--bg-elev-2));
+  color: var(--text-dim-on-tint);
+  font-size: var(--text-sm);
+  line-height: 1.4;
+}
+.snooze-conflict strong { color: var(--text); }
+.snooze-dialog .btn[aria-disabled="true"] { cursor: not-allowed; opacity: 0.55; }
 .snooze-policy { margin-top: var(--space-1); }
 .snooze-preview {
   display: grid;
