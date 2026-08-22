@@ -22,6 +22,7 @@ import {
   validatePromptImages,
   validateQuestionAnswers,
   type AgentContext,
+  type AgentDriverKind,
   type AcpSessionContextConfig,
   type AgentCapabilities,
   type ApprovalQueueItem,
@@ -383,8 +384,16 @@ export function capabilityConfigError(
   if (config.model && capabilities.models.length && !capabilities.models.some((model) => model.id === config.model)) {
     return `model ${JSON.stringify(config.model)} is not supported by this agent installation`;
   }
-  if (config.effort && !capabilities.effortLevels.includes(config.effort)) {
-    return `effort ${JSON.stringify(config.effort)} is not supported by this agent installation`;
+  if (config.effort) {
+    const selectedModel = config.model
+      ? capabilities.models.find((model) => model.id === config.model)
+      : undefined;
+    const supportedEfforts = selectedModel?.efforts?.length
+      ? selectedModel.efforts
+      : capabilities.effortLevels;
+    if (!supportedEfforts.includes(config.effort)) {
+      return "effort " + JSON.stringify(config.effort) + " is not supported by this agent installation";
+    }
   }
   if (config.permissionMode && !(capabilities.permissionModes ?? []).includes(config.permissionMode)) {
     return `permission mode ${JSON.stringify(config.permissionMode)} is not supported by this agent installation`;
@@ -401,7 +410,13 @@ export function normalizeClaudePersistedConfig(
   driver: string,
 ): SessionConfig {
   if (driver !== "claude-code" || !capabilities) return config;
-  const effort = config.effort && capabilities.effortLevels.includes(config.effort) ? config.effort : undefined;
+  const selectedModel = config.model
+    ? capabilities.models.find((model) => model.id === config.model)
+    : undefined;
+  const supportedEfforts = selectedModel?.efforts?.length
+    ? selectedModel.efforts
+    : capabilities.effortLevels;
+  const effort = config.effort && supportedEfforts.includes(config.effort) ? config.effort : undefined;
   const configuredMode = config.permissionMode;
   const permissionMode = configuredMode && (capabilities.permissionModes ?? []).includes(configuredMode)
     ? configuredMode
@@ -442,6 +457,58 @@ function claudeCatalogFamily(value: string): string | null {
   return claudeStableAliasFamily(normalized)
     ?? /^claude-(opus|fable|sonnet|haiku)-\d+(?:-\d+)?(?:-\d{8})?(?:\[1m\])?$/.exec(normalized)?.[1]
     ?? null;
+}
+
+const EFFORT_FALLBACK_ORDER = ["high", "medium", "low", "xhigh", "max", "minimal"] as const;
+
+export type EffectiveModelEffort = { model: string; effort: string };
+
+/** Resolve provider defaults into an explicit, capability-compatible pair without relying on discovery order. */
+export function resolveEffectiveModelEffort(
+  config: Pick<SessionConfig, "model" | "effort">,
+  capabilities: AgentCapabilities | undefined,
+  driver: AgentDriverKind,
+): { value?: EffectiveModelEffort; error?: string } {
+  if (!capabilities?.models?.length) return {};
+  const concrete = capabilities.models.filter((model) => model.id !== "default");
+  const selectable = concrete.filter((model) => !model.hidden);
+  const effortsFor = (model: AgentCapabilities["models"][number]) =>
+    (model.efforts?.length ? model.efforts : capabilities.effortLevels) ?? [];
+  if (!concrete.some((model) => effortsFor(model).length)) return {};
+  if (!selectable.length) return { error: "No visible concrete model is advertised. Rediscover the runner or choose a compatible agent." };
+
+  const explicitFamily = driver === "claude-code" && config.model
+    ? claudeCatalogFamily(config.model)
+    : null;
+  const explicitModel = config.model && config.model !== "default"
+    ? concrete.find((model) => model.id === config.model)
+      ?? (explicitFamily
+        ? concrete.find((model) => claudeCatalogFamily(model.id) === explicitFamily)
+        : undefined)
+    : undefined;
+  const advertised = selectable.find((model) => model.default);
+  const preferredPattern = driver === "claude-code" ? /(?:^|[-_])opus(?:$|[-_\[])/i : /gpt[-_.]?5\.6[-_.]?sol/i;
+  const preferred = selectable.find((model) => preferredPattern.test(model.id))
+    ?? selectable.find((model) => preferredPattern.test(model.displayName ?? ""));
+  const compatible = [...selectable]
+    .filter((model) => effortsFor(model).length)
+    .sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  const model = explicitModel ?? advertised ?? preferred ?? compatible[0];
+  if (!model) return { error: "No concrete supported model and reasoning effort are advertised. Rediscover the runner or choose a compatible agent." };
+  const efforts = effortsFor(model);
+  if (!efforts.length) return { error: `Model "${model.displayName ?? model.id}" advertises no supported reasoning effort. Choose another model or rediscover the runner.` };
+  const explicitEffort = config.effort && efforts.includes(config.effort) ? config.effort : undefined;
+  const advertisedEffort = model.defaultEffort && efforts.includes(model.defaultEffort) ? model.defaultEffort : undefined;
+  const preferredEffort = efforts.includes("high") ? "high" : undefined;
+  const fallbackEffort = EFFORT_FALLBACK_ORDER.find((effort) => efforts.includes(effort))
+    ?? [...efforts].sort()[0];
+  const effort = explicitEffort ?? advertisedEffort ?? preferredEffort ?? fallbackEffort;
+  const preserveExplicitModel = explicitModel && config.model && (
+    explicitModel.id === config.model || claudeStableAliasFamily(config.model) !== null
+  );
+  const resolvedModel = preserveExplicitModel ? config.model! : model.id;
+  return effort ? { value: { model: resolvedModel, effort } }
+    : { error: `Model "${model.displayName ?? model.id}" has no concrete supported reasoning effort.` };
 }
 
 export function sessionBlocksConversationFork(status: SessionStatus): boolean {
@@ -486,6 +553,20 @@ export { budgetDecision } from "./policy-engine.js";
 /** The conductor's agent id — a contract constant shared with the runner's agent synthesis and
  * provisioning (apps/runner/src/conductor.ts). Renaming one side breaks the enforcement pairing. */
 const CONDUCTOR_AGENT_ID = "conductor";
+
+/** Persist the capability-dependent Claude default at creation time so the selector, stored
+ * session, and launch argv all describe the same mode. Older sessions with no stored mode keep
+ * the driver's compatibility fallback and are deliberately not migrated. */
+export function defaultPermissionModeForNewSession(
+  driver: AgentDriverKind,
+  capabilities: AgentCapabilities | undefined,
+): string | undefined {
+  if (driver !== "claude-code") return undefined;
+  const modes = capabilities?.permissionModes;
+  if (!modes?.length) return undefined;
+  if (modes.includes("auto")) return "auto";
+  return modes.includes("acceptEdits") ? "acceptEdits" : undefined;
+}
 
 /** Conductor clamp: sessions of the "conductor" agent must stay in permissionMode "default" —
  * the only mode where every mcp__manager__ mutation parks on a human Allow/Reject card. Any other
@@ -2498,7 +2579,19 @@ export class SessionsService {
     }
     const agentCapabilities = snapshotSpec?.capabilities ??
       this.db.getRunner(req.runnerId)?.agents.find((agent) => agent.id === req.agentId)?.capabilities;
-    const requestedConfig = snapshotSpec?.config ?? req.config ?? {};
+    const requestedConfig = { ...(snapshotSpec?.config ?? req.config ?? {}) };
+    if (!snapshotSpec) {
+      if (req.agentId !== CONDUCTOR_AGENT_ID && requestedConfig.permissionMode === undefined) {
+        requestedConfig.permissionMode = defaultPermissionModeForNewSession(launch.driver, agentCapabilities);
+      }
+      const explicitConfigError = capabilityConfigError(
+        claudeModelConfigForValidation(requestedConfig, agentCapabilities, launch.driver), agentCapabilities,
+      );
+      if (explicitConfigError) return fail(explicitConfigError, 409);
+      const resolved = resolveEffectiveModelEffort(requestedConfig, agentCapabilities, launch.driver);
+      if (resolved.error) return fail(resolved.error, 409);
+      if (resolved.value) Object.assign(requestedConfig, resolved.value);
+    }
     const validationConfig = claudeModelConfigForValidation(requestedConfig, agentCapabilities, launch.driver);
     const modelImageValidation = validateModelImageSupport(images, agentCapabilities, validationConfig.model);
     if (!modelImageValidation.ok) return fail(modelImageValidation.error ?? "model does not support image input", 400);
@@ -2758,8 +2851,23 @@ export class SessionsService {
           ? { elicitation: session.agentCapabilities.elicitation }
           : undefined,
     );
-    const validationConfig = effectiveConfig
-      ? claudeModelConfigForValidation(effectiveConfig, agentCapabilities, session.driver)
+    let resolvedEffectiveConfig = effectiveConfig;
+    if (!snapshotCommand) {
+      if (effectiveConfig) {
+        const explicitConfigError = capabilityConfigError(
+          claudeModelConfigForValidation(effectiveConfig, agentCapabilities, session.driver), agentCapabilities,
+        );
+        if (explicitConfigError) return fail(explicitConfigError, 409);
+      }
+      const resolved = resolveEffectiveModelEffort({
+        model: resolvedEffectiveConfig?.model ?? session.model ?? undefined,
+        effort: effectiveConfig?.effort ?? (effectiveConfig?.model ? undefined : session.effort ?? undefined),
+      }, agentCapabilities, session.driver);
+      if (resolved.error) return fail(resolved.error, 409);
+      if (resolved.value) resolvedEffectiveConfig = { ...effectiveConfig, ...resolved.value };
+    }
+    const validationConfig = resolvedEffectiveConfig
+      ? claudeModelConfigForValidation(resolvedEffectiveConfig, agentCapabilities, session.driver)
       : undefined;
     if (!snapshotCommand) {
       const modelImageValidation = validateModelImageSupport(
@@ -2784,8 +2892,8 @@ export class SessionsService {
       permissionMode: effectiveConfig?.permissionMode,
     } : normalizeClaudePersistedConfig(
       {
-        model: effectiveConfig?.model ?? session.model ?? undefined,
-        effort: effectiveConfig?.effort ?? session.effort ?? undefined,
+        model: resolvedEffectiveConfig?.model ?? session.model ?? undefined,
+        effort: resolvedEffectiveConfig?.effort ?? session.effort ?? undefined,
         permissionMode: effectiveConfig?.permissionMode ?? session.permissionMode ?? undefined,
       },
       agentCapabilities,
@@ -2939,6 +3047,16 @@ export class SessionsService {
           ? { elicitation: session.agentCapabilities.elicitation }
           : undefined,
     );
+    const explicitConfigError = capabilityConfigError(
+      claudeModelConfigForValidation(config, agentCapabilities, session.driver), agentCapabilities,
+    );
+    if (explicitConfigError) return fail(explicitConfigError, 409);
+    const resolvedModelEffort = resolveEffectiveModelEffort({
+      model: config.model ?? session.model ?? undefined,
+      effort: config.effort ?? (config.model ? undefined : session.effort ?? undefined),
+    }, agentCapabilities, session.driver);
+    if (resolvedModelEffort.error) return fail(resolvedModelEffort.error, 409);
+    if (resolvedModelEffort.value) config = { ...config, ...resolvedModelEffort.value };
     const validationConfig = claudeModelConfigForValidation(config, agentCapabilities, session.driver);
     const configCapabilityError = capabilityConfigError(validationConfig, agentCapabilities);
     if (configCapabilityError) return fail(configCapabilityError, 409);

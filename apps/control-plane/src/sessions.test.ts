@@ -38,10 +38,40 @@ import {
   budgetDecision,
   capabilityConfigError,
   claudeModelConfigForValidation,
+  defaultPermissionModeForNewSession,
   normalizeClaudePersistedConfig,
+  resolveEffectiveModelEffort,
   sessionBlocksConversationFork,
   type PreStagedDeliveryPlan,
 } from "./sessions.js";
+
+test("new Claude sessions choose Auto only when the connected installation advertises it", () => {
+  const base = { models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true };
+  assert.equal(defaultPermissionModeForNewSession("claude-code", { ...base, permissionModes: ["default", "auto", "acceptEdits"] }), "auto");
+  assert.equal(defaultPermissionModeForNewSession("claude-code", { ...base, permissionModes: ["default", "acceptEdits"] }), "acceptEdits");
+  assert.equal(defaultPermissionModeForNewSession("claude-code", { ...base, permissionModes: ["default"] }), undefined);
+  assert.equal(defaultPermissionModeForNewSession("claude-code", { ...base, permissionModes: [] }), undefined);
+  assert.equal(defaultPermissionModeForNewSession("claude-code", undefined), undefined);
+  assert.equal(defaultPermissionModeForNewSession("codex-app-server", { ...base, permissionModes: ["auto-review"] }), undefined);
+});
+
+test("effective model and effort resolution follows explicit, advertised, preferred, and deterministic fallbacks", () => {
+  const caps = {
+    models: [
+      { id: "default", default: true },
+      { id: "zeta", efforts: ["low"] },
+      { id: "gpt-5.6-sol", efforts: ["medium", "high"], defaultEffort: "medium" },
+    ],
+    effortLevels: ["low", "medium", "high"], slashCommands: [], supportsImages: true, supportsApprovals: true,
+  };
+  assert.deepEqual(resolveEffectiveModelEffort({ model: "zeta", effort: "low" }, caps, "codex-app-server").value, { model: "zeta", effort: "low" });
+  assert.deepEqual(resolveEffectiveModelEffort({}, caps, "codex-app-server").value, { model: "gpt-5.6-sol", effort: "medium" });
+  const noAdvertisedDefault = { ...caps, models: caps.models.map((model) => ({ ...model, default: false })) };
+  assert.deepEqual(resolveEffectiveModelEffort({}, noAdvertisedDefault, "codex-app-server").value, { model: "gpt-5.6-sol", effort: "medium" });
+  const noPreferred = { ...caps, models: [{ id: "hidden", hidden: true, efforts: ["high"] }, { id: "zeta", efforts: ["low"] }, { id: "alpha", efforts: ["medium"] }] };
+  assert.deepEqual(resolveEffectiveModelEffort({}, noPreferred, "codex-app-server").value, { model: "alpha", effort: "medium" });
+  assert.deepEqual(resolveEffectiveModelEffort({ model: "missing", effort: "xhigh" }, noPreferred, "codex-app-server").value, { model: "alpha", effort: "medium" });
+});
 
 test("conversation forks fail closed for every in-progress source lifecycle", () => {
   for (const status of ["queued", "starting", "running", "input_required"] as const) {
@@ -61,6 +91,12 @@ test("capability config validation rejects unverified effort and permission mode
   assert.match(capabilityConfigError({ model: "missing" }, { ...caps, models: [{ id: "known" }] })!, /model/);
   assert.match(capabilityConfigError({ permissionMode: "auto" }, caps)!, /permission mode/);
   assert.equal(capabilityConfigError({ effort: "low", permissionMode: "acceptEdits" }, caps), null);
+  const perModelCaps = {
+    ...caps,
+    models: [{ id: "visible", efforts: ["low"] }, { id: "legacy", hidden: true, efforts: ["minimal"] }],
+  };
+  assert.equal(capabilityConfigError({ model: "legacy", effort: "minimal" }, perModelCaps), null);
+  assert.match(capabilityConfigError({ model: "legacy", effort: "low" }, perModelCaps)!, /effort/);
 });
 
 test("persisted Claude config normalization drops stale knobs and preserves the conductor gate", () => {
@@ -1063,6 +1099,71 @@ test("createRun rejects member counts that cannot be represented by the live UI 
   assert.equal(db.listRuns().length, 0);
   assert.equal(db.listSessions({ includeArchived: true }).length, 0);
   assert.equal(hub.sentOfType("start_session").length, 0);
+});
+
+test("createSession persists and launches the capability-dependent Claude permission default", () => {
+  const { db, hub, svc } = makeHarness();
+  const updateModes = (permissionModes: string[]) => db.updateRunnerAgents(
+    RUNNER_ID,
+    runnerMeta().agents.map((agent) => agent.id === AGENT_ID ? {
+      ...agent,
+      capabilities: {
+        models: [], effortLevels: [], slashCommands: [], supportsImages: true,
+        supportsApprovals: true, permissionModes,
+      },
+    } : agent),
+    Date.now(),
+  );
+
+  updateModes(["default", "auto", "acceptEdits", "plan"]);
+  const supported = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
+  assert.ok(supported.ok && supported.data);
+  assert.equal(db.getSession(supported.data.id)!.permissionMode, "auto");
+  assert.equal(hub.sentOfType("start_session").at(-1)!.spec.config.permissionMode, "auto");
+
+  const explicit = svc.createSession({
+    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, config: { permissionMode: "plan" },
+  });
+  assert.ok(explicit.ok && explicit.data);
+  assert.equal(db.getSession(explicit.data.id)!.permissionMode, "plan");
+
+  updateModes(["default", "acceptEdits", "plan"]);
+  const unsupported = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
+  assert.ok(unsupported.ok && unsupported.data);
+  assert.equal(db.getSession(unsupported.data.id)!.permissionMode, "acceptEdits");
+  assert.equal(hub.sentOfType("start_session").at(-1)!.spec.config.permissionMode, "acceptEdits");
+
+  updateModes([]);
+  const undiscovered = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
+  assert.ok(undiscovered.ok && undiscovered.data);
+  assert.equal(db.getSession(undiscovered.data.id)!.permissionMode, null);
+  assert.equal(hub.sentOfType("start_session").at(-1)!.spec.config.permissionMode, undefined);
+});
+
+test("createSession persists and launches the resolved concrete model and effort", () => {
+  const { db, hub, svc } = makeHarness();
+  db.updateRunnerAgents(
+    RUNNER_ID,
+    runnerMeta().agents.map((agent) => agent.id === AGENT_ID ? {
+      ...agent,
+      capabilities: {
+        models: [
+          { id: "default", displayName: "Default (Sonnet)", default: true },
+          { id: "opus", displayName: "Opus 5", efforts: ["low", "high"] },
+        ],
+        effortLevels: ["low", "high"], slashCommands: [], supportsImages: true,
+        supportsApprovals: true, permissionModes: ["acceptEdits"],
+      },
+    } : agent),
+    Date.now(),
+  );
+
+  const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
+  assert.ok(created.ok && created.data, created.error);
+  assert.equal(db.getSession(created.data.id)?.model, "opus");
+  assert.equal(db.getSession(created.data.id)?.effort, "high");
+  assert.equal(hub.sentOfType("start_session").at(-1)?.spec.config.model, "opus");
+  assert.equal(hub.sentOfType("start_session").at(-1)?.spec.config.effort, "high");
 });
 
 test("createSession online → 201 and sends start_session with the right launch spec", () => {
@@ -2881,9 +2982,9 @@ test("prompt heals persisted Claude knobs without rewriting a compatible model a
   const res = svc.prompt(id, "continue");
   assert.equal(res.ok, true);
   assert.equal(db.getSession(id)!.model, "opus");
-  assert.equal(db.getSession(id)!.effort, null);
+  assert.equal(db.getSession(id)!.effort, "low");
   assert.equal(db.getSession(id)!.permissionMode, null);
-  assert.deepEqual(sentPromptCommands(hub)[0]!.config, { model: "opus" });
+  assert.deepEqual(sentPromptCommands(hub)[0]!.config, { model: "opus", effort: "low" });
 });
 
 test("explicit unsupported Claude effort and permission values still fail capability validation", () => {
@@ -2952,6 +3053,62 @@ test("fallback family compatibility never rewrites a persisted live Claude model
   assert.equal(result.ok, true, result.error);
   assert.equal(db.getSession(id)?.model, "opus[1m]");
   assert.equal(hub.sentOfType("prompt_session")[0]?.config?.model, "opus[1m]");
+});
+
+test("prompt accepts a persisted hidden model effort advertised by that model", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { config: { model: "legacy", effort: "minimal" } });
+  db.updateSessionStatus(id, "idle", Date.now());
+  db.updateRunnerAgents(
+    RUNNER_ID,
+    runnerMeta().agents.map((agent) => agent.id === AGENT_ID ? {
+      ...agent,
+      capabilities: {
+        models: [
+          { id: "visible", efforts: ["low", "high"] },
+          { id: "legacy", hidden: true, efforts: ["minimal"] },
+        ],
+        effortLevels: ["low", "high"], slashCommands: [], supportsImages: true,
+        supportsApprovals: true, permissionModes: ["acceptEdits"],
+      },
+    } : agent),
+    Date.now(),
+  );
+  hub.sentToRunner.length = 0;
+
+  const result = svc.prompt(id, "continue");
+  assert.equal(result.ok, true, result.error);
+  assert.equal(hub.sentOfType("prompt_session")[0]?.config?.model, "legacy");
+  assert.equal(hub.sentOfType("prompt_session")[0]?.config?.effort, "minimal");
+});
+
+test("stale Claude family ids heal to an advertised concrete model instead of stranding prompts", () => {
+  for (const [staleModel, advertisedModel] of [
+    ["claude-opus-4-20250514", "opus"],
+    ["opus-plan", "opus-fast"],
+  ] as const) {
+    const { db, hub, svc } = makeHarness();
+    const id = seedSession(svc, hub, { config: { model: staleModel } });
+    db.updateSessionStatus(id, "idle", Date.now());
+    db.updateRunnerAgents(
+      RUNNER_ID,
+      runnerMeta().agents.map((agent) => agent.id === AGENT_ID ? {
+        ...agent,
+        capabilities: {
+          models: [{ id: "default", default: true }, { id: advertisedModel }],
+          effortLevels: ["low"], slashCommands: [], supportsImages: true,
+          supportsApprovals: true, permissionModes: ["acceptEdits"],
+        },
+      } : agent),
+      Date.now(),
+    );
+    hub.sentToRunner.length = 0;
+
+    const result = svc.prompt(id, "continue");
+    assert.equal(result.ok, true, result.error);
+    assert.equal(db.getSession(id)?.model, advertisedModel);
+    assert.equal(hub.sentOfType("prompt_session")[0]?.config?.model, advertisedModel);
+  }
 });
 
 test("prompt is rejected while a cost-budget approval is pending (no bypass)", () => {
