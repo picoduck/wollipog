@@ -61,9 +61,9 @@ function structurallyMatches(
   session: SessionView,
   filters: Pick<ArchiveBrowserFilters, "archive" | "lifecycle">,
 ): boolean {
-  const stopPending = session.archiveStatus === "stop_pending";
+  const pendingArchive = session.archiveStatus === "stop_pending" || session.archiveStatus === "stop_failed";
   const archiveMatches = filters.archive === "all" ||
-    (filters.archive === "archived" ? session.archived || stopPending : !session.archived && !stopPending);
+    (filters.archive === "archived" ? session.archived || pendingArchive : !session.archived && !pendingArchive);
   return archiveMatches && (filters.lifecycle === "all" || session.status === filters.lifecycle);
 }
 

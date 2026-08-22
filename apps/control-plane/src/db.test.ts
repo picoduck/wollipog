@@ -4340,3 +4340,20 @@ test("archive page SQL bounds candidate materialization before cursor hydration"
   assert.equal(second.hasMore, false);
   assert.equal(new Set([...first.sessionIds, ...second.sessionIds]).size, 60);
 });
+
+test("archive page SQL preserves Stop Failed recovery state", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "stop-failed" }));
+  const intent = db.addSessionStopIntent("stop-failed", "runner-1", 1_100, true);
+  assert.equal(db.failSessionStopIntent(
+    "stop-failed",
+    intent.operation.operationId,
+    "retry_exhausted",
+    "Automatic retries were exhausted.",
+    1_200,
+  ), true);
+  const candidates = db.archiveSessionCandidatePageForPrincipal(localOwner(), {});
+  assert.ok(!("error" in candidates));
+  if ("error" in candidates) throw new Error(candidates.error);
+  assert.equal(candidates.sessions[0]?.archiveStatus, "stop_failed");
+});

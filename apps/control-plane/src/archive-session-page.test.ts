@@ -55,8 +55,9 @@ test("cursor ordering is stable across live updates and excludes later inserts",
   assert.deepEqual(second.sessionIds, sessions.slice(50).map((item) => item.id));
 });
 
-test("filters include Stop Pending and transcript matches without returning unscoped facets", () => {
+test("filters include recoverable Stop states and transcript matches without returning unscoped facets", () => {
   const pending = session(1, { archived: false, archiveStatus: "stop_pending", status: "stopped" });
+  const failed = session(4, { archived: false, archiveStatus: "stop_failed", status: "stopped" });
   const metadataMatch = session(2, { title: "Release Needle" });
   const transcriptMatch = session(3, { title: "Unrelated", projectName: "Other" });
   const page = archiveSessionPage({
@@ -71,6 +72,9 @@ test("filters include Stop Pending and transcript matches without returning unsc
   const pendingPage = archiveSessionPage({ sessions: [pending], query: {} });
   assert.ok(!("error" in pendingPage));
   assert.deepEqual(pendingPage.sessionIds, [pending.id]);
+  const failedPage = archiveSessionPage({ sessions: [failed], query: {} });
+  assert.ok(!("error" in failedPage));
+  assert.deepEqual(failedPage.sessionIds, [failed.id]);
 });
 
 test("server metadata canonicalizes conductor labels and stays aligned with cursor order", () => {

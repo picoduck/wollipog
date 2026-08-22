@@ -5891,8 +5891,10 @@ export class ControlPlaneDb {
       WHEN session.driver='codex' THEN 'Codex — Non-Interactive (codex exec)'
       ELSE COALESCE(agent.name, session.agent_id, session.driver)
     END`;
-    const stopPendingSql = `EXISTS(SELECT 1 FROM session_stop_intents intent
+    const pendingArchiveSql = `EXISTS(SELECT 1 FROM session_stop_intents intent
       WHERE intent.session_id=session.id AND intent.archive_after_stop=1)`;
+    const stopFailedSql = `EXISTS(SELECT 1 FROM session_stop_intents intent
+      WHERE intent.session_id=session.id AND intent.archive_after_stop=1 AND intent.failed_at IS NOT NULL)`;
     const joins = `FROM sessions session
       JOIN session_ownership ownership ON ownership.session_id=session.id
       LEFT JOIN projects project ON project.id=session.project_id
@@ -5907,8 +5909,8 @@ export class ControlPlaneDb {
       LEFT JOIN agent_definitions agent ON agent.id=session.agent_id`;
     const where = [authorization.sql];
     const params: Array<string | number> = [...authorization.params];
-    if (window.archive === "archived") where.push(`(session.archived=1 OR ${stopPendingSql})`);
-    else if (window.archive === "unarchived") where.push(`session.archived=0 AND NOT ${stopPendingSql}`);
+    if (window.archive === "archived") where.push(`(session.archived=1 OR ${pendingArchiveSql})`);
+    else if (window.archive === "unarchived") where.push(`session.archived=0 AND NOT ${pendingArchiveSql}`);
     if (window.lifecycle !== "all") {
       where.push("session.status=?");
       params.push(window.lifecycle);
@@ -5945,7 +5947,8 @@ export class ControlPlaneDb {
       `SELECT session.id, session.title, session.project_id, project.name AS project_name,
               session.workspace_id, ${locationSql} AS location_name,
               session.agent_id, agent.name AS agent_name, session.driver, session.archived,
-              session.status, session.created_at, ${stopPendingSql} AS stop_pending,
+              session.status, session.created_at, ${pendingArchiveSql} AS pending_archive,
+              ${stopFailedSql} AS stop_failed,
               ${match ? transcriptSql : "0"} AS transcript_match
        ${joins}
        WHERE ${where.join(" AND ")}
@@ -5955,7 +5958,8 @@ export class ControlPlaneDb {
       id: string; title: string; project_id: string | null; project_name: string | null;
       workspace_id: string | null; location_name: string | null; agent_id: string | null;
       agent_name: string | null; driver: SessionView["driver"]; archived: number;
-      status: SessionStatus; created_at: number; stop_pending: number; transcript_match: number;
+      status: SessionStatus; created_at: number; pending_archive: number; stop_failed: number;
+      transcript_match: number;
     }>;
     const sessions = rows.map((row) => ({
       id: row.id,
@@ -5968,7 +5972,9 @@ export class ControlPlaneDb {
       agentName: row.agent_name ?? row.agent_id,
       driver: row.driver,
       archived: row.archived === 1,
-      ...(row.stop_pending === 1 ? { archiveStatus: "stop_pending" as const } : {}),
+      ...(row.pending_archive === 1
+        ? { archiveStatus: row.stop_failed === 1 ? "stop_failed" as const : "stop_pending" as const }
+        : {}),
       status: row.status,
       createdAt: row.created_at,
     }));

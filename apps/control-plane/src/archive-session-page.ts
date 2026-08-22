@@ -166,9 +166,9 @@ export function archiveSessionPage(input: {
   const transcriptIds = new Set(input.transcriptHits?.keys() ?? []);
   const scoped = ordered.filter((session) => {
     if (anchor && !tupleAtOrBelow(session, anchor.anchorCreatedAt, anchor.anchorId)) return false;
-    const stopPending = session.archiveStatus === "stop_pending";
-    if (archive === "archived" && !session.archived && !stopPending) return false;
-    if (archive === "unarchived" && (session.archived || stopPending)) return false;
+    const pendingArchive = session.archiveStatus === "stop_pending" || session.archiveStatus === "stop_failed";
+    if (archive === "archived" && !session.archived && !pendingArchive) return false;
+    if (archive === "unarchived" && (session.archived || pendingArchive)) return false;
     if (lifecycle !== "all" && session.status !== lifecycle) return false;
     const item = metadata(session);
     if (input.query.project && item.project !== input.query.project) return false;

@@ -121,9 +121,9 @@ async function mount(sessions: SessionView[], overrides: Partial<ApiClient> = {}
       archiveInputs.push(input);
       const offset = Number(input.cursor ?? "0");
       const ordered = [...sessions].filter((item) => {
-        const stopPending = item.archiveStatus === "stop_pending";
-        if (input.archive === "archived" && !item.archived && !stopPending) return false;
-        if (input.archive === "unarchived" && (item.archived || stopPending)) return false;
+        const pendingArchive = item.archiveStatus === "stop_pending" || item.archiveStatus === "stop_failed";
+        if (input.archive === "archived" && !item.archived && !pendingArchive) return false;
+        if (input.archive === "unarchived" && (item.archived || pendingArchive)) return false;
         if (input.lifecycle !== "all" && item.status !== input.lifecycle) return false;
         if (input.project && item.projectName !== input.project) return false;
         if (input.location && item.workspaceName !== input.location) return false;
