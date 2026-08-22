@@ -12,6 +12,7 @@ import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { ArchivedSessionsView } from "./ArchivedSessionsView.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
+import { filterArchiveSessions, pageArchiveSessions } from "../archive-browser.js";
 
 const domWindow = new Window({ url: "http://localhost/archived" });
 for (const [name, value] of Object.entries({
@@ -114,6 +115,32 @@ async function mount(sessions: SessionView[], overrides: Partial<ApiClient> = {}
     ...api,
     listAllSessions: async () => ({ sessions }),
     search: async () => ({ results: [] }),
+    archiveSessionPage: async (input) => {
+      const cursorPage = Number(input.cursor ?? "1");
+      const result = pageArchiveSessions(filterArchiveSessions({
+        sessions,
+        filters: {
+          query: input.q ?? "",
+          project: input.project ?? "all",
+          location: input.location ?? "all",
+          agent: input.agent ?? "all",
+          archive: input.archive,
+          lifecycle: input.lifecycle,
+        },
+      }), cursorPage);
+      const nextCursor = result.page < result.pageCount ? String(result.page + 1) : null;
+      return {
+        sessions: result.sessions,
+        snippets: {},
+        nextCursor,
+        hasMore: nextCursor !== null,
+        facets: {
+          projects: ["Wollipog"],
+          locations: ["Local Checkout"],
+          agents: ["Codex — Interactive"],
+        },
+      };
+    },
     ...overrides,
   } as ApiClient;
   await act(async () => {
@@ -150,7 +177,7 @@ function button(container: HTMLElement, label: string): HTMLButtonElement {
 test("empty archives expose labelled choice filters and a screen-reader status", async () => {
   const fixture = await mount([]);
   assert.match(fixture.container.textContent ?? "", /No Archived Sessions/);
-  assert.equal(fixture.container.querySelector('[role="status"]')?.textContent?.trim(), "0 Sessions");
+  assert.equal(fixture.container.querySelector('[role="status"]')?.textContent?.trim(), "Showing 0 Sessions");
   assert.ok([...fixture.container.querySelectorAll("label")]
     .some((label) => label.textContent?.trim().startsWith("Search Sessions and Transcripts")));
   for (const expected of ["Project", "Location", "Agent", "Archive State", "Lifecycle State"]) {
@@ -166,7 +193,7 @@ test("large archives paginate, deep-link, filter, and accept live lifecycle upda
   assert.equal(fixture.container.querySelectorAll("tbody tr").length, 50);
   assert.match(fixture.container.textContent ?? "", /Archived.*Idle/s,
     "archive and canonical lifecycle labels are both text-backed");
-  assert.equal(fixture.container.querySelector('nav[aria-label="Archived Sessions Pagination"]')?.textContent?.includes("Page 1 of 2"), true);
+  assert.equal(fixture.container.querySelector('nav[aria-label="Archived Sessions Pagination"]')?.textContent?.includes("Page 1"), true);
   assert.ok([...fixture.container.querySelectorAll("button")].some((candidate) => candidate.textContent?.trim() === "Stop"),
     "ordinary nonterminal archived sessions retain the Stop action");
   const tableRegion = fixture.container.querySelector<HTMLElement>('[role="region"][aria-label="Archived Sessions Table"]');
@@ -181,7 +208,7 @@ test("large archives paginate, deep-link, filter, and accept live lifecycle upda
 
   await act(async () => { Simulate.click(button(fixture.container, "Next Page")); });
   assert.equal(fixture.container.querySelectorAll("tbody tr").length, 5);
-  assert.match(fixture.container.textContent ?? "", /Page 2 of 2/);
+  assert.match(fixture.container.textContent ?? "", /Page 2/);
 
   const lifecycle = fixture.container.querySelector<HTMLButtonElement>('button[aria-label^="Lifecycle State:"]');
   assert.ok(lifecycle);
@@ -310,14 +337,15 @@ test("a successful deletion cannot be resurrected by the live session overlay", 
   });
   assert.doesNotMatch(fixture.container.textContent ?? "", /Archived Session 4/,
     "an unrelated live update does not merge the deleted cached session back into the catalog");
-  assert.match(fixture.container.textContent ?? "", /Archived Session 5/);
+  assert.doesNotMatch(fixture.container.textContent ?? "", /Archived Session 5/,
+    "a bounded page does not expand based on websocket arrival order");
   await fixture.unmount();
 });
 
-test("transcript search failures disclose the metadata-only fallback", async () => {
+test("paged search failures expose a retryable load error", async () => {
   const archived = session(3, { title: "Metadata Match" });
   const fixture = await mount([archived], {
-    search: async () => { throw new Error("search unavailable"); },
+    archiveSessionPage: async () => { throw new Error("search unavailable"); },
   });
   const input = fixture.container.querySelector<HTMLInputElement>('input[type="search"]');
   assert.ok(input);
@@ -325,10 +353,10 @@ test("transcript search failures disclose the metadata-only fallback", async () 
     input.value = "metadata";
     Simulate.change(input);
   });
-  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
+  await act(async () => { await Promise.resolve(); });
   assert.match(
-    fixture.container.querySelector('[role="status"]')?.textContent ?? "",
-    /Transcript search is unavailable; showing metadata matches\./,
+    fixture.container.textContent ?? "",
+    /Could not load archived sessions: search unavailable/,
   );
   await fixture.unmount();
 });

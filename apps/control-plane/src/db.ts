@@ -9985,7 +9985,7 @@ export class ControlPlaneDb {
    * Results are grouped to DISTINCT sessions (best-ranked hit each) by overfetching raw
    * rows — one chatty session would otherwise consume the whole row budget and collapse to
    * a single visible result, hiding every other matching session. */
-  searchEvents(q: string, limit = 20): { sessionId: string; seq: number; snippet: string }[] {
+  searchEvents(q: string, limit = 20, authorizedSessionIds?: readonly string[]): { sessionId: string; seq: number; snippet: string }[] {
     const match = q
       .split(/\s+/)
       .filter(Boolean)
@@ -9993,10 +9993,14 @@ export class ControlPlaneDb {
       .map((t) => `"${t.replace(/"/g, '""')}"`)
       .join(" ");
     if (!match) return [];
+    if (authorizedSessionIds?.length === 0) return [];
+    const authorization = authorizedSessionIds
+      ? " AND session_id IN (SELECT value FROM json_each(?))"
+      : "";
     const rows = this.stmt(
       `SELECT session_id, seq, snippet(session_events_fts, 0, '⟪', '⟫', '…', 10) AS snip
-         FROM session_events_fts WHERE session_events_fts MATCH ? ORDER BY rank LIMIT ?`,
-    ).all(match, limit * 10) as unknown as { session_id: string; seq: number; snip: string }[];
+         FROM session_events_fts WHERE session_events_fts MATCH ?${authorization} ORDER BY rank LIMIT ?`,
+    ).all(...(authorizedSessionIds ? [match, JSON.stringify(authorizedSessionIds), limit * 10] : [match, limit * 10])) as unknown as { session_id: string; seq: number; snip: string }[];
     const out: { sessionId: string; seq: number; snippet: string }[] = [];
     const seen = new Set<string>();
     for (const r of rows) {

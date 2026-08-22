@@ -4287,3 +4287,20 @@ test("searchEvents groups hits to distinct sessions and indexes stderr/thought t
   assert.equal(hits.length, sessions.size, "one hit per session");
   assert.ok(sessions.has("s_other"), "a chatty session must not crowd out other sessions");
 });
+
+test("searchEvents applies authorized session scope before its ranking window and limit", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "authorized" }));
+  db.createSession(newSession({ id: "inaccessible" }));
+  for (let i = 0; i < 30; i++) {
+    db.appendEvent("inaccessible", { kind: "agent_message", text: `needle inaccessible ${i}` }, i);
+  }
+  db.appendEvent("authorized", { kind: "agent_message", text: "needle authorized result" }, 100);
+
+  assert.deepEqual(
+    db.searchEvents("needle", 1, ["authorized"]).map((hit) => hit.sessionId),
+    ["authorized"],
+    "inaccessible higher-ranked rows cannot consume the authorized result bound",
+  );
+  assert.deepEqual(db.searchEvents("needle", 1, []), []);
+});
