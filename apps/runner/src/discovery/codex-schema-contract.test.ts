@@ -116,16 +116,27 @@ test("pinned schema fixture matches discovery metadata and reports a useful drif
     assert.match(formModeDrift.stderr, /McpServerElicitationRequestParams.*variant removed: mode=form/);
     formVariant.properties.mode.enum = ["form"];
 
-    // MCP url mode: the driver keys the parked request on elicitationId, so losing it must fail the check.
+    // MCP url mode: the driver cancels unless message, serverName, and url are all present.
     const urlVariant = elicitation.oneOf.find(
       (variant: { properties?: { mode?: { enum?: string[] } } }) => variant.properties?.mode?.enum?.includes("url"),
     );
-    urlVariant.required = urlVariant.required.filter((name: string) => name !== "elicitationId");
+    urlVariant.required = urlVariant.required.filter((name: string) => name !== "url");
     writeFileSync(elicitationPath, JSON.stringify(elicitation));
     const urlModeDrift = spawnSync(process.execPath, [script], { encoding: "utf8", env: { ...process.env, CODEX_SCHEMA_DIR: dir } });
     assert.notEqual(urlModeDrift.status, 0);
-    assert.match(urlModeDrift.stderr, /mode=url: required field removed: elicitationId/);
-    urlVariant.required = ["elicitationId", "message", "mode", "url"];
+    assert.match(urlModeDrift.stderr, /mode=url: required field removed: url/);
+    urlVariant.required = ["message", "mode", "url"];
+
+    // elicitationId is only an id fallback for a malformed envelope id, so it is pinned as a
+    // property and not as a required field: Codex making it optional is not drift, renaming is.
+    urlVariant.properties.mcpElicitationId = urlVariant.properties.elicitationId;
+    delete urlVariant.properties.elicitationId;
+    writeFileSync(elicitationPath, JSON.stringify(elicitation));
+    const elicitationIdDrift = spawnSync(process.execPath, [script], { encoding: "utf8", env: { ...process.env, CODEX_SCHEMA_DIR: dir } });
+    assert.notEqual(elicitationIdDrift.status, 0);
+    assert.match(elicitationIdDrift.stderr, /mode=url: property removed: elicitationId/);
+    urlVariant.properties.elicitationId = {};
+    delete urlVariant.properties.mcpElicitationId;
 
     // A consumed property of a nested form control: maxLength drives the free-text bound.
     delete elicitation.definitions.McpElicitationStringSchema.properties.maxLength;
@@ -180,6 +191,46 @@ test("pinned schema fixture matches discovery metadata and reports a useful drif
     assert.match(formatDrift.stderr, /McpElicitationStringFormat.*enum value removed: uri/);
     elicitation.definitions.McpElicitationStringFormat.enum = ["email", "uri", "date", "date-time"];
     writeFileSync(elicitationPath, JSON.stringify(elicitation));
+
+    // The requestUserInput chain normalizeCodexUserInput walks: params -> question -> option, and
+    // the answer map it replies with. Repointing any of these keeps every definition intact.
+    const userInputPath = join(dir, "ToolRequestUserInputParams.json");
+    const userInput = JSON.parse(readFileSync(userInputPath, "utf8"));
+    userInput.properties.questions = { items: { $ref: "#/definitions/ToolRequestUserInputOption" }, type: "array" };
+    writeFileSync(userInputPath, JSON.stringify(userInput));
+    const questionsRefDrift = spawnSync(process.execPath, [script], { encoding: "utf8", env: { ...process.env, CODEX_SCHEMA_DIR: dir } });
+    assert.notEqual(questionsRefDrift.status, 0);
+    assert.match(questionsRefDrift.stderr, /ToolRequestUserInputParams.*property reference removed: questions -> ToolRequestUserInputQuestion/);
+    userInput.properties.questions = { items: { $ref: "#/definitions/ToolRequestUserInputQuestion" }, type: "array" };
+    userInput.definitions.ToolRequestUserInputQuestion.properties.options = { items: { type: "string" }, type: "array" };
+    writeFileSync(userInputPath, JSON.stringify(userInput));
+    const optionsRefDrift = spawnSync(process.execPath, [script], { encoding: "utf8", env: { ...process.env, CODEX_SCHEMA_DIR: dir } });
+    assert.notEqual(optionsRefDrift.status, 0);
+    assert.match(optionsRefDrift.stderr, /ToolRequestUserInputQuestion: property reference removed: options -> ToolRequestUserInputOption/);
+    userInput.definitions.ToolRequestUserInputQuestion.properties.options = { items: { $ref: "#/definitions/ToolRequestUserInputOption" }, type: "array" };
+    writeFileSync(userInputPath, JSON.stringify(userInput));
+
+    const answersPath = join(dir, "ToolRequestUserInputResponse.json");
+    const answers = JSON.parse(readFileSync(answersPath, "utf8"));
+    answers.properties.answers = { additionalProperties: { type: "string" }, type: "object" };
+    writeFileSync(answersPath, JSON.stringify(answers));
+    const answersRefDrift = spawnSync(process.execPath, [script], { encoding: "utf8", env: { ...process.env, CODEX_SCHEMA_DIR: dir } });
+    assert.notEqual(answersRefDrift.status, 0);
+    assert.match(answersRefDrift.stderr, /ToolRequestUserInputResponse.*property reference removed: answers -> ToolRequestUserInputAnswer/);
+    answers.properties.answers = { additionalProperties: { $ref: "#/definitions/ToolRequestUserInputAnswer" }, type: "object" };
+    writeFileSync(answersPath, JSON.stringify(answers));
+
+    // approvalResponse copies params.permissions verbatim into the grant, and the approval card
+    // reads its network field, so both the reference and the consumed field are pinned.
+    const permissionsPath = join(dir, "PermissionsRequestApprovalParams.json");
+    const permissions = JSON.parse(readFileSync(permissionsPath, "utf8"));
+    delete permissions.definitions.RequestPermissionProfile.properties.network;
+    writeFileSync(permissionsPath, JSON.stringify(permissions));
+    const profileDrift = spawnSync(process.execPath, [script], { encoding: "utf8", env: { ...process.env, CODEX_SCHEMA_DIR: dir } });
+    assert.notEqual(profileDrift.status, 0);
+    assert.match(profileDrift.stderr, /RequestPermissionProfile: property removed: network/);
+    permissions.definitions.RequestPermissionProfile.properties.network = {};
+    writeFileSync(permissionsPath, JSON.stringify(permissions));
 
     // Native decision values Wollipog returns: dropping one would make an authorized choice unsendable.
     const decisionPath = join(dir, "CommandExecutionRequestApprovalResponse.json");

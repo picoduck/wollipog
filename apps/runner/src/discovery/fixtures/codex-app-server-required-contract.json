@@ -351,7 +351,18 @@
         "reason",
         "threadId",
         "turnId"
-      ]
+      ],
+      "propertyRefs": {
+        "permissions": "RequestPermissionProfile"
+      },
+      "definitions": {
+        "RequestPermissionProfile": {
+          "properties": [
+            "fileSystem",
+            "network"
+          ]
+        }
+      }
     },
     "CommandExecutionRequestApprovalResponse.json": {
       "required": [
@@ -452,7 +463,10 @@
             "isSecret",
             "options",
             "question"
-          ]
+          ],
+          "propertyRefs": {
+            "options": "ToolRequestUserInputOption"
+          }
         },
         "ToolRequestUserInputOption": {
           "required": [
@@ -464,6 +478,9 @@
             "label"
           ]
         }
+      },
+      "propertyRefs": {
+        "questions": "ToolRequestUserInputQuestion"
       }
     },
     "ToolRequestUserInputResponse.json": {
@@ -482,6 +499,9 @@
             "answers"
           ]
         }
+      },
+      "propertyRefs": {
+        "answers": "ToolRequestUserInputAnswer"
       }
     },
     "McpServerElicitationRequestParams.json": {
@@ -511,12 +531,19 @@
               "requestedSchema": "McpElicitationSchema"
             }
           },
-          "url": [
-            "elicitationId",
-            "message",
-            "mode",
-            "url"
-          ]
+          "url": {
+            "required": [
+              "message",
+              "mode",
+              "url"
+            ],
+            "properties": [
+              "elicitationId",
+              "message",
+              "mode",
+              "url"
+            ]
+          }
         }
       },
       "definitions": {
