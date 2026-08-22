@@ -282,8 +282,11 @@ function setScrollerMetrics(
   });
 }
 
-async function scrollReader(scroller: HTMLElement, scrollTop: number) {
+async function scrollReader(scroller: HTMLElement, scrollTop: number, readerIntent = true) {
   await act(async () => {
+    if (readerIntent) {
+      scroller.dispatchEvent(new domWindow.Event(VIRTUAL_VIEWPORT_INTENT_EVENT) as never);
+    }
     scroller.scrollTop = scrollTop;
     scroller.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as never);
   });
@@ -495,6 +498,9 @@ test("scrolling near the partial window head loads one earlier page and requires
     await scrollReader(fixture.scroller, 500);
     assert.equal(pages.tailCalls.length, 1, "scrolling away from the head does not page");
 
+    await scrollReader(fixture.scroller, 120, false);
+    assert.equal(pages.tailCalls.length, 1, "saved-anchor restoration cannot inherit earlier intent");
+
     await scrollReader(fixture.scroller, 120);
     assert.equal(pages.tailCalls.length, 2, "the near-head scroll requests an earlier page");
     assert.equal(pages.tailCalls[1]!.before, openingWindow[0]!.seq);
@@ -512,11 +518,10 @@ test("scrolling near the partial window head loads one earlier page and requires
       });
     });
     setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 3_200, scrollTop: 1_600 });
-    await scrollReader(fixture.scroller, 1_560);
+    await scrollReader(fixture.scroller, 1_560, false);
     assert.equal(pages.tailCalls.length, 2, "a prepend does not cascade into an uncontrolled request loop");
 
     await flushAsyncWork(10);
-    fixture.scroller.dispatchEvent(new domWindow.Event(VIRTUAL_VIEWPORT_INTENT_EVENT) as never);
     await scrollReader(fixture.scroller, 1_560);
     assert.equal(pages.tailCalls.length, 2, "fresh upward travel far from the new head does not page");
 

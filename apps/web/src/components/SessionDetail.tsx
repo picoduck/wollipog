@@ -538,6 +538,7 @@ function SessionDetailLoaded({
     readerStarted: false,
     settling: false,
     settleFrame: null as number | null,
+    readerIntent: false,
   });
   const [composerSelection, setComposerSelection] = useState({ start: 0, end: 0 });
   const [slashDismissedFor, setSlashDismissedFor] = useState<string | null>(null);
@@ -1125,6 +1126,7 @@ function SessionDetailLoaded({
   }, []);
 
   const markEarlierActivityIntent = useCallback(() => {
+    automaticEarlierLoadRef.current.readerIntent = true;
     cancelEarlierActivitySettle();
   }, [cancelEarlierActivitySettle]);
 
@@ -1162,10 +1164,14 @@ function SessionDetailLoaded({
       state.historyKey = timelineHistoryKey;
       state.requestedBase = null;
       state.nextTriggerTop = null;
+      state.readerIntent = false;
       state.readerStarted = false;
     }
+    const readerIntent = state.readerIntent;
+    state.readerIntent = false;
     if (eventWindow?.hasOlder !== true || eventWindow.loadingOlder || eventWindow.error ||
-        eventWindow.baseSeq <= 1 || state.requestedBase !== null || state.settling) return;
+        eventWindow.baseSeq <= 1 || state.requestedBase !== null || state.settling ||
+        !readerIntent) return;
 
     // A transcript waits until the reader is genuinely near its head, rather than treating every
     // follow-tail scroll as a request for history. A zero-range viewport cannot produce real
@@ -1196,10 +1202,12 @@ function SessionDetailLoaded({
       state.historyKey = timelineHistoryKey;
       state.requestedBase = null;
       state.nextTriggerTop = null;
+      state.readerIntent = false;
       state.readerStarted = false;
     }
     const base = eventWindow?.baseSeq;
     if (base === undefined || !loadOlder()) return;
+    state.readerIntent = false;
     state.readerStarted = true;
     state.nextTriggerTop = null;
     state.requestedBase = base;
@@ -1215,6 +1223,7 @@ function SessionDetailLoaded({
       state.historyKey = timelineHistoryKey;
       state.requestedBase = null;
       state.nextTriggerTop = null;
+      state.readerIntent = false;
       state.readerStarted = false;
       return;
     }
