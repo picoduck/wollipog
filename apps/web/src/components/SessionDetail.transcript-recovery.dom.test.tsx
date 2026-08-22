@@ -293,6 +293,17 @@ async function scrollReader(scroller: HTMLElement, scrollTop: number, readerInte
   await flushAsyncWork();
 }
 
+async function touchTraverseReader(scroller: HTMLElement, scrollTops: number[]) {
+  await act(async () => {
+    scroller.dispatchEvent(new domWindow.Event("touchstart", { bubbles: true }) as never);
+    for (const scrollTop of scrollTops) {
+      scroller.scrollTop = scrollTop;
+      scroller.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as never);
+    }
+  });
+  await flushAsyncWork();
+}
+
 async function flushAsyncWork(delay = 0) {
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, delay));
@@ -528,6 +539,32 @@ test("scrolling near the partial window head loads one earlier page and requires
     await scrollReader(fixture.scroller, 120);
     assert.equal(pages.tailCalls.length, 3, "further near-head navigation requests the next page");
     assert.equal(pages.tailCalls[2]!.before, earlierPage[0]!.seq);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("the first mobile touch traversal keeps its intent until it reaches the window head", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages);
+  try {
+    const openingWindow = fixture.events.slice(-8);
+    await act(async () => {
+      pages.releaseTail({
+        events: openingWindow,
+        eventEpoch: 0,
+        nextBefore: openingWindow[0]!.seq,
+        hasMoreOlder: true,
+        cacheComplete: true,
+      });
+    });
+    await flushAsyncWork();
+    setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 1_600, scrollTop: 1_200 });
+
+    await touchTraverseReader(fixture.scroller, [500, 120]);
+
+    assert.equal(pages.tailCalls.length, 2, "one touch traversal requests the earlier page on its first trip");
+    assert.equal(pages.tailCalls[1]!.before, openingWindow[0]!.seq);
   } finally {
     await unmountFixture(fixture);
   }

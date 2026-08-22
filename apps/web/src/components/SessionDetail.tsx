@@ -174,6 +174,8 @@ const EARLIER_ACTIVITY_TRIGGER_PX = 160;
 const EARLIER_ACTIVITY_REARM_DISTANCE_PX = 32;
 const EARLIER_ACTIVITY_REARM_FRAMES = 8;
 
+type EarlierActivityIntent = "single-scroll" | "touch-traversal";
+
 type ComposerMutationKind = "send" | "steer" | "promote" | "stop";
 type ComposerMutationEntry = {
   token: symbol;
@@ -541,7 +543,9 @@ function SessionDetailLoaded({
     readerStarted: false,
     settling: false,
     settleFrame: null as number | null,
-    readerIntent: false,
+    readerIntent: null as EarlierActivityIntent | null,
+    readerIntentTop: null as number | null,
+    readerIntentMovedUp: false,
   });
   const [composerSelection, setComposerSelection] = useState({ start: 0, end: 0 });
   const [slashDismissedFor, setSlashDismissedFor] = useState<string | null>(null);
@@ -1128,10 +1132,28 @@ function SessionDetailLoaded({
     state.settling = false;
   }, []);
 
-  const markEarlierActivityIntent = useCallback(() => {
-    automaticEarlierLoadRef.current.readerIntent = true;
+  const clearEarlierActivityIntent = useCallback(() => {
+    const state = automaticEarlierLoadRef.current;
+    state.readerIntent = null;
+    state.readerIntentTop = null;
+    state.readerIntentMovedUp = false;
+  }, []);
+
+  const markEarlierActivityIntent = useCallback((intent: EarlierActivityIntent) => {
+    const state = automaticEarlierLoadRef.current;
+    state.readerIntent = intent;
+    state.readerIntentTop = scrollRef.current?.scrollTop ?? null;
+    state.readerIntentMovedUp = false;
     cancelEarlierActivitySettle();
   }, [cancelEarlierActivitySettle]);
+
+  const markSingleEarlierActivityIntent = useCallback(() => {
+    markEarlierActivityIntent("single-scroll");
+  }, [markEarlierActivityIntent]);
+
+  const markTouchEarlierActivityIntent = useCallback(() => {
+    markEarlierActivityIntent("touch-traversal");
+  }, [markEarlierActivityIntent]);
 
   const rearmEarlierActivityAfterMeasurements = useCallback(() => {
     cancelEarlierActivitySettle();
@@ -1167,14 +1189,21 @@ function SessionDetailLoaded({
       state.historyKey = timelineHistoryKey;
       state.requestedBase = null;
       state.nextTriggerTop = null;
-      state.readerIntent = false;
+      clearEarlierActivityIntent();
       state.readerStarted = false;
     }
     const readerIntent = state.readerIntent;
-    state.readerIntent = false;
     if (eventWindow?.hasOlder !== true || eventWindow.loadingOlder || eventWindow.error ||
         eventWindow.baseSeq <= 1 || state.requestedBase !== null || state.settling ||
-        !readerIntent) return;
+        !readerIntent) {
+      clearEarlierActivityIntent();
+      return;
+    }
+
+    const previousIntentTop = state.readerIntentTop;
+    const movedUp = previousIntentTop !== null && scroll.scrollTop < previousIntentTop - 1;
+    const movedDown = previousIntentTop !== null && scroll.scrollTop > previousIntentTop + 1;
+    if (readerIntent === "touch-traversal" && movedUp) state.readerIntentMovedUp = true;
 
     // A transcript waits until the reader is genuinely near its head, rather than treating every
     // follow-tail scroll as a request for history. A zero-range viewport cannot produce real
@@ -1183,7 +1212,10 @@ function SessionDetailLoaded({
     // A zero-range scroll event can be a browser layout clamp, but cannot be produced by reader
     // navigation. Keep a bounded opening inert until the reader has started from scrollable
     // geometry (or used the explicit control).
-    if (!state.readerStarted && maxScrollTop <= 1) return;
+    if (!state.readerStarted && maxScrollTop <= 1) {
+      clearEarlierActivityIntent();
+      return;
+    }
     const initialTriggerTop = Math.min(EARLIER_ACTIVITY_TRIGGER_PX, maxScrollTop * 0.25);
     // Rearming proves fresh upward traversal; it never replaces the requirement to remain near
     // the newly loaded window head after an anchor-preserved prepend.
@@ -1191,12 +1223,27 @@ function SessionDetailLoaded({
       state.nextTriggerTop ?? Number.POSITIVE_INFINITY,
       initialTriggerTop,
     );
-    if (scroll.scrollTop > triggerTop) return;
+    if (scroll.scrollTop > triggerTop) {
+      // A wheel tick or reading-key scroll is a single scroll. Touch, however, emits a stream of
+      // scroll events for one drag and its momentum. Keep that traversal armed while it continues
+      // upward so the first event cannot consume intent before a later event reaches the head.
+      if (readerIntent === "touch-traversal" && !movedDown) {
+        state.readerIntentTop = scroll.scrollTop;
+      } else {
+        clearEarlierActivityIntent();
+      }
+      return;
+    }
+    if (readerIntent === "touch-traversal" && (!state.readerIntentMovedUp || movedDown)) {
+      if (movedDown) clearEarlierActivityIntent();
+      return;
+    }
 
+    clearEarlierActivityIntent();
     state.readerStarted = true;
     state.nextTriggerTop = null;
     if (loadOlder()) state.requestedBase = eventWindow.baseSeq;
-  }, [cancelEarlierActivitySettle, eventWindow, loadOlder, timelineHistoryKey]);
+  }, [cancelEarlierActivitySettle, clearEarlierActivityIntent, eventWindow, loadOlder, timelineHistoryKey]);
 
   const loadEarlierFromControl = useCallback(() => {
     const state = automaticEarlierLoadRef.current;
@@ -1205,16 +1252,16 @@ function SessionDetailLoaded({
       state.historyKey = timelineHistoryKey;
       state.requestedBase = null;
       state.nextTriggerTop = null;
-      state.readerIntent = false;
+      clearEarlierActivityIntent();
       state.readerStarted = false;
     }
     const base = eventWindow?.baseSeq;
     if (base === undefined || !loadOlder()) return;
-    state.readerIntent = false;
+    clearEarlierActivityIntent();
     state.readerStarted = true;
     state.nextTriggerTop = null;
     state.requestedBase = base;
-  }, [cancelEarlierActivitySettle, eventWindow?.baseSeq, loadOlder, timelineHistoryKey]);
+  }, [cancelEarlierActivitySettle, clearEarlierActivityIntent, eventWindow?.baseSeq, loadOlder, timelineHistoryKey]);
 
   // Once a prepend settles, require a fresh upward traversal before requesting another page. The
   // only exception is a reader-initiated window that still cannot scroll at all: keep filling that
@@ -1226,7 +1273,7 @@ function SessionDetailLoaded({
       state.historyKey = timelineHistoryKey;
       state.requestedBase = null;
       state.nextTriggerTop = null;
-      state.readerIntent = false;
+      clearEarlierActivityIntent();
       state.readerStarted = false;
       return;
     }
@@ -1251,6 +1298,7 @@ function SessionDetailLoaded({
     if (!eventWindow.error) rearmEarlierActivityAfterMeasurements();
   }, [
     cancelEarlierActivitySettle,
+    clearEarlierActivityIntent,
     eventWindow,
     loadOlder,
     olderRequestSettled,
@@ -1261,9 +1309,9 @@ function SessionDetailLoaded({
   useEffect(() => {
     const scroll = scrollRef.current;
     if (!scroll) return;
-    scroll.addEventListener(VIRTUAL_VIEWPORT_INTENT_EVENT, markEarlierActivityIntent);
-    return () => scroll.removeEventListener(VIRTUAL_VIEWPORT_INTENT_EVENT, markEarlierActivityIntent);
-  }, [markEarlierActivityIntent]);
+    scroll.addEventListener(VIRTUAL_VIEWPORT_INTENT_EVENT, markSingleEarlierActivityIntent);
+    return () => scroll.removeEventListener(VIRTUAL_VIEWPORT_INTENT_EVENT, markSingleEarlierActivityIntent);
+  }, [markSingleEarlierActivityIntent]);
 
   // Incremental derivation: streamed chunks push only the NEW events into a per-session
   // builder instead of re-folding the whole array (O(n²) over a long session).
@@ -2377,13 +2425,15 @@ function SessionDetailLoaded({
                 maybeLoadEarlier(event.currentTarget);
               }}
               onWheel={(event) => {
-                markEarlierActivityIntent();
+                markSingleEarlierActivityIntent();
                 followTail.onWheel(event);
               }}
-              onPointerDown={markEarlierActivityIntent}
+              onPointerDown={(event) => {
+                markEarlierActivityIntent(event.pointerType === "touch" ? "touch-traversal" : "single-scroll");
+              }}
               onPointerMove={followTail.onPointerMove}
               onTouchStart={() => {
-                markEarlierActivityIntent();
+                markTouchEarlierActivityIntent();
                 followTail.onTouchStart();
               }}
               onKeyDown={(event) => {
