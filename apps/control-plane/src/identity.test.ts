@@ -30,6 +30,9 @@ function human(role: HumanPrincipal["role"]): HumanPrincipal {
 test("organization roles centrally gate mutations while reads remain available", () => {
   assert.equal(mutationAuthorizationError("GET", "/api/sessions", human("viewer")), null);
   assert.match(mutationAuthorizationError("POST", "/api/sessions", human("viewer"))!, /read-only/);
+  assert.equal(mutationAuthorizationError("PUT", "/api/sessions/:id/reminder", human("viewer")), null);
+  assert.equal(mutationAuthorizationError("DELETE", "/api/sessions/:id/reminder", human("viewer")), null);
+  assert.match(mutationAuthorizationError("PUT", "/api/sessions/:id/title", human("viewer"))!, /read-only/);
   assert.equal(mutationAuthorizationError("POST", "/api/sessions", human("operator")), null);
   assert.match(mutationAuthorizationError("POST", "/api/identity/users", human("operator"))!, /owner or admin/);
   assert.equal(mutationAuthorizationError("POST", "/api/identity/users", human("admin")), null);

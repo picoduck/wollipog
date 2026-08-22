@@ -296,6 +296,7 @@ export type SessionDetailProps = {
   onApprove?: () => void;
   onDeny?: () => void;
   onArchive?: () => void;
+  onSnooze?: () => void;
   /** App-shell control cluster (editor, pinned/terminal/panel toggles) rendered in the unified
    * session bar when it replaces the app-level top bar on desktop. */
   topbarControls?: ReactNode;
@@ -421,6 +422,7 @@ function SessionDetailLoaded({
   onApprove,
   onDeny,
   onArchive,
+  onSnooze,
   topbarControls,
   providerCommandAttachmentPolicy = "send",
   onPreviewNavigationReady,
@@ -1536,10 +1538,11 @@ function SessionDetailLoaded({
     approve: () => onApprove?.(),
     deny: () => onDeny?.(),
     archive: () => onArchive?.(),
+    snooze: () => onSnooze?.(),
     reply: focusComposerAtDraftEnd,
     pauseFollow: followTail.pause,
     resumeFollow: followTail.follow,
-  }), [focusComposerAtDraftEnd, followTail.follow, followTail.pause, onApprove, onArchive, onDeny, onNextSession, onPreviousSession]);
+  }), [focusComposerAtDraftEnd, followTail.follow, followTail.pause, onApprove, onArchive, onDeny, onNextSession, onPreviousSession, onSnooze]);
   useSessionReadingKeys({
     enabled: mode === "expanded" && !isMobile,
     sessionId,
@@ -2263,6 +2266,7 @@ function SessionDetailLoaded({
           exportReady={eventHistory?.everComplete === true}
           onBack={onBack ?? (() => navigate({ name: "inbox" }))}
           onArchive={onArchive}
+          onSnooze={onSnooze}
           projectCrumb={<ProjectChip session={session} onOpenInbox={onBack ?? (() => navigate({ name: "inbox" }))} />}
           topbarControls={topbarControls}
           // The unified bar replaces the app-level top bar on desktop, so it owns the page-title

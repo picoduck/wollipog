@@ -120,6 +120,7 @@ const snapshotDb = {
   listProjectsForPrincipal: () => [],
   listRuns: () => [],
   listPods: () => [],
+  listSessionReminders: () => [],
 } as unknown as ControlPlaneDb;
 
 test("dashboard background delivery acknowledgements are session-authorized and idempotent", () => {
@@ -717,6 +718,7 @@ test("unsubscribed high-volume events skip authorization database reads", () => 
     listBoxes: () => [],
     listRuns: () => [],
     listPods: () => [],
+    listSessionReminders: () => [],
     canAccessSession: () => { authorizationReads++; return true; },
   } as unknown as ControlPlaneDb;
   const hub = new Hub(scopedDb);

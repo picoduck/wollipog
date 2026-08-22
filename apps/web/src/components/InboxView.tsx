@@ -1,5 +1,5 @@
 import { type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { type SessionView, type SourceLocation } from "@wollipog/protocol";
+import { type SessionView, type SetSessionReminderRequest, type SourceLocation } from "@wollipog/protocol";
 import { sessionArchiveRequiresStop } from "../archive-actions.js";
 import {
   INBOX_REORDER_SETTLE_MS,
@@ -37,12 +37,19 @@ import { SessionDetail } from "./SessionDetail.js";
 import type { RightPanelState } from "./RightPanel.js";
 import { useIsMobile } from "./useIsMobile.js";
 import { useInboxKeys, type InboxKeyActions } from "../useInboxKeys.js";
+import {
+  sessionVisibleForReminderMode,
+  sortSessionsForReminders,
+  type ReminderInboxMode,
+} from "../session-reminders.js";
+import { SnoozeDialog } from "./SnoozeDialog.js";
 import type { NewSessionPreset } from "./NewSessionDialog.js";
 import { isHeartbeatBusy } from "../activity.js";
 import { PlusIcon, SearchIcon } from "./Icons.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { dispatchVirtualViewportIntent } from "../viewport-intent.js";
 import type { PreviewNavigationControls } from "./usePreviewNavigationRegistration.js";
+import { SegmentedControl } from "./ui/ChoiceControls.js";
 
 const PROJECT_PIN_KEY = "wollipog.projects.pinned";
 const SEEN_DWELL_MS = 1_500;
@@ -117,6 +124,8 @@ export function InboxView({
   const sessions = useStoreSelector((state) => state.sessions);
   const projects = useStoreSelector((state) => state.projects);
   const projectsSupported = useStoreSelector((state) => state.projectsSupported);
+  const sessionRemindersSupported = useStoreSelector((state) => state.sessionRemindersSupported);
+  const reminders = useStoreSelector((state) => state.reminders);
   const accessScopeManagementSupported = useStoreSelector((state) => state.accessScopeManagementSupported);
   const stopBeforeArchiveSupported = useStoreSelector((state) => state.stopBeforeArchiveSupported);
   const stalledIndex = useStoreSelector((state) => state.stalledSessionIds);
@@ -146,6 +155,8 @@ export function InboxView({
   // the list before the character appears.
   const deferredQuery = useDeferredValue(query);
   const [creatingProject, setCreatingProject] = useState(false);
+  const [reminderMode, setReminderMode] = useState<ReminderInboxMode>("ordinary");
+  const [snoozeSessionId, setSnoozeSessionId] = useState<string | null>(null);
   const [dragRatio, setDragRatio] = useState<number | null>(null);
   const [heldOrder, setHeldOrder] = useState<string[] | null>(null);
   const [busySessionIds, setBusySessionIds] = useState<Set<string>>(() => new Set());
@@ -270,14 +281,36 @@ export function InboxView({
   // when membership changes; ordinary heartbeat pulses never rebuild Inbox splits or rows.
   const stalledSessionIds = useMemo(() => new Set(stalledIndex), [stalledIndex, stalledRevision]);
 
-  const splits = useMemo(() => buildInboxSplits(
-    sessions.values(),
-    pinnedProjects,
-    pinnedSessions,
-    stalledSessionIds,
-    projects.values(),
-    projectsSupported,
-  ), [pinnedProjects, pinnedSessions, projects, projectsSupported, sessions, stalledSessionIds]);
+  const snoozedCount = useMemo(() => [...reminders.values()].filter((reminder) => {
+    const session = sessions.get(reminder.sessionId);
+    return reminder.state === "pending" && session !== undefined && !session.archived;
+  }).length, [reminders, sessions]);
+  const splits = useMemo(() => {
+    const baseSplits = buildInboxSplits(
+      sessions.values(),
+      pinnedProjects,
+      pinnedSessions,
+      stalledSessionIds,
+      projects.values(),
+      projectsSupported,
+    );
+    return baseSplits.map((split) => {
+      const visibleSessions = split.sessions.filter((session) => sessionVisibleForReminderMode(
+        session, reminders.get(session.id), reminderMode,
+      ));
+      // Durable Project counts can exceed the locally loaded catalog. Preserve that server-owned
+      // total in the ordinary Inbox, subtracting only reminder-hidden rows we can prove locally.
+      const hiddenLocalCount = split.sessions.length - visibleSessions.length;
+      const count = reminderMode === "snoozed"
+        ? visibleSessions.length
+        : Math.max(0, split.count - hiddenLocalCount);
+      return {
+        ...split,
+        sessions: sortSessionsForReminders(visibleSessions, reminders, reminderMode),
+        count,
+      };
+    });
+  }, [pinnedProjects, pinnedSessions, projects, projectsSupported, reminderMode, reminders, sessions, stalledSessionIds]);
   const activeSplit = inboxSplitByKey(splits, inbox.splitKey);
   const activeNewSessionPreset = useMemo<NewSessionPreset | undefined>(
     () => newSessionPresetForInboxSplit(activeSplit),
@@ -353,11 +386,13 @@ export function InboxView({
       session,
       projectName: inboxProjectName(session, projectsSupported ? projects : undefined),
       unread: seen[session.id] != null && session.lastEventAt != null && session.lastEventAt > seen[session.id]!,
-    })), [activeSplit?.sessions, normalizedQuery, projects, projectsSupported, seen]);
+      reminder: reminders.get(session.id),
+    })), [activeSplit?.sessions, normalizedQuery, projects, projectsSupported, reminders, seen]);
   const liveIds = useMemo(() => liveEntries.map((entry) => entry.session.id), [liveEntries]);
   liveIdsRef.current = liveIds;
   const structuralOrderKey = JSON.stringify([
     instanceScope,
+    reminderMode,
     activeSplit?.key ?? null,
     normalizedQuery,
     [...pinnedSessions].sort(),
@@ -583,6 +618,45 @@ export function InboxView({
     setSeen(next);
   }, [instanceScope, sessions]);
 
+  const saveReminder = useCallback(async (sessionId: string, request: SetSessionReminderRequest) => {
+    const previous = reminders.get(sessionId);
+    const updated = await api.setReminder(sessionId, request);
+    showUndo(previous ? "Reminder updated." : "Session snoozed.", async () => {
+      if (previous) {
+        await api.setReminder(sessionId, {
+          scheduledFor: previous.scheduledFor,
+          timeZone: previous.timeZone,
+          originalExpression: previous.originalExpression,
+          wakePolicy: previous.wakePolicy,
+          expectedRevision: updated.revision,
+          ...(previous.state === "fired" && previous.firedAt !== undefined && previous.wakeReason !== undefined
+            ? { restoreFired: { firedAt: previous.firedAt, wakeReason: previous.wakeReason } }
+            : {}),
+        });
+      } else {
+        await api.removeReminder(sessionId, updated.revision);
+      }
+    });
+  }, [api, reminders, showUndo]);
+
+  const removeReminder = useCallback(async (sessionId: string) => {
+    const previous = reminders.get(sessionId);
+    if (!previous) return;
+    await api.removeReminder(sessionId, previous.revision);
+    showUndo("Reminder removed.", async () => {
+      await api.setReminder(sessionId, {
+        scheduledFor: previous.scheduledFor,
+        timeZone: previous.timeZone,
+        originalExpression: previous.originalExpression,
+        wakePolicy: previous.wakePolicy,
+        expectedRevision: 0,
+        ...(previous.state === "fired" && previous.firedAt !== undefined && previous.wakeReason !== undefined
+          ? { restoreFired: { firedAt: previous.firedAt, wakeReason: previous.wakeReason } }
+          : {}),
+      });
+    });
+  }, [api, reminders, showUndo]);
+
   const archive = useCallback(async (sessionId: string) => {
     const session = sessions.get(sessionId);
     if (!session) return;
@@ -676,6 +750,7 @@ export function InboxView({
     approve: () => { if (displayedSelection) void decide(displayedSelection, "approve").catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" })); },
     deny: () => { if (displayedSelection) void decide(displayedSelection, "deny").catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" })); },
     archive: () => { if (displayedSelection) void archive(displayedSelection); },
+    snooze: () => { if (displayedSelection && sessionRemindersSupported) setSnoozeSessionId(displayedSelection); },
     pin: () => { if (displayedSelection) togglePin(displayedSelection); },
     unread: () => { if (displayedSelection) setUnread(displayedSelection); },
     reply: () => { if (displayedSelection) expand(displayedSelection, true); },
@@ -695,7 +770,7 @@ export function InboxView({
       const scroll = viewRef.current?.querySelector<HTMLElement>(".detail-scroll");
       pageInboxPreview(scroll, "previous", previewNavigationRef.current?.beginProgrammaticScroll);
     },
-  }), [activeSplit?.key, archive, decide, displayedSelection, expand, moveSelection, selectSplit, setUnread, showToast, splits, togglePin]);
+  }), [activeSplit?.key, archive, decide, displayedSelection, expand, moveSelection, selectSplit, sessionRemindersSupported, setUnread, showToast, splits, togglePin]);
   useInboxKeys(!isMobile && !expanded, keyActions);
 
   const ratio = dragRatio ?? inbox.splitRatio;
@@ -791,6 +866,17 @@ export function InboxView({
             })}
           </div>
           <div className="inbox-toolbar-actions">
+            {sessionRemindersSupported && (
+              <SegmentedControl<ReminderInboxMode>
+                label="Reminder View"
+                value={reminderMode}
+                options={[
+                  { value: "ordinary", label: "Inbox" },
+                  { value: "snoozed", label: `Snoozed (${snoozedCount})` },
+                ]}
+                onChange={setReminderMode}
+              />
+            )}
             {projectsSupported && (
               <button
                 type="button"
@@ -828,7 +914,12 @@ export function InboxView({
           stalledSessionIds={stalledSessionIds}
           runningCount={(activeSplit?.sessions ?? []).filter(isInboxRunning).length}
           filtered={normalizedQuery.length > 0}
-          emptyState={activeSplit?.kind === "project"
+          emptyState={reminderMode === "snoozed"
+            ? {
+              title: "No Snoozed Sessions",
+              description: "Snoozed sessions and their pending reminder times appear here.",
+              showNewSession: false,
+            } : activeSplit?.kind === "project"
             ? activeDurableProject && activeDurableProject.locations.length === 0
               ? {
                 title: "No Project Locations",
@@ -894,6 +985,9 @@ export function InboxView({
             onTogglePin={() => { if (displayedSelection) togglePin(displayedSelection); }}
             onMarkUnread={() => { if (displayedSelection) setUnread(displayedSelection); }}
             onArchive={() => { if (displayedSelection) void archive(displayedSelection); }}
+            {...(sessionRemindersSupported ? {
+              onSnooze: () => { if (displayedSelection) setSnoozeSessionId(displayedSelection); },
+            } : {})}
           />
         </footer>
       </section>
@@ -945,6 +1039,9 @@ export function InboxView({
                 onApprove={() => { void decide(surfaceSessionId, "approve").catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" })); }}
                 onDeny={() => { void decide(surfaceSessionId, "deny").catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" })); }}
                 onArchive={() => { void archive(surfaceSessionId); }}
+                {...(sessionRemindersSupported ? {
+                  onSnooze: () => setSnoozeSessionId(surfaceSessionId),
+                } : {})}
                 onPreviewNavigationReady={expanded ? undefined : registerPreviewNavigation}
               />
             ) : (
@@ -964,6 +1061,15 @@ export function InboxView({
             setCreatingProject(false);
             showToast(`Created ${project.name}.`);
           }}
+        />
+      )}
+      {snoozeSessionId && sessionRemindersSupported && (
+        <SnoozeDialog
+          key={`${snoozeSessionId}:${reminders.get(snoozeSessionId)?.revision ?? 0}`}
+          reminder={reminders.get(snoozeSessionId)}
+          onClose={() => setSnoozeSessionId(null)}
+          onSave={(request) => saveReminder(snoozeSessionId, request)}
+          onRemove={reminders.has(snoozeSessionId) ? () => removeReminder(snoozeSessionId) : undefined}
         />
       )}
     </div>

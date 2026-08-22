@@ -11,6 +11,7 @@ export interface InboxKeyActions {
   approve: () => void;
   deny: () => void;
   archive: () => void;
+  snooze: () => void;
   pin: () => void;
   unread: () => void;
   reply: () => void;
@@ -29,6 +30,7 @@ const BINDINGS: ReadonlyArray<[ShortcutId, keyof InboxKeyActions]> = [
   ["inbox-approve", "approve"],
   ["inbox-deny", "deny"],
   ["inbox-archive", "archive"],
+  ["inbox-snooze", "snooze"],
   ["inbox-pin", "pin"],
   ["inbox-unread", "unread"],
   ["inbox-reply", "reply"],

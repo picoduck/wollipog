@@ -39,6 +39,7 @@ test("the central Inbox layer handles bare keys but never steals typing or termi
     next: action("next"), previous: action("previous"), expand: action("expand"),
     nextSplit: action("nextSplit"), previousSplit: action("previousSplit"),
     approve: action("approve"), deny: action("deny"), archive: action("archive"),
+    snooze: action("snooze"),
     pin: action("pin"), unread: action("unread"), reply: action("reply"),
     pageDown: action("pageDown"), pageUp: action("pageUp"), resumeFollow: () => {
       if (!previewAvailable) return false;

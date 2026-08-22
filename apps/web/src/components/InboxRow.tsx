@@ -1,7 +1,8 @@
-import type { SessionView } from "@wollipog/protocol";
+import type { SessionReminderView, SessionView } from "@wollipog/protocol";
 import { memo } from "react";
 import { isHeartbeatBusy, type SessionActivity } from "../activity.js";
 import { relativeTime, statusMeta } from "../format.js";
+import { reminderBadgeLabel } from "../session-reminders.js";
 import { AgentIcon } from "./AgentIcon.js";
 import { ActivityStrip } from "./ActivityStrip.js";
 import { sessionAgentLabel } from "./agent-options.js";
@@ -24,6 +25,7 @@ export interface InboxRowProps {
   activity?: SessionActivity;
   stalled: boolean;
   activityNow: number;
+  reminder?: SessionReminderView;
   /** Take the id, so the parent can pass ONE stable callback to every row. */
   onSelect: (sessionId: string) => void;
   onExpand: (sessionId: string) => void;
@@ -40,6 +42,7 @@ function InboxRowInner({
   activity,
   stalled,
   activityNow,
+  reminder,
   onSelect,
   onExpand,
 }: InboxRowProps) {
@@ -89,6 +92,9 @@ function InboxRowInner({
             ) : diffReady ? (
               <span className="inbox-diff-chip">Diff Ready</span>
             ) : null}
+            {reminder && (
+              <span className="inbox-status-pill reminder">{reminderBadgeLabel(reminder, activityNow || Date.now())}</span>
+            )}
             {stalled && (
               <span className="inbox-status-pill stalled" aria-label="Stalled: No Activity for at Least 10 Minutes">
                 Stalled

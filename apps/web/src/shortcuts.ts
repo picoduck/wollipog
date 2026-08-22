@@ -28,6 +28,7 @@ export type ShortcutId =
   | "inbox-approve"
   | "inbox-deny"
   | "inbox-archive"
+  | "inbox-snooze"
   | "inbox-pin"
   | "inbox-unread"
   | "inbox-reply"
@@ -47,6 +48,7 @@ export type ShortcutId =
   | "session-reading-approve"
   | "session-reading-deny"
   | "session-reading-archive"
+  | "session-reading-snooze"
   | "session-reading-reply"
   | "steer-turn"
   | "stop-turn"
@@ -314,6 +316,14 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     binding: { key: "e", bare: true },
   },
   {
+    id: "inbox-snooze",
+    group: "Inbox",
+    label: "Snooze Session",
+    description: "Schedule or edit a reminder for the selected session",
+    scope: "Inbox",
+    binding: { key: "h", bare: true },
+  },
+  {
     id: "inbox-pin",
     group: "Inbox",
     label: "Pin Session",
@@ -464,6 +474,14 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     description: "Archive this session and open the next session",
     scope: "Session Reading",
     binding: { key: "e", bare: true },
+  },
+  {
+    id: "session-reading-snooze",
+    group: "Session Reading",
+    label: "Snooze Session",
+    description: "Schedule or edit a reminder for this session",
+    scope: "Session Reading",
+    binding: { key: "h", bare: true },
   },
   {
     id: "session-reading-reply",

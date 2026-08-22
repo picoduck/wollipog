@@ -75,6 +75,7 @@ function setupActions() {
     approve: action("approve"),
     deny: action("deny"),
     archive: action("archive"),
+    snooze: action("snooze"),
     reply: action("reply"),
     pauseFollow: action("pauseFollow"),
     resumeFollow: action("resumeFollow"),

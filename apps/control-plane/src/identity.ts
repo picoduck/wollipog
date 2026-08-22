@@ -57,6 +57,11 @@ export function mutationAuthorizationError(
   if (!isMutationMethod(method) || !(routePath === "/api" || routePath.startsWith("/api/"))) return null;
   if (!principal) return "authentication required";
   if (principal.kind === "agent") return null;
+  // Session reminders are private per-user Inbox metadata, not a mutation of the shared session.
+  // The route separately requires a human principal and exact read access to the session.
+  if (routePath === "/api/sessions/:id/reminder") {
+    return null;
+  }
   if (!canOperate(principal.role)) return "read-only members cannot mutate organization resources";
   if (
     (routePath === "/api/identity" || routePath.startsWith("/api/identity/") ||

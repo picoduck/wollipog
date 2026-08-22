@@ -13,6 +13,7 @@ import type {
   RunnerMetadata,
   RunView,
   SessionEvent,
+  SessionReminderView,
   SessionSnapshot,
   SessionView,
   SteerRequest,
@@ -242,6 +243,14 @@ class FakeHub {
   sessionChangedById(sessionId: string): void {
     this.calls.push({ method: "sessionChangedById", args: [sessionId] });
     this.sessionChangedByIdCalls.push(sessionId);
+  }
+
+  sessionReminderChanged(userId: string, reminder: SessionReminderView): void {
+    this.calls.push({ method: "sessionReminderChanged", args: [userId, reminder] });
+  }
+
+  sessionReminderRemoved(userId: string, sessionId: string): void {
+    this.calls.push({ method: "sessionReminderRemoved", args: [userId, sessionId] });
   }
 
   sessionEvent(event: SessionEvent): void {
@@ -475,6 +484,138 @@ function seedReadyPodSession(
   db.updateSessionStatus(id, "idle", Date.now());
   return id;
 }
+
+test("fired reminder policy edits and removal Undo can restore their observed past instant", () => {
+  const { db, hub, svc } = makeHarness();
+  const sessionId = seedSession(svc, hub);
+  const userId = db.localIdentityContext().userId;
+  const now = Date.now();
+  const scheduledFor = now - 1_000;
+  const schedule = {
+    sessionId,
+    userId,
+    scheduledFor,
+    timeZone: "UTC",
+    originalExpression: "one second ago",
+    wakePolicy: "until_activity" as const,
+  };
+  assert.equal(db.setSessionReminder({ ...schedule, expectedRevision: 0, now: now - 2_000 }).kind, "updated");
+  assert.equal(db.fireDueSessionReminders(now).length, 1);
+  const fired = db.getSessionReminder(sessionId, userId)!;
+  assert.equal(fired.state, "fired");
+
+  const policyEdit = svc.setReminder(sessionId, userId, {
+    scheduledFor,
+    timeZone: "UTC",
+    originalExpression: "one second ago",
+    wakePolicy: "regardless",
+    expectedRevision: fired.revision,
+  });
+  assert.equal(policyEdit.ok, true);
+  assert.equal(policyEdit.data?.scheduledFor, scheduledFor);
+  assert.equal(policyEdit.data?.wakePolicy, "regardless");
+  assert.equal(policyEdit.data?.state, "fired");
+  assert.equal(db.fireDueSessionReminders(now + 1).length, 0,
+    "a policy-only edit must not reset an already-fired instant to pending");
+
+  const policyUndo = svc.setReminder(sessionId, userId, {
+    scheduledFor,
+    timeZone: "UTC",
+    originalExpression: "one second ago",
+    wakePolicy: "until_activity",
+    expectedRevision: policyEdit.data!.revision,
+  });
+  assert.equal(policyUndo.ok, true);
+  assert.equal(policyUndo.data?.state, "fired");
+
+  const futureEdit = svc.setReminder(sessionId, userId, {
+    scheduledFor: now + 60_000,
+    timeZone: "UTC",
+    originalExpression: "in one minute",
+    wakePolicy: "regardless",
+    expectedRevision: policyUndo.data!.revision,
+  });
+  assert.equal(futureEdit.ok, true);
+  const futureEditUndo = svc.setReminder(sessionId, userId, {
+    scheduledFor,
+    timeZone: "UTC",
+    originalExpression: "one second ago",
+    wakePolicy: "until_activity",
+    expectedRevision: futureEdit.data!.revision,
+  });
+  assert.equal(futureEditUndo.ok, true, "Undo may restore the prior fired instant after a future edit");
+
+  const removed = svc.removeReminder(sessionId, userId, futureEditUndo.data!.revision);
+  assert.equal(removed.ok, true);
+  const restored = svc.setReminder(sessionId, userId, {
+    scheduledFor,
+    timeZone: "UTC",
+    originalExpression: "one second ago",
+    wakePolicy: "until_activity",
+    expectedRevision: 0,
+  });
+  assert.equal(restored.ok, true);
+  assert.equal(restored.data?.scheduledFor, scheduledFor);
+
+  const unguardedPast = svc.setReminder(sessionId, userId, {
+    scheduledFor: now - 2_000,
+    timeZone: "UTC",
+    originalExpression: "two seconds ago",
+    wakePolicy: "until_activity",
+  });
+  assert.equal(unguardedPast.ok, false);
+  assert.equal(unguardedPast.status, 400);
+  db.close();
+});
+
+test("activity-fired reminder edits and Undo preserve their future fired state", () => {
+  const { db, hub, svc } = makeHarness();
+  const sessionId = seedSession(svc, hub);
+  const userId = db.localIdentityContext().userId;
+  const now = Date.now();
+  const scheduledFor = now + 60_000;
+  assert.equal(db.setSessionReminder({
+    sessionId, userId, scheduledFor, timeZone: "UTC", originalExpression: "in one minute",
+    wakePolicy: "until_activity", expectedRevision: 0, now,
+  }).kind, "updated");
+  assert.equal(db.fireSessionRemindersForActivity(sessionId, 1, "agent_response", now + 1).length, 1);
+  const fired = db.getSessionReminder(sessionId, userId)!;
+  assert.equal(fired.state, "fired");
+  assert.equal(fired.wakeReason, "agent_response");
+
+  const edited = svc.setReminder(sessionId, userId, {
+    scheduledFor, timeZone: "UTC", originalExpression: "in one minute",
+    wakePolicy: "regardless", expectedRevision: fired.revision,
+  });
+  assert.equal(edited.ok, true);
+  assert.equal(edited.data?.state, "fired");
+  assert.equal(edited.data?.wakeReason, "agent_response");
+
+  const futureReschedule = svc.setReminder(sessionId, userId, {
+    scheduledFor: scheduledFor + 60_000, timeZone: "UTC", originalExpression: "in two minutes",
+    wakePolicy: "regardless", expectedRevision: edited.data!.revision,
+  });
+  assert.equal(futureReschedule.ok, true);
+  const editUndo = svc.setReminder(sessionId, userId, {
+    scheduledFor, timeZone: "UTC", originalExpression: "in one minute",
+    wakePolicy: "until_activity", expectedRevision: futureReschedule.data!.revision,
+    restoreFired: { firedAt: fired.firedAt!, wakeReason: fired.wakeReason! },
+  });
+  assert.equal(editUndo.ok, true);
+  assert.equal(editUndo.data?.state, "fired");
+  assert.equal(editUndo.data?.wakeReason, "agent_response");
+
+  assert.equal(svc.removeReminder(sessionId, userId, editUndo.data!.revision).ok, true);
+  const removeUndo = svc.setReminder(sessionId, userId, {
+    scheduledFor, timeZone: "UTC", originalExpression: "in one minute",
+    wakePolicy: "until_activity", expectedRevision: 0,
+    restoreFired: { firedAt: fired.firedAt!, wakeReason: fired.wakeReason! },
+  });
+  assert.equal(removeUndo.ok, true);
+  assert.equal(removeUndo.data?.state, "fired");
+  assert.equal(removeUndo.data?.firedAt, fired.firedAt);
+  db.close();
+});
 
 /* -------------------------------------------------------------------------- */
 /* createSession                                                             */

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { ControlPlaneToUi, PodView, SessionEvent, SessionView, SteeringAttemptView } from "@wollipog/protocol";
+import type { ControlPlaneToUi, PodView, SessionEvent, SessionReminderView, SessionView, SteeringAttemptView } from "@wollipog/protocol";
 import { isPartialHistory, Store } from "./store.js";
 import { shouldReadOpeningWindow } from "./history-recovery.js";
 import { ACTIVITY_BUCKET_MS, activitySeries } from "./activity.js";
@@ -21,6 +21,20 @@ const pod = (members: string[]): PodView => ({
 function message(store: Store, msg: ControlPlaneToUi, now?: number): void {
   store.dispatch({ type: "msg", msg, now });
 }
+
+test("a recreated reminder replaces a stale higher revision from the prior reminder id", () => {
+  const store = new Store();
+  const reminder = (reminderId: string, revision: number): SessionReminderView => ({
+    reminderId, sessionId: "s1", scheduledFor: revision, timeZone: "UTC",
+    originalExpression: "test", wakePolicy: "until_activity", state: "pending",
+    revision, createdAt: 1, updatedAt: revision,
+  });
+  message(store, { type: "session_reminder_upsert", reminder: reminder("old", 3) });
+  message(store, { type: "session_reminder_upsert", reminder: reminder("new", 1) });
+  assert.equal(store.getState().reminders.get("s1")?.reminderId, "new");
+  message(store, { type: "session_reminder_upsert", reminder: reminder("new", 1) });
+  assert.equal(store.getState().reminders.get("s1")?.revision, 1);
+});
 
 test("session upserts retain and clear the projected interruption queue hold", () => {
   const store = new Store();
