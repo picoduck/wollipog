@@ -644,6 +644,116 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     "a paired device can authenticate the real /ui WebSocket route",
   );
 
+  const plainStopResponse = await ownerFetch("/api/sessions/session-other/stop", { method: "POST" });
+  assert.equal(plainStopResponse.status, 200);
+  const plainStopPayload = await plainStopResponse.json() as {
+    archived: boolean;
+    archiveStatus?: string;
+    stopOperation: {
+      operationId: string;
+      status: string;
+      attemptCount: number;
+      capacityReleased: boolean;
+    };
+  };
+  assert.equal(plainStopPayload.archived, false);
+  assert.equal(plainStopPayload.archiveStatus, undefined);
+  assert.equal(plainStopPayload.stopOperation.status, "stop_pending");
+  assert.equal(plainStopPayload.stopOperation.capacityReleased, false);
+  const plainStopCommand = await runnerInbox.take((message) =>
+    message.type === "stop_session" && message.sessionId === "session-other");
+  assert.equal(
+    plainStopCommand.type === "stop_session" ? plainStopCommand.operationId : undefined,
+    plainStopPayload.stopOperation.operationId,
+  );
+  for (const inbox of [uiInbox, operatorUiInbox]) {
+    await inbox.take((message) => message.type === "session_upsert" &&
+      (message.session as { id?: string; stopOperation?: { status?: string } } | undefined)?.id === "session-other" &&
+      (message.session as { stopOperation?: { status?: string } } | undefined)
+        ?.stopOperation?.status === "stop_pending");
+  }
+
+  runner.send(JSON.stringify({
+    type: "stop_session_result",
+    sessionId: "session-other",
+    operationId: plainStopPayload.stopOperation.operationId,
+    accepted: false,
+    error: "/private/provider/path and runtime output",
+  }));
+  for (const inbox of [uiInbox, operatorUiInbox]) {
+    const failedUpsert = await inbox.take((message) => message.type === "session_upsert" &&
+      (message.session as { id?: string; stopOperation?: { status?: string } } | undefined)?.id === "session-other" &&
+      (message.session as { stopOperation?: { status?: string } } | undefined)
+        ?.stopOperation?.status === "stop_failed");
+    const failedSession = failedUpsert.session as {
+      archived: boolean;
+      archiveStatus?: string;
+      stopOperation: { capacityReleased: boolean; failure?: { message?: string } };
+    };
+    assert.equal(failedSession.archived, false);
+    assert.equal(failedSession.archiveStatus, undefined);
+    assert.equal(failedSession.stopOperation.capacityReleased, false);
+    assert.doesNotMatch(failedSession.stopOperation.failure?.message ?? "", /private|provider\/path/u);
+  }
+
+  assert.equal(
+    (await fetch(`${httpBase}/api/sessions/session-other/retry-stop`, { method: "POST" })).status,
+    401,
+    "an unauthenticated caller cannot recover a failed Stop",
+  );
+  const authorizedRetryResponse = await fetchWithBearer(
+    `${httpBase}/api/sessions/session-other/retry-stop`,
+    operatorToken,
+    { method: "POST" },
+  );
+  assert.equal(authorizedRetryResponse.status, 202);
+  const authorizedRetry = await authorizedRetryResponse.json() as {
+    stopOperation: { operationId: string; status: string; attemptCount: number };
+  };
+  assert.equal(authorizedRetry.stopOperation.operationId, plainStopPayload.stopOperation.operationId);
+  assert.equal(authorizedRetry.stopOperation.status, "stop_pending");
+  assert.equal(authorizedRetry.stopOperation.attemptCount, 1);
+  const authorizedRetryCommand = await runnerInbox.take((message) =>
+    message.type === "stop_session" && message.sessionId === "session-other");
+  assert.equal(
+    authorizedRetryCommand.type === "stop_session" ? authorizedRetryCommand.operationId : undefined,
+    plainStopPayload.stopOperation.operationId,
+  );
+  const duplicateRetryResponse = await ownerFetch(
+    "/api/sessions/session-other/retry-stop",
+    { method: "POST" },
+  );
+  assert.equal(duplicateRetryResponse.status, 202);
+  const duplicateRetry = await duplicateRetryResponse.json() as {
+    stopOperation: { operationId: string; attemptCount: number };
+  };
+  assert.equal(duplicateRetry.stopOperation.operationId, authorizedRetry.stopOperation.operationId);
+  assert.equal(duplicateRetry.stopOperation.attemptCount, authorizedRetry.stopOperation.attemptCount);
+  const duplicateRetryCommand = await runnerInbox.take((message) =>
+    message.type === "stop_session" && message.sessionId === "session-other");
+  assert.equal(
+    duplicateRetryCommand.type === "stop_session" ? duplicateRetryCommand.operationId : undefined,
+    plainStopPayload.stopOperation.operationId,
+  );
+  for (const inbox of [uiInbox, operatorUiInbox]) {
+    await inbox.take((message) => message.type === "session_upsert" &&
+      (message.session as { id?: string; stopOperation?: { status?: string } } | undefined)?.id === "session-other" &&
+      (message.session as { stopOperation?: { status?: string } } | undefined)
+        ?.stopOperation?.status === "stop_pending");
+  }
+
+  runner.send(JSON.stringify({
+    type: "session_status",
+    sessionId: "session-other",
+    status: "stopped",
+  }));
+  for (const inbox of [uiInbox, operatorUiInbox]) {
+    const settledUpsert = await inbox.take((message) => message.type === "session_upsert" &&
+      (message.session as { id?: string; stopOperation?: unknown } | undefined)?.id === "session-other" &&
+      (message.session as { stopOperation?: unknown } | undefined)?.stopOperation === undefined);
+    assert.equal((settledUpsert.session as { archived?: boolean }).archived, false);
+  }
+
   const renameResponse = await ownerFetch("/api/sessions/session-target/title", {
     method: "POST",
     headers: { "content-type": "application/json" },

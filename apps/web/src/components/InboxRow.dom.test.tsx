@@ -17,10 +17,19 @@ for (const [name, value] of Object.entries({
   IS_REACT_ACT_ENVIRONMENT: true,
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
 
-test("Inbox rows expose Stop Failed instead of Diff Ready", async () => {
+test("Inbox rows expose plain Stop Failed instead of Diff Ready", async () => {
   const session = {
     id: "session-stop-failed", runnerId: "runner-1", title: "Failed Stop",
-    status: "stopped", column: "review", archived: false, archiveStatus: "stop_failed",
+    status: "stopped", column: "review", archived: false,
+    stopOperation: {
+      operationId: "stop-operation-1",
+      status: "stop_failed",
+      requestedAt: 1,
+      lastAttemptAt: 2,
+      attemptCount: 1,
+      capacityReleased: false,
+      failure: { code: "runner_rejected", message: "Stop failed.", failedAt: 3 },
+    },
     pendingApproval: null, lastEventAt: null, preview: null,
     agentId: "codex", agentName: "Codex", driver: "codex-app-server",
   } as SessionView;

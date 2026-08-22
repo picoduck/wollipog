@@ -749,6 +749,43 @@ test("Stop Failed metadata and idempotent recovery survive control-plane restart
   }
 });
 
+test("plain Stop Failed metadata and idempotent recovery survive control-plane restart", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-plain-session-stop-failure-"));
+  const path = join(root, "control-plane.db");
+  try {
+    const initial = ControlPlaneDb.open(path);
+    initial.registerRunner(meta(), 500, PROTOCOL_VERSION);
+    initial.createSession(newSession());
+    const intent = initial.addSessionStopIntent("sess-1", "runner-1", 1_100);
+    assert.equal(initial.failSessionStopIntent(
+      "sess-1",
+      intent.operation.operationId,
+      "runner_rejected",
+      "The runner rejected the Stop request.",
+      1_200,
+    ), true);
+    const projected = initial.getSession("sess-1");
+    assert.equal(projected?.stopOperation?.status, "stop_failed");
+    assert.equal(projected?.archiveStatus, undefined);
+    assert.equal(projected?.archiveOperation, undefined);
+    initial.close();
+
+    const reopened = ControlPlaneDb.open(path);
+    const failed = reopened.getSession("sess-1")?.stopOperation;
+    assert.equal(failed?.operationId, intent.operation.operationId);
+    assert.equal(failed?.failure?.code, "runner_rejected");
+    assert.equal(failed?.failure?.failedAt, 1_200);
+    const retried = reopened.retrySessionStopIntent("sess-1", 1_300);
+    assert.equal(retried?.operation.operationId, intent.operation.operationId);
+    assert.equal(retried?.operation.status, "stop_pending");
+    assert.equal(retried?.operation.attemptCount, 1);
+    assert.equal(reopened.retrySessionStopIntent("sess-1", 1_400)?.operation.attemptCount, 1);
+    reopened.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 function localOwner(): HumanPrincipal {
   return {
     kind: "human",

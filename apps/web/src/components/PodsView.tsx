@@ -149,7 +149,7 @@ function PodMemberColumn({
           <span className="compare-agent">{sessionAgentLabel(session.agentName, session.driver, session.agentId)}</span>
           <span className="muted sm">{session.title}</span>
         </button>
-        <StatusBadge status={session.status} />
+        <StatusBadge status={session.status} stopOperation={session.stopOperation} />
         <label className="pod-member-setting">
           <span>Role</span>
           <select

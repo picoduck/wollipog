@@ -107,7 +107,7 @@ export function PinnedSummary({
           <span>Session</span>
         </div>
         <div className="ps-row is-static">
-          <StatusBadge status={session.status} />
+          <StatusBadge status={session.status} stopOperation={session.stopOperation} />
           <span className="ps-right ps-detail">Updated {relativeTime(session.updatedAt)}</span>
         </div>
         <div className="ps-row is-static">

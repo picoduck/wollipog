@@ -3710,6 +3710,7 @@ export class SessionsService {
 
   private sendStopCommand(runnerId: string, sessionId: string): boolean {
     const intent = this.db.sessionStopIntent(sessionId);
+    if (intent?.operation.status === "stop_failed") return false;
     const protocolVersion = this.db.getRunner(runnerId)?.protocolVersion;
     return this.hub.sendToRunner(runnerId, {
       type: "stop_session",
@@ -3720,7 +3721,7 @@ export class SessionsService {
     });
   }
 
-  /** Turn a supported Stop operation into a truthful failure without releasing its archive fence. */
+  /** Turn a supported Stop operation into a truthful failure without claiming capacity release. */
   private failStopOperation(
     sessionId: string,
     operationId: string,
@@ -3792,6 +3793,13 @@ export class SessionsService {
   private requestStop(session: SessionView, now: number, archiveAfterStop = false, refreshProject = true): SessionView {
     // Persist before touching the socket: ws.send acceptance is not delivery proof on a half-open
     // connection. Reconnect inventory/status reconciliation owns retry and final clearance.
+    const existing = this.db.sessionStopIntent(session.id);
+    // A fresh Stop or archive request after an explicit runner rejection is itself an authorized
+    // recovery action. Re-arm the same durable identity before attaching any archive follow-up;
+    // timed-out or exhausted archive operations still require the dedicated Retry Stop action.
+    if (existing?.operation.failure?.code === "runner_rejected" && !existing.archiveAfterStop) {
+      this.db.retrySessionStopIntent(session.id, now);
+    }
     this.db.addSessionStopIntent(session.id, session.runnerId, now, archiveAfterStop);
     this.promptOutbox.stopSession(session.id, now);
     this.abortPolicyHookApprovals(session, now, "session-stopped");
@@ -3824,13 +3832,13 @@ export class SessionsService {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
     const existing = this.db.sessionStopIntent(sessionId);
-    if (!existing?.archiveAfterStop) return fail("there is no archive Stop operation to retry", 409);
+    if (!existing) return fail("there is no Stop operation to retry", 409);
     if (isTerminal(session.status) && session.status !== "stopped") {
       this.settleStopIntent(sessionId, Date.now());
       return ok(this.db.getSession(sessionId)!, 200);
     }
     const rearmed = this.db.retrySessionStopIntent(sessionId, Date.now());
-    if (!rearmed) return fail("there is no archive Stop operation to retry", 409);
+    if (!rearmed) return fail("there is no Stop operation to retry", 409);
     this.sendStopCommand(rearmed.runnerId, sessionId);
     this.hub.sessionChangedById(sessionId);
     return ok(this.db.getSession(sessionId)!, 202);
@@ -3905,6 +3913,9 @@ export class SessionsService {
   restart(sessionId: string): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    if (session.stopOperation?.status === "stop_failed") {
+      return fail("retry the failed Stop before restarting the session", 409);
+    }
     if (session.archiveStatus) {
       return fail("archive is waiting for runtime capacity to be released", 409);
     }

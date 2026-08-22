@@ -198,7 +198,12 @@ export function SessionHeader({
           {session.title}
         </h1>
       </div>
-      <StatusBadge status={session.status} archiveStatus={session.archiveStatus} archiveOperation={session.archiveOperation} />
+      <StatusBadge
+        status={session.status}
+        archiveStatus={session.archiveStatus}
+        archiveOperation={session.archiveOperation}
+        stopOperation={session.stopOperation}
+      />
       {session.backgroundWorkState && (
         <span
           className={session.backgroundWorkState === "orphaned"
@@ -399,7 +404,22 @@ export function SessionHeader({
                       Sign Out
                     </button>
                   )}
-                  {terminal && runnerOnline && (
+                  {session.stopOperation?.status === "stop_failed" && !session.archiveStatus && (
+                    <button
+                      className="menu-item menu-danger menu-separated"
+                      type="button"
+                      role="menuitem"
+                      disabled={busy}
+                      title="Retry the same Stop operation without archiving the session"
+                      onClick={() => {
+                        closeMenu(true);
+                        void run(() => api.retryStop(session.id));
+                      }}
+                    >
+                      Retry Stop
+                    </button>
+                  )}
+                  {terminal && runnerOnline && session.stopOperation?.status !== "stop_failed" && (
                     <button
                       className="menu-item menu-separated"
                       type="button"

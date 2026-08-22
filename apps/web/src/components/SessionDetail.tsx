@@ -2398,7 +2398,12 @@ function SessionDetailLoaded({
           <div className="session-preview-heading">
             <h2 className="session-preview-title">{session.title}</h2>
             <div className="session-preview-meta">
-              <StatusBadge status={session.status} archiveStatus={session.archiveStatus} archiveOperation={session.archiveOperation} />
+              <StatusBadge
+                status={session.status}
+                archiveStatus={session.archiveStatus}
+                archiveOperation={session.archiveOperation}
+                stopOperation={session.stopOperation}
+              />
               {session.backgroundWorkState && <BackgroundWorkBadge state={session.backgroundWorkState} />}
               {!session.backgroundWorkState && session.backgroundWorkTracking === "untracked" && (
                 <UntrackedBackgroundWorkBadge />

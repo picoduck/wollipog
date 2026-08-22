@@ -32,7 +32,6 @@ import {
   type AutomationAuditEvent,
   type AccessScopeChangePreview,
   type AccessScopeAuditView,
-  type ArchiveOperationView,
   type ArchiveStatus,
   type ArchiveStopFailureCode,
   type AutomationAuditEventKind,
@@ -55,6 +54,7 @@ import {
   type BackgroundWorkTracking,
   type ManagedBackgroundJobSnapshot,
   type SessionCapabilities,
+  type StopOperationView,
   type AcpSessionContextConfig,
   type ApprovalQueueProvenance,
   type AgentContext,
@@ -1828,7 +1828,7 @@ export interface SessionStopIntentRecord {
   runnerId: string;
   restartLaunchId: string | null;
   archiveAfterStop: boolean;
-  operation: ArchiveOperationView;
+  operation: StopOperationView;
 }
 
 interface SessionReminderRow {
@@ -10286,16 +10286,16 @@ export class ControlPlaneDb {
     this.stmt("DELETE FROM session_stop_intents WHERE session_id=?").run(sessionId);
   }
 
-  sessionArchiveOperation(sessionId: string): ArchiveOperationView | undefined {
+  sessionArchiveOperation(sessionId: string): StopOperationView | undefined {
     const intent = this.sessionStopIntent(sessionId);
     return intent?.archiveAfterStop ? intent.operation : undefined;
   }
 
-  private sessionArchiveOperations(): Map<string, ArchiveOperationView> {
+  private sessionStopIntents(): Map<string, SessionStopIntentRecord> {
     const rows = this.stmt(
-      "SELECT * FROM session_stop_intents WHERE archive_after_stop=1",
+      "SELECT * FROM session_stop_intents",
     ).all() as unknown as SessionStopIntentRow[];
-    return new Map(rows.map((row) => [row.session_id, this.sessionStopIntentRecord(row).operation]));
+    return new Map(rows.map((row) => [row.session_id, this.sessionStopIntentRecord(row)]));
   }
 
   sessionArchiveStatus(sessionId: string): ArchiveStatus | undefined {
@@ -10307,7 +10307,7 @@ export class ControlPlaneDb {
   retrySessionStopIntent(sessionId: string, now: number): SessionStopIntentRecord | undefined {
     return this.atomic(() => {
       const existing = this.sessionStopIntent(sessionId);
-      if (!existing?.archiveAfterStop) return undefined;
+      if (!existing) return undefined;
       if (existing.operation.status === "stop_failed") {
         this.stmt(
           "UPDATE session_stop_intents " +
@@ -10341,7 +10341,7 @@ export class ControlPlaneDb {
     const changed = this.stmt(
       "UPDATE session_stop_intents " +
       "SET failed_at=?, failure_code=?, failure_message=? " +
-      "WHERE session_id=? AND operation_id=? AND archive_after_stop=1 AND failed_at IS NULL",
+      "WHERE session_id=? AND operation_id=? AND failed_at IS NULL",
     ).run(now, code, bounded || "The runner could not confirm that the session stopped.", sessionId, operationId);
     return Number(changed.changes) === 1;
   }
@@ -11638,7 +11638,7 @@ export class ControlPlaneDb {
     const row = this.stmt("SELECT * FROM sessions WHERE id=?").get(id) as unknown as
       | SessionRow
       | undefined;
-    return row ? this.sessionView(row, undefined, this.sessionArchiveOperation(id)) : null;
+    return row ? this.sessionView(row, undefined, this.sessionStopIntent(id)) : null;
   }
 
   recordSideChat(parentSessionId: string, childSessionId: string, now: number): void {
@@ -11706,8 +11706,8 @@ export class ControlPlaneDb {
     const rows = this.stmt(`SELECT * FROM sessions ${where} ORDER BY created_at DESC`)
       .all() as unknown as SessionRow[];
     const legacyTargets = new Map<string, ExecutionTargetDefinition[] | undefined>();
-    const archiveOperations = this.sessionArchiveOperations();
-    return rows.map((r) => this.sessionView(r, legacyTargets, archiveOperations.get(r.id)));
+    const stopIntents = this.sessionStopIntents();
+    return rows.map((r) => this.sessionView(r, legacyTargets, stopIntents.get(r.id)));
   }
 
   private legacyExecutionTargets(runnerId: string): ExecutionTargetDefinition[] | undefined {
@@ -11730,7 +11730,7 @@ export class ControlPlaneDb {
   private sessionView(
     row: SessionRow,
     legacyTargetCache?: Map<string, ExecutionTargetDefinition[] | undefined>,
-    archiveOperation?: ArchiveOperationView,
+    stopIntent?: SessionStopIntentRecord,
   ): SessionView {
     const agentName = row.agent_id
       ? ((this.stmt("SELECT name FROM agent_definitions WHERE id=?").get(row.agent_id) as
@@ -11823,8 +11823,9 @@ export class ControlPlaneDb {
         }
       })(),
       archived: row.archived === 1,
-      archiveStatus: archiveOperation?.status,
-      archiveOperation,
+      archiveStatus: stopIntent?.archiveAfterStop ? stopIntent.operation.status : undefined,
+      archiveOperation: stopIntent?.archiveAfterStop ? stopIntent.operation : undefined,
+      stopOperation: stopIntent?.operation,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       lastEventAt: row.last_event_at,
