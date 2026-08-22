@@ -151,7 +151,12 @@ export function InboxView({
   // re-adopted only at boundaries where the user cannot be aiming at a row: leaving the tab or
   // window (`inboxAway`), expanding a session, and the deliberate structural actions folded into
   // structuralOrderKey below.
-  const [inboxAway, setInboxAway] = useState(() => document.visibilityState === "hidden");
+  // Focus and visibility are tracked apart, not folded into one flag: a page can be made visible
+  // again while its window stays unfocused, and a shared flag would let that visibility event
+  // re-arm the lease and turn the eventual focus into a no-op, stranding a stale order.
+  const [windowBlurred, setWindowBlurred] = useState(false);
+  const [documentHidden, setDocumentHidden] = useState(() => document.visibilityState === "hidden");
+  const inboxAway = windowBlurred || documentHidden;
   const browsingOrderLease = expandedSessionId === null && !inboxAway;
   const browsingOrderLeaseRef = useRef(browsingOrderLease);
   browsingOrderLeaseRef.current = browsingOrderLease;
@@ -541,9 +546,9 @@ export function InboxView({
   // recency ordering is re-adopted. Nothing snaps out from under a returning click, because a
   // pointer entering the list re-holds the order at `pointerover`, before focus follows the press.
   useEffect(() => {
-    const leaveInbox = () => setInboxAway(true);
-    const enterInbox = () => setInboxAway(false);
-    const trackVisibility = () => setInboxAway(document.visibilityState === "hidden");
+    const leaveInbox = () => setWindowBlurred(true);
+    const enterInbox = () => setWindowBlurred(false);
+    const trackVisibility = () => setDocumentHidden(document.visibilityState === "hidden");
     trackVisibility();
     window.addEventListener("blur", leaveInbox);
     window.addEventListener("focus", enterInbox);

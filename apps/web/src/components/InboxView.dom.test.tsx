@@ -378,6 +378,42 @@ test("InboxView holds desktop browsing order until the user leaves the window", 
   await act(async () => { socket.push({ type: "session_upsert", session: session("C", 110) }); });
   assert.deepEqual(rowTitles(container), ["Session B", "Session C"]);
 
+  // Becoming visible again inside a still-unfocused window is not a return: the lease must stay
+  // down until focus comes back, or activity between the two events is frozen into a stale order.
+  await act(async () => { domWindow.dispatchEvent(new domWindow.Event("blur")); });
+  setVisibility("hidden");
+  await act(async () => { domWindow.document.dispatchEvent(new domWindow.Event("visibilitychange")); });
+  setVisibility("visible");
+  await act(async () => { domWindow.document.dispatchEvent(new domWindow.Event("visibilitychange")); });
+  await act(async () => { socket.push({ type: "session_upsert", session: session("B", 120) }); });
+  assert.deepEqual(rowTitles(container), ["Session B", "Session C"],
+    "an unfocused window is still away, whatever the page's visibility did in the meantime");
+
+  // Focus is the return, and the hold re-arms from the order the user actually comes back to.
+  await act(async () => { domWindow.dispatchEvent(new domWindow.Event("focus")); });
+  await act(async () => { socket.push({ type: "session_upsert", session: session("C", 130) }); });
+  assert.deepEqual(rowTitles(container), ["Session B", "Session C"]);
+
+  // Archiving the selected middle row hands selection to the row that took its slot, without
+  // disturbing the held positions around it.
+  await act(async () => { socket.push({ type: "session_upsert", session: session("A", 140) }); });
+  assert.deepEqual(rowTitles(container), ["Session B", "Session C", "Session A"]);
+  const middleRow = [...container.querySelectorAll<HTMLButtonElement>(".inbox-row")]
+    .find((row) => row.textContent?.includes("Session C"));
+  await act(async () => { middleRow?.click(); });
+  assert.match(
+    container.querySelector<HTMLElement>('.inbox-row-shell[aria-selected="true"]')?.textContent ?? "",
+    /Session C/,
+  );
+  await act(async () => {
+    socket.push({ type: "session_upsert", session: session("C", 150, { archived: true }) });
+  });
+  assert.deepEqual(rowTitles(container), ["Session B", "Session A"]);
+  assert.match(
+    container.querySelector<HTMLElement>('.inbox-row-shell[aria-selected="true"]')?.textContent ?? "",
+    /Session A/,
+  );
+
   await act(async () => { root.unmount(); });
   container.remove();
   mobileViewport = true;
