@@ -48,6 +48,9 @@ test("new Claude sessions choose Auto only when the connected installation adver
   const base = { models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true };
   assert.equal(defaultPermissionModeForNewSession("claude-code", { ...base, permissionModes: ["default", "auto", "acceptEdits"] }), "auto");
   assert.equal(defaultPermissionModeForNewSession("claude-code", { ...base, permissionModes: ["default", "acceptEdits"] }), "acceptEdits");
+  assert.equal(defaultPermissionModeForNewSession("claude-code", { ...base, permissionModes: ["default"] }), undefined);
+  assert.equal(defaultPermissionModeForNewSession("claude-code", { ...base, permissionModes: [] }), undefined);
+  assert.equal(defaultPermissionModeForNewSession("claude-code", undefined), undefined);
   assert.equal(defaultPermissionModeForNewSession("codex-app-server", { ...base, permissionModes: ["auto-review"] }), undefined);
 });
 
@@ -1104,6 +1107,12 @@ test("createSession persists and launches the capability-dependent Claude permis
   assert.ok(unsupported.ok && unsupported.data);
   assert.equal(db.getSession(unsupported.data.id)!.permissionMode, "acceptEdits");
   assert.equal(hub.sentOfType("start_session").at(-1)!.spec.config.permissionMode, "acceptEdits");
+
+  updateModes([]);
+  const undiscovered = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
+  assert.ok(undiscovered.ok && undiscovered.data);
+  assert.equal(db.getSession(undiscovered.data.id)!.permissionMode, null);
+  assert.equal(hub.sentOfType("start_session").at(-1)!.spec.config.permissionMode, undefined);
 });
 
 test("createSession online → 201 and sends start_session with the right launch spec", () => {

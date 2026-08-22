@@ -495,10 +495,11 @@ export function defaultPermissionModeForNewSession(
   driver: AgentDriverKind,
   capabilities: AgentCapabilities | undefined,
 ): string | undefined {
-  if (driver === "claude-code") {
-    return capabilities?.permissionModes?.includes("auto") ? "auto" : "acceptEdits";
-  }
-  return undefined;
+  if (driver !== "claude-code") return undefined;
+  const modes = capabilities?.permissionModes;
+  if (!modes?.length) return undefined;
+  if (modes.includes("auto")) return "auto";
+  return modes.includes("acceptEdits") ? "acceptEdits" : undefined;
 }
 
 /** Conductor clamp: sessions of the "conductor" agent must stay in permissionMode "default" —
