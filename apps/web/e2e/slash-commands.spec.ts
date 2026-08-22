@@ -341,6 +341,14 @@ test("description-only fuzzy text sends literally instead of rewriting the comma
     .toBe("/no");
 });
 
+test("rename-session arguments remain literal prompt text", async ({ page }) => {
+  const composer = page.locator(".composer-input");
+  await composer.fill("/rename-session keep this literal");
+  await page.keyboard.press("Enter");
+  await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests()[0]?.text))
+    .toBe("/rename-session keep this literal");
+});
+
 test("unknown commands and absolute paths stay plaintext while command triggers require leading context", async ({ page }) => {
   const composer = page.locator(".composer-input");
 

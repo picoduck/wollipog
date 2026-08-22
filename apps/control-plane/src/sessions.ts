@@ -111,6 +111,7 @@ import {
 } from "./db.js";
 import { isRunnerRequestNotSentError, isRunnerRequestTimeoutError, type Hub } from "./hub.js";
 import { SessionPromptOutbox } from "./session-prompt-outbox.js";
+import { redactOperationalTranscriptText } from "./share-projection.js";
 import {
   approvalForDecision,
   conductorSafetyPolicy,
@@ -140,6 +141,11 @@ import {
   composePodOrchestrationPrompt,
   normalizePodOutput,
 } from "./pod-orchestration.js";
+import {
+  boundedSessionTitleContext,
+  normalizeGeneratedSessionTitle,
+  type SessionTitleGenerator,
+} from "./session-title-generator.js";
 
 type Logger = { info: (m: string) => void; warn: (m: string) => void; error: (m: string) => void };
 
@@ -643,6 +649,10 @@ export class SessionsService {
   /** Remember authoritative no-repository results across refreshes and offline intervals. */
   private readonly reviewQueueNoRepository = new Set<string>();
   private readonly promptOutbox: SessionPromptOutbox;
+  /** Process-local epochs fence late initial/manual results. Durable title/source checks provide
+   * the cross-restart fence, so an abandoned request can never overwrite newer state. */
+  private readonly titleGenerationEpochs = new Map<string, number>();
+  private readonly titleGenerationControllers = new Map<string, AbortController>();
 
   constructor(
     private readonly db: ControlPlaneDb,
@@ -654,6 +664,8 @@ export class SessionsService {
      * view AFTER it; the decision policy lives with the sender. */
     private readonly notify?: (prev: SessionView, view: SessionView) => void,
     private readonly steeringRequestTimeoutMs = STEERING_REQUEST_TIMEOUT_MS,
+    private readonly titleGenerator?: SessionTitleGenerator,
+    private readonly titleGenerationTimeoutMs = 5_000,
   ) {
     this.promptOutbox = new SessionPromptOutbox(this.db, this.hub, this.log);
     // A restart can happen after a prompt reached a runner but before the delivery marker was
@@ -3979,10 +3991,68 @@ export class SessionsService {
     const title = value.trim().replace(/\s+/g, " ");
     if (!title) return fail("title is required", 400);
     if (title.length > 120) return fail("title must be 120 characters or fewer", 400);
+    this.cancelTitleGeneration(sessionId);
     this.db.setSessionTitle(sessionId, title, Date.now(), "user");
     const updated = this.db.getSession(sessionId)!;
     this.hub.sessionChanged(updated);
     return ok(updated);
+  }
+
+  private cancelTitleGeneration(sessionId: string): void {
+    this.titleGenerationControllers.get(sessionId)?.abort();
+    this.titleGenerationControllers.delete(sessionId);
+    this.titleGenerationEpochs.delete(sessionId);
+  }
+
+  private bumpTitleGenerationEpoch(sessionId: string): number {
+    this.titleGenerationControllers.get(sessionId)?.abort();
+    const epoch = (this.titleGenerationEpochs.get(sessionId) ?? 0) + 1;
+    this.titleGenerationEpochs.set(sessionId, epoch);
+    return epoch;
+  }
+
+  private generateSessionTitle(
+    sessionId: string,
+    ownership: "generated" | "user",
+  ): ServiceResult<{ accepted: true }> {
+    if (!this.titleGenerator) return fail("semantic session naming is disabled or not configured", 409);
+    const session = this.db.getSession(sessionId);
+    if (!session) return fail("session not found", 404);
+    const sensitivePaths = this.db.sessionSensitivePaths(sessionId);
+    const messages = boundedSessionTitleContext(
+      this.db.listSessionTitleContextEvents(sessionId),
+      (text) => redactOperationalTranscriptText(text, sensitivePaths),
+    );
+    if (!messages.length) return fail("the session has no completed conversation context to name", 409);
+
+    const epoch = this.bumpTitleGenerationEpoch(sessionId);
+    const expectedTitle = session.title;
+    const expectedSource = session.titleSource ?? "generated";
+    const controller = new AbortController();
+    this.titleGenerationControllers.set(sessionId, controller);
+    const timeout = setTimeout(() => controller.abort(), this.titleGenerationTimeoutMs);
+    void this.titleGenerator({ messages, signal: controller.signal }).then((rawTitle) => {
+      const title = normalizeGeneratedSessionTitle(rawTitle);
+      if (!title || controller.signal.aborted || this.titleGenerationEpochs.get(sessionId) !== epoch) return;
+      const current = this.db.getSession(sessionId);
+      if (!current || current.title !== expectedTitle || (current.titleSource ?? "generated") !== expectedSource) return;
+      this.db.setSemanticSessionTitle(sessionId, title, Date.now(), ownership);
+      this.hub.sessionChangedById(sessionId);
+    }).catch((error: unknown) => {
+      if (!controller.signal.aborted) this.log.warn("semantic title generation failed: " + (error as Error).message);
+    }).finally(() => {
+      clearTimeout(timeout);
+      if (this.titleGenerationControllers.get(sessionId) === controller) {
+        this.titleGenerationControllers.delete(sessionId);
+        this.titleGenerationEpochs.delete(sessionId);
+      }
+    });
+    return ok({ accepted: true }, 202);
+  }
+
+  /** Explicit local retitle requests are metadata work and never enter runner lifecycle or queues. */
+  retitleSession(sessionId: string): ServiceResult<{ accepted: true }> {
+    return this.generateSessionTitle(sessionId, "user");
   }
 
   /** Legacy compatibility adapter for workspace grouping. Durable clients use setProject. This is
@@ -4154,6 +4224,7 @@ export class SessionsService {
   }
 
   private deleteMaterializedSession(session: SessionView): void {
+    this.cancelTitleGeneration(session.id);
     const pods = this.db.podsForSession(session.id);
     const now = Date.now();
     this.abortPolicyHookApprovals(session, now, "session-deleted");
@@ -5681,6 +5752,11 @@ export class SessionsService {
       this.onSessionStatus(sessionId, payload.status);
       return;
     }
+    const isCompletedUserMessage = payload.kind === "user_message" &&
+      payload.final !== false && !payload.commandInvocation;
+    const generatedOwnership = (session.titleSource ?? "generated") === "generated";
+    const shouldGenerateInitialTitle = Boolean(this.titleGenerator) && isCompletedUserMessage &&
+      generatedOwnership && !this.db.hasCompletedUserMessage(sessionId);
     // Keep the runner-seq cursor gap-free: if a live event is ahead of our high-water (we hydrated a
     // session whose earlier history we haven't pulled yet), don't append it out of order and skip
     // past the gap — pull the ordered history from the box (which includes this event) instead.
@@ -5786,17 +5862,15 @@ export class SessionsService {
     }
 
     // The first real user message names an untitled session (Codex-style) for immediate feedback.
-    // The runner also persists this into meta.title, so it survives re-hydration; both derive from
-    // the same prompt text and agree. Streamed chunks (final === false) are skipped.
-    if (
-      payload.kind === "user_message" &&
-      payload.final !== false &&
-      !payload.commandInvocation &&
-      (session.titleSource ?? "generated") === "generated" &&
-      session.title === UNTITLED
-    ) {
+    // The runner persists the same fallback into meta.title. A later CP semantic result is marked
+    // separately so stale non-provider hydration cannot revert it. Streamed chunks are skipped.
+    if (isCompletedUserMessage && generatedOwnership && session.title === UNTITLED) {
       const t = titleFromPrompt(payload.text);
       if (t) this.db.setSessionTitle(sessionId, t, now, "generated");
+    }
+    if (shouldGenerateInitialTitle) {
+      // Fire-and-forget: the normal turn has already entered the runner independently.
+      this.generateSessionTitle(sessionId, "generated");
     }
 
     // Parented usage is a display-only subagent breakdown. The provider's top-level result is the
