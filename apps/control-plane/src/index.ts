@@ -130,6 +130,7 @@ import { RUNNER_RELEASE_TAG } from "./release-version.js";
 import { readSshConfigHosts } from "./ssh-config.js";
 import { ControlPlaneDb, GOVERNANCE_AUDIT_RETENTION_MS } from "./db.js";
 import { registerSessionLookupRoute } from "./session-lookup-route.js";
+import { sessionTitleGeneratorFromEnv } from "./session-title-generator.js";
 import { registerRunnerAttestationRoute } from "./runner-attestation-route.js";
 import {
   canAssignSessionProject,
@@ -755,6 +756,8 @@ app.post("/api/public/push-receipt", async (req, reply) => {
   return reply.code(204).send();
 });
 
+const semanticTitleConfig = sessionTitleGeneratorFromEnv();
+
 const svc = new SessionsService(
   db,
   hub,
@@ -769,6 +772,9 @@ const svc = new SessionsService(
     const msg = pushDecision(prevStatus, view);
     if (msg) pushSender.send(msg, { kind: "session", sessionId: view.id });
   },
+  undefined,
+  semanticTitleConfig.generator,
+  semanticTitleConfig.timeoutMs,
 );
 
 registerPromptImageRoutes(app, {
@@ -3436,6 +3442,11 @@ app.post("/api/sessions/:id/title", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const body = req.body as Partial<SetSessionTitleRequest>;
   return respond(reply, svc.setTitle(id, body?.title));
+});
+
+app.post("/api/sessions/:id/retitle", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  return respond(reply, svc.retitleSession(id));
 });
 
 app.post("/api/sessions/:id/workspace", async (req, reply) => {

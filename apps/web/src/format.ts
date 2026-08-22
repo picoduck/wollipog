@@ -238,6 +238,11 @@ const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   "on-request": "Reads, writes, and commands inside the workspace run automatically; external files and network access require approval.",
 };
 
+export function effortLabel(value: string): string {
+  const labels: Record<string, string> = { minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra High", max: "Max" };
+  return labels[value] ?? value.charAt(0).toUpperCase() + value.slice(1);
+}
+
 export function permissionModeLabel(id: string, driver?: AgentDriverKind): string {
   if (driver === "codex" && id === "workspace-write") return "Auto (Workspace Sandbox)";
   return PERMISSION_LABELS[id] ?? id;
