@@ -598,8 +598,9 @@ export function createApiClient(transport: ApiTransport) {
     const query = new URLSearchParams();
     if (revision !== undefined) query.set("revision", String(revision));
     if (reminderId !== undefined) query.set("reminderId", reminderId);
+    const serialized = query.toString();
     return req<{ removed: true }>(`/api/sessions/${encodeURIComponent(id)}/reminder${
-      query.size === 0 ? "" : `?${query.toString()}`
+      serialized ? `?${serialized}` : ""
     }`, { method: "DELETE" });
   },
 

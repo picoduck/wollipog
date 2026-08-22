@@ -569,6 +569,46 @@ test("fired reminder policy edits and removal Undo can restore their observed pa
   db.close();
 });
 
+test("reminder identity validation is paired and stale-safe at the service boundary", () => {
+  const { db, hub, svc } = makeHarness();
+  const sessionId = seedSession(svc, hub);
+  const userId = db.localIdentityContext().userId;
+  const schedule = {
+    scheduledFor: Date.now() + 60_000,
+    timeZone: "UTC",
+    originalExpression: "in one minute",
+    wakePolicy: "until_activity" as const,
+  };
+
+  const unpaired = svc.setReminder(sessionId, userId, {
+    ...schedule,
+    expectedReminderId: "rem_stale",
+  });
+  assert.equal(unpaired.ok, false);
+  assert.equal(unpaired.status, 400);
+
+  const oversized = svc.setReminder(sessionId, userId, {
+    ...schedule,
+    expectedRevision: 0,
+    expectedReminderId: "x".repeat(129),
+  });
+  assert.equal(oversized.ok, false);
+  assert.equal(oversized.status, 400);
+
+  const created = svc.setReminder(sessionId, userId, { ...schedule, expectedRevision: 0 });
+  assert.equal(created.ok, true);
+  const staleIdentity = svc.setReminder(sessionId, userId, {
+    ...schedule,
+    scheduledFor: schedule.scheduledFor + 60_000,
+    expectedRevision: created.data!.revision,
+    expectedReminderId: "rem_stale",
+  });
+  assert.equal(staleIdentity.ok, false);
+  assert.equal(staleIdentity.status, 409);
+  assert.equal(db.getSessionReminder(sessionId, userId)?.reminderId, created.data!.reminderId);
+  db.close();
+});
+
 test("activity-fired reminder edits and Undo preserve their future fired state", () => {
   const { db, hub, svc } = makeHarness();
   const sessionId = seedSession(svc, hub);

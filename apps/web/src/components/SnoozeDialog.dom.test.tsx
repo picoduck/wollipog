@@ -124,7 +124,8 @@ test("live reminder changes preserve the complete draft and require an explicit 
   assert.equal([...container.querySelectorAll(".snooze-preview span")].at(-1)?.textContent, draftTimeZone);
   assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /updated in another client.*local draft is preserved/i);
   const submit = container.querySelector<HTMLButtonElement>('button[type="submit"]')!;
-  assert.equal(submit.disabled, true);
+  assert.equal(submit.disabled, false);
+  assert.equal(submit.getAttribute("aria-disabled"), "true");
   await act(async () => { submit.click(); });
   assert.equal(saved.length, 0);
 
@@ -143,6 +144,48 @@ test("live reminder changes preserve the complete draft and require an explicit 
   assert.equal(saved[0]?.expectedRevision, 2);
   assert.equal(saved[0]?.expectedReminderId, "reminder-original");
 
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("the server echo from the dialog's own save is not announced as a remote conflict", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const original: SessionReminderView = {
+    reminderId: "reminder-original",
+    sessionId: "session-1",
+    scheduledFor: Date.now() + 60_000,
+    timeZone: "UTC",
+    originalExpression: "in 1 hour",
+    wakePolicy: "until_activity",
+    state: "pending",
+    revision: 1,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  let resolveSave!: () => void;
+  const savePending = new Promise<void>((resolve) => { resolveSave = resolve; });
+  const props = {
+    onClose: () => undefined,
+    onSave: async () => savePending,
+    onRemove: async () => undefined,
+  };
+
+  await act(async () => { root.render(<SnoozeDialog reminder={original} {...props} />); });
+  await act(async () => {
+    container.querySelector<HTMLButtonElement>('button[type="submit"]')!.click();
+    await Promise.resolve();
+  });
+  await act(async () => {
+    root.render(<SnoozeDialog reminder={{ ...original, revision: 2, updatedAt: 2 }} {...props} />);
+  });
+  assert.equal(container.querySelector('[role="alert"]'), null);
+
+  await act(async () => {
+    resolveSave();
+    await savePending;
+  });
   await act(async () => { root.unmount(); });
   container.remove();
 });
@@ -175,11 +218,27 @@ test("fired, removed, and recreated reminders have distinct live-conflict messag
   };
 
   await render(original);
+  const submit = container.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+  submit.focus();
   await render({ ...original, state: "fired", revision: 2, firedAt: 2, wakeReason: "scheduled" });
-  assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /fired in another client/i);
+  assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /already fired/i);
+  assert.equal(domWindow.document.activeElement, submit);
+  assert.equal(submit.disabled, false);
+  assert.equal(submit.getAttribute("aria-disabled"), "true");
 
+  await act(async () => {
+    [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Reload Reminder")!.click();
+  });
+  const remove = [...container.querySelectorAll<HTMLButtonElement>("button")]
+    .find((button) => button.textContent === "Dismiss Reminder")!;
+  remove.focus();
   await render(undefined);
   assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /removed in another client/i);
+  assert.equal(domWindow.document.activeElement, remove);
+  assert.equal(remove.isConnected, true);
+  assert.equal(remove.disabled, false);
+  assert.equal(remove.getAttribute("aria-disabled"), "true");
   assert.equal([...container.querySelectorAll<HTMLButtonElement>("button")]
     .some((button) => button.textContent === "Start New Reminder"), true);
 

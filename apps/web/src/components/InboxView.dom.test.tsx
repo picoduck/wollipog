@@ -380,7 +380,9 @@ test("a two-client reminder upsert preserves the open Inbox Snooze draft and foc
   assert.equal(container.querySelector<HTMLButtonElement>('.snooze-policy [role="radio"][aria-checked="true"]')?.textContent?.includes("Regardless"), true);
   assert.equal([...container.querySelectorAll(".snooze-preview span")].at(-1)?.textContent, draftTimeZone);
   assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /updated in another client/i);
-  assert.equal(container.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled, true);
+  const submit = container.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+  assert.equal(submit.disabled, false);
+  assert.equal(submit.getAttribute("aria-disabled"), "true");
 
   const cancel = [...container.querySelectorAll<HTMLButtonElement>("button")]
     .find((button) => button.textContent === "Cancel")!;

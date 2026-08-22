@@ -1074,10 +1074,8 @@ export function InboxView({
           reminder={reminders.get(snoozeSessionId)}
           onClose={() => setSnoozeSessionId(null)}
           onSave={(request) => saveReminder(snoozeSessionId, request)}
-          onRemove={reminders.has(snoozeSessionId)
-            ? (expectedRevision, expectedReminderId) =>
-                removeReminder(snoozeSessionId, expectedRevision, expectedReminderId)
-            : undefined}
+          onRemove={(expectedRevision, expectedReminderId) =>
+            removeReminder(snoozeSessionId, expectedRevision, expectedReminderId)}
         />
       )}
     </div>

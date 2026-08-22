@@ -31,7 +31,7 @@ export function SnoozeDialog({
   const [error, setError] = useState<string | null>(null);
   const localTimeZone = browserTimeZone();
   const timeZone = loadedReminder && !scheduleTouched ? loadedReminder.timeZone : localTimeZone;
-  const conflict = reminderConflict(loadedReminder, reminder);
+  const conflict = submitting ? null : reminderConflict(loadedReminder, reminder);
   const parsed = useMemo(() => {
     if (loadedReminder && !scheduleTouched) return storedReminderSchedule(loadedReminder);
     return exact
@@ -84,16 +84,29 @@ export function SnoozeDialog({
 
   return (
     <Modal
+      className="snooze-dialog"
       title={loadedReminder ? "Edit Reminder" : "Snooze Session"}
       onClose={onClose}
       describedBy="snooze-description"
       footer={<>
-        {loadedReminder && onRemove && <button className="btn ghost" type="button" onClick={() => void remove()} disabled={submitting || Boolean(conflict)}>
+        {loadedReminder && onRemove && <button
+          className="btn ghost"
+          type="button"
+          onClick={() => void remove()}
+          disabled={submitting}
+          aria-disabled={Boolean(conflict) || undefined}
+        >
           {loadedReminder.state === "fired" ? "Dismiss Reminder" : "Remove Reminder"}
         </button>}
         <span className="modal-foot-spacer" />
         <button className="btn ghost" type="button" onClick={onClose} disabled={submitting}>Cancel</button>
-        <button className="btn primary" type="submit" form="snooze-session-form" disabled={!parsed || submitting || Boolean(conflict)}>
+        <button
+          className="btn primary"
+          type="submit"
+          form="snooze-session-form"
+          disabled={!parsed || submitting}
+          aria-disabled={Boolean(conflict) || undefined}
+        >
           {submitting ? "Saving…" : loadedReminder ? "Update Reminder" : "Snooze Session"}
         </button>
       </>}
@@ -173,6 +186,6 @@ function reminderConflict(
     return "The reminder was removed and recreated in another client.";
   }
   if (loaded.revision === current.revision) return null;
-  if (loaded.state !== "fired" && current.state === "fired") return "The reminder fired in another client.";
+  if (loaded.state !== "fired" && current.state === "fired") return "The reminder already fired.";
   return "The reminder was updated in another client.";
 }

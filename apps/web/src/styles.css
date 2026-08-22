@@ -6305,6 +6305,7 @@ button.file-head.source-path-link {
   line-height: 1.4;
 }
 .snooze-conflict strong { color: var(--text); }
+.snooze-dialog .btn[aria-disabled="true"] { cursor: not-allowed; opacity: 0.55; }
 .snooze-policy { margin-top: var(--space-1); }
 .snooze-preview {
   display: grid;
