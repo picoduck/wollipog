@@ -11,8 +11,7 @@ test.use({
   reducedMotion: "reduce",
 });
 
-test("the first mobile touch traversal loads earlier activity", async ({ page, browserName }) => {
-  test.skip(browserName !== "chromium", "The native touch gesture uses Chromium DevTools input.");
+test("the first mobile touch traversal loads earlier activity", async ({ page }) => {
   await page.goto("/recovery-notice-e2e.html?pagination=1&height=720&width=412");
 
   const reader = page.locator(".detail-scroll");
@@ -31,11 +30,12 @@ test("the first mobile touch traversal loads earlier activity", async ({ page, b
 
   await reader.dispatchEvent("touchstart");
   await reader.evaluate((element) => {
-    for (const scrollTop of [260, 120]) {
+    for (const scrollTop of [260, 0]) {
       element.scrollTop = scrollTop;
       element.dispatchEvent(new Event("scroll", { bubbles: true }));
     }
   });
+  await reader.dispatchEvent("touchend");
 
   await expect.poll(() => page.locator("body").getAttribute("data-tail-request-count")).toBe("2");
   await expect(control).toContainText("Loading Earlier Activity…");

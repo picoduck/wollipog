@@ -293,13 +293,22 @@ async function scrollReader(scroller: HTMLElement, scrollTop: number, readerInte
   await flushAsyncWork();
 }
 
+function touchInputEvent(type: "touchstart" | "touchmove" | "touchend", clientY: number | null = null) {
+  const event = new domWindow.Event(type, { bubbles: true });
+  Object.defineProperty(event, "touches", {
+    value: clientY === null ? [] : [{ clientY }],
+  });
+  return event;
+}
+
 async function touchTraverseReader(scroller: HTMLElement, scrollTops: number[]) {
   await act(async () => {
-    scroller.dispatchEvent(new domWindow.Event("touchstart", { bubbles: true }) as never);
+    scroller.dispatchEvent(touchInputEvent("touchstart", 100) as never);
     for (const scrollTop of scrollTops) {
       scroller.scrollTop = scrollTop;
       scroller.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as never);
     }
+    scroller.dispatchEvent(touchInputEvent("touchend") as never);
   });
   await flushAsyncWork();
 }
@@ -565,6 +574,124 @@ test("the first mobile touch traversal keeps its intent until it reaches the win
 
     assert.equal(pages.tailCalls.length, 2, "one touch traversal requests the earlier page on its first trip");
     assert.equal(pages.tailCalls[1]!.before, openingWindow[0]!.seq);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a finished touch traversal cannot leak intent into a later layout scroll", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages);
+  try {
+    const openingWindow = fixture.events.slice(-8);
+    await act(async () => {
+      pages.releaseTail({
+        events: openingWindow,
+        eventEpoch: 0,
+        nextBefore: openingWindow[0]!.seq,
+        hasMoreOlder: true,
+        cacheComplete: true,
+      });
+    });
+    await flushAsyncWork();
+    setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 1_600, scrollTop: 1_200 });
+
+    await touchTraverseReader(fixture.scroller, [500]);
+    await flushAsyncWork(250);
+    await scrollReader(fixture.scroller, 120, false);
+
+    assert.equal(pages.tailCalls.length, 1, "a later layout scroll cannot inherit finished touch intent");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a touch tap cannot arm later programmatic pagination", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages);
+  try {
+    const openingWindow = fixture.events.slice(-8);
+    await act(async () => {
+      pages.releaseTail({
+        events: openingWindow,
+        eventEpoch: 0,
+        nextBefore: openingWindow[0]!.seq,
+        hasMoreOlder: true,
+        cacheComplete: true,
+      });
+    });
+    await flushAsyncWork();
+    setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 1_600, scrollTop: 500 });
+
+    await act(async () => {
+      fixture.scroller.dispatchEvent(touchInputEvent("touchstart", 100) as never);
+      fixture.scroller.dispatchEvent(touchInputEvent("touchend") as never);
+    });
+    await scrollReader(fixture.scroller, 120, false);
+
+    assert.equal(pages.tailCalls.length, 1, "a tap without upward traversal cannot arm pagination");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("touch momentum after lift can finish the same upward traversal", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages);
+  try {
+    const openingWindow = fixture.events.slice(-8);
+    await act(async () => {
+      pages.releaseTail({
+        events: openingWindow,
+        eventEpoch: 0,
+        nextBefore: openingWindow[0]!.seq,
+        hasMoreOlder: true,
+        cacheComplete: true,
+      });
+    });
+    await flushAsyncWork();
+    setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 1_600, scrollTop: 1_200 });
+
+    await act(async () => {
+      fixture.scroller.dispatchEvent(touchInputEvent("touchstart", 100) as never);
+      fixture.scroller.dispatchEvent(touchInputEvent("touchmove", 200) as never);
+      fixture.scroller.dispatchEvent(touchInputEvent("touchend") as never);
+    });
+    await scrollReader(fixture.scroller, 500, false);
+    await scrollReader(fixture.scroller, 120, false);
+
+    assert.equal(pages.tailCalls.length, 2, "post-lift momentum completes the proven touch traversal");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a downward touch traversal near the head does not load earlier activity", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages);
+  try {
+    const openingWindow = fixture.events.slice(-8);
+    await act(async () => {
+      pages.releaseTail({
+        events: openingWindow,
+        eventEpoch: 0,
+        nextBefore: openingWindow[0]!.seq,
+        hasMoreOlder: true,
+        cacheComplete: true,
+      });
+    });
+    await flushAsyncWork();
+    setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 1_600, scrollTop: 120 });
+
+    await act(async () => {
+      fixture.scroller.dispatchEvent(touchInputEvent("touchstart", 200) as never);
+      fixture.scroller.scrollTop = 160;
+      fixture.scroller.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as never);
+      fixture.scroller.dispatchEvent(touchInputEvent("touchend") as never);
+    });
+    await flushAsyncWork();
+
+    assert.equal(pages.tailCalls.length, 1, "downward touch movement cannot arm earlier pagination");
   } finally {
     await unmountFixture(fixture);
   }

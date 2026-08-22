@@ -173,6 +173,7 @@ const STOP_TURN_RETRY_MS = 8_000;
 const EARLIER_ACTIVITY_TRIGGER_PX = 160;
 const EARLIER_ACTIVITY_REARM_DISTANCE_PX = 32;
 const EARLIER_ACTIVITY_REARM_FRAMES = 8;
+const EARLIER_ACTIVITY_TOUCH_IDLE_MS = 180;
 
 type EarlierActivityIntent = "single-scroll" | "touch-traversal";
 
@@ -545,6 +546,10 @@ function SessionDetailLoaded({
     settleFrame: null as number | null,
     readerIntent: null as EarlierActivityIntent | null,
     readerIntentTop: null as number | null,
+    touchActive: false,
+    touchInputY: null as number | null,
+    touchTraversalStarted: false,
+    touchEndTimer: null as number | null,
     readerIntentMovedUp: false,
   });
   const [composerSelection, setComposerSelection] = useState({ start: 0, end: 0 });
@@ -1134,16 +1139,29 @@ function SessionDetailLoaded({
 
   const clearEarlierActivityIntent = useCallback(() => {
     const state = automaticEarlierLoadRef.current;
+    if (state.touchEndTimer !== null) window.clearTimeout(state.touchEndTimer);
+    state.touchEndTimer = null;
     state.readerIntent = null;
     state.readerIntentTop = null;
     state.readerIntentMovedUp = false;
+    state.touchActive = false;
+    state.touchInputY = null;
+    state.touchTraversalStarted = false;
   }, []);
 
-  const markEarlierActivityIntent = useCallback((intent: EarlierActivityIntent) => {
+  const markEarlierActivityIntent = useCallback((
+    intent: EarlierActivityIntent,
+    touchInputY: number | null = null,
+  ) => {
     const state = automaticEarlierLoadRef.current;
+    if (state.touchEndTimer !== null) window.clearTimeout(state.touchEndTimer);
+    state.touchEndTimer = null;
     state.readerIntent = intent;
     state.readerIntentTop = scrollRef.current?.scrollTop ?? null;
     state.readerIntentMovedUp = false;
+    state.touchActive = intent === "touch-traversal";
+    state.touchInputY = touchInputY;
+    state.touchTraversalStarted = false;
     cancelEarlierActivitySettle();
   }, [cancelEarlierActivitySettle]);
 
@@ -1151,9 +1169,37 @@ function SessionDetailLoaded({
     markEarlierActivityIntent("single-scroll");
   }, [markEarlierActivityIntent]);
 
-  const markTouchEarlierActivityIntent = useCallback(() => {
-    markEarlierActivityIntent("touch-traversal");
+  const markTouchEarlierActivityIntent = useCallback((clientY: number | null = null) => {
+    markEarlierActivityIntent("touch-traversal", clientY);
   }, [markEarlierActivityIntent]);
+
+  const markTouchEarlierActivityMovement = useCallback((clientY: number | null) => {
+    const state = automaticEarlierLoadRef.current;
+    if (state.readerIntent !== "touch-traversal" || clientY === null) return;
+    if (state.touchInputY !== null && clientY > state.touchInputY + 1) {
+      state.touchTraversalStarted = true;
+    }
+    state.touchInputY = clientY;
+  }, []);
+
+  const deferTouchEarlierActivityEnd = useCallback(() => {
+    const state = automaticEarlierLoadRef.current;
+    if (state.readerIntent !== "touch-traversal") return;
+    if (state.touchEndTimer !== null) window.clearTimeout(state.touchEndTimer);
+    state.touchEndTimer = window.setTimeout(() => {
+      state.touchEndTimer = null;
+      if (!state.touchActive && state.readerIntent === "touch-traversal") {
+        clearEarlierActivityIntent();
+      }
+    }, EARLIER_ACTIVITY_TOUCH_IDLE_MS);
+  }, [clearEarlierActivityIntent]);
+
+  const finishTouchEarlierActivityIntent = useCallback(() => {
+    const state = automaticEarlierLoadRef.current;
+    if (state.readerIntent !== "touch-traversal") return;
+    state.touchActive = false;
+    deferTouchEarlierActivityEnd();
+  }, [deferTouchEarlierActivityEnd]);
 
   const rearmEarlierActivityAfterMeasurements = useCallback(() => {
     cancelEarlierActivitySettle();
@@ -1181,6 +1227,7 @@ function SessionDetailLoaded({
   }, [cancelEarlierActivitySettle, timelineHistoryKey]);
 
   useEffect(() => cancelEarlierActivitySettle, [cancelEarlierActivitySettle, timelineHistoryKey]);
+  useEffect(() => clearEarlierActivityIntent, [clearEarlierActivityIntent, timelineHistoryKey]);
 
   const maybeLoadEarlier = useCallback((scroll: HTMLElement) => {
     const state = automaticEarlierLoadRef.current;
@@ -1203,7 +1250,11 @@ function SessionDetailLoaded({
     const previousIntentTop = state.readerIntentTop;
     const movedUp = previousIntentTop !== null && scroll.scrollTop < previousIntentTop - 1;
     const movedDown = previousIntentTop !== null && scroll.scrollTop > previousIntentTop + 1;
-    if (readerIntent === "touch-traversal" && movedUp) state.readerIntentMovedUp = true;
+    if (readerIntent === "touch-traversal" && movedUp &&
+        (state.touchActive || state.touchTraversalStarted)) {
+      state.touchTraversalStarted = true;
+      state.readerIntentMovedUp = true;
+    }
 
     // A transcript waits until the reader is genuinely near its head, rather than treating every
     // follow-tail scroll as a request for history. A zero-range viewport cannot produce real
@@ -1229,6 +1280,7 @@ function SessionDetailLoaded({
       // upward so the first event cannot consume intent before a later event reaches the head.
       if (readerIntent === "touch-traversal" && !movedDown) {
         state.readerIntentTop = scroll.scrollTop;
+        if (state.touchEndTimer !== null) deferTouchEarlierActivityEnd();
       } else {
         clearEarlierActivityIntent();
       }
@@ -1243,7 +1295,7 @@ function SessionDetailLoaded({
     state.readerStarted = true;
     state.nextTriggerTop = null;
     if (loadOlder()) state.requestedBase = eventWindow.baseSeq;
-  }, [cancelEarlierActivitySettle, clearEarlierActivityIntent, eventWindow, loadOlder, timelineHistoryKey]);
+  }, [cancelEarlierActivitySettle, clearEarlierActivityIntent, deferTouchEarlierActivityEnd, eventWindow, loadOlder, timelineHistoryKey]);
 
   const loadEarlierFromControl = useCallback(() => {
     const state = automaticEarlierLoadRef.current;
@@ -2429,13 +2481,28 @@ function SessionDetailLoaded({
                 followTail.onWheel(event);
               }}
               onPointerDown={(event) => {
-                markEarlierActivityIntent(event.pointerType === "touch" ? "touch-traversal" : "single-scroll");
+                if (event.pointerType === "touch") markTouchEarlierActivityIntent(event.clientY);
+                else markSingleEarlierActivityIntent();
               }}
-              onPointerMove={followTail.onPointerMove}
-              onTouchStart={() => {
-                markTouchEarlierActivityIntent();
+              onPointerMove={(event) => {
+                if (event.pointerType === "touch") markTouchEarlierActivityMovement(event.clientY);
+                followTail.onPointerMove(event);
+              }}
+              onPointerUp={(event) => {
+                if (event.pointerType === "touch") finishTouchEarlierActivityIntent();
+              }}
+              onPointerCancel={(event) => {
+                if (event.pointerType === "touch") finishTouchEarlierActivityIntent();
+              }}
+              onTouchStart={(event) => {
+                markTouchEarlierActivityIntent(event.touches[0]?.clientY ?? null);
                 followTail.onTouchStart();
               }}
+              onTouchMove={(event) => {
+                markTouchEarlierActivityMovement(event.touches[0]?.clientY ?? null);
+              }}
+              onTouchEnd={finishTouchEarlierActivityIntent}
+              onTouchCancel={finishTouchEarlierActivityIntent}
               onKeyDown={(event) => {
                 if (event.defaultPrevented) return;
                 if (mode !== "expanded" && !isFollowTailResumeKey(event)) return;
