@@ -5,11 +5,14 @@ import {
   permissionModeEmptyLabel,
   permissionModeForDisplay,
   permissionModeLabel,
+  effortLabel,
 } from "../format.js";
 import {
   defaultPermissionMode,
+  effectiveModelEffortForDisplay,
   elicitationAvailability,
   resolveCaps,
+  resolveEffectiveCaps,
   type ElicitationAvailability,
 } from "../caps.js";
 import { useStoreSelector } from "../store.js";
@@ -18,26 +21,20 @@ import { ShieldIcon } from "./Icons.js";
 
 type Apply = (patch: Partial<SessionConfig>) => void;
 
-/** Prettify a raw effort token for display (xhigh → "Extra High"), Codex-style. */
-function prettyEffort(e: string): string {
-  const map: Record<string, string> = { minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra High" };
-  return map[e] ?? e.charAt(0).toUpperCase() + e.slice(1);
-}
-
 /** Caps-derived session config (model / effort / approvals) for the composer-bar controls. Model/effort
  * appear only when the agent advertises them; approvals excludes `plan` (that lives in the + menu). */
 function useSessionConfig(session: SessionView) {
   const runner = useStoreSelector((s) => s.runners.get(session.runnerId));
   const caps = resolveCaps(runner, session);
+  const effectiveCaps = resolveEffectiveCaps(runner, session);
   const models = (caps?.models ?? []).filter((model) => !model.hidden || model.id === session.model);
   const permModes = (caps?.permissionModes ?? []).filter((p) => p !== "plan");
 
-  const modelVal = models.some((m) => m.id === session.model)
-    ? session.model!
-    : models.find((m) => m.default)?.id ?? models[0]?.id ?? "";
-  const selectedModel = models.find((m) => m.id === modelVal);
-  const modelEfforts = (selectedModel?.efforts?.length ? selectedModel.efforts : caps?.effortLevels) ?? [];
-  const effortVal = session.effort && modelEfforts.includes(session.effort) ? session.effort : "";
+  const effective = effectiveModelEffortForDisplay(effectiveCaps, session.driver, session.model, session.effort, caps);
+  const modelVal = effective.model?.id ?? "";
+  const selectedModel = effective.model;
+  const modelEfforts = effective.efforts;
+  const effortVal = effective.effort ?? "";
   const permVal = permissionModeForDisplay(session.permissionMode, permModes, session.driver);
   return {
     caps,
@@ -142,7 +139,7 @@ export function ModelEffortMenuChoices({
           </button>
           {modelEfforts.map((effort) => (
             <button key={effort} type="button" role="menuitemradio" aria-checked={effort === effortVal} className={`cbar-opt${effort === effortVal ? " on" : ""}`} onClick={() => apply({ effort })}>
-              {prettyEffort(effort)}
+              {effortLabel(effort)}
             </button>
           ))}
         </div>
@@ -162,7 +159,7 @@ export function ModelEffortControl({ session, apply }: { session: SessionView; a
   const label = (
     <>
       <span className="cbar-model">{modelEffortControlLabel(selectedModel, modelVal)}</span>
-      {effortVal && <span className="cbar-effort">{prettyEffort(effortVal)}</span>}
+      {effortVal && <span className="cbar-effort">{effortLabel(effortVal)}</span>}
     </>
   );
   return (
