@@ -151,7 +151,7 @@ export function InboxView({
   // re-adopted only at boundaries where the user cannot be aiming at a row: leaving the tab or
   // window (`inboxAway`), expanding a session, and the deliberate structural actions folded into
   // structuralOrderKey below.
-  const [inboxAway, setInboxAway] = useState(false);
+  const [inboxAway, setInboxAway] = useState(() => document.visibilityState === "hidden");
   const browsingOrderLease = expandedSessionId === null && !inboxAway;
   const browsingOrderLeaseRef = useRef(browsingOrderLease);
   browsingOrderLeaseRef.current = browsingOrderLease;
@@ -429,8 +429,10 @@ export function InboxView({
       // through it, so incoming activity changes row content without moving rows. Deliberate
       // group, filter, and pin changes still replace the lease through structuralOrderKey above.
       if (!current) return browsingOrderLease ? liveIds : current;
-      const extended = extendInboxHeldOrder(current, liveIds);
-      return extended.length === current.length ? current : extended;
+      const extended = extendInboxHeldOrder(current, liveIds, selectedSessionIdRef.current);
+      return extended.length === current.length && extended.every((id, index) => id === current[index])
+        ? current
+        : extended;
     });
   }, [liveIds, browsingOrderLease]);
 
@@ -488,9 +490,18 @@ export function InboxView({
 
   useLayoutEffect(() => {
     if (browsingOrderLease) return;
+    // Leaving ends pointer ownership outright. A pointer resting over the list keeps its entry
+    // until a pointerout that a backgrounded page never delivers, and platforms that hide a page
+    // without a window blur would otherwise strand the hold and skip the boundary entirely.
+    if (inboxAway) {
+      activePointerIdsRef.current.clear();
+      targetPointerIdsRef.current.clear();
+      clearHeldOrder();
+      return;
+    }
     if (targetPointerIdsRef.current.size > 0 || activePointerIdsRef.current.size > 0) return;
     clearHeldOrder();
-  }, [clearHeldOrder, browsingOrderLease]);
+  }, [clearHeldOrder, browsingOrderLease, inboxAway]);
 
 
   const holdDisplayedOrder = useCallback(() => {
@@ -533,6 +544,7 @@ export function InboxView({
     const leaveInbox = () => setInboxAway(true);
     const enterInbox = () => setInboxAway(false);
     const trackVisibility = () => setInboxAway(document.visibilityState === "hidden");
+    trackVisibility();
     window.addEventListener("blur", leaveInbox);
     window.addEventListener("focus", enterInbox);
     document.addEventListener("visibilitychange", trackVisibility);

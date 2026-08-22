@@ -407,6 +407,16 @@ test("successive arrivals append without moving an earlier arrival", () => {
   assert.deepEqual(reconcileInboxOrder(afterSecond, ["arrival-2", "arrival-1", "newest", "older"]), afterSecond);
 });
 
+test("a held order drops departed rows but keeps a vanished selection for repair", () => {
+  const afterRemoval = extendInboxHeldOrder(["removed", "kept", "newest"], ["kept", "newest"], "removed");
+  assert.deepEqual(afterRemoval, ["removed", "kept", "newest"]);
+  // Once the selection has been repaired off the removed row, nothing pins the tombstone: a
+  // day-long desktop lease must not accumulate one entry per departed session.
+  assert.deepEqual(extendInboxHeldOrder(afterRemoval, ["kept", "newest", "arrival"], "kept"),
+    ["kept", "newest", "arrival"]);
+  assert.deepEqual(extendInboxHeldOrder(["gone-1", "gone-2"], ["kept"], null), ["kept"]);
+});
+
 test("interaction order uses current row data instead of freezing live content", () => {
   const current = [{ id: "older", status: "idle" }, { id: "newest", status: "idle" }];
   const next = [{ id: "newest", status: "needs-input" }, { id: "older", status: "failed" }];

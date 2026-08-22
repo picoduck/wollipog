@@ -47,6 +47,10 @@ for (const [name, value] of Object.entries({
   ResizeObserver: class { observe() {} unobserve() {} disconnect() {} },
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
 
+function setVisibility(value: "visible" | "hidden"): void {
+  Object.defineProperty(domWindow.document, "visibilityState", { configurable: true, value });
+}
+
 const VIEWPORT_HEIGHT = 2_000;
 const ROW_HEIGHT = 68;
 Object.defineProperty(domWindow.Element.prototype, "getBoundingClientRect", {
@@ -293,6 +297,7 @@ test("InboxView keeps mobile browsing order stable before and through a touch", 
 
 test("InboxView holds desktop browsing order until the user leaves the window", async () => {
   mobileViewport = false;
+  setVisibility("visible");
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
@@ -354,6 +359,24 @@ test("InboxView holds desktop browsing order until the user leaves the window", 
   await act(async () => { domWindow.dispatchEvent(new domWindow.Event("focus")); });
   await act(async () => { socket.push({ type: "session_upsert", session: session("B", 90) }); });
   assert.deepEqual(rowTitles(container), ["Session C", "Session B"]);
+
+  // A page can be backgrounded with no window blur, and a pointer resting over the list gets no
+  // pointerout when that happens. The boundary has to hold anyway.
+  const grid = container.querySelector<HTMLElement>(".inbox-list")!;
+  await act(async () => {
+    grid.dispatchEvent(new domWindow.PointerEvent("pointerover", {
+      bubbles: true, pointerId: 3, pointerType: "mouse",
+    }) as unknown as Event);
+  });
+  setVisibility("hidden");
+  await act(async () => { domWindow.document.dispatchEvent(new domWindow.Event("visibilitychange")); });
+  await act(async () => { socket.push({ type: "session_upsert", session: session("B", 100) }); });
+  assert.deepEqual(rowTitles(container), ["Session B", "Session C"],
+    "a hidden page is not a browsing interval, whatever the pointer was last seen doing");
+  setVisibility("visible");
+  await act(async () => { domWindow.document.dispatchEvent(new domWindow.Event("visibilitychange")); });
+  await act(async () => { socket.push({ type: "session_upsert", session: session("C", 110) }); });
+  assert.deepEqual(rowTitles(container), ["Session B", "Session C"]);
 
   await act(async () => { root.unmount(); });
   container.remove();
