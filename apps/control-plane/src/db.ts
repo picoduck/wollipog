@@ -12422,6 +12422,9 @@ export class ControlPlaneDb {
     // No anchor within reach: an adopted transcript, a resumed session, or a turn longer than the
     // cap. The count boundary stands, and the page says it is unaligned.
     if (!anchor) return { ...page, turnAligned: false };
+    // The count boundary itself is already a semantic boundary, so no extension (or extension
+    // budget) is needed even when the requested page's own payload exceeds the safety ceiling.
+    if (anchor.seq === windowStartSeq) return { ...page, turnAligned: true };
     const extension = this.stmt(
       `SELECT COALESCE(SUM(LENGTH(CAST(payload AS BLOB))), 0) AS payload_bytes
         FROM session_events WHERE session_id=? AND seq>=? AND seq<?`,

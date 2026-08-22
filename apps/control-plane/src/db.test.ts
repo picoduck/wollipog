@@ -3305,6 +3305,31 @@ test("a page already starting at a user message is left as it is", () => {
   assert.equal(page.hasMoreOlder, true);
 });
 
+test("an oversized page already starting at a user message is still aligned", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "large-boundary-cache" }));
+  db.appendEvent("large-boundary-cache", { kind: "agent_message", text: "older turn" }, 1);
+  db.appendEvent("large-boundary-cache", { kind: "user_message", text: "second" }, 2);
+  const chunk = "x".repeat(22 * 1024);
+  for (let seq = 3; seq <= 201; seq += 1) {
+    db.appendEvent("large-boundary-cache", {
+      kind: "agent_message",
+      text: chunk,
+      messageId: "large-response",
+      final: false,
+    }, seq);
+  }
+  assert.ok(199 * Buffer.byteLength(chunk, "utf8") > TAIL_TURN_ALIGNMENT_MAX_PAYLOAD_BYTES);
+
+  const page = db.listCachedEventTailPage(
+    "large-boundary-cache", undefined, 200, { alignToTurn: true },
+  );
+  assert.equal(page.events.length, 200);
+  assert.equal(page.events[0]!.seq, 2);
+  assert.equal(page.turnAligned, true, "the byte cap only limits extension beyond the base page");
+  assert.equal(page.hasMoreOlder, true);
+});
+
 test("turn alignment stops at its cap and never extends a page without bound", () => {
   const db = withRunner();
   db.createSession(newSession({ id: "verbose-turn" }));
