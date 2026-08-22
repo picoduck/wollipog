@@ -10349,7 +10349,7 @@ export class ControlPlaneDb {
   pendingSessionStopIntents(): SessionStopIntentRecord[] {
     const rows = this.stmt(
       "SELECT * FROM session_stop_intents " +
-      "WHERE failed_at IS NULL " +
+      "WHERE archive_after_stop=1 AND failed_at IS NULL " +
       "ORDER BY last_attempt_at, session_id",
     ).all() as unknown as SessionStopIntentRow[];
     return rows.map((row) => this.sessionStopIntentRecord(row));

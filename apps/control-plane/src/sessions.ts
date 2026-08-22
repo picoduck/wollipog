@@ -3793,6 +3793,13 @@ export class SessionsService {
   private requestStop(session: SessionView, now: number, archiveAfterStop = false, refreshProject = true): SessionView {
     // Persist before touching the socket: ws.send acceptance is not delivery proof on a half-open
     // connection. Reconnect inventory/status reconciliation owns retry and final clearance.
+    const existing = this.db.sessionStopIntent(session.id);
+    // A fresh Stop or archive request after an explicit runner rejection is itself an authorized
+    // recovery action. Re-arm the same durable identity before attaching any archive follow-up;
+    // timed-out or exhausted archive operations still require the dedicated Retry Stop action.
+    if (existing?.operation.failure?.code === "runner_rejected" && !existing.archiveAfterStop) {
+      this.db.retrySessionStopIntent(session.id, now);
+    }
     this.db.addSessionStopIntent(session.id, session.runnerId, now, archiveAfterStop);
     this.promptOutbox.stopSession(session.id, now);
     this.abortPolicyHookApprovals(session, now, "session-stopped");
@@ -3906,6 +3913,9 @@ export class SessionsService {
   restart(sessionId: string): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    if (session.stopOperation?.status === "stop_failed") {
+      return fail("retry the failed Stop before restarting the session", 409);
+    }
     if (session.archiveStatus) {
       return fail("archive is waiting for runtime capacity to be released", 409);
     }

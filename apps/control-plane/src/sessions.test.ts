@@ -6817,6 +6817,8 @@ test("correlated plain Stop rejection is visible, fenced, retryable, and termina
   assert.equal(failed.stopOperation?.capacityReleased, false);
   assert.equal(failed.archived, false);
   assert.equal(failed.archiveStatus, undefined);
+  assert.equal(svc.restart(id).status, 409);
+  assert.equal(hub.sentOfType("start_session").length, 0);
 
   const beforeReconnect = hub.sentOfType("stop_session").length;
   svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, status: "running" })]);
@@ -6824,6 +6826,16 @@ test("correlated plain Stop rejection is visible, fenced, retryable, and termina
     "a failed Stop remains fenced but is not invisibly replayed");
   assert.equal(db.getSession(id)?.status, "stopped");
   assert.equal(db.getSession(id)?.stopOperation?.status, "stop_failed");
+
+  const repeatedStop = svc.stop(id).data!;
+  assert.equal(repeatedStop.stopOperation?.status, "stop_pending");
+  assert.equal(repeatedStop.stopOperation?.operationId, operation.operationId);
+  assert.equal(hub.sentOfType("stop_session").length, beforeReconnect + 1,
+    "a fresh explicit Stop re-arms and reissues the same durable operation");
+  assert.equal(svc.onStopSessionResult(RUNNER_ID, {
+    type: "stop_session_result", sessionId: id,
+    operationId: operation.operationId, accepted: false,
+  }), true);
 
   const firstRetry = svc.retryStop(id).data!;
   const duplicateRetry = svc.retryStop(id).data!;
@@ -6837,6 +6849,47 @@ test("correlated plain Stop rejection is visible, fenced, retryable, and termina
   const settled = db.getSession(id)!;
   assert.equal(settled.stopOperation, undefined);
   assert.equal(settled.archived, false);
+});
+
+test("plain Stop stays pending while offline and reconnect reissues it after the archive failure window", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.online = false;
+
+  const pending = svc.stop(id).data!.stopOperation!;
+  assert.equal(svc.maintainSessionStopIntents(
+    pending.requestedAt + SESSION_STOP_TIMEOUT_MS * 2,
+  ), 0);
+  assert.equal(db.getSession(id)?.stopOperation?.status, "stop_pending");
+
+  const beforeReconnect = hub.sentOfType("stop_session").length;
+  hub.online = true;
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, status: "running" })]);
+  assert.equal(hub.sentOfType("stop_session").length, beforeReconnect + 1);
+  assert.equal(hub.sentOfType("stop_session").at(-1)?.operationId, pending.operationId);
+});
+
+test("archive after a rejected plain Stop opens and delivers a fresh recovery window", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "running", Date.now());
+  const plain = svc.stop(id).data!.stopOperation!;
+  assert.equal(svc.onStopSessionResult(RUNNER_ID, {
+    type: "stop_session_result", sessionId: id,
+    operationId: plain.operationId, accepted: false,
+  }), true);
+  const beforeArchive = hub.sentOfType("stop_session").length;
+
+  const archived = svc.setArchived(id, true).data!;
+
+  assert.equal(archived.archived, false);
+  assert.equal(archived.archiveStatus, "stop_pending");
+  assert.equal(archived.archiveOperation?.operationId, plain.operationId);
+  assert.equal(archived.archiveOperation?.failure, undefined);
+  assert.equal(archived.archiveOperation?.attemptCount, 1);
+  assert.equal(hub.sentOfType("stop_session").length, beforeArchive + 1);
+  assert.equal(hub.sentOfType("stop_session").at(-1)?.operationId, plain.operationId);
 });
 
 test("protocol-v84 plain Stop intents retain conservative pending behavior", () => {
