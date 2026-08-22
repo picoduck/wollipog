@@ -406,6 +406,7 @@ function snapshot(): UiSnapshotMessage {
       projects: true,
       createProjectLocations: true,
       nativeTuiLaunch: true,
+      stopBeforeArchive: true,
     },
     runners: [runner],
     boxes: [],
