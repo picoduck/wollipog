@@ -499,7 +499,7 @@ test("every destination is painted with blocked and stalled sessions", async ({ 
  *
  * A pixel count cannot tell an inbox glyph from a rectangle — replacing every icon's path with
  * `<rect x="6.5" y="2.5" width="11" height="19" fill="currentColor"/>` clears every floor here
- * while reducing the bar to eight identical slabs. Proving each glyph is the RIGHT one needs
+ * while reducing the bar to nine identical slabs. Proving each glyph is the RIGHT one needs
  * committed per-icon baselines, which is a larger piece of work than this suite; proving they are
  * DISTINCT costs one comparison and rules out the whole family of mutations that collapses them,
  * which is what actually makes a tab bar unusable.
@@ -512,9 +512,9 @@ test("no two destinations render the same glyph", async ({ page }) => {
 
   const icons = page.locator(".rail-destinations > .rail-item > svg, .rail-more-item > svg");
   const count = await icons.count();
-  expect(count, "every destination must carry an icon").toBe(8);
-  // The MASK, not the screenshot. Comparing raw captures compares the backdrop too, so eight
-  // identical rectangles over eight `nth-child` background tints five levels apart differed by
+  expect(count, "every destination must carry an icon").toBe(9);
+  // The MASK, not the screenshot. Comparing raw captures compares the backdrop too, so nine
+  // identical rectangles over nine `nth-child` background tints five levels apart differed by
   // hundreds of pixels and passed. A mask holds only the positions the glyph itself paints, which
   // is what the difference measurement already isolates, so a backdrop cannot contribute to it.
   const masks: { key: string; positions: number[] }[] = [];

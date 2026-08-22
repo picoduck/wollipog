@@ -28,6 +28,7 @@ import { Board } from "./components/Board.js";
 import { RunnersView } from "./components/RunnersView.js";
 import { RunsView, RunDetail } from "./components/RunsView.js";
 import { InboxView } from "./components/InboxView.js";
+import { ArchivedSessionsView } from "./components/ArchivedSessionsView.js";
 import { NewSessionDialog, type NewSessionPreset } from "./components/NewSessionDialog.js";
 import { NewRunDialog } from "./components/NewRunDialog.js";
 import { NewPodDialog } from "./components/NewPodDialog.js";
@@ -475,6 +476,7 @@ function Shell() {
       ["navigate-automations", { name: "automations" }],
       ["navigate-usage", { name: "usage" }],
       ["navigate-connections", { name: "runners" }],
+      ["navigate-archived", { name: "archived" }],
     ] as const;
     const onKey = (event: KeyboardEvent) => {
       if (event.defaultPrevented || shortcutLayerActive(document) || xtermOwnsKey(event.target)) return;
@@ -701,6 +703,7 @@ function Shell() {
           {view.name === "pods" && <PodsView onNewPod={() => setDialog({ kind: "pod" })} />}
           {view.name === "automations" && <AutomationsView />}
           {view.name === "usage" && <UsageView />}
+          {view.name === "archived" && <ArchivedSessionsView />}
           {view.name === "settings" && (
             <SettingsView
               section={view.section ?? "appearance"}

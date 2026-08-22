@@ -106,6 +106,7 @@ test("the global keyboard layer wires rail navigation, Inbox search, creation, a
     "navigate-automations",
     "navigate-usage",
     "navigate-connections",
+    "navigate-archived",
   ];
   for (const id of [
     ...navigationIds,

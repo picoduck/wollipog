@@ -430,6 +430,11 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   }));
   await runnerInbox.take((message) => message.type === "registered");
 
+  const memberSearch = await fetch(`${httpBase}/api/search?q=session`, {
+    headers: { authorization: `Bearer ${operatorToken}` },
+  });
+  assert.equal(memberSearch.status, 200, "an authorized scoped member can search accessible transcripts");
+
   const scopedReveal = fetch(`${httpBase}/api/runners/runner-ui-route/host-action`, {
     method: "POST",
     headers: {

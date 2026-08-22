@@ -521,7 +521,7 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
   const memberScopedRoute = routePath === "/api/instance" || routePath === "/api/identity" || routePath === "/api/runners" ||
     routePath === "/api/projects" || routePath.startsWith("/api/projects/") ||
     routePath === "/api/sessions" || routePath.startsWith("/api/sessions/") ||
-    routePath === "/api/usage" || routePath === "/api/usage/retention" ||
+    routePath === "/api/search" || routePath === "/api/usage" || routePath === "/api/usage/retention" ||
     routePath === "/api/push/vapid-public-key" || routePath === "/api/push/subscriptions" ||
     routePath === "/api/push/unsubscribe" ||
     routePath === "/api/artifacts/:artifactId/export" ||
@@ -2952,21 +2952,29 @@ app.post("/api/governance/approval-queue/reject", async (req, reply) => {
   }));
 });
 
-// Full-text transcript search (Cmd+K palette). Hits carry the owning session's title so the
-// palette renders without a per-hit lookup.
+// Full-text transcript search (Cmd+K palette and Archived Sessions). Hits carry the owning
+// session metadata so archive and lifecycle state never depend on a racing catalog request.
 app.get("/api/search", async (req, reply) => {
   const q = String((req.query as { q?: string })?.q ?? "").trim();
   if (q.length < 2) return reply.code(400).send({ error: "q must be at least 2 characters" });
   // Bound the work: FTS parsing/ranking runs synchronously on this thread.
   if (q.length > 256) return reply.code(400).send({ error: "q is too long (max 256 characters)" });
   const hits = db.searchEvents(q, 20);
+  const principal = requestPrincipal(req);
   const results = hits.flatMap((h) => {
     const session = db.getSession(h.sessionId);
-    // Archived sessions are absent from the UI snapshot — a hit would navigate to
-    // "Session Not Found". Filter them (matches the palette's local session matching).
-    return session && !session.archived
-      ? [{ ...h, title: session.title, workspaceName: session.workspaceName }]
-      : [];
+    if (!session || (principal && !db.canAccessSession(principal, session.id))) return [];
+    return [{
+      ...h,
+      title: session.title,
+      workspaceName: session.workspaceName,
+      projectName: session.projectName,
+      archived: session.archived,
+      status: session.status,
+      agentId: session.agentId,
+      agentName: session.agentName,
+      driver: session.driver,
+    }];
   });
   return { results };
 });

@@ -59,9 +59,9 @@ test("rail exposes every destination, nested active states, live badges, and per
 
   await render({ name: "session", id: "session-1" });
   const links = [...container.querySelectorAll<HTMLAnchorElement>(".rail-destinations a")];
-  assert.equal(links.length, 8);
+  assert.equal(links.length, 9);
   assert.deepEqual(links.map((link) => link.getAttribute("href")), [
-    "/", "/projects", "/board", "/runs", "/pods", "/automations", "/usage", "/connections/machines",
+    "/", "/projects", "/board", "/runs", "/pods", "/automations", "/usage", "/connections/machines", "/archived",
   ]);
   assert.match(links[0]!.getAttribute("aria-label") ?? "", /2 Blocked/);
   assert.match(links[0]!.getAttribute("aria-label") ?? "", /1 Stalled/);
@@ -153,7 +153,7 @@ test("the phone rail is destinations-only and hosts no nested layers", async () 
     await act(async () => { moreTrigger.click(); });
     const sheet = container.querySelector(".rail-more-sheet")!;
     assert.deepEqual([...sheet.querySelectorAll(".rail-more-item")].map((el) => el.textContent),
-      ["Multi-Agent Runs", "Collaboration Pods", "Automations", "Usage & Cost"]);
+      ["Multi-Agent Runs", "Collaboration Pods", "Automations", "Usage & Cost", "Archived Sessions"]);
     assert.equal(sheet.querySelector(".rail-more-control"), null,
       "the sheet must contain no nested dialog or menu content");
     // Every child of a role=menu must be a menu item, or roving navigation silently skips it.
