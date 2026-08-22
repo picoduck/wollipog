@@ -2146,7 +2146,7 @@ export interface CachedEventTailPage {
  * started inside. A turn is a semantic unit — splitting one orphans its tool updates from the
  * invocation that explains them — but a single verbose turn is unbounded, so alignment stops here
  * and the page keeps its count boundary rather than growing without limit. */
-export const TAIL_TURN_ALIGNMENT_MAX_EVENTS = 400;
+export const TAIL_TURN_ALIGNMENT_MAX_EVENTS = 2_000;
 
 interface ReviewFindingRow {
   finding_id: string;

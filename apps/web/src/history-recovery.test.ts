@@ -486,7 +486,7 @@ test("fleet recovery does not report an obsolete failure after its view is cance
 
 test("the opening window paints the newest events in one request, whatever the session's length", async () => {
   const requested: Array<number | undefined> = [];
-  const applied: Array<{ seqs: number[]; complete: boolean; hasOlder: boolean }> = [];
+  const applied: Array<{ seqs: number[]; complete: boolean; hasOlder: boolean; turnAligned?: boolean }> = [];
   const result = await recoverSessionHistoryWindow(
     { sessionId: "s1", eventEpoch: 3, recoveryRevision: 7 },
     {
@@ -497,11 +497,12 @@ test("the opening window paints the newest events in one request, whatever the s
           eventEpoch: 3,
           nextBefore: 4_801,
           hasMoreOlder: true,
+          turnAligned: true,
           cacheComplete: true,
         };
       },
-      applyWindow: (_id, events, _epoch, _revision, complete, hasOlder) =>
-        applied.push({ seqs: events.map((entry) => entry.seq), complete, hasOlder }),
+      applyWindow: (_id, events, _epoch, _revision, complete, hasOlder, turnAligned) =>
+        applied.push({ seqs: events.map((entry) => entry.seq), complete, hasOlder, turnAligned }),
       isCurrent: () => true,
       wait: async () => {},
     },
@@ -509,7 +510,12 @@ test("the opening window paints the newest events in one request, whatever the s
   assert.deepEqual(result, { supported: true, complete: true });
   // One request, no cursor: a 4,800-event history costs exactly the same open as an empty one.
   assert.deepEqual(requested, [undefined]);
-  assert.deepEqual(applied, [{ seqs: [4_801, 4_802], complete: true, hasOlder: true }]);
+  assert.deepEqual(applied, [{
+    seqs: [4_801, 4_802],
+    complete: true,
+    hasOlder: true,
+    turnAligned: true,
+  }]);
 });
 
 test("a hydrating cache is never painted: its newest cached row is still an old prefix", async () => {

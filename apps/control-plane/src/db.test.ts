@@ -3229,6 +3229,43 @@ test("a turn-aligned tail page begins at an invocation rather than orphaned upda
   assert.equal(whole.hasMoreOlder, false);
 });
 
+test("turn alignment includes a streamed Markdown response beyond the former opening bound", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "long-markdown-cache" }));
+  db.appendEvent("long-markdown-cache", { kind: "user_message", text: "Draft the issue" }, 1);
+  const markdownChunks = [
+    "## Summary\n\n",
+    "- [x] Complete\n\n",
+    "> Context\n\n",
+    "| Area | Status |\n| --- | --- |\n| History | Fixed |\n\n",
+    "```ts\n",
+    ...Array.from({ length: 644 }, (_, index) => `const line${index} = true;\n`),
+    "```\n",
+  ];
+  for (const [index, text] of markdownChunks.entries()) {
+    db.appendEvent("long-markdown-cache", {
+      kind: "agent_message",
+      text,
+      messageId: "formatted-draft",
+      final: false,
+    }, index + 2);
+  }
+
+  const page = db.listCachedEventTailPage("long-markdown-cache", undefined, 200, { alignToTurn: true });
+  assert.equal(markdownChunks.length, 650);
+  assert.equal(page.events.length, 651,
+    "one bounded response includes the whole semantic turn instead of a 200-event suffix");
+  assert.equal(page.events[0]!.payload.kind, "user_message");
+  assert.equal(page.turnAligned, true);
+  assert.equal(page.hasMoreOlder, false);
+  assert.equal(
+    page.events.slice(1).map((entry) =>
+      entry.payload.kind === "agent_message" ? entry.payload.text : "").join(""),
+    markdownChunks.join(""),
+    "Markdown delimiters on both sides of the former boundary remain in one response",
+  );
+});
+
 test("a page already starting at a user message is left as it is", () => {
   const db = withRunner();
   db.createSession(newSession({ id: "boundary-cache" }));

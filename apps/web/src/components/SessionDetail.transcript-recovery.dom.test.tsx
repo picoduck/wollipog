@@ -509,6 +509,52 @@ test("recovery failure falls back to the existing error notice with its retry af
   }
 });
 
+test("an opening-window safety cut identifies the partial response and reach-back clears it", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages);
+  try {
+    const openingWindow = fixture.events.slice(-7);
+    await act(async () => {
+      pages.releaseTail({
+        events: openingWindow,
+        eventEpoch: 0,
+        nextBefore: openingWindow[0]!.seq,
+        hasMoreOlder: true,
+        turnAligned: false,
+        cacheComplete: true,
+      });
+    });
+    await flushAsyncWork();
+
+    const control = fixture.container.querySelector(".transcript-earlier-activity") as HTMLElement;
+    assert.ok(control.textContent!.includes("The beginning of the latest response may not be loaded."));
+    const load = control.querySelector("button") as HTMLButtonElement;
+    assert.equal(load.textContent, "Load Earlier Activity");
+    await act(async () => load.click());
+    assert.equal(pages.tailCalls.length, 2, "the partial-response notice keeps a reliable reach-back control");
+
+    const earlierPage = fixture.events.slice(-15, -7);
+    assert.ok(earlierPage.some((entry) => entry.payload.kind === "user_message"));
+    await act(async () => {
+      pages.releaseTail({
+        events: earlierPage,
+        eventEpoch: 0,
+        nextBefore: earlierPage[0]!.seq,
+        hasMoreOlder: true,
+        cacheComplete: true,
+      });
+    });
+    await flushAsyncWork();
+    assert.equal(
+      fixture.container.textContent!.includes("The beginning of the latest response may not be loaded."),
+      false,
+      "loading through the turn boundary removes the partial-response warning",
+    );
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("scrolling near the partial window head loads one earlier page and requires further navigation", async () => {
   const pages = pageController();
   const fixture = await mountFixture(pages);
