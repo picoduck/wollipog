@@ -15,19 +15,33 @@ function run(args) {
   return spawnSync(command, args, { encoding: "utf8", windowsHide: true, maxBuffer: 8 * 1024 * 1024 });
 }
 
+/** Every definition a property can reach in one hop. Codex expresses the same edge as a direct
+ * `$ref`, a map value, array items, or a nullable/defaulted single-branch union, so a check that
+ * understands only one of those shapes reports drift that is not there and misses drift that is. */
+function propertyRefTargets(property) {
+  if (!property || typeof property !== "object") return [];
+  return [property, property.additionalProperties, property.items]
+    .filter((node) => node && typeof node === "object")
+    .flatMap((node) => [
+      node.$ref,
+      ...(node.anyOf || []).map((entry) => entry?.$ref),
+      ...(node.allOf || []).map((entry) => entry?.$ref),
+      ...(node.oneOf || []).map((entry) => entry?.$ref),
+    ])
+    .filter(Boolean);
+}
+
 /** Check one named `oneOf` branch. A missing branch is a rename or a dropped variant: either way
- * the consuming code stops recognizing requests it used to normalize. */
-function checkVariant(variant, names, label, title, diffs) {
+ * the consuming code stops recognizing requests it used to normalize. A branch is just another
+ * schema node, so it gets the whole comparison — including its own reference edges. The array
+ * shorthand means "these names are both required and present". */
+function checkVariant(variant, expected, label, title, diffs) {
   if (!variant) {
     diffs.push(`- ${label}: variant removed: ${title}`);
     return;
   }
-  const variantRequired = new Set(variant.required || []);
-  const variantProperties = new Set(Object.keys(variant.properties || {}));
-  for (const name of names) {
-    if (!variantRequired.has(name)) diffs.push(`- ${label}/${title}: required field removed: ${name}`);
-    if (!variantProperties.has(name)) diffs.push(`- ${label}/${title}: property removed: ${name}`);
-  }
+  const shape = Array.isArray(expected) ? { required: expected, properties: expected } : expected;
+  checkShape(variant, shape, `${label}/${title}`, diffs);
 }
 
 /** Compare one schema node — a whole file or a single definition — against the curated subset the
@@ -67,10 +81,9 @@ function checkShape(node, expected, label, diffs) {
     if (!variantRefs.has(`#/definitions/${name}`)) diffs.push(`- ${label}: variant reference removed: ${name}`);
   }
   for (const [property, name] of Object.entries(expected.propertyRefs || {})) {
-    const target = node.properties?.[property];
-    // Codex reaches a definition either directly, through a map value, or through array items.
-    const refs = [target?.$ref, target?.additionalProperties?.$ref, target?.items?.$ref];
-    if (!refs.includes(`#/definitions/${name}`)) diffs.push(`- ${label}: property reference removed: ${property} -> ${name}`);
+    if (!propertyRefTargets(node.properties?.[property]).includes(`#/definitions/${name}`)) {
+      diffs.push(`- ${label}: property reference removed: ${property} -> ${name}`);
+    }
   }
   const variantEnumValues = new Set(variants.flatMap((variant) => variant.enum || []));
   for (const value of expected.enumValuesInVariants || []) {

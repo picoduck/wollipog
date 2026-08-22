@@ -369,6 +369,9 @@
             "cancel"
           ]
         }
+      },
+      "propertyRefs": {
+        "decision": "CommandExecutionApprovalDecision"
       }
     },
     "FileChangeRequestApprovalResponse.json": {
@@ -387,6 +390,9 @@
             "cancel"
           ]
         }
+      },
+      "propertyRefs": {
+        "decision": "FileChangeApprovalDecision"
       }
     },
     "PermissionsRequestApprovalResponse.json": {
@@ -410,6 +416,10 @@
             "session"
           ]
         }
+      },
+      "propertyRefs": {
+        "permissions": "GrantedPermissionProfile",
+        "scope": "PermissionGrantScope"
       }
     },
     "ToolRequestUserInputParams.json": {
@@ -486,11 +496,21 @@
       ],
       "discriminatedVariants": {
         "mode": {
-          "form": [
-            "message",
-            "mode",
-            "requestedSchema"
-          ],
+          "form": {
+            "required": [
+              "message",
+              "mode",
+              "requestedSchema"
+            ],
+            "properties": [
+              "message",
+              "mode",
+              "requestedSchema"
+            ],
+            "propertyRefs": {
+              "requestedSchema": "McpElicitationSchema"
+            }
+          },
           "url": [
             "elicitationId",
             "message",
@@ -511,7 +531,8 @@
             "type"
           ],
           "propertyRefs": {
-            "properties": "McpElicitationPrimitiveSchema"
+            "properties": "McpElicitationPrimitiveSchema",
+            "type": "McpElicitationObjectType"
           }
         },
         "McpElicitationObjectType": {
@@ -557,7 +578,11 @@
             "minLength",
             "title",
             "type"
-          ]
+          ],
+          "propertyRefs": {
+            "format": "McpElicitationStringFormat",
+            "type": "McpElicitationStringType"
+          }
         },
         "McpElicitationStringType": {
           "enumValues": [
@@ -582,7 +607,10 @@
             "minimum",
             "title",
             "type"
-          ]
+          ],
+          "propertyRefs": {
+            "type": "McpElicitationNumberType"
+          }
         },
         "McpElicitationNumberType": {
           "enumValues": [
@@ -598,7 +626,10 @@
             "description",
             "title",
             "type"
-          ]
+          ],
+          "propertyRefs": {
+            "type": "McpElicitationBooleanType"
+          }
         },
         "McpElicitationBooleanType": {
           "enumValues": [
@@ -630,7 +661,10 @@
             "enum",
             "title",
             "type"
-          ]
+          ],
+          "propertyRefs": {
+            "type": "McpElicitationStringType"
+          }
         },
         "McpElicitationTitledSingleSelectEnumSchema": {
           "required": [
@@ -644,7 +678,8 @@
             "type"
           ],
           "propertyRefs": {
-            "oneOf": "McpElicitationConstOption"
+            "oneOf": "McpElicitationConstOption",
+            "type": "McpElicitationStringType"
           }
         },
         "McpElicitationLegacyTitledEnumSchema": {
@@ -658,7 +693,10 @@
             "enumNames",
             "title",
             "type"
-          ]
+          ],
+          "propertyRefs": {
+            "type": "McpElicitationStringType"
+          }
         },
         "McpElicitationUntitledEnumItems": {
           "required": [
@@ -668,7 +706,10 @@
           "properties": [
             "enum",
             "type"
-          ]
+          ],
+          "propertyRefs": {
+            "type": "McpElicitationStringType"
+          }
         },
         "McpElicitationTitledEnumItems": {
           "required": [
@@ -695,7 +736,8 @@
             "type"
           ],
           "propertyRefs": {
-            "items": "McpElicitationUntitledEnumItems"
+            "items": "McpElicitationUntitledEnumItems",
+            "type": "McpElicitationArrayType"
           }
         },
         "McpElicitationTitledMultiSelectEnumSchema": {
@@ -712,7 +754,8 @@
             "type"
           ],
           "propertyRefs": {
-            "items": "McpElicitationTitledEnumItems"
+            "items": "McpElicitationTitledEnumItems",
+            "type": "McpElicitationArrayType"
           }
         }
       }
@@ -734,6 +777,9 @@
             "cancel"
           ]
         }
+      },
+      "propertyRefs": {
+        "action": "McpServerElicitationAction"
       }
     },
     "v2/ServerRequestResolvedNotification.json": {

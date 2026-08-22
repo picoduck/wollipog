@@ -19,7 +19,7 @@ interface ExpectedShape {
   requiredInEveryVariant?: string[];
   propertyEnumValues?: Record<string, string[]>;
   variantRequiredProperties?: Record<string, string[]>;
-  discriminatedVariants?: Record<string, Record<string, string[]>>;
+  discriminatedVariants?: Record<string, Record<string, string[] | ExpectedShape>>;
   variantRefs?: string[];
   propertyRefs?: Record<string, string>;
   enumValues?: string[];
@@ -50,13 +50,13 @@ function synthesizeShape(expected: ExpectedShape): Record<string, unknown> {
         properties: Object.fromEntries(names.map((name) => [name, {}])),
       })),
       ...Object.entries(expected.discriminatedVariants ?? {}).flatMap(([discriminator, byValue]) =>
-        Object.entries(byValue).map(([value, names]) => ({
-          required: names,
-          properties: {
-            ...Object.fromEntries(names.map((name) => [name, {}])),
-            [discriminator]: { enum: [value] },
-          },
-        }))),
+        Object.entries(byValue).map(([value, variant]) => {
+          const shape = synthesizeShape(Array.isArray(variant) ? { required: variant, properties: variant } : variant);
+          return {
+            ...shape,
+            properties: { ...(shape.properties as Record<string, unknown>), [discriminator]: { enum: [value] } },
+          };
+        })),
     ],
     anyOf: (expected.variantRefs ?? []).map((name) => ({ $ref: `#/definitions/${name}` })),
     enum: expected.enumValues,
@@ -159,6 +159,18 @@ test("pinned schema fixture matches discovery metadata and reports a useful drif
     );
     elicitation.definitions.McpElicitationSchema.properties.properties.$ref = "#/definitions/McpElicitationPrimitiveSchema";
 
+    // The form variant's requestedSchema is the root of the whole consumed form tree: repointing it
+    // leaves every definition intact while making object forms inadmissible.
+    formVariant.properties.requestedSchema = { $ref: "#/definitions/McpElicitationStringSchema" };
+    writeFileSync(elicitationPath, JSON.stringify(elicitation));
+    const variantRefDrift = spawnSync(process.execPath, [script], { encoding: "utf8", env: { ...process.env, CODEX_SCHEMA_DIR: dir } });
+    assert.notEqual(variantRefDrift.status, 0);
+    assert.match(
+      variantRefDrift.stderr,
+      /mode=form: property reference removed: requestedSchema -> McpElicitationSchema/,
+    );
+    formVariant.properties.requestedSchema = { $ref: "#/definitions/McpElicitationSchema" };
+
     // A consumed string format the driver maps onto its own input formats.
     elicitation.definitions.McpElicitationStringFormat.enum =
       elicitation.definitions.McpElicitationStringFormat.enum.filter((value: string) => value !== "uri");
@@ -181,6 +193,15 @@ test("pinned schema fixture matches discovery metadata and reports a useful drif
     assert.notEqual(decisionDrift.status, 0);
     assert.match(decisionDrift.stderr, /CommandExecutionApprovalDecision.*enum variant removed: acceptForSession/);
     decision.definitions.CommandExecutionApprovalDecision.oneOf.push({ enum: ["acceptForSession"] });
+    decision.properties.decision = { type: "string" };
+    writeFileSync(decisionPath, JSON.stringify(decision));
+    const decisionRefDrift = spawnSync(process.execPath, [script], { encoding: "utf8", env: { ...process.env, CODEX_SCHEMA_DIR: dir } });
+    assert.notEqual(decisionRefDrift.status, 0);
+    assert.match(
+      decisionRefDrift.stderr,
+      /CommandExecutionRequestApprovalResponse.*property reference removed: decision -> CommandExecutionApprovalDecision/,
+    );
+    decision.properties.decision = { $ref: "#/definitions/CommandExecutionApprovalDecision" };
     writeFileSync(decisionPath, JSON.stringify(decision));
 
     // The grant scope Wollipog sends back when allowing or rejecting a permissions request.

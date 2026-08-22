@@ -564,9 +564,11 @@ request variant, and enum value the driver reads or sends. That includes both su
 variant title), the nested `McpElicitation*` form-control schemas the normalizer reads, and the
 native decision/action/scope enums Wollipog sends back. It also pins **reachability**, not only each
 definition's own shape: the unions and property references that make a form control valid under
-`requestedSchema`. Dropping `McpElicitationBooleanSchema` from the primitive union, or repointing
-that union elsewhere, leaves every definition intact while making boolean form fields unsendable, so
-those links are checked directly. A compatible-looking upgrade that renames a mode, drops a decision
+`requestedSchema`, down to each control's own type and format definitions, plus the definition every
+response property must still resolve to. Dropping `McpElicitationBooleanSchema` from the primitive
+union, or repointing the form variant's `requestedSchema` at a single control type, leaves every
+definition intact while making those forms unsendable, so the reference edges are checked directly —
+whether Codex expresses one as a direct `$ref`, a map value, array items, or a single-branch union. A compatible-looking upgrade that renames a mode, drops a decision
 value, or disconnects a control therefore fails the check instead of silently losing structured
 interactions at runtime. Fields Wollipog never consumes are deliberately left unpinned so the
 contract stays a compatibility boundary rather than a change detector.
