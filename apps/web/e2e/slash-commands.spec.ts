@@ -265,6 +265,8 @@ test("app and provider collisions remain explicit across draft text and capabili
   await expect(composer).toHaveValue("/provider:plan ");
 
   await composer.fill("/provider:plan provider arguments");
+  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
+  await expect(composer).toHaveAttribute("aria-expanded", "false");
   await page.keyboard.press("Enter");
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests()[0])).toEqual({
     sessionId: "session-alpha",
@@ -272,8 +274,11 @@ test("app and provider collisions remain explicit across draft text and capabili
     images: [],
     slashCommand: "plan",
   });
+  await expect(composer).toHaveValue("");
 
   await composer.fill("/plan on");
+  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
+  await expect(composer).toHaveAttribute("aria-expanded", "false");
   await page.keyboard.press("Enter");
   await expect.poll(() => page.evaluate(() =>
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.model().sessions.find((session) => session.id === "session-alpha")?.permissionMode
@@ -286,6 +291,8 @@ test("invalid app-command arguments remain literal prompts regardless of availab
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([], []));
   const composer = page.locator(".composer-input");
   await composer.fill("/plan out the refactor in three stages");
+  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
+  await expect(composer).toHaveAttribute("aria-expanded", "false");
   await page.keyboard.press("Enter");
 
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests())).toEqual([{
@@ -293,20 +300,27 @@ test("invalid app-command arguments remain literal prompts regardless of availab
     text: "/plan out the refactor in three stages",
     images: [],
   }]);
+  await expect(composer).toHaveValue("");
   await composer.fill("/stop the deploy pipeline");
+  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
+  await expect(composer).toHaveAttribute("aria-expanded", "false");
   await page.keyboard.press("Enter");
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests()[1])).toEqual({
     sessionId: "session-alpha",
     text: "/stop the deploy pipeline",
     images: [],
   });
+  await expect(composer).toHaveValue("");
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.cancelTurnCount())).toBe(0);
 
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([], ["plan"]));
   await composer.fill("/plan keep this literal too");
+  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
+  await expect(composer).toHaveAttribute("aria-expanded", "false");
   await page.keyboard.press("Enter");
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests()[2]?.text))
     .toBe("/plan keep this literal too");
+  await expect(composer).toHaveValue("");
   await expect.poll(() => page.evaluate(() =>
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.model().sessions.find((session) => session.id === "session-alpha")?.permissionMode
   )).not.toBe("plan");
@@ -322,6 +336,7 @@ test("programmatic clear and history recall cannot open or hijack the slash menu
   });
   const composer = page.locator(".composer-input");
   await composer.fill("hello");
+  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
   await page.keyboard.press("Enter");
   await expect(composer).toHaveValue("");
 
@@ -330,6 +345,7 @@ test("programmatic clear and history recall cannot open or hijack the slash menu
   await page.keyboard.press("ArrowUp");
   await expect(composer).toHaveValue("/review");
   await expect(page.getByRole("listbox", { name: "Slash Commands" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
 
   await page.keyboard.press("Enter");
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests().at(-1))).toMatchObject({
@@ -359,15 +375,20 @@ test("unknown commands and absolute paths stay plaintext while command triggers 
   const composer = page.locator(".composer-input");
 
   await composer.fill("/unknown literal input");
+  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
+  await expect(composer).toHaveAttribute("aria-expanded", "false");
   await page.keyboard.press("Enter");
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests()[0]?.text))
     .toBe("/unknown literal input");
+  await expect(composer).toHaveValue("");
 
   await composer.fill("/etc/hosts");
+  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
   await expect(page.getByRole("listbox", { name: "Slash Commands" })).toHaveCount(0);
   await page.keyboard.press("Enter");
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests()[1]?.text))
     .toBe("/etc/hosts");
+  await expect(composer).toHaveValue("");
 
   await composer.fill("First line\n/rev");
   await expect(page.getByRole("listbox", { name: "Slash Commands" })).toHaveCount(0);
