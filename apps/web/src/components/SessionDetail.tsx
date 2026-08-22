@@ -1657,7 +1657,7 @@ function SessionDetailLoaded({
       const args = invocation.arguments.trim().toLowerCase();
       const validArguments = invocation.command.name === "plan"
         ? !args || args === "on" || args === "off"
-        : invocation.command.name === "stop"
+        : invocation.command.name === "stop" || invocation.command.name === "rename-session"
           ? !args
           : true;
       if (!validArguments) invocation = { kind: "plaintext", text: outgoing };
@@ -1676,6 +1676,15 @@ function SessionDetailLoaded({
         if (invocation.command.name === "stop") {
           if (!await stopTurn()) return;
           clearAppCommandText();
+          return;
+        }
+        if (invocation.command.name === "rename-session") {
+          try {
+            await api.retitleSession(sessionId);
+            clearAppCommandText();
+          } catch (cause) {
+            setError((cause as Error).message);
+          }
           return;
         }
         if (invocation.command.name === "plan") {

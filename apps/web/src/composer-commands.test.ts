@@ -33,6 +33,9 @@ test("the registry exposes stable typed app commands and explicit gate reasons",
     { id: "app", label: "App Commands", order: 0 },
     { id: "provider", label: "Harness Commands", order: 1 },
   ]);
+  assert.equal(command(enabled, "app:rename-session").description, "Rename this session from its conversation.");
+  assert.equal(command(enabled, "app:rename-session").label, "/rename-session");
+  assert.equal(command(enabled, "app:rename-session").displayName, "Rename Session");
   assert.deepEqual(command(enabled, "app:plan"), {
     id: "app:plan",
     name: "plan",
@@ -55,6 +58,7 @@ test("the registry exposes stable typed app commands and explicit gate reasons",
   assert.deepEqual(
     disabled.map(({ id, available, disabledReason }) => ({ id, available, disabledReason })),
     [
+      { id: "app:rename-session", available: true, disabledReason: undefined },
       { id: "app:plan", available: false, disabledReason: "Plan mode is unavailable for this provider." },
       { id: "app:stop", available: false, disabledReason: "There is no active turn to stop." },
     ],
@@ -201,6 +205,16 @@ test("provider-provider collisions are source-qualified and deterministic", () =
     ],
   );
   assert.deepEqual(reverse, forward);
+});
+
+test("the reserved rename command keeps the bare alias when a provider uses the same name", () => {
+  const commands = registry([{ name: "rename-session", providerSource: "user" }]);
+  const app = resolveComposerCommandInvocation("/rename-session", commands);
+  assert.equal(app.kind, "command");
+  if (app.kind === "command") assert.equal(app.command.id, "app:rename-session");
+  const provider = resolveComposerCommandInvocation("/provider:rename-session", commands);
+  assert.equal(provider.kind, "command");
+  if (provider.kind === "command") assert.equal(provider.command.id, "provider:user:rename-session");
 });
 
 test("a stored bare provider alias remains resolvable when a same-name command appears", () => {
@@ -516,7 +530,7 @@ test("grouping and active-id retention preserve stable ranked selection", () => 
       commands: grouped.map((candidate) => candidate.id),
     })),
     [
-      { id: "app", label: "App Commands", order: 0, commands: ["app:plan", "app:stop"] },
+      { id: "app", label: "App Commands", order: 0, commands: ["app:rename-session", "app:plan", "app:stop"] },
       {
         id: "provider",
         label: "Harness Commands",
@@ -527,7 +541,7 @@ test("grouping and active-id retention preserve stable ranked selection", () => 
   );
   assert.equal(retainActiveComposerCommandId("provider:plugin:deploy", ranked), "provider:plugin:deploy",
     "a disabled row may remain active so its reason is readable");
-  assert.equal(retainActiveComposerCommandId("removed", ranked), "provider:builtin:review",
+  assert.equal(retainActiveComposerCommandId("removed", ranked), "app:rename-session",
     "fallback chooses the first available ranked row while unavailable rows remain selectable");
   assert.equal(retainActiveComposerCommandId(null, []), null);
 });
