@@ -271,8 +271,15 @@ export function SessionQuestionBanner({
 
   const picked = questionSelectionForRequest(selection, requestId);
   const draftValues = drafts.requestId === requestId ? drafts.values : {};
+  const controlsDisabled = busy !== null || !runnerOnline;
 
   const toggle = (question: AgentQuestion, label: string) => {
+    if (!question.multiSelect) {
+      setDrafts((current) => ({
+        requestId,
+        values: { ...(current.requestId === requestId ? current.values : {}), [question.id]: "" },
+      }));
+    }
     setSelection((current) => {
       const currentPicked = questionSelectionForRequest(current, requestId);
       const previous = currentPicked[question.id] ?? [];
@@ -316,6 +323,14 @@ export function SessionQuestionBanner({
     if (!draft) return question.required === false;
     return question.allowOther === true && validateQuestionFreeText(question, draft) == null;
   });
+  const freeTextErrors = new Map<string, string>();
+  for (const question of questions) {
+    const selected = picked[question.id] ?? [];
+    const draft = draftValues[question.id]?.trim() ?? "";
+    if (!draft || selected.length > 0 || question.multiSelect || !question.allowOther) continue;
+    const validationError = validateQuestionFreeText(question, draft);
+    if (validationError) freeTextErrors.set(question.id, `Response ${validationError}.`);
+  }
 
   const submit = async () => {
     setBusy("submit");
@@ -370,12 +385,30 @@ export function SessionQuestionBanner({
           )}
         </div>
       </div>
-      {questions[0]?.context && <div className="question-context">{questions[0].context}</div>}
+      {!runnerOnline && (
+        <div className="question-availability">Responses are unavailable until the runner reconnects.</div>
+      )}
+      {runnerOnline && busy === null && questions.length > 0 && !complete && (
+        <div className="question-submit-hint">
+          {freeTextErrors.size > 0
+            ? "Correct the response errors before submitting."
+            : "Complete all required responses before submitting."}
+        </div>
+      )}
       <div className="question-list">
         {questions.map((question, questionIndex) => {
           const questionLabelId = `${labelPrefix}-question-${questionIndex}`;
           const responseLabelId = `${labelPrefix}-response-${questionIndex}`;
+          const contextId = `${labelPrefix}-context-${questionIndex}`;
+          const requirementId = `${labelPrefix}-requirement-${questionIndex}`;
+          const responseErrorId = `${labelPrefix}-response-error-${questionIndex}`;
           const selected = picked[question.id] ?? [];
+          const freeTextError = freeTextErrors.get(question.id);
+          const controlDescriptionIds = [question.context ? contextId : null, requirementId]
+            .filter((value): value is string => value !== null);
+          const inputDescriptionIds = [...controlDescriptionIds, freeTextError ? responseErrorId : null]
+            .filter((value): value is string => value !== null)
+            .join(" ");
           return (
             <div className="question-block" key={question.id}>
               <div className="question-text" id={questionLabelId}>
@@ -383,11 +416,17 @@ export function SessionQuestionBanner({
                 {question.question}
                 {question.multiSelect && <span className="muted sm"> (select all that apply)</span>}
               </div>
+              <span className="sr-only" id={requirementId}>
+                {question.required === false ? "Optional." : "Required."}
+              </span>
+              {question.context && <div className="question-context" id={contextId}>{question.context}</div>}
               {question.options.length > 0 && (
                 <div
                   className="question-options"
                   role={question.multiSelect ? "group" : "radiogroup"}
                   aria-labelledby={questionLabelId}
+                  aria-describedby={controlDescriptionIds.join(" ")}
+                  aria-required={question.multiSelect ? undefined : question.required !== false}
                   onKeyDown={question.multiSelect ? undefined : (event) => handleRovingChoiceKeyDown(event, "radio")}
                 >
                   {question.options.map((option, optionIndex) => {
@@ -398,6 +437,8 @@ export function SessionQuestionBanner({
                         type="button"
                         role={question.multiSelect ? "checkbox" : "radio"}
                         aria-checked={on}
+                        aria-disabled={controlsDisabled}
+                        disabled={controlsDisabled}
                         tabIndex={question.multiSelect ? 0 : on || (selected.length === 0 && optionIndex === 0) ? 0 : -1}
                         className={`question-option${on ? " on" : ""}`}
                         title={option.description}
@@ -420,6 +461,11 @@ export function SessionQuestionBanner({
                   <input
                     className="input question-input"
                     aria-labelledby={`${questionLabelId} ${responseLabelId}`}
+                    aria-describedby={inputDescriptionIds}
+                    aria-invalid={freeTextError ? true : undefined}
+                    aria-required={question.options.length === 0 ? question.required !== false : undefined}
+                    required={question.options.length === 0 && question.required !== false}
+                    disabled={controlsDisabled}
                     type={question.secret
                       ? "password"
                       : question.inputFormat === "date-time"
@@ -437,6 +483,11 @@ export function SessionQuestionBanner({
                     autoComplete="off"
                     onChange={(event) => updateDraft(question, event.target.value)}
                   />
+                  {freeTextError && (
+                    <span className="form-error question-field-error" id={responseErrorId} role="alert">
+                      {freeTextError}
+                    </span>
+                  )}
                 </label>
               )}
             </div>

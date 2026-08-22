@@ -34,8 +34,8 @@ test("question choices expose labelled radio and checkbox semantics with one rad
   assert.match(html, /role="radiogroup" aria-labelledby=/);
   assert.equal((html.match(/role="radio"/g) ?? []).length, 2);
   assert.equal((html.match(/role="checkbox"/g) ?? []).length, 2);
-  assert.equal((html.match(/role="radio" aria-checked="false" tabindex="0"/g) ?? []).length, 1);
-  assert.equal((html.match(/role="radio" aria-checked="false" tabindex="-1"/g) ?? []).length, 1);
+  assert.equal((html.match(/role="radio"[^>]*aria-checked="false"[^>]*tabindex="0"/g) ?? []).length, 1);
+  assert.equal((html.match(/role="radio"[^>]*aria-checked="false"[^>]*tabindex="-1"/g) ?? []).length, 1);
 });
 
 test("approval key hints appear only for one unambiguous one-time option", () => {
@@ -105,6 +105,7 @@ test("provider form questions render context and constrained free-text controls"
         id: "retries",
         header: "Retries",
         question: "How many retries?",
+        context: "Retry policy for the deployment",
         options: [],
         allowOther: true,
         inputFormat: "integer",
@@ -115,6 +116,7 @@ test("provider form questions render context and constrained free-text controls"
         id: "note",
         header: "Note",
         question: "Optional note",
+        context: "This note is stored with the deployment",
         options: [],
         allowOther: true,
         required: false,
@@ -122,6 +124,9 @@ test("provider form questions render context and constrained free-text controls"
     ],
   }));
   assert.match(html, /Deploy MCP: Choose deployment settings/);
+  assert.match(html, /Retry policy for the deployment/);
+  assert.match(html, /This note is stored with the deployment/);
+  assert.equal((html.match(/class="question-context"/g) ?? []).length, 3);
   assert.match(html, /<span[^>]*>Response<\/span>/);
   assert.match(html, /type="password"[^>]*maxLength="120"/);
   assert.match(html, /type="number"[^>]*inputMode="numeric"[^>]*step="1"[^>]*min="1"[^>]*max="5"/);
@@ -129,4 +134,7 @@ test("provider form questions render context and constrained free-text controls"
   assert.match(html, /aria-labelledby="[^"]+-question-0 [^"]+-response-0"/);
   assert.match(html, /aria-labelledby="[^"]+-question-1 [^"]+-response-1"/);
   assert.match(html, /aria-labelledby="[^"]+-question-2 [^"]+-response-2"/);
+  assert.equal((html.match(/aria-required="true" required=""/g) ?? []).length, 2);
+  assert.equal((html.match(/aria-required="false"/g) ?? []).length, 1);
+  assert.equal((html.match(/aria-describedby="[^"]+-context-[0-2] [^"]+-requirement-[0-2]"/g) ?? []).length, 3);
 });
