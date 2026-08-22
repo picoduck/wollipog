@@ -4298,7 +4298,8 @@ export class SessionsService {
     }
     const restoreFired = request.restoreFired;
     const validWakeReasons = new Set(["scheduled", "agent_response", "approval", "question", "failure", "background_job"]);
-    if (restoreFired !== undefined && (request.expectedRevision === undefined ||
+    if (restoreFired !== undefined && (restoreFired === null || typeof restoreFired !== "object" ||
+        Array.isArray(restoreFired) || request.expectedRevision === undefined ||
         !Number.isSafeInteger(restoreFired.firedAt) || restoreFired.firedAt > now ||
         restoreFired.firedAt < now - scheduleHorizon || !validWakeReasons.has(restoreFired.wakeReason))) {
       return fail("restoreFired requires an optimistic revision and bounded fired reminder facts", 400);

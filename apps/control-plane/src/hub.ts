@@ -800,21 +800,18 @@ export class Hub {
     }
   }
 
-  private reminderPrincipalMatches(userId: string, principal: AuthPrincipal | undefined): boolean {
+  private reminderPrincipalMatches(userId: unknown, principal: AuthPrincipal | undefined): boolean {
+    if (typeof userId !== "string" || !userId) return false;
     return principal === undefined ? userId === LOCAL_OWNER_USER_ID
       : principal.kind === "human" && principal.userId === userId;
   }
 
   sessionReminderChanged(userId: string, reminder: SessionReminderView): void {
-    this.broadcast({ type: "session_reminder_upsert", reminder }, (principal) =>
-      this.reminderPrincipalMatches(userId, principal) &&
-      (principal === undefined || this.db.canAccessSession(principal, reminder.sessionId)));
+    this.broadcast({ type: "session_reminder_upsert", userId, reminder });
   }
 
   sessionReminderRemoved(userId: string, sessionId: string): void {
-    this.broadcast({ type: "session_reminder_removed", sessionId }, (principal) =>
-      this.reminderPrincipalMatches(userId, principal) &&
-      (principal === undefined || this.db.canAccessSession(principal, sessionId)));
+    this.broadcast({ type: "session_reminder_removed", userId, sessionId });
   }
 
   fireDueSessionReminders(now = Date.now()): number {
@@ -881,6 +878,11 @@ export class Hub {
   }
 
   private canReceive(principal: AuthPrincipal | undefined, msg: ControlPlaneToUi): boolean {
+    if (msg.type === "session_reminder_upsert" || msg.type === "session_reminder_removed") {
+      const sessionId = msg.type === "session_reminder_upsert" ? msg.reminder.sessionId : msg.sessionId;
+      return this.reminderPrincipalMatches(msg.userId, principal) &&
+        (principal === undefined || this.db.canAccessSession(principal, sessionId));
+    }
     if (principal === undefined) return true;
     switch (msg.type) {
       case "runner_upsert":
@@ -889,10 +891,6 @@ export class Hub {
         return false;
       case "session_upsert":
         return this.db.canAccessSession(principal, msg.session.id);
-      case "session_reminder_upsert":
-        return principal.kind === "human" && this.db.canAccessSession(principal, msg.reminder.sessionId);
-      case "session_reminder_removed":
-        return principal.kind === "human" && this.db.canAccessSession(principal, msg.sessionId);
       case "project_upsert":
         return this.db.canAccessProject(principal, msg.project.id);
       case "project_removed":

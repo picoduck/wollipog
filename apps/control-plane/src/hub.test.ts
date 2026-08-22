@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { GitActionRequestMessage, ProjectView, SessionEvent, SessionView } from "@wollipog/protocol";
+import type { GitActionRequestMessage, ProjectView, SessionEvent, SessionReminderView, SessionView } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
+import { LOCAL_OWNER_USER_ID } from "./identity.js";
 import {
   Hub,
   isRunnerRequestTimeoutError,
@@ -707,6 +708,95 @@ test("subscription admission uses deterministic LRU eviction at its hard key cei
     true,
     "the least recently used key was evicted and receives a fresh bounded window",
   );
+});
+
+test("reminder snapshots and live fan-out require exact owner and session access", () => {
+  const reminder = (userId: string): SessionReminderView => ({
+    reminderId: "reminder-" + userId,
+    sessionId: "shared-session",
+    scheduledFor: 10_000,
+    timeZone: "UTC",
+    originalExpression: userId,
+    wakePolicy: "until_activity",
+    state: "pending",
+    revision: 1,
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  const db = {
+    ...snapshotDb,
+    listSessionReminders: (userId: string) => [reminder(userId)],
+    canAccessSession: (principal: { organizationId: string }, sessionId: string) =>
+      sessionId === "shared-session" && principal.organizationId !== "denied",
+  } as unknown as ControlPlaneDb;
+  const hub = new Hub(db);
+  const messages = new Map<string, Array<Record<string, unknown>>>();
+  const add = (name: string, userId?: string, organizationId = "allowed") => {
+    const received: Array<Record<string, unknown>> = [];
+    messages.set(name, received);
+    const socket: Socket = { send: (data) => received.push(JSON.parse(data) as Record<string, unknown>) };
+    hub.addUiClient(socket, {
+      deviceId: name,
+      ...(userId === undefined ? {} : {
+        principal: { kind: "human" as const, organizationId, userId, deviceId: name },
+      }),
+      close: () => {},
+    });
+    return socket;
+  };
+
+  add("owner", "user-a");
+  add("other-authorized-user", "user-b");
+  add("owner-without-session-access", "user-a", "denied");
+  add("local-owner");
+  assert.deepEqual(
+    [...messages].map(([name, received]) => [
+      name,
+      (received[0]?.reminders as SessionReminderView[] | undefined)?.map((item) => item.originalExpression),
+    ]),
+    [
+      ["owner", ["user-a"]],
+      ["other-authorized-user", ["user-b"]],
+      ["owner-without-session-access", []],
+      ["local-owner", [LOCAL_OWNER_USER_ID]],
+    ],
+    "reconnect snapshots remain exactly user-scoped and session-authorized",
+  );
+  for (const received of messages.values()) received.length = 0;
+
+  hub.sessionReminderChanged("user-a", reminder("user-a"));
+  assert.deepEqual(messages.get("owner")?.map((item) => item.type), ["session_reminder_upsert"]);
+  assert.deepEqual(messages.get("other-authorized-user"), []);
+  assert.deepEqual(messages.get("owner-without-session-access"), []);
+  assert.deepEqual(messages.get("local-owner"), []);
+
+  for (const received of messages.values()) received.length = 0;
+  hub.sessionReminderRemoved("user-b", "shared-session");
+  assert.deepEqual(messages.get("other-authorized-user")?.map((item) => item.type), ["session_reminder_removed"]);
+  assert.deepEqual(messages.get("owner"), []);
+
+  for (const received of messages.values()) received.length = 0;
+  hub.sessionReminderChanged(LOCAL_OWNER_USER_ID, reminder(LOCAL_OWNER_USER_ID));
+  assert.deepEqual(messages.get("local-owner")?.map((item) => item.type), ["session_reminder_upsert"]);
+  assert.deepEqual(messages.get("owner"), []);
+});
+
+test("generic reminder fan-out fails closed without exact ownership", () => {
+  const db = { ...snapshotDb, canAccessSession: () => true } as unknown as ControlPlaneDb;
+  const hub = new Hub(db);
+  const received: string[] = [];
+  hub.addUiClient({ send: (data) => received.push(data) }, {
+    deviceId: "owner",
+    principal: { kind: "human", organizationId: "org", userId: "user-a", deviceId: "owner" },
+    close: () => {},
+  });
+  received.length = 0;
+  const unsafeBroadcast = hub as unknown as { broadcast(message: unknown): void };
+  unsafeBroadcast.broadcast({
+    type: "session_reminder_removed",
+    sessionId: "shared-session",
+  });
+  assert.deepEqual(received, []);
 });
 
 test("unsubscribed high-volume events skip authorization database reads", () => {

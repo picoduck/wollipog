@@ -4685,11 +4685,15 @@ export interface UiSessionRemovedMessage {
 
 export interface UiSessionReminderUpsertMessage {
   type: "session_reminder_upsert";
+  /** Exact reminder owner used by the control plane's fail-closed fan-out boundary. */
+  userId: string;
   reminder: SessionReminderView;
 }
 
 export interface UiSessionReminderRemovedMessage {
   type: "session_reminder_removed";
+  /** Exact reminder owner used by the control plane's fail-closed fan-out boundary. */
+  userId: string;
   sessionId: string;
 }
 
