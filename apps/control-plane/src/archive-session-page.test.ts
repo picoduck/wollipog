@@ -55,6 +55,15 @@ test("cursor ordering is stable across live updates and excludes later inserts",
   assert.deepEqual(second.sessionIds, sessions.slice(50).map((item) => item.id));
 });
 
+test("opaque cursor ids use the same UTF-8 BINARY tie-break as SQLite", () => {
+  const ids = ["sa1", "sB1", "𐀀", ""];
+  const sessions = ids.map((id, index) => session(index, { id, createdAt: 1_000 }));
+  const page = archiveSessionPage({ sessions, query: {} });
+  assert.ok(!("error" in page));
+  assert.deepEqual(page.sessionIds, [...ids].sort((left, right) =>
+    Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"))));
+});
+
 test("filters include recoverable Stop states and transcript matches without returning unscoped facets", () => {
   const pending = session(1, { archived: false, archiveStatus: "stop_pending", status: "stopped" });
   const failed = session(4, { archived: false, archiveStatus: "stop_failed", status: "stopped" });

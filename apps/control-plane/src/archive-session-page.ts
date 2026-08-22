@@ -109,12 +109,16 @@ function metadata(session: ArchiveSessionCandidate): ArchiveSessionMetadata {
   };
 }
 
+function compareIds(left: string, right: string): number {
+  return Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"));
+}
+
 function order(left: ArchiveSessionCandidate, right: ArchiveSessionCandidate): number {
-  return right.createdAt - left.createdAt || left.id.localeCompare(right.id);
+  return right.createdAt - left.createdAt || compareIds(left.id, right.id);
 }
 
 function tupleAtOrBelow(session: ArchiveSessionCandidate, createdAt: number, id: string): boolean {
-  return session.createdAt < createdAt || (session.createdAt === createdAt && session.id.localeCompare(id) >= 0);
+  return session.createdAt < createdAt || (session.createdAt === createdAt && compareIds(session.id, id) >= 0);
 }
 
 function cursorFilterKey(query: ArchiveSessionPageQuery, archive: string, lifecycle: string): string {
@@ -187,7 +191,7 @@ export function archiveSessionPage(input: {
   };
   const after = cursor
     ? scoped.filter((session) => session.createdAt < cursor.afterCreatedAt ||
-      (session.createdAt === cursor.afterCreatedAt && session.id.localeCompare(cursor.afterId) > 0))
+      (session.createdAt === cursor.afterCreatedAt && compareIds(session.id, cursor.afterId) > 0))
     : scoped;
   const sessions = after.slice(0, ARCHIVE_SESSION_PAGE_SIZE);
   const hasMore = after.length > sessions.length;

@@ -170,6 +170,7 @@ import {
   type HumanPrincipal,
 } from "./identity.js";
 import {
+  ARCHIVE_SESSION_PAGE_SIZE,
   archiveSessionCursorWindow,
   type ArchiveSessionCandidate,
   type ArchiveSessionPageQuery,
@@ -5953,7 +5954,7 @@ export class ControlPlaneDb {
        ${joins}
        WHERE ${where.join(" AND ")}
        ORDER BY session.created_at DESC, session.id ASC
-       LIMIT 51`,
+       LIMIT ${ARCHIVE_SESSION_PAGE_SIZE + 1}`,
     ).all(...(match ? [match, ...params] : params)) as unknown as Array<{
       id: string; title: string; project_id: string | null; project_name: string | null;
       workspace_id: string | null; location_name: string | null; agent_id: string | null;
