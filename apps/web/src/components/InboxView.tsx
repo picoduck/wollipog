@@ -281,26 +281,36 @@ export function InboxView({
   // when membership changes; ordinary heartbeat pulses never rebuild Inbox splits or rows.
   const stalledSessionIds = useMemo(() => new Set(stalledIndex), [stalledIndex, stalledRevision]);
 
-  const reminderSessions = useMemo(() => sortSessionsForReminders(
-    [...sessions.values()].filter((session) => sessionVisibleForReminderMode(
-      session, reminders.get(session.id), reminderMode,
-    )),
-    reminders,
-    reminderMode,
-  ), [reminderMode, reminders, sessions]);
   const snoozedCount = useMemo(() => [...reminders.values()].filter((reminder) => {
     const session = sessions.get(reminder.sessionId);
     return reminder.state === "pending" && session !== undefined && !session.archived;
   }).length, [reminders, sessions]);
-  const splits = useMemo(() => buildInboxSplits(
-    reminderSessions,
-    pinnedProjects,
-    pinnedSessions,
-    stalledSessionIds,
-    projects.values(),
-    projectsSupported,
-  ).map((split) => ({ ...split, sessions: sortSessionsForReminders(split.sessions, reminders, reminderMode), count: split.sessions.length })),
-  [pinnedProjects, pinnedSessions, projects, projectsSupported, reminderMode, reminderSessions, reminders, stalledSessionIds]);
+  const splits = useMemo(() => {
+    const baseSplits = buildInboxSplits(
+      sessions.values(),
+      pinnedProjects,
+      pinnedSessions,
+      stalledSessionIds,
+      projects.values(),
+      projectsSupported,
+    );
+    return baseSplits.map((split) => {
+      const visibleSessions = split.sessions.filter((session) => sessionVisibleForReminderMode(
+        session, reminders.get(session.id), reminderMode,
+      ));
+      // Durable Project counts can exceed the locally loaded catalog. Preserve that server-owned
+      // total in the ordinary Inbox, subtracting only reminder-hidden rows we can prove locally.
+      const hiddenLocalCount = split.sessions.length - visibleSessions.length;
+      const count = reminderMode === "snoozed"
+        ? visibleSessions.length
+        : Math.max(0, split.count - hiddenLocalCount);
+      return {
+        ...split,
+        sessions: sortSessionsForReminders(visibleSessions, reminders, reminderMode),
+        count,
+      };
+    });
+  }, [pinnedProjects, pinnedSessions, projects, projectsSupported, reminderMode, reminders, sessions, stalledSessionIds]);
   const activeSplit = inboxSplitByKey(splits, inbox.splitKey);
   const activeNewSessionPreset = useMemo<NewSessionPreset | undefined>(
     () => newSessionPresetForInboxSplit(activeSplit),

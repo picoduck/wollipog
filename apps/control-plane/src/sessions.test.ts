@@ -207,6 +207,14 @@ class FakeHub {
     this.sessionChangedByIdCalls.push(sessionId);
   }
 
+  sessionReminderChanged(userId: string, reminder: SessionReminderView): void {
+    this.calls.push({ method: "sessionReminderChanged", args: [userId, reminder] });
+  }
+
+  sessionReminderRemoved(userId: string, sessionId: string): void {
+    this.calls.push({ method: "sessionReminderRemoved", args: [userId, sessionId] });
+  }
+
   sessionEvent(event: SessionEvent): void {
     this.calls.push({ method: "sessionEvent", args: [event] });
     this.sessionEventCalls.push(event);
@@ -438,6 +446,59 @@ function seedReadyPodSession(
   db.updateSessionStatus(id, "idle", Date.now());
   return id;
 }
+
+test("fired reminder policy edits and removal Undo can restore their observed past instant", () => {
+  const { db, hub, svc } = makeHarness();
+  const sessionId = seedSession(svc, hub);
+  const userId = db.localIdentityContext().userId;
+  const now = Date.now();
+  const scheduledFor = now - 1_000;
+  const schedule = {
+    sessionId,
+    userId,
+    scheduledFor,
+    timeZone: "UTC",
+    originalExpression: "one second ago",
+    wakePolicy: "until_activity" as const,
+  };
+  assert.equal(db.setSessionReminder({ ...schedule, expectedRevision: 0, now: now - 2_000 }).kind, "updated");
+  assert.equal(db.fireDueSessionReminders(now).length, 1);
+  const fired = db.getSessionReminder(sessionId, userId)!;
+  assert.equal(fired.state, "fired");
+
+  const policyEdit = svc.setReminder(sessionId, userId, {
+    scheduledFor,
+    timeZone: "UTC",
+    originalExpression: "one second ago",
+    wakePolicy: "regardless",
+    expectedRevision: fired.revision,
+  });
+  assert.equal(policyEdit.ok, true);
+  assert.equal(policyEdit.data?.scheduledFor, scheduledFor);
+  assert.equal(policyEdit.data?.wakePolicy, "regardless");
+
+  const removed = svc.removeReminder(sessionId, userId, policyEdit.data!.revision);
+  assert.equal(removed.ok, true);
+  const restored = svc.setReminder(sessionId, userId, {
+    scheduledFor,
+    timeZone: "UTC",
+    originalExpression: "one second ago",
+    wakePolicy: "until_activity",
+    expectedRevision: 0,
+  });
+  assert.equal(restored.ok, true);
+  assert.equal(restored.data?.scheduledFor, scheduledFor);
+
+  const unguardedPast = svc.setReminder(sessionId, userId, {
+    scheduledFor: now - 2_000,
+    timeZone: "UTC",
+    originalExpression: "two seconds ago",
+    wakePolicy: "until_activity",
+  });
+  assert.equal(unguardedPast.ok, false);
+  assert.equal(unguardedPast.status, 400);
+  db.close();
+});
 
 /* -------------------------------------------------------------------------- */
 /* createSession                                                             */

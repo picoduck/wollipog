@@ -1148,7 +1148,8 @@ function reducer(state: State, action: Action): State {
         }
         case "session_reminder_upsert": {
           const current = state.reminders.get(msg.reminder.sessionId);
-          if (current && current.revision >= msg.reminder.revision) return state;
+          if (current?.reminderId === msg.reminder.reminderId &&
+              current.revision >= msg.reminder.revision) return state;
           const reminders = new Map(state.reminders);
           reminders.set(msg.reminder.sessionId, msg.reminder);
           return { ...state, reminders };

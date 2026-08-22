@@ -32,8 +32,10 @@ export function sortSessionsForReminders(
     const leftReminder = reminders.get(left.id);
     const rightReminder = reminders.get(right.id);
     if (mode === "snoozed") {
-      return (leftReminder?.scheduledFor ?? Number.POSITIVE_INFINITY) -
-        (rightReminder?.scheduledFor ?? Number.POSITIVE_INFINITY);
+      const leftScheduledFor = leftReminder?.scheduledFor;
+      const rightScheduledFor = rightReminder?.scheduledFor;
+      if (leftScheduledFor === undefined || rightScheduledFor === undefined) return 0;
+      return leftScheduledFor - rightScheduledFor;
     }
     const leftFired = leftReminder?.state === "fired";
     const rightFired = rightReminder?.state === "fired";

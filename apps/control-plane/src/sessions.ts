@@ -4077,10 +4077,18 @@ export class SessionsService {
     request: Partial<SetSessionReminderRequest>,
   ): ServiceResult<SessionReminderView> {
     if (!this.db.getSession(sessionId)) return fail("session not found", 404);
+    const current = this.db.getSessionReminder(sessionId, userId);
     const now = Date.now();
-    if (!Number.isSafeInteger(request.scheduledFor) || request.scheduledFor! <= now ||
-        request.scheduledFor! > now + 10 * 366 * 86_400_000) {
-      return fail("scheduledFor must be a future absolute instant within ten years", 400);
+    const scheduleHorizon = 10 * 366 * 86_400_000;
+    const restoresCurrentInstant = current !== null &&
+      request.expectedRevision === current.revision && request.scheduledFor === current.scheduledFor;
+    const restoresRemovedInstant = current === null && request.expectedRevision === 0;
+    const restoresPastInstant = request.scheduledFor! <= now &&
+      (restoresCurrentInstant || restoresRemovedInstant);
+    if (!Number.isSafeInteger(request.scheduledFor) ||
+        request.scheduledFor! < now - scheduleHorizon || request.scheduledFor! > now + scheduleHorizon ||
+        (request.scheduledFor! <= now && !restoresPastInstant)) {
+      return fail("scheduledFor must be within ten years; past instants require an optimistic restoration", 400);
     }
     if (typeof request.timeZone !== "string" || !request.timeZone || request.timeZone.length > 128) {
       return fail("timeZone must be a valid IANA time-zone identifier", 400);

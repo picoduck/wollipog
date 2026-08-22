@@ -3,7 +3,7 @@ import test from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { ControlPlaneToUi, SessionView, UiSnapshotMessage } from "@wollipog/protocol";
+import type { ControlPlaneToUi, ProjectView, SessionView, UiSnapshotMessage } from "@wollipog/protocol";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
@@ -149,6 +149,63 @@ function snapshot(sessions: SessionView[]): UiSnapshotMessage {
 function rowTitles(container: HTMLDivElement): string[] {
   return [...container.querySelectorAll(".inbox-row-title")].map((row) => row.textContent ?? "");
 }
+
+test("InboxView preserves the server-authoritative Project count when reminders hide no rows", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "inbox-project-count-test",
+    runtimeKey: "inbox-project-count-test:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  const project: ProjectView = {
+    id: "project-1",
+    name: "Project One",
+    hidden: false,
+    locations: [],
+    activeSessionCount: 1,
+    unarchivedSessionCount: 7,
+    totalSessionCount: 7,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+
+  await act(async () => {
+    root.render(
+      <StoreProvider connection={connection} navigation={navigation}>
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+      </StoreProvider>,
+    );
+  });
+  await act(async () => {
+    socket.push({
+      type: "snapshot",
+      capabilities: {
+        sessionSubscriptions: false,
+        boundedDelivery: false,
+        paginatedSessionHistory: false,
+        projects: true,
+        sessionReminders: true,
+      },
+      runners: [],
+      boxes: [],
+      sessions: [session("project-session", 10, { projectId: project.id })],
+      projects: [project],
+      reminders: [],
+      runs: [],
+      pods: [],
+    });
+  });
+  const projectTab = [...container.querySelectorAll<HTMLElement>(".inbox-tab")]
+    .find((tab) => tab.textContent?.includes("Project One"));
+  assert.equal(projectTab?.querySelector(".inbox-tab-count")?.textContent, "7");
+
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
 
 test("InboxView keeps mobile browsing order stable before and through a touch", async () => {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;

@@ -813,7 +813,8 @@ export class Hub {
 
   sessionReminderRemoved(userId: string, sessionId: string): void {
     this.broadcast({ type: "session_reminder_removed", sessionId }, (principal) =>
-      this.reminderPrincipalMatches(userId, principal));
+      this.reminderPrincipalMatches(userId, principal) &&
+      (principal === undefined || this.db.canAccessSession(principal, sessionId)));
   }
 
   fireDueSessionReminders(now = Date.now()): number {

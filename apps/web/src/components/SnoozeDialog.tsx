@@ -34,7 +34,7 @@ export function SnoozeDialog({
   const parsed = useMemo(() => {
     if (reminder && !scheduleTouched) return storedReminderSchedule(reminder);
     return exact
-      ? exactReminderSchedule(exact, localTimeZone)
+      ? exactReminderSchedule(exact)
       : parseReminderExpression(expression, new Date(), localTimeZone);
   }, [exact, expression, localTimeZone, reminder, scheduleTouched]);
 
@@ -96,8 +96,8 @@ export function SnoozeDialog({
           ))}
         </div>
         <label className="field-label" htmlFor="snooze-expression">Natural Language</label>
-        <input id="snooze-expression" className="input" value={expression} onChange={(event) => { setScheduleTouched(true); setExact(""); setExpression(event.target.value); }} placeholder="e.g. in 2 hours" autoFocus />
-        <span className="field-hint">Supported phrases are shown by the presets, plus “in N minutes/hours/days” and “today/tomorrow at 3:30 pm.” Ambiguous numeric dates are not guessed.</span>
+        <input id="snooze-expression" className="input" aria-describedby="snooze-expression-hint" value={expression} onChange={(event) => { setScheduleTouched(true); setExact(""); setExpression(event.target.value); }} placeholder="e.g. in 2 hours" autoFocus />
+        <span className="field-hint" id="snooze-expression-hint">Supported phrases are shown by the presets, plus “in N minutes/hours/days” and “today/tomorrow at 3:30 pm.” Ambiguous numeric dates are not guessed.</span>
         <label className="field-label" htmlFor="snooze-exact">Exact Date and Time</label>
         <input id="snooze-exact" className="input" type="datetime-local" value={exact} onChange={(event) => { setScheduleTouched(true); setExact(event.target.value); }} />
         <ChoiceCards<SessionReminderWakePolicy>

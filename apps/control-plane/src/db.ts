@@ -8875,7 +8875,9 @@ export class ControlPlaneDb {
   fireDueSessionReminders(now: number): Array<{ userId: string; reminder: SessionReminderView }> {
     return this.atomic(() => {
       const rows = this.stmt(
-        "SELECT * FROM session_reminders WHERE state='pending' AND scheduled_for<=? ORDER BY scheduled_for,session_id,user_id",
+        `SELECT r.* FROM session_reminders r JOIN sessions s ON s.id=r.session_id
+         WHERE r.state='pending' AND r.scheduled_for<=? AND s.archived=0
+         ORDER BY r.scheduled_for,r.session_id,r.user_id`,
       ).all(now) as unknown as SessionReminderRow[];
       return this.fireSessionReminderRows(rows, "scheduled", now);
     });
@@ -8887,10 +8889,17 @@ export class ControlPlaneDb {
     reason: Exclude<SessionReminderWakeReason, "scheduled">,
     now: number,
   ): Array<{ userId: string; reminder: SessionReminderView }> {
+    // Avoid a write transaction on the session-event hot path when there is no eligible reminder.
+    const eligible = this.stmt(
+      `SELECT 1 AS found FROM session_reminders r JOIN sessions s ON s.id=r.session_id
+       WHERE r.session_id=? AND r.state='pending' AND r.wake_policy='until_activity' AND s.archived=0 LIMIT 1`,
+    ).get(sessionId) as { found: number } | undefined;
+    if (!eligible) return [];
     return this.atomic(() => {
       const rows = this.stmt(
-        `SELECT * FROM session_reminders WHERE session_id=? AND state='pending'
-           AND wake_policy='until_activity' AND baseline_event_seq<?`,
+        `SELECT r.* FROM session_reminders r JOIN sessions s ON s.id=r.session_id
+         WHERE r.session_id=? AND r.state='pending' AND r.wake_policy='until_activity'
+           AND r.baseline_event_seq<? AND s.archived=0`,
       ).all(sessionId, eventSeq) as unknown as SessionReminderRow[];
       return this.fireSessionReminderRows(rows, reason, now);
     });

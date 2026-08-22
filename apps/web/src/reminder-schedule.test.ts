@@ -16,7 +16,7 @@ test("relative days are exact elapsed 24-hour periods", () => {
 });
 
 test("exact inputs reject past instants and ambiguous free-form dates", () => {
-  assert.equal(exactReminderSchedule("2026-08-20T09:00", "UTC", Date.UTC(2026, 7, 21)), null);
+  assert.equal(exactReminderSchedule("2026-08-20T09:00", Date.UTC(2026, 7, 21)), null);
   assert.equal(parseReminderExpression("08/22/2026", new Date(2026, 7, 21)), null);
 });
 

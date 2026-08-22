@@ -78,6 +78,21 @@ test("overdue reminders fire exactly once after a delayed sweep", () => {
   db.close();
 });
 
+test("archived reminders stay pending until the session is restored", () => {
+  const db = fixture();
+  assert.equal(db.setSessionReminder({ ...schedule, expectedRevision: 0 }).kind, "updated");
+  db.setSessionArchived("session-1", true, schedule.scheduledFor - 1);
+  assert.equal(db.fireDueSessionReminders(schedule.scheduledFor + 1).length, 0);
+  assert.equal(db.getSessionReminder("session-1", LOCAL_OWNER_USER_ID)?.state, "pending");
+  assert.equal(db.fireSessionRemindersForActivity("session-1", 1, "agent_response", schedule.scheduledFor + 2).length, 0);
+
+  db.setSessionArchived("session-1", false, schedule.scheduledFor + 3);
+  const fired = db.fireDueSessionReminders(schedule.scheduledFor + 4);
+  assert.equal(fired.length, 1);
+  assert.equal(fired[0]?.reminder.state, "fired");
+  db.close();
+});
+
 test("deleting a session cascades its per-user reminder", () => {
   const db = fixture();
   assert.equal(db.setSessionReminder({ ...schedule, expectedRevision: 0 }).kind, "updated");

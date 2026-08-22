@@ -57,15 +57,16 @@ export function parseReminderExpression(
   return { scheduledFor: scheduled.getTime(), timeZone, originalExpression };
 }
 
+/** A datetime-local control is interpreted by the browser runtime. Persist that runtime's zone
+ * beside the resolved instant so later rendering does not silently reinterpret the user's choice. */
 export function exactReminderSchedule(
   localDateTime: string,
-  timeZone = browserTimeZone(),
   now = Date.now(),
 ): ParsedReminderSchedule | null {
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(localDateTime)) return null;
   const instant = new Date(localDateTime);
   if (!Number.isFinite(instant.getTime()) || instant.getTime() <= now) return null;
-  return { scheduledFor: instant.getTime(), timeZone, originalExpression: localDateTime };
+  return { scheduledFor: instant.getTime(), timeZone: browserTimeZone(), originalExpression: localDateTime };
 }
 
 /** Editing starts from the stored absolute instant. In particular, a datetime-local expression

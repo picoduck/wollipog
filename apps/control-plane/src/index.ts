@@ -3806,14 +3806,15 @@ const workflowRecoveryTimer = setInterval(() => svc.recoverExpiredWorkflowAttemp
 workflowRecoveryTimer.unref();
 const automationTimer = setInterval(() => automations.tick(Date.now()), 5_000);
 automationTimer.unref();
-hub.fireDueSessionReminders(Date.now());
-const sessionReminderTimer = setInterval(() => {
+const sweepSessionReminders = () => {
   try {
     hub.fireDueSessionReminders(Date.now());
   } catch (error) {
     app.log.warn({ error: error instanceof Error ? error.message : String(error) }, "session reminder sweep deferred");
   }
-}, 1_000);
+};
+sweepSessionReminders();
+const sessionReminderTimer = setInterval(sweepSessionReminders, 1_000);
 sessionReminderTimer.unref();
 const sessionCommandRetryTimer = setInterval(() => {
   try {
