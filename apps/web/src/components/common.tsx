@@ -2,6 +2,7 @@ import React, { useEffect, useId, useRef, useState, type KeyboardEvent as ReactK
 import type {
   ArchiveStatus,
   ArchiveOperationView,
+  StopOperationView,
   BackgroundDeliveryWatchdogState,
   BackgroundNotificationReceiptState,
   BackgroundWorkState,
@@ -143,18 +144,21 @@ export function CopyButton({
   );
 }
 
-export function StatusBadge({ status, archiveStatus, archiveOperation }: {
+export function StatusBadge({ status, archiveStatus, archiveOperation, stopOperation }: {
   status: SessionStatus;
   archiveStatus?: ArchiveStatus;
   archiveOperation?: ArchiveOperationView;
+  stopOperation?: StopOperationView;
 }) {
-  const m = archiveStatus === "stop_pending"
+  const operation = stopOperation ?? archiveOperation;
+  const operationStatus = operation?.status ?? archiveStatus;
+  const m = operationStatus === "stop_pending"
     ? { label: "Stop Pending", className: "st-running", busy: true }
-    : archiveStatus === "stop_failed"
+    : operationStatus === "stop_failed"
       ? { label: "Stop Failed", className: "st-failed", busy: false }
       : statusMeta(status);
   return (
-    <span className={"status-badge " + m.className} title={archiveOperation?.failure?.message}>
+    <span className={"status-badge " + m.className} title={operation?.failure?.message}>
       <span className={"status-dot2 " + (m.busy ? "pulse" : "")} />
       {m.label}
     </span>

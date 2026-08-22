@@ -311,7 +311,7 @@ function SessionCard({
       onDragEnd={onDragEnd}
     >
       <div className="card-top">
-        <StatusBadge status={session.status} />
+        <StatusBadge status={session.status} stopOperation={session.stopOperation} />
         <span className="card-time">{relativeTime(session.lastEventAt ?? session.updatedAt)}</span>
       </div>
       <button

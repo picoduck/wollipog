@@ -1237,9 +1237,9 @@ export type ArchiveStatus = "stop_pending" | "stop_failed";
 
 export type ArchiveStopFailureCode = "timeout" | "retry_exhausted" | "runner_rejected";
 
-/** Structured, server-owned Stop-before-archive operation. Failure never proves that runtime
- * capacity was released, and the operation identity remains stable across idempotent retries. */
-export interface ArchiveOperationView {
+/** Structured, server-owned Stop operation. Failure never proves that runtime capacity was
+ * released, and the operation identity remains stable across idempotent retries. */
+export interface StopOperationView {
   operationId: string;
   status: ArchiveStatus;
   requestedAt: number;
@@ -1252,6 +1252,9 @@ export interface ArchiveOperationView {
     failedAt: number;
   };
 }
+
+/** Compatibility name retained for clients that consume archive-specific Stop state. */
+export type ArchiveOperationView = StopOperationView;
 
 /** Archive must release runtime capacity for every non-terminal provider lifecycle. Idle is
  * intentionally included: it can retain a resident provider process and runner/target leases. */
@@ -2557,6 +2560,9 @@ export interface SessionView {
   /** Structured operation state for clients that support Stop failure recovery. Omitted by older
    * control planes and when no archive follow-up remains attached to the durable Stop intent. */
   archiveOperation?: ArchiveOperationView;
+  /** Structured state for every durable Stop intent, including a plain Stop without an archive
+   * follow-up. Terminal or absence evidence removes the operation. */
+  stopOperation?: StopOperationView;
   createdAt: number;
   updatedAt: number;
   lastEventAt: number | null;

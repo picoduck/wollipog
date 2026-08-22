@@ -6776,6 +6776,85 @@ test("stop sends stop_session and marks the session stopped", () => {
   assert.ok(hub.sessionChangedByIdCalls.includes(id));
 });
 
+test("correlated plain Stop rejection is visible, fenced, retryable, and terminally settled", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  const otherId = seedSession(svc, hub);
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.sentToRunner.length = 0;
+
+  const stopped = svc.stop(id).data!;
+  const operation = stopped.stopOperation!;
+  assert.equal(operation.status, "stop_pending");
+  assert.equal(operation.capacityReleased, false);
+  assert.equal(stopped.archived, false);
+  assert.equal(stopped.archiveStatus, undefined);
+  assert.equal(stopped.archiveOperation, undefined);
+
+  assert.equal(svc.onStopSessionResult("intruder", {
+    type: "stop_session_result", sessionId: id,
+    operationId: operation.operationId, accepted: false, error: "private output",
+  }), false);
+  assert.equal(svc.onStopSessionResult(RUNNER_ID, {
+    type: "stop_session_result", sessionId: id,
+    operationId: "stale-operation", accepted: false, error: "private output",
+  }), false);
+  assert.equal(svc.onStopSessionResult(RUNNER_ID, {
+    type: "stop_session_result", sessionId: otherId,
+    operationId: operation.operationId, accepted: false, error: "private output",
+  }), false);
+  assert.equal(db.getSession(id)?.stopOperation?.status, "stop_pending");
+
+  assert.equal(svc.onStopSessionResult(RUNNER_ID, {
+    type: "stop_session_result", sessionId: id,
+    operationId: operation.operationId, accepted: false,
+    error: "/private/provider/path and runtime output",
+  }), true);
+  const failed = db.getSession(id)!;
+  assert.equal(failed.stopOperation?.status, "stop_failed");
+  assert.equal(failed.stopOperation?.failure?.code, "runner_rejected");
+  assert.doesNotMatch(failed.stopOperation?.failure?.message ?? "", /private|provider\/path/u);
+  assert.equal(failed.stopOperation?.capacityReleased, false);
+  assert.equal(failed.archived, false);
+  assert.equal(failed.archiveStatus, undefined);
+
+  const beforeReconnect = hub.sentOfType("stop_session").length;
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, status: "running" })]);
+  assert.equal(hub.sentOfType("stop_session").length, beforeReconnect,
+    "a failed Stop remains fenced but is not invisibly replayed");
+  assert.equal(db.getSession(id)?.status, "stopped");
+  assert.equal(db.getSession(id)?.stopOperation?.status, "stop_failed");
+
+  const firstRetry = svc.retryStop(id).data!;
+  const duplicateRetry = svc.retryStop(id).data!;
+  assert.equal(firstRetry.stopOperation?.status, "stop_pending");
+  assert.equal(firstRetry.stopOperation?.operationId, operation.operationId);
+  assert.equal(duplicateRetry.stopOperation?.operationId, operation.operationId);
+  assert.equal(duplicateRetry.stopOperation?.attemptCount, firstRetry.stopOperation?.attemptCount);
+  assert.equal(hub.sentOfType("stop_session").at(-1)?.operationId, operation.operationId);
+
+  svc.onSessionStatus(id, "stopped", undefined, undefined, RUNNER_ID);
+  const settled = db.getSession(id)!;
+  assert.equal(settled.stopOperation, undefined);
+  assert.equal(settled.archived, false);
+});
+
+test("protocol-v84 plain Stop intents retain conservative pending behavior", () => {
+  const { db, hub, svc } = makeHarness();
+  db.registerRunner(runnerMeta(), Date.now(), 84);
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "running", Date.now());
+
+  const pending = svc.stop(id).data!;
+  assert.equal(pending.stopOperation?.status, "stop_pending");
+  assert.equal(hub.sentOfType("stop_session").at(-1)?.operationId, undefined);
+  assert.equal(svc.maintainSessionStopIntents(
+    pending.stopOperation!.requestedAt + SESSION_STOP_TIMEOUT_MS * 2,
+  ), 0);
+  assert.equal(db.getSession(id)?.stopOperation?.status, "stop_pending");
+  assert.equal(db.getSession(id)?.archived, false);
+});
+
 test("stop persists an offline intent and reconnect reissues it without resurrecting the session", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);

@@ -46,8 +46,9 @@ function InboxRowInner({
   onSelect,
   onExpand,
 }: InboxRowProps) {
-  const stopFailed = session.archiveStatus === "stop_failed";
-  const status = session.archiveStatus === "stop_pending"
+  const stopStatus = session.stopOperation?.status ?? session.archiveStatus;
+  const stopFailed = stopStatus === "stop_failed";
+  const status = stopStatus === "stop_pending"
     ? { label: "Stop Pending", className: "st-running", busy: true }
     : stopFailed
       ? { label: "Stop Failed", className: "st-failed", busy: false }

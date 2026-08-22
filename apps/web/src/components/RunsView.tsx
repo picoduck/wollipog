@@ -39,7 +39,7 @@ function MemberColumn({ sessionId }: { sessionId: string }) {
     <div className="compare-col">
       <button className="compare-head" type="button" onClick={() => navigate({ name: "session", id: sessionId })}>
         <div className="compare-agent">{agentLabel}</div>
-        <StatusBadge status={session.status} />
+        <StatusBadge status={session.status} stopOperation={session.stopOperation} />
       </button>
       <div className="compare-body" ref={scrollRef} role="region" aria-label={`${agentLabel} activity`} aria-busy={presentation.busy} tabIndex={0}>
         {presentation.notice === "refreshing" && <div className="muted sm" role="status">Checking for missed activity…</div>}

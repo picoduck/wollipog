@@ -3710,6 +3710,7 @@ export class SessionsService {
 
   private sendStopCommand(runnerId: string, sessionId: string): boolean {
     const intent = this.db.sessionStopIntent(sessionId);
+    if (intent?.operation.status === "stop_failed") return false;
     const protocolVersion = this.db.getRunner(runnerId)?.protocolVersion;
     return this.hub.sendToRunner(runnerId, {
       type: "stop_session",
@@ -3720,7 +3721,7 @@ export class SessionsService {
     });
   }
 
-  /** Turn a supported Stop operation into a truthful failure without releasing its archive fence. */
+  /** Turn a supported Stop operation into a truthful failure without claiming capacity release. */
   private failStopOperation(
     sessionId: string,
     operationId: string,
@@ -3824,13 +3825,13 @@ export class SessionsService {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
     const existing = this.db.sessionStopIntent(sessionId);
-    if (!existing?.archiveAfterStop) return fail("there is no archive Stop operation to retry", 409);
+    if (!existing) return fail("there is no Stop operation to retry", 409);
     if (isTerminal(session.status) && session.status !== "stopped") {
       this.settleStopIntent(sessionId, Date.now());
       return ok(this.db.getSession(sessionId)!, 200);
     }
     const rearmed = this.db.retrySessionStopIntent(sessionId, Date.now());
-    if (!rearmed) return fail("there is no archive Stop operation to retry", 409);
+    if (!rearmed) return fail("there is no Stop operation to retry", 409);
     this.sendStopCommand(rearmed.runnerId, sessionId);
     this.hub.sessionChangedById(sessionId);
     return ok(this.db.getSession(sessionId)!, 202);
