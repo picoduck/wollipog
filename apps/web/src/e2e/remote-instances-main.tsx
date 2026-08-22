@@ -143,7 +143,6 @@ createRoot(root).render(
             stalledCount={0}
             onlineConnections={1}
             onNavigate={() => undefined}
-            onNewSession={() => undefined}
             instanceControl={<InstanceSelector compact />}
             settingsControl={<button type="button" className="settings-trigger">Settings</button>}
           />

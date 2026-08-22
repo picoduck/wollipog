@@ -132,7 +132,6 @@ test("compact instance selector stays bottom-anchored inside the real desktop Ra
         stalledCount={0}
         onlineConnections={1}
         onNavigate={() => undefined}
-        onNewSession={() => undefined}
         instanceControl={<InstanceSelector compact />}
         settingsControl={<button type="button">Settings</button>}
       />
