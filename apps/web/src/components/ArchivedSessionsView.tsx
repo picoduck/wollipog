@@ -52,10 +52,11 @@ export function ArchivedSessionsView() {
   const api = useApi();
   const instanceScope = useInstanceScope();
   const { confirm, showToast, showUndo } = useFeedback();
-  const { loadSession, navigate } = useStoreActions();
+  const { dispatch, loadSession, navigate } = useStoreActions();
   const liveSessions = useStoreSelector((state) => state.sessions);
   const projects = useStoreSelector((state) => state.projects);
   const conn = useStoreSelector((state) => state.conn);
+  const deletedSessionIdsRef = useRef(new Set<string>());
   const liveSessionsRef = useRef(liveSessions);
   liveSessionsRef.current = liveSessions;
 
@@ -72,10 +73,14 @@ export function ArchivedSessionsView() {
   const refreshCatalog = useCallback(async () => {
     try {
       const response = await api.listAllSessions();
-      setCatalog(mergeArchiveSessionCatalog(
+      const next = mergeArchiveSessionCatalog(
         new Map(response.sessions.map((session) => [session.id, session])),
         liveSessionsRef.current.values(),
-      ));
+      );
+      for (const sessionId of deletedSessionIdsRef.current) {
+        next.delete(sessionId);
+      }
+      setCatalog(next);
       setError(null);
     } catch (cause) {
       setError(`Could not load archived sessions: ${(cause as Error).message}`);
@@ -89,7 +94,11 @@ export function ArchivedSessionsView() {
   // Authorized websocket upserts include archived sessions, so lifecycle and archive changes made
   // by another client replace their catalog rows without waiting for another REST request.
   useEffect(() => {
-    setCatalog((current) => mergeArchiveSessionCatalog(current, liveSessions.values()));
+    setCatalog((current) => {
+      const next = mergeArchiveSessionCatalog(current, liveSessions.values());
+      for (const sessionId of deletedSessionIdsRef.current) next.delete(sessionId);
+      return next;
+    });
   }, [liveSessions]);
 
   // Deletions of rows that have not emitted an upsert on this socket cannot be identified by the
@@ -237,11 +246,13 @@ export function ArchivedSessionsView() {
       await api.deleteSession(session.id);
       removeFromInstanceKeySet(SESSION_PIN_KEY, instanceScope, session.id);
       void discardComposerDraft(session.id, instanceScope);
+      deletedSessionIdsRef.current.add(session.id);
       setCatalog((current) => {
         const next = new Map(current);
         next.delete(session.id);
         return next;
       });
+      dispatch({ type: "msg", msg: { type: "session_removed", sessionId: session.id } });
       showToast("Session deleted.");
     } catch (cause) {
       showToast(`Could not delete session: ${(cause as Error).message}`, { tone: "error" });

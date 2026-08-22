@@ -243,6 +243,39 @@ test("Stop Pending sessions expose an idempotent Retry Stop recovery action", as
   await fixture.unmount();
 });
 
+test("a successful deletion cannot be resurrected by the live session overlay", async () => {
+  const archived = session(4);
+  const deleted: string[] = [];
+  const fixture = await mount([archived], {
+    deleteSession: async (id) => { deleted.push(id); },
+  });
+
+  await act(async () => {
+    Simulate.click(button(fixture.container, "Open"));
+    await Promise.resolve();
+  });
+  await act(async () => {
+    Simulate.click(button(fixture.container, "Delete"));
+    await Promise.resolve();
+  });
+  await act(async () => {
+    Simulate.click(button(fixture.container, "Delete Session"));
+    await Promise.resolve();
+  });
+
+  assert.deepEqual(deleted, [archived.id]);
+  assert.doesNotMatch(fixture.container.textContent ?? "", /Archived Session 4/);
+
+  await act(async () => {
+    fixture.socket.push({ type: "session_upsert", session: session(5, { updatedAt: 100 }) });
+    await Promise.resolve();
+  });
+  assert.doesNotMatch(fixture.container.textContent ?? "", /Archived Session 4/,
+    "an unrelated live update does not merge the deleted cached session back into the catalog");
+  assert.match(fixture.container.textContent ?? "", /Archived Session 5/);
+  await fixture.unmount();
+});
+
 test("transcript search failures disclose the metadata-only fallback", async () => {
   const archived = session(3, { title: "Metadata Match" });
   const fixture = await mount([archived], {
