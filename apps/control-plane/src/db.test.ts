@@ -2679,6 +2679,45 @@ test("snapshot context gauges round-trip while a user title resists provider rep
   assert.equal(session.providerUpdatedAt, "2026-07-13T00:00:00.000Z");
 });
 
+test("semantic titles survive stale generated snapshots but yield to provider metadata", () => {
+  const db = withRunner();
+  db.createSessionFromSnapshot(snapshot({
+    id: "semantic-title", title: "Initial fallback", titleSource: "generated",
+  }), "runner-1", 2_000);
+  db.setSemanticSessionTitle("semantic-title", "Semantic objective", 2_100, "generated");
+
+  db.updateSessionFromSnapshot("semantic-title", snapshot({
+    id: "semantic-title", title: "Initial fallback", titleSource: "generated",
+  }), 2_200);
+  assert.equal(db.getSession("semantic-title")?.title, "Semantic objective");
+  assert.equal(db.getSession("semantic-title")?.titleSource, "generated");
+
+  db.updateSessionFromSnapshot("semantic-title", snapshot({
+    id: "semantic-title", title: "Provider objective", titleSource: "provider",
+  }), 2_300);
+  assert.equal(db.getSession("semantic-title")?.title, "Provider objective");
+  assert.equal(db.getSession("semantic-title")?.titleSource, "provider");
+});
+
+test("session title context queries keep the original objective and a bounded semantic tail", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "title-context" }));
+  db.appendEvent("title-context", { kind: "user_message", text: "Original", final: true }, 1);
+  db.appendEvent("title-context", { kind: "agent_thought", text: "Excluded", final: true }, 2);
+  db.appendEvent("title-context", { kind: "user_message", text: "Partial", final: false }, 3);
+  for (let index = 0; index < 5; index += 1) {
+    db.appendEvent("title-context", { kind: "agent_message", text: `Answer ${index}`, final: true }, 4 + index);
+  }
+
+  assert.equal(db.hasCompletedUserMessage("title-context"), true);
+  assert.deepEqual(
+    db.listSessionTitleContextEvents("title-context", 2).map((entry) => entry.payload.kind === "user_message"
+      ? entry.payload.text
+      : entry.payload.kind === "agent_message" ? entry.payload.text : "excluded"),
+    ["Original", "Answer 3", "Answer 4"],
+  );
+});
+
 test("createSessionFromSnapshot auto-files an adopted session by its workspacePath", () => {
   const db = withRunner();
   // Adopted from ANOTHER dashboard (or delete-then-rehydrate): the snapshot carries no workspaceId

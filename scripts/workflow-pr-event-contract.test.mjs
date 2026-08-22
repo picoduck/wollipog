@@ -9,6 +9,7 @@ const WORKFLOWS = [
   ".github/workflows/desktop-native.yml",
   ".github/workflows/platform-isolation.yml",
 ];
+const RELEASE_WORKFLOW = ".github/workflows/release.yml";
 
 const EXPECTED_PULL_REQUEST_TYPES = ["opened", "synchronize", "reopened", "ready_for_review"];
 const EXPECTED_GROUP_TEMPLATE =
@@ -160,6 +161,42 @@ test("PR workflows share the ready-for-review concurrency contract", () => {
     1,
     "job guards must remain identical across PR workflows",
   );
+});
+
+test("PR workflows keep least-privilege permissions and an always-present required check", () => {
+  for (const path of WORKFLOWS) {
+    const text = readFileSync(resolve(process.cwd(), path), "utf8");
+    assert.match(
+      text,
+      /^permissions:\r?\n  contents: read$/m,
+      `${path}: expected explicit read-only contents permission`,
+    );
+  }
+
+  const ci = readFileSync(resolve(process.cwd(), WORKFLOWS[0]), "utf8");
+  assert.doesNotMatch(
+    ci,
+    /^\s+paths-ignore:/m,
+    `${WORKFLOWS[0]}: path filters can suppress the required status check`,
+  );
+});
+
+test("workflow actions use immutable commit pins", () => {
+  for (const path of [...WORKFLOWS, RELEASE_WORKFLOW]) {
+    const text = readFileSync(resolve(process.cwd(), path), "utf8");
+    const actionRefs = [...text.matchAll(/^\s*(?:-\s*)?uses:\s*([^\s#]+)/gm)].map(
+      (match) => match[1],
+    );
+
+    assert.notEqual(actionRefs.length, 0, `${path}: expected at least one action reference`);
+    for (const actionRef of actionRefs) {
+      assert.match(
+        actionRef,
+        /^[^@\s]+@[0-9a-f]{40}$/,
+        `${path}: action reference must use a full commit SHA: ${actionRef}`,
+      );
+    }
+  }
 });
 
 test("PR workflow expressions satisfy the complete event matrix", () => {
