@@ -1056,6 +1056,7 @@ test("composer growth and shrink are layout-owned: following re-pins and a near-
   // browser's, not the reader's — the pause must survive it.
   await page.getByTestId("shrink-composer").click();
   await expect.poll(() => distanceFromTail(page)).toBeLessThanOrEqual(2);
+  await expect(reader).toHaveAttribute("data-follow-tail-state", "paused");
   await waitForStableReaderGeometry(page);
   await expect(reader).toHaveAttribute("data-follow-tail-state", "paused");
 });

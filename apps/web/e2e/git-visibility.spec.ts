@@ -231,7 +231,9 @@ test("turn boundaries and dashboard reconnect refresh both reads while active tu
 
   await page.evaluate(() =>
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", { status: "running" }));
-  await expect(page.getByLabel("Pinned Summary").locator(".status-badge")).toHaveText("Running");
+  await expect(page.getByLabel("Pinned Summary")
+    .locator(".session-status-indicators > .status-badge")
+    .first()).toHaveText("Running");
   await expect.poll(async () => {
     const before = await page.evaluate(() =>
       window.__WOLLIPOG_PROJECT_INBOX_E2E__.gitRequestCounts("session-alpha"));
