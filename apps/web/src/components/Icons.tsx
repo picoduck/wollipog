@@ -444,6 +444,44 @@ export function CodeIcon(props: IconProps) {
   );
 }
 
+/** Recognizable editor marks used only beside an explicit text label in the Open destination menu. */
+export function VisualStudioCodeIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="m17.5 4-8 6.2L5.5 7.3 3 9.5l4 2.5-4 2.5 2.5 2.2 4-2.9 8 6.2 3.5-1.7V5.7z" />
+      <path d="M17.5 4v16M9.5 10.2v3.6" />
+    </IconBase>
+  );
+}
+
+export function CursorEditorIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <rect x="3.5" y="3.5" width="17" height="17" rx="4" />
+      <path d="m8 7 8.8 5-4 1.1-1.7 4.2z" />
+    </IconBase>
+  );
+}
+
+export function WindsurfEditorIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M3 8.5c3.2-2 5.7-2 8 0s4.8 2 10 0" />
+      <path d="M3 12c3.2-2 5.7-2 8 0s4.8 2 10 0" />
+      <path d="M3 15.5c3.2-2 5.7-2 8 0s4.8 2 10 0" />
+    </IconBase>
+  );
+}
+
+export function ZedEditorIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <rect x="3.5" y="3.5" width="17" height="17" rx="4" />
+      <path d="M8 8h8l-8 8h8" />
+    </IconBase>
+  );
+}
+
 /**
  * SOLID, not stroked — the approvals control is a status mark whose weight is the point, and
  * running its path through IconBase's `fill: none` turned it into a thin hollow outline.

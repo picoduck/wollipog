@@ -38,6 +38,7 @@ const TITLE_CASE_MINOR_WORDS = new Set([
 const TITLE_CASE_OVERRIDES: Record<string, string> = {
   chatops: "Chat-Ops",
   github: "GitHub",
+  intellij: "IntelliJ",
   macos: "macOS",
 };
 
