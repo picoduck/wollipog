@@ -249,7 +249,10 @@
 // 89: Stop delivery attempts carry a distinct durable identity in addition to their stable
 //     operation identity, so delayed results cannot cross an authorized retry boundary. Older
 //     peers retain conservative Stop Pending behavior because they cannot prove the attempt.
-export const PROTOCOL_VERSION = 89;
+// 90: Managed agent skills: the control plane pushes the authoritative desired skill set for a
+//     machine (skills_sync) and the runner reports authoritative deployment state (skills_state).
+//     Pre-v90 runners never receive the new messages because the capability gate fails closed.
+export const PROTOCOL_VERSION = 90;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
@@ -368,6 +371,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   correlatedRestartEcho: 84,
   stopFailureRecovery: 85,
   stopAttemptCorrelation: 89,
+  agentSkills: 90,
 } as const;
 
 /* ========================================================================== */
@@ -579,6 +583,79 @@ export interface AgentSlashCommand {
 }
 
 export type SessionCommandExecutionMode = "passthrough" | "structured";
+
+/* --- Managed agent skills (control-plane-owned skill deployment, protocol v90) --- */
+
+/** One file inside a managed skill, addressed by a validated POSIX-relative path. */
+export interface SkillFile {
+  path: string;
+  content: string;
+  encoding: "utf8" | "base64";
+}
+
+/** Whether the deployed variant lets the model invoke the skill or reserves it for manual use. */
+export type SkillInvocationPolicy = "agent" | "manual";
+
+/** One exact runner agent that should receive a harness link for a skill. */
+export interface SkillSyncTarget {
+  agentId: string;
+  invocation: SkillInvocationPolicy;
+}
+
+/** Complete desired deployment of one skill version on one machine. */
+export interface SkillSyncEntry {
+  /** Kebab-case directory name; must equal the SKILL.md frontmatter name. */
+  name: string;
+  /** sha256 hex of the canonical file manifest (see skillVersionDigest in skills-digest.ts). */
+  versionDigest: string;
+  files: SkillFile[];
+  targets: SkillSyncTarget[];
+}
+
+export type SkillLinkStatus = "linked" | "conflict" | "unsupported" | "error";
+
+/** Deployment outcome for one (skill, agent) harness link on the runner host. */
+export interface SkillLinkState {
+  agentId: string;
+  status: SkillLinkStatus;
+  /** Sanitized human-readable reason for a non-linked status. */
+  detail?: string;
+}
+
+export interface DeployedSkillState {
+  name: string;
+  digest: string;
+  links: SkillLinkState[];
+  error?: string;
+}
+
+/** A skill found in a harness skill directory that the control plane does not manage. */
+export interface UnmanagedSkillInfo {
+  agentId: string;
+  name: string;
+  description?: string;
+}
+
+export const SKILL_MAX_FILES = 64;
+export const SKILL_MAX_TOTAL_BYTES = 2 * 1024 * 1024;
+export const SKILL_MAX_FILE_BYTES = 512 * 1024;
+
+/** A skill name is also its on-disk directory name: the leading character class rejects ".",
+ * "..", and every hidden-file spelling, and the class as a whole rejects path separators. */
+export function validSkillName(name: string): boolean {
+  return /^[a-z0-9][a-z0-9._-]{0,63}$/.test(name);
+}
+
+/** Validate a relative POSIX path inside a skill directory without ever allowing an absolute,
+ * parent-relative, backslashed, or drive-lettered target. Unlike normalizeSourcePath this never
+ * rewrites: the exact wire path participates in the version digest and must already be canonical. */
+export function validSkillFilePath(p: string): boolean {
+  if (!p || p.length > 256 || /[\0-\x1f\x7f]/.test(p) || p.includes("\\")) return false;
+  if (p.startsWith("/") || /^[A-Za-z]:/.test(p)) return false;
+  const parts = p.split("/");
+  if (parts.length > 8) return false;
+  return parts.every((part) => part !== "" && part !== "." && part !== "..");
+}
 
 /** How an agent can deliver a permission decision for one permission mode. */
 export type ElicitationTransport =
@@ -3775,6 +3852,7 @@ export type RunnerToControlPlane =
   | ForkResultMessage
   | LogoutAgentResultMessage
   | AcpRegistryApprovalResultMessage
+  | SkillsStateMessage
   | DurableSessionCommandResultMessage
   | DurableSessionCommandUpdateMessage
   | HostActionResultMessage;
@@ -4137,6 +4215,30 @@ export interface AcpRegistryApprovalResultMessage {
   agentId: string;
   action: AcpRegistryApprovalAction;
   ok: boolean;
+  error?: string;
+}
+
+/* --- Managed agent skills (protocol v90) --- */
+
+/** Authoritative desired skill state for the whole machine. The runner reconciles against this
+ * complete list; anything managed but absent here is removed. */
+export interface SkillsSyncMessage {
+  type: "skills_sync";
+  runnerId: string;
+  /** Present when sent via requestFromRunner; fire-and-forget push syncs omit it. */
+  requestId?: string;
+  skills: SkillSyncEntry[];
+}
+
+/** Authoritative full replacement of one machine's skill deployment state. Sent as the correlated
+ * reply to a solicited sync and unsolicited after push syncs or discovery-time rescans. */
+export interface SkillsStateMessage {
+  type: "skills_state";
+  runnerId: string;
+  /** Echoes SkillsSyncMessage.requestId when this state answers a solicited sync. */
+  requestId?: string;
+  deployed: DeployedSkillState[];
+  unmanaged: UnmanagedSkillInfo[];
   error?: string;
 }
 
@@ -4826,6 +4928,7 @@ export type ControlPlaneToRunner =
   | RefreshSubscriptionUsageMessage
   | LogoutAgentMessage
   | AcpRegistryApprovalMessage
+  | SkillsSyncMessage
   | GitActionRequestMessage
   | SessionHistoryRequestMessage
   | SessionHistoryPageRequestMessage
