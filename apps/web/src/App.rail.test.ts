@@ -146,9 +146,10 @@ test("Inbox focus, unread state, and shortcuts use non-overlapping visual treatm
   assert.match(css, /\.inbox-zero\s*\{[^}]*min-height:\s*0;[^}]*flex:\s*1;[^}]*overflow:\s*auto;/,
     "the empty state consumes the flexible list area so the footer remains bottom-pinned");
   assert.match(css, /\.inbox-shortcut-rail\s*\{[\s\S]*?justify-content:\s*flex-end/);
-  assert.match(css, /\.inbox-list:focus-visible,[\s\S]*?background-color:[\s\S]*?box-shadow:/,
-    "active panes use a soft glow instead of a clipped outline");
-  assert.doesNotMatch(css, /\.inbox-list:focus-visible\s*\{\s*box-shadow:\s*inset 0 0 0 2px/);
+  assert.match(css, /\.inbox-list-pane:has\(> \.inbox-list:focus-visible\)::after,[\s\S]*?\.inbox-preview-pane:has\(\.detail-scroll:focus-visible\)::after[\s\S]*?position:\s*absolute;[\s\S]*?inset:\s*0;[\s\S]*?border:\s*2px solid var\(--accent\);[\s\S]*?pointer-events:\s*none;/,
+    "active panes draw one stable overlay above Inbox and transcript contents");
+  assert.match(css, /\.inbox-list:focus-visible,[\s\S]*?\.detail-scroll:focus-visible \{ outline: none; \}/,
+    "scrolling contents must not own the focus boundary");
   assert.match(css, /\.inbox-row-shell\.unread \.inbox-row\s*\{[\s\S]*?linear-gradient[\s\S]*?inset 3px 0 0/,
     "unread sessions need a distinct surface and leading accent");
 });

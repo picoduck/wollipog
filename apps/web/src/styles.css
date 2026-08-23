@@ -7793,6 +7793,7 @@ body.shell-dock-dragging * {
 .inbox-view.expanded > .inbox-splitter { display: none; }
 .inbox-view.expanded > .inbox-preview-pane { height: 100%; }
 .inbox-list-pane {
+  position: relative;
   display: flex;
   min-height: 0;
   flex-direction: column;
@@ -8020,17 +8021,17 @@ body.shell-dock-dragging * {
   overflow: auto;
   padding: 7px 10px;
   outline: none;
-  transition: background-color var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out);
 }
 .inbox-list:focus-visible,
-.detail-scroll:focus-visible {
-  /* One ring, not four blurred inset shadows. Four 30px-blur layers on a SCROLLING container
-     repaint on every frame of every scroll, which is the one place in the app where a paint cost
-     is felt continuously — and they read as a vague glow rather than as a focus indicator. An
-     inset outline is a single composited edge and says "this has keyboard focus" plainly. */
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-  background-color: color-mix(in srgb, var(--accent) 2.5%, transparent);
+.detail-scroll:focus-visible { outline: none; }
+.inbox-list-pane:has(> .inbox-list:focus-visible)::after,
+.inbox-preview-pane:has(.detail-scroll:focus-visible)::after {
+  position: absolute;
+  z-index: var(--z-sticky);
+  inset: 0;
+  border: 2px solid var(--accent);
+  pointer-events: none;
+  content: "";
 }
 .inbox-activity-footer {
   display: flex;
@@ -8284,6 +8285,7 @@ body.shell-dock-dragging * {
 .inbox-splitter:hover::after,
 .inbox-splitter:focus-visible::after { background: var(--accent); }
 .inbox-preview-pane {
+  position: relative;
   min-height: 0;
   flex: 1;
   overflow: hidden;
