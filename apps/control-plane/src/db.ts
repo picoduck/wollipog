@@ -10342,8 +10342,16 @@ export class ControlPlaneDb {
     const changed = this.stmt(
       "UPDATE session_stop_intents " +
       "SET failed_at=?, failure_code=?, failure_message=? " +
-      "WHERE session_id=? AND operation_id=? AND failed_at IS NULL",
-    ).run(now, code, bounded || "The runner could not confirm that the session stopped.", sessionId, operationId);
+      "WHERE session_id=? AND operation_id=? AND " +
+      "(failed_at IS NULL OR (?='runner_rejected' AND failure_code IN ('timeout', 'retry_exhausted')))",
+    ).run(
+      now,
+      code,
+      bounded || "The runner could not confirm that the session stopped.",
+      sessionId,
+      operationId,
+      code,
+    );
     return Number(changed.changes) === 1;
   }
 
