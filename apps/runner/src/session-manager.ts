@@ -321,6 +321,12 @@ interface ActiveSession {
   toolCallIds?: Set<string>;
   /** A runner-side threshold cancelled this turn. Queued prompts remain held until CP re-arms. */
   governanceTripped?: "cost_budget" | "max_tool_calls";
+  /** Request-scoped option semantics for live permission asks. The current approval card can be
+   * cleared by a settled status or replaced while this driver still owns the original request, so
+   * it cannot classify a later successful resolution. This retains only option ids/kinds in the
+   * exact live process generation; disposing the entry discards them without durable provider
+   * content or a cross-generation leak. */
+  permissionOptionKinds?: Map<string, Map<string, string>>;
   /** Continue can arrive while driver cancellation is still unwinding (especially for live usage
    * events). Defer release until drain() has observed the trip and released the session lock. */
   governanceRearmPending?: "resume" | "cost_budget" | "max_tool_calls";
@@ -2326,6 +2332,7 @@ export class SessionManager {
       providerReady: false,
       running: false,
       queue: [],
+      permissionOptionKinds: new Map(),
       ...(meta.providerAuthBlock ? { authenticationBlocked: true } : {}),
       steerFenceIds: new Set(
         [...retainedPromotions.values()]
@@ -5761,8 +5768,13 @@ export class SessionManager {
       const started = this.approvalStarted.get(`${sessionId}:${requestId}`);
       this.approvalStarted.delete(`${sessionId}:${requestId}`);
       const meta = this.store.readMeta(sessionId);
+      const trackedOptionKind = this.takePermissionOptionKind(sessionId, requestId, optionId);
+      const optionKind = trackedOptionKind ?? (
+        meta?.pendingApproval?.requestId === requestId
+          ? meta.pendingApproval.options.find((option) => option.optionId === optionId)?.kind
+          : undefined
+      );
       if (meta && started != null) {
-        const optionKind = meta.pendingApproval?.options.find((option) => option.optionId === optionId)?.kind;
         this.emitTelemetry(meta, {
           metric: "approval",
           outcome:
@@ -5780,13 +5792,12 @@ export class SessionManager {
         kind: "permission_resolved",
         requestId,
         optionId,
-        resolutionReason: optionId == null || meta?.pendingApproval?.options.some(
-          (option) => option.optionId === optionId && option.kind === "cancel",
-        ) ? "dismissed" : "submitted",
+        resolutionReason: optionId == null || optionKind === "cancel" ? "dismissed" : "submitted",
       });
       return;
     }
     this.approvalStarted.delete(`${sessionId}:${requestId}`);
+    this.forgetPermissionOptionKinds(sessionId, requestId);
     if (!this.store.has(sessionId)) return;
     // The ask is gone (process exited / turn settled / runner restarted between card render and
     // click). Emitting permission_resolved here would phantom-flip the session to "running" with
@@ -7386,6 +7397,35 @@ export class SessionManager {
     }
   }
 
+  private rememberPermissionOptionKinds(
+    sessionId: string,
+    requestId: string,
+    options: Extract<SessionEventPayload, { kind: "permission_request" }>["options"],
+  ): void {
+    const entry = this.active.get(sessionId);
+    if (!entry) return;
+    entry.permissionOptionKinds ??= new Map();
+    entry.permissionOptionKinds.set(requestId, new Map(
+      options.flatMap((option) => option.kind == null ? [] : [[option.optionId, option.kind]]),
+    ));
+  }
+
+  private takePermissionOptionKind(
+    sessionId: string,
+    requestId: string,
+    optionId: string | null,
+  ): string | undefined {
+    const kind = optionId == null
+      ? undefined
+      : this.active.get(sessionId)?.permissionOptionKinds?.get(requestId)?.get(optionId);
+    this.forgetPermissionOptionKinds(sessionId, requestId);
+    return kind;
+  }
+
+  private forgetPermissionOptionKinds(sessionId: string, requestId: string): void {
+    this.active.get(sessionId)?.permissionOptionKinds?.delete(requestId);
+  }
+
   /** Keep the cheap snapshot fields (preview, token/cost totals, pending approval) current so the
    * register snapshot — and therefore any hydrating dashboard — stays accurate. */
   private accrueMeta(sessionId: string, payload: SessionEventPayload, trackApprovalLatency = true): void {
@@ -7396,7 +7436,10 @@ export class SessionManager {
     } else if (payload.kind === "permission_request") {
       const prior = this.store.readMeta(sessionId)?.pendingApproval?.requestId;
       if (prior && prior !== payload.requestId) this.approvalStarted.delete(`${sessionId}:${prior}`);
-      if (trackApprovalLatency) this.approvalStarted.set(`${sessionId}:${payload.requestId}`, Date.now());
+      if (trackApprovalLatency) {
+        this.approvalStarted.set(`${sessionId}:${payload.requestId}`, Date.now());
+        this.rememberPermissionOptionKinds(sessionId, payload.requestId, payload.options);
+      }
       // Persist the pending approval AND the input_required status so a hydrating dashboard files
       // the card under Needs Input (not Running) and fires its notification.
       this.store.patchMeta(sessionId, {
@@ -7427,6 +7470,9 @@ export class SessionManager {
       });
     } else if (payload.kind === "permission_resolved" || payload.kind === "question_resolved") {
       this.approvalStarted.delete(`${sessionId}:${payload.requestId}`);
+      if (payload.kind === "permission_resolved") {
+        this.forgetPermissionOptionKinds(sessionId, payload.requestId);
+      }
       // Card answered — the turn resumes, so clear the approval and restore the running status.
       this.store.patchMeta(sessionId, { pendingApproval: null, status: "running" });
     } else if (payload.kind === "token_usage" && !payload.parentToolUseId) {

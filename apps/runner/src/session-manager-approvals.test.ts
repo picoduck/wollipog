@@ -141,6 +141,110 @@ test("an explicit Cancel option records cancelled telemetry and a dismissed life
   }
 });
 
+test("a delivered Cancel remains dismissed after its approval card was cleared", () => {
+  const { sm, sent, store, cleanup } = makeHarness(true);
+  try {
+    (sm as any).emitEvent("s_perm", {
+      kind: "permission_request",
+      requestId: "req-cleared-cancel",
+      title: "approval",
+      options: [{ optionId: "choice", name: "Cancel", kind: "cancel" }],
+    });
+    store.patchMeta("s_perm", { pendingApproval: null, status: "idle" });
+
+    sm.resolvePermission("s_perm", "req-cleared-cancel", "choice");
+
+    const telemetry = sent.find(
+      (message) => message.type === "driver_telemetry" && message.metric === "approval",
+    );
+    assert.ok(telemetry && telemetry.type === "driver_telemetry");
+    assert.equal(telemetry.outcome, "cancelled");
+    assert.deepEqual((eventsOf(sent, "permission_resolved").at(-1) as { payload: unknown }).payload, {
+      kind: "permission_resolved",
+      requestId: "req-cleared-cancel",
+      optionId: "choice",
+      resolutionReason: "dismissed",
+    });
+  } finally {
+    cleanup();
+  }
+});
+
+test("a delivered Cancel uses its own semantics when another approval card is current", () => {
+  const { sm, sent, store, cleanup } = makeHarness(true);
+  try {
+    (sm as any).emitEvent("s_perm", {
+      kind: "permission_request",
+      requestId: "req-original-cancel",
+      title: "original approval",
+      options: [{ optionId: "shared-choice", name: "Cancel", kind: "cancel" }],
+    });
+    store.patchMeta("s_perm", {
+      pendingApproval: {
+        requestId: "req-current-allow",
+        title: "current approval",
+        options: [{ optionId: "shared-choice", name: "Allow", kind: "allow_once" }],
+      },
+      status: "input_required",
+    });
+
+    sm.resolvePermission("s_perm", "req-original-cancel", "shared-choice");
+
+    const telemetry = sent.find(
+      (message) => message.type === "driver_telemetry" && message.metric === "approval",
+    );
+    assert.ok(telemetry && telemetry.type === "driver_telemetry");
+    assert.equal(telemetry.outcome, "cancelled");
+    assert.deepEqual((eventsOf(sent, "permission_resolved").at(-1) as { payload: unknown }).payload, {
+      kind: "permission_resolved",
+      requestId: "req-original-cancel",
+      optionId: "shared-choice",
+      resolutionReason: "dismissed",
+    });
+  } finally {
+    cleanup();
+  }
+});
+
+test("delivered allow and reject options do not borrow Cancel semantics from another card", () => {
+  for (const [optionKind, expectedOutcome] of [
+    ["allow_always", "allowed"],
+    ["reject_once", "denied"],
+  ] as const) {
+    const { sm, sent, store, cleanup } = makeHarness(true);
+    try {
+      (sm as any).emitEvent("s_perm", {
+        kind: "permission_request",
+        requestId: `req-original-${optionKind}`,
+        title: "original approval",
+        options: [{ optionId: "shared-choice", name: "Choose", kind: optionKind }],
+      });
+      store.patchMeta("s_perm", {
+        pendingApproval: {
+          requestId: "req-current-cancel",
+          title: "current approval",
+          options: [{ optionId: "shared-choice", name: "Cancel", kind: "cancel" }],
+        },
+        status: "input_required",
+      });
+
+      sm.resolvePermission("s_perm", `req-original-${optionKind}`, "shared-choice");
+
+      const telemetry = sent.find(
+        (message) => message.type === "driver_telemetry" && message.metric === "approval",
+      );
+      assert.ok(telemetry && telemetry.type === "driver_telemetry");
+      assert.equal(telemetry.outcome, expectedOutcome);
+      const resolved = eventsOf(sent, "permission_resolved").at(-1) as {
+        payload: { resolutionReason?: string };
+      };
+      assert.equal(resolved.payload.resolutionReason, "submitted");
+    } finally {
+      cleanup();
+    }
+  }
+});
+
 test("explicit question dismissal records cancelled telemetry and a dismissed lifecycle reason", () => {
   const { sm, sent, cleanup } = makeHarness(true);
   try {
