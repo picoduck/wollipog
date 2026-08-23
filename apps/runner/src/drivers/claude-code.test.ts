@@ -2878,6 +2878,14 @@ test("normalizeQuestions tolerates malformed input", () => {
   assert.deepEqual(normalizeQuestions(null), []);
   assert.deepEqual(normalizeQuestions({}), []);
   assert.deepEqual(normalizeQuestions({ questions: "nope" }), []);
+  assert.deepEqual(normalizeQuestions({
+    questions: [{
+      question: "Choose features or add another",
+      multiSelect: true,
+      allowOther: true,
+      options: [{ label: "Audit" }],
+    }],
+  }), []);
 });
 
 test("renderApprovalInput shows the command for Bash and path+content for Write, bounded", () => {

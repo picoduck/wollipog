@@ -39,6 +39,26 @@ test("question choices expose labelled radio and checkbox semantics with one rad
   assert.equal((html.match(/role="radio"[^>]*aria-checked="false"[^>]*tabindex="-1"/g) ?? []).length, 1);
 });
 
+test("unsupported multi-select Other questions hide the unusable field and disable Submit", () => {
+  const html = renderToStaticMarkup(React.createElement(SessionQuestionBanner, {
+    sessionId: "s1",
+    requestId: "ask-unsupported",
+    runnerOnline: true,
+    questions: [{
+      id: "features",
+      question: "Choose features or add another",
+      multiSelect: true,
+      allowOther: true,
+      options: [{ label: "Audit" }],
+    }],
+  }));
+
+  assert.doesNotMatch(html, /class="input question-input"/);
+  assert.match(html, /This question format is unsupported\. Dismiss the question to continue\./);
+  assert.match(html, /<button[^>]*disabled=""[^>]*>Submit<\/button>/);
+  assert.match(html, /role="checkbox"/);
+});
+
 test("approval key hints appear only for one unambiguous one-time option", () => {
   assert.equal(approvalKeyHintForOption([
     { optionId: "allow", kind: "allow_once" },
