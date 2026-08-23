@@ -65,7 +65,7 @@ import {
 } from "./instance-storage.js";
 import { FeedbackProvider } from "./components/FeedbackProvider.js";
 import { Empty, Modal } from "./components/common.js";
-import { DockBottomIcon, KeyboardIcon, LockIcon, PanelRightIcon, PinnedPanelIcon, WarningTriangleIcon } from "./components/Icons.js";
+import { DockBottomIcon, KeyboardIcon, LockIcon, PanelRightIcon, PinnedPanelIcon, PlusIcon, WarningTriangleIcon } from "./components/Icons.js";
 import { NavRow, SwitchRow } from "./components/ui/SettingsRows.js";
 import { viewPath, viewTitle } from "./navigation.js";
 import { handleSettingsNavigationKey } from "./settings-navigation.js";
@@ -873,7 +873,7 @@ function Header({
             <button type="button" className="btn primary sm topbar-create" onClick={onNewRun}>New Multi-Agent Run</button>
           )}
           {view.name === "pods" && flags.pods && (
-            <button type="button" className="btn primary sm topbar-create" onClick={onNewPod}>New Collaboration Pod</button>
+            <NewPodHeaderButton onClick={onNewPod} />
           )}
           {view.name === "session" && sessionActions}
           {mobileSettingsControl}
@@ -883,12 +883,26 @@ function Header({
         <button type="button" className="btn primary sm topbar-create" onClick={onNewRun}>New Multi-Agent Run</button>
       )}
       {!mobileInstanceControl && view.name === "pods" && flags.pods && (
-        <button type="button" className="btn primary sm topbar-create" onClick={onNewPod}>New Collaboration Pod</button>
+        <NewPodHeaderButton onClick={onNewPod} />
       )}
       {!mobileInstanceControl && view.name === "session" && sessionActions && (
         <div className="topbar-actions">{sessionActions}</div>
       )}
     </header>
+  );
+}
+
+function NewPodHeaderButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      className="icon-btn topbar-create"
+      onClick={onClick}
+      title="New Collaboration Pod"
+      aria-label="New Collaboration Pod"
+    >
+      <PlusIcon size={16} />
+    </button>
   );
 }
 
