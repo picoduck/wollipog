@@ -134,6 +134,22 @@ function fetchWithBearer(url: string, token: string, init: RequestInit = {}): Pr
   return fetch(url, { ...init, headers });
 }
 
+async function waitForValue<T>(
+  read: () => T | Promise<T>,
+  predicate: (value: T) => boolean,
+  description: string,
+  timeoutMs = 5_000,
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  let value = await read();
+  while (!predicate(value)) {
+    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${description}`);
+    await delay(10);
+    value = await read();
+  }
+  return value;
+}
+
 function authenticatedUiUrl(wsBase: string, token: string): string {
   return `${wsBase}/ui?token=${encodeURIComponent(token)}`;
 }
@@ -358,23 +374,33 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   const invalidLegacy = await openSocketWithInbox(`${wsBase}/runner`);
   sockets.add(invalidLegacy.socket);
   invalidLegacy.socket.send(JSON.stringify(runnerRegistration(
-    "runner-legacy-warning",
+    "runner-legacy-rejected",
     `mamr_${"b".repeat(43)}`,
   )));
   await invalidLegacy.inbox.take((message) => message.type === "register_rejected");
-  await delay(50);
-  assert.equal(output.includes("runner authenticated with a legacy credential"), false);
 
   const firstLegacy = await openSocketWithInbox(`${wsBase}/runner`);
   sockets.add(firstLegacy.socket);
   firstLegacy.socket.send(JSON.stringify(runnerRegistration("runner-legacy-warning", legacyRunnerToken)));
   await firstLegacy.inbox.take((message) => message.type === "registered");
+  const onlineLegacyRunnerLineCount = () => output
+    .split(/\r?\n/u)
+    .filter((line) => line.includes("runner online: runner-legacy-warning")).length;
+  await waitForValue(
+    onlineLegacyRunnerLineCount,
+    (count) => count >= 1,
+    "the log sentinel after the first legacy runner registration",
+  );
 
   const repeatedLegacy = await openSocketWithInbox(`${wsBase}/runner`);
   sockets.add(repeatedLegacy.socket);
   repeatedLegacy.socket.send(JSON.stringify(runnerRegistration("runner-legacy-warning", legacyRunnerToken)));
   await repeatedLegacy.inbox.take((message) => message.type === "registered");
-  await delay(50);
+  await waitForValue(
+    onlineLegacyRunnerLineCount,
+    (count) => count >= 2,
+    "the log sentinel after the repeated legacy runner registration",
+  );
   const legacyWarningLines = output
     .split(/\r?\n/u)
     .filter((line) => line.includes("a runner authenticated with a legacy credential"));
@@ -809,10 +835,19 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     events: [{ seq: 3, ts: 23, payload: { kind: "agent_message", text: "three" } }],
     page: { logEpoch: 9, throughSeq: 3, nextAfterSeq: 3, hasMore: false },
   }));
-  await delay(25);
-  const hydratedPage = await (await ownerFetch(
-    "/api/sessions/session-history/events?after=0&limit=2&eventEpoch=0",
-  )).json() as { events: Array<{ seq: number }>; nextAfter: number; hasMoreCached: boolean; cacheComplete: boolean };
+  type HydratedHistoryPage = {
+    events: Array<{ seq: number }>;
+    nextAfter: number;
+    hasMoreCached: boolean;
+    cacheComplete: boolean;
+  };
+  const hydratedPage = await waitForValue(
+    async () => await (await ownerFetch(
+      "/api/sessions/session-history/events?after=0&limit=2&eventEpoch=0",
+    )).json() as HydratedHistoryPage,
+    (page) => page.cacheComplete,
+    "session history ingest to complete",
+  );
   assert.deepEqual(hydratedPage.events.map((event) => event.seq), [1, 2]);
   assert.equal(hydratedPage.nextAfter, 2);
   assert.equal(hydratedPage.hasMoreCached, true);
@@ -853,7 +888,6 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     (message.event as { sessionId?: string } | undefined)?.sessionId === "session-target",
   );
   assert.equal(((targeted.event as { payload: { text: string } }).payload).text, "targeted delivery");
-  await delay(100);
   assert.equal(uiInbox.has((message) =>
     message.type === "session_event" &&
     (message.event as { sessionId?: string } | undefined)?.sessionId === "session-other"), false);
@@ -1244,13 +1278,6 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     }),
   });
   assert.equal(deniedOperatorLocation.status, 403);
-  await delay(50);
-  assert.equal(
-    runnerInbox.has((message) =>
-      message.type === "list_directory" && message.path === "/repos/operator-host-path"),
-    false,
-    "a non-admin Project member must not reach the runner with an arbitrary host path",
-  );
 
   const createLocationRequest = ownerFetch(`/api/projects/${createdProject.id}/locations/new`, {
     method: "POST",
@@ -1261,7 +1288,14 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
       path: "/repos/browsed-location",
     }),
   });
-  const browseRequest = await runnerInbox.take((message) => message.type === "list_directory");
+  const browseRequest = await runnerInbox.take((message) =>
+    message.type === "list_directory" && message.path === "/repos/browsed-location");
+  assert.equal(
+    runnerInbox.has((message) =>
+      message.type === "list_directory" && message.path === "/repos/operator-host-path"),
+    false,
+    "a non-admin Project member must not reach the runner with an arbitrary host path",
+  );
   assert.deepEqual(
     { context: browseRequest.context, path: browseRequest.path },
     { context: { kind: "native" }, path: "/repos/browsed-location" },

@@ -24,6 +24,7 @@ import {
   type UiSnapshotMessage,
 } from "@wollipog/protocol";
 import type { ProviderComposerCommand } from "../composer-commands.js";
+import { loadComposerDraft, type ComposerDraft } from "../composer-drafts.js";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
@@ -1095,6 +1096,7 @@ declare global {
       settleDeferredSteeringResult(result: SteeringFixtureResult): void;
       promptRequests(): PromptFixtureRequest[];
       sessionCommandRequests(): SessionCommandFixtureRequest[];
+      composerDraft(id: string): Promise<ComposerDraft | null>;
       failNextSessionCommandResponse(): void;
       deferNextSessionCommandResponse(): void;
       settleDeferredSessionCommandResponse(): void;
@@ -1226,6 +1228,7 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
   },
   promptRequests: () => structuredClone(promptRequests),
   sessionCommandRequests: () => structuredClone(sessionCommandRequests),
+  composerDraft: (id) => loadComposerDraft(id, "project-inbox-e2e"),
   failNextSessionCommandResponse() {
     failNextSessionCommandResponse = true;
   },

@@ -90,6 +90,26 @@ async function distanceFromTail(page: Page) {
     reader.scrollHeight - reader.scrollTop - reader.clientHeight);
 }
 
+async function waitForStableReaderGeometry(page: Page) {
+  const reader = page.getByTestId("reader");
+  await expect.poll(async () => {
+    const first = await reader.evaluate((element) => ({
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+      scrollTop: element.scrollTop,
+    }));
+    await settleLayout(page, 3);
+    const second = await reader.evaluate((element) => ({
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+      scrollTop: element.scrollTop,
+    }));
+    return Math.abs(first.clientHeight - second.clientHeight) < 0.5
+      && Math.abs(first.scrollHeight - second.scrollHeight) < 0.5
+      && Math.abs(first.scrollTop - second.scrollTop) < 0.5;
+  }).toBe(true);
+}
+
 async function moveToStableReadingAnchor(page: Page, ratio = 0.4) {
   const reader = page.getByTestId("reader");
   await reader.evaluate((element, position) => {
@@ -846,6 +866,7 @@ test("width reflow and tail streaming honor following, paused, and previewing st
   await expect(reader).toHaveAttribute("data-follow-tail-state", "following");
   await expect.poll(() => distanceFromTail(page)).toBeLessThanOrEqual(2);
 
+  await waitForStableReaderGeometry(page);
   await page.getByTestId("pause-follow").click();
   await expect(reader).toHaveAttribute("data-follow-tail-state", "paused");
   const pausedAnchor = await moveToStableReadingAnchor(page);
@@ -1035,10 +1056,9 @@ test("composer growth and shrink are layout-owned: following re-pins and a near-
   // onto the new bottom with its native ResizeObserver/scroll delivery order. That landing is the
   // browser's, not the reader's — the pause must survive it.
   await page.getByTestId("shrink-composer").click();
-  await settleLayout(page, 16);
   await expect.poll(() => distanceFromTail(page)).toBeLessThanOrEqual(2);
   await expect(reader).toHaveAttribute("data-follow-tail-state", "paused");
-  await page.waitForTimeout(200);
+  await waitForStableReaderGeometry(page);
   await expect(reader).toHaveAttribute("data-follow-tail-state", "paused");
 });
 

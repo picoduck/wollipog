@@ -4,6 +4,8 @@ export default defineConfig({
   testDir: "./apps/web/e2e",
   fullyParallel: false,
   retries: process.env.CI ? 2 : 0,
+  // A retry-only pass is a regression signal, not a green build hidden behind the retry budget.
+  failOnFlakyTests: Boolean(process.env.CI),
   workers: 1,
   reporter: process.env.CI ? "github" : "list",
   use: {
