@@ -3710,8 +3710,12 @@ export class SessionsService {
 
   private sendStopCommand(runnerId: string, sessionId: string): boolean {
     const intent = this.db.sessionStopIntent(sessionId);
-    if (intent?.operation.status === "stop_failed") return false;
     const protocolVersion = this.db.getRunner(runnerId)?.protocolVersion;
+    if (intent?.operation.status === "stop_failed") {
+      const recoverableFailure = intent.operation.failure?.code === "timeout" ||
+        intent.operation.failure?.code === "retry_exhausted";
+      if (!recoverableFailure || !runnerSupportsProtocol(protocolVersion, "stopFailureRecovery")) return false;
+    }
     return this.hub.sendToRunner(runnerId, {
       type: "stop_session",
       sessionId,
