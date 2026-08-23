@@ -2470,7 +2470,16 @@ function SessionDetailLoaded({
             className="detail-main"
             data-active-pane={activePane}
             onFocusCapture={() => setActivePane("reader")}
-            onPointerDownCapture={() => setActivePane("reader")}
+            onPointerDownCapture={(event) => {
+              setActivePane("reader");
+              const composer = inputRef.current;
+              // Mobile browsers can defer native textarea blur while recognizing a tap, scroll,
+              // or long-press. Relinquish focus inside React's reader event boundary so transcript
+              // selection cannot be followed by stale focus recovery or a reopened keyboard.
+              if (event.pointerType !== "mouse" && composer && composer.ownerDocument.activeElement === composer) {
+                composer.blur();
+              }
+            }}
           >
             {/* The reader region: the scroller and its floating pinned summary, and NOTHING
                 below them. It is the summary's containing block, so the card's bounds can never

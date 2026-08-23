@@ -856,7 +856,7 @@ test("focus recovery distinguishes background loss from explicit transfer and IM
 
     await act(async () => {
       fixture.composer.focus();
-      transcript.dispatchEvent(new domWindow.PointerEvent("pointerdown", { bubbles: true }) as never);
+      fixture.container.dispatchEvent(new domWindow.PointerEvent("pointerdown", { bubbles: true }) as never);
     });
     await flushAsyncWork();
     await act(async () => {
@@ -864,7 +864,7 @@ test("focus recovery distinguishes background loss from explicit transfer and IM
       flushFrames();
     });
     assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer,
-      "an old pointer intent must not suppress a later background-loss recovery");
+      "an old pointer intent outside the reader must not suppress a later background-loss recovery");
 
     await act(async () => {
       fixture.composer.focus();
@@ -876,6 +876,58 @@ test("focus recovery distinguishes background loss from explicit transfer and IM
     });
     assert.notEqual(fixture.composer.ownerDocument.activeElement, fixture.composer,
       "focus recovery must not interrupt or resurrect an ended IME composition");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a delayed mobile transcript gesture relinquishes composer focus through selection and copy", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await resolveComposerDraft(draft, { text: "preserved mobile draft", images: [], updatedAt: 1 });
+    await fixture.pushEvent({ kind: "agent_message", text: "Selectable transcript prose", final: true });
+    await focusRequestedComposer(fixture);
+
+    const transcript = fixture.container.querySelector('[aria-label="Session Activity"]') as HTMLElement;
+    await act(async () => {
+      assert.equal(transcript.dispatchEvent(new domWindow.PointerEvent("pointerdown", {
+        bubbles: true,
+        cancelable: true,
+        pointerType: "touch",
+      }) as never), true, "the transcript touch gesture must remain uncanceled");
+    });
+    assert.notEqual(fixture.composer.ownerDocument.activeElement, fixture.composer,
+      "touching transcript prose must dismiss composer focus before mobile gesture recognition");
+
+    await flushAsyncWork();
+    await act(async () => {
+      transcript.dispatchEvent(new domWindow.Event("selectionchange", { bubbles: true }) as never);
+      transcript.dispatchEvent(new domWindow.Event("copy", { bubbles: true }) as never);
+      transcript.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as never);
+      transcript.dispatchEvent(new domWindow.PointerEvent("pointerup", {
+        bubbles: true,
+        pointerType: "touch",
+      }) as never);
+      flushFrames();
+    });
+    await fixture.pushEvent({ kind: "agent_message", text: "Live update during selection", final: true });
+    await act(async () => { flushFrames(); });
+    assert.notEqual(fixture.composer.ownerDocument.activeElement, fixture.composer,
+      "selection, copy, scrolling, and live updates must not reclaim composer focus");
+
+    await act(async () => { fixture.composer.focus(); });
+    assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer);
+    assert.equal(fixture.composer.value, "preserved mobile draft");
+
+    await act(async () => {
+      transcript.dispatchEvent(new domWindow.PointerEvent("pointerdown", {
+        bubbles: true,
+        pointerType: "mouse",
+      }) as never);
+    });
+    assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer,
+      "desktop mouse gestures must retain the browser's native focus behavior");
   } finally {
     await unmountFixture(fixture);
   }
