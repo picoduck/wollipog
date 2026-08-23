@@ -113,6 +113,9 @@ window.hostActions = [];
 const client = {
   ...api,
   hostAction: async (_sessionId: string, action: HostAction) => {
+    if (fixtureParams.get("fail") === "1") {
+      throw new Error("VS Code is not installed or is not available on PATH on the runner host.");
+    }
     window.hostActions.push(structuredClone(action));
     return { ok: true as const };
   },

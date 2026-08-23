@@ -41,11 +41,12 @@ export function fileManagerLabel(os: OS): "Explorer" | "Finder" | "File Manager"
 }
 
 function editorDestination(editor: EditorInfo): OpenDestination {
+  const preservesIntentionalCasing = /[a-z]/.test(editor.name) && /[A-Z]/.test(editor.name.slice(1));
   return {
     kind: "editor",
     key: `editor:${editor.id}`,
     editorId: editor.id,
-    name: titleCaseLabel(editor.name),
+    name: preservesIntentionalCasing ? editor.name : titleCaseLabel(editor.name),
   };
 }
 
@@ -54,8 +55,9 @@ function DestinationIcon({ destination, size = 16 }: { destination: OpenDestinat
     return <span className="editor-destination-icon" data-destination-icon="file-manager"><FolderIcon size={size} /></span>;
   }
   const normalizedId = destination.editorId.toLocaleLowerCase();
-  const Icon = EDITOR_ICONS[normalizedId] ?? CodeIcon;
-  const iconName = EDITOR_ICONS[normalizedId] ? normalizedId : "generic-editor";
+  const hasKnownIcon = Object.hasOwn(EDITOR_ICONS, normalizedId);
+  const Icon = hasKnownIcon ? EDITOR_ICONS[normalizedId]! : CodeIcon;
+  const iconName = hasKnownIcon ? normalizedId : "generic-editor";
   return <span className="editor-destination-icon" data-destination-icon={iconName}><Icon size={size} /></span>;
 }
 
@@ -140,7 +142,10 @@ export function EditorSelect({ sessionId }: { sessionId: string }) {
   };
 
   const chooseAndLaunch = (destination: OpenDestination) => {
-    if (unavailable) return void launch(destination);
+    if (unavailable) {
+      menu.close(true);
+      return void launch(destination);
+    }
     rememberDestination(destination);
     menu.close(true);
     void launch(destination);

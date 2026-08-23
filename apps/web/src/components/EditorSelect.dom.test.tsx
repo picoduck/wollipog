@@ -38,8 +38,9 @@ const runner: RunnerView = {
   editors: [
     { id: "code", name: "VS Code" },
     { id: "cursor", name: "Cursor" },
-    { id: "future-editor", name: "future editor" },
+    { id: "constructor", name: "future editor" },
     { id: "idea", name: "IntelliJ IDEA" },
+    { id: "webstorm", name: "WebStorm" },
   ],
   connectedAt: 1,
   lastSeen: 1,
@@ -175,11 +176,11 @@ test("destination menu launches immediately, persists the primary action, and re
     await act(async () => { choose.click(); });
     const choices = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')];
     assert.deepEqual(choices.map((item) => item.textContent?.replace("✓", "").trim()), [
-      "VS Code", "Cursor", "Future Editor", "IntelliJ IDEA", "File Manager",
+      "VS Code", "Cursor", "Future Editor", "IntelliJ IDEA", "WebStorm", "File Manager",
     ]);
     assert.ok(choices[0]?.querySelector('[data-destination-icon="code"]'), "known editors receive their recognizable icon");
     assert.ok(choices[2]?.querySelector('[data-destination-icon="generic-editor"]'), "unknown editors remain visible with a fallback icon");
-    assert.ok(choices[4]?.querySelector('[data-destination-icon="file-manager"]'));
+    assert.ok(choices[5]?.querySelector('[data-destination-icon="file-manager"]'));
 
     const cursor = choices.find((item) => item.textContent?.includes("Cursor"));
     assert.ok(cursor);
@@ -319,6 +320,17 @@ test("offline runners remain understandable while remote and unsupported runners
     assert.equal(offline.container.querySelector('[role="status"]')?.textContent, "Runner is offline.");
     await offline.pushRunner({ ...runner, status: "online" });
     assert.equal(offline.container.querySelector('[role="status"]'), null, "reconnecting clears stale offline feedback");
+
+    const reopenedChoose = offline.container.querySelector<HTMLButtonElement>('button[aria-label="Choose Destination"]');
+    assert.ok(reopenedChoose);
+    await act(async () => { reopenedChoose.click(); });
+    await offline.pushRunner({ ...runner, status: "offline" });
+    const cursor = [...offline.container.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')]
+      .find((item) => item.textContent?.includes("Cursor"));
+    assert.ok(cursor);
+    await act(async () => { cursor.click(); });
+    assert.equal(offline.container.querySelector('[role="menu"]'), null, "an offline transition closes the stale menu");
+    assert.equal(offline.container.querySelector('[role="status"]')?.textContent, "Runner is offline.");
   } finally {
     await offline.cleanup();
   }

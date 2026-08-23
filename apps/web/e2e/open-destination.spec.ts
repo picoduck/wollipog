@@ -94,4 +94,11 @@ test("the compact mobile presentation stays on one line and inside the viewport"
   }));
   expect(offlineMetrics.scrollWidth).toBe(offlineMetrics.clientWidth);
   expect(offlineMetrics.rightmostControl).toBeLessThanOrEqual(offlineMetrics.viewportWidth);
+
+  await page.goto("/open-destination-e2e.html?mobile=1&fail=1");
+  await page.getByRole("button", { name: "Open in VS Code" }).click();
+  const failureBox = await page.getByRole("status").boundingBox();
+  expect(failureBox).not.toBeNull();
+  expect(failureBox!.x).toBeGreaterThanOrEqual(8);
+  expect(failureBox!.x + failureBox!.width).toBeLessThanOrEqual(312);
 });
