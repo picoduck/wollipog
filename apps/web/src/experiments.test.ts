@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { beforeEach, test } from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   DEFAULT_EXPERIMENT_FLAGS,
   EXPERIMENT_TITLES,
@@ -115,6 +117,53 @@ test("every gated global destination has a settings row title", () => {
       assert.ok(EXPERIMENT_TITLES[experiment], `${item.name} needs a name the settings row can use`);
     }
   }
+});
+
+/**
+ * The gating CONSUMERS, pinned at the source like settings-route.test.ts pins its topology.
+ *
+ * The behavioral tests above stay green if every gate is deleted, because the store and the
+ * map are correct in isolation. What ties the flags to the UI is a handful of call sites, and
+ * each one below failed a mental revert: remove it and a hidden feature quietly reappears on
+ * that one surface while every other test still passes.
+ */
+const read = (path: string) =>
+  readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8");
+
+test("every surface that exposes a gated feature consults the flags", () => {
+  const consumers: ReadonlyArray<[string, RegExp, string]> = [
+    ["./components/Rail.tsx", /experimentForViewName/,
+      "the rail must filter destinations, or a hidden feature keeps its row"],
+    ["./components/CommandPalette.tsx", /experimentForViewName/,
+      "the palette must filter destinations, or search reaches what the rail hides"],
+    ["./App.tsx", /experimentForViewName\(destination\.name\)/,
+      "the numbered shortcuts must consult the flags, or a hidden view stays one keypress away"],
+    ["./App.tsx", /disabledExperimentView/,
+      "a direct route into a hidden feature must render the notice, not the feature"],
+    ["./App.tsx", /flags\.multiAgent[\s\S]{0,200}New Multi-Agent Run/,
+      "the topbar create button is a creation surface and gates with its view"],
+    ["./components/NewSessionDialog.tsx", /conductorExperimentEnabled/,
+      "the conductor preset must gate, or New Session re-exposes the hidden experiment"],
+    ["./components/AutomationsView.tsx", /multiAgentEnabled \|\| form\.actionKind === "workflow_run"/,
+      "Automations must not OFFER workflow runs while multi-agent is off, but an automation already using one keeps rendering truthfully"],
+    ["./components/Board.tsx", /multiAgentEnabled/,
+      "the Board's empty-state hint must not point at a control the flags removed"],
+    ["./components/ShortcutReference.tsx", /experimentFlags/,
+      "the reference must mark a dead binding unavailable rather than advertise it"],
+    ["./shortcuts.ts", /EXPERIMENT_SHORTCUT_IDS/,
+      "the dead-binding map is the one list the reference reads"],
+  ];
+  for (const [path, pattern, why] of consumers) {
+    assert.match(read(path), pattern, `${path}: ${why}`);
+  }
+});
+
+test("conductor availability requires an ONLINE runner", () => {
+  // The store keeps a disconnected runner's advertised agents; a row calling the conductor
+  // available on the strength of a runner that cannot start anything would be a false claim.
+  assert.match(read("./App.tsx"),
+    /runner\.status === "online" && conductorAgentId/,
+    "the availability predicate must not count offline runners");
 });
 
 test("the Experimental section is a route like its siblings", () => {

@@ -1,3 +1,5 @@
+import type { ExperimentFlags, ExperimentId } from "./experiments.js";
+
 export type ShortcutId =
   | "search"
   | "navigate-inbox"
@@ -623,6 +625,16 @@ export function advanceShortcutSequence(
   return { matched: false, state: { index: index + 1, expiresAt: now + windowMs } };
 }
 
+/** Shortcuts whose feature can be switched off in Settings → Experimental. Their handlers all
+ * live inside the gated surfaces, so the binding is already dead when the flag is off — this
+ * mapping exists so the reference says why instead of advertising a working key. */
+const EXPERIMENT_SHORTCUT_IDS: Partial<Record<ShortcutId, ExperimentId>> = {
+  "navigate-runs": "multiAgent",
+  "submit-run": "multiAgent",
+  "navigate-pods": "pods",
+  "relay-pod-note": "pods",
+};
+
 export function shortcutUnavailableReason(
   definition: ShortcutDefinition,
   context: {
@@ -631,8 +643,13 @@ export function shortcutUnavailableReason(
     filesSupported: boolean;
     conversationSteeringSupported?: boolean;
     turnInterruptionSupported?: boolean;
+    experimentFlags?: ExperimentFlags;
   },
 ): string | null {
+  const experiment = EXPERIMENT_SHORTCUT_IDS[definition.id];
+  if (experiment && context.experimentFlags && !context.experimentFlags[experiment]) {
+    return "Turned off in Settings → Experimental";
+  }
   if ((definition.scope === "Session" || definition.scope === "Session Reading") && !context.sessionOpen) {
     return "Open a session to use this binding";
   }

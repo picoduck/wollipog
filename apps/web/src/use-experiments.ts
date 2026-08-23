@@ -17,8 +17,11 @@ import { useInstanceScope } from "./instance-scope.js";
  */
 export function useExperiments(): { flags: ExperimentFlags; setFlag: (id: ExperimentId, enabled: boolean) => void } {
   const instanceScope = useInstanceScope();
+  // The server snapshot is the same getter: tests renderToString these components, and the
+  // store already returns a stable object per scope, so both environments read one value.
   const flags = useSyncExternalStore(
     subscribeExperimentFlags,
+    () => getExperimentFlags(instanceScope),
     () => getExperimentFlags(instanceScope),
   );
   const setFlag = useCallback(

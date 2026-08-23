@@ -260,10 +260,12 @@ function Shell() {
   const sessions = useStoreSelector((s) => s.sessions);
   const stalledSessions = useStoreSelector((s) => s.stalledCount);
   const experiments = useExperiments();
-  // The Conductor switch needs to say when the runner side is missing; any runner advertising
-  // an available conductor agent is enough, matching NewSessionDialog's per-runner check.
+  // The Conductor switch needs to say when the runner side is missing. ONLINE runners only:
+  // the store keeps a disconnected runner's advertised agents, and a row calling the conductor
+  // available on the strength of a runner that cannot start anything would be a false claim.
   const conductorAvailable = useMemo(
-    () => [...runners.values()].some((runner) => conductorAgentId(runner.agents ?? []) !== undefined),
+    () => [...runners.values()].some((runner) =>
+      runner.status === "online" && conductorAgentId(runner.agents ?? []) !== undefined),
     [runners],
   );
   // A route into a feature this device has switched off renders the explanation instead of the

@@ -18,6 +18,7 @@ import { titleCaseLabel } from "../format.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { machineOptionLabels } from "../runners.js";
+import { useExperiments } from "../use-experiments.js";
 import { agentDisplayName } from "../agent-presentation.js";
 import {
   automationProjectPlacement,
@@ -132,6 +133,10 @@ export function AutomationsView() {
   const instances = useInstances();
   const publicOrigin = instancePublicOrigin(instances);
   const { confirm } = useFeedback();
+  // Workflow runs belong to the Multi-Agent experiment: with it off, this view must not offer
+  // creating one. An automation that ALREADY uses the action keeps its option so editing it
+  // renders truthfully — the flag hides surfaces, it does not orphan stored data.
+  const multiAgentEnabled = useExperiments().flags.multiAgent;
   const runners = useStoreSelector((state) => state.runners);
   const boxes = useStoreSelector((state) => state.boxes);
   // Passing the correlated Box matters for an SSH Machine left unnamed: runnerDisplay falls back
@@ -419,7 +424,7 @@ export function AutomationsView() {
               setForm((current) => ({ ...current, actionKind: kind,
                 runnerPolicy: kind === "prompt_session" && current.runnerPolicy === "alternate" ? "wait" : current.runnerPolicy,
                 concurrency: kind === "prompt_session" && current.concurrency === "parallel" ? "wait" : current.concurrency }));
-            }}><option value="create_session">Create Session</option><option value="prompt_session">Prompt Existing Session</option><option value="workflow_run">Start Workflow Run</option></select></label>
+            }}><option value="create_session">Create Session</option><option value="prompt_session">Prompt Existing Session</option>{(multiAgentEnabled || form.actionKind === "workflow_run") && <option value="workflow_run">Start Workflow Run</option>}</select></label>
 
             {form.actionKind === "prompt_session" ? (
               <label className="automation-span">Session<select value={form.sessionId} onChange={(event) => patch("sessionId", event.target.value)}>
