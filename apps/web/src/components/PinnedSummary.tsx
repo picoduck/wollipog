@@ -10,6 +10,7 @@ import {
   deriveHost,
   deriveSubagents,
   fixChecksPrompt,
+  legacyLocalGitFacts,
   remoteHttpUrl,
   sourceKind,
   type GitPresentation,
@@ -83,9 +84,10 @@ export function PinnedSummary({
     gitPresentation.state !== "loading" &&
     gitPresentation.state !== "unavailable" &&
     gitPresentation.state !== "not_repository";
+  const legacyFacts = legacyLocalGitFacts(git.status, summary);
   const displayedFacts = richGitSupported
     ? richFactsVisible ? gitPresentation.facts : null
-    : summary ?? git.status;
+    : legacyFacts;
   // Review mutations remain linked-worktree-only even though v76 allows read-only facts for a
   // primary checkout. Never render a button that can only open Review's unavailable state.
   const reviewFacts = session.worktreePath ? displayedFacts : null;
@@ -97,7 +99,7 @@ export function PinnedSummary({
   const source = sourceKind(remoteUrl);
   const sourceUrl = remoteHttpUrl(remoteUrl);
   const pane = useMemo(() => deriveSidePaneContent(items), [items]);
-  const branch = summary?.branch ?? git.status?.branch ?? (session.worktreePath ? `agent/${session.id}` : null);
+  const branch = legacyFacts?.branch ?? (session.worktreePath ? `agent/${session.id}` : null);
   const pr = forgeFactsVisible ? summary?.pr ?? null : null;
   const checks = forgeFactsVisible ? summary?.checks ?? null : null;
   const prHref = safeExternalHref(pr?.url);
