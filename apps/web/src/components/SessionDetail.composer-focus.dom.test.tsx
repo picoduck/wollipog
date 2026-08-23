@@ -856,16 +856,15 @@ test("focus recovery distinguishes background loss from explicit transfer and IM
 
     await act(async () => {
       fixture.composer.focus();
-      transcript.dispatchEvent(new domWindow.PointerEvent("pointerdown", { bubbles: true }) as never);
+      fixture.container.dispatchEvent(new domWindow.PointerEvent("pointerdown", { bubbles: true }) as never);
     });
     await flushAsyncWork();
     await act(async () => {
-      fixture.composer.focus();
       fixture.composer.blur();
       flushFrames();
     });
     assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer,
-      "refocusing the composer must clear old pointer intent before a later background loss");
+      "an old pointer intent outside the reader must not suppress a later background-loss recovery");
 
     await act(async () => {
       fixture.composer.focus();
@@ -892,10 +891,11 @@ test("a delayed mobile transcript gesture relinquishes composer focus through se
 
     const transcript = fixture.container.querySelector('[aria-label="Session Activity"]') as HTMLElement;
     await act(async () => {
-      transcript.dispatchEvent(new domWindow.PointerEvent("pointerdown", {
+      assert.equal(transcript.dispatchEvent(new domWindow.PointerEvent("pointerdown", {
         bubbles: true,
+        cancelable: true,
         pointerType: "touch",
-      }) as never);
+      }) as never), true, "the transcript touch gesture must remain uncanceled");
     });
     assert.notEqual(fixture.composer.ownerDocument.activeElement, fixture.composer,
       "touching transcript prose must dismiss composer focus before mobile gesture recognition");
@@ -919,6 +919,15 @@ test("a delayed mobile transcript gesture relinquishes composer focus through se
     await act(async () => { fixture.composer.focus(); });
     assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer);
     assert.equal(fixture.composer.value, "preserved mobile draft");
+
+    await act(async () => {
+      transcript.dispatchEvent(new domWindow.PointerEvent("pointerdown", {
+        bubbles: true,
+        pointerType: "mouse",
+      }) as never);
+    });
+    assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer,
+      "desktop mouse gestures must retain the browser's native focus behavior");
   } finally {
     await unmountFixture(fixture);
   }
