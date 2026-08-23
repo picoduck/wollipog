@@ -151,6 +151,18 @@ test("change labels require settled Git evidence and never use workflow or lifec
     "Changes Present",
     "uncommitted files are not necessarily part of the open PR",
   );
+  assert.equal(
+    sessionChangeStatus({ available: true,
+      settled: true,
+      summary: gitSummary({
+        baseRef: null,
+        ahead: 2,
+        pr: { number: 142, title: "Upstream only", url: "https://example.test/142", state: "OPEN" },
+      }),
+    })?.label,
+    "Changes Present",
+    "upstream-only divergence cannot prove that commits are present in the pull request",
+  );
 });
 
 test("change labels reject unavailable facts and prefer fresh status over a stale summary", () => {
@@ -162,6 +174,14 @@ test("change labels reject unavailable facts and prefer fresh status over a stal
       pr: { number: 142, title: "Legacy", url: "https://example.test/142" } as NonNullable<GitSummaryInfo["pr"]>,
     }),
   })?.label, "Changes Present", "malformed PR evidence fails neutrally without hiding confirmed changes");
+  assert.equal(sessionChangeStatus({
+    available: true,
+    settled: true,
+    summary: gitSummary({
+      ahead: 2,
+      pr: { number: 142, title: "Malformed", url: "https://example.test/142", state: 3 as unknown as string },
+    }),
+  })?.label, "Changes Present", "non-string PR evidence fails neutrally without hiding confirmed changes");
   assert.equal(sessionChangeStatus({
     available: false,
     settled: true,

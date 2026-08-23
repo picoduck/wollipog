@@ -34,12 +34,14 @@ export function sessionChangeStatus(evidence: SessionChangeEvidence): SessionCha
   const facts = evidence.status ?? evidence.summary;
   if (!facts) return null;
   const changesPresent = facts.hasChanges || facts.ahead > 0;
+  const baseComparisonKnown = Object.hasOwn(facts, "baseRef") && facts.baseRef != null;
   const summaryMatchesStatus = !evidence.status || (
     evidence.summary?.branch === evidence.status.branch &&
     evidence.summary?.baseRef === evidence.status.baseRef
   );
-  const openPullRequest = summaryMatchesStatus && evidence.summary?.pr?.state?.toUpperCase() === "OPEN";
-  if (facts.ahead > 0 && openPullRequest) {
+  const prState = evidence.summary?.pr?.state;
+  const openPullRequest = summaryMatchesStatus && typeof prState === "string" && prState.toUpperCase() === "OPEN";
+  if (baseComparisonKnown && facts.ahead > 0 && openPullRequest) {
     return {
       kind: "ready_for_review",
       label: "Ready for Review",
@@ -53,7 +55,6 @@ export function sessionChangeStatus(evidence: SessionChangeEvidence): SessionCha
       description: "Git confirms uncommitted or base-relative changes.",
     };
   }
-  const baseComparisonKnown = Object.hasOwn(facts, "baseRef") && facts.baseRef != null;
   if (!baseComparisonKnown) return null;
   return {
     kind: "no_changes",
