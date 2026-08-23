@@ -12,6 +12,7 @@ import {
   runnerSupportsProtocol,
   type ResourceScope,
   type SkillInvocationPolicy,
+  type SkillsSyncMessage,
 } from "@wollipog/protocol";
 import type {
   ControlPlaneDb,
@@ -20,7 +21,13 @@ import type {
 } from "./db.js";
 import type { Hub } from "./hub.js";
 import type { HumanPrincipal, AuthPrincipal } from "./identity.js";
-import { parseSkillAgentSelector, resolveDesiredSkills, validateSkillPayload } from "./skills.js";
+import {
+  parseSkillAgentSelector,
+  resolveDesiredSkills,
+  SKILLS_SYNC_MAX_TOTAL_BYTES,
+  skillsSyncMessageBytes,
+  validateSkillPayload,
+} from "./skills.js";
 
 /** The narrow hub surface the skill routes need (mockable in tests). */
 export type SkillsHub = Pick<Hub, "isRunnerOnline" | "sendToRunner" | "requestFromRunner">;
@@ -28,9 +35,10 @@ export type SkillsHub = Pick<Hub, "isRunnerOnline" | "sendToRunner" | "requestFr
 export interface SkillsLog {
   debug(message: string): void;
   warn(message: string): void;
+  error(message: string): void;
 }
 
-const NOOP_LOG: SkillsLog = { debug: () => {}, warn: () => {} };
+const NOOP_LOG: SkillsLog = { debug: () => {}, warn: () => {}, error: () => {} };
 
 /**
  * Fire-and-forget the authoritative desired skill set to one machine. Used after every skill /
@@ -53,11 +61,22 @@ export function makeSkillsSyncPusher(deps: {
       return;
     }
     try {
-      deps.hub.sendToRunner(runnerId, {
+      const message: SkillsSyncMessage = {
         type: "skills_sync",
         runnerId,
         skills: resolveDesiredSkills(deps.db, runnerId),
-      });
+      };
+      const bytes = skillsSyncMessageBytes(message);
+      if (bytes > SKILLS_SYNC_MAX_TOTAL_BYTES) {
+        // Fail closed, never partial: a truncated authoritative list would make the runner
+        // delete deployed skills, and an oversized frame would close the runner connection.
+        log.error(
+          `skills sync push to ${runnerId} skipped: the aggregate desired skill payload is ${bytes} bytes, ` +
+            `over the ${SKILLS_SYNC_MAX_TOTAL_BYTES}-byte sync budget; unassign or shrink skills for this machine`,
+        );
+        return;
+      }
+      deps.hub.sendToRunner(runnerId, message);
     } catch (error) {
       log.warn(`skills sync push to ${runnerId} failed: ${error instanceof Error ? error.message : "unknown error"}`);
     }
@@ -339,13 +358,22 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
       });
     }
     const requestId = `skills_${randomUUID().slice(0, 8)}`;
-    try {
-      const result = await hub.requestFromRunner(id, requestId, {
-        type: "skills_sync",
-        runnerId: id,
-        requestId,
-        skills: resolveDesiredSkills(db, id),
+    const message: SkillsSyncMessage = {
+      type: "skills_sync",
+      runnerId: id,
+      requestId,
+      skills: resolveDesiredSkills(db, id),
+    };
+    const bytes = skillsSyncMessageBytes(message);
+    if (bytes > SKILLS_SYNC_MAX_TOTAL_BYTES) {
+      // Fail closed, never partial (see makeSkillsSyncPusher).
+      return reply.code(409).send({
+        error: `this machine's aggregate desired skill payload is ${bytes} bytes, over the ` +
+          `${SKILLS_SYNC_MAX_TOTAL_BYTES}-byte skills sync budget; unassign or shrink skills before syncing`,
       });
+    }
+    try {
+      const result = await hub.requestFromRunner(id, requestId, message);
       if (result.type !== "skills_state") {
         return reply.code(502).send({ error: "unexpected runner reply" });
       }

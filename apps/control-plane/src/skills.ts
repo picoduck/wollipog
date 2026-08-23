@@ -13,6 +13,7 @@ import {
   type AgentDefinition,
   type SkillFile,
   type SkillInvocationPolicy,
+  type SkillsSyncMessage,
   type SkillSyncEntry,
   type SkillSyncTarget,
 } from "@wollipog/protocol";
@@ -244,4 +245,18 @@ export function resolveDesiredSkills(db: ControlPlaneDb, runnerId: string): Skil
     });
   }
   return entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+}
+
+/**
+ * Upper bound for one assembled skills_sync frame. Per-skill payloads are individually capped
+ * (SKILL_MAX_TOTAL_BYTES), but enough max-size skills assigned to one machine could otherwise
+ * exceed the runner websocket frame limit and close the connection on a routine push. Senders
+ * fail closed at this budget — a truncated authoritative list would make the runner delete
+ * deployed skills. Chunked delivery is the future fix if real libraries ever approach this.
+ */
+export const SKILLS_SYNC_MAX_TOTAL_BYTES = 32 * 1024 * 1024;
+
+/** JSON-encoded size of an outgoing skills_sync, as it would go over the wire. */
+export function skillsSyncMessageBytes(message: SkillsSyncMessage): number {
+  return Buffer.byteLength(JSON.stringify(message), "utf8");
 }

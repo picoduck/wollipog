@@ -12,7 +12,8 @@ import { ControlPlaneDb } from "./db.js";
 import type { RunnerRequestResult } from "./hub.js";
 import { RunnerRequestTimeoutError } from "./hub.js";
 import { LOCAL_OWNER_USER_ID, PERSONAL_ORGANIZATION_ID, type HumanPrincipal } from "./identity.js";
-import { makeSkillsSyncPusher, registerSkillRoutes, type SkillsHub } from "./skills-route.js";
+import { SKILLS_SYNC_MAX_TOTAL_BYTES } from "./skills.js";
+import { makeSkillsSyncPusher, registerSkillRoutes, type SkillsHub, type SkillsLog } from "./skills-route.js";
 
 const AGENTS: AgentDefinition[] = [
   { id: "claude", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code" },
@@ -242,4 +243,78 @@ test("POST /api/runners/:id/skills/sync gates offline and capability, persists t
   } as unknown as RunnerRequestResult));
   const unexpected = await app.inject({ method: "POST", url: "/api/runners/runner-1/skills/sync" });
   assert.equal(unexpected.statusCode, 502);
+});
+
+// REGRESSION (P2): per-skill payloads are capped, but enough of them assigned to one machine used
+// to assemble an unbounded skills_sync that would blow the runner websocket frame limit and close
+// the connection on a routine push. The aggregate must fail closed — a truncated authoritative
+// list would make the runner delete deployed skills — so nothing is sent at all.
+test("an over-budget aggregate skills_sync fails closed: push skipped, manual sync 409", async (t) => {
+  const db = ControlPlaneDb.open(":memory:");
+  const pushed: Array<{ runnerId: string; msg: ControlPlaneToRunner }> = [];
+  const requested: SkillsSyncMessage[] = [];
+  const errors: string[] = [];
+  const log: SkillsLog = { debug: () => {}, warn: () => {}, error: (message) => errors.push(message) };
+  const hub: SkillsHub = {
+    isRunnerOnline: () => true,
+    sendToRunner: (runnerId: string, msg: ControlPlaneToRunner) => {
+      pushed.push({ runnerId, msg });
+      return true;
+    },
+    requestFromRunner: async (_runnerId, requestId, msg) => {
+      requested.push(msg as SkillsSyncMessage);
+      const state: SkillsStateMessage & { requestId: string } = {
+        type: "skills_state", runnerId: "runner-1", requestId, deployed: [], unmanaged: [],
+      };
+      return state;
+    },
+  } as SkillsHub;
+  const pushSkillsSync = makeSkillsSyncPusher({ db, hub, log });
+  const app = Fastify();
+  registerSkillRoutes(app, {
+    db, hub, requestHuman: () => principal(), requestPrincipal: () => principal(), pushSkillsSync,
+  });
+  await app.ready();
+  t.after(() => app.close());
+  db.registerRunner(runnerMeta("runner-1"), 10, 90);
+
+  // Four ~7.875 MiB skills stay just under the 32 MiB budget even with JSON envelope overhead.
+  const contentBytes = SKILLS_SYNC_MAX_TOTAL_BYTES / 4 - 128 * 1024;
+  const addSkill = (index: number) => {
+    const skill = db.createSkill({
+      name: `bulk-${index}`,
+      description: null,
+      groupId: null,
+      files: [{ path: "SKILL.md", content: "x".repeat(contentBytes), encoding: "utf8" }],
+      manifest: '{"files":[]}',
+      digest: `bulk-${index}-digest`,
+    });
+    db.createSkillAssignment({ skillId: skill.id, scopeKind: "instance", agentSelector: { kind: "all" } });
+  };
+  for (let index = 0; index < 4; index++) addSkill(index);
+
+  pushSkillsSync("runner-1");
+  assert.equal(pushed.length, 1, "a just-under-budget aggregate is pushed normally");
+  assert.equal((pushed[0]!.msg as SkillsSyncMessage).skills.length, 4);
+  assert.deepEqual(errors, []);
+  const underBudget = await app.inject({ method: "POST", url: "/api/runners/runner-1/skills/sync" });
+  assert.equal(underBudget.statusCode, 200, "a just-under-budget aggregate syncs normally");
+  assert.equal(requested.length, 1);
+
+  // A fifth max-size skill tips the aggregate over the budget.
+  addSkill(4);
+  pushed.length = 0;
+  requested.length = 0;
+  pushSkillsSync("runner-1");
+  assert.equal(pushed.length, 0, "an over-budget aggregate is never pushed, not even truncated");
+  assert.equal(errors.length, 1);
+  assert.match(errors[0]!, /bytes/);
+  assert.ok(errors[0]!.includes(String(SKILLS_SYNC_MAX_TOTAL_BYTES)), "the error names the budget");
+
+  const overBudget = await app.inject({ method: "POST", url: "/api/runners/runner-1/skills/sync" });
+  assert.equal(overBudget.statusCode, 409);
+  assert.match(overBudget.json().error, /bytes/);
+  assert.ok(overBudget.json().error.includes(String(SKILLS_SYNC_MAX_TOTAL_BYTES)),
+    "the 409 names the machine's aggregate size and the budget");
+  assert.equal(requested.length, 0, "the oversized frame never reaches the runner");
 });

@@ -116,9 +116,16 @@ export function skillAssignmentsFromPayload(payload: SkillAssignmentListPayload 
 
 export function skillFromPayload(payload: SkillDetailPayload | unknown): SkillSummary | null {
   if (!payload || typeof payload !== "object") return null;
-  const record = payload as { skill?: unknown; id?: unknown; name?: unknown };
-  const candidate = record.skill && typeof record.skill === "object" ? record.skill as SkillSummary : record as SkillSummary;
-  return candidate.id && candidate.name ? candidate : null;
+  const record = payload as { skill?: unknown; latestVersion?: unknown; id?: unknown; name?: unknown };
+  const wrapped = record.skill && typeof record.skill === "object";
+  const candidate = wrapped ? (record.skill as SkillSummary) : (record as SkillSummary);
+  if (!candidate.id || !candidate.name) return null;
+  // The detail route returns { skill, latestVersion, assignments } with the version (and its
+  // files) as a sibling of the skill record — fold it in so the view has one shape.
+  if (wrapped && !candidate.latestVersion && record.latestVersion && typeof record.latestVersion === "object") {
+    return { ...candidate, latestVersion: record.latestVersion as SkillVersionSummary };
+  }
+  return candidate;
 }
 
 /* --- Grouping --- */

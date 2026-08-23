@@ -532,6 +532,13 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
     routePath === "/api/push/vapid-public-key" || routePath === "/api/push/subscriptions" ||
     routePath === "/api/push/unsubscribe" ||
     routePath === "/api/artifacts/:artifactId/export" ||
+    // Skills record per-resource ownership rows, so like /api/projects they are member-scoped
+    // rather than personal-organization-global resources.
+    routePath === "/api/skills" || routePath.startsWith("/api/skills/") ||
+    routePath === "/api/skill-groups" || routePath.startsWith("/api/skill-groups/") ||
+    routePath === "/api/skill-assignments" || routePath.startsWith("/api/skill-assignments/") ||
+    routePath === "/api/runners/:id/skills" ||
+    routePath === "/api/runners/:id/skills/sync" ||
     routePath === "/api/runners/:runnerId/host-action" ||
     routePath === "/api/runners/:runnerId/workspaces/:workspaceId/rename" ||
     routePath === "/api/runners/:runnerId/workspaces/:workspaceId/access-scope";
@@ -837,6 +844,7 @@ const pushSkillsSync = makeSkillsSyncPusher({
   log: {
     debug: (message) => app.log.debug(message),
     warn: (message) => app.log.warn(message),
+    error: (message) => app.log.error(message),
   },
 });
 
@@ -1069,6 +1077,11 @@ app.register(async (instance) => {
         if (runnerId === msg.runnerId) {
           db.updateRunnerAgents(msg.runnerId, msg.agents, Date.now(), msg.editors);
           hub.runnerChanged(msg.runnerId);
+          // A runner may register with an empty or stale agent list and only discover its
+          // harnesses afterward — the registration-time skills_sync then resolved no targets.
+          // Re-push after the new inventory persists; the runner reconciler is idempotent, so a
+          // repeated identical sync is harmless.
+          pushSkillsSync(msg.runnerId);
           app.log.info(`runner ${msg.runnerId} agents: [${msg.agents.map((a) => a.id).join(", ")}]`);
         }
         break;

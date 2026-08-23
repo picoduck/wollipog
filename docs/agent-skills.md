@@ -220,9 +220,12 @@ Git backs the library as an **upstream source**, not as the distribution transpo
 - **Container and cloud execution targets cannot see host skills** — they mount only the workspace
   cwd. Gate exactly like `includeClaudeUserCommandsForTarget()` and report "unavailable on this
   target" honestly. Mounting the skills root into containers is a deliberate later decision.
-- **Provider-home concurrency.** Writers into `~/.claude` take the `ProviderHomeLeaseRegistry`
-  lease. Harnesses may cache their skill list at session start, so updates apply to new sessions;
-  the UI says so.
+- **Provider-home concurrency.** Every link mutation is an atomic rename, so concurrent readers
+  always see either the old or the new deployment. The MVP does not take the
+  `ProviderHomeLeaseRegistry` lease during reconciliation (same-data-dir runners are already
+  serialized by the runner data-dir lease); integrating the provider-home lease is planned for
+  the phase that supports multiple runners sharing one home. Harnesses may cache their skill list
+  at session start, so updates apply to new sessions; the UI says so.
 - **Frontmatter is untrusted input.** Keep the "never interpret YAML aliases, tags, objects, or
   executable extensions" stance and the bounded-traversal limits when scanning machines.
 - **Codex skill support is evolving.** The per-harness adapter table isolates directory paths,

@@ -7,11 +7,16 @@
  * Layout: verified skill versions are materialized once into the runner-owned store at
  * `<dataDir>/skills/store/<name>/<digest>` (plus `<digest>-manual` for the manual-invocation
  * variant). `~/.agents/skills/<name>` is the canonical symlink to the agent-invocation variant,
- * and each supported harness receives its own symlink (`~/.claude/skills`, `~/.codex/skills`).
+ * and each supported harness receives its own symlink (`~/.claude/skills`, `~/.codex/skills`)
+ * that routes through the canonical link, so one atomic canonical flip switches every harness.
  *
  * Safety invariants (deliberate, tested):
  * - Nothing is ever replaced or deleted unless it is a symlink whose target verifiably resolves
- *   inside the store root (lstat + readlink + containment against the realpathed store root).
+ *   inside the store root (lstat + readlink + containment against the realpathed store root) or
+ *   whose immediate readlink target is the canonical link path for that skill name.
+ * - The store is never traversed through a symlink: the store root, `<store>/<name>`, and the
+ *   digest dir are lstat-verified as non-symlinks before any mkdir, rename, or GC beneath them,
+ *   and the published dir's realpath must stay inside the realpathed store root.
  * - A real file/directory at a link path is a conflict: reported, never touched.
  * - All materialization goes through a fresh temp dir and one atomic rename; files are created
  *   with "wx" so no pre-existing path (symlinks included) can ever be followed or overwritten.
@@ -241,6 +246,21 @@ function isRealDirectory(path: string): boolean {
   }
 }
 
+/** Refuse to operate through a symlink planted inside the store. The symlink is reported (via the
+ * thrown error), never followed, and never deleted through. */
+function assertNotSymlink(path: string, what: string): void {
+  let entry;
+  try {
+    entry = lstatSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  if (entry.isSymbolicLink()) {
+    throw new Error(`${what} is a symlink and will not be followed`);
+  }
+}
+
 /** Build the version into a fresh temp dir, then publish it with one atomic rename. Every file is
  * opened "wx" (mirroring protectedWrite): a pre-existing path — symlinks included — always fails
  * instead of being followed or replaced. An already-published digest dir is left untouched. */
@@ -251,7 +271,12 @@ function materializeVersion(
   files: SkillFile[],
   manualVariant: boolean,
 ): void {
-  const finalDir = join(storeRoot, name, dirName);
+  const nameDir = join(storeRoot, name);
+  const finalDir = join(nameDir, dirName);
+  // A symlink planted at the name or digest path would make mkdir/rename publish outside the
+  // store while lexical containment still classifies the links as managed. Never follow it.
+  assertNotSymlink(nameDir, `the store directory for this skill`);
+  assertNotSymlink(finalDir, `the store version directory for this skill`);
   if (isRealDirectory(finalDir)) return;
   const temp = join(storeRoot, `.tmp-${randomUUID()}`);
   mkdirSync(temp, { recursive: true, mode: 0o755 });
@@ -270,12 +295,17 @@ function materializeVersion(
         closeSync(fd);
       }
     }
-    mkdirSync(join(storeRoot, name), { recursive: true, mode: 0o755 });
+    mkdirSync(nameDir, { recursive: true, mode: 0o755 });
     try {
       renameSync(temp, finalDir);
     } catch (error) {
       // A concurrent pass may have published the same digest dir first; that content is identical.
       if (!isRealDirectory(finalDir)) throw error;
+    }
+    // Belt and suspenders behind the lstat checks: the published dir must physically live inside
+    // the (already realpathed) store root, or it was somehow routed through a symlink.
+    if (!containedInStore(realpathSync(finalDir), storeRoot)) {
+      throw new Error("the published skill version escaped the store root");
     }
   } finally {
     rmSync(temp, { recursive: true, force: true });
@@ -295,9 +325,13 @@ function containedInStore(path: string, realStoreRoot: string): boolean {
   return path === realStoreRoot || path.startsWith(prefix);
 }
 
-/** Classify what currently sits at a link path. Only "ours" (a symlink whose target resolves
- * inside the realpathed store root) may ever be replaced or removed. */
-function probeLink(linkPath: string, realStoreRoot: string): LinkProbe {
+/** Classify what currently sits at a link path. Only "ours" may ever be replaced or removed: a
+ * symlink whose target resolves inside the realpathed store root, or — when `canonicalDir` is
+ * given (harness link paths) — one whose immediate readlink target is the canonical link path for
+ * that skill name. The canonical match is lexical on the readlink value, deliberately not a
+ * resolution: a harness link left dangling because the canonical link was already removed must
+ * still classify as ours so a sweep can remove it instead of stranding it as "foreign". */
+function probeLink(linkPath: string, realStoreRoot: string, canonicalDir?: string): LinkProbe {
   let entry;
   try {
     entry = lstatSync(linkPath);
@@ -312,6 +346,9 @@ function probeLink(linkPath: string, realStoreRoot: string): LinkProbe {
     return { kind: "occupied" };
   }
   const resolvedTarget = resolve(dirname(linkPath), target);
+  if (canonicalDir !== undefined && resolvedTarget === join(canonicalDir, basename(linkPath))) {
+    return { kind: "ours", resolvedTarget };
+  }
   return containedInStore(resolvedTarget, realStoreRoot)
     ? { kind: "ours", resolvedTarget }
     : { kind: "foreign-symlink" };
@@ -321,8 +358,14 @@ type LinkOutcome = { ok: true } | { ok: false; status: "conflict" | "error"; det
 
 /** Point linkPath at targetDir. Replacement is atomic (temp symlink + rename) and only ever
  * replaces a verified store-owned symlink; anything else is a reported conflict, untouched. */
-function ensureManagedSymlink(linkPath: string, targetDir: string, realStoreRoot: string, shownPath: string): LinkOutcome {
-  const probe = probeLink(linkPath, realStoreRoot);
+function ensureManagedSymlink(
+  linkPath: string,
+  targetDir: string,
+  realStoreRoot: string,
+  shownPath: string,
+  canonicalDir?: string,
+): LinkOutcome {
+  const probe = probeLink(linkPath, realStoreRoot, canonicalDir);
   if (probe.kind === "occupied") {
     return { ok: false, status: "conflict", detail: `an unmanaged file or directory already exists at ${shownPath}` };
   }
@@ -347,7 +390,12 @@ function ensureManagedSymlink(linkPath: string, targetDir: string, realStoreRoot
 
 /** Remove store-owned symlinks whose name is no longer desired. Foreign symlinks, real files,
  * and real directories are never touched. */
-function sweepManagedLinks(dir: string, keep: ReadonlySet<string>, realStoreRoot: string): void {
+function sweepManagedLinks(
+  dir: string,
+  keep: ReadonlySet<string>,
+  realStoreRoot: string,
+  canonicalDir?: string,
+): void {
   let entries;
   try {
     entries = readdirSync(dir);
@@ -357,7 +405,7 @@ function sweepManagedLinks(dir: string, keep: ReadonlySet<string>, realStoreRoot
   for (const name of entries) {
     if (keep.has(name)) continue;
     const linkPath = join(dir, name);
-    if (probeLink(linkPath, realStoreRoot).kind !== "ours") continue;
+    if (probeLink(linkPath, realStoreRoot, canonicalDir).kind !== "ours") continue;
     try {
       unlinkSync(linkPath);
     } catch {
@@ -370,8 +418,12 @@ function sweepManagedLinks(dir: string, keep: ReadonlySet<string>, realStoreRoot
 
 type StoreKeep = Map<string, { digest: string; manual: boolean } | "all">;
 
-/** Delete store versions no longer referenced by desired. Names whose desired entry could not be
- * validated keep every version: a transient bad payload must not tear down a working deployment. */
+/** Prune stale store versions of names still present in desired. Names absent from desired keep
+ * their store content: disabling a skill is link removal only, and re-enabling it must not
+ * require a full re-transfer. Known MVP limitation: retention for removed skills is therefore
+ * unbounded — nothing ever reclaims the store content of a never-again-desired name. Names whose
+ * desired entry could not be validated also keep every version: a transient bad payload must not
+ * tear down a working deployment. */
 function gcStore(storeRoot: string, keep: StoreKeep): void {
   let entries;
   try {
@@ -386,22 +438,22 @@ function gcStore(storeRoot: string, keep: StoreKeep): void {
       rmSync(path, { recursive: true, force: true });
       continue;
     }
-    if (!entry.isDirectory()) continue;
+    // Never traverse or delete through a symlink planted inside the store.
+    if (entry.isSymbolicLink() || !entry.isDirectory()) continue;
     const want = keep.get(entry.name);
-    if (want === "all") continue;
-    if (!want) {
-      rmSync(path, { recursive: true, force: true });
-      continue;
-    }
+    if (!want || want === "all") continue;
     let versions;
     try {
-      versions = readdirSync(path);
+      versions = readdirSync(path, { withFileTypes: true });
     } catch {
       continue;
     }
     for (const version of versions) {
-      const wanted = version === want.digest || (want.manual && version === `${want.digest}-manual`);
-      if (!wanted) rmSync(join(path, version), { recursive: true, force: true });
+      // A symlinked version entry is never ours; skip it rather than delete through it.
+      if (version.isSymbolicLink()) continue;
+      const wanted =
+        version.name === want.digest || (want.manual && version.name === `${want.digest}-manual`);
+      if (!wanted) rmSync(join(path, version.name), { recursive: true, force: true });
     }
   }
 }
@@ -454,16 +506,18 @@ function scanHarnessSkillDir(dir: string): { name: string; description?: string 
 interface HarnessBinding {
   agentId: string;
   relDir: string;
+  driver: AgentDriverKind;
 }
 
 /** Native agents whose driver has a harness skill directory, in stable agent order. */
 function harnessBindings(agents: AgentDefinition[]): HarnessBinding[] {
   const bindings: HarnessBinding[] = [];
   for (const agent of agents) {
-    const relDir = SKILL_DIRS[agent.driver ?? "acp"];
+    const driver = agent.driver ?? "acp";
+    const relDir = SKILL_DIRS[driver];
     if (!relDir) continue;
     if ((agent.context?.kind ?? "native") !== "native") continue;
-    bindings.push({ agentId: agent.id, relDir });
+    bindings.push({ agentId: agent.id, relDir, driver });
   }
   return bindings;
 }
@@ -511,8 +565,24 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
   }
 
   const storeRoot = skillsStoreRoot(dataDir);
-  mkdirSync(storeRoot, { recursive: true, mode: 0o755 });
-  const realStoreRoot = realpathSync(storeRoot);
+  let realStoreRoot: string;
+  try {
+    mkdirSync(storeRoot, { recursive: true, mode: 0o755 });
+    // The store root itself must be a real directory: a symlink here would redirect every
+    // materialization, link target, and GC pass somewhere the runner does not own.
+    assertNotSymlink(storeRoot, "the skills store root");
+    realStoreRoot = realpathSync(storeRoot);
+  } catch (error) {
+    return {
+      deployed: desired.map((entry) => ({
+        name: String(entry.name),
+        digest: String(entry.versionDigest),
+        links: [],
+        error: `skills store unavailable: ${errText(error)}`,
+      })),
+      unmanaged: scanUnmanagedSkills(home, agents),
+    };
+  }
   const canonicalDir = canonicalSkillsDir(home);
   const bindings = harnessBindings(agents);
   const agentBinding = new Map(bindings.map((binding) => [binding.agentId, binding]));
@@ -542,7 +612,13 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
       continue;
     }
 
-    const manualNeeded = entry.targets.some((target) => target.invocation === "manual");
+    // `disable-model-invocation` is Claude Code frontmatter semantics; only claude-code targets
+    // can consume the manual variant (codex-family manual targets are reported unsupported
+    // below), so only they force its materialization.
+    const manualNeeded = entry.targets.some(
+      (target) =>
+        target.invocation === "manual" && agentBinding.get(target.agentId)?.driver === "claude-code",
+    );
     if (!storeKeep.has(entry.name)) {
       storeKeep.set(entry.name, { digest: entry.versionDigest, manual: manualNeeded });
     }
@@ -568,10 +644,11 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
 
     const agentVariantDir = join(realStoreRoot, entry.name, entry.versionDigest);
     const manualVariantDir = `${agentVariantDir}-manual`;
+    const canonicalPath = join(canonicalDir, entry.name);
 
     // Canonical link always points at the untransformed agent-invocation variant.
     const canonical = ensureManagedSymlink(
-      join(canonicalDir, entry.name),
+      canonicalPath,
       agentVariantDir,
       realStoreRoot,
       `~/.agents/skills/${entry.name}`,
@@ -593,6 +670,17 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
         state.links.push({ agentId: target.agentId, status: "unsupported", detail });
         continue;
       }
+      if (target.invocation === "manual" && binding.driver !== "claude-code") {
+        // `disable-model-invocation` is Claude Code semantics: a codex-family harness has no
+        // mechanism that enforces manual-only invocation, so linking would silently over-expose
+        // the skill. Report it honestly instead of claiming a linked deployment.
+        state.links.push({
+          agentId: target.agentId,
+          status: "unsupported",
+          detail: "Manual-only invocation is not supported for this agent.",
+        });
+        continue;
+      }
       let plan = plans.get(binding.relDir);
       if (!plan) {
         plan = { agentTargets: [], manualTargets: [] };
@@ -601,15 +689,38 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
       (target.invocation === "manual" ? plan.manualTargets : plan.agentTargets).push(target.agentId);
       harnessKeep.get(binding.relDir)?.add(entry.name);
     }
+    const targetedIds = new Set(entry.targets.map((target) => target.agentId));
     for (const [relDir, plan] of plans) {
       const mixed = plan.agentTargets.length > 0 && plan.manualTargets.length > 0;
       const useManual = plan.manualTargets.length > 0 && plan.agentTargets.length === 0;
-      const outcome = ensureManagedSymlink(
-        join(home, relDir, entry.name),
-        useManual ? manualVariantDir : agentVariantDir,
-        realStoreRoot,
-        `~/${relDir}/${entry.name}`,
-      );
+      let outcome: LinkOutcome;
+      if (useManual) {
+        // The manual variant's content differs from the canonical agent-invocation variant, so
+        // its harness link must point straight at the `-manual` digest dir; it cannot route
+        // through the canonical link.
+        outcome = ensureManagedSymlink(
+          join(home, relDir, entry.name),
+          manualVariantDir,
+          realStoreRoot,
+          `~/${relDir}/${entry.name}`,
+          canonicalDir,
+        );
+      } else if (!canonical.ok) {
+        // Agent-invocation harness links route through the canonical link; without it there is
+        // nothing managed to point at.
+        outcome = { ok: false, status: canonical.status, detail: `canonical link: ${canonical.detail}` };
+      } else {
+        // Point at the canonical link, not the digest dir: one atomic canonical flip then
+        // switches every harness at once, and a crash mid-reconcile can never leave harness
+        // links on different versions.
+        outcome = ensureManagedSymlink(
+          join(home, relDir, entry.name),
+          canonicalPath,
+          realStoreRoot,
+          `~/${relDir}/${entry.name}`,
+          canonicalDir,
+        );
+      }
       const linkedIds = useManual ? plan.manualTargets : [...plan.agentTargets, ...(mixed ? [] : plan.manualTargets)];
       for (const agentId of linkedIds) {
         state.links.push(
@@ -617,6 +728,20 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
             ? { agentId, status: "linked" }
             : { agentId, status: outcome.status, detail: outcome.detail },
         );
+      }
+      if (outcome.ok) {
+        // A shared harness directory (codex and codex-app-server both read ~/.codex/skills)
+        // cannot scope a skill to one of its agents: every other native agent reading this
+        // directory can consume the link, so report that visibility instead of over-claiming
+        // isolation. Targeted agents keep their normal state.
+        for (const other of bindings) {
+          if (other.relDir !== relDir || targetedIds.has(other.agentId)) continue;
+          state.links.push({
+            agentId: other.agentId,
+            status: "linked",
+            detail: "Shared harness directory; also visible to this agent.",
+          });
+        }
       }
       if (mixed) {
         for (const agentId of plan.manualTargets) {
@@ -632,10 +757,12 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
   }
 
   if (allowRemovals) {
-    sweepManagedLinks(canonicalDir, canonicalKeep, realStoreRoot);
+    // Harness links route through the canonical link, so remove them first: removing the
+    // canonical link first would leave dangling harness links if this pass crashed in between.
     for (const [relDir, keep] of harnessKeep) {
-      sweepManagedLinks(join(home, relDir), keep, realStoreRoot);
+      sweepManagedLinks(join(home, relDir), keep, realStoreRoot, canonicalDir);
     }
+    sweepManagedLinks(canonicalDir, canonicalKeep, realStoreRoot);
     // Known limitation (MVP): no retention window — a running session keeps deleted version
     // content alive only through its already-open file descriptors.
     gcStore(realStoreRoot, storeKeep);
