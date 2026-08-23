@@ -174,6 +174,15 @@ export function withModel(form: FormState, model: string, capabilities: AgentCap
  * — against this codebase's rule that a setting which could exist is disabled and explained, never
  * hidden. Validating the finished spec instead is one rule, checked on one path, that no
  * transition can slip past.
+ *
+ * The `.length` guard applies to MODELS ONLY, exactly as the server does it. Adding one to efforts
+ * or permission modes would make this client accept a value the server rejects, which is the only
+ * divergence direction that can actually break a run.
+ *
+ * KNOWN DIVERGENCE, in the safe direction: the server applies `claudeModelConfigForValidation`, so
+ * it treats `opus` and `opus[1m]` as one family; this compares ids exactly. That can only refuse a
+ * save the server would have accepted, and needs two Claude agents whose catalogs disagree on alias
+ * form.
  */
 export function alternateConfigError(
   config: SessionConfig | undefined,
@@ -187,12 +196,12 @@ export function alternateConfigError(
   if (config.effort) {
     const selected = config.model ? models.find((model) => model.id === config.model) : undefined;
     const efforts = (selected?.efforts?.length ? selected.efforts : capabilities.effortLevels) ?? [];
-    if (efforts.length && !efforts.includes(config.effort)) {
+    if (!efforts.includes(config.effort)) {
       return `The alternate agent does not support ${config.effort} effort for this model.`;
     }
   }
   const permissionModes = capabilities.permissionModes ?? [];
-  if (config.permissionMode && permissionModes.length && !permissionModes.includes(config.permissionMode)) {
+  if (config.permissionMode && !permissionModes.includes(config.permissionMode)) {
     return `The alternate agent does not support the ${config.permissionMode} permission mode.`;
   }
   return null;
@@ -255,7 +264,9 @@ export function buildSpec(form: FormState, context: BuildSpecContext): Automatio
       // Workflow runs default to worktrees server-side, the opposite of create-session. With no
       // control rendered for them, absence is preserved as absence.
       ...(baseWorkflow?.useWorktree !== undefined ? { useWorktree: baseWorkflow.useWorktree } : {}),
-      ...(sameRunner && baseWorkflow?.config !== undefined ? { config: baseWorkflow.config } : {}),
+      ...(sameRunner && form.runnerPolicy !== "alternate" && baseWorkflow?.config !== undefined
+        ? { config: baseWorkflow.config }
+        : {}),
       ...(baseWorkflow?.costBudgetUsd !== undefined ? { costBudgetUsd: baseWorkflow.costBudgetUsd } : {}),
       ...(baseWorkflow?.maxToolCalls !== undefined ? { maxToolCalls: baseWorkflow.maxToolCalls } : {}),
     } };

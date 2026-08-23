@@ -292,3 +292,34 @@ test("an alternate policy blocks the save that would fail on failover", () => {
   // Without an alternate configured the same config saves cleanly.
   assert.doesNotThrow(() => buildSpec({ ...form, runnerPolicy: "wait" }, CONTEXT));
 });
+
+test("empty alternate capability lists reject rather than wave values through", () => {
+  // The server guards on `.length` for models only. A guard this client does not share would make
+  // it ACCEPT what the server rejects, which is the direction that breaks a failover run.
+  const empty = { models: [], effortLevels: [], permissionModes: [], slashCommands: [], supportsImages: true, supportsApprovals: true };
+  assert.match(alternateConfigError({ effort: "high" }, empty)!, /high effort/);
+  assert.match(alternateConfigError({ permissionMode: "auto" }, empty)!, /auto permission mode/);
+  // An empty model catalog stays permissive, because that is what the server does.
+  assert.equal(alternateConfigError({ model: "opus[1m]" }, empty), null);
+});
+
+test("a workflow automation drops runner-scoped config once an alternate can run it", () => {
+  const spec = baseSpec({
+    kind: "workflow_run",
+    request: {
+      runnerId: "local-dev", workspaceId: "wollipog", workflowId: "build-review", task: "Go.",
+      config: { model: "opus[1m]" }, costBudgetUsd: 12,
+    },
+  });
+  // Only the runner policy changes; the runner itself is untouched, so `sameRunner` still holds.
+  const withAlternate = {
+    ...formFrom(spec), runnerPolicy: "alternate" as const,
+    fallbackRunnerId: "other", fallbackWorkspaceId: "ws",
+  };
+  const saved = buildSpec(withAlternate, { ...CONTEXT, base: spec });
+  assert(saved.action.kind === "workflow_run");
+  // A workflow's agents come from its graph, so the client cannot know which agent runs on the
+  // alternate and cannot validate against it. Carrying the config would fail at failover.
+  assert.equal(saved.action.request.config, undefined);
+  assert.equal(saved.action.request.costBudgetUsd, 12);
+});
