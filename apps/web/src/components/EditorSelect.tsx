@@ -1,17 +1,66 @@
-import { useRef, useState } from "react";
+import { runnerSupportsProtocol, type EditorInfo, type OS } from "@wollipog/protocol";
+import { useRef, useState, type ComponentType } from "react";
 import { useApi } from "../api-context.js";
+import { titleCaseLabel } from "../format.js";
 import { useStoreSelector } from "../store.js";
-import { useAccessibleMenu } from "./interactions.js";
-import { CodeIcon } from "./Icons.js";
+import { useAccessibleMenu, useAnchoredMenuStyle } from "./interactions.js";
+import {
+  ChevronDownIcon,
+  CodeIcon,
+  CursorEditorIcon,
+  FolderIcon,
+  VisualStudioCodeIcon,
+  WindsurfEditorIcon,
+  ZedEditorIcon,
+  type IconProps,
+} from "./Icons.js";
 import { loadBrowserStorageValue, saveBrowserStorageValue } from "../instance-storage.js";
 
-const LAUNCH_IN_PROGRESS_NOTE = "An editor launch is already in progress.";
+const EDITOR_STORAGE_KEY = "wollipog.editor.lastUsed";
+const DESTINATION_STORAGE_KEY = "wollipog.openDestination.lastUsed";
+const REVEAL_DESTINATION_KEY = "reveal";
+const LAUNCH_IN_PROGRESS_NOTE = "A destination launch is already in progress.";
+
+type OpenDestination =
+  | { kind: "editor"; key: string; editorId: string; name: string }
+  | { kind: "reveal"; key: typeof REVEAL_DESTINATION_KEY; name: string };
+
+const EDITOR_ICONS: Record<string, ComponentType<IconProps>> = {
+  code: VisualStudioCodeIcon,
+  "code-insiders": VisualStudioCodeIcon,
+  cursor: CursorEditorIcon,
+  windsurf: WindsurfEditorIcon,
+  zed: ZedEditorIcon,
+};
+
+export function fileManagerLabel(os: OS): "Explorer" | "Finder" | "File Manager" {
+  if (os === "windows") return "Explorer";
+  if (os === "macos") return "Finder";
+  return "File Manager";
+}
+
+function editorDestination(editor: EditorInfo): OpenDestination {
+  return {
+    kind: "editor",
+    key: `editor:${editor.id}`,
+    editorId: editor.id,
+    name: titleCaseLabel(editor.name),
+  };
+}
+
+function DestinationIcon({ destination, size = 16 }: { destination: OpenDestination; size?: number }) {
+  if (destination.kind === "reveal") {
+    return <span className="editor-destination-icon" data-destination-icon="file-manager"><FolderIcon size={size} /></span>;
+  }
+  const normalizedId = destination.editorId.toLocaleLowerCase();
+  const Icon = EDITOR_ICONS[normalizedId] ?? CodeIcon;
+  const iconName = EDITOR_ICONS[normalizedId] ? normalizedId : "generic-editor";
+  return <span className="editor-destination-icon" data-destination-icon={iconName}><Icon size={size} /></span>;
+}
 
 /**
- * Codex-style "Open in …" split button for the topbar: the main click opens the session's
- * working directory in the last-used editor; the chevron lists every editor discovery found
- * on the runner host. Hidden for box (remote) runners — the editors live on the wrong
- * machine — and when discovery found none.
+ * Session-root destination split button. The server resolves the root from the session ID; the
+ * browser can choose only a discovered editor ID or the fixed file-manager reveal action.
  */
 export function EditorSelect({ sessionId }: { sessionId: string }) {
   const api = useApi();
@@ -24,30 +73,46 @@ export function EditorSelect({ sessionId }: { sessionId: string }) {
   const busyRef = useRef(false);
   const [lastUsed, setLastUsed] = useState<string | null>(() => {
     try {
-      return loadBrowserStorageValue("wollipog.editor.lastUsed");
+      const destination = loadBrowserStorageValue(DESTINATION_STORAGE_KEY);
+      if (destination) return destination;
+      const editor = loadBrowserStorageValue(EDITOR_STORAGE_KEY);
+      return editor ? `editor:${editor}` : null;
     } catch {
       return null;
     }
   });
   const menu = useAccessibleMenu(open, setOpen, "editor-menu");
+  const menuStyle = useAnchoredMenuStyle(open, menu.triggerRef, {
+    desiredWidth: 220,
+    desiredHeight: 260,
+    align: "end",
+  });
 
   const session = sessions.get(sessionId);
   if (!session) return null;
   const runner = runners.get(session.runnerId);
-  const editors = runner?.editors ?? [];
   const isRemote = [...boxes.values()].some((b) => b.runnerId === session.runnerId);
-  if (isRemote || editors.length === 0 || runner?.status !== "online") return null;
+  if (!runner || isRemote || !runnerSupportsProtocol(runner.protocolVersion, "hostActions")) return null;
 
-  const chosen = editors.find((e) => e.id === lastUsed) ?? editors[0]!;
+  const destinations: OpenDestination[] = [
+    ...(runner.editors ?? []).map(editorDestination),
+    { kind: "reveal", key: REVEAL_DESTINATION_KEY, name: fileManagerLabel(runner.os) },
+  ];
+  const chosen = destinations.find((destination) => destination.key === lastUsed) ?? destinations[0]!;
+  const offline = runner.status !== "online";
+  const unavailable = offline || busy;
 
-  const selectEditor = (editorId: string) => {
-    saveBrowserStorageValue("wollipog.editor.lastUsed", editorId);
-    setLastUsed(editorId);
-    setNote(null);
-    menu.close(true);
+  const rememberDestination = (destination: OpenDestination) => {
+    saveBrowserStorageValue(DESTINATION_STORAGE_KEY, destination.key);
+    if (destination.kind === "editor") saveBrowserStorageValue(EDITOR_STORAGE_KEY, destination.editorId);
+    setLastUsed(destination.key);
   };
 
-  const openInChosenEditor = async () => {
+  const launch = async (destination: OpenDestination) => {
+    if (offline) {
+      setNote("Runner is offline.");
+      return;
+    }
     if (busyRef.current) {
       setNote(LAUNCH_IN_PROGRESS_NOTE);
       return;
@@ -56,10 +121,13 @@ export function EditorSelect({ sessionId }: { sessionId: string }) {
     setBusy(true);
     setNote(null);
     try {
-      await api.hostAction(session.id, { kind: "open_editor", editorId: chosen.id });
+      await api.hostAction(session.id, destination.kind === "editor"
+        ? { kind: "open_editor", editorId: destination.editorId }
+        : { kind: "reveal" });
     } catch (e) {
-      setNote((e as Error).message);
-      setTimeout(() => setNote(null), 6000);
+      const message = (e as Error).message;
+      setNote(message);
+      window.setTimeout(() => setNote((current) => current === message ? null : current), 6000);
     } finally {
       busyRef.current = false;
       setBusy(false);
@@ -67,48 +135,68 @@ export function EditorSelect({ sessionId }: { sessionId: string }) {
     }
   };
 
+  const chooseAndLaunch = (destination: OpenDestination) => {
+    if (unavailable) return void launch(destination);
+    rememberDestination(destination);
+    menu.close(true);
+    void launch(destination);
+  };
+
+  const availabilityLabel = offline ? "Open Unavailable: Runner Offline" : `Open in ${chosen.name}`;
+
   return (
     <div className="editor-select">
       {note && <span className="editor-note" role="status">{note}</span>}
       <button
         type="button"
-        className="icon-btn editor-main"
-        aria-disabled={busy}
-        onClick={() => void openInChosenEditor()}
-        title={`Open in ${chosen.name}`}
-        aria-label={`Open in ${chosen.name}`}
+        className="editor-split-segment editor-main"
+        aria-disabled={unavailable}
+        onClick={() => void launch(chosen)}
+        title={offline ? "Runner is offline." : availabilityLabel}
+        aria-label={availabilityLabel}
       >
-        <CodeIcon size={15} />
+        <DestinationIcon destination={chosen} size={15} />
+        <span className="editor-main-label">Open</span>
       </button>
       <button
         ref={menu.triggerRef}
         type="button"
-        className="icon-btn editor-caret"
-        onClick={menu.toggle}
-        onKeyDown={menu.onTriggerKeyDown}
-        title="Choose Editor"
-        aria-label="Choose Editor"
+        className="editor-split-segment editor-caret"
+        aria-disabled={unavailable}
+        onClick={() => { if (!unavailable) menu.toggle(); }}
+        onKeyDown={(event) => { if (!unavailable) menu.onTriggerKeyDown(event); }}
+        title={offline ? "Runner is offline." : "Choose Destination"}
+        aria-label={offline ? "Choose Destination Unavailable: Runner Offline" : "Choose Destination"}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={menu.menuId}
       >
-        ▾
+        <ChevronDownIcon size={13} />
       </button>
       {open && (
         <>
           <div className="menu-backdrop" onClick={() => menu.close(true)} />
-          <div className="menu-pop editor-pop" role="menu" id={menu.menuId} ref={menu.menuRef} onKeyDown={menu.onMenuKeyDown}>
-            {editors.map((e) => (
+          <div
+            className="menu-pop editor-pop"
+            role="menu"
+            id={menu.menuId}
+            ref={menu.menuRef}
+            style={menuStyle}
+            onKeyDown={menu.onMenuKeyDown}
+          >
+            {destinations.map((destination) => (
               <button
-                key={e.id}
+                key={destination.key}
                 type="button"
-                className="menu-item"
+                className="menu-item editor-destination-item"
                 role="menuitemradio"
-                aria-checked={e.id === chosen.id}
-                onClick={() => selectEditor(e.id)}
+                aria-checked={destination.key === chosen.key}
+                data-menu-label={destination.name}
+                onClick={() => chooseAndLaunch(destination)}
               >
-                {e.name}
-                {e.id === chosen.id && <span className="editor-current" aria-hidden="true">✓</span>}
+                <DestinationIcon destination={destination} />
+                <span>{destination.name}</span>
+                {destination.key === chosen.key && <span className="editor-current" aria-hidden="true">✓</span>}
               </button>
             ))}
           </div>
