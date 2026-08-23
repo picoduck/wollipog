@@ -452,3 +452,20 @@ test("Shortcut Reference restores focus after a breakpoint change", () => {
   assert.match(close, /\?\? document\.getElementById\("page-title"\)/,
     "a fallback chain that can still resolve to nothing is not a fallback");
 });
+
+test("the Inbox reminder filter joins option borders without a wrapper outline", () => {
+  assert.match(inbox, /<SegmentedControl<ReminderInboxMode>[\s\S]*className="inbox-reminder-view"/,
+    "the reminder filter must opt into the scoped joined treatment");
+  assert.match(css, /\.ui-seg\.inbox-reminder-view \{[^}]*isolation: isolate;[^}]*gap: 0;[^}]*padding: 0;[^}]*border: 0;[^}]*background: transparent/,
+    "the reminder wrapper must not paint an outer outline or nested gap");
+  assert.match(css, /\.inbox-reminder-view \.ui-seg-option \{[^}]*border-color: var\(--control-outline\)/,
+    "each reminder choice must carry its own boundary");
+  assert.match(css, /\.inbox-reminder-view \.ui-seg-option \+ \.ui-seg-option \{ margin-left: -1px; \}/,
+    "adjacent reminder borders must collapse to one seam");
+  assert.match(css, /\.inbox-reminder-view \.ui-seg-option\.is-selected \{[^}]*z-index: var\(--z-sticky\);[^}]*border-color: var\(--accent\)/,
+    "the selected boundary must paint above its neighbor");
+  assert.match(css, /\.inbox-reminder-view \.ui-seg-option:focus-visible \{[^}]*z-index: var\(--z-dock\)/,
+    "the keyboard focus ring must paint above every segment");
+  assert.match(css, /\.ui-seg \{[^}]*gap: 2px;[^}]*padding: 2px;[^}]*border: 1px solid var\(--control-outline\)/,
+    "unrelated shared segmented controls must retain their established appearance");
+});
