@@ -630,7 +630,9 @@ pre {
    The icon-only treatment already existed but was scoped to .rail-instance, which this row does
    not use. The visible label is safe to drop: .instance-selector-trigger carries its own
    aria-label ("Switch Instance, Current <name>"), so the accessible name is unaffected. */
-.topbar-mobile-controls { min-width: 0; flex: none; }
+.topbar-mobile-controls { min-width: 0; flex: none; flex-wrap: nowrap; }
+.topbar-mobile-controls > * { flex: none; }
+.topbar-mobile-controls .topbar-create { margin-left: 0; }
 .topbar-mobile-controls .instance-selector-trigger {
   width: 44px;
   height: 44px;
