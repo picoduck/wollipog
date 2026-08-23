@@ -146,18 +146,22 @@ test("typing is decoupled from filtering", () => {
     "the filtering must actually consume the deferred value");
 });
 
-test("the scrolling containers do not paint blurred shadows on focus", () => {
+test("pane focus boundaries are not painted by scrolling containers", () => {
   const focusRules = rulesWith(css, ["outline"])
     .filter(({ selector }) => /\.inbox-list:focus-visible|\.detail-scroll:focus-visible/.test(selector));
-  assert.ok(focusRules.length > 0, "the scroll containers must declare a focus outline");
+  assert.ok(focusRules.length > 0,
+    "the scroll containers must explicitly suppress their moving focus boundary");
+  assert.ok(focusRules.every(({ declarations }) => declarations.outline === "none"),
+    "scroll containers must not paint their own moving focus boundary");
 
-  // Four 30px-blur inset shadows on a SCROLLING container repaint on every frame of every scroll,
-  // which is the one place in the app where paint cost is felt continuously.
-  for (const { selector, value } of declarationsOf(css, "box-shadow")) {
-    if (!/\.inbox-list:focus-visible|\.detail-scroll:focus-visible/.test(selector)) continue;
-    const layers = value.split(/,(?![^()]*\))/).length;
-    assert.ok(layers <= 1, `${selector} paints ${layers} shadow layers while scrolling`);
+  for (const { selector } of declarationsOf(css, "box-shadow")) {
+    assert.doesNotMatch(selector, /\.inbox-list:focus-visible|\.detail-scroll:focus-visible/,
+      `${selector} repaints a shadow while scrolling`);
   }
+
+  const overlay = rulesWith(css, ["position", "inset", "pointer-events"])
+    .find(({ selector }) => selector.includes(".inbox-list-pane:has") && selector.includes(".inbox-preview-pane:has"));
+  assert.ok(overlay, "both pane wrappers need one fixed, pointer-transparent focus overlay");
 });
 
 test("the disclosures do not claim a height they do not have", () => {
