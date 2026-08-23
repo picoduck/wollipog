@@ -145,7 +145,8 @@ const STATUS_META: Record<SessionStatus, StatusMeta> = {
 };
 
 export function statusMeta(status: SessionStatus): StatusMeta {
-  return STATUS_META[status as SessionStatus] ?? {
+  if (Object.hasOwn(STATUS_META, status)) return STATUS_META[status];
+  return {
     label: "Status Unavailable",
     className: "st-stopped",
     busy: false,

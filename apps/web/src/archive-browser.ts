@@ -34,7 +34,9 @@ export const CANONICAL_LIFECYCLE_LABELS: Readonly<Record<SessionStatus, string>>
 export const SESSION_LIFECYCLE_STATES = Object.keys(CANONICAL_LIFECYCLE_LABELS) as SessionStatus[];
 
 export function canonicalLifecycleLabel(status: SessionStatus): string {
-  return CANONICAL_LIFECYCLE_LABELS[status] ?? "Status Unavailable";
+  return Object.hasOwn(CANONICAL_LIFECYCLE_LABELS, status)
+    ? CANONICAL_LIFECYCLE_LABELS[status]
+    : "Status Unavailable";
 }
 
 export function sessionArchiveSearchDetail(

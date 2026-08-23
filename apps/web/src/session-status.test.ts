@@ -24,6 +24,7 @@ const lifecycleCases: Array<[SessionStatus, string]> = [
 test("canonical lifecycle labels cover every state and use a neutral unknown fallback", () => {
   assert.deepEqual(lifecycleCases.map(([status]) => statusMeta(status).label), lifecycleCases.map(([, label]) => label));
   assert.equal(statusMeta("future_state" as SessionStatus).label, "Status Unavailable");
+  assert.equal(statusMeta("constructor" as SessionStatus).label, "Status Unavailable");
   assert.equal(statusMeta("queued").busy, false);
   assert.equal(statusMeta("starting").busy, true);
   assert.equal(statusMeta("running").busy, true);

@@ -5,6 +5,7 @@ import { statusMeta } from "./format.js";
 import {
   ARCHIVE_PAGE_SIZE,
   CANONICAL_LIFECYCLE_LABELS,
+  canonicalLifecycleLabel,
   filterArchiveSessions,
   mergeArchiveSessionCatalog,
   pageArchiveSessions,
@@ -71,6 +72,7 @@ test("archive search surfaces archive and every canonical lifecycle label indepe
     stopped: "Stopped",
   };
   assert.deepEqual(CANONICAL_LIFECYCLE_LABELS, expected);
+  assert.equal(canonicalLifecycleLabel("toString" as SessionStatus), "Status Unavailable");
   assert.deepEqual(
     Object.fromEntries(Object.keys(expected).map((status) => [status, statusMeta(status as SessionStatus).label])),
     CANONICAL_LIFECYCLE_LABELS,
