@@ -428,3 +428,68 @@ test("an over-budget aggregate skills_sync fails closed: push skipped, manual sy
     "the 409 names the machine's aggregate size and the budget");
   assert.equal(requested.length, 0, "the oversized frame never reaches the runner");
 });
+
+test("runner-scoped assignments require machine access and scope containment", async (t) => {
+  const db = ControlPlaneDb.open(":memory:");
+  const hub: SkillsHub = {
+    isRunnerOnline: () => false,
+    sendToRunner: () => true,
+    requestFromRunner: async () => { throw new Error("unused"); },
+  } as SkillsHub;
+  let current: HumanPrincipal = principal();
+  const app = Fastify();
+  registerSkillRoutes(app, {
+    db,
+    hub,
+    requestHuman: () => current,
+    requestPrincipal: () => current,
+    pushSkillsSync: makeSkillsSyncPusher({ db, hub }),
+  });
+  await app.ready();
+  t.after(() => app.close());
+
+  // A machine privately scoped to one ordinary member.
+  db.registerRunner(runnerMeta("runner-private"), 10, 90, {
+    organizationId: PERSONAL_ORGANIZATION_ID,
+    owner: { kind: "user", userId: "usr_b" },
+  });
+
+  // The owner publishes an org-scoped skill.
+  const created = await app.inject({ method: "POST", url: "/api/skills", payload: skillPayload("org-skill") });
+  assert.equal(created.statusCode, 201);
+  const skillId = created.json().skill.id as string;
+
+  // Assigning a skill whose audience is wider than the machine's is rejected up front — the
+  // delivery-time containment rule would silently drop it, so a 201 here could never deploy.
+  current = humanPrincipal("usr_b", PERSONAL_ORGANIZATION_ID, "operator");
+  const rejected = await app.inject({
+    method: "POST",
+    url: "/api/skill-assignments",
+    payload: { skillId, scopeKind: "runner", runnerId: "runner-private", agentSelector: { kind: "all" } },
+  });
+  assert.equal(rejected.statusCode, 409, "scope-incompatible runner assignments are rejected, not accepted inertly");
+
+  // A runner-scoped row referencing a machine the caller cannot access is invisible and
+  // immutable even though the skill itself is org-visible. Seeded directly: route-level guards
+  // cannot retroactively fix rows whose ownership drifted after creation.
+  const seeded = db.createSkillAssignment({
+    skillId, scopeKind: "runner", runnerId: "runner-private", agentSelector: { kind: "all" }, invocation: "agent",
+  });
+  current = humanPrincipal("usr_other", PERSONAL_ORGANIZATION_ID, "operator");
+  assert.deepEqual((await app.inject({ method: "GET", url: "/api/skill-assignments" })).json().assignments, [],
+    "a member without machine access cannot see the private-runner assignment");
+  assert.deepEqual((await app.inject({ method: "GET", url: `/api/skills/${skillId}` })).json().assignments, [],
+    "the skill detail hides assignments on inaccessible machines");
+  assert.equal((await app.inject({
+    method: "PATCH", url: `/api/skill-assignments/${seeded.id}`, payload: { enabled: false },
+  })).statusCode, 404);
+  assert.equal((await app.inject({ method: "DELETE", url: `/api/skill-assignments/${seeded.id}` })).statusCode, 404);
+
+  // The machine's own user still sees and manages the row.
+  current = humanPrincipal("usr_b", PERSONAL_ORGANIZATION_ID, "operator");
+  assert.equal((await app.inject({ method: "GET", url: "/api/skill-assignments" })).json().assignments.length, 1,
+    "the machine's user sees the assignment");
+  assert.equal((await app.inject({
+    method: "PATCH", url: `/api/skill-assignments/${seeded.id}`, payload: { enabled: false },
+  })).statusCode, 200);
+});

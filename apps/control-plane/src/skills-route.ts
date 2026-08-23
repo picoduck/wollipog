@@ -127,6 +127,14 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
     for (const runner of db.listRunners()) pushSkillsSync(runner.runnerId);
   };
 
+  /** An assignment is visible and mutable only to principals who can access the referenced skill
+   * AND, for runner-scoped rows, that runner — otherwise a skill-visible assignment would leak
+   * (and let a caller redeploy against) a machine the principal cannot access. */
+  const canAccessAssignment = (principal: AuthPrincipal, assignment: SkillAssignmentView): boolean =>
+    db.canAccessSkill(principal, assignment.skillId) &&
+    (assignment.scopeKind !== "runner" || !assignment.runnerId ||
+      db.canAccessRunner(principal, assignment.runnerId));
+
   /* ------------------------------ Skill library ------------------------------ */
 
   // Per-resource authorization mirrors /api/projects exactly: listings filter to the caller's
@@ -183,7 +191,12 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
     const skill = db.getSkill(id);
     if (!skill) return reply.code(404).send({ error: "skill not found" });
     const latestVersion = skill.latestVersion ? db.getSkillVersion(skill.latestVersion.id) : null;
-    return { skill, latestVersion, assignments: db.listSkillAssignments(id) };
+    return {
+      skill,
+      latestVersion,
+      assignments: db.listSkillAssignments(id)
+        .filter((assignment) => canAccessAssignment(principal, assignment)),
+    };
   });
 
   app.put("/api/skills/:id", async (req, reply) => {
@@ -292,7 +305,7 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
     const skillId = (req.query as { skillId?: unknown }).skillId;
     return {
       assignments: db.listSkillAssignments(typeof skillId === "string" && skillId ? skillId : undefined)
-        .filter((assignment) => db.canAccessSkill(principal, assignment.skillId)),
+        .filter((assignment) => canAccessAssignment(principal, assignment)),
     };
   });
 
@@ -311,6 +324,15 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
     if (body.scopeKind === "runner" && (typeof body.runnerId !== "string" ||
         !db.getRunner(body.runnerId) || !db.canAccessRunner(principal, body.runnerId))) {
       return reply.code(404).send({ error: "runner not found" });
+    }
+    if (body.scopeKind === "runner") {
+      // Same containment rule resolveDesiredSkills applies at delivery time — rejecting here
+      // instead of returning a 201 for an assignment that could never deploy.
+      const skillScope = db.skillScope(body.skillId);
+      const runnerScope = db.runnerScope(body.runnerId as string);
+      if (!skillScope || !runnerScope || !db.scopeAudienceContainedWithMembership(skillScope, runnerScope)) {
+        return reply.code(409).send({ error: "the skill's access scope does not include this machine" });
+      }
     }
     const agentSelector = parseSkillAgentSelector(body.agentSelector);
     if (!agentSelector) {
@@ -334,7 +356,7 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
     if (!principal) return reply.code(403).send({ error: "human identity is required" });
     const id = (req.params as { id: string }).id;
     const existing = db.getSkillAssignment(id);
-    if (!existing || !db.canAccessSkill(principal, existing.skillId)) {
+    if (!existing || !canAccessAssignment(principal, existing)) {
       return reply.code(404).send({ error: "skill assignment not found" });
     }
     const body = (req.body ?? {}) as { enabled?: unknown; invocation?: unknown };
@@ -357,7 +379,7 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
     if (!principal) return reply.code(403).send({ error: "human identity is required" });
     const id = (req.params as { id: string }).id;
     const existing = db.getSkillAssignment(id);
-    if (!existing || !db.canAccessSkill(principal, existing.skillId)) {
+    if (!existing || !canAccessAssignment(principal, existing)) {
       return reply.code(404).send({ error: "skill assignment not found" });
     }
     const removed = db.deleteSkillAssignment(id);
