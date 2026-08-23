@@ -291,6 +291,7 @@ test("an accepted steer settles cleanly across an in-place expanded-to-preview t
   await expect(composer).toHaveValue("");
 
   await composer.fill("Steer after in-place settlement");
+  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
   await page.keyboard.press("Control+Enter");
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringRequests().length)).toBe(2);
   await expect(composer).toHaveValue("");

@@ -866,6 +866,7 @@ test("width reflow and tail streaming honor following, paused, and previewing st
   await expect(reader).toHaveAttribute("data-follow-tail-state", "following");
   await expect.poll(() => distanceFromTail(page)).toBeLessThanOrEqual(2);
 
+  await waitForStableReaderGeometry(page);
   await page.getByTestId("pause-follow").click();
   await expect(reader).toHaveAttribute("data-follow-tail-state", "paused");
   const pausedAnchor = await moveToStableReadingAnchor(page);
