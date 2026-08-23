@@ -372,6 +372,16 @@ test("Settings is the trailing control in the unified phone topbar cluster", () 
     "the unified control cluster must stay on one line");
 });
 
+test("the Collaboration Pod header action is one accessible plus-icon control across layouts", () => {
+  assert.match(app, /function NewPodHeaderButton[\s\S]*className="icon-btn topbar-create"[\s\S]*title="New Collaboration Pod"[\s\S]*aria-label="New Collaboration Pod"[\s\S]*<PlusIcon/);
+  assert.equal([...app.matchAll(/<NewPodHeaderButton onClick=\{onNewPod\} \/>/g)].length, 2,
+    "mobile and desktop paths must reuse the same pod action");
+  assert.match(css, /\.topbar-create\.icon-btn \{[^}]*width: 32px;[^}]*height: 32px/,
+    "the desktop action must remain compact");
+  assert.match(css, /\.topbar-mobile-controls \.topbar-create\.icon-btn \{[^}]*width: 44px;[^}]*height: 44px/,
+    "the phone action must retain a full touch target");
+});
+
 test("keyboard reachability does not depend on optional viewport metadata alone", () => {
   // interactive-widget=resizes-content is not universally implemented. Where it is ignored, only
   // the visual viewport shrinks, 100dvh still measures the full screen, and the fixed bottom rail

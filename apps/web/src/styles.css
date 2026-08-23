@@ -916,6 +916,7 @@ pre {
   letter-spacing: 0.2px;
 }
 .topbar-create { margin-left: auto; }
+.topbar-create.icon-btn { width: 32px; height: 32px; padding: 0; }
 /* Codex-style top-right control cluster (panel toggles, editor selector). */
 .topbar-actions {
   margin-left: auto;
@@ -9775,6 +9776,7 @@ body.shell-dock-dragging * {
     padding: env(safe-area-inset-top, 0px) calc(10px + env(safe-area-inset-right, 0px)) 0
       calc(10px + env(safe-area-inset-left, 0px));
   }
+  .topbar-mobile-controls .topbar-create.icon-btn { width: 44px; height: 44px; }
   .main-body {
     padding: 12px calc(12px + env(safe-area-inset-right, 0px)) calc(14px + env(safe-area-inset-bottom, 0px))
       calc(12px + env(safe-area-inset-left, 0px));
