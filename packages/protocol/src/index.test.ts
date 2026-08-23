@@ -100,8 +100,8 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 88", () => {
-  assert.equal(PROTOCOL_VERSION, 88);
+test("PROTOCOL_VERSION is 89", () => {
+  assert.equal(PROTOCOL_VERSION, 89);
 });
 
 test("slash-command argument hints remain additive metadata", () => {
@@ -535,6 +535,8 @@ test("runner command capability gates fail closed for unknown/old protocols", ()
   assert.equal(runnerSupportsProtocol(84, "correlatedRestartEcho"), true);
   assert.equal(runnerSupportsProtocol(84, "stopFailureRecovery"), false);
   assert.equal(runnerSupportsProtocol(85, "stopFailureRecovery"), true);
+  assert.equal(runnerSupportsProtocol(88, "stopAttemptCorrelation"), false);
+  assert.equal(runnerSupportsProtocol(89, "stopAttemptCorrelation"), true);
   assert.equal(runnerSupportsProtocol(Number.NaN, "externalSessions"), false);
   assert.equal(runnerSupportsProtocol(6.5, "externalSessions"), false);
   assert.match(runnerCapabilityRequirement(null, "sessionFiles", "Files"), /unknown.*requires protocol v16/i);

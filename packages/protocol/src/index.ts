@@ -246,7 +246,10 @@
 // 88: structured request resolution events gain an optional bounded reason so replacement,
 //     provider-side settlement, explicit submission, and dismissal remain distinguishable in
 //     durable history. Pre-v88 peers retain the existing optionId/answered presentation.
-export const PROTOCOL_VERSION = 88;
+// 89: Stop delivery attempts carry a distinct durable identity in addition to their stable
+//     operation identity, so delayed results cannot cross an authorized retry boundary. Older
+//     peers retain conservative Stop Pending behavior because they cannot prove the attempt.
+export const PROTOCOL_VERSION = 89;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
@@ -364,6 +367,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   backgroundWorkTracking: 83,
   correlatedRestartEcho: 84,
   stopFailureRecovery: 85,
+  stopAttemptCorrelation: 89,
 } as const;
 
 /* ========================================================================== */
@@ -3511,6 +3515,8 @@ export interface StopSessionResultMessage {
   type: "stop_session_result";
   sessionId: string;
   operationId: string;
+  /** Added in v89. Identifies the exact durable delivery attempt within the stable operation. */
+  deliveryAttemptId?: string;
   accepted: boolean;
   /** Bounded, provider-neutral rejection detail. Present only when accepted is false. */
   error?: string;
@@ -3999,6 +4005,8 @@ export interface StopSessionMessage {
   sessionId: string;
   /** Added in v85. Older runners ignore this optional field and emit no correlated result. */
   operationId?: string;
+  /** Added in v89. Older runners omit this from their result and therefore fail conservatively. */
+  deliveryAttemptId?: string;
 }
 
 /** Re-arm runner-side governance after the user continues past a threshold. Values are absolute
