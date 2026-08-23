@@ -938,6 +938,7 @@ export function InboxView({
           <div className="inbox-toolbar-actions">
             {sessionRemindersSupported && (
               <SegmentedControl<ReminderInboxMode>
+                className="inbox-reminder-view"
                 label="Reminder View"
                 value={reminderMode}
                 options={[

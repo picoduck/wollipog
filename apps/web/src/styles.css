@@ -10743,6 +10743,43 @@ body.shell-dock-dragging * {
   background: color-mix(in srgb, var(--accent) 12%, transparent);
   color: var(--accent-on-tint);
 }
+
+/* The compact Inbox reminder filter is visually one joined control. Its option borders carry the
+   boundary; the shared wrapper remains unchanged for Settings and other segmented controls. */
+.ui-seg.inbox-reminder-view {
+  isolation: isolate;
+  gap: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+.inbox-reminder-view .ui-seg-option {
+  border-color: var(--control-outline);
+}
+.inbox-reminder-view .ui-seg-option + .ui-seg-option { margin-left: -1px; }
+.inbox-reminder-view .ui-seg-option:first-child {
+  border-top-left-radius: var(--radius-xs);
+  border-bottom-left-radius: var(--radius-xs);
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.inbox-reminder-view .ui-seg-option:last-child {
+  border-top-right-radius: var(--radius-xs);
+  border-bottom-right-radius: var(--radius-xs);
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+.inbox-reminder-view .ui-seg-option.is-selected {
+  position: relative;
+  z-index: var(--z-sticky);
+  border-color: var(--accent);
+}
+.inbox-reminder-view .ui-seg-option:focus-visible {
+  position: relative;
+  z-index: var(--z-dock);
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 .ui-seg-option.is-disabled { color: var(--text-dim); cursor: not-allowed; }
 .ui-select-option.is-active { background: var(--bg-elev-3); }
 .ui-select-option.is-disabled { cursor: not-allowed; }
