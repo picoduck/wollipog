@@ -1,5 +1,6 @@
 import { Modal } from "./common.js";
 import { SHORTCUT_GROUPS, SHORTCUTS, shortcutDisplay, shortcutUnavailableReason } from "../shortcuts.js";
+import { useExperiments } from "../use-experiments.js";
 
 function shortcutGroupId(group: string): string {
   return `shortcut-${group.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
@@ -20,6 +21,9 @@ export function ShortcutReference({
   conversationSteeringSupported: boolean;
   turnInterruptionSupported: boolean;
 }) {
+  // A switched-off experiment's bindings are dead — their handlers live inside the hidden
+  // surfaces — so the reference must say so rather than advertise a working key.
+  const { flags: experimentFlags } = useExperiments();
   return (
     <Modal title="Keyboard Shortcuts" onClose={onClose}>
       <p className="shortcut-intro">These bindings are shared by the app and this reference, so the list stays in step with the controls.</p>
@@ -35,6 +39,7 @@ export function ShortcutReference({
                   filesSupported,
                   conversationSteeringSupported,
                   turnInterruptionSupported,
+                  experimentFlags,
                 });
                 return (
                   <div className={`shortcut-row${unavailable ? " is-unavailable" : ""}`} key={item.id} aria-disabled={unavailable ? "true" : undefined}>

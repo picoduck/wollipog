@@ -22,7 +22,7 @@ function fixtureView(): View {
   if (entry === "settings") {
     const section = params.get("section");
     if (section === "appearance" || section === "notifications" || section === "keyboard" ||
-        section === "behavior" || section === "network" || section === "about") {
+        section === "behavior" || section === "network" || section === "experimental" || section === "about") {
       return { name: "settings", section };
     }
     return { name: "settings", section: "keyboard" };

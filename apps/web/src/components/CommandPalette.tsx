@@ -4,6 +4,8 @@ import { useStoreActions, useStoreSelector, type View } from "../store.js";
 import { matchSessions, type PaletteEntry } from "../palette.js";
 import { EXTRA_PALETTE_DESTINATIONS, GLOBAL_VIEW_ITEMS } from "../navigation.js";
 import { sessionArchiveSearchDetail } from "../archive-browser.js";
+import { experimentForViewName } from "../experiments.js";
+import { useExperiments } from "../use-experiments.js";
 
 export function useCommandPaletteFocus(
   inputRef: RefObject<HTMLInputElement>,
@@ -76,9 +78,15 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
     };
   }, [api, q]);
 
+  const { flags } = useExperiments();
   const entries = useMemo<PaletteEntry[]>(() => {
     const views: PaletteEntry[] = [
-      ...GLOBAL_VIEW_ITEMS.map((item) => ({
+      // A hidden experiment is hidden from search too: a palette hit that lands on the
+      // "turned off" notice would advertise a destination the rail says does not exist.
+      ...GLOBAL_VIEW_ITEMS.filter((item) => {
+        const experiment = experimentForViewName(item.name);
+        return experiment === null || flags[experiment];
+      }).map((item) => ({
         kind: "view" as const,
         label: item.paletteLabel,
         view: { name: item.name } as View,
@@ -112,7 +120,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
       ? views.filter((v) => v.label.toLowerCase().includes(q.trim().toLowerCase()))
       : views;
     return [...sess, ...transcript, ...viewMatches];
-  }, [catalogSessions, sessions, q, hits]);
+  }, [catalogSessions, sessions, q, hits, flags]);
 
   useEffect(() => {
     // Clamp BOTH bounds: ArrowDown on an empty list would park sel at -1 and leave Enter

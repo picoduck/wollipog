@@ -15,6 +15,8 @@ import {
 } from "./Icons.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { useIsMobile } from "./useIsMobile.js";
+import { experimentForViewName } from "../experiments.js";
+import { useExperiments } from "../use-experiments.js";
 
 /**
  * The four destinations that stay on the phone tab bar. Everything else moves behind "More".
@@ -106,11 +108,19 @@ export function Rail({
     });
   }, [isMobile, moreOpen, more]);
 
+  // Filtered before the mobile split so a hidden experiment is absent from BOTH the primary bar
+  // and the More sheet. The Ctrl+N numbers stay anchored to the canonical list below, so hiding
+  // a destination never renumbers the survivors' advertised shortcuts.
+  const { flags } = useExperiments();
+  const enabledItems = GLOBAL_VIEW_ITEMS.filter((item) => {
+    const experiment = experimentForViewName(item.name);
+    return experiment === null || flags[experiment];
+  });
   const visibleItems = isMobile
-    ? GLOBAL_VIEW_ITEMS.filter((item) => MOBILE_PRIMARY_VIEWS.includes(item.name))
-    : GLOBAL_VIEW_ITEMS;
+    ? enabledItems.filter((item) => MOBILE_PRIMARY_VIEWS.includes(item.name))
+    : enabledItems;
   const overflowItems = isMobile
-    ? GLOBAL_VIEW_ITEMS.filter((item) => !MOBILE_PRIMARY_VIEWS.includes(item.name))
+    ? enabledItems.filter((item) => !MOBILE_PRIMARY_VIEWS.includes(item.name))
     : [];
   // A destination hidden behind More still has to read as current, or the bar looks like nothing
   // is selected while the user is standing on Usage.

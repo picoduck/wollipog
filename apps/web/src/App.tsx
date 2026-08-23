@@ -64,7 +64,7 @@ import {
   saveBrowserStorageValue,
 } from "./instance-storage.js";
 import { FeedbackProvider } from "./components/FeedbackProvider.js";
-import { Modal } from "./components/common.js";
+import { Empty, Modal } from "./components/common.js";
 import { DockBottomIcon, KeyboardIcon, LockIcon, PanelRightIcon, PinnedPanelIcon, WarningTriangleIcon } from "./components/Icons.js";
 import { NavRow, SwitchRow } from "./components/ui/SettingsRows.js";
 import { viewPath, viewTitle } from "./navigation.js";
@@ -79,12 +79,16 @@ import {
   AboutPanel,
   AppearancePanel,
   BehaviorPanel,
+  ExperimentalPanel,
   KeyboardPanel,
   NetworkPanel,
   NotificationsPanel,
   SettingsView,
   useNotifySetting,
 } from "./components/SettingsView.js";
+import { EXPERIMENT_TITLES, experimentForViewName, type ExperimentId } from "./experiments.js";
+import { useExperiments } from "./use-experiments.js";
+import { conductorAgentId } from "./workflow-presets.js";
 import {
   isTauriRuntime,
   readTailnetAccess,
@@ -255,6 +259,21 @@ function Shell() {
   const runners = useStoreSelector((s) => s.runners);
   const sessions = useStoreSelector((s) => s.sessions);
   const stalledSessions = useStoreSelector((s) => s.stalledCount);
+  const experiments = useExperiments();
+  // The Conductor switch needs to say when the runner side is missing. ONLINE runners only:
+  // the store keeps a disconnected runner's advertised agents, and a row calling the conductor
+  // available on the strength of a runner that cannot start anything would be a false claim.
+  const conductorAvailable = useMemo(
+    () => [...runners.values()].some((runner) =>
+      runner.status === "online" && conductorAgentId(runner.agents ?? []) !== undefined),
+    [runners],
+  );
+  // A route into a feature this device has switched off renders the explanation instead of the
+  // feature: removing the branch entirely would make a bookmarked /runs a silent Inbox redirect.
+  const disabledExperimentView = (() => {
+    const experiment = experimentForViewName(view.name);
+    return experiment !== null && !experiments.flags[experiment] ? experiment : null;
+  })();
   const activeSession = view.name === "session" ? sessions.get(view.id) : undefined;
   const activeRunnerProtocol = activeSession ? runners.get(activeSession.runnerId)?.protocolVersion : undefined;
   const terminalSupported = runnerSupportsProtocol(activeRunnerProtocol, "sessionShells");
@@ -482,6 +501,10 @@ function Shell() {
       if (event.defaultPrevented || shortcutLayerActive(document) || xtermOwnsKey(event.target)) return;
       for (const [shortcutId, destination] of destinations) {
         if (!matchesShortcut(event, shortcutId)) continue;
+        // A number for a switched-off experiment does nothing rather than opening the
+        // explanation page: the rail hides the destination, so the binding is unadvertised.
+        const experiment = experimentForViewName(destination.name);
+        if (experiment !== null && !experiments.flags[experiment]) return;
         event.preventDefault();
         navigate(destination);
         return;
@@ -502,7 +525,7 @@ function Shell() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [isMobile, navigate]);
+  }, [isMobile, navigate, experiments.flags]);
 
   // Ctrl+K / Cmd+K opens the global search palette (sessions + transcripts + views).
   // Deliberately ALSO from inputs/textareas (the Slack/Linear convention — jumping mid-typing
@@ -689,8 +712,14 @@ function Shell() {
             />
           )}
           {view.name === "runners" && <RunnersView />}
-          {view.name === "runs" && <RunsView onNewRun={() => setDialog({ kind: "run" })} />}
-          {view.name === "pods" && <PodsView onNewPod={() => setDialog({ kind: "pod" })} />}
+          {disabledExperimentView && (
+            <ExperimentDisabledNotice
+              experiment={disabledExperimentView}
+              onOpenSettings={() => navigate({ name: "settings", section: "experimental" })}
+            />
+          )}
+          {view.name === "runs" && !disabledExperimentView && <RunsView onNewRun={() => setDialog({ kind: "run" })} />}
+          {view.name === "pods" && !disabledExperimentView && <PodsView onNewPod={() => setDialog({ kind: "pod" })} />}
           {view.name === "automations" && <AutomationsView />}
           {view.name === "usage" && <UsageView />}
           {view.name === "archived" && <ArchivedSessionsView />}
@@ -727,6 +756,13 @@ function Shell() {
                 ),
                 behavior: <BehaviorPanel />,
                 network: <NetworkPanel tailnet={tailnet} />,
+                experimental: (
+                  <ExperimentalPanel
+                    flags={experiments.flags}
+                    onToggle={experiments.setFlag}
+                    conductorAvailable={conductorAvailable}
+                  />
+                ),
                 about: <AboutPanel />,
               }}
             />
@@ -737,8 +773,8 @@ function Shell() {
               onNewSession={(preset) => setDialog({ kind: "session", preset })}
             />
           )}
-          {view.name === "run" && <RunDetail runId={view.id} />}
-          {view.name === "pod" && <PodDetail podId={view.id} />}
+          {view.name === "run" && !disabledExperimentView && <RunDetail runId={view.id} />}
+          {view.name === "pod" && !disabledExperimentView && <PodDetail podId={view.id} />}
           </ErrorBoundary>
         </div>
         {/* Bottom shell dock: session-scoped terminals in the compact desktop layout. Mounted only
@@ -822,22 +858,50 @@ function Header({
   sessionActions?: React.ReactNode;
 }) {
   const title = viewTitle(view);
+  const { flags } = useExperiments();
   return (
     <header className="topbar">
       {/* Focusable only programmatically: the rescue below moves focus here when a layout swap
           drops it, so the next Tab continues from the page rather than from the document top. */}
       <h1 id="page-title" tabIndex={-1}>{title}</h1>
       {mobileControls && <div className="topbar-actions topbar-mobile-controls">{mobileControls}</div>}
-      {view.name === "runs" && (
+      {view.name === "runs" && flags.multiAgent && (
         <button type="button" className="btn primary sm topbar-create" onClick={onNewRun}>New Multi-Agent Run</button>
       )}
-      {view.name === "pods" && (
+      {view.name === "pods" && flags.pods && (
         <button type="button" className="btn primary sm topbar-create" onClick={onNewPod}>New Collaboration Pod</button>
       )}
       {view.name === "session" && sessionActions && (
         <div className="topbar-actions">{sessionActions}</div>
       )}
     </header>
+  );
+}
+
+/**
+ * What a direct route into a switched-off experiment renders.
+ *
+ * The route still parses — a bookmark must not silently become the Inbox — but the feature's
+ * views stay unmounted, and the page says which switch governs it and where that switch lives.
+ */
+function ExperimentDisabledNotice({
+  experiment,
+  onOpenSettings,
+}: {
+  experiment: ExperimentId;
+  onOpenSettings: () => void;
+}) {
+  return (
+    <Empty
+      headingLevel={2}
+      title={`${EXPERIMENT_TITLES[experiment]} Is Turned Off`}
+      hint="This experimental feature is hidden on this device."
+      action={
+        <button type="button" className="btn sm" onClick={onOpenSettings}>
+          Open Experimental Settings
+        </button>
+      }
+    />
   );
 }
 
