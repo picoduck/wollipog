@@ -1432,7 +1432,7 @@ export interface QuestionOption {
 }
 
 export interface AgentQuestion {
-  /** Provider-supplied request context shared by this question group. */
+  /** Provider-supplied context for this question. */
   context?: string;
   /** Opaque answer key. For native Claude this is the question TEXT (the SDK looks answers up
    * by text) — the UI must treat it as opaque and key answers by it verbatim. */
