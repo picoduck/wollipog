@@ -81,8 +81,10 @@ export function SessionApprovalRegion({
   const regionRef = useRef<HTMLDivElement>(null);
   const focusOwnedRef = useRef(false);
   const previousRequestRef = useRef<string | null>(null);
+  const previousRunnerOnlineRef = useRef(runnerOnline);
   const [announcement, setAnnouncement] = useState("");
   const requestId = session.pendingApproval?.requestId ?? null;
+  const focusWasOwnedBeforeRender = focusOwnedRef.current;
   const focusFallback = () => {
     const primary = fallbackFocusRef.current;
     const target = primary && !primary.matches(":disabled") ? primary : alternateFallbackFocusRef?.current;
@@ -114,6 +116,14 @@ export function SessionApprovalRegion({
       focusOwnedRef.current = false;
     }
   }, [alternateFallbackFocusRef, fallbackFocusRef, requestId]);
+
+  useIsomorphicLayoutEffect(() => {
+    const wentOffline = previousRunnerOnlineRef.current && !runnerOnline;
+    previousRunnerOnlineRef.current = runnerOnline;
+    if (!wentOffline || !focusWasOwnedBeforeRender) return;
+    focusFallback();
+    focusOwnedRef.current = false;
+  }, [alternateFallbackFocusRef, fallbackFocusRef, focusWasOwnedBeforeRender, runnerOnline]);
 
   return (
     <div
@@ -386,7 +396,7 @@ export function SessionQuestionBanner({
         </div>
       </div>
       {!runnerOnline && (
-        <div className="question-availability">Responses are unavailable until the runner reconnects.</div>
+        <div className="question-availability" role="status">Responses are unavailable until the runner reconnects.</div>
       )}
       {runnerOnline && busy === null && questions.length > 0 && !complete && (
         <div className="question-submit-hint">
@@ -417,7 +427,7 @@ export function SessionQuestionBanner({
                 {question.multiSelect && <span className="muted sm"> (select all that apply)</span>}
               </div>
               <span className="sr-only" id={requirementId}>
-                {question.required === false ? "Optional." : "Required."}
+                {question.required === false ? "This question is optional." : "An answer to this question is required."}
               </span>
               {question.context && <div className="question-context" id={contextId}>{question.context}</div>}
               {question.options.length > 0 && (

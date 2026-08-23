@@ -132,6 +132,7 @@ test("an online-to-offline transition disables every response control", async ()
       container.querySelector(".question-availability")?.textContent,
       "Responses are unavailable until the runner reconnects.",
     );
+    assert.equal(container.querySelector(".question-availability")?.getAttribute("role"), "status");
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();
@@ -165,7 +166,10 @@ test("keyboard choice selection clears an Other draft and submits the visible fi
     assert.equal(input.required, false, "Other is an alternative to the required fixed choices");
     const requirementId = input.getAttribute("aria-describedby")?.split(" ")
       .find((id) => id.includes("-requirement-"));
-    assert.equal(requirementId ? domWindow.document.getElementById(requirementId)?.textContent?.trim() : null, "Required.");
+    assert.equal(
+      requirementId ? domWindow.document.getElementById(requirementId)?.textContent?.trim() : null,
+      "An answer to this question is required.",
+    );
     await act(async () => { setInputValue(input, "Canary"); });
     assert.equal(input.value, "Canary");
     assert.equal(submitButton(container).disabled, false);
