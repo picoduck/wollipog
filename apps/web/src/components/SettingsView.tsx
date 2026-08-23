@@ -7,6 +7,7 @@ import { KeyboardIcon } from "./Icons.js";
 import { NavRow, SegmentedRow, SelectRow, StaticRow, SwitchRow } from "./ui/SettingsRows.js";
 import { SCHEME_SWATCHES, type ColorScheme, type ResolvedTheme } from "../theme.js";
 import { SETTINGS_SECTIONS, type SettingsSection, type View } from "../navigation.js";
+import type { ExperimentFlags, ExperimentId } from "../experiments.js";
 
 /**
  * Settings as a ROUTE, not a dialog.
@@ -255,6 +256,56 @@ export function BehaviorPanel() {
         title="Default Agent and Model"
         description="What a new session starts with."
         reason="Chosen per session when you create it; a default is not built yet."
+      />
+    </SettingsGroup>
+  );
+}
+
+/**
+ * Untested features, each behind its own switch.
+ *
+ * These gate UI EXPOSURE on this device and this instance, never capability: the control
+ * plane keeps serving the underlying APIs, and turning a feature back on restores every
+ * surface without a reload. The exception to "never hide a setting that could exist" is
+ * deliberate here — hiding is the setting.
+ */
+export function ExperimentalPanel({
+  flags,
+  onToggle,
+  conductorAvailable,
+}: {
+  flags: ExperimentFlags;
+  onToggle: (id: ExperimentId, enabled: boolean) => void;
+  /** Whether any connected runner advertises an available conductor agent. */
+  conductorAvailable: boolean;
+}) {
+  return (
+    <SettingsGroup title="Untested Features">
+      <SwitchRow
+        title="Multi-Agent Runs"
+        description="Runs and workflow graphs that coordinate several agents. Off hides Multi-Agent from navigation and search on this device."
+        checked={flags.multiAgent}
+        onClick={() => onToggle("multiAgent", !flags.multiAgent)}
+      />
+      <SwitchRow
+        title="Collaboration Pods"
+        description="Shared-context groups of sessions. Off hides Pods from navigation and search on this device."
+        checked={flags.pods}
+        onClick={() => onToggle("pods", !flags.pods)}
+      />
+      {/* Disabled rather than hidden when no runner can supply one, and with the reason —
+          the switch alone cannot say that the runner, not this page, is what is missing. */}
+      <SwitchRow
+        title="Conductor-Led Work"
+        description={conductorAvailable
+          ? "The Conductor preset when creating a session. Controls what this device shows; the runner decides whether a conductor exists."
+          : <>The Conductor preset when creating a session.{" "}
+            <small className="settings-pending-reason">
+              No connected runner advertises a conductor agent, so there is nothing to show; enable it on a runner with WOLLIPOG_CONDUCTOR=1.
+            </small></>}
+        checked={flags.conductor}
+        disabled={!conductorAvailable}
+        onClick={() => onToggle("conductor", !flags.conductor)}
       />
     </SettingsGroup>
   );

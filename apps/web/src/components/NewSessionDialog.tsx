@@ -38,6 +38,7 @@ import { AgentIcon } from "./AgentIcon.js";
 import { Modal } from "./common.js";
 import { DirectoryPicker } from "./DirectoryPicker.js";
 import { conductorAgentId, type SessionWorkMode } from "../workflow-presets.js";
+import { useExperiments } from "../use-experiments.js";
 import { handleRovingChoiceKeyDown, rovingChoiceTabIndex } from "./interactions.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { CreateProjectDialog } from "./CreateProjectDialog.js";
@@ -195,7 +196,10 @@ export function NewSessionDialog({
   const executionTarget = executionTargets.find((target) => target.id === executionTargetId) ??
     executionTargets.find((target) => target.adapter === "host" &&
       target.workspaceStrategy === (useWorktree ? "worktree" : "in_place"));
-  const availableConductorId = conductorAgentId(runner?.agents ?? []);
+  // With the experiment off, no conductor is "available" anywhere in this dialog: the guard
+  // effect below then also resets a stranded conductor work mode back to an agent session.
+  const conductorExperimentEnabled = useExperiments().flags.conductor;
+  const availableConductorId = conductorExperimentEnabled ? conductorAgentId(runner?.agents ?? []) : undefined;
   const agent = selectedAgentOption?.agent;
   const nativeTuiRunnerSupported = supportsAgentTui(agent?.driver, runner?.protocolVersion, runner?.os);
   const nativeTuiStartFenceSupported = runnerSupportsProtocol(
@@ -701,7 +705,10 @@ export function NewSessionDialog({
             </fieldset>
           )}
 
-          <div className="field">
+          {/* Hidden entirely — not disabled-with-a-reason — when the experiment is off: unlike a
+              missing runner conductor, absence here is this device's own choice, made on the
+              Experimental settings page, and a one-option radiogroup would remain. */}
+          {conductorExperimentEnabled && <div className="field">
             <span>Preset</span>
             <div className="workflow-preset-grid" role="radiogroup" aria-label="Session Preset" onKeyDown={(event) => handleRovingChoiceKeyDown(event, "radio")}>
               <button type="button" role="radio" aria-checked={workMode === "agent"} tabIndex={workMode === "agent" || !availableConductorId ? 0 : -1} className={`workflow-preset ${workMode === "agent" ? "on" : ""}`} onClick={() => selectWorkMode("agent")}>
@@ -713,7 +720,7 @@ export function NewSessionDialog({
                 <span>{availableConductorId ? "Delegate sessions, workflows, gates, and guardrails." : "Requires an available native Claude conductor."}</span>
               </button>
             </div>
-          </div>
+          </div>}
 
           {workMode === "agent" ? <div className="field">
             <label htmlFor="new-session-agent">Agent</label>
