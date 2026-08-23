@@ -243,13 +243,21 @@ test("provider authentication card uses the visible Authentication Required acce
   container.remove();
 });
 
-function OfflineApprovalHarness({ requestId, withContext }: { requestId: string; withContext: boolean }) {
+function OfflineApprovalHarness({
+  requestId,
+  withContext,
+  runnerOnline = false,
+}: {
+  requestId: string;
+  withContext: boolean;
+  runnerOnline?: boolean;
+}) {
   const fallbackRef = useRef<HTMLTextAreaElement>(null);
   return (
     <>
       <SessionApprovalRegion
         session={offlinePolicySession(requestId, withContext)}
-        runnerOnline={false}
+        runnerOnline={runnerOnline}
         fallbackFocusRef={fallbackRef}
       />
       <textarea ref={fallbackRef} aria-label="Offline composer" />
@@ -356,6 +364,27 @@ test("offline approval replacement falls back when the new request has no enable
   container.querySelector<HTMLButtonElement>('button[aria-expanded]')!.focus();
   await act(async () => { root.render(<OfflineApprovalHarness requestId="ask-b" withContext={false} />); });
   assert.equal(domWindow.document.activeElement?.getAttribute("aria-label"), "Offline composer");
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("going offline preserves focus on an approval control that remains enabled", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<OfflineApprovalHarness requestId="ask-a" withContext runnerOnline />);
+  });
+  const details = container.querySelector<HTMLButtonElement>("button[aria-expanded]");
+  assert.ok(details);
+  details.focus();
+
+  await act(async () => {
+    root.render(<OfflineApprovalHarness requestId="ask-a" withContext />);
+  });
+  assert.equal(domWindow.document.activeElement, details);
+  assert.equal(details.disabled, false);
   await act(async () => { root.unmount(); });
   container.remove();
 });

@@ -84,7 +84,12 @@ export function SessionApprovalRegion({
   const previousRunnerOnlineRef = useRef(runnerOnline);
   const [announcement, setAnnouncement] = useState("");
   const requestId = session.pendingApproval?.requestId ?? null;
-  const focusWasOwnedBeforeRender = focusOwnedRef.current;
+  const requestWasUnchangedBeforeRender = previousRequestRef.current === requestId;
+  const focusedElementBeforeRender = typeof document !== "undefined"
+    && focusOwnedRef.current
+    && document.activeElement instanceof HTMLElement
+    ? document.activeElement
+    : null;
   const focusFallback = () => {
     const primary = fallbackFocusRef.current;
     const target = primary && !primary.matches(":disabled") ? primary : alternateFallbackFocusRef?.current;
@@ -120,10 +125,12 @@ export function SessionApprovalRegion({
   useIsomorphicLayoutEffect(() => {
     const wentOffline = previousRunnerOnlineRef.current && !runnerOnline;
     previousRunnerOnlineRef.current = runnerOnline;
-    if (!wentOffline || !focusWasOwnedBeforeRender) return;
+    if (!wentOffline || !requestWasUnchangedBeforeRender || !focusedElementBeforeRender) return;
+    if (!focusedElementBeforeRender.matches(":disabled")
+      && focusedElementBeforeRender.getAttribute("aria-disabled") !== "true") return;
     focusFallback();
     focusOwnedRef.current = false;
-  }, [alternateFallbackFocusRef, fallbackFocusRef, focusWasOwnedBeforeRender, runnerOnline]);
+  }, [alternateFallbackFocusRef, fallbackFocusRef, focusedElementBeforeRender, requestWasUnchangedBeforeRender, runnerOnline]);
 
   return (
     <div
@@ -395,9 +402,9 @@ export function SessionQuestionBanner({
           )}
         </div>
       </div>
-      {!runnerOnline && (
-        <div className="question-availability" role="status">Responses are unavailable until the runner reconnects.</div>
-      )}
+      <div className="question-availability" role="status" aria-atomic="true">
+        {runnerOnline ? "" : "Responses are unavailable until the runner reconnects."}
+      </div>
       {runnerOnline && busy === null && questions.length > 0 && !complete && (
         <div className="question-submit-hint">
           {freeTextErrors.size > 0

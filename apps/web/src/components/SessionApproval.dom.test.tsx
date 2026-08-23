@@ -117,6 +117,11 @@ test("an online-to-offline transition disables every response control", async ()
     await renderBanner(root, questions, true);
     assert.equal(container.querySelector<HTMLButtonElement>(".question-option")?.disabled, false);
     assert.equal(container.querySelector<HTMLInputElement>(".question-input")?.disabled, false);
+    const availability = container.querySelector(".question-availability");
+    assert.ok(availability);
+    assert.equal(availability.textContent, "");
+    assert.equal(availability.getAttribute("role"), "status");
+    assert.equal(availability.getAttribute("aria-atomic"), "true");
 
     await renderBanner(root, questions, false);
     const responseControls = [
