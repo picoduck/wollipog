@@ -1,4 +1,10 @@
-import type { GitStatusInfo, GitSummaryInfo } from "@wollipog/protocol";
+import type { GitStatusInfo, GitSummaryInfo, SessionStatus } from "@wollipog/protocol";
+
+const CHANGE_UNAVAILABLE_STATUSES = new Set<SessionStatus>(["queued", "starting", "running", "input_required"]);
+
+export function sessionMayShowChangeStatus(status: SessionStatus): boolean {
+  return !CHANGE_UNAVAILABLE_STATUSES.has(status);
+}
 
 export type SessionChangeKind = "no_changes" | "changes_present" | "ready_for_review";
 
@@ -32,7 +38,7 @@ export function sessionChangeStatus(evidence: SessionChangeEvidence): SessionCha
     evidence.summary?.branch === evidence.status.branch &&
     evidence.summary?.baseRef === evidence.status.baseRef
   );
-  const openPullRequest = summaryMatchesStatus && evidence.summary?.pr?.state.toUpperCase() === "OPEN";
+  const openPullRequest = summaryMatchesStatus && evidence.summary?.pr?.state?.toUpperCase() === "OPEN";
   if (facts.ahead > 0 && openPullRequest) {
     return {
       kind: "ready_for_review",

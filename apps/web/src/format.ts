@@ -144,7 +144,7 @@ const STATUS_META: Record<SessionStatus, StatusMeta> = {
   stopped: { label: "Stopped", className: "st-stopped", busy: false },
 };
 
-export function statusMeta(status: SessionStatus | string): StatusMeta {
+export function statusMeta(status: SessionStatus): StatusMeta {
   return STATUS_META[status as SessionStatus] ?? {
     label: "Status Unavailable",
     className: "st-stopped",

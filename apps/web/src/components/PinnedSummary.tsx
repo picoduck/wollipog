@@ -20,7 +20,7 @@ import { AgentIcon } from "./AgentIcon.js";
 import { BranchIcon, ComputerIcon, DialIcon, FolderOutlineIcon, GitHubIcon, GlobeIcon, NotesIcon, PullRequestIcon, TuningIcon } from "./Icons.js";
 import { BackgroundDeliveryBadge, BackgroundNotificationBadge, BackgroundWorkBadge, ChangeStatusBadge, SessionStatusIndicators, Spinner, UntrackedBackgroundWorkBadge } from "./common.js";
 import { effortLabel, relativeTime, resolvedModelLabel } from "../format.js";
-import { sessionChangeStatus } from "../session-status.js";
+import { sessionChangeStatus, sessionMayShowChangeStatus } from "../session-status.js";
 import { effectiveModelEffortForDisplay, resolveCaps, resolveEffectiveCaps } from "../caps.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { safeExternalHref } from "../external-href.js";
@@ -74,7 +74,8 @@ export function PinnedSummary({
     status: git.status,
     summary,
     settled: git.settled || gitSummary.settled,
-    available: gitPresentation.state === "ready" || gitPresentation.state === "updating",
+    available: sessionMayShowChangeStatus(session.status) &&
+      (gitPresentation.state === "ready" || gitPresentation.state === "updating"),
   });
 
   const host = deriveHost(session, runners.get(session.runnerId), boxes.values());

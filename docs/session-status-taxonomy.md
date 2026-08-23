@@ -11,7 +11,7 @@ Session status is multidimensional. A workflow column is organization only; it n
 | Activity | `status=running` | **Running** | An agent turn is actively executing. |
 | Activity | `status=input_required` | **Awaiting Input** | The current turn is paused for a person. Pair this with the concrete attention label when available. |
 | Activity | `status=idle` | **Awaiting Prompt** | The reusable session has no executing turn and can accept another prompt. This says nothing about changes or review readiness. |
-| Activity | `archiveStatus=stop_pending` | **Stopping** | A durable stop-before-archive operation is in progress. |
+| Activity | `stopOperation.status=stop_pending` (falling back to `archiveStatus=stop_pending` for older control planes) | **Stopping** | A durable stop operation is in progress. |
 | Activity | `status=completed` | **Completed** | The session ended normally. |
 | Activity | `status=failed` | **Failed** | The provider or session ended in failure. |
 | Activity | `status=stopped` | **Stopped** | A person stopped the session. |
@@ -19,9 +19,9 @@ Session status is multidimensional. A workflow column is organization only; it n
 | Attention | `pendingApproval.kind=authentication` | **Authentication Required** | Provider authentication is required. |
 | Attention | Any other `pendingApproval` | **Approval Required** | A permission, policy, budget, or tool-limit decision is required. |
 | Attention | `status=input_required` without a pending-action kind | **Input Required** | Neutral mixed-version fallback; the concrete action is unavailable. |
-| Attention | Explicit review-request evidence | **Review Requested** | Reserved for an authoritative review request. Workflow-column placement is not evidence. |
+| Attention | Explicit review-request evidence (reserved; no current producer) | **Review Requested** | Reserved for an authoritative review request. Workflow-column placement is not evidence. |
 | Changes | Completed Git read with a known base and no working-tree or base-relative changes | **No Changes** | Git confirmed an empty change set. |
-| Changes | Completed Git read with working-tree changes or commits ahead of base | **Changes Present** | Git confirmed a real change set, including while another dimension says Running or requires attention. |
+| Changes | Completed Git read with working-tree changes or commits ahead of base | **Changes Present** | Git confirmed a real change set at the latest eligible quiescent boundary. |
 | Changes | Confirmed commits ahead of base with an open pull request | **Ready for Review** | The current defensible review-readiness signal. |
 | Changes | No completed Git read, unavailable repository, or stale/missing evidence | No badge | Never infer **Changes Present** or **Ready for Review** from lifecycle or Board column. |
 | Workflow | `column` | Board column title only | Filing and organization; it does not alter any status dimension. |
@@ -36,7 +36,7 @@ Session status is multidimensional. A workflow column is organization only; it n
 
 - Show **Running** only for `status=running`. Counts labeled **Running** use that same predicate; **Queued** and **Starting** have separate counts.
 - Show lifecycle and attention together when both apply. Do not replace **Running**, **Awaiting Prompt**, or another lifecycle fact with a workflow-column interpretation.
-- Show change state only after a successful Git observation. A Review-column session with no observation has no change badge.
+- Show change state only after a successful Git observation, and suppress retained observations while a turn is queued, starting, running, or awaiting input. A Review-column session with no observation has no change badge.
 - Keep compact visible labels and accessible names on the same Title Case terminology. Descriptions and notifications use sentence case.
 - Unknown lifecycle values use **Status Unavailable**. An undifferentiated legacy input state uses **Input Required**. Missing Git or background fields produce no affirmative claim.
 - Refreshes, reconnects, and session transitions replace the relevant dimension independently; they must not synthesize a change in another dimension.

@@ -8,7 +8,7 @@ import {
   type SessionView,
 } from "@wollipog/protocol";
 import { statusMeta } from "./format.js";
-import { sessionChangeStatus } from "./session-status.js";
+import { sessionChangeStatus, sessionMayShowChangeStatus } from "./session-status.js";
 
 const lifecycleCases: Array<[SessionStatus, string]> = [
   ["queued", "Queued"],
@@ -23,7 +23,7 @@ const lifecycleCases: Array<[SessionStatus, string]> = [
 
 test("canonical lifecycle labels cover every state and use a neutral unknown fallback", () => {
   assert.deepEqual(lifecycleCases.map(([status]) => statusMeta(status).label), lifecycleCases.map(([, label]) => label));
-  assert.equal(statusMeta("future_state").label, "Status Unavailable");
+  assert.equal(statusMeta("future_state" as SessionStatus).label, "Status Unavailable");
   assert.equal(statusMeta("queued").busy, false);
   assert.equal(statusMeta("starting").busy, true);
   assert.equal(statusMeta("running").busy, true);
@@ -96,6 +96,15 @@ function gitSummary(overrides: Partial<GitSummaryInfo> = {}): GitSummaryInfo {
   };
 }
 
+test("active turns suppress retained change evidence", () => {
+  for (const status of ["queued", "starting", "running", "input_required"] as SessionStatus[]) {
+    assert.equal(sessionMayShowChangeStatus(status), false);
+  }
+  for (const status of ["idle", "completed", "failed", "stopped"] as SessionStatus[]) {
+    assert.equal(sessionMayShowChangeStatus(status), true);
+  }
+});
+
 test("change labels require settled Git evidence and never use workflow or lifecycle guesses", () => {
   assert.equal(sessionChangeStatus({ available: true, settled: false, status: gitStatus({ hasChanges: true }) }), null);
   assert.equal(sessionChangeStatus({ available: true, settled: true, status: null }), null);
@@ -145,6 +154,14 @@ test("change labels require settled Git evidence and never use workflow or lifec
 });
 
 test("change labels reject unavailable facts and prefer fresh status over a stale summary", () => {
+  assert.equal(sessionChangeStatus({
+    available: true,
+    settled: true,
+    summary: gitSummary({
+      ahead: 2,
+      pr: { number: 142, title: "Legacy", url: "https://example.test/142" } as NonNullable<GitSummaryInfo["pr"]>,
+    }),
+  })?.label, "Changes Present", "malformed PR evidence fails neutrally without hiding confirmed changes");
   assert.equal(sessionChangeStatus({
     available: false,
     settled: true,

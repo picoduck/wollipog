@@ -48,7 +48,7 @@ import { EventTimeline, type TimelineRevealRequest } from "./EventTimeline.js";
 import { isTimelineSessionActive } from "../timeline-clock.js";
 import { RightPanel, type RightPanelState } from "./RightPanel.js";
 import { useGitStatus, useGitSummary } from "./useGitStatus.js";
-import { sessionChangeStatus } from "../session-status.js";
+import { sessionChangeStatus, sessionMayShowChangeStatus } from "../session-status.js";
 import { ImageStrip, usePastedImages } from "./images.js";
 import { PromptImageView } from "./PromptImageView.js";
 import {
@@ -860,7 +860,8 @@ function SessionDetailLoaded({
     status: git.status,
     summary: gitSummary.summary,
     settled: git.settled || gitSummary.settled,
-    available: gitPresentation.state === "ready" || gitPresentation.state === "updating",
+    available: sessionMayShowChangeStatus(session.status) &&
+      (gitPresentation.state === "ready" || gitPresentation.state === "updating"),
   });
 
   useEffect(() => {
