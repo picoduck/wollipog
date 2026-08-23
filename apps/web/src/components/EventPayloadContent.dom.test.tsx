@@ -29,6 +29,16 @@ function ref(artifactId: string, text: string, mimeType: EventPayloadReference["
   };
 }
 
+async function waitForDom(predicate: () => boolean, description: string): Promise<void> {
+  const deadline = Date.now() + 1_000;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${description}`);
+    await act(async () => {
+      await new Promise((resolve) => domWindow.setTimeout(resolve, 0));
+    });
+  }
+}
+
 test("event payload loader reconstructs ordered chunks after MIME, size, digest, and UTF-8 checks", async () => {
   const refs = [ref("a", "first "), ref("b", "second")];
   const blobs = new Map([
@@ -82,17 +92,19 @@ test("event payload content is preview-first, explicitly loads, hides, and retri
     assert.deepEqual(requested, []);
     assert.equal(container.querySelector("pre")?.textContent, "preview");
 
-    await act(async () => {
-      (container.querySelector("button") as HTMLButtonElement).click();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
+    await act(async () => { (container.querySelector("button") as HTMLButtonElement).click(); });
+    await waitForDom(
+      () => Boolean(container.querySelector('[role="alert"]')?.textContent?.includes("temporary failure")),
+      "the payload load error",
+    );
     assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /temporary failure/);
 
     fail = false;
-    await act(async () => {
-      (container.querySelector("button") as HTMLButtonElement).click();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
+    await act(async () => { (container.querySelector("button") as HTMLButtonElement).click(); });
+    await waitForDom(
+      () => container.querySelector("pre")?.textContent === "complete payload",
+      "the complete payload",
+    );
     assert.deepEqual(requested, ["payload", "payload"]);
     assert.equal(container.querySelector("pre")?.textContent, "complete payload");
 
