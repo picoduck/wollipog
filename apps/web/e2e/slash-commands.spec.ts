@@ -45,9 +45,11 @@ test("the typed command menu groups, ranks, selects, and dispatches provider com
   await expect.poll(() => composer.evaluate((element) => (element as HTMLTextAreaElement).selectionStart)).toBe(4);
   await page.keyboard.press("Tab");
   await expect(composer).toHaveValue("/review ");
+  await expect.poll(() => composer.evaluate((element) =>
+    (element as HTMLTextAreaElement).selectionStart)).toBe(8);
 
   await composer.fill("/review focus on tests");
-  await expect(composer).toHaveAttribute("aria-expanded", "false");
+  await expect(composer).toHaveValue("/review focus on tests");
   await page.keyboard.press("Enter");
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests())).toEqual([{
     sessionId: "session-alpha",
