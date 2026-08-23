@@ -1728,6 +1728,15 @@ textarea {
   background: var(--text-dim);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--text-dim) 14%, transparent);
 }
+.session-more-actions { width: 32px; height: 32px; padding: 0; }
+.session-more-actions:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+.session-more-actions:disabled:hover {
+  color: var(--text-dim);
+  background: transparent;
+}
 .detail-actions {
   display: flex;
   align-items: center;
@@ -1809,13 +1818,9 @@ textarea {
 }
 @media (max-width: 600px) {
   .detail-actions > .btn,
-  .detail-actions .overflow-menu > .btn,
   .menu-item,
   .plus-item {
     min-height: 44px;
-  }
-  .detail-actions .overflow-menu > .btn {
-    min-width: 44px;
   }
   .detail-note {
     max-width: 160px;
@@ -9940,6 +9945,7 @@ body.shell-dock-dragging * {
   .session-detail > .detail-head .detail-crumbs .cctx-item {
     max-width: 96px;
   }
+  .session-more-actions { width: 44px; height: 44px; }
   .detail-actions {
     flex-wrap: wrap;
     row-gap: 6px;
@@ -9947,12 +9953,8 @@ body.shell-dock-dragging * {
   .session-detail > .detail-head > .detail-actions {
     min-width: 0;
   }
-  .session-detail > .detail-head > .detail-actions .overflow-menu > .btn,
   .session-detail > .detail-head > .detail-actions .menu-item {
     min-height: 44px;
-  }
-  .session-detail > .detail-head > .detail-actions .overflow-menu > .btn {
-    min-width: 44px;
   }
   .detail-scroll {
     padding: 12px 0;

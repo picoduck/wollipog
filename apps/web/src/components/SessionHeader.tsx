@@ -22,7 +22,7 @@ import { reachableTranscriptShareOrigin, transcriptShareUrl } from "../transcrip
 import { ChangeStatusBadge, SessionStatusIndicators, Modal, CopyButton } from "./common.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { useFeedback } from "./FeedbackProvider.js";
-import { ChevronLeftIcon } from "./Icons.js";
+import { ChevronLeftIcon, MoreHorizontalIcon } from "./Icons.js";
 
 const BACKGROUND_WORK_DOT_LABELS: Record<BackgroundWorkState, string> = {
   running: "Waiting on External Job",
@@ -227,7 +227,7 @@ export function SessionHeader({
         <div className="overflow-menu">
             <button
               ref={menu.triggerRef}
-              className="btn ghost sm"
+              className="icon-btn session-more-actions"
               onClick={menu.toggle}
               onKeyDown={menu.onTriggerKeyDown}
               disabled={busy}
@@ -237,7 +237,7 @@ export function SessionHeader({
               aria-expanded={menuOpen}
               aria-controls={menu.menuId}
             >
-              ⋯
+              <MoreHorizontalIcon size={16} />
             </button>
             {menuOpen && (
               <>
