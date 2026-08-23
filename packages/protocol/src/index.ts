@@ -1373,6 +1373,57 @@ export interface PolicyHookEvaluationResponse {
   expiresAt?: number;
 }
 
+/** User attention is orthogonal to lifecycle: a paused turn may need an answer, authentication,
+ * or approval, while an older runner may expose only the undifferentiated input_required state. */
+export type SessionAttentionKind =
+  | "approval_required"
+  | "answer_required"
+  | "authentication_required"
+  | "review_requested"
+  | "input_required";
+
+export interface SessionAttentionStatus {
+  kind: SessionAttentionKind;
+  label: string;
+  description: string;
+}
+
+/** Canonical, compatibility-safe projection of the concrete action a person must take. */
+export function sessionAttentionStatus(
+  session: Pick<SessionView, "status" | "pendingApproval">,
+): SessionAttentionStatus | null {
+  const pending = session.pendingApproval;
+  if (pending?.kind === "question") {
+    return {
+      kind: "answer_required",
+      label: "Answer Required",
+      description: "The agent asked a question and is waiting for an answer.",
+    };
+  }
+  if (pending?.kind === "authentication") {
+    return {
+      kind: "authentication_required",
+      label: "Authentication Required",
+      description: "The agent is waiting for authentication.",
+    };
+  }
+  if (pending) {
+    return {
+      kind: "approval_required",
+      label: "Approval Required",
+      description: "The agent is waiting for an approval decision.",
+    };
+  }
+  if (session.status === "input_required") {
+    return {
+      kind: "input_required",
+      label: "Input Required",
+      description: "This session needs user input, but an older or incomplete update did not identify the action.",
+    };
+  }
+  return null;
+}
+
 /** One option in a structured agent question. The normalized contract preserves provider-native
  * labels and descriptions without exposing provider-specific wire shapes to the UI. */
 export interface QuestionOption {

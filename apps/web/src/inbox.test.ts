@@ -327,6 +327,8 @@ test("status predicates distinguish active, running, and blocked states", () => 
     assert.equal(isInboxActiveStatus(status), false, status);
   }
   assert.equal(isInboxRunning(session("running", { status: "running" })), true);
+  assert.equal(isInboxRunning(session("queued", { status: "queued" })), false);
+  assert.equal(isInboxRunning(session("starting", { status: "starting" })), false);
   assert.equal(isInboxRunning(session("blocked", { status: "input_required" })), false);
   assert.equal(isInboxBlocked(session("blocked", { status: "input_required" })), true);
   assert.equal(isInboxBlocked(session("approval", {

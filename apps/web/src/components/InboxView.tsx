@@ -10,7 +10,6 @@ import {
   newSessionPresetForInboxSplit,
   inboxSelectionAfterMove,
   inboxSelectionAfterArchive,
-  isInboxRunning,
   inboxSplitByKey,
   nextInboxSplitKey,
   repairInboxSelectionAfterSnapshot,
@@ -45,7 +44,6 @@ import {
 } from "../session-reminders.js";
 import { SnoozeDialog } from "./SnoozeDialog.js";
 import type { NewSessionPreset } from "./NewSessionDialog.js";
-import { isHeartbeatBusy } from "../activity.js";
 import { SearchIcon } from "./Icons.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { dispatchVirtualViewportIntent } from "../viewport-intent.js";
@@ -326,6 +324,15 @@ export function InboxView({
     });
   }, [pinnedProjects, pinnedSessions, projects, projectsSupported, reminderMode, reminders, sessions, stalledSessionIds]);
   const activeSplit = inboxSplitByKey(splits, inbox.splitKey);
+  const activityCounts = useMemo(() => (activeSplit?.sessions ?? []).reduce(
+    (counts, session) => {
+      if (session.status === "running") counts.running += 1;
+      else if (session.status === "queued") counts.queued += 1;
+      else if (session.status === "starting") counts.starting += 1;
+      return counts;
+    },
+    { running: 0, queued: 0, starting: 0 },
+  ), [activeSplit?.sessions]);
   const activeNewSessionPreset = useMemo<NewSessionPreset | undefined>(
     () => newSessionPresetForInboxSplit(activeSplit),
     [activeSplit],
@@ -968,7 +975,9 @@ export function InboxView({
           selectedSessionId={displayedSelection}
           pinnedSessionIds={pinnedSessions}
           stalledSessionIds={stalledSessionIds}
-          runningCount={(activeSplit?.sessions ?? []).filter(isInboxRunning).length}
+          runningCount={activityCounts.running}
+          queuedCount={activityCounts.queued}
+          startingCount={activityCounts.starting}
           filtered={normalizedQuery.length > 0}
           emptyState={reminderMode === "snoozed"
             ? {
@@ -1019,7 +1028,9 @@ export function InboxView({
         />
         <footer className="inbox-activity-footer" aria-label="Inbox Status and Shortcuts">
           <div className="inbox-activity-summary" aria-label="Inbox Activity Summary">
-            <span>{(activeSplit?.sessions ?? []).filter((session) => isHeartbeatBusy(session.status)).length} Active</span>
+            <span>{activityCounts.running} Running</span>
+            <span>{activityCounts.queued} Queued</span>
+            <span>{activityCounts.starting} Starting</span>
             <span className="blocked">{activeSplit?.blockedCount ?? 0} Blocked</span>
             <span className="stalled" aria-live="polite">{activeSplit?.stalledCount ?? 0} Stalled</span>
           </div>

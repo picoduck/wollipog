@@ -5,7 +5,7 @@ import { useApi } from "../api-context.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { relativeTime } from "../format.js";
 import { machineOptionLabels, runnerDisplay } from "../runners.js";
-import { StatusBadge, Empty } from "./common.js";
+import { SessionStatusIndicators, Empty } from "./common.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { ReviewQueue } from "./ReviewQueue.js";
 import { MeasuredVirtualList } from "./MeasuredVirtualList.js";
@@ -311,7 +311,7 @@ function SessionCard({
       onDragEnd={onDragEnd}
     >
       <div className="card-top">
-        <StatusBadge status={session.status} stopOperation={session.stopOperation} />
+        <SessionStatusIndicators session={session} disconnected={!runnerOnline} />
         <span className="card-time">{relativeTime(session.lastEventAt ?? session.updatedAt)}</span>
       </div>
       <button

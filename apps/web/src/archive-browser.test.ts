@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { SessionStatus, SessionView } from "@wollipog/protocol";
+import { statusMeta } from "./format.js";
 import {
   ARCHIVE_PAGE_SIZE,
   CANONICAL_LIFECYCLE_LABELS,
+  canonicalLifecycleLabel,
   filterArchiveSessions,
   mergeArchiveSessionCatalog,
   pageArchiveSessions,
@@ -63,13 +65,19 @@ test("archive search surfaces archive and every canonical lifecycle label indepe
     queued: "Queued",
     starting: "Starting",
     running: "Running",
-    input_required: "Input Required",
-    idle: "Idle",
+    input_required: "Awaiting Input",
+    idle: "Awaiting Prompt",
     completed: "Completed",
     failed: "Failed",
     stopped: "Stopped",
   };
   assert.deepEqual(CANONICAL_LIFECYCLE_LABELS, expected);
+  assert.equal(canonicalLifecycleLabel("toString" as SessionStatus), "Status Unavailable");
+  assert.deepEqual(
+    Object.fromEntries(Object.keys(expected).map((status) => [status, statusMeta(status as SessionStatus).label])),
+    CANONICAL_LIFECYCLE_LABELS,
+    "archive and primary lifecycle labels must stay identical",
+  );
   for (const [status, label] of Object.entries(expected) as [SessionStatus, string][]) {
     assert.equal(sessionArchiveSearchDetail(session({ status })), `Archived · ${label} · Wollipog · Codex — Interactive`);
   }

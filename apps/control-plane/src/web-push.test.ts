@@ -617,17 +617,21 @@ test("pushDecision fires on the attention transitions and stays quiet otherwise"
   } as Partial<SessionView>));
   assert.equal(ask?.urgency, "high");
   assert.match(ask!.body, /Run npm install\?/);
-  // Question kind is labeled as a question.
+  assert.match(
+    pushDecision(prev("running"), view("input_required", { pendingApproval: null }))!.body,
+    /^Input required/,
+  );
+  // Questions ask for an answer rather than approval.
   const q = pushDecision(prev("running"), view("input_required", {
     pendingApproval: { requestId: "r", title: "Which DB?", options: [], kind: "question" },
   } as Partial<SessionView>));
-  assert.match(q!.body, /^Question/);
+  assert.match(q!.body, /^Answer required/);
   const auth = pushDecision(prev("running"), view("input_required", {
     pendingApproval: { requestId: "auth", title: "Sign in to Gemini CLI", options: [], kind: "authentication" },
   } as Partial<SessionView>));
-  assert.match(auth!.body, /^Sign-in required/);
+  assert.match(auth!.body, /^Authentication required/);
   // Turn settle + completion + failure.
-  assert.match(pushDecision(prev("running"), view("idle"))!.title, /ready/);
+  assert.match(pushDecision(prev("running"), view("idle"))!.title, /awaiting a prompt/);
   assert.match(pushDecision(prev("running"), view("completed"))!.title, /completed/);
   assert.match(pushDecision(prev("idle"), view("failed"))!.title, /failed/);
   // Quiet: no transition, non-busy→idle, non-busy→completed, busy→busy, →stopped.

@@ -201,7 +201,7 @@ test("large archives paginate, deep-link, filter, and accept live lifecycle upda
   const sessions = Array.from({ length: 55 }, (_, index) => session(index));
   const fixture = await mount(sessions);
   assert.equal(fixture.container.querySelectorAll("tbody tr").length, 50);
-  assert.match(fixture.container.textContent ?? "", /Archived.*Idle/s,
+  assert.match(fixture.container.textContent ?? "", /Archived.*Awaiting Prompt/s,
     "archive and canonical lifecycle labels are both text-backed");
   assert.equal(fixture.container.querySelector('nav[aria-label="Archived Sessions Pagination"]')?.textContent?.includes("Page 1"), true);
   assert.ok([...fixture.container.querySelectorAll("button")].some((candidate) => candidate.textContent?.trim() === "Stop"),
@@ -224,11 +224,11 @@ test("large archives paginate, deep-link, filter, and accept live lifecycle upda
   assert.ok(lifecycle);
   await act(async () => { lifecycle.click(); });
   const inputRequired = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
-    .find((option) => option.textContent?.trim() === "Input Required");
+    .find((option) => option.textContent?.trim() === "Awaiting Input");
   assert.ok(inputRequired);
   await act(async () => { inputRequired.click(); });
   assert.equal(fixture.container.querySelectorAll("tbody tr").length, 1);
-  assert.match(fixture.container.textContent ?? "", /Input Required/);
+  assert.match(fixture.container.textContent ?? "", /Awaiting Input/);
 
   await act(async () => {
     fixture.socket.push({ type: "session_upsert", session: session(0, { status: "stopped", updatedAt: 100 }) });
@@ -290,7 +290,7 @@ test("unarchive uses the existing authorized mutation and removes the row from t
   await fixture.unmount();
 });
 
-test("Stop Pending sessions fall back to the legacy idempotent archive mutation", async () => {
+test("Stopping sessions fall back to the legacy idempotent archive mutation", async () => {
   const calls: Array<[string, boolean]> = [];
   const pending = session(2, {
     archived: false,
@@ -307,7 +307,7 @@ test("Stop Pending sessions fall back to the legacy idempotent archive mutation"
     },
   });
 
-  assert.match(fixture.container.textContent ?? "", /Stop Pending/);
+  assert.match(fixture.container.textContent ?? "", /Stopping/);
   const retry = button(fixture.container, "Retry Stop");
   assert.equal([...fixture.container.querySelectorAll("button")].some((candidate) => candidate.textContent?.trim() === "Stop"), false,
     "pending recovery replaces the ordinary Stop action even for a terminal lifecycle");

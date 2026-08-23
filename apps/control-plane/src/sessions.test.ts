@@ -7957,7 +7957,7 @@ test("only live continuation provenance suppresses its trailing Ready across res
   assert.equal(db.getSession("s_box1")?.backgroundDeliveries?.[0]?.statusSettledAt, undefined,
     "historical delivery replay cannot arm the currently running foreground turn");
   svc.onSessionStatus("s_box1", "idle");
-  assert.match(sent.at(-1) ?? "", /is ready/, "the unrelated later foreground idle still notifies");
+  assert.match(sent.at(-1) ?? "", /is awaiting a prompt/, "the unrelated later foreground idle still notifies");
 
   db.updateSessionStatus("s_box1", "running", Date.now());
   svc.onSessionEvent("s_box1", {
@@ -8065,7 +8065,7 @@ test("a restoration-replayed idle consumes the armed settlement instead of dupli
   db.updateSessionStatus("s_box1", "idle", Date.now());
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (svc as any).notifyTransition({ ...previous, status: "running" }, "s_box1");
-  assert.equal(sent.filter((title) => /is ready/.test(title)).length, 0,
+  assert.equal(sent.filter((title) => /is awaiting a prompt/.test(title)).length, 0,
     "the restoration replay consumes the settlement instead of emitting the duplicate Ready");
   assert.ok(db.getSession("s_box1")?.backgroundDeliveries?.some((d) =>
     d.continuationId === "bgcont-restored" && d.statusSettledAt != null));
@@ -8073,7 +8073,7 @@ test("a restoration-replayed idle consumes the armed settlement instead of dupli
   // The next genuine busy -> idle is unrelated and must notify again.
   db.updateSessionStatus("s_box1", "running", Date.now());
   svc.onSessionStatus("s_box1", "idle");
-  assert.equal(sent.filter((title) => /is ready/.test(title)).length, 1);
+  assert.equal(sent.filter((title) => /is awaiting a prompt/.test(title)).length, 1);
 });
 
 test("a terminal transition orphans an armed settlement so a later run's Ready is not suppressed", () => {
@@ -8097,7 +8097,7 @@ test("a terminal transition orphans an armed settlement so a later run's Ready i
   svc.onSessionStatus("s_box1", "failed");
   db.updateSessionStatus("s_box1", "running", Date.now());
   svc.onSessionStatus("s_box1", "idle");
-  assert.equal(sent.filter((title) => /is ready/.test(title)).length, 1,
+  assert.equal(sent.filter((title) => /is awaiting a prompt/.test(title)).length, 1,
     "the later run's Ready is emitted; the stale marker was cleared at terminality");
   assert.ok(db.getSession("s_box1")?.backgroundDeliveries?.every((d) =>
     d.continuationId !== "bgcont-orphaned" || d.statusSettledAt == null),
@@ -8123,9 +8123,9 @@ test("an armed settlement survives a runner disconnect and still suppresses afte
   // Transient disconnect: the stop is provisional and reconnect hydration restores the same run.
   svc.failRunnerSessions(RUNNER_ID);
   svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ status: "running" })]);
-  const before = sent.filter((title) => /is ready/.test(title)).length;
+  const before = sent.filter((title) => /is awaiting a prompt/.test(title)).length;
   svc.onSessionStatus("s_box1", "idle");
-  assert.equal(sent.filter((title) => /is ready/.test(title)).length, before,
+  assert.equal(sent.filter((title) => /is awaiting a prompt/.test(title)).length, before,
     "the delivery's trailing Ready stays suppressed across the disconnect flap");
   assert.ok(db.getSession("s_box1")?.backgroundDeliveries?.some((d) =>
     d.continuationId === "bgcont-flap" && d.statusSettledAt != null));
@@ -8151,7 +8151,7 @@ test("a terminal snapshot orphans an armed settlement like a terminal status eve
   svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ status: "failed" })]);
   db.updateSessionStatus("s_box1", "running", Date.now());
   svc.onSessionStatus("s_box1", "idle");
-  assert.equal(sent.filter((title) => /is ready/.test(title)).length, 1,
+  assert.equal(sent.filter((title) => /is awaiting a prompt/.test(title)).length, 1,
     "a later run's Ready is emitted; the terminal snapshot orphaned the stale marker");
 });
 
@@ -9695,7 +9695,7 @@ test("notify hook: fires with the ask on input_required, on settle, on failure â
   assert.equal(sent.length, 1, "approving is the user's own action â€” no notification");
   svc.onSessionStatus(id, "idle");
   assert.equal(sent.length, 2);
-  assert.match(sent[1]!.title, /is ready/);
+  assert.match(sent[1]!.title, /is awaiting a prompt/);
 
   // Failure notifies; a stale post-terminal status does not (early return preserves terminal).
   svc.onSessionStatus(id, "failed", "boom");

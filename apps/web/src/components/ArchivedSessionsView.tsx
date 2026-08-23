@@ -389,7 +389,7 @@ export function ArchivedSessionsView() {
                       {stopFailed && <span className="archive-badge" title={session.archiveOperation?.failure?.message}>
                         Stop Failed
                       </span>}
-                      {stopPending && <span className="archive-badge">Stop Pending</span>}
+                      {stopPending && <span className="archive-badge">Stopping</span>}
                     </div></td>
                     <td>{rowMetadata.project}</td>
                     <td>{rowMetadata.location}</td>

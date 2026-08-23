@@ -65,7 +65,7 @@ test("matchSessions: empty query lists recent live and archived sessions", () =>
     ["z", "b", "a"],
   );
   assert.match(hits[0]?.detail ?? "", /Archived/);
-  assert.match(hits[0]?.detail ?? "", /Idle/, "archive and lifecycle remain independent metadata");
+  assert.match(hits[0]?.detail ?? "", /Awaiting Prompt/, "archive and lifecycle remain independent metadata");
 });
 
 test("matchSessions normalizes both persisted Conductor labels for display and search", () => {

@@ -328,6 +328,8 @@ test("InboxView keeps mobile browsing order stable before and through a touch", 
   });
   await act(async () => { socket.push(snapshot([session("A", 30), session("B", 20)])); });
   assert.deepEqual(rowTitles(container), ["Session A", "Session B"]);
+  assert.match(container.textContent ?? "", /Awaiting Prompt/);
+  assert.doesNotMatch(container.textContent ?? "", /Diff Ready|Ready for Review/);
 
   const grid = container.querySelector<HTMLElement>(".inbox-list")!;
   const pointer = (type: string, pointerId: number, pointerType: string) =>
@@ -336,12 +338,19 @@ test("InboxView keeps mobile browsing order stable before and through a touch", 
   await act(async () => {
     socket.push({
       type: "session_upsert",
-      session: session("B", 40, { preview: "Approval arrived.", status: "input_required" }),
+      session: session("B", 40, {
+        preview: "Question arrived.",
+        status: "input_required",
+        column: "input_required",
+        pendingApproval: { requestId: "question", title: "Which database?", options: [], kind: "question" },
+      }),
     });
     socket.push({ type: "session_upsert", session: session("C", 50) });
   });
   assert.deepEqual(rowTitles(container), ["Session A", "Session B", "Session C"]);
-  assert.match(container.textContent ?? "", /Approval arrived/);
+  assert.match(container.textContent ?? "", /Question arrived/);
+  assert.match(container.textContent ?? "", /Awaiting Input/);
+  assert.match(container.textContent ?? "", /Answer Required/);
 
   await act(async () => { socket.push({ type: "session_removed", sessionId: "A" }); });
   assert.deepEqual(rowTitles(container), ["Session B", "Session C"]);

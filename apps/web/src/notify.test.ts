@@ -29,21 +29,22 @@ test("running -> input_required notifies with the approval title", () => {
   assert.equal(p!.sessionId, "s1");
 });
 
-test("authentication input is labeled as sign-in rather than tool approval", () => {
+test("authentication input is distinct from tool approval", () => {
   const next = session({
     status: "input_required",
     pendingApproval: { requestId: "auth", title: "Sign in to Gemini CLI", options: [], kind: "authentication" },
   });
-  assert.match(notifyDecision(session({ status: "running" }), next)!.body, /^Sign-in required/);
+  assert.match(notifyDecision(session({ status: "running" }), next)!.body, /^Authentication required/);
 });
 
 test("running -> completed / failed / idle each notify", () => {
   assert.match(notifyDecision(session({ status: "running" }), session({ status: "completed" }))!.title, /completed/);
   assert.match(notifyDecision(session({ status: "running" }), session({ status: "failed" }))!.title, /failed/);
-  assert.match(notifyDecision(session({ status: "running" }), session({ status: "idle" }))!.title, /ready/);
+  assert.match(notifyDecision(session({ status: "running" }), session({ status: "idle" }))!.title, /awaiting a prompt/);
+  assert.match(notifyDecision(session({ status: "running" }), session({ status: "idle" }))!.body, /awaiting another prompt/);
 });
 
-test("only a newly settled live background delivery suppresses the trailing Ready", () => {
+test("only a newly settled live background delivery suppresses the trailing Awaiting Prompt", () => {
   const delivery = {
     continuationId: "bgcont-1",
     parentTurnId: "turn-1",
@@ -52,7 +53,7 @@ test("only a newly settled live background delivery suppresses the trailing Read
     notificationQueuedAt: 100,
   };
   const historical = session({ status: "running", backgroundDeliveries: [delivery] });
-  assert.match(notifyDecision(historical, session({ status: "idle", backgroundDeliveries: [delivery] }))!.title, /ready/,
+  assert.match(notifyDecision(historical, session({ status: "idle", backgroundDeliveries: [delivery] }))!.title, /awaiting a prompt/,
     "an old replayed delivery cannot suppress an unrelated foreground completion");
   assert.equal(notifyDecision(historical, session({
     status: "idle",
@@ -155,4 +156,18 @@ test("notification tags and click handlers remain bound to the originating insta
     Object.defineProperty(globalThis, "document", { configurable: true, value: previousDocument });
     Object.defineProperty(globalThis, "window", { configurable: true, value: previousWindow });
   }
+});
+
+
+test("questions and approvals receive distinct notification labels", () => {
+  const question = session({
+    status: "input_required",
+    pendingApproval: { requestId: "question", title: "Which database?", options: [], kind: "question" },
+  });
+  const approval = session({
+    status: "input_required",
+    pendingApproval: { requestId: "approval", title: "Run deploy?", options: [], kind: "permission" },
+  });
+  assert.match(notifyDecision(session({ status: "running" }), question)!.body, /^Answer required/);
+  assert.match(notifyDecision(session({ status: "running" }), approval)!.body, /^Approval required/);
 });

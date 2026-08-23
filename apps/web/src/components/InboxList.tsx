@@ -43,6 +43,8 @@ export const InboxList = forwardRef<HTMLDivElement, {
   /** Test/story override paired with `activityBySession`. */
   activityNow?: number;
   runningCount: number;
+  queuedCount: number;
+  startingCount: number;
   filtered: boolean;
   emptyState?: InboxEmptyState;
   onNewSession: () => void;
@@ -59,6 +61,8 @@ export const InboxList = forwardRef<HTMLDivElement, {
   stalledSessionIds,
   activityNow,
   runningCount,
+  queuedCount,
+  startingCount,
   filtered,
   emptyState,
   onNewSession,
@@ -96,7 +100,7 @@ export const InboxList = forwardRef<HTMLDivElement, {
         <strong>{filtered ? "No Matching Sessions" : emptyState?.title ?? "All Agents Unblocked"}</strong>
         <span>{filtered
           ? "Try a different search."
-          : emptyState?.description ?? `${runningCount} ${runningCount === 1 ? "session is" : "sessions are"} still running.`}</span>
+          : emptyState?.description ?? `Running: ${runningCount}. Queued: ${queuedCount}. Starting: ${startingCount}.`}</span>
         {!filtered && (emptyState?.showNewSession ?? true) && (
           <button type="button" className="btn primary sm" onClick={onNewSession}>
             New Session <kbd aria-hidden="true">C</kbd>

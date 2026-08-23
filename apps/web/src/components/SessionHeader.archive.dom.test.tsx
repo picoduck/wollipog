@@ -82,17 +82,20 @@ test("Unarchive on an archived Stop Failed session cancels the archive follow-up
           <SessionHeader
             session={session}
             onBack={() => undefined}
-            runnerOnline
+            runnerOnline={false}
             runnerProtocolVersion={85}
             providerLogoutSupported={false}
             stopBeforeArchiveSupported
             exportReady={false}
+            changeStatus={{ kind: "changes_present", label: "Changes Present", description: "Git confirms changes." }}
           />
         </FeedbackContext.Provider>
       </ApiProvider>,
     );
   });
 
+  assert.match(container.textContent ?? "", /Disconnected/);
+  assert.match(container.textContent ?? "", /Changes Present/);
   await act(async () => { button(container, "More Actions").click(); await tick(); });
   await act(async () => { button(container, "Unarchive").click(); await tick(); await tick(); });
 

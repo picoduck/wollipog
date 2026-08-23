@@ -1,14 +1,17 @@
 import React, { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
-import type {
-  ArchiveStatus,
-  ArchiveOperationView,
-  StopOperationView,
-  BackgroundDeliveryWatchdogState,
-  BackgroundNotificationReceiptState,
-  BackgroundWorkState,
-  SessionStatus,
+import {
+  sessionAttentionStatus,
+  type ArchiveStatus,
+  type ArchiveOperationView,
+  type StopOperationView,
+  type BackgroundDeliveryWatchdogState,
+  type BackgroundNotificationReceiptState,
+  type BackgroundWorkState,
+  type SessionStatus,
+  type SessionView,
 } from "@wollipog/protocol";
 import { statusMeta } from "../format.js";
+import type { SessionChangeStatus } from "../session-status.js";
 import { CheckIcon, CloseIcon, CopyIcon, WarningIcon } from "./Icons.js";
 
 let nextModalLayerId = 1;
@@ -153,7 +156,7 @@ export function StatusBadge({ status, archiveStatus, archiveOperation, stopOpera
   const operation = stopOperation ?? archiveOperation;
   const operationStatus = operation?.status ?? archiveStatus;
   const m = operationStatus === "stop_pending"
-    ? { label: "Stop Pending", className: "st-running", busy: true }
+    ? { label: "Stopping", className: "st-running", busy: true }
     : operationStatus === "stop_failed"
       ? { label: "Stop Failed", className: "st-failed", busy: false }
       : statusMeta(status);
@@ -161,6 +164,54 @@ export function StatusBadge({ status, archiveStatus, archiveOperation, stopOpera
     <span className={"status-badge " + m.className} title={operation?.failure?.message}>
       <span className={"status-dot2 " + (m.busy ? "pulse" : "")} />
       {m.label}
+    </span>
+  );
+}
+
+export function AttentionBadge({ session }: {
+  session: Pick<SessionView, "status" | "pendingApproval">;
+}) {
+  const attention = sessionAttentionStatus(session);
+  if (!attention) return null;
+  return (
+    <span className="status-badge st-input" title={attention.description} aria-label={attention.label}>
+      <span className="status-dot2" aria-hidden="true" />
+      {attention.label}
+    </span>
+  );
+}
+
+export function SessionStatusIndicators({ session, disconnected = false }: {
+  session: Pick<SessionView, "status" | "pendingApproval" | "archiveStatus" | "archiveOperation" | "stopOperation">;
+  disconnected?: boolean;
+}) {
+  return (
+    <span className="session-status-indicators">
+      <StatusBadge status={session.status} archiveStatus={session.archiveStatus} archiveOperation={session.archiveOperation} stopOperation={session.stopOperation} />
+      <AttentionBadge session={session} />
+      {disconnected && (
+        <span
+          className="status-badge st-failed"
+          title="The session runner is disconnected."
+          aria-label="Disconnected"
+        >
+          <span className="status-dot2" aria-hidden="true" />
+          Disconnected
+        </span>
+      )}
+    </span>
+  );
+}
+
+export function ChangeStatusBadge({ change }: { change: SessionChangeStatus | null }) {
+  if (!change) return null;
+  const className = change.kind === "ready_for_review"
+    ? "st-done"
+    : change.kind === "changes_present" ? "st-idle" : "st-stopped";
+  return (
+    <span className={"status-badge " + className} title={change.description} aria-label={change.label}>
+      <span className="status-dot2" aria-hidden="true" />
+      {change.label}
     </span>
   );
 }
