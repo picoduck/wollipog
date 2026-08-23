@@ -25,6 +25,8 @@ import {
   defaults,
   formFrom,
   specOf,
+  withAgent,
+  withModel,
   type FormState,
 } from "../automation-form.js";
 
@@ -323,15 +325,13 @@ export function AutomationsView() {
               <>
                 <label>Machine<select value={form.runnerId} onChange={(event) => {
                   const runner = runners.get(event.target.value);
-                  setForm((current) => ({ ...current, runnerId: event.target.value,
-                    workspaceId: runner?.workspaces[0]?.id ?? "", agentId: runner?.agents[0]?.id ?? "" }));
+                  setForm((current) => ({ ...withAgent(current, runner?.agents[0]?.id ?? ""),
+                    runnerId: event.target.value, workspaceId: runner?.workspaces[0]?.id ?? "" }));
                 }}>{[...runners.values()].map((runner) => <option key={runner.runnerId} value={runner.runnerId}>{machineLabels.get(runner.runnerId)}</option>)}</select></label>
                 <label>Workspace<select value={form.workspaceId} onChange={(event) => patch("workspaceId", event.target.value)}>
                   {(selectedRunner?.workspaces ?? []).map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}
                 </select></label>
-                {form.actionKind === "create_session" ? <label>Agent<select value={form.agentId} onChange={(event) => setForm((current) => ({
-                  ...current, agentId: event.target.value, model: "", effort: "", permissionMode: "",
-                }))}>
+                {form.actionKind === "create_session" ? <label>Agent<select value={form.agentId} onChange={(event) => setForm((current) => withAgent(current, event.target.value))}>
                   {(selectedRunner?.agents ?? []).map((agent) => <option key={agent.id} value={agent.id}>{agentDisplayName(agent)}</option>)}
                 </select></label> : <label>Workflow<select value={form.workflowId} onChange={(event) => patch("workflowId", event.target.value)}>
                   {workflows.map((workflow) => <option key={`${workflow.workflowId}:${workflow.version}`} value={workflow.workflowId}>{workflow.name} · v{workflow.version}</option>)}
@@ -341,7 +341,7 @@ export function AutomationsView() {
             {form.actionKind === "create_session" && <>
               {modelOptions.length > 0 && <div className="automation-field">
                 <span className="field-label">Model</span>
-                <Select label="Model" value={form.model} onChange={(value) => patch("model", value)}
+                <Select label="Model" value={form.model} onChange={(value) => setForm((current) => withModel(current, value, agentCapabilities))}
                   options={[{ value: "", label: "Agent Default" },
                     ...modelOptions.map((model) => ({
                       value: model.id,

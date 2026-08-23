@@ -1,4 +1,5 @@
 import type {
+  AgentCapabilities,
   AutomationAction,
   AutomationNotificationEvent,
   AutomationSchedule,
@@ -135,6 +136,27 @@ function sessionConfig(form: FormState, base: SessionConfig | undefined): Sessio
     ...(form.permissionMode ? { permissionMode: form.permissionMode } : {}),
   };
   return Object.keys(config).length ? config : undefined;
+}
+
+/**
+ * Model, effort and permission mode are advertised PER AGENT, so a different agent invalidates all
+ * three. Carrying them over saves a spec that passes `validateAutomationSpec` — which checks shape
+ * only — and is then rejected by `capabilityConfigError` when the session is created, so the
+ * automation fails on every scheduled run instead of at the moment the choice was made.
+ */
+export function withAgent(form: FormState, agentId: string): FormState {
+  return { ...form, agentId, model: "", effort: "", permissionMode: "" };
+}
+
+/**
+ * Effort is advertised per MODEL, falling back to the agent's levels. Switching to a model that
+ * does not advertise the selected effort clears it for the same reason as above; permission mode is
+ * agent-scoped and survives a model change.
+ */
+export function withModel(form: FormState, model: string, capabilities: AgentCapabilities | undefined): FormState {
+  const selected = model ? capabilities?.models.find((candidate) => candidate.id === model) : undefined;
+  const efforts = (selected?.efforts?.length ? selected.efforts : capabilities?.effortLevels) ?? [];
+  return { ...form, model, effort: form.effort && efforts.includes(form.effort) ? form.effort : "" };
 }
 
 export interface BuildSpecContext {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AutomationSpec } from "@wollipog/protocol";
-import { buildSpec, defaults, formFrom } from "./automation-form.js";
+import { buildSpec, defaults, formFrom, withAgent, withModel } from "./automation-form.js";
 
 const CONTEXT = { projectsSupported: false, projects: [] };
 
@@ -144,4 +144,52 @@ test("switching action kind does not carry the previous action's fields", () => 
   const saved = buildSpec(switched, { ...CONTEXT, base: spec });
   assert(saved.action.kind === "prompt_session");
   assert.deepEqual(saved.action.request, { text: "Sweep." });
+});
+
+const CAPS = {
+  models: [
+    { id: "opus[1m]", displayName: "Opus 5", efforts: ["low", "medium", "high"] },
+    { id: "haiku", displayName: "Haiku 4.5", efforts: ["low"] },
+  ],
+  effortLevels: ["low", "medium", "high"],
+  permissionModes: ["default", "auto"],
+  slashCommands: [],
+  supportsImages: true,
+  supportsApprovals: true,
+};
+
+test("changing agent clears every agent-scoped selection", () => {
+  const form = { ...defaults(), agentId: "claude-native", model: "opus[1m]", effort: "high", permissionMode: "auto" };
+  const moved = withAgent(form, "codex-native");
+  // Carrying these would save a spec that `capabilityConfigError` rejects at fire time, so the
+  // automation would fail on every scheduled run rather than at the moment of the choice.
+  assert.deepEqual(
+    { agentId: moved.agentId, model: moved.model, effort: moved.effort, permissionMode: moved.permissionMode },
+    { agentId: "codex-native", model: "", effort: "", permissionMode: "" },
+  );
+});
+
+test("changing model drops an effort the new model does not advertise", () => {
+  const form = { ...defaults(), model: "opus[1m]", effort: "high", permissionMode: "auto" };
+  const narrowed = withModel(form, "haiku", CAPS);
+  assert.equal(narrowed.effort, "");
+  // Permission mode is agent-scoped, so a model change must not disturb it.
+  assert.equal(narrowed.permissionMode, "auto");
+});
+
+test("changing model keeps an effort the new model still advertises", () => {
+  const form = { ...defaults(), model: "opus[1m]", effort: "low" };
+  assert.equal(withModel(form, "haiku", CAPS).effort, "low");
+});
+
+test("returning to the agent default validates effort against the agent's levels", () => {
+  const form = { ...defaults(), model: "haiku", effort: "low" };
+  const cleared = withModel(form, "", CAPS);
+  assert.equal(cleared.model, "");
+  assert.equal(cleared.effort, "low");
+});
+
+test("an unknown agent with no advertised capabilities clears effort rather than guessing", () => {
+  const form = { ...defaults(), model: "opus[1m]", effort: "high" };
+  assert.equal(withModel(form, "opus[1m]", undefined).effort, "");
 });
