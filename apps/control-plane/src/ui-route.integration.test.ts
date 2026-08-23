@@ -374,7 +374,7 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   const invalidLegacy = await openSocketWithInbox(`${wsBase}/runner`);
   sockets.add(invalidLegacy.socket);
   invalidLegacy.socket.send(JSON.stringify(runnerRegistration(
-    "runner-legacy-warning",
+    "runner-legacy-rejected",
     `mamr_${"b".repeat(43)}`,
   )));
   await invalidLegacy.inbox.take((message) => message.type === "register_rejected");
