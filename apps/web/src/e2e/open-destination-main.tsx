@@ -90,18 +90,20 @@ class FakeSocket implements UiSocket {
   onmessage: ((event: { data: string }) => void) | null = null;
   onclose: ((event: { code: number }) => void) | null = null;
   onerror: (() => void) | null = null;
+  constructor() {
+    window.setTimeout(() => {
+      this.onopen?.();
+      this.onmessage?.({ data: JSON.stringify(snapshot) });
+    }, 0);
+  }
   send() {}
   close() {}
-  push(message: UiSnapshotMessage) {
-    this.onmessage?.({ data: JSON.stringify(message) });
-  }
 }
 
-const socket = new FakeSocket();
 const connection: UiConnectionRuntime = {
   instanceId: "open-destination-e2e",
   runtimeKey: "open-destination-e2e:1",
-  createSocket: () => socket,
+  createSocket: () => new FakeSocket(),
   close() {},
 };
 const navigation: ViewNavigation = {
@@ -168,4 +170,3 @@ createRoot(root).render(
     </StoreProvider>
   </ApiProvider>,
 );
-window.setTimeout(() => socket.push(snapshot), 0);
