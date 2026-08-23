@@ -19,7 +19,7 @@ type SubscriptionView =
   // Settings subscribes to nothing — it reads local preferences — but it is a View like any other,
   // and leaving it out made the whole View union unassignable here.
   | { name: "settings"; section?: string }
-  | { name: "board" | "runners" | "runs" | "pods" | "automations" | "usage" | "projects" | "archived"; id?: string };
+  | { name: "board" | "runners" | "runs" | "pods" | "automations" | "usage" | "projects" | "archived" | "skills"; id?: string };
 
 export interface UiSubscriptionSource {
   view: SubscriptionView;

@@ -102,7 +102,18 @@ import type {
   UpdateAutomationRequest,
   DispatchWorkflowNodeResult,
 } from "@wollipog/protocol";
-import { isPromptImageReference } from "@wollipog/protocol";
+import { isPromptImageReference, type SkillFile, type SkillInvocationPolicy } from "@wollipog/protocol";
+import type {
+  RunnerSkillsResponse,
+  ReportedSkillsState,
+  SkillAgentSelector,
+  SkillAssignmentListPayload,
+  SkillAssignmentPayload,
+  SkillDetailPayload,
+  SkillGroupListPayload,
+  SkillGroupView,
+  SkillListPayload,
+} from "./skills.js";
 import { CONTROL_PLANE_HTTP } from "./config.js";
 import { deviceToken } from "./device-token.js";
 import { createBrowserApiTransport, type ApiTransport } from "./api-transport.js";
@@ -379,6 +390,76 @@ export function createApiClient(transport: ApiTransport) {
     req<{ deleted: true }>(
       `/api/automations/${encodeURIComponent(automationId)}/triggers/${encodeURIComponent(triggerId)}`,
       { method: "DELETE" },
+    ),
+
+  /* Managed agent skills. List payloads are typed wrapped-or-bare and normalized by the
+   * `*FromPayload` helpers in skills.ts, because the routes are versioned separately from this
+   * dashboard. */
+  listSkills: () => req<SkillListPayload>("/api/skills"),
+
+  createSkill: (body: { name: string; description?: string; groupId?: string; files: SkillFile[]; note?: string }) =>
+    req<SkillDetailPayload>("/api/skills", { method: "POST", body: JSON.stringify(body) }),
+
+  getSkill: (id: string) => req<SkillDetailPayload>(`/api/skills/${encodeURIComponent(id)}`),
+
+  updateSkill: (id: string, body: { description?: string; groupId?: string | null }) =>
+    req<SkillDetailPayload>(`/api/skills/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+
+  deleteSkill: (id: string) => req<void>(`/api/skills/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  createSkillVersion: (id: string, body: { files: SkillFile[]; note?: string }) =>
+    req<SkillDetailPayload>(`/api/skills/${encodeURIComponent(id)}/versions`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  listSkillGroups: () => req<SkillGroupListPayload>("/api/skill-groups"),
+
+  createSkillGroup: (body: { name: string }) =>
+    req<SkillGroupView>("/api/skill-groups", { method: "POST", body: JSON.stringify(body) }),
+
+  deleteSkillGroup: (id: string) =>
+    req<void>(`/api/skill-groups/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  listSkillAssignments: (skillId?: string) =>
+    req<SkillAssignmentListPayload>(`/api/skill-assignments${
+      skillId ? `?${new URLSearchParams({ skillId }).toString()}` : ""
+    }`),
+
+  createSkillAssignment: (body: {
+    skillId: string;
+    scopeKind: "instance" | "runner";
+    runnerId?: string;
+    agentSelector: SkillAgentSelector;
+    invocation?: SkillInvocationPolicy;
+  }) => req<SkillAssignmentPayload>("/api/skill-assignments", {
+    method: "POST",
+    body: JSON.stringify(body),
+  }),
+
+  updateSkillAssignment: (id: string, body: { enabled?: boolean; invocation?: SkillInvocationPolicy }) =>
+    req<SkillAssignmentPayload>(`/api/skill-assignments/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+
+  deleteSkillAssignment: (id: string) =>
+    req<void>(`/api/skill-assignments/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  runnerSkills: (runnerId: string) =>
+    req<RunnerSkillsResponse>(`/api/runners/${encodeURIComponent(runnerId)}/skills`),
+
+  syncRunnerSkills: (runnerId: string) =>
+    req<ReportedSkillsState | { state?: ReportedSkillsState | null }>(
+      `/api/runners/${encodeURIComponent(runnerId)}/skills/sync`,
+      { method: "POST" },
+    ).then((payload): ReportedSkillsState =>
+      payload && typeof payload === "object" && "state" in payload
+        ? ((payload as { state?: ReportedSkillsState | null }).state ?? {})
+        : ((payload as ReportedSkillsState | null) ?? {}),
     ),
 
   getSessionEvents: (id: string, after = 0) =>

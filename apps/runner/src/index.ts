@@ -4,7 +4,7 @@
  * ACP agent sessions on behalf of the control plane.
  */
 
-import { hostname } from "node:os";
+import { homedir, hostname } from "node:os";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -40,6 +40,7 @@ import {
   type SessionCommandInvocationResultMessage,
   type SessionCommandInvocationUpdateMessage,
   type SessionEventPayload,
+  type SkillSyncEntry,
   type StartSessionMessage,
 } from "@wollipog/protocol";
 import {
@@ -116,6 +117,7 @@ import {
   prepareClaudeSlashCommandCatalog,
 } from "./discovery/claude-commands.js";
 import { discoverRegistryAgents, updateRegistryApproval } from "./discovery/acp-registry.js";
+import { reconcileSkills } from "./skills.js";
 import { VERSION } from "./version.js";
 import { overlayAcpAuthStatus, type AcpAuthRuntime } from "./acp-auth-status.js";
 import {
@@ -662,6 +664,49 @@ function startTrackedSession(
   });
 }
 
+/** Last authoritative desired skill list from the control plane. Null until the first skills_sync
+ * arrives on this process; removal sweeps and store GC never run before then, so a fresh runner
+ * cannot tear down links deployed by its previous incarnation on a scan-only pass. */
+let lastDesiredSkills: SkillSyncEntry[] | null = null;
+/** Serializes reconcile passes so concurrent syncs and discovery rescans cannot interleave the
+ * link-replacement and removal steps. */
+let skillsReconcileQueue: Promise<void> = Promise.resolve();
+
+function queueSkillsReconcile(requestId?: string): void {
+  const run = async () => {
+    // Read at run time, not queue time: a pass queued behind another always applies the freshest
+    // authoritative list, and replaying it under an older requestId still reports converged truth.
+    const desired = lastDesiredSkills;
+    try {
+      const result = await reconcileSkills({
+        dataDir: config.dataDir,
+        home: homedir(),
+        agents: metadata.agents,
+        desired: desired ?? [],
+        allowRemovals: desired !== null,
+        log,
+      });
+      sendUp({
+        type: "skills_state",
+        runnerId: config.runnerId,
+        ...(requestId !== undefined ? { requestId } : {}),
+        deployed: result.deployed,
+        unmanaged: result.unmanaged,
+      });
+    } catch (error) {
+      sendUp({
+        type: "skills_state",
+        runnerId: config.runnerId,
+        ...(requestId !== undefined ? { requestId } : {}),
+        deployed: [],
+        unmanaged: [],
+        error: `skill reconcile failed: ${errText(error)}`,
+      });
+    }
+  };
+  skillsReconcileQueue = skillsReconcileQueue.then(run, run);
+}
+
 let discovering = false;
 let rediscoverPending = false;
 let rediscoverRefreshModels = false;
@@ -763,6 +808,11 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
       editors,
     };
     sendUp(update);
+    // Discovery may have changed the agent list, and harness skill dirs drift out of band: heal
+    // links against the last authoritative desired list (scan-only, no removals, before the first
+    // sync) and report fresh deployment + unmanaged state. Gated so a pre-v90 control plane never
+    // receives an unsolicited message type it cannot parse.
+    if (runnerSupportsProtocol(controlPlaneProtocolVersion, "agentSkills")) queueSkillsReconcile();
     if (registered) publishSubscriptionUsageInventory(refreshSubscriptionUsage);
   } catch (err) {
     log(`discovery failed: ${(err as Error).message}`);
@@ -1271,6 +1321,21 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           fail(errText(error));
         }
       })();
+      break;
+    case "skills_sync":
+      if (msg.runnerId !== config.runnerId) {
+        sendUp({
+          type: "skills_state",
+          runnerId: config.runnerId,
+          ...(msg.requestId !== undefined ? { requestId: msg.requestId } : {}),
+          deployed: [],
+          unmanaged: [],
+          error: "skills sync targeted a different runner",
+        });
+        break;
+      }
+      lastDesiredSkills = msg.skills;
+      queueSkillsReconcile(msg.requestId);
       break;
     case "git_action":
       runCommandTask("git_action", handleGitAction(msg));

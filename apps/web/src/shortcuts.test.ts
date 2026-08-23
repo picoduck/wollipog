@@ -214,6 +214,8 @@ test("PR4 rail, search, create, and focus-zone shortcuts replace the retired sid
 });
 
 test("global rail numbering stays aligned with its navigation shortcuts", () => {
+  // null = past the nine bare digit keys: the destination exists but no number is advertised.
+  // The rail's RAIL_SHORTCUT_DIGITS gate keeps its keycaps aligned with this same boundary.
   const shortcutIdByView = {
     inbox: "navigate-inbox",
     projects: "navigate-projects",
@@ -224,9 +226,15 @@ test("global rail numbering stays aligned with its navigation shortcuts", () => 
     usage: "navigate-usage",
     runners: "navigate-connections",
     archived: "navigate-archived",
+    skills: null,
   } as const;
   for (const [index, item] of GLOBAL_VIEW_ITEMS.entries()) {
-    assert.equal(shortcut(shortcutIdByView[item.name]).binding.key, String(index + 1), item.name);
+    const id = shortcutIdByView[item.name];
+    if (id === null) {
+      assert.ok(index >= 9, `${item.name} has no digit shortcut, so it must sit past the numbered nine`);
+      continue;
+    }
+    assert.equal(shortcut(id).binding.key, String(index + 1), item.name);
   }
 });
 

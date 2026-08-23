@@ -34,6 +34,7 @@ import { NewRunDialog } from "./components/NewRunDialog.js";
 import { NewPodDialog } from "./components/NewPodDialog.js";
 import { PodDetail, PodsView } from "./components/PodsView.js";
 import { AutomationsView } from "./components/AutomationsView.js";
+import { SkillsView } from "./components/SkillsView.js";
 import { UsageView } from "./components/UsageView.js";
 import { ShellDock } from "./components/ShellDock.js";
 import { useRightPanelState, type RightPanelState } from "./components/RightPanel.js";
@@ -721,6 +722,7 @@ function Shell() {
           {view.name === "runs" && !disabledExperimentView && <RunsView onNewRun={() => setDialog({ kind: "run" })} />}
           {view.name === "pods" && !disabledExperimentView && <PodsView onNewPod={() => setDialog({ kind: "pod" })} />}
           {view.name === "automations" && <AutomationsView />}
+          {view.name === "skills" && <SkillsView />}
           {view.name === "usage" && <UsageView />}
           {view.name === "archived" && <ArchivedSessionsView />}
           {view.name === "settings" && (

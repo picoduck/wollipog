@@ -27,6 +27,7 @@ import type {
   ResolveSteeringAttemptResultMessage,
   RewindResultMessage,
   ShellOpenResultMessage,
+  SkillsStateMessage,
   PodContextEntry,
   RunView,
   PodView,
@@ -157,8 +158,10 @@ export type UiSubscriptionApplyResult =
   | { ok: true; sessionIds: string[]; podIds: string[] }
   | { ok: false; reason: "client_missing" | "stale_revision" | "rate_limited" };
 
-/** Correlated runner replies the hub awaits (all carry `requestId`). */
+/** Correlated runner replies the hub awaits (all carry `requestId`). A skills_state is only
+ * correlatable when it echoes a solicited sync's requestId; unsolicited ones never enter here. */
 export type RunnerRequestResult =
+  | (SkillsStateMessage & { requestId: string })
   | GitActionResultMessage
   | AdoptSessionResultMessage
   | ForkResultMessage
