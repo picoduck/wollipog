@@ -6365,6 +6365,48 @@ test("an explicit empty question submission remains distinct from dismissal", ()
   });
 });
 
+test("question governance audit distinguishes explicit dismissal from submission", () => {
+  const { hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  const question = {
+    id: "note",
+    question: "Optional note",
+    options: [],
+    allowOther: true,
+    required: false,
+  };
+
+  svc.onSessionEvent(id, {
+    kind: "question_request",
+    requestId: "submitted-question",
+    questions: [question],
+  });
+  assert.ok(svc.answerQuestion(
+    id,
+    "submitted-question",
+    {},
+    { kind: "human", id: "device-audit" },
+    "submit",
+  ).ok);
+
+  svc.onSessionEvent(id, {
+    kind: "question_request",
+    requestId: "dismissed-question",
+    questions: [question],
+  });
+  assert.ok(svc.answerQuestion(
+    id,
+    "dismissed-question",
+    {},
+    { kind: "human", id: "device-audit" },
+    "dismiss",
+  ).ok);
+
+  const resolutions = svc.governanceAudit(id).filter((entry) => entry.stage === "resolution");
+  assert.equal(resolutions.find((entry) => entry.requestId === "submitted-question")?.outcome, "answered");
+  assert.equal(resolutions.find((entry) => entry.requestId === "dismissed-question")?.outcome, "dismissed");
+});
+
 test("governance audit distinguishes authentication, question answers, and policy decisions", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);

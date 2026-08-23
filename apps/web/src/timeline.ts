@@ -10,6 +10,7 @@ import type {
   ReviewRiskLevel,
   SessionCommandExecutionMode,
   SessionEvent,
+  StructuredRequestResolutionReason,
 } from "@wollipog/protocol";
 
 
@@ -113,6 +114,7 @@ export type TimelineItem =
       title: string;
       options: PermissionOption[];
       resolvedOptionId?: string | null;
+      resolutionReason?: StructuredRequestResolutionReason;
       context?: ApprovalContext;
     }
   | {
@@ -122,6 +124,7 @@ export type TimelineItem =
       questions: AgentQuestion[];
       /** undefined = still pending; true = answered; false = dismissed. */
       answered?: boolean;
+      resolutionReason?: StructuredRequestResolutionReason;
     }
   | { kind: "checkpoint"; id: number; turn: number }
   | { kind: "checkpoint_restored"; id: number; turn: number }
@@ -810,7 +813,7 @@ export class TimelineBuilder {
         const idx = this.permIndex.get(p.requestId);
         if (idx != null) {
           const it = this.items[idx] as Extract<TimelineItem, { kind: "permission" }>;
-          this.items[idx] = { ...it, resolvedOptionId: p.optionId };
+          this.items[idx] = { ...it, resolvedOptionId: p.optionId, resolutionReason: p.resolutionReason };
           this.markDirty(idx);
         }
         break;
@@ -827,7 +830,7 @@ export class TimelineBuilder {
         const idx = this.permIndex.get(p.requestId);
         if (idx != null && this.items[idx]!.kind === "question") {
           const it = this.items[idx] as Extract<TimelineItem, { kind: "question" }>;
-          this.items[idx] = { ...it, answered: p.answered };
+          this.items[idx] = { ...it, answered: p.answered, resolutionReason: p.resolutionReason };
           this.markDirty(idx);
         }
         break;

@@ -616,19 +616,41 @@ test("side pane collapses per-turn worktree deltas into one Files entry", () => 
   );
 });
 
-test("question_request renders a question item; question_resolved marks it answered", () => {
+test("question resolution projection preserves submitted and replacement outcomes", () => {
+  const questions = [{ id: "Which?", question: "Which?", options: [{ label: "A" }, { label: "B" }] }];
+  const items = deriveTimeline([
+    ev({ kind: "question_request", requestId: "submitted", questions }),
+    ev({ kind: "question_resolved", requestId: "submitted", answered: true, resolutionReason: "submitted" }),
+    ev({ kind: "question_request", requestId: "replaced", questions }),
+    ev({ kind: "question_resolved", requestId: "replaced", answered: false, resolutionReason: "replaced" }),
+  ]);
+  assert.equal(items.length, 2);
+  const submitted = items[0] as Extract<import("./timeline.js").TimelineItem, { kind: "question" }>;
+  const replaced = items[1] as Extract<import("./timeline.js").TimelineItem, { kind: "question" }>;
+  assert.equal(submitted.answered, true);
+  assert.equal(submitted.resolutionReason, "submitted");
+  assert.equal(replaced.answered, false);
+  assert.equal(replaced.resolutionReason, "replaced");
+});
+
+test("permission resolution reasons survive timeline projection", () => {
   const items = deriveTimeline([
     ev({
-      kind: "question_request",
-      requestId: "q1",
-      questions: [{ id: "Which?", question: "Which?", options: [{ label: "A" }, { label: "B" }] }],
+      kind: "permission_request",
+      requestId: "p-provider",
+      title: "Approve command",
+      options: [{ optionId: "allow", name: "Allow" }],
     }),
-    ev({ kind: "question_resolved", requestId: "q1", answered: true }),
+    ev({
+      kind: "permission_resolved",
+      requestId: "p-provider",
+      optionId: null,
+      resolutionReason: "provider_resolved",
+    }),
   ]);
-  assert.equal(items.length, 1);
-  const q = items[0] as Extract<import("./timeline.js").TimelineItem, { kind: "question" }>;
-  assert.equal(q.kind, "question");
-  assert.equal(q.answered, true);
+  const permission = items[0] as Extract<import("./timeline.js").TimelineItem, { kind: "permission" }>;
+  assert.equal(permission.resolvedOptionId, null);
+  assert.equal(permission.resolutionReason, "provider_resolved");
 });
 
 test("permission context rides into the timeline item", () => {

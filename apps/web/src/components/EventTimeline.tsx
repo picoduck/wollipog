@@ -1611,7 +1611,15 @@ const TimelineRow = memo(function TimelineRow({
             <span>{item.title}</span>
             {item.resolvedOptionId !== undefined ? (
               <span className="perm-resolved">
-                {item.resolvedOptionId ? `→ ${item.resolvedOptionId}` : "→ cancelled"}
+                {item.resolutionReason === "replaced"
+                  ? "→ Replaced"
+                  : item.resolutionReason === "provider_resolved"
+                    ? "→ Resolved by Provider"
+                    : item.resolutionReason === "dismissed"
+                      ? "→ Dismissed"
+                      : item.resolvedOptionId
+                      ? `→ ${item.resolvedOptionId}`
+                      : "→ Dismissed"}
               </span>
             ) : (
               <span className="perm-pending">awaiting decision…</span>
@@ -1644,7 +1652,13 @@ const TimelineRow = memo(function TimelineRow({
                 : `The agent asked ${item.questions.length} questions`}
             </span>
             {item.answered !== undefined ? (
-              <span className="perm-resolved">{item.answered ? "→ answered" : "→ dismissed"}</span>
+              <span className="perm-resolved">
+                {item.resolutionReason === "replaced"
+                  ? "→ Replaced"
+                  : item.resolutionReason === "provider_resolved"
+                    ? "→ Resolved by Provider"
+                    : item.answered ? "→ Answered" : "→ Dismissed"}
+              </span>
             ) : (
               <span className="perm-pending">awaiting answer…</span>
             )}
