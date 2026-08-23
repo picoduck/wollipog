@@ -289,8 +289,8 @@ export function SessionQuestionBanner({
 
   const picked = questionSelectionForRequest(selection, requestId);
   const draftValues = drafts.requestId === requestId ? drafts.values : {};
-  const controlsDisabled = busy !== null || !runnerOnline;
   const unsupportedQuestionFormat = questions.some((question) => !isSupportedAgentQuestion(question));
+  const controlsDisabled = busy !== null || !runnerOnline || unsupportedQuestionFormat;
 
   const toggle = (question: AgentQuestion, label: string) => {
     if (!question.multiSelect) {
@@ -460,7 +460,9 @@ export function SessionQuestionBanner({
                         aria-checked={on}
                         aria-disabled={controlsDisabled}
                         disabled={controlsDisabled}
-                        tabIndex={question.multiSelect ? 0 : on || (selected.length === 0 && optionIndex === 0) ? 0 : -1}
+                        tabIndex={controlsDisabled
+                          ? -1
+                          : question.multiSelect ? 0 : on || (selected.length === 0 && optionIndex === 0) ? 0 : -1}
                         className={`question-option${on ? " on" : ""}`}
                         title={option.description}
                         onClick={() => toggle(question, option.label)}
