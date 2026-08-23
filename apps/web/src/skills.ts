@@ -120,9 +120,10 @@ export function skillFromPayload(payload: SkillDetailPayload | unknown): SkillSu
   const wrapped = record.skill && typeof record.skill === "object";
   const candidate = wrapped ? (record.skill as SkillSummary) : (record as SkillSummary);
   if (!candidate.id || !candidate.name) return null;
-  // The detail route returns { skill, latestVersion, assignments } with the version (and its
-  // files) as a sibling of the skill record — fold it in so the view has one shape.
-  if (wrapped && !candidate.latestVersion && record.latestVersion && typeof record.latestVersion === "object") {
+  // The detail route returns { skill, latestVersion, assignments } where the skill record holds
+  // only a version summary and the sibling holds the full version including files — the sibling
+  // always wins so the view sees the files.
+  if (wrapped && record.latestVersion && typeof record.latestVersion === "object") {
     return { ...candidate, latestVersion: record.latestVersion as SkillVersionSummary };
   }
   return candidate;

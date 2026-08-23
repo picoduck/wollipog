@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   SKILL_MAX_FILES,
   type AgentDefinition,
+  type ResourceScope,
   type RunnerMetadata,
   type SkillFile,
 } from "@wollipog/protocol";
@@ -137,7 +138,7 @@ function runnerMeta(runnerId: string, agents: AgentDefinition[] = AGENTS): Runne
   return { runnerId, hostname: `${runnerId}-host`, os: "linux", version: "1.0.0", agents, workspaces: [] };
 }
 
-function createSkill(db: ControlPlaneDb, name: string) {
+function createSkill(db: ControlPlaneDb, name: string, scope?: ResourceScope) {
   const validated = validateSkillPayload({ name, files: files(name) });
   assert.ok(validated.ok);
   return db.createSkill({
@@ -146,6 +147,7 @@ function createSkill(db: ControlPlaneDb, name: string) {
     files: validated.files,
     manifest: validated.manifest,
     digest: validated.digest,
+    ...(scope ? { scope } : {}),
     now: 100,
   });
 }
@@ -236,6 +238,55 @@ test("resolveDesiredSkills keeps an all-scoped skill desired with zero targets b
   const entries = resolveDesiredSkills(db, "runner-1");
   assert.deepEqual(entries.map((entry) => entry.name), ["kept-skill"]);
   assert.deepEqual(entries[0]!.targets, [], "the machine-level canonical link survives per-agent removal");
+});
+
+// REGRESSION (P1): an instance-wide assignment used to fan the skill out to EVERY runner,
+// including runners owned by other organizations. Desired-state resolution must apply the same
+// ownership-audience containment projects use for project↔runner attachment.
+test("resolveDesiredSkills never fans an instance assignment out across organizations", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const orgBScope: ResourceScope = {
+    organizationId: "org_b",
+    owner: { kind: "organization", organizationId: "org_b" },
+  };
+  db.registerRunner(runnerMeta("runner-org-a"), 10, 90); // defaults to the personal organization
+  db.registerRunner(runnerMeta("runner-org-b"), 10, 90, orgBScope);
+
+  const foreign = createSkill(db, "org-b-skill", orgBScope);
+  assign(db, foreign.id, { kind: "instance" }, { kind: "all" });
+
+  assert.deepEqual(resolveDesiredSkills(db, "runner-org-a"), [],
+    "an org-B skill with an instance assignment must not reach org A's runner");
+  assert.deepEqual(resolveDesiredSkills(db, "runner-org-b").map((entry) => entry.name), ["org-b-skill"],
+    "the owning organization's own runner still receives the skill");
+});
+
+// Same containment inside one organization: a user-scoped skill deploys to an org-wide runner
+// (everyone who can see the skill can see the machine) but an org-scoped skill must not deploy to
+// a private user-scoped runner belonging to someone with no claim on it — the audience rule, not a
+// symmetric equality check.
+test("resolveDesiredSkills applies audience containment, not scope equality, within an organization", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const orgScope: ResourceScope = {
+    organizationId: "org_c",
+    owner: { kind: "organization", organizationId: "org_c" },
+  };
+  const userScope: ResourceScope = { organizationId: "org_c", owner: { kind: "user", userId: "usr_private" } };
+  db.registerRunner(runnerMeta("runner-org-wide"), 10, 90, orgScope);
+  db.registerRunner(runnerMeta("runner-private"), 10, 90, userScope);
+
+  const userSkill = createSkill(db, "user-skill", userScope);
+  assign(db, userSkill.id, { kind: "instance" }, { kind: "all" });
+
+  assert.deepEqual(resolveDesiredSkills(db, "runner-org-wide").map((entry) => entry.name), ["user-skill"],
+    "a user-scoped skill is contained within an org-wide runner audience");
+  assert.deepEqual(resolveDesiredSkills(db, "runner-private").map((entry) => entry.name), ["user-skill"],
+    "the exact same user audience is contained in the matching private runner");
+
+  const orgSkill = createSkill(db, "org-skill", orgScope);
+  assign(db, orgSkill.id, { kind: "instance" }, { kind: "all" });
+  assert.deepEqual(resolveDesiredSkills(db, "runner-private").map((entry) => entry.name), ["user-skill"],
+    "an org-audience skill is NOT contained within a single user's private runner audience");
 });
 
 test("resolveDesiredSkills always ships the latest version", () => {

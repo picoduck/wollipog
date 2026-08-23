@@ -38,6 +38,20 @@ function principal(): HumanPrincipal {
   };
 }
 
+function humanPrincipal(userId: string, organizationId: string, role: "admin" | "operator"): HumanPrincipal {
+  return {
+    kind: "human",
+    actorId: userId,
+    userId,
+    userName: userId,
+    organizationId,
+    organizationName: organizationId,
+    role,
+    deviceId: null,
+    localBootstrap: false,
+  };
+}
+
 function skillPayload(name: string) {
   return {
     name,
@@ -243,6 +257,102 @@ test("POST /api/runners/:id/skills/sync gates offline and capability, persists t
   } as unknown as RunnerRequestResult));
   const unexpected = await app.inject({ method: "POST", url: "/api/runners/runner-1/skills/sync" });
   assert.equal(unexpected.statusCode, 502);
+});
+
+// REGRESSION (P1): every skill route used to trust any authenticated member — including an admin
+// of a DIFFERENT organization — with the entire library (list, full version files, update,
+// version, delete, assignments). Per-resource ownership now mirrors /api/projects exactly:
+// listings filter to accessible scopes and an inaccessible id answers 404, never 403.
+test("skill and assignment routes are ownership-scoped per resource: foreign org and foreign user get 404", async (t) => {
+  const db = ControlPlaneDb.open(":memory:");
+  const hub: SkillsHub = {
+    isRunnerOnline: () => false,
+    sendToRunner: () => true,
+    requestFromRunner: async () => { throw new Error("unused"); },
+  } as SkillsHub;
+  let current: HumanPrincipal = principal();
+  const app = Fastify();
+  registerSkillRoutes(app, {
+    db,
+    hub,
+    requestHuman: () => current,
+    requestPrincipal: () => current,
+    pushSkillsSync: makeSkillsSyncPusher({ db, hub }),
+  });
+  await app.ready();
+  t.after(() => app.close());
+
+  // The personal-organization owner creates an org-scoped skill with an instance assignment.
+  const created = await app.inject({ method: "POST", url: "/api/skills", payload: skillPayload("home-skill") });
+  assert.equal(created.statusCode, 201);
+  const skillId = created.json().skill.id as string;
+  const assigned = await app.inject({
+    method: "POST",
+    url: "/api/skill-assignments",
+    payload: { skillId, scopeKind: "instance", agentSelector: { kind: "all" } },
+  });
+  assert.equal(assigned.statusCode, 201);
+  const assignmentId = assigned.json().assignment.id as string;
+
+  // A user-scoped skill belonging to another ordinary member of the same organization.
+  const privateSkill = db.createSkill({
+    name: "private-skill",
+    files: [{ path: "SKILL.md", content: "---\nname: private-skill\n---\nBody", encoding: "utf8" }],
+    manifest: '{"files":[]}',
+    digest: "private-digest",
+    scope: { organizationId: PERSONAL_ORGANIZATION_ID, owner: { kind: "user", userId: "usr_private_owner" } },
+  });
+
+  /* ------------- an admin of a DIFFERENT organization sees and touches nothing ------------- */
+  current = humanPrincipal("usr_foreign_admin", "org_foreign", "admin");
+  assert.deepEqual((await app.inject({ method: "GET", url: "/api/skills" })).json().skills, [],
+    "the listing filters out every foreign-organization skill");
+  assert.equal((await app.inject({ method: "GET", url: `/api/skills/${skillId}` })).statusCode, 404,
+    "reading a foreign skill (with its full version files) is a 404, not a 403");
+  assert.equal((await app.inject({
+    method: "PUT", url: `/api/skills/${skillId}`, payload: { description: "defaced" },
+  })).statusCode, 404);
+  assert.equal((await app.inject({
+    method: "POST", url: `/api/skills/${skillId}/versions`, payload: skillPayload("home-skill"),
+  })).statusCode, 404);
+  assert.equal((await app.inject({ method: "DELETE", url: `/api/skills/${skillId}` })).statusCode, 404);
+  assert.deepEqual((await app.inject({ method: "GET", url: "/api/skill-assignments" })).json().assignments, [],
+    "assignment listings filter by the referenced skill's ownership");
+  assert.equal((await app.inject({
+    method: "POST",
+    url: "/api/skill-assignments",
+    payload: { skillId, scopeKind: "instance", agentSelector: { kind: "all" } },
+  })).statusCode, 404, "assigning a foreign skill is a 404 on the skill");
+  assert.equal((await app.inject({
+    method: "PATCH", url: `/api/skill-assignments/${assignmentId}`, payload: { enabled: false },
+  })).statusCode, 404);
+  assert.equal((await app.inject({ method: "DELETE", url: `/api/skill-assignments/${assignmentId}` })).statusCode, 404);
+
+  /* --------- an ordinary member cannot read another member's user-scoped skill --------- */
+  current = humanPrincipal("usr_other_member", PERSONAL_ORGANIZATION_ID, "operator");
+  assert.deepEqual(
+    ((await app.inject({ method: "GET", url: "/api/skills" })).json().skills as Array<{ name: string }>)
+      .map((row) => row.name),
+    ["home-skill"],
+    "an ordinary member sees org-scoped skills but not another user's user-scoped skill",
+  );
+  assert.equal((await app.inject({ method: "GET", url: `/api/skills/${privateSkill.id}` })).statusCode, 404);
+
+  /* ------- runner-scoped assignments demand runner access like other per-runner routes ------- */
+  db.registerRunner(runnerMeta("private-runner"), 10, 90,
+    { organizationId: PERSONAL_ORGANIZATION_ID, owner: { kind: "user", userId: "usr_private_owner" } });
+  assert.equal((await app.inject({
+    method: "POST",
+    url: "/api/skill-assignments",
+    payload: { skillId, scopeKind: "runner", runnerId: "private-runner", agentSelector: { kind: "all" } },
+  })).statusCode, 404, "the caller can access the skill but not this private machine");
+
+  /* ----------------- none of the denied calls touched the owner's resources ----------------- */
+  current = principal();
+  assert.equal((await app.inject({ method: "GET", url: `/api/skills/${skillId}` })).statusCode, 200);
+  assert.equal((await app.inject({ method: "GET", url: `/api/skills/${privateSkill.id}` })).statusCode, 200,
+    "an organization admin still reaches a member's user-scoped skill");
+  assert.equal(db.getSkillAssignment(assignmentId)!.enabled, true, "the foreign PATCH never landed");
 });
 
 // REGRESSION (P2): per-skill payloads are capped, but enough of them assigned to one machine used

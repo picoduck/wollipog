@@ -48,14 +48,16 @@ test("payload normalizers accept wrapped and bare shapes and drop malformed rows
   assert.deepEqual(skillFromPayload(skill()), skill());
   assert.equal(skillFromPayload({ error: "nope" }), null);
 
-  // The detail route keeps the version as a sibling of the skill record; the normalizer must
-  // fold it in or the view never sees the files.
+  // The detail route keeps the full version (with files) as a sibling while the skill record
+  // carries only a summary version without files — the sibling must win or the view never sees
+  // the files.
   const siblingVersion = {
     id: "v1", digest: "d1", createdAt: 1,
     files: [{ path: "SKILL.md", content: "---\nname: s\n---\nBody", encoding: "utf8" as const }],
   };
-  const merged = skillFromPayload({ skill: skill(), latestVersion: siblingVersion, assignments: [] });
-  assert.deepEqual(merged?.latestVersion, siblingVersion, "sibling latestVersion is folded into the skill");
+  const summarySkill = { ...skill(), latestVersion: { id: "v1", digest: "d1", createdAt: 1 } };
+  const merged = skillFromPayload({ skill: summarySkill, latestVersion: siblingVersion, assignments: [] });
+  assert.deepEqual(merged?.latestVersion, siblingVersion, "sibling full version replaces the summary");
 });
 
 test("the skill list groups by group order and collects ungrouped skills last", () => {

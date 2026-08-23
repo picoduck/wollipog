@@ -411,6 +411,135 @@ test("a symlinked store name dir is a reported error, never followed, and never 
   }
 });
 
+test("a symlink planted at the skills ancestor fails the whole pass with no writes outside the data dir", async () => {
+  const roots = makeRoots();
+  try {
+    const outside = mkdtempSync(join(tmpdir(), "runner-skills-outside-"));
+    try {
+      // `<dataDir>/skills` is a symlink to an outside dir; only `<dataDir>/skills/store` gets
+      // an lstat check, so a recursive mkdir of the store root would land inside `outside`.
+      symlinkSync(outside, join(roots.dataDir, "skills"));
+
+      const result = await reconcile(roots, [
+        entry("alpha", [{ agentId: claudeAgent.id, invocation: "agent" }]),
+        entry("beta", [{ agentId: codexAgent.id, invocation: "agent" }]),
+      ]);
+
+      // Every entry reports an error; nothing was materialized, linked, or removed.
+      assert.equal(result.deployed.length, 2);
+      for (const state of result.deployed) {
+        assert.match(state.error ?? "", /skills store unavailable/);
+        assert.match(state.error ?? "", /symlink/);
+        assert.deepEqual(state.links, []);
+      }
+      assert.deepEqual(readdirSync(outside), []);
+      // The planted symlink is reported, not followed and not deleted.
+      assert.equal(lstatSync(join(roots.dataDir, "skills")).isSymbolicLink(), true);
+      assert.equal(existsSync(join(roots.home, ".agents", "skills", "alpha")), false);
+      assert.equal(existsSync(join(roots.home, ".claude", "skills", "alpha")), false);
+      assert.equal(existsSync(join(roots.home, ".codex", "skills", "beta")), false);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("a conflicted canonical path removes the managed harness links routed through it", async () => {
+  const roots = makeRoots();
+  try {
+    const alpha = entry("alpha", [
+      { agentId: claudeAgent.id, invocation: "agent" },
+      { agentId: codexAgent.id, invocation: "agent" },
+    ]);
+    await reconcile(roots, [alpha]);
+    const canonicalPath = join(roots.home, ".agents", "skills", "alpha");
+    const claudeLink = join(roots.home, ".claude", "skills", "alpha");
+    const codexLink = join(roots.home, ".codex", "skills", "alpha");
+    assert.equal(linkTarget(claudeLink), canonicalPath);
+
+    // Replace the canonical symlink with a foreign real directory: the existing harness links
+    // would otherwise keep resolving through it and serve the foreign content.
+    unlinkSync(canonicalPath);
+    mkdirSync(canonicalPath, { recursive: true });
+    writeFileSync(join(canonicalPath, "marker.txt"), "foreign content");
+
+    const result = await reconcile(roots, [alpha]);
+    const state = result.deployed[0]!;
+    // The canonical conflict is reported.
+    assert.match(state.error ?? "", /canonical link:.*unmanaged file or directory/);
+    for (const agentId of [claudeAgent.id, codexAgent.id]) {
+      const link = state.links.find((candidate) => candidate.agentId === agentId)!;
+      assert.equal(link.status, "error");
+      assert.match(link.detail ?? "", /canonical location at ~\/\.agents\/skills\/alpha is conflicted/);
+    }
+    // The managed harness links are gone: nothing serves the foreign content under a managed name.
+    assert.equal(existsSync(claudeLink), false);
+    assert.equal(existsSync(codexLink), false);
+    // The foreign directory itself is never touched and its content survives byte-identical.
+    const foreign = lstatSync(canonicalPath);
+    assert.equal(foreign.isDirectory() && !foreign.isSymbolicLink(), true);
+    assert.deepEqual(readdirSync(canonicalPath), ["marker.txt"]);
+    assert.equal(readFileSync(join(canonicalPath, "marker.txt"), "utf8"), "foreign content");
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("a manual codex target is a conflict while the shared harness dir still exposes the skill", async () => {
+  const roots = makeRoots();
+  try {
+    const codexCli: AgentDefinition = {
+      id: "codex-cli",
+      name: "Codex CLI",
+      command: "codex",
+      args: [],
+      env: {},
+      driver: "codex",
+      context: { kind: "native" },
+    };
+    const roster = [claudeAgent, codexAgent, codexCli];
+
+    // Another codex-driver agent gets an agent-invocable link in the shared ~/.codex/skills dir,
+    // so the manual-only target can consume the skill anyway: that is a conflict, not a skip.
+    const result = await reconcile(
+      roots,
+      [
+        entry("alpha", [
+          { agentId: codexCli.id, invocation: "manual" },
+          { agentId: codexAgent.id, invocation: "agent" },
+        ]),
+      ],
+      { agents: roster },
+    );
+    const links = result.deployed[0]!.links;
+    const linked = links.find((link) => link.agentId === codexAgent.id)!;
+    assert.equal(linked.status, "linked");
+    const manual = links.find((link) => link.agentId === codexCli.id)!;
+    assert.equal(manual.status, "conflict");
+    assert.equal(
+      manual.detail,
+      "Manual-only invocation is not supported for this agent and the skill is still visible through the shared harness directory.",
+    );
+    assert.equal(lstatSync(join(roots.home, ".codex", "skills", "alpha")).isSymbolicLink(), true);
+
+    // Flip to the manual codex target alone: no other target links into the shared dir, so the
+    // state is plain unsupported and the previously shared link is swept.
+    const alone = await reconcile(roots, [entry("alpha", [{ agentId: codexCli.id, invocation: "manual" }])], {
+      agents: roster,
+    });
+    const aloneLinks = alone.deployed[0]!.links;
+    assert.equal(aloneLinks.length, 1);
+    assert.equal(aloneLinks[0]!.agentId, codexCli.id);
+    assert.equal(aloneLinks[0]!.status, "unsupported");
+    assert.equal(aloneLinks[0]!.detail, "Manual-only invocation is not supported for this agent.");
+    assert.equal(existsSync(join(roots.home, ".codex", "skills", "alpha")), false);
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
 test("store GC never follows or deletes through a symlinked version entry", async () => {
   const roots = makeRoots();
   try {

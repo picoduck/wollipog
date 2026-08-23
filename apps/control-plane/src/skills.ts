@@ -205,10 +205,18 @@ function assignmentRank(assignment: SkillAssignmentView): number {
  * agents it matches (the skill itself stays desired for the machine while any enabled machine-wide
  * assignment still matches, so the canonical ~/.agents/skills link survives). Only native-context
  * claude-code / codex / codex-app-server agents ever become link targets.
+ *
+ * Ownership containment: a skill only deploys to a machine when the skill's ownership audience is
+ * contained within the machine's (the same scopeAudienceContainedWithMembership rule projects use
+ * for project↔runner attachment, db.createProjectWorkspace). Without this an instance-wide
+ * assignment created in one organization would fan out to every other organization's runners.
+ * Missing ownership rows fail closed on both sides.
  */
 export function resolveDesiredSkills(db: ControlPlaneDb, runnerId: string): SkillSyncEntry[] {
   const runner = db.getRunner(runnerId);
   if (!runner) return [];
+  const runnerScope = db.runnerScope(runnerId);
+  if (!runnerScope) return [];
   const eligibleAgents = runner.agents.filter(agentEligibleForSkills);
   const bySkill = new Map<string, SkillAssignmentView[]>();
   for (const assignment of db.listSkillAssignmentsForRunner(runnerId)) {
@@ -220,6 +228,8 @@ export function resolveDesiredSkills(db: ControlPlaneDb, runnerId: string): Skil
   for (const [skillId, assignments] of bySkill) {
     const skill = db.getSkill(skillId);
     if (!skill?.latestVersion) continue;
+    const skillScope = db.skillScope(skillId);
+    if (!skillScope || !db.scopeAudienceContainedWithMembership(skillScope, runnerScope)) continue;
     const version = db.getSkillVersion(skill.latestVersion.id);
     if (!version) continue;
     const targets: SkillSyncTarget[] = [];

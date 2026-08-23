@@ -16,8 +16,14 @@
  *   whose immediate readlink target is the canonical link path for that skill name.
  * - The store is never traversed through a symlink: the store root, `<store>/<name>`, and the
  *   digest dir are lstat-verified as non-symlinks before any mkdir, rename, or GC beneath them,
- *   and the published dir's realpath must stay inside the realpathed store root.
- * - A real file/directory at a link path is a conflict: reported, never touched.
+ *   and the published dir's realpath must stay inside the realpathed store root. The store root's
+ *   ancestry is verified too: dataDir itself may be a symlink, but every segment below the
+ *   realpathed dataDir must be a real directory (checked before mkdir and re-checked by realpath
+ *   equality after), and a violation fails the whole pass with no writes and no removals.
+ * - A real file/directory at a link path is a conflict: reported, never touched. When the
+ *   canonical link path itself is conflicted, managed harness links that route through it are
+ *   removed (they are verified ours first) so foreign content is never served under a managed
+ *   name; the foreign canonical path is still never touched.
  * - All materialization goes through a fresh temp dir and one atomic rename; files are created
  *   with "wx" so no pre-existing path (symlinks included) can ever be followed or overwritten.
  * - Names, paths, and digests are validated and the digest recomputed before any write.
@@ -567,11 +573,21 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
   const storeRoot = skillsStoreRoot(dataDir);
   let realStoreRoot: string;
   try {
+    // dataDir itself may legitimately be a symlink, but every segment below it must be a real
+    // directory: a symlink planted at an ancestor such as `<dataDir>/skills` would make a
+    // recursive mkdir (and every later materialization, link target, and GC pass) land outside
+    // the data dir even though the terminal store dir passes its own lstat check. Verify the
+    // ancestry before mkdir can follow anything, then re-verify by realpath equality after.
+    mkdirSync(dataDir, { recursive: true, mode: 0o755 });
+    const realDataDir = realpathSync(dataDir);
+    assertNotSymlink(join(dataDir, "skills"), "the skills directory");
+    assertNotSymlink(storeRoot, "the skills store root");
     mkdirSync(storeRoot, { recursive: true, mode: 0o755 });
-    // The store root itself must be a real directory: a symlink here would redirect every
-    // materialization, link target, and GC pass somewhere the runner does not own.
     assertNotSymlink(storeRoot, "the skills store root");
     realStoreRoot = realpathSync(storeRoot);
+    if (realStoreRoot !== join(realDataDir, "skills", "store")) {
+      throw new Error("the skills store root does not resolve inside the data directory");
+    }
   } catch (error) {
     return {
       deployed: desired.map((entry) => ({
@@ -658,6 +674,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
     // Group targets by harness link path; a shared harness directory can only carry one variant,
     // and the agent-invocation variant wins when policies disagree.
     const plans = new Map<string, { agentTargets: string[]; manualTargets: string[] }>();
+    const manualUnsupported: { agentId: string; relDir: string }[] = [];
     for (const target of entry.targets) {
       const binding = agentBinding.get(target.agentId);
       if (!binding) {
@@ -673,12 +690,11 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
       if (target.invocation === "manual" && binding.driver !== "claude-code") {
         // `disable-model-invocation` is Claude Code semantics: a codex-family harness has no
         // mechanism that enforces manual-only invocation, so linking would silently over-expose
-        // the skill. Report it honestly instead of claiming a linked deployment.
-        state.links.push({
-          agentId: target.agentId,
-          status: "unsupported",
-          detail: "Manual-only invocation is not supported for this agent.",
-        });
+        // the skill. Report it honestly instead of claiming a linked deployment — and if another
+        // target puts a link into the same shared harness directory, this agent can consume the
+        // skill anyway, which is a conflict (resolved below once link outcomes are known), not
+        // a clean skip.
+        manualUnsupported.push({ agentId: target.agentId, relDir: binding.relDir });
         continue;
       }
       let plan = plans.get(binding.relDir);
@@ -690,6 +706,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
       harnessKeep.get(binding.relDir)?.add(entry.name);
     }
     const targetedIds = new Set(entry.targets.map((target) => target.agentId));
+    const linkedDirs = new Set<string>();
     for (const [relDir, plan] of plans) {
       const mixed = plan.agentTargets.length > 0 && plan.manualTargets.length > 0;
       const useManual = plan.manualTargets.length > 0 && plan.agentTargets.length === 0;
@@ -705,6 +722,25 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
           `~/${relDir}/${entry.name}`,
           canonicalDir,
         );
+      } else if (!canonical.ok && canonical.status === "conflict") {
+        // The canonical path has been replaced by foreign content. A managed harness link
+        // routing through it would serve that foreign content under a managed name, so remove
+        // the harness link — it is verified ours by the canonical-path-equality probe rule —
+        // and report the removal. The foreign canonical path itself is never touched.
+        const linkPath = join(home, relDir, entry.name);
+        if (probeLink(linkPath, realStoreRoot, canonicalDir).kind === "ours") {
+          try {
+            unlinkSync(linkPath);
+          } catch {
+            /* Removal is best effort; a vanished or contested entry is left for the next pass. */
+          }
+        }
+        harnessKeep.get(relDir)?.delete(entry.name);
+        outcome = {
+          ok: false,
+          status: "error",
+          detail: `The canonical location at ~/.agents/skills/${entry.name} is conflicted, so this harness link was removed.`,
+        };
       } else if (!canonical.ok) {
         // Agent-invocation harness links route through the canonical link; without it there is
         // nothing managed to point at.
@@ -730,6 +766,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
         );
       }
       if (outcome.ok) {
+        linkedDirs.add(relDir);
         // A shared harness directory (codex and codex-app-server both read ~/.codex/skills)
         // cannot scope a skill to one of its agents: every other native agent reading this
         // directory can consume the link, so report that visibility instead of over-claiming
@@ -752,6 +789,26 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
           });
         }
       }
+    }
+    // A manual target on a codex-family driver is only a clean "unsupported" skip while its
+    // shared harness directory carries no managed link for this skill. Once another target puts
+    // an agent-invocable link there, this agent can consume the skill anyway, so the honest
+    // state is a conflict, not a skip.
+    for (const { agentId, relDir } of manualUnsupported) {
+      state.links.push(
+        linkedDirs.has(relDir)
+          ? {
+              agentId,
+              status: "conflict" as const,
+              detail:
+                "Manual-only invocation is not supported for this agent and the skill is still visible through the shared harness directory.",
+            }
+          : {
+              agentId,
+              status: "unsupported" as const,
+              detail: "Manual-only invocation is not supported for this agent.",
+            },
+      );
     }
     deployed.push(state);
   }

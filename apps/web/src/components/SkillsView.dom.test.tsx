@@ -96,7 +96,10 @@ test("SkillsView lists skills, opens a detail with assignments and deployment, a
     // Mirrors the real control-plane detail shape: the version (with files) is a sibling of
     // the skill record, not nested inside it.
     getSkill: async () => ({
-      skill: { id: "skill-1", name: "code-review", description: "Reviews code" },
+      skill: {
+        id: "skill-1", name: "code-review", description: "Reviews code",
+        latestVersion: { id: "v1", digest: "d1", createdAt: 1_700_000_000_000 },
+      },
       latestVersion: {
         id: "v1", digest: "d1", createdAt: 1_700_000_000_000,
         files: [{ path: "SKILL.md", content: skillMd, encoding: "utf8" as const }],

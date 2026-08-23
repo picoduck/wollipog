@@ -129,9 +129,13 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
 
   /* ------------------------------ Skill library ------------------------------ */
 
+  // Per-resource authorization mirrors /api/projects exactly: listings filter to the caller's
+  // accessible scopes (db.canAccessSkill ≙ db.canAccessProject) and an inaccessible id answers
+  // 404 "not found" — never 403 — so foreign-organization callers cannot probe for existence.
+
   app.get("/api/skills", async (req) => {
     const principal = deps.requestPrincipal(req);
-    return { skills: principal ? db.listSkills() : [] };
+    return { skills: principal ? db.listSkillsForPrincipal(principal) : [] };
   });
 
   app.post("/api/skills", async (req, reply) => {
@@ -171,7 +175,11 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
   });
 
   app.get("/api/skills/:id", async (req, reply) => {
+    const principal = deps.requestPrincipal(req);
     const id = (req.params as { id: string }).id;
+    if (!principal || !db.canAccessSkill(principal, id)) {
+      return reply.code(404).send({ error: "skill not found" });
+    }
     const skill = db.getSkill(id);
     if (!skill) return reply.code(404).send({ error: "skill not found" });
     const latestVersion = skill.latestVersion ? db.getSkillVersion(skill.latestVersion.id) : null;
@@ -182,6 +190,7 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
     const principal = deps.requestHuman(req);
     if (!principal) return reply.code(403).send({ error: "human identity is required" });
     const id = (req.params as { id: string }).id;
+    if (!db.canAccessSkill(principal, id)) return reply.code(404).send({ error: "skill not found" });
     const body = (req.body ?? {}) as { description?: unknown; groupId?: unknown };
     if (body.description !== undefined && body.description !== null &&
         (typeof body.description !== "string" || body.description.length > 1024)) {
@@ -207,6 +216,7 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
     const principal = deps.requestHuman(req);
     if (!principal) return reply.code(403).send({ error: "human identity is required" });
     const id = (req.params as { id: string }).id;
+    if (!db.canAccessSkill(principal, id)) return reply.code(404).send({ error: "skill not found" });
     const skill = db.getSkill(id);
     if (!skill) return reply.code(404).send({ error: "skill not found" });
     const body = (req.body ?? {}) as { files?: unknown; note?: unknown };
@@ -229,6 +239,7 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
     const principal = deps.requestHuman(req);
     if (!principal) return reply.code(403).send({ error: "human identity is required" });
     const id = (req.params as { id: string }).id;
+    if (!db.canAccessSkill(principal, id)) return reply.code(404).send({ error: "skill not found" });
     const assignments = db.listSkillAssignments(id);
     if (!db.deleteSkill(id)) return reply.code(404).send({ error: "skill not found" });
     if (assignments.some((assignment) => assignment.scopeKind === "instance")) {
@@ -242,6 +253,11 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
   });
 
   /* ------------------------------ Skill groups ------------------------------ */
+
+  // Groups carry no ownership rows: they are instance-visible organizational metadata (a name and
+  // a sort order), never a deployment gate — deleting one only detaches member skills' group_id.
+  // Skills themselves are strictly ownership-filtered above, so a group can at most reveal its own
+  // name; member-scoped auth (authorizeApiRequest) still applies to every group route.
 
   app.get("/api/skill-groups", async () => ({ groups: db.listSkillGroups() }));
 
@@ -266,9 +282,18 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
 
   /* ---------------------------- Skill assignments ---------------------------- */
 
+  // Assignment authorization derives from the referenced skill: listings show only assignments of
+  // accessible skills, and creating/mutating/deleting one requires access to that skill (plus, for
+  // runner-scoped rows, the same canAccessRunner gate the other /api/runners/:id routes use).
+
   app.get("/api/skill-assignments", async (req) => {
+    const principal = deps.requestPrincipal(req);
+    if (!principal) return { assignments: [] };
     const skillId = (req.query as { skillId?: unknown }).skillId;
-    return { assignments: db.listSkillAssignments(typeof skillId === "string" && skillId ? skillId : undefined) };
+    return {
+      assignments: db.listSkillAssignments(typeof skillId === "string" && skillId ? skillId : undefined)
+        .filter((assignment) => db.canAccessSkill(principal, assignment.skillId)),
+    };
   });
 
   app.post("/api/skill-assignments", async (req, reply) => {
@@ -277,13 +302,14 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
     const body = (req.body ?? {}) as {
       skillId?: unknown; scopeKind?: unknown; runnerId?: unknown; agentSelector?: unknown; invocation?: unknown;
     };
-    if (typeof body.skillId !== "string" || !db.getSkill(body.skillId)) {
+    if (typeof body.skillId !== "string" || !db.canAccessSkill(principal, body.skillId)) {
       return reply.code(404).send({ error: "skill not found" });
     }
     if (body.scopeKind !== "instance" && body.scopeKind !== "runner") {
       return reply.code(400).send({ error: "scopeKind must be instance or runner" });
     }
-    if (body.scopeKind === "runner" && (typeof body.runnerId !== "string" || !db.getRunner(body.runnerId))) {
+    if (body.scopeKind === "runner" && (typeof body.runnerId !== "string" ||
+        !db.getRunner(body.runnerId) || !db.canAccessRunner(principal, body.runnerId))) {
       return reply.code(404).send({ error: "runner not found" });
     }
     const agentSelector = parseSkillAgentSelector(body.agentSelector);
@@ -307,6 +333,10 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
     const principal = deps.requestHuman(req);
     if (!principal) return reply.code(403).send({ error: "human identity is required" });
     const id = (req.params as { id: string }).id;
+    const existing = db.getSkillAssignment(id);
+    if (!existing || !db.canAccessSkill(principal, existing.skillId)) {
+      return reply.code(404).send({ error: "skill assignment not found" });
+    }
     const body = (req.body ?? {}) as { enabled?: unknown; invocation?: unknown };
     if (body.enabled !== undefined && typeof body.enabled !== "boolean") {
       return reply.code(400).send({ error: "enabled must be a boolean" });
@@ -325,7 +355,12 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
   app.delete("/api/skill-assignments/:id", async (req, reply) => {
     const principal = deps.requestHuman(req);
     if (!principal) return reply.code(403).send({ error: "human identity is required" });
-    const removed = db.deleteSkillAssignment((req.params as { id: string }).id);
+    const id = (req.params as { id: string }).id;
+    const existing = db.getSkillAssignment(id);
+    if (!existing || !db.canAccessSkill(principal, existing.skillId)) {
+      return reply.code(404).send({ error: "skill assignment not found" });
+    }
+    const removed = db.deleteSkillAssignment(id);
     if (!removed) return reply.code(404).send({ error: "skill assignment not found" });
     pushAffected(removed);
     return reply.code(204).send();

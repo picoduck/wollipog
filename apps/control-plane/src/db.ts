@@ -5126,6 +5126,17 @@ export class ControlPlaneDb {
     return row ? this.scopeFromRow(row) : null;
   }
 
+  /** Per-resource skill authorization, exactly like canAccessProject: a missing ownership row
+   * fails closed. */
+  canAccessSkill(principal: AuthPrincipal, skillId: string): boolean {
+    const scope = this.skillScope(skillId);
+    return scope ? this.principalCanAccessScope(principal, scope) : false;
+  }
+
+  listSkillsForPrincipal(principal: AuthPrincipal): SkillView[] {
+    return this.listSkills().filter((skill) => this.canAccessSkill(principal, skill.id));
+  }
+
   /** Create a skill together with its first version. Throws on a duplicate name (the caller maps
    * that to 409); validation of names/files/digest happens in skills.ts before this call. */
   createSkill(input: {

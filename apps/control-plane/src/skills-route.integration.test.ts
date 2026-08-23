@@ -4,10 +4,15 @@
  * through the genuine auth gate (authorizeApiRequest) and runner frames through the genuine
  * /runner channel.
  *
- * Pins two review findings:
+ * Pins four review findings:
  * - P1 authorization: skill routes are member-scoped like /api/projects — an ordinary member and
  *   an owner/admin of a NON-personal organization must both reach them (previously every skill
  *   route was rejected as a personal-organization-global resource).
+ * - P1 per-resource ownership: reaching the routes is not reaching the resources — listings filter
+ *   to accessible skill_ownership scopes, and a foreign organization's (or another user's
+ *   user-scoped) skill answers 404 to read/update/version/delete/assign, mirroring projects.
+ * - P1 cross-organization fan-out: an instance-wide assignment on one organization's skill must
+ *   never appear in the skills_sync of another organization's runner.
  * - P1 discovery race: a runner that registers with an empty agent inventory and only reports its
  *   harnesses via a later agents_updated message must still receive a refreshed skills_sync.
  */
@@ -31,6 +36,7 @@ const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const RUNNER_ID = "runner-skills-integration";
 const RUNNER_TOKEN = `wollipogr_${"s".repeat(43)}`;
 const MEMBER_TOKEN = "skills-integration-member-token";
+const SECOND_MEMBER_TOKEN = "skills-integration-second-member-token";
 const FOREIGN_ADMIN_TOKEN = "skills-integration-foreign-admin-token";
 const FOREIGN_ORGANIZATION_ID = "org_skills_integration_other";
 
@@ -179,6 +185,21 @@ test("skill routes are member-scoped and agents_updated refreshes the skills_syn
     organizationId: identity.organizationId,
     now: 2,
   });
+  seed.createIdentityMember({
+    userId: "usr_skills_member_two",
+    displayName: "Second Skills Member",
+    organizationId: identity.organizationId,
+    role: "operator",
+    now: 6,
+  });
+  seed.createDevice({
+    id: "dev_skills_member_two",
+    name: "Second Skills Member Device",
+    tokenHash: hashToken(SECOND_MEMBER_TOKEN),
+    userId: "usr_skills_member_two",
+    organizationId: identity.organizationId,
+    now: 7,
+  });
   const credentialNow = Date.now();
   seed.issueRunnerCredential({
     credentialId: "rcred_skills_integration_test1",
@@ -275,6 +296,52 @@ test("skill routes are member-scoped and agents_updated refreshes the skills_syn
     body: skillPayload("foreign-org-skill"),
   });
   assert.equal(foreignCreate.status, 201, "a non-personal-organization admin can create a skill");
+  const foreignSkill = (await foreignCreate.json() as { skill: { id: string } }).skill;
+
+  /* -------- P1: per-resource ownership — foreign-organization callers are scoped out -------- */
+
+  assert.deepEqual(
+    ((await (await api(httpBase, FOREIGN_ADMIN_TOKEN, "/api/skills")).json()) as
+      { skills: Array<{ name: string }> }).skills.map((skill) => skill.name),
+    ["foreign-org-skill"],
+    "a foreign-organization admin's listing excludes the personal organization's skills");
+  assert.deepEqual(
+    ((await (await api(httpBase, MEMBER_TOKEN, "/api/skills")).json()) as
+      { skills: Array<{ name: string }> }).skills.map((skill) => skill.name),
+    ["member-skill"],
+    "the personal-organization member's listing excludes the foreign organization's skills");
+
+  const foreignRead = await api(httpBase, FOREIGN_ADMIN_TOKEN, `/api/skills/${memberSkill.id}`);
+  assert.equal(foreignRead.status, 404, "reading a foreign skill is a 404, never a 403 or the files");
+  const foreignUpdate = await api(httpBase, FOREIGN_ADMIN_TOKEN, `/api/skills/${memberSkill.id}`, {
+    method: "PUT",
+    body: JSON.stringify({ description: "defaced" }),
+  });
+  assert.equal(foreignUpdate.status, 404, "updating a foreign skill is a 404");
+  const foreignVersion = await api(httpBase, FOREIGN_ADMIN_TOKEN, `/api/skills/${memberSkill.id}/versions`, {
+    method: "POST",
+    body: skillPayload("member-skill"),
+  });
+  assert.equal(foreignVersion.status, 404, "versioning a foreign skill is a 404");
+  const foreignDelete = await api(httpBase, FOREIGN_ADMIN_TOKEN, `/api/skills/${memberSkill.id}`, {
+    method: "DELETE",
+  });
+  assert.equal(foreignDelete.status, 404, "deleting a foreign skill is a 404");
+  const foreignAssign = await api(httpBase, FOREIGN_ADMIN_TOKEN, "/api/skill-assignments", {
+    method: "POST",
+    body: JSON.stringify({ skillId: memberSkill.id, scopeKind: "instance", agentSelector: { kind: "all" } }),
+  });
+  assert.equal(foreignAssign.status, 404, "assigning a foreign skill is a 404 on the skill");
+
+  // Within one organization, another ordinary member cannot read a user-scoped skill either.
+  const secondMemberRead = await api(httpBase, SECOND_MEMBER_TOKEN, `/api/skills/${memberSkill.id}`);
+  assert.equal(secondMemberRead.status, 404,
+    "an ordinary member cannot read another member's user-scoped skill");
+  assert.deepEqual(
+    ((await (await api(httpBase, SECOND_MEMBER_TOKEN, "/api/skills")).json()) as
+      { skills: unknown[] }).skills,
+    [],
+    "another ordinary member's listing excludes the user-scoped skill");
 
   /* --------------- P1: assignments + the discovery-race fixture (finding 2 setup) --------------- */
 
@@ -283,6 +350,14 @@ test("skill routes are member-scoped and agents_updated refreshes the skills_syn
     body: JSON.stringify({ skillId: memberSkill.id, scopeKind: "instance", agentSelector: { kind: "all" } }),
   });
   assert.equal(assigned.status, 201, "an ordinary member can assign a skill machine-wide");
+
+  // The foreign organization instance-assigns ITS OWN skill. That must never fan out to the
+  // personal organization's runner below (P1: cross-organization skills_sync containment).
+  const foreignOwnAssign = await api(httpBase, FOREIGN_ADMIN_TOKEN, "/api/skill-assignments", {
+    method: "POST",
+    body: JSON.stringify({ skillId: foreignSkill.id, scopeKind: "instance", agentSelector: { kind: "all" } }),
+  });
+  assert.equal(foreignOwnAssign.status, 201, "the foreign admin can assign their own skill");
 
   // The runner registers with an EMPTY agent inventory — discovery has not reported yet, so the
   // registration-time skills_sync can resolve no harness targets.
@@ -305,7 +380,8 @@ test("skill routes are member-scoped and agents_updated refreshes the skills_syn
   await runnerInbox.take((message) => message.type === "registered");
   const registrationSync = await runnerInbox.take((message) => message.type === "skills_sync");
   const registrationSkills = registrationSync.skills as Array<{ name: string; targets: unknown[] }>;
-  assert.equal(registrationSkills[0]?.name, "member-skill");
+  assert.deepEqual(registrationSkills.map((skill) => skill.name), ["member-skill"],
+    "the instance-assigned foreign-organization skill never reaches this organization's runner");
   assert.deepEqual(registrationSkills[0]?.targets, [],
     "before discovery reports agents, the desired set has no harness targets");
 
