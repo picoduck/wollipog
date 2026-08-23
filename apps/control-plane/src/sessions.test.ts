@@ -6720,6 +6720,62 @@ test("reconnect replays only recoverable failed archive Stops without clearing f
   }
 });
 
+test("late runner rejection overrides recoverable Stop failures and suppresses reconnect replay", () => {
+  for (const initialFailure of ["timeout", "retry_exhausted"] as const) {
+    const { db, hub, svc } = makeHarness();
+    const id = seedSession(svc, hub);
+    db.updateSessionStatus(id, "running", Date.now());
+    const operation = svc.setArchived(id, true).data!.archiveOperation!;
+
+    if (initialFailure === "timeout") {
+      svc.maintainSessionStopIntents(operation.requestedAt + SESSION_STOP_TIMEOUT_MS);
+    } else {
+      for (let attempt = 1; attempt <= SESSION_STOP_MAX_ATTEMPTS; attempt++) {
+        svc.maintainSessionStopIntents(
+          operation.requestedAt + attempt * SESSION_STOP_RETRY_INTERVAL_MS,
+        );
+      }
+    }
+    assert.equal(db.getSession(id)?.archiveOperation?.failure?.code, initialFailure);
+
+    assert.equal(svc.onStopSessionResult("intruder", {
+      type: "stop_session_result",
+      sessionId: id,
+      operationId: operation.operationId,
+      accepted: false,
+    }), false, initialFailure);
+    assert.equal(svc.onStopSessionResult(RUNNER_ID, {
+      type: "stop_session_result",
+      sessionId: id,
+      operationId: "stale-operation",
+      accepted: false,
+    }), false, initialFailure);
+    assert.equal(db.getSession(id)?.archiveOperation?.failure?.code, initialFailure);
+
+    assert.equal(svc.onStopSessionResult(RUNNER_ID, {
+      type: "stop_session_result",
+      sessionId: id,
+      operationId: operation.operationId,
+      accepted: false,
+    }), true, initialFailure);
+    const rejected = db.getSession(id)!;
+    assert.equal(rejected.archiveStatus, "stop_failed", initialFailure);
+    assert.equal(rejected.archiveOperation?.failure?.code, "runner_rejected", initialFailure);
+    assert.equal(rejected.archiveOperation?.capacityReleased, false, initialFailure);
+    assert.equal(rejected.archived, false, initialFailure);
+
+    hub.sentToRunner.length = 0;
+    svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, status: "running" })]);
+
+    assert.equal(hub.sentOfType("stop_session").length, 0, initialFailure);
+    const afterReconnect = db.getSession(id)!;
+    assert.equal(afterReconnect.archiveStatus, "stop_failed", initialFailure);
+    assert.equal(afterReconnect.archiveOperation?.failure?.code, "runner_rejected", initialFailure);
+    assert.equal(afterReconnect.archiveOperation?.capacityReleased, false, initialFailure);
+    assert.equal(afterReconnect.archived, false, initialFailure);
+  }
+});
+
 test("an old runner cannot replay a failed archive Stop without correlated operation support", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);
