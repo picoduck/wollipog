@@ -96,6 +96,10 @@ test("Unarchive on an archived Stop Failed session cancels the archive follow-up
 
   assert.match(container.textContent ?? "", /Disconnected/);
   assert.match(container.textContent ?? "", /Changes Present/);
+  const moreActions = button(container, "More Actions");
+  assert.ok(moreActions.classList.contains("session-more-actions"), "the trigger carries the fixed-geometry class");
+  assert.ok(moreActions.querySelector("svg"), "the trigger uses the shared icon instead of a text glyph");
+  assert.equal(moreActions.textContent?.trim(), "", "the trigger has no font-dependent ellipsis text");
   await act(async () => { button(container, "More Actions").click(); await tick(); });
   await act(async () => { button(container, "Unarchive").click(); await tick(); await tick(); });
 
