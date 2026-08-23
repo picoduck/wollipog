@@ -16,12 +16,14 @@ declare global {
   }
 }
 
+const fixtureParams = new URLSearchParams(window.location.search);
+
 const runner: RunnerView = {
   runnerId: "runner-1",
   hostname: "fixture-runner",
   os: "linux",
   version: "1",
-  status: "online",
+  status: fixtureParams.get("offline") === "1" ? "offline" : "online",
   agents: [],
   workspaces: [],
   editors: [
@@ -130,16 +132,25 @@ function SessionActions() {
 }
 
 function Harness() {
-  const mobile = new URLSearchParams(window.location.search).get("mobile") === "1";
+  const mobile = fixtureParams.get("mobile") === "1";
+  if (!mobile) {
+    return (
+      <main className="session-detail">
+        <header className="detail-head">
+          <div className="detail-actions">
+            <div className="topbar-actions"><SessionActions /></div>
+          </div>
+        </header>
+      </main>
+    );
+  }
   return (
     <header className="topbar">
       <h1>Destination Fixture</h1>
-      {mobile && (
-        <div className="topbar-actions topbar-mobile-controls">
-          <button type="button" className="instance-selector-trigger" aria-label="Instance">I</button>
-          <button type="button" className="settings-trigger" aria-label="Settings">S</button>
-        </div>
-      )}
+      <div className="topbar-actions topbar-mobile-controls">
+        <button type="button" className="instance-selector-trigger" aria-label="Instance">I</button>
+        <button type="button" className="settings-trigger" aria-label="Settings">S</button>
+      </div>
       <div className="topbar-actions"><SessionActions /></div>
     </header>
   );

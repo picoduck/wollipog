@@ -39,6 +39,7 @@ const runner: RunnerView = {
     { id: "code", name: "VS Code" },
     { id: "cursor", name: "Cursor" },
     { id: "future-editor", name: "future editor" },
+    { id: "idea", name: "IntelliJ IDEA" },
   ],
   connectedAt: 1,
   lastSeen: 1,
@@ -143,6 +144,9 @@ async function mountEditor(client: ApiClient, runnerView: RunnerView = runner, b
   await act(async () => { socket.push(snapshot(runnerView, boxes)); });
   return {
     container,
+    async pushRunner(nextRunner: RunnerView, nextBoxes: BoxView[] = []) {
+      await act(async () => { socket.push(snapshot(nextRunner, nextBoxes)); });
+    },
     async cleanup() {
       await act(async () => { root.unmount(); });
       container.remove();
@@ -171,11 +175,11 @@ test("destination menu launches immediately, persists the primary action, and re
     await act(async () => { choose.click(); });
     const choices = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')];
     assert.deepEqual(choices.map((item) => item.textContent?.replace("✓", "").trim()), [
-      "VS Code", "Cursor", "Future Editor", "File Manager",
+      "VS Code", "Cursor", "Future Editor", "IntelliJ IDEA", "File Manager",
     ]);
     assert.ok(choices[0]?.querySelector('[data-destination-icon="code"]'), "known editors receive their recognizable icon");
     assert.ok(choices[2]?.querySelector('[data-destination-icon="generic-editor"]'), "unknown editors remain visible with a fallback icon");
-    assert.ok(choices[3]?.querySelector('[data-destination-icon="file-manager"]'));
+    assert.ok(choices[4]?.querySelector('[data-destination-icon="file-manager"]'));
 
     const cursor = choices.find((item) => item.textContent?.includes("Cursor"));
     assert.ok(cursor);
@@ -313,6 +317,8 @@ test("offline runners remain understandable while remote and unsupported runners
     assert.equal(main.getAttribute("aria-disabled"), "true");
     await act(async () => { main.click(); });
     assert.equal(offline.container.querySelector('[role="status"]')?.textContent, "Runner is offline.");
+    await offline.pushRunner({ ...runner, status: "online" });
+    assert.equal(offline.container.querySelector('[role="status"]'), null, "reconnecting clears stale offline feedback");
   } finally {
     await offline.cleanup();
   }

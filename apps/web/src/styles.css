@@ -994,9 +994,17 @@ pre {
   color: var(--accent);
 }
 .editor-note {
+  position: absolute;
+  z-index: var(--z-popover);
+  top: calc(100% + 6px);
+  right: 0;
   font-size: 11.5px;
-  color: var(--red);
+  color: var(--danger-text);
   max-width: 260px;
+  padding: 3px 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev-2);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

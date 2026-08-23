@@ -1,5 +1,5 @@
 import { runnerSupportsProtocol, type EditorInfo, type OS } from "@wollipog/protocol";
-import { useRef, useState, type ComponentType } from "react";
+import { useEffect, useRef, useState, type ComponentType } from "react";
 import { useApi } from "../api-context.js";
 import { titleCaseLabel } from "../format.js";
 import { useStoreSelector } from "../store.js";
@@ -20,6 +20,7 @@ const EDITOR_STORAGE_KEY = "wollipog.editor.lastUsed";
 const DESTINATION_STORAGE_KEY = "wollipog.openDestination.lastUsed";
 const REVEAL_DESTINATION_KEY = "reveal";
 const LAUNCH_IN_PROGRESS_NOTE = "A destination launch is already in progress.";
+const RUNNER_OFFLINE_NOTE = "Runner is offline.";
 
 type OpenDestination =
   | { kind: "editor"; key: string; editorId: string; name: string }
@@ -89,8 +90,12 @@ export function EditorSelect({ sessionId }: { sessionId: string }) {
   });
 
   const session = sessions.get(sessionId);
+  const runner = session ? runners.get(session.runnerId) : undefined;
+  const offline = runner?.status !== "online";
+  useEffect(() => {
+    if (!offline) setNote((current) => current === RUNNER_OFFLINE_NOTE ? null : current);
+  }, [offline]);
   if (!session) return null;
-  const runner = runners.get(session.runnerId);
   const isRemote = [...boxes.values()].some((b) => b.runnerId === session.runnerId);
   if (!runner || isRemote || !runnerSupportsProtocol(runner.protocolVersion, "hostActions")) return null;
 
@@ -99,7 +104,6 @@ export function EditorSelect({ sessionId }: { sessionId: string }) {
     { kind: "reveal", key: REVEAL_DESTINATION_KEY, name: fileManagerLabel(runner.os) },
   ];
   const chosen = destinations.find((destination) => destination.key === lastUsed) ?? destinations[0]!;
-  const offline = runner.status !== "online";
   const unavailable = offline || busy;
 
   const rememberDestination = (destination: OpenDestination) => {
@@ -110,7 +114,7 @@ export function EditorSelect({ sessionId }: { sessionId: string }) {
 
   const launch = async (destination: OpenDestination) => {
     if (offline) {
-      setNote("Runner is offline.");
+      setNote(RUNNER_OFFLINE_NOTE);
       return;
     }
     if (busyRef.current) {

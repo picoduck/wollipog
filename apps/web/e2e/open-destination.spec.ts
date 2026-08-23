@@ -82,4 +82,16 @@ test("the compact mobile presentation stays on one line and inside the viewport"
   expect(menuBox).not.toBeNull();
   expect(menuBox!.x).toBeGreaterThanOrEqual(8);
   expect(menuBox!.x + menuBox!.width).toBeLessThanOrEqual(312);
+
+  await page.goto("/open-destination-e2e.html?mobile=1&offline=1");
+  await page.getByRole("button", { name: "Open Unavailable: Runner Offline" }).dispatchEvent("click");
+  await expect(page.getByRole("status")).toHaveText("Runner is offline.");
+  const offlineMetrics = await page.locator(".topbar").evaluate((element) => ({
+    scrollWidth: element.scrollWidth,
+    clientWidth: element.clientWidth,
+    rightmostControl: element.querySelector(".topbar-actions:last-child")!.getBoundingClientRect().right,
+    viewportWidth: window.innerWidth,
+  }));
+  expect(offlineMetrics.scrollWidth).toBe(offlineMetrics.clientWidth);
+  expect(offlineMetrics.rightmostControl).toBeLessThanOrEqual(offlineMetrics.viewportWidth);
 });
