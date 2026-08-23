@@ -1939,6 +1939,9 @@ function driverBackgroundJob(task: PendingBackgroundTask): DriverBackgroundJob {
 
 export function normalizeQuestions(input: Json): AgentQuestion[] {
   const raw = Array.isArray(input?.questions) ? input.questions : [];
+  if (raw.some((question: Json) => question?.multiSelect === true && question?.allowOther === true)) {
+    return [];
+  }
   const out: AgentQuestion[] = raw
     .filter((q: Json) => typeof q?.question === "string" && q.question)
     .map((q: Json) => ({

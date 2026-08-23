@@ -1444,9 +1444,12 @@ export interface AgentQuestion {
   /** Short chip label, e.g. "Language". */
   header?: string;
   question: string;
+  /** Multi-select answers contain offered labels only. This is mutually exclusive with
+   * `allowOther`; custom values have no unambiguous array representation on the normalized wire. */
   multiSelect?: boolean;
   options: QuestionOption[];
-  /** Whether the provider accepts a free-form string instead of one of options[]. */
+  /** Whether the provider accepts a free-form string instead of one of options[]. Mutually
+   * exclusive with `multiSelect`; producers must reject that unsupported combination. */
   allowOther?: boolean;
   /** Optional provider form fields may be omitted. Absence keeps the legacy required behavior. */
   required?: boolean;
@@ -1463,6 +1466,10 @@ export interface AgentQuestion {
   maximum?: number;
   minSelections?: number;
   maxSelections?: number;
+}
+
+export function isSupportedAgentQuestion(question: AgentQuestion): boolean {
+  return !(question.multiSelect === true && question.allowOther === true);
 }
 
 /** Upper bound applied to any provider free-text answer that declares no `maxLength`. Providers
@@ -1530,6 +1537,8 @@ export function validateQuestionAnswers(
   const keys = Object.keys(answers);
   if (action === "dismiss" && keys.length > 0) return "a dismissal cannot include answers";
   if (keys.length === 0 && action !== "submit") return null; // legacy or explicit dismiss
+  const unsupported = questions.find((question) => !isSupportedAgentQuestion(question));
+  if (unsupported) return `"${unsupported.id.slice(0, 80)}" cannot combine multi-select and Other responses`;
   const byId = new Map(questions.map((q) => [q.id, q]));
   for (const key of keys) {
     const q = byId.get(key);

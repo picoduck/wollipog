@@ -6365,6 +6365,51 @@ test("an explicit empty question submission remains distinct from dismissal", ()
   });
 });
 
+test("mixed-version multi-select Other requests reject submission but remain safely dismissible", () => {
+  const { hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  svc.onSessionEvent(id, {
+    kind: "question_request",
+    requestId: "unsupported-question",
+    questions: [{
+      id: "features",
+      question: "Choose features or add another",
+      multiSelect: true,
+      allowOther: true,
+      options: [{ label: "Audit" }],
+    }],
+  });
+  const deliveriesBeforeSubmit = hub.sentOfType("answer_question").length;
+
+  const submission = svc.answerQuestion(
+    id,
+    "unsupported-question",
+    { features: ["Audit"] },
+    { kind: "human", id: "device-unsupported" },
+    "submit",
+  );
+
+  assert.equal(submission.status, 400);
+  assert.match(submission.error ?? "", /cannot combine multi-select and Other responses/);
+  assert.equal(hub.sentOfType("answer_question").length, deliveriesBeforeSubmit);
+
+  const dismissal = svc.answerQuestion(
+    id,
+    "unsupported-question",
+    {},
+    { kind: "human", id: "device-unsupported" },
+    "dismiss",
+  );
+  assert.ok(dismissal.ok);
+  assert.deepEqual(hub.sentOfType("answer_question").at(-1), {
+    type: "answer_question",
+    sessionId: id,
+    requestId: "unsupported-question",
+    answers: {},
+    action: "dismiss",
+  });
+});
+
 test("question governance audit distinguishes explicit dismissal from submission", () => {
   const { hub, svc } = makeHarness();
   const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });

@@ -59,6 +59,54 @@ function submitButton(container: HTMLDivElement): HTMLButtonElement {
   return button;
 }
 
+test("unsupported multi-select Other responses are deactivated while Dismiss remains usable", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const calls: Array<{ sessionId: string; action: Parameters<ApiClient["answerQuestion"]>[1] }> = [];
+  const client = {
+    ...api,
+    answerQuestion: async (sessionId: string, action: Parameters<ApiClient["answerQuestion"]>[1]) => {
+      calls.push({ sessionId, action: structuredClone(action) });
+      return {} as SessionView;
+    },
+  } as ApiClient;
+  const questions: AgentQuestion[] = [{
+    id: "features",
+    question: "Choose features or add another",
+    multiSelect: true,
+    allowOther: true,
+    options: [{ label: "Audit" }],
+  }];
+
+  try {
+    await renderBanner(root, questions, true, client);
+    assert.equal(container.querySelector(".question-input"), null);
+    const choice = container.querySelector<HTMLButtonElement>('[role="checkbox"]');
+    assert.ok(choice);
+    assert.equal(choice.disabled, true);
+    assert.equal(choice.getAttribute("aria-disabled"), "true");
+    assert.equal(choice.tabIndex, -1);
+    assert.equal(submitButton(container).disabled, true);
+
+    const dismiss = [...container.querySelectorAll<HTMLButtonElement>(".approval-actions button")]
+      .find((candidate) => candidate.textContent?.trim().startsWith("Dismiss"));
+    assert.ok(dismiss);
+    assert.equal(dismiss.disabled, false);
+    await act(async () => {
+      dismiss.click();
+      await tick();
+    });
+    assert.deepEqual(calls, [{
+      sessionId: "session-1",
+      action: { requestId: "question-1", answers: {}, action: "dismiss" },
+    }]);
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
 test("constrained free text exposes its shared validation reason and accessible field state", async () => {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);

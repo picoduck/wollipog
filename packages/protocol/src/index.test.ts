@@ -22,6 +22,7 @@ import {
   archiveRequiresStop,
   columnForStatus,
   isTerminal,
+  isSupportedAgentQuestion,
   TERMINAL_STATUSES,
   parseMessage,
   DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH,
@@ -735,6 +736,23 @@ test("validateQuestionAnswers accepts valid, empty (dismiss), rejects unknown/un
   assert.match(validateQuestionAnswers(questions, { "Lang?": ["TS"], "Feats?": ["Auth"] } as never)!, /offered label/);
   assert.match(validateQuestionAnswers(questions, { "Lang?": "TS", "Feats?": "Auth" } as never)!, /array/);
   assert.match(validateQuestionAnswers(questions, { "Lang?": "TS" })!, /missing answer/);
+});
+
+test("the normalized question contract rejects multi-select Other responses but remains dismissible", () => {
+  const unsupported = {
+    id: "features",
+    question: "Choose features or add another",
+    multiSelect: true,
+    allowOther: true,
+    options: [{ label: "Audit" }],
+  };
+
+  assert.equal(isSupportedAgentQuestion(unsupported), false);
+  assert.match(
+    validateQuestionAnswers([unsupported], { features: ["Audit"] }, "submit")!,
+    /cannot combine multi-select and Other responses/,
+  );
+  assert.equal(validateQuestionAnswers([unsupported], {}, "dismiss"), null);
 });
 
 test("validateQuestionAnswers: duplicate multi-select labels + prototype-chain ids are rejected", () => {

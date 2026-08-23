@@ -1025,6 +1025,7 @@ export function normalizeCodexUserInput(params: Json): NormalizedQuestionRequest
   if (!Array.isArray(params?.questions) || params.questions.length === 0 || params.questions.length > 3) return null;
   const questions: AgentQuestion[] = [];
   for (const raw of params.questions) {
+    if (raw?.multiSelect === true && raw?.isOther === true) return null;
     const id = boundedString(raw?.id, MAX_QUESTION_ID);
     const question = boundedString(raw?.question, MAX_QUESTION_TEXT);
     const header = boundedString(raw?.header, MAX_QUESTION_HEADER);

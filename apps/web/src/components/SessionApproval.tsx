@@ -2,6 +2,7 @@ import React, { useEffect, useId, useLayoutEffect, useRef, useState, type RefObj
 import {
   DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH,
   isPolicyApproval,
+  isSupportedAgentQuestion,
   validateQuestionFreeText,
   type AgentQuestion,
   type ApprovalContext,
@@ -288,7 +289,8 @@ export function SessionQuestionBanner({
 
   const picked = questionSelectionForRequest(selection, requestId);
   const draftValues = drafts.requestId === requestId ? drafts.values : {};
-  const controlsDisabled = busy !== null || !runnerOnline;
+  const unsupportedQuestionFormat = questions.some((question) => !isSupportedAgentQuestion(question));
+  const controlsDisabled = busy !== null || !runnerOnline || unsupportedQuestionFormat;
 
   const toggle = (question: AgentQuestion, label: string) => {
     if (!question.multiSelect) {
@@ -328,7 +330,7 @@ export function SessionQuestionBanner({
     }
   };
 
-  const complete = questions.every((question) => {
+  const complete = !unsupportedQuestionFormat && questions.every((question) => {
     const selected = picked[question.id] ?? [];
     const draft = draftValues[question.id]?.trim() ?? "";
     if (question.multiSelect) {
@@ -407,9 +409,11 @@ export function SessionQuestionBanner({
       </div>
       {runnerOnline && busy === null && questions.length > 0 && !complete && (
         <div className="question-submit-hint">
-          {freeTextErrors.size > 0
-            ? "Correct the response errors before submitting."
-            : "Complete all required responses before submitting."}
+          {unsupportedQuestionFormat
+            ? "This question format is unsupported. Dismiss the question to continue."
+            : freeTextErrors.size > 0
+              ? "Correct the response errors before submitting."
+              : "Complete all required responses before submitting."}
         </div>
       )}
       <div className="question-list">
@@ -456,7 +460,9 @@ export function SessionQuestionBanner({
                         aria-checked={on}
                         aria-disabled={controlsDisabled}
                         disabled={controlsDisabled}
-                        tabIndex={question.multiSelect ? 0 : on || (selected.length === 0 && optionIndex === 0) ? 0 : -1}
+                        tabIndex={controlsDisabled
+                          ? -1
+                          : question.multiSelect ? 0 : on || (selected.length === 0 && optionIndex === 0) ? 0 : -1}
                         className={`question-option${on ? " on" : ""}`}
                         title={option.description}
                         onClick={() => toggle(question, option.label)}
@@ -471,7 +477,7 @@ export function SessionQuestionBanner({
                   })}
                 </div>
               )}
-              {question.allowOther && (
+              {question.allowOther && !question.multiSelect && (
                 <label className="question-input-label">
                   <span id={responseLabelId}>{question.options.length > 0 ? "Other Response" : "Response"}</span>
                   {question.required === false && <span className="muted sm"> (optional)</span>}

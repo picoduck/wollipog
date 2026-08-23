@@ -994,6 +994,18 @@ test("Codex tool user input keeps the provider request id and returns native ans
     }],
   }, 702), { answers: {} });
   assert.equal(h.events.length, eventCount);
+
+  assert.deepEqual(await requests.get("item/tool/requestUserInput")!({
+    questions: [{
+      id: "unsupported",
+      header: "Features",
+      question: "Choose features or add another",
+      multiSelect: true,
+      isOther: true,
+      options: [{ label: "Audit", description: "Audit events" }],
+    }],
+  }, 703), { answers: {} });
+  assert.equal(h.events.length, eventCount);
 });
 
 test("MCP form elicitation maps primitive controls and returns provider-native content", async () => {
