@@ -160,43 +160,42 @@ export function withModel(form: FormState, model: string, capabilities: AgentCap
 }
 
 /**
- * The capabilities a config must satisfy on EVERY runner that can execute the action.
+ * The client-side mirror of the control plane's `capabilityConfigError`.
  *
- * An alternate target supplies its own agent, and `automations.ts` spreads the primary's `config`
- * onto it verbatim. Restricting the pickers to what only the primary advertises therefore saves a
- * spec that fails the moment the primary is unavailable and the alternate is selected — the one
- * run the alternate exists to rescue.
+ * An alternate target runs the primary's stored config on ITS OWN agent — `automations.ts` spreads
+ * `config` and overrides only `agentId` — so a config the alternate cannot honour is rejected on
+ * the one run the alternate exists to rescue.
+ *
+ * An earlier attempt intersected the two agents' catalogs and offered only the overlap. Review
+ * found three defects in that approach and it is not salvageable by patching: a shared model with
+ * disjoint efforts yields an empty `efforts` array, which the protocol reads as "unspecified" and
+ * silently widens; every capability transition needs its own revalidation hook and one was always
+ * missed; and a Claude/Codex pair overlaps in NOTHING, so the pickers vanished with no explanation
+ * — against this codebase's rule that a setting which could exist is disabled and explained, never
+ * hidden. Validating the finished spec instead is one rule, checked on one path, that no
+ * transition can slip past.
  */
-export function sharedCapabilities(
-  primary: AgentCapabilities | undefined,
-  alternate: AgentCapabilities | undefined,
-): AgentCapabilities | undefined {
-  if (!primary || !alternate) return primary;
-  const alternateModels = new Map(alternate.models.map((model) => [model.id, model]));
-  const effortLevels = (primary.effortLevels ?? []).filter((effort) => (alternate.effortLevels ?? []).includes(effort));
-  return {
-    ...primary,
-    models: primary.models.flatMap((model) => {
-      const other = alternateModels.get(model.id);
-      if (!other) return [];
-      const mine = model.efforts?.length ? model.efforts : primary.effortLevels ?? [];
-      const theirs = other.efforts?.length ? other.efforts : alternate.effortLevels ?? [];
-      return [{ ...model, efforts: mine.filter((effort) => theirs.includes(effort)) }];
-    }),
-    effortLevels,
-    permissionModes: (primary.permissionModes ?? []).filter((mode) => (alternate.permissionModes ?? []).includes(mode)),
-  };
-}
-
-/** Drop any selection the given capability set does not advertise, used when the scope changes. */
-export function withCapabilities(form: FormState, capabilities: AgentCapabilities | undefined): FormState {
-  const model = form.model && capabilities?.models.some((candidate) => candidate.id === form.model) ? form.model : "";
-  return withModel({
-    ...form,
-    permissionMode: form.permissionMode && (capabilities?.permissionModes ?? []).includes(form.permissionMode)
-      ? form.permissionMode
-      : "",
-  }, model, capabilities);
+export function alternateConfigError(
+  config: SessionConfig | undefined,
+  capabilities: AgentCapabilities | undefined,
+): string | null {
+  if (!config || !capabilities) return null;
+  const models = capabilities.models ?? [];
+  if (config.model && models.length && !models.some((model) => model.id === config.model)) {
+    return `The alternate agent does not support the model ${config.model}.`;
+  }
+  if (config.effort) {
+    const selected = config.model ? models.find((model) => model.id === config.model) : undefined;
+    const efforts = (selected?.efforts?.length ? selected.efforts : capabilities.effortLevels) ?? [];
+    if (efforts.length && !efforts.includes(config.effort)) {
+      return `The alternate agent does not support ${config.effort} effort for this model.`;
+    }
+  }
+  const permissionModes = capabilities.permissionModes ?? [];
+  if (config.permissionMode && permissionModes.length && !permissionModes.includes(config.permissionMode)) {
+    return `The alternate agent does not support the ${config.permissionMode} permission mode.`;
+  }
+  return null;
 }
 
 export interface BuildSpecContext {
@@ -211,6 +210,8 @@ export interface BuildSpecContext {
    * current runner and workspace, and reviving a stale `projectId` would be its own corruption.
    */
   base?: AutomationSpec;
+  /** Capabilities of the explicit alternate's agent, when one is configured. */
+  alternateCapabilities?: AgentCapabilities;
 }
 
 export function buildSpec(form: FormState, context: BuildSpecContext): AutomationSpec {
@@ -280,6 +281,10 @@ export function buildSpec(form: FormState, context: BuildSpecContext): Automatio
     : {};
   if (form.runnerPolicy === "alternate") {
     validateAutomationAlternatePlacement(context.projectsSupported, primaryPlacement, alternatePlacement);
+    if (action.kind === "create_session") {
+      const configError = alternateConfigError(action.request.config, context.alternateCapabilities);
+      if (configError) throw new Error(configError);
+    }
   }
   const runnerPolicy: AutomationSpec["runnerPolicy"] = form.runnerPolicy === "wait"
     ? { kind: "wait" }

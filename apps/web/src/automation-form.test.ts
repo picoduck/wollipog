@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AutomationSpec } from "@wollipog/protocol";
 import {
-  buildSpec, defaults, formFrom, sharedCapabilities, withAgent, withCapabilities, withModel,
+  alternateConfigError, buildSpec, defaults, formFrom, withAgent, withModel,
 } from "./automation-form.js";
 
 const CONTEXT = { projectsSupported: false, projects: [] };
@@ -253,24 +253,42 @@ const CODEX_CAPS = {
   slashCommands: [], supportsImages: true, supportsApprovals: true,
 };
 
-test("an alternate agent narrows the honourable config to what both agents advertise", () => {
-  const shared = sharedCapabilities(CAPS, CODEX_CAPS);
-  assert.deepEqual(shared?.models.map((model) => model.id), ["haiku"]);
-  assert.deepEqual(shared?.models[0]?.efforts, ["low"]);
-  assert.deepEqual(shared?.permissionModes, ["default"]);
-  // "auto" is primary-only and must not remain selectable once a Codex alternate is configured.
-  assert.equal(shared?.permissionModes?.includes("auto"), false);
+test("saving rejects a config the explicit alternate agent cannot honour", () => {
+  assert.equal(alternateConfigError({ model: "opus[1m]" }, CODEX_CAPS),
+    "The alternate agent does not support the model opus[1m].");
+  assert.equal(alternateConfigError({ model: "haiku", effort: "high" }, CODEX_CAPS),
+    "The alternate agent does not support high effort for this model.");
+  assert.equal(alternateConfigError({ permissionMode: "auto" }, CODEX_CAPS),
+    "The alternate agent does not support the auto permission mode.");
+  assert.equal(alternateConfigError({ model: "haiku", effort: "low", permissionMode: "default" }, CODEX_CAPS), null);
 });
 
-test("configuring an alternate clears selections it cannot honour", () => {
-  const form = { ...defaults(), model: "opus[1m]", effort: "high", permissionMode: "auto" };
-  const narrowed = withCapabilities(form, sharedCapabilities(CAPS, CODEX_CAPS));
-  assert.deepEqual(
-    { model: narrowed.model, effort: narrowed.effort, permissionMode: narrowed.permissionMode },
-    { model: "", effort: "", permissionMode: "" },
-  );
+test("an alternate with unknown capabilities is not second-guessed", () => {
+  // Absent capabilities mean discovery has not run, not that nothing is supported. The control
+  // plane makes the same call in `capabilityConfigError`.
+  assert.equal(alternateConfigError({ model: "opus[1m]" }, undefined), null);
 });
 
-test("with no alternate configured the primary capabilities stand unchanged", () => {
-  assert.equal(sharedCapabilities(CAPS, undefined), CAPS);
+test("a shared model with disjoint efforts is rejected rather than silently widened", () => {
+  // The defect that sank the intersection approach: an empty per-model effort set read as
+  // "unspecified" and fell back to the global levels, offering an effort the alternate rejects.
+  const primaryOnly = {
+    models: [{ id: "same", displayName: "Same", efforts: ["high"] }],
+    effortLevels: ["low", "high"], permissionModes: ["default"],
+    slashCommands: [], supportsImages: true, supportsApprovals: true,
+  };
+  assert.match(alternateConfigError({ model: "same", effort: "low" }, primaryOnly)!, /low effort/);
+});
+
+test("an alternate policy blocks the save that would fail on failover", () => {
+  const form = {
+    ...defaults(), name: "Sweep", runnerId: "local-dev", workspaceId: "wollipog",
+    agentId: "claude-native", prompt: "Go.", model: "opus[1m]",
+    runnerPolicy: "alternate" as const, fallbackRunnerId: "other", fallbackWorkspaceId: "ws",
+    fallbackAgentId: "codex-native",
+  };
+  assert.throws(() => buildSpec(form, { ...CONTEXT, alternateCapabilities: CODEX_CAPS }),
+    /does not support the model/);
+  // Without an alternate configured the same config saves cleanly.
+  assert.doesNotThrow(() => buildSpec({ ...form, runnerPolicy: "wait" }, CONTEXT));
 });
