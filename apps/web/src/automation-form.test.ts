@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AutomationSpec } from "@wollipog/protocol";
-import { buildSpec, defaults, formFrom, withAgent, withModel } from "./automation-form.js";
+import {
+  buildSpec, defaults, formFrom, sharedCapabilities, withAgent, withCapabilities, withModel,
+} from "./automation-form.js";
 
 const CONTEXT = { projectsSupported: false, projects: [] };
 
@@ -192,4 +194,83 @@ test("returning to the agent default validates effort against the agent's levels
 test("an unknown agent with no advertised capabilities clears effort rather than guessing", () => {
   const form = { ...defaults(), model: "opus[1m]", effort: "high" };
   assert.equal(withModel(form, "opus[1m]", undefined).effort, "");
+});
+
+test("a retargeted prompt session drops the previous session's config", () => {
+  const spec = baseSpec({
+    kind: "prompt_session", sessionId: "s_old",
+    request: { text: "continue", slashCommand: "/review", config: { model: "opus[1m]" } },
+  });
+  const retargeted = { ...formFrom(spec), sessionId: "s_new" };
+  const saved = buildSpec(retargeted, { ...CONTEXT, base: spec });
+  assert(saved.action.kind === "prompt_session");
+  // The prompt path validates config against the TARGET session's agent.
+  assert.equal(saved.action.request.config, undefined);
+  assert.equal(saved.action.request.slashCommand, "/review");
+});
+
+test("moving a workflow automation to another machine drops runner-scoped carry-overs", () => {
+  const spec = baseSpec({
+    kind: "workflow_run",
+    request: {
+      runnerId: "local-dev", workspaceId: "wollipog", workflowId: "build-review", task: "Go.",
+      config: { model: "opus[1m]" }, agentBindings: { build: "claude-native" },
+      orchestratorAgentId: "claude-native", costBudgetUsd: 12,
+    },
+  });
+  const moved = { ...formFrom(spec), runnerId: "other-machine" };
+  const saved = buildSpec(moved, { ...CONTEXT, base: spec });
+  assert(saved.action.kind === "workflow_run");
+  assert.equal(saved.action.request.config, undefined);
+  assert.equal(saved.action.request.agentBindings, undefined);
+  assert.equal(saved.action.request.orchestratorAgentId, undefined);
+  assert.equal(saved.action.request.costBudgetUsd, 12);
+});
+
+test("an omitted useWorktree stays omitted when the control is untouched", () => {
+  assertRoundTrips(baseSpec({
+    kind: "create_session",
+    request: {
+      runnerId: "local-dev", workspaceId: "wollipog", agentId: "claude-native", prompt: "Sweep.",
+    },
+  }));
+});
+
+test("touching the worktree control makes the choice explicit", () => {
+  const spec = baseSpec({
+    kind: "create_session",
+    request: { runnerId: "local-dev", workspaceId: "wollipog", agentId: "claude-native", prompt: "Sweep." },
+  });
+  const saved = buildSpec({ ...formFrom(spec), useWorktree: true }, { ...CONTEXT, base: spec });
+  assert(saved.action.kind === "create_session");
+  assert.equal(saved.action.request.useWorktree, true);
+});
+
+const CODEX_CAPS = {
+  models: [{ id: "haiku", displayName: "Haiku", efforts: ["low"] }, { id: "gpt", displayName: "GPT" }],
+  effortLevels: ["low"],
+  permissionModes: ["default"],
+  slashCommands: [], supportsImages: true, supportsApprovals: true,
+};
+
+test("an alternate agent narrows the honourable config to what both agents advertise", () => {
+  const shared = sharedCapabilities(CAPS, CODEX_CAPS);
+  assert.deepEqual(shared?.models.map((model) => model.id), ["haiku"]);
+  assert.deepEqual(shared?.models[0]?.efforts, ["low"]);
+  assert.deepEqual(shared?.permissionModes, ["default"]);
+  // "auto" is primary-only and must not remain selectable once a Codex alternate is configured.
+  assert.equal(shared?.permissionModes?.includes("auto"), false);
+});
+
+test("configuring an alternate clears selections it cannot honour", () => {
+  const form = { ...defaults(), model: "opus[1m]", effort: "high", permissionMode: "auto" };
+  const narrowed = withCapabilities(form, sharedCapabilities(CAPS, CODEX_CAPS));
+  assert.deepEqual(
+    { model: narrowed.model, effort: narrowed.effort, permissionMode: narrowed.permissionMode },
+    { model: "", effort: "", permissionMode: "" },
+  );
+});
+
+test("with no alternate configured the primary capabilities stand unchanged", () => {
+  assert.equal(sharedCapabilities(CAPS, undefined), CAPS);
 });

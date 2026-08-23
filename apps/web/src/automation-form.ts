@@ -159,6 +159,46 @@ export function withModel(form: FormState, model: string, capabilities: AgentCap
   return { ...form, model, effort: form.effort && efforts.includes(form.effort) ? form.effort : "" };
 }
 
+/**
+ * The capabilities a config must satisfy on EVERY runner that can execute the action.
+ *
+ * An alternate target supplies its own agent, and `automations.ts` spreads the primary's `config`
+ * onto it verbatim. Restricting the pickers to what only the primary advertises therefore saves a
+ * spec that fails the moment the primary is unavailable and the alternate is selected — the one
+ * run the alternate exists to rescue.
+ */
+export function sharedCapabilities(
+  primary: AgentCapabilities | undefined,
+  alternate: AgentCapabilities | undefined,
+): AgentCapabilities | undefined {
+  if (!primary || !alternate) return primary;
+  const alternateModels = new Map(alternate.models.map((model) => [model.id, model]));
+  const effortLevels = (primary.effortLevels ?? []).filter((effort) => (alternate.effortLevels ?? []).includes(effort));
+  return {
+    ...primary,
+    models: primary.models.flatMap((model) => {
+      const other = alternateModels.get(model.id);
+      if (!other) return [];
+      const mine = model.efforts?.length ? model.efforts : primary.effortLevels ?? [];
+      const theirs = other.efforts?.length ? other.efforts : alternate.effortLevels ?? [];
+      return [{ ...model, efforts: mine.filter((effort) => theirs.includes(effort)) }];
+    }),
+    effortLevels,
+    permissionModes: (primary.permissionModes ?? []).filter((mode) => (alternate.permissionModes ?? []).includes(mode)),
+  };
+}
+
+/** Drop any selection the given capability set does not advertise, used when the scope changes. */
+export function withCapabilities(form: FormState, capabilities: AgentCapabilities | undefined): FormState {
+  const model = form.model && capabilities?.models.some((candidate) => candidate.id === form.model) ? form.model : "";
+  return withModel({
+    ...form,
+    permissionMode: form.permissionMode && (capabilities?.permissionModes ?? []).includes(form.permissionMode)
+      ? form.permissionMode
+      : "",
+  }, model, capabilities);
+}
+
 export interface BuildSpecContext {
   projectsSupported: boolean;
   projects: Iterable<ProjectView>;
@@ -190,24 +230,31 @@ export function buildSpec(form: FormState, context: BuildSpecContext): Automatio
     action = { kind: "prompt_session", sessionId: form.sessionId, request: {
       text: form.prompt,
       ...(basePrompt?.slashCommand !== undefined ? { slashCommand: basePrompt.slashCommand } : {}),
-      ...(basePrompt?.config !== undefined ? { config: basePrompt.config } : {}),
+      // Config is validated against the TARGET session's agent by `capabilityConfigError` on the
+      // prompt path, so carrying it to a different session fails every fire. `slashCommand` has no
+      // such gate and is left alone.
+      ...(basePrompt?.config !== undefined && baseAction?.kind === "prompt_session" &&
+          baseAction.sessionId === form.sessionId ? { config: basePrompt.config } : {}),
     } };
   } else if (form.actionKind === "workflow_run") {
     // A workflow's pinned version, agent bindings, and orchestrator are meaningful only for the
     // workflow they were authored against. Selecting a different workflow drops them rather than
     // pinning a version of one graph onto another.
     const sameWorkflow = baseWorkflow?.workflowId === form.workflowId;
+    // Bindings name CONCRETE agent ids on one runner and config must be honourable by that
+    // runner's agents, so a Machine change invalidates both even when the workflow is unchanged.
+    const sameRunner = baseWorkflow?.runnerId === form.runnerId;
     action = { kind: "workflow_run", request: {
       runnerId: form.runnerId, workspaceId: form.workspaceId, workflowId: form.workflowId, task: form.prompt,
       ...primaryPlacement,
       ...(sameWorkflow && baseWorkflow?.workflowVersion !== undefined ? { workflowVersion: baseWorkflow.workflowVersion } : {}),
-      ...(sameWorkflow && baseWorkflow?.agentBindings !== undefined ? { agentBindings: baseWorkflow.agentBindings } : {}),
-      ...(sameWorkflow && baseWorkflow?.orchestratorAgentId !== undefined ? { orchestratorAgentId: baseWorkflow.orchestratorAgentId } : {}),
+      ...(sameWorkflow && sameRunner && baseWorkflow?.agentBindings !== undefined ? { agentBindings: baseWorkflow.agentBindings } : {}),
+      ...(sameWorkflow && sameRunner && baseWorkflow?.orchestratorAgentId !== undefined ? { orchestratorAgentId: baseWorkflow.orchestratorAgentId } : {}),
       ...(baseWorkflow?.title !== undefined ? { title: baseWorkflow.title } : {}),
       // Workflow runs default to worktrees server-side, the opposite of create-session. With no
       // control rendered for them, absence is preserved as absence.
       ...(baseWorkflow?.useWorktree !== undefined ? { useWorktree: baseWorkflow.useWorktree } : {}),
-      ...(baseWorkflow?.config !== undefined ? { config: baseWorkflow.config } : {}),
+      ...(sameRunner && baseWorkflow?.config !== undefined ? { config: baseWorkflow.config } : {}),
       ...(baseWorkflow?.costBudgetUsd !== undefined ? { costBudgetUsd: baseWorkflow.costBudgetUsd } : {}),
       ...(baseWorkflow?.maxToolCalls !== undefined ? { maxToolCalls: baseWorkflow.maxToolCalls } : {}),
     } };
@@ -215,7 +262,12 @@ export function buildSpec(form: FormState, context: BuildSpecContext): Automatio
     const config = sessionConfig(form, baseCreate?.config);
     action = { kind: "create_session", request: {
       runnerId: form.runnerId, workspaceId: form.workspaceId, agentId: form.agentId,
-      prompt: form.prompt, useWorktree: form.useWorktree, ...primaryPlacement,
+      prompt: form.prompt, ...primaryPlacement,
+      // A stored request may legitimately omit `useWorktree`; `formFrom` loads that as unchecked,
+      // so an untouched control must round-trip as absence rather than durably rewriting the field.
+      ...(baseCreate !== undefined && baseCreate.useWorktree === undefined && form.useWorktree === false
+        ? {}
+        : { useWorktree: form.useWorktree }),
       ...(baseCreate?.title !== undefined ? { title: baseCreate.title } : {}),
       ...(config ? { config } : {}),
     } };

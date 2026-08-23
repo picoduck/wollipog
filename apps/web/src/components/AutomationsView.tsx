@@ -25,7 +25,9 @@ import {
   defaults,
   formFrom,
   specOf,
+  sharedCapabilities,
   withAgent,
+  withCapabilities,
   withModel,
   type FormState,
 } from "../automation-form.js";
@@ -130,10 +132,20 @@ export function AutomationsView() {
   }, [refresh]);
 
   const selectedRunner = runners.get(form.runnerId);
+  const selectedFallback = runners.get(form.fallbackRunnerId);
   // Model, effort, and permission mode are agent-scoped: the runner advertises them per agent, and
   // the pickers must never offer a value the selected agent cannot honour. A value already stored
   // but no longer advertised is still listed, so editing an automation cannot silently rewrite it.
-  const agentCapabilities = selectedRunner?.agents.find((agent) => agent.id === form.agentId)?.capabilities;
+  const primaryCapabilities = selectedRunner?.agents.find((agent) => agent.id === form.agentId)?.capabilities;
+  // An explicit alternate runs the SAME stored config on a different agent, so the pickers offer
+  // only what both agents can honour. Anything else saves a spec that fails on failover.
+  const alternateCapabilities = form.actionKind === "create_session" && form.runnerPolicy === "alternate"
+    ? selectedFallback?.agents.find((agent) => agent.id === form.fallbackAgentId)?.capabilities
+    : undefined;
+  const agentCapabilities = useMemo(
+    () => sharedCapabilities(primaryCapabilities, alternateCapabilities),
+    [primaryCapabilities, alternateCapabilities],
+  );
   const modelOptions = useMemo(() => {
     const advertised = (agentCapabilities?.models ?? []).filter((model) => !model.hidden);
     return form.model && !advertised.some((model) => model.id === form.model)
@@ -151,7 +163,6 @@ export function AutomationsView() {
       ? [form.permissionMode, ...advertised]
       : advertised;
   }, [agentCapabilities, form.permissionMode]);
-  const selectedFallback = runners.get(form.fallbackRunnerId);
   const editableSessions = useMemo(() => [...sessions.values()]
     .filter((session) => !session.archived && !["completed", "failed", "stopped"].includes(session.status))
     .sort((a, b) => a.title.localeCompare(b.title)), [sessions]);
@@ -379,11 +390,18 @@ export function AutomationsView() {
             {form.runnerPolicy === "alternate" && <>
               <label>Alternate Machine<select value={form.fallbackRunnerId} onChange={(event) => {
                 const runner = runners.get(event.target.value);
-                setForm((current) => ({ ...current, fallbackRunnerId: event.target.value,
-                  fallbackWorkspaceId: runner?.workspaces[0]?.id ?? "", fallbackAgentId: runner?.agents[0]?.id ?? "" }));
+                const agentId = runner?.agents[0]?.id ?? "";
+                setForm((current) => ({
+                  ...withCapabilities(current, sharedCapabilities(primaryCapabilities,
+                    runner?.agents.find((agent) => agent.id === agentId)?.capabilities)),
+                  fallbackRunnerId: event.target.value,
+                  fallbackWorkspaceId: runner?.workspaces[0]?.id ?? "", fallbackAgentId: agentId }));
               }}><option value="">Select…</option>{[...runners.values()].filter((runner) => runner.runnerId !== form.runnerId).map((runner) => <option key={runner.runnerId} value={runner.runnerId}>{machineLabels.get(runner.runnerId)}</option>)}</select></label>
               <label>Alternate Workspace<select value={form.fallbackWorkspaceId} onChange={(event) => patch("fallbackWorkspaceId", event.target.value)}>{(selectedFallback?.workspaces ?? []).map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}</select></label>
-              {form.actionKind === "create_session" && <label>Alternate Agent<select value={form.fallbackAgentId} onChange={(event) => patch("fallbackAgentId", event.target.value)}>{(selectedFallback?.agents ?? []).map((agent) => <option key={agent.id} value={agent.id}>{agentDisplayName(agent)}</option>)}</select></label>}
+              {form.actionKind === "create_session" && <label>Alternate Agent<select value={form.fallbackAgentId} onChange={(event) => setForm((current) => ({
+                ...withCapabilities(current, sharedCapabilities(primaryCapabilities,
+                  selectedFallback?.agents.find((agent) => agent.id === event.target.value)?.capabilities)),
+                fallbackAgentId: event.target.value }))}>{(selectedFallback?.agents ?? []).map((agent) => <option key={agent.id} value={agent.id}>{agentDisplayName(agent)}</option>)}</select></label>}
             </>}
             <label>Concurrency<select value={form.concurrency} onChange={(event) => patch("concurrency", event.target.value as FormState["concurrency"])}><option value="wait">Wait for Previous</option><option value="skip">Skip While Active</option>{form.actionKind !== "prompt_session" && <option value="parallel">Allow Parallel</option>}</select></label>
             <label>Max Additional Cost (USD)<input type="number" min="0.01" max="10000" step="0.01" value={form.maxCostUsd} onChange={(event) => patch("maxCostUsd", event.target.value)} /></label>
