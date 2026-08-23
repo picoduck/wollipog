@@ -43,7 +43,8 @@ test("the application shell is rail-first and the legacy sidebar is fully retire
   assert.match(rail, /const RAIL_ICON_SIZE = 26;[\s\S]*<Icon size=\{RAIL_ICON_SIZE\}/);
   assert.doesNotMatch(rail, /onNewSession|rail-action|PlusIcon/);
   assert.doesNotMatch(app, /title="New Session"[\s\S]*aria-label="New Session"/);
-  assert.match(app, /mobileControls=\{isMobile \?/);
+  assert.match(app, /mobileInstanceControl=\{isMobile \?/);
+  assert.match(app, /mobileSettingsControl=\{isMobile \?/);
   assert.match(css, /\.app-rail\s*\{\s*width:\s*66px/);
   assert.match(css, /\.rail-brand img\s*\{[^}]*width:\s*39px;[^}]*height:\s*39px/);
   assert.match(css, /\.app-rail \.rail-item > \.app-icon,[\s\S]*?\.rail-settings \.settings-trigger svg\s*\{[^}]*width:\s*26px;[^}]*height:\s*26px/);
@@ -347,6 +348,28 @@ test("the phone topbar cannot push its controls off-screen", () => {
     "and must not grow with the instance name");
   assert.match(css, /\.topbar:has\(\.topbar-mobile-controls\) h1 \{[^}]*text-overflow: ellipsis/,
     "the title must yield before any control does");
+});
+
+test("Settings is the trailing control in the unified phone topbar cluster", () => {
+  const start = app.indexOf('<div className="topbar-actions topbar-mobile-controls">');
+  const end = app.indexOf("</div>", start);
+  assert.ok(start >= 0 && end > start, "the phone controls must share one ordered cluster");
+
+  const mobileCluster = app.slice(start, end);
+  const instanceIndex = mobileCluster.indexOf("mobileInstanceControl");
+  const createIndex = mobileCluster.indexOf("topbar-create");
+  const sessionActionsIndex = mobileCluster.indexOf("sessionActions");
+  const settingsIndex = mobileCluster.indexOf("mobileSettingsControl");
+  assert.ok(instanceIndex >= 0 && createIndex >= 0 && sessionActionsIndex >= 0 && settingsIndex >= 0,
+    "the phone cluster must include every control category");
+  assert.ok(instanceIndex < settingsIndex,
+    "the instance control must precede Settings");
+  assert.ok(createIndex < settingsIndex,
+    "creation actions must precede Settings");
+  assert.ok(sessionActionsIndex < settingsIndex,
+    "session actions must precede Settings");
+  assert.match(css, /\.topbar-mobile-controls \{[^}]*flex-wrap: nowrap/,
+    "the unified control cluster must stay on one line");
 });
 
 test("keyboard reachability does not depend on optional viewport metadata alone", () => {

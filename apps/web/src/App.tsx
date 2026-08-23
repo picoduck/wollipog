@@ -653,14 +653,14 @@ function Shell() {
         {!(view.name === "session" && !isMobile) && (
           <Header
             view={view}
-            mobileControls={isMobile ? (
+            mobileInstanceControl={isMobile ? (
               /* The phone rail has room for five destinations and nothing else, so these live here.
                  The topbar is fixed and uncontested — unlike the bottom band, which an open shell
                  dock and the toast stack both occupy. */
-              <>
-                <InstanceSelector compact />
-                <SettingsTrigger active={view.name === "settings"} onOpen={() => navigate({ name: "settings" })} />
-              </>
+              <InstanceSelector compact />
+            ) : null}
+            mobileSettingsControl={isMobile ? (
+              <SettingsTrigger active={view.name === "settings"} onOpen={() => navigate({ name: "settings" })} />
             ) : null}
             onNewRun={() => setDialog({ kind: "run" })}
             onNewPod={() => setDialog({ kind: "pod" })}
@@ -843,14 +843,16 @@ function BannerStatusIcon({ kind }: { kind: "lock" | "warning" }) {
 
 function Header({
   view,
-  mobileControls,
+  mobileInstanceControl,
+  mobileSettingsControl,
   onNewRun,
   onNewPod,
   sessionActions,
 }: {
   view: View;
-  /** Instance switcher and Settings on phone widths, where the rail has no room. */
-  mobileControls?: React.ReactNode;
+  /** Global controls moved out of the rail on phone widths. */
+  mobileInstanceControl?: React.ReactNode;
+  mobileSettingsControl?: React.ReactNode;
   onNewRun: () => void;
   onNewPod: () => void;
   /** Session panel-control cluster; rendered here only on phone widths, where the unified
@@ -864,14 +866,26 @@ function Header({
       {/* Focusable only programmatically: the rescue below moves focus here when a layout swap
           drops it, so the next Tab continues from the page rather than from the document top. */}
       <h1 id="page-title" tabIndex={-1}>{title}</h1>
-      {mobileControls && <div className="topbar-actions topbar-mobile-controls">{mobileControls}</div>}
-      {view.name === "runs" && flags.multiAgent && (
+      {mobileInstanceControl && mobileSettingsControl && (
+        <div className="topbar-actions topbar-mobile-controls">
+          {mobileInstanceControl}
+          {view.name === "runs" && flags.multiAgent && (
+            <button type="button" className="btn primary sm topbar-create" onClick={onNewRun}>New Multi-Agent Run</button>
+          )}
+          {view.name === "pods" && flags.pods && (
+            <button type="button" className="btn primary sm topbar-create" onClick={onNewPod}>New Collaboration Pod</button>
+          )}
+          {view.name === "session" && sessionActions}
+          {mobileSettingsControl}
+        </div>
+      )}
+      {!mobileInstanceControl && view.name === "runs" && flags.multiAgent && (
         <button type="button" className="btn primary sm topbar-create" onClick={onNewRun}>New Multi-Agent Run</button>
       )}
-      {view.name === "pods" && flags.pods && (
+      {!mobileInstanceControl && view.name === "pods" && flags.pods && (
         <button type="button" className="btn primary sm topbar-create" onClick={onNewPod}>New Collaboration Pod</button>
       )}
-      {view.name === "session" && sessionActions && (
+      {!mobileInstanceControl && view.name === "session" && sessionActions && (
         <div className="topbar-actions">{sessionActions}</div>
       )}
     </header>
