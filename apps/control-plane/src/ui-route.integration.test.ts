@@ -692,6 +692,7 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     plainStopCommand.type === "stop_session" ? plainStopCommand.operationId : undefined,
     plainStopPayload.stopOperation.operationId,
   );
+  assert.ok(plainStopCommand.type === "stop_session" && plainStopCommand.deliveryAttemptId);
   for (const inbox of [uiInbox, operatorUiInbox]) {
     await inbox.take((message) => message.type === "session_upsert" &&
       (message.session as { id?: string; stopOperation?: { status?: string } } | undefined)?.id === "session-other" &&
@@ -703,6 +704,9 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     type: "stop_session_result",
     sessionId: "session-other",
     operationId: plainStopPayload.stopOperation.operationId,
+    deliveryAttemptId: plainStopCommand.type === "stop_session"
+      ? plainStopCommand.deliveryAttemptId
+      : undefined,
     accepted: false,
     error: "/private/provider/path and runtime output",
   }));
@@ -745,6 +749,8 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     authorizedRetryCommand.type === "stop_session" ? authorizedRetryCommand.operationId : undefined,
     plainStopPayload.stopOperation.operationId,
   );
+  assert.ok(authorizedRetryCommand.type === "stop_session" && authorizedRetryCommand.deliveryAttemptId);
+  assert.notEqual(authorizedRetryCommand.deliveryAttemptId, plainStopCommand.deliveryAttemptId);
   const duplicateRetryResponse = await ownerFetch(
     "/api/sessions/session-other/retry-stop",
     { method: "POST" },
@@ -760,6 +766,10 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   assert.equal(
     duplicateRetryCommand.type === "stop_session" ? duplicateRetryCommand.operationId : undefined,
     plainStopPayload.stopOperation.operationId,
+  );
+  assert.equal(
+    duplicateRetryCommand.type === "stop_session" ? duplicateRetryCommand.deliveryAttemptId : undefined,
+    authorizedRetryCommand.deliveryAttemptId,
   );
   for (const inbox of [uiInbox, operatorUiInbox]) {
     await inbox.take((message) => message.type === "session_upsert" &&
@@ -1430,7 +1440,7 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   assert.deepEqual(archivePayload.pendingSessionIds, ["session-target"]);
   const stopRequest = await runnerInbox.take((message) =>
     message.type === "stop_session" && message.sessionId === "session-target");
-  assert.ok(stopRequest.type === "stop_session" && stopRequest.operationId);
+  assert.ok(stopRequest.type === "stop_session" && stopRequest.operationId && stopRequest.deliveryAttemptId);
   await uiInbox.take((message) => message.type === "session_upsert" &&
     (message.session as { id?: string; archived?: boolean; archiveStatus?: string } | undefined)?.id === "session-target" &&
     (message.session as { archived?: boolean } | undefined)?.archived === false &&
@@ -1439,6 +1449,7 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     type: "stop_session_result",
     sessionId: "session-target",
     operationId: stopRequest.operationId,
+    deliveryAttemptId: stopRequest.deliveryAttemptId,
     accepted: false,
     error: "private runner detail",
   }));

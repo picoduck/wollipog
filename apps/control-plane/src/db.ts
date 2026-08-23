@@ -1816,6 +1816,7 @@ interface SessionStopIntentRow {
   restart_launch_id: string | null;
   archive_after_stop: number;
   operation_id: string;
+  delivery_attempt_id: string;
   last_attempt_at: number;
   attempt_count: number;
   failed_at: number | null;
@@ -1827,6 +1828,7 @@ export interface SessionStopIntentRecord {
   sessionId: string;
   runnerId: string;
   restartLaunchId: string | null;
+  deliveryAttemptId: string;
   archiveAfterStop: boolean;
   operation: StopOperationView;
 }
@@ -3613,6 +3615,7 @@ export class ControlPlaneDb {
          operation_id TEXT,
          last_attempt_at INTEGER,
          attempt_count INTEGER NOT NULL DEFAULT 1 CHECK (attempt_count >= 1),
+         delivery_attempt_id TEXT,
          failed_at INTEGER,
          failure_code TEXT,
          failure_message TEXT
@@ -3632,6 +3635,9 @@ export class ControlPlaneDb {
     if (!stopIntentColumns.some((column) => column.name === "last_attempt_at")) {
       db.exec("ALTER TABLE session_stop_intents ADD COLUMN last_attempt_at INTEGER");
     }
+    if (!stopIntentColumns.some((column) => column.name === "delivery_attempt_id")) {
+      db.exec("ALTER TABLE session_stop_intents ADD COLUMN delivery_attempt_id TEXT");
+    }
     if (!stopIntentColumns.some((column) => column.name === "attempt_count")) {
       db.exec("ALTER TABLE session_stop_intents ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 1 CHECK (attempt_count >= 1)");
     }
@@ -3647,6 +3653,7 @@ export class ControlPlaneDb {
     db.exec(
       `UPDATE session_stop_intents
        SET operation_id=COALESCE(operation_id, 'stop_' || lower(hex(randomblob(16)))),
+           delivery_attempt_id=COALESCE(delivery_attempt_id, 'stop_delivery_' || lower(hex(randomblob(16)))),
            last_attempt_at=COALESCE(last_attempt_at, created_at)`,
     );
     db.exec(
@@ -10232,6 +10239,7 @@ export class ControlPlaneDb {
       runnerId: row.runner_id,
       restartLaunchId: row.restart_launch_id,
       archiveAfterStop: row.archive_after_stop === 1,
+      deliveryAttemptId: row.delivery_attempt_id,
       operation: {
         operationId: row.operation_id,
         status,
@@ -10259,10 +10267,11 @@ export class ControlPlaneDb {
     archiveAfterStop = false,
   ): SessionStopIntentRecord {
     const operationId = "stop_" + randomUUID();
+    const deliveryAttemptId = "stop_delivery_" + randomUUID();
     this.stmt(
       "INSERT INTO session_stop_intents " +
-      "(session_id, runner_id, created_at, archive_after_stop, operation_id, last_attempt_at, attempt_count) " +
-      "VALUES (?, ?, ?, ?, ?, ?, 1) " +
+      "(session_id, runner_id, created_at, archive_after_stop, operation_id, last_attempt_at, attempt_count, delivery_attempt_id) " +
+      "VALUES (?, ?, ?, ?, ?, ?, 1, ?) " +
       "ON CONFLICT(session_id) DO UPDATE SET " +
       "runner_id=excluded.runner_id, restart_launch_id=NULL, " +
       "created_at=CASE WHEN session_stop_intents.archive_after_stop=0 " +
@@ -10274,8 +10283,11 @@ export class ControlPlaneDb {
       "attempt_count=CASE WHEN session_stop_intents.archive_after_stop=0 " +
         "AND excluded.archive_after_stop=1 AND session_stop_intents.failed_at IS NULL " +
         "THEN 1 ELSE session_stop_intents.attempt_count END, " +
+      "delivery_attempt_id=CASE WHEN session_stop_intents.archive_after_stop=0 " +
+        "AND excluded.archive_after_stop=1 AND session_stop_intents.failed_at IS NULL " +
+        "THEN excluded.delivery_attempt_id ELSE session_stop_intents.delivery_attempt_id END, " +
       "archive_after_stop=MAX(session_stop_intents.archive_after_stop, excluded.archive_after_stop)",
-    ).run(sessionId, runnerId, now, archiveAfterStop ? 1 : 0, operationId, now);
+    ).run(sessionId, runnerId, now, archiveAfterStop ? 1 : 0, operationId, now, deliveryAttemptId);
     return this.sessionStopIntent(sessionId)!;
   }
 
@@ -10310,29 +10322,32 @@ export class ControlPlaneDb {
       const existing = this.sessionStopIntent(sessionId);
       if (!existing) return undefined;
       if (existing.operation.status === "stop_failed") {
+        const deliveryAttemptId = "stop_delivery_" + randomUUID();
         this.stmt(
           "UPDATE session_stop_intents " +
-          "SET created_at=?, failed_at=NULL, failure_code=NULL, failure_message=NULL, " +
+          "SET created_at=?, failed_at=NULL, failure_code=NULL, failure_message=NULL, delivery_attempt_id=?, " +
           "last_attempt_at=?, attempt_count=1, restart_launch_id=NULL " +
           "WHERE session_id=? AND failed_at IS NOT NULL",
-        ).run(now, now, sessionId);
+        ).run(now, deliveryAttemptId, now, sessionId);
       }
       return this.sessionStopIntent(sessionId);
     });
   }
 
   recordSessionStopAttempt(sessionId: string, now: number): SessionStopIntentRecord | undefined {
+    const deliveryAttemptId = "stop_delivery_" + randomUUID();
     this.stmt(
       "UPDATE session_stop_intents " +
-      "SET last_attempt_at=?, attempt_count=attempt_count+1 " +
+      "SET last_attempt_at=?, attempt_count=attempt_count+1, delivery_attempt_id=? " +
       "WHERE session_id=? AND failed_at IS NULL",
-    ).run(now, sessionId);
+    ).run(now, deliveryAttemptId, sessionId);
     return this.sessionStopIntent(sessionId);
   }
 
   failSessionStopIntent(
     sessionId: string,
     operationId: string,
+    deliveryAttemptId: string,
     code: ArchiveStopFailureCode,
     message: string,
     now: number,
@@ -10342,7 +10357,7 @@ export class ControlPlaneDb {
     const changed = this.stmt(
       "UPDATE session_stop_intents " +
       "SET failed_at=?, failure_code=?, failure_message=? " +
-      "WHERE session_id=? AND operation_id=? AND " +
+      "WHERE session_id=? AND operation_id=? AND delivery_attempt_id=? AND " +
       "(failed_at IS NULL OR (?='runner_rejected' AND failure_code IN ('timeout', 'retry_exhausted')))",
     ).run(
       now,
@@ -10350,6 +10365,7 @@ export class ControlPlaneDb {
       bounded || "The runner could not confirm that the session stopped.",
       sessionId,
       operationId,
+      deliveryAttemptId,
       code,
     );
     return Number(changed.changes) === 1;

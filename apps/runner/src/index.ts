@@ -1105,6 +1105,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             type: "stop_session_result",
             sessionId: msg.sessionId,
             operationId: msg.operationId,
+            ...(msg.deliveryAttemptId ? { deliveryAttemptId: msg.deliveryAttemptId } : {}),
             accepted: true,
           });
         }
@@ -1114,6 +1115,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           sendUp({
             type: "stop_session_result", sessionId: msg.sessionId,
             operationId: msg.operationId, accepted: false, error: detail,
+            ...(msg.deliveryAttemptId ? { deliveryAttemptId: msg.deliveryAttemptId } : {}),
           });
         } else log("session stop failed for " + msg.sessionId + ": " + detail);
       }

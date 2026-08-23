@@ -3714,13 +3714,16 @@ export class SessionsService {
     if (intent?.operation.status === "stop_failed") {
       const recoverableFailure = intent.operation.failure?.code === "timeout" ||
         intent.operation.failure?.code === "retry_exhausted";
-      if (!recoverableFailure || !runnerSupportsProtocol(protocolVersion, "stopFailureRecovery")) return false;
+      if (!recoverableFailure || !runnerSupportsProtocol(protocolVersion, "stopAttemptCorrelation")) return false;
     }
     return this.hub.sendToRunner(runnerId, {
       type: "stop_session",
       sessionId,
       ...(intent && runnerSupportsProtocol(protocolVersion, "stopFailureRecovery")
         ? { operationId: intent.operation.operationId }
+        : {}),
+      ...(intent && runnerSupportsProtocol(protocolVersion, "stopAttemptCorrelation")
+        ? { deliveryAttemptId: intent.deliveryAttemptId }
         : {}),
     });
   }
@@ -3729,6 +3732,7 @@ export class SessionsService {
   private failStopOperation(
     sessionId: string,
     operationId: string,
+    deliveryAttemptId: string,
     code: "timeout" | "retry_exhausted" | "runner_rejected",
     message: string,
     now: number,
@@ -3736,6 +3740,7 @@ export class SessionsService {
     const changed = this.db.failSessionStopIntent(
       sessionId,
       operationId,
+      deliveryAttemptId,
       code,
       message.slice(0, SESSION_STOP_FAILURE_MESSAGE_MAX_CHARS),
       now,
@@ -3745,16 +3750,17 @@ export class SessionsService {
   }
 
   /** Reconcile durable attempts on a bounded schedule. Older runners never enter Stop Failed
-   * because they cannot return correlated acceptance/rejection and must fail conservatively. */
+   * because they cannot return attempt-correlated results and must fail conservatively. */
   maintainSessionStopIntents(now = Date.now()): number {
     let changed = 0;
     for (const intent of this.db.pendingSessionStopIntents()) {
       const protocolVersion = this.db.getRunner(intent.runnerId)?.protocolVersion;
-      if (!runnerSupportsProtocol(protocolVersion, "stopFailureRecovery")) continue;
+      if (!runnerSupportsProtocol(protocolVersion, "stopAttemptCorrelation")) continue;
       if (now - intent.operation.requestedAt >= SESSION_STOP_TIMEOUT_MS) {
         changed += Number(this.failStopOperation(
           intent.sessionId,
           intent.operation.operationId,
+          intent.deliveryAttemptId,
           "timeout",
           "The runner did not confirm that runtime capacity was released before the Stop timeout.",
           now,
@@ -3766,6 +3772,7 @@ export class SessionsService {
         changed += Number(this.failStopOperation(
           intent.sessionId,
           intent.operation.operationId,
+          intent.deliveryAttemptId,
           "retry_exhausted",
           "The automatic Stop retry policy was exhausted without terminal runner evidence.",
           now,
@@ -3784,10 +3791,15 @@ export class SessionsService {
     const intent = this.db.sessionStopIntent(result.sessionId);
     if (!intent || intent.runnerId !== runnerId ||
         intent.operation.operationId !== result.operationId) return false;
+    const protocolVersion = this.db.getRunner(runnerId)?.protocolVersion;
+    if (!runnerSupportsProtocol(protocolVersion, "stopAttemptCorrelation") ||
+        !result.deliveryAttemptId || result.deliveryAttemptId !== intent.deliveryAttemptId) return false;
     if (result.accepted) return true;
+    if (intent.operation.failure?.code === "runner_rejected") return true;
     return this.failStopOperation(
       result.sessionId,
       result.operationId,
+      result.deliveryAttemptId,
       "runner_rejected",
       "The runner rejected the Stop request without confirming that runtime capacity was released.",
       Date.now(),

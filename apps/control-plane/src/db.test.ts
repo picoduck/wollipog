@@ -722,9 +722,11 @@ test("Stop Failed metadata and idempotent recovery survive control-plane restart
     initial.registerRunner(meta(), 500, PROTOCOL_VERSION);
     initial.createSession(newSession());
     const intent = initial.addSessionStopIntent("sess-1", "runner-1", 1_100, true);
+    assert.match(intent.deliveryAttemptId, /^stop_delivery_/u);
     assert.equal(initial.failSessionStopIntent(
       "sess-1",
       intent.operation.operationId,
+      intent.deliveryAttemptId,
       "runner_rejected",
       "The runner rejected the Stop request.",
       1_200,
@@ -737,13 +739,21 @@ test("Stop Failed metadata and idempotent recovery survive control-plane restart
     assert.equal(failed?.operationId, intent.operation.operationId);
     assert.equal(failed?.failure?.code, "runner_rejected");
     assert.equal(failed?.failure?.failedAt, 1_200);
+    assert.equal(reopened.sessionStopIntent("sess-1")?.deliveryAttemptId, intent.deliveryAttemptId);
     const retried = reopened.retrySessionStopIntent("sess-1", 1_300);
     assert.equal(retried?.operation.operationId, intent.operation.operationId);
+    assert.notEqual(retried?.deliveryAttemptId, intent.deliveryAttemptId);
     assert.equal(retried?.operation.status, "stop_pending");
     assert.equal(retried?.operation.attemptCount, 1, "explicit recovery receives a fresh retry budget");
     assert.equal(retried?.operation.requestedAt, 1_300, "explicit recovery receives a fresh timeout window");
-    assert.equal(reopened.retrySessionStopIntent("sess-1", 1_400)?.operation.attemptCount, 1);
+    const duplicate = reopened.retrySessionStopIntent("sess-1", 1_400);
+    assert.equal(duplicate?.operation.attemptCount, 1);
+    assert.equal(duplicate?.deliveryAttemptId, retried?.deliveryAttemptId);
     reopened.close();
+
+    const restartedAgain = ControlPlaneDb.open(path);
+    assert.equal(restartedAgain.sessionStopIntent("sess-1")?.deliveryAttemptId, retried?.deliveryAttemptId);
+    restartedAgain.close();
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -760,6 +770,7 @@ test("plain Stop Failed metadata and idempotent recovery survive control-plane r
     assert.equal(initial.failSessionStopIntent(
       "sess-1",
       intent.operation.operationId,
+      intent.deliveryAttemptId,
       "runner_rejected",
       "The runner rejected the Stop request.",
       1_200,
@@ -4509,6 +4520,7 @@ test("archive page SQL preserves Stop Failed recovery state", () => {
   assert.equal(db.failSessionStopIntent(
     "stop-failed",
     intent.operation.operationId,
+    intent.deliveryAttemptId,
     "retry_exhausted",
     "Automatic retries were exhausted.",
     1_200,

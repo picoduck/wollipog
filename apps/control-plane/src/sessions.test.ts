@@ -6601,10 +6601,13 @@ test("supported Stop operations time out durably and retry the same operation id
   ), 1);
   assert.equal(db.getSession(id)?.archiveStatus, "stop_pending",
     "manual recovery receives all three bounded deliveries before exhaustion");
+  const latestDeliveryAttemptId = hub.sentOfType("stop_session").at(-1)?.deliveryAttemptId;
+  assert.ok(latestDeliveryAttemptId);
   assert.equal(svc.onStopSessionResult(RUNNER_ID, {
     type: "stop_session_result",
     sessionId: id,
     operationId: operation.operationId,
+    deliveryAttemptId: latestDeliveryAttemptId,
     accepted: true,
   }), true);
   assert.equal(db.getSession(id)?.archiveStatus, "stop_pending", "acceptance is not capacity-release proof");
@@ -6648,18 +6651,22 @@ test("exhausted retries and explicit runner rejection become bounded Stop Failed
   const rejectedId = seedSession(rejectedHarness.svc, rejectedHarness.hub);
   rejectedHarness.db.updateSessionStatus(rejectedId, "running", Date.now());
   const rejectedOperation = rejectedHarness.svc.setArchived(rejectedId, true).data!.archiveOperation!;
+  const rejectedDeliveryAttemptId = rejectedHarness.hub.sentOfType("stop_session").at(-1)?.deliveryAttemptId;
+  assert.ok(rejectedDeliveryAttemptId);
   assert.equal(rejectedHarness.svc.onStopSessionResult("intruder", {
     type: "stop_session_result", sessionId: rejectedId,
-    operationId: rejectedOperation.operationId, accepted: false, error: "private output",
+    operationId: rejectedOperation.operationId, deliveryAttemptId: rejectedDeliveryAttemptId,
+    accepted: false, error: "private output",
   }), false);
   assert.equal(rejectedHarness.svc.onStopSessionResult(RUNNER_ID, {
     type: "stop_session_result", sessionId: rejectedId,
-    operationId: "stale-operation", accepted: false, error: "private output",
+    operationId: "stale-operation", deliveryAttemptId: rejectedDeliveryAttemptId,
+    accepted: false, error: "private output",
   }), false);
   assert.equal(rejectedHarness.svc.onStopSessionResult(RUNNER_ID, {
     type: "stop_session_result", sessionId: rejectedId,
-    operationId: rejectedOperation.operationId, accepted: false,
-    error: "/private/provider/path and runtime output",
+    operationId: rejectedOperation.operationId, deliveryAttemptId: rejectedDeliveryAttemptId,
+    accepted: false, error: "/private/provider/path and runtime output",
   }), true);
   const rejected = rejectedHarness.db.getSession(rejectedId)!;
   assert.equal(rejected.archiveOperation?.failure?.code, "runner_rejected");
@@ -6688,11 +6695,13 @@ test("reconnect replays only recoverable failed archive Stops without clearing f
         type: "stop_session_result",
         sessionId: id,
         operationId: operation.operationId,
+        deliveryAttemptId: db.sessionStopIntent(id)!.deliveryAttemptId,
         accepted: false,
       });
     }
 
     const failed = db.getSession(id)!.archiveOperation!;
+    const failedDeliveryAttemptId = db.sessionStopIntent(id)!.deliveryAttemptId;
     assert.equal(failed.status, "stop_failed", failureCode);
     assert.equal(failed.failure?.code, failureCode);
     hub.sentToRunner.length = 0;
@@ -6703,6 +6712,7 @@ test("reconnect replays only recoverable failed archive Stops without clearing f
     assert.equal(replayed.length, failureCode === "runner_rejected" ? 0 : 1, failureCode);
     if (failureCode !== "runner_rejected") {
       assert.equal(replayed[0]?.operationId, operation.operationId, failureCode);
+      assert.equal(replayed[0]?.deliveryAttemptId, failedDeliveryAttemptId, failureCode);
     }
     const afterReconnect = db.getSession(id)!;
     assert.equal(afterReconnect.archiveStatus, "stop_failed", failureCode);
@@ -6737,17 +6747,20 @@ test("late runner rejection overrides recoverable Stop failures and suppresses r
       }
     }
     assert.equal(db.getSession(id)?.archiveOperation?.failure?.code, initialFailure);
+    const failedDeliveryAttemptId = db.sessionStopIntent(id)!.deliveryAttemptId;
 
     assert.equal(svc.onStopSessionResult("intruder", {
       type: "stop_session_result",
       sessionId: id,
       operationId: operation.operationId,
+      deliveryAttemptId: failedDeliveryAttemptId,
       accepted: false,
     }), false, initialFailure);
     assert.equal(svc.onStopSessionResult(RUNNER_ID, {
       type: "stop_session_result",
       sessionId: id,
       operationId: "stale-operation",
+      deliveryAttemptId: failedDeliveryAttemptId,
       accepted: false,
     }), false, initialFailure);
     assert.equal(db.getSession(id)?.archiveOperation?.failure?.code, initialFailure);
@@ -6756,6 +6769,7 @@ test("late runner rejection overrides recoverable Stop failures and suppresses r
       type: "stop_session_result",
       sessionId: id,
       operationId: operation.operationId,
+      deliveryAttemptId: failedDeliveryAttemptId,
       accepted: false,
     }), true, initialFailure);
     const rejected = db.getSession(id)!;
@@ -6776,7 +6790,7 @@ test("late runner rejection overrides recoverable Stop failures and suppresses r
   }
 });
 
-test("an old runner cannot replay a failed archive Stop without correlated operation support", () => {
+test("a pre-v89 runner cannot replay a failed archive Stop without attempt correlation", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);
   db.updateSessionStatus(id, "running", Date.now());
@@ -6784,7 +6798,7 @@ test("an old runner cannot replay a failed archive Stop without correlated opera
   svc.maintainSessionStopIntents(operation.requestedAt + SESSION_STOP_TIMEOUT_MS);
   assert.equal(db.getSession(id)?.archiveOperation?.failure?.code, "timeout");
 
-  db.registerRunner(runnerMeta(), Date.now(), 84);
+  db.registerRunner(runnerMeta(), Date.now(), 88);
   hub.sentToRunner.length = 0;
   svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, status: "running" })]);
 
@@ -6794,7 +6808,7 @@ test("an old runner cannot replay a failed archive Stop without correlated opera
   assert.equal(db.getSession(id)?.archived, false);
 });
 
-test("offline v85 runners exhaust bounded automatic Stop recovery without hiding capacity", () => {
+test("offline current runners exhaust bounded automatic Stop recovery without hiding capacity", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);
   db.updateSessionStatus(id, "running", Date.now());
@@ -6814,14 +6828,20 @@ test("offline v85 runners exhaust bounded automatic Stop recovery without hiding
   assert.equal(failed.archived, false);
 });
 
-test("mixed-version runners remain conservatively Stop Pending after the v85 failure window", () => {
+test("pre-v89 runners remain conservatively Stop Pending without attempt correlation", () => {
   const { db, hub, svc } = makeHarness();
-  db.registerRunner(runnerMeta(), Date.now(), 84);
+  db.registerRunner(runnerMeta(), Date.now(), 88);
   const id = seedSession(svc, hub);
   db.updateSessionStatus(id, "running", Date.now());
 
   const pending = svc.setArchived(id, true).data!;
-  assert.equal(hub.sentOfType("stop_session").at(-1)?.operationId, undefined);
+  const command = hub.sentOfType("stop_session").at(-1)!;
+  assert.equal(command.operationId, pending.archiveOperation?.operationId);
+  assert.equal(command.deliveryAttemptId, undefined);
+  assert.equal(svc.onStopSessionResult(RUNNER_ID, {
+    type: "stop_session_result", sessionId: id,
+    operationId: command.operationId!, accepted: false,
+  }), false);
   assert.equal(svc.maintainSessionStopIntents(
     pending.archiveOperation!.requestedAt + SESSION_STOP_TIMEOUT_MS * 2,
   ), 0);
@@ -6920,9 +6940,11 @@ test("Project bulk archive uses the same stop-and-archive lifecycle for mixed st
   assert.deepEqual(hub.projectChangedByIdCalls, [], "the route owns the one batched Project refresh");
 
   const operationId = db.getSession(running)?.archiveOperation?.operationId;
+  const deliveryAttemptId = hub.sentOfType("stop_session").at(-1)?.deliveryAttemptId;
   assert.ok(operationId);
+  assert.ok(deliveryAttemptId);
   svc.onStopSessionResult(RUNNER_ID, {
-    type: "stop_session_result", sessionId: running, operationId,
+    type: "stop_session_result", sessionId: running, operationId, deliveryAttemptId,
     accepted: false, error: "runner rejection detail",
   });
   const failed = svc.archiveProjectSessions(projectId!);
@@ -6944,7 +6966,7 @@ test("stop sends stop_session and marks the session stopped", () => {
   assert.ok(hub.sessionChangedByIdCalls.includes(id));
 });
 
-test("correlated plain Stop rejection is visible, fenced, retryable, and terminally settled", () => {
+test("correlated plain Stop rejection fences stale attempts and settles terminally", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);
   const otherId = seedSession(svc, hub);
@@ -6953,6 +6975,8 @@ test("correlated plain Stop rejection is visible, fenced, retryable, and termina
 
   const stopped = svc.stop(id).data!;
   const operation = stopped.stopOperation!;
+  const initialDeliveryAttemptId = hub.sentOfType("stop_session").at(-1)?.deliveryAttemptId;
+  assert.ok(initialDeliveryAttemptId);
   assert.equal(operation.status, "stop_pending");
   assert.equal(operation.capacityReleased, false);
   assert.equal(stopped.archived, false);
@@ -6961,23 +6985,31 @@ test("correlated plain Stop rejection is visible, fenced, retryable, and termina
 
   assert.equal(svc.onStopSessionResult("intruder", {
     type: "stop_session_result", sessionId: id,
-    operationId: operation.operationId, accepted: false, error: "private output",
+    operationId: operation.operationId, deliveryAttemptId: initialDeliveryAttemptId,
+    accepted: false, error: "private output",
   }), false);
   assert.equal(svc.onStopSessionResult(RUNNER_ID, {
     type: "stop_session_result", sessionId: id,
-    operationId: "stale-operation", accepted: false, error: "private output",
+    operationId: "stale-operation", deliveryAttemptId: initialDeliveryAttemptId,
+    accepted: false, error: "private output",
   }), false);
   assert.equal(svc.onStopSessionResult(RUNNER_ID, {
     type: "stop_session_result", sessionId: otherId,
-    operationId: operation.operationId, accepted: false, error: "private output",
+    operationId: operation.operationId, deliveryAttemptId: initialDeliveryAttemptId,
+    accepted: false, error: "private output",
   }), false);
   assert.equal(db.getSession(id)?.stopOperation?.status, "stop_pending");
 
   assert.equal(svc.onStopSessionResult(RUNNER_ID, {
     type: "stop_session_result", sessionId: id,
-    operationId: operation.operationId, accepted: false,
-    error: "/private/provider/path and runtime output",
+    operationId: operation.operationId, deliveryAttemptId: initialDeliveryAttemptId,
+    accepted: false, error: "/private/provider/path and runtime output",
   }), true);
+  assert.equal(svc.onStopSessionResult(RUNNER_ID, {
+    type: "stop_session_result", sessionId: id,
+    operationId: operation.operationId, deliveryAttemptId: initialDeliveryAttemptId,
+    accepted: false,
+  }), true, "a duplicate rejection for the current delivery is idempotent");
   const failed = db.getSession(id)!;
   assert.equal(failed.stopOperation?.status, "stop_failed");
   assert.equal(failed.stopOperation?.failure?.code, "runner_rejected");
@@ -6996,27 +7028,76 @@ test("correlated plain Stop rejection is visible, fenced, retryable, and termina
   assert.equal(db.getSession(id)?.stopOperation?.status, "stop_failed");
 
   const repeatedStop = svc.stop(id).data!;
+  const repeatedDeliveryAttemptId = hub.sentOfType("stop_session").at(-1)?.deliveryAttemptId;
+  assert.ok(repeatedDeliveryAttemptId);
   assert.equal(repeatedStop.stopOperation?.status, "stop_pending");
   assert.equal(repeatedStop.stopOperation?.operationId, operation.operationId);
+  assert.notEqual(repeatedDeliveryAttemptId, initialDeliveryAttemptId,
+    "an authorized recovery retains the operation id but opens a fresh delivery attempt");
   assert.equal(hub.sentOfType("stop_session").length, beforeReconnect + 1,
     "a fresh explicit Stop re-arms and reissues the same durable operation");
   assert.equal(svc.onStopSessionResult(RUNNER_ID, {
     type: "stop_session_result", sessionId: id,
-    operationId: operation.operationId, accepted: false,
+    operationId: operation.operationId, deliveryAttemptId: initialDeliveryAttemptId, accepted: false,
+  }), false, "a delayed rejection from the superseded delivery is ignored");
+  assert.equal(db.getSession(id)?.stopOperation?.status, "stop_pending");
+  assert.equal(svc.onStopSessionResult(RUNNER_ID, {
+    type: "stop_session_result", sessionId: id,
+    operationId: operation.operationId, deliveryAttemptId: repeatedDeliveryAttemptId, accepted: false,
   }), true);
 
   const firstRetry = svc.retryStop(id).data!;
+  const retryDeliveryAttemptId = hub.sentOfType("stop_session").at(-1)?.deliveryAttemptId;
   const duplicateRetry = svc.retryStop(id).data!;
+  const duplicateRetryDeliveryAttemptId = hub.sentOfType("stop_session").at(-1)?.deliveryAttemptId;
+  assert.ok(retryDeliveryAttemptId);
+  assert.equal(duplicateRetryDeliveryAttemptId, retryDeliveryAttemptId,
+    "concurrent recovery requests re-deliver one logical attempt");
   assert.equal(firstRetry.stopOperation?.status, "stop_pending");
   assert.equal(firstRetry.stopOperation?.operationId, operation.operationId);
   assert.equal(duplicateRetry.stopOperation?.operationId, operation.operationId);
   assert.equal(duplicateRetry.stopOperation?.attemptCount, firstRetry.stopOperation?.attemptCount);
   assert.equal(hub.sentOfType("stop_session").at(-1)?.operationId, operation.operationId);
+  assert.equal(svc.onStopSessionResult(RUNNER_ID, {
+    type: "stop_session_result", sessionId: id,
+    operationId: operation.operationId, deliveryAttemptId: repeatedDeliveryAttemptId, accepted: false,
+  }), false, "the retry remains pending when the prior attempt rejects late");
+  assert.equal(db.getSession(id)?.stopOperation?.status, "stop_pending");
 
   svc.onSessionStatus(id, "stopped", undefined, undefined, RUNNER_ID);
   const settled = db.getSession(id)!;
   assert.equal(settled.stopOperation, undefined);
   assert.equal(settled.archived, false);
+});
+
+test("late rejection from before Retry Stop cannot block Restart", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "running", Date.now());
+
+  const operation = svc.stop(id).data!.stopOperation!;
+  const firstDeliveryAttemptId = hub.sentOfType("stop_session").at(-1)?.deliveryAttemptId;
+  assert.ok(firstDeliveryAttemptId);
+  assert.equal(svc.onStopSessionResult(RUNNER_ID, {
+    type: "stop_session_result", sessionId: id,
+    operationId: operation.operationId, deliveryAttemptId: firstDeliveryAttemptId, accepted: false,
+  }), true);
+
+  assert.equal(svc.retryStop(id).status, 202);
+  const retryDeliveryAttemptId = hub.sentOfType("stop_session").at(-1)?.deliveryAttemptId;
+  assert.ok(retryDeliveryAttemptId);
+  assert.notEqual(retryDeliveryAttemptId, firstDeliveryAttemptId);
+  assert.equal(svc.onStopSessionResult(RUNNER_ID, {
+    type: "stop_session_result", sessionId: id,
+    operationId: operation.operationId, deliveryAttemptId: firstDeliveryAttemptId, accepted: false,
+  }), false);
+  assert.equal(db.getSession(id)?.stopOperation?.status, "stop_pending");
+
+  assert.equal(svc.restart(id).status, 200);
+  const launchId = hub.sentOfType("start_session").at(-1)?.spec.controlPlaneLaunchId;
+  assert.ok(launchId);
+  svc.onSessionStatus(id, "running", undefined, undefined, RUNNER_ID, launchId);
+  assert.equal(db.getSession(id)?.stopOperation, undefined);
 });
 
 test("plain Stop stays pending while offline and reconnect reissues it after the archive failure window", () => {
@@ -7043,9 +7124,11 @@ test("archive after a rejected plain Stop opens and delivers a fresh recovery wi
   const id = seedSession(svc, hub);
   db.updateSessionStatus(id, "running", Date.now());
   const plain = svc.stop(id).data!.stopOperation!;
+  const plainDeliveryAttemptId = hub.sentOfType("stop_session").at(-1)?.deliveryAttemptId;
+  assert.ok(plainDeliveryAttemptId);
   assert.equal(svc.onStopSessionResult(RUNNER_ID, {
     type: "stop_session_result", sessionId: id,
-    operationId: plain.operationId, accepted: false,
+    operationId: plain.operationId, deliveryAttemptId: plainDeliveryAttemptId, accepted: false,
   }), true);
   const beforeArchive = hub.sentOfType("stop_session").length;
 
