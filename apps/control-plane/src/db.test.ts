@@ -3383,6 +3383,45 @@ test("turn alignment stops at its cap and never extends a page without bound", (
   assert.equal(page.hasMoreOlder, true);
 });
 
+test("an unaligned opening window can split an older response and retain complete newer turns", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "older-split-cache" }));
+  db.appendEvent("older-split-cache", { kind: "user_message", text: "start the long response" }, 1);
+  const longResponseEvents = TAIL_TURN_ALIGNMENT_MAX_EVENTS + 200;
+  for (let seq = 2; seq <= longResponseEvents + 1; seq += 1) {
+    db.appendEvent("older-split-cache", {
+      kind: "agent_message",
+      text: String(seq),
+      messageId: "older-long-response",
+      final: seq === longResponseEvents + 1,
+    }, seq);
+  }
+  const newerTurns = [
+    { kind: "user_message", text: "first newer question" },
+    { kind: "agent_message", text: "first newer answer", final: true },
+    { kind: "user_message", text: "second newer question" },
+    { kind: "agent_message", text: "second newer answer", final: true },
+  ] as const;
+  for (const [index, payload] of newerTurns.entries()) {
+    db.appendEvent("older-split-cache", payload, longResponseEvents + index + 2);
+  }
+
+  const page = db.listCachedEventTailPage(
+    "older-split-cache", undefined, 200, { alignToTurn: true },
+  );
+  const newestSeq = longResponseEvents + newerTurns.length + 1;
+  assert.equal(page.events.length, 200, "the unaligned page retains its count boundary");
+  assert.equal(page.events[0]?.seq, newestSeq - 199);
+  assert.equal(page.events[0]?.payload.kind, "agent_message",
+    "the count boundary splits the older exceptionally long response");
+  assert.deepEqual(page.events.slice(-4).map((entry) => entry.payload.kind), [
+    "user_message", "agent_message", "user_message", "agent_message",
+  ], "both newer complete turns remain in the opening window");
+  assert.equal(page.turnAligned, false,
+    "alignment metadata describes the split at the window's leading edge");
+  assert.equal(page.hasMoreOlder, true);
+});
+
 test("a transcript with no user message keeps its count boundary and reports it unaligned", () => {
   const db = withRunner();
   db.createSession(newSession({ id: "adopted-cache" }));

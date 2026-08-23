@@ -13,6 +13,13 @@ const event = (sessionId: string, seq: number): SessionEvent => ({
   ts: seq,
   payload: { kind: "agent_message", text: `${sessionId}:${seq}` },
 });
+const userEvent = (sessionId: string, seq: number): SessionEvent => ({
+  id: seq,
+  sessionId,
+  seq,
+  ts: seq,
+  payload: { kind: "user_message", text: `${sessionId}:${seq}`, images: [] },
+});
 const pod = (members: string[]): PodView => ({
   id: "pod-1",
   members: members.map((sessionId) => ({ sessionId })),
@@ -888,6 +895,14 @@ test("reader-driven older pages extend the window downward without touching reco
 
   store.loadEvents("s1", [event("s1", 10), event("s1", 11)], 0, 1, true, generation, true, false);
   assert.equal(store.getState().eventWindows.get("s1")?.turnAligned, false);
+  store.loadOlderEvents("s1", [event("s1", 8), event("s1", 9)], true, 10, 0);
+  assert.equal(store.getState().eventWindows.get("s1")?.turnAligned, false,
+    "an agent-only older page preserves the partial head while more history remains");
+  store.loadOlderEvents("s1", [userEvent("s1", 7)], true, 8, 0);
+  assert.equal(store.getState().eventWindows.get("s1")?.turnAligned, true,
+    "finding a user-message boundary completes the partial head");
+
+  store.loadEvents("s1", [event("s1", 10), event("s1", 11)], 0, 1, true, generation, true, false);
   store.loadOlderEvents(
     "s1",
     Array.from({ length: 9 }, (_, index) => event("s1", index + 1)),

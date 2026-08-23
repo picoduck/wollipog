@@ -509,11 +509,15 @@ test("recovery failure falls back to the existing error notice with its retry af
   }
 });
 
-test("an opening-window safety cut identifies the partial response and reach-back clears it", async () => {
+test("an opening-window safety cut describes the leading response and reach-back clears it", async () => {
   const pages = pageController();
   const fixture = await mountFixture(pages);
   try {
     const openingWindow = fixture.events.slice(-7);
+    assert.equal(openingWindow[0]?.payload.kind, "agent_message",
+      "the opening window splits an older response");
+    assert.equal(openingWindow.filter((entry) => entry.payload.kind === "user_message").length, 3,
+      "the same window contains newer complete turns");
     await act(async () => {
       pages.releaseTail({
         events: openingWindow,
@@ -527,7 +531,11 @@ test("an opening-window safety cut identifies the partial response and reach-bac
     await flushAsyncWork();
 
     const control = fixture.container.querySelector(".transcript-earlier-activity") as HTMLElement;
-    assert.ok(control.textContent!.includes("The beginning of the latest response may not be loaded."));
+    assert.ok(control.textContent!.includes(
+      "A response near the beginning of the loaded activity may be incomplete.",
+    ));
+    assert.equal(control.textContent!.includes("latest response"), false,
+      "the notice does not misidentify the split response as the latest one");
     const partialDescription = control.querySelector("span") as HTMLSpanElement;
     const load = control.querySelector("button") as HTMLButtonElement;
     assert.equal(load.textContent, "Load Earlier Activity");
@@ -549,7 +557,9 @@ test("an opening-window safety cut identifies the partial response and reach-bac
     });
     await flushAsyncWork();
     assert.equal(
-      fixture.container.textContent!.includes("The beginning of the latest response may not be loaded."),
+      fixture.container.textContent!.includes(
+        "A response near the beginning of the loaded activity may be incomplete.",
+      ),
       false,
       "loading through the turn boundary removes the partial-response warning",
     );

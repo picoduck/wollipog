@@ -229,7 +229,8 @@ export interface EventWindowState {
    * no older rows while still being a prefix, so completeness is tracked separately. */
   complete: boolean;
   /** Opening-window alignment proves that the visible head is a semantic turn boundary. False
-   * means the bounded safety cap was reached and the latest response may begin above this slice. */
+   * means the bounded safety cap was reached and a response at the head may begin above this
+   * slice; newer complete turns can still follow it. */
   turnAligned?: boolean;
   loadingOlder: boolean;
   error: string | null;
