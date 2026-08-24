@@ -1014,34 +1014,73 @@ test.describe("while a text field is focused", () => {
     await expectRailAt(page, 0);
   });
 
-  test("a toolbar collapse against a small keyboard is not a dismissal", async ({ page }) => {
+  test("a partly-receded keyboard is not a dismissal", async ({ page }) => {
     await useHarness(page);
     await page.locator(".main-body textarea").focus();
-    // The smallest keyboard the detector recognises — a landscape phone's — with a URL-bar
-    // collapse on top: 120 down, then 56 of the SAME-WIDTH growth a collapsing toolbar produces.
-    // That lands within KEYBOARD_CLOSE_PX of the peak while the keyboard is still open, so a
-    // release keyed on the peak alone blurred the field mid-word. The growth measured from the
-    // lowest armed height is 56 — a toolbar's worth, not a keyboard's — and must not release.
+    // The visual-only engine family, where the bottom occlusion is a DIRECT keyboard signal. A
+    // 120px landscape keyboard recedes in same-width steps — 56, then to the last 20px, which is
+    // past every height threshold two earlier revisions released at (the peak band, then the
+    // shared 100px growth number). While ANY occlusion remains the keyboard is still there, and
+    // releasing blurred the field mid-word.
     await openKeyboard(page, 120);
     await expect(page.locator(".app-rail")).toBeHidden();
     await applyViewport(page, () => page.evaluate(() => window.setKeyboard(64)));
     expect(await page.evaluate(() => document.activeElement?.tagName),
-      "a toolbar collapse must not steal focus from the field").toBe("TEXTAREA");
+      "a partly-receded keyboard must not steal focus from the field").toBe("TEXTAREA");
     await expect(page.locator(".app-rail")).toBeHidden();
-    // The top of the toolbar range too: 100px of accumulated same-width chrome growth is exactly
-    // the arming threshold, so a release keyed at the SAME number fired here — the keyboard is
-    // still holding its last 20px of the screen. Only keyboard-scale growth (KEYBOARD_LEAVE_PX)
-    // may release.
     await applyViewport(page, () => page.evaluate(() => window.setKeyboard(20)));
     expect(await page.evaluate(() => document.activeElement?.tagName),
-      "chrome growth at the arming threshold must not steal focus either").toBe("TEXTAREA");
+      "the last 20px of keyboard must still hold the release").toBe("TEXTAREA");
     await expect(page.locator(".app-rail")).toBeHidden();
 
-    // The real dismissal afterwards still lands: from the lowest point the viewport has now grown
-    // by the whole keyboard.
+    // The real dismissal afterwards still lands: the occlusion is gone.
     await applyViewport(page, () => page.evaluate(() => window.setKeyboard(0)));
     await expect.poll(() => page.evaluate(() => document.activeElement === document.body),
-      { message: "the genuine dismissal after the toolbar collapse must still blur" }).toBe(true);
+      { message: "the genuine dismissal after the partial recessions must still blur" }).toBe(true);
+    await expectRailAt(page, 0);
+  });
+
+  test("chrome collapse interleaved with a live keyboard is not a dismissal", async ({ page }) => {
+    await useHarness(page);
+    await page.locator(".main-body textarea").focus();
+    // Round 5's construction: a 140px keyboard, then 100px of chrome collapsing WHILE its
+    // accessory row gives back 20px. Total same-width growth from the lowest armed height is 120
+    // — a keyboard's worth, so every height predicate reads a dismissal — but chrome moves both
+    // viewports together and cancels out of the occlusion, which still shows 120px of keyboard.
+    await openKeyboard(page, 140);
+    await expect(page.locator(".app-rail")).toBeHidden();
+    await applyViewport(page, () => page.evaluate(() => window.shiftChrome(100)));
+    expect(await page.evaluate(() => document.activeElement?.tagName),
+      "chrome collapse must not steal focus from the field").toBe("TEXTAREA");
+    await applyViewport(page, () => page.evaluate(() => window.setKeyboard(20)));
+    expect(await page.evaluate(() => document.activeElement?.tagName),
+      "keyboard-scale growth that is really chrome plus accessory row must not release").toBe("TEXTAREA");
+    await expect(page.locator(".app-rail")).toBeHidden();
+
+    // The genuine dismissal, with the chrome still collapsed: the visual viewport meets the
+    // (shifted) layout viewport and the occlusion reads zero.
+    await applyViewport(page, () => page.evaluate(() => window.setKeyboard(-100)));
+    await expect.poll(() => page.evaluate(() => document.activeElement === document.body),
+      { message: "the dismissal under collapsed chrome must still blur" }).toBe(true);
+  });
+
+  test("the resizes-content family still blurs on a dismissal", async ({ page }) => {
+    await useHarness(page);
+    await page.locator(".main-body textarea").focus();
+    // The engine family that shrinks the LAYOUT viewport with the keyboard: no occlusion is ever
+    // published, so the height predicates are the only release path this family can take —
+    // deleting them strands every Android Back dismissal with the suite otherwise green.
+    await applyViewport(page, () => page.evaluate(() => window.setLayoutKeyboard(300)));
+    await expectInset(page, "");
+    await expect(page.locator(".app-rail")).toBeHidden();
+    // A partial recovery — the accessory row hiding — is not the dismissal.
+    await applyViewport(page, () => page.evaluate(() => window.setLayoutKeyboard(250)));
+    expect(await page.evaluate(() => document.activeElement?.tagName),
+      "a partial layout-viewport recovery must not steal focus").toBe("TEXTAREA");
+
+    await applyViewport(page, () => page.evaluate(() => window.setLayoutKeyboard(0)));
+    await expect.poll(() => page.evaluate(() => document.activeElement === document.body),
+      { message: "the layout-viewport dismissal must blur without any occlusion signal" }).toBe(true);
     await expectRailAt(page, 0);
   });
 

@@ -84,6 +84,16 @@ export function installMobileViewportFallback(win: Window = window): () => void 
   // releasing on that blurred the field mid-word. The toolbar can only ever grow the height by
   // its own ~56px; a dismissal always grows it by the whole keyboard.
   let trough = viewport.height;
+  // Whether this armed episode has shown a real bottom occlusion. On the browsers that shrink
+  // only the visual viewport, `occluded` is a DIRECT keyboard signal the height heuristics can
+  // only approximate: browser chrome moves innerHeight and the visual viewport together and
+  // cancels out of it, while the keyboard alone moves the gap. Keying release on it makes every
+  // chrome-motion interleaving irrelevant — a 140px keyboard whose accessory row shrinks while
+  // 100px of toolbar collapses satisfies both height predicates with the keyboard still open,
+  // but its occlusion never comes near zero. The height path below remains for the
+  // resizes-content family, which never publishes an occlusion and pins its toolbar while the
+  // keyboard is up, so the interleaving cannot arise there.
+  let occlusionTracked = false;
 
   const apply = () => {
     frame = 0;
@@ -103,14 +113,19 @@ export function installMobileViewportFallback(win: Window = window): () => void 
     // and blurring there would dismiss a keyboard mid-word. The blur is gated to the geometry the
     // hiding rule exists in, so a desktop window resize never steals focus from a form.
     const height = viewport.height;
+    if (keyboardOpen) occlusionTracked ||= occluded > NOISE_FLOOR_PX;
+    const released = occlusionTracked
+      ? occluded <= NOISE_FLOOR_PX
+      : height >= peak - KEYBOARD_CLOSE_PX && height - trough >= KEYBOARD_LEAVE_PX;
     if (viewport.width !== lastWidth) {
       lastWidth = viewport.width;
       peak = height;
       trough = height;
       keyboardOpen = false;
-    } else if (keyboardOpen && height >= peak - KEYBOARD_CLOSE_PX
-      && height - trough >= KEYBOARD_LEAVE_PX) {
+      occlusionTracked = false;
+    } else if (keyboardOpen && released) {
       keyboardOpen = false;
+      occlusionTracked = false;
       peak = Math.max(peak, height);
       if (win.matchMedia("(max-width: 760px) and (pointer: coarse)").matches) {
         const active = win.document.activeElement;
@@ -119,7 +134,11 @@ export function installMobileViewportFallback(win: Window = window): () => void 
     } else {
       if (!keyboardOpen && height > peak) peak = height;
       if (keyboardOpen) trough = Math.min(trough, height);
-      else if (peak - height >= KEYBOARD_CLOSE_PX) { keyboardOpen = true; trough = height; }
+      else if (peak - height >= KEYBOARD_CLOSE_PX) {
+        keyboardOpen = true;
+        trough = height;
+        occlusionTracked = occluded > NOISE_FLOOR_PX;
+      }
     }
   };
 

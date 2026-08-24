@@ -56,6 +56,20 @@ declare global {
      */
     resizeViewport(width: number, height: number): void;
     /**
+     * Collapse (positive) or return (negative) browser chrome: the LAYOUT viewport and the
+     * visual viewport grow together, leaving the bottom gap untouched — which is exactly what
+     * distinguishes chrome motion from the keyboard, and what the occlusion-keyed release relies
+     * on. `setKeyboard` cannot model this: it moves only the visual viewport.
+     */
+    shiftChrome(pixels: number): void;
+    /**
+     * The OTHER engine family: a browser honouring interactive-widget=resizes-content shrinks
+     * the layout viewport with the keyboard, so both heights move and no occlusion is ever
+     * published. Without this entry point the height-keyed release path — the only one that
+     * family can take — is unreachable from any test.
+     */
+    setLayoutKeyboard(pixels: number): void;
+    /**
      * How many times the fallback's coalesced frame has RUN.
      *
      * The fallback schedules through `requestAnimationFrame`, so a mutation is not observable the
@@ -145,12 +159,18 @@ function Harness() {
   useEffect(() => {
     const viewport = new FakeVisualViewport(window.innerHeight - occludedAtInstall);
     let applies = 0;
+    // How far fake browser chrome has shifted the LAYOUT viewport. The fallback reads
+    // `innerHeight` through the proxy, so this moves the layout viewport without touching the
+    // real window — `setKeyboard`'s arithmetic stays anchored to the real `innerHeight` and the
+    // shift composes with it.
+    let chromeShift = 0;
     window.keyboardApplies = () => applies;
-    // Everything except `visualViewport` is the real window, so the fallback writes to the real
-    // documentElement and the real stylesheet responds.
+    // Everything except `visualViewport` and `innerHeight` is the real window, so the fallback
+    // writes to the real documentElement and the real stylesheet responds.
     const win = new Proxy(window, {
       get(target, property) {
         if (property === "visualViewport") return viewport;
+        if (property === "innerHeight") return window.innerHeight + chromeShift;
         // Counted here rather than in the fallback: production must not carry a test hook, and the
         // proxy already owns everything the fallback sees. Only the fallback holds this window, so
         // the count is exclusively its own frames — the Rail's own rAF goes to the real window.
@@ -182,6 +202,16 @@ function Harness() {
     window.resizeViewport = (width: number, height: number) => {
       viewport.width = width;
       viewport.height = height;
+      viewport.dispatchEvent(new Event("resize"));
+    };
+    window.shiftChrome = (pixels: number) => {
+      chromeShift += pixels;
+      viewport.height += pixels;
+      viewport.dispatchEvent(new Event("resize"));
+    };
+    window.setLayoutKeyboard = (pixels: number) => {
+      chromeShift = -pixels;
+      viewport.height = window.innerHeight - pixels;
       viewport.dispatchEvent(new Event("resize"));
     };
     window.burstKeyboard = (pixels: number, count: number) => {
