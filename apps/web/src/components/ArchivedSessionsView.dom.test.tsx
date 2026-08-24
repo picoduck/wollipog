@@ -481,8 +481,9 @@ test("a live title update removes a row that no longer matches the active query"
   rows[0] = updated;
   await act(async () => {
     fixture.socket.push({ type: "session_upsert", session: updated });
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await Promise.resolve();
   });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 80)); });
 
   assert.match(fixture.container.textContent ?? "", /No Matching Sessions/);
   assert.equal(fixture.archivePageCalls(), callsBeforeUpdate + 1);
@@ -508,8 +509,9 @@ test("a live Project update removes a row that no longer matches the active face
   rows[0] = updated;
   await act(async () => {
     fixture.socket.push({ type: "session_upsert", session: updated });
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await Promise.resolve();
   });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 80)); });
 
   assert.match(fixture.container.textContent ?? "", /No Matching Sessions/);
   assert.equal(fixture.archivePageCalls(), callsBeforeUpdate + 1);
@@ -549,5 +551,102 @@ test("Undo restores an unarchived row in server cursor order", async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
   assert.deepEqual(rowTitles(), ["Newest", "Middle", "Oldest"]);
+
+  await fixture.unmount();
+});
+test("server search rows remain authoritative when local derived labels differ", async () => {
+  const serverMatch = session(30, { id: "server-match", title: "Server Match", status: "idle" });
+  const fixture = await mount([], {
+    archiveSessionPage: async () => archiveResponse([serverMatch]),
+  });
+  const input = fixture.container.querySelector<HTMLInputElement>('input[type="search"]')!;
+  await act(async () => {
+    input.value = "idle";
+    Simulate.change(input);
+  });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
+
+  assert.match(fixture.container.textContent ?? "", /Server Match/,
+    "the client does not reject a row the server matched using raw lifecycle data");
+  await fixture.unmount();
+});
+
+test("a stale live snapshot cannot overwrite a newer REST row or trigger a refresh loop", async () => {
+  const fresh = session(31, { id: "versioned", title: "Fresh REST Row", updatedAt: 120 });
+  const fixture = await mount([fresh]);
+  const callsBeforeUpdate = fixture.archivePageCalls();
+
+  await act(async () => {
+    fixture.socket.push({
+      type: "session_upsert",
+      session: { ...fresh, title: "Stale Live Row", status: "running", updatedAt: 100 },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 80));
+  });
+
+  assert.match(fixture.container.textContent ?? "", /Fresh REST Row/);
+  assert.doesNotMatch(fixture.container.textContent ?? "", /Stale Live Row/);
+  assert.equal(fixture.archivePageCalls(), callsBeforeUpdate);
+  await fixture.unmount();
+});
+
+test("bursty live filter misses coalesce into one bounded revalidation", async () => {
+  const rows = [
+    session(32, { id: "burst-one", title: "Needle One" }),
+    session(33, { id: "burst-two", title: "Needle Two" }),
+  ];
+  const fixture = await mount(rows);
+  const input = fixture.container.querySelector<HTMLInputElement>('input[type="search"]')!;
+  await act(async () => {
+    input.value = "needle";
+    Simulate.change(input);
+  });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
+  const callsBeforeUpdate = fixture.archivePageCalls();
+
+  const first = { ...rows[0]!, title: "Different One", updatedAt: 100 };
+  const second = { ...rows[1]!, title: "Different Two", updatedAt: 101 };
+  rows.splice(0, rows.length, first, second);
+  await act(async () => {
+    fixture.socket.push({ type: "session_upsert", session: first });
+    await Promise.resolve();
+  });
+  await act(async () => {
+    fixture.socket.push({ type: "session_upsert", session: second });
+    await Promise.resolve();
+  });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 80)); });
+
+  assert.equal(fixture.archivePageCalls(), callsBeforeUpdate + 1);
+  assert.match(fixture.container.textContent ?? "", /No Matching Sessions/);
+  await fixture.unmount();
+});
+
+test("Undo revalidates with the filters active when Undo is clicked", async () => {
+  const rows = [session(34, { id: "undo-current-filter", title: "Undo Current Filter" })];
+  const fixture = await mount(rows, {
+    setArchived: async (id, archived) => {
+      const updated = { ...rows[0]!, id, archived, updatedAt: rows[0]!.updatedAt + 1 };
+      rows[0] = updated;
+      return updated;
+    },
+  });
+
+  await act(async () => {
+    Simulate.click(button(fixture.container, "Unarchive"));
+    await Promise.resolve();
+  });
+  const input = fixture.container.querySelector<HTMLInputElement>('input[type="search"]')!;
+  await act(async () => {
+    input.value = "current-filter";
+    Simulate.change(input);
+  });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
+  await act(async () => {
+    Simulate.click(button(fixture.container, "Undo"));
+    await Promise.resolve();
+  });
+
+  assert.equal(fixture.archiveInputs.at(-1)?.q, "current-filter");
   await fixture.unmount();
 });

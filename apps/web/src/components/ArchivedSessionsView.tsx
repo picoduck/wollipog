@@ -85,6 +85,9 @@ export function ArchivedSessionsView() {
   const liveSessions = useStoreSelector((state) => state.sessions);
   const projects = useStoreSelector((state) => state.projects);
   const conn = useStoreSelector((state) => state.conn);
+  const refreshCatalogRef = useRef<() => Promise<void>>(async () => {});
+  const liveRevalidationTimerRef = useRef<number | null>(null);
+  const revalidatedLiveVersionsRef = useRef(new Map<string, number>());
   const stopFailureRecoverySupported = useStoreSelector((state) => state.stopFailureRecoverySupported);
   const deletedSessionIdsRef = useRef(new Set<string>());
   const liveSessionsRef = useRef(liveSessions);
@@ -127,16 +130,16 @@ export function ArchivedSessionsView() {
         q: filters.query.trim() || undefined,
       });
       const responseSessions = new Map(response.sessions.map((session) => [session.id, session]));
-      const next = mergeArchiveSessionCatalog(
-        responseSessions,
-        [...liveSessionsRef.current.values()].filter((session) => {
-          const responseSession = responseSessions.get(session.id);
-          return responseSession !== undefined && session.updatedAt >= responseSession.updatedAt;
-        }),
-      );
+      const next = new Map(responseSessions);
       const transcriptSessionIds = new Set(Object.keys(response.snippets));
-      for (const [sessionId, session] of next) {
-        if (!locallyMatches(session, filters, locationNamesRef.current, transcriptSessionIds)) next.delete(sessionId);
+      for (const session of liveSessionsRef.current.values()) {
+        const responseSession = responseSessions.get(session.id);
+        if (responseSession === undefined || session.updatedAt <= responseSession.updatedAt) continue;
+        if (locallyMatches(session, filters, locationNamesRef.current, transcriptSessionIds)) {
+          next.set(session.id, session);
+        } else {
+          next.delete(session.id);
+        }
       }
       for (const sessionId of deletedSessionIdsRef.current) {
         next.delete(sessionId);
@@ -155,6 +158,15 @@ export function ArchivedSessionsView() {
       if (requestSequence === requestSequenceRef.current) setLoading(false);
     }
   }, [api, cursors, filters, page]);
+  refreshCatalogRef.current = refreshCatalog;
+
+  const scheduleLiveRevalidation = useCallback(() => {
+    if (liveRevalidationTimerRef.current !== null) return;
+    liveRevalidationTimerRef.current = window.setTimeout(() => {
+      liveRevalidationTimerRef.current = null;
+      void refreshCatalogRef.current();
+    }, 50);
+  }, []);
 
   useEffect(() => { void refreshCatalog(); }, [refreshCatalog]);
 
@@ -172,10 +184,18 @@ export function ArchivedSessionsView() {
   // and reconnect reconciliation below so websocket arrival order cannot alter cursor membership.
   useEffect(() => {
     const currentCatalog = catalogRef.current;
-    const pageUpserts = [...liveSessions.values()].filter((session) => currentCatalog.has(session.id));
+    const pageUpserts = [...liveSessions.values()].filter((session) => {
+      const catalogSession = currentCatalog.get(session.id);
+      return catalogSession !== undefined && session.updatedAt > catalogSession.updatedAt;
+    });
     const transcriptSessionIds = new Set(transcriptHits.keys());
-    const needsRevalidation = pageUpserts.some((session) =>
-      !locallyMatches(session, filters, locationNames, transcriptSessionIds));
+    let needsRevalidation = false;
+    for (const session of pageUpserts) {
+      if (locallyMatches(session, filters, locationNames, transcriptSessionIds)) continue;
+      if (revalidatedLiveVersionsRef.current.get(session.id) === session.updatedAt) continue;
+      revalidatedLiveVersionsRef.current.set(session.id, session.updatedAt);
+      needsRevalidation = true;
+    }
     setCatalog((current) => {
       const next = new Map(current);
       let changed = false;
@@ -203,8 +223,15 @@ export function ArchivedSessionsView() {
         return next;
       });
     }
-    if (needsRevalidation) void refreshCatalog();
-  }, [filters, liveSessions, locationNames, refreshCatalog, transcriptHits]);
+    if (needsRevalidation) scheduleLiveRevalidation();
+  }, [filters, liveSessions, locationNames, scheduleLiveRevalidation, transcriptHits]);
+
+  useEffect(() => () => {
+    if (liveRevalidationTimerRef.current !== null) {
+      window.clearTimeout(liveRevalidationTimerRef.current);
+      liveRevalidationTimerRef.current = null;
+    }
+  }, []);
 
   // Deletions of rows that have not emitted an upsert on this socket cannot be identified by the
   // live snapshot (which omits archives). Revalidate when a client returns to the tab or reconnects.
@@ -270,7 +297,7 @@ export function ArchivedSessionsView() {
       showUndo("Session restored.", async () => {
         const restored = await api.setArchived(session.id, true);
         loadSession(restored);
-        await refreshCatalog();
+        await refreshCatalogRef.current();
       });
     } catch (cause) {
       showToast(`Could not unarchive session: ${(cause as Error).message}`, { tone: "error" });
