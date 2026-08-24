@@ -26,6 +26,9 @@ import "../styles.css";
 
 class FakeVisualViewport extends EventTarget {
   height: number;
+  // The real property, because the fallback reads it: a keyboard only ever moves the height, and
+  // the width moving too is how it tells a rotation or a pinch-zoom from a keyboard closing.
+  width = window.innerWidth;
   offsetTop = 0;
   constructor(height: number) {
     super();
@@ -45,6 +48,27 @@ declare global {
     setKeyboard(pixels: number, panned?: number): void;
     /** Pan an already-shrunk viewport, changing only `offsetTop` and firing only `scroll`. */
     panKeyboard(offset: number): void;
+    /**
+     * Move BOTH axes in one resize, as a rotation or a pinch-zoom does. `setKeyboard` never
+     * touches the width — which is faithful, a keyboard cannot — so without this entry point the
+     * width guard on the blur-on-close path could be deleted with every test green, and a
+     * rotation would blur the field the user was typing into.
+     */
+    resizeViewport(width: number, height: number): void;
+    /**
+     * Collapse (positive) or return (negative) browser chrome: the LAYOUT viewport and the
+     * visual viewport grow together, leaving the bottom gap untouched — which is exactly what
+     * distinguishes chrome motion from the keyboard, and what the occlusion-keyed release relies
+     * on. `setKeyboard` cannot model this: it moves only the visual viewport.
+     */
+    shiftChrome(pixels: number): void;
+    /**
+     * The OTHER engine family: a browser honouring interactive-widget=resizes-content shrinks
+     * the layout viewport with the keyboard, so both heights move and no occlusion is ever
+     * published. Without this entry point the height-keyed release path — the only one that
+     * family can take — is unreachable from any test.
+     */
+    setLayoutKeyboard(pixels: number): void;
     /**
      * How many times the fallback's coalesced frame has RUN.
      *
@@ -135,12 +159,18 @@ function Harness() {
   useEffect(() => {
     const viewport = new FakeVisualViewport(window.innerHeight - occludedAtInstall);
     let applies = 0;
+    // How far fake browser chrome has shifted the LAYOUT viewport. The fallback reads
+    // `innerHeight` through the proxy, so this moves the layout viewport without touching the
+    // real window — `setKeyboard`'s arithmetic stays anchored to the real `innerHeight` and the
+    // shift composes with it.
+    let chromeShift = 0;
     window.keyboardApplies = () => applies;
-    // Everything except `visualViewport` is the real window, so the fallback writes to the real
-    // documentElement and the real stylesheet responds.
+    // Everything except `visualViewport` and `innerHeight` is the real window, so the fallback
+    // writes to the real documentElement and the real stylesheet responds.
     const win = new Proxy(window, {
       get(target, property) {
         if (property === "visualViewport") return viewport;
+        if (property === "innerHeight") return window.innerHeight + chromeShift;
         // Counted here rather than in the fallback: production must not carry a test hook, and the
         // proxy already owns everything the fallback sees. Only the fallback holds this window, so
         // the count is exclusively its own frames — the Rail's own rAF goes to the real window.
@@ -168,6 +198,21 @@ function Harness() {
     window.panKeyboard = (offset: number) => {
       viewport.offsetTop = offset;
       viewport.dispatchEvent(new Event("scroll"));
+    };
+    window.resizeViewport = (width: number, height: number) => {
+      viewport.width = width;
+      viewport.height = height;
+      viewport.dispatchEvent(new Event("resize"));
+    };
+    window.shiftChrome = (pixels: number) => {
+      chromeShift += pixels;
+      viewport.height += pixels;
+      viewport.dispatchEvent(new Event("resize"));
+    };
+    window.setLayoutKeyboard = (pixels: number) => {
+      chromeShift = -pixels;
+      viewport.height = window.innerHeight - pixels;
+      viewport.dispatchEvent(new Event("resize"));
     };
     window.burstKeyboard = (pixels: number, count: number) => {
       for (let step = 1; step <= count; step += 1) {
@@ -199,7 +244,20 @@ function Harness() {
         <Topbar />
         {/* Production's `<main>` is never just a header; every view renders a `.main-body` under
             it. A fixture that omits it is distinguishable by `.app:has(.main-body)`. */}
-        <div className="main-body" />
+        <div className="main-body">
+          {/* One control of each focus kind the while-typing rule divides the world into: a
+              text field whose focus means the software keyboard is up and the rail must yield,
+              and a non-text control whose focus summons no keyboard and must leave the rail
+              alone. A fixture without the checkbox lets `input:focus` — every input, keyboard
+              or not — pass for the production selector, stranding the navigation hidden after
+              any tap on a checkbox or radio. */}
+          <textarea aria-label="Reply" />
+          <input type="checkbox" aria-label="Notify" />
+          {/* Production's Share Link field (SessionHeader) is a READ-ONLY text input: tapping it
+              selects the URL and summons no keyboard, so its focus must not hide the rail — and
+              no viewport event would ever arrive to put the rail back if it did. */}
+          <input type="text" readOnly aria-label="Share Link" value="https://example.invalid/s/1" />
+        </div>
       </main>
     </div>
   );

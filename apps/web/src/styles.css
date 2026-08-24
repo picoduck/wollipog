@@ -9776,6 +9776,31 @@ body.shell-dock-dragging * {
   .rail-more { display: block; }
   .rail-destinations { flex: 1; justify-content: space-around; }
 
+  /* While a text field is focused the software keyboard is up, and a tab bar directly above it is
+     the difference between reading the transcript and reading three lines of it. The rail is
+     removed for the duration and returns on blur — including the blur mobile-viewport.ts issues
+     when the keyboard is dismissed WITHOUT one (Android Back leaves the field focused; see
+     KEYBOARD_EDITABLE there, kept in step with this selector). Keyed on FOCUS rather than on
+     --keyboard-inset, because browsers honouring interactive-widget=resizes-content shrink the
+     layout viewport and never publish the inset — no geometric signal exists in both engine
+     families, but a focused text field is when the keyboard is up in either. Gated to coarse
+     pointers so a narrow desktop window, which has no software keyboard, keeps its bar. Controls
+     whose focus summons no keyboard are excluded: a checkbox, a radio, or a READ-ONLY field —
+     the Share Link input is one — holds focus after a tap and would strand the navigation
+     hidden with no viewport event ever arriving to put it back. */
+  @media (pointer: coarse) {
+    .app:has(
+      textarea:focus:not([readonly]),
+      [contenteditable=""]:focus,
+      [contenteditable="true"]:focus,
+      input:focus:not([readonly], [type="button"], [type="checkbox"], [type="color"],
+        [type="file"], [type="image"], [type="radio"], [type="range"], [type="reset"],
+        [type="submit"])
+    ) .app-rail {
+      display: none;
+    }
+  }
+
   /* 50px of controls below the top safe-area inset (notch / Dynamic Island). Anything that
      anchors to the topbar's bottom edge must use the same calc (see .right-panel below). */
   .topbar {
