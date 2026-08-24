@@ -961,6 +961,7 @@ test("gitDiff last_turn: probes the snapshot tree, snapshots the worktree now, a
   setGitRunnerForTests(async (_cwd, args, o) => {
     calls.push(args);
     opts.push(o);
+    if (args[0] === "add" && args[1] === "--renormalize") throw new Error("transient read failure");
     if (gitVerb(args) === "write-tree") return "nowtree123\n";
     if (gitVerb(args) === "diff") {
       return "diff --git a/x.ts b/x.ts\n--- a/x.ts\n+++ b/x.ts\n@@ -1 +1 @@\n-a\n+b\n";
