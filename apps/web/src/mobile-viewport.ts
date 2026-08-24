@@ -34,11 +34,21 @@ const NOISE_FLOOR_PX = 8;
  * the smallest software keyboard — a small phone in landscape — occupies ~120, which is also the
  * landscape keyboard the e2e suite drives, so this cannot rise past it. The close side reuses the
  * same number so a keyboard that closes while the browser toolbar returns — leaving the height up
- * to ~100px short of where it started — still reads as closed. Closing additionally requires the
- * same growth measured from the LOWEST armed height (see `trough` below), or a toolbar collapse
- * against a small landscape keyboard would read as the keyboard closing.
+ * to ~100px short of where it started — still reads as closed.
  */
 const KEYBOARD_CLOSE_PX = 100;
+
+/**
+ * The growth from the LOWEST armed height that counts as the keyboard actually leaving.
+ *
+ * Deliberately larger than KEYBOARD_CLOSE_PX: a collapsing browser toolbar can return up to
+ * ~100px of same-width height in one step, so a release keyed at 100 read a toolbar collapse
+ * against a 120px landscape keyboard as the keyboard closing and blurred the field mid-word. No
+ * toolbar returns 120; every keyboard this file models does. A keyboard between the two constants
+ * arms but cannot release this way — it strands the rail until any tap blurs the field, which is
+ * recoverable, where the false blur it replaces dismissed a keyboard the user was typing on.
+ */
+const KEYBOARD_LEAVE_PX = 120;
 
 /**
  * The controls whose focus summons the software keyboard.
@@ -99,7 +109,7 @@ export function installMobileViewportFallback(win: Window = window): () => void 
       trough = height;
       keyboardOpen = false;
     } else if (keyboardOpen && height >= peak - KEYBOARD_CLOSE_PX
-      && height - trough >= KEYBOARD_CLOSE_PX) {
+      && height - trough >= KEYBOARD_LEAVE_PX) {
       keyboardOpen = false;
       peak = Math.max(peak, height);
       if (win.matchMedia("(max-width: 760px) and (pointer: coarse)").matches) {

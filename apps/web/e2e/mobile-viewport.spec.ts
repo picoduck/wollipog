@@ -1028,6 +1028,14 @@ test.describe("while a text field is focused", () => {
     expect(await page.evaluate(() => document.activeElement?.tagName),
       "a toolbar collapse must not steal focus from the field").toBe("TEXTAREA");
     await expect(page.locator(".app-rail")).toBeHidden();
+    // The top of the toolbar range too: 100px of accumulated same-width chrome growth is exactly
+    // the arming threshold, so a release keyed at the SAME number fired here — the keyboard is
+    // still holding its last 20px of the screen. Only keyboard-scale growth (KEYBOARD_LEAVE_PX)
+    // may release.
+    await applyViewport(page, () => page.evaluate(() => window.setKeyboard(20)));
+    expect(await page.evaluate(() => document.activeElement?.tagName),
+      "chrome growth at the arming threshold must not steal focus either").toBe("TEXTAREA");
+    await expect(page.locator(".app-rail")).toBeHidden();
 
     // The real dismissal afterwards still lands: from the lowest point the viewport has now grown
     // by the whole keyboard.
