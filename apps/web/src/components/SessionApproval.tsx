@@ -106,7 +106,7 @@ export function SessionApprovalRegion({
     setAnnouncement(requestId ? (hadRequest ? "Agent request updated" : "Agent response required") : "Agent request resolved");
     if (focusDestination === "request") {
       const target = regionRef.current?.querySelector<HTMLElement>(
-        'button:not(:disabled), [role="radio"][tabindex="0"]:not(:disabled), [role="checkbox"]:not([aria-disabled="true"]), input:not(:disabled)',
+        'button:not(:disabled):not([aria-disabled="true"]), [role="radio"][tabindex="0"]:not(:disabled):not([aria-disabled="true"]), [role="checkbox"]:not([aria-disabled="true"]), input:not(:disabled)',
       );
       if (target) {
         target.focus();
@@ -279,6 +279,7 @@ export function SessionQuestionBanner({
   const [drafts, setDrafts] = useState<{ requestId: string; values: Record<string, string> }>({ requestId, values: {} });
   const [error, setError] = useState<string | null>(null);
   const labelPrefix = useId();
+  const availabilityId = `${labelPrefix}-availability`;
 
   useEffect(() => {
     setSelection({ requestId, picked: {} });
@@ -291,6 +292,7 @@ export function SessionQuestionBanner({
   const draftValues = drafts.requestId === requestId ? drafts.values : {};
   const unsupportedQuestionFormat = questions.some((question) => !isSupportedAgentQuestion(question));
   const controlsDisabled = busy !== null || !runnerOnline || unsupportedQuestionFormat;
+  const fixedChoicesNativelyDisabled = busy !== null || unsupportedQuestionFormat;
 
   const toggle = (question: AgentQuestion, label: string) => {
     if (!question.multiSelect) {
@@ -394,17 +396,29 @@ export function SessionQuestionBanner({
           {!runnerOnline && <span className="muted"> · Runner Offline</span>}
         </span>
         <div className="approval-actions">
-          <button className="btn ghost sm" type="button" disabled={busy !== null || !runnerOnline} onClick={() => void dismiss()}>
+          <button
+            className="btn ghost sm"
+            type="button"
+            aria-describedby={!runnerOnline ? availabilityId : undefined}
+            disabled={busy !== null || !runnerOnline}
+            onClick={() => void dismiss()}
+          >
             {busy === "dismiss" ? "Dismissing…" : "Dismiss"} {showKeyHints && busy === null && <kbd className="inbox-key-hint">D</kbd>}
           </button>
           {questions.length > 0 && (
-            <button className="btn sm primary" type="button" disabled={busy !== null || !runnerOnline || !complete} onClick={() => void submit()}>
+            <button
+              className="btn sm primary"
+              type="button"
+              aria-describedby={!runnerOnline ? availabilityId : undefined}
+              disabled={busy !== null || !runnerOnline || !complete}
+              onClick={() => void submit()}
+            >
               {busy === "submit" ? "Submitting…" : "Submit"}
             </button>
           )}
         </div>
       </div>
-      <div className="question-availability" role="status" aria-atomic="true">
+      <div id={availabilityId} className="question-availability" role="status" aria-atomic="true">
         {runnerOnline ? "" : "Responses are unavailable until the runner reconnects."}
       </div>
       {runnerOnline && busy === null && questions.length > 0 && !complete && (
@@ -425,7 +439,11 @@ export function SessionQuestionBanner({
           const responseErrorId = `${labelPrefix}-response-error-${questionIndex}`;
           const selected = picked[question.id] ?? [];
           const freeTextError = freeTextErrors.get(question.id);
-          const controlDescriptionIds = [question.context ? contextId : null, requirementId]
+          const controlDescriptionIds = [
+            question.context ? contextId : null,
+            requirementId,
+            !runnerOnline ? availabilityId : null,
+          ]
             .filter((value): value is string => value !== null);
           const inputDescriptionIds = [...controlDescriptionIds, freeTextError ? responseErrorId : null]
             .filter((value): value is string => value !== null)
@@ -458,14 +476,14 @@ export function SessionQuestionBanner({
                         type="button"
                         role={question.multiSelect ? "checkbox" : "radio"}
                         aria-checked={on}
-                        aria-disabled={controlsDisabled}
-                        disabled={controlsDisabled}
-                        tabIndex={controlsDisabled
+                        aria-disabled={controlsDisabled || undefined}
+                        disabled={fixedChoicesNativelyDisabled}
+                        tabIndex={fixedChoicesNativelyDisabled
                           ? -1
                           : question.multiSelect ? 0 : on || (selected.length === 0 && optionIndex === 0) ? 0 : -1}
                         className={`question-option${on ? " on" : ""}`}
                         title={option.description}
-                        onClick={() => toggle(question, option.label)}
+                        onClick={() => { if (!controlsDisabled) toggle(question, option.label); }}
                       >
                         <span className="question-mark" aria-hidden="true">{question.multiSelect ? (on ? "☑" : "☐") : on ? "●" : "○"}</span>
                         <span>

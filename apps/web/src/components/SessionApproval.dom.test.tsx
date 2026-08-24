@@ -150,7 +150,7 @@ test("constrained free text exposes its shared validation reason and accessible 
   }
 });
 
-test("an online-to-offline transition disables every response control", async () => {
+test("an online-to-offline transition keeps choices reachable and explains every unavailable response", async () => {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
@@ -171,21 +171,31 @@ test("an online-to-offline transition disables every response control", async ()
     assert.equal(availability.getAttribute("role"), "status");
     assert.equal(availability.getAttribute("aria-atomic"), "true");
 
+    assert.ok(availability.id);
     await renderBanner(root, questions, false);
-    const responseControls = [
-      ...container.querySelectorAll<HTMLButtonElement>(".question-option"),
-      ...container.querySelectorAll<HTMLInputElement>(".question-input"),
-      ...container.querySelectorAll<HTMLButtonElement>(".approval-actions button"),
-    ];
-    assert.ok(responseControls.length > 0);
-    assert.ok(responseControls.every((control) => control.disabled));
-    assert.ok([...container.querySelectorAll(".question-option")]
-      .every((control) => control.getAttribute("aria-disabled") === "true"));
+    const choices = [...container.querySelectorAll<HTMLButtonElement>(".question-option")];
+    assert.equal(choices.length, 2);
+    assert.ok(choices.every((choice) => !choice.disabled));
+    assert.ok(choices.every((choice) => choice.getAttribute("aria-disabled") === "true"));
+    assert.deepEqual(choices.map((choice) => choice.tabIndex), [0, -1]);
+    const input = container.querySelector<HTMLInputElement>(".question-input");
+    assert.ok(input?.disabled);
+    assert.ok([...container.querySelectorAll<HTMLButtonElement>(".approval-actions button")]
+      .every((control) => control.disabled));
     assert.equal(
       container.querySelector(".question-availability")?.textContent,
       "Responses are unavailable until the runner reconnects.",
     );
-    assert.equal(container.querySelector(".question-availability")?.getAttribute("role"), "status");
+    const offlineAvailability = container.querySelector<HTMLElement>(".question-availability");
+    assert.equal(offlineAvailability?.getAttribute("role"), "status");
+    const group = container.querySelector<HTMLElement>('[role="radiogroup"]');
+    assert.ok(group?.getAttribute("aria-describedby")?.split(" ").includes(offlineAvailability!.id));
+    assert.ok(input.getAttribute("aria-describedby")?.split(" ").includes(offlineAvailability!.id));
+    assert.ok([...container.querySelectorAll<HTMLButtonElement>(".approval-actions button")]
+      .every((control) => control.getAttribute("aria-describedby") === offlineAvailability!.id));
+
+    await act(async () => { choices[0]!.click(); });
+    assert.equal(choices[0]!.getAttribute("aria-checked"), "false");
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();

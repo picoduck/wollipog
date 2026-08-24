@@ -9448,7 +9448,7 @@ body.shell-dock-dragging * {
   line-height: 1.4;
 }
 .question-availability:empty {
-  display: none;
+  margin-top: 0;
 }
 .question-list {
   display: flex;
