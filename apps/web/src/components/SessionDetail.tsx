@@ -119,7 +119,7 @@ import {
 import { useSessionReadingKeys, type SessionReadingKeyActions } from "../useSessionReadingKeys.js";
 import { VIRTUAL_VIEWPORT_INTENT_EVENT } from "../viewport-intent.js";
 import { matchesShortcut, shortcutDisplay, shortcutLayerActive } from "../shortcuts.js";
-import { useIsMobile } from "./useIsMobile.js";
+import { useIsMobile, useIsTouchPhone } from "./useIsMobile.js";
 import {
   usePreviewNavigationRegistration,
   type PreviewNavigationControls,
@@ -156,6 +156,7 @@ import {
   restoreComposerFocus,
   restoreRememberedComposerFocus,
 } from "../composer-focus.js";
+import { KEYBOARD_DISMISS_BLUR_EVENT, TOUCH_PHONE_MEDIA } from "../mobile-viewport.js";
 import { resizeComposerToContent } from "../composer-autogrow.js";
 import { IncrementalActiveTurnProgress } from "../turn-progress.js";
 import { WorkingIndicator } from "./WorkingIndicator.js";
@@ -685,11 +686,17 @@ function SessionDetailLoaded({
     document.addEventListener("keydown", markExplicitKeyboardTransfer, true);
     window.addEventListener("blur", markWindowTransfer);
     window.addEventListener("focus", clearExplicitTransfer);
+    // The keyboard-dismissal detector (mobile-viewport.ts) blurs the composer when the software
+    // keyboard closes without one — Android Back — and a programmatic blur has no pointerdown or
+    // keydown to mark it. Unmarked, it reads as accidental background loss, and the recovery
+    // refocus re-summons on Android the very keyboard the user just collapsed.
+    window.addEventListener(KEYBOARD_DISMISS_BLUR_EVENT, markExplicitTransfer);
     return () => {
       document.removeEventListener("pointerdown", markExplicitPointerTransfer, true);
       document.removeEventListener("keydown", markExplicitKeyboardTransfer, true);
       window.removeEventListener("blur", markWindowTransfer);
       window.removeEventListener("focus", clearExplicitTransfer);
+      window.removeEventListener(KEYBOARD_DISMISS_BLUR_EVENT, markExplicitTransfer);
       if (clearExplicitTransferTimer) clearTimeout(clearExplicitTransferTimer);
     };
   }, []);
@@ -2308,6 +2315,10 @@ function SessionDetailLoaded({
     insertSlashCommand(command);
   };
 
+  // Enter only sends where a hardware keyboard is the norm; the tooltip must not advertise a
+  // shortcut the touch-phone layout no longer honours.
+  const isTouchPhone = useIsTouchPhone();
+
   const onKeyDown = (e: KeyboardEvent) => {
     composerInteractionVersionRef.current += 1;
     // While an IME owns the key sequence, the app owns nothing: not submission, shortcuts, menu
@@ -2374,7 +2385,12 @@ function SessionDetailLoaded({
       }
     }
     // Enter sends; Shift+Enter inserts a newline. (Ctrl/Cmd+Enter intentionally does NOT send.)
+    // Except on the touch-phone layout, where Enter falls through to the textarea's native
+    // newline: a software keyboard has no Shift, held or otherwise, mid-word — so send-on-Enter
+    // made multi-line drafts unwritable on a phone. The Send button is the send affordance there,
+    // and its press keeps the keyboard open.
     if (e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey && !composing) {
+      if (window.matchMedia(TOUCH_PHONE_MEDIA).matches) return;
       e.preventDefault();
       void send();
     }
@@ -2979,9 +2995,16 @@ function SessionDetailLoaded({
                   {primaryComposerAction === "send" ? (
                     <button
                       className="send-btn"
+                      /* Keep focus in the textarea, like the dictation button above. On a phone
+                         the tap otherwise blurs the composer, and the blur closes the keyboard
+                         and brings the bottom rail back — a layout shift between touchstart and
+                         click that moved this button out from under the finger, so the first tap
+                         collapsed the keyboard instead of sending. Retained focus also keeps the
+                         keyboard open after sending, which is the chat convention. */
+                      onPointerDown={(e) => e.preventDefault()}
                       onClick={send}
                       disabled={!canSend || composerRequestBusy}
-                      title="Send (Enter)"
+                      title={isTouchPhone ? "Send" : "Send (Enter)"}
                       aria-label="Send"
                     >
                       {busy ? <Spinner /> : <ArrowUpIcon size={14} />}
@@ -2989,6 +3012,8 @@ function SessionDetailLoaded({
                   ) : (
                     <button
                       className={`send-btn stop-turn-btn${primaryComposerAction === "stopping" ? " is-stopping" : ""}`}
+                      /* Same tap-vs-reflow race as the Send button it replaces in this slot. */
+                      onPointerDown={(e) => e.preventDefault()}
                       onClick={() => void stopTurn()}
                       disabled={primaryComposerAction === "stopping"}
                       title={primaryComposerAction === "stopping"
