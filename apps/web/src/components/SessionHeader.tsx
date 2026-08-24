@@ -224,8 +224,8 @@ export function SessionHeader({
           />
         )}
       </div>
+      {note && <span className="detail-note session-header-note" role="status" aria-live="polite">{note}</span>}
       <div className="detail-actions">
-        {note && <span className="detail-note" role="status" aria-live="polite">{note}</span>}
         <div className="overflow-menu">
             <button
               ref={menu.triggerRef}

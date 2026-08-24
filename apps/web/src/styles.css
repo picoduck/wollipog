@@ -1761,6 +1761,10 @@ textarea {
   max-width: 260px;
   overflow-wrap: anywhere;
 }
+.session-detail > .detail-head > .session-header-note {
+  flex: 0 1 260px;
+  min-width: 0;
+}
 /* "⋯" overflow menu for infrequent actions (e.g. Reprocess) */
 .overflow-menu {
   position: relative;
@@ -9971,7 +9975,7 @@ body.shell-dock-dragging * {
   .session-detail > .detail-head {
     display: grid;
     grid-template-columns: 44px minmax(0, 1fr) 44px;
-    grid-template-rows: minmax(44px, auto) auto;
+    grid-template-rows: minmax(44px, auto) auto auto;
     column-gap: 10px;
     row-gap: 4px;
   }
@@ -10004,6 +10008,12 @@ body.shell-dock-dragging * {
     grid-column: 3;
     grid-row: 1;
     min-width: 0;
+  }
+  .session-detail > .detail-head > .session-header-note {
+    grid-column: 2 / -1;
+    grid-row: 3;
+    width: 100%;
+    max-width: none;
   }
   .session-detail > .detail-head > .detail-actions .menu-item {
     min-height: 44px;

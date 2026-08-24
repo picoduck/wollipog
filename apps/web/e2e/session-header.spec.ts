@@ -14,7 +14,7 @@ async function openSession(page: Page, scenario = "preview-follow") {
   }
 }
 
-async function capture(page: Page, viewport: "desktop" | "narrow") {
+async function capture(page: Page, viewport: string) {
   const directory = process.env.SESSION_HEADER_SCREENSHOT_DIR;
   const phase = process.env.SESSION_HEADER_SCREENSHOT_PHASE;
   if (!directory || !phase) return;
@@ -155,7 +155,7 @@ for (const viewport of [
         backgroundWorkState: "running",
       });
     });
-    await capture(page, "narrow");
+    await capture(page, `narrow-${viewport.width}`);
 
     const header = page.locator(".detail-head");
     await expect(header.getByText("Awaiting Prompt", { exact: true })).toBeVisible();
@@ -226,6 +226,36 @@ for (const viewport of [
     for (const item of await menu.getByRole("menuitem").all()) {
       const box = await item.boundingBox();
       expect(box?.height).toBeGreaterThanOrEqual(44);
+    }
+    if (viewport.width === 390) {
+      const copyLink = menu.getByRole("menuitem", { name: "Copy Internal Session Link" });
+      await expect(copyLink).toBeEnabled();
+      await copyLink.click();
+      const note = header.locator(":scope > .session-header-note");
+      await expect(note).toContainText(/session link/i);
+      await expect(header.locator(".detail-actions .detail-note")).toHaveCount(0);
+      const noteMetrics = await header.evaluate((element) => {
+        const noteBox = element.querySelector(".session-header-note")!.getBoundingClientRect();
+        const statusBox = element.querySelector(".session-header-statuses")!.getBoundingClientRect();
+        const crumbBox = element.querySelector(".detail-crumbs")!.getBoundingClientRect();
+        const headerBox = element.getBoundingClientRect();
+        return {
+          width: noteBox.width,
+          x: noteBox.x,
+          right: noteBox.right,
+          y: noteBox.y,
+          statusBottom: statusBox.bottom,
+          crumbX: crumbBox.x,
+          headerRight: headerBox.right,
+          paddingRight: Number.parseFloat(getComputedStyle(element).paddingRight),
+          hasHorizontalOverflow: element.scrollWidth > element.clientWidth,
+        };
+      });
+      expect(noteMetrics.width).toBeGreaterThanOrEqual(140);
+      expect(noteMetrics.x).toBeCloseTo(noteMetrics.crumbX, 0);
+      expect(noteMetrics.y).toBeGreaterThanOrEqual(noteMetrics.statusBottom);
+      expect(noteMetrics.right).toBeLessThanOrEqual(noteMetrics.headerRight - noteMetrics.paddingRight + 1);
+      expect(noteMetrics.hasHorizontalOverflow).toBe(false);
     }
   });
 }
