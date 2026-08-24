@@ -156,6 +156,7 @@ import {
   restoreComposerFocus,
   restoreRememberedComposerFocus,
 } from "../composer-focus.js";
+import { KEYBOARD_DISMISS_BLUR_EVENT } from "../mobile-viewport.js";
 import { resizeComposerToContent } from "../composer-autogrow.js";
 import { IncrementalActiveTurnProgress } from "../turn-progress.js";
 import { WorkingIndicator } from "./WorkingIndicator.js";
@@ -685,11 +686,17 @@ function SessionDetailLoaded({
     document.addEventListener("keydown", markExplicitKeyboardTransfer, true);
     window.addEventListener("blur", markWindowTransfer);
     window.addEventListener("focus", clearExplicitTransfer);
+    // The keyboard-dismissal detector (mobile-viewport.ts) blurs the composer when the software
+    // keyboard closes without one — Android Back — and a programmatic blur has no pointerdown or
+    // keydown to mark it. Unmarked, it reads as accidental background loss, and the recovery
+    // refocus re-summons on Android the very keyboard the user just collapsed.
+    window.addEventListener(KEYBOARD_DISMISS_BLUR_EVENT, markExplicitTransfer);
     return () => {
       document.removeEventListener("pointerdown", markExplicitPointerTransfer, true);
       document.removeEventListener("keydown", markExplicitKeyboardTransfer, true);
       window.removeEventListener("blur", markWindowTransfer);
       window.removeEventListener("focus", clearExplicitTransfer);
+      window.removeEventListener(KEYBOARD_DISMISS_BLUR_EVENT, markExplicitTransfer);
       if (clearExplicitTransferTimer) clearTimeout(clearExplicitTransferTimer);
     };
   }, []);
@@ -2979,6 +2986,13 @@ function SessionDetailLoaded({
                   {primaryComposerAction === "send" ? (
                     <button
                       className="send-btn"
+                      /* Keep focus in the textarea, like the dictation button above. On a phone
+                         the tap otherwise blurs the composer, and the blur closes the keyboard
+                         and brings the bottom rail back — a layout shift between touchstart and
+                         click that moved this button out from under the finger, so the first tap
+                         collapsed the keyboard instead of sending. Retained focus also keeps the
+                         keyboard open after sending, which is the chat convention. */
+                      onPointerDown={(e) => e.preventDefault()}
                       onClick={send}
                       disabled={!canSend || composerRequestBusy}
                       title="Send (Enter)"
@@ -2989,6 +3003,8 @@ function SessionDetailLoaded({
                   ) : (
                     <button
                       className={`send-btn stop-turn-btn${primaryComposerAction === "stopping" ? " is-stopping" : ""}`}
+                      /* Same tap-vs-reflow race as the Send button it replaces in this slot. */
+                      onPointerDown={(e) => e.preventDefault()}
                       onClick={() => void stopTurn()}
                       disabled={primaryComposerAction === "stopping"}
                       title={primaryComposerAction === "stopping"

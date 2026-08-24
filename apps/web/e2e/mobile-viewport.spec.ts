@@ -1,6 +1,7 @@
 import { devices, expect, test, type Locator, type Page } from "@playwright/test";
 import { GLOBAL_VIEW_ITEMS, viewPath, type View } from "../src/navigation.js";
 import { MOBILE_PRIMARY_VIEWS } from "../src/components/Rail.js";
+import { KEYBOARD_DISMISS_BLUR_EVENT } from "../src/mobile-viewport.js";
 
 /**
  * The software keyboard, end to end.
@@ -982,6 +983,14 @@ test.describe("while a text field is focused", () => {
 
   test("a keyboard dismissed without blur gives the rail back", async ({ page }) => {
     await useHarness(page);
+    // The blur must be ANNOUNCED as well as performed: composer focus recovery (SessionDetail)
+    // refocuses any unannounced background blur one frame later, and on Android that refocus
+    // re-summons the keyboard the user just collapsed.
+    await page.evaluate((eventName) => {
+      const w = window as unknown as { dismissAnnouncements: number };
+      w.dismissAnnouncements = 0;
+      window.addEventListener(eventName, () => { w.dismissAnnouncements += 1; });
+    }, KEYBOARD_DISMISS_BLUR_EVENT);
     await page.locator(".main-body textarea").focus();
     await openKeyboard(page);
     await expect(page.locator(".app-rail")).toBeHidden();
@@ -993,6 +1002,8 @@ test.describe("while a text field is focused", () => {
     await applyViewport(page, () => page.evaluate(() => window.setKeyboard(0)));
     await expect.poll(() => page.evaluate(() => document.activeElement === document.body),
       { message: "the fallback must blur the field the dismissed keyboard belonged to" }).toBe(true);
+    expect(await page.evaluate(() => (window as unknown as { dismissAnnouncements: number }).dismissAnnouncements),
+      "exactly one announcement, exactly for the dismissal blur").toBe(1);
     await expectRailAt(page, 0);
     await expectEveryPrimaryDestinationUsable(page);
   });

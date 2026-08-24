@@ -64,6 +64,17 @@ const KEYBOARD_EDITABLE = "textarea:not([readonly]), [contenteditable=''], [cont
   + "input:not([readonly], [type='button'], [type='checkbox'], [type='color'], [type='file'], "
   + "[type='image'], [type='radio'], [type='range'], [type='reset'], [type='submit'])";
 
+/**
+ * Dispatched on the window immediately before the dismissal blur below.
+ *
+ * The composer's focus-recovery machinery (SessionDetail) treats a blur with no preceding user
+ * gesture as ACCIDENTAL background loss and refocuses one frame later — and on Android that
+ * refocus re-summons the keyboard the user just collapsed, instantly. Every user-initiated blur
+ * is announced by a pointerdown or a keydown; this event is how the detector's programmatic blur
+ * announces itself the same way, so the recovery machinery lets it stand.
+ */
+export const KEYBOARD_DISMISS_BLUR_EVENT = "wollipog:keyboard-dismiss-blur";
+
 export function installMobileViewportFallback(win: Window = window): () => void {
   const viewport = win.visualViewport;
   if (!viewport) return () => undefined;
@@ -135,7 +146,12 @@ export function installMobileViewportFallback(win: Window = window): () => void 
       peak = Math.max(peak, height);
       if (win.matchMedia("(max-width: 760px) and (pointer: coarse)").matches) {
         const active = win.document.activeElement;
-        if (active instanceof HTMLElement && active.matches(KEYBOARD_EDITABLE)) active.blur();
+        if (active instanceof HTMLElement && active.matches(KEYBOARD_EDITABLE)) {
+          // Announced BEFORE the blur, synchronously: the recovery machinery reads the mark
+          // inside its blur handler, so an event after the fact arrives one decision too late.
+          win.dispatchEvent(new Event(KEYBOARD_DISMISS_BLUR_EVENT));
+          active.blur();
+        }
       }
     } else {
       if (!keyboardOpen && height > peak) peak = height;

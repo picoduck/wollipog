@@ -8,6 +8,7 @@ import type { ControlPlaneToUi, RunnerView, SessionEvent, SessionView, SideChatV
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { COMPOSER_FOCUS_DIAGNOSTIC_EVENT } from "../composer-focus.js";
+import { KEYBOARD_DISMISS_BLUR_EVENT } from "../mobile-viewport.js";
 import {
   deleteComposerDraftIfMatches,
   loadComposerDraft,
@@ -928,6 +929,64 @@ test("a delayed mobile transcript gesture relinquishes composer focus through se
     });
     assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer,
       "desktop mouse gestures must retain the browser's native focus behavior");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("the keyboard-dismissal blur is announced and allowed to stand", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await resolveComposerDraft(draft, { text: "dismissed by the detector", images: [], updatedAt: 1 });
+    await focusRequestedComposer(fixture);
+
+    // mobile-viewport.ts announces its programmatic blur with this event so the recovery
+    // machinery treats it like any user-initiated transfer. Unannounced, the blur reads as
+    // background loss, the composer is refocused a frame later, and on Android that refocus
+    // re-summons the keyboard the user just collapsed — an instant reopen loop.
+    await act(async () => {
+      domWindow.dispatchEvent(new domWindow.Event(KEYBOARD_DISMISS_BLUR_EVENT));
+      fixture.composer.blur();
+      flushFrames();
+    });
+    assert.notEqual(fixture.composer.ownerDocument.activeElement, fixture.composer,
+      "the detector's announced blur must stand");
+
+    // The mark is consumed by the blur it announced: an ordinary background loss afterwards is
+    // still recovered, so the announcement cannot latch recovery off.
+    await act(async () => { fixture.composer.focus(); });
+    await flushAsyncWork();
+    await act(async () => {
+      fixture.composer.blur();
+      flushFrames();
+    });
+    assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer,
+      "a later unannounced background loss must still be recovered");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("the send button's press keeps focus in the composer", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await resolveComposerDraft(draft, { text: "ready to send", images: [], updatedAt: 1 });
+    await focusRequestedComposer(fixture);
+    const sendButton = fixture.container.querySelector(".send-btn") as HTMLElement;
+    assert.ok(sendButton, "the composer must render its send button");
+    // Cancelling the press's default is what stops the tap from blurring the textarea. On a
+    // phone that blur closed the keyboard and brought the bottom rail back BETWEEN touchstart
+    // and click, moving this button out from under the finger — so the first tap collapsed the
+    // keyboard instead of sending. The dictation button already presses this way.
+    const uncanceled = sendButton.dispatchEvent(new domWindow.PointerEvent("pointerdown", {
+      bubbles: true,
+      cancelable: true,
+    }) as never);
+    assert.equal(uncanceled, false, "the send press must cancel the focus-stealing default");
+    assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer,
+      "the composer keeps focus through the press");
   } finally {
     await unmountFixture(fixture);
   }
