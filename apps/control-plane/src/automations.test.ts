@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type {
+  AgentCapabilities,
+  AgentDriverKind,
   AutomationSpec,
   CreateSessionRequest,
   CreateWorkflowRunRequest,
@@ -13,7 +15,11 @@ import type { PreStagedDeliveryOptions, SessionsService } from "./sessions.js";
 import { AutomationsService, validateAutomationSpec } from "./automations.js";
 import { signAutomationTrigger } from "./automation-trigger-ingress.js";
 
-function runner(runnerId: string): RunnerMetadata {
+function runner(
+  runnerId: string,
+  capabilities?: AgentCapabilities,
+  driver: AgentDriverKind = "acp",
+): RunnerMetadata {
   return {
     runnerId,
     hostname: runnerId,
@@ -22,8 +28,8 @@ function runner(runnerId: string): RunnerMetadata {
     version: "test",
     workspaces: [{ id: "ws-1", name: "Repo", path: `/repos/${runnerId}` }],
     agents: [{
-      id: "agent-1", name: "Agent", command: "agent", args: [], env: {}, driver: "acp",
-      context: { kind: "native" }, available: true,
+      id: "agent-1", name: "Agent", command: "agent", args: [], env: {}, driver,
+      context: { kind: "native" }, available: true, capabilities,
     }],
   };
 }
@@ -47,10 +53,12 @@ function baseSpec(overrides: Partial<AutomationSpec> = {}): AutomationSpec {
   };
 }
 
-function harness(protocolVersion = 53) {
+function harness(
+  protocolVersion = 53,
+  runners: RunnerMetadata[] = [runner("runner-1"), runner("runner-2")],
+) {
   const db = ControlPlaneDb.open(":memory:");
-  db.registerRunner(runner("runner-1"), 1, protocolVersion);
-  db.registerRunner(runner("runner-2"), 1, protocolVersion);
+  for (const metadata of runners) db.registerRunner(metadata, 1, protocolVersion);
   const online = new Set(["runner-1"]);
   const delivered: unknown[] = [];
   const hub = {
@@ -473,6 +481,90 @@ test("calendar-impossible cron schedules fail cleanly before create or update", 
   assert.equal(updated.status, 400);
   assert.match(updated.error ?? "", /no fire time within five years/);
   assert.equal(db.getAutomation(existing.automationId)?.cron, "* * * * *");
+});
+
+test("create and update reject config unsupported by the primary or any alternate target", () => {
+  const claudeCapabilities: AgentCapabilities = {
+    models: [{ id: "claude-opus-4-1", efforts: ["high"] }],
+    effortLevels: ["high"], permissionModes: ["default"], slashCommands: [],
+    supportsImages: true, supportsApprovals: true,
+  };
+  const codexCapabilities: AgentCapabilities = {
+    models: [{ id: "gpt-5", efforts: ["medium"] }],
+    effortLevels: ["medium"], permissionModes: ["default"], slashCommands: [],
+    supportsImages: true, supportsApprovals: true,
+  };
+  const { db, service } = harness(53, [
+    runner("runner-1", claudeCapabilities, "claude-code"),
+    runner("runner-2", claudeCapabilities, "claude-code"),
+    runner("runner-3", codexCapabilities, "codex-app-server"),
+  ]);
+  const actor = { kind: "human" as const, id: "device" };
+
+  const primaryRejected = service.create(baseSpec({
+    action: { kind: "create_session", request: {
+      runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1", prompt: "Build",
+      config: { model: "gpt-5" },
+    } },
+  }), actor, 0);
+  assert.equal(primaryRejected.status, 409);
+  assert.match(primaryRejected.error ?? "", /runner-1\/ws-1\/agent-1.*model.*gpt-5/);
+
+  const incompatibleAlternate = baseSpec({
+    action: { kind: "create_session", request: {
+      runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1", prompt: "Build",
+      config: { model: "opus[1m]", effort: "high" },
+    } },
+    runnerPolicy: { kind: "alternate", targets: [
+      { runnerId: "runner-2", workspaceId: "ws-1", agentId: "agent-1" },
+      { runnerId: "runner-3", workspaceId: "ws-1", agentId: "agent-1" },
+    ] },
+  });
+  const alternateRejected = service.create(incompatibleAlternate, actor, 0);
+  assert.equal(alternateRejected.status, 409);
+  assert.match(alternateRejected.error ?? "", /runner-3\/ws-1\/agent-1.*model.*opus\[1m\]/);
+
+  const existing = service.create(baseSpec(), actor, 0).data!;
+  const updated = service.update(existing.automationId, incompatibleAlternate, actor, 1);
+  assert.equal(updated.status, 409);
+  assert.match(updated.error ?? "", /runner-3\/ws-1\/agent-1.*model.*opus\[1m\]/);
+  assert.equal(db.getAutomation(existing.automationId)?.action.kind, "create_session");
+  assert.equal(db.getAutomation(existing.automationId)?.runnerPolicy.kind, "wait");
+});
+
+test("legacy capabilities stay permissive and capability drift cannot prevent pausing", () => {
+  const actor = { kind: "human" as const, id: "device" };
+  const explicitConfig = baseSpec({
+    action: { kind: "create_session", request: {
+      runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1", prompt: "Build",
+      config: { model: "legacy-model", effort: "max" },
+    } },
+  });
+  const legacy = harness();
+  assert.equal(legacy.service.create(explicitConfig, actor, 0).status, 201);
+
+  const supportedCapabilities: AgentCapabilities = {
+    models: [{ id: "claude-opus-4-1", efforts: ["high"] }],
+    effortLevels: ["high"], permissionModes: ["default"], slashCommands: [],
+    supportsImages: true, supportsApprovals: true,
+  };
+  const narrowedCapabilities: AgentCapabilities = {
+    ...supportedCapabilities,
+    models: [{ id: "claude-sonnet-4", efforts: ["high"] }],
+  };
+  const drift = harness(53, [runner("runner-1", supportedCapabilities, "claude-code")]);
+  const supportedSpec = baseSpec({
+    action: { kind: "create_session", request: {
+      runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1", prompt: "Build",
+      config: { model: "claude-opus-4-1", effort: "high" },
+    } },
+  });
+  const created = drift.service.create(supportedSpec, actor, 0).data!;
+  drift.db.registerRunner(runner("runner-1", narrowedCapabilities, "claude-code"), 1, 53);
+
+  const paused = drift.service.update(created.automationId, { ...supportedSpec, enabled: false }, actor, 2);
+  assert.equal(paused.status, 200);
+  assert.equal(drift.db.getAutomation(created.automationId)?.enabled, false);
 });
 
 test("a due create-session occurrence claims once, applies ceilings, and reconciles to success", () => {
