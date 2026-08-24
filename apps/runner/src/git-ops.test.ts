@@ -971,13 +971,15 @@ test("gitDiff last_turn: probes the snapshot tree, snapshots the worktree now, a
 
   const probe = calls.find((a) => gitVerb(a) === "rev-parse")!;
   assert.deepEqual(probe, ["rev-parse", "--verify", "--quiet", "snaptree456^{tree}"]);
-  // The now-tree is built on a throwaway index: read-tree HEAD, add -A, write-tree — all with
-  // the SAME GIT_INDEX_FILE env, which no other call carries.
+  // The now-tree is built on a throwaway index: seed, capture every path, force-rehash tracked
+  // paths, then write-tree — all with the SAME GIT_INDEX_FILE env, which no other call carries.
   const treeCalls = calls.filter((a) => ["read-tree", "add", "write-tree"].includes(gitVerb(a)));
   assert.deepEqual(
     treeCalls.map((a) => gitVerb(a)),
-    ["read-tree", "add", "write-tree"],
+    ["read-tree", "add", "add", "write-tree"],
   );
+  assert.deepEqual(treeCalls[1], ["add", "-A"]);
+  assert.deepEqual(treeCalls[2], ["add", "--renormalize", "-u"]);
   const idxFiles = new Set(
     opts.filter((o, i) => ["read-tree", "add", "write-tree"].includes(gitVerb(calls[i]!))).map((o) => o?.env?.GIT_INDEX_FILE),
   );

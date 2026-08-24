@@ -358,7 +358,11 @@ export async function captureWorktreeTree(cwd: string): Promise<string> {
       }
     }
     if (!seeded) await git(cwd, ["read-tree", "HEAD"], opts);
+    // A copied index can trust a same-size rewrite as clean when its mtime lands in the cached
+    // timestamp tick. First capture deletions/untracked, then force the remaining tracked entries
+    // through the clean/hash path in the TEMP index so the snapshot is content-authoritative.
     await git(cwd, ["add", "-A"], opts); // stages into the TEMP index only; .gitignore respected
+    await git(cwd, ["add", "--renormalize", "-u"], opts);
     return (await git(cwd, ["write-tree"], opts)).trim();
   } finally {
     if (context.kind === "wsl") {
