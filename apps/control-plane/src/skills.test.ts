@@ -306,3 +306,18 @@ test("resolveDesiredSkills always ships the latest version", () => {
   assert.equal(entry!.versionDigest, version!.digest);
   assert.notEqual(entry!.versionDigest, skill.latestVersion!.digest);
 });
+
+test("resolveDesiredSkills never targets the synthesized conductor", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  // The conductor shares its donor Claude's harness directory, so a target row for it would
+  // double-deploy into the same directory and make mixed policies read as conflicts.
+  db.registerRunner(runnerMeta("runner-1", [
+    ...AGENTS,
+    { id: "conductor", name: "Conductor (Wollipog)", command: "claude", args: [], env: {}, driver: "claude-code" },
+  ]), 10, 91);
+  const skill = createSkill(db, "gamma-skill");
+  assign(db, skill.id, { kind: "instance" }, { kind: "all" });
+  assign(db, skill.id, { kind: "instance" }, { kind: "agent", agentId: "conductor" });
+  const [entry] = resolveDesiredSkills(db, "runner-1");
+  assert.equal(entry!.targets.some((target) => target.agentId === "conductor"), false);
+});
