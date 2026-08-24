@@ -10254,6 +10254,8 @@ body.shell-dock-dragging * {
 }
 .automation-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 16px; }
 .automation-form-grid > label { display: grid; gap: 6px; color: var(--text-dim); font-size: 12px; font-weight: 600; }
+.automation-form-grid > .automation-field { display: grid; gap: 6px; }
+.automation-form-grid > .automation-field .field-label { margin-bottom: 0; font-weight: 600; }
 .automation-form-grid input, .automation-form-grid select, .automation-form-grid textarea {
   width: 100%; min-width: 0; min-height: 44px; color: var(--text); background: var(--bg-elev-2);
   border: 1px solid var(--border); border-radius: 7px; padding: 9px 10px; font: inherit; font-size: 13px;
