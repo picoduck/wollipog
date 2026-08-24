@@ -9776,6 +9776,27 @@ body.shell-dock-dragging * {
   .rail-more { display: block; }
   .rail-destinations { flex: 1; justify-content: space-around; }
 
+  /* While a text field is focused the software keyboard is up, and a tab bar directly above it is
+     the difference between reading the transcript and reading three lines of it. The rail is
+     removed for the duration; it returns on blur, which is also how the keyboard is dismissed.
+     Keyed on FOCUS rather than on --keyboard-inset, because browsers honouring
+     interactive-widget=resizes-content shrink the layout viewport and never publish the inset —
+     no geometric signal exists in both engine families, but a focused text field is when the
+     keyboard is up in either. Gated to coarse pointers so a narrow desktop window, which has no
+     software keyboard, keeps its bar. Input types that summon no keyboard are excluded: a
+     checkbox or a radio holds focus after a tap and would strand the navigation hidden. */
+  @media (pointer: coarse) {
+    .app:has(
+      textarea:focus,
+      [contenteditable=""]:focus,
+      [contenteditable="true"]:focus,
+      input:focus:not([type="button"], [type="checkbox"], [type="color"], [type="file"],
+        [type="image"], [type="radio"], [type="range"], [type="reset"], [type="submit"])
+    ) .app-rail {
+      display: none;
+    }
+  }
+
   /* 50px of controls below the top safe-area inset (notch / Dynamic Island). Anything that
      anchors to the topbar's bottom edge must use the same calc (see .right-panel below). */
   .topbar {

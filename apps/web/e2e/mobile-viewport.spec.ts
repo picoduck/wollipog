@@ -938,6 +938,80 @@ test("closing the keyboard puts everything back", async ({ page }) => {
 });
 
 /**
+ * The rail yields while the user is typing.
+ *
+ * A focused text field is when the software keyboard is up — on BOTH engine families, which no
+ * geometric signal covers: browsers honouring `interactive-widget=resizes-content` shrink the
+ * layout viewport and never publish `--keyboard-inset`, so a rule keyed on the inset would hide
+ * nothing on them. With the keyboard holding ~300px and the topbar 50px, the rail's 56px is a
+ * meaningful slice of what remains for the transcript, and no one is tapping navigation mid-word.
+ */
+test.describe("while a text field is focused", () => {
+  test("the rail is removed and the freed band goes to the content", async ({ page }) => {
+    await useHarness(page);
+    // The gate the rule hangs on. The Pixel 7 emulation reports a coarse pointer; if it stopped,
+    // every assertion below would pass vacuously against a rule that never applies in it.
+    expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches),
+      "this emulation must report the coarse pointer the rule is gated to").toBe(true);
+
+    await page.locator(".main-body textarea").focus();
+    await expect(page.locator(".app-rail")).toBeHidden();
+    // Removed, not merely invisible: `visibility: hidden` or `opacity: 0` satisfies toBeHidden
+    // while the 56px band still belongs to the rail. The content must reach the bottom edge.
+    const main = (await page.locator(".main").boundingBox())!;
+    const height = page.viewportSize()!.height;
+    expect(main.y + main.height, "the content must take over the band the rail held")
+      .toBeGreaterThan(height - 2);
+
+    await page.locator(".main-body textarea").blur();
+    await expectRailAt(page, 0);
+    await expectEveryPrimaryDestinationUsable(page);
+  });
+
+  test("blur while the inset is still published puts the rail on the occluded band", async ({ page }) => {
+    await useHarness(page);
+    await page.locator(".main-body textarea").focus();
+    await openKeyboard(page);
+    await expect(page.locator(".app-rail")).toBeHidden();
+    // The keyboard animates out AFTER blur, so for those frames the inset is still published with
+    // nothing focused. The returning rail must sit on the occluded band, not under it — hiding
+    // while typing does not repeal #207.
+    await page.locator(".main-body textarea").blur();
+    await expectRailAt(page, KEYBOARD);
+  });
+
+  test("focus that summons no keyboard leaves the rail in place", async ({ page }) => {
+    await useHarness(page);
+    // A checkbox holds focus after a tap and opens nothing; hiding on it strands the navigation
+    // hidden until the user happens to focus something else.
+    await page.locator(".main-body input[type=checkbox]").focus();
+    await expectRailAt(page, 0);
+    // The rail's own destinations too: a selector loosened to `.app:has(:focus)` removes the bar
+    // in response to the user reaching for it.
+    await page.locator(".rail-destinations > .rail-item").first().focus();
+    await expectRailAt(page, 0);
+    await expectEveryPrimaryDestinationUsable(page);
+  });
+});
+
+/**
+ * The same width without the touch emulation, which is a narrow DESKTOP window: no software
+ * keyboard exists there, so focusing the composer must not cost the navigation.
+ */
+test.describe("with a fine pointer", () => {
+  test.use({ hasTouch: false, isMobile: false });
+
+  test("a narrow desktop window keeps its rail while typing", async ({ page }) => {
+    await useHarness(page);
+    expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches),
+      "without touch emulation this context must report a fine pointer").toBe(false);
+    await page.locator(".main-body textarea").focus();
+    await expectRailAt(page, 0);
+    await expectEveryPrimaryDestinationUsable(page);
+  });
+});
+
+/**
  * A panned viewport, where the total shrink and the occluded band are different numbers.
  *
  * Some browsers resize the visual viewport in place — `offsetTop` stays 0 — and others scroll it

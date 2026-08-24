@@ -199,7 +199,16 @@ function Harness() {
         <Topbar />
         {/* Production's `<main>` is never just a header; every view renders a `.main-body` under
             it. A fixture that omits it is distinguishable by `.app:has(.main-body)`. */}
-        <div className="main-body" />
+        <div className="main-body">
+          {/* One control of each focus kind the while-typing rule divides the world into: a
+              text field whose focus means the software keyboard is up and the rail must yield,
+              and a non-text control whose focus summons no keyboard and must leave the rail
+              alone. A fixture without the checkbox lets `input:focus` — every input, keyboard
+              or not — pass for the production selector, stranding the navigation hidden after
+              any tap on a checkbox or radio. */}
+          <textarea aria-label="Reply" />
+          <input type="checkbox" aria-label="Notify" />
+        </div>
       </main>
     </div>
   );
