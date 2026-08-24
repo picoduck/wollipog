@@ -55,10 +55,15 @@ Skip anything that a human is already touching:
 
 - files changed by an open pull request (`gh pr list --state open` then `gh pr diff`);
 - files with uncommitted changes or that differ from `origin/main`;
-- code added or modified in the last 7 days (`git log --since='7 days ago' --name-only`), which is
-  usually deliberate and unfinished rather than abandoned.
+- LINES added or modified in the last 7 days, which are usually deliberate and unfinished rather
+  than abandoned. Judge this per finding with `git blame` on the exact candidate lines, not per
+  file: in an active repository, `git log --since='7 days ago' --name-only` excludes most of the
+  tree because unrelated lines in the same files moved. (The first two runs of these jobs each
+  hit that independently — one lost 363 files, the other 28 of 76 documents — and both fell back
+  to per-line blame; that fallback is now the rule.) The file-level listing remains useful as the
+  cheap first pass for spotting where recent work is concentrated.
 
-Say which paths you excluded and why. Silent exclusion reads as coverage you did not have.
+Say what you excluded and why. Silent exclusion reads as coverage you did not have.
 
 ## Do Not Re-Report
 
