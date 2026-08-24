@@ -142,7 +142,8 @@ export function AutomationsView() {
   const selectedRunner = runners.get(form.runnerId);
   const selectedFallback = runners.get(form.fallbackRunnerId);
   const carriedAlternateRunnerIds = new Set(editingSpec?.runnerPolicy.kind === "alternate" &&
-      editingSpec.action.kind === form.actionKind
+      editingSpec.action.kind === form.actionKind &&
+      form.runnerPolicy === "alternate"
     ? editingSpec.runnerPolicy.targets.slice(1).map((target) => target.runnerId)
     : []);
   // Model, effort, and permission mode are agent-scoped: the runner advertises them per agent, and
@@ -410,6 +411,11 @@ export function AutomationsView() {
                 .map((runner) => <option key={runner.runnerId} value={runner.runnerId}>{machineLabels.get(runner.runnerId)}</option>)}</select></label>
               <label>Alternate Workspace<select value={form.fallbackWorkspaceId} onChange={(event) => patch("fallbackWorkspaceId", event.target.value)}>{(selectedFallback?.workspaces ?? []).map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}</select></label>
               {form.actionKind === "create_session" && <label>Alternate Agent<select value={form.fallbackAgentId} onChange={(event) => patch("fallbackAgentId", event.target.value)}>{automationAgents(selectedFallback?.agents, form.fallbackAgentId).map((agent) => <option key={agent.id} value={agent.id}>{agentDisplayName(agent)}</option>)}</select></label>}
+              {carriedAlternateRunnerIds.size > 0 && <p className="automation-hint automation-span">
+                Additional stored alternate machines are preserved: {[...carriedAlternateRunnerIds]
+                  .map((runnerId) => machineLabels.get(runnerId) ?? runnerId)
+                  .join(", ")}.
+              </p>}
             </>}
             <label>Concurrency<select value={form.concurrency} onChange={(event) => patch("concurrency", event.target.value as FormState["concurrency"])}><option value="wait">Wait for Previous</option><option value="skip">Skip While Active</option>{form.actionKind !== "prompt_session" && <option value="parallel">Allow Parallel</option>}</select></label>
             <label>Max Additional Cost (USD)<input type="number" min="0.01" max="10000" step="0.01" value={form.maxCostUsd} onChange={(event) => patch("maxCostUsd", event.target.value)} /></label>

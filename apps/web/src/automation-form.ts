@@ -300,10 +300,11 @@ export function buildSpec(form: FormState, context: BuildSpecContext): Automatio
   // workflow identities when the selected workflow changes; those agent ids belong to the old
   // graph. The first workflow target follows the same rule below for its unrendered fields.
   const carriedAlternateTargets = form.runnerPolicy === "alternate"
-    ? baseAlternateTargets.slice(1).map((target) => {
+    ? baseAlternateTargets.slice(1)
+      .filter((target) => target.runnerId !== form.fallbackRunnerId)
+      .map((target) => {
         const { projectId: _projectId, projectLocationId: _projectLocationId, ...targetWithoutPlacement } = target;
         const currentPlacement = automationProjectPlacement(context.projectsSupported, projectList, target);
-        validateAutomationAlternatePlacement(context.projectsSupported, primaryPlacement, currentPlacement);
         if (context.projectsSupported &&
             ((target.projectId ?? null) !== (currentPlacement.projectId ?? null) ||
               (target.projectLocationId ?? null) !== (currentPlacement.projectLocationId ?? null))) {
@@ -311,6 +312,7 @@ export function buildSpec(form: FormState, context: BuildSpecContext): Automatio
             `Carried alternate target ${target.runnerId} no longer matches its exact Project Location.`,
           );
         }
+        validateAutomationAlternatePlacement(context.projectsSupported, primaryPlacement, currentPlacement);
         return form.actionKind === "workflow_run" && !sameWorkflow
           ? { runnerId: target.runnerId, workspaceId: target.workspaceId, ...currentPlacement }
           : context.projectsSupported

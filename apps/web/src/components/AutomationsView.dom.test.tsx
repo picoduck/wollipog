@@ -357,6 +357,14 @@ test("editing and saving without changes sends the exact stored multi-alternate 
       [...nativeSelect(fixture.container, "Alternate Machine").options].map((option) => option.value),
       ["", "runner-2"],
     );
+    assert.match(fixture.container.textContent ?? "", /Additional stored alternate machines are preserved: runner-3\./);
+
+    await changeNativeSelect(fixture.container, "Runner Availability", "wait");
+    assert.equal(
+      [...nativeSelect(fixture.container, "Machine").options].find((option) => option.value === "runner-3")?.disabled,
+      false,
+    );
+    await changeNativeSelect(fixture.container, "Runner Availability", "alternate");
 
     await act(async () => { button(fixture.container, "Save Automation").click(); });
     await act(settle);

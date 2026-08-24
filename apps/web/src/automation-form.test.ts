@@ -374,6 +374,35 @@ test("multi-target workflow bindings survive an unchanged edit", () => {
   assertRoundTrips(spec);
 });
 
+test("selecting a carried runner as the visible alternate keeps the runner policy unique", () => {
+  const spec: AutomationSpec = {
+    ...baseSpec({
+      kind: "create_session",
+      request: {
+        runnerId: "primary", workspaceId: "primary-ws", agentId: "claude", prompt: "Sweep.",
+      },
+    }),
+    runnerPolicy: {
+      kind: "alternate",
+      targets: [
+        { runnerId: "alternate-a", workspaceId: "a-ws", agentId: "claude-a" },
+        { runnerId: "alternate-b", workspaceId: "b-ws", agentId: "claude-b" },
+      ],
+      expireAfterMinutes: 60,
+    },
+  };
+  const moved = {
+    ...formFrom(spec),
+    fallbackRunnerId: "alternate-b", fallbackWorkspaceId: "b-ws", fallbackAgentId: "claude-b",
+  };
+
+  const saved = buildSpec(moved, { ...CONTEXT, base: spec });
+  assert.equal(saved.runnerPolicy.kind, "alternate");
+  assert.deepEqual(saved.runnerPolicy.targets, [
+    { runnerId: "alternate-b", workspaceId: "b-ws", agentId: "claude-b" },
+  ]);
+});
+
 test("Project-less carried alternates normalize omitted placement for a Project-aware server", () => {
   const spec: AutomationSpec = {
     ...baseSpec({
@@ -491,6 +520,16 @@ test("a carried alternate whose Project Location is stale blocks the save", () =
 
   assert.throws(
     () => buildSpec(formFrom(spec), { projectsSupported: true, projects, base: spec }),
+    /Carried alternate target alternate-b no longer matches its exact Project Location\./,
+  );
+
+  const movedOutOfProject = [
+    project("project-a", "primary", "primary-ws", "primary-location"),
+    project("project-a", "alternate-a", "a-ws", "alternate-a-location"),
+    project("project-b", "alternate-b", "b-ws", "current-location"),
+  ];
+  assert.throws(
+    () => buildSpec(formFrom(spec), { projectsSupported: true, projects: movedOutOfProject, base: spec }),
     /Carried alternate target alternate-b no longer matches its exact Project Location\./,
   );
 });
