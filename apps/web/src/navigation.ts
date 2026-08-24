@@ -11,6 +11,7 @@ export type View =
   | { name: "runs" }
   | { name: "pods" }
   | { name: "automations" }
+  | { name: "skills" }
   | { name: "usage" }
   | { name: "archived" }
   | { name: "projects"; id?: string }
@@ -41,7 +42,7 @@ export const SETTINGS_SECTIONS: ReadonlyArray<{ id: SettingsSection; title: stri
 
 export type ConnectionSection = "instances" | "machines" | "people";
 
-export type GlobalViewName = Extract<View["name"], "inbox" | "projects" | "board" | "runs" | "pods" | "automations" | "usage" | "runners" | "archived">;
+export type GlobalViewName = Extract<View["name"], "inbox" | "projects" | "board" | "runs" | "pods" | "automations" | "usage" | "runners" | "archived" | "skills">;
 
 /** One vocabulary for every global destination, shared by the rail, header, and palette. */
 export const GLOBAL_VIEW_ITEMS: ReadonlyArray<{
@@ -59,6 +60,9 @@ export const GLOBAL_VIEW_ITEMS: ReadonlyArray<{
   { name: "usage", label: "Usage", title: "Usage & Cost", paletteLabel: "Usage & Cost" },
   { name: "runners", label: "Connections", title: "Connections", paletteLabel: "Connections" },
   { name: "archived", label: "Archived", title: "Archived Sessions", paletteLabel: "Archived Sessions" },
+  // Appended rather than slotted beside Automations: the rail numbers double as the bare digit
+  // shortcuts, so inserting mid-list would silently rebind every later destination.
+  { name: "skills", label: "Skills", title: "Agent Skills", paletteLabel: "Agent Skills" },
 ];
 
 /**
@@ -80,6 +84,7 @@ export function viewTitle(view: View): string {
     case "usage":
     case "runners":
     case "archived":
+    case "skills":
       // Named once, in the list the rail and palette already read, so the three surfaces cannot
       // drift apart.
       return GLOBAL_VIEW_ITEMS.find((item) => item.name === view.name)!.title;
@@ -170,6 +175,7 @@ export function viewPath(view: View): string {
     case "runs": return "/runs";
     case "pods": return "/pods";
     case "automations": return "/automations";
+    case "skills": return "/skills";
     case "usage": return "/usage";
     case "archived": return "/archived";
     case "projects": return view.id ? `/projects/~${encodeResourceId(view.id)}` : "/projects";
@@ -229,6 +235,7 @@ export function viewFromPath(pathname: string, search = ""): View | null {
   if (path === "/runs") return { name: "runs" };
   if (path === "/pods") return { name: "pods" };
   if (path === "/automations") return { name: "automations" };
+  if (path === "/skills") return { name: "skills" };
   if (path === "/usage") return { name: "usage" };
   if (path === "/archived") return { name: "archived" };
   if (path === "/settings") return { name: "settings", section: "appearance" };

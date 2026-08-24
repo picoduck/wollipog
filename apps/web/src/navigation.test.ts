@@ -26,6 +26,7 @@ const routes: Array<[View, string]> = [
   [{ name: "runs" }, "/runs"],
   [{ name: "pods" }, "/pods"],
   [{ name: "automations" }, "/automations"],
+  [{ name: "skills" }, "/skills"],
   [{ name: "usage" }, "/usage"],
   [{ name: "projects" }, "/projects"],
   [{ name: "projects", id: "project / unicode ✅" }, `/projects/~${encodeResourceId("project / unicode ✅")}`],

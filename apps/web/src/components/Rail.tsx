@@ -11,6 +11,7 @@ import {
   PodsIcon,
   ProjectsIcon,
   RunsIcon,
+  SkillsIcon,
   UsageIcon,
 } from "./Icons.js";
 import { useAccessibleMenu } from "./interactions.js";
@@ -36,7 +37,12 @@ const VIEW_ICONS: Record<GlobalViewName, (props: { size?: number; className?: st
   usage: UsageIcon,
   runners: ConnectionsIcon,
   archived: FolderSolidIcon,
+  skills: SkillsIcon,
 };
+
+/** The bare digit shortcuts stop at 9. A destination past that limit gets no number, because the
+ * number IS the advertised binding and a "(10)" keycap names a key that cannot be pressed. */
+const RAIL_SHORTCUT_DIGITS = 9;
 
 const RAIL_ICON_SIZE = 26;
 
@@ -146,7 +152,8 @@ export function Rail({
           // Anchored to the canonical list, not the filtered one: the number IS the Ctrl+N
           // shortcut, so renumbering it on mobile would advertise a binding that does not exist.
           const index = GLOBAL_VIEW_ITEMS.findIndex((entry) => entry.name === item.name);
-          const shortcutSuffix = isMobile ? "" : ` (${index + 1})`;
+          const shortcutDigit = index < RAIL_SHORTCUT_DIGITS ? index + 1 : null;
+          const shortcutSuffix = isMobile || shortcutDigit === null ? "" : ` (${shortcutDigit})`;
           const Icon = VIEW_ICONS[item.name];
           const active = selected === item.name;
           const badge = item.name === "runners" ? onlineConnections : 0;
@@ -178,7 +185,9 @@ export function Rail({
                 <span className="rail-badge stalled" aria-hidden="true">{stalledCount}</span>
               )}
               {item.name === "runners" && badge > 0 && <span className="rail-badge" aria-hidden="true">{badge}</span>}
-              {!isMobile && <span className="rail-number" aria-hidden="true">{index + 1}</span>}
+              {!isMobile && shortcutDigit !== null && (
+                <span className="rail-number" aria-hidden="true">{shortcutDigit}</span>
+              )}
             </a>
           );
         })}

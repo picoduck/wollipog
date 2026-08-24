@@ -58,10 +58,14 @@ test("rail exposes every destination, nested active states, live badges, and per
 
   await render({ name: "session", id: "session-1" });
   const links = [...container.querySelectorAll<HTMLAnchorElement>(".rail-destinations a")];
-  assert.equal(links.length, 9);
+  assert.equal(links.length, 10);
   assert.deepEqual(links.map((link) => link.getAttribute("href")), [
-    "/", "/projects", "/board", "/runs", "/pods", "/automations", "/usage", "/connections/machines", "/archived",
+    "/", "/projects", "/board", "/runs", "/pods", "/automations", "/usage", "/connections/machines", "/archived", "/skills",
   ]);
+  // The tenth destination advertises no keycap: the bare digit shortcuts stop at 9.
+  assert.equal(links[9]!.querySelector(".rail-number"), null);
+  assert.doesNotMatch(links[9]!.getAttribute("aria-label") ?? "", /\(10\)/);
+  assert.ok(links[8]!.querySelector(".rail-number"), "numbered destinations keep their keycaps");
   assert.match(links[0]!.getAttribute("aria-label") ?? "", /2 Blocked/);
   assert.match(links[0]!.getAttribute("aria-label") ?? "", /1 Stalled/);
   assert.match(links[7]!.getAttribute("aria-label") ?? "", /3 Online/);
@@ -150,7 +154,7 @@ test("the phone rail is destinations-only and hosts no nested layers", async () 
     await act(async () => { moreTrigger.click(); });
     const sheet = container.querySelector(".rail-more-sheet")!;
     assert.deepEqual([...sheet.querySelectorAll(".rail-more-item")].map((el) => el.textContent),
-      ["Multi-Agent Runs", "Collaboration Pods", "Automations", "Usage & Cost", "Archived Sessions"]);
+      ["Multi-Agent Runs", "Collaboration Pods", "Automations", "Usage & Cost", "Archived Sessions", "Agent Skills"]);
     assert.equal(sheet.querySelector(".rail-more-control"), null,
       "the sheet must contain no nested dialog or menu content");
     // Every child of a role=menu must be a menu item, or roving navigation silently skips it.

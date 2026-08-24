@@ -57,6 +57,10 @@ import {
   type StopOperationView,
   type AcpSessionContextConfig,
   type ApprovalQueueProvenance,
+  type DeployedSkillState,
+  type SkillFile,
+  type SkillInvocationPolicy,
+  type UnmanagedSkillInfo,
   type AgentContext,
   type AgentDefinition,
   type AgentDriverKind,
@@ -1684,6 +1688,69 @@ CREATE TABLE IF NOT EXISTS subscription_usage_snapshots (
 );
 CREATE INDEX IF NOT EXISTS idx_subscription_usage_runner
   ON subscription_usage_snapshots(runner_id, provider, agent_id);
+
+-- Managed agent skills (protocol v90). Version files are stored inline as JSON for MVP; the
+-- canonical manifest (path/sha256/size list) is what the version digest commits to.
+CREATE TABLE IF NOT EXISTS skill_groups (
+  id         TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS skills (
+  id                TEXT PRIMARY KEY,
+  name              TEXT NOT NULL UNIQUE,
+  description       TEXT,
+  group_id          TEXT,
+  source            TEXT NOT NULL DEFAULT 'library',
+  latest_version_id TEXT,
+  created_at        INTEGER NOT NULL,
+  updated_at        INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS skill_versions (
+  id         TEXT PRIMARY KEY,
+  skill_id   TEXT NOT NULL,
+  digest     TEXT NOT NULL,
+  manifest   TEXT NOT NULL,
+  files      TEXT NOT NULL,
+  note       TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_skill_versions_skill ON skill_versions(skill_id, created_at DESC, id);
+
+CREATE TABLE IF NOT EXISTS skill_assignments (
+  id             TEXT PRIMARY KEY,
+  skill_id       TEXT NOT NULL,
+  scope_kind     TEXT NOT NULL,
+  runner_id      TEXT,
+  agent_selector TEXT NOT NULL,
+  enabled        INTEGER NOT NULL DEFAULT 1,
+  invocation     TEXT NOT NULL DEFAULT 'agent',
+  created_at     INTEGER NOT NULL,
+  updated_at     INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_skill_assignments_skill ON skill_assignments(skill_id, id);
+
+CREATE TABLE IF NOT EXISTS runner_skill_state (
+  runner_id  TEXT PRIMARY KEY,
+  state      TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS skill_ownership (
+  skill_id        TEXT PRIMARY KEY,
+  organization_id TEXT NOT NULL,
+  owner_kind      TEXT NOT NULL CHECK (owner_kind IN ('organization','user','team')),
+  owner_id        TEXT NOT NULL,
+  created_at      INTEGER NOT NULL,
+  updated_at      INTEGER NOT NULL,
+  FOREIGN KEY (skill_id) REFERENCES skills(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_skill_ownership_scope
+  ON skill_ownership(organization_id, owner_kind, owner_id, skill_id);
 `;
 
 /**
@@ -2439,6 +2506,106 @@ export interface AgentLaunch {
   context: AgentContext;
   version?: string;
   capabilities?: AgentCapabilities;
+}
+
+/* --------------------------- Managed agent skills --------------------------- */
+
+/** Which of a runner's agents a skill assignment addresses. Groups are organizational only in
+ * MVP, so the selector is the complete assignable-unit vocabulary. */
+export type SkillAgentSelector =
+  | { kind: "all" }
+  | { kind: "driver"; driver: AgentDriverKind }
+  | { kind: "agent"; agentId: string };
+
+export type SkillAssignmentScopeKind = "instance" | "runner";
+
+export interface SkillVersionSummary {
+  id: string;
+  digest: string;
+  createdAt: number;
+}
+
+export interface SkillView {
+  id: string;
+  name: string;
+  description: string | null;
+  groupId: string | null;
+  source: string;
+  latestVersion: SkillVersionSummary | null;
+  assignmentCount: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface SkillVersionView extends SkillVersionSummary {
+  skillId: string;
+  /** Canonical manifest JSON (`{"files":[{"path","sha256","size"},...]}`) the digest commits to. */
+  manifest: string;
+  files: SkillFile[];
+  note: string | null;
+}
+
+export interface SkillGroupView {
+  id: string;
+  name: string;
+  sortOrder: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface SkillAssignmentView {
+  id: string;
+  skillId: string;
+  scopeKind: SkillAssignmentScopeKind;
+  runnerId: string | null;
+  agentSelector: SkillAgentSelector;
+  enabled: boolean;
+  invocation: SkillInvocationPolicy;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** The runner-reported deployment state for one machine, stored verbatim (authoritative full
+ * replacement) plus the receipt time. */
+export interface RunnerSkillStateRecord {
+  runnerId: string;
+  deployed: DeployedSkillState[];
+  unmanaged: UnmanagedSkillInfo[];
+  error?: string;
+  updatedAt: number;
+}
+
+interface SkillRow {
+  id: string;
+  name: string;
+  description: string | null;
+  group_id: string | null;
+  source: string;
+  latest_version_id: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+interface SkillVersionRow {
+  id: string;
+  skill_id: string;
+  digest: string;
+  manifest: string;
+  files: string;
+  note: string | null;
+  created_at: number;
+}
+
+interface SkillAssignmentRow {
+  id: string;
+  skill_id: string;
+  scope_kind: string;
+  runner_id: string | null;
+  agent_selector: string;
+  enabled: number;
+  invocation: string;
+  created_at: number;
+  updated_at: number;
 }
 
 export interface DriverTelemetryAggregate {
@@ -4890,6 +5057,363 @@ export class ControlPlaneDb {
     return rows.map((r) => this.runnerView(r));
   }
 
+  /* --------------------------- Managed agent skills --------------------------- */
+
+  private skillView(row: SkillRow): SkillView {
+    const latest = row.latest_version_id
+      ? (this.stmt("SELECT id, digest, created_at FROM skill_versions WHERE id=?")
+        .get(row.latest_version_id) as { id: string; digest: string; created_at: number } | undefined)
+      : undefined;
+    const assignments = this.stmt("SELECT COUNT(*) AS n FROM skill_assignments WHERE skill_id=?")
+      .get(row.id) as { n: number };
+    return {
+      id: row.id,
+      name: row.name,
+      description: row.description,
+      groupId: row.group_id,
+      source: row.source,
+      latestVersion: latest
+        ? { id: latest.id, digest: latest.digest, createdAt: latest.created_at }
+        : null,
+      assignmentCount: Number(assignments.n),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  private skillVersionView(row: SkillVersionRow): SkillVersionView {
+    return {
+      id: row.id,
+      skillId: row.skill_id,
+      digest: row.digest,
+      manifest: row.manifest,
+      files: parseJson<SkillFile[]>(row.files) ?? [],
+      note: row.note,
+      createdAt: row.created_at,
+    };
+  }
+
+  private skillAssignmentView(row: SkillAssignmentRow): SkillAssignmentView {
+    return {
+      id: row.id,
+      skillId: row.skill_id,
+      scopeKind: row.scope_kind === "runner" ? "runner" : "instance",
+      runnerId: row.runner_id,
+      agentSelector: parseJson<SkillAgentSelector>(row.agent_selector) ?? { kind: "all" },
+      enabled: row.enabled === 1,
+      invocation: row.invocation === "manual" ? "manual" : "agent",
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  private insertSkillOwnership(skillId: string, scope: ResourceScope, now: number): void {
+    const ownerId = scope.owner.kind === "organization" ? scope.owner.organizationId
+      : scope.owner.kind === "user" ? scope.owner.userId : scope.owner.teamId;
+    this.stmt(
+      `INSERT INTO skill_ownership
+       (skill_id, organization_id, owner_kind, owner_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(skillId, scope.organizationId, scope.owner.kind, ownerId, now, now);
+  }
+
+  skillScope(skillId: string): ResourceScope | null {
+    const row = this.stmt(
+      "SELECT organization_id, owner_kind, owner_id FROM skill_ownership WHERE skill_id=?",
+    ).get(skillId) as
+      | { organization_id: string; owner_kind: "organization" | "user" | "team"; owner_id: string }
+      | undefined;
+    return row ? this.scopeFromRow(row) : null;
+  }
+
+  /** Per-resource skill authorization, exactly like canAccessProject: a missing ownership row
+   * fails closed. */
+  canAccessSkill(principal: AuthPrincipal, skillId: string): boolean {
+    const scope = this.skillScope(skillId);
+    return scope ? this.principalCanAccessScope(principal, scope) : false;
+  }
+
+  listSkillsForPrincipal(principal: AuthPrincipal): SkillView[] {
+    return this.listSkills().filter((skill) => this.canAccessSkill(principal, skill.id));
+  }
+
+  /** Create a skill together with its first version. Throws on a duplicate name (the caller maps
+   * that to 409); validation of names/files/digest happens in skills.ts before this call. */
+  createSkill(input: {
+    name: string;
+    description?: string | null;
+    groupId?: string | null;
+    files: SkillFile[];
+    manifest: string;
+    digest: string;
+    note?: string | null;
+    scope?: ResourceScope;
+    now?: number;
+  }): SkillView {
+    const now = input.now ?? Date.now();
+    const skillId = `skill_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
+    const versionId = `skillv_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
+    const scope = input.scope ?? {
+      organizationId: PERSONAL_ORGANIZATION_ID,
+      owner: { kind: "organization" as const, organizationId: PERSONAL_ORGANIZATION_ID },
+    };
+    this.atomic(() => {
+      const existing = this.stmt("SELECT 1 FROM skills WHERE name=?").get(input.name);
+      if (existing) throw new Error("a skill with this name already exists");
+      if (input.groupId && !this.stmt("SELECT 1 FROM skill_groups WHERE id=?").get(input.groupId)) {
+        throw new Error("skill group not found");
+      }
+      this.stmt(
+        `INSERT INTO skills (id, name, description, group_id, source, latest_version_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'library', ?, ?, ?)`,
+      ).run(skillId, input.name, input.description ?? null, input.groupId ?? null, versionId, now, now);
+      this.stmt(
+        `INSERT INTO skill_versions (id, skill_id, digest, manifest, files, note, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run(versionId, skillId, input.digest, input.manifest, JSON.stringify(input.files), input.note ?? null, now);
+      this.insertSkillOwnership(skillId, scope, now);
+    });
+    return this.getSkill(skillId)!;
+  }
+
+  getSkill(skillId: string): SkillView | null {
+    const row = this.stmt(
+      "SELECT id, name, description, group_id, source, latest_version_id, created_at, updated_at FROM skills WHERE id=?",
+    ).get(skillId) as unknown as SkillRow | undefined;
+    return row ? this.skillView(row) : null;
+  }
+
+  getSkillByName(name: string): SkillView | null {
+    const row = this.stmt(
+      "SELECT id, name, description, group_id, source, latest_version_id, created_at, updated_at FROM skills WHERE name=?",
+    ).get(name) as unknown as SkillRow | undefined;
+    return row ? this.skillView(row) : null;
+  }
+
+  listSkills(): SkillView[] {
+    const rows = this.stmt(
+      "SELECT id, name, description, group_id, source, latest_version_id, created_at, updated_at FROM skills ORDER BY name",
+    ).all() as unknown as SkillRow[];
+    return rows.map((row) => this.skillView(row));
+  }
+
+  updateSkill(
+    skillId: string,
+    input: { description?: string | null; groupId?: string | null },
+    now = Date.now(),
+  ): SkillView | null {
+    return this.atomic(() => {
+      const current = this.stmt("SELECT description, group_id FROM skills WHERE id=?")
+        .get(skillId) as { description: string | null; group_id: string | null } | undefined;
+      if (!current) return null;
+      if (input.groupId && !this.stmt("SELECT 1 FROM skill_groups WHERE id=?").get(input.groupId)) {
+        throw new Error("skill group not found");
+      }
+      this.stmt("UPDATE skills SET description=?, group_id=?, updated_at=? WHERE id=?").run(
+        input.description === undefined ? current.description : input.description,
+        input.groupId === undefined ? current.group_id : input.groupId,
+        now,
+        skillId,
+      );
+      return this.getSkill(skillId);
+    });
+  }
+
+  /** Append a new version and make it the latest (track-latest only in MVP). */
+  addSkillVersion(
+    skillId: string,
+    input: { files: SkillFile[]; manifest: string; digest: string; note?: string | null },
+    now = Date.now(),
+  ): SkillVersionView | null {
+    const versionId = `skillv_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
+    return this.atomic(() => {
+      if (!this.stmt("SELECT 1 FROM skills WHERE id=?").get(skillId)) return null;
+      this.stmt(
+        `INSERT INTO skill_versions (id, skill_id, digest, manifest, files, note, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run(versionId, skillId, input.digest, input.manifest, JSON.stringify(input.files), input.note ?? null, now);
+      this.stmt("UPDATE skills SET latest_version_id=?, updated_at=? WHERE id=?").run(versionId, now, skillId);
+      return this.getSkillVersion(versionId);
+    });
+  }
+
+  getSkillVersion(versionId: string): SkillVersionView | null {
+    const row = this.stmt(
+      "SELECT id, skill_id, digest, manifest, files, note, created_at FROM skill_versions WHERE id=?",
+    ).get(versionId) as unknown as SkillVersionRow | undefined;
+    return row ? this.skillVersionView(row) : null;
+  }
+
+  deleteSkill(skillId: string): boolean {
+    return this.atomic(() => {
+      if (!this.stmt("SELECT 1 FROM skills WHERE id=?").get(skillId)) return false;
+      this.stmt("DELETE FROM skill_assignments WHERE skill_id=?").run(skillId);
+      this.stmt("DELETE FROM skill_versions WHERE skill_id=?").run(skillId);
+      // skill_ownership cascades from the skills row.
+      this.stmt("DELETE FROM skills WHERE id=?").run(skillId);
+      return true;
+    });
+  }
+
+  listSkillGroups(): SkillGroupView[] {
+    const rows = this.stmt(
+      "SELECT id, name, sort_order, created_at, updated_at FROM skill_groups ORDER BY sort_order, name",
+    ).all() as unknown as Array<{ id: string; name: string; sort_order: number; created_at: number; updated_at: number }>;
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      sortOrder: row.sort_order,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  createSkillGroup(name: string, now = Date.now()): SkillGroupView {
+    const trimmed = name.trim();
+    if (!trimmed) throw new Error("skill group name is required");
+    const id = `skillg_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
+    const order = this.stmt("SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM skill_groups")
+      .get() as { next: number };
+    this.stmt(
+      "INSERT INTO skill_groups (id, name, sort_order, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+    ).run(id, trimmed, Number(order.next), now, now);
+    return { id, name: trimmed, sortOrder: Number(order.next), createdAt: now, updatedAt: now };
+  }
+
+  /** Deleting a group only detaches its member skills (groups organize, never gate deployment). */
+  deleteSkillGroup(groupId: string, now = Date.now()): boolean {
+    return this.atomic(() => {
+      if (!this.stmt("SELECT 1 FROM skill_groups WHERE id=?").get(groupId)) return false;
+      this.stmt("UPDATE skills SET group_id=NULL, updated_at=? WHERE group_id=?").run(now, groupId);
+      this.stmt("DELETE FROM skill_groups WHERE id=?").run(groupId);
+      return true;
+    });
+  }
+
+  listSkillAssignments(skillId?: string): SkillAssignmentView[] {
+    const rows = (skillId
+      ? this.stmt(
+        `SELECT id, skill_id, scope_kind, runner_id, agent_selector, enabled, invocation, created_at, updated_at
+         FROM skill_assignments WHERE skill_id=? ORDER BY created_at, id`,
+      ).all(skillId)
+      : this.stmt(
+        `SELECT id, skill_id, scope_kind, runner_id, agent_selector, enabled, invocation, created_at, updated_at
+         FROM skill_assignments ORDER BY created_at, id`,
+      ).all()) as unknown as SkillAssignmentRow[];
+    return rows.map((row) => this.skillAssignmentView(row));
+  }
+
+  /** Every assignment (including disabled overrides) whose scope covers this machine. */
+  listSkillAssignmentsForRunner(runnerId: string): SkillAssignmentView[] {
+    const rows = this.stmt(
+      `SELECT id, skill_id, scope_kind, runner_id, agent_selector, enabled, invocation, created_at, updated_at
+       FROM skill_assignments
+       WHERE scope_kind='instance' OR (scope_kind='runner' AND runner_id=?)
+       ORDER BY created_at, id`,
+    ).all(runnerId) as unknown as SkillAssignmentRow[];
+    return rows.map((row) => this.skillAssignmentView(row));
+  }
+
+  createSkillAssignment(input: {
+    skillId: string;
+    scopeKind: SkillAssignmentScopeKind;
+    runnerId?: string | null;
+    agentSelector: SkillAgentSelector;
+    invocation?: SkillInvocationPolicy;
+    enabled?: boolean;
+    now?: number;
+  }): SkillAssignmentView {
+    const now = input.now ?? Date.now();
+    const id = `skilla_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
+    return this.atomic(() => {
+      if (!this.stmt("SELECT 1 FROM skills WHERE id=?").get(input.skillId)) {
+        throw new Error("skill not found");
+      }
+      this.stmt(
+        `INSERT INTO skill_assignments
+         (id, skill_id, scope_kind, runner_id, agent_selector, enabled, invocation, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        id,
+        input.skillId,
+        input.scopeKind,
+        input.scopeKind === "runner" ? input.runnerId ?? null : null,
+        JSON.stringify(input.agentSelector),
+        input.enabled === false ? 0 : 1,
+        input.invocation ?? "agent",
+        now,
+        now,
+      );
+      return this.getSkillAssignment(id)!;
+    });
+  }
+
+  getSkillAssignment(assignmentId: string): SkillAssignmentView | null {
+    const row = this.stmt(
+      `SELECT id, skill_id, scope_kind, runner_id, agent_selector, enabled, invocation, created_at, updated_at
+       FROM skill_assignments WHERE id=?`,
+    ).get(assignmentId) as unknown as SkillAssignmentRow | undefined;
+    return row ? this.skillAssignmentView(row) : null;
+  }
+
+  updateSkillAssignment(
+    assignmentId: string,
+    input: { enabled?: boolean; invocation?: SkillInvocationPolicy },
+    now = Date.now(),
+  ): SkillAssignmentView | null {
+    return this.atomic(() => {
+      const current = this.getSkillAssignment(assignmentId);
+      if (!current) return null;
+      this.stmt("UPDATE skill_assignments SET enabled=?, invocation=?, updated_at=? WHERE id=?").run(
+        (input.enabled ?? current.enabled) ? 1 : 0,
+        input.invocation ?? current.invocation,
+        now,
+        assignmentId,
+      );
+      return this.getSkillAssignment(assignmentId);
+    });
+  }
+
+  /** Returns the removed assignment so the caller knows which machines to re-sync. */
+  deleteSkillAssignment(assignmentId: string): SkillAssignmentView | null {
+    return this.atomic(() => {
+      const current = this.getSkillAssignment(assignmentId);
+      if (!current) return null;
+      this.stmt("DELETE FROM skill_assignments WHERE id=?").run(assignmentId);
+      return current;
+    });
+  }
+
+  /** Persist a runner's authoritative skills_state (full replacement for that machine). */
+  setRunnerSkillState(
+    runnerId: string,
+    state: { deployed: DeployedSkillState[]; unmanaged: UnmanagedSkillInfo[]; error?: string },
+    now = Date.now(),
+  ): void {
+    this.stmt(
+      `INSERT INTO runner_skill_state (runner_id, state, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(runner_id) DO UPDATE SET state=excluded.state, updated_at=excluded.updated_at`,
+    ).run(runnerId, JSON.stringify({
+      deployed: state.deployed,
+      unmanaged: state.unmanaged,
+      ...(state.error === undefined ? {} : { error: state.error }),
+    }), now);
+  }
+
+  getRunnerSkillState(runnerId: string): RunnerSkillStateRecord | null {
+    const row = this.stmt("SELECT state, updated_at FROM runner_skill_state WHERE runner_id=?")
+      .get(runnerId) as { state: string; updated_at: number } | undefined;
+    if (!row) return null;
+    const parsed = parseJson<{ deployed?: DeployedSkillState[]; unmanaged?: UnmanagedSkillInfo[]; error?: string }>(row.state);
+    return {
+      runnerId,
+      deployed: parsed?.deployed ?? [],
+      unmanaged: parsed?.unmanaged ?? [],
+      ...(parsed?.error === undefined ? {} : { error: parsed.error }),
+      updatedAt: row.updated_at,
+    };
+  }
+
   /* ------------------------- Runner credentials ------------------------- */
 
   private runnerCredentialView(row: RunnerCredentialRow): RunnerCredentialView {
@@ -6931,6 +7455,8 @@ export class ControlPlaneDb {
       this.stmt("DELETE FROM workspace_ownership WHERE runner_id=?").run(runnerId);
       this.stmt("DELETE FROM runner_ownership WHERE runner_id=?").run(runnerId);
       this.stmt("DELETE FROM runner_credentials WHERE runner_id=?").run(runnerId);
+      this.stmt("DELETE FROM runner_skill_state WHERE runner_id=?").run(runnerId);
+      this.stmt("DELETE FROM skill_assignments WHERE scope_kind='runner' AND runner_id=?").run(runnerId);
       this.stmt("DELETE FROM runners WHERE runner_id=?").run(runnerId); // cascades workspaces, agents
       this.db.exec("COMMIT");
     } catch (err) {

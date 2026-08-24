@@ -106,6 +106,15 @@ export function AutomationsIcon(props: IconProps) {
   );
 }
 
+export function SkillsIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M11 3.5 12.9 9.6 19 11.5l-6.1 1.9L11 19.5l-1.9-6.1L3 11.5l6.1-1.9Z" />
+      <path d="M18.5 3.5v4M20.5 5.5h-4" />
+    </IconBase>
+  );
+}
+
 export function UsageIcon(props: IconProps) {
   return (
     <IconBase {...props}>

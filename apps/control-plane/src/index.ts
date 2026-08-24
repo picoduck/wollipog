@@ -191,6 +191,7 @@ import { buildAuthorizedSessionTranscriptExport, type TranscriptExportFormat } f
 import { principalCanReadWorkflowArtifact } from "./artifact-exports.js";
 import { registerWorkflowArtifactExportRoute } from "./artifact-export-route.js";
 import { registerRunnerCredentialRoutes } from "./runner-credential-route.js";
+import { makeSkillsSyncPusher, registerSkillRoutes } from "./skills-route.js";
 import { registerPromptImageRoutes } from "./prompt-image-route.js";
 import {
   makeManagedBoxRunnerCredentialIssuer,
@@ -531,6 +532,13 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
     routePath === "/api/push/vapid-public-key" || routePath === "/api/push/subscriptions" ||
     routePath === "/api/push/unsubscribe" ||
     routePath === "/api/artifacts/:artifactId/export" ||
+    // Skills record per-resource ownership rows, so like /api/projects they are member-scoped
+    // rather than personal-organization-global resources.
+    routePath === "/api/skills" || routePath.startsWith("/api/skills/") ||
+    routePath === "/api/skill-groups" || routePath.startsWith("/api/skill-groups/") ||
+    routePath === "/api/skill-assignments" || routePath.startsWith("/api/skill-assignments/") ||
+    routePath === "/api/runners/:id/skills" ||
+    routePath === "/api/runners/:id/skills/sync" ||
     routePath === "/api/runners/:runnerId/host-action" ||
     routePath === "/api/runners/:runnerId/workspaces/:workspaceId/rename" ||
     routePath === "/api/runners/:runnerId/workspaces/:workspaceId/access-scope";
@@ -828,6 +836,18 @@ function runnerCapabilityError(
     : runnerCapabilityRequirement(protocolVersion, capability, label);
 }
 
+// Push-on-change/push-on-registration for managed skills: fire-and-forget the authoritative
+// desired set; no-ops (with a debug log) for offline or capability-lacking runners.
+const pushSkillsSync = makeSkillsSyncPusher({
+  db,
+  hub,
+  log: {
+    debug: (message) => app.log.debug(message),
+    warn: (message) => app.log.warn(message),
+    error: (message) => app.log.error(message),
+  },
+});
+
 // Bootstraps + supervises runners on remote machines over SSH ("boxes"). The runner binary it
 // deploys is found in $WOLLIPOG_RUNNER_BIN_DIR / apps/runner/dist-bin (explicit overrides) / a
 // release-identified cache, else downloaded from this packaged control plane's exact release.
@@ -994,6 +1014,9 @@ app.register(async (instance) => {
         for (const projectId of db.projectIdsForRunner(runnerId)) hub.projectChangedById(projectId);
         // If this runner is a box's runner (connected through the SSH tunnel), flip it online.
         orchestrator.onRunnerRegistered(runnerId, credential.credentialId);
+        // Registration completes with the machine's authoritative desired skill set so a fresh
+        // (or reconnected) runner converges without waiting for the next library mutation.
+        pushSkillsSync(runnerId);
         app.log.info(
           `runner online: ${runnerId} (${msg.runner.hostname}, ${msg.runner.os}) ` +
             `agents=[${msg.runner.agents.map((a) => a.id).join(", ")}]`,
@@ -1054,6 +1077,11 @@ app.register(async (instance) => {
         if (runnerId === msg.runnerId) {
           db.updateRunnerAgents(msg.runnerId, msg.agents, Date.now(), msg.editors);
           hub.runnerChanged(msg.runnerId);
+          // A runner may register with an empty or stale agent list and only discover its
+          // harnesses afterward — the registration-time skills_sync then resolved no targets.
+          // Re-push after the new inventory persists; the runner reconciler is idempotent, so a
+          // repeated identical sync is harmless.
+          pushSkillsSync(msg.runnerId);
           app.log.info(`runner ${msg.runnerId} agents: [${msg.agents.map((a) => a.id).join(", ")}]`);
         }
         break;
@@ -1152,6 +1180,21 @@ app.register(async (instance) => {
       case "interrupt_turn_result":
         hub.resolveRunnerRequest(msg, runnerId!);
         break;
+      case "skills_state": {
+        // Authoritative full replacement for one machine — persist solicited and unsolicited
+        // reports alike, then settle any awaiting sync request via the shared correlator.
+        if (runnerId !== msg.runnerId) {
+          app.log.warn(`runner ${runnerId} sent a mismatched skills state`);
+          break;
+        }
+        if (!runnerSupportsProtocol(db.getRunner(runnerId)?.protocolVersion, "agentSkills")) {
+          app.log.warn(`runner ${runnerId} sent skills state without negotiated support`);
+          break;
+        }
+        db.setRunnerSkillState(runnerId, msg, Date.now());
+        if (msg.requestId) hub.resolveRunnerRequest({ ...msg, requestId: msg.requestId }, runnerId);
+        break;
+      }
       case "steer_session_result":
         svc.onSteerSessionResult(runnerId!, msg);
         break;
@@ -1749,6 +1792,10 @@ app.get("/api/onboarding", async (): Promise<OnboardingInfo> => {
 });
 
 registerRunnerCredentialRoutes(app, { db, hub, requestHuman });
+
+/* ------------------------------- Skills ---------------------------------- */
+
+registerSkillRoutes(app, { db, hub, requestHuman, requestPrincipal, pushSkillsSync });
 
 /* ------------------------------- Devices --------------------------------- */
 

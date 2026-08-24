@@ -512,7 +512,7 @@ test("no two destinations render the same glyph", async ({ page }) => {
 
   const icons = page.locator(".rail-destinations > .rail-item > svg, .rail-more-item > svg");
   const count = await icons.count();
-  expect(count, "every destination must carry an icon").toBe(9);
+  expect(count, "every destination must carry an icon").toBe(GLOBAL_VIEW_ITEMS.length);
   // The MASK, not the screenshot. Comparing raw captures compares the backdrop too, so nine
   // identical rectangles over nine `nth-child` background tints five levels apart differed by
   // hundreds of pixels and passed. A mask holds only the positions the glyph itself paints, which
