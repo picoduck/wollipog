@@ -119,7 +119,7 @@ import {
 import { useSessionReadingKeys, type SessionReadingKeyActions } from "../useSessionReadingKeys.js";
 import { VIRTUAL_VIEWPORT_INTENT_EVENT } from "../viewport-intent.js";
 import { matchesShortcut, shortcutDisplay, shortcutLayerActive } from "../shortcuts.js";
-import { useIsMobile } from "./useIsMobile.js";
+import { useIsMobile, useIsTouchPhone } from "./useIsMobile.js";
 import {
   usePreviewNavigationRegistration,
   type PreviewNavigationControls,
@@ -2315,6 +2315,10 @@ function SessionDetailLoaded({
     insertSlashCommand(command);
   };
 
+  // Enter only sends where a hardware keyboard is the norm; the tooltip must not advertise a
+  // shortcut the touch-phone layout no longer honours.
+  const isTouchPhone = useIsTouchPhone();
+
   const onKeyDown = (e: KeyboardEvent) => {
     composerInteractionVersionRef.current += 1;
     // While an IME owns the key sequence, the app owns nothing: not submission, shortcuts, menu
@@ -3000,7 +3004,7 @@ function SessionDetailLoaded({
                       onPointerDown={(e) => e.preventDefault()}
                       onClick={send}
                       disabled={!canSend || composerRequestBusy}
-                      title="Send (Enter)"
+                      title={isTouchPhone ? "Send" : "Send (Enter)"}
                       aria-label="Send"
                     >
                       {busy ? <Spinner /> : <ArrowUpIcon size={14} />}

@@ -1081,6 +1081,45 @@ test("Enter falls through to a newline on the touch-phone layout and still sends
   }
 });
 
+test("the send tooltip stops advertising Enter on the touch-phone layout", async () => {
+  // Stubbed BEFORE mount: the tooltip is render-time copy, not a keydown-time read.
+  const priorMatchMedia = domWindow.matchMedia;
+  domWindow.matchMedia = ((query: string) => ({
+    matches: query === TOUCH_PHONE_MEDIA,
+    media: query,
+    onchange: null,
+    addEventListener() {},
+    removeEventListener() {},
+    addListener() {},
+    removeListener() {},
+    dispatchEvent: () => false,
+  })) as never;
+  try {
+    const draft = deferred<ComposerDraft | null>();
+    const fixture = await mountFixture(draft);
+    try {
+      await resolveComposerDraft(draft, { text: "draft", images: [], updatedAt: 1 });
+      assert.equal(fixture.container.querySelector(".send-btn")?.getAttribute("title"), "Send",
+        "the tooltip must not advertise an Enter that inserts a newline here");
+    } finally {
+      await unmountFixture(fixture);
+    }
+  } finally {
+    domWindow.matchMedia = priorMatchMedia;
+  }
+
+  // And elsewhere the shortcut is real, so it stays advertised.
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await resolveComposerDraft(draft, { text: "draft", images: [], updatedAt: 1 });
+    assert.equal(fixture.container.querySelector(".send-btn")?.getAttribute("title"), "Send (Enter)",
+      "off the phone layout the Enter shortcut exists and stays advertised");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("an immediate same-session remount restores exact selection direction and textarea scroll after hydration", async () => {
   const draft = deferred<ComposerDraft | null>();
   const fixture = await mountFixture(draft);

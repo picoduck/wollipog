@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { TOUCH_PHONE_MEDIA } from "../mobile-viewport.js";
 
 /**
  * The phone-width breakpoint. One source of truth shared by the JS behavior and styles.css mobile
@@ -24,5 +25,19 @@ export function useIsMobile(): boolean {
       };
     },
     () => window.matchMedia(QUERY).matches,
+  );
+}
+
+/** Live touch-phone flag — the layout where typing means a software keyboard (TOUCH_PHONE_MEDIA).
+ * Distinct from useIsMobile: a narrow desktop window is mobile-wide but has a hardware keyboard,
+ * so copy and behavior keyed on the SOFTWARE keyboard must not follow width alone. */
+export function useIsTouchPhone(): boolean {
+  return useSyncExternalStore(
+    (onChange) => {
+      const mq = window.matchMedia(TOUCH_PHONE_MEDIA);
+      mq.addEventListener("change", onChange);
+      return () => mq.removeEventListener("change", onChange);
+    },
+    () => window.matchMedia(TOUCH_PHONE_MEDIA).matches,
   );
 }
