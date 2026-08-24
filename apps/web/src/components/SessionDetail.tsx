@@ -156,7 +156,7 @@ import {
   restoreComposerFocus,
   restoreRememberedComposerFocus,
 } from "../composer-focus.js";
-import { KEYBOARD_DISMISS_BLUR_EVENT } from "../mobile-viewport.js";
+import { KEYBOARD_DISMISS_BLUR_EVENT, TOUCH_PHONE_MEDIA } from "../mobile-viewport.js";
 import { resizeComposerToContent } from "../composer-autogrow.js";
 import { IncrementalActiveTurnProgress } from "../turn-progress.js";
 import { WorkingIndicator } from "./WorkingIndicator.js";
@@ -2381,7 +2381,12 @@ function SessionDetailLoaded({
       }
     }
     // Enter sends; Shift+Enter inserts a newline. (Ctrl/Cmd+Enter intentionally does NOT send.)
+    // Except on the touch-phone layout, where Enter falls through to the textarea's native
+    // newline: a software keyboard has no Shift, held or otherwise, mid-word — so send-on-Enter
+    // made multi-line drafts unwritable on a phone. The Send button is the send affordance there,
+    // and its press keeps the keyboard open.
     if (e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey && !composing) {
+      if (window.matchMedia(TOUCH_PHONE_MEDIA).matches) return;
       e.preventDefault();
       void send();
     }

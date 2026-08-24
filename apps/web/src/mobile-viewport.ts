@@ -65,6 +65,15 @@ const KEYBOARD_EDITABLE = "textarea:not([readonly]), [contenteditable=''], [cont
   + "[type='image'], [type='radio'], [type='range'], [type='reset'], [type='submit'])";
 
 /**
+ * The layout in which typing means a software keyboard: the phone breakpoint on a coarse pointer.
+ *
+ * One string shared by everything that changes behavior for on-screen typing — the while-typing
+ * rail hiding in styles.css restates it as a media block, the dismissal blur below is gated on
+ * it, and the composer swaps Enter from send to newline under it.
+ */
+export const TOUCH_PHONE_MEDIA = "(max-width: 760px) and (pointer: coarse)";
+
+/**
  * Dispatched on the window immediately before the dismissal blur below.
  *
  * The composer's focus-recovery machinery (SessionDetail) treats a blur with no preceding user
@@ -144,7 +153,7 @@ export function installMobileViewportFallback(win: Window = window): () => void 
       keyboardOpen = false;
       occlusionTracked = false;
       peak = Math.max(peak, height);
-      if (win.matchMedia("(max-width: 760px) and (pointer: coarse)").matches) {
+      if (win.matchMedia(TOUCH_PHONE_MEDIA).matches) {
         const active = win.document.activeElement;
         if (active instanceof HTMLElement && active.matches(KEYBOARD_EDITABLE)) {
           // Announced BEFORE the blur, synchronously: the recovery machinery reads the mark

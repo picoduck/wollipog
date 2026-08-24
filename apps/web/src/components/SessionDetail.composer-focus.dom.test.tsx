@@ -8,7 +8,7 @@ import type { ControlPlaneToUi, RunnerView, SessionEvent, SessionView, SideChatV
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { COMPOSER_FOCUS_DIAGNOSTIC_EVENT } from "../composer-focus.js";
-import { KEYBOARD_DISMISS_BLUR_EVENT } from "../mobile-viewport.js";
+import { KEYBOARD_DISMISS_BLUR_EVENT, TOUCH_PHONE_MEDIA } from "../mobile-viewport.js";
 import {
   deleteComposerDraftIfMatches,
   loadComposerDraft,
@@ -1014,6 +1014,68 @@ test("the stop-turn button's press keeps focus in the composer", async () => {
     assert.equal(uncanceled, false, "the stop-turn press must cancel the focus-stealing default");
     assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer,
       "the composer keeps focus through the press");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("Enter falls through to a newline on the touch-phone layout and still sends elsewhere", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const calls: string[] = [];
+  const fixture = await mountFixture(draft, {
+    client: {
+      prompt: async (_sessionId, text) => {
+        calls.push(text);
+        return undefined as never;
+      },
+    },
+  });
+  try {
+    await resolveComposerDraft(draft, { text: "line one", images: [], updatedAt: 1 });
+    await focusRequestedComposer(fixture);
+
+    // The touch-phone layout, by the same shared media string the rail hiding and the dismissal
+    // blur are gated on. A software keyboard offers no held Shift, so send-on-Enter made a
+    // multi-line draft unwritable on a phone; Enter must reach the textarea's native newline.
+    const priorMatchMedia = domWindow.matchMedia;
+    domWindow.matchMedia = ((query: string) => ({
+      matches: query === TOUCH_PHONE_MEDIA,
+      media: query,
+      onchange: null,
+      addEventListener() {},
+      removeEventListener() {},
+      addListener() {},
+      removeListener() {},
+      dispatchEvent: () => false,
+    })) as never;
+    let uncanceled = false;
+    try {
+      await act(async () => {
+        uncanceled = fixture.composer.dispatchEvent(new domWindow.KeyboardEvent("keydown", {
+          key: "Enter",
+          bubbles: true,
+          cancelable: true,
+        }) as never);
+      });
+    } finally {
+      domWindow.matchMedia = priorMatchMedia;
+    }
+    await flushAsyncWork();
+    assert.equal(uncanceled, true, "Enter must fall through to the textarea's native newline");
+    assert.deepEqual(calls, [], "Enter must not send on the touch-phone layout");
+
+    // Elsewhere the contract is unchanged: plain Enter is claimed and sends.
+    let canceled = false;
+    await act(async () => {
+      canceled = !fixture.composer.dispatchEvent(new domWindow.KeyboardEvent("keydown", {
+        key: "Enter",
+        bubbles: true,
+        cancelable: true,
+      }) as never);
+    });
+    await flushAsyncWork();
+    assert.equal(canceled, true, "Enter must still be claimed for send off the phone layout");
+    assert.deepEqual(calls, ["line one"], "Enter must still send off the phone layout");
   } finally {
     await unmountFixture(fixture);
   }
