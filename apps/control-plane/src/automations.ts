@@ -364,7 +364,8 @@ export class AutomationsService {
     const parsed = validateAutomationSpec(input);
     if (!parsed.ok) return fail(parsed.error ?? "automation request is malformed", parsed.status);
     const spec = parsed.data!;
-    const capabilityError = automationCapabilityError(this.db, spec);
+    // Always allow disabling so capability drift cannot trap a failing automation in the enabled state.
+    const capabilityError = spec.enabled ? automationCapabilityError(this.db, spec) : null;
     if (capabilityError) return fail(capabilityError, 409);
     let nextFireAt: number | null = null;
     try {

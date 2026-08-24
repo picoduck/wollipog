@@ -532,6 +532,41 @@ test("create and update reject config unsupported by the primary or any alternat
   assert.equal(db.getAutomation(existing.automationId)?.runnerPolicy.kind, "wait");
 });
 
+test("legacy capabilities stay permissive and capability drift cannot prevent pausing", () => {
+  const actor = { kind: "human" as const, id: "device" };
+  const explicitConfig = baseSpec({
+    action: { kind: "create_session", request: {
+      runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1", prompt: "Build",
+      config: { model: "legacy-model", effort: "max" },
+    } },
+  });
+  const legacy = harness();
+  assert.equal(legacy.service.create(explicitConfig, actor, 0).status, 201);
+
+  const supportedCapabilities: AgentCapabilities = {
+    models: [{ id: "claude-opus-4-1", efforts: ["high"] }],
+    effortLevels: ["high"], permissionModes: ["default"], slashCommands: [],
+    supportsImages: true, supportsApprovals: true,
+  };
+  const narrowedCapabilities: AgentCapabilities = {
+    ...supportedCapabilities,
+    models: [{ id: "claude-sonnet-4", efforts: ["high"] }],
+  };
+  const drift = harness(53, [runner("runner-1", supportedCapabilities, "claude-code")]);
+  const supportedSpec = baseSpec({
+    action: { kind: "create_session", request: {
+      runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1", prompt: "Build",
+      config: { model: "claude-opus-4-1", effort: "high" },
+    } },
+  });
+  const created = drift.service.create(supportedSpec, actor, 0).data!;
+  drift.db.registerRunner(runner("runner-1", narrowedCapabilities, "claude-code"), 1, 53);
+
+  const paused = drift.service.update(created.automationId, { ...supportedSpec, enabled: false }, actor, 2);
+  assert.equal(paused.status, 200);
+  assert.equal(drift.db.getAutomation(created.automationId)?.enabled, false);
+});
+
 test("a due create-session occurrence claims once, applies ceilings, and reconciles to success", () => {
   const { db, service, created, notifications } = harness();
   const automation = service.create(baseSpec(), { kind: "human", id: "device-1" }, 0).data!;
