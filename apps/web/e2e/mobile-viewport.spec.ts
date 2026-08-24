@@ -1014,6 +1014,29 @@ test.describe("while a text field is focused", () => {
     await expectRailAt(page, 0);
   });
 
+  test("a toolbar collapse against a small keyboard is not a dismissal", async ({ page }) => {
+    await useHarness(page);
+    await page.locator(".main-body textarea").focus();
+    // The smallest keyboard the detector recognises — a landscape phone's — with a URL-bar
+    // collapse on top: 120 down, then 56 of the SAME-WIDTH growth a collapsing toolbar produces.
+    // That lands within KEYBOARD_CLOSE_PX of the peak while the keyboard is still open, so a
+    // release keyed on the peak alone blurred the field mid-word. The growth measured from the
+    // lowest armed height is 56 — a toolbar's worth, not a keyboard's — and must not release.
+    await openKeyboard(page, 120);
+    await expect(page.locator(".app-rail")).toBeHidden();
+    await applyViewport(page, () => page.evaluate(() => window.setKeyboard(64)));
+    expect(await page.evaluate(() => document.activeElement?.tagName),
+      "a toolbar collapse must not steal focus from the field").toBe("TEXTAREA");
+    await expect(page.locator(".app-rail")).toBeHidden();
+
+    // The real dismissal afterwards still lands: from the lowest point the viewport has now grown
+    // by the whole keyboard.
+    await applyViewport(page, () => page.evaluate(() => window.setKeyboard(0)));
+    await expect.poll(() => page.evaluate(() => document.activeElement === document.body),
+      { message: "the genuine dismissal after the toolbar collapse must still blur" }).toBe(true);
+    await expectRailAt(page, 0);
+  });
+
   test("growth with no keyboard behind it is not a dismissal", async ({ page }) => {
     await useHarness(page);
     await page.locator(".main-body textarea").focus();

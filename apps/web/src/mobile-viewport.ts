@@ -34,7 +34,9 @@ const NOISE_FLOOR_PX = 8;
  * the smallest software keyboard — a small phone in landscape — occupies ~120, which is also the
  * landscape keyboard the e2e suite drives, so this cannot rise past it. The close side reuses the
  * same number so a keyboard that closes while the browser toolbar returns — leaving the height up
- * to ~100px short of where it started — still reads as closed.
+ * to ~100px short of where it started — still reads as closed. Closing additionally requires the
+ * same growth measured from the LOWEST armed height (see `trough` below), or a toolbar collapse
+ * against a small landscape keyboard would read as the keyboard closing.
  */
 const KEYBOARD_CLOSE_PX = 100;
 
@@ -66,6 +68,12 @@ export function installMobileViewportFallback(win: Window = window): () => void 
   let peak = viewport.height;
   let lastWidth = viewport.width;
   let keyboardOpen = false;
+  // The lowest height seen while armed. Release needs growth of a keyboard's worth from HERE as
+  // well as near-restoration to the peak: against a 120px landscape keyboard, a 56px URL-bar
+  // collapse lands within KEYBOARD_CLOSE_PX of the peak while the keyboard is still open, and
+  // releasing on that blurred the field mid-word. The toolbar can only ever grow the height by
+  // its own ~56px; a dismissal always grows it by the whole keyboard.
+  let trough = viewport.height;
 
   const apply = () => {
     frame = 0;
@@ -88,8 +96,10 @@ export function installMobileViewportFallback(win: Window = window): () => void 
     if (viewport.width !== lastWidth) {
       lastWidth = viewport.width;
       peak = height;
+      trough = height;
       keyboardOpen = false;
-    } else if (keyboardOpen && height >= peak - KEYBOARD_CLOSE_PX) {
+    } else if (keyboardOpen && height >= peak - KEYBOARD_CLOSE_PX
+      && height - trough >= KEYBOARD_CLOSE_PX) {
       keyboardOpen = false;
       peak = Math.max(peak, height);
       if (win.matchMedia("(max-width: 760px) and (pointer: coarse)").matches) {
@@ -98,7 +108,8 @@ export function installMobileViewportFallback(win: Window = window): () => void 
       }
     } else {
       if (!keyboardOpen && height > peak) peak = height;
-      if (peak - height >= KEYBOARD_CLOSE_PX) keyboardOpen = true;
+      if (keyboardOpen) trough = Math.min(trough, height);
+      else if (peak - height >= KEYBOARD_CLOSE_PX) { keyboardOpen = true; trough = height; }
     }
   };
 
