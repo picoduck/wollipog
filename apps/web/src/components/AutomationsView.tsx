@@ -348,7 +348,10 @@ export function AutomationsView() {
                   const runner = runners.get(event.target.value);
                   setForm((current) => ({ ...withAgent(current, defaultAgentId(runner?.agents)),
                     runnerId: event.target.value, workspaceId: runner?.workspaces[0]?.id ?? "" }));
-                }}>{[...runners.values()].map((runner) => <option key={runner.runnerId} value={runner.runnerId}>{machineLabels.get(runner.runnerId)}</option>)}</select></label>
+                }}>{[...runners.values()].map((runner) => <option
+                  key={runner.runnerId} value={runner.runnerId}
+                  disabled={runner.runnerId !== form.runnerId && carriedAlternateRunnerIds.has(runner.runnerId)}
+                >{machineLabels.get(runner.runnerId)}</option>)}</select></label>
                 <label>Workspace<select value={form.workspaceId} onChange={(event) => patch("workspaceId", event.target.value)}>
                   {(selectedRunner?.workspaces ?? []).map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}
                 </select></label>

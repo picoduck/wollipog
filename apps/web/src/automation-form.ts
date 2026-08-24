@@ -301,16 +301,21 @@ export function buildSpec(form: FormState, context: BuildSpecContext): Automatio
   // graph. The first workflow target follows the same rule below for its unrendered fields.
   const carriedAlternateTargets = form.runnerPolicy === "alternate"
     ? baseAlternateTargets.slice(1).map((target) => {
+        const { projectId: _projectId, projectLocationId: _projectLocationId, ...targetWithoutPlacement } = target;
         const currentPlacement = automationProjectPlacement(context.projectsSupported, projectList, target);
         validateAutomationAlternatePlacement(context.projectsSupported, primaryPlacement, currentPlacement);
         if (context.projectsSupported &&
             ((target.projectId ?? null) !== (currentPlacement.projectId ?? null) ||
               (target.projectLocationId ?? null) !== (currentPlacement.projectLocationId ?? null))) {
-          throw new Error("A carried alternate target no longer matches its exact Project Location.");
+          throw new Error(
+            `Carried alternate target ${target.runnerId} no longer matches its exact Project Location.`,
+          );
         }
         return form.actionKind === "workflow_run" && !sameWorkflow
           ? { runnerId: target.runnerId, workspaceId: target.workspaceId, ...currentPlacement }
-          : { ...target, ...currentPlacement };
+          : context.projectsSupported
+            ? { ...target, ...currentPlacement }
+            : targetWithoutPlacement;
       })
     : [];
   if (form.runnerPolicy === "alternate") {

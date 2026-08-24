@@ -411,6 +411,42 @@ test("Project-less carried alternates normalize omitted placement for a Project-
   ]);
 });
 
+test("carried alternates drop Project placement when the server does not support Projects", () => {
+  const spec: AutomationSpec = {
+    ...baseSpec({
+      kind: "create_session",
+      request: {
+        runnerId: "primary", workspaceId: "primary-ws", agentId: "claude",
+        projectId: "project-a", projectLocationId: "primary-location", prompt: "Sweep.",
+      },
+    }),
+    runnerPolicy: {
+      kind: "alternate",
+      targets: [
+        {
+          runnerId: "alternate-a", workspaceId: "a-ws", agentId: "claude-a",
+          projectId: "project-a", projectLocationId: "alternate-a-location",
+        },
+        {
+          runnerId: "alternate-b", workspaceId: "b-ws", agentId: "claude-b",
+          projectId: "project-a", projectLocationId: "alternate-b-location",
+        },
+      ],
+      expireAfterMinutes: 60,
+    },
+  };
+
+  const saved = buildSpec(formFrom(spec), { ...CONTEXT, base: spec });
+  assert.equal(saved.action.kind, "create_session");
+  assert.equal(saved.action.request.projectId, undefined);
+  assert.equal(saved.action.request.projectLocationId, undefined);
+  assert.equal(saved.runnerPolicy.kind, "alternate");
+  assert.deepEqual(saved.runnerPolicy.targets, [
+    { runnerId: "alternate-a", workspaceId: "a-ws", agentId: "claude-a" },
+    { runnerId: "alternate-b", workspaceId: "b-ws", agentId: "claude-b" },
+  ]);
+});
+
 test("a carried alternate whose Project Location is stale blocks the save", () => {
   const project = (id: string, runnerId: string, workspaceId: string, locationId: string) => ({
     id,
@@ -455,6 +491,6 @@ test("a carried alternate whose Project Location is stale blocks the save", () =
 
   assert.throws(
     () => buildSpec(formFrom(spec), { projectsSupported: true, projects, base: spec }),
-    /A carried alternate target no longer matches its exact Project Location\./,
+    /Carried alternate target alternate-b no longer matches its exact Project Location\./,
   );
 });
