@@ -364,6 +364,12 @@ export async function captureWorktreeTree(cwd: string): Promise<string> {
     // a transiently unreadable file, retain the complete add -A snapshot instead of losing it.
     await git(cwd, ["add", "-A"], opts); // stages into the TEMP index only; .gitignore respected
     await gitSoft(cwd, ["add", "--renormalize", "-u"], opts);
+    if (context.kind === "wsl") {
+      await runContextCommand(context, "rm", ["-f", "--", `${indexFile}.lock`], { cwd, timeoutMs: SNAPSHOT_TIMEOUT_MS })
+        .catch(() => {});
+    } else {
+      rmSync(`${indexFile}.lock`, { force: true });
+    }
     return (await git(cwd, ["write-tree"], opts)).trim();
   } finally {
     if (context.kind === "wsl") {
