@@ -980,6 +980,38 @@ test.describe("while a text field is focused", () => {
     await expectRailAt(page, KEYBOARD);
   });
 
+  test("a keyboard dismissed without blur gives the rail back", async ({ page }) => {
+    await useHarness(page);
+    await page.locator(".main-body textarea").focus();
+    await openKeyboard(page);
+    await expect(page.locator(".app-rail")).toBeHidden();
+
+    // Android Back closes the keyboard and leaves the field focused — no blur event ever fires,
+    // so the focus-keyed rule alone would hold the navigation hidden over an empty band. The
+    // viewport growing back by a keyboard's height while a text field holds focus IS that
+    // dismissal, and the fallback answers it by blurring the field.
+    await applyViewport(page, () => page.evaluate(() => window.setKeyboard(0)));
+    await expect.poll(() => page.evaluate(() => document.activeElement === document.body),
+      { message: "the fallback must blur the field the dismissed keyboard belonged to" }).toBe(true);
+    await expectRailAt(page, 0);
+    await expectEveryPrimaryDestinationUsable(page);
+  });
+
+  test("a rotation is not read as a keyboard dismissal", async ({ page }) => {
+    await useHarness(page);
+    await page.locator(".main-body textarea").focus();
+    await openKeyboard(page);
+
+    // Rotating with the keyboard up also grows the height past the close threshold — landscape
+    // to portrait is hundreds of pixels — but it moves the WIDTH too, which a keyboard cannot.
+    // Blurring here would dismiss the keyboard mid-word; the field must keep focus and the rail
+    // must stay yielded.
+    await applyViewport(page, () => page.evaluate(() => window.resizeViewport(915, 892)));
+    expect(await page.evaluate(() => document.activeElement?.tagName),
+      "a rotation must not steal focus from the field").toBe("TEXTAREA");
+    await expect(page.locator(".app-rail")).toBeHidden();
+  });
+
   test("focus that summons no keyboard leaves the rail in place", async ({ page }) => {
     await useHarness(page);
     // A checkbox holds focus after a tap and opens nothing; hiding on it strands the navigation

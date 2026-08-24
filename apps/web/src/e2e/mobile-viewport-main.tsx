@@ -26,6 +26,9 @@ import "../styles.css";
 
 class FakeVisualViewport extends EventTarget {
   height: number;
+  // The real property, because the fallback reads it: a keyboard only ever moves the height, and
+  // the width moving too is how it tells a rotation or a pinch-zoom from a keyboard closing.
+  width = window.innerWidth;
   offsetTop = 0;
   constructor(height: number) {
     super();
@@ -45,6 +48,13 @@ declare global {
     setKeyboard(pixels: number, panned?: number): void;
     /** Pan an already-shrunk viewport, changing only `offsetTop` and firing only `scroll`. */
     panKeyboard(offset: number): void;
+    /**
+     * Move BOTH axes in one resize, as a rotation or a pinch-zoom does. `setKeyboard` never
+     * touches the width — which is faithful, a keyboard cannot — so without this entry point the
+     * width guard on the blur-on-close path could be deleted with every test green, and a
+     * rotation would blur the field the user was typing into.
+     */
+    resizeViewport(width: number, height: number): void;
     /**
      * How many times the fallback's coalesced frame has RUN.
      *
@@ -168,6 +178,11 @@ function Harness() {
     window.panKeyboard = (offset: number) => {
       viewport.offsetTop = offset;
       viewport.dispatchEvent(new Event("scroll"));
+    };
+    window.resizeViewport = (width: number, height: number) => {
+      viewport.width = width;
+      viewport.height = height;
+      viewport.dispatchEvent(new Event("resize"));
     };
     window.burstKeyboard = (pixels: number, count: number) => {
       for (let step = 1; step <= count; step += 1) {
