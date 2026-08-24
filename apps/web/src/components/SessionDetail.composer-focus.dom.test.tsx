@@ -8,6 +8,7 @@ import type { ControlPlaneToUi, RunnerView, SessionEvent, SessionView, SideChatV
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { COMPOSER_FOCUS_DIAGNOSTIC_EVENT } from "../composer-focus.js";
+import { ENTER_KEY_STORAGE_KEY } from "../enter-key.js";
 import { KEYBOARD_DISMISS_BLUR_EVENT, TOUCH_PHONE_MEDIA } from "../mobile-viewport.js";
 import {
   deleteComposerDraftIfMatches,
@@ -1081,6 +1082,79 @@ test("Enter falls through to a newline on the touch-phone layout and still sends
   }
 });
 
+test("the Enter pair swaps as a unit and a stored choice beats the device class", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const calls: string[] = [];
+  const fixture = await mountFixture(draft, {
+    client: {
+      prompt: async (_sessionId, text) => {
+        calls.push(text);
+        return undefined as never;
+      },
+    },
+  });
+  const phoneMatchMedia = ((query: string) => ({
+    matches: query === TOUCH_PHONE_MEDIA,
+    media: query,
+    onchange: null,
+    addEventListener() {},
+    removeEventListener() {},
+    addListener() {},
+    removeListener() {},
+    dispatchEvent: () => false,
+  })) as never;
+  const pressEnter = async (shiftKey: boolean) => {
+    let uncanceled = true;
+    await act(async () => {
+      uncanceled = fixture.composer.dispatchEvent(new domWindow.KeyboardEvent("keydown", {
+        key: "Enter",
+        shiftKey,
+        bubbles: true,
+        cancelable: true,
+      }) as never);
+    });
+    await flushAsyncWork();
+    return !uncanceled;
+  };
+  const seed = async (text: string) => {
+    await act(async () => {
+      fixture.composer.value = text;
+      Simulate.change(fixture.composer);
+    });
+  };
+  const priorMatchMedia = domWindow.matchMedia;
+  try {
+    await resolveComposerDraft(draft, { text: "swap draft", images: [], updatedAt: 1 });
+    await focusRequestedComposer(fixture);
+    domWindow.matchMedia = phoneMatchMedia;
+
+    // Newline mode (the phone default): Shift+Enter is the SEND half of the swapped pair. This is
+    // also what a hardware keyboard on a phone uses, which no detection could rescue.
+    assert.equal(await pressEnter(true), true, "newline mode: Shift+Enter must be claimed for send");
+    assert.deepEqual(calls, ["swap draft"], "newline mode: Shift+Enter must send");
+
+    // A stored "send" beats the phone's derived default — the setting is the escape hatch.
+    domWindow.localStorage.setItem(ENTER_KEY_STORAGE_KEY, "send");
+    await seed("stored send on a phone");
+    assert.equal(await pressEnter(false), true, "a stored send must reclaim plain Enter on a phone");
+    assert.deepEqual(calls.at(-1), "stored send on a phone");
+    assert.equal(await pressEnter(true), false, "and Shift+Enter goes back to being the newline");
+
+    // A stored "newline" beats the desktop's derived default, and the swap holds there too.
+    domWindow.matchMedia = priorMatchMedia;
+    domWindow.localStorage.setItem(ENTER_KEY_STORAGE_KEY, "newline");
+    await seed("stored newline on a desktop");
+    assert.equal(await pressEnter(false), false, "a stored newline must release plain Enter off the phone");
+    assert.equal(calls.length, 2, "plain Enter must not send in stored newline mode");
+    assert.equal(await pressEnter(true), true, "Shift+Enter must send in stored newline mode");
+    assert.deepEqual(calls.at(-1), "stored newline on a desktop");
+  } finally {
+    domWindow.matchMedia = priorMatchMedia;
+    domWindow.localStorage.removeItem(ENTER_KEY_STORAGE_KEY);
+    await unmountFixture(fixture);
+  }
+});
+
 test("the send tooltip stops advertising Enter on the touch-phone layout", async () => {
   // Stubbed BEFORE mount: the tooltip is render-time copy, not a keydown-time read.
   const priorMatchMedia = domWindow.matchMedia;
@@ -1117,6 +1191,23 @@ test("the send tooltip stops advertising Enter on the touch-phone layout", async
       "off the phone layout the Enter shortcut exists and stays advertised");
   } finally {
     await unmountFixture(fixture);
+  }
+
+  // Stored newline off the phone: Shift+Enter is the live send binding, and a hover surface
+  // exists there, so it is advertised rather than suppressed.
+  domWindow.localStorage.setItem(ENTER_KEY_STORAGE_KEY, "newline");
+  try {
+    const storedDraft = deferred<ComposerDraft | null>();
+    const storedFixture = await mountFixture(storedDraft);
+    try {
+      await resolveComposerDraft(storedDraft, { text: "draft", images: [], updatedAt: 1 });
+      assert.equal(storedFixture.container.querySelector(".send-btn")?.getAttribute("title"), "Send (Shift+Enter)",
+        "the tooltip must advertise the binding that actually sends");
+    } finally {
+      await unmountFixture(storedFixture);
+    }
+  } finally {
+    domWindow.localStorage.removeItem(ENTER_KEY_STORAGE_KEY);
   }
 });
 

@@ -6,6 +6,7 @@ import { type PushSetting } from "../push.js";
 import { KeyboardIcon } from "./Icons.js";
 import { NavRow, SegmentedRow, SelectRow, StaticRow, SwitchRow } from "./ui/SettingsRows.js";
 import { SCHEME_SWATCHES, type ColorScheme, type ResolvedTheme } from "../theme.js";
+import { setEnterKeyBehavior, useEnterKeyBehavior, type EnterKeyBehavior } from "../enter-key.js";
 import { SETTINGS_SECTIONS, type SettingsSection, type View } from "../navigation.js";
 import type { ExperimentFlags, ExperimentId } from "../experiments.js";
 
@@ -235,8 +236,29 @@ export function PendingSetting({ title, description, reason }: { title: string; 
 }
 
 export function BehaviorPanel() {
+  const enterKey = useEnterKeyBehavior();
   return (
     <SettingsGroup title="Defaults">
+      {/* Stored per device and only on an explicit choice; the unstored default derives from the
+          device class (touch phones get newline, everything else send), so this row shows each
+          device's own effective behavior. The pair swaps as a unit — see enter-key.ts. */}
+      <SegmentedRow
+        title="Enter Key"
+        options={[
+          {
+            value: "send",
+            label: "Send Message",
+            description: "Enter sends; Shift+Enter inserts a new line. Stored on this device.",
+          },
+          {
+            value: "newline",
+            label: "Insert New Line",
+            description: "Enter inserts a new line; Shift+Enter sends. Stored on this device.",
+          },
+        ]}
+        value={enterKey}
+        onChange={(value) => setEnterKeyBehavior(value as EnterKeyBehavior)}
+      />
       <PendingSetting
         title="Reduce Motion"
         description="Follows your system setting."
