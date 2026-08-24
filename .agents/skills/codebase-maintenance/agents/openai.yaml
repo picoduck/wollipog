@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codebase Maintenance"
+  short_description: "Run a scheduled read-only maintenance sweep"
+  default_prompt: "Use $codebase-maintenance to run the named maintenance job and draft its findings."
