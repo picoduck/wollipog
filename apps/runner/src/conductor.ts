@@ -310,23 +310,31 @@ export function provisionConductor(
  * native claude-code agent exists to donate the launch command.
  */
 /**
- * Synthesis fenced on the control plane's protocol version (v91+).
+ * Advertisement fenced on the control plane's protocol version (v91+), at SEND time.
  *
  * With the runner env gate removed, the device-local experiment toggle is the feature's only
  * gate — and only a v91+ control plane serves web bundles that default that toggle off and
  * read the versioned client storage. An older control plane's bundles default it ON and would
  * treat a legacy stored value as an opt-in, so advertising to them would surface the conductor
- * to users who never chose it. An unknown version (pre-registration) fails closed; the next
- * discovery merge after registration re-publishes with the version known. A config-DEFINED
- * conductor is explicit operator opt-in and is advertised regardless.
+ * to users who never chose it.
+ *
+ * This filters rather than gating synthesis: the conductor stays in the runner's own agent list
+ * unconditionally so launches and retained-session resumes always resolve (capability on,
+ * exposure gated), and every agents_updated applies this with the version negotiated on the
+ * CURRENT socket. Fencing synthesis instead was tried and reviewed away: the merged list is
+ * cached and re-published on reconnect, so a list synthesized under v91 would reach a v90
+ * control plane verbatim, and a list merged before registration would omit the conductor from a
+ * v91 control plane until the next discovery pass. An unknown version (pre-registration) fails
+ * closed. A config-DEFINED conductor is explicit operator opt-in and always passes.
  */
-export function applyConductorAdvertisementFence(
+export function fenceConductorAdvertisement(
   agents: AgentDefinition[],
   controlPlaneProtocolVersion: number | null,
 ): AgentDefinition[] {
-  return runnerSupportsProtocol(controlPlaneProtocolVersion ?? undefined, "ungatedConductorAdvertisement")
-    ? withConductorAgent(agents)
-    : agents;
+  if (runnerSupportsProtocol(controlPlaneProtocolVersion ?? undefined, "ungatedConductorAdvertisement")) {
+    return agents;
+  }
+  return agents.filter((agent) => agent.id !== CONDUCTOR_AGENT_ID || agent.source === "config");
 }
 
 export function withConductorAgent(agents: AgentDefinition[]): AgentDefinition[] {

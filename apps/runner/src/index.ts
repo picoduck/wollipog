@@ -51,7 +51,8 @@ import {
   type RunnerConfig,
 } from "./config.js";
 import {
-  applyConductorAdvertisementFence,
+  fenceConductorAdvertisement,
+  withConductorAgent,
   defaultConductorHost,
   provisionConductor,
   removeConductorMcpConfig,
@@ -335,9 +336,13 @@ const metadata: RunnerMetadata = {
 const configAgents = metadata.agents;
 const acpAuthStatus = new Map<string, AcpAuthRuntime>();
 
-/** The control plane receives neither values nor fromEnv reference names. */
+/** The control plane receives neither values nor fromEnv reference names. The synthesized
+ * conductor is fenced here — at send time, with the CURRENT socket's negotiated version — so a
+ * cached list can never carry it to a pre-v91 control plane, and a list merged before
+ * registration still advertises it to a v91+ control plane on the post-register re-push. */
 function agentsForControlPlane() {
-  return metadata.agents.map((agent) => ({ ...agent, env: {} }));
+  return fenceConductorAdvertisement(metadata.agents, controlPlaneProtocolVersion)
+    .map((agent) => ({ ...agent, env: {} }));
 }
 
 /** Resolve exact configured/discovered agent env at the last responsible moment. */
@@ -763,9 +768,8 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
     // The conductor is synthesized AFTER the merge — inside discovery, a configured claude entry
     // sharing the launch key would silently suppress it via the merge's usedKeys check.
     metadata.agents = applyClaudeHookCapability(
-      await enrichAgentModels(applyConductorAdvertisementFence(
+      await enrichAgentModels(withConductorAgent(
         mergeAgents(configAgents, discovered),
-        controlPlaneProtocolVersion,
       ), {
         refresh: refreshModels,
       }),

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentDefinition, SessionLaunchSpec } from "@wollipog/protocol";
 import {
-  applyConductorAdvertisementFence,
+  fenceConductorAdvertisement,
   CONDUCTOR_DISALLOWED_TOOLS,
   CONDUCTOR_READ_TOOLS,
   buildConductorArgs,
@@ -530,17 +530,21 @@ test("post-merge synthesis: a configured claude entry sharing the launch key doe
   assert.equal(conductor!.command, "/usr/local/bin/claude", "donated by the merged (config) entry");
 });
 
-test("conductor advertisement is fenced on a v91+ control plane", () => {
-  const donor = claudeAgent();
-  // Unknown (pre-registration) and pre-v91 control planes serve web bundles that default the
-  // experiment on and cannot distinguish a legacy stored opt-in — synthesis must fail closed.
-  assert.equal(applyConductorAdvertisementFence([donor], null).some((a) => a.id === "conductor"), false);
-  assert.equal(applyConductorAdvertisementFence([donor], 90).some((a) => a.id === "conductor"), false);
-  assert.equal(applyConductorAdvertisementFence([donor], 91).some((a) => a.id === "conductor"), true);
+test("conductor advertisement is fenced at send time on a v91+ control plane", () => {
+  // The list is CACHED between reconnects, so the fence must hold for an already-synthesized
+  // list: a v91-merged catalog republished to a v90 control plane must lose the conductor, and
+  // an unknown (pre-registration) version must fail closed.
+  const synthesized = withConductorAgent([claudeAgent()]);
+  assert.equal(synthesized.some((a) => a.id === "conductor"), true, "fixture synthesizes");
+  assert.equal(fenceConductorAdvertisement(synthesized, null).some((a) => a.id === "conductor"), false);
+  assert.equal(fenceConductorAdvertisement(synthesized, 90).some((a) => a.id === "conductor"), false);
+  assert.equal(fenceConductorAdvertisement(synthesized, 91).some((a) => a.id === "conductor"), true);
+  // Non-conductor rows pass untouched in both directions.
+  assert.equal(fenceConductorAdvertisement(synthesized, 90).some((a) => a.id === "claude-code"), true);
 });
 
 test("a config-defined conductor passes the fence untouched: it is explicit operator opt-in", () => {
   const configured = claudeAgent({ id: "conductor", name: "Configured Conductor", source: "config" });
-  const fenced = applyConductorAdvertisementFence([configured], 90);
+  const fenced = fenceConductorAdvertisement([configured], 90);
   assert.equal(fenced.some((a) => a.id === "conductor"), true);
 });
