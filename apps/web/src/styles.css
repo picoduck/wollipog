@@ -1705,6 +1705,13 @@ textarea {
   white-space: nowrap;
 }
 .session-detail > .detail-head .status-badge { flex: none; }
+.session-header-statuses {
+  display: flex;
+  align-items: center;
+  flex: none;
+  min-width: 0;
+  gap: 5px;
+}
 /* Compact background-work presence dot; its full label lives in the tooltip, accessible name,
    and the pinned summary's Session section. */
 .bgwork-indicator {
@@ -9957,20 +9964,36 @@ body.shell-dock-dragging * {
   .review-signals { flex-direction: column; }
   .review-exact-input summary { min-height: 44px; display: flex; align-items: center; }
 
-  /* Session detail: header rows wrap; the transcript gets the full width. */
+  /* Session detail: identity and actions own the first row; statuses get a compact second row. */
   .detail-head {
     flex-wrap: wrap;
   }
+  .session-detail > .detail-head {
+    display: grid;
+    grid-template-columns: 44px minmax(0, 1fr) 44px;
+    grid-template-rows: minmax(44px, auto) auto;
+    column-gap: 10px;
+    row-gap: 4px;
+  }
   .session-detail > .detail-head > .back {
+    grid-column: 1;
+    grid-row: 1;
     width: 44px;
     min-width: 44px;
     height: 44px;
     min-height: 44px;
   }
-  /* The compact bar keeps one row on the phone too: the Project crumb yields first, the title
-     truncates, and every remaining target meets the 44px touch contract. */
+  .session-detail > .detail-head > .detail-crumbs {
+    grid-column: 2;
+    grid-row: 1;
+  }
   .session-detail > .detail-head .detail-crumbs .cctx-item {
     max-width: 96px;
+  }
+  .session-detail > .detail-head > .session-header-statuses {
+    grid-column: 2 / -1;
+    grid-row: 2;
+    flex-wrap: wrap;
   }
   .session-more-actions { width: 44px; height: 44px; }
   .detail-actions {
@@ -9978,6 +10001,8 @@ body.shell-dock-dragging * {
     row-gap: 6px;
   }
   .session-detail > .detail-head > .detail-actions {
+    grid-column: 3;
+    grid-row: 1;
     min-width: 0;
   }
   .session-detail > .detail-head > .detail-actions .menu-item {

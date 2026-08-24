@@ -201,27 +201,29 @@ export function SessionHeader({
           {session.title}
         </h1>
       </div>
-      <SessionStatusIndicators session={session} disconnected={!runnerOnline} />
-      <ChangeStatusBadge change={changeStatus ?? null} />
-      {session.backgroundWorkState && (
-        <span
-          className={session.backgroundWorkState === "orphaned"
-            ? "bgwork-indicator bgwork-orphaned"
-            : session.backgroundWorkState === "resumed"
-              ? "bgwork-indicator bgwork-resumed"
-              : "bgwork-indicator bgwork-running"}
-          role="img"
-          title={BACKGROUND_WORK_DOT_LABELS[session.backgroundWorkState]}
-          aria-label={BACKGROUND_WORK_DOT_LABELS[session.backgroundWorkState]}
-        />
-      )}
-      {!session.backgroundWorkState && session.backgroundWorkTracking === "untracked" && (
-        <span
-          className="bgwork-indicator bgwork-untracked"
-          title="Detached Work: Untracked"
-          aria-label="Detached Work: Untracked"
-        />
-      )}
+      <div className="session-header-statuses">
+        <SessionStatusIndicators session={session} disconnected={!runnerOnline} />
+        <ChangeStatusBadge change={changeStatus ?? null} />
+        {session.backgroundWorkState && (
+          <span
+            className={session.backgroundWorkState === "orphaned"
+              ? "bgwork-indicator bgwork-orphaned"
+              : session.backgroundWorkState === "resumed"
+                ? "bgwork-indicator bgwork-resumed"
+                : "bgwork-indicator bgwork-running"}
+            role="img"
+            title={BACKGROUND_WORK_DOT_LABELS[session.backgroundWorkState]}
+            aria-label={BACKGROUND_WORK_DOT_LABELS[session.backgroundWorkState]}
+          />
+        )}
+        {!session.backgroundWorkState && session.backgroundWorkTracking === "untracked" && (
+          <span
+            className="bgwork-indicator bgwork-untracked"
+            title="Detached Work: Untracked"
+            aria-label="Detached Work: Untracked"
+          />
+        )}
+      </div>
       <div className="detail-actions">
         {note && <span className="detail-note" role="status" aria-live="polite">{note}</span>}
         <div className="overflow-menu">
