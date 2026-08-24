@@ -100,9 +100,9 @@ test("the compact mobile presentation stays on one line and inside the viewport"
   await page.goto("/open-destination-e2e.html?mobile=1&fail=1");
   await page.getByRole("button", { name: "Open in VS Code" }).click();
   const failureNote = page.getByRole("status");
-  await expect(failureNote).toHaveCSS("pointer-events", "none");
   const failureBox = await failureNote.boundingBox();
   expect(failureBox).not.toBeNull();
+  await expect(failureNote).toHaveCSS("pointer-events", "none");
   expect(failureBox!.x).toBeGreaterThanOrEqual(8);
   expect(failureBox!.x + failureBox!.width).toBeLessThanOrEqual(312);
 });
