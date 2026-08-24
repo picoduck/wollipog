@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   DEFAULT_MAX_CONCURRENT_SESSIONS,
-  conductorEnabled,
   loadConfig,
   parseArgs,
   parseEnv,
@@ -14,30 +13,6 @@ import {
   resolveConfig,
   resolveWorkspacePath,
 } from "./config.js";
-
-test("conductorEnabled requires the exact runner opt-in value", () => {
-  assert.equal(conductorEnabled({} as NodeJS.ProcessEnv), false);
-  assert.equal(conductorEnabled({ WOLLIPOG_CONDUCTOR: "0" } as NodeJS.ProcessEnv), false);
-  assert.equal(conductorEnabled({ WOLLIPOG_CONDUCTOR: "true" } as NodeJS.ProcessEnv), false);
-  assert.equal(conductorEnabled({ WOLLIPOG_CONDUCTOR: "1" } as NodeJS.ProcessEnv), true);
-});
-
-test("conductorEnabled prefers the Wollipog flag and warns only on legacy fallback", () => {
-  const warnings: string[] = [];
-  assert.equal(
-    conductorEnabled(
-      { WOLLIPOG_CONDUCTOR: "0", MAM_CONDUCTOR: "1" } as NodeJS.ProcessEnv,
-      (warning) => warnings.push(warning),
-    ),
-    false,
-  );
-  assert.deepEqual(warnings, []);
-  assert.equal(
-    conductorEnabled({ MAM_CONDUCTOR: "1" } as NodeJS.ProcessEnv, (warning) => warnings.push(warning)),
-    true,
-  );
-  assert.deepEqual(warnings, ["MAM_CONDUCTOR is deprecated; use WOLLIPOG_CONDUCTOR"]);
-});
 
 test("parseArgs defaults to runner.config.json (absolute)", () => {
   const { configPath } = parseArgs([]);

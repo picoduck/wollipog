@@ -1,6 +1,6 @@
 # ADR 0004: Disable the Conductor Pending ACP v2
 
-- Status: Accepted
+- Status: Accepted (amended 2026-08-23: gate mechanism changed, see Amendment)
 - Date: 2026-07-25
 - Decision owners: Wollipog maintainers
 
@@ -60,3 +60,28 @@ native Claude implementation remains opt-in.
 - Existing Conductor history remains visible, but it cannot launch or resume while disabled.
 - Ordinary agents, workflows, automations, and governance behavior are unchanged.
 - Operators relying on the legacy Conductor must set one documented runner environment variable.
+
+## Amendment (2026-08-23)
+
+The runner environment gate (`WOLLIPOG_CONDUCTOR` / legacy `MAM_CONDUCTOR`) is removed. The
+runner now always synthesizes and advertises a conductor when an available native Claude Code
+installation can donate one, and always provisions the manager MCP when a conductor session
+starts. The opt-in moves to the client: the Conductor-Led Work switch in Experimental Settings,
+which now defaults OFF, is the feature's gate. It is device-local UI exposure, matching how the
+Multi-Agent Runs and Collaboration Pods experiments already gate their surfaces.
+
+What this changes and what it does not:
+
+- The opt-in remains. It no longer requires runner environment configuration and a restart, and
+  it no longer applies runner-wide; each device chooses for itself.
+- Every Retained Defense above is unchanged: the control-plane permission-mode validation and
+  clamps, the `default`-mode capability narrowing, the scoped conductor credential and API-route
+  allowlist, startup MCP-config cleanup, and the recursion/delegation guards.
+- The stale-snapshot refusal is narrowed: a retained conductor session now resumes, because the
+  runner side is always provisioned. The control-plane clamps still bound what such a session
+  can do.
+- A non-UI API caller can start a conductor session regardless of any device's switch, exactly
+  as `/api/runs` and `/api/pods` are served regardless of their experiment flags.
+
+The Reopen Criterion is unaffected: the native Claude implementation remains the interim design,
+and an ACP-v2-based conductor is still the intended replacement.

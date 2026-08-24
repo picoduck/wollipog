@@ -7,7 +7,6 @@ import type { AgentDefinition, SessionLaunchSpec } from "@wollipog/protocol";
 import {
   CONDUCTOR_DISALLOWED_TOOLS,
   CONDUCTOR_READ_TOOLS,
-  applyConductorFeature,
   buildConductorArgs,
   conductorMcpCommand,
   conductorSystemPrompt,
@@ -350,21 +349,6 @@ test("enabled non-conductor and non-claude-code specs are untouched", () => {
   });
 });
 
-test("disabled conductor provisioning refuses stale starts before writing launch material", () => {
-  withTempDir((dir) => {
-    for (const driver of ["claude-code", "acp", undefined] as const) {
-      const spec = makeSpec({ driver });
-      assert.throws(
-        () => provisionConductor(spec, { ...CP_CONFIG, enabled: false }, () => {}, makeHost(dir)),
-        /WOLLIPOG_CONDUCTOR=1/,
-      );
-      assert.deepEqual(spec.args, []);
-      assert.deepEqual(spec.config, {});
-    }
-    assert.equal(existsSync(join(dir, "s_cond1.mcp.json")), false);
-  });
-});
-
 test("a WSL-context conductor is skipped with a log line (out of scope)", () => {
   withTempDir((dir) => {
     const logs: string[] = [];
@@ -436,23 +420,6 @@ test("withConductorAgent does not widen elicitation when the donor lacks a defau
   const conductor = withConductorAgent([donor]).find((agent) => agent.id === "conductor")!;
   assert.deepEqual(conductor.capabilities!.permissionModes, ["default"]);
   assert.equal(conductor.capabilities!.elicitation, undefined);
-});
-
-test("applyConductorFeature removes synthesized and config-defined conductors while disabled", () => {
-  const configured = claudeAgent({ id: "conductor", name: "Configured Conductor", source: "config" });
-  const logs: string[] = [];
-  const withoutConfigured = applyConductorFeature([configured, claudeAgent()], false, (message) => logs.push(message));
-  assert.deepEqual(withoutConfigured.map((agent) => agent.id), ["claude-code"]);
-  assert.deepEqual(logs, [
-    "Conductor is disabled on this runner; set WOLLIPOG_CONDUCTOR=1 and restart to enable it",
-  ]);
-
-  logs.length = 0;
-  applyConductorFeature([claudeAgent()], false, (message) => logs.push(message));
-  assert.deepEqual(logs, []);
-
-  const enabled = applyConductorFeature([claudeAgent()], true);
-  assert.equal(enabled.some((agent) => agent.id === "conductor"), true);
 });
 
 test("withConductorAgent inherits the donor's base args (node-wrapped nvm installs)", () => {

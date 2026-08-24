@@ -293,18 +293,18 @@ export function ExperimentalPanel({
         checked={flags.pods}
         onClick={() => onToggle("pods", !flags.pods)}
       />
-      {/* Disabled rather than hidden when no runner can supply one, and with the reason —
-          the switch alone cannot say that the runner, not this page, is what is missing. */}
+      {/* The switch stays operable even with no runner able to supply a conductor: it is the
+          feature's only gate now, and the preference must be settable before the runner that
+          can host one connects. The pending reason says what is missing and that it self-heals. */}
       <SwitchRow
         title="Conductor-Led Work"
         description={conductorAvailable
-          ? "The Conductor preset when creating a session. Controls what this device shows; the runner decides whether a conductor exists."
+          ? "The Conductor preset when creating a session. This switch is the feature's only gate on this device."
           : <>The Conductor preset when creating a session.{" "}
             <small className="settings-pending-reason">
-              No connected runner advertises a conductor agent, so there is nothing to show; enable it on a runner with WOLLIPOG_CONDUCTOR=1.
+              No online runner can host a conductor yet; the preset appears once a runner with a native Claude Code installation connects.
             </small></>}
         checked={flags.conductor}
-        disabled={!conductorAvailable}
         onClick={() => onToggle("conductor", !flags.conductor)}
       />
     </SettingsGroup>

@@ -261,16 +261,12 @@ export function provisionConductor(
   config: {
     controlPlaneUrl: string;
     tokenFile: string;
-    enabled?: boolean;
     allowInsecureTransport?: boolean;
   },
   log: (msg: string) => void,
   host: ConductorHost = defaultConductorHost(),
 ): void {
   if (spec.agentId !== CONDUCTOR_AGENT_ID) return;
-  if (config.enabled === false) {
-    throw new Error("Conductor is disabled on this runner; set WOLLIPOG_CONDUCTOR=1 and restart the runner to enable it");
-  }
   if (spec.driver !== "claude-code") return;
   if ((spec.context?.kind ?? "native") === "wsl") {
     log(`conductor ${spec.sessionId}: WSL-context provisioning is not supported — starting without manager tools`);
@@ -383,17 +379,3 @@ export function withConductorAgent(agents: AgentDefinition[]): AgentDefinition[]
   ];
 }
 
-/** Apply the runner feature gate to both synthesized and explicitly configured conductors.
- * Filtering while disabled is required because skipping synthesis alone would leave a
- * config-defined conductor advertised during the registration-before-discovery race. */
-export function applyConductorFeature(
-  agents: AgentDefinition[],
-  enabled: boolean,
-  log?: (message: string) => void,
-): AgentDefinition[] {
-  if (enabled) return withConductorAgent(agents);
-  if (agents.some((agent) => agent.id === CONDUCTOR_AGENT_ID)) {
-    log?.("Conductor is disabled on this runner; set WOLLIPOG_CONDUCTOR=1 and restart to enable it");
-  }
-  return agents.filter((agent) => agent.id !== CONDUCTOR_AGENT_ID);
-}

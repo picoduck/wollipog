@@ -40,12 +40,14 @@ test("nothing stored means every experiment stays at its default", () => {
   assert.deepEqual(parseExperimentFlags(null), DEFAULT_EXPERIMENT_FLAGS);
 });
 
-test("defaults preserve current behavior: everything the app renders today stays on", () => {
-  // The flags EXISTING must not change what an untouched install shows. A default that hides
-  // a surface would make this release a silent regression for everyone who never opens the tab.
-  for (const [id, enabled] of Object.entries(DEFAULT_EXPERIMENT_FLAGS)) {
-    assert.equal(enabled, true, `${id} must default on`);
-  }
+test("defaults: existing surfaces stay on, the conductor stays opt-in", () => {
+  // multiAgent and pods EXISTING must not change what an untouched install shows. The conductor
+  // is the exception by decision, not accident: its old default-on was safe only because the
+  // runner env gate was the real switch, and with that gate removed (ADR 0004 amendment) the
+  // toggle IS the opt-in — defaulting it on would silently enable the feature everywhere.
+  assert.equal(DEFAULT_EXPERIMENT_FLAGS.multiAgent, true);
+  assert.equal(DEFAULT_EXPERIMENT_FLAGS.pods, true);
+  assert.equal(DEFAULT_EXPERIMENT_FLAGS.conductor, false);
 });
 
 test("garbage and non-object payloads fall back to the defaults without throwing", () => {
@@ -60,7 +62,7 @@ test("unknown keys are ignored and missing keys keep their defaults", () => {
   const flags = parseExperimentFlags(JSON.stringify({ pods: false, warpDrive: false }));
   assert.equal(flags.pods, false);
   assert.equal(flags.multiAgent, true);
-  assert.equal(flags.conductor, true);
+  assert.equal(flags.conductor, false, "a missing conductor key keeps the opt-in default");
 });
 
 test("non-boolean values for known keys are rejected key-by-key", () => {

@@ -44,7 +44,6 @@ import {
   type StartSessionMessage,
 } from "@wollipog/protocol";
 import {
-  conductorEnabled,
   loadConfig,
   parseArgs,
   parseEnv,
@@ -52,7 +51,7 @@ import {
   type RunnerConfig,
 } from "./config.js";
 import {
-  applyConductorFeature,
+  withConductorAgent,
   defaultConductorHost,
   provisionConductor,
   removeConductorMcpConfig,
@@ -210,7 +209,6 @@ async function startRunner(config: RunnerConfig, allowInsecureTransport: boolean
 const log = (msg: string) => console.log(`[runner ${config.runnerId}] ${msg}`);
 validateControlPlaneUrl(config.controlPlaneUrl, allowInsecureTransport);
 const warnLegacyEnvironment = (message: string) => console.warn(`[runner ${config.runnerId}] ${message}`);
-const conductorFeatureEnabled = conductorEnabled(process.env, warnLegacyEnvironment);
 const claudeHookFeatureEnabled = claudeHooksEnabled(process.env, warnLegacyEnvironment);
 warnLegacyClaudeLifetimeEnvironment(process.env, warnLegacyEnvironment);
 const v1Credential = readV1RunnerCredentialForAttestation(config.dataDir, {
@@ -313,12 +311,9 @@ const metadata: RunnerMetadata = {
   hostname: runnerHostname,
   os: detectOs(),
   version: VERSION,
-  // With the feature enabled, preserve the pre-discovery config rows verbatim so live discovery
-  // can still authoritatively fill availability and capabilities. Disabled runners filter even
-  // an explicitly configured conductor before the initial registration can advertise it.
-  agents: conductorFeatureEnabled
-    ? configuredAgentDefinitions
-    : applyConductorFeature(configuredAgentDefinitions, false, log),
+  // Pre-discovery config rows go out verbatim so live discovery can still authoritatively
+  // fill availability and capabilities; conductor synthesis happens after every merge.
+  agents: configuredAgentDefinitions,
   workspaces: config.workspaces.map((w) => ({
     id: w.id,
     name: w.name,
@@ -454,7 +449,6 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
       {
         controlPlaneUrl: config.controlPlaneUrl,
         tokenFile: runnerCredentialFile,
-        enabled: conductorFeatureEnabled,
         allowInsecureTransport,
       },
       log,
@@ -769,9 +763,8 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
     // The conductor is synthesized AFTER the merge — inside discovery, a configured claude entry
     // sharing the launch key would silently suppress it via the merge's usedKeys check.
     metadata.agents = applyClaudeHookCapability(
-      await enrichAgentModels(applyConductorFeature(
+      await enrichAgentModels(withConductorAgent(
         mergeAgents(configAgents, discovered),
-        conductorFeatureEnabled,
       ), {
         refresh: refreshModels,
       }),
@@ -963,8 +956,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           {
             controlPlaneUrl: config.controlPlaneUrl,
             tokenFile: runnerCredentialFile,
-            enabled: conductorFeatureEnabled,
-            allowInsecureTransport,
+                allowInsecureTransport,
           },
           log,
           conductorHost,
@@ -1087,8 +1079,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             {
               controlPlaneUrl: config.controlPlaneUrl,
               tokenFile: runnerCredentialFile,
-              enabled: conductorFeatureEnabled,
-              allowInsecureTransport,
+                    allowInsecureTransport,
             },
             log,
             conductorHost,
