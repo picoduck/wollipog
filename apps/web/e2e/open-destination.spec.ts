@@ -85,7 +85,9 @@ test("the compact mobile presentation stays on one line and inside the viewport"
 
   await page.goto("/open-destination-e2e.html?mobile=1&offline=1");
   await page.getByRole("button", { name: "Open Unavailable: Runner Offline" }).dispatchEvent("click");
-  await expect(page.getByRole("status")).toHaveText("Runner is offline.");
+  const offlineNote = page.getByRole("status");
+  await expect(offlineNote).toHaveText("Runner is offline.");
+  await expect(offlineNote).toHaveCSS("pointer-events", "none");
   const offlineMetrics = await page.locator(".topbar").evaluate((element) => ({
     scrollWidth: element.scrollWidth,
     clientWidth: element.clientWidth,
@@ -97,8 +99,10 @@ test("the compact mobile presentation stays on one line and inside the viewport"
 
   await page.goto("/open-destination-e2e.html?mobile=1&fail=1");
   await page.getByRole("button", { name: "Open in VS Code" }).click();
-  const failureBox = await page.getByRole("status").boundingBox();
+  const failureNote = page.getByRole("status");
+  const failureBox = await failureNote.boundingBox();
   expect(failureBox).not.toBeNull();
+  await expect(failureNote).toHaveCSS("pointer-events", "none");
   expect(failureBox!.x).toBeGreaterThanOrEqual(8);
   expect(failureBox!.x + failureBox!.width).toBeLessThanOrEqual(312);
 });
