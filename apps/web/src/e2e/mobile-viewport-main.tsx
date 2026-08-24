@@ -223,6 +223,10 @@ function Harness() {
               any tap on a checkbox or radio. */}
           <textarea aria-label="Reply" />
           <input type="checkbox" aria-label="Notify" />
+          {/* Production's Share Link field (SessionHeader) is a READ-ONLY text input: tapping it
+              selects the URL and summons no keyboard, so its focus must not hide the rail — and
+              no viewport event would ever arrive to put the rail back if it did. */}
+          <input type="text" readOnly aria-label="Share Link" value="https://example.invalid/s/1" />
         </div>
       </main>
     </div>

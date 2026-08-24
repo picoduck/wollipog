@@ -997,6 +997,38 @@ test.describe("while a text field is focused", () => {
     await expectEveryPrimaryDestinationUsable(page);
   });
 
+  test("an animated dismissal accumulates to the blur", async ({ page }) => {
+    await useHarness(page);
+    await page.locator(".main-body textarea").focus();
+    await openKeyboard(page);
+    await expect(page.locator(".app-rail")).toBeHidden();
+
+    // A closing keyboard animates: several resize frames each growing less than any threshold,
+    // whose SUM is the keyboard. A detector comparing single-frame deltas never fires on this
+    // sequence and the field stays focused over an empty band — round 2's P1.
+    for (const remaining of [240, 180, 120, 60, 0]) {
+      await applyViewport(page, () => page.evaluate((step) => window.setKeyboard(step), remaining));
+    }
+    await expect.poll(() => page.evaluate(() => document.activeElement === document.body),
+      { message: "the accumulated growth must be read as the dismissal it is" }).toBe(true);
+    await expectRailAt(page, 0);
+  });
+
+  test("growth with no keyboard behind it is not a dismissal", async ({ page }) => {
+    await useHarness(page);
+    await page.locator(".main-body textarea").focus();
+    await expect(page.locator(".app-rail")).toBeHidden();
+
+    // Same-width growth alone: a split-screen pane being enlarged while composing. No keyboard
+    // was ever open — nothing shrank first — so blurring here would dismiss the real keyboard
+    // and interrupt the user for a window change they made on purpose.
+    await applyViewport(page, () => page.evaluate(() =>
+      window.resizeViewport(window.innerWidth, window.innerHeight + 150)));
+    expect(await page.evaluate(() => document.activeElement?.tagName),
+      "growth the keyboard cannot explain must not steal focus").toBe("TEXTAREA");
+    await expect(page.locator(".app-rail")).toBeHidden();
+  });
+
   test("a rotation is not read as a keyboard dismissal", async ({ page }) => {
     await useHarness(page);
     await page.locator(".main-body textarea").focus();
@@ -1017,6 +1049,10 @@ test.describe("while a text field is focused", () => {
     // A checkbox holds focus after a tap and opens nothing; hiding on it strands the navigation
     // hidden until the user happens to focus something else.
     await page.locator(".main-body input[type=checkbox]").focus();
+    await expectRailAt(page, 0);
+    // A read-only text input likewise: production's Share Link field is one, tapped exactly to
+    // select and copy — no keyboard appears and no viewport event would ever restore the rail.
+    await page.locator(".main-body input[readonly]").focus();
     await expectRailAt(page, 0);
     // The rail's own destinations too: a selector loosened to `.app:has(:focus)` removes the bar
     // in response to the user reaching for it.

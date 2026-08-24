@@ -27,11 +27,14 @@
 const NOISE_FLOOR_PX = 8;
 
 /**
- * The height a viewport must grow back in one step to count as the keyboard CLOSING.
+ * How far below the tallest observed height the viewport must SHRINK to count as the keyboard
+ * opening, and how close to it the height must return for the keyboard to count as closed.
  *
- * Sits between the two populations it separates: a collapsing browser toolbar returns 56-100px,
- * and the smallest software keyboard — a small phone in landscape — occupies ~120, which is also
- * the landscape keyboard the e2e suite drives, so this cannot rise past it.
+ * Sits between the two populations it separates: a collapsing browser toolbar moves 56-100px, and
+ * the smallest software keyboard — a small phone in landscape — occupies ~120, which is also the
+ * landscape keyboard the e2e suite drives, so this cannot rise past it. The close side reuses the
+ * same number so a keyboard that closes while the browser toolbar returns — leaving the height up
+ * to ~100px short of where it started — still reads as closed.
  */
 const KEYBOARD_CLOSE_PX = 100;
 
@@ -41,10 +44,12 @@ const KEYBOARD_CLOSE_PX = 100;
  * Kept in step with the while-typing rule in styles.css (the `.app:has(...)` selector in the phone
  * block): that rule hides the rail while one of these holds focus, and the blur below is what
  * releases it when the keyboard was dismissed WITHOUT a blur — Android Back closes the keyboard
- * and leaves the field focused, which would otherwise strand the navigation hidden.
+ * and leaves the field focused, which would otherwise strand the navigation hidden. Read-only
+ * fields are excluded on both sides: focusing one selects its text and summons nothing, and no
+ * viewport event would ever arrive to put the rail back.
  */
-const KEYBOARD_EDITABLE = "textarea, [contenteditable=''], [contenteditable='true'], "
-  + "input:not([type='button'], [type='checkbox'], [type='color'], [type='file'], "
+const KEYBOARD_EDITABLE = "textarea:not([readonly]), [contenteditable=''], [contenteditable='true'], "
+  + "input:not([readonly], [type='button'], [type='checkbox'], [type='color'], [type='file'], "
   + "[type='image'], [type='radio'], [type='range'], [type='reset'], [type='submit'])";
 
 export function installMobileViewportFallback(win: Window = window): () => void {
@@ -53,8 +58,14 @@ export function installMobileViewportFallback(win: Window = window): () => void 
 
   const root = win.document.documentElement;
   let frame = 0;
-  let lastHeight = viewport.height;
+  // The keyboard-presence detector: armed by a keyboard-scale SHRINK below the tallest height seen
+  // at the current width, released when the height climbs back to within KEYBOARD_CLOSE_PX of it.
+  // States rather than per-frame deltas, because a closing keyboard animates: several resize
+  // frames each growing less than any threshold, whose sum is the keyboard. Comparing single
+  // steps missed every animated dismissal.
+  let peak = viewport.height;
   let lastWidth = viewport.width;
+  let keyboardOpen = false;
 
   const apply = () => {
     frame = 0;
@@ -66,19 +77,28 @@ export function installMobileViewportFallback(win: Window = window): () => void 
     }
 
     // The keyboard closing while a text field keeps focus, which Android Back does and no event
-    // announces. The one signature it leaves is the viewport growing back by a keyboard's height
-    // with the width untouched — a rotation or a pinch-zoom moves the width too, and blurring on
-    // those would dismiss a keyboard the user is typing on. The blur is what lets the focus-keyed
-    // hiding rule in styles.css release the rail, and it is gated to the geometry that rule
-    // exists in, so a desktop window resize never steals focus from a form.
-    const grewBy = viewport.height - lastHeight;
-    const widthMoved = viewport.width !== lastWidth;
-    lastHeight = viewport.height;
-    lastWidth = viewport.width;
-    if (grewBy >= KEYBOARD_CLOSE_PX && !widthMoved
-      && win.matchMedia("(max-width: 760px) and (pointer: coarse)").matches) {
-      const active = win.document.activeElement;
-      if (active instanceof HTMLElement && active.matches(KEYBOARD_EDITABLE)) active.blur();
+    // announces. The blur is what lets the focus-keyed hiding rule in styles.css release the
+    // rail. It requires the detector to have been ARMED by a keyboard-scale shrink first — a
+    // split-screen pane growing taller is same-width growth too, and blurring on growth alone
+    // would dismiss a keyboard that was never open. A width change resets the tracking outright:
+    // a rotation or a pinch-zoom moves both axes, nothing about the keyboard survives across one,
+    // and blurring there would dismiss a keyboard mid-word. The blur is gated to the geometry the
+    // hiding rule exists in, so a desktop window resize never steals focus from a form.
+    const height = viewport.height;
+    if (viewport.width !== lastWidth) {
+      lastWidth = viewport.width;
+      peak = height;
+      keyboardOpen = false;
+    } else if (keyboardOpen && height >= peak - KEYBOARD_CLOSE_PX) {
+      keyboardOpen = false;
+      peak = Math.max(peak, height);
+      if (win.matchMedia("(max-width: 760px) and (pointer: coarse)").matches) {
+        const active = win.document.activeElement;
+        if (active instanceof HTMLElement && active.matches(KEYBOARD_EDITABLE)) active.blur();
+      }
+    } else {
+      if (!keyboardOpen && height > peak) peak = height;
+      if (peak - height >= KEYBOARD_CLOSE_PX) keyboardOpen = true;
     }
   };
 
