@@ -90,6 +90,25 @@ function snapshot(): UiSnapshotMessage {
   };
 }
 
+function archiveResponse(rows: SessionView[]): Awaited<ReturnType<ApiClient["archiveSessionPage"]>> {
+  return {
+    sessions: rows,
+    snippets: {},
+    metadata: Object.fromEntries(rows.map((item) => [item.id, {
+      project: item.projectName ?? "No Project",
+      location: item.workspaceName ?? "No Location",
+      agent: "Codex — Interactive",
+    }])),
+    nextCursor: null,
+    hasMore: false,
+    facets: {
+      projects: [...new Set(rows.map((item) => item.projectName ?? "No Project"))].sort(),
+      locations: [...new Set(rows.map((item) => item.workspaceName ?? "No Location"))].sort(),
+      agents: ["Codex — Interactive"],
+    },
+  };
+}
+
 let sequence = 0;
 
 async function mount(sessions: SessionView[], overrides: Partial<ApiClient> = {}) {
@@ -404,5 +423,131 @@ test("paged search failures expose a retryable load error", async () => {
     fixture.container.textContent ?? "",
     /Could not load archived sessions: search unavailable/,
   );
+  await fixture.unmount();
+});
+
+test("reconnecting during a pending archive load schedules exactly one post-load revalidation", async () => {
+  const stale = session(1, { title: "Stale Archived Session" });
+  const fresh = session(2, { title: "Fresh Archived Session" });
+  let calls = 0;
+  let resolveInitial!: (response: Awaited<ReturnType<ApiClient["archiveSessionPage"]>>) => void;
+  const initial = new Promise<Awaited<ReturnType<ApiClient["archiveSessionPage"]>>>((resolve) => {
+    resolveInitial = resolve;
+  });
+  const fixture = await mount([], {
+    archiveSessionPage: async () => {
+      calls += 1;
+      return calls === 1 ? initial : archiveResponse([fresh]);
+    },
+  });
+  assert.equal(calls, 1);
+
+  await act(async () => {
+    fixture.socket.onclose?.({ code: 1006 });
+    await Promise.resolve();
+  });
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 1_550));
+    fixture.socket.push(snapshot());
+    await Promise.resolve();
+  });
+  assert.equal(calls, 1, "reconnect records a pending refresh instead of overlapping the active request");
+
+  await act(async () => {
+    resolveInitial(archiveResponse([stale]));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+
+  assert.equal(calls, 2, "the completed request is followed by one bounded revalidation");
+  assert.match(fixture.container.textContent ?? "", /Fresh Archived Session/);
+  assert.doesNotMatch(fixture.container.textContent ?? "", /Stale Archived Session/);
+  await fixture.unmount();
+});
+
+test("a live title update removes a row that no longer matches the active query", async () => {
+  const rows = [session(1, { title: "Needle Session" })];
+  const fixture = await mount(rows);
+  const input = fixture.container.querySelector<HTMLInputElement>('input[type="search"]')!;
+  await act(async () => {
+    input.value = "needle";
+    Simulate.change(input);
+  });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
+  assert.match(fixture.container.textContent ?? "", /Needle Session/);
+  const callsBeforeUpdate = fixture.archivePageCalls();
+
+  const updated = session(1, { title: "Different Session", updatedAt: 20 });
+  rows[0] = updated;
+  await act(async () => {
+    fixture.socket.push({ type: "session_upsert", session: updated });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  assert.match(fixture.container.textContent ?? "", /No Matching Sessions/);
+  assert.equal(fixture.archivePageCalls(), callsBeforeUpdate + 1);
+  await fixture.unmount();
+});
+
+test("a live Project update removes a row that no longer matches the active facet", async () => {
+  const rows = [session(1, { projectName: "Wollipog" })];
+  const fixture = await mount(rows);
+  const project = fixture.container.querySelector<HTMLButtonElement>('button[aria-label^="Project:"]')!;
+  await act(async () => { project.click(); });
+  const wollipog = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+    .find((option) => option.textContent?.trim() === "Wollipog");
+  assert.ok(wollipog);
+  await act(async () => {
+    wollipog.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  assert.match(fixture.container.textContent ?? "", /Archived Session 1/);
+  const callsBeforeUpdate = fixture.archivePageCalls();
+
+  const updated = session(1, { projectName: "Other Project", updatedAt: 20 });
+  rows[0] = updated;
+  await act(async () => {
+    fixture.socket.push({ type: "session_upsert", session: updated });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  assert.match(fixture.container.textContent ?? "", /No Matching Sessions/);
+  assert.equal(fixture.archivePageCalls(), callsBeforeUpdate + 1);
+  await fixture.unmount();
+});
+
+test("Undo restores an unarchived row in server cursor order", async () => {
+  const rows = [
+    session(3, { id: "newest", title: "Newest", createdAt: 30 }),
+    session(2, { id: "middle", title: "Middle", createdAt: 20 }),
+    session(1, { id: "oldest", title: "Oldest", createdAt: 10 }),
+  ];
+  const fixture = await mount(rows, {
+    setArchived: async (id, archived) => {
+      const index = rows.findIndex((item) => item.id === id);
+      assert.notEqual(index, -1);
+      const updated = { ...rows[index]!, archived, updatedAt: rows[index]!.updatedAt + 1 };
+      rows[index] = updated;
+      return updated;
+    },
+  });
+  const rowTitles = () => [...fixture.container.querySelectorAll<HTMLAnchorElement>("tbody a")]
+    .map((link) => link.textContent);
+  assert.deepEqual(rowTitles(), ["Newest", "Middle", "Oldest"]);
+
+  const newestRow = [...fixture.container.querySelectorAll<HTMLElement>("tbody tr")]
+    .find((row) => row.textContent?.includes("Newest"));
+  assert.ok(newestRow);
+  await act(async () => {
+    Simulate.click(button(newestRow, "Unarchive"));
+    await Promise.resolve();
+  });
+  assert.deepEqual(rowTitles(), ["Middle", "Oldest"]);
+
+  await act(async () => {
+    Simulate.click(button(fixture.container, "Undo"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  assert.deepEqual(rowTitles(), ["Newest", "Middle", "Oldest"]);
   await fixture.unmount();
 });
