@@ -466,7 +466,11 @@ export function SessionQuestionBanner({
                   aria-labelledby={questionLabelId}
                   aria-describedby={controlDescriptionIds.join(" ")}
                   aria-required={question.multiSelect ? undefined : question.required !== false}
-                  onKeyDown={question.multiSelect ? undefined : (event) => handleRovingChoiceKeyDown(event, "radio")}
+                  onKeyDown={question.multiSelect ? undefined : (event) => handleRovingChoiceKeyDown(
+                    event,
+                    "radio",
+                    { includeAriaDisabled: !runnerOnline, activate: runnerOnline },
+                  )}
                 >
                   {question.options.map((option, optionIndex) => {
                     const on = selected.includes(option.label);

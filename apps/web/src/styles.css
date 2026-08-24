@@ -9494,10 +9494,11 @@ body.shell-dock-dragging * {
   color: var(--text);
   cursor: pointer;
 }
-.question-option:not(:disabled):hover {
+.question-option:not(:disabled):not([aria-disabled="true"]):hover {
   border-color: var(--border-strong);
 }
-.question-option:disabled {
+.question-option:disabled,
+.question-option[aria-disabled="true"] {
   cursor: not-allowed;
   opacity: .6;
 }

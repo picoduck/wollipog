@@ -174,7 +174,13 @@ test("an online question becoming offline remains keyboard-discoverable without 
     .toHaveAccessibleDescription(/Responses are unavailable until the runner reconnects/);
   await expect(page.getByRole("group", { name: /Select every validation/ }))
     .toHaveAccessibleDescription(/Responses are unavailable until the runner reconnects/);
+  await expect(firstRadio).toHaveCSS("cursor", "not-allowed");
+  await expect(firstRadio).toHaveCSS("opacity", "0.6");
 
+  await firstRadio.focus();
+  await firstRadio.press("ArrowDown");
+  await expect(secondRadio).toBeFocused();
+  await expect(secondRadio).toHaveAttribute("aria-checked", "false");
   await firstRadio.focus();
   await expect(firstRadio).toBeFocused();
   await firstRadio.press("Space");
