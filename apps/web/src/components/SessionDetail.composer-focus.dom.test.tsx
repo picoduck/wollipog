@@ -992,6 +992,33 @@ test("the send button's press keeps focus in the composer", async () => {
   }
 });
 
+test("the stop-turn button's press keeps focus in the composer", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  // An active turn with an EMPTY composer is what renders Stop Turn in the send slot — the state
+  // the send-button case never reaches, so reverting only this branch's cancellation left every
+  // other test green.
+  const fixture = await mountFixture(draft, {
+    // turnInterruptionAck arrived at protocol 72; the fixture's default runner predates it.
+    runnerProtocolVersion: 73,
+    sessionPatch: { status: "running", activeTurnId: "turn-1" },
+  });
+  try {
+    await resolveComposerDraft(draft, { text: "", images: [], updatedAt: 1 });
+    await focusRequestedComposer(fixture);
+    const stopButton = fixture.container.querySelector(".stop-turn-btn") as HTMLElement;
+    assert.ok(stopButton, "an active turn with an empty composer must render Stop Turn");
+    const uncanceled = stopButton.dispatchEvent(new domWindow.PointerEvent("pointerdown", {
+      bubbles: true,
+      cancelable: true,
+    }) as never);
+    assert.equal(uncanceled, false, "the stop-turn press must cancel the focus-stealing default");
+    assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer,
+      "the composer keeps focus through the press");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("an immediate same-session remount restores exact selection direction and textarea scroll after hydration", async () => {
   const draft = deferred<ComposerDraft | null>();
   const fixture = await mountFixture(draft);
