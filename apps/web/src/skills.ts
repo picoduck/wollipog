@@ -188,7 +188,10 @@ const DEPLOYABLE_DRIVERS = new Set(["claude-code", "codex", "codex-app-server"])
 /** Agents on this machine that skill deployment can actually reach. The pickers list these so an
  * assignment cannot be aimed at an ACP or WSL agent the reconciler would only mark unsupported. */
 export function skillEligibleAgents(agents: ReadonlyArray<AgentDefinition>): AgentDefinition[] {
+  // The synthesized conductor shares its donor Claude's harness directory, so as a deploy
+  // target it is a duplicate row: deploying "to the conductor" is deploying to Claude again.
   return agents.filter((agent) =>
+    agent.id !== "conductor" &&
     DEPLOYABLE_DRIVERS.has(agent.driver ?? "acp") && (agent.context?.kind ?? "native") === "native");
 }
 

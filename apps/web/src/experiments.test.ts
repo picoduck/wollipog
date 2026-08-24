@@ -13,6 +13,7 @@ import {
   setExperimentFlag,
   subscribeExperimentFlags,
 } from "./experiments.js";
+import { LOCAL_INSTANCE_SCOPE } from "./instance-storage.js";
 import { instanceStorageKey } from "./instance-storage.js";
 import { GLOBAL_VIEW_ITEMS, SETTINGS_SECTIONS, viewFromPath, viewPath } from "./navigation.js";
 
@@ -40,12 +41,14 @@ test("nothing stored means every experiment stays at its default", () => {
   assert.deepEqual(parseExperimentFlags(null), DEFAULT_EXPERIMENT_FLAGS);
 });
 
-test("defaults preserve current behavior: everything the app renders today stays on", () => {
-  // The flags EXISTING must not change what an untouched install shows. A default that hides
-  // a surface would make this release a silent regression for everyone who never opens the tab.
-  for (const [id, enabled] of Object.entries(DEFAULT_EXPERIMENT_FLAGS)) {
-    assert.equal(enabled, true, `${id} must default on`);
-  }
+test("defaults: existing surfaces stay on, the conductor stays opt-in", () => {
+  // multiAgent and pods EXISTING must not change what an untouched install shows. The conductor
+  // is the exception by decision, not accident: its old default-on was safe only because the
+  // runner env gate was the real switch, and with that gate removed (ADR 0004 amendment) the
+  // toggle IS the opt-in — defaulting it on would silently enable the feature everywhere.
+  assert.equal(DEFAULT_EXPERIMENT_FLAGS.multiAgent, true);
+  assert.equal(DEFAULT_EXPERIMENT_FLAGS.pods, true);
+  assert.equal(DEFAULT_EXPERIMENT_FLAGS.conductor, false);
 });
 
 test("garbage and non-object payloads fall back to the defaults without throwing", () => {
@@ -60,7 +63,7 @@ test("unknown keys are ignored and missing keys keep their defaults", () => {
   const flags = parseExperimentFlags(JSON.stringify({ pods: false, warpDrive: false }));
   assert.equal(flags.pods, false);
   assert.equal(flags.multiAgent, true);
-  assert.equal(flags.conductor, true);
+  assert.equal(flags.conductor, false, "a missing conductor key keeps the opt-in default");
 });
 
 test("non-boolean values for known keys are rejected key-by-key", () => {
@@ -171,4 +174,29 @@ test("the Experimental section is a route like its siblings", () => {
     "the section must exist in the one list the nav, routes, and palette derive from");
   assert.equal(viewPath({ name: "settings", section: "experimental" }), "/settings/experimental");
   assert.deepEqual(viewFromPath("/settings/experimental"), { name: "settings", section: "experimental" });
+});
+
+test("a legacy payload's conductor:true is the old default, not an opt-in", () => {
+  // Every legacy write serialized ALL flags, so toggling pods once stored conductor:true for a
+  // user who never chose it. With the runner env gate removed, honouring that value would
+  // silently enable the feature on upgrade for exactly those devices.
+  const legacy = parseExperimentFlags(JSON.stringify({ multiAgent: true, pods: false, conductor: true }));
+  assert.equal(legacy.conductor, false);
+  assert.equal(legacy.pods, false, "other legacy choices stay honoured");
+});
+
+test("a legacy conductor value is never an opt-in, in either direction", () => {
+  assert.equal(parseExperimentFlags(JSON.stringify({ conductor: false })).conductor, false);
+  assert.equal(parseExperimentFlags(JSON.stringify({ conductor: true })).conductor, false);
+});
+
+test("a v2 payload's conductor value is an explicit choice in both directions", () => {
+  assert.equal(parseExperimentFlags(JSON.stringify({ v: 2, conductor: true })).conductor, true);
+  assert.equal(parseExperimentFlags(JSON.stringify({ v: 2, conductor: false })).conductor, false);
+});
+
+test("writes are versioned so the next read trusts the stored conductor value", () => {
+  setExperimentFlag("conductor", true, LOCAL_INSTANCE_SCOPE);
+  resetExperimentFlagsForTest();
+  assert.equal(getExperimentFlags(LOCAL_INSTANCE_SCOPE).conductor, true);
 });

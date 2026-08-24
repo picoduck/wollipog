@@ -1,3 +1,5 @@
+import { setExperimentFlag } from "../experiments.js";
+import { LOCAL_INSTANCE_SCOPE } from "../instance-storage.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import React, { act } from "react";
@@ -252,6 +254,9 @@ test("run Project copy stays neutral before selection and fails closed when audi
 });
 
 test("workflow copy discloses the organization-visible conductor outside a narrower Project", async () => {
+  // The conductor orchestrator exists only behind the device-local experiment, which defaults
+  // off; this test is about the disclosure copy, so it opts in first.
+  setExperimentFlag("conductor", true, LOCAL_INSTANCE_SCOPE);
   const conductorRunner: RunnerView = {
     ...runner,
     agents: [

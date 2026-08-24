@@ -5,19 +5,6 @@ import { resolve } from "node:path";
 import { homedir } from "node:os";
 import type { AcpEnvironmentReference, AcpMcpServerConfig, AgentContext, AgentDriverKind } from "@wollipog/protocol";
 import { resolveAcpSessionContext } from "./acp-session-context.js";
-import { readCompatibleEnv, type LegacyEnvironmentWarning } from "./env-compat.js";
-
-/** Runner-only opt-in for the shelved native Claude conductor. */
-export const CONDUCTOR_FLAG = "WOLLIPOG_CONDUCTOR";
-export const LEGACY_CONDUCTOR_FLAG = "MAM_CONDUCTOR";
-
-/** Only an exact `1` enables the conductor; every other value preserves the default-off state. */
-export function conductorEnabled(
-  env: NodeJS.ProcessEnv = process.env,
-  warn?: LegacyEnvironmentWarning,
-): boolean {
-  return readCompatibleEnv(env, CONDUCTOR_FLAG, LEGACY_CONDUCTOR_FLAG, warn) === "1";
-}
 
 export interface RunnerConfigAgent {
   id: string;

@@ -43,8 +43,6 @@ const CLAUDE_RUNNER_ENV = [
   "MAM_CLAUDE_PERSISTENT",
   "MAM_CLAUDE_PERSISTENT_IDLE_MS",
   "MAM_CLAUDE_PENDING_MAX_MS",
-  "WOLLIPOG_CONDUCTOR",
-  "MAM_CONDUCTOR",
 ];
 
 test("agent TUI launch is provider-gated and never attaches structured session identity", () => {

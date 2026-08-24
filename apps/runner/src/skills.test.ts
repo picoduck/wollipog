@@ -727,3 +727,27 @@ test("windows performs no writes and reports every link as unsupported", async (
     rmSync(roots.root, { recursive: true, force: true });
   }
 });
+
+test("the synthesized conductor contributes no harness binding", async () => {
+  // It shares the donor Claude's ~/.claude/skills directory: a second binding for the same
+  // directory doubles every unmanaged row and turns one directory's state into a per-agent
+  // conflict under mixed invocation policies.
+  const home = mkdtempSync(join(tmpdir(), "wollipog-skills-conductor-"));
+  const dataDir = mkdtempSync(join(tmpdir(), "wollipog-skills-conductor-data-"));
+  try {
+    mkdirSync(join(home, ".claude", "skills", "handrolled"), { recursive: true });
+    writeFileSync(join(home, ".claude", "skills", "handrolled", "SKILL.md"), "---\nname: handrolled\n---\n");
+    const agents = [
+      { id: "claude-native", name: "Claude", command: "claude", args: [], env: {}, driver: "claude-code" as const },
+      { id: "conductor", name: "Conductor (Wollipog)", command: "claude", args: [], env: {}, driver: "claude-code" as const },
+    ];
+    const result = await reconcileSkills({ dataDir, home, agents, desired: [], allowRemovals: false, log: () => {} });
+    const unmanagedAgents = result.unmanaged.flatMap((entry) => entry.agentIds ?? []);
+    assert.equal(unmanagedAgents.includes("conductor"), false);
+    const reported = JSON.stringify(result);
+    assert.equal(reported.includes('"conductor"'), false, "no per-agent state names the conductor");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});

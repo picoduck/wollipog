@@ -16,6 +16,7 @@ import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { runnerSupportsProtocol } from "@wollipog/protocol";
 import type { AgentDefinition, SessionLaunchSpec } from "@wollipog/protocol";
 import { defaultRunnerReentryHost, runnerReentryCommand, type RunnerReentryHost } from "./runner-reentry.js";
 import { scopedRunnerCredentialFile, type RunnerDataDirIdentity } from "./runner-data-dir.js";
@@ -261,16 +262,12 @@ export function provisionConductor(
   config: {
     controlPlaneUrl: string;
     tokenFile: string;
-    enabled?: boolean;
     allowInsecureTransport?: boolean;
   },
   log: (msg: string) => void,
   host: ConductorHost = defaultConductorHost(),
 ): void {
   if (spec.agentId !== CONDUCTOR_AGENT_ID) return;
-  if (config.enabled === false) {
-    throw new Error("Conductor is disabled on this runner; set WOLLIPOG_CONDUCTOR=1 and restart the runner to enable it");
-  }
   if (spec.driver !== "claude-code") return;
   if ((spec.context?.kind ?? "native") === "wsl") {
     log(`conductor ${spec.sessionId}: WSL-context provisioning is not supported — starting without manager tools`);
@@ -312,6 +309,34 @@ export function provisionConductor(
  * agent already claims the id (a config-defined conductor wins) or when no available
  * native claude-code agent exists to donate the launch command.
  */
+/**
+ * Advertisement fenced on the control plane's protocol version (v91+), at SEND time.
+ *
+ * With the runner env gate removed, the device-local experiment toggle is the feature's only
+ * gate — and only a v91+ control plane serves web bundles that default that toggle off and
+ * read the versioned client storage. An older control plane's bundles default it ON and would
+ * treat a legacy stored value as an opt-in, so advertising to them would surface the conductor
+ * to users who never chose it.
+ *
+ * This filters rather than gating synthesis: the conductor stays in the runner's own agent list
+ * unconditionally so launches and retained-session resumes always resolve (capability on,
+ * exposure gated), and every agents_updated applies this with the version negotiated on the
+ * CURRENT socket. Fencing synthesis instead was tried and reviewed away: the merged list is
+ * cached and re-published on reconnect, so a list synthesized under v91 would reach a v90
+ * control plane verbatim, and a list merged before registration would omit the conductor from a
+ * v91 control plane until the next discovery pass. An unknown version (pre-registration) fails
+ * closed. A config-DEFINED conductor is explicit operator opt-in and always passes.
+ */
+export function fenceConductorAdvertisement(
+  agents: AgentDefinition[],
+  controlPlaneProtocolVersion: number | null,
+): AgentDefinition[] {
+  if (runnerSupportsProtocol(controlPlaneProtocolVersion ?? undefined, "ungatedConductorAdvertisement")) {
+    return agents;
+  }
+  return agents.filter((agent) => agent.id !== CONDUCTOR_AGENT_ID || agent.source === "config");
+}
+
 export function withConductorAgent(agents: AgentDefinition[]): AgentDefinition[] {
   if (agents.some((a) => a.id === CONDUCTOR_AGENT_ID)) {
     // Config wins on IDENTITY (launch command/args/env), but the UI contract still applies:
@@ -383,17 +408,3 @@ export function withConductorAgent(agents: AgentDefinition[]): AgentDefinition[]
   ];
 }
 
-/** Apply the runner feature gate to both synthesized and explicitly configured conductors.
- * Filtering while disabled is required because skipping synthesis alone would leave a
- * config-defined conductor advertised during the registration-before-discovery race. */
-export function applyConductorFeature(
-  agents: AgentDefinition[],
-  enabled: boolean,
-  log?: (message: string) => void,
-): AgentDefinition[] {
-  if (enabled) return withConductorAgent(agents);
-  if (agents.some((agent) => agent.id === CONDUCTOR_AGENT_ID)) {
-    log?.("Conductor is disabled on this runner; set WOLLIPOG_CONDUCTOR=1 and restart to enable it");
-  }
-  return agents.filter((agent) => agent.id !== CONDUCTOR_AGENT_ID);
-}

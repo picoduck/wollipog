@@ -3209,14 +3209,14 @@ test("an open policy transport circuit immediately removes the session hook capa
   }
 });
 
-test("a disabled retained conductor session cannot resume or spawn", async () => {
+test("a retained session whose launch provisioning throws cannot resume or spawn", async () => {
   const h = harness(
     { agentId: "conductor", driver: "claude-code", command: "claude", agentSessionId: "claude-session" },
     Promise.resolve(),
     Promise.resolve(),
     () => {},
     () => {
-      throw new Error("Conductor is disabled on this runner; set WOLLIPOG_CONDUCTOR=1 and restart the runner to enable it");
+      throw new Error("conductor manager MCP provisioning failed: simulated");
     },
   );
   try {
@@ -3228,7 +3228,7 @@ test("a disabled retained conductor session cannot resume or spawn", async () =>
     assert.ok(h.sent.some((message) =>
       message.type === "session_event" &&
       message.payload.kind === "error" &&
-      message.payload.message.includes("WOLLIPOG_CONDUCTOR=1")));
+      message.payload.message.includes("provisioning failed")));
   } finally {
     h.manager.shutdownAll();
     h.cleanup();

@@ -1,3 +1,5 @@
+import { setExperimentFlag } from "../experiments.js";
+import { LOCAL_INSTANCE_SCOPE } from "../instance-storage.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import React, { act } from "react";
@@ -229,6 +231,9 @@ test("Project visibility copy stays neutral before selection and fails closed wh
 });
 
 test("Conductor-Led Work is disabled unless the runner advertises an available conductor", async () => {
+  // The preset renders only behind the device-local experiment flag, which now defaults off;
+  // this test is about runner availability, so it opts in first.
+  setExperimentFlag("conductor", true, LOCAL_INSTANCE_SCOPE);
   const disabledFixture = await mountFixture();
   try {
     await act(async () => { selectProject(disabledFixture.container, project.id); });

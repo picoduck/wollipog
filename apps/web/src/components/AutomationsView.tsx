@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
+  AgentDefinition,
   AutomationAction,
   AutomationExecution,
   AutomationSchedule,
@@ -51,6 +52,15 @@ export function AutomationsView() {
   // creating one. An automation that ALREADY uses the action keeps its option so editing it
   // renders truthfully — the flag hides surfaces, it does not orphan stored data.
   const multiAgentEnabled = useExperiments().flags.multiAgent;
+  // The conductor is advertised by every runner that can host one, but it is a feature behind
+  // the device-local Conductor-Led Work experiment. With the switch off it must not be
+  // schedulable here — while an automation ALREADY targeting it keeps its stored agent visible,
+  // the same never-silently-rewrite rule the rest of this form follows.
+  const conductorEnabled = useExperiments().flags.conductor;
+  const automationAgents = (agents: readonly AgentDefinition[] | undefined, keepId: string) =>
+    (agents ?? []).filter((agent) => conductorEnabled || agent.id !== "conductor" || agent.id === keepId);
+  const defaultAgentId = (agents: readonly AgentDefinition[] | undefined) =>
+    automationAgents(agents, "")[0]?.id ?? "";
   const runners = useStoreSelector((state) => state.runners);
   const boxes = useStoreSelector((state) => state.boxes);
   // Passing the correlated Box matters for an SSH Machine left unnamed: runnerDisplay falls back
@@ -173,7 +183,7 @@ export function AutomationsView() {
       const runner = [...runners.values()][0]!;
       setForm((current) => ({
         ...current, runnerId: runner.runnerId, workspaceId: runner.workspaces[0]?.id ?? "",
-        agentId: runner.agents[0]?.id ?? "",
+        agentId: defaultAgentId(runner.agents),
       }));
     }
   }, [form.runnerId, runners]);
@@ -332,14 +342,14 @@ export function AutomationsView() {
               <>
                 <label>Machine<select value={form.runnerId} onChange={(event) => {
                   const runner = runners.get(event.target.value);
-                  setForm((current) => ({ ...withAgent(current, runner?.agents[0]?.id ?? ""),
+                  setForm((current) => ({ ...withAgent(current, defaultAgentId(runner?.agents)),
                     runnerId: event.target.value, workspaceId: runner?.workspaces[0]?.id ?? "" }));
                 }}>{[...runners.values()].map((runner) => <option key={runner.runnerId} value={runner.runnerId}>{machineLabels.get(runner.runnerId)}</option>)}</select></label>
                 <label>Workspace<select value={form.workspaceId} onChange={(event) => patch("workspaceId", event.target.value)}>
                   {(selectedRunner?.workspaces ?? []).map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}
                 </select></label>
                 {form.actionKind === "create_session" ? <label>Agent<select value={form.agentId} onChange={(event) => setForm((current) => withAgent(current, event.target.value))}>
-                  {(selectedRunner?.agents ?? []).map((agent) => <option key={agent.id} value={agent.id}>{agentDisplayName(agent)}</option>)}
+                  {automationAgents(selectedRunner?.agents, form.agentId).map((agent) => <option key={agent.id} value={agent.id}>{agentDisplayName(agent)}</option>)}
                 </select></label> : <label>Workflow<select value={form.workflowId} onChange={(event) => patch("workflowId", event.target.value)}>
                   {workflows.map((workflow) => <option key={`${workflow.workflowId}:${workflow.version}`} value={workflow.workflowId}>{workflow.name} · v{workflow.version}</option>)}
                 </select></label>}
@@ -387,10 +397,10 @@ export function AutomationsView() {
               <label>Alternate Machine<select value={form.fallbackRunnerId} onChange={(event) => {
                 const runner = runners.get(event.target.value);
                 setForm((current) => ({ ...current, fallbackRunnerId: event.target.value,
-                  fallbackWorkspaceId: runner?.workspaces[0]?.id ?? "", fallbackAgentId: runner?.agents[0]?.id ?? "" }));
+                  fallbackWorkspaceId: runner?.workspaces[0]?.id ?? "", fallbackAgentId: defaultAgentId(runner?.agents) }));
               }}><option value="">Select…</option>{[...runners.values()].filter((runner) => runner.runnerId !== form.runnerId).map((runner) => <option key={runner.runnerId} value={runner.runnerId}>{machineLabels.get(runner.runnerId)}</option>)}</select></label>
               <label>Alternate Workspace<select value={form.fallbackWorkspaceId} onChange={(event) => patch("fallbackWorkspaceId", event.target.value)}>{(selectedFallback?.workspaces ?? []).map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}</select></label>
-              {form.actionKind === "create_session" && <label>Alternate Agent<select value={form.fallbackAgentId} onChange={(event) => patch("fallbackAgentId", event.target.value)}>{(selectedFallback?.agents ?? []).map((agent) => <option key={agent.id} value={agent.id}>{agentDisplayName(agent)}</option>)}</select></label>}
+              {form.actionKind === "create_session" && <label>Alternate Agent<select value={form.fallbackAgentId} onChange={(event) => patch("fallbackAgentId", event.target.value)}>{automationAgents(selectedFallback?.agents, form.fallbackAgentId).map((agent) => <option key={agent.id} value={agent.id}>{agentDisplayName(agent)}</option>)}</select></label>}
             </>}
             <label>Concurrency<select value={form.concurrency} onChange={(event) => patch("concurrency", event.target.value as FormState["concurrency"])}><option value="wait">Wait for Previous</option><option value="skip">Skip While Active</option>{form.actionKind !== "prompt_session" && <option value="parallel">Allow Parallel</option>}</select></label>
             <label>Max Additional Cost (USD)<input type="number" min="0.01" max="10000" step="0.01" value={form.maxCostUsd} onChange={(event) => patch("maxCostUsd", event.target.value)} /></label>

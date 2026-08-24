@@ -519,6 +519,10 @@ interface HarnessBinding {
 function harnessBindings(agents: AgentDefinition[]): HarnessBinding[] {
   const bindings: HarnessBinding[] = [];
   for (const agent of agents) {
+    // The synthesized conductor shares its donor Claude's harness directory; a binding for it
+    // would duplicate every unmanaged-skill row and turn one directory's state into a per-agent
+    // conflict. Its id is stable across runners (see runner conductor synthesis).
+    if (agent.id === "conductor") continue;
     const driver = agent.driver ?? "acp";
     const relDir = SKILL_DIRS[driver];
     if (!relDir) continue;
