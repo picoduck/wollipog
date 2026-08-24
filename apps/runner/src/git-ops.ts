@@ -368,14 +368,28 @@ export async function captureWorktreeTree(cwd: string): Promise<string> {
       await runContextCommand(context, "rm", ["-f", "--", `${indexFile}.lock`], { cwd, timeoutMs: SNAPSHOT_TIMEOUT_MS })
         .catch(() => {});
     } else {
-      rmSync(`${indexFile}.lock`, { force: true });
+      try {
+        rmSync(`${indexFile}.lock`, { force: true });
+      } catch {
+        /* stale lock removal is best-effort */
+      }
     }
     return (await git(cwd, ["write-tree"], opts)).trim();
   } finally {
     if (context.kind === "wsl") {
-      await runContextCommand(context, "rm", ["-f", "--", indexFile], { cwd, timeoutMs: SNAPSHOT_TIMEOUT_MS }).catch(() => {});
+      await runContextCommand(context, "rm", ["-f", "--", indexFile, `${indexFile}.lock`], {
+        cwd, timeoutMs: SNAPSHOT_TIMEOUT_MS,
+      }).catch(() => {});
     } else {
-      rmSync(indexFile, { force: true });
+      try {
+        rmSync(indexFile, { force: true });
+      } finally {
+        try {
+          rmSync(`${indexFile}.lock`, { force: true });
+        } catch {
+          /* stale lock removal is best-effort */
+        }
+      }
     }
   }
 }
