@@ -59,8 +59,15 @@ export interface AgentOption {
 /** Group → dedup → order → label the runner's agents into flat, cleanly-named dropdown options. */
 export function agentOptions(
   agents: AgentDefinition[],
-  options: { includeProviderAdapters?: boolean } = {},
+  options: { includeProviderAdapters?: boolean; includeConductor?: boolean } = {},
 ): AgentOption[] {
+  // The conductor is a runner-synthesized special mode behind the device-local Conductor-Led
+  // Work experiment, and with the runner env gate removed it is advertised whenever a native
+  // Claude can host it. Excluding it by default keeps that switch the feature's ONLY gate:
+  // a surface lists it only by passing the flag through as includeConductor.
+  if (!options.includeConductor) {
+    agents = agents.filter((a) => agentFamily(a) !== CONDUCTOR_FAMILY);
+  }
   // Hide the generic ACP path for a provider once a USABLE native harness for it exists — it's a
   // weaker duplicate (no model picker / slash commands). ACP stays for providers with no native
   // driver, and an explicitly-unavailable native entry (discovery probed and failed) must not

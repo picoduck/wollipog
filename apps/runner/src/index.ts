@@ -51,7 +51,7 @@ import {
   type RunnerConfig,
 } from "./config.js";
 import {
-  withConductorAgent,
+  applyConductorAdvertisementFence,
   defaultConductorHost,
   provisionConductor,
   removeConductorMcpConfig,
@@ -763,8 +763,9 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
     // The conductor is synthesized AFTER the merge — inside discovery, a configured claude entry
     // sharing the launch key would silently suppress it via the merge's usedKeys check.
     metadata.agents = applyClaudeHookCapability(
-      await enrichAgentModels(withConductorAgent(
+      await enrichAgentModels(applyConductorAdvertisementFence(
         mergeAgents(configAgents, discovered),
+        controlPlaneProtocolVersion,
       ), {
         refresh: refreshModels,
       }),

@@ -158,7 +158,12 @@ export function NewSessionDialog({
         ? initialProjectLocation.workspaceId
       : runner?.workspaces[0]?.id) ?? "",
   );
-  const initialAgentOptions = agentOptions(runner?.agents ?? []);
+  // With the experiment off, no conductor exists anywhere in this dialog — not in the plain
+  // agent picker and not as the Conductor-Led Work preset; the guard effect below also resets
+  // a stranded conductor work mode back to an agent session. Read before the initial options
+  // because the first agent selection must already respect it.
+  const conductorExperimentEnabled = useExperiments().flags.conductor;
+  const initialAgentOptions = agentOptions(runner?.agents ?? [], { includeConductor: conductorExperimentEnabled });
   const initialAgentSelection = savedAgentSelection(initialAgentOptions, agentDefaults[runnerId]);
   const [agentId, setAgentId] = useState(initialAgentSelection.agentId);
   const [workMode, setWorkMode] = useState<SessionWorkMode>("agent");
@@ -185,7 +190,10 @@ export function NewSessionDialog({
   const projectLocationsAvailable = selectedProject?.locations.filter((location) =>
     isLaunchableProjectLocation(location, runners)) ?? [];
 
-  const agentOpts = useMemo(() => agentOptions(runner?.agents ?? []), [runner?.agents]);
+  const agentOpts = useMemo(
+    () => agentOptions(runner?.agents ?? [], { includeConductor: conductorExperimentEnabled }),
+    [runner?.agents, conductorExperimentEnabled],
+  );
   const primaryOpts = useMemo(() => primaryAgentOptions(agentOpts), [agentOpts]);
   const advancedOpts = useMemo(() => advancedAgentOptions(agentOpts), [agentOpts]);
   const selectedAgentOption = agentOpts.find((option) => option.agent.id === agentId);
@@ -196,9 +204,6 @@ export function NewSessionDialog({
   const executionTarget = executionTargets.find((target) => target.id === executionTargetId) ??
     executionTargets.find((target) => target.adapter === "host" &&
       target.workspaceStrategy === (useWorktree ? "worktree" : "in_place"));
-  // With the experiment off, no conductor is "available" anywhere in this dialog: the guard
-  // effect below then also resets a stranded conductor work mode back to an agent session.
-  const conductorExperimentEnabled = useExperiments().flags.conductor;
   const availableConductorId = conductorExperimentEnabled ? conductorAgentId(runner?.agents ?? []) : undefined;
   const agent = selectedAgentOption?.agent;
   const nativeTuiRunnerSupported = supportsAgentTui(agent?.driver, runner?.protocolVersion, runner?.os);
@@ -278,7 +283,7 @@ export function NewSessionDialog({
     setRunnerId(id);
     const r = runners.get(id);
     setWorkspaceId(r?.workspaces[0]?.id ?? "");
-    const options = agentOptions(r?.agents ?? []);
+    const options = agentOptions(r?.agents ?? [], { includeConductor: conductorExperimentEnabled });
     const selection = savedAgentSelection(options, agentDefaults[id]);
     setAgentId(workMode === "conductor" ? (conductorAgentId(r?.agents ?? []) ?? selection.agentId) : selection.agentId);
     setAdvancedOpen(isAdvancedAgentId(options, selection.agentId));
@@ -298,7 +303,7 @@ export function NewSessionDialog({
     if (!r?.workspaces.some((w) => w.id === loc.workspaceId)) return;
     setRunnerId(loc.runnerId);
     setWorkspaceId(loc.workspaceId);
-    const options = agentOptions(r.agents);
+    const options = agentOptions(r.agents, { includeConductor: conductorExperimentEnabled });
     const selection = savedAgentSelection(options, agentDefaults[loc.runnerId]);
     setAgentId(workMode === "conductor" ? (conductorAgentId(r.agents) ?? selection.agentId) : selection.agentId);
     setAdvancedOpen(isAdvancedAgentId(options, selection.agentId));

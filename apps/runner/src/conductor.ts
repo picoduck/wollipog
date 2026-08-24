@@ -16,6 +16,7 @@ import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { runnerSupportsProtocol } from "@wollipog/protocol";
 import type { AgentDefinition, SessionLaunchSpec } from "@wollipog/protocol";
 import { defaultRunnerReentryHost, runnerReentryCommand, type RunnerReentryHost } from "./runner-reentry.js";
 import { scopedRunnerCredentialFile, type RunnerDataDirIdentity } from "./runner-data-dir.js";
@@ -308,6 +309,26 @@ export function provisionConductor(
  * agent already claims the id (a config-defined conductor wins) or when no available
  * native claude-code agent exists to donate the launch command.
  */
+/**
+ * Synthesis fenced on the control plane's protocol version (v91+).
+ *
+ * With the runner env gate removed, the device-local experiment toggle is the feature's only
+ * gate — and only a v91+ control plane serves web bundles that default that toggle off and
+ * read the versioned client storage. An older control plane's bundles default it ON and would
+ * treat a legacy stored value as an opt-in, so advertising to them would surface the conductor
+ * to users who never chose it. An unknown version (pre-registration) fails closed; the next
+ * discovery merge after registration re-publishes with the version known. A config-DEFINED
+ * conductor is explicit operator opt-in and is advertised regardless.
+ */
+export function applyConductorAdvertisementFence(
+  agents: AgentDefinition[],
+  controlPlaneProtocolVersion: number | null,
+): AgentDefinition[] {
+  return runnerSupportsProtocol(controlPlaneProtocolVersion ?? undefined, "ungatedConductorAdvertisement")
+    ? withConductorAgent(agents)
+    : agents;
+}
+
 export function withConductorAgent(agents: AgentDefinition[]): AgentDefinition[] {
   if (agents.some((a) => a.id === CONDUCTOR_AGENT_ID)) {
     // Config wins on IDENTITY (launch command/args/env), but the UI contract still applies:

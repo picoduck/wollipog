@@ -252,7 +252,13 @@
 // 90: Managed agent skills: the control plane pushes the authoritative desired skill set for a
 //     machine (skills_sync) and the runner reports authoritative deployment state (skills_state).
 //     Pre-v90 runners never receive the new messages because the capability gate fails closed.
-export const PROTOCOL_VERSION = 90;
+// 91: the Conductor's runner env gate (WOLLIPOG_CONDUCTOR) is removed; the device-local
+//     Conductor-Led Work experiment (default off, versioned client storage) becomes the only
+//     gate. A runner synthesizes and advertises the conductor only to a v91+ control plane:
+//     older deployments serve web bundles that both default the experiment ON and cannot
+//     distinguish a legacy stored opt-in, so unconditional advertisement to them would surface
+//     the feature to users who never chose it.
+export const PROTOCOL_VERSION = 91;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
@@ -366,6 +372,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   durablePromptQueueIdentity: 78,
   providerAuthenticationReceipts: 79,
   subscriptionUsage: 80,
+  /** The control plane serves an experiment-gated web bundle (versioned conductor storage,
+   * default off). Runners fence unconditional conductor advertisement on this floor. */
+  ungatedConductorAdvertisement: 91,
   managedBackgroundDelivery: 82,
   backgroundWorkTracking: 83,
   correlatedRestartEcho: 84,

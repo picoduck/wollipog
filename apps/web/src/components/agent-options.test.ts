@@ -21,7 +21,10 @@ function agent(p: Partial<AgentDefinition> & { id: string; name: string }): Agen
   return { command: "x", args: [], env: {}, available: true, ...p };
 }
 
-const labels = (agents: AgentDefinition[]) => agentOptions(agents).map((o) => o.label);
+// Conductor-inclusive labels: these presentation tests cover the conductor's family ordering
+// and naming, which a surface sees only after opting in via the experiment flag.
+const labels = (agents: AgentDefinition[]) =>
+  agentOptions(agents, { includeConductor: true }).map((o) => o.label);
 
 test("driver presentation never exposes protocol ids", () => {
   assert.equal(agentDriverLabel(agent({ id: "codex", name: "Codex", driver: "codex-app-server" })), "Codex App Server");
@@ -370,4 +373,21 @@ test("persisted session labels audit the actual Codex driver", () => {
   assert.equal(sessionAgentLabel("Conductor (Wollipog)", "claude-code"), "Conductor (Wollipog)");
   assert.equal(sessionAgentLabel("Configured", "claude-code", "conductor"), "Conductor (Wollipog)");
   assert.equal(sessionAgentLabel(null, "acp", "gemini"), "gemini");
+});
+
+test("the conductor is excluded from generic agent lists unless a surface opts in", () => {
+  const agents = [
+    agent({ id: "claude-native", driver: "claude-code" }),
+    agent({ id: "conductor", name: "Conductor (Wollipog)", driver: "claude-code" }),
+  ];
+  // The runner now advertises the conductor whenever it can host one, so the device-local
+  // experiment switch is the feature's only gate; a list that included it by default would
+  // launch it from ordinary surfaces with the switch off.
+  assert.equal(agentOptions(agents).some((o) => o.agent.id === "conductor"), false);
+  assert.equal(defaultRunAgentIds(agents).includes("conductor"), false);
+  assert.equal(runnableAgentIds(agents).includes("conductor"), false);
+  assert.equal(
+    agentOptions(agents, { includeConductor: true }).some((o) => o.agent.id === "conductor"),
+    true,
+  );
 });

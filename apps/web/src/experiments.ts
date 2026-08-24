@@ -41,6 +41,15 @@ export const DEFAULT_EXPERIMENT_FLAGS: ExperimentFlags = {
   conductor: false,
 };
 
+/**
+ * Payload schema version. Writes have always serialized EVERY flag, so a legacy (unversioned)
+ * payload's `conductor: true` is indistinguishable from the old default and is NOT evidence the
+ * user opted in — before v2, toggling any other experiment stored `conductor: true` alongside
+ * it. A legacy `conductor: false` was reachable only by an explicit switch-off and is honoured.
+ * multiAgent and pods keep their legacy semantics; their defaults never changed.
+ */
+export const EXPERIMENTS_SCHEMA_VERSION = 2;
+
 /** Unknown shapes and unknown keys fall back to the defaults key-by-key, never throw. */
 export function parseExperimentFlags(raw: string | null): ExperimentFlags {
   if (raw === null) return DEFAULT_EXPERIMENT_FLAGS;
@@ -54,7 +63,10 @@ export function parseExperimentFlags(raw: string | null): ExperimentFlags {
   const record = parsed as Record<string, unknown>;
   const flag = (id: ExperimentId): boolean =>
     typeof record[id] === "boolean" ? (record[id] as boolean) : DEFAULT_EXPERIMENT_FLAGS[id];
-  return { multiAgent: flag("multiAgent"), pods: flag("pods"), conductor: flag("conductor") };
+  // A legacy payload can never prove a conductor opt-in: stored true was the old default and
+  // stored false agrees with the new default, so the legacy branch is simply off.
+  const conductor = record.v === EXPERIMENTS_SCHEMA_VERSION ? flag("conductor") : false;
+  return { multiAgent: flag("multiAgent"), pods: flag("pods"), conductor };
 }
 
 /** One vocabulary for the settings rows and the disabled-route notice, so they cannot drift. */
@@ -102,7 +114,11 @@ export function setExperimentFlag(
   flagsByScope.set(instanceScope, next);
   // Persistence is best-effort like every other preference; the in-memory value still wins
   // for this page's lifetime even when private mode rejects the write.
-  saveInstanceStorageValue(EXPERIMENTS_STORAGE_KEY, JSON.stringify(next), instanceScope);
+  saveInstanceStorageValue(
+    EXPERIMENTS_STORAGE_KEY,
+    JSON.stringify({ v: EXPERIMENTS_SCHEMA_VERSION, ...next }),
+    instanceScope,
+  );
   for (const listener of listeners) listener();
 }
 

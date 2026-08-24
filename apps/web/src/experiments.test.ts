@@ -13,6 +13,7 @@ import {
   setExperimentFlag,
   subscribeExperimentFlags,
 } from "./experiments.js";
+import { LOCAL_INSTANCE_SCOPE } from "./instance-storage.js";
 import { instanceStorageKey } from "./instance-storage.js";
 import { GLOBAL_VIEW_ITEMS, SETTINGS_SECTIONS, viewFromPath, viewPath } from "./navigation.js";
 
@@ -173,4 +174,29 @@ test("the Experimental section is a route like its siblings", () => {
     "the section must exist in the one list the nav, routes, and palette derive from");
   assert.equal(viewPath({ name: "settings", section: "experimental" }), "/settings/experimental");
   assert.deepEqual(viewFromPath("/settings/experimental"), { name: "settings", section: "experimental" });
+});
+
+test("a legacy payload's conductor:true is the old default, not an opt-in", () => {
+  // Every legacy write serialized ALL flags, so toggling pods once stored conductor:true for a
+  // user who never chose it. With the runner env gate removed, honouring that value would
+  // silently enable the feature on upgrade for exactly those devices.
+  const legacy = parseExperimentFlags(JSON.stringify({ multiAgent: true, pods: false, conductor: true }));
+  assert.equal(legacy.conductor, false);
+  assert.equal(legacy.pods, false, "other legacy choices stay honoured");
+});
+
+test("a legacy conductor value is never an opt-in, in either direction", () => {
+  assert.equal(parseExperimentFlags(JSON.stringify({ conductor: false })).conductor, false);
+  assert.equal(parseExperimentFlags(JSON.stringify({ conductor: true })).conductor, false);
+});
+
+test("a v2 payload's conductor value is an explicit choice in both directions", () => {
+  assert.equal(parseExperimentFlags(JSON.stringify({ v: 2, conductor: true })).conductor, true);
+  assert.equal(parseExperimentFlags(JSON.stringify({ v: 2, conductor: false })).conductor, false);
+});
+
+test("writes are versioned so the next read trusts the stored conductor value", () => {
+  setExperimentFlag("conductor", true, LOCAL_INSTANCE_SCOPE);
+  resetExperimentFlagsForTest();
+  assert.equal(getExperimentFlags(LOCAL_INSTANCE_SCOPE).conductor, true);
 });

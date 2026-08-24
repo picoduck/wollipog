@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentDefinition, SessionLaunchSpec } from "@wollipog/protocol";
 import {
+  applyConductorAdvertisementFence,
   CONDUCTOR_DISALLOWED_TOOLS,
   CONDUCTOR_READ_TOOLS,
   buildConductorArgs,
@@ -527,4 +528,19 @@ test("post-merge synthesis: a configured claude entry sharing the launch key doe
   // The bare "claude" config command adopts discovery's RESOLVED path in the merge (it's a
   // pointer, not an override), so the donor — and hence the conductor — carries the real path.
   assert.equal(conductor!.command, "/usr/local/bin/claude", "donated by the merged (config) entry");
+});
+
+test("conductor advertisement is fenced on a v91+ control plane", () => {
+  const donor = claudeAgent();
+  // Unknown (pre-registration) and pre-v91 control planes serve web bundles that default the
+  // experiment on and cannot distinguish a legacy stored opt-in — synthesis must fail closed.
+  assert.equal(applyConductorAdvertisementFence([donor], null).some((a) => a.id === "conductor"), false);
+  assert.equal(applyConductorAdvertisementFence([donor], 90).some((a) => a.id === "conductor"), false);
+  assert.equal(applyConductorAdvertisementFence([donor], 91).some((a) => a.id === "conductor"), true);
+});
+
+test("a config-defined conductor passes the fence untouched: it is explicit operator opt-in", () => {
+  const configured = claudeAgent({ id: "conductor", name: "Configured Conductor", source: "config" });
+  const fenced = applyConductorAdvertisementFence([configured], 90);
+  assert.equal(fenced.some((a) => a.id === "conductor"), true);
 });
