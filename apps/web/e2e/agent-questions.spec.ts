@@ -152,3 +152,38 @@ test("offline questions explain the state and can be dismissed after reconnectin
   await expect(page.getByRole("status")).toHaveText("Question Answered");
   expect(await page.evaluate(() => window.agentQuestionCalls[0]?.answers)).toEqual({});
 });
+
+test("an online question becoming offline remains keyboard-discoverable without accepting responses", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/agent-questions-e2e.html?set=long");
+
+  const availability = page.locator(".question-availability");
+  await expect(availability).toHaveAttribute("role", "status");
+  await expect(availability).toHaveText("");
+  await expect(availability).not.toHaveCSS("display", "none");
+
+  await page.evaluate(() => window.setAgentQuestionOnline(false));
+  await expect(availability).toHaveText("Responses are unavailable until the runner reconnects.");
+
+  const firstRadio = page.getByRole("radio", { name: /Canary/ });
+  const secondRadio = page.getByRole("radio", { name: /Blue-Green/ });
+  await expect(firstRadio).toHaveAttribute("aria-disabled", "true");
+  await expect(firstRadio).toHaveAttribute("tabindex", "0");
+  await expect(secondRadio).toHaveAttribute("tabindex", "-1");
+  await expect(page.getByRole("radiogroup", { name: /Choose the release strategy/ }))
+    .toHaveAccessibleDescription(/Responses are unavailable until the runner reconnects/);
+  await expect(page.getByRole("group", { name: /Select every validation/ }))
+    .toHaveAccessibleDescription(/Responses are unavailable until the runner reconnects/);
+  await expect(firstRadio).toHaveCSS("cursor", "not-allowed");
+  await expect(firstRadio).toHaveCSS("opacity", "0.6");
+
+  await firstRadio.focus();
+  await firstRadio.press("ArrowDown");
+  await expect(secondRadio).toBeFocused();
+  await expect(secondRadio).toHaveAttribute("aria-checked", "false");
+  await firstRadio.focus();
+  await expect(firstRadio).toBeFocused();
+  await firstRadio.press("Space");
+  await expect(firstRadio).toHaveAttribute("aria-checked", "false");
+  await expect(page.getByRole("checkbox", { name: /Unit Tests/ })).toHaveAttribute("tabindex", "0");
+});

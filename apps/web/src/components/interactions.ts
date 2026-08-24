@@ -172,17 +172,26 @@ export function rovingChoiceIndex(
   return current;
 }
 
-function enabledChoices(container: HTMLElement, role: "radio" | "tab"): HTMLElement[] {
+function enabledChoices(
+  container: HTMLElement,
+  role: "radio" | "tab",
+  includeAriaDisabled = false,
+): HTMLElement[] {
   return Array.from(container.querySelectorAll<HTMLElement>(`[role="${role}"]`)).filter(
-    (item) => item.getAttribute("aria-disabled") !== "true" && !(item instanceof HTMLButtonElement && item.disabled),
+    (item) => (includeAriaDisabled || item.getAttribute("aria-disabled") !== "true") &&
+      !(item instanceof HTMLButtonElement && item.disabled),
   );
 }
 
 /** Shared Arrow/Home/End behavior for button radios, segmented controls, and true tabs. */
-export function handleRovingChoiceKeyDown(event: ReactKeyboardEvent<HTMLElement>, role: "radio" | "tab"): void {
+export function handleRovingChoiceKeyDown(
+  event: ReactKeyboardEvent<HTMLElement>,
+  role: "radio" | "tab",
+  options: { includeAriaDisabled?: boolean; activate?: boolean } = {},
+): void {
   if (!["ArrowDown", "ArrowRight", "ArrowUp", "ArrowLeft", "Home", "End"].includes(event.key)) return;
   if (!(event.target instanceof HTMLElement) || !isRovingChoiceTarget(event.target.getAttribute("role"), role)) return;
-  const choices = enabledChoices(event.currentTarget, role);
+  const choices = enabledChoices(event.currentTarget, role, options.includeAriaDisabled);
   const current = choices.indexOf(document.activeElement as HTMLElement);
   const next = rovingChoiceIndex(current, choices.map(() => true), event.key as RovingKey);
   const target = choices[next];
@@ -194,7 +203,7 @@ export function handleRovingChoiceKeyDown(event: ReactKeyboardEvent<HTMLElement>
   // re-selecting the current range as a refresh, so holding Home fired a request per keydown. The
   // button row this replaced ignored these keys entirely, so the amplification is new.
   const selected = role === "radio" ? target.getAttribute("aria-checked") : target.getAttribute("aria-selected");
-  if (selected !== "true") target.click();
+  if (options.activate !== false && selected !== "true") target.click();
 }
 
 const MENU_ITEM_SELECTOR = '[role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"]';
