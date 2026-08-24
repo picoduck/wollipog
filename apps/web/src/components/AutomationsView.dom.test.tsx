@@ -349,6 +349,10 @@ test("editing and saving without changes sends the exact stored multi-alternate 
     assert.equal(choiceTrigger(fixture.container, "Model")?.getAttribute("aria-label"), "Model: Opus");
     assert.equal(choiceTrigger(fixture.container, "Reasoning Effort")?.getAttribute("aria-label"), "Reasoning Effort: High");
     assert.equal(choiceTrigger(fixture.container, "Permission Mode")?.getAttribute("aria-label"), "Permission Mode: Auto");
+    assert.deepEqual(
+      [...nativeSelect(fixture.container, "Alternate Machine").options].map((option) => option.value),
+      ["", "runner-2"],
+    );
 
     await act(async () => { button(fixture.container, "Save Automation").click(); });
     await act(settle);

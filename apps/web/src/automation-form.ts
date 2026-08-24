@@ -299,27 +299,22 @@ export function buildSpec(form: FormState, context: BuildSpecContext): Automatio
   // The form renders only the first target. Later targets are carried wholesale, except graph-bound
   // workflow identities when the selected workflow changes; those agent ids belong to the old
   // graph. The first workflow target follows the same rule below for its unrendered fields.
-  const carriedAlternateTargets = baseAlternateTargets.slice(1).map((target) => (
-    form.actionKind === "workflow_run" && !sameWorkflow
-      ? {
-          runnerId: target.runnerId,
-          workspaceId: target.workspaceId,
-          ...(target.projectId !== undefined ? { projectId: target.projectId } : {}),
-          ...(target.projectLocationId !== undefined ? { projectLocationId: target.projectLocationId } : {}),
+  const carriedAlternateTargets = form.runnerPolicy === "alternate"
+    ? baseAlternateTargets.slice(1).map((target) => {
+        const currentPlacement = automationProjectPlacement(context.projectsSupported, projectList, target);
+        validateAutomationAlternatePlacement(context.projectsSupported, primaryPlacement, currentPlacement);
+        if (context.projectsSupported &&
+            ((target.projectId ?? null) !== (currentPlacement.projectId ?? null) ||
+              (target.projectLocationId ?? null) !== (currentPlacement.projectLocationId ?? null))) {
+          throw new Error("A carried alternate target no longer matches its exact Project Location.");
         }
-      : target
-  ));
+        return form.actionKind === "workflow_run" && !sameWorkflow
+          ? { runnerId: target.runnerId, workspaceId: target.workspaceId, ...currentPlacement }
+          : { ...target, ...currentPlacement };
+      })
+    : [];
   if (form.runnerPolicy === "alternate") {
     validateAutomationAlternatePlacement(context.projectsSupported, primaryPlacement, alternatePlacement);
-    for (const target of carriedAlternateTargets) {
-      const currentPlacement = automationProjectPlacement(context.projectsSupported, projectList, target);
-      validateAutomationAlternatePlacement(context.projectsSupported, primaryPlacement, currentPlacement);
-      if (context.projectsSupported &&
-          (target.projectId !== currentPlacement.projectId ||
-            target.projectLocationId !== currentPlacement.projectLocationId)) {
-        throw new Error("A carried alternate target no longer matches its exact Project Location.");
-      }
-    }
     if (action.kind === "create_session") {
       const configError = alternateConfigError(action.request.config, context.alternateCapabilities);
       if (configError) throw new Error(configError);

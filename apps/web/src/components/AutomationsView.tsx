@@ -141,6 +141,10 @@ export function AutomationsView() {
 
   const selectedRunner = runners.get(form.runnerId);
   const selectedFallback = runners.get(form.fallbackRunnerId);
+  const carriedAlternateRunnerIds = new Set(editingSpec?.runnerPolicy.kind === "alternate" &&
+      editingSpec.action.kind === form.actionKind
+    ? editingSpec.runnerPolicy.targets.slice(1).map((target) => target.runnerId)
+    : []);
   // Model, effort, and permission mode are agent-scoped: the runner advertises them per agent, and
   // the pickers must never offer a value the selected agent cannot honour. A value already stored
   // but no longer advertised is still listed, so editing an automation cannot silently rewrite it.
@@ -398,7 +402,9 @@ export function AutomationsView() {
                 const runner = runners.get(event.target.value);
                 setForm((current) => ({ ...current, fallbackRunnerId: event.target.value,
                   fallbackWorkspaceId: runner?.workspaces[0]?.id ?? "", fallbackAgentId: defaultAgentId(runner?.agents) }));
-              }}><option value="">Select…</option>{[...runners.values()].filter((runner) => runner.runnerId !== form.runnerId).map((runner) => <option key={runner.runnerId} value={runner.runnerId}>{machineLabels.get(runner.runnerId)}</option>)}</select></label>
+              }}><option value="">Select…</option>{[...runners.values()]
+                .filter((runner) => runner.runnerId !== form.runnerId && !carriedAlternateRunnerIds.has(runner.runnerId))
+                .map((runner) => <option key={runner.runnerId} value={runner.runnerId}>{machineLabels.get(runner.runnerId)}</option>)}</select></label>
               <label>Alternate Workspace<select value={form.fallbackWorkspaceId} onChange={(event) => patch("fallbackWorkspaceId", event.target.value)}>{(selectedFallback?.workspaces ?? []).map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}</select></label>
               {form.actionKind === "create_session" && <label>Alternate Agent<select value={form.fallbackAgentId} onChange={(event) => patch("fallbackAgentId", event.target.value)}>{automationAgents(selectedFallback?.agents, form.fallbackAgentId).map((agent) => <option key={agent.id} value={agent.id}>{agentDisplayName(agent)}</option>)}</select></label>}
             </>}

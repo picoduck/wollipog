@@ -374,6 +374,43 @@ test("multi-target workflow bindings survive an unchanged edit", () => {
   assertRoundTrips(spec);
 });
 
+test("Project-less carried alternates normalize omitted placement for a Project-aware server", () => {
+  const spec: AutomationSpec = {
+    ...baseSpec({
+      kind: "create_session",
+      request: {
+        runnerId: "primary", workspaceId: "primary-ws", agentId: "claude", prompt: "Sweep.",
+      },
+    }),
+    runnerPolicy: {
+      kind: "alternate",
+      targets: [
+        { runnerId: "alternate-a", workspaceId: "a-ws", agentId: "claude-a" },
+        { runnerId: "alternate-b", workspaceId: "b-ws", agentId: "claude-b" },
+      ],
+      expireAfterMinutes: 60,
+    },
+  };
+
+  const saved = buildSpec(formFrom(spec), {
+    projectsSupported: true, projects: [], base: spec,
+  });
+  assert.equal(saved.action.kind, "create_session");
+  assert.equal(saved.action.request.projectId, null);
+  assert.equal(saved.action.request.projectLocationId, null);
+  assert.equal(saved.runnerPolicy.kind, "alternate");
+  assert.deepEqual(saved.runnerPolicy.targets, [
+    {
+      runnerId: "alternate-a", workspaceId: "a-ws", agentId: "claude-a",
+      projectId: null, projectLocationId: null,
+    },
+    {
+      runnerId: "alternate-b", workspaceId: "b-ws", agentId: "claude-b",
+      projectId: null, projectLocationId: null,
+    },
+  ]);
+});
+
 test("a carried alternate whose Project Location is stale blocks the save", () => {
   const project = (id: string, runnerId: string, workspaceId: string, locationId: string) => ({
     id,
@@ -413,11 +450,11 @@ test("a carried alternate whose Project Location is stale blocks the save", () =
   const projects = [
     project("project-a", "primary", "primary-ws", "primary-location"),
     project("project-a", "alternate-a", "a-ws", "alternate-a-location"),
-    project("project-b", "alternate-b", "b-ws", "current-location"),
+    project("project-a", "alternate-b", "b-ws", "current-location"),
   ];
 
   assert.throws(
     () => buildSpec(formFrom(spec), { projectsSupported: true, projects, base: spec }),
-    /same Project|exact Project Location/,
+    /A carried alternate target no longer matches its exact Project Location\./,
   );
 });
