@@ -156,7 +156,8 @@ import {
   restoreComposerFocus,
   restoreRememberedComposerFocus,
 } from "../composer-focus.js";
-import { KEYBOARD_DISMISS_BLUR_EVENT, TOUCH_PHONE_MEDIA } from "../mobile-viewport.js";
+import { enterKeystrokeSends, useEnterKeyBehavior } from "../enter-key.js";
+import { KEYBOARD_DISMISS_BLUR_EVENT } from "../mobile-viewport.js";
 import { resizeComposerToContent } from "../composer-autogrow.js";
 import { IncrementalActiveTurnProgress } from "../turn-progress.js";
 import { WorkingIndicator } from "./WorkingIndicator.js";
@@ -2315,9 +2316,11 @@ function SessionDetailLoaded({
     insertSlashCommand(command);
   };
 
-  // Enter only sends where a hardware keyboard is the norm; the tooltip must not advertise a
-  // shortcut the touch-phone layout no longer honours.
+  // The tooltip advertises whichever binding actually sends under the Enter-key setting; on a
+  // touch phone in newline mode it stays plain "Send" — the software keyboard has no Shift+Enter
+  // to advertise, and the button itself is the affordance there.
   const isTouchPhone = useIsTouchPhone();
+  const enterKeySetting = useEnterKeyBehavior();
 
   const onKeyDown = (e: KeyboardEvent) => {
     composerInteractionVersionRef.current += 1;
@@ -2384,13 +2387,15 @@ function SessionDetailLoaded({
         return;
       }
     }
-    // Enter sends; Shift+Enter inserts a newline. (Ctrl/Cmd+Enter intentionally does NOT send.)
-    // Except on the touch-phone layout, where Enter falls through to the textarea's native
-    // newline: a software keyboard has no Shift, held or otherwise, mid-word — so send-on-Enter
-    // made multi-line drafts unwritable on a phone. The Send button is the send affordance there,
-    // and its press keeps the keyboard open.
-    if (e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey && !composing) {
-      if (window.matchMedia(TOUCH_PHONE_MEDIA).matches) return;
+    // Enter and Shift+Enter split send from newline; WHICH is which is the per-device Enter-key
+    // setting (Settings > Behavior), whose unstored default derives from the device class —
+    // send on a hardware-keyboard layout, newline on a touch phone, where a software keyboard
+    // has no Shift to hold and send-on-Enter made multi-line drafts unwritable. The pair swaps
+    // as a unit so a keyboard send always exists without touching Ctrl+Enter, which is steering.
+    // Read at keydown, not render: the settings panel can flip it while this composer is mounted.
+    // (Ctrl/Cmd+Enter intentionally does NOT send.)
+    if (e.key === "Enter" && !e.metaKey && !e.ctrlKey && !composing) {
+      if (!enterKeystrokeSends(e.shiftKey)) return; // the other half of the pair is the newline
       e.preventDefault();
       void send();
     }
@@ -3004,7 +3009,9 @@ function SessionDetailLoaded({
                       onPointerDown={(e) => e.preventDefault()}
                       onClick={send}
                       disabled={!canSend || composerRequestBusy}
-                      title={isTouchPhone ? "Send" : "Send (Enter)"}
+                      title={enterKeySetting === "send"
+                        ? "Send (Enter)"
+                        : isTouchPhone ? "Send" : "Send (Shift+Enter)"}
                       aria-label="Send"
                     >
                       {busy ? <Spinner /> : <ArrowUpIcon size={14} />}
