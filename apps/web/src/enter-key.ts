@@ -21,7 +21,19 @@ export const ENTER_KEY_STORAGE_KEY = "wollipog.enter-key";
 /** Same-tab writes never fire the browser's `storage` event, so the setter announces its own. */
 const ENTER_KEY_CHANGE_EVENT = "wollipog:enter-key-change";
 
+/**
+ * The page-lifetime home of a choice storage refused to keep.
+ *
+ * Populated ONLY when the write throws (private mode, quota, sandboxing) and cleared by the next
+ * successful write, so it can never shadow a value another tab stored. Without it the change
+ * event announced a choice every reader immediately re-derived away: the settings row snapped
+ * back and the composer never changed, with no feedback that anything failed.
+ */
+const unstorableChoice = new WeakMap<Window, EnterKeyBehavior>();
+
 export function storedEnterKeyBehavior(win: Window = window): EnterKeyBehavior | null {
+  const remembered = unstorableChoice.get(win);
+  if (remembered) return remembered;
   try {
     const value = win.localStorage.getItem(ENTER_KEY_STORAGE_KEY);
     return value === "send" || value === "newline" ? value : null;
@@ -38,9 +50,10 @@ export function enterKeyBehavior(win: Window = window): EnterKeyBehavior {
 export function setEnterKeyBehavior(value: EnterKeyBehavior, win: Window = window): void {
   try {
     win.localStorage.setItem(ENTER_KEY_STORAGE_KEY, value);
+    unstorableChoice.delete(win);
   } catch {
-    // Private-mode storage failures leave the derived default in force; the UI still reflects
-    // the attempted choice for this page's lifetime only via the change event below.
+    // The choice still governs this page for its lifetime; only persistence is lost.
+    unstorableChoice.set(win, value);
   }
   win.dispatchEvent(new Event(ENTER_KEY_CHANGE_EVENT));
 }

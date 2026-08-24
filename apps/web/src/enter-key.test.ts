@@ -54,12 +54,19 @@ test("an unrecognised stored value falls back to the derived default", () => {
   assert.equal(enterKeyBehavior(fakeWin({ stored: "garbage", touchPhone: true }).win), "newline");
 });
 
-test("denied storage leaves the derived default in force", () => {
+test("denied storage leaves the derived default in force until a choice is made", () => {
   // Private-mode localStorage throws; the composer must still resolve a mode.
   assert.equal(enterKeyBehavior(fakeWin({ broken: true, touchPhone: true }).win), "newline");
+});
+
+test("a choice storage refuses to keep still governs this page", () => {
+  // The change event alone was a lie: it announced a choice every reader immediately re-derived
+  // away, so the settings row snapped back and the composer never changed.
   const { win, events } = fakeWin({ broken: true });
   setEnterKeyBehavior("newline", win);
-  assert.equal(events.length, 1, "the change is still announced so the UI tracks the attempt");
+  assert.equal(events.length, 1, "the change is still announced");
+  assert.equal(enterKeyBehavior(win), "newline", "the denied choice must hold for the page's lifetime");
+  assert.equal(enterKeystrokeSends(true, win), true, "and the composer must follow it");
 });
 
 test("the pair swaps as a unit", () => {
