@@ -323,3 +323,101 @@ test("a workflow automation drops runner-scoped config once an alternate can run
   assert.equal(saved.action.request.config, undefined);
   assert.equal(saved.action.request.costBudgetUsd, 12);
 });
+
+test("an alternate policy with multiple targets survives an unchanged edit", () => {
+  const spec: AutomationSpec = {
+    ...baseSpec({
+      kind: "create_session",
+      request: {
+        runnerId: "primary", workspaceId: "primary-ws", agentId: "claude",
+        prompt: "Sweep.", useWorktree: false,
+      },
+    }),
+    runnerPolicy: {
+      kind: "alternate",
+      targets: [
+        { runnerId: "alternate-a", workspaceId: "a-ws", agentId: "claude-a" },
+        { runnerId: "alternate-b", workspaceId: "b-ws", agentId: "claude-b" },
+        { runnerId: "alternate-c", workspaceId: "c-ws", agentId: "claude-c" },
+      ],
+      expireAfterMinutes: 60,
+    },
+  };
+
+  assertRoundTrips(spec);
+});
+
+test("multi-target workflow bindings survive an unchanged edit", () => {
+  const spec: AutomationSpec = {
+    ...baseSpec({
+      kind: "workflow_run",
+      request: {
+        runnerId: "primary", workspaceId: "primary-ws", workflowId: "build-review", task: "Sweep.",
+      },
+    }),
+    runnerPolicy: {
+      kind: "alternate",
+      targets: [
+        {
+          runnerId: "alternate-a", workspaceId: "a-ws",
+          agentBindings: { build: "claude-a", review: "codex-a" }, orchestratorAgentId: "claude-a",
+        },
+        {
+          runnerId: "alternate-b", workspaceId: "b-ws",
+          agentBindings: { build: "claude-b", review: "codex-b" }, orchestratorAgentId: "claude-b",
+        },
+      ],
+      expireAfterMinutes: 60,
+    },
+  };
+
+  assertRoundTrips(spec);
+});
+
+test("a carried alternate whose Project Location is stale blocks the save", () => {
+  const project = (id: string, runnerId: string, workspaceId: string, locationId: string) => ({
+    id,
+    name: id,
+    hidden: false,
+    locations: [{
+      id: locationId, projectId: id, runnerId, workspaceId, name: locationId,
+      path: `/${workspaceId}`, source: "managed" as const, availability: "available" as const,
+      isDefault: true, createdAt: 1, updatedAt: 1,
+    }],
+    activeSessionCount: 0, unarchivedSessionCount: 0, totalSessionCount: 0,
+    createdAt: 1, updatedAt: 1,
+  });
+  const spec: AutomationSpec = {
+    ...baseSpec({
+      kind: "create_session",
+      request: {
+        runnerId: "primary", workspaceId: "primary-ws", agentId: "claude",
+        projectId: "project-a", projectLocationId: "primary-location", prompt: "Sweep.",
+      },
+    }),
+    runnerPolicy: {
+      kind: "alternate",
+      targets: [
+        {
+          runnerId: "alternate-a", workspaceId: "a-ws", agentId: "claude-a",
+          projectId: "project-a", projectLocationId: "alternate-a-location",
+        },
+        {
+          runnerId: "alternate-b", workspaceId: "b-ws", agentId: "claude-b",
+          projectId: "project-a", projectLocationId: "stale-location",
+        },
+      ],
+      expireAfterMinutes: 60,
+    },
+  };
+  const projects = [
+    project("project-a", "primary", "primary-ws", "primary-location"),
+    project("project-a", "alternate-a", "a-ws", "alternate-a-location"),
+    project("project-b", "alternate-b", "b-ws", "current-location"),
+  ];
+
+  assert.throws(
+    () => buildSpec(formFrom(spec), { projectsSupported: true, projects, base: spec }),
+    /same Project|exact Project Location/,
+  );
+});
