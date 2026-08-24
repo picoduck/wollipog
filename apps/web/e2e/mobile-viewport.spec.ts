@@ -1064,6 +1064,27 @@ test.describe("while a text field is focused", () => {
       { message: "the dismissal under collapsed chrome must still blur" }).toBe(true);
   });
 
+  test("a fully panned keyboard is not a dismissal", async ({ page }) => {
+    await useHarness(page);
+    await page.locator(".main-body textarea").focus();
+    await openKeyboard(page);
+    await expect(page.locator(".app-rail")).toBeHidden();
+
+    // Panning toward the focused field can drive the BOTTOM GAP inside the noise floor with the
+    // keyboard fully open — the height never grew, only the origin moved. Reading the residual
+    // gap alone as closure blurred the field just as the user started typing.
+    await applyViewport(page, () => page.evaluate(() => window.panKeyboard(295)));
+    expect(await page.evaluate(() => document.activeElement?.tagName),
+      "a panned-away bottom gap must not read as a dismissal").toBe("TEXTAREA");
+    await expect(page.locator(".app-rail")).toBeHidden();
+
+    // The genuine dismissal restores both the height and the origin.
+    await applyViewport(page, () => page.evaluate(() => window.setKeyboard(0)));
+    await expect.poll(() => page.evaluate(() => document.activeElement === document.body),
+      { message: "the unpanned dismissal must still blur" }).toBe(true);
+    await expectRailAt(page, 0);
+  });
+
   test("the resizes-content family still blurs on a dismissal", async ({ page }) => {
     await useHarness(page);
     await page.locator(".main-body textarea").focus();

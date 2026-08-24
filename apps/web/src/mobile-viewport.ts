@@ -114,8 +114,14 @@ export function installMobileViewportFallback(win: Window = window): () => void 
     // hiding rule exists in, so a desktop window resize never steals focus from a form.
     const height = viewport.height;
     if (keyboardOpen) occlusionTracked ||= occluded > NOISE_FLOOR_PX;
+    // The occlusion release also requires the PAN to be gone: `occluded` is the bottom gap, and a
+    // viewport panned toward the focused field can drive the gap inside the noise floor with the
+    // keyboard fully open — the height never grew, only the origin moved. A dismissal restores
+    // both: the visual viewport cannot be full-height and offset at once. (While pinch-zoomed the
+    // offset legitimately stays, so a dismissal there strands the rail until a tap — the
+    // recoverable side, where releasing on the gap alone blurred mid-word.)
     const released = occlusionTracked
-      ? occluded <= NOISE_FLOOR_PX
+      ? occluded <= NOISE_FLOOR_PX && viewport.offsetTop <= NOISE_FLOOR_PX
       : height >= peak - KEYBOARD_CLOSE_PX && height - trough >= KEYBOARD_LEAVE_PX;
     if (viewport.width !== lastWidth) {
       lastWidth = viewport.width;
