@@ -10018,9 +10018,12 @@ body.shell-dock-dragging * {
     max-width: 96px;
   }
   .session-detail > .detail-head > .session-header-statuses {
-    grid-column: 2 / -1;
+    grid-column: 1 / -1;
     grid-row: 2;
     flex-wrap: wrap;
+  }
+  .session-detail > .detail-head .change-status-indicators {
+    display: contents;
   }
   .session-more-actions { width: 44px; height: 44px; }
   .detail-actions {

@@ -145,6 +145,19 @@ test("review-ready and uncommitted badges wrap together at narrow widths", () =>
   assert.match(group, /min-width: 0;/);
   assert.match(group, /flex-wrap: wrap;/,
     "the shared header and pinned-summary group must not hide either compact status on mobile");
+  const phoneRule = mediaBlocks(css).find((block) =>
+    block.maxWidths.includes(760) &&
+    block.containsSelector(".session-detail > .detail-head .change-status-indicators"));
+  assert.ok(phoneRule, "the phone layout must flatten the change group into the shared status row");
+  assert.deepEqual(
+    phoneRule.declarationsForSelector(".session-detail > .detail-head .change-status-indicators").get("display"),
+    ["contents"],
+  );
+  assert.deepEqual(
+    phoneRule.declarationsForSelector(".session-detail > .detail-head > .session-header-statuses")
+      .get("grid-column"),
+    ["1 / -1"],
+  );
 });
 
 /**
