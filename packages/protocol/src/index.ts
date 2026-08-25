@@ -2386,6 +2386,39 @@ export interface UsageAggregationResponse {
   byRunner: UsageBreakdown[];
 }
 
+/* -------------------------- Session naming ----------------------------- */
+
+export type SessionNamingMode =
+  | "prompt_text_only"
+  | "session_agent_account"
+  | "custom_model_endpoint";
+
+export interface SessionNamingModeAvailability {
+  available: boolean;
+  reason?: string;
+}
+
+/** Secret-free organization setting. Legacy environment configuration is reported only as
+ * endpoint/model metadata; bearer credentials never cross the control-plane API boundary. */
+export interface SessionNamingSettingsView {
+  mode: SessionNamingMode;
+  effectiveMode: "prompt_text_only" | "custom_model_endpoint";
+  source: "default" | "environment" | "organization";
+  canManage: boolean;
+  modes: Record<SessionNamingMode, SessionNamingModeAvailability>;
+  customModel?: {
+    endpointOrigin: string;
+    model: string;
+    timeoutMs: number;
+    apiKeyConfigured: boolean;
+    configurationSource: "environment";
+  };
+}
+
+export interface UpdateSessionNamingSettingsRequest {
+  mode: SessionNamingMode;
+}
+
 /* ---------------- Provider subscription usage (account-level) ---------- */
 
 export type SubscriptionUsageProvider = "codex" | "claude";

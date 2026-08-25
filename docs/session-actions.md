@@ -73,6 +73,15 @@ privacy boundary. The request has no tools, bounded completed user/assistant inp
 output limit, zero temperature, minimal reasoning, and a short timeout. It never enters the runner, transcript, agent
 context, prompt queue, or session lifecycle.
 
+Settings → Session Naming exposes this legacy endpoint as **Custom Model Endpoint** and also keeps
+the credential-free **Prompt Text Only** mode available. An organization with no saved choice
+inherits the environment behavior above, preserving existing deployments during migration. Once an
+owner or admin saves a mode, that organization setting takes precedence and applies to subsequent
+naming requests without restarting Wollipog. Endpoint/model/key changes still come from the startup
+environment in this compatibility phase; the API returns only the endpoint origin, model, timeout,
+and whether a key is configured, never the key itself. **Use Session Agent Account** remains visible
+but unavailable until runner-hosted provider integrations are implemented.
+
 The reserved `/rename-session` command has the visible label **Rename Session**. It derives a title from the
 original objective and recent completed semantic context. Images, reasoning, tool and shell output,
 provider commands, partial messages, and queued prompts are excluded. Successful explicit results

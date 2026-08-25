@@ -789,7 +789,9 @@ export class SessionsService {
     private readonly notify?: (prev: SessionView, view: SessionView) => void,
     private readonly steeringRequestTimeoutMs = STEERING_REQUEST_TIMEOUT_MS,
     private readonly titleGenerator?: SessionTitleGenerator,
-    private readonly titleGenerationTimeoutMs = 5_000,
+    private readonly titleGenerationTimeoutMs: number | ((sessionId: string) => number) = 5_000,
+    private readonly titleGenerationEnabled?: (sessionId: string) => boolean,
+    private readonly titleGenerationRevision?: (sessionId: string) => string,
   ) {
     this.promptOutbox = new SessionPromptOutbox(this.db, this.hub, this.log);
     // A restart can happen after a prompt reached a runner but before the delivery marker was
@@ -4358,9 +4360,11 @@ export class SessionsService {
     sessionId: string,
     ownership: "generated" | "user",
   ): ServiceResult<{ accepted: true }> {
-    if (!this.titleGenerator) return fail("semantic session naming is disabled or not configured", 409);
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    if (!this.titleGenerator || (this.titleGenerationEnabled && !this.titleGenerationEnabled(sessionId))) {
+      return fail("semantic session naming is disabled or not configured", 409);
+    }
     const sensitivePaths = this.db.sessionSensitivePaths(sessionId);
     const messages = boundedSessionTitleContext(
       this.db.listSessionTitleContextEvents(sessionId),
@@ -4371,12 +4375,17 @@ export class SessionsService {
     const epoch = this.bumpTitleGenerationEpoch(sessionId);
     const expectedTitle = session.title;
     const expectedSource = session.titleSource ?? "generated";
+    const expectedGenerationRevision = this.titleGenerationRevision?.(sessionId);
     const controller = new AbortController();
     this.titleGenerationControllers.set(sessionId, controller);
-    const timeout = setTimeout(() => controller.abort(), this.titleGenerationTimeoutMs);
-    void this.titleGenerator({ messages, signal: controller.signal }).then((rawTitle) => {
+    const configuredTimeout = typeof this.titleGenerationTimeoutMs === "function"
+      ? this.titleGenerationTimeoutMs(sessionId) : this.titleGenerationTimeoutMs;
+    const timeout = setTimeout(() => controller.abort(), configuredTimeout);
+    void this.titleGenerator({ sessionId, messages, signal: controller.signal }).then((rawTitle) => {
       const title = normalizeGeneratedSessionTitle(rawTitle);
-      if (!title || controller.signal.aborted || this.titleGenerationEpochs.get(sessionId) !== epoch) return;
+      if (!title || controller.signal.aborted || this.titleGenerationEpochs.get(sessionId) !== epoch ||
+          (this.titleGenerationEnabled && !this.titleGenerationEnabled(sessionId)) ||
+          (this.titleGenerationRevision && this.titleGenerationRevision(sessionId) !== expectedGenerationRevision)) return;
       const current = this.db.getSession(sessionId);
       if (!current || current.title !== expectedTitle || (current.titleSource ?? "generated") !== expectedSource) return;
       this.db.setSemanticSessionTitle(sessionId, title, Date.now(), ownership);
@@ -6218,7 +6227,8 @@ export class SessionsService {
       payload.final !== false && !payload.commandInvocation;
     const generatedOwnership = (session.titleSource ?? "generated") === "generated";
     const shouldGenerateInitialTitle = Boolean(this.titleGenerator) && isCompletedUserMessage &&
-      generatedOwnership && !this.db.hasCompletedUserMessage(sessionId);
+      generatedOwnership && (!this.titleGenerationEnabled || this.titleGenerationEnabled(sessionId)) &&
+      !this.db.hasCompletedUserMessage(sessionId);
     // Keep the runner-seq cursor gap-free: if a live event is ahead of our high-water (we hydrated a
     // session whose earlier history we haven't pulled yet), don't append it out of order and skip
     // past the gap — pull the ordered history from the box (which includes this event) instead.

@@ -136,7 +136,8 @@ import { RUNNER_RELEASE_TAG } from "./release-version.js";
 import { readSshConfigHosts } from "./ssh-config.js";
 import { ControlPlaneDb, GOVERNANCE_AUDIT_RETENTION_MS } from "./db.js";
 import { registerSessionLookupRoute } from "./session-lookup-route.js";
-import { sessionTitleGeneratorFromEnv } from "./session-title-generator.js";
+import { SessionNamingSettings } from "./session-naming-settings.js";
+import { registerSessionNamingRoutes } from "./session-naming-route.js";
 import { registerRunnerAttestationRoute } from "./runner-attestation-route.js";
 import {
   canAssignSessionProject,
@@ -526,6 +527,7 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
   if (!principal) return null;
 
   const memberScopedRoute = routePath === "/api/instance" || routePath === "/api/identity" || routePath === "/api/runners" ||
+    routePath === "/api/session-naming" ||
     routePath === "/api/projects" || routePath.startsWith("/api/projects/") ||
     routePath === "/api/sessions" || routePath.startsWith("/api/sessions/") ||
     routePath === "/api/search" || routePath === "/api/usage" || routePath === "/api/usage/retention" ||
@@ -770,7 +772,7 @@ app.post("/api/public/push-receipt", async (req, reply) => {
   return reply.code(204).send();
 });
 
-const semanticTitleConfig = sessionTitleGeneratorFromEnv();
+const sessionNamingSettings = new SessionNamingSettings(db);
 
 const svc = new SessionsService(
   db,
@@ -787,9 +789,13 @@ const svc = new SessionsService(
     if (msg) pushSender.send(msg, { kind: "session", sessionId: view.id });
   },
   undefined,
-  semanticTitleConfig.generator,
-  semanticTitleConfig.timeoutMs,
+  sessionNamingSettings.generator,
+  sessionNamingSettings.timeoutForSession,
+  sessionNamingSettings.enabledForSession,
+  sessionNamingSettings.revisionForSession,
 );
+
+registerSessionNamingRoutes(app, sessionNamingSettings, requestPrincipal);
 
 registerPromptImageRoutes(app, {
   db,

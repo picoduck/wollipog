@@ -1670,6 +1670,13 @@ CREATE TABLE IF NOT EXISTS usage_retention_policy (
   updated_at          INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS session_naming_preferences (
+  organization_id TEXT PRIMARY KEY,
+  mode            TEXT NOT NULL CHECK (mode IN ('prompt_text_only','custom_model_endpoint')),
+  updated_at      INTEGER NOT NULL,
+  FOREIGN KEY (organization_id) REFERENCES identity_organizations(organization_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS usage_aggregation_meta (
   id                 INTEGER PRIMARY KEY CHECK (id = 1),
   baseline_seeded_at INTEGER NOT NULL
@@ -6298,6 +6305,26 @@ export class ControlPlaneDb {
       "SELECT organization_id, owner_kind, owner_id FROM session_ownership WHERE session_id=?",
     ).get(sessionId) as { organization_id: string; owner_kind: "organization" | "user" | "team"; owner_id: string } | undefined;
     return row ? this.scopeFromRow(row) : null;
+  }
+
+  getSessionNamingPreference(
+    organizationId: string,
+  ): { mode: "prompt_text_only" | "custom_model_endpoint"; updatedAt: number } | null {
+    const row = this.stmt(
+      "SELECT mode, updated_at FROM session_naming_preferences WHERE organization_id=?",
+    ).get(organizationId) as { mode: "prompt_text_only" | "custom_model_endpoint"; updated_at: number } | undefined;
+    return row ? { mode: row.mode, updatedAt: row.updated_at } : null;
+  }
+
+  setSessionNamingPreference(
+    organizationId: string,
+    mode: "prompt_text_only" | "custom_model_endpoint",
+    now: number,
+  ): void {
+    this.stmt(
+      `INSERT INTO session_naming_preferences (organization_id, mode, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(organization_id) DO UPDATE SET mode=excluded.mode, updated_at=excluded.updated_at`,
+    ).run(organizationId, mode, now);
   }
 
   private principalCanAccessScope(principal: AuthPrincipal, scope: ResourceScope): boolean {

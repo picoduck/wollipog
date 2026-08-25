@@ -68,6 +68,8 @@ import type {
   UpdateReviewFindingRequest,
   BundleReviewFindingsRequest,
   SessionConfig,
+  SessionNamingSettingsView,
+  UpdateSessionNamingSettingsRequest,
   SessionEventsResponse,
   SessionFileEntry,
   SessionView,
@@ -257,6 +259,14 @@ export function createApiClient(transport: ApiTransport) {
     }
     return req<UsageAggregationResponse>(`/api/usage?${query.toString()}`);
   },
+
+  sessionNamingSettings: () => req<SessionNamingSettingsView>("/api/session-naming"),
+
+  updateSessionNamingSettings: (input: UpdateSessionNamingSettingsRequest) =>
+    req<SessionNamingSettingsView>("/api/session-naming", {
+      method: "PUT",
+      body: JSON.stringify(input),
+    }),
 
   subscriptionUsage: () => req<SubscriptionUsageResponse>("/api/usage/subscriptions"),
 
