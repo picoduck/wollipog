@@ -349,6 +349,22 @@ test("the phone topbar cannot push its controls off-screen", () => {
     "and must not grow with the instance name");
   assert.match(css, /\.topbar:has\(\.topbar-mobile-controls\) h1 \{[^}]*text-overflow: ellipsis/,
     "the title must yield before any control does");
+  assert.match(css, /\.topbar-mobile-controls \.settings-trigger,[\s\S]*?\.mobile-session-back \{[^}]*width: 44px;[^}]*height: 44px/,
+    "Settings and the Session Back control must retain full phone touch targets");
+});
+
+test("the phone Session topbar owns Back and the live Session title without Open", () => {
+  assert.match(app, /view\.name === "session" \? \([\s\S]*?className="icon-btn mobile-session-back"[\s\S]*?aria-label="Back to Inbox"[\s\S]*?<h1 id="page-title"[^>]*>\{sessionTitle \?\? title\}<\/h1>/,
+    "the mobile app bar must replace its generic Session heading with Back and the live title");
+  assert.match(app, /sessionTitle=\{view\.name === "session" \? sessions\.get\(view\.id\)\?\.title \?\? "Session" : undefined\}/,
+    "the shell must pass the routed Session title into the app bar");
+  assert.match(app, /\{!isMobile && <EditorSelect key=\{view\.id\} sessionId=\{view\.id\} \/>\}/,
+    "Open destinations must not be mounted on the mobile Session route");
+});
+
+test("Session menu triggers clear popovers without rising to the modal backdrop layer", () => {
+  assert.match(css, /\.detail-actions:has\(\.session-header-action\[aria-expanded="true"\]\) \.session-header-action \{[^}]*z-index: var\(--z-popovercontent\);/,
+    "sibling triggers should clear the menu backdrop but stay below every modal");
 });
 
 test("Settings is the trailing control in the unified phone topbar cluster", () => {

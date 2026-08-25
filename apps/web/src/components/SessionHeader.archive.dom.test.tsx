@@ -97,10 +97,21 @@ test("Unarchive on an archived Stop Failed session cancels the archive follow-up
   assert.match(container.textContent ?? "", /Disconnected/);
   assert.match(container.textContent ?? "", /Changes Present/);
   const moreActions = button(container, "More Actions");
-  assert.ok(moreActions.classList.contains("session-more-actions"), "the trigger carries the fixed-geometry class");
+  assert.ok(moreActions.classList.contains("session-header-action"), "the trigger carries the fixed-geometry class");
   assert.ok(moreActions.querySelector("svg"), "the trigger uses the shared icon instead of a text glyph");
   assert.equal(moreActions.textContent?.trim(), "", "the trigger has no font-dependent ellipsis text");
   await act(async () => { button(container, "More Actions").click(); await tick(); });
+  assert.equal(container.textContent?.includes("Export Markdown"), false,
+    "operational actions must not retain sharing or export commands");
+  await act(async () => { button(container, "Share").click(); await tick(); });
+  assert.equal(container.querySelector('[role="menu"][aria-label="Session Actions"]'), null,
+    "opening Share must dismiss More Actions");
+  assert.match(container.textContent ?? "", /Share Transcript…/);
+  assert.match(container.textContent ?? "", /Export Markdown/);
+  assert.match(container.textContent ?? "", /Export JSON/);
+  await act(async () => { button(container, "More Actions").click(); await tick(); });
+  assert.equal(container.querySelector('[role="menu"][aria-label="Session Sharing"]'), null,
+    "opening More Actions must dismiss Share");
   await act(async () => { button(container, "Unarchive").click(); await tick(); await tick(); });
 
   assert.deepEqual(archived, [[session.id, false]]);
@@ -171,6 +182,59 @@ test("plain Stop Failed exposes idempotent Retry Stop and withholds Restart", as
   );
   await act(async () => { button(container, "Retry Stop").click(); await tick(); await tick(); });
   assert.deepEqual(retries, [session.id]);
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+test("archive Stop Failed does not leave an empty Runtime section", async () => {
+  const session = {
+    id: "session-archive-stop-failed",
+    runnerId: "runner-1",
+    title: "Failed Archive Stop",
+    status: "stopped",
+    archived: false,
+    archiveStatus: "stop_failed",
+    stopOperation: {
+      operationId: "archive-stop-operation",
+      status: "stop_failed",
+      requestedAt: 1,
+      lastAttemptAt: 2,
+      attemptCount: 1,
+      capacityReleased: false,
+      failure: { code: "runner_rejected", message: "Stop failed.", failedAt: 3 },
+    },
+  } as SessionView;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      <ApiProvider client={api}>
+        <FeedbackContext.Provider value={{
+          confirm: async () => false,
+          showToast: () => 1,
+          showUndo: () => 1,
+          dismissToast: () => undefined,
+        }}>
+          <SessionHeader
+            session={session}
+            onBack={() => undefined}
+            runnerOnline
+            runnerProtocolVersion={85}
+            providerLogoutSupported={false}
+            stopBeforeArchiveSupported
+            exportReady={false}
+          />
+        </FeedbackContext.Provider>
+      </ApiProvider>,
+    );
+  });
+
+  await act(async () => { button(container, "More Actions").click(); await tick(); });
+  assert.match(container.textContent ?? "", /Retry Stop/,
+    "the Session section retains the archive retry action");
+  assert.equal(container.textContent?.includes("Runtime"), false,
+    "Runtime must not render without a following runtime action");
   await act(async () => root.unmount());
   container.remove();
 });

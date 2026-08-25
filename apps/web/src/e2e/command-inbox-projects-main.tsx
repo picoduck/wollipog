@@ -36,6 +36,8 @@ import { RunDetail } from "../components/RunsView.js";
 import { SessionDetail } from "../components/SessionDetail.js";
 import { ShellDock } from "../components/ShellDock.js";
 import type { RightPanelState } from "../components/RightPanel.js";
+import { useIsMobile } from "../components/useIsMobile.js";
+import { Header } from "../App.js";
 import { InstanceScopeProvider } from "../instance-scope.js";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
@@ -46,6 +48,8 @@ import "../styles.css";
 const FIXTURE_QUERY = new URLSearchParams(window.location.search);
 const SCENARIO = FIXTURE_QUERY.get("scenario");
 const REVIEW_READY = FIXTURE_QUERY.get("reviewReady") === "1";
+const INCLUDE_SESSION_SHELL = FIXTURE_QUERY.get("sessionShell") === "1";
+const LEGACY_WORKSPACES = FIXTURE_QUERY.get("legacyWorkspaces") === "1";
 const HISTORY_PAGE_DELAY_MS = Number(FIXTURE_QUERY.get("historyDelay") ?? 25);
 const STORAGE_KEY = `wollipog.e2e.project-inbox-model${SCENARIO ? `.${SCENARIO}` : ""}`;
 
@@ -405,14 +409,14 @@ function snapshot(): UiSnapshotMessage {
       sessionSubscriptions: false,
       boundedDelivery: false,
       paginatedSessionHistory: false,
-      projects: true,
-      createProjectLocations: true,
+      projects: !LEGACY_WORKSPACES,
+      createProjectLocations: !LEGACY_WORKSPACES,
       nativeTuiLaunch: true,
       stopBeforeArchive: true,
     },
     runners: [runner],
     boxes: [],
-    projects: structuredClone(model.projects),
+    ...(LEGACY_WORKSPACES ? {} : { projects: structuredClone(model.projects) }),
     sessions: structuredClone(model.sessions.filter((candidate) => !candidate.archived)),
     runs: [structuredClone(activeRun)],
     pods: [structuredClone(activePod)],
@@ -1380,6 +1384,8 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
 
 function FixtureSurface() {
   const view = useStoreSelector((state) => state.view);
+  const sessions = useStoreSelector((state) => state.sessions);
+  const isMobile = useIsMobile();
   const [providerCommandAttachmentPolicy, setProviderCommandAttachmentPolicy] = useState(
     fixtureProviderCommandAttachmentPolicy,
   );
@@ -1397,6 +1403,24 @@ function FixtureSurface() {
     setTerminalSessionId(model.sessions.at(-1)?.id ?? null);
   }, []);
   useNewSessionShortcut(true, openShortcutSession);
+  const mobileSessionShell = INCLUDE_SESSION_SHELL && isMobile && view.name === "session" ? (
+    <Header
+      view={view}
+      mobileInstanceControl={<button type="button" className="instance-selector-trigger" aria-label="Switch Instance">I</button>}
+      mobileSettingsControl={<button type="button" className="settings-trigger" aria-label="Settings">S</button>}
+      onNewRun={() => undefined}
+      onNewPod={() => undefined}
+      sessionActions={(
+        <>
+          <button type="button" className="icon-btn" aria-label="Toggle Pinned Summary">P</button>
+          <button type="button" className="icon-btn" aria-label="Show Terminal">T</button>
+          <button type="button" className="icon-btn" aria-label="Show Side Panel">F</button>
+        </>
+      )}
+      sessionTitle={sessions.get(view.id)?.title ?? "Session"}
+      onSessionBack={() => undefined}
+    />
+  ) : null;
   if (view.name === "projects") {
     return (
       <>
@@ -1414,6 +1438,7 @@ function FixtureSurface() {
   if (view.name === "session" && SCENARIO !== "conversation-steering" && SCENARIO !== "preview-follow") {
     return (
       <>
+        {mobileSessionShell}
         <SessionDetail
           sessionId={view.id}
           mode="expanded"
@@ -1437,6 +1462,7 @@ function FixtureSurface() {
   if (view.name !== "inbox" && view.name !== "session") return <div>Fixture View: {view.name}</div>;
   return (
     <>
+      {mobileSessionShell}
       <InboxView
         expandedSessionId={view.name === "session" ? view.id : null}
         rightPanel={rightPanel}
