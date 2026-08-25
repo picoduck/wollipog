@@ -64,7 +64,7 @@ fields. The driver mapping tables (agent event → `SessionEventPayload`) live i
 back-compat). `SessionManager.start()` switches on it:
 
 ```ts
-const driver = makeDriver(spec, callbacks); // factory in apps/runner/src/drivers/index.ts
+const driver = makeDriver(spec, callbacks); // factory in apps/runner/src/drivers/factory.ts
 ```
 
 The factory (`apps/runner/src/drivers/factory.ts`) reads `spec.driver`, `spec.model`,
