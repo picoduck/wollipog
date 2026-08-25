@@ -182,18 +182,27 @@ test("session indicators preserve simultaneous lifecycle, attention, and change 
           },
         }} />
         <ChangeStatusBadge change={{
-          kind: "changes_present",
-          label: "Changes Present",
-          description: "Git confirms a real change set.",
+          kind: "ready_for_review",
+          label: "Ready for Review",
+          description: "Git confirms reviewable commits.",
+          supplement: {
+            kind: "uncommitted_changes",
+            label: "Uncommitted Changes",
+            description: "Git confirms additional local work outside the pull request.",
+          },
         }} />
       </>);
     });
     assert.match(container.textContent ?? "", /Running/);
     assert.match(container.textContent ?? "", /Answer Required/);
-    assert.match(container.textContent ?? "", /Changes Present/);
+    assert.match(container.textContent ?? "", /Ready for Review/);
+    assert.match(container.textContent ?? "", /Uncommitted Changes/);
     assert.match(container.textContent ?? "", /Disconnected/);
     assert.equal(container.querySelector('[aria-label="Answer Required"]')?.textContent?.trim(), "Answer Required");
-    assert.equal(container.querySelector('[aria-label="Changes Present"]')?.textContent?.trim(), "Changes Present");
+    assert.equal(container.querySelector('[aria-label="Ready for Review"]')?.textContent?.trim(), "Ready for Review");
+    assert.equal(container.querySelector('[aria-label="Uncommitted Changes"]')?.textContent?.trim(), "Uncommitted Changes");
+    assert.equal(container.querySelectorAll(".change-status-indicators > .status-badge").length, 2,
+      "compact surfaces preserve both facts as separate badges");
     assert.equal(container.querySelector('[aria-label="Disconnected"]')?.textContent?.trim(), "Disconnected");
   } finally {
     await act(async () => { root.unmount(); });

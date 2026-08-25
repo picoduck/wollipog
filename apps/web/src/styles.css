@@ -1124,6 +1124,13 @@ pre {
 
 /* ----------------------------- Status badges ---------------------------- */
 .session-status-indicators { display: inline-flex; min-width: 0; align-items: center; gap: 5px; flex-wrap: wrap; }
+.change-status-indicators {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
 .status-badge {
   display: inline-flex;
   align-items: center;

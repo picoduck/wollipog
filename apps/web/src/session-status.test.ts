@@ -131,6 +131,17 @@ test("change labels require settled Git evidence and never use workflow or lifec
     })?.label,
     "Ready for Review",
   );
+  const reviewReadyWithLocalWork = sessionChangeStatus({ available: true,
+    settled: true,
+    summary: gitSummary({
+      hasChanges: true,
+      ahead: 2,
+      pr: { number: 142, title: "Status taxonomy", url: "https://example.test/142", state: "OPEN" },
+    }),
+  });
+  assert.equal(reviewReadyWithLocalWork?.label, "Ready for Review");
+  assert.equal(reviewReadyWithLocalWork?.supplement?.label, "Uncommitted Changes");
+  assert.match(reviewReadyWithLocalWork?.supplement?.description ?? "", /not included in the pull request/u);
   assert.equal(
     sessionChangeStatus({ available: true,
       settled: true,
@@ -189,6 +200,15 @@ test("change labels reject unavailable facts and prefer fresh status over a stal
     status: gitStatus({ hasChanges: true }),
     summary: gitSummary({ hasChanges: true }),
   }), null);
+  assert.equal(sessionChangeStatus({
+    available: false,
+    settled: true,
+    summary: gitSummary({
+      hasChanges: true,
+      ahead: 2,
+      pr: { number: 142, title: "Stale", url: "https://example.test/142", state: "OPEN" },
+    }),
+  }), null, "stale review and working-tree evidence cannot produce either affirmative indicator");
   assert.equal(sessionChangeStatus({
     available: true,
     settled: true,

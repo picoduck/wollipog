@@ -8,10 +8,17 @@ export function sessionMayShowChangeStatus(status: SessionStatus): boolean {
 
 export type SessionChangeKind = "no_changes" | "changes_present" | "ready_for_review";
 
+export interface SessionChangeSupplement {
+  kind: "uncommitted_changes";
+  label: "Uncommitted Changes";
+  description: string;
+}
+
 export interface SessionChangeStatus {
   kind: SessionChangeKind;
   label: "No Changes" | "Changes Present" | "Ready for Review";
   description: string;
+  supplement?: SessionChangeSupplement;
 }
 
 export interface SessionChangeEvidence {
@@ -46,6 +53,13 @@ export function sessionChangeStatus(evidence: SessionChangeEvidence): SessionCha
       kind: "ready_for_review",
       label: "Ready for Review",
       description: "Git confirms commits ahead of base with an open pull request.",
+      ...(facts.hasChanges ? {
+        supplement: {
+          kind: "uncommitted_changes" as const,
+          label: "Uncommitted Changes" as const,
+          description: "Git confirms additional uncommitted changes that are not included in the pull request.",
+        },
+      } : {}),
     };
   }
   if (changesPresent) {
