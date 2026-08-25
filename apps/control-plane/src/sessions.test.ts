@@ -6662,6 +6662,64 @@ test("supported Stop operations time out durably and retry the same operation id
   assert.equal(db.getSession(id)?.archiveOperation, undefined);
 });
 
+test("accepted Stops get a persisted bounded completion phase instead of delivery exhaustion", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "running", Date.now());
+  const operation = svc.setArchived(id, true).data!.archiveOperation!;
+
+  for (let attempt = 1; attempt <= SESSION_STOP_MAX_ATTEMPTS; attempt++) {
+    svc.maintainSessionStopIntents(
+      operation.requestedAt + attempt * SESSION_STOP_RETRY_INTERVAL_MS,
+    );
+  }
+  const exhausted = db.sessionStopIntent(id)!;
+  assert.equal(exhausted.operation.failure?.code, "retry_exhausted");
+  const deliveryAttemptId = exhausted.deliveryAttemptId;
+
+  assert.equal(svc.onStopSessionResult(RUNNER_ID, {
+    type: "stop_session_result",
+    sessionId: id,
+    operationId: operation.operationId,
+    deliveryAttemptId,
+    accepted: true,
+  }), true, "late correlated acceptance repairs local delivery exhaustion");
+  const accepted = db.getSession(id)!.archiveOperation!;
+  assert.equal(accepted.status, "stop_pending");
+  assert.equal(accepted.failure, undefined);
+  assert.equal(accepted.capacityReleased, false);
+  assert.ok(accepted.acceptedAt);
+  const acceptedAttemptCount = accepted.attemptCount;
+
+  assert.equal(svc.maintainSessionStopIntents(
+    accepted.acceptedAt + SESSION_STOP_MAX_ATTEMPTS * SESSION_STOP_RETRY_INTERVAL_MS,
+  ), 0);
+  assert.equal(db.getSession(id)?.archiveOperation?.status, "stop_pending",
+    "delivery retry exhaustion no longer applies after acceptance");
+  assert.equal(db.getSession(id)?.archiveOperation?.attemptCount, acceptedAttemptCount,
+    "accepted execution is not redelivered while completion evidence is pending");
+  assert.equal(svc.maintainSessionStopIntents(
+    accepted.acceptedAt + SESSION_STOP_TIMEOUT_MS,
+  ), 1);
+  const timedOut = db.getSession(id)!.archiveOperation!;
+  assert.equal(timedOut.failure?.code, "timeout");
+  assert.match(timedOut.failure?.message ?? "", /accepted Stop.*completion timeout/u);
+  assert.equal(timedOut.capacityReleased, false);
+  assert.equal(db.getSession(id)?.archived, false);
+
+  const previousDeliveryAttemptId = db.sessionStopIntent(id)!.deliveryAttemptId;
+  const retried = svc.retryStop(id).data!.archiveOperation!;
+  assert.equal(retried.operationId, operation.operationId);
+  assert.equal(retried.acceptedAt, undefined);
+  assert.equal(retried.status, "stop_pending");
+  assert.equal(retried.attemptCount, 1);
+  assert.notEqual(db.sessionStopIntent(id)!.deliveryAttemptId, previousDeliveryAttemptId);
+
+  svc.onSessionStatus(id, "stopped", undefined, undefined, RUNNER_ID);
+  assert.equal(db.getSession(id)?.archived, true);
+  assert.equal(db.getSession(id)?.archiveOperation, undefined);
+});
+
 test("attaching archive to an older non-archive Stop intent opens a fresh recovery window", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);

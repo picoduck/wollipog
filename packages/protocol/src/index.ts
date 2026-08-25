@@ -1376,6 +1376,9 @@ export interface StopOperationView {
   requestedAt: number;
   lastAttemptAt: number;
   attemptCount: number;
+  /** When the runner accepted the current delivery attempt. Acceptance starts a bounded
+   * completion window but is not evidence that runtime capacity was released. */
+  acceptedAt?: number;
   capacityReleased: false;
   failure?: {
     code: ArchiveStopFailureCode;

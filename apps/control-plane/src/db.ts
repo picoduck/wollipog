@@ -1886,6 +1886,7 @@ interface SessionStopIntentRow {
   delivery_attempt_id: string;
   last_attempt_at: number;
   attempt_count: number;
+  accepted_at: number | null;
   failed_at: number | null;
   failure_code: string | null;
   failure_message: string | null;
@@ -3783,6 +3784,7 @@ export class ControlPlaneDb {
          last_attempt_at INTEGER,
          attempt_count INTEGER NOT NULL DEFAULT 1 CHECK (attempt_count >= 1),
          delivery_attempt_id TEXT,
+         accepted_at INTEGER,
          failed_at INTEGER,
          failure_code TEXT,
          failure_message TEXT
@@ -3807,6 +3809,9 @@ export class ControlPlaneDb {
     }
     if (!stopIntentColumns.some((column) => column.name === "attempt_count")) {
       db.exec("ALTER TABLE session_stop_intents ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 1 CHECK (attempt_count >= 1)");
+    }
+    if (!stopIntentColumns.some((column) => column.name === "accepted_at")) {
+      db.exec("ALTER TABLE session_stop_intents ADD COLUMN accepted_at INTEGER");
     }
     if (!stopIntentColumns.some((column) => column.name === "failed_at")) {
       db.exec("ALTER TABLE session_stop_intents ADD COLUMN failed_at INTEGER");
@@ -10772,6 +10777,7 @@ export class ControlPlaneDb {
         requestedAt: row.created_at,
         lastAttemptAt: row.last_attempt_at,
         attemptCount: row.attempt_count,
+        ...(row.accepted_at !== null ? { acceptedAt: row.accepted_at } : {}),
         capacityReleased: false,
         ...(failed && code && row.failure_message
           ? { failure: { code, message: row.failure_message, failedAt: row.failed_at! } }
@@ -10812,6 +10818,9 @@ export class ControlPlaneDb {
       "delivery_attempt_id=CASE WHEN session_stop_intents.archive_after_stop=0 " +
         "AND excluded.archive_after_stop=1 AND session_stop_intents.failed_at IS NULL " +
         "THEN excluded.delivery_attempt_id ELSE session_stop_intents.delivery_attempt_id END, " +
+      "accepted_at=CASE WHEN session_stop_intents.archive_after_stop=0 " +
+        "AND excluded.archive_after_stop=1 AND session_stop_intents.failed_at IS NULL " +
+        "THEN NULL ELSE session_stop_intents.accepted_at END, " +
       "archive_after_stop=MAX(session_stop_intents.archive_after_stop, excluded.archive_after_stop)",
     ).run(sessionId, runnerId, now, archiveAfterStop ? 1 : 0, operationId, now, deliveryAttemptId);
     return this.sessionStopIntent(sessionId)!;
@@ -10852,7 +10861,7 @@ export class ControlPlaneDb {
         this.stmt(
           "UPDATE session_stop_intents " +
           "SET created_at=?, failed_at=NULL, failure_code=NULL, failure_message=NULL, delivery_attempt_id=?, " +
-          "last_attempt_at=?, attempt_count=1, restart_launch_id=NULL " +
+          "last_attempt_at=?, attempt_count=1, accepted_at=NULL, restart_launch_id=NULL " +
           "WHERE session_id=? AND failed_at IS NOT NULL",
         ).run(now, deliveryAttemptId, now, sessionId);
       }
@@ -10865,9 +10874,26 @@ export class ControlPlaneDb {
     this.stmt(
       "UPDATE session_stop_intents " +
       "SET last_attempt_at=?, attempt_count=attempt_count+1, delivery_attempt_id=? " +
-      "WHERE session_id=? AND failed_at IS NULL",
+      "WHERE session_id=? AND failed_at IS NULL AND accepted_at IS NULL",
     ).run(now, deliveryAttemptId, sessionId);
     return this.sessionStopIntent(sessionId);
+  }
+
+  /** Persist correlated runner acceptance for the current delivery. A late acceptance may repair
+   * a local timeout/exhaustion projection, but never overrides an explicit runner rejection. */
+  recordSessionStopAcceptance(
+    sessionId: string,
+    operationId: string,
+    deliveryAttemptId: string,
+    now: number,
+  ): boolean {
+    const changed = this.stmt(
+      "UPDATE session_stop_intents " +
+      "SET accepted_at=?, failed_at=NULL, failure_code=NULL, failure_message=NULL " +
+      "WHERE session_id=? AND operation_id=? AND delivery_attempt_id=? AND accepted_at IS NULL AND " +
+      "(failed_at IS NULL OR failure_code IN ('timeout', 'retry_exhausted'))",
+    ).run(now, sessionId, operationId, deliveryAttemptId);
+    return Number(changed.changes) === 1;
   }
 
   failSessionStopIntent(
