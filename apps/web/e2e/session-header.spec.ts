@@ -278,8 +278,12 @@ for (const viewport of [
     const center = (box: { y: number; height: number }) => box.y + box.height / 2;
     expect(Math.abs(center(metrics.actions) - center(metrics.lifecycle))).toBeLessThanOrEqual(12);
     for (let index = 0; index < metrics.badges.length; index += 1) {
+      const badge = metrics.badges[index]!;
+      const overlapsActions = badge.x < metrics.actions.right && badge.right > metrics.actions.x &&
+        badge.y < metrics.actions.bottom && badge.bottom > metrics.actions.y;
+      expect(overlapsActions).toBe(false);
       for (let other = index + 1; other < metrics.badges.length; other += 1) {
-        const left = metrics.badges[index]!;
+        const left = badge;
         const right = metrics.badges[other]!;
         const overlaps = left.x < right.right && left.right > right.x &&
           left.y < right.bottom && left.bottom > right.y;
@@ -339,6 +343,27 @@ for (const viewport of [
     }
   });
 }
+
+test("wrapped background work clears phone actions when no change status is available", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 800 });
+  await openSession(page, "preview-follow", { sessionShell: "1" });
+  await page.evaluate(() => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
+      backgroundWorkState: "running",
+    });
+  });
+
+  const header = page.locator(".session-detail > .detail-head");
+  await expect(header.getByRole("group", { name: "Change Status" })).toHaveCount(0);
+  await expect(header.getByRole("status", { name: "Background Work: Waiting on External Job" })).toBeVisible();
+  const overlapsActions = await header.evaluate((element) => {
+    const badge = element.querySelector(".background-work-badge")!.getBoundingClientRect();
+    const actions = element.querySelector(".detail-actions")!.getBoundingClientRect();
+    return badge.x < actions.right && badge.right > actions.x &&
+      badge.y < actions.bottom && badge.bottom > actions.y;
+  });
+  expect(overlapsActions).toBe(false);
+});
 
 test("long session titles truncate inside the breadcrumb without hiding actions", async ({ page }) => {
   await page.setViewportSize({ width: 780, height: 800 });

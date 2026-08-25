@@ -8,6 +8,7 @@ import {
   BackgroundNotificationBadge,
   BackgroundWorkBadge,
   ActiveSubagentsBadge,
+  AttentionBadge,
   CopyButton,
   ChangeStatusBadge,
   SessionStatusIndicators,
@@ -90,8 +91,12 @@ test("background-work badges expose every durable state with Title Case visible 
 
     const badges = [...container.querySelectorAll(".background-work-badge")];
     assert.deepEqual(
-      badges.map((badge) => badge.textContent),
+      badges.map((badge) => badge.querySelector(".background-work-label-full")?.textContent),
       ["Background Work: Waiting on External Job", "Background Work: Continuation Pending", "Background Work: Orphaned", "Background Work: Resumed"],
+    );
+    assert.deepEqual(
+      badges.map((badge) => badge.querySelector(".background-work-label-compact")?.textContent?.trim()),
+      ["Background Work Active", "Continuation Pending", "Background Work Orphaned", "Background Work Resumed"],
     );
     assert.deepEqual(
       badges.map((badge) => badge.getAttribute("aria-label")),
@@ -120,9 +125,35 @@ test("active subagent badges expose their count and open the active work", async
       root.render(<ActiveSubagentsBadge count={2} onOpen={() => { opens += 1; }} />);
     });
     const badge = container.querySelector<HTMLButtonElement>('button[aria-label="2 Subagents Active"]');
-    assert.equal(badge?.textContent?.trim(), "2 Subagents Active");
+    assert.equal(badge?.querySelector(".background-work-label-full")?.textContent, "2 Subagents Active");
+    assert.equal(badge?.querySelector(".background-work-label-compact")?.textContent, "2 Subagents");
+    assert.equal(badge?.title, "2 Subagents Active");
     await act(async () => { badge?.click(); });
     assert.equal(opens, 1);
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
+test("attention badges retain their own accessible name without an override", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(<AttentionBadge session={{
+        status: "input_required",
+        pendingApproval: {
+          requestId: "question",
+          title: "Choose a database",
+          options: [],
+          kind: "question",
+        },
+      }} />);
+    });
+    assert.equal(container.querySelector(".status-badge")?.getAttribute("aria-label"), "Answer Required");
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();

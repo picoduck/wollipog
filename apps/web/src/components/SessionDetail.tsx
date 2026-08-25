@@ -160,7 +160,7 @@ import { enterKeystrokeSends, useEnterKeyBehavior } from "../enter-key.js";
 import { KEYBOARD_DISMISS_BLUR_EVENT } from "../mobile-viewport.js";
 import { resizeComposerToContent } from "../composer-autogrow.js";
 import { IncrementalActiveTurnProgress } from "../turn-progress.js";
-import { IncrementalSubagentProjector } from "../subagents.js";
+import { IncrementalSubagentProjector, selectedSubagentId } from "../subagents.js";
 import { WorkingIndicator } from "./WorkingIndicator.js";
 import {
   projectAssignmentAudienceConfirmation,
@@ -1432,7 +1432,7 @@ function SessionDetailLoaded({
     descriptor.availability === "live" &&
     ["starting", "running", "waiting"].includes(descriptor.lifecycle)),
   [items, runnerOnline, session.status]);
-  const firstActiveSubagent = activeSubagents[0];
+  const preferredActiveSubagentId = selectedSubagentId(activeSubagents);
 
   // Prior user prompts for ↑ history recall (chronological; recall walks from newest backward).
   const timelineUserPrompts = useMemo(
@@ -2448,8 +2448,8 @@ function SessionDetailLoaded({
           topbarControls={topbarControls}
           changeStatus={changeStatus}
           activeSubagentCount={activeSubagents.length}
-          onOpenActiveSubagents={firstActiveSubagent
-            ? () => openSubagent(firstActiveSubagent.id)
+          onOpenActiveSubagents={preferredActiveSubagentId
+            ? () => openSubagent(preferredActiveSubagentId)
             : undefined}
           // The unified bar replaces the app-level top bar on desktop, so it owns the page-title
           // focus-rescue anchor there; the mobile layout keeps the app bar and its own anchor.

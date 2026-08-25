@@ -1186,6 +1186,7 @@ button.background-work-badge:focus-visible {
   border-radius: var(--radius-pill);
   background: currentColor;
 }
+.background-work-label-compact { display: none; }
 .background-work-running {
   color: var(--blue-on-tint);
   background: color-mix(in srgb, var(--blue) 13%, transparent);
@@ -10129,6 +10130,8 @@ body.shell-dock-dragging * {
     padding-inline: 7px;
     font-size: var(--text-xs);
   }
+  .session-detail > .detail-head .background-work-label-full { display: none; }
+  .session-detail > .detail-head .background-work-label-compact { display: inline; }
   .session-header-action { width: 36px; height: 36px; }
   .session-header-action svg { width: 15px; height: 15px; }
   .detail-actions {

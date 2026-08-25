@@ -186,7 +186,7 @@ export function AttentionBadge({ session, ariaLabel }: {
   const attention = sessionAttentionStatus(session);
   if (!attention) return null;
   return (
-    <span className="status-badge st-input" title={attention.description} aria-label={ariaLabel}>
+    <span className="status-badge st-input" title={attention.description} aria-label={ariaLabel ?? attention.label}>
       <span className="status-dot2" aria-hidden="true" />
       {attention.label}
     </span>
@@ -254,6 +254,13 @@ const BACKGROUND_WORK_LABELS: Record<BackgroundWorkState, string> = {
   resumed: "Resumed",
 };
 
+const COMPACT_BACKGROUND_WORK_LABELS: Record<BackgroundWorkState, string> = {
+  running: "Background Work Active",
+  continuation_pending: "Continuation Pending",
+  orphaned: "Background Work Orphaned",
+  resumed: "Background Work Resumed",
+};
+
 export function BackgroundWorkBadge({ state }: { state: BackgroundWorkState }) {
   const label = `Background Work: ${BACKGROUND_WORK_LABELS[state]}`;
   return (
@@ -267,7 +274,10 @@ export function BackgroundWorkBadge({ state }: { state: BackgroundWorkState }) {
       aria-label={label}
     >
       <span className="background-work-dot" aria-hidden="true" />
-      {label}
+      <span className="background-work-label-full">{label}</span>
+      <span className="background-work-label-compact" aria-hidden="true">
+        {COMPACT_BACKGROUND_WORK_LABELS[state]}
+      </span>
     </span>
   );
 }
@@ -289,15 +299,18 @@ export function UntrackedBackgroundWorkBadge() {
 export function ActiveSubagentsBadge({ count, onOpen }: { count: number; onOpen: () => void }) {
   if (count < 1) return null;
   const label = count === 1 ? "1 Subagent Active" : `${count} Subagents Active`;
+  const visibleLabel = count === 1 ? "1 Subagent" : `${count} Subagents`;
   return (
     <button
       type="button"
       className="background-work-badge background-work-running"
       onClick={onOpen}
       aria-label={label}
+      title={label}
     >
       <span className="background-work-dot" aria-hidden="true" />
-      {label}
+      <span className="background-work-label-full">{label}</span>
+      <span className="background-work-label-compact" aria-hidden="true">{visibleLabel}</span>
     </button>
   );
 }
