@@ -727,6 +727,30 @@ test("dispose interrupts, cancels parked approvals, then closes transport withou
   assert.deepEqual(order, ["turn/interrupt", "cancel", "dispose"]);
 });
 
+test("dispose records active subagents as unreachable without deleting their durable threads", () => {
+  const h = makeHarness({ resumeId: "thread-1" });
+  (h.driver as any).threadId = "thread-1";
+  (h.driver as any).peer = { notify: () => {}, dispose: () => {} };
+  const notifications = notificationHandlers(h.driver);
+  notifications.get("item/completed")!({
+    threadId: "thread-1",
+    item: {
+      type: "collabAgentToolCall",
+      id: "spawn-child",
+      tool: "spawnAgent",
+      status: "completed",
+      senderThreadId: "thread-1",
+      receiverThreadIds: ["child-thread"],
+      agentsStates: { "child-thread": { status: "running" } },
+    },
+  });
+
+  h.driver.dispose();
+
+  assert.ok(h.events.some((event) => event.kind === "tool_call_update" &&
+    event.toolCallId === "spawn-child" && event.subagentLifecycle === "unreachable"));
+});
+
 test("cancel emits already-consumed per-turn usage once before settling", () => {
   const h = makeHarness();
   (h.driver as any).pendingTurnUsage = { input: 7, output: 4, cached: 2 };

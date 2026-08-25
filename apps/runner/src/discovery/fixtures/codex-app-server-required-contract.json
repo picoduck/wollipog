@@ -272,15 +272,27 @@
       "definitions": {
         "ThreadItem": {
           "variantRequiredProperties": {
-            "CollabAgentToolCallThreadItem": [
-              "agentsStates",
-              "id",
-              "receiverThreadIds",
-              "senderThreadId",
-              "status",
-              "tool",
-              "type"
-            ]
+            "CollabAgentToolCallThreadItem": {
+              "required": [
+                "agentsStates",
+                "id",
+                "receiverThreadIds",
+                "senderThreadId",
+                "status",
+                "tool",
+                "type"
+              ],
+              "properties": [
+                "agentsStates",
+                "id",
+                "prompt",
+                "receiverThreadIds",
+                "senderThreadId",
+                "status",
+                "tool",
+                "type"
+              ]
+            }
           }
         },
         "CollabAgentState": {
@@ -335,15 +347,27 @@
       "definitions": {
         "ThreadItem": {
           "variantRequiredProperties": {
-            "CollabAgentToolCallThreadItem": [
-              "agentsStates",
-              "id",
-              "receiverThreadIds",
-              "senderThreadId",
-              "status",
-              "tool",
-              "type"
-            ]
+            "CollabAgentToolCallThreadItem": {
+              "required": [
+                "agentsStates",
+                "id",
+                "receiverThreadIds",
+                "senderThreadId",
+                "status",
+                "tool",
+                "type"
+              ],
+              "properties": [
+                "agentsStates",
+                "id",
+                "prompt",
+                "receiverThreadIds",
+                "senderThreadId",
+                "status",
+                "tool",
+                "type"
+              ]
+            }
           }
         },
         "CollabAgentState": {

@@ -641,6 +641,15 @@ export class CodexAppServerDriver implements Driver {
         /* ignore */
       }
     }
+    // The Codex thread remains durable, but this driver can no longer observe or control any
+    // children that were active on its transport. Persist that loss of reachability so a later
+    // replay cannot present stale work as live; a successful resume/sendInput collaboration item
+    // will establish a fresh live boundary if the durable child is reattached.
+    for (const [threadId, lifecycle] of this.subagentLifecycleByThread) {
+      if (lifecycle === "starting" || lifecycle === "running" || lifecycle === "waiting") {
+        this.updateSubagentLifecycle(threadId, "unreachable");
+      }
+    }
     this.declinePendingRequests();
     this.closeTurnUsage();
     this.settleTurn("cancelled");
