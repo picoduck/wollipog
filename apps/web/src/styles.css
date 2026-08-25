@@ -1134,7 +1134,6 @@ pre {
 
 /* ----------------------------- Status badges ---------------------------- */
 .session-status-indicators { display: inline-flex; min-width: 0; align-items: center; gap: 5px; flex-wrap: wrap; }
-.session-status-visuals { display: contents; }
 .change-status-indicators {
   display: inline-flex;
   min-width: 0;
@@ -1174,7 +1173,7 @@ pre {
   white-space: nowrap;
 }
 button.background-work-badge {
-  font: inherit;
+  font-family: inherit;
   cursor: pointer;
 }
 button.background-work-badge:hover,
@@ -10108,16 +10107,27 @@ body.shell-dock-dragging * {
   }
   .session-detail > .detail-head:has(> .session-header-note) { row-gap: 4px; }
   .session-detail > .detail-head > .session-header-statuses {
-    /* Span the shared status row so flattened change badges can wrap independently, while
-       reserving two compact action targets plus the gaps between buttons and columns. */
+    /* The lifecycle group owns the first line and reserves the two compact action targets. Later
+       status dimensions can use the full bar width, keeping concurrent work visible without
+       forcing every badge into its own narrow column. */
     grid-column: 1 / -1;
     grid-row: 1;
-    width: calc(100% - 86px);
+    width: 100%;
     align-self: center;
     flex-wrap: wrap;
   }
+  .session-detail > .detail-head .session-status-indicators {
+    flex: 0 0 100%;
+    box-sizing: border-box;
+    padding-right: 86px;
+  }
   .session-detail > .detail-head .change-status-indicators {
     display: contents;
+  }
+  .session-detail > .detail-head .status-badge,
+  .session-detail > .detail-head .background-work-badge {
+    padding-inline: 7px;
+    font-size: var(--text-xs);
   }
   .session-header-action { width: 36px; height: 36px; }
   .session-header-action svg { width: 15px; height: 15px; }
@@ -10128,6 +10138,7 @@ body.shell-dock-dragging * {
     grid-column: 2;
     grid-row: 1;
     min-width: 0;
+    align-self: start;
   }
   .session-detail > .detail-head > .session-header-note {
     grid-column: 1 / -1;

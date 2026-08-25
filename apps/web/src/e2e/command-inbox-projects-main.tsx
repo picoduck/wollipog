@@ -1101,6 +1101,7 @@ declare global {
       ): void;
       emitUserMessage(id: string, text: string, turnId: string): void;
       emitAgentMessage(id: string, text: string): void;
+      emitActiveSubagent(id: string, toolCallId: string): void;
       sessionEventPageRequests(): Array<{ sessionId: string; after: number; direction?: "backward" }>;
       emitCanonicalSteeredMessage(id: string, text: string, turnId: string, submissionId: string): void;
       emitSteeringReceipt(id: string, attempt: SteeringAttemptView): void;
@@ -1207,6 +1208,32 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
         text,
         final: true,
         messageId: `streamed-preview-message-${seq}`,
+      },
+    };
+    sessionEvents.set(id, [...(sessionEvents.get(id) ?? []), event]);
+    socket?.push({ type: "session_event", event: structuredClone(event) });
+    pushSession(value);
+  },
+  emitActiveSubagent(id, toolCallId) {
+    const value = model.sessions.find((candidate) => candidate.id === id);
+    if (!value) throw new Error(`unknown session: ${id}`);
+    const seq = value.messageCount + 1;
+    value.messageCount = seq;
+    value.updatedAt += 1;
+    value.lastEventAt = value.updatedAt;
+    const event: SessionEvent = {
+      id: seq,
+      sessionId: id,
+      seq,
+      ts: value.updatedAt,
+      payload: {
+        kind: "tool_call",
+        toolCallId,
+        title: "Background Agent",
+        text: "",
+        toolKind: "agent",
+        status: "in_progress",
+        subagentLifecycle: "running",
       },
     };
     sessionEvents.set(id, [...(sessionEvents.get(id) ?? []), event]);

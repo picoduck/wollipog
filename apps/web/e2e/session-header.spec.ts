@@ -169,6 +169,7 @@ for (const viewport of [
       window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
         backgroundWorkState: "running",
       });
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitActiveSubagent("session-alpha", "active-mobile-subagent");
     });
     await capture(page, `narrow-${viewport.width}`);
 
@@ -183,7 +184,8 @@ for (const viewport of [
     await expect(header.getByText("Awaiting Prompt", { exact: true })).toBeVisible();
     await expect(header.getByText("Ready for Review", { exact: true })).toBeVisible();
     await expect(header.getByText("Uncommitted Changes", { exact: true })).toBeVisible();
-    await expect(header.getByRole("img", { name: "Waiting on External Job" })).toBeVisible();
+    await expect(header.getByRole("status", { name: "Background Work: Waiting on External Job" })).toBeVisible();
+    await expect(header.getByRole("button", { name: "1 Subagent Active" })).toBeVisible();
     const metrics = await header.evaluate((element) => {
       const rect = (node: Element) => {
         const value = node.getBoundingClientRect();
@@ -194,14 +196,13 @@ for (const viewport of [
       };
       const clippingPane = element.closest(".inbox-preview-pane");
       const badges = [...element.querySelectorAll(
-        ".session-header-statuses > .status-badge, " +
-        ".session-header-statuses .session-status-indicators > .status-badge, " +
-        ".session-header-statuses .change-status-indicators > .status-badge, " +
-        ".session-header-statuses > .bgwork-indicator",
+        ".session-header-statuses .status-badge, " +
+        ".session-header-statuses > .background-work-badge",
       )].map(rect);
       return {
         display: getComputedStyle(element).display,
         statuses: rect(element.querySelector(".session-header-statuses")!),
+        lifecycle: rect(element.querySelector(".session-status-indicators > .status-badge")!),
         actions: rect(element.querySelector(".detail-actions")!),
         share: rect(element.querySelector('[aria-label="Share"]')!),
         shareIcon: rect(element.querySelector('[aria-label="Share"] svg')!),
@@ -261,21 +262,21 @@ for (const viewport of [
     expect(shellMetrics.title.x).toBeGreaterThanOrEqual(shellMetrics.back.right);
     expect(shellMetrics.title.right).toBeLessThanOrEqual(shellMetrics.controlsLeft);
     expect(shellMetrics.title.width).toBeGreaterThanOrEqual(72);
-    // Four simultaneous statuses require three badge lines at 320px; they remain inside the
+    // Five simultaneous statuses require multiple badge lines at 320px; they remain inside the
     // second header bar without overlap or horizontal overflow.
-    expect(subheaderBottom - shellMetrics.top).toBeLessThan(140);
+    expect(subheaderBottom - shellMetrics.top).toBeLessThan(184);
     expect(metrics.share.width).toBeGreaterThanOrEqual(36);
     expect(metrics.share.height).toBeGreaterThanOrEqual(36);
     expect(metrics.moreActions.width).toBeGreaterThanOrEqual(36);
     expect(metrics.moreActions.height).toBeGreaterThanOrEqual(36);
-    expect(metrics.statuses.right).toBeLessThanOrEqual(metrics.actions.x - 6);
-    expect(metrics.headerHeight).toBeLessThanOrEqual(104);
+    expect(metrics.lifecycle.right).toBeLessThanOrEqual(metrics.actions.x - 6);
+    expect(metrics.headerHeight).toBeLessThanOrEqual(132);
     expect(metrics.hasHorizontalOverflow).toBe(false);
     expect(metrics.paddingRight).toBeGreaterThanOrEqual(12);
     expect(metrics.clippingRight - metrics.moreActions.right).toBeGreaterThanOrEqual(11.5);
-    expect(metrics.badges.length).toBeGreaterThanOrEqual(4);
+    expect(metrics.badges.length).toBe(5);
     const center = (box: { y: number; height: number }) => box.y + box.height / 2;
-    expect(Math.abs(center(metrics.actions) - center(metrics.statuses))).toBeLessThanOrEqual(12);
+    expect(Math.abs(center(metrics.actions) - center(metrics.lifecycle))).toBeLessThanOrEqual(12);
     for (let index = 0; index < metrics.badges.length; index += 1) {
       for (let other = index + 1; other < metrics.badges.length; other += 1) {
         const left = metrics.badges[index]!;

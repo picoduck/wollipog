@@ -108,7 +108,7 @@ export function PinnedSummary({
           <span>Session</span>
         </div>
         <div className="ps-row is-static">
-          <span title={session.title}>{session.title}</span>
+          <span className="ps-sub-title" title={session.title}>{session.title}</span>
           <span className="ps-right ps-detail">Updated {relativeTime(session.updatedAt)}</span>
         </div>
         <div className="ps-row is-static">

@@ -231,9 +231,8 @@ test("turn boundaries and dashboard reconnect refresh both reads while active tu
 
   await page.evaluate(() =>
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", { status: "running" }));
-  await expect(page.getByLabel("Pinned Summary")
-    .locator(".session-status-indicators > .status-badge")
-    .first()).toHaveText("Running");
+  await expect(page.locator(".session-detail > .detail-head")
+    .getByLabel("Activity: Running")).toHaveText("Running");
   await expect.poll(async () => {
     const before = await page.evaluate(() =>
       window.__WOLLIPOG_PROJECT_INBOX_E2E__.gitRequestCounts("session-alpha"));
@@ -292,7 +291,7 @@ test("offline, unavailable, and not-repository states are explicit", async ({ pa
   const prLink = page.getByRole("link", { name: "Alpha Visibility PR" });
   await expect(prLink).toHaveAttribute("href", "https://github.com/example/wollipog/pull/318");
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerStatus("offline"));
-  await expect(gitRegion(page)).toContainText("Runner Offline");
+  await expect(gitRegion(page)).toContainText("Git Unavailable While Disconnected");
   await expect(gitRegion(page)).not.toContainText(LONG_BRANCH);
   await expect(prLink).toBeVisible();
 

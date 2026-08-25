@@ -1424,13 +1424,14 @@ function SessionDetailLoaded({
   }, [session.eventEpoch, session.id]);
   const headerSubagentProjector = useRef<IncrementalSubagentProjector | null>(null);
   headerSubagentProjector.current ??= new IncrementalSubagentProjector();
-  const activeSubagents = headerSubagentProjector.current.project(items, {
+  const activeSubagents = useMemo(() => headerSubagentProjector.current!.project(items, {
     sessionStatus: session.status,
     runnerOnline,
     availability: runnerOnline && isTimelineSessionActive(session.status) ? "live" : "recorded",
   }).descriptors.filter((descriptor) =>
     descriptor.availability === "live" &&
-    ["starting", "running", "waiting"].includes(descriptor.lifecycle));
+    ["starting", "running", "waiting"].includes(descriptor.lifecycle)),
+  [items, runnerOnline, session.status]);
   const firstActiveSubagent = activeSubagents[0];
 
   // Prior user prompts for ↑ history recall (chronological; recall walks from newest backward).

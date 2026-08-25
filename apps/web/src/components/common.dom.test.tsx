@@ -220,8 +220,13 @@ test("session indicators preserve simultaneous lifecycle, attention, and change 
     assert.match(container.textContent ?? "", /Ready for Review/);
     assert.match(container.textContent ?? "", /Uncommitted Changes/);
     assert.match(container.textContent ?? "", /Disconnected/);
-    assert.ok(container.querySelector('[role="group"][aria-label="Activity: Running. Attention: Answer Required. Health: Disconnected"]'));
-    assert.ok(container.querySelector('[role="group"][aria-label="Changes: Ready for Review. Changes: Uncommitted Changes"]'));
+    assert.ok(container.querySelector('[role="group"][aria-label="Session Status"]'));
+    assert.equal(container.querySelector('[aria-label="Activity: Running"]')?.textContent?.trim(), "Running");
+    assert.equal(container.querySelector('[aria-label="Attention: Answer Required"]')?.textContent?.trim(), "Answer Required");
+    assert.equal(container.querySelector('[aria-label="Health: Disconnected"]')?.textContent?.trim(), "Disconnected");
+    assert.ok(container.querySelector('[role="group"][aria-label="Change Status"]'));
+    assert.equal(container.querySelector('[aria-label="Changes: Ready for Review"]')?.textContent?.trim(), "Ready for Review");
+    assert.equal(container.querySelector('[aria-label="Changes: Uncommitted Changes"]')?.textContent?.trim(), "Uncommitted Changes");
     assert.equal(container.querySelectorAll(".change-status-indicators > .status-badge").length, 2,
       "compact surfaces preserve both facts as separate badges");
     const changeBadges = [...container.querySelectorAll(".change-status-indicators > .status-badge")];

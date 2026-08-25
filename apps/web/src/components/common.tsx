@@ -147,16 +147,17 @@ export function CopyButton({
   );
 }
 
-export function StatusBadge({ status, archiveStatus, archiveOperation, stopOperation }: {
+export function StatusBadge({ status, archiveStatus, archiveOperation, stopOperation, ariaLabel }: {
   status: SessionStatus;
   archiveStatus?: ArchiveStatus;
   archiveOperation?: ArchiveOperationView;
   stopOperation?: StopOperationView;
+  ariaLabel?: string;
 }) {
   const m = sessionStatusBadgeMeta(status, archiveStatus, archiveOperation, stopOperation);
   const operation = stopOperation ?? archiveOperation;
   return (
-    <span className={"status-badge " + m.className} title={operation?.failure?.message}>
+    <span className={"status-badge " + m.className} title={operation?.failure?.message} aria-label={ariaLabel}>
       <span className={"status-dot2 " + (m.busy ? "pulse" : "")} />
       {m.label}
     </span>
@@ -178,13 +179,14 @@ function sessionStatusBadgeMeta(
       : statusMeta(status);
 }
 
-export function AttentionBadge({ session }: {
+export function AttentionBadge({ session, ariaLabel }: {
   session: Pick<SessionView, "status" | "pendingApproval">;
+  ariaLabel?: string;
 }) {
   const attention = sessionAttentionStatus(session);
   if (!attention) return null;
   return (
-    <span className="status-badge st-input" title={attention.description}>
+    <span className="status-badge st-input" title={attention.description} aria-label={ariaLabel}>
       <span className="status-dot2" aria-hidden="true" />
       {attention.label}
     </span>
@@ -202,23 +204,22 @@ export function SessionStatusIndicators({ session, disconnected = false }: {
     session.stopOperation,
   );
   const attention = sessionAttentionStatus(session);
-  const label = [
-    `Activity: ${lifecycle.label}`,
-    attention ? `Attention: ${attention.label}` : null,
-    disconnected ? "Health: Disconnected" : null,
-  ].filter(Boolean).join(". ");
   return (
-    <span className="session-status-indicators" role="group" aria-label={label}>
-      <span aria-hidden="true" className="session-status-visuals">
-        <StatusBadge status={session.status} archiveStatus={session.archiveStatus} archiveOperation={session.archiveOperation} stopOperation={session.stopOperation} />
-        <AttentionBadge session={session} />
-        {disconnected && (
-          <span className="status-badge st-failed" title="The session runner is disconnected.">
-            <span className="status-dot2" aria-hidden="true" />
-            Disconnected
-          </span>
-        )}
-      </span>
+    <span className="session-status-indicators" role="group" aria-label="Session Status">
+      <StatusBadge
+        status={session.status}
+        archiveStatus={session.archiveStatus}
+        archiveOperation={session.archiveOperation}
+        stopOperation={session.stopOperation}
+        ariaLabel={`Activity: ${lifecycle.label}`}
+      />
+      <AttentionBadge session={session} ariaLabel={attention ? `Attention: ${attention.label}` : undefined} />
+      {disconnected && (
+        <span className="status-badge st-failed" title="The session runner is disconnected." aria-label="Health: Disconnected">
+          <span className="status-dot2" aria-hidden="true" />
+          Disconnected
+        </span>
+      )}
     </span>
   );
 }
@@ -228,16 +229,15 @@ export function ChangeStatusBadge({ change }: { change: SessionChangeStatus | nu
   const indicators = change.kind === "ready_for_review" && change.supplement
     ? [change, change.supplement]
     : [change];
-  const label = indicators.map((indicator) => `Changes: ${indicator.label}`).join(". ");
   return (
-    <span className="change-status-indicators" role="group" aria-label={label}>
+    <span className="change-status-indicators" role="group" aria-label="Change Status">
       {indicators.map((indicator) => {
         const className = indicator.kind === "ready_for_review"
           ? "st-done"
           : indicator.kind === "no_changes" ? "st-stopped" : "st-idle";
         return (
           <span key={indicator.kind} className={"status-badge " + className}
-            title={indicator.description} aria-hidden="true">
+            title={indicator.description} aria-label={`Changes: ${indicator.label}`}>
             <span className="status-dot2" aria-hidden="true" />
             {indicator.label}
           </span>
