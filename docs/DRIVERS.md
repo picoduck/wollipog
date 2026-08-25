@@ -650,9 +650,11 @@ their `supportedReasoningEfforts` come from the `model/list` request (also used 
 App-server is a multiplexed transport: the root thread and every structured child thread share one
 stdio stream. The driver accepts the root thread plus only child ids introduced by a root-or-known-
 child `spawnAgent` item, and ignores unrelated thread notifications. Child turn boundaries cannot
-replace or settle the foreground turn. `agentsStates` is authoritative for starting, running,
-waiting, completed, failed, interrupted, and unreachable presentation, so a detached child can stay
-visibly active after the foreground turn becomes idle. These normalized events are stored in the
+replace or settle the foreground turn. `agentsStates` is authoritative for the states its stable
+schema distinguishes: starting, running, completed, failed, interrupted, and unreachable. The shared
+model also supports waiting when a harness reports that state, but the current stable Codex enum does
+not distinguish it. A detached child can stay visibly active after the foreground turn becomes idle.
+These normalized events are stored in the
 ordinary runner event log, preserving the same subagent tree across reconnect and resume.
 
 ### 3.4 Approval and elicitation server requests to pending actions

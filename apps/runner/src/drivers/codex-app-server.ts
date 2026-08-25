@@ -88,6 +88,15 @@ function normalizedCodexItemId(value: unknown): string | undefined {
   if (typeof value === "number" && Number.isFinite(value)) return `item-${value}`;
   return undefined;
 }
+
+/** Item ids are documented only as thread-item identities, not as globally unique across the
+ * App Server's multiplexed threads. Keep root ids stable for compatibility and scope every admitted
+ * child id by its thread so a valid per-thread counter cannot update or suppress a root item. */
+function scopedCodexItemId(value: unknown, threadId: unknown, rootThreadId: string | null): string | undefined {
+  const id = normalizedCodexItemId(value);
+  if (!id || typeof threadId !== "string" || !threadId || threadId === rootThreadId) return id;
+  return `codex-child:${JSON.stringify([threadId, id])}`;
+}
 /**
  * "auto-review" = the Guardian subagent reviews each action. It is on-request approvals
  * with the reviewer swapped to `auto_review`: low-risk actions run automatically and risky
@@ -706,19 +715,23 @@ export class CodexAppServerDriver implements Driver {
   private updateSubagentStates(states: unknown): void {
     if (!states || typeof states !== "object" || Array.isArray(states)) return;
     for (const [threadId, raw] of Object.entries(states as Record<string, Json>)) {
-      const toolCallId = this.subagentToolByThread.get(threadId);
       const lifecycle = codexSubagentLifecycle(raw?.status);
-      if (!toolCallId || !lifecycle) continue;
-      this.cb.onEvent({
-        kind: "tool_call_update",
-        toolCallId,
-        status: subagentToolStatus(lifecycle),
-        subagentLifecycle: lifecycle,
-        ...(this.subagentParentByTool.get(toolCallId)
-          ? { parentToolUseId: this.subagentParentByTool.get(toolCallId) }
-          : {}),
-      });
+      if (lifecycle) this.updateSubagentLifecycle(threadId, lifecycle);
     }
+  }
+
+  private updateSubagentLifecycle(threadId: string, lifecycle: AuthoritativeSubagentLifecycle): void {
+    const toolCallId = this.subagentToolByThread.get(threadId);
+    if (!toolCallId) return;
+    this.cb.onEvent({
+      kind: "tool_call_update",
+      toolCallId,
+      status: subagentToolStatus(lifecycle),
+      subagentLifecycle: lifecycle,
+      ...(this.subagentParentByTool.get(toolCallId)
+        ? { parentToolUseId: this.subagentParentByTool.get(toolCallId) }
+        : {}),
+    });
   }
 
   private flushSubagentUsage(threadId: string): void {
@@ -735,9 +748,7 @@ export class CodexAppServerDriver implements Driver {
     });
   }
 
-  private onCollabItem(item: Json, completed: boolean, notificationParent?: string): void {
-    const id = normalizedCodexItemId(item?.id);
-    if (!id) return;
+  private onCollabItem(item: Json, completed: boolean, id: string, notificationParent?: string): void {
     const senderParent = typeof item?.senderThreadId === "string"
       ? this.subagentToolByThread.get(item.senderThreadId)
       : undefined;
@@ -898,7 +909,7 @@ export class CodexAppServerDriver implements Driver {
       if (!p?.delta) return;
       const context = this.eventContext(p?.threadId);
       if (!context.accepted) return;
-      const messageId = normalizedCodexItemId(p.itemId);
+      const messageId = scopedCodexItemId(p.itemId, p?.threadId, this.threadId);
       if (!context.parentToolUseId) this.streamedAgentResponse = true;
       if (messageId) this.seenItems.add(`msg:${messageId}`);
       this.cb.onEvent({
@@ -912,7 +923,7 @@ export class CodexAppServerDriver implements Driver {
       if (!p?.delta) return;
       const context = this.eventContext(p?.threadId);
       if (!context.accepted) return;
-      const messageId = normalizedCodexItemId(p.itemId);
+      const messageId = scopedCodexItemId(p.itemId, p?.threadId, this.threadId);
       if (messageId) this.seenItems.add(`think:${messageId}`);
       this.cb.onEvent({
         kind: "agent_thought",
@@ -962,7 +973,11 @@ export class CodexAppServerDriver implements Driver {
     });
     peer.onNotification("turn/completed", (p: Json) => {
       if (p?.threadId && p.threadId !== this.threadId) {
-        if (this.subagentToolByThread.has(p.threadId)) this.flushSubagentUsage(p.threadId);
+        if (this.subagentToolByThread.has(p.threadId)) {
+          this.flushSubagentUsage(p.threadId);
+          if (p?.turn?.status === "failed") this.updateSubagentLifecycle(p.threadId, "failed");
+          if (p?.turn?.status === "interrupted") this.updateSubagentLifecycle(p.threadId, "interrupted");
+        }
         return;
       }
       this.declinePendingRequests();
@@ -985,7 +1000,10 @@ export class CodexAppServerDriver implements Driver {
     });
     peer.onNotification("turn/failed", (p: Json) => {
       if (p?.threadId && p.threadId !== this.threadId) {
-        if (this.subagentToolByThread.has(p.threadId)) this.flushSubagentUsage(p.threadId);
+        if (this.subagentToolByThread.has(p.threadId)) {
+          this.flushSubagentUsage(p.threadId);
+          this.updateSubagentLifecycle(p.threadId, "failed");
+        }
         return;
       }
       this.declinePendingRequests();
@@ -1040,7 +1058,7 @@ export class CodexAppServerDriver implements Driver {
     const context = this.eventContext(threadId);
     if (!context.accepted) return;
     const parentToolUseId = context.parentToolUseId;
-    const id = normalizedCodexItemId(item.id) ?? "item";
+    const id = scopedCodexItemId(item.id, threadId, this.threadId) ?? "item";
     switch (item.type) {
       case "userMessage": {
         // A steered user message can arrive before the turn/steer response. Suppress both item
@@ -1127,7 +1145,7 @@ export class CodexAppServerDriver implements Driver {
         break;
       }
       case "collabAgentToolCall":
-        this.onCollabItem(item, completed, parentToolUseId);
+        this.onCollabItem(item, completed, id, parentToolUseId);
         break;
     }
   }

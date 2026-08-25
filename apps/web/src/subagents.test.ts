@@ -39,6 +39,8 @@ test("subagent lifecycle uses only observable tool, session, and reachability st
     "provider-observed detached lifecycle remains active after the foreground turn becomes idle",
   );
   assert.equal(deriveSubagentLifecycle("running", "idle", false, "running"), "unreachable");
+  assert.equal(deriveSubagentLifecycle("running", "stopped", true, "running"), "interrupted");
+  assert.equal(deriveSubagentLifecycle("running", "completed", true, "running"), "interrupted");
   assert.equal(deriveSubagentLifecycle("completed", "failed", false, "completed"), "completed");
 });
 

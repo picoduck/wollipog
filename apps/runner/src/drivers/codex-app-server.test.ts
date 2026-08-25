@@ -33,6 +33,10 @@ function nextTask(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
+function childItemId(threadId: string, itemId: string): string {
+  return `codex-child:${JSON.stringify([threadId, itemId])}`;
+}
+
 /**
  * Unit tests for the app-server item -> SessionEventPayload mapping and the
  * approval decision wiring. No process spawn: we drive the private onItem mapper
@@ -916,10 +920,11 @@ test("real NDJSON transport keeps structured child output live after the parent 
     assert.equal(await driver.newSession(process.cwd()), "fixture-subagents");
     assert.equal(await driver.prompt("inspect"), "end_turn", "the foreground turn settles first");
     await new Promise<void>((resolve) => setTimeout(resolve, 30));
-    assert.deepEqual(events.find((event) => event.kind === "agent_message" && event.messageId === "fixture-child-message"), {
+    const messageId = childItemId("fixture-child", "fixture-child-message");
+    assert.deepEqual(events.find((event) => event.kind === "agent_message" && event.messageId === messageId), {
       kind: "agent_message",
       text: "Background inspection complete.",
-      messageId: "fixture-child-message",
+      messageId,
       final: true,
       parentToolUseId: "fixture-spawn",
     });
@@ -1044,16 +1049,18 @@ test("structured Codex collaboration items expose recursive live subagent output
     status: "pending",
     subagentLifecycle: "starting",
   });
-  assert.deepEqual(h.events.find((event) => event.kind === "agent_message" && event.messageId === "child-message"), {
+  const childMessageId = childItemId("child-thread", "child-message");
+  const innerSpawnId = childItemId("child-thread", "spawn-inner");
+  assert.deepEqual(h.events.find((event) => event.kind === "agent_message" && event.messageId === childMessageId), {
     kind: "agent_message",
     text: "Inspecting parser events.",
-    messageId: "child-message",
+    messageId: childMessageId,
     final: true,
     parentToolUseId: "spawn-outer",
   });
-  assert.deepEqual(h.events.find((event) => event.kind === "tool_call" && event.toolCallId === "spawn-inner"), {
+  assert.deepEqual(h.events.find((event) => event.kind === "tool_call" && event.toolCallId === innerSpawnId), {
     kind: "tool_call",
-    toolCallId: "spawn-inner",
+    toolCallId: innerSpawnId,
     title: "Agent: Check nested attribution",
     toolKind: "agent",
     status: "in_progress",
@@ -1063,20 +1070,52 @@ test("structured Codex collaboration items expose recursive live subagent output
   assert.deepEqual(h.events.find((event) => event.kind === "command_output"), {
     kind: "command_output",
     text: "passed",
-    parentToolUseId: "spawn-inner",
+    parentToolUseId: innerSpawnId,
   });
   assert.deepEqual(h.events.find((event) => event.kind === "token_usage"), {
     kind: "token_usage",
     inputTokens: 11,
     outputTokens: 5,
     cachedInputTokens: 3,
-    parentToolUseId: "spawn-inner",
+    parentToolUseId: innerSpawnId,
   });
   assert.ok(h.events.some((event) => event.kind === "tool_call_update" &&
     event.toolCallId === "spawn-outer" && event.subagentLifecycle === "completed"));
   assert.equal(h.events.filter((event) => event.kind === "token_usage").length, 1,
     "repeated cumulative child updates emit only the latest settled usage");
   assert.equal(h.events.some((event) => event.kind === "agent_message" && event.text.includes("must not cross")), false);
+});
+
+test("multiplexed child item ids cannot collide with root item ids", () => {
+  const h = makeHarness();
+  (h.driver as any).threadId = "root-thread";
+  const notifications = notificationHandlers(h.driver);
+  notifications.get("item/started")!({
+    threadId: "root-thread",
+    item: { type: "commandExecution", id: "shared-counter", command: "root command" },
+  });
+  notifications.get("item/completed")!({
+    threadId: "root-thread",
+    item: {
+      type: "collabAgentToolCall",
+      id: "spawn-child",
+      tool: "spawnAgent",
+      status: "completed",
+      senderThreadId: "root-thread",
+      receiverThreadIds: ["child-thread"],
+      agentsStates: { "child-thread": { status: "running" } },
+    },
+  });
+  notifications.get("item/started")!({
+    threadId: "child-thread",
+    item: { type: "commandExecution", id: "shared-counter", command: "child command" },
+  });
+
+  const calls = h.events.filter((event) => event.kind === "tool_call" && event.toolKind === "execute");
+  assert.deepEqual(calls.map((event) => ({ id: event.toolCallId, parent: event.parentToolUseId })), [
+    { id: "shared-counter", parent: undefined },
+    { id: childItemId("child-thread", "shared-counter"), parent: "spawn-child" },
+  ]);
 });
 
 test("subagent turn notifications cannot replace or settle the parent turn", async () => {
@@ -1103,6 +1142,36 @@ test("subagent turn notifications cannot replace or settle the parent turn", asy
   await nextTask();
   assert.equal((h.driver as any).turnId, "root-turn");
   assert.equal(settled, false);
+});
+
+test("an admitted child turn failure updates only that subagent lifecycle", async () => {
+  const h = makeHarness();
+  (h.driver as any).threadId = "root-thread";
+  (h.driver as any).turnId = "root-turn";
+  const notifications = notificationHandlers(h.driver);
+  notifications.get("item/completed")!({
+    threadId: "root-thread",
+    item: {
+      type: "collabAgentToolCall",
+      id: "spawn-child",
+      tool: "spawnAgent",
+      status: "completed",
+      senderThreadId: "root-thread",
+      receiverThreadIds: ["child-thread"],
+      agentsStates: { "child-thread": { status: "running" } },
+    },
+  });
+  let settled = false;
+  (h.driver as any).turnResolve = () => { settled = true; };
+  notifications.get("turn/failed")!({ threadId: "child-thread", error: { message: "child failed" } });
+  await nextTask();
+
+  assert.ok(h.events.some((event) => event.kind === "tool_call_update" &&
+    event.toolCallId === "spawn-child" && event.subagentLifecycle === "failed"));
+  assert.equal((h.driver as any).turnId, "root-turn");
+  assert.equal(settled, false);
+  assert.equal(h.events.some((event) => event.kind === "error"), false,
+    "a child failure does not become the foreground turn error");
 });
 
 test("numeric app-server item identities normalize to safe distinct strings", () => {

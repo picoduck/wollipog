@@ -217,7 +217,14 @@ export function groupTimeline(items: TimelineItem[]): TimelineGroup[] {
 }
 
 /** Item kinds a subagent emits, which the recursive projection may re-parent under an agent tool. */
-const NESTABLE_CHILD_KINDS = new Set(["agent_message", "agent_thought", "tool_call", "plan", "file_edit"]);
+const NESTABLE_CHILD_KINDS = new Set([
+  "agent_message",
+  "agent_thought",
+  "command_output",
+  "tool_call",
+  "plan",
+  "file_edit",
+]);
 
 type ToolItem = Extract<TimelineItem, { kind: "tool_call" }>;
 

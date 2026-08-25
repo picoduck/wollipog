@@ -171,6 +171,7 @@ export function deriveSubagentLifecycle(
   if (authoritative) {
     const active = authoritative === "starting" || authoritative === "running" || authoritative === "waiting";
     if (active && (!runnerOnline || sessionStatus === "failed")) return "unreachable";
+    if (active && (sessionStatus === "stopped" || sessionStatus === "completed")) return "interrupted";
     return authoritative;
   }
   const normalized = toolStatus.toLowerCase();
