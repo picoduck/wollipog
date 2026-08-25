@@ -750,14 +750,14 @@ export function NewSessionDialog({
               <div className="agent-default-warning" role="alert">
                 <span>
                   {selectionIssue === "legacy"
-                    ? "Your saved default uses Codex non-interactive mode. Codex App Server is recommended for new sessions."
+                    ? "Your saved default uses Codex non-interactive mode. Codex App Server supports interactive approvals and resumable conversations."
                     : selectionIssue === "unavailable"
                       ? "The selected agent is unavailable on this runner."
                       : "Your saved default is no longer advertised by this runner."}
                 </span>
                 {savedSelection.recommendedId && savedSelection.recommendedId !== agentDefaults[runnerId] && (
                   <button type="button" className="btn ghost sm" onClick={() => selectAgent(savedSelection.recommendedId)}>
-                    Use Recommended
+                    Use Codex App Server
                   </button>
                 )}
               </div>

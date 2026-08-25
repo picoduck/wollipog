@@ -48,7 +48,7 @@ export function agentSessionDiscoveryUnavailableReason(
   return runnerCapabilityRequirement(
     protocolVersion,
     "codexAppServerExternalSessions",
-    "Codex Interactive session discovery",
+    "Codex App Server session discovery",
   );
 }
 

@@ -19,7 +19,7 @@ export function agentDisplayName(agent: AgentDefinition): string {
     return GENERATED_CONDUCTOR_DISPLAY_NAME;
   }
   if (agent.source === "discovered" && agent.driver === "codex") return "Codex (Non-Interactive)";
-  if (agent.source === "discovered" && agent.driver === "codex-app-server") return "Codex";
+  if (agent.source === "discovered" && agent.driver === "codex-app-server") return "Codex App Server";
   return agent.name;
 }
 

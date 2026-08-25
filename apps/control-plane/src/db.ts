@@ -6574,7 +6574,7 @@ export class ControlPlaneDb {
     const agentSql = `CASE
       WHEN session.agent_id='conductor' OR COALESCE(agent.name, session.agent_id, '') IN
         ('Conductor (Wollipog)', 'Conductor (Agent Manager)') THEN 'Conductor (Wollipog)'
-      WHEN session.driver='codex-app-server' THEN 'Codex — Interactive'
+      WHEN session.driver='codex-app-server' THEN 'Codex App Server'
       WHEN session.driver='codex' THEN 'Codex — Non-Interactive (codex exec)'
       ELSE COALESCE(agent.name, session.agent_id, session.driver)
     END`;

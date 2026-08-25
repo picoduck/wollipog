@@ -98,6 +98,14 @@ test("server metadata canonicalizes conductor labels and stays aligned with curs
   assert.deepEqual(page.sessionIds, [conductor.id]);
 });
 
+test("server metadata uses the canonical Codex App Server archive label", () => {
+  const appServer = session(1, { agentName: "Codex", driver: "codex-app-server" });
+  const page = archiveSessionPage({ sessions: [appServer], query: {} });
+  assert.ok(!("error" in page));
+  assert.equal(page.metadata[appServer.id]?.agent, "Codex App Server");
+  assert.deepEqual(page.facets.agents, ["Codex App Server"]);
+});
+
 test("malformed and mismatched cursors fail closed", () => {
   assert.deepEqual(archiveSessionPage({ sessions: [], query: { cursor: "not-json" } }), {
     error: "cursor is invalid",

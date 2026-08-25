@@ -440,7 +440,7 @@ test("listExternalSessions sends the selected agent and filters broad legacy run
   assert.deepEqual(res.data?.map((session) => session.agentSessionId), ["claude-native"]);
 });
 
-test("listExternalSessions requires protocol v63 for Codex Interactive discovery", async () => {
+test("listExternalSessions requires protocol v63 for Codex App Server discovery", async () => {
   const db = ControlPlaneDb.open(":memory:");
   const meta = runnerMeta();
   const appServer = {

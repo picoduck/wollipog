@@ -13,3 +13,8 @@ test("generated Conductor labels normalize across the wire-name compatibility wi
   assert.equal(agentDisplayName(agent("conductor", "Custom Conductor")), "Conductor (Wollipog)");
   assert.equal(agentDisplayName(agent("custom", "My Conductor")), "My Conductor");
 });
+
+test("discovered Codex transports keep their canonical user-facing names", () => {
+  assert.equal(agentDisplayName({ ...agent("codex-app", "Codex"), driver: "codex-app-server", source: "discovered" }), "Codex App Server");
+  assert.equal(agentDisplayName({ ...agent("codex-exec", "Codex"), driver: "codex", source: "discovered" }), "Codex (Non-Interactive)");
+});

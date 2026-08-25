@@ -98,7 +98,7 @@ function metadata(session: ArchiveSessionCandidate): ArchiveSessionMetadata {
   const agent = conductor
     ? "Conductor (Wollipog)"
     : session.driver === "codex-app-server"
-    ? "Codex — Interactive"
+    ? "Codex App Server"
     : session.driver === "codex"
       ? "Codex — Non-Interactive (codex exec)"
       : session.agentName ?? session.agentId ?? session.driver;
