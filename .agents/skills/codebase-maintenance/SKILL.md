@@ -98,6 +98,9 @@ End with a single report. Structure it as:
    following the format and public-content rules in `.github/ISSUE_REPORTING.md`. Use the
    `maintenance` label plus `bug` or `enhancement`. Title each draft `Maintenance: <summary>`.
 
+Present each draft using the Approval Preview Formatting rules in `.github/ISSUE_REPORTING.md`.
+Never wrap a body that may contain code fences in a fixed three-backtick fence.
+
 Then stop. Publishing happens only when a human replies with approval; at that point follow
 `.agents/skills/log-github-issue/SKILL.md` to create and verify the issue.
 
