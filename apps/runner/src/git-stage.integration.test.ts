@@ -335,9 +335,11 @@ test("last_turn (real git): shows exactly the turn's changes; untouched pre-exis
     writeFileSync(join(repo, "pre-untracked.txt"), "was here before the turn\n");
     writeFileSync(join(repo, "pre-edited.txt"), "untracked v1\n");
 
-    const porcelainBefore = git(repo, ["status", "--porcelain"]);
+    // Mirror production status reads: optional-lock suppression keeps the deliberately racy index
+    // timestamp intact instead of letting an observation rewrite the fixture's cache metadata.
+    const porcelainBefore = git(repo, ["--no-optional-locks", "status", "--porcelain"]);
     const snap = await captureWorktreeTree(repo);
-    assert.equal(git(repo, ["status", "--porcelain"]), porcelainBefore, "capture leaves the real index untouched");
+    assert.equal(git(repo, ["--no-optional-locks", "status", "--porcelain"]), porcelainBefore, "capture leaves the real index untouched");
 
     // "The turn": modify tracked, edit a pre-existing untracked file, create a file, delete one.
     writeFileSync(trackedPath, "v2\n");
