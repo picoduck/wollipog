@@ -1,5 +1,11 @@
-import React, { useState, type ReactNode } from "react";
-import type { AgentCapabilities, AgentDriverKind, SessionConfig, SessionView } from "@wollipog/protocol";
+import React, { useRef, useState, type ReactNode } from "react";
+import type {
+  AgentCapabilities,
+  AgentDriverKind,
+  ElicitationTransport,
+  SessionConfig,
+  SessionView,
+} from "@wollipog/protocol";
 import {
   permissionModeDescription,
   permissionModeEmptyLabel,
@@ -17,7 +23,8 @@ import {
 } from "../caps.js";
 import { useStoreSelector } from "../store.js";
 import { useAccessibleMenu } from "./interactions.js";
-import { ShieldIcon } from "./Icons.js";
+import { Modal } from "./common.js";
+import { InfoIcon, ShieldIcon } from "./Icons.js";
 
 type Apply = (patch: Partial<SessionConfig>) => void;
 
@@ -186,16 +193,28 @@ export function permissionModeOutcome(
   permissionMode: string | undefined,
   status: ElicitationAvailability,
 ): { label: string; description: string; warning: boolean } {
+  // A question or MCP elicitation channel can stay live while these policies deliberately disable
+  // command/file approval checks. Mode semantics win over transport availability: calling that
+  // combination "Approvals Available" implies a safety boundary that does not exist.
+  if (permissionMode === "bypassPermissions" || permissionMode === "danger-full-access") {
+    return {
+      label: "No Command Approvals",
+      description: status === "available"
+        ? "Questions or matching governance policies can still reach you, but actions otherwise run without sandbox or approval checks."
+        : "Actions run without sandbox or approval checks.",
+      warning: false,
+    };
+  }
+  if (permissionMode === "plan") {
+    return { label: "Read-Only", description: "The agent researches and plans without editing files.", warning: false };
+  }
   if (status === "available") {
     return { label: "Approvals Available", description: "Approval requests raised through this mode reach you in Wollipog.", warning: false };
   }
-  if (permissionMode === "bypassPermissions" || permissionMode === "danger-full-access" || permissionMode === "plan") {
-    return { label: "No Approvals Needed", description: "This policy does not use approval prompts.", warning: false };
-  }
   if (status === "unknown") {
-    return { label: "Approval Support Unknown", description: "Wollipog has not verified approval delivery for this mode.", warning: true };
+    return { label: "Support Unknown", description: "Wollipog has not verified approval delivery for this mode.", warning: true };
   }
-  return { label: "Blocked Instead of Asking", description: "Wollipog will not prompt in this mode.", warning: false };
+  return { label: "Blocks Requests", description: "Actions requiring approval are blocked instead of prompting you.", warning: false };
 }
 
 export function defaultPermissionModeDisplayLabel(driver: AgentDriverKind): string {
@@ -217,16 +236,33 @@ export function permissionModeOptionDescription(
   driver: AgentDriverKind,
   status: ElicitationAvailability,
   outcome: ReturnType<typeof permissionModeOutcome>,
+  transports?: readonly ElicitationTransport[],
 ): string | undefined {
+  if (permissionMode === "bypassPermissions" || permissionMode === "danger-full-access") {
+    const base = permissionModeDescription(permissionMode, driver);
+    if (status === "available") {
+      const questions = transports?.includes("app-server");
+      const governance = transports?.includes("hook");
+      const available = questions && governance
+        ? "Questions, MCP elicitations, and matching governance policies can still reach you."
+        : questions
+          ? "Questions and MCP elicitations can still reach you."
+          : governance
+            ? "Matching governance policies can still ask you before a tool runs."
+            : "Questions or matching governance policies can still reach you.";
+      return `${available} Actions otherwise run without sandbox or approval checks. Use only in isolated environments.`;
+    }
+    if (status === "unknown") {
+      return `${base ?? "Actions run without sandbox or approval checks."} Wollipog has not verified whether questions or governance prompts can reach you.`;
+    }
+    return base;
+  }
   if (status === "available") {
     if (permissionMode === "acceptEdits") {
       return "File edits and common file commands run without asking. Matching governance policies can ask you before other actions; otherwise those actions are blocked.";
     }
     if (permissionMode === "dontAsk") {
       return "Matching governance policies can ask you before an action; otherwise actions requiring approval are blocked.";
-    }
-    if (permissionMode === "bypassPermissions" || permissionMode === "danger-full-access") {
-      return "Matching governance policies can ask you before a tool runs; otherwise everything runs with no checks. Use only in isolated environments.";
     }
     if (permissionMode === "plan") {
       return "The agent remains read-only. Matching governance policies can still ask you before a tool runs.";
@@ -249,6 +285,68 @@ function PermissionModeOutcome({ outcome }: { outcome: ReturnType<typeof permiss
   return <span className={`cbar-elicitation-state${outcome.warning ? " unknown" : ""}`}>{outcome.label}</span>;
 }
 
+export interface PermissionModeDetails {
+  label: string;
+  description: string;
+  outcome: ReturnType<typeof permissionModeOutcome>;
+}
+
+export function PermissionModeDetailsDialog({ details, onClose, returnFocusRef }: {
+  details: PermissionModeDetails;
+  onClose: () => void;
+  returnFocusRef: { current: HTMLElement | null };
+}) {
+  return (
+    <Modal title={`${details.label} Details`} onClose={onClose} returnFocusRef={returnFocusRef} className="permission-mode-details-dialog">
+      <div className="permission-mode-details-copy">
+        <PermissionModeOutcome outcome={details.outcome} />
+        <p>{details.description}</p>
+      </div>
+    </Modal>
+  );
+}
+
+function PermissionModeChoice({
+  label,
+  description,
+  outcome,
+  checked,
+  onSelect,
+  onDetails,
+}: PermissionModeDetails & {
+  checked: boolean;
+  onSelect: () => void;
+  onDetails: (details: PermissionModeDetails, trigger: HTMLButtonElement) => void;
+}) {
+  const details = { label, description, outcome };
+  return (
+    <div className="cbar-permission-row" role="none">
+      <button
+        type="button"
+        role="menuitemradio"
+        aria-checked={checked}
+        className={`cbar-opt permission-mode${checked ? " on" : ""}`}
+        data-menu-label={label}
+        onClick={onSelect}
+      >
+        <span className="cbar-permission-label">{label}</span>
+        <PermissionModeOutcome outcome={outcome} />
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        className="icon-btn cbar-permission-details-trigger"
+        aria-label={`${label} Details`}
+        data-menu-label={`${label} Details`}
+        title={`${label} Details`}
+        onClick={(event) => onDetails(details, event.currentTarget)}
+      >
+        <InfoIcon size={15} />
+      </button>
+    </div>
+  );
+}
+
 export function ApprovalsMenuChoices({
   capabilities,
   driver,
@@ -256,6 +354,7 @@ export function ApprovalsMenuChoices({
   permVal,
   apply,
   close,
+  onDetails,
 }: {
   capabilities: AgentCapabilities | undefined;
   driver: AgentDriverKind;
@@ -263,56 +362,59 @@ export function ApprovalsMenuChoices({
   permVal: string;
   apply: Apply;
   close: () => void;
+  onDetails: (details: PermissionModeDetails, trigger: HTMLButtonElement) => void;
 }) {
   const defaultStatus = elicitationAvailability(capabilities, defaultPermissionMode(driver));
   const defaultMode = defaultPermissionMode(driver);
   const defaultOutcome = permissionModeOutcome(defaultMode, defaultStatus);
-  const defaultDescription = permissionModeOptionDescription(defaultMode, driver, defaultStatus, defaultOutcome);
+  const defaultDescription = permissionModeOptionDescription(
+    defaultMode,
+    driver,
+    defaultStatus,
+    defaultOutcome,
+    defaultMode ? capabilities?.elicitation?.[defaultMode] : undefined,
+  ) ?? defaultOutcome.description;
   const unlistedMode = permVal && !permModes.includes(permVal) ? permVal : undefined;
   const displayedModes = unlistedMode ? [unlistedMode, ...permModes] : permModes;
 
   return (
     <>
       <div className="plus-section" role="presentation">Permission Mode</div>
-      <button
-        type="button"
-        role="menuitemradio"
-        aria-checked={!permVal}
-        className={`cbar-opt permission-mode${!permVal ? " on" : ""}`}
-        onClick={() => {
+      <PermissionModeChoice
+        label={defaultPermissionModeDisplayLabel(driver)}
+        description={defaultDescription}
+        outcome={defaultOutcome}
+        checked={!permVal}
+        onSelect={() => {
           apply({ permissionMode: "" });
           close();
         }}
-      >
-        <span className="cbar-permission-copy">
-          <span>{defaultPermissionModeDisplayLabel(driver)}</span>
-          <span className="cbar-permission-description">{defaultDescription}</span>
-        </span>
-        <PermissionModeOutcome outcome={defaultOutcome} />
-      </button>
+        onDetails={onDetails}
+      />
       {displayedModes.map((p) => {
         const status = elicitationAvailability(capabilities, p);
         const outcome = permissionModeOutcome(p, status);
-        const description = permissionModeOptionDescription(p, driver, status, outcome);
+        const description = permissionModeOptionDescription(
+          p,
+          driver,
+          status,
+          outcome,
+          capabilities?.elicitation?.[p],
+        ) ?? outcome.description;
         const isUnlisted = p === unlistedMode;
         return (
-          <button
+          <PermissionModeChoice
             key={p}
-            type="button"
-            role="menuitemradio"
-            aria-checked={p === permVal}
-            className={`cbar-opt permission-mode${p === permVal ? " on" : ""}`}
-            onClick={() => {
+            label={permissionModeLabel(p, driver)}
+            description={description}
+            outcome={outcome}
+            checked={p === permVal}
+            onSelect={() => {
               if (!isUnlisted) apply({ permissionMode: p });
               close();
             }}
-          >
-            <span className="cbar-permission-copy">
-              <span>{permissionModeLabel(p, driver)}</span>
-              <span className="cbar-permission-description">{description}</span>
-            </span>
-            <PermissionModeOutcome outcome={outcome} />
-          </button>
+            onDetails={onDetails}
+          />
         );
       })}
     </>
@@ -320,31 +422,46 @@ export function ApprovalsMenuChoices({
 }
 
 export function ApprovalsControl({ session, apply }: { session: SessionView; apply: Apply }) {
+  const [details, setDetails] = useState<PermissionModeDetails | null>(null);
+  const detailsReturnFocusRef = useRef<HTMLElement | null>(null);
   const { caps, permModes, permVal } = useSessionConfig(session);
   if (permModes.length === 0) return null;
   const currentStatus = elicitationAvailability(caps, permVal || defaultPermissionMode(session.driver));
   const currentOutcome = permissionModeOutcome(permVal || defaultPermissionMode(session.driver), currentStatus);
   return (
-    <BarMenu
-      permissionMode
-      label={
-        <span className="cbar-approvals">
-          <ShieldIcon size={14} />
-          {approvalControlLabel(session.driver, permVal, currentStatus)}
-        </span>
-      }
-      title={approvalOptionTitle("Permission mode (applies next turn).", currentOutcome)}
-    >
-      {(close) => (
-        <ApprovalsMenuChoices
-          capabilities={caps}
-          driver={session.driver}
-          permModes={permModes}
-          permVal={permVal}
-          apply={apply}
-          close={close}
+    <>
+      <BarMenu
+        permissionMode
+        label={
+          <span className="cbar-approvals">
+            <ShieldIcon size={14} />
+            {approvalControlLabel(session.driver, permVal, currentStatus)}
+          </span>
+        }
+        title={approvalOptionTitle("Permission mode (applies next turn).", currentOutcome)}
+      >
+        {(close) => (
+          <ApprovalsMenuChoices
+            capabilities={caps}
+            driver={session.driver}
+            permModes={permModes}
+            permVal={permVal}
+            apply={apply}
+            close={close}
+            onDetails={(nextDetails, trigger) => {
+              detailsReturnFocusRef.current = trigger;
+              setDetails(nextDetails);
+            }}
+          />
+        )}
+      </BarMenu>
+      {details && (
+        <PermissionModeDetailsDialog
+          details={details}
+          onClose={() => setDetails(null)}
+          returnFocusRef={detailsReturnFocusRef}
         />
       )}
-    </BarMenu>
+    </>
   );
 }

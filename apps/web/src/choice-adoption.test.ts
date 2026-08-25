@@ -94,7 +94,7 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   ["components/AutomationsView.tsx", "native-select", 12],
   ["components/Board.tsx", "native-select", 2],
   ["components/BrowserPanel.tsx", "seg", 1],
-  ["components/ComposerControls.tsx", "cbar-opt", 5],
+  ["components/ComposerControls.tsx", "cbar-opt", 4],
   ["components/FilesPanel.tsx", "native-select", 1],
   ["components/FilesPanel.tsx", "seg", 1],
   ["components/GitDiffViewer.tsx", "native-select", 1],
@@ -136,7 +136,7 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   // Like CommandPalette, this is transient command navigation rather than a persisted setting or
   // one-of-N form choice. Listbox/option is the correct combobox popup contract for its textarea.
   ["components/SlashCommandMenu.tsx", "raw-radiogroup", 2],
-  ["components/ComposerControls.tsx", "raw-radiogroup", 5],
+  ["components/ComposerControls.tsx", "raw-radiogroup", 4],
   ["components/EditorSelect.tsx", "raw-radiogroup", 1],
   ["components/GitDiffViewer.tsx", "raw-radiogroup", 3],
   ["components/InstanceSelector.tsx", "raw-radiogroup", 1],
