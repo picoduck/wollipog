@@ -295,7 +295,7 @@ export class CodexAppServerDriver implements Driver {
 
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (t: string) => {
-      if (this.disposed) return;
+      if (this.disposed || this.child !== child) return;
       const s = String(t).trim();
       if (s && !/DeprecationWarning|trace-deprecation/.test(s)) {
         if (isProviderAuthenticationFailure(s)) this.signalAuthenticationFailure();
@@ -346,7 +346,10 @@ export class CodexAppServerDriver implements Driver {
         // callback normally clears the exact child/peer handles. A transport error can reject the
         // initialize request before close, so explicitly stop that probe before replacing it; its
         // identity-guarded close callback cannot tear down the fallback launch.
-        if (this.child) this.kill(this.child);
+        const rejectedChild = this.child;
+        this.child = null;
+        this.peer = null;
+        if (rejectedChild) this.kill(rejectedChild);
         this.initializationStderr = [];
         this.initializationExit = null;
         this.cb.onStderr(

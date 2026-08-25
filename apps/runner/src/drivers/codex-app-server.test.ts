@@ -141,6 +141,7 @@ test("a late rejected-probe close cannot fail or tear down the healthy fallback"
   const children: AgentProcess[] = [];
   const exits: Array<number | null> = [];
   const killed: AgentProcess[] = [];
+  const stderr: string[] = [];
   const driver = new CodexAppServerDriver({
     command: "codex",
     args: [],
@@ -150,7 +151,7 @@ test("a late rejected-probe close cannot fail or tear down the healthy fallback"
     context: { kind: "native" },
   }, {
     onEvent: () => {},
-    onStderr: () => {},
+    onStderr: (line) => stderr.push(line),
     onExit: (code) => exits.push(code),
   }, undefined, {
     spawn: () => {
@@ -165,6 +166,7 @@ test("a late rejected-probe close cannot fail or tear down the healthy fallback"
           return;
         }
         child.stdout.write(JSON.stringify({ id: message.id, result: { userAgent: "old-codex" } }) + "\n");
+        children[0]!.stderr.write("Usage: codex [OPTIONS]\n");
         children[0]!.emit("close", 1);
       });
       return child;
@@ -177,6 +179,9 @@ test("a late rejected-probe close cannot fail or tear down the healthy fallback"
     assert.equal(children.length, 2);
     assert.deepEqual(killed, [children[0]]);
     assert.deepEqual(exits, []);
+    assert.equal(stderr.length, 1);
+    assert.match(stderr[0]!, /continuing without Default-mode structured questions/);
+    assert.doesNotMatch(stderr[0]!, /Usage:/);
     assert.equal(driver.pid, children[1]!.pid, "the fallback remains the managed child");
   } finally {
     driver.dispose();
