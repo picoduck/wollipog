@@ -33,7 +33,11 @@ import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { TextDecoder } from "node:util";
-import { PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL } from "@wollipog/protocol";
+import {
+  PROTOCOL_VERSION,
+  RUNNER_CAPABILITY_MIN_PROTOCOL,
+  projectSessionEventPayloadForProtocol,
+} from "@wollipog/protocol";
 import type {
   AgentCapabilities,
   AgentSlashCommand,
@@ -353,6 +357,14 @@ interface HistoryIndexInfo {
   last: HistoryCheckpoint | null;
 }
 
+interface SessionEventProjectionIndex {
+  protocolVersion: number | null;
+  logEpoch: number;
+  localTail: number;
+  completeBytes: number;
+  omittedSeqs: number[];
+}
+
 class HistoryStoreError extends Error {
   constructor(readonly code: SessionHistoryPageErrorCode, message: string) {
     super(message);
@@ -408,6 +420,8 @@ export class SessionStore {
     string,
     { epoch: number; throughSeq: number; completeBytes: number }
   >();
+  /** Exact local sequence ids omitted by the current explicit older-peer event policy. */
+  private readonly eventProjectionIndexes = new Map<string, SessionEventProjectionIndex>();
   /** Immutable segment hashes are expensive but only need revalidation when inode metadata changes. */
   private readonly verifiedHistorySegments = new Map<string, string>();
   private historyMaintenanceCursor: string | null = null;
@@ -1857,12 +1871,215 @@ export class SessionStore {
     const disk = this.readDiskMeta(id);
     if (!disk) return;
     this.pending.delete(id); // stale preview/seq deltas from the pre-reset log must not resurface
+    this.eventProjectionIndexes.delete(id);
     // Bump the log epoch: OTHER processes may hold pending deltas recorded against the old
     // log — their flushes see the mismatch and drop them instead of resurrecting the old
     // seq high-water over the reset (or over a shorter re-backfilled) log.
     const nextEpoch = (disk.logEpoch ?? 0) + 1;
     this.writeHistoryResetIntent(id, nextEpoch);
     this.recoverHistoryReset(id);
+  }
+
+  private eventProjectionRequired(protocolVersion: number | null | undefined): boolean {
+    return projectSessionEventPayloadForProtocol({ kind: "agent_response_completed" }, protocolVersion) === null;
+  }
+
+  private upperBound(values: readonly number[], target: number): number {
+    let low = 0;
+    let high = values.length;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (values[middle]! <= target) low = middle + 1;
+      else high = middle;
+    }
+    return low;
+  }
+
+  /** Build an append-incremental index containing only explicitly omittable local sequence ids.
+   * The exact JSONL remains authoritative; this derived index can be discarded on reset/restart. */
+  private refreshEventProjectionIndex(
+    id: string,
+    protocolVersion: number | null | undefined,
+  ): SessionEventProjectionIndex {
+    const meta = this.readDiskMeta(id);
+    if (!meta) throw new HistoryStoreError("history_cursor_invalid", "session history does not exist");
+    const peerProtocolVersion = Number.isInteger(protocolVersion) ? protocolVersion! : null;
+    const logEpoch = meta.logEpoch ?? 0;
+    const layout = this.historyLayout(id, logEpoch);
+    const tail = this.historyTail(id).seq;
+    let index = this.eventProjectionIndexes.get(id);
+    if (!index || index.protocolVersion !== peerProtocolVersion || index.logEpoch !== logEpoch ||
+        index.localTail > tail || index.completeBytes > layout.totalBytes) {
+      index = {
+        protocolVersion: peerProtocolVersion,
+        logEpoch,
+        localTail: 0,
+        completeBytes: 0,
+        omittedSeqs: [],
+      };
+    }
+    if (index.localTail < tail) {
+      let expected = index.localTail + 1;
+      const scanned = this.scanHistoryLines(id, index.completeBytes, layout.totalBytes, (line) => {
+        const event = this.parseStoredEvent(line);
+        if (event.seq !== expected || event.seq > tail) {
+          throw new HistoryStoreError("history_corrupt", "session history is not contiguous during wire projection");
+        }
+        if (projectSessionEventPayloadForProtocol(event.payload, protocolVersion) === null) {
+          index.omittedSeqs.push(event.seq);
+        }
+        expected += 1;
+      });
+      if (scanned.trailingBytes !== 0) {
+        throw new HistoryStoreError("history_corrupt", "session history has an incomplete projected record");
+      }
+      if (expected - 1 !== tail) {
+        throw new HistoryStoreError("history_corrupt", "session history ended before its projected tail");
+      }
+      index.localTail = tail;
+      index.completeBytes = scanned.completeBytes;
+    }
+    this.eventProjectionIndexes.set(id, index);
+    return index;
+  }
+
+  private projectedSeq(index: SessionEventProjectionIndex, localSeq: number): number {
+    return localSeq - this.upperBound(index.omittedSeqs, localSeq);
+  }
+
+  private localSeqForProjected(index: SessionEventProjectionIndex, projectedSeq: number): number {
+    const projectedTail = this.projectedSeq(index, index.localTail);
+    if (!Number.isSafeInteger(projectedSeq) || projectedSeq < 0 || projectedSeq > projectedTail) {
+      throw new HistoryStoreError("history_cursor_invalid", "projected history cursor is beyond the durable tail");
+    }
+    if (projectedSeq === 0) return 0;
+    let localSeq = projectedSeq;
+    for (const omittedSeq of index.omittedSeqs) {
+      if (omittedSeq > localSeq) break;
+      localSeq += 1;
+    }
+    return localSeq;
+  }
+
+  /** Dense peer-facing high-water for a local durable sequence. */
+  projectedEventSeq(
+    id: string,
+    localSeq: number,
+    protocolVersion: number | null | undefined,
+  ): number {
+    if (!this.eventProjectionRequired(protocolVersion)) return localSeq;
+    return this.projectedSeq(this.refreshEventProjectionIndex(id, protocolVersion), localSeq);
+  }
+
+  /** Project one exact local event for live delivery. An omitted event consumes no peer sequence. */
+  projectEventForProtocol(
+    id: string,
+    event: StoredEvent,
+    protocolVersion: number | null | undefined,
+  ): StoredEvent | null {
+    const payload = projectSessionEventPayloadForProtocol(event.payload, protocolVersion);
+    if (payload === null) {
+      this.refreshEventProjectionIndex(id, protocolVersion);
+      return null;
+    }
+    if (!this.eventProjectionRequired(protocolVersion)) return event;
+    const index = this.refreshEventProjectionIndex(id, protocolVersion);
+    return { ...event, seq: this.projectedSeq(index, event.seq), payload };
+  }
+
+  /** Legacy whole-history hydration projected into the peer's dense sequence space. */
+  readEventsForProtocol(
+    id: string,
+    afterSeq: number,
+    protocolVersion: number | null | undefined,
+  ): StoredEvent[] {
+    if (!this.eventProjectionRequired(protocolVersion)) return this.readEvents(id, afterSeq);
+    const index = this.refreshEventProjectionIndex(id, protocolVersion);
+    if (afterSeq >= this.projectedSeq(index, index.localTail)) return [];
+    const localAfter = this.localSeqForProjected(index, afterSeq);
+    return this.readEvents(id, localAfter).flatMap((event) => {
+      const projected = this.projectEventForProtocol(id, event, protocolVersion);
+      return projected ? [projected] : [];
+    });
+  }
+
+  /** Indexed history keeps its frozen page contract while omitting reviewed additive events. */
+  readEventPageForProtocol(
+    id: string,
+    request: { afterSeq: number; limit: number; logEpoch?: number; throughSeq?: number },
+    protocolVersion: number | null | undefined,
+  ): HistoryPageResult {
+    if (!this.eventProjectionRequired(protocolVersion)) return this.readEventPage(id, request);
+    try {
+      if (!Number.isSafeInteger(request.afterSeq) || request.afterSeq < 0) {
+        throw new HistoryStoreError("history_cursor_invalid", "afterSeq must be a non-negative safe integer");
+      }
+      if (!Number.isSafeInteger(request.limit) || request.limit < 1 || request.limit > HISTORY_PAGE_MAX_EVENTS) {
+        throw new HistoryStoreError(
+          "history_cursor_invalid",
+          `limit must be an integer from 1 to ${HISTORY_PAGE_MAX_EVENTS}`,
+        );
+      }
+      const hasEpoch = request.logEpoch !== undefined;
+      const hasThrough = request.throughSeq !== undefined;
+      if (hasEpoch !== hasThrough) {
+        throw new HistoryStoreError(
+          "history_cursor_invalid", "logEpoch and throughSeq must either both be omitted or both be supplied",
+        );
+      }
+      if (hasEpoch && (!Number.isSafeInteger(request.logEpoch) || request.logEpoch! < 0 ||
+          !Number.isSafeInteger(request.throughSeq) || request.throughSeq! < 0)) {
+        throw new HistoryStoreError("history_cursor_invalid", "history continuation is not a safe integer cursor");
+      }
+      const index = this.refreshEventProjectionIndex(id, protocolVersion);
+      if (request.logEpoch !== undefined && request.logEpoch !== index.logEpoch) {
+        throw new HistoryStoreError("history_epoch_changed", "session history was reset during pagination");
+      }
+      const throughSeq = request.throughSeq ?? this.projectedSeq(index, index.localTail);
+      if (request.afterSeq > throughSeq) {
+        throw new HistoryStoreError("history_cursor_invalid", "history cursor is beyond the frozen durable tail");
+      }
+      if (request.afterSeq === throughSeq) {
+        return {
+          ok: true,
+          events: [],
+          page: { logEpoch: index.logEpoch, throughSeq, nextAfterSeq: request.afterSeq, hasMore: false },
+        };
+      }
+      let localAfter = this.localSeqForProjected(index, request.afterSeq);
+      const localThrough = this.localSeqForProjected(index, throughSeq);
+      while (localAfter < localThrough) {
+        const page = this.readEventPage(id, {
+          afterSeq: localAfter,
+          limit: request.limit,
+          logEpoch: index.logEpoch,
+          throughSeq: localThrough,
+        });
+        if (!page.ok) return page;
+        const events = page.events.flatMap((event) => {
+          const projected = this.projectEventForProtocol(id, event, protocolVersion);
+          return projected ? [projected] : [];
+        });
+        if (events.length) {
+          const nextAfterSeq = events.at(-1)!.seq;
+          return {
+            ok: true,
+            events,
+            page: { logEpoch: index.logEpoch, throughSeq, nextAfterSeq, hasMore: nextAfterSeq < throughSeq },
+          };
+        }
+        if (!page.page.hasMore) break;
+        localAfter = page.page.nextAfterSeq;
+      }
+      return {
+        ok: true,
+        events: [],
+        page: { logEpoch: index.logEpoch, throughSeq, nextAfterSeq: request.afterSeq, hasMore: false },
+      };
+    } catch (error) {
+      if (error instanceof HistoryStoreError) return { ok: false, code: error.code, error: error.message };
+      return { ok: false, code: "history_corrupt", error: (error as Error).message };
+    }
   }
 
   /** Events with seq > afterSeq, in seq order. */
@@ -2128,7 +2345,10 @@ export class SessionStore {
   }
 
   /** Protocol snapshots for every stored session (sent on register). */
-  snapshots(controlPlaneProtocolVersion: number | null = PROTOCOL_VERSION): SessionSnapshot[] {
+  snapshots(
+    controlPlaneProtocolVersion: number | null = PROTOCOL_VERSION,
+    exactEventSeq = false,
+  ): SessionSnapshot[] {
     const snapshots: SessionSnapshot[] = [];
     for (const listed of this.listSessions()) {
       if (this.isDeleted(listed.sessionId)) continue;
@@ -2143,6 +2363,9 @@ export class SessionStore {
       let durableSeq = meta.seq;
       try {
         durableSeq = this.historyTail(meta.sessionId).seq;
+        if (!exactEventSeq) {
+          durableSeq = this.projectedEventSeq(meta.sessionId, durableSeq, controlPlaneProtocolVersion);
+        }
       } catch {
         // Preserve the last metadata high-water so a later page attempt fails closed on corruption.
       }
@@ -2161,6 +2384,7 @@ export class SessionStore {
     this.checkpointCache.delete(id);
     this.historyIndexInfoCache.delete(id);
     this.historyBoundaryCache.delete(id);
+    this.eventProjectionIndexes.delete(id);
     for (const path of [...this.verifiedHistorySegments.keys()]) {
       if (path.startsWith(`${this.dir(id)}\\`) || path.startsWith(`${this.dir(id)}/`)) {
         this.verifiedHistorySegments.delete(path);

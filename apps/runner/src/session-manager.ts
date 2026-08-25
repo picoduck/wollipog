@@ -778,9 +778,9 @@ export class SessionManager {
   }
 
   /** Phase 2: full metadata for every session the box holds (sent on register for hydration). */
-  sessionSnapshots() {
+  sessionSnapshots(exactEventSeq = false) {
     const protocolVersion = this.controlPlaneProtocolVersion();
-    return this.store.snapshots(protocolVersion).map((snapshot) =>
+    return this.store.snapshots(protocolVersion, exactEventSeq).map((snapshot) =>
       this.sessionCommandAuthority.overlaySnapshot(snapshot, protocolVersion));
   }
 
@@ -789,6 +789,10 @@ export class SessionManager {
     return this.sessionCommandAuthority.overlaySnapshot(metaToSnapshot(meta, protocolVersion), protocolVersion);
   }
 
+  /** One negotiated snapshot for correlated result messages assembled by the socket layer. */
+  snapshotForControlPlane(meta: SessionMeta) {
+    return this.snapshot(meta);
+  }
   /** Revoke process-local command authority and immediately replace any executable coordinates at
    * the control plane with the persisted display-only catalog. */
   private revokeSessionCommandAuthority(sessionId: string): boolean {
@@ -807,14 +811,16 @@ export class SessionManager {
 
   /** Phase 2: a session's event history from the store (control plane lazy-hydrates the timeline). */
   history(sessionId: string, afterSeq: number) {
-    return this.store.readEvents(sessionId, afterSeq);
+    return this.store.readEventsForProtocol(sessionId, afterSeq, this.controlPlaneProtocolVersion());
   }
 
   historyPage(
     sessionId: string,
     request: { afterSeq: number; limit: number; logEpoch?: number; throughSeq?: number },
   ) {
-    return this.store.readEventPage(sessionId, request);
+    return this.store.readEventPageForProtocol(
+      sessionId, request, this.controlPlaneProtocolVersion(),
+    );
   }
 
   /** On startup, demote sessions left mid-flight (their agent process is gone) to `idle` so the

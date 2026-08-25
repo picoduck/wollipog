@@ -512,6 +512,30 @@ export function providerAuthenticationReceiptCode(
     : "COMMAND_CANCELLED";
 }
 
+/** Additive event kinds that have an explicit older-peer wire policy. Kinds absent from this
+ * table are sent unchanged: an unreviewed event must fail closed at an older consumer rather than
+ * being silently discarded. */
+const SESSION_EVENT_WIRE_POLICIES = {
+  agent_response_completed: { minProtocol: 87, legacy: "omit" },
+} as const satisfies Partial<Record<SessionEventKind, {
+  minProtocol: number;
+  legacy: "omit";
+}>>;
+
+/** Project one exact runner-local event payload for the currently connected control plane.
+ * `null` means that this explicitly reviewed event kind is safe to omit from the older peer's
+ * dense wire history. Callers remain responsible for projecting its runner sequence. */
+export function projectSessionEventPayloadForProtocol(
+  payload: SessionEventPayload,
+  protocolVersion: number | null | undefined,
+): SessionEventPayload | null {
+  const policy = SESSION_EVENT_WIRE_POLICIES[payload.kind as keyof typeof SESSION_EVENT_WIRE_POLICIES];
+  if (policy && (!Number.isInteger(protocolVersion) || protocolVersion! < policy.minProtocol)) {
+    if (policy.legacy === "omit") return null;
+  }
+  return payload;
+}
+
 /** Project additive receipt codes at the actual socket-send boundary. Keeping buffered messages
  * exact until then makes reconnecting to an older control plane safe. */
 export function projectRunnerMessageForProtocol(

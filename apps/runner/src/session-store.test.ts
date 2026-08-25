@@ -118,6 +118,82 @@ test("appendEvent assigns increasing seq and readEvents filters by afterSeq", ()
   }
 });
 
+test("v86 wire projection omits response completions while keeping dense live and hydration cursors", () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta());
+    const first = store.appendEvent("s_abc", { kind: "agent_message", text: "one" }, 1001)!;
+    const completion = store.appendEvent("s_abc", { kind: "agent_response_completed" }, 1002)!;
+    const second = store.appendEvent("s_abc", { kind: "agent_message", text: "two" }, 1003)!;
+
+    assert.deepEqual(store.readEvents("s_abc").map((event) => event.payload.kind), [
+      "agent_message", "agent_response_completed", "agent_message",
+    ], "runner-local history remains exact");
+    assert.equal(store.snapshots(86)[0]?.seq, 2);
+    assert.equal(store.snapshots(86, true)[0]?.seq, 3,
+      "buffered messages retain the exact local high-water until socket send");
+    assert.equal(store.snapshots(87)[0]?.seq, 3);
+    assert.deepEqual(store.projectEventForProtocol("s_abc", first, 86), first);
+    assert.equal(store.projectEventForProtocol("s_abc", completion, 86), null);
+    assert.deepEqual(store.projectEventForProtocol("s_abc", second, 86), {
+      ...second,
+      seq: 2,
+    });
+    assert.deepEqual(store.projectEventForProtocol("s_abc", completion, 87), completion);
+
+    const legacy = store.readEventsForProtocol("s_abc", 0, 86);
+    assert.deepEqual(legacy.map((event) => [event.seq, event.payload.kind]), [
+      [1, "agent_message"],
+      [2, "agent_message"],
+    ]);
+    assert.deepEqual(store.readEventsForProtocol("s_abc", 1, 86).map((event) => event.seq), [2]);
+    assert.deepEqual(store.readEventsForProtocol("s_abc", 99, 86), [],
+      "legacy hydration preserves the empty result for a stale cursor beyond the projected tail");
+    assert.deepEqual(store.readEventsForProtocol("s_abc", 0, 87).map((event) => event.seq), [1, 2, 3]);
+
+    const page1 = store.readEventPageForProtocol("s_abc", { afterSeq: 0, limit: 1 }, 86);
+    assert.equal(page1.ok, true);
+    if (!page1.ok) return;
+    assert.deepEqual(page1.events.map((event) => [event.seq, event.payload.kind]), [[1, "agent_message"]]);
+    assert.deepEqual(page1.page, {
+      logEpoch: 0,
+      throughSeq: 2,
+      nextAfterSeq: 1,
+      hasMore: true,
+    });
+
+    const page2 = store.readEventPageForProtocol("s_abc", {
+      afterSeq: page1.page.nextAfterSeq,
+      limit: 1,
+      logEpoch: page1.page.logEpoch,
+      throughSeq: page1.page.throughSeq,
+    }, 86);
+    assert.equal(page2.ok, true);
+    if (!page2.ok) return;
+    assert.deepEqual(page2.events.map((event) => [event.seq, event.payload.kind]), [[2, "agent_message"]]);
+    assert.equal(page2.page.hasMore, false);
+
+    store.appendEvent("s_abc", { kind: "agent_response_completed" }, 1004);
+    store.appendEvent("s_abc", { kind: "agent_message", text: "three" }, 1005);
+    const frozen = store.readEventPageForProtocol("s_abc", {
+      afterSeq: 2,
+      limit: 10,
+      logEpoch: page1.page.logEpoch,
+      throughSeq: page1.page.throughSeq,
+    }, 86);
+    assert.deepEqual(frozen, {
+      ok: true,
+      events: [],
+      page: { logEpoch: 0, throughSeq: 2, nextAfterSeq: 2, hasMore: false },
+    });
+    assert.deepEqual(store.readEventsForProtocol("s_abc", 2, 86).map((event) => [event.seq, event.payload.kind]), [
+      [3, "agent_message"],
+    ], "a new connection/version projection is evaluated from exact local history");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("resetEvents truncates the log + resets seq/preview but PRESERVES usage (for reprocess re-import)", () => {
   const { store, root } = tmpStore();
   try {

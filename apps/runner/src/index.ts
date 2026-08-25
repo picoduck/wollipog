@@ -13,6 +13,7 @@ import {
   parseMessage,
   PROTOCOL_VERSION,
   projectRunnerMessageForProtocol,
+  projectSessionEventPayloadForProtocol,
   runnerSupportsProtocol,
   validatePromptImageInputs,
   type AdoptSessionMessage,
@@ -40,6 +41,7 @@ import {
   type SessionCommandInvocationResultMessage,
   type SessionCommandInvocationUpdateMessage,
   type SessionEventPayload,
+  type SessionSnapshot,
   type SkillSyncEntry,
   type StartSessionMessage,
 } from "@wollipog/protocol";
@@ -87,7 +89,7 @@ import {
   warnLegacyClaudeLifetimeEnvironment,
 } from "./drivers/claude-code.js";
 import { resolveAcpSessionContext } from "./acp-session-context.js";
-import { SessionStore, isAdoptedSession, metaToSnapshot, type SessionMeta } from "./session-store.js";
+import { SessionStore, isAdoptedSession, type SessionMeta } from "./session-store.js";
 import { waitForPendingKills } from "./spawn.js";
 import {
   findExternalSession,
@@ -525,9 +527,77 @@ const shells = new ShellManager({
 // policy lives in outbox.ts; the online-decision and the actual protocol-projected send stay here.
 const outbox = new Outbox<RunnerToControlPlane>();
 
+function projectSnapshotForCurrentProtocol(snapshot: SessionSnapshot): SessionSnapshot {
+  return {
+    ...snapshot,
+    seq: store.projectedEventSeq(snapshot.id, snapshot.seq, controlPlaneProtocolVersion),
+  };
+}
+
+function projectStoredEventsForCurrentProtocol(
+  sessionId: string,
+  events: Array<{ seq: number; ts: number; payload: SessionEventPayload }>,
+) {
+  return events.flatMap((event) => {
+    const projected = store.projectEventForProtocol(sessionId, event, controlPlaneProtocolVersion);
+    return projected ? [projected] : [];
+  });
+}
+
+function projectMessageForCurrentProtocol(msg: RunnerToControlPlane): RunnerToControlPlane | null {
+  if (msg.type === "session_event") {
+    if (msg.seq === undefined) {
+      const payload = projectSessionEventPayloadForProtocol(msg.payload, controlPlaneProtocolVersion);
+      return payload ? { ...msg, payload } : null;
+    }
+    const event = store.projectEventForProtocol(
+      msg.sessionId,
+      { seq: msg.seq, ts: msg.ts ?? Date.now(), payload: msg.payload },
+      controlPlaneProtocolVersion,
+    );
+    return event
+      ? { ...msg, seq: event.seq, ts: msg.ts, payload: event.payload }
+      : null;
+  }
+  if (msg.type === "session_runtime_updated") {
+    return projectRunnerMessageForProtocol({
+      ...msg,
+      snapshot: projectSnapshotForCurrentProtocol(msg.snapshot),
+    }, controlPlaneProtocolVersion);
+  }
+  if (msg.type === "reprocess_session_result") {
+    const events = msg.events
+      ? projectStoredEventsForCurrentProtocol(msg.sessionId, msg.events)
+      : undefined;
+    return projectRunnerMessageForProtocol({
+      ...msg,
+      ...(msg.snapshot ? { snapshot: projectSnapshotForCurrentProtocol(msg.snapshot) } : {}),
+      ...(events ? { events, eventCount: events.length } : {}),
+    }, controlPlaneProtocolVersion);
+  }
+  if (msg.type === "fork_result") {
+    const events = msg.events && msg.snapshot
+      ? projectStoredEventsForCurrentProtocol(msg.snapshot.id, msg.events)
+      : undefined;
+    return projectRunnerMessageForProtocol({
+      ...msg,
+      ...(msg.snapshot ? { snapshot: projectSnapshotForCurrentProtocol(msg.snapshot) } : {}),
+      ...(events ? { events } : {}),
+    }, controlPlaneProtocolVersion);
+  }
+  if (msg.type === "adopt_session_result" && msg.snapshot) {
+    return projectRunnerMessageForProtocol({
+      ...msg,
+      snapshot: projectSnapshotForCurrentProtocol(msg.snapshot),
+    }, controlPlaneProtocolVersion);
+  }
+  return projectRunnerMessageForProtocol(msg, controlPlaneProtocolVersion);
+}
+
 function sendUp(msg: RunnerToControlPlane): void {
   if (ws && ws.readyState === WebSocket.OPEN && registered) {
-    ws.send(JSON.stringify(projectRunnerMessageForProtocol(msg, controlPlaneProtocolVersion)));
+    const projected = projectMessageForCurrentProtocol(msg);
+    if (projected) ws.send(JSON.stringify(projected));
     return;
   }
   outbox.enqueue(msg);
@@ -536,7 +606,8 @@ function sendUp(msg: RunnerToControlPlane): void {
 function flushOutbox(): void {
   if (!ws || ws.readyState !== WebSocket.OPEN || !registered) return;
   for (const m of outbox.drain()) {
-    ws.send(JSON.stringify(projectRunnerMessageForProtocol(m, controlPlaneProtocolVersion)));
+    const projected = projectMessageForCurrentProtocol(m);
+    if (projected) ws.send(JSON.stringify(projected));
   }
 }
 
@@ -902,7 +973,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       // Registration snapshots are sent before the control plane's protocol version is known, so
       // they conservatively omit native capability overlays. Re-publish negotiated snapshots now;
       // v65 peers continue to receive no overlay, while v66+ peers get the hook transport truth.
-      for (const snapshot of sessions.sessionSnapshots()) {
+      for (const snapshot of sessions.sessionSnapshots(true)) {
         sendUp({ type: "session_runtime_updated", snapshot });
       }
       // The CP may have restarted or missed live frames. Reconcile retained terminal processes
@@ -1549,9 +1620,9 @@ async function handleReprocess(msg: ReprocessSessionMessage): Promise<void> {
       requestId,
       sessionId,
       ok: true,
-      snapshot: metaToSnapshot(updated, controlPlaneProtocolVersion),
+      snapshot: sessions.snapshotForControlPlane(updated),
       ...(msg.deferHistory ? {} : {
-        events: sessions.history(sessionId, 0), // legacy CP swaps in the complete re-issued log
+        events: store.readEvents(sessionId), // exact until the socket-send peer projection
       }),
       eventCount: events.length,
     });
@@ -1673,7 +1744,7 @@ async function handleAdopt(msg: AdoptSessionMessage): Promise<void> {
       requestId,
       ok: true,
       descriptor,
-      snapshot: metaToSnapshot(meta, controlPlaneProtocolVersion),
+      snapshot: sessions.snapshotForControlPlane(meta),
     });
   }
 
