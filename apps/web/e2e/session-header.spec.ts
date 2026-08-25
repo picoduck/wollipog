@@ -497,6 +497,18 @@ test("legacy control planes keep mobile Workspace re-filing in More Actions", as
   await expect(moreActions).toBeFocused();
 });
 
+test("legacy unfiled sessions use the Workspace vocabulary in More Actions", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 800 });
+  await openSession(page, "preview-follow", {
+    sessionShell: "1",
+    legacyWorkspaces: "1",
+    unfiledWorkspace: "1",
+  });
+  await page.locator(".session-detail > .detail-head").getByRole("button", { name: "More Actions" }).click();
+  await expect(page.getByRole("menu", { name: "Session Actions" }).locator(".session-project-menu-header"))
+    .toHaveText("Workspace · No Workspace");
+});
+
 test("shared Pod headers keep their trailing controls out of the back-button track", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto("/command-inbox-projects-e2e.html?view=pod");

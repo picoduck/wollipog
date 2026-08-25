@@ -2406,7 +2406,7 @@ function SessionDetailLoaded({
   const usage = sessionPreviewUsage(session);
   const currentProjectName = projectsSupported
     ? (session.projectId ? projects.get(session.projectId)?.name : undefined) ?? session.projectName ?? "No Project"
-    : session.workspaceName ?? "No Project";
+    : session.workspaceName ?? "No Workspace";
 
   return (
     <div className={`session-detail ${mode}`} data-session-surface-id={session.id}>

@@ -50,6 +50,7 @@ const SCENARIO = FIXTURE_QUERY.get("scenario");
 const REVIEW_READY = FIXTURE_QUERY.get("reviewReady") === "1";
 const INCLUDE_SESSION_SHELL = FIXTURE_QUERY.get("sessionShell") === "1";
 const LEGACY_WORKSPACES = FIXTURE_QUERY.get("legacyWorkspaces") === "1";
+const UNFILED_WORKSPACE = FIXTURE_QUERY.get("unfiledWorkspace") === "1";
 const HISTORY_PAGE_DELAY_MS = Number(FIXTURE_QUERY.get("historyDelay") ?? 25);
 const STORAGE_KEY = `wollipog.e2e.project-inbox-model${SCENARIO ? `.${SCENARIO}` : ""}`;
 
@@ -184,6 +185,14 @@ function initialModel(): FixtureModel {
     Object.assign(initial.sessions.find((candidate) => candidate.id === "session-alpha")!, {
       useWorktree: true,
       worktreePath: "/repos/alpha/.agent-worktrees/session-alpha",
+    });
+  }
+  if (UNFILED_WORKSPACE) {
+    Object.assign(initial.sessions.find((candidate) => candidate.id === "session-alpha")!, {
+      projectId: null,
+      projectLocationId: null,
+      workspaceId: null,
+      workspaceName: null,
     });
   }
   return initial;
