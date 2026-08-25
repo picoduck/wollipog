@@ -667,6 +667,128 @@ test("permission context rides into the timeline item", () => {
   assert.equal(p.context?.input, "rm -rf build");
 });
 
+test("repeated pending permission requests update one stable transcript row", () => {
+  const builder = new TimelineBuilder();
+  builder.push(ev({
+    kind: "permission_request",
+    requestId: "p1",
+    title: "First Title",
+    options: [{ optionId: "first", name: "First" }],
+    context: { toolName: "Bash", input: "first guidance" },
+  }));
+  const first = builder.snapshot();
+  builder.push(ev({
+    kind: "permission_request",
+    requestId: "p1",
+    title: "Updated Title",
+    options: [{ optionId: "updated", name: "Updated" }],
+    context: { toolName: "Bash", input: "updated guidance" },
+  }));
+  const updated = builder.snapshot();
+
+  assert.equal(updated.length, 1);
+  assert.equal(updated[0]?.id, first[0]?.id, "the transcript position retains its original identity");
+  assert.deepEqual(updated[0], {
+    kind: "permission",
+    id: first[0]!.id,
+    requestId: "p1",
+    title: "Updated Title",
+    options: [{ optionId: "updated", name: "Updated" }],
+    context: { toolName: "Bash", input: "updated guidance" },
+    resolvedOptionId: undefined,
+    resolutionReason: undefined,
+  });
+  assert.deepEqual(timelineSnapshotDelta(updated)?.dirtyIndexes, [0]);
+});
+
+test("authentication request identity changes coalesce until the current request resolves", () => {
+  const events = [
+    ev({
+      kind: "permission_request",
+      requestId: "provider-auth:recovery",
+      title: "Authentication Required — Claude Code",
+      options: [{ optionId: "auth:login", name: "Start Sign-In" }],
+      purpose: "authentication",
+      context: { toolName: "Claude Code", input: "Sign in." },
+    }),
+    ev({ kind: "agent_message", text: "The row must stay before this message.", final: true }),
+    ev({
+      kind: "permission_request",
+      requestId: "provider-auth:recovery:login-operation",
+      title: "Signing In — Claude Code",
+      options: [{ optionId: "auth:cancel", name: "Cancel Sign-In" }],
+      purpose: "authentication",
+      context: { toolName: "Claude Code", input: "Provider-owned sign-in is active." },
+    }),
+    ev({
+      kind: "permission_resolved",
+      requestId: "provider-auth:recovery",
+      optionId: "auth:login",
+    }),
+    ev({
+      kind: "permission_request",
+      requestId: "provider-auth:recovery",
+      title: "Authentication Required — Claude Code",
+      options: [{ optionId: "auth:revalidate", name: "Recheck Authentication" }],
+      purpose: "authentication",
+      context: { toolName: "Claude Code", input: "Sign-in finished; recheck authentication." },
+    }),
+    ev({
+      kind: "permission_resolved",
+      requestId: "provider-auth:recovery",
+      optionId: "auth:revalidate",
+      resolutionReason: "submitted",
+    }),
+  ];
+
+  const projected = deriveTimeline(events);
+  const permissions = projected.filter(
+    (item): item is Extract<TimelineItem, { kind: "permission" }> => item.kind === "permission",
+  );
+  assert.equal(permissions.length, 1);
+  assert.equal(projected[0]?.kind, "permission", "updates do not move the original row");
+  assert.deepEqual(permissions[0], {
+    kind: "permission",
+    id: events[0]!.seq,
+    requestId: "provider-auth:recovery",
+    title: "Authentication Required — Claude Code",
+    options: [{ optionId: "auth:revalidate", name: "Recheck Authentication" }],
+    context: { toolName: "Claude Code", input: "Sign-in finished; recheck authentication." },
+    resolvedOptionId: "auth:revalidate",
+    resolutionReason: "submitted",
+  });
+
+  const live = new TimelineBuilder();
+  for (const event of events) live.push(event);
+  assert.deepEqual(live.snapshot(), projected, "live streaming and replay produce the same timeline");
+});
+
+test("a later authentication recovery creates a new historical card after resolution", () => {
+  const items = deriveTimeline([
+    ev({
+      kind: "permission_request",
+      requestId: "provider-auth:first",
+      title: "Authentication Required — Claude Code",
+      options: [{ optionId: "auth:dismiss", name: "Dismiss Recovery" }],
+      purpose: "authentication",
+    }),
+    ev({ kind: "permission_resolved", requestId: "provider-auth:first", optionId: "auth:dismiss" }),
+    ev({
+      kind: "permission_request",
+      requestId: "provider-auth:second",
+      title: "Authentication Required — Claude Code",
+      options: [{ optionId: "auth:revalidate", name: "Recheck Authentication" }],
+      purpose: "authentication",
+    }),
+  ]);
+  const permissions = items.filter((item) => item.kind === "permission");
+  assert.equal(permissions.length, 2);
+  assert.deepEqual(
+    permissions.map((item) => [item.requestId, item.resolvedOptionId]),
+    [["provider-auth:first", "auth:dismiss"], ["provider-auth:second", undefined]],
+  );
+});
+
 test("review_decision renders as a standalone visible timeline item", () => {
   const items = deriveTimeline([
     ev({
