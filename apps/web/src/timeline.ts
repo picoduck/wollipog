@@ -380,6 +380,9 @@ export class TimelineBuilder {
   // subagent's). tool ids are globally unique, so toolIndex needs no such scoping.
   private readonly fileIndex = new Map<string, number>();
   private readonly permIndex = new Map<string, number>();
+  /** Authentication recovery may rotate request ids while one provider-owned recovery remains
+   * active. Keep that episode anchored to its first transcript row; only a resolution ends it. */
+  private activeAuthenticationIndex: number | null = null;
   private readonly planIndex = new Map<string, number>();
   private readonly pendingSubagentRollups = new Map<string, SubagentRollup>();
   private activeUserIndex: number | null = null;
@@ -796,7 +799,27 @@ export class TimelineBuilder {
       }
       case "permission_request": {
         this.breakText();
-        const i =
+        const indexed = this.permIndex.get(p.requestId);
+        const authIndex = p.purpose === "authentication" ? this.activeAuthenticationIndex : null;
+        const i = indexed ?? authIndex;
+        if (i != null && this.items[i]?.kind === "permission") {
+          const prior = this.items[i];
+          if (prior.requestId !== p.requestId) this.permIndex.delete(prior.requestId);
+          this.items[i] = {
+            ...prior,
+            requestId: p.requestId,
+            title: p.title,
+            options: p.options,
+            context: p.context,
+            resolvedOptionId: undefined,
+            resolutionReason: undefined,
+          };
+          this.permIndex.set(p.requestId, i);
+          if (p.purpose === "authentication") this.activeAuthenticationIndex = i;
+          this.markDirty(i);
+          break;
+        }
+        const appended =
           this.items.push({
             kind: "permission",
             id: ev.seq,
@@ -805,8 +828,9 @@ export class TimelineBuilder {
             options: p.options,
             context: p.context,
           }) - 1;
-        this.permIndex.set(p.requestId, i);
-        this.markDirty(i);
+        this.permIndex.set(p.requestId, appended);
+        if (p.purpose === "authentication") this.activeAuthenticationIndex = appended;
+        this.markDirty(appended);
         break;
       }
       case "permission_resolved": {
@@ -814,6 +838,8 @@ export class TimelineBuilder {
         if (idx != null) {
           const it = this.items[idx] as Extract<TimelineItem, { kind: "permission" }>;
           this.items[idx] = { ...it, resolvedOptionId: p.optionId, resolutionReason: p.resolutionReason };
+          this.permIndex.delete(p.requestId);
+          if (this.activeAuthenticationIndex === idx) this.activeAuthenticationIndex = null;
           this.markDirty(idx);
         }
         break;
