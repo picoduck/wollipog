@@ -781,7 +781,7 @@ export class CodexAppServerDriver implements Driver {
       if (reattached.length > 0) {
         const firstState = reattached.map((threadId: string) => item?.agentsStates?.[threadId])
           .find((state: Json) => codexSubagentLifecycle(state?.status));
-        const lifecycle = failed ? "failed" : codexSubagentLifecycle(firstState?.status) ?? "starting";
+        const lifecycle = codexSubagentLifecycle(firstState?.status) ?? "starting";
         this.emitTool(id, collabToolTitle(item?.tool), "agent", subagentToolStatus(lifecycle), parentToolUseId, lifecycle);
         this.subagentParentByTool.set(id, parentToolUseId);
         for (const threadId of reattached) {

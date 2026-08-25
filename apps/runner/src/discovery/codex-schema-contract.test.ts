@@ -18,7 +18,7 @@ interface ExpectedShape {
   properties?: string[];
   requiredInEveryVariant?: string[];
   propertyEnumValues?: Record<string, string[]>;
-  variantRequiredProperties?: Record<string, string[]>;
+  variantRequiredProperties?: Record<string, string[] | ExpectedShape>;
   discriminatedVariants?: Record<string, Record<string, string[] | ExpectedShape>>;
   variantRefs?: string[];
   propertyRefs?: Record<string, string>;
@@ -44,11 +44,12 @@ function synthesizeShape(expected: ExpectedShape): Record<string, unknown> {
         required: expected.requiredInEveryVariant ?? [],
         properties: { [property]: { enum: [value] } },
       }))),
-      ...Object.entries(expected.variantRequiredProperties ?? {}).map(([title, names]) => ({
-        title,
-        required: names,
-        properties: Object.fromEntries(names.map((name) => [name, {}])),
-      })),
+      ...Object.entries(expected.variantRequiredProperties ?? {}).map(([title, variant]) => {
+        const shape = synthesizeShape(Array.isArray(variant)
+          ? { required: variant, properties: variant }
+          : variant);
+        return { title, ...shape };
+      }),
       ...Object.entries(expected.discriminatedVariants ?? {}).flatMap(([discriminator, byValue]) =>
         Object.entries(byValue).map(([value, variant]) => {
           const shape = synthesizeShape(Array.isArray(variant) ? { required: variant, properties: variant } : variant);
@@ -86,6 +87,23 @@ test("pinned schema fixture matches discovery metadata and reports a useful drif
     }
     const ok = spawnSync(process.execPath, [script], { encoding: "utf8", env: { ...process.env, CODEX_SCHEMA_DIR: dir } });
     assert.equal(ok.status, 0, ok.stderr);
+
+    // Collaboration prompt is visible title input but remains optional. The object-form variant
+    // fixture must synthesize and detect its removal without promoting it into `required`.
+    const itemStartedPath = join(dir, "v2", "ItemStartedNotification.json");
+    const itemStarted = JSON.parse(readFileSync(itemStartedPath, "utf8"));
+    const collaborationVariant = itemStarted.definitions.ThreadItem.oneOf.find(
+      (variant: { title?: string }) => variant.title === "CollabAgentToolCallThreadItem",
+    );
+    assert.ok(collaborationVariant.properties.prompt);
+    assert.equal(collaborationVariant.required.includes("prompt"), false);
+    delete collaborationVariant.properties.prompt;
+    writeFileSync(itemStartedPath, JSON.stringify(itemStarted));
+    const promptDrift = spawnSync(process.execPath, [script], { encoding: "utf8", env: { ...process.env, CODEX_SCHEMA_DIR: dir } });
+    assert.notEqual(promptDrift.status, 0);
+    assert.match(promptDrift.stderr, /CollabAgentToolCallThreadItem: property removed: prompt/);
+    collaborationVariant.properties.prompt = {};
+    writeFileSync(itemStartedPath, JSON.stringify(itemStarted));
 
     const resumePath = join(dir, "v2", "ThreadResumeParams.json");
     writeFileSync(resumePath, JSON.stringify({ required: [], properties: {} }));
