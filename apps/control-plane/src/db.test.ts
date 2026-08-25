@@ -714,6 +714,48 @@ test("session stop intents survive control-plane restart and cascade with their 
   }
 });
 
+test("accepted Stop completion state survives restart and explicit recovery clears it", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-session-stop-accepted-"));
+  const path = join(root, "control-plane.db");
+  try {
+    const initial = ControlPlaneDb.open(path);
+    initial.registerRunner(meta(), 500, PROTOCOL_VERSION);
+    initial.createSession(newSession());
+    const intent = initial.addSessionStopIntent("sess-1", "runner-1", 1_100, true);
+    assert.equal(initial.recordSessionStopAcceptance(
+      "sess-1",
+      intent.operation.operationId,
+      intent.deliveryAttemptId,
+      1_200,
+    ), true);
+    assert.equal(initial.getSession("sess-1")?.archiveOperation?.acceptedAt, 1_200);
+    assert.equal(initial.getSession("sess-1")?.archiveOperation?.capacityReleased, false);
+    initial.close();
+
+    const reopened = ControlPlaneDb.open(path);
+    const accepted = reopened.sessionStopIntent("sess-1")!;
+    assert.equal(accepted.operation.acceptedAt, 1_200);
+    assert.equal(accepted.operation.status, "stop_pending");
+    assert.equal(reopened.failSessionStopIntent(
+      "sess-1",
+      accepted.operation.operationId,
+      accepted.deliveryAttemptId,
+      "timeout",
+      "Accepted Stop completion timed out.",
+      1_300,
+    ), true);
+    const retried = reopened.retrySessionStopIntent("sess-1", 1_400)!;
+    assert.equal(retried.operation.operationId, accepted.operation.operationId);
+    assert.equal(retried.operation.acceptedAt, undefined);
+    assert.equal(retried.operation.requestedAt, 1_400);
+    assert.equal(retried.operation.attemptCount, 1);
+    assert.notEqual(retried.deliveryAttemptId, accepted.deliveryAttemptId);
+    reopened.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("Stop Failed metadata and idempotent recovery survive control-plane restart", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-session-stop-failure-"));
   const path = join(root, "control-plane.db");

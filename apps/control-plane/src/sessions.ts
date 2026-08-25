@@ -3801,6 +3801,19 @@ export class SessionsService {
     for (const intent of this.db.pendingSessionStopIntents()) {
       const protocolVersion = this.db.getRunner(intent.runnerId)?.protocolVersion;
       if (!runnerSupportsProtocol(protocolVersion, "stopAttemptCorrelation")) continue;
+      if (intent.operation.acceptedAt !== undefined) {
+        if (now - intent.operation.acceptedAt >= SESSION_STOP_TIMEOUT_MS) {
+          changed += Number(this.failStopOperation(
+            intent.sessionId,
+            intent.operation.operationId,
+            intent.deliveryAttemptId,
+            "timeout",
+            "The accepted Stop did not reach terminal or absence evidence before its completion timeout.",
+            now,
+          ));
+        }
+        continue;
+      }
       if (now - intent.operation.requestedAt >= SESSION_STOP_TIMEOUT_MS) {
         changed += Number(this.failStopOperation(
           intent.sessionId,
@@ -3839,7 +3852,15 @@ export class SessionsService {
     const protocolVersion = this.db.getRunner(runnerId)?.protocolVersion;
     if (!runnerSupportsProtocol(protocolVersion, "stopAttemptCorrelation") ||
         !result.deliveryAttemptId || result.deliveryAttemptId !== intent.deliveryAttemptId) return false;
-    if (result.accepted) return true;
+    if (result.accepted) {
+      if (this.db.recordSessionStopAcceptance(
+        result.sessionId,
+        result.operationId,
+        result.deliveryAttemptId,
+        Date.now(),
+      )) this.hub.sessionChangedById(result.sessionId);
+      return true;
+    }
     if (intent.operation.failure?.code === "runner_rejected") return true;
     return this.failStopOperation(
       result.sessionId,
