@@ -24,7 +24,11 @@ Hard rules:
    push, or open a pull request.
 2. Do not run installs, migrations, formatters, code generators, or any command whose purpose is to
    change the tree. Analysis tooling that writes only to caches, `node_modules/.cache`, or a temp
-   directory is allowed.
+   directory is allowed. Put every scratch file under one run-scoped directory,
+   `/tmp/<job-id>-<YYYY-MM-DD>/` — date-keyed rather than random, so a resumed run can re-derive
+   its own path. Concurrent sessions share `/tmp`, and a session that loses its conversation
+   context can otherwise find another session's drafts there and mistake them for its own — which
+   happened, and turned one lost session into a false "already published" claim.
 3. Before finishing, run `git status --porcelain` and `git stash list`. The working tree must be
    exactly as you found it. If anything changed, say so explicitly at the top of your report and
    name the files rather than quietly reverting.
