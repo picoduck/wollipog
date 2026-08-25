@@ -654,8 +654,11 @@ replace or settle the foreground turn. `agentsStates` is authoritative for the s
 schema distinguishes: starting, running, completed, failed, interrupted, and unreachable. The shared
 model also supports waiting when a harness reports that state, but the current stable Codex enum does
 not distinguish it. A detached child can stay visibly active after the foreground turn becomes idle.
-These normalized events are stored in the
-ordinary runner event log, preserving the same subagent tree across reconnect and resume.
+These normalized events are stored in the ordinary runner event log, preserving the recorded
+subagent tree across browser reconnect, replay, and manager resume.
+After an App Server process restart, a structured `resumeAgent` or `sendInput` item can re-admit an
+otherwise unknown durable receiver thread as a new selectable agent boundary; already-known receivers
+keep their original spawn identity.
 
 ### 3.4 Approval and elicitation server requests to pending actions
 

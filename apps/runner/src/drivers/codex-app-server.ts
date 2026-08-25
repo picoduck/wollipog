@@ -260,6 +260,7 @@ export class CodexAppServerDriver implements Driver {
    * spawning collaboration tool. */
   private readonly subagentToolByThread = new Map<string, string>();
   private readonly subagentParentByTool = new Map<string, string | undefined>();
+  private readonly subagentLifecycleByThread = new Map<string, AuthoritativeSubagentLifecycle>();
   /** Latest per-child turn usage. Like root usage, it is emitted once when that child turn settles,
    * not once per cumulative update notification. */
   private readonly pendingSubagentUsage = new Map<string, ReturnType<typeof flattenUsage>>();
@@ -723,6 +724,8 @@ export class CodexAppServerDriver implements Driver {
   private updateSubagentLifecycle(threadId: string, lifecycle: AuthoritativeSubagentLifecycle): void {
     const toolCallId = this.subagentToolByThread.get(threadId);
     if (!toolCallId) return;
+    if (this.subagentLifecycleByThread.get(threadId) === lifecycle) return;
+    this.subagentLifecycleByThread.set(threadId, lifecycle);
     this.cb.onEvent({
       kind: "tool_call_update",
       toolCallId,
@@ -754,30 +757,52 @@ export class CodexAppServerDriver implements Driver {
       : undefined;
     const parentToolUseId = senderParent ?? notificationParent;
     const failed = item?.status === "failed";
+    const receivers = Array.isArray(item?.receiverThreadIds)
+      ? item.receiverThreadIds.filter((value: unknown): value is string => typeof value === "string" && value.length > 0)
+      : [];
 
     if (item?.tool !== "spawnAgent") {
-      this.emitTool(
-        id,
-        collabToolTitle(item?.tool),
-        "other",
-        completed ? (failed ? "failed" : "completed") : "in_progress",
-        parentToolUseId,
-      );
+      // A restarted App Server can report resume/sendInput for a durable child before this driver
+      // has seen its original spawn item. That collaboration item is authoritative reattachment
+      // evidence; bind only previously unknown receivers and represent them as a fresh selectable
+      // agent boundary rather than dropping their subsequent multiplexed output.
+      const reattached = !failed && (item?.tool === "resumeAgent" || item?.tool === "sendInput")
+        ? receivers.filter((threadId: string) => !this.subagentToolByThread.has(threadId))
+        : [];
+      if (reattached.length > 0) {
+        const firstState = reattached.map((threadId: string) => item?.agentsStates?.[threadId])
+          .find((state: Json) => codexSubagentLifecycle(state?.status));
+        const lifecycle = failed ? "failed" : codexSubagentLifecycle(firstState?.status) ?? "starting";
+        this.emitTool(id, collabToolTitle(item?.tool), "agent", subagentToolStatus(lifecycle), parentToolUseId, lifecycle);
+        this.subagentParentByTool.set(id, parentToolUseId);
+        for (const threadId of reattached) {
+          this.subagentToolByThread.set(threadId, id);
+          this.subagentLifecycleByThread.set(threadId, lifecycle);
+        }
+      } else {
+        this.emitTool(
+          id,
+          collabToolTitle(item?.tool),
+          "other",
+          completed ? (failed ? "failed" : "completed") : "in_progress",
+          parentToolUseId,
+        );
+      }
       this.updateSubagentStates(item?.agentsStates);
       return;
     }
 
     const prompt = typeof item?.prompt === "string" ? item.prompt.trim() : "";
     const title = prompt ? `Agent: ${truncate(prompt, 80)}` : "Agent";
-    const receivers = Array.isArray(item?.receiverThreadIds)
-      ? item.receiverThreadIds.filter((value: unknown): value is string => typeof value === "string" && value.length > 0)
-      : [];
     const firstState = receivers.map((threadId: string) => item?.agentsStates?.[threadId])
       .find((state: Json) => codexSubagentLifecycle(state?.status));
     const lifecycle = failed ? "failed" : codexSubagentLifecycle(firstState?.status) ?? "starting";
     this.emitTool(id, title, "agent", subagentToolStatus(lifecycle), parentToolUseId, lifecycle);
     this.subagentParentByTool.set(id, parentToolUseId);
-    for (const threadId of receivers) this.subagentToolByThread.set(threadId, id);
+    for (const threadId of receivers) {
+      this.subagentToolByThread.set(threadId, id);
+      this.subagentLifecycleByThread.set(threadId, lifecycle);
+    }
     this.updateSubagentStates(item?.agentsStates);
   }
 
@@ -919,7 +944,7 @@ export class CodexAppServerDriver implements Driver {
         ...(context.parentToolUseId ? { parentToolUseId: context.parentToolUseId } : {}),
       });
     });
-    peer.onNotification("item/reasoning/delta", (p: Json) => {
+    const onReasoningDelta = (p: Json) => {
       if (!p?.delta) return;
       const context = this.eventContext(p?.threadId);
       if (!context.accepted) return;
@@ -931,7 +956,12 @@ export class CodexAppServerDriver implements Driver {
         ...(messageId ? { messageId } : {}),
         ...(context.parentToolUseId ? { parentToolUseId: context.parentToolUseId } : {}),
       });
-    });
+    };
+    // summaryTextDelta/textDelta are the stable v2 notifications. Keep the older generic method as
+    // a compatibility alias; all three share the same required attribution envelope.
+    peer.onNotification("item/reasoning/summaryTextDelta", onReasoningDelta);
+    peer.onNotification("item/reasoning/textDelta", onReasoningDelta);
+    peer.onNotification("item/reasoning/delta", onReasoningDelta);
     peer.onNotification("item/started", (p: Json) => this.onItem(p?.item, false, p?.threadId));
     peer.onNotification("item/completed", (p: Json) => this.onItem(p?.item, true, p?.threadId));
     // Guardian auto-review (approvalsReviewer=auto_review): surface the model's verdict so

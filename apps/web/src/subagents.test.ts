@@ -96,6 +96,35 @@ test("replayed App Server events retain selectable durable subagent output", () 
   assert.equal((projector.timeline("codex-child")[0] as { text: string }).text, "Durable child result");
 });
 
+test("authoritative detached activity remains live while terminal history stays recorded", () => {
+  const active: TimelineItem[] = [{
+    kind: "tool_call",
+    id: 1,
+    toolCallId: "detached",
+    title: "Detached Agent",
+    text: "",
+    toolKind: "agent",
+    status: "in_progress",
+    subagentLifecycle: "running",
+  }];
+  const idle = deriveSubagentDescriptors(active, {
+    sessionStatus: "idle",
+    runnerOnline: true,
+    availability: "recorded",
+  });
+  assert.deepEqual(idle.map(({ lifecycle, availability }) => ({ lifecycle, availability })), [
+    { lifecycle: "running", availability: "live" },
+  ]);
+  const stopped = deriveSubagentDescriptors(active, {
+    sessionStatus: "stopped",
+    runnerOnline: true,
+    availability: "recorded",
+  });
+  assert.deepEqual(stopped.map(({ lifecycle, availability }) => ({ lifecycle, availability })), [
+    { lifecycle: "interrupted", availability: "recorded" },
+  ]);
+});
+
 test("referenced legacy task tools remain visible while duplicate and cyclic ownership stays finite", () => {
   const items: TimelineItem[] = [
     { kind: "tool_call", id: 1, toolCallId: "legacy", title: "Task", text: "", status: "completed" },
@@ -145,6 +174,11 @@ test("selection retains a valid request, then prefers active, failed, and recent
   assert.equal(selectedSubagentId(terminal), "failed");
   const completed = deriveSubagentDescriptors([base("old", "completed", 10), base("new", "completed", 20)], context);
   assert.equal(selectedSubagentId(completed), "new");
+  const waiting = deriveSubagentDescriptors([base("failed-newer", "failed", 40), {
+    ...base("waiting", "in_progress", 30),
+    subagentLifecycle: "waiting",
+  }], context);
+  assert.equal(selectedSubagentId(waiting), "waiting", "waiting remains an active selection candidate");
 });
 
 test("incremental projection inspects only changed timeline slots and preserves unrelated output", () => {

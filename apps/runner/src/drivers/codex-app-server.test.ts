@@ -985,6 +985,13 @@ test("structured Codex collaboration items expose recursive live subagent output
     threadId: "child-thread",
     item: { type: "agentMessage", id: "child-message", text: "Inspecting parser events." },
   });
+  notifications.get("item/reasoning/summaryTextDelta")!({
+    threadId: "child-thread",
+    turnId: "child-turn",
+    itemId: "child-reasoning",
+    summaryIndex: 0,
+    delta: "Checking nested behavior.",
+  });
   notifications.get("item/completed")!({
     threadId: "child-thread",
     item: {
@@ -1058,6 +1065,12 @@ test("structured Codex collaboration items expose recursive live subagent output
     final: true,
     parentToolUseId: "spawn-outer",
   });
+  assert.deepEqual(h.events.find((event) => event.kind === "agent_thought"), {
+    kind: "agent_thought",
+    text: "Checking nested behavior.",
+    messageId: childItemId("child-thread", "child-reasoning"),
+    parentToolUseId: "spawn-outer",
+  });
   assert.deepEqual(h.events.find((event) => event.kind === "tool_call" && event.toolCallId === innerSpawnId), {
     kind: "tool_call",
     toolCallId: innerSpawnId,
@@ -1116,6 +1129,44 @@ test("multiplexed child item ids cannot collide with root item ids", () => {
     { id: "shared-counter", parent: undefined },
     { id: childItemId("child-thread", "shared-counter"), parent: "spawn-child" },
   ]);
+});
+
+test("resume collaboration re-admits a durable child after driver restart", () => {
+  const h = makeHarness();
+  (h.driver as any).threadId = "root-thread";
+  const notifications = notificationHandlers(h.driver);
+  notifications.get("item/completed")!({
+    threadId: "root-thread",
+    item: {
+      type: "collabAgentToolCall",
+      id: "resume-child",
+      tool: "resumeAgent",
+      status: "completed",
+      senderThreadId: "root-thread",
+      receiverThreadIds: ["durable-child-thread"],
+      agentsStates: { "durable-child-thread": { status: "running" } },
+    },
+  });
+  notifications.get("item/completed")!({
+    threadId: "durable-child-thread",
+    item: { type: "agentMessage", id: "resumed-output", text: "Continued after restart." },
+  });
+
+  assert.deepEqual(h.events[0], {
+    kind: "tool_call",
+    toolCallId: "resume-child",
+    title: "Resume Agent",
+    toolKind: "agent",
+    status: "in_progress",
+    subagentLifecycle: "running",
+  });
+  assert.deepEqual(h.events[1], {
+    kind: "agent_message",
+    text: "Continued after restart.",
+    messageId: childItemId("durable-child-thread", "resumed-output"),
+    final: true,
+    parentToolUseId: "resume-child",
+  });
 });
 
 test("subagent turn notifications cannot replace or settle the parent turn", async () => {

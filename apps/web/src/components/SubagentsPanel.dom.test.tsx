@@ -317,6 +317,8 @@ test("Codex App Server structured children render as selectable live agents", as
     ));
     assert.match(container.querySelector(".subagent-list-row")?.textContent ?? "", /Running/);
     assert.match(container.querySelector(".subagent-detail-title")?.textContent ?? "", /Inspect Background Work/);
+    assert.match(container.querySelector(".subagent-detail-meta")?.textContent ?? "", /Running · Current Activity/);
+    assert.doesNotMatch(container.querySelector(".subagent-list-row")?.textContent ?? "", /Recorded/);
     assert.match(container.querySelector(".subagent-output")?.textContent ?? "", /Still inspecting/);
   } finally {
     await act(async () => root.unmount());

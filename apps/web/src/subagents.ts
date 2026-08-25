@@ -265,6 +265,14 @@ function deriveIndexedSubagentDescriptors(
     emitted.add(id);
     const node = nodes.get(id)!;
     const childIds = children.get(id) ?? [];
+    const lifecycle = deriveSubagentLifecycle(
+      node.tool.status,
+      context.sessionStatus,
+      context.runnerOnline,
+      node.tool.subagentLifecycle,
+    );
+    const authoritativelyLive = context.runnerOnline &&
+      (lifecycle === "starting" || lifecycle === "running" || lifecycle === "waiting");
     descriptors.push({
       id,
       ...(effectiveParent.get(id) ? { parentId: effectiveParent.get(id) } : {}),
@@ -272,14 +280,9 @@ function deriveIndexedSubagentDescriptors(
       title: node.tool.title && !/^(Task|Agent)$/i.test(node.tool.title) ? node.tool.title : "Agent",
       depth,
       sourceIndex: node.sourceIndex,
-      lifecycle: deriveSubagentLifecycle(
-        node.tool.status,
-        context.sessionStatus,
-        context.runnerOnline,
-        node.tool.subagentLifecycle,
-      ),
+      lifecycle,
       toolStatus: node.tool.status,
-      availability: context.availability,
+      availability: authoritativelyLive ? "live" : context.availability,
       ...(node.tool.startedAt == null ? {} : { startedAt: node.tool.startedAt }),
       ...(inclusiveActivity.get(id) == null ? {} : { lastActivityAt: inclusiveActivity.get(id) }),
       ...(node.tool.completedAt == null ? {} : { completedAt: node.tool.completedAt }),
@@ -515,7 +518,7 @@ export function selectedSubagentId(
       (left.lastActivityAt ?? left.startedAt ?? left.sourceIndex))
     .at(0)?.id ?? null;
   return mostRecent(descriptors.filter((descriptor) =>
-    descriptor.lifecycle === "starting" || descriptor.lifecycle === "running"))
+    descriptor.lifecycle === "starting" || descriptor.lifecycle === "running" || descriptor.lifecycle === "waiting"))
     ?? mostRecent(descriptors.filter((descriptor) => descriptor.lifecycle === "failed"))
     ?? mostRecent(descriptors);
 }

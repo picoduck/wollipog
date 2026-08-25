@@ -1,5 +1,5 @@
 {
-  "contractFingerprint": "codex-app-server-v2-subagents-consumed-surface-2026-08-25",
+  "contractFingerprint": "codex-app-server-v2-subagents-reasoning-consumed-surface-2026-08-25",
   "generatedWith": "codex-cli 0.147.0",
   "minimumVerifiedVersion": "0.147.0",
   "files": {
@@ -220,6 +220,38 @@
         "turnId"
       ],
       "properties": [
+        "delta",
+        "itemId",
+        "threadId",
+        "turnId"
+      ]
+    },
+    "v2/ReasoningSummaryTextDeltaNotification.json": {
+      "required": [
+        "delta",
+        "itemId",
+        "summaryIndex",
+        "threadId",
+        "turnId"
+      ],
+      "properties": [
+        "delta",
+        "itemId",
+        "summaryIndex",
+        "threadId",
+        "turnId"
+      ]
+    },
+    "v2/ReasoningTextDeltaNotification.json": {
+      "required": [
+        "contentIndex",
+        "delta",
+        "itemId",
+        "threadId",
+        "turnId"
+      ],
+      "properties": [
+        "contentIndex",
         "delta",
         "itemId",
         "threadId",
