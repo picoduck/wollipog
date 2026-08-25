@@ -306,6 +306,9 @@ export class CodexAppServerDriver implements Driver {
     // `exit` fires. Tear the peer down only at the post-stdio `close` boundary.
     child.on("close", (code) => {
       peer.dispose("codex app-server exited");
+      // A rejected feature probe can be replaced before its delayed close event arrives.
+      // Only the current launch may tear down session state or report an exit.
+      if (this.peer !== peer && this.child !== child) return;
       // The persistent server is gone: drop our handles so a later prompt() fails fast
       // instead of parking a turn/start request that never settles.
       if (this.peer === peer) this.peer = null;
@@ -340,8 +343,10 @@ export class CodexAppServerDriver implements Driver {
           throw error;
         }
         // Unsupported Codex versions have already exited after rejecting the flag. Their close
-        // callback clears the exact child/peer handles; a second launch therefore preserves the
-        // previous unflagged behavior without racing a live provider process.
+        // callback normally clears the exact child/peer handles. A transport error can reject the
+        // initialize request before close, so explicitly stop that probe before replacing it; its
+        // identity-guarded close callback cannot tear down the fallback launch.
+        if (this.child) this.kill(this.child);
         this.initializationStderr = [];
         this.initializationExit = null;
         this.cb.onStderr(

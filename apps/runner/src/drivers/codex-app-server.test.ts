@@ -137,6 +137,52 @@ test("unsupported Default-mode question feature retries the unchanged app-server
   }
 });
 
+test("a late rejected-probe close cannot fail or tear down the healthy fallback", async () => {
+  const children: AgentProcess[] = [];
+  const exits: Array<number | null> = [];
+  const killed: AgentProcess[] = [];
+  const driver = new CodexAppServerDriver({
+    command: "codex",
+    args: [],
+    cwd: "/tmp/work",
+    env: {},
+    config: {},
+    context: { kind: "native" },
+  }, {
+    onEvent: () => {},
+    onStderr: () => {},
+    onExit: (code) => exits.push(code),
+  }, undefined, {
+    spawn: () => {
+      const child = fakeAgentProcess();
+      children.push(child);
+      child.stdin.on("data", (chunk) => {
+        const message = JSON.parse(String(chunk).trim()) as { id?: number; method?: string };
+        if (message.method !== "initialize") return;
+        if (children.length === 1) {
+          child.stderr.write("Error: Unknown feature flag: default_mode_request_user_input\n");
+          child.stdin.emit("error", new Error("EPIPE"));
+          return;
+        }
+        child.stdout.write(JSON.stringify({ id: message.id, result: { userAgent: "old-codex" } }) + "\n");
+        children[0]!.emit("close", 1);
+      });
+      return child;
+    },
+    kill: (child) => killed.push(child),
+  });
+
+  try {
+    await driver.initialize();
+    assert.equal(children.length, 2);
+    assert.deepEqual(killed, [children[0]]);
+    assert.deepEqual(exits, []);
+    assert.equal(driver.pid, children[1]!.pid, "the fallback remains the managed child");
+  } finally {
+    driver.dispose();
+  }
+});
+
 test("app-server auth errors emit a secret-free auth signal", () => {
   const h = makeHarness();
   const raw = "unexpected status 401 Unauthorized: bearer token secret-value";
