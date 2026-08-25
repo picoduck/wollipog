@@ -41,10 +41,7 @@ import {
 } from "./activity.js";
 import { BrowserNavigation, sameView, viewFromNotificationMessage, type View, type ViewNavigation } from "./navigation.js";
 import {
-  INBOX_DEFAULT_RATIO,
   INBOX_SELECTION_STORAGE_KEY,
-  INBOX_SPLIT_RATIO_MAX,
-  INBOX_SPLIT_RATIO_MIN,
   INBOX_SPLIT_RATIO_STORAGE_KEY,
   clampInboxSplitRatio,
   parseInboxSplitRatio,
@@ -83,9 +80,6 @@ export interface Filters {
 
 export const INBOX_SELECTION_KEY = INBOX_SELECTION_STORAGE_KEY;
 export const INBOX_SPLIT_RATIO_KEY = INBOX_SPLIT_RATIO_STORAGE_KEY;
-export const INBOX_DEFAULT_SPLIT_RATIO = INBOX_DEFAULT_RATIO;
-export const INBOX_MIN_SPLIT_RATIO = INBOX_SPLIT_RATIO_MIN;
-export const INBOX_MAX_SPLIT_RATIO = INBOX_SPLIT_RATIO_MAX;
 export { clampInboxSplitRatio, parseInboxSplitRatio };
 
 /** Slightly exceeds the control plane's fixed 10-second admission window. */

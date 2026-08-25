@@ -10,13 +10,10 @@ import { groupLegacySessionsByWorkspace, workspaceLocationKey } from "./projects
 import type { ProjectSessionPreset } from "./project-session-selection.js";
 
 export const INBOX_ALL_SPLIT_KEY = null;
-export const INBOX_ALL_SPLIT = INBOX_ALL_SPLIT_KEY;
 export const INBOX_NO_PROJECT_SPLIT_KEY = " no-project";
 export const INBOX_SPLIT_RATIO_STORAGE_KEY = "wollipog.inbox.split";
 export const INBOX_SELECTION_STORAGE_KEY = "wollipog.inbox.selection";
 export const INBOX_SPLIT_RATIO_DEFAULT = 0.4;
-export const INBOX_DEFAULT_RATIO = INBOX_SPLIT_RATIO_DEFAULT;
-export const INBOX_SPLIT_RATIO_RESET = INBOX_SPLIT_RATIO_DEFAULT;
 export const INBOX_SPLIT_RATIO_MIN = 0.25;
 export const INBOX_SPLIT_RATIO_MAX = 0.75;
 
@@ -438,8 +435,6 @@ export function clampInboxSplitRatio(ratio: number): number {
   if (!Number.isFinite(ratio)) return INBOX_SPLIT_RATIO_DEFAULT;
   return Math.min(INBOX_SPLIT_RATIO_MAX, Math.max(INBOX_SPLIT_RATIO_MIN, ratio));
 }
-
-export const clampInboxRatio = clampInboxSplitRatio;
 
 export function parseInboxSplitRatio(raw: string | null | undefined): number {
   if (raw == null || raw.trim() === "") return INBOX_SPLIT_RATIO_DEFAULT;
