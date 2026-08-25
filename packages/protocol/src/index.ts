@@ -522,6 +522,17 @@ const SESSION_EVENT_WIRE_POLICIES = {
   legacy: "omit";
 }>>;
 
+/** Whether this peer needs any explicit additive session-event compatibility projection.
+ * Keeping policy inspection beside the policy table avoids callers probing it with a fabricated
+ * payload and automatically covers future reviewed event policies. */
+export function sessionEventWireProjectionRequiredForProtocol(
+  protocolVersion: number | null | undefined,
+): boolean {
+  return Object.values(SESSION_EVENT_WIRE_POLICIES).some(
+    (policy) => !Number.isInteger(protocolVersion) || protocolVersion! < policy.minProtocol,
+  );
+}
+
 /** Project one exact runner-local event payload for the currently connected control plane.
  * `null` means that this explicitly reviewed event kind is safe to omit from the older peer's
  * dense wire history. Callers remain responsible for projecting its runner sequence. */

@@ -80,7 +80,7 @@ import {
   validatePodReconciliationMetadata,
   withGitExecutionContext,
 } from "./git-ops.js";
-import { Outbox } from "./outbox.js";
+import { flushProjectedOutbox, Outbox } from "./outbox.js";
 import { SessionManager } from "./session-manager.js";
 import { NativeProviderAuthRecovery } from "./provider-auth-recovery.js";
 import { handleResolveSteeringAttemptMessage, handleSteerSessionMessage } from "./steering-handler.js";
@@ -531,6 +531,8 @@ function projectSnapshotForCurrentProtocol(snapshot: SessionSnapshot): SessionSn
   return {
     ...snapshot,
     seq: store.projectedEventSeq(snapshot.id, snapshot.seq, controlPlaneProtocolVersion),
+    ...(snapshot.historyEpoch === undefined ? {} :
+      { historyEpoch: store.projectedHistoryEpoch(snapshot.historyEpoch, controlPlaneProtocolVersion) }),
   };
 }
 
@@ -538,10 +540,7 @@ function projectStoredEventsForCurrentProtocol(
   sessionId: string,
   events: Array<{ seq: number; ts: number; payload: SessionEventPayload }>,
 ) {
-  return events.flatMap((event) => {
-    const projected = store.projectEventForProtocol(sessionId, event, controlPlaneProtocolVersion);
-    return projected ? [projected] : [];
-  });
+  return store.projectEventsForProtocol(sessionId, events, controlPlaneProtocolVersion);
 }
 
 function projectMessageForCurrentProtocol(msg: RunnerToControlPlane): RunnerToControlPlane | null {
@@ -566,13 +565,20 @@ function projectMessageForCurrentProtocol(msg: RunnerToControlPlane): RunnerToCo
     }, controlPlaneProtocolVersion);
   }
   if (msg.type === "reprocess_session_result") {
+    const snapshot = msg.snapshot
+      ? projectSnapshotForCurrentProtocol(msg.snapshot)
+      : undefined;
     const events = msg.events
       ? projectStoredEventsForCurrentProtocol(msg.sessionId, msg.events)
       : undefined;
     return projectRunnerMessageForProtocol({
       ...msg,
-      ...(msg.snapshot ? { snapshot: projectSnapshotForCurrentProtocol(msg.snapshot) } : {}),
-      ...(events ? { events, eventCount: events.length } : {}),
+      ...(snapshot ? { snapshot } : {}),
+      ...(events
+        ? { events, eventCount: events.length }
+        : snapshot && msg.eventCount !== undefined
+          ? { eventCount: snapshot.seq }
+          : {}),
     }, controlPlaneProtocolVersion);
   }
   if (msg.type === "fork_result") {
@@ -596,8 +602,20 @@ function projectMessageForCurrentProtocol(msg: RunnerToControlPlane): RunnerToCo
 
 function sendUp(msg: RunnerToControlPlane): void {
   if (ws && ws.readyState === WebSocket.OPEN && registered) {
-    const projected = projectMessageForCurrentProtocol(msg);
-    if (projected) ws.send(JSON.stringify(projected));
+    let projected: RunnerToControlPlane | null;
+    try {
+      projected = projectMessageForCurrentProtocol(msg);
+    } catch (error) {
+      log(`dropping ${msg.type}: wire projection failed (${errText(error)})`);
+      return;
+    }
+    if (!projected) return;
+    try {
+      ws.send(JSON.stringify(projected));
+    } catch (error) {
+      outbox.enqueue(msg);
+      log(`buffering ${msg.type}: socket send failed (${errText(error)})`);
+    }
     return;
   }
   outbox.enqueue(msg);
@@ -605,10 +623,14 @@ function sendUp(msg: RunnerToControlPlane): void {
 
 function flushOutbox(): void {
   if (!ws || ws.readyState !== WebSocket.OPEN || !registered) return;
-  for (const m of outbox.drain()) {
-    const projected = projectMessageForCurrentProtocol(m);
-    if (projected) ws.send(JSON.stringify(projected));
-  }
+  const socket = ws;
+  flushProjectedOutbox(
+    outbox,
+    projectMessageForCurrentProtocol,
+    (message) => socket.send(JSON.stringify(message)),
+    (error, message) => log(`dropping ${message.type}: wire projection failed (${errText(error)})`),
+    (error, message) => log(`retaining ${message.type}: socket send failed (${errText(error)})`),
+  );
 }
 
 function sendDurableUpdate(receipt: DurableCommandReceipt): void {
@@ -1409,8 +1431,13 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       break;
     case "session_history": {
       // Reply with the session's event log from the box store (control plane lazy-hydration).
-      const events = sessions.history(msg.sessionId, msg.afterSeq);
-      sendUp({ type: "session_history_result", requestId: msg.requestId, sessionId: msg.sessionId, ok: true, events });
+      try {
+        const events = sessions.history(msg.sessionId, msg.afterSeq);
+        sendUp({ type: "session_history_result", requestId: msg.requestId, sessionId: msg.sessionId, ok: true, events });
+      } catch (error) {
+        const detail = errText(error).replace(/[\u0000-\u001f\u007f]/gu, " ").slice(0, 240);
+        sendUp({ type: "session_history_result", requestId: msg.requestId, sessionId: msg.sessionId, ok: false, error: detail });
+      }
       break;
     }
     case "session_history_page": {

@@ -46,8 +46,41 @@ export class Outbox<T extends CoalescableMessage> {
     if (this.buffer.length > this.max) this.buffer.splice(0, this.buffer.length - this.max);
   }
 
+  /** Restore an unsent suffix at the front without re-coalescing or reordering it. */
+  restoreFront(messages: readonly T[]): void {
+    if (!messages.length) return;
+    this.buffer.unshift(...messages);
+    if (this.buffer.length > this.max) this.buffer.splice(this.max);
+  }
   /** Remove and return every buffered message in send order (oldest first). */
   drain(): T[] {
     return this.buffer.splice(0);
+  }
+}
+export function flushProjectedOutbox<T extends CoalescableMessage, U>(
+  outbox: Outbox<T>,
+  project: (message: T) => U | null,
+  send: (message: U) => void,
+  onProjectionError: (error: unknown, message: T) => void,
+  onSendError: (error: unknown, message: T) => void,
+): void {
+  const messages = outbox.drain();
+  for (let index = 0; index < messages.length; index++) {
+    const message = messages[index]!;
+    let projected: U | null;
+    try {
+      projected = project(message);
+    } catch (error) {
+      onProjectionError(error, message);
+      continue;
+    }
+    if (projected === null) continue;
+    try {
+      send(projected);
+    } catch (error) {
+      outbox.restoreFront(messages.slice(index));
+      onSendError(error, message);
+      return;
+    }
   }
 }

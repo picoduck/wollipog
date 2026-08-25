@@ -37,6 +37,7 @@ import {
   PROTOCOL_VERSION,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   projectSessionEventPayloadForProtocol,
+  sessionEventWireProjectionRequiredForProtocol,
 } from "@wollipog/protocol";
 import type {
   AgentCapabilities,
@@ -1881,7 +1882,7 @@ export class SessionStore {
   }
 
   private eventProjectionRequired(protocolVersion: number | null | undefined): boolean {
-    return projectSessionEventPayloadForProtocol({ kind: "agent_response_completed" }, protocolVersion) === null;
+    return sessionEventWireProjectionRequiredForProtocol(protocolVersion);
   }
 
   private upperBound(values: readonly number[], target: number): number {
@@ -1905,11 +1906,10 @@ export class SessionStore {
     if (!meta) throw new HistoryStoreError("history_cursor_invalid", "session history does not exist");
     const peerProtocolVersion = Number.isInteger(protocolVersion) ? protocolVersion! : null;
     const logEpoch = meta.logEpoch ?? 0;
-    const layout = this.historyLayout(id, logEpoch);
-    const tail = this.historyTail(id).seq;
+    const tail = this.historyTail(id);
     let index = this.eventProjectionIndexes.get(id);
     if (!index || index.protocolVersion !== peerProtocolVersion || index.logEpoch !== logEpoch ||
-        index.localTail > tail || index.completeBytes > layout.totalBytes) {
+        index.localTail > tail.seq || index.completeBytes > tail.completeBytes) {
       index = {
         protocolVersion: peerProtocolVersion,
         logEpoch,
@@ -1918,11 +1918,11 @@ export class SessionStore {
         omittedSeqs: [],
       };
     }
-    if (index.localTail < tail) {
+    if (index.localTail < tail.seq) {
       let expected = index.localTail + 1;
-      const scanned = this.scanHistoryLines(id, index.completeBytes, layout.totalBytes, (line) => {
+      const scanned = this.scanHistoryLines(id, index.completeBytes, tail.completeBytes, (line) => {
         const event = this.parseStoredEvent(line);
-        if (event.seq !== expected || event.seq > tail) {
+        if (event.seq !== expected || event.seq > tail.seq) {
           throw new HistoryStoreError("history_corrupt", "session history is not contiguous during wire projection");
         }
         if (projectSessionEventPayloadForProtocol(event.payload, protocolVersion) === null) {
@@ -1933,10 +1933,10 @@ export class SessionStore {
       if (scanned.trailingBytes !== 0) {
         throw new HistoryStoreError("history_corrupt", "session history has an incomplete projected record");
       }
-      if (expected - 1 !== tail) {
+      if (expected - 1 !== tail.seq) {
         throw new HistoryStoreError("history_corrupt", "session history ended before its projected tail");
       }
-      index.localTail = tail;
+      index.localTail = tail.seq;
       index.completeBytes = scanned.completeBytes;
     }
     this.eventProjectionIndexes.set(id, index);
@@ -1961,6 +1961,31 @@ export class SessionStore {
     return localSeq;
   }
 
+  /** Peer-version fence for the projected sequence space. A version change that adds or removes
+   * omitted events must present a new history generation so the control plane cannot retain rows
+   * whose dense sequence ids now refer to different exact local events. */
+  projectedHistoryEpoch(
+    localEpoch: number,
+    protocolVersion: number | null | undefined,
+  ): number {
+    const variant = this.eventProjectionRequired(protocolVersion) ? 1 : 0;
+    if (!Number.isSafeInteger(localEpoch) || localEpoch < 0 ||
+        localEpoch > Math.floor((Number.MAX_SAFE_INTEGER - variant) / 2)) {
+      throw new HistoryStoreError("history_corrupt", "session history epoch cannot be projected safely");
+    }
+    return localEpoch * 2 + variant;
+  }
+
+  private projectEventsWithIndex(
+    events: StoredEvent[],
+    protocolVersion: number | null | undefined,
+    index: SessionEventProjectionIndex,
+  ): StoredEvent[] {
+    return events.flatMap((event) => {
+      const payload = projectSessionEventPayloadForProtocol(event.payload, protocolVersion);
+      return payload === null ? [] : [{ ...event, seq: this.projectedSeq(index, event.seq), payload }];
+    });
+  }
   /** Dense peer-facing high-water for a local durable sequence. */
   projectedEventSeq(
     id: string,
@@ -1977,14 +2002,27 @@ export class SessionStore {
     event: StoredEvent,
     protocolVersion: number | null | undefined,
   ): StoredEvent | null {
-    const payload = projectSessionEventPayloadForProtocol(event.payload, protocolVersion);
-    if (payload === null) {
-      this.refreshEventProjectionIndex(id, protocolVersion);
-      return null;
-    }
     if (!this.eventProjectionRequired(protocolVersion)) return event;
-    const index = this.refreshEventProjectionIndex(id, protocolVersion);
-    return { ...event, seq: this.projectedSeq(index, event.seq), payload };
+    return this.projectEventsWithIndex(
+      [event],
+      protocolVersion,
+      this.refreshEventProjectionIndex(id, protocolVersion),
+    )[0] ?? null;
+  }
+
+  /** Project a batch against one exact derived index snapshot, avoiding repeated metadata/layout
+   * and tail reads for every hydrated or correlated result event. */
+  projectEventsForProtocol(
+    id: string,
+    events: StoredEvent[],
+    protocolVersion: number | null | undefined,
+  ): StoredEvent[] {
+    if (!this.eventProjectionRequired(protocolVersion)) return events;
+    return this.projectEventsWithIndex(
+      events,
+      protocolVersion,
+      this.refreshEventProjectionIndex(id, protocolVersion),
+    );
   }
 
   /** Legacy whole-history hydration projected into the peer's dense sequence space. */
@@ -1997,10 +2035,7 @@ export class SessionStore {
     const index = this.refreshEventProjectionIndex(id, protocolVersion);
     if (afterSeq >= this.projectedSeq(index, index.localTail)) return [];
     const localAfter = this.localSeqForProjected(index, afterSeq);
-    return this.readEvents(id, localAfter).flatMap((event) => {
-      const projected = this.projectEventForProtocol(id, event, protocolVersion);
-      return projected ? [projected] : [];
-    });
+    return this.projectEventsWithIndex(this.readEvents(id, localAfter), protocolVersion, index);
   }
 
   /** Indexed history keeps its frozen page contract while omitting reviewed additive events. */
@@ -2009,8 +2044,23 @@ export class SessionStore {
     request: { afterSeq: number; limit: number; logEpoch?: number; throughSeq?: number },
     protocolVersion: number | null | undefined,
   ): HistoryPageResult {
-    if (!this.eventProjectionRequired(protocolVersion)) return this.readEventPage(id, request);
     try {
+      if (!this.eventProjectionRequired(protocolVersion)) {
+        const wireEpoch = request.logEpoch;
+        const localEpoch = wireEpoch === undefined ? undefined : Math.floor(wireEpoch / 2);
+        if (localEpoch !== undefined && this.projectedHistoryEpoch(localEpoch, protocolVersion) !== wireEpoch) {
+          throw new HistoryStoreError("history_epoch_changed", "session history projection changed during pagination");
+        }
+        const result = this.readEventPage(
+          id,
+          { ...request, ...(localEpoch === undefined ? {} : { logEpoch: localEpoch }) },
+        );
+        if (!result.ok) return result;
+        return {
+          ...result,
+          page: { ...result.page, logEpoch: this.projectedHistoryEpoch(result.page.logEpoch, protocolVersion) },
+        };
+      }
       if (!Number.isSafeInteger(request.afterSeq) || request.afterSeq < 0) {
         throw new HistoryStoreError("history_cursor_invalid", "afterSeq must be a non-negative safe integer");
       }
@@ -2032,7 +2082,14 @@ export class SessionStore {
         throw new HistoryStoreError("history_cursor_invalid", "history continuation is not a safe integer cursor");
       }
       const index = this.refreshEventProjectionIndex(id, protocolVersion);
-      if (request.logEpoch !== undefined && request.logEpoch !== index.logEpoch) {
+      const projectedEpoch = this.projectedHistoryEpoch(index.logEpoch, protocolVersion);
+      if (request.logEpoch === undefined) {
+        // The underlying page call is intentionally frozen below; prepare/repair its sparse index
+        // here so legacy projection does not permanently bypass normal first-page maintenance.
+        this.ensureHistoryIndex(id, index.logEpoch, this.historyTail(id));
+      }
+
+      if (request.logEpoch !== undefined && request.logEpoch !== projectedEpoch) {
         throw new HistoryStoreError("history_epoch_changed", "session history was reset during pagination");
       }
       const throughSeq = request.throughSeq ?? this.projectedSeq(index, index.localTail);
@@ -2043,7 +2100,7 @@ export class SessionStore {
         return {
           ok: true,
           events: [],
-          page: { logEpoch: index.logEpoch, throughSeq, nextAfterSeq: request.afterSeq, hasMore: false },
+          page: { logEpoch: projectedEpoch, throughSeq, nextAfterSeq: request.afterSeq, hasMore: false },
         };
       }
       let localAfter = this.localSeqForProjected(index, request.afterSeq);
@@ -2056,16 +2113,13 @@ export class SessionStore {
           throughSeq: localThrough,
         });
         if (!page.ok) return page;
-        const events = page.events.flatMap((event) => {
-          const projected = this.projectEventForProtocol(id, event, protocolVersion);
-          return projected ? [projected] : [];
-        });
+        const events = this.projectEventsWithIndex(page.events, protocolVersion, index);
         if (events.length) {
           const nextAfterSeq = events.at(-1)!.seq;
           return {
             ok: true,
             events,
-            page: { logEpoch: index.logEpoch, throughSeq, nextAfterSeq, hasMore: nextAfterSeq < throughSeq },
+            page: { logEpoch: projectedEpoch, throughSeq, nextAfterSeq, hasMore: nextAfterSeq < throughSeq },
           };
         }
         if (!page.page.hasMore) break;
@@ -2074,7 +2128,7 @@ export class SessionStore {
       return {
         ok: true,
         events: [],
-        page: { logEpoch: index.logEpoch, throughSeq, nextAfterSeq: request.afterSeq, hasMore: false },
+        page: { logEpoch: projectedEpoch, throughSeq, nextAfterSeq: request.afterSeq, hasMore: false },
       };
     } catch (error) {
       if (error instanceof HistoryStoreError) return { ok: false, code: error.code, error: error.message };
@@ -2369,7 +2423,14 @@ export class SessionStore {
       } catch {
         // Preserve the last metadata high-water so a later page attempt fails closed on corruption.
       }
-      snapshots.push({ ...metaToSnapshot(meta, controlPlaneProtocolVersion), seq: durableSeq });
+      const snapshot = metaToSnapshot(meta, controlPlaneProtocolVersion);
+      snapshots.push({
+        ...snapshot,
+        seq: durableSeq,
+        ...(!exactEventSeq && snapshot.historyEpoch !== undefined
+          ? { historyEpoch: this.projectedHistoryEpoch(snapshot.historyEpoch, controlPlaneProtocolVersion) }
+          : {}),
+      });
     }
     return snapshots;
   }

@@ -12,6 +12,7 @@ import {
   providerAuthenticationReceiptCode,
   projectRunnerMessageForProtocol,
   projectSessionEventPayloadForProtocol,
+  sessionEventWireProjectionRequiredForProtocol,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   WOLLIPOG_CONTROL_PLANE_SERVICE,
   WOLLIPOG_POLICY_HOOK_POLL_CAPABILITY_HEADER,
@@ -578,6 +579,9 @@ test("additive session-event kinds use explicit older-peer policies without muta
   assert.equal(projectSessionEventPayloadForProtocol(completion, 86), null);
   assert.equal(projectSessionEventPayloadForProtocol(completion, undefined), null);
   assert.equal(projectSessionEventPayloadForProtocol(completion, 87), completion);
+  assert.equal(sessionEventWireProjectionRequiredForProtocol(undefined), true);
+  assert.equal(sessionEventWireProjectionRequiredForProtocol(86), true);
+  assert.equal(sessionEventWireProjectionRequiredForProtocol(87), false);
 
   const required = { kind: "error", message: "still required" } as const;
   assert.equal(projectSessionEventPayloadForProtocol(required, 1), required,

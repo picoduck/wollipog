@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { MAX_OUTBOX, Outbox } from "./outbox.js";
+import { flushProjectedOutbox, MAX_OUTBOX, Outbox } from "./outbox.js";
 
 interface TestMessage {
   type: string;
@@ -85,4 +85,47 @@ test("the exported default cap matches the daemon's historical MAX_OUTBOX", () =
   const drained = outbox.drain();
   assert.equal(drained[0]?.tag, 5, "the five oldest events past the cap are dropped");
   assert.equal(drained.at(-1)?.tag, MAX_OUTBOX + 4);
+});
+
+test("projected flush drops one failed projection without discarding later critical messages", () => {
+  const outbox = new Outbox<TestMessage>();
+  outbox.enqueue({ type: "session_event", sessionId: "removed", tag: 1 });
+  outbox.enqueue({ type: "session_status", sessionId: "live", tag: 2 });
+  outbox.enqueue({ type: "permission_request", sessionId: "live", tag: 3 });
+  const sent: number[] = [];
+  const projectionErrors: number[] = [];
+
+  flushProjectedOutbox(
+    outbox,
+    (message) => {
+      if (message.tag === 1) throw new Error("removed session");
+      return message;
+    },
+    (message) => sent.push(message.tag!),
+    (_error, message) => projectionErrors.push(message.tag!),
+    () => assert.fail("send should not fail"),
+  );
+
+  assert.deepEqual(projectionErrors, [1]);
+  assert.deepEqual(sent, [2, 3]);
+  assert.equal(outbox.size, 0);
+});
+
+test("projected flush restores the exact unsent suffix when socket send fails", () => {
+  const outbox = new Outbox<TestMessage>();
+  for (let tag = 1; tag <= 3; tag++) {
+    outbox.enqueue({ type: "session_event", sessionId: "live", tag });
+  }
+  const sendErrors: number[] = [];
+
+  flushProjectedOutbox(
+    outbox,
+    (message) => message,
+    () => { throw new Error("socket closed"); },
+    () => assert.fail("projection should not fail"),
+    (_error, message) => sendErrors.push(message.tag!),
+  );
+
+  assert.deepEqual(sendErrors, [1]);
+  assert.deepEqual(outbox.drain().map((message) => message.tag), [1, 2, 3]);
 });
