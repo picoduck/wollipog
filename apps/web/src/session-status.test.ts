@@ -121,16 +121,16 @@ test("change labels require settled Git evidence and never use workflow or lifec
     sessionChangeStatus({ available: true, settled: true, status: gitStatus({ ahead: 2 }) })?.label,
     "Changes Present",
   );
-  assert.equal(
-    sessionChangeStatus({ available: true,
-      settled: true,
-      summary: gitSummary({
-        ahead: 2,
-        pr: { number: 142, title: "Status taxonomy", url: "https://example.test/142", state: "OPEN" },
-      }),
-    })?.label,
-    "Ready for Review",
-  );
+  const cleanReviewReady = sessionChangeStatus({ available: true,
+    settled: true,
+    summary: gitSummary({
+      ahead: 2,
+      pr: { number: 142, title: "Status taxonomy", url: "https://example.test/142", state: "OPEN" },
+    }),
+  });
+  assert.equal(cleanReviewReady?.label, "Ready for Review");
+  assert.equal(cleanReviewReady?.supplement, undefined,
+    "a clean review-ready branch keeps the concise single-badge presentation");
   const reviewReadyWithLocalWork = sessionChangeStatus({ available: true,
     settled: true,
     summary: gitSummary({
@@ -142,6 +142,29 @@ test("change labels require settled Git evidence and never use workflow or lifec
   assert.equal(reviewReadyWithLocalWork?.label, "Ready for Review");
   assert.equal(reviewReadyWithLocalWork?.supplement?.label, "Uncommitted Changes");
   assert.match(reviewReadyWithLocalWork?.supplement?.description ?? "", /not included in the pull request/u);
+  const reviewReadyFromProductionEvidence = sessionChangeStatus({
+    available: true,
+    settled: true,
+    status: gitStatus({ hasChanges: true, ahead: 2 }),
+    summary: gitSummary({
+      ahead: 2,
+      pr: { number: 142, title: "Status taxonomy", url: "https://example.test/142", state: "OPEN" },
+    }),
+  });
+  assert.equal(reviewReadyFromProductionEvidence?.supplement?.label, "Uncommitted Changes",
+    "fresh status owns working-tree facts while the matching summary contributes PR evidence");
+  const cleanStatusWithDirtySummary = sessionChangeStatus({
+    available: true,
+    settled: true,
+    status: gitStatus({ ahead: 2 }),
+    summary: gitSummary({
+      hasChanges: true,
+      ahead: 2,
+      pr: { number: 142, title: "Status taxonomy", url: "https://example.test/142", state: "OPEN" },
+    }),
+  });
+  assert.equal(cleanStatusWithDirtySummary?.supplement, undefined,
+    "stale summary dirtiness cannot override the fresh clean status");
   assert.equal(
     sessionChangeStatus({ available: true,
       settled: true,

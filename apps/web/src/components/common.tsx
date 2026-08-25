@@ -205,7 +205,9 @@ export function SessionStatusIndicators({ session, disconnected = false }: {
 
 export function ChangeStatusBadge({ change }: { change: SessionChangeStatus | null }) {
   if (!change) return null;
-  const indicators = change.supplement ? [change, change.supplement] : [change];
+  const indicators = change.kind === "ready_for_review" && change.supplement
+    ? [change, change.supplement]
+    : [change];
   return (
     <span className="change-status-indicators">
       {indicators.map((indicator) => {

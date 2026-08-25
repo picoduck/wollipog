@@ -203,6 +203,11 @@ test("session indicators preserve simultaneous lifecycle, attention, and change 
     assert.equal(container.querySelector('[aria-label="Uncommitted Changes"]')?.textContent?.trim(), "Uncommitted Changes");
     assert.equal(container.querySelectorAll(".change-status-indicators > .status-badge").length, 2,
       "compact surfaces preserve both facts as separate badges");
+    const changeBadges = [...container.querySelectorAll(".change-status-indicators > .status-badge")];
+    assert.equal(changeBadges[0]?.classList.contains("st-done"), true,
+      "review readiness keeps its successful status tone and primary position");
+    assert.equal(changeBadges[1]?.classList.contains("st-idle"), true,
+      "uncommitted work keeps its neutral attention tone and supplemental position");
     assert.equal(container.querySelector('[aria-label="Disconnected"]')?.textContent?.trim(), "Disconnected");
   } finally {
     await act(async () => { root.unmount(); });

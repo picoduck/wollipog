@@ -14,12 +14,15 @@ export interface SessionChangeSupplement {
   description: string;
 }
 
-export interface SessionChangeStatus {
-  kind: SessionChangeKind;
-  label: "No Changes" | "Changes Present" | "Ready for Review";
-  description: string;
-  supplement?: SessionChangeSupplement;
-}
+export type SessionChangeStatus =
+  | { kind: "no_changes"; label: "No Changes"; description: string }
+  | { kind: "changes_present"; label: "Changes Present"; description: string }
+  | {
+    kind: "ready_for_review";
+    label: "Ready for Review";
+    description: string;
+    supplement?: SessionChangeSupplement;
+  };
 
 export interface SessionChangeEvidence {
   status?: GitStatusInfo | null;
