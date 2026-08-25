@@ -217,6 +217,108 @@ test("v86 wire projection omits response completions while keeping dense live an
   }
 });
 
+test("registration keeps history neutral until one negotiated v86 or v87 generation is published", () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta());
+    store.appendEvent("s_abc", { kind: "agent_message", text: "one" }, 1001);
+    store.appendEvent("s_abc", { kind: "agent_response_completed" }, 1002);
+    store.appendEvent("s_abc", { kind: "agent_message", text: "two" }, 1003);
+
+    const exact = store.snapshots(87, true)[0]!;
+    const historyTail = (store as any).historyTail.bind(store);
+    let historyTailCalls = 0;
+    (store as any).historyTail = (...args: unknown[]) => {
+      historyTailCalls += 1;
+      return historyTail(...args);
+    };
+    const firstRegister = store.registrationSnapshots()[0]!;
+    const reconnectRegister = store.registrationSnapshots()[0]!;
+    assert.equal(historyTailCalls, 0, "pre-negotiation registration never scans event history");
+    assert.equal(firstRegister.seq, 0);
+    assert.equal(firstRegister.historyEpoch, undefined);
+    assert.deepEqual(reconnectRegister, firstRegister, "reconnect does not fabricate another generation");
+
+    const v86 = store.projectSnapshotForProtocol(exact, 86);
+    const v87 = store.projectSnapshotForProtocol(exact, 87);
+    assert.deepEqual([v86.seq, v86.historyEpoch], [2, 1]);
+    assert.deepEqual([v87.seq, v87.historyEpoch], [3, 0]);
+    assert.deepEqual(store.projectSnapshotForProtocol(exact, 86), v86,
+      "a v86 reconnect republishes the same negotiated generation");
+    assert.deepEqual(store.projectSnapshotForProtocol(exact, 87), v87,
+      "a v87 reconnect republishes the same negotiated generation");
+
+    const legacyPage = store.readEventPageForProtocol("s_abc", { afterSeq: 0, limit: 10 }, 86);
+    const currentPage = store.readEventPageForProtocol("s_abc", { afterSeq: 0, limit: 10 }, 87);
+    assert.equal(legacyPage.ok, true);
+    assert.equal(currentPage.ok, true);
+    if (legacyPage.ok && currentPage.ok) {
+      assert.equal(legacyPage.page.logEpoch, v86.historyEpoch);
+      assert.equal(currentPage.page.logEpoch, v87.historyEpoch);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a failed incremental projection scan commits no duplicate omissions on retry", () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta());
+    store.appendEvent("s_abc", { kind: "agent_message", text: "one" }, 1001);
+    store.appendEvent("s_abc", { kind: "agent_response_completed" }, 1002);
+    store.appendEvent("s_abc", { kind: "agent_message", text: "two" }, 1003);
+    assert.equal(store.projectedEventSeq("s_abc", 3, 86), 2, "prime the cached prefix");
+
+    store.appendEvent("s_abc", { kind: "agent_response_completed" }, 1004);
+    store.appendEvent("s_abc", { kind: "agent_message", text: "three" }, 1005);
+    const scan = (store as any).scanHistoryLines.bind(store);
+    let failAfterFirstRecord = true;
+    (store as any).scanHistoryLines = (
+      id: string,
+      startOffset: number,
+      endOffset: number,
+      visit: (line: Buffer, offset: number) => boolean | void,
+    ) => scan(id, startOffset, endOffset, (line: Buffer, offset: number) => {
+      const result = visit(line, offset);
+      if (failAfterFirstRecord) {
+        failAfterFirstRecord = false;
+        throw new Error("transient projection read failure");
+      }
+      return result;
+    });
+
+    assert.throws(() => store.projectedEventSeq("s_abc", 5, 86), /transient projection read failure/);
+    assert.equal(store.projectedEventSeq("s_abc", 5, 86), 3,
+      "retry subtracts each omitted local sequence exactly once");
+    assert.deepEqual(store.readEventsForProtocol("s_abc", 0, 86).map((event) => event.seq), [1, 2, 3]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("projected snapshot corruption fallback never advertises an exact local tail", () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta());
+    store.appendEvent("s_abc", { kind: "agent_message", text: "one" }, 1001);
+    store.appendEvent("s_abc", { kind: "agent_response_completed" }, 1002);
+    store.appendEvent("s_abc", { kind: "agent_message", text: "two" }, 1003);
+    (store as any).projectedEventSeq = () => {
+      throw new Error("projection index unavailable");
+    };
+
+    const legacy = store.snapshots(86)[0]!;
+    assert.deepEqual([legacy.seq, legacy.historyEpoch], [0, 1],
+      "legacy fallback remains in its dense sequence space");
+    const current = store.snapshots(87)[0]!;
+    assert.deepEqual([current.seq, current.historyEpoch], [3, 0],
+      "an exact current peer may retain the metadata high-water");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("projection failure for a removed session is explicit for the socket containment boundary", () => {
   const { store, root } = tmpStore();
   try {

@@ -784,6 +784,12 @@ export class SessionManager {
       this.sessionCommandAuthority.overlaySnapshot(snapshot, protocolVersion));
   }
 
+  /** Pre-negotiation register metadata. History is published only after the peer version is known. */
+  registrationSessionSnapshots() {
+    return this.store.registrationSnapshots().map((snapshot) =>
+      this.sessionCommandAuthority.overlaySnapshot(snapshot, null));
+  }
+
   private snapshot(meta: SessionMeta) {
     const protocolVersion = this.controlPlaneProtocolVersion();
     return this.sessionCommandAuthority.overlaySnapshot(metaToSnapshot(meta, protocolVersion), protocolVersion);

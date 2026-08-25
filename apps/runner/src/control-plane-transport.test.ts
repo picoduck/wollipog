@@ -2,8 +2,34 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   deriveControlPlaneHttpUrl,
+  publishNegotiatedSessionSnapshots,
+  registrationSessionSnapshots,
   validateControlPlaneUrl,
 } from "./control-plane-transport.js";
+import type { SessionSnapshot } from "@wollipog/protocol";
+
+function snapshot(seq: number, historyEpoch: number | undefined): SessionSnapshot {
+  return {
+    id: "s_handshake",
+    workspaceId: null,
+    agentId: "codex",
+    title: "Handshake",
+    status: "idle",
+    driver: "codex",
+    useWorktree: false,
+    worktreePath: null,
+    workspacePath: "/repo",
+    config: {},
+    tokensIn: 0,
+    tokensOut: 0,
+    costUsd: 0,
+    adopted: false,
+    seq,
+    historyEpoch,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+}
 
 test("credential transport permits secure remote and plaintext loopback control planes", () => {
   for (const url of [
@@ -53,4 +79,27 @@ test("explicit insecure transport acknowledgement reaches HTTP side-channel deri
     () => deriveControlPlaneHttpUrl("ws://manager.example.test/runner"),
     /--allow-insecure-transport/u,
   );
+});
+
+test("register uses neutral snapshots and negotiated republish preserves exact snapshots for send-time projection", () => {
+  const register = snapshot(0, undefined);
+  const exact = snapshot(3, 0);
+  const calls: string[] = [];
+  const source = {
+    registrationSessionSnapshots: () => {
+      calls.push("register");
+      return [register];
+    },
+    sessionSnapshots: (exactEventSeq: boolean) => {
+      calls.push(`runtime:${exactEventSeq}`);
+      assert.equal(exactEventSeq, true);
+      return [exact];
+    },
+  };
+
+  assert.deepEqual(registrationSessionSnapshots(source), [register]);
+  const sent: SessionSnapshot[] = [];
+  publishNegotiatedSessionSnapshots(source, (message) => sent.push(message.snapshot));
+  assert.deepEqual(calls, ["register", "runtime:true"]);
+  assert.deepEqual(sent, [exact], "the send callback receives local truth for negotiated projection");
 });

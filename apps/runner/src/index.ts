@@ -113,7 +113,11 @@ import { ShellManager } from "./shell-manager.js";
 import { agentTuiLaunch } from "./agent-tui.js";
 import { capabilitiesFor } from "./catalog.js";
 import { createPromptImageFetcher } from "./prompt-image-fetch.js";
-import { validateControlPlaneUrl } from "./control-plane-transport.js";
+import {
+  publishNegotiatedSessionSnapshots,
+  registrationSessionSnapshots,
+  validateControlPlaneUrl,
+} from "./control-plane-transport.js";
 import { discoverAgents, enrichAgentModels, mergeAgents } from "./discovery/discover.js";
 import {
   prepareClaudeSlashCommandCatalog,
@@ -528,12 +532,7 @@ const shells = new ShellManager({
 const outbox = new Outbox<RunnerToControlPlane>();
 
 function projectSnapshotForCurrentProtocol(snapshot: SessionSnapshot): SessionSnapshot {
-  return {
-    ...snapshot,
-    seq: store.projectedEventSeq(snapshot.id, snapshot.seq, controlPlaneProtocolVersion),
-    ...(snapshot.historyEpoch === undefined ? {} :
-      { historyEpoch: store.projectedHistoryEpoch(snapshot.historyEpoch, controlPlaneProtocolVersion) }),
-  };
+  return store.projectSnapshotForProtocol(snapshot, controlPlaneProtocolVersion);
 }
 
 function projectStoredEventsForCurrentProtocol(
@@ -995,9 +994,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       // Registration snapshots are sent before the control plane's protocol version is known, so
       // they conservatively omit native capability overlays. Re-publish negotiated snapshots now;
       // v65 peers continue to receive no overlay, while v66+ peers get the hook transport truth.
-      for (const snapshot of sessions.sessionSnapshots(true)) {
-        sendUp({ type: "session_runtime_updated", snapshot });
-      }
+      publishNegotiatedSessionSnapshots(sessions, sendUp);
       // The CP may have restarted or missed live frames. Reconcile retained terminal processes
       // from bounded, sequence-addressed snapshots, then close the inventory with a fence.
       const shellSnapshots = shells.snapshots();
@@ -1884,7 +1881,9 @@ function connect(): void {
       liveSessions: sessions.liveSessionIds(),
       // Phase 2: full metadata for every session in the box store, so this dashboard hydrates
       // sessions it didn't create (and ones from before a runner restart).
-      sessionSnapshots: sessions.sessionSnapshots(),
+      // The peer profile is unknown until `registered`. Advertise complete metadata but no history
+      // generation here; the ordered negotiated runtime updates below become authoritative.
+      sessionSnapshots: registrationSessionSnapshots(sessions),
     };
     socket.send(JSON.stringify(register));
   });

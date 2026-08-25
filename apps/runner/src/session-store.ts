@@ -1920,13 +1920,17 @@ export class SessionStore {
     }
     if (index.localTail < tail.seq) {
       let expected = index.localTail + 1;
+      // A scan can fail after visiting a valid prefix (for example when compaction replaces a
+      // later segment). Keep the cached index immutable until the whole captured suffix validates,
+      // otherwise a retry appends the same omissions again and shifts the dense wire sequence.
+      const omittedSeqs = [...index.omittedSeqs];
       const scanned = this.scanHistoryLines(id, index.completeBytes, tail.completeBytes, (line) => {
         const event = this.parseStoredEvent(line);
         if (event.seq !== expected || event.seq > tail.seq) {
           throw new HistoryStoreError("history_corrupt", "session history is not contiguous during wire projection");
         }
         if (projectSessionEventPayloadForProtocol(event.payload, protocolVersion) === null) {
-          index.omittedSeqs.push(event.seq);
+          omittedSeqs.push(event.seq);
         }
         expected += 1;
       });
@@ -1936,8 +1940,12 @@ export class SessionStore {
       if (expected - 1 !== tail.seq) {
         throw new HistoryStoreError("history_corrupt", "session history ended before its projected tail");
       }
-      index.localTail = tail.seq;
-      index.completeBytes = scanned.completeBytes;
+      index = {
+        ...index,
+        localTail: tail.seq,
+        completeBytes: scanned.completeBytes,
+        omittedSeqs,
+      };
     }
     this.eventProjectionIndexes.set(id, index);
     return index;
@@ -1994,6 +2002,20 @@ export class SessionStore {
   ): number {
     if (!this.eventProjectionRequired(protocolVersion)) return localSeq;
     return this.projectedSeq(this.refreshEventProjectionIndex(id, protocolVersion), localSeq);
+  }
+
+  /** Project an exact local snapshot at the negotiated socket boundary. */
+  projectSnapshotForProtocol(
+    snapshot: SessionSnapshot,
+    protocolVersion: number | null | undefined,
+  ): SessionSnapshot {
+    return {
+      ...snapshot,
+      seq: this.projectedEventSeq(snapshot.id, snapshot.seq, protocolVersion),
+      ...(snapshot.historyEpoch === undefined ? {} : {
+        historyEpoch: this.projectedHistoryEpoch(snapshot.historyEpoch, protocolVersion),
+      }),
+    };
   }
 
   /** Project one exact local event for live delivery. An omitted event consumes no peer sequence. */
@@ -2398,7 +2420,23 @@ export class SessionStore {
     return scrubbed;
   }
 
-  /** Protocol snapshots for every stored session (sent on register). */
+  /** Metadata-only snapshots for the pre-negotiation register frame. History stays neutral until
+   * the ordered `registered` acknowledgement lets the socket publish one authoritative peer-facing
+   * sequence space. This path deliberately performs no history tail or projection scan. */
+  registrationSnapshots(): SessionSnapshot[] {
+    const snapshots: SessionSnapshot[] = [];
+    for (const listed of this.listSessions()) {
+      if (this.isDeleted(listed.sessionId)) continue;
+      this.recoverHistoryReset(listed.sessionId);
+      const meta = this.readMeta(listed.sessionId);
+      if (!meta) continue;
+      const snapshot = metaToSnapshot(meta, null);
+      snapshots.push({ ...snapshot, seq: 0, historyEpoch: undefined });
+    }
+    return snapshots;
+  }
+
+  /** Protocol snapshots for every stored session after the peer version is known. */
   snapshots(
     controlPlaneProtocolVersion: number | null = PROTOCOL_VERSION,
     exactEventSeq = false,
@@ -2421,7 +2459,10 @@ export class SessionStore {
           durableSeq = this.projectedEventSeq(meta.sessionId, durableSeq, controlPlaneProtocolVersion);
         }
       } catch {
-        // Preserve the last metadata high-water so a later page attempt fails closed on corruption.
+        // An exact peer can safely retain the metadata high-water. A projected peer cannot: that
+        // number belongs to the local sequence space and may exceed every dense cursor it can page.
+        // Zero is a conservative same-generation tail; a later page attempt still fails closed.
+        if (!exactEventSeq && this.eventProjectionRequired(controlPlaneProtocolVersion)) durableSeq = 0;
       }
       const snapshot = metaToSnapshot(meta, controlPlaneProtocolVersion);
       snapshots.push({
