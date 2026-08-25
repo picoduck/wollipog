@@ -395,7 +395,12 @@ function runnerMeta(): RunnerMetadata {
 }
 
 /** Fresh in-memory DB seeded with one online-capable runner + its agent/workspace. */
-function makeHarness(titleGenerator?: SessionTitleGenerator, titleGenerationTimeoutMs = 1_000) {
+function makeHarness(
+  titleGenerator?: SessionTitleGenerator,
+  titleGenerationTimeoutMs = 1_000,
+  titleGenerationEnabled?: (sessionId: string) => boolean,
+  titleGenerationRevision?: (sessionId: string) => string,
+) {
   const db = ControlPlaneDb.open(":memory:");
   db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);
   const hub = new FakeHub();
@@ -434,7 +439,17 @@ function makeHarness(titleGenerator?: SessionTitleGenerator, titleGenerationTime
       }),
     };
   };
-  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG, undefined, undefined, titleGenerator, titleGenerationTimeoutMs);
+  const svc = new SessionsService(
+    db,
+    hub as unknown as Hub,
+    NOOP_LOG,
+    undefined,
+    undefined,
+    titleGenerator,
+    titleGenerationTimeoutMs,
+    titleGenerationEnabled,
+    titleGenerationRevision,
+  );
   return { db, hub, svc };
 }
 
@@ -3522,6 +3537,41 @@ test("a prompt-created fallback also schedules semantic naming on its first dura
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(requested, [["Prompt-created fallback title"]]);
   assert.equal(db.getSession(id)?.title, "Semantic Prompt Title");
+});
+
+test("runtime naming mode changes apply to subsequent first messages without a restart", async () => {
+  let enabled = false;
+  const requested: string[] = [];
+  const generator: SessionTitleGenerator = async ({ sessionId }) => {
+    requested.push(sessionId ?? "missing");
+    return "Runtime Semantic Title";
+  };
+  const { db, hub, svc } = makeHarness(generator, 1_000, () => enabled);
+  const promptOnlyId = seedSession(svc, hub);
+  svc.onSessionEvent(promptOnlyId, { kind: "user_message", text: "Prompt fallback", final: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(db.getSession(promptOnlyId)?.title, "Prompt fallback");
+  assert.deepEqual(requested, []);
+
+  enabled = true;
+  const semanticId = seedSession(svc, hub);
+  svc.onSessionEvent(semanticId, { kind: "user_message", text: "Custom endpoint request", final: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(requested, [semanticId]);
+  assert.equal(db.getSession(semanticId)?.title, "Runtime Semantic Title");
+});
+
+test("a runtime naming setting revision fences an older in-flight result", async () => {
+  let revision = "custom:1";
+  let finish: ((title: string) => void) | undefined;
+  const generator: SessionTitleGenerator = () => new Promise((resolve) => { finish = resolve; });
+  const { db, hub, svc } = makeHarness(generator, 1_000, () => true, () => revision);
+  const id = seedSession(svc, hub);
+  svc.onSessionEvent(id, { kind: "user_message", text: "Original fallback", final: true });
+  revision = "custom:2";
+  finish!("Stale Semantic Title");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(db.getSession(id)?.title, "Original fallback");
 });
 
 test("a manual rename fences late initial and explicit semantic title results", async () => {

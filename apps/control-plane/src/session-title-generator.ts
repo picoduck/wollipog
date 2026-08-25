@@ -11,6 +11,8 @@ export interface SessionTitleMessage {
 }
 
 export interface SessionTitleRequest {
+  /** Present for control-plane initiated naming so runtime organization settings can be resolved. */
+  sessionId?: string;
   messages: readonly SessionTitleMessage[];
   signal: AbortSignal;
 }
@@ -115,7 +117,11 @@ export function openAiCompatibleTitleGenerator(config: OpenAiTitleConfig): Sessi
 
 export function sessionTitleGeneratorFromEnv(
   env: NodeJS.ProcessEnv = process.env,
-): { generator?: SessionTitleGenerator; timeoutMs: number } {
+): {
+  generator?: SessionTitleGenerator;
+  timeoutMs: number;
+  customModel?: { endpoint: string; model: string; apiKeyConfigured: boolean };
+} {
   const endpoint = env.WOLLIPOG_TITLE_MODEL_URL?.trim();
   const model = env.WOLLIPOG_TITLE_MODEL?.trim();
   const configuredTimeout = env.WOLLIPOG_TITLE_MODEL_TIMEOUT_MS?.trim();
@@ -138,5 +144,10 @@ export function sessionTitleGeneratorFromEnv(
       apiKey: env.WOLLIPOG_TITLE_MODEL_API_KEY?.trim() || undefined,
     }),
     timeoutMs,
+    customModel: {
+      endpoint: parsed.toString(),
+      model,
+      apiKeyConfigured: Boolean(env.WOLLIPOG_TITLE_MODEL_API_KEY?.trim()),
+    },
   };
 }

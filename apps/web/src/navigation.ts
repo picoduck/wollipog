@@ -28,13 +28,14 @@ export type View =
  * section is deep-linkable, which is what makes "see Settings → Appearance" a thing you can send
  * someone.
  */
-export type SettingsSection = "appearance" | "notifications" | "keyboard" | "behavior" | "network" | "experimental" | "about";
+export type SettingsSection = "appearance" | "notifications" | "keyboard" | "behavior" | "session-naming" | "network" | "experimental" | "about";
 
 export const SETTINGS_SECTIONS: ReadonlyArray<{ id: SettingsSection; title: string }> = [
   { id: "appearance", title: "Appearance" },
   { id: "notifications", title: "Notifications" },
   { id: "keyboard", title: "Keyboard" },
   { id: "behavior", title: "Behavior" },
+  { id: "session-naming", title: "Session Naming" },
   { id: "network", title: "Network" },
   { id: "experimental", title: "Experimental" },
   { id: "about", title: "About" },
@@ -239,7 +240,7 @@ export function viewFromPath(pathname: string, search = ""): View | null {
   if (path === "/usage") return { name: "usage" };
   if (path === "/archived") return { name: "archived" };
   if (path === "/settings") return { name: "settings", section: "appearance" };
-  const settingsMatch = /^\/settings\/(appearance|notifications|keyboard|behavior|network|experimental|about)$/.exec(path);
+  const settingsMatch = /^\/settings\/(appearance|notifications|keyboard|behavior|session-naming|network|experimental|about)$/.exec(path);
   if (settingsMatch) return { name: "settings", section: settingsMatch[1] as SettingsSection };
   if (path === "/projects") return { name: "projects" };
   const projectMatch = /^\/projects\/~([^/]+)$/.exec(path);

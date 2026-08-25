@@ -8,6 +8,8 @@ import {
   KeyboardPanel,
   NetworkPanel,
   NotificationsPanel,
+  PendingSetting,
+  SettingsGroup,
   SettingsView,
 } from "../components/SettingsView.js";
 import { DEFAULT_EXPERIMENT_FLAGS } from "../experiments.js";
@@ -158,6 +160,15 @@ function Harness() {
               ),
               keyboard: <KeyboardPanel shortcutLabel="Reference · ?" disabled={disabled} onOpenShortcuts={() => undefined} />,
               behavior: <BehaviorPanel />,
+              "session-naming": (
+                <SettingsGroup title="Session Naming">
+                  <PendingSetting
+                    title="Naming Mode"
+                    description="Controls automatic session titles."
+                    reason="The visual fixture does not connect to a control plane."
+                  />
+                </SettingsGroup>
+              ),
               network: (
                 <NetworkPanel
                   tailnet={{

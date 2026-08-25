@@ -85,6 +85,7 @@ import {
   NetworkPanel,
   NotificationsPanel,
   SettingsView,
+  SessionNamingPanel,
   useNotifySetting,
 } from "./components/SettingsView.js";
 import { EXPERIMENT_TITLES, experimentForViewName, type ExperimentId } from "./experiments.js";
@@ -757,6 +758,7 @@ function Shell() {
                   />
                 ),
                 behavior: <BehaviorPanel />,
+                "session-naming": <SessionNamingPanel />,
                 network: <NetworkPanel tailnet={tailnet} />,
                 experimental: (
                   <ExperimentalPanel
