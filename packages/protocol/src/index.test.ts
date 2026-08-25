@@ -11,6 +11,8 @@ import {
   PROTOCOL_VERSION,
   providerAuthenticationReceiptCode,
   projectRunnerMessageForProtocol,
+  projectSessionEventPayloadForProtocol,
+  sessionEventWireProjectionRequiredForProtocol,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   WOLLIPOG_CONTROL_PLANE_SERVICE,
   WOLLIPOG_POLICY_HOOK_POLL_CAPABILITY_HEADER,
@@ -570,6 +572,22 @@ test("provider-authentication receipts are projected for the peer only at send t
   );
   assert.equal(exact.type === "durable_session_command_update" ? exact.code : undefined,
     "PROVIDER_AUTHENTICATION_REQUIRED", "the buffered runner message retains exact local truth");
+});
+
+test("additive session-event kinds use explicit older-peer policies without mutating local truth", () => {
+  const completion = { kind: "agent_response_completed" } as const;
+  assert.equal(projectSessionEventPayloadForProtocol(completion, 86), null);
+  assert.equal(projectSessionEventPayloadForProtocol(completion, undefined), null);
+  assert.equal(projectSessionEventPayloadForProtocol(completion, 87), completion);
+  assert.equal(sessionEventWireProjectionRequiredForProtocol(undefined), true);
+  assert.equal(sessionEventWireProjectionRequiredForProtocol(86), true);
+  assert.equal(sessionEventWireProjectionRequiredForProtocol(87), false);
+
+  const required = { kind: "error", message: "still required" } as const;
+  assert.equal(projectSessionEventPayloadForProtocol(required, 1), required,
+    "event kinds without an omission policy fail closed by remaining exact on the wire");
+  assert.deepEqual(completion, { kind: "agent_response_completed" },
+    "wire projection never rewrites runner-local event history");
 });
 
 test("source locations normalize canonical root-relative paths and reject escapes", () => {

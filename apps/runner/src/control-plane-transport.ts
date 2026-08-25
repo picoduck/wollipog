@@ -1,6 +1,31 @@
 /** Shared transport policy for every runner connection that carries a control-plane credential. */
 
 import { isIP } from "node:net";
+import type { SessionRuntimeUpdatedMessage, SessionSnapshot } from "@wollipog/protocol";
+
+interface SessionSnapshotHandshakeSource {
+  registrationSessionSnapshots(): SessionSnapshot[];
+  sessionSnapshots(exactEventSeq: boolean): SessionSnapshot[];
+}
+
+/** Registration precedes version negotiation, so it may advertise metadata but not a guessed
+ * history sequence space. */
+export function registrationSessionSnapshots(
+  source: SessionSnapshotHandshakeSource,
+): SessionSnapshot[] {
+  return source.registrationSessionSnapshots();
+}
+
+/** Publish exact local snapshots through the normal send boundary after negotiation. The caller's
+ * send function owns peer-version projection and failure containment. */
+export function publishNegotiatedSessionSnapshots(
+  source: SessionSnapshotHandshakeSource,
+  send: (message: SessionRuntimeUpdatedMessage) => void,
+): void {
+  for (const snapshot of source.sessionSnapshots(true)) {
+    send({ type: "session_runtime_updated", snapshot });
+  }
+}
 
 function isLoopbackHostname(hostname: string): boolean {
   const normalized = hostname.toLowerCase().replace(/^\[|\]$/gu, "");

@@ -3120,6 +3120,41 @@ test("runner history snapshots persist epoch/tail and replace cache only on a kn
   assert.equal(db.searchEvents("world").length, 0, "epoch replacement clears transcript FTS rows");
 });
 
+test("neutral registration followed by negotiated history does not re-fence reconnects", () => {
+  for (const negotiated of [
+    { id: "handshake-v86", historyEpoch: 1, seq: 2 },
+    { id: "handshake-v87", historyEpoch: 0, seq: 3 },
+  ]) {
+    const db = withRunner();
+    db.createSessionFromSnapshot(snapshot({ ...negotiated, historyEpoch: undefined, seq: 0 }), "runner-1", 1_000);
+
+    const firstNegotiated = db.reconcileRunnerHistory(
+      negotiated.id,
+      negotiated.historyEpoch,
+      negotiated.seq,
+    );
+    assert.equal(firstNegotiated?.reset, false, `${negotiated.id}: first known generation is adopted`);
+    const eventEpoch = firstNegotiated?.eventEpoch;
+
+    const reconnectRegister = db.reconcileRunnerHistory(negotiated.id, undefined, 0);
+    assert.equal(reconnectRegister?.reset, false, `${negotiated.id}: neutral reconnect preserves generation`);
+    assert.deepEqual(
+      [reconnectRegister?.historyEpoch, reconnectRegister?.tailSeq, reconnectRegister?.eventEpoch],
+      [negotiated.historyEpoch, negotiated.seq, eventEpoch],
+      `${negotiated.id}: neutral history cannot lower or replace the negotiated fence`,
+    );
+
+    const reconnectNegotiated = db.reconcileRunnerHistory(
+      negotiated.id,
+      negotiated.historyEpoch,
+      negotiated.seq,
+    );
+    assert.equal(reconnectNegotiated?.reset, false, `${negotiated.id}: negotiated republish is idempotent`);
+    assert.equal(reconnectNegotiated?.eventEpoch, eventEpoch);
+    db.close();
+  }
+});
+
 test("appendHydratedPage is atomic, crash-idempotent, stale-safe, and keeps CP seq independent", () => {
   const db = withRunner();
   db.createSession(newSession({ id: "history-page" }));

@@ -13,6 +13,7 @@ import {
   parseMessage,
   PROTOCOL_VERSION,
   projectRunnerMessageForProtocol,
+  projectSessionEventPayloadForProtocol,
   runnerSupportsProtocol,
   validatePromptImageInputs,
   type AdoptSessionMessage,
@@ -40,6 +41,7 @@ import {
   type SessionCommandInvocationResultMessage,
   type SessionCommandInvocationUpdateMessage,
   type SessionEventPayload,
+  type SessionSnapshot,
   type SkillSyncEntry,
   type StartSessionMessage,
 } from "@wollipog/protocol";
@@ -78,7 +80,7 @@ import {
   validatePodReconciliationMetadata,
   withGitExecutionContext,
 } from "./git-ops.js";
-import { Outbox } from "./outbox.js";
+import { flushProjectedOutbox, Outbox } from "./outbox.js";
 import { SessionManager } from "./session-manager.js";
 import { NativeProviderAuthRecovery } from "./provider-auth-recovery.js";
 import { handleResolveSteeringAttemptMessage, handleSteerSessionMessage } from "./steering-handler.js";
@@ -87,7 +89,7 @@ import {
   warnLegacyClaudeLifetimeEnvironment,
 } from "./drivers/claude-code.js";
 import { resolveAcpSessionContext } from "./acp-session-context.js";
-import { SessionStore, isAdoptedSession, metaToSnapshot, type SessionMeta } from "./session-store.js";
+import { SessionStore, isAdoptedSession, type SessionMeta } from "./session-store.js";
 import { waitForPendingKills } from "./spawn.js";
 import {
   findExternalSession,
@@ -111,7 +113,11 @@ import { ShellManager } from "./shell-manager.js";
 import { agentTuiLaunch } from "./agent-tui.js";
 import { capabilitiesFor } from "./catalog.js";
 import { createPromptImageFetcher } from "./prompt-image-fetch.js";
-import { validateControlPlaneUrl } from "./control-plane-transport.js";
+import {
+  publishNegotiatedSessionSnapshots,
+  registrationSessionSnapshots,
+  validateControlPlaneUrl,
+} from "./control-plane-transport.js";
 import { discoverAgents, enrichAgentModels, mergeAgents } from "./discovery/discover.js";
 import {
   prepareClaudeSlashCommandCatalog,
@@ -525,9 +531,90 @@ const shells = new ShellManager({
 // policy lives in outbox.ts; the online-decision and the actual protocol-projected send stay here.
 const outbox = new Outbox<RunnerToControlPlane>();
 
+function projectSnapshotForCurrentProtocol(snapshot: SessionSnapshot): SessionSnapshot {
+  return store.projectSnapshotForProtocol(snapshot, controlPlaneProtocolVersion);
+}
+
+function projectStoredEventsForCurrentProtocol(
+  sessionId: string,
+  events: Array<{ seq: number; ts: number; payload: SessionEventPayload }>,
+) {
+  return store.projectEventsForProtocol(sessionId, events, controlPlaneProtocolVersion);
+}
+
+function projectMessageForCurrentProtocol(msg: RunnerToControlPlane): RunnerToControlPlane | null {
+  if (msg.type === "session_event") {
+    if (msg.seq === undefined) {
+      const payload = projectSessionEventPayloadForProtocol(msg.payload, controlPlaneProtocolVersion);
+      return payload ? { ...msg, payload } : null;
+    }
+    const event = store.projectEventForProtocol(
+      msg.sessionId,
+      { seq: msg.seq, ts: msg.ts ?? Date.now(), payload: msg.payload },
+      controlPlaneProtocolVersion,
+    );
+    return event
+      ? { ...msg, seq: event.seq, ts: msg.ts, payload: event.payload }
+      : null;
+  }
+  if (msg.type === "session_runtime_updated") {
+    return projectRunnerMessageForProtocol({
+      ...msg,
+      snapshot: projectSnapshotForCurrentProtocol(msg.snapshot),
+    }, controlPlaneProtocolVersion);
+  }
+  if (msg.type === "reprocess_session_result") {
+    const snapshot = msg.snapshot
+      ? projectSnapshotForCurrentProtocol(msg.snapshot)
+      : undefined;
+    const events = msg.events
+      ? projectStoredEventsForCurrentProtocol(msg.sessionId, msg.events)
+      : undefined;
+    return projectRunnerMessageForProtocol({
+      ...msg,
+      ...(snapshot ? { snapshot } : {}),
+      ...(events
+        ? { events, eventCount: events.length }
+        : snapshot && msg.eventCount !== undefined
+          ? { eventCount: snapshot.seq }
+          : {}),
+    }, controlPlaneProtocolVersion);
+  }
+  if (msg.type === "fork_result") {
+    const events = msg.events && msg.snapshot
+      ? projectStoredEventsForCurrentProtocol(msg.snapshot.id, msg.events)
+      : undefined;
+    return projectRunnerMessageForProtocol({
+      ...msg,
+      ...(msg.snapshot ? { snapshot: projectSnapshotForCurrentProtocol(msg.snapshot) } : {}),
+      ...(events ? { events } : {}),
+    }, controlPlaneProtocolVersion);
+  }
+  if (msg.type === "adopt_session_result" && msg.snapshot) {
+    return projectRunnerMessageForProtocol({
+      ...msg,
+      snapshot: projectSnapshotForCurrentProtocol(msg.snapshot),
+    }, controlPlaneProtocolVersion);
+  }
+  return projectRunnerMessageForProtocol(msg, controlPlaneProtocolVersion);
+}
+
 function sendUp(msg: RunnerToControlPlane): void {
   if (ws && ws.readyState === WebSocket.OPEN && registered) {
-    ws.send(JSON.stringify(projectRunnerMessageForProtocol(msg, controlPlaneProtocolVersion)));
+    let projected: RunnerToControlPlane | null;
+    try {
+      projected = projectMessageForCurrentProtocol(msg);
+    } catch (error) {
+      log(`dropping ${msg.type}: wire projection failed (${errText(error)})`);
+      return;
+    }
+    if (!projected) return;
+    try {
+      ws.send(JSON.stringify(projected));
+    } catch (error) {
+      outbox.enqueue(msg);
+      log(`buffering ${msg.type}: socket send failed (${errText(error)})`);
+    }
     return;
   }
   outbox.enqueue(msg);
@@ -535,9 +622,14 @@ function sendUp(msg: RunnerToControlPlane): void {
 
 function flushOutbox(): void {
   if (!ws || ws.readyState !== WebSocket.OPEN || !registered) return;
-  for (const m of outbox.drain()) {
-    ws.send(JSON.stringify(projectRunnerMessageForProtocol(m, controlPlaneProtocolVersion)));
-  }
+  const socket = ws;
+  flushProjectedOutbox(
+    outbox,
+    projectMessageForCurrentProtocol,
+    (message) => socket.send(JSON.stringify(message)),
+    (error, message) => log(`dropping ${message.type}: wire projection failed (${errText(error)})`),
+    (error, message) => log(`retaining ${message.type}: socket send failed (${errText(error)})`),
+  );
 }
 
 function sendDurableUpdate(receipt: DurableCommandReceipt): void {
@@ -902,9 +994,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       // Registration snapshots are sent before the control plane's protocol version is known, so
       // they conservatively omit native capability overlays. Re-publish negotiated snapshots now;
       // v65 peers continue to receive no overlay, while v66+ peers get the hook transport truth.
-      for (const snapshot of sessions.sessionSnapshots()) {
-        sendUp({ type: "session_runtime_updated", snapshot });
-      }
+      publishNegotiatedSessionSnapshots(sessions, sendUp);
       // The CP may have restarted or missed live frames. Reconcile retained terminal processes
       // from bounded, sequence-addressed snapshots, then close the inventory with a fence.
       const shellSnapshots = shells.snapshots();
@@ -1338,8 +1428,13 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       break;
     case "session_history": {
       // Reply with the session's event log from the box store (control plane lazy-hydration).
-      const events = sessions.history(msg.sessionId, msg.afterSeq);
-      sendUp({ type: "session_history_result", requestId: msg.requestId, sessionId: msg.sessionId, ok: true, events });
+      try {
+        const events = sessions.history(msg.sessionId, msg.afterSeq);
+        sendUp({ type: "session_history_result", requestId: msg.requestId, sessionId: msg.sessionId, ok: true, events });
+      } catch (error) {
+        const detail = errText(error).replace(/[\u0000-\u001f\u007f]/gu, " ").slice(0, 240);
+        sendUp({ type: "session_history_result", requestId: msg.requestId, sessionId: msg.sessionId, ok: false, error: detail });
+      }
       break;
     }
     case "session_history_page": {
@@ -1549,9 +1644,9 @@ async function handleReprocess(msg: ReprocessSessionMessage): Promise<void> {
       requestId,
       sessionId,
       ok: true,
-      snapshot: metaToSnapshot(updated, controlPlaneProtocolVersion),
+      snapshot: sessions.snapshotForControlPlane(updated),
       ...(msg.deferHistory ? {} : {
-        events: sessions.history(sessionId, 0), // legacy CP swaps in the complete re-issued log
+        events: store.readEvents(sessionId), // exact until the socket-send peer projection
       }),
       eventCount: events.length,
     });
@@ -1673,7 +1768,7 @@ async function handleAdopt(msg: AdoptSessionMessage): Promise<void> {
       requestId,
       ok: true,
       descriptor,
-      snapshot: metaToSnapshot(meta, controlPlaneProtocolVersion),
+      snapshot: sessions.snapshotForControlPlane(meta),
     });
   }
 
@@ -1786,7 +1881,9 @@ function connect(): void {
       liveSessions: sessions.liveSessionIds(),
       // Phase 2: full metadata for every session in the box store, so this dashboard hydrates
       // sessions it didn't create (and ones from before a runner restart).
-      sessionSnapshots: sessions.sessionSnapshots(),
+      // The peer profile is unknown until `registered`. Advertise complete metadata but no history
+      // generation here; the ordered negotiated runtime updates below become authoritative.
+      sessionSnapshots: registrationSessionSnapshots(sessions),
     };
     socket.send(JSON.stringify(register));
   });
