@@ -7,9 +7,11 @@ import type { SessionConfig, SessionEventPayload } from "@wollipog/protocol";
 import {
   approvalContext,
   approvalResponse,
+  codexAppServerArgs,
   buildCodexTurnParams,
   CodexAppServerDriver,
   CodexAppServerResumeError,
+  DEFAULT_MODE_QUESTION_FEATURE,
   diagnosticValue,
   parseReviewDecision,
   reviewSummary,
@@ -67,6 +69,73 @@ function makeHarness(
   const onItem = (item: unknown, completed: boolean) => (driver as any).onItem(item, completed);
   return { driver, events, stderr, subscriptionUsage, onItem, authenticationFailures: () => authenticationFailures };
 }
+
+test("app-server launch enables Default-mode questions before the subcommand", () => {
+  const base = ["/opt/codex.js", "-c", "model=default"];
+  assert.deepEqual(codexAppServerArgs(base), [
+    ...base,
+    "--enable",
+    DEFAULT_MODE_QUESTION_FEATURE,
+    "app-server",
+  ]);
+  assert.deepEqual(codexAppServerArgs(base, false), [...base, "app-server"]);
+  assert.deepEqual(base, ["/opt/codex.js", "-c", "model=default"], "configured arguments remain immutable");
+});
+
+test("unsupported Default-mode question feature retries the unchanged app-server launch", async () => {
+  const launches: string[][] = [];
+  const stderr: string[] = [];
+  const exits: Array<number | null> = [];
+  const driver = new CodexAppServerDriver({
+    command: "codex",
+    args: ["--config", "model=default"],
+    cwd: "/tmp/work",
+    env: {},
+    config: {},
+    context: { kind: "native" },
+  }, {
+    onEvent: () => {},
+    onStderr: (line) => stderr.push(line),
+    onExit: (code) => exits.push(code),
+  }, undefined, {
+    spawn: (opts) => {
+      launches.push([...opts.args]);
+      const child = fakeAgentProcess();
+      if (launches.length === 1) {
+        setImmediate(() => {
+          child.stderr.write("Error: Unknown feature flag: default_mode_request_user_input\n");
+          child.emit("close", 1);
+        });
+      } else {
+        child.stdin.on("data", (chunk) => {
+          for (const line of String(chunk).trim().split(/\r?\n/)) {
+            if (!line) continue;
+            const message = JSON.parse(line) as { id?: number; method?: string };
+            if (message.method === "initialize") {
+              child.stdout.write(JSON.stringify({ id: message.id, result: { userAgent: "old-codex" } }) + "\n");
+            }
+          }
+        });
+      }
+      return child;
+    },
+    kill: () => {},
+  });
+
+  try {
+    await driver.initialize();
+    assert.deepEqual(launches, [
+      ["--config", "model=default", "--enable", DEFAULT_MODE_QUESTION_FEATURE, "app-server"],
+      ["--config", "model=default", "app-server"],
+    ]);
+    assert.equal(stderr.length, 1);
+    assert.match(stderr[0]!, /continuing without Default-mode structured questions/);
+    assert.doesNotMatch(stderr[0]!, /Unknown feature flag/);
+    assert.deepEqual(exits, [], "the rejected probe launch must not fail the managed session");
+  } finally {
+    driver.dispose();
+  }
+});
 
 test("app-server auth errors emit a secret-free auth signal", () => {
   const h = makeHarness();

@@ -582,8 +582,20 @@ contract stays a compatibility boundary rather than a change detector.
 ### 3.2 Spawn + lifecycle (app-server)
 
 ```
-codex app-server          # stdio NDJSON; reuse JsonRpcPeer-style framing
+codex --enable default_mode_request_user_input app-server
 ```
+
+Wollipog enables Codex's `default_mode_request_user_input` feature on every managed app-server
+launch so Default collaboration mode can use the same structured `item/tool/requestUserInput` path
+as Plan mode. Codex `0.149.1` is the first release verified by this repository to advertise the
+flag; operators can confirm another installed build with `codex features list` (the output must
+contain `default_mode_request_user_input`). The flag is passed as a global option before
+`app-server`, which preserves configured launch arguments and Codex config precedence.
+
+Compatibility is fail-safe. A CLI that rejects the named feature, or predates the global `--enable`
+option, exits before initialization; the driver suppresses that expected probe error and retries
+exactly once as `codex app-server`. The session then retains the prior prose-question behavior and
+all existing app-server capabilities. Other startup failures are not retried or hidden.
 
 1. `initialize` (request) `{clientInfo, capabilities:{experimentalApi:true}}` → result; then send
    `initialized` (notification). Any call before this errors "Not initialized".
