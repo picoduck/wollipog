@@ -2072,6 +2072,7 @@ textarea {
 }
 .subagent-state-dot[data-lifecycle="starting"],
 .subagent-state-dot[data-lifecycle="running"] { background: var(--accent); }
+.subagent-state-dot[data-lifecycle="waiting"] { background: var(--warning); }
 .subagent-state-dot[data-lifecycle="completed"] { background: var(--green); }
 .subagent-state-dot[data-lifecycle="failed"],
 .subagent-state-dot[data-lifecycle="unreachable"] { background: var(--red); }

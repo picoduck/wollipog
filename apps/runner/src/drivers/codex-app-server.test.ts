@@ -33,6 +33,18 @@ function nextTask(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
+async function waitForCondition(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) assert.fail(`condition was not met within ${timeoutMs}ms`);
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+function childItemId(threadId: string, itemId: string): string {
+  return `codex-child:${JSON.stringify([threadId, itemId])}`;
+}
+
 /**
  * Unit tests for the app-server item -> SessionEventPayload mapping and the
  * approval decision wiring. No process spawn: we drive the private onItem mapper
@@ -723,6 +735,30 @@ test("dispose interrupts, cancels parked approvals, then closes transport withou
   assert.deepEqual(order, ["turn/interrupt", "cancel", "dispose"]);
 });
 
+test("dispose records active subagents as unreachable without deleting their durable threads", () => {
+  const h = makeHarness({ resumeId: "thread-1" });
+  (h.driver as any).threadId = "thread-1";
+  (h.driver as any).peer = { notify: () => {}, dispose: () => {} };
+  const notifications = notificationHandlers(h.driver);
+  notifications.get("item/completed")!({
+    threadId: "thread-1",
+    item: {
+      type: "collabAgentToolCall",
+      id: "spawn-child",
+      tool: "spawnAgent",
+      status: "completed",
+      senderThreadId: "thread-1",
+      receiverThreadIds: ["child-thread"],
+      agentsStates: { "child-thread": { status: "running" } },
+    },
+  });
+
+  h.driver.dispose();
+
+  assert.ok(h.events.some((event) => event.kind === "tool_call_update" &&
+    event.toolCallId === "spawn-child" && event.subagentLifecycle === "unreachable"));
+});
+
 test("cancel emits already-consumed per-turn usage once before settling", () => {
   const h = makeHarness();
   (h.driver as any).pendingTurnUsage = { input: 7, output: 4, cached: 2 };
@@ -897,6 +933,41 @@ test("real NDJSON child resumes and continues without replaying history or cumul
   }
 });
 
+test("real NDJSON transport keeps structured child output live after the parent turn settles", async () => {
+  const events: SessionEventPayload[] = [];
+  const fixture = fileURLToPath(new URL("./fixtures/fake-codex-app-server.mjs", import.meta.url));
+  const driver = new CodexAppServerDriver(
+    {
+      command: process.execPath,
+      args: [fixture, "subagents"],
+      cwd: process.cwd(),
+      env: {},
+      config: {} as SessionConfig,
+      context: { kind: "native" },
+    },
+    { onEvent: (event) => events.push(event), onStderr: () => {}, onExit: () => {} },
+  );
+  try {
+    await driver.initialize();
+    assert.equal(await driver.newSession(process.cwd()), "fixture-subagents");
+    assert.equal(await driver.prompt("inspect"), "end_turn", "the foreground turn settles first");
+    const messageId = childItemId("fixture-child", "fixture-child-message");
+    await waitForCondition(() => events.some((event) => event.kind === "tool_call_update" &&
+      event.toolCallId === "fixture-spawn" && event.subagentLifecycle === "completed"));
+    assert.deepEqual(events.find((event) => event.kind === "agent_message" && event.messageId === messageId), {
+      kind: "agent_message",
+      text: "Background inspection complete.",
+      messageId,
+      final: true,
+      parentToolUseId: "fixture-spawn",
+    });
+    assert.ok(events.some((event) => event.kind === "tool_call_update" &&
+      event.toolCallId === "fixture-spawn" && event.subagentLifecycle === "completed"));
+  } finally {
+    driver.dispose();
+  }
+});
+
 test("commandExecution: started -> tool_call, completed -> tool_call_update + command_output", () => {
   const h = makeHarness();
   h.onItem({ type: "commandExecution", id: "c1", command: "echo hi" }, false);
@@ -923,6 +994,268 @@ test("agentMessage completed -> agent_message; reasoning -> agent_thought; todoL
     h.events.map((e) => e.kind),
     ["agent_message", "agent_thought", "plan"],
   );
+});
+
+test("structured Codex collaboration items expose recursive live subagent output and lifecycle", () => {
+  const h = makeHarness();
+  (h.driver as any).threadId = "root-thread";
+  const notifications = notificationHandlers(h.driver);
+
+  notifications.get("item/started")!({
+    threadId: "root-thread",
+    item: {
+      type: "collabAgentToolCall",
+      id: "spawn-outer",
+      tool: "spawnAgent",
+      status: "inProgress",
+      senderThreadId: "root-thread",
+      receiverThreadIds: ["child-thread"],
+      prompt: "Inspect parser behavior",
+      agentsStates: { "child-thread": { status: "pendingInit" } },
+    },
+  });
+  notifications.get("item/completed")!({
+    threadId: "child-thread",
+    item: { type: "agentMessage", id: "child-message", text: "Inspecting parser events." },
+  });
+  notifications.get("item/reasoning/summaryTextDelta")!({
+    threadId: "child-thread",
+    turnId: "child-turn",
+    itemId: "child-reasoning",
+    summaryIndex: 0,
+    delta: "Checking nested behavior.",
+  });
+  notifications.get("item/completed")!({
+    threadId: "child-thread",
+    item: {
+      type: "collabAgentToolCall",
+      id: "spawn-inner",
+      tool: "spawnAgent",
+      status: "completed",
+      senderThreadId: "child-thread",
+      receiverThreadIds: ["grandchild-thread"],
+      prompt: "Check nested attribution",
+      agentsStates: { "grandchild-thread": { status: "running" } },
+    },
+  });
+  notifications.get("item/started")!({
+    threadId: "grandchild-thread",
+    item: { type: "commandExecution", id: "grandchild-command", command: "pnpm test" },
+  });
+  notifications.get("item/completed")!({
+    threadId: "grandchild-thread",
+    item: {
+      type: "commandExecution",
+      id: "grandchild-command",
+      command: "pnpm test",
+      status: "completed",
+      aggregatedOutput: "passed",
+    },
+  });
+  notifications.get("thread/tokenUsage/updated")!({
+    threadId: "grandchild-thread",
+    tokenUsage: { last: { inputTokens: 9, outputTokens: 4, cachedInputTokens: 2 } },
+  });
+  notifications.get("thread/tokenUsage/updated")!({
+    threadId: "grandchild-thread",
+    tokenUsage: { last: { inputTokens: 11, outputTokens: 5, cachedInputTokens: 3 } },
+  });
+  notifications.get("turn/completed")!({
+    threadId: "grandchild-thread",
+    turn: { id: "grandchild-turn", status: "completed" },
+  });
+  notifications.get("item/completed")!({
+    threadId: "root-thread",
+    item: {
+      type: "collabAgentToolCall",
+      id: "wait-outer",
+      tool: "wait",
+      status: "completed",
+      senderThreadId: "root-thread",
+      receiverThreadIds: ["child-thread"],
+      agentsStates: { "child-thread": { status: "completed", message: "Parser audit complete." } },
+    },
+  });
+  notifications.get("item/completed")!({
+    threadId: "unrelated-thread",
+    item: { type: "agentMessage", id: "private-other-thread", text: "must not cross sessions" },
+  });
+
+  assert.deepEqual(h.events[0], {
+    kind: "tool_call",
+    toolCallId: "spawn-outer",
+    title: "Agent: Inspect parser behavior",
+    toolKind: "agent",
+    status: "pending",
+    subagentLifecycle: "starting",
+  });
+  const childMessageId = childItemId("child-thread", "child-message");
+  const innerSpawnId = childItemId("child-thread", "spawn-inner");
+  assert.deepEqual(h.events.find((event) => event.kind === "agent_message" && event.messageId === childMessageId), {
+    kind: "agent_message",
+    text: "Inspecting parser events.",
+    messageId: childMessageId,
+    final: true,
+    parentToolUseId: "spawn-outer",
+  });
+  assert.deepEqual(h.events.find((event) => event.kind === "agent_thought"), {
+    kind: "agent_thought",
+    text: "Checking nested behavior.",
+    messageId: childItemId("child-thread", "child-reasoning"),
+    parentToolUseId: "spawn-outer",
+  });
+  assert.deepEqual(h.events.find((event) => event.kind === "tool_call" && event.toolCallId === innerSpawnId), {
+    kind: "tool_call",
+    toolCallId: innerSpawnId,
+    title: "Agent: Check nested attribution",
+    toolKind: "agent",
+    status: "in_progress",
+    parentToolUseId: "spawn-outer",
+    subagentLifecycle: "running",
+  });
+  assert.deepEqual(h.events.find((event) => event.kind === "command_output"), {
+    kind: "command_output",
+    text: "passed",
+    parentToolUseId: innerSpawnId,
+  });
+  assert.deepEqual(h.events.find((event) => event.kind === "token_usage"), {
+    kind: "token_usage",
+    inputTokens: 11,
+    outputTokens: 5,
+    cachedInputTokens: 3,
+    parentToolUseId: innerSpawnId,
+  });
+  assert.ok(h.events.some((event) => event.kind === "tool_call_update" &&
+    event.toolCallId === "spawn-outer" && event.subagentLifecycle === "completed"));
+  assert.equal(h.events.filter((event) => event.kind === "token_usage").length, 1,
+    "repeated cumulative child updates emit only the latest settled usage");
+  assert.equal(h.events.some((event) => event.kind === "agent_message" && event.text.includes("must not cross")), false);
+});
+
+test("multiplexed child item ids cannot collide with root item ids", () => {
+  const h = makeHarness();
+  (h.driver as any).threadId = "root-thread";
+  const notifications = notificationHandlers(h.driver);
+  notifications.get("item/started")!({
+    threadId: "root-thread",
+    item: { type: "commandExecution", id: "shared-counter", command: "root command" },
+  });
+  notifications.get("item/completed")!({
+    threadId: "root-thread",
+    item: {
+      type: "collabAgentToolCall",
+      id: "spawn-child",
+      tool: "spawnAgent",
+      status: "completed",
+      senderThreadId: "root-thread",
+      receiverThreadIds: ["child-thread"],
+      agentsStates: { "child-thread": { status: "running" } },
+    },
+  });
+  notifications.get("item/started")!({
+    threadId: "child-thread",
+    item: { type: "commandExecution", id: "shared-counter", command: "child command" },
+  });
+
+  const calls = h.events.filter((event) => event.kind === "tool_call" && event.toolKind === "execute");
+  assert.deepEqual(calls.map((event) => ({ id: event.toolCallId, parent: event.parentToolUseId })), [
+    { id: "shared-counter", parent: undefined },
+    { id: childItemId("child-thread", "shared-counter"), parent: "spawn-child" },
+  ]);
+});
+
+test("resume collaboration re-admits a durable child after driver restart", () => {
+  const h = makeHarness();
+  (h.driver as any).threadId = "root-thread";
+  const notifications = notificationHandlers(h.driver);
+  notifications.get("item/completed")!({
+    threadId: "root-thread",
+    item: {
+      type: "collabAgentToolCall",
+      id: "resume-child",
+      tool: "resumeAgent",
+      status: "completed",
+      senderThreadId: "root-thread",
+      receiverThreadIds: ["durable-child-thread"],
+      agentsStates: { "durable-child-thread": { status: "running" } },
+    },
+  });
+  notifications.get("item/completed")!({
+    threadId: "durable-child-thread",
+    item: { type: "agentMessage", id: "resumed-output", text: "Continued after restart." },
+  });
+
+  assert.deepEqual(h.events[0], {
+    kind: "tool_call",
+    toolCallId: "resume-child",
+    title: "Resume Agent",
+    toolKind: "agent",
+    status: "in_progress",
+    subagentLifecycle: "running",
+  });
+  assert.deepEqual(h.events[1], {
+    kind: "agent_message",
+    text: "Continued after restart.",
+    messageId: childItemId("durable-child-thread", "resumed-output"),
+    final: true,
+    parentToolUseId: "resume-child",
+  });
+});
+
+test("subagent turn notifications cannot replace or settle the parent turn", async () => {
+  const h = makeHarness();
+  (h.driver as any).threadId = "root-thread";
+  (h.driver as any).turnId = "root-turn";
+  const notifications = notificationHandlers(h.driver);
+  notifications.get("item/completed")!({
+    threadId: "root-thread",
+    item: {
+      type: "collabAgentToolCall",
+      id: "spawn-child",
+      tool: "spawnAgent",
+      status: "completed",
+      senderThreadId: "root-thread",
+      receiverThreadIds: ["child-thread"],
+      agentsStates: { "child-thread": { status: "running" } },
+    },
+  });
+  let settled = false;
+  (h.driver as any).turnResolve = () => { settled = true; };
+  notifications.get("turn/started")!({ threadId: "child-thread", turn: { id: "child-turn" } });
+  notifications.get("turn/completed")!({ threadId: "child-thread", turn: { id: "child-turn", status: "completed" } });
+  await nextTask();
+  assert.equal((h.driver as any).turnId, "root-turn");
+  assert.equal(settled, false);
+});
+
+test("an admitted child turn failure updates only that subagent lifecycle", async () => {
+  const h = makeHarness();
+  (h.driver as any).threadId = "root-thread";
+  (h.driver as any).turnId = "root-turn";
+  const notifications = notificationHandlers(h.driver);
+  notifications.get("item/completed")!({
+    threadId: "root-thread",
+    item: {
+      type: "collabAgentToolCall",
+      id: "spawn-child",
+      tool: "spawnAgent",
+      status: "completed",
+      senderThreadId: "root-thread",
+      receiverThreadIds: ["child-thread"],
+      agentsStates: { "child-thread": { status: "running" } },
+    },
+  });
+  let settled = false;
+  (h.driver as any).turnResolve = () => { settled = true; };
+  notifications.get("turn/failed")!({ threadId: "child-thread", error: { message: "child failed" } });
+  await nextTask();
+
+  assert.ok(h.events.some((event) => event.kind === "tool_call_update" &&
+    event.toolCallId === "spawn-child" && event.subagentLifecycle === "failed"));
+  assert.equal((h.driver as any).turnId, "root-turn");
+  assert.equal(settled, false);
+  assert.equal(h.events.some((event) => event.kind === "error"), false,
+    "a child failure does not become the foreground turn error");
 });
 
 test("numeric app-server item identities normalize to safe distinct strings", () => {

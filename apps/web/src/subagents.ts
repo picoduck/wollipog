@@ -1,4 +1,4 @@
-import type { SessionStatus } from "@wollipog/protocol";
+import type { AuthoritativeSubagentLifecycle, SessionStatus } from "@wollipog/protocol";
 import {
   publishTimelineSnapshotDelta,
   timelineSnapshotDelta,
@@ -6,14 +6,7 @@ import {
   type TimelineItem,
 } from "./timeline.js";
 
-export type SubagentLifecycle =
-  | "starting"
-  | "running"
-  | "completed"
-  | "failed"
-  | "interrupted"
-  | "unreachable"
-  | "unknown";
+export type SubagentLifecycle = AuthoritativeSubagentLifecycle | "unknown";
 
 export interface SubagentDescriptor {
   /** Stable provider task identity: the spawning Task/Agent tool-call id. */
@@ -173,7 +166,14 @@ export function deriveSubagentLifecycle(
   toolStatus: string,
   sessionStatus: SessionStatus,
   runnerOnline: boolean,
+  authoritative?: AuthoritativeSubagentLifecycle,
 ): SubagentLifecycle {
+  if (authoritative) {
+    const active = authoritative === "starting" || authoritative === "running" || authoritative === "waiting";
+    if (active && (!runnerOnline || sessionStatus === "failed")) return "unreachable";
+    if (active && (sessionStatus === "stopped" || sessionStatus === "completed")) return "interrupted";
+    return authoritative;
+  }
   const normalized = toolStatus.toLowerCase();
   if (["completed", "success", "succeeded"].includes(normalized)) return "completed";
   if (["failed", "error", "rejected"].includes(normalized)) return "failed";
@@ -265,6 +265,14 @@ function deriveIndexedSubagentDescriptors(
     emitted.add(id);
     const node = nodes.get(id)!;
     const childIds = children.get(id) ?? [];
+    const lifecycle = deriveSubagentLifecycle(
+      node.tool.status,
+      context.sessionStatus,
+      context.runnerOnline,
+      node.tool.subagentLifecycle,
+    );
+    const authoritativelyLive = context.runnerOnline &&
+      (lifecycle === "starting" || lifecycle === "running" || lifecycle === "waiting");
     descriptors.push({
       id,
       ...(effectiveParent.get(id) ? { parentId: effectiveParent.get(id) } : {}),
@@ -272,9 +280,9 @@ function deriveIndexedSubagentDescriptors(
       title: node.tool.title && !/^(Task|Agent)$/i.test(node.tool.title) ? node.tool.title : "Agent",
       depth,
       sourceIndex: node.sourceIndex,
-      lifecycle: deriveSubagentLifecycle(node.tool.status, context.sessionStatus, context.runnerOnline),
+      lifecycle,
       toolStatus: node.tool.status,
-      availability: context.availability,
+      availability: authoritativelyLive ? "live" : context.availability,
       ...(node.tool.startedAt == null ? {} : { startedAt: node.tool.startedAt }),
       ...(inclusiveActivity.get(id) == null ? {} : { lastActivityAt: inclusiveActivity.get(id) }),
       ...(node.tool.completedAt == null ? {} : { completedAt: node.tool.completedAt }),
@@ -510,7 +518,7 @@ export function selectedSubagentId(
       (left.lastActivityAt ?? left.startedAt ?? left.sourceIndex))
     .at(0)?.id ?? null;
   return mostRecent(descriptors.filter((descriptor) =>
-    descriptor.lifecycle === "starting" || descriptor.lifecycle === "running"))
+    descriptor.lifecycle === "starting" || descriptor.lifecycle === "running" || descriptor.lifecycle === "waiting"))
     ?? mostRecent(descriptors.filter((descriptor) => descriptor.lifecycle === "failed"))
     ?? mostRecent(descriptors);
 }

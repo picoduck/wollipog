@@ -245,6 +245,8 @@ test("parseCodexTranscript folds a subagent_notification into work, not a user m
   const thought = first(ev, "agent_thought");
   assert.match(thought.text, /Subagent result/);
   assert.match(thought.text, /a real bug/);
+  assert.equal(ev.some((event) => event.kind === "tool_call" && event.toolKind === "agent"), false,
+    "raw imports retain a truthful summary instead of fabricating selectable identity");
 });
 
 /* ---- Phase 1 chat-log fidelity: rich backfill (reasoning + tool calls + edits) ---- */

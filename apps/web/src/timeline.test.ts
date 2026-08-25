@@ -386,6 +386,13 @@ test("artifact-backed output remains a standalone preview and keeps its ordered 
   assert.deepEqual(backed.textRefs, refs);
 });
 
+test("command output keeps structured subagent parent attribution", () => {
+  const item = deriveTimeline([
+    ev({ kind: "command_output", text: "child output", parentToolUseId: "child-agent" }),
+  ])[0] as Extract<TimelineItem, { kind: "command_output" }>;
+  assert.equal(item.parentToolUseId, "child-agent");
+});
+
 test("tool-call projections preserve every artifact-backed text fragment", () => {
   const first = [payloadRef("tool-1")];
   const second = [payloadRef("tool-2")];
@@ -535,6 +542,26 @@ test("stream start + authoritative tool call upsert by id instead of duplicating
     lastActivityAt: (items[0] as Extract<TimelineItem, { kind: "tool_call" }>).lastActivityAt,
     subagentRollup: undefined,
   });
+});
+
+test("tool updates preserve authoritative subagent lifecycle", () => {
+  const item = deriveTimeline([
+    ev({
+      kind: "tool_call",
+      toolCallId: "agent",
+      title: "Spawn Agent",
+      toolKind: "agent",
+      status: "in_progress",
+      subagentLifecycle: "starting",
+    }),
+    ev({
+      kind: "tool_call_update",
+      toolCallId: "agent",
+      status: "in_progress",
+      subagentLifecycle: "waiting",
+    }),
+  ])[0] as Extract<TimelineItem, { kind: "tool_call" }>;
+  assert.equal(item.subagentLifecycle, "waiting");
 });
 
 test("groupTimeline folds reasoning + tool calls into a work block, messages stay standalone", () => {
@@ -860,6 +887,7 @@ test("nestSubagents: a subagent's items nest under the Task tool call that spawn
     ev({ kind: "agent_message", text: "looking around", parentToolUseId: "task1" }),
     ev({ kind: "tool_call", toolCallId: "grep1", title: "Grep", status: "in_progress", parentToolUseId: "task1" }),
     ev({ kind: "tool_call_update", toolCallId: "grep1", status: "completed", parentToolUseId: "task1" }),
+    ev({ kind: "command_output", text: "child command output", parentToolUseId: "task1" }),
     ev({ kind: "agent_message", text: "done exploring" }), // top-level, after the subagent
   ]);
   const nested = nestSubagents(items);
@@ -868,8 +896,8 @@ test("nestSubagents: a subagent's items nest under the Task tool call that spawn
   assert.deepEqual(nested.map((i) => i.kind), ["tool_call", "agent_message"]);
   const task = nested[0] as Extract<TimelineItem, { kind: "tool_call" }>;
   assert.equal(task.toolCallId, "task1");
-  assert.equal(task.children?.length, 2, "message + the (merged) grep call");
-  assert.deepEqual(task.children?.map((c) => c.kind), ["agent_message", "tool_call"]);
+  assert.equal(task.children?.length, 3, "message + the (merged) grep call + attributed command output");
+  assert.deepEqual(task.children?.map((c) => c.kind), ["agent_message", "tool_call", "command_output"]);
   assert.equal((nested[1] as { text: string }).text, "done exploring");
 });
 

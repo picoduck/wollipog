@@ -33,6 +33,15 @@ test("subagent lifecycle uses only observable tool, session, and reachability st
   assert.equal(deriveSubagentLifecycle("in_progress", "failed", true), "unreachable");
   assert.equal(deriveSubagentLifecycle("in_progress", "running", false), "unreachable");
   assert.equal(deriveSubagentLifecycle("provider_new_state", "running", true), "unknown");
+  assert.equal(
+    deriveSubagentLifecycle("running", "idle", true, "running"),
+    "running",
+    "provider-observed detached lifecycle remains active after the foreground turn becomes idle",
+  );
+  assert.equal(deriveSubagentLifecycle("running", "idle", false, "running"), "unreachable");
+  assert.equal(deriveSubagentLifecycle("running", "stopped", true, "running"), "interrupted");
+  assert.equal(deriveSubagentLifecycle("running", "completed", true, "running"), "interrupted");
+  assert.equal(deriveSubagentLifecycle("completed", "failed", false, "completed"), "completed");
 });
 
 test("descriptor projection derives nested identity, activity, direct usage, and inclusive usage", () => {
@@ -52,6 +61,68 @@ test("descriptor projection derives nested identity, activity, direct usage, and
   assert.equal(subagentTokenTotal(descriptors[0]!.directUsage), 12);
   assert.equal(subagentTokenTotal(descriptors[0]!.inclusiveUsage), 17);
   assert.equal(descriptors[1]!.lastActivityAt, 170);
+});
+
+test("replayed App Server events retain selectable durable subagent output", () => {
+  const builder = new TimelineBuilder();
+  const events: SessionEventPayload[] = [
+    {
+      kind: "tool_call",
+      toolCallId: "codex-child",
+      title: "Agent: Inspect Background Work",
+      toolKind: "agent",
+      status: "completed",
+      subagentLifecycle: "completed",
+    },
+    { kind: "agent_message", text: "Durable child result", final: true, parentToolUseId: "codex-child" },
+  ];
+  events.forEach((payload, index) => builder.push({
+    id: index + 1,
+    sessionId: "codex-resumed",
+    seq: index + 1,
+    ts: 100 + index,
+    payload,
+  }));
+  const recorded = {
+    sessionStatus: "idle" as const,
+    runnerOnline: false,
+    availability: "recorded" as const,
+  };
+  const projector = new IncrementalSubagentProjector();
+  const projection = projector.project(builder.snapshot(), recorded);
+  assert.deepEqual(projection.descriptors.map(({ id, lifecycle, availability }) => ({ id, lifecycle, availability })), [
+    { id: "codex-child", lifecycle: "completed", availability: "recorded" },
+  ]);
+  assert.equal((projector.timeline("codex-child")[0] as { text: string }).text, "Durable child result");
+});
+
+test("authoritative detached activity remains live while terminal history stays recorded", () => {
+  const active: TimelineItem[] = [{
+    kind: "tool_call",
+    id: 1,
+    toolCallId: "detached",
+    title: "Detached Agent",
+    text: "",
+    toolKind: "agent",
+    status: "in_progress",
+    subagentLifecycle: "running",
+  }];
+  const idle = deriveSubagentDescriptors(active, {
+    sessionStatus: "idle",
+    runnerOnline: true,
+    availability: "recorded",
+  });
+  assert.deepEqual(idle.map(({ lifecycle, availability }) => ({ lifecycle, availability })), [
+    { lifecycle: "running", availability: "live" },
+  ]);
+  const stopped = deriveSubagentDescriptors(active, {
+    sessionStatus: "stopped",
+    runnerOnline: true,
+    availability: "recorded",
+  });
+  assert.deepEqual(stopped.map(({ lifecycle, availability }) => ({ lifecycle, availability })), [
+    { lifecycle: "interrupted", availability: "recorded" },
+  ]);
 });
 
 test("referenced legacy task tools remain visible while duplicate and cyclic ownership stays finite", () => {
@@ -103,6 +174,11 @@ test("selection retains a valid request, then prefers active, failed, and recent
   assert.equal(selectedSubagentId(terminal), "failed");
   const completed = deriveSubagentDescriptors([base("old", "completed", 10), base("new", "completed", 20)], context);
   assert.equal(selectedSubagentId(completed), "new");
+  const waiting = deriveSubagentDescriptors([base("failed-newer", "failed", 40), {
+    ...base("waiting", "in_progress", 30),
+    subagentLifecycle: "waiting",
+  }], context);
+  assert.equal(selectedSubagentId(waiting), "waiting", "waiting remains an active selection candidate");
 });
 
 test("incremental projection inspects only changed timeline slots and preserves unrelated output", () => {

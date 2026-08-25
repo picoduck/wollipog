@@ -1,5 +1,5 @@
 {
-  "contractFingerprint": "codex-app-server-v2-elicitations-consumed-surface-2026-08-22",
+  "contractFingerprint": "codex-app-server-v2-subagents-reasoning-consumed-surface-2026-08-25",
   "generatedWith": "codex-cli 0.147.0",
   "minimumVerifiedVersion": "0.147.0",
   "files": {
@@ -225,6 +225,184 @@
         "threadId",
         "turnId"
       ]
+    },
+    "v2/ReasoningSummaryTextDeltaNotification.json": {
+      "required": [
+        "delta",
+        "itemId",
+        "threadId",
+        "turnId"
+      ],
+      "properties": [
+        "delta",
+        "itemId",
+        "threadId",
+        "turnId"
+      ]
+    },
+    "v2/ReasoningTextDeltaNotification.json": {
+      "required": [
+        "delta",
+        "itemId",
+        "threadId",
+        "turnId"
+      ],
+      "properties": [
+        "delta",
+        "itemId",
+        "threadId",
+        "turnId"
+      ]
+    },
+    "v2/ItemStartedNotification.json": {
+      "required": [
+        "item",
+        "threadId",
+        "turnId"
+      ],
+      "properties": [
+        "item",
+        "threadId",
+        "turnId"
+      ],
+      "definitions": {
+        "ThreadItem": {
+          "variantRequiredProperties": {
+            "CollabAgentToolCallThreadItem": {
+              "required": [
+                "agentsStates",
+                "id",
+                "receiverThreadIds",
+                "senderThreadId",
+                "status",
+                "tool",
+                "type"
+              ],
+              "properties": [
+                "agentsStates",
+                "id",
+                "prompt",
+                "receiverThreadIds",
+                "senderThreadId",
+                "status",
+                "tool",
+                "type"
+              ]
+            }
+          }
+        },
+        "CollabAgentState": {
+          "required": [
+            "status"
+          ],
+          "properties": [
+            "message",
+            "status"
+          ]
+        },
+        "CollabAgentStatus": {
+          "enumValues": [
+            "pendingInit",
+            "running",
+            "interrupted",
+            "completed",
+            "errored",
+            "shutdown",
+            "notFound"
+          ]
+        },
+        "CollabAgentTool": {
+          "enumValues": [
+            "spawnAgent",
+            "sendInput",
+            "resumeAgent",
+            "wait",
+            "closeAgent"
+          ]
+        },
+        "CollabAgentToolCallStatus": {
+          "enumValues": [
+            "inProgress",
+            "completed",
+            "failed"
+          ]
+        }
+      }
+    },
+    "v2/ItemCompletedNotification.json": {
+      "required": [
+        "item",
+        "threadId",
+        "turnId"
+      ],
+      "properties": [
+        "item",
+        "threadId",
+        "turnId"
+      ],
+      "definitions": {
+        "ThreadItem": {
+          "variantRequiredProperties": {
+            "CollabAgentToolCallThreadItem": {
+              "required": [
+                "agentsStates",
+                "id",
+                "receiverThreadIds",
+                "senderThreadId",
+                "status",
+                "tool",
+                "type"
+              ],
+              "properties": [
+                "agentsStates",
+                "id",
+                "prompt",
+                "receiverThreadIds",
+                "senderThreadId",
+                "status",
+                "tool",
+                "type"
+              ]
+            }
+          }
+        },
+        "CollabAgentState": {
+          "required": [
+            "status"
+          ],
+          "properties": [
+            "message",
+            "status"
+          ]
+        },
+        "CollabAgentStatus": {
+          "enumValues": [
+            "pendingInit",
+            "running",
+            "interrupted",
+            "completed",
+            "errored",
+            "shutdown",
+            "notFound"
+          ]
+        },
+        "CollabAgentTool": {
+          "enumValues": [
+            "spawnAgent",
+            "sendInput",
+            "resumeAgent",
+            "wait",
+            "closeAgent"
+          ]
+        },
+        "CollabAgentToolCallStatus": {
+          "enumValues": [
+            "inProgress",
+            "completed",
+            "failed"
+          ]
+        }
+      }
     },
     "v2/TurnCompletedNotification.json": {
       "required": [
