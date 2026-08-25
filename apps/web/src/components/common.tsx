@@ -153,13 +153,8 @@ export function StatusBadge({ status, archiveStatus, archiveOperation, stopOpera
   archiveOperation?: ArchiveOperationView;
   stopOperation?: StopOperationView;
 }) {
+  const m = sessionStatusBadgeMeta(status, archiveStatus, archiveOperation, stopOperation);
   const operation = stopOperation ?? archiveOperation;
-  const operationStatus = operation?.status ?? archiveStatus;
-  const m = operationStatus === "stop_pending"
-    ? { label: "Stopping", className: "st-running", busy: true }
-    : operationStatus === "stop_failed"
-      ? { label: "Stop Failed", className: "st-failed", busy: false }
-      : statusMeta(status);
   return (
     <span className={"status-badge " + m.className} title={operation?.failure?.message}>
       <span className={"status-dot2 " + (m.busy ? "pulse" : "")} />
@@ -168,13 +163,28 @@ export function StatusBadge({ status, archiveStatus, archiveOperation, stopOpera
   );
 }
 
+function sessionStatusBadgeMeta(
+  status: SessionStatus,
+  archiveStatus?: ArchiveStatus,
+  archiveOperation?: ArchiveOperationView,
+  stopOperation?: StopOperationView,
+) {
+  const operation = stopOperation ?? archiveOperation;
+  const operationStatus = operation?.status ?? archiveStatus;
+  return operationStatus === "stop_pending"
+    ? { label: "Stopping", className: "st-running", busy: true }
+    : operationStatus === "stop_failed"
+      ? { label: "Stop Failed", className: "st-failed", busy: false }
+      : statusMeta(status);
+}
+
 export function AttentionBadge({ session }: {
   session: Pick<SessionView, "status" | "pendingApproval">;
 }) {
   const attention = sessionAttentionStatus(session);
   if (!attention) return null;
   return (
-    <span className="status-badge st-input" title={attention.description} aria-label={attention.label}>
+    <span className="status-badge st-input" title={attention.description}>
       <span className="status-dot2" aria-hidden="true" />
       {attention.label}
     </span>
@@ -185,20 +195,30 @@ export function SessionStatusIndicators({ session, disconnected = false }: {
   session: Pick<SessionView, "status" | "pendingApproval" | "archiveStatus" | "archiveOperation" | "stopOperation">;
   disconnected?: boolean;
 }) {
+  const lifecycle = sessionStatusBadgeMeta(
+    session.status,
+    session.archiveStatus,
+    session.archiveOperation,
+    session.stopOperation,
+  );
+  const attention = sessionAttentionStatus(session);
+  const label = [
+    `Activity: ${lifecycle.label}`,
+    attention ? `Attention: ${attention.label}` : null,
+    disconnected ? "Health: Disconnected" : null,
+  ].filter(Boolean).join(". ");
   return (
-    <span className="session-status-indicators">
-      <StatusBadge status={session.status} archiveStatus={session.archiveStatus} archiveOperation={session.archiveOperation} stopOperation={session.stopOperation} />
-      <AttentionBadge session={session} />
-      {disconnected && (
-        <span
-          className="status-badge st-failed"
-          title="The session runner is disconnected."
-          aria-label="Disconnected"
-        >
-          <span className="status-dot2" aria-hidden="true" />
-          Disconnected
-        </span>
-      )}
+    <span className="session-status-indicators" role="group" aria-label={label}>
+      <span aria-hidden="true" className="session-status-visuals">
+        <StatusBadge status={session.status} archiveStatus={session.archiveStatus} archiveOperation={session.archiveOperation} stopOperation={session.stopOperation} />
+        <AttentionBadge session={session} />
+        {disconnected && (
+          <span className="status-badge st-failed" title="The session runner is disconnected.">
+            <span className="status-dot2" aria-hidden="true" />
+            Disconnected
+          </span>
+        )}
+      </span>
     </span>
   );
 }
@@ -208,15 +228,16 @@ export function ChangeStatusBadge({ change }: { change: SessionChangeStatus | nu
   const indicators = change.kind === "ready_for_review" && change.supplement
     ? [change, change.supplement]
     : [change];
+  const label = indicators.map((indicator) => `Changes: ${indicator.label}`).join(". ");
   return (
-    <span className="change-status-indicators">
+    <span className="change-status-indicators" role="group" aria-label={label}>
       {indicators.map((indicator) => {
         const className = indicator.kind === "ready_for_review"
           ? "st-done"
           : indicator.kind === "no_changes" ? "st-stopped" : "st-idle";
         return (
           <span key={indicator.kind} className={"status-badge " + className}
-            title={indicator.description} aria-label={indicator.label}>
+            title={indicator.description} aria-hidden="true">
             <span className="status-dot2" aria-hidden="true" />
             {indicator.label}
           </span>
@@ -242,6 +263,7 @@ export function BackgroundWorkBadge({ state }: { state: BackgroundWorkState }) {
         : state === "orphaned"
           ? "background-work-orphaned"
           : "background-work-resumed"}`}
+      role="status"
       aria-label={label}
     >
       <span className="background-work-dot" aria-hidden="true" />
@@ -254,12 +276,29 @@ export function UntrackedBackgroundWorkBadge() {
   return (
     <span
       className="background-work-badge background-work-untracked"
+      role="status"
       aria-label="Detached Work: Untracked"
       title="This provider does not expose a durable detached-work lifecycle. Wollipog cannot promise automatic completion, cancellation, or recovery."
     >
       <span className="background-work-dot" aria-hidden="true" />
       Detached Work: Untracked
     </span>
+  );
+}
+
+export function ActiveSubagentsBadge({ count, onOpen }: { count: number; onOpen: () => void }) {
+  if (count < 1) return null;
+  const label = count === 1 ? "1 Subagent Active" : `${count} Subagents Active`;
+  return (
+    <button
+      type="button"
+      className="background-work-badge background-work-running"
+      onClick={onOpen}
+      aria-label={label}
+    >
+      <span className="background-work-dot" aria-hidden="true" />
+      {label}
+    </button>
   );
 }
 

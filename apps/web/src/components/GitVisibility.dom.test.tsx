@@ -192,7 +192,7 @@ test("updating, failed, offline, and not-repository states are explicit without 
     await act(async () => root.render(
       <GitPinnedSection model={model({ online: false })} onRefresh={async () => {}} />,
     ));
-    assert.match(container.textContent ?? "", /Runner Offline/);
+    assert.match(container.textContent ?? "", /Git Unavailable While Disconnected/);
     assert.doesNotMatch(container.textContent ?? "", new RegExp(branch), "offline state hides old facts");
 
     await act(async () => root.render(
@@ -219,7 +219,7 @@ test("collapsed non-ready states keep the explicit state row without headline le
     await act(async () => root.render(
       <GitPinnedSection model={model({ online: false })} onRefresh={async () => {}} />,
     ));
-    assert.match(container.textContent ?? "", /Runner Offline/);
+    assert.match(container.textContent ?? "", /Git Unavailable While Disconnected/);
     assert.equal(container.querySelector(".ps-git-headline"), null);
     assert.doesNotMatch(container.textContent ?? "", new RegExp(branch));
 

@@ -1134,6 +1134,7 @@ pre {
 
 /* ----------------------------- Status badges ---------------------------- */
 .session-status-indicators { display: inline-flex; min-width: 0; align-items: center; gap: 5px; flex-wrap: wrap; }
+.session-status-visuals { display: contents; }
 .change-status-indicators {
   display: inline-flex;
   min-width: 0;
@@ -1171,6 +1172,14 @@ pre {
   font-size: var(--text-xs);
   font-weight: 600;
   white-space: nowrap;
+}
+button.background-work-badge {
+  font: inherit;
+  cursor: pointer;
+}
+button.background-work-badge:hover,
+button.background-work-badge:focus-visible {
+  filter: brightness(1.12);
 }
 .background-work-dot {
   width: 6px;
@@ -1728,30 +1737,6 @@ textarea {
   flex: none;
   min-width: 0;
   gap: 5px;
-}
-/* Compact background-work presence dot; its full label lives in the tooltip, accessible name,
-   and the pinned summary's Session section. */
-.bgwork-indicator {
-  flex: none;
-  width: 9px;
-  height: 9px;
-  border-radius: var(--radius-pill);
-}
-.bgwork-running {
-  background: var(--blue);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 16%, transparent);
-}
-.bgwork-orphaned {
-  background: var(--red);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--red) 16%, transparent);
-}
-.bgwork-resumed {
-  background: var(--teal);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--teal) 16%, transparent);
-}
-.bgwork-untracked {
-  background: var(--text-dim);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--text-dim) 14%, transparent);
 }
 .session-header-action { width: 32px; height: 32px; padding: 0; }
 .session-header-action:disabled {

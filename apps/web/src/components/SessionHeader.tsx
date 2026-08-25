@@ -3,7 +3,6 @@ import {
   isTerminal,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
-  type BackgroundWorkState,
   type SessionView,
   type TranscriptShareView,
 } from "@wollipog/protocol";
@@ -19,18 +18,19 @@ import { requestTranscriptDownload } from "../transcript-download.js";
 import type { SessionChangeStatus } from "../session-status.js";
 import { CONTROL_PLANE_HTTP, DASHBOARD_ORIGIN, hasSameOriginMarker } from "../config.js";
 import { reachableTranscriptShareOrigin, transcriptShareUrl } from "../transcript-share-client.js";
-import { ChangeStatusBadge, SessionStatusIndicators, Modal, CopyButton } from "./common.js";
+import {
+  ActiveSubagentsBadge,
+  BackgroundWorkBadge,
+  ChangeStatusBadge,
+  CopyButton,
+  Modal,
+  SessionStatusIndicators,
+  UntrackedBackgroundWorkBadge,
+} from "./common.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { ChevronLeftIcon, MoreVerticalIcon, ShareIcon } from "./Icons.js";
 import { useIsMobile } from "./useIsMobile.js";
-
-const BACKGROUND_WORK_DOT_LABELS: Record<BackgroundWorkState, string> = {
-  running: "Waiting on External Job",
-  continuation_pending: "Continuation Pending",
-  orphaned: "Background Work: Orphaned",
-  resumed: "Background Work: Resumed",
-};
 
 /**
  * The responsive Session header. Desktop keeps one compact row for identity, status, Share / More
@@ -54,6 +54,8 @@ export function SessionHeader({
   renderMoveProjectDialog,
   topbarControls,
   changeStatus,
+  activeSubagentCount = 0,
+  onOpenActiveSubagents,
   titleId,
 }: {
   session: SessionView;
@@ -80,6 +82,9 @@ export function SessionHeader({
    * replaces the top-level app bar on desktop. */
   topbarControls?: ReactNode;
   changeStatus?: SessionChangeStatus | null;
+  /** Live structured subagents remain visible even while the parent awaits its next prompt. */
+  activeSubagentCount?: number;
+  onOpenActiveSubagents?: () => void;
   /** Set when this bar owns the page heading (`page-title` focus-rescue anchor). */
   titleId?: string;
 }) {
@@ -233,24 +238,12 @@ export function SessionHeader({
       <div className="session-header-statuses">
         <SessionStatusIndicators session={session} disconnected={!runnerOnline} />
         <ChangeStatusBadge change={changeStatus ?? null} />
-        {session.backgroundWorkState && (
-          <span
-            className={session.backgroundWorkState === "orphaned"
-              ? "bgwork-indicator bgwork-orphaned"
-              : session.backgroundWorkState === "resumed"
-                ? "bgwork-indicator bgwork-resumed"
-                : "bgwork-indicator bgwork-running"}
-            role="img"
-            title={BACKGROUND_WORK_DOT_LABELS[session.backgroundWorkState]}
-            aria-label={BACKGROUND_WORK_DOT_LABELS[session.backgroundWorkState]}
-          />
-        )}
+        {session.backgroundWorkState && <BackgroundWorkBadge state={session.backgroundWorkState} />}
         {!session.backgroundWorkState && session.backgroundWorkTracking === "untracked" && (
-          <span
-            className="bgwork-indicator bgwork-untracked"
-            title="Detached Work: Untracked"
-            aria-label="Detached Work: Untracked"
-          />
+          <UntrackedBackgroundWorkBadge />
+        )}
+        {onOpenActiveSubagents && (
+          <ActiveSubagentsBadge count={activeSubagentCount} onOpen={onOpenActiveSubagents} />
         )}
       </div>
       {note && <span className="detail-note session-header-note" role="status" aria-live="polite">{note}</span>}

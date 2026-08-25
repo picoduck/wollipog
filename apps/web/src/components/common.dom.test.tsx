@@ -7,6 +7,7 @@ import {
   BackgroundDeliveryBadge,
   BackgroundNotificationBadge,
   BackgroundWorkBadge,
+  ActiveSubagentsBadge,
   CopyButton,
   ChangeStatusBadge,
   SessionStatusIndicators,
@@ -96,11 +97,32 @@ test("background-work badges expose every durable state with Title Case visible 
       badges.map((badge) => badge.getAttribute("aria-label")),
       ["Background Work: Waiting on External Job", "Background Work: Continuation Pending", "Background Work: Orphaned", "Background Work: Resumed"],
     );
+    assert.ok(badges.every((badge) => badge.getAttribute("role") === "status"));
     assert.deepEqual(
       badges.map((badge) => [...badge.classList].at(-1)),
       ["background-work-running", "background-work-running", "background-work-orphaned", "background-work-resumed"],
     );
     assert.equal(container.querySelectorAll(".background-work-dot[aria-hidden='true']").length, 4);
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
+test("active subagent badges expose their count and open the active work", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  let opens = 0;
+  try {
+    await act(async () => {
+      root.render(<ActiveSubagentsBadge count={2} onOpen={() => { opens += 1; }} />);
+    });
+    const badge = container.querySelector<HTMLButtonElement>('button[aria-label="2 Subagents Active"]');
+    assert.equal(badge?.textContent?.trim(), "2 Subagents Active");
+    await act(async () => { badge?.click(); });
+    assert.equal(opens, 1);
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();
@@ -198,9 +220,8 @@ test("session indicators preserve simultaneous lifecycle, attention, and change 
     assert.match(container.textContent ?? "", /Ready for Review/);
     assert.match(container.textContent ?? "", /Uncommitted Changes/);
     assert.match(container.textContent ?? "", /Disconnected/);
-    assert.equal(container.querySelector('[aria-label="Answer Required"]')?.textContent?.trim(), "Answer Required");
-    assert.equal(container.querySelector('[aria-label="Ready for Review"]')?.textContent?.trim(), "Ready for Review");
-    assert.equal(container.querySelector('[aria-label="Uncommitted Changes"]')?.textContent?.trim(), "Uncommitted Changes");
+    assert.ok(container.querySelector('[role="group"][aria-label="Activity: Running. Attention: Answer Required. Health: Disconnected"]'));
+    assert.ok(container.querySelector('[role="group"][aria-label="Changes: Ready for Review. Changes: Uncommitted Changes"]'));
     assert.equal(container.querySelectorAll(".change-status-indicators > .status-badge").length, 2,
       "compact surfaces preserve both facts as separate badges");
     const changeBadges = [...container.querySelectorAll(".change-status-indicators > .status-badge")];
@@ -208,7 +229,6 @@ test("session indicators preserve simultaneous lifecycle, attention, and change 
       "review readiness keeps its successful status tone and primary position");
     assert.equal(changeBadges[1]?.classList.contains("st-idle"), true,
       "uncommitted work keeps its neutral attention tone and supplemental position");
-    assert.equal(container.querySelector('[aria-label="Disconnected"]')?.textContent?.trim(), "Disconnected");
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();
