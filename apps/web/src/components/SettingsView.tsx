@@ -315,9 +315,12 @@ export function SessionNamingPanel() {
   const mounted = useRef(true);
   const [settings, setSettings] = useState<SessionNamingSettingsView | null>(null);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ action: "load" | "update"; message: string } | null>(null);
 
-  useEffect(() => () => { mounted.current = false; }, []);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   useEffect(() => {
     let disposed = false;
@@ -327,7 +330,7 @@ export function SessionNamingPanel() {
     void api.sessionNamingSettings().then((next) => {
       if (!disposed) setSettings(next);
     }).catch((cause: unknown) => {
-      if (!disposed) setError(cause instanceof Error ? cause.message : String(cause));
+      if (!disposed) setError({ action: "load", message: cause instanceof Error ? cause.message : String(cause) });
     });
     return () => { disposed = true; };
   }, [api]);
@@ -341,7 +344,7 @@ export function SessionNamingPanel() {
       if (mounted.current && activeApi.current === requestApi) setSettings(next);
     }).catch((cause: unknown) => {
       if (mounted.current && activeApi.current === requestApi) {
-        setError(cause instanceof Error ? cause.message : String(cause));
+        setError({ action: "update", message: cause instanceof Error ? cause.message : String(cause) });
       }
     }).finally(() => {
       if (mounted.current && activeApi.current === requestApi) setBusy(false);
@@ -363,7 +366,7 @@ export function SessionNamingPanel() {
   });
   const custom = settings?.customModel;
   const status = error
-    ? `Could not update session naming: ${error}`
+    ? `Could not ${error.action} session naming: ${error.message}`
     : !settings
       ? "Loading the organization setting…"
       : settings.mode !== settings.effectiveMode

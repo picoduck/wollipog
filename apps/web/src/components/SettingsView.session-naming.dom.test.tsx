@@ -87,9 +87,11 @@ test("Session Naming shows every mode, explains unavailable agent accounts, and 
   try {
     await act(async () => {
       root.render(
-        <ApiProvider client={createApiClient(transport)}>
-          <SessionNamingPanel />
-        </ApiProvider>,
+        <React.StrictMode>
+          <ApiProvider client={createApiClient(transport)}>
+            <SessionNamingPanel />
+          </ApiProvider>
+        </React.StrictMode>,
       );
     });
     assert.equal(calls[0]?.path, "/api/session-naming");

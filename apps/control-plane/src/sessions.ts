@@ -4360,11 +4360,11 @@ export class SessionsService {
     sessionId: string,
     ownership: "generated" | "user",
   ): ServiceResult<{ accepted: true }> {
+    const session = this.db.getSession(sessionId);
+    if (!session) return fail("session not found", 404);
     if (!this.titleGenerator || (this.titleGenerationEnabled && !this.titleGenerationEnabled(sessionId))) {
       return fail("semantic session naming is disabled or not configured", 409);
     }
-    const session = this.db.getSession(sessionId);
-    if (!session) return fail("session not found", 404);
     const sensitivePaths = this.db.sessionSensitivePaths(sessionId);
     const messages = boundedSessionTitleContext(
       this.db.listSessionTitleContextEvents(sessionId),
@@ -6226,9 +6226,9 @@ export class SessionsService {
     const isCompletedUserMessage = payload.kind === "user_message" &&
       payload.final !== false && !payload.commandInvocation;
     const generatedOwnership = (session.titleSource ?? "generated") === "generated";
-    const shouldGenerateInitialTitle = Boolean(this.titleGenerator) &&
-      (!this.titleGenerationEnabled || this.titleGenerationEnabled(sessionId)) && isCompletedUserMessage &&
-      generatedOwnership && !this.db.hasCompletedUserMessage(sessionId);
+    const shouldGenerateInitialTitle = Boolean(this.titleGenerator) && isCompletedUserMessage &&
+      generatedOwnership && (!this.titleGenerationEnabled || this.titleGenerationEnabled(sessionId)) &&
+      !this.db.hasCompletedUserMessage(sessionId);
     // Keep the runner-seq cursor gap-free: if a live event is ahead of our high-water (we hydrated a
     // session whose earlier history we haven't pulled yet), don't append it out of order and skip
     // past the gap — pull the ordered history from the box (which includes this event) instead.

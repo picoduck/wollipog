@@ -3561,6 +3561,38 @@ test("runtime naming mode changes apply to subsequent first messages without a r
   assert.equal(db.getSession(semanticId)?.title, "Runtime Semantic Title");
 });
 
+test("runtime naming availability is resolved only for a completed first user message", async () => {
+  let checks = 0;
+  const generator: SessionTitleGenerator = async () => "Runtime Semantic Title";
+  const { hub, svc } = makeHarness(generator, 1_000, () => {
+    checks += 1;
+    return true;
+  });
+  const id = seedSession(svc, hub);
+
+  svc.onSessionEvent(id, { kind: "agent_message", text: "streamed response", final: false });
+  svc.onSessionEvent(id, { kind: "user_message", text: "partial request", final: false });
+  assert.equal(checks, 0, "unrelated and partial events must not query runtime naming settings");
+
+  svc.onSessionEvent(id, { kind: "user_message", text: "completed request", final: true });
+  assert.ok(checks > 0, "the completed first user message resolves the runtime setting");
+});
+
+test("retitle reports an unknown session before resolving its runtime naming setting", () => {
+  let checks = 0;
+  const { svc } = makeHarness(async () => "Unused", 1_000, () => {
+    checks += 1;
+    return true;
+  });
+  const result = svc.retitleSession("missing-session");
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.status, 404);
+    assert.equal(result.error, "session not found");
+  }
+  assert.equal(checks, 0);
+});
+
 test("a runtime naming setting revision fences an older in-flight result", async () => {
   let revision = "custom:1";
   let finish: ((title: string) => void) | undefined;

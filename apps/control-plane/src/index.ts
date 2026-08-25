@@ -527,6 +527,7 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
   if (!principal) return null;
 
   const memberScopedRoute = routePath === "/api/instance" || routePath === "/api/identity" || routePath === "/api/runners" ||
+    routePath === "/api/session-naming" ||
     routePath === "/api/projects" || routePath.startsWith("/api/projects/") ||
     routePath === "/api/sessions" || routePath.startsWith("/api/sessions/") ||
     routePath === "/api/search" || routePath === "/api/usage" || routePath === "/api/usage/retention" ||
