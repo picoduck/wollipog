@@ -18,3 +18,9 @@ test("discovered Codex transports keep their canonical user-facing names", () =>
   assert.equal(agentDisplayName({ ...agent("codex-app", "Codex"), driver: "codex-app-server", source: "discovered" }), "Codex App Server");
   assert.equal(agentDisplayName({ ...agent("codex-exec", "Codex"), driver: "codex", source: "discovered" }), "Codex (Non-Interactive)");
 });
+
+test("generated legacy App Server names normalize without rewriting custom configured names", () => {
+  assert.equal(agentDisplayName({ ...agent("codex-app", "Codex — Interactive"), driver: "codex-app-server" }), "Codex App Server");
+  assert.equal(agentDisplayName({ ...agent("codex-app", "Codex Interactive"), driver: "codex-app-server" }), "Codex App Server");
+  assert.equal(agentDisplayName({ ...agent("codex-app", "My Codex"), driver: "codex-app-server" }), "My Codex");
+});

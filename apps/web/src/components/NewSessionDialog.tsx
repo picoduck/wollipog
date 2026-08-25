@@ -226,6 +226,7 @@ export function NewSessionDialog({
     : [];
   const savedSelection = savedAgentSelection(agentOpts, agentDefaults[runnerId]);
   const selectionIssue = currentAgentSelectionIssue(agentOpts, agentId, agentDefaults[runnerId]);
+  const suggestedAgentOption = agentOpts.find((option) => option.agent.id === savedSelection.recommendedId);
   // Browse the runner's filesystem in the selected agent's context (native host vs a WSL distro).
   const browseDistro = agent?.context?.kind === "wsl" ? agent.context.distro : undefined;
 
@@ -755,9 +756,9 @@ export function NewSessionDialog({
                       ? "The selected agent is unavailable on this runner."
                       : "Your saved default is no longer advertised by this runner."}
                 </span>
-                {savedSelection.recommendedId && savedSelection.recommendedId !== agentDefaults[runnerId] && (
+                {suggestedAgentOption && savedSelection.recommendedId !== agentDefaults[runnerId] && (
                   <button type="button" className="btn ghost sm" onClick={() => selectAgent(savedSelection.recommendedId)}>
-                    Use Codex App Server
+                    Use {suggestedAgentOption.label}
                   </button>
                 )}
               </div>

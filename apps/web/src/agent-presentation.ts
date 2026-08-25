@@ -14,12 +14,18 @@ export function isGeneratedConductorName(name: string): boolean {
   return /^Conductor \((?:agent manager|wollipog)\)$/i.test(name);
 }
 
+/** Normalize only names emitted by earlier Wollipog onboarding, preserving custom agent names. */
+export function isGeneratedCodexAppServerName(name: string): boolean {
+  return /^Codex(?: —)? Interactive$/u.test(name);
+}
+
 export function agentDisplayName(agent: AgentDefinition): string {
   if (agent.id === "conductor" || isGeneratedConductorName(agent.name)) {
     return GENERATED_CONDUCTOR_DISPLAY_NAME;
   }
   if (agent.source === "discovered" && agent.driver === "codex") return "Codex (Non-Interactive)";
-  if (agent.source === "discovered" && agent.driver === "codex-app-server") return "Codex App Server";
+  if (agent.driver === "codex-app-server" &&
+      (agent.source === "discovered" || isGeneratedCodexAppServerName(agent.name))) return "Codex App Server";
   return agent.name;
 }
 
