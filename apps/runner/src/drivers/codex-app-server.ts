@@ -15,6 +15,7 @@
 import {
   DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH,
   type AgentQuestion,
+  type AuthoritativeSubagentLifecycle,
   type PlanEntry,
   type PromptImage,
   type ReviewDecision,
@@ -36,6 +37,42 @@ import { stagePromptImages, type StagedPromptImages } from "./prompt-images.js";
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Json = any;
 type ToolStatus = "in_progress" | "completed" | "failed";
+
+const CODEX_SUBAGENT_LIFECYCLES: Record<string, AuthoritativeSubagentLifecycle> = {
+  pendingInit: "starting",
+  running: "running",
+  interrupted: "interrupted",
+  completed: "completed",
+  errored: "failed",
+  shutdown: "interrupted",
+  notFound: "unreachable",
+};
+
+function codexSubagentLifecycle(value: unknown): AuthoritativeSubagentLifecycle | undefined {
+  return typeof value === "string" ? CODEX_SUBAGENT_LIFECYCLES[value] : undefined;
+}
+
+function subagentToolStatus(lifecycle: AuthoritativeSubagentLifecycle): string {
+  switch (lifecycle) {
+    case "starting": return "pending";
+    case "running":
+    case "waiting": return "in_progress";
+    case "completed": return "completed";
+    case "failed":
+    case "unreachable": return "failed";
+    case "interrupted": return "cancelled";
+  }
+}
+
+function collabToolTitle(tool: unknown): string {
+  switch (tool) {
+    case "sendInput": return "Send Input to Agent";
+    case "resumeAgent": return "Resume Agent";
+    case "wait": return "Wait for Agent";
+    case "closeAgent": return "Close Agent";
+    default: return "Agent Collaboration";
+  }
+}
 
 /** Map our approval-mode ids to the app-server SandboxPolicy `type`. */
 const SANDBOX_TYPE: Record<string, string> = {
@@ -209,6 +246,14 @@ export class CodexAppServerDriver implements Driver {
   private readonly stagedSteerImages = new Map<string, StagedPromptImages>();
   /** Codex echoes steered input as userMessage items. SessionManager owns the canonical event. */
   private readonly steerClientIds = new Set<string>();
+  /** App-server multiplexes parent and spawned threads over one notification stream. A child
+   * thread is admitted to this session only after a structured spawn item binds it to the exact
+   * spawning collaboration tool. */
+  private readonly subagentToolByThread = new Map<string, string>();
+  private readonly subagentParentByTool = new Map<string, string | undefined>();
+  /** Latest per-child turn usage. Like root usage, it is emitted once when that child turn settles,
+   * not once per cumulative update notification. */
+  private readonly pendingSubagentUsage = new Map<string, ReturnType<typeof flattenUsage>>();
   private promptGeneration = 0;
   private promptBusy = false;
   /** Provider diagnostics are held until startup succeeds so an expected unsupported-feature
@@ -647,6 +692,84 @@ export class CodexAppServerDriver implements Driver {
     }
   }
 
+  /** Admit only the root thread and descendants bound by a structured collaboration item. App
+   * Server can multiplex unrelated loaded threads over the same transport, so treating every
+   * notification as parent-session output would cross conversation boundaries. */
+  private eventContext(threadId: unknown): { accepted: boolean; parentToolUseId?: string } {
+    if (threadId == null || threadId === "") return { accepted: true };
+    if (typeof threadId !== "string") return { accepted: false };
+    if (threadId === this.threadId) return { accepted: true };
+    const parentToolUseId = this.subagentToolByThread.get(threadId);
+    return parentToolUseId ? { accepted: true, parentToolUseId } : { accepted: false };
+  }
+
+  private updateSubagentStates(states: unknown): void {
+    if (!states || typeof states !== "object" || Array.isArray(states)) return;
+    for (const [threadId, raw] of Object.entries(states as Record<string, Json>)) {
+      const toolCallId = this.subagentToolByThread.get(threadId);
+      const lifecycle = codexSubagentLifecycle(raw?.status);
+      if (!toolCallId || !lifecycle) continue;
+      this.cb.onEvent({
+        kind: "tool_call_update",
+        toolCallId,
+        status: subagentToolStatus(lifecycle),
+        subagentLifecycle: lifecycle,
+        ...(this.subagentParentByTool.get(toolCallId)
+          ? { parentToolUseId: this.subagentParentByTool.get(toolCallId) }
+          : {}),
+      });
+    }
+  }
+
+  private flushSubagentUsage(threadId: string): void {
+    const usage = this.pendingSubagentUsage.get(threadId);
+    const parentToolUseId = this.subagentToolByThread.get(threadId);
+    if (!usage || !parentToolUseId) return;
+    this.pendingSubagentUsage.delete(threadId);
+    this.cb.onEvent({
+      kind: "token_usage",
+      inputTokens: usage.input,
+      outputTokens: usage.output,
+      cachedInputTokens: usage.cached,
+      parentToolUseId,
+    });
+  }
+
+  private onCollabItem(item: Json, completed: boolean, notificationParent?: string): void {
+    const id = normalizedCodexItemId(item?.id);
+    if (!id) return;
+    const senderParent = typeof item?.senderThreadId === "string"
+      ? this.subagentToolByThread.get(item.senderThreadId)
+      : undefined;
+    const parentToolUseId = senderParent ?? notificationParent;
+    const failed = item?.status === "failed";
+
+    if (item?.tool !== "spawnAgent") {
+      this.emitTool(
+        id,
+        collabToolTitle(item?.tool),
+        "other",
+        completed ? (failed ? "failed" : "completed") : "in_progress",
+        parentToolUseId,
+      );
+      this.updateSubagentStates(item?.agentsStates);
+      return;
+    }
+
+    const prompt = typeof item?.prompt === "string" ? item.prompt.trim() : "";
+    const title = prompt ? `Agent: ${truncate(prompt, 80)}` : "Agent";
+    const receivers = Array.isArray(item?.receiverThreadIds)
+      ? item.receiverThreadIds.filter((value: unknown): value is string => typeof value === "string" && value.length > 0)
+      : [];
+    const firstState = receivers.map((threadId: string) => item?.agentsStates?.[threadId])
+      .find((state: Json) => codexSubagentLifecycle(state?.status));
+    const lifecycle = failed ? "failed" : codexSubagentLifecycle(firstState?.status) ?? "starting";
+    this.emitTool(id, title, "agent", subagentToolStatus(lifecycle), parentToolUseId, lifecycle);
+    this.subagentParentByTool.set(id, parentToolUseId);
+    for (const threadId of receivers) this.subagentToolByThread.set(threadId, id);
+    this.updateSubagentStates(item?.agentsStates);
+  }
+
   private registerHandlers(peer: JsonRpcPeer): void {
     // Server -> client approval requests: park a promise until the UI answers. The
     // method is captured so the response is built in the shape that method expects
@@ -773,19 +896,33 @@ export class CodexAppServerDriver implements Driver {
     // fallback only when nothing streamed).
     peer.onNotification("item/agentMessage/delta", (p: Json) => {
       if (!p?.delta) return;
+      const context = this.eventContext(p?.threadId);
+      if (!context.accepted) return;
       const messageId = normalizedCodexItemId(p.itemId);
-      this.streamedAgentResponse = true;
+      if (!context.parentToolUseId) this.streamedAgentResponse = true;
       if (messageId) this.seenItems.add(`msg:${messageId}`);
-      this.cb.onEvent({ kind: "agent_message", text: String(p.delta), ...(messageId ? { messageId } : {}) });
+      this.cb.onEvent({
+        kind: "agent_message",
+        text: String(p.delta),
+        ...(messageId ? { messageId } : {}),
+        ...(context.parentToolUseId ? { parentToolUseId: context.parentToolUseId } : {}),
+      });
     });
     peer.onNotification("item/reasoning/delta", (p: Json) => {
       if (!p?.delta) return;
+      const context = this.eventContext(p?.threadId);
+      if (!context.accepted) return;
       const messageId = normalizedCodexItemId(p.itemId);
       if (messageId) this.seenItems.add(`think:${messageId}`);
-      this.cb.onEvent({ kind: "agent_thought", text: String(p.delta), ...(messageId ? { messageId } : {}) });
+      this.cb.onEvent({
+        kind: "agent_thought",
+        text: String(p.delta),
+        ...(messageId ? { messageId } : {}),
+        ...(context.parentToolUseId ? { parentToolUseId: context.parentToolUseId } : {}),
+      });
     });
-    peer.onNotification("item/started", (p: Json) => this.onItem(p?.item, false));
-    peer.onNotification("item/completed", (p: Json) => this.onItem(p?.item, true));
+    peer.onNotification("item/started", (p: Json) => this.onItem(p?.item, false, p?.threadId));
+    peer.onNotification("item/completed", (p: Json) => this.onItem(p?.item, true, p?.threadId));
     // Guardian auto-review (approvalsReviewer=auto_review): surface the model's verdict so
     // the user can see that a boundary-crossing action was AI-reviewed rather than silently
     // auto-approved. One thought per review; genuine escalations arrive as requestApproval
@@ -796,6 +933,7 @@ export class CodexAppServerDriver implements Driver {
       if (decision) this.cb.onEvent({ kind: "review_decision", ...decision });
     });
     peer.onNotification("turn/started", (p: Json) => {
+      if (p?.threadId && p.threadId !== this.threadId) return;
       this.declinePendingRequests();
       const id = p?.turn?.id;
       if (typeof id === "string" && id) {
@@ -810,12 +948,23 @@ export class CodexAppServerDriver implements Driver {
       // to SessionMeta would double-count restored history. Keep only the latest update and emit
       // once at settlement because app-server may publish several updates during one turn.
       const u = flattenUsage(p?.tokenUsage?.last ?? p?.tokenUsage?.lastTurn ?? p?.tokenUsage?.last_turn);
-      if (u && !this.turnUsageClosed) this.pendingTurnUsage = u;
+      if (!u) return;
+      const context = this.eventContext(p?.threadId);
+      if (!context.accepted) return;
+      if (context.parentToolUseId) {
+        this.pendingSubagentUsage.set(String(p.threadId), u);
+      } else if (!this.turnUsageClosed) {
+        this.pendingTurnUsage = u;
+      }
     });
     peer.onNotification("account/rateLimits/updated", (payload: Json) => {
       this.cb.onSubscriptionUsage?.({ provider: "codex", kind: "sparse", payload });
     });
     peer.onNotification("turn/completed", (p: Json) => {
+      if (p?.threadId && p.threadId !== this.threadId) {
+        if (this.subagentToolByThread.has(p.threadId)) this.flushSubagentUsage(p.threadId);
+        return;
+      }
       this.declinePendingRequests();
       this.closeTurnUsage();
       const status = p?.turn?.status;
@@ -835,6 +984,10 @@ export class CodexAppServerDriver implements Driver {
       }
     });
     peer.onNotification("turn/failed", (p: Json) => {
+      if (p?.threadId && p.threadId !== this.threadId) {
+        if (this.subagentToolByThread.has(p.threadId)) this.flushSubagentUsage(p.threadId);
+        return;
+      }
       this.declinePendingRequests();
       this.streamedAgentResponse = false;
       this.emitDriverError(p?.error);
@@ -882,8 +1035,11 @@ export class CodexAppServerDriver implements Driver {
   }
 
   /** Map an item.started/completed payload to our normalized events. */
-  private onItem(item: Json, completed: boolean): void {
+  private onItem(item: Json, completed: boolean, threadId?: unknown): void {
     if (!item || this.disposed) return;
+    const context = this.eventContext(threadId);
+    if (!context.accepted) return;
+    const parentToolUseId = context.parentToolUseId;
     const id = normalizedCodexItemId(item.id) ?? "item";
     switch (item.type) {
       case "userMessage": {
@@ -901,31 +1057,62 @@ export class CodexAppServerDriver implements Driver {
         // messageId, so emitting a second authoritative completion after deltas would duplicate
         // the bubble. A completion-only item is already whole and may be marked final safely.
         if (completed && item.text && !this.seenItems.has(`msg:${id}`)) {
-          this.cb.onEvent({ kind: "agent_message", text: String(item.text), messageId: id, final: true });
+          this.cb.onEvent({
+            kind: "agent_message",
+            text: String(item.text),
+            messageId: id,
+            final: true,
+            ...(parentToolUseId ? { parentToolUseId } : {}),
+          });
         }
         break;
       case "reasoning":
         if (completed && item.text && !this.seenItems.has(`think:${id}`)) {
-          this.cb.onEvent({ kind: "agent_thought", text: String(item.text), messageId: id, final: true });
+          this.cb.onEvent({
+            kind: "agent_thought",
+            text: String(item.text),
+            messageId: id,
+            final: true,
+            ...(parentToolUseId ? { parentToolUseId } : {}),
+          });
         }
         break;
       case "commandExecution": {
         const status: ToolStatus = completed ? (item.exitCode === 0 || item.status === "completed" ? "completed" : "failed") : "in_progress";
-        this.emitTool(id, `$ ${truncate(String(item.command ?? ""), 80)}`, "execute", status);
+        this.emitTool(id, `$ ${truncate(String(item.command ?? ""), 80)}`, "execute", status, parentToolUseId);
         const out = item.aggregatedOutput ?? item.output;
-        if (completed && out) this.cb.onEvent({ kind: "command_output", text: truncate(String(out), 2000) });
+        if (completed && out) {
+          this.cb.onEvent({
+            kind: "command_output",
+            text: truncate(String(out), 2000),
+            ...(parentToolUseId ? { parentToolUseId } : {}),
+          });
+        }
         break;
       }
       case "fileChange": {
         const changes: Json[] = item.changes ?? [];
-        for (const ch of changes) if (ch?.path) this.cb.onEvent({ kind: "file_edit", path: ch.path, diff: ch.diff });
-        this.emitTool(id, `edit ${changes.length} file(s)`, "edit", completed ? "completed" : "in_progress");
+        for (const ch of changes) if (ch?.path) {
+          this.cb.onEvent({
+            kind: "file_edit",
+            path: ch.path,
+            diff: ch.diff,
+            ...(parentToolUseId ? { parentToolUseId } : {}),
+          });
+        }
+        this.emitTool(id, `edit ${changes.length} file(s)`, "edit", completed ? "completed" : "in_progress", parentToolUseId);
         break;
       }
       case "mcpToolCall":
       case "webSearch": {
         const title = item.type === "webSearch" ? `web_search: ${item.query ?? ""}` : `${item.server ?? ""}/${item.tool ?? ""}`;
-        this.emitTool(id, title, item.type === "webSearch" ? "fetch" : "other", completed ? "completed" : "in_progress");
+        this.emitTool(
+          id,
+          title,
+          item.type === "webSearch" ? "fetch" : "other",
+          completed ? "completed" : "in_progress",
+          parentToolUseId,
+        );
         break;
       }
       case "todoList": {
@@ -934,18 +1121,44 @@ export class CodexAppServerDriver implements Driver {
           content: String(t.text ?? t.content ?? ""),
           status: t.completed || t.status === "completed" ? "completed" : t.status === "in_progress" ? "in_progress" : "pending",
         }));
-        if (entries.length) this.cb.onEvent({ kind: "plan", entries });
+        if (entries.length) {
+          this.cb.onEvent({ kind: "plan", entries, ...(parentToolUseId ? { parentToolUseId } : {}) });
+        }
         break;
       }
+      case "collabAgentToolCall":
+        this.onCollabItem(item, completed, parentToolUseId);
+        break;
     }
   }
 
-  private emitTool(id: string, title: string, toolKind: string, status: ToolStatus): void {
+  private emitTool(
+    id: string,
+    title: string,
+    toolKind: string,
+    status: string,
+    parentToolUseId?: string,
+    subagentLifecycle?: AuthoritativeSubagentLifecycle,
+  ): void {
     if (!this.seenItems.has(id)) {
       this.seenItems.add(id);
-      this.cb.onEvent({ kind: "tool_call", toolCallId: id, title, toolKind, status });
+      this.cb.onEvent({
+        kind: "tool_call",
+        toolCallId: id,
+        title,
+        toolKind,
+        status,
+        ...(parentToolUseId ? { parentToolUseId } : {}),
+        ...(subagentLifecycle ? { subagentLifecycle } : {}),
+      });
     } else {
-      this.cb.onEvent({ kind: "tool_call_update", toolCallId: id, status });
+      this.cb.onEvent({
+        kind: "tool_call_update",
+        toolCallId: id,
+        status,
+        ...(parentToolUseId ? { parentToolUseId } : {}),
+        ...(subagentLifecycle ? { subagentLifecycle } : {}),
+      });
     }
   }
 }

@@ -2,7 +2,13 @@ import { writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 const scenario = process.argv[2] ?? "resume";
-const threadId = scenario === "fresh" ? "fixture-fresh" : scenario === "question" ? "fixture-question" : "fixture-resume";
+const threadId = scenario === "fresh"
+  ? "fixture-fresh"
+  : scenario === "question"
+    ? "fixture-question"
+    : scenario === "subagents"
+      ? "fixture-subagents"
+      : "fixture-resume";
 const questionRequestId = "live-codex-question-1";
 const expectedLaunchArgs = ["--enable", "default_mode_request_user_input", "app-server"];
 if (JSON.stringify(process.argv.slice(3)) !== JSON.stringify(expectedLaunchArgs)) {
@@ -51,7 +57,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     send({ id: message.id, result: { thread: { id: threadId, turns: [{ id: "historical" }] } } });
     return;
   }
-  if (message.method === "thread/start" && (scenario === "fresh" || scenario === "question")) {
+  if (message.method === "thread/start" && (scenario === "fresh" || scenario === "question" || scenario === "subagents")) {
     send({ id: message.id, result: { thread: { id: threadId } } });
     return;
   }
@@ -90,6 +96,53 @@ createInterface({ input: process.stdin }).on("line", (line) => {
           ],
         },
       });
+      return;
+    }
+    if (scenario === "subagents") {
+      send({
+        method: "item/started",
+        params: {
+          threadId,
+          turnId: "fixture-turn",
+          item: {
+            type: "collabAgentToolCall",
+            id: "fixture-spawn",
+            tool: "spawnAgent",
+            status: "inProgress",
+            senderThreadId: threadId,
+            receiverThreadIds: ["fixture-child"],
+            prompt: "Inspect background work",
+            agentsStates: { "fixture-child": { status: "running" } },
+          },
+        },
+      });
+      send({ method: "turn/completed", params: { threadId, turn: { id: "fixture-turn", status: "completed" } } });
+      setTimeout(() => {
+        send({
+          method: "item/completed",
+          params: {
+            threadId: "fixture-child",
+            turnId: "fixture-child-turn",
+            item: { type: "agentMessage", id: "fixture-child-message", text: "Background inspection complete." },
+          },
+        });
+        send({
+          method: "item/completed",
+          params: {
+            threadId,
+            turnId: "fixture-turn",
+            item: {
+              type: "collabAgentToolCall",
+              id: "fixture-wait",
+              tool: "wait",
+              status: "completed",
+              senderThreadId: threadId,
+              receiverThreadIds: ["fixture-child"],
+              agentsStates: { "fixture-child": { status: "completed", message: "Background inspection complete." } },
+            },
+          },
+        });
+      }, 10);
       return;
     }
     send({ method: "item/agentMessage/delta", params: { threadId, turnId: "fixture-turn", itemId: "m1", delta: "continued" } });

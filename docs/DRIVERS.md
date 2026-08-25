@@ -561,7 +561,8 @@ shape loss produces a focused drift report.
 The fixture pins the **consumed surface**, not the whole generated schema: every required property,
 request variant, and enum value the driver reads or sends. That includes both supported
 `mcpServer/elicitation/request` modes (identified by their `mode` discriminator rather than a
-variant title), the nested `McpElicitation*` form-control schemas the normalizer reads, and the
+variant title), structured `collabAgentToolCall` items and their tool/lifecycle enums, the nested
+`McpElicitation*` form-control schemas the normalizer reads, and the
 native decision/action/scope enums Wollipog sends back. It also pins **reachability**, not only each
 definition's own shape: the unions and property references that make a form control valid under
 `requestedSchema`, down to each control's own type and format definitions, plus the definition every
@@ -638,11 +639,21 @@ their `supportedReasoningEfforts` come from the `model/list` request (also used 
 | `item/started`/`completed` `fileChange {changes:[{path,kind,diff}],status}` | per change: `{kind:"file_edit", path, diff}` + `{kind:"tool_call_update", toolCallId, status}` |
 | `item/*` `mcpToolCall {server,tool,arguments,result?,error?,status}` | `{kind:"tool_call"/"tool_call_update", toolCallId:id, title:`${server}/${tool}`, status, text}` |
 | `item/*` `webSearch {query}` | `{kind:"tool_call", toolCallId:id, title:`web_search: ${query}`, status:"completed"}` |
+| `item/*` `collabAgentToolCall {tool:"spawnAgent",senderThreadId,receiverThreadIds,agentsStates}` | `{kind:"tool_call"/"tool_call_update", toolCallId:id, toolKind:"agent", parentToolUseId?, subagentLifecycle}`; receiver thread ids bind subsequent structured child output to this exact call |
+| child-thread item/delta notifications | the ordinary mapped payload plus `parentToolUseId` for the spawning collaboration call; nested `spawnAgent` calls recursively preserve that ownership |
 | `turn/plan/updated {plan:[{step,status}]}` | `{kind:"plan", entries: plan.map(p=>({content:p.step,status:p.status}))}` |
 | `turn/diff/updated {diff}` | `{kind:"file_edit", path:"worktree", diff}` |
 | `thread/tokenUsage/updated {…}` | retain latest schema-pinned `last`, then emit one `{kind:"token_usage",…}` at turn settlement; never add restored cumulative `total` usage |
 | `turn/completed {turn.status}` | end turn → `StopReason` (`completed`→`end_turn`, `interrupted`→`cancelled`, `failed`→`refusal`); `{kind:"status", status:"idle"}` |
 | `error {error:{message,codexErrorInfo?}}` | `{kind:"error", message}` |
+
+App-server is a multiplexed transport: the root thread and every structured child thread share one
+stdio stream. The driver accepts the root thread plus only child ids introduced by a root-or-known-
+child `spawnAgent` item, and ignores unrelated thread notifications. Child turn boundaries cannot
+replace or settle the foreground turn. `agentsStates` is authoritative for starting, running,
+waiting, completed, failed, interrupted, and unreachable presentation, so a detached child can stay
+visibly active after the foreground turn becomes idle. These normalized events are stored in the
+ordinary runner event log, preserving the same subagent tree across reconnect and resume.
 
 ### 3.4 Approval and elicitation server requests to pending actions
 
@@ -690,6 +701,9 @@ NDJSON `ThreadEvent`s (**snake_case**): `thread.started{thread_id}`, `turn.start
 (`agent_message`, `reasoning`, `command_execution`, `file_change`, `mcp_tool_call`, `web_search`,
 `todo_list`) map to the same `SessionEventPayload`s as §3.3 (just snake_case field names). No approval
 channel — only when the manager can pre-grant via sandbox. Final answer = last `agent_message.text`.
+The exec transcript surface does not provide durable structured child-thread ownership. Imported raw
+Codex transcripts therefore keep provider completion summaries in the parent activity and do not
+invent independently selectable subagents.
 
 ### 3.6 Model / effort enumeration (feeds discovery)
 

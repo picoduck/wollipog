@@ -897,6 +897,39 @@ test("real NDJSON child resumes and continues without replaying history or cumul
   }
 });
 
+test("real NDJSON transport keeps structured child output live after the parent turn settles", async () => {
+  const events: SessionEventPayload[] = [];
+  const fixture = fileURLToPath(new URL("./fixtures/fake-codex-app-server.mjs", import.meta.url));
+  const driver = new CodexAppServerDriver(
+    {
+      command: process.execPath,
+      args: [fixture, "subagents"],
+      cwd: process.cwd(),
+      env: {},
+      config: {} as SessionConfig,
+      context: { kind: "native" },
+    },
+    { onEvent: (event) => events.push(event), onStderr: () => {}, onExit: () => {} },
+  );
+  try {
+    await driver.initialize();
+    assert.equal(await driver.newSession(process.cwd()), "fixture-subagents");
+    assert.equal(await driver.prompt("inspect"), "end_turn", "the foreground turn settles first");
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+    assert.deepEqual(events.find((event) => event.kind === "agent_message" && event.messageId === "fixture-child-message"), {
+      kind: "agent_message",
+      text: "Background inspection complete.",
+      messageId: "fixture-child-message",
+      final: true,
+      parentToolUseId: "fixture-spawn",
+    });
+    assert.ok(events.some((event) => event.kind === "tool_call_update" &&
+      event.toolCallId === "fixture-spawn" && event.subagentLifecycle === "completed"));
+  } finally {
+    driver.dispose();
+  }
+});
+
 test("commandExecution: started -> tool_call, completed -> tool_call_update + command_output", () => {
   const h = makeHarness();
   h.onItem({ type: "commandExecution", id: "c1", command: "echo hi" }, false);
@@ -923,6 +956,153 @@ test("agentMessage completed -> agent_message; reasoning -> agent_thought; todoL
     h.events.map((e) => e.kind),
     ["agent_message", "agent_thought", "plan"],
   );
+});
+
+test("structured Codex collaboration items expose recursive live subagent output and lifecycle", () => {
+  const h = makeHarness();
+  (h.driver as any).threadId = "root-thread";
+  const notifications = notificationHandlers(h.driver);
+
+  notifications.get("item/started")!({
+    threadId: "root-thread",
+    item: {
+      type: "collabAgentToolCall",
+      id: "spawn-outer",
+      tool: "spawnAgent",
+      status: "inProgress",
+      senderThreadId: "root-thread",
+      receiverThreadIds: ["child-thread"],
+      prompt: "Inspect parser behavior",
+      agentsStates: { "child-thread": { status: "pendingInit" } },
+    },
+  });
+  notifications.get("item/completed")!({
+    threadId: "child-thread",
+    item: { type: "agentMessage", id: "child-message", text: "Inspecting parser events." },
+  });
+  notifications.get("item/completed")!({
+    threadId: "child-thread",
+    item: {
+      type: "collabAgentToolCall",
+      id: "spawn-inner",
+      tool: "spawnAgent",
+      status: "completed",
+      senderThreadId: "child-thread",
+      receiverThreadIds: ["grandchild-thread"],
+      prompt: "Check nested attribution",
+      agentsStates: { "grandchild-thread": { status: "running" } },
+    },
+  });
+  notifications.get("item/started")!({
+    threadId: "grandchild-thread",
+    item: { type: "commandExecution", id: "grandchild-command", command: "pnpm test" },
+  });
+  notifications.get("item/completed")!({
+    threadId: "grandchild-thread",
+    item: {
+      type: "commandExecution",
+      id: "grandchild-command",
+      command: "pnpm test",
+      status: "completed",
+      aggregatedOutput: "passed",
+    },
+  });
+  notifications.get("thread/tokenUsage/updated")!({
+    threadId: "grandchild-thread",
+    tokenUsage: { last: { inputTokens: 9, outputTokens: 4, cachedInputTokens: 2 } },
+  });
+  notifications.get("thread/tokenUsage/updated")!({
+    threadId: "grandchild-thread",
+    tokenUsage: { last: { inputTokens: 11, outputTokens: 5, cachedInputTokens: 3 } },
+  });
+  notifications.get("turn/completed")!({
+    threadId: "grandchild-thread",
+    turn: { id: "grandchild-turn", status: "completed" },
+  });
+  notifications.get("item/completed")!({
+    threadId: "root-thread",
+    item: {
+      type: "collabAgentToolCall",
+      id: "wait-outer",
+      tool: "wait",
+      status: "completed",
+      senderThreadId: "root-thread",
+      receiverThreadIds: ["child-thread"],
+      agentsStates: { "child-thread": { status: "completed", message: "Parser audit complete." } },
+    },
+  });
+  notifications.get("item/completed")!({
+    threadId: "unrelated-thread",
+    item: { type: "agentMessage", id: "private-other-thread", text: "must not cross sessions" },
+  });
+
+  assert.deepEqual(h.events[0], {
+    kind: "tool_call",
+    toolCallId: "spawn-outer",
+    title: "Agent: Inspect parser behavior",
+    toolKind: "agent",
+    status: "pending",
+    subagentLifecycle: "starting",
+  });
+  assert.deepEqual(h.events.find((event) => event.kind === "agent_message" && event.messageId === "child-message"), {
+    kind: "agent_message",
+    text: "Inspecting parser events.",
+    messageId: "child-message",
+    final: true,
+    parentToolUseId: "spawn-outer",
+  });
+  assert.deepEqual(h.events.find((event) => event.kind === "tool_call" && event.toolCallId === "spawn-inner"), {
+    kind: "tool_call",
+    toolCallId: "spawn-inner",
+    title: "Agent: Check nested attribution",
+    toolKind: "agent",
+    status: "in_progress",
+    parentToolUseId: "spawn-outer",
+    subagentLifecycle: "running",
+  });
+  assert.deepEqual(h.events.find((event) => event.kind === "command_output"), {
+    kind: "command_output",
+    text: "passed",
+    parentToolUseId: "spawn-inner",
+  });
+  assert.deepEqual(h.events.find((event) => event.kind === "token_usage"), {
+    kind: "token_usage",
+    inputTokens: 11,
+    outputTokens: 5,
+    cachedInputTokens: 3,
+    parentToolUseId: "spawn-inner",
+  });
+  assert.ok(h.events.some((event) => event.kind === "tool_call_update" &&
+    event.toolCallId === "spawn-outer" && event.subagentLifecycle === "completed"));
+  assert.equal(h.events.filter((event) => event.kind === "token_usage").length, 1,
+    "repeated cumulative child updates emit only the latest settled usage");
+  assert.equal(h.events.some((event) => event.kind === "agent_message" && event.text.includes("must not cross")), false);
+});
+
+test("subagent turn notifications cannot replace or settle the parent turn", async () => {
+  const h = makeHarness();
+  (h.driver as any).threadId = "root-thread";
+  (h.driver as any).turnId = "root-turn";
+  const notifications = notificationHandlers(h.driver);
+  notifications.get("item/completed")!({
+    threadId: "root-thread",
+    item: {
+      type: "collabAgentToolCall",
+      id: "spawn-child",
+      tool: "spawnAgent",
+      status: "completed",
+      senderThreadId: "root-thread",
+      receiverThreadIds: ["child-thread"],
+      agentsStates: { "child-thread": { status: "running" } },
+    },
+  });
+  let settled = false;
+  (h.driver as any).turnResolve = () => { settled = true; };
+  notifications.get("turn/started")!({ threadId: "child-thread", turn: { id: "child-turn" } });
+  notifications.get("turn/completed")!({ threadId: "child-thread", turn: { id: "child-turn", status: "completed" } });
+  await nextTask();
+  assert.equal((h.driver as any).turnId, "root-turn");
+  assert.equal(settled, false);
 });
 
 test("numeric app-server item identities normalize to safe distinct strings", () => {

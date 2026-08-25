@@ -1,6 +1,7 @@
 import type {
   AgentQuestion,
   ApprovalContext,
+  AuthoritativeSubagentLifecycle,
   EventPayloadReference,
   GovernanceReviewer,
   PermissionOption,
@@ -71,7 +72,7 @@ export type TimelineItem =
       /** Runner-recorded authoritative final, when the provider emits one. */
       completedAt?: number;
     }
-  | { kind: "command_output"; id: number; sourceEndId?: number; text: string; textRefs?: EventPayloadReference[] }
+  | { kind: "command_output"; id: number; sourceEndId?: number; text: string; textRefs?: EventPayloadReference[]; parentToolUseId?: string }
   | { kind: "stderr"; id: number; sourceEndId?: number; text: string; textRefs?: EventPayloadReference[] }
   | {
       kind: "tool_call";
@@ -84,6 +85,8 @@ export type TimelineItem =
       referencedText?: Array<{ preview: string; refs: EventPayloadReference[] }>;
       /** The Task tool call that spawned this one (v26+); absent ⇒ a top-level call. */
       parentToolUseId?: string;
+      /** Provider-observed lifecycle that remains independent of foreground session state. */
+      subagentLifecycle?: AuthoritativeSubagentLifecycle;
       /** Subagent items nested under this Task call — populated only by nestSubagents(). */
       children?: TimelineItem[];
       /** Event timestamps keep duration available even when the provider has no explicit metric. */
@@ -597,7 +600,7 @@ export class TimelineBuilder {
         }) - 1);
         break;
       case "command_output":
-        this.pushText("command_output", ev.seq, p.text, undefined, undefined, undefined, p.textRefs);
+        this.pushText("command_output", ev.seq, p.text, undefined, p.parentToolUseId, undefined, p.textRefs);
         break;
       case "stderr":
         if (p.runnerMarker === "background_continuation_delivery") {
@@ -633,6 +636,9 @@ export class TimelineBuilder {
               referencedText: [...(item.referencedText ?? []), { preview: p.text ?? "", refs: p.textRefs }],
             } : {}),
             parentToolUseId: item.parentToolUseId ?? p.parentToolUseId,
+            ...((p.subagentLifecycle ?? item.subagentLifecycle)
+              ? { subagentLifecycle: p.subagentLifecycle ?? item.subagentLifecycle }
+              : {}),
             ...(activityAt != null ? { lastActivityAt: activityAt } : {}),
           };
           if (isTerminalToolStatus(p.status) && activityAt != null) updated.completedAt = activityAt;
@@ -652,6 +658,7 @@ export class TimelineBuilder {
             text: p.text ?? "",
             ...(p.textRefs?.length ? { referencedText: [{ preview: p.text ?? "", refs: p.textRefs }] } : {}),
             parentToolUseId: p.parentToolUseId,
+            ...(p.subagentLifecycle ? { subagentLifecycle: p.subagentLifecycle } : {}),
             ...(Number.isFinite(ev.ts) ? { startedAt: ev.ts, lastActivityAt: ev.ts } : {}),
             ...(isTerminalToolStatus(p.status) && Number.isFinite(ev.ts) ? { completedAt: ev.ts } : {}),
             subagentRollup: this.pendingSubagentRollups.get(p.toolCallId),
@@ -677,6 +684,9 @@ export class TimelineBuilder {
               referencedText: [...(it.referencedText ?? []), { preview: p.text ?? "", refs: p.textRefs }],
             } : {}),
             parentToolUseId: it.parentToolUseId ?? p.parentToolUseId,
+            ...((p.subagentLifecycle ?? it.subagentLifecycle)
+              ? { subagentLifecycle: p.subagentLifecycle ?? it.subagentLifecycle }
+              : {}),
             ...(activityAt != null ? { lastActivityAt: activityAt } : {}),
             subagentRollup: isTerminalToolStatus(p.status) && it.startedAt != null
               ? { ...it.subagentRollup, durationMs: it.subagentRollup?.durationMs ?? Math.max(0, (activityAt ?? it.startedAt) - it.startedAt) }
@@ -698,6 +708,7 @@ export class TimelineBuilder {
               text: p.text ?? "",
               ...(p.textRefs?.length ? { referencedText: [{ preview: p.text ?? "", refs: p.textRefs }] } : {}),
               parentToolUseId: p.parentToolUseId,
+              ...(p.subagentLifecycle ? { subagentLifecycle: p.subagentLifecycle } : {}),
               ...(Number.isFinite(ev.ts) ? { startedAt: ev.ts, lastActivityAt: ev.ts } : {}),
               ...(isTerminalToolStatus(p.status) && Number.isFinite(ev.ts) ? { completedAt: ev.ts } : {}),
               subagentRollup: this.pendingSubagentRollups.get(p.toolCallId),

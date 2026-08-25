@@ -15,6 +15,7 @@ import { EventTimeline } from "./EventTimeline.js";
 const LIFECYCLE_LABELS: Record<SubagentLifecycle, string> = {
   starting: "Starting",
   running: "Running",
+  waiting: "Waiting",
   completed: "Completed",
   failed: "Failed",
   interrupted: "Interrupted",
@@ -26,7 +27,7 @@ function elapsed(descriptor: SubagentDescriptor, now: number): string {
   if (descriptor.directUsage?.durationMs != null) return formatDuration(descriptor.directUsage.durationMs);
   if (descriptor.startedAt == null) return "";
   const end = descriptor.completedAt ??
-    (["starting", "running"].includes(descriptor.lifecycle) ? now : descriptor.lastActivityAt);
+    (["starting", "running", "waiting"].includes(descriptor.lifecycle) ? now : descriptor.lastActivityAt);
   return end == null ? "" : formatDuration(Math.max(0, end - descriptor.startedAt));
 }
 
@@ -41,7 +42,7 @@ export function subagentEmptyMessage(
   if (earlierActivityUnloaded) {
     return "Earlier activity in this session is not loaded, so subagents from those turns are not listed. Load earlier activity to include them.";
   }
-  if (session.driver === "codex" || session.driver === "codex-app-server") {
+  if (session.driver === "codex") {
     return runnerOnline && isTimelineSessionActive(session.status)
       ? "Codex does not currently expose live subagent identity or parent linkage, so Wollipog cannot show independently selectable live output."
       : "Recorded Codex transcripts retain subagent completion summaries in the parent activity. Independently selectable output requires structured parent linkage.";
@@ -54,7 +55,7 @@ export function subagentOutputLabel(
   runnerOnline: boolean,
 ): "Current Activity" | "Recorded Activity" | "Subagent Activity" {
   if (descriptor.availability === "recorded") return "Recorded Activity";
-  return runnerOnline && (descriptor.lifecycle === "starting" || descriptor.lifecycle === "running")
+  return runnerOnline && ["starting", "running", "waiting"].includes(descriptor.lifecycle)
     ? "Current Activity"
     : "Subagent Activity";
 }
@@ -109,7 +110,7 @@ export function SubagentsPanel({
   const labelId = `subagents-detail-${useId().replace(/:/g, "")}`;
   const metaId = `${labelId}-meta`;
   const clockEnabled = descriptors.some((descriptor) =>
-    descriptor.lifecycle === "starting" || descriptor.lifecycle === "running");
+    ["starting", "running", "waiting"].includes(descriptor.lifecycle));
   const now = useTimelineClock(clockEnabled);
 
   useEffect(() => {
@@ -230,7 +231,7 @@ export function SubagentsPanel({
                 items={output}
                 scrollRef={outputScrollRef}
                 historyKey={`${session.id}:${session.eventEpoch ?? 0}:${selected.id}`}
-                sessionActive={selected.lifecycle === "starting" || selected.lifecycle === "running"}
+                sessionActive={["starting", "running", "waiting"].includes(selected.lifecycle)}
                 ariaLabel="Subagent Activity"
                 onOpenSubagent={openNestedSubagent}
               />

@@ -258,7 +258,11 @@
 //     older deployments serve web bundles that both default the experiment ON and cannot
 //     distinguish a legacy stored opt-in, so unconditional advertisement to them would surface
 //     the feature to users who never chose it.
-export const PROTOCOL_VERSION = 91;
+// 92: authoritative cross-harness subagent lifecycle. Tool events may carry a provider-observed
+//     subagentLifecycle independent of the foreground session lifecycle, and command output can be
+//     attributed to its spawning agent. Pre-v92 runners omit both fields; dashboards retain the
+//     existing conservative session/tool inference and flat command-output presentation.
+export const PROTOCOL_VERSION = 92;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
@@ -2217,6 +2221,18 @@ export function validatePromptImageInputs(
 
 /* ---------------------------- Session events ------------------------------ */
 
+/** Provider-observed subagent lifecycle. Unlike a generic tool status, this may remain active
+ * after the foreground parent turn becomes idle. Consumers must not synthesize it when the
+ * provider exposes only an unstructured task summary. */
+export type AuthoritativeSubagentLifecycle =
+  | "starting"
+  | "running"
+  | "waiting"
+  | "completed"
+  | "failed"
+  | "interrupted"
+  | "unreachable";
+
 /**
  * Normalized streaming event taxonomy (brief-aligned). The runner maps ACP
  * `session/update` notifications onto these; the control plane assigns id/seq/ts.
@@ -2266,6 +2282,8 @@ export type SessionEventPayload =
       // Set (v26+) when this call was made by a subagent — the id of the spawning Task tool
       // call. The UI nests it under that Task block; absent ⇒ a top-level call.
       parentToolUseId?: string;
+      /** Provider-observed lifecycle for an agent-spawning tool (v92+). */
+      subagentLifecycle?: AuthoritativeSubagentLifecycle;
     }
   | {
       kind: "tool_call_update";
@@ -2275,9 +2293,11 @@ export type SessionEventPayload =
       text?: string;
       textRefs?: EventPayloadReference[];
       parentToolUseId?: string;
+      /** Provider-observed lifecycle for an agent-spawning tool (v92+). */
+      subagentLifecycle?: AuthoritativeSubagentLifecycle;
     }
   | { kind: "plan"; entries: PlanEntry[]; parentToolUseId?: string }
-  | { kind: "command_output"; text: string; textRefs?: EventPayloadReference[] }
+  | { kind: "command_output"; text: string; textRefs?: EventPayloadReference[]; parentToolUseId?: string }
   | { kind: "file_edit"; path: string; diff?: string; diffRefs?: EventPayloadReference[]; parentToolUseId?: string }
   | {
       kind: "stderr";
