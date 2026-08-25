@@ -173,6 +173,7 @@ for (const viewport of [
       const badges = [...element.querySelectorAll(
         ".session-header-statuses > .status-badge, " +
         ".session-header-statuses .session-status-indicators > .status-badge, " +
+        ".session-header-statuses .change-status-indicators > .status-badge, " +
         ".session-header-statuses > .bgwork-indicator",
       )].map(rect);
       return {
@@ -207,6 +208,7 @@ for (const viewport of [
     expect(metrics.hasHorizontalOverflow).toBe(false);
     expect(metrics.paddingRight).toBeGreaterThanOrEqual(12);
     expect(metrics.clippingRight - metrics.moreActions.right).toBeGreaterThanOrEqual(11.5);
+    expect(metrics.badges.length).toBeGreaterThanOrEqual(3);
     const center = (box: { y: number; height: number }) => box.y + box.height / 2;
     expect(Math.abs(center(metrics.back) - center(metrics.crumbs))).toBeLessThanOrEqual(1);
     expect(Math.abs(center(metrics.actions) - center(metrics.crumbs))).toBeLessThanOrEqual(1);

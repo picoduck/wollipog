@@ -21,7 +21,7 @@ Session status is multidimensional. A workflow column is organization only; it n
 | Attention | `status=input_required` without a pending-action kind | **Input Required** | Neutral mixed-version fallback; the concrete action is unavailable. |
 | Attention | Explicit review-request evidence (reserved; no current producer) | **Review Requested** | Reserved for an authoritative review request. Workflow-column placement is not evidence. |
 | Changes | Completed Git read with a known base and no working-tree or base-relative changes | **No Changes** | Git confirmed an empty change set. |
-| Changes | Completed Git read with working-tree changes, or commits ahead without a confirmed base-plus-open-pull-request pairing | **Changes Present** | Git confirmed a real change set at the latest eligible quiescent boundary. |
+| Changes | Completed Git read with working-tree changes or commits ahead, without a confirmed base-plus-open-pull-request pairing | **Changes Present** | Git confirmed a real change set at the latest eligible quiescent boundary. |
 | Changes | Confirmed commits ahead of base with an open pull request and a clean working tree | **Ready for Review** | The committed base-relative change set is reviewable. |
 | Changes | Confirmed commits ahead of base with an open pull request and working-tree changes | **Ready for Review** + **Uncommitted Changes** | The committed change set is reviewable, while additional local work remains outside the pull request. Neither indicator replaces the other. |
 | Changes | No completed Git read, unavailable repository, or stale/missing evidence | No badge | Never infer **Changes Present** or **Ready for Review** from lifecycle or Board column. |
