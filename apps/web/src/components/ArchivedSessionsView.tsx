@@ -4,6 +4,7 @@ import { useApi } from "../api-context.js";
 import {
   archiveSessionMetadata,
   canonicalLifecycleLabel,
+  filterArchiveSessions,
   mergeArchiveSessionCatalog,
   SESSION_LIFECYCLE_STATES,
   type ArchiveBrowserFilters,
@@ -57,14 +58,23 @@ function plainSnippet(snippet: string | undefined): string | null {
   return snippet ? snippet.replace(/[⟪⟫]/g, "") : null;
 }
 
-function structurallyMatches(
+function locallyMatches(
   session: SessionView,
-  filters: Pick<ArchiveBrowserFilters, "archive" | "lifecycle">,
+  filters: ArchiveBrowserViewFilters,
+  locationNames: ReadonlyMap<string, string>,
+  transcriptSessionIds: ReadonlySet<string>,
 ): boolean {
-  const pendingArchive = session.archiveStatus === "stop_pending" || session.archiveStatus === "stop_failed";
-  const archiveMatches = filters.archive === "all" ||
-    (filters.archive === "archived" ? session.archived || pendingArchive : !session.archived && !pendingArchive);
-  return archiveMatches && (filters.lifecycle === "all" || session.status === filters.lifecycle);
+  return filterArchiveSessions({
+    sessions: [session],
+    filters: {
+      ...filters,
+      project: filters.project ?? "all",
+      location: filters.location ?? "all",
+      agent: filters.agent ?? "all",
+    },
+    locationNames,
+    transcriptSessionIds,
+  }).length === 1;
 }
 
 export function ArchivedSessionsView() {
@@ -75,14 +85,18 @@ export function ArchivedSessionsView() {
   const liveSessions = useStoreSelector((state) => state.sessions);
   const projects = useStoreSelector((state) => state.projects);
   const conn = useStoreSelector((state) => state.conn);
+  const refreshCatalogRef = useRef<() => Promise<void>>(async () => {});
+  const liveRevalidationTimerRef = useRef<number | null>(null);
+  const revalidatedLiveVersionsRef = useRef(new Map<string, number>());
   const stopFailureRecoverySupported = useStoreSelector((state) => state.stopFailureRecoverySupported);
-  const previousConnRef = useRef(conn);
   const deletedSessionIdsRef = useRef(new Set<string>());
   const liveSessionsRef = useRef(liveSessions);
   const requestSequenceRef = useRef(0);
   liveSessionsRef.current = liveSessions;
 
   const [catalog, setCatalog] = useState(() => new Map<string, SessionView>());
+  const connectionLostRef = useRef(false);
+  const revalidateAfterLoadRef = useRef(false);
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
   const [queryInput, setQueryInput] = useState("");
   const [page, setPage] = useState(1);
@@ -97,7 +111,11 @@ export function ArchivedSessionsView() {
   const locationNames = useMemo(() => new Map(
     [...projects.values()].flatMap((project) => project.locations.map((location) => [location.id, location.name] as const)),
   ), [projects]);
+  const locationNamesRef = useRef(locationNames);
+  locationNamesRef.current = locationNames;
 
+  const catalogRef = useRef(catalog);
+  catalogRef.current = catalog;
   const refreshCatalog = useCallback(async () => {
     const requestSequence = ++requestSequenceRef.current;
     setLoading(true);
@@ -111,11 +129,18 @@ export function ArchivedSessionsView() {
         lifecycle: filters.lifecycle,
         q: filters.query.trim() || undefined,
       });
-      const next = mergeArchiveSessionCatalog(
-        new Map(response.sessions.map((session) => [session.id, session])),
-        [...liveSessionsRef.current.values()].filter((session) =>
-          response.sessions.some((row) => row.id === session.id)),
-      );
+      const responseSessions = new Map(response.sessions.map((session) => [session.id, session]));
+      const next = new Map(responseSessions);
+      const transcriptSessionIds = new Set(Object.keys(response.snippets));
+      for (const session of liveSessionsRef.current.values()) {
+        const responseSession = responseSessions.get(session.id);
+        if (responseSession === undefined || session.updatedAt <= responseSession.updatedAt) continue;
+        if (locallyMatches(session, filters, locationNamesRef.current, transcriptSessionIds)) {
+          next.set(session.id, session);
+        } else {
+          next.delete(session.id);
+        }
+      }
       for (const sessionId of deletedSessionIdsRef.current) {
         next.delete(sessionId);
       }
@@ -133,6 +158,15 @@ export function ArchivedSessionsView() {
       if (requestSequence === requestSequenceRef.current) setLoading(false);
     }
   }, [api, cursors, filters, page]);
+  refreshCatalogRef.current = refreshCatalog;
+
+  const scheduleLiveRevalidation = useCallback(() => {
+    if (liveRevalidationTimerRef.current !== null) return;
+    liveRevalidationTimerRef.current = window.setTimeout(() => {
+      liveRevalidationTimerRef.current = null;
+      void refreshCatalogRef.current();
+    }, 50);
+  }, []);
 
   useEffect(() => { void refreshCatalog(); }, [refreshCatalog]);
 
@@ -149,16 +183,55 @@ export function ArchivedSessionsView() {
   // Update rows already present in this bounded page. New rows are incorporated by the visibility
   // and reconnect reconciliation below so websocket arrival order cannot alter cursor membership.
   useEffect(() => {
-    setCatalog((current) => {
-      const next = mergeArchiveSessionCatalog(current,
-        [...liveSessions.values()].filter((session) => current.has(session.id)));
-      for (const sessionId of deletedSessionIdsRef.current) next.delete(sessionId);
-      for (const [sessionId, session] of next) {
-        if (!structurallyMatches(session, filters)) next.delete(sessionId);
-      }
-      return next;
+    const currentCatalog = catalogRef.current;
+    const pageUpserts = [...liveSessions.values()].filter((session) => {
+      const catalogSession = currentCatalog.get(session.id);
+      return catalogSession !== undefined && session.updatedAt > catalogSession.updatedAt;
     });
-  }, [filters.archive, filters.lifecycle, liveSessions]);
+    const transcriptSessionIds = new Set(transcriptHits.keys());
+    let needsRevalidation = false;
+    for (const session of pageUpserts) {
+      if (locallyMatches(session, filters, locationNames, transcriptSessionIds)) continue;
+      if (revalidatedLiveVersionsRef.current.get(session.id) === session.updatedAt) continue;
+      revalidatedLiveVersionsRef.current.set(session.id, session.updatedAt);
+      needsRevalidation = true;
+    }
+    setCatalog((current) => {
+      const next = new Map(current);
+      let changed = false;
+      for (const session of pageUpserts) {
+        if (!locallyMatches(session, filters, locationNames, transcriptSessionIds)) {
+          changed = next.delete(session.id) || changed;
+        } else if (next.get(session.id) !== session) {
+          next.set(session.id, session);
+          changed = true;
+        }
+      }
+      for (const sessionId of deletedSessionIdsRef.current) {
+        changed = next.delete(sessionId) || changed;
+      }
+      return changed ? next : current;
+    });
+    if (pageUpserts.length > 0) {
+      setPageMetadata((current) => {
+        const next = { ...current };
+        for (const session of pageUpserts) {
+          if (locallyMatches(session, filters, locationNames, transcriptSessionIds)) {
+            next[session.id] = archiveSessionMetadata(session, locationNames);
+          }
+        }
+        return next;
+      });
+    }
+    if (needsRevalidation) scheduleLiveRevalidation();
+  }, [filters, liveSessions, locationNames, scheduleLiveRevalidation, transcriptHits]);
+
+  useEffect(() => () => {
+    if (liveRevalidationTimerRef.current !== null) {
+      window.clearTimeout(liveRevalidationTimerRef.current);
+      liveRevalidationTimerRef.current = null;
+    }
+  }, []);
 
   // Deletions of rows that have not emitted an upsert on this socket cannot be identified by the
   // live snapshot (which omits archives). Revalidate when a client returns to the tab or reconnects.
@@ -170,9 +243,22 @@ export function ArchivedSessionsView() {
     return () => document.removeEventListener("visibilitychange", revalidate);
   }, [refreshCatalog]);
   useEffect(() => {
-    const previous = previousConnRef.current;
-    previousConnRef.current = conn;
-    if (previous !== "online" && conn === "online" && !loading) void refreshCatalog();
+    if (conn === "offline" || conn === "unauthorized") {
+      connectionLostRef.current = true;
+      return;
+    }
+    if (conn !== "online" || !connectionLostRef.current) return;
+    connectionLostRef.current = false;
+    if (loading) revalidateAfterLoadRef.current = true;
+    else {
+      revalidateAfterLoadRef.current = false;
+      void refreshCatalog();
+    }
+  }, [conn, loading, refreshCatalog]);
+  useEffect(() => {
+    if (loading || conn !== "online" || !revalidateAfterLoadRef.current) return;
+    revalidateAfterLoadRef.current = false;
+    void refreshCatalog();
   }, [conn, loading, refreshCatalog]);
 
   const pageSessions = useMemo(() => [...catalog.values()], [catalog]);
@@ -196,7 +282,9 @@ export function ArchivedSessionsView() {
   const updateSession = (session: SessionView) => {
     setCatalog((current) => {
       const next = mergeArchiveSessionCatalog(current, [session]);
-      if (!structurallyMatches(session, filters)) next.delete(session.id);
+      if (!locallyMatches(session, filters, locationNames, new Set(transcriptHits.keys()))) {
+        next.delete(session.id);
+      }
       return next;
     });
     loadSession(session);
@@ -206,7 +294,11 @@ export function ArchivedSessionsView() {
     setBusy(session.id, true);
     try {
       updateSession(await api.setArchived(session.id, false));
-      showUndo("Session restored.", async () => updateSession(await api.setArchived(session.id, true)));
+      showUndo("Session restored.", async () => {
+        const restored = await api.setArchived(session.id, true);
+        loadSession(restored);
+        await refreshCatalogRef.current();
+      });
     } catch (cause) {
       showToast(`Could not unarchive session: ${(cause as Error).message}`, { tone: "error" });
     } finally {
