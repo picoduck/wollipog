@@ -34,6 +34,12 @@ Check history with `git log -1 --format='%h %ad' -- <test-file>` and, when the t
   finding is a bug in the implementation.
 - Report a resource-contention failure as environmental only when you can show it — for example a
   port already bound by another process on this machine.
+- A reproduced failure is exempt from the shared recent-work exclusion. That rule guards against
+  inferring abandonment from code age; a live nondeterministic failure on the default branch is
+  direct evidence, not an inference, and suppressing it for a week because its lines are young
+  defeats this job's purpose. (The first run faced exactly this and overrode the rule with the
+  same reasoning; this codifies it.) State each finding's line age so the reader can weigh it,
+  and still skip findings whose lines are under an OPEN pull request — those belong to the PR.
 
 ## Report
 
