@@ -21,8 +21,9 @@ Session status is multidimensional. A workflow column is organization only; it n
 | Attention | `status=input_required` without a pending-action kind | **Input Required** | Neutral mixed-version fallback; the concrete action is unavailable. |
 | Attention | Explicit review-request evidence (reserved; no current producer) | **Review Requested** | Reserved for an authoritative review request. Workflow-column placement is not evidence. |
 | Changes | Completed Git read with a known base and no working-tree or base-relative changes | **No Changes** | Git confirmed an empty change set. |
-| Changes | Completed Git read with working-tree changes or commits ahead of base | **Changes Present** | Git confirmed a real change set at the latest eligible quiescent boundary. |
-| Changes | Confirmed commits ahead of base with an open pull request | **Ready for Review** | The current defensible review-readiness signal. |
+| Changes | Completed Git read with working-tree changes or commits ahead, without a confirmed base-plus-open-pull-request pairing | **Changes Present** | Git confirmed a real change set at the latest eligible quiescent boundary. |
+| Changes | Confirmed commits ahead of base with an open pull request and a clean working tree | **Ready for Review** | The committed base-relative change set is reviewable. |
+| Changes | Confirmed commits ahead of base with an open pull request and working-tree changes | **Ready for Review** + **Uncommitted Changes** | The committed change set is reviewable, while additional local work remains outside the pull request. Neither indicator replaces the other. |
 | Changes | No completed Git read, unavailable repository, or stale/missing evidence | No badge | Never infer **Changes Present** or **Ready for Review** from lifecycle or Board column. |
 | Workflow | `column` | Board column title only | Filing and organization; it does not alter any status dimension. |
 | Health | Activity watchdog exceeds ten minutes | **Stalled** | A derived exceptional condition shown alongside lifecycle and attention. |
@@ -37,6 +38,7 @@ Session status is multidimensional. A workflow column is organization only; it n
 - Show **Running** only for `status=running`. Counts labeled **Running** use that same predicate; **Queued** and **Starting** have separate counts.
 - Show lifecycle and attention together when both apply. Do not replace **Running**, **Awaiting Prompt**, or another lifecycle fact with a workflow-column interpretation.
 - Show change state only after a successful Git observation, and suppress retained observations while a turn is queued, starting, running, or awaiting input. A Review-column session with no observation has no change badge.
+- Review readiness and uncommitted work coexist. Keep **Ready for Review** for the confirmed committed change set and add **Uncommitted Changes** for working-tree changes; never imply that those local changes are included in the pull request.
 - Keep compact visible labels and accessible names on the same Title Case terminology. Descriptions and notifications use sentence case.
 - Unknown lifecycle values use **Status Unavailable**. An undifferentiated legacy input state uses **Input Required**. Missing Git or background fields produce no affirmative claim.
 - Refreshes, reconnects, and session transitions replace the relevant dimension independently; they must not synthesize a change in another dimension.

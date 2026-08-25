@@ -45,6 +45,7 @@ import "../styles.css";
 
 const FIXTURE_QUERY = new URLSearchParams(window.location.search);
 const SCENARIO = FIXTURE_QUERY.get("scenario");
+const REVIEW_READY = FIXTURE_QUERY.get("reviewReady") === "1";
 const HISTORY_PAGE_DELAY_MS = Number(FIXTURE_QUERY.get("historyDelay") ?? 25);
 const STORAGE_KEY = `wollipog.e2e.project-inbox-model${SCENARIO ? `.${SCENARIO}` : ""}`;
 
@@ -197,7 +198,7 @@ const defaultGitStatus = (id: string): GitStatusInfo => ({
   branch: id === "session-no-project" ? "HEAD" : id === "session-alpha" ? longGitBranch : "main",
   files: [],
   hasChanges: id === "session-alpha",
-  ahead: 0,
+  ahead: id === "session-alpha" && REVIEW_READY ? 2 : 0,
   remoteUrl: "https://github.com/example/wollipog.git",
   headSha: id === "session-no-project" ? "bbbbbbbbbbbb" : id === "session-alpha" ? "aaaaaaaaaaaa" : "cccccccccccc",
   detached: id === "session-no-project",

@@ -205,13 +205,23 @@ export function SessionStatusIndicators({ session, disconnected = false }: {
 
 export function ChangeStatusBadge({ change }: { change: SessionChangeStatus | null }) {
   if (!change) return null;
-  const className = change.kind === "ready_for_review"
-    ? "st-done"
-    : change.kind === "changes_present" ? "st-idle" : "st-stopped";
+  const indicators = change.kind === "ready_for_review" && change.supplement
+    ? [change, change.supplement]
+    : [change];
   return (
-    <span className={"status-badge " + className} title={change.description} aria-label={change.label}>
-      <span className="status-dot2" aria-hidden="true" />
-      {change.label}
+    <span className="change-status-indicators">
+      {indicators.map((indicator) => {
+        const className = indicator.kind === "ready_for_review"
+          ? "st-done"
+          : indicator.kind === "no_changes" ? "st-stopped" : "st-idle";
+        return (
+          <span key={indicator.kind} className={"status-badge " + className}
+            title={indicator.description} aria-label={indicator.label}>
+            <span className="status-dot2" aria-hidden="true" />
+            {indicator.label}
+          </span>
+        );
+      })}
     </span>
   );
 }

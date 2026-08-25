@@ -1,8 +1,9 @@
 import { expect, test, type Page } from "@playwright/test";
 import { join } from "node:path";
 
-async function openSession(page: Page, scenario = "preview-follow") {
-  await page.goto(`/command-inbox-projects-e2e.html?scenario=${scenario}`);
+async function openSession(page: Page, scenario = "preview-follow", params: Record<string, string> = {}) {
+  const query = new URLSearchParams({ scenario, ...params });
+  await page.goto(`/command-inbox-projects-e2e.html?${query.toString()}`);
   await page.evaluate(() => localStorage.clear());
   await page.reload();
   await page.getByRole("button", { name: /Alpha Session/ }).click();
@@ -149,7 +150,7 @@ for (const viewport of [
 ]) {
   test(`the session bar gives simultaneous statuses a second row on a ${viewport.name}`, async ({ page }) => {
     await page.setViewportSize({ width: viewport.width, height: 800 });
-    await openSession(page, "git-visibility");
+    await openSession(page, "git-visibility", { reviewReady: "1" });
     await page.evaluate(() => {
       window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
         backgroundWorkState: "running",
@@ -159,7 +160,8 @@ for (const viewport of [
 
     const header = page.locator(".detail-head");
     await expect(header.getByText("Awaiting Prompt", { exact: true })).toBeVisible();
-    await expect(header.getByText("Changes Present", { exact: true })).toBeVisible();
+    await expect(header.getByText("Ready for Review", { exact: true })).toBeVisible();
+    await expect(header.getByText("Uncommitted Changes", { exact: true })).toBeVisible();
     await expect(header.getByRole("img", { name: "Waiting on External Job" })).toBeVisible();
     const metrics = await header.evaluate((element) => {
       const rect = (node: Element) => {
@@ -173,6 +175,7 @@ for (const viewport of [
       const badges = [...element.querySelectorAll(
         ".session-header-statuses > .status-badge, " +
         ".session-header-statuses .session-status-indicators > .status-badge, " +
+        ".session-header-statuses .change-status-indicators > .status-badge, " +
         ".session-header-statuses > .bgwork-indicator",
       )].map(rect);
       return {
@@ -201,12 +204,13 @@ for (const viewport of [
     expect(metrics.moreActions.height).toBeGreaterThanOrEqual(44);
     expect(metrics.title.width).toBeGreaterThanOrEqual(72);
     expect(metrics.statuses.y).toBeGreaterThanOrEqual(metrics.crumbs.bottom);
-    expect(metrics.statuses.x).toBeCloseTo(metrics.crumbs.x, 0);
+    expect(metrics.statuses.x).toBeCloseTo(metrics.back.x, 0);
     expect(metrics.statuses.right).toBeLessThanOrEqual(metrics.headerRight - metrics.paddingRight + 1);
     expect(metrics.headerHeight).toBeLessThanOrEqual(120);
     expect(metrics.hasHorizontalOverflow).toBe(false);
     expect(metrics.paddingRight).toBeGreaterThanOrEqual(12);
     expect(metrics.clippingRight - metrics.moreActions.right).toBeGreaterThanOrEqual(11.5);
+    expect(metrics.badges.length).toBeGreaterThanOrEqual(4);
     const center = (box: { y: number; height: number }) => box.y + box.height / 2;
     expect(Math.abs(center(metrics.back) - center(metrics.crumbs))).toBeLessThanOrEqual(1);
     expect(Math.abs(center(metrics.actions) - center(metrics.crumbs))).toBeLessThanOrEqual(1);
