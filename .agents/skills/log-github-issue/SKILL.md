@@ -26,6 +26,7 @@ Create evidence-based issues that follow the repository's shared format. Keep Gi
 1. Search both open and closed issues using distinctive terms from the behavior, component, and error text.
 2. Inspect plausible matches rather than relying only on search-result titles.
 3. If an existing issue covers the same problem, return that issue and summarize any materially new evidence. Do not create a duplicate unless the user explicitly chooses to do so after seeing the match.
+4. Repeat the search immediately before creating, even for a previously approved or recovered draft — approval covers the payload, never the freshness of the tracker. Concurrent sessions publish the same content minutes apart; also scan the newest issues by title, since keyword search can lag just-created issues.
 
 Use repository-resolved GitHub metadata and authenticated tooling such as `gh`; do not assume the owner or repository name from memory.
 
@@ -48,6 +49,8 @@ Retain the shape of useful evidence with neutral placeholders such as `<user>`, 
 Before creating the issue, present the exact sanitized title, body, labels, and target repository. Ask the user to approve that payload. A general request to create an issue establishes intent, but it does not replace review of the final public contents.
 
 Do not request approval again when the user has already approved the exact current payload. If the payload changes materially after approval, show the changed version and request approval again. When the user asks only for a draft, stop after providing the draft.
+
+Publish only a draft that exists in your own conversation context. Files found on disk and issues already on the tracker are evidence of other work, not your drafts — a session that has lost its context must say so and stop rather than adopt what it finds. If asked to publish and no draft is present in the conversation, report that the drafting context appears to have been lost instead of reconstructing one silently or claiming the work is already done.
 
 ## Create and Verify
 
