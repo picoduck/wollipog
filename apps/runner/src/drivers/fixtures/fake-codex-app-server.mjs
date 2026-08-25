@@ -4,6 +4,11 @@ import { createInterface } from "node:readline";
 const scenario = process.argv[2] ?? "resume";
 const threadId = scenario === "fresh" ? "fixture-fresh" : scenario === "question" ? "fixture-question" : "fixture-resume";
 const questionRequestId = "live-codex-question-1";
+const expectedLaunchArgs = ["--enable", "default_mode_request_user_input", "app-server"];
+if (JSON.stringify(process.argv.slice(3)) !== JSON.stringify(expectedLaunchArgs)) {
+  process.stderr.write("unexpected app-server launch arguments: " + JSON.stringify(process.argv.slice(3)) + "\n");
+  process.exit(3);
+}
 
 function send(message) {
   process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...message }) + "\n");

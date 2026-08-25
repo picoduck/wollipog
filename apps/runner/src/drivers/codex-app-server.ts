@@ -61,6 +61,21 @@ const PERMISSIONS_METHOD = "item/permissions/requestApproval";
 const APPROVAL_METHODS = ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", PERMISSIONS_METHOD];
 const USER_INPUT_METHOD = "item/tool/requestUserInput";
 const MCP_ELICITATION_METHOD = "mcpServer/elicitation/request";
+export const DEFAULT_MODE_QUESTION_FEATURE = "default_mode_request_user_input";
+
+/** Place the global feature override before the subcommand. Codex currently has separate global
+ * and app-server config parsers, and keeping the override global works across both old and new
+ * app-server argument surfaces. */
+export function codexAppServerArgs(baseArgs: string[], enableDefaultModeQuestions = true): string[] {
+  return enableDefaultModeQuestions
+    ? [...baseArgs, "--enable", DEFAULT_MODE_QUESTION_FEATURE, "app-server"]
+    : [...baseArgs, "app-server"];
+}
+
+function defaultModeQuestionFeatureUnsupported(stderr: string): boolean {
+  return /unknown feature flag:\s*default_mode_request_user_input/i.test(stderr) ||
+    /(?:unexpected argument|unrecognized (?:option|argument)).*--enable/is.test(stderr);
+}
 
 /** A parked server->client approval request awaiting the UI's verdict. */
 interface PendingApproval {
@@ -196,6 +211,11 @@ export class CodexAppServerDriver implements Driver {
   private readonly steerClientIds = new Set<string>();
   private promptGeneration = 0;
   private promptBusy = false;
+  /** Provider diagnostics are held until startup succeeds so an expected unsupported-feature
+   * retry does not surface a false session error. */
+  private initializationStderr: string[] | null = null;
+  private initializationExit: { code: number | null } | null = null;
+  private initializing = false;
   private readonly spawn: typeof spawnAgent;
   private readonly kill: typeof killTree;
 
@@ -240,10 +260,25 @@ export class CodexAppServerDriver implements Driver {
     this.config = config;
   }
 
-  async initialize(): Promise<void> {
+  private emitProviderStderr(text: string): void {
+    if (this.initializationStderr) this.initializationStderr.push(text);
+    else this.cb.onStderr(text);
+  }
+
+  private flushInitializationStderr(): void {
+    for (const line of this.initializationStderr ?? []) this.cb.onStderr(line);
+    this.initializationStderr = [];
+  }
+
+  private takeInitializationExit(): { code: number | null } | null {
+    const exit = this.initializationExit;
+    this.initializationExit = null;
+    return exit;
+  }
+  private async startAppServer(enableDefaultModeQuestions: boolean): Promise<void> {
     const child = this.spawn({
       command: this.opts.command,
-      args: [...this.opts.args, "app-server"],
+      args: codexAppServerArgs(this.opts.args, enableDefaultModeQuestions),
       cwd: this.cwd,
       env: this.opts.env,
       context: this.opts.context,
@@ -255,37 +290,85 @@ export class CodexAppServerDriver implements Driver {
       cloudAgentLaunch: true,
     });
     this.child = child;
-    const peer = new JsonRpcPeer(child.stdin, child.stdout, (err) => this.cb.onStderr(`transport: ${err.message}`));
+    const peer = new JsonRpcPeer(child.stdin, child.stdout, (err) => this.emitProviderStderr(`transport: ${err.message}`));
     this.peer = peer;
 
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (t: string) => {
-      if (this.disposed) return;
+      if (this.disposed || this.child !== child) return;
       const s = String(t).trim();
       if (s && !/DeprecationWarning|trace-deprecation/.test(s)) {
         if (isProviderAuthenticationFailure(s)) this.signalAuthenticationFailure();
-        else this.cb.onStderr(s);
+        else this.emitProviderStderr(s);
       }
     });
     // JSON-RPC stdout may still contain a response or final notification when
     // `exit` fires. Tear the peer down only at the post-stdio `close` boundary.
     child.on("close", (code) => {
       peer.dispose("codex app-server exited");
+      // A rejected feature probe can be replaced before its delayed close event arrives.
+      // Only the current launch may tear down session state or report an exit.
+      if (this.peer !== peer && this.child !== child) return;
       // The persistent server is gone: drop our handles so a later prompt() fails fast
       // instead of parking a turn/start request that never settles.
       if (this.peer === peer) this.peer = null;
-      this.child = null;
+      if (this.child === child) this.child = null;
       this.declinePendingRequests();
       this.closeTurnUsage();
       this.settleTurn(this.cancelled ? "cancelled" : this.turnResolve ? "refusal" : this.turnStop);
       // Tell SessionManager the process died (it removes the session and marks it failed),
       // unless this exit was our own dispose()/restart.
-      if (!this.disposed) this.cb.onExit(code);
+      if (!this.disposed) {
+        if (this.initializing) this.initializationExit = { code };
+        else this.cb.onExit(code);
+      }
     });
 
     this.registerHandlers(peer);
     await peer.request("initialize", { clientInfo: { name: "wollipog", version: "0.4.0" } });
     peer.notify("initialized", {});
+  }
+
+  async initialize(): Promise<void> {
+    this.initializing = true;
+    this.initializationStderr = [];
+    this.initializationExit = null;
+    try {
+      try {
+        await this.startAppServer(true);
+      } catch (error) {
+        const startupDiagnostics = this.initializationStderr.join("\n");
+        if (this.disposed || !defaultModeQuestionFeatureUnsupported(startupDiagnostics)) {
+          this.flushInitializationStderr();
+          throw error;
+        }
+        // Unsupported Codex versions have already exited after rejecting the flag. Their close
+        // callback normally clears the exact child/peer handles. A transport error can reject the
+        // initialize request before close, so explicitly stop that probe before replacing it; its
+        // identity-guarded close callback cannot tear down the fallback launch.
+        const rejectedChild = this.child;
+        this.child = null;
+        this.peer = null;
+        if (rejectedChild) this.kill(rejectedChild);
+        this.initializationStderr = [];
+        this.initializationExit = null;
+        this.cb.onStderr(
+          "Codex does not support " + DEFAULT_MODE_QUESTION_FEATURE +
+            "; continuing without Default-mode structured questions.",
+        );
+        await this.startAppServer(false);
+      }
+      this.flushInitializationStderr();
+    } catch (error) {
+      this.flushInitializationStderr();
+      throw error;
+    } finally {
+      const initializationExit = this.takeInitializationExit();
+      this.initializationStderr = null;
+      this.initializationExit = null;
+      this.initializing = false;
+      if (initializationExit && !this.disposed) this.cb.onExit(initializationExit.code);
+    }
   }
 
   async newSession(cwd: string): Promise<string> {
