@@ -715,7 +715,3 @@ export function updateHookCircuitState(
     rmSync(lock, { force: true });
   }
 }
-
-export function hookFileMode(file: string): number {
-  return statSync(file).mode & 0o777;
-}
