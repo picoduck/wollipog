@@ -1,9 +1,8 @@
 # Push notifications (Web Push / push-to-wake)
 
 > Shipped 2026-07-10 (the second half of the mobile arc; the responsive/installable PWA is the
-> first — see docs/sota-meta-harness-gap-review.md §2.7). Design follows
-> docs/mobile-access-research.md §5: live socket while foregrounded, push-to-wake otherwise;
-> Web Push first because it needs no app and no relay.
+> first). Design: live socket while foregrounded, push-to-wake otherwise; Web Push first because
+> it needs no app and no relay.
 
 The control plane now notifies subscribed browsers **out-of-band** — with the tab closed, the
 phone locked, or the PWA backgrounded — at the attention moments:
