@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { adoptLegacyCheckpointRefs, anchorForkRef, anchorTurnRef, captureWorktreeTree, clearGhPrCacheForTests, computeDiffHash, deleteTurnRef, deleteTurnRefs, gitDiff, gitStatus, gitSummary, readTurnRef, restoreWorktreeToTree, runPodReconcile, synchronizeCheckpointRefs } from "./git-ops.js";
@@ -362,6 +362,50 @@ test("checkpoints (real git): anchor, read, restore (incl. deleting post-checkpo
     // ...and cleanup drops every ref for the session.
     await deleteTurnRefs(repo, "s_test");
     assert.equal(await readTurnRef(repo, "s_test", 1), null);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("checkpoints (real git): capture and restore do not renormalize an untouched tracked file", { skip: !GIT }, async () => {
+  const repo = mkdtempSync(join(tmpdir(), "wollipog-ckpt-filter-"));
+  try {
+    initRepo(repo);
+    const trackedPath = join(repo, "tracked.txt");
+    writeFileSync(trackedPath, "legacy content\n");
+    git(repo, ["add", "tracked.txt"]);
+    git(repo, ["commit", "-q", "-m", "baseline before filter"]);
+    const nonRacyTime = new Date(1_600_000_000_000);
+    utimesSync(trackedPath, nonRacyTime, nonRacyTime);
+    git(repo, ["update-index", "--refresh"]);
+
+    const baselineBlob = git(repo, ["rev-parse", "HEAD:tracked.txt"]).trim();
+    git(repo, ["config", "filter.snapshot.clean",
+      `node -e "let s='';process.stdin.setEncoding('utf8');process.stdin.on('data',d=>s+=d);process.stdin.on('end',()=>process.stdout.write(s.replaceAll('legacy','current')))"`,
+    ]);
+    writeFileSync(join(repo, ".gitattributes"), "tracked.txt filter=snapshot\n");
+
+    const currentFilterBlob = git(repo, ["hash-object", "--path=tracked.txt", "tracked.txt"]).trim();
+    assert.notEqual(currentFilterBlob, baselineBlob, "the current clean filter would replace the indexed blob");
+    assert.equal(readFileSync(trackedPath, "utf8"), "legacy content\n", "the tracked worktree file is untouched");
+
+    const indexBefore = readFileSync(join(repo, ".git", "index"));
+    const statusBefore = git(repo, ["--no-optional-locks", "status", "--porcelain"]);
+    const tree = await captureWorktreeTree(repo);
+
+    assert.equal(git(repo, ["rev-parse", `${tree}:tracked.txt`]).trim(), baselineBlob,
+      "capture preserves the existing blob instead of renormalizing an untouched path");
+    assert.match(git(repo, ["rev-parse", `${tree}:.gitattributes`]).trim(), /^[0-9a-f]{40,64}$/,
+      "the complete snapshot still includes the untracked attributes file");
+    assert.deepEqual(readFileSync(join(repo, ".git", "index")), indexBefore,
+      "capture leaves the real index byte-for-byte unchanged");
+    assert.equal(git(repo, ["--no-optional-locks", "status", "--porcelain"]), statusBefore,
+      "capture leaves worktree status unchanged");
+
+    writeFileSync(trackedPath, "mutated after checkpoint\n");
+    await restoreWorktreeToTree(repo, tree);
+    assert.equal(readFileSync(trackedPath, "utf8"), "legacy content\n",
+      "restore writes the checkpoint's original content through the unchanged smudge behavior");
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }

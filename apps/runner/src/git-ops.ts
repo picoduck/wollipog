@@ -11,7 +11,7 @@
 import { execFile } from "node:child_process";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
-import { copyFileSync, openSync, readSync, closeSync, rmSync } from "node:fs";
+import { copyFileSync, openSync, readSync, closeSync, rmSync, statSync, utimesSync } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve, sep } from "node:path";
@@ -335,6 +335,7 @@ export async function captureWorktreeTree(cwd: string): Promise<string> {
   const context = executionContext.getStore() ?? { kind: "native" as const };
   // OUTSIDE the worktree — an in-worktree temp file would itself be snapshotted by add -A.
   const indexFile = context.kind === "wsl" ? `/tmp/wollipog-idx-${randomUUID()}` : join(tmpdir(), `wollipog-idx-${randomUUID()}`);
+  const indexMtimeReference = `${indexFile}.mtime`;
   const opts: GitRunOpts = { env: { GIT_INDEX_FILE: indexFile }, timeoutMs: SNAPSHOT_TIMEOUT_MS };
   try {
     // Seed the temp index from a COPY of the real index when possible: it carries the stat cache
@@ -344,26 +345,72 @@ export async function captureWorktreeTree(cwd: string): Promise<string> {
     // (missing index, unusual layouts) — load-bearing vs an empty seed, which would false-delete
     // every tracked-but-ignored file.
     let seeded = false;
+    let copiedIndexMtime: number | null = null;
+    let copiedIndexMtimeReference = false;
     const gitDir = (await gitSoft(cwd, ["rev-parse", "--absolute-git-dir"])).trim();
     if (gitDir) {
+      const realIndex = context.kind === "wsl" ? `${gitDir}/index` : join(gitDir, "index");
       try {
         if (context.kind === "wsl") {
-          await runContextCommand(context, "cp", ["--", `${gitDir}/index`, indexFile], { cwd, timeoutMs: SNAPSHOT_TIMEOUT_MS });
+          try {
+            await runContextCommand(context, "touch", ["-r", realIndex, "--", indexMtimeReference], {
+              cwd,
+              timeoutMs: SNAPSHOT_TIMEOUT_MS,
+            });
+            copiedIndexMtimeReference = true;
+          } catch {
+            /* timestamp correction is best-effort; the copied index is still a complete seed */
+          }
+          await runContextCommand(context, "cp", ["--", realIndex, indexFile], { cwd, timeoutMs: SNAPSHOT_TIMEOUT_MS });
         } else {
-          copyFileSync(join(gitDir, "index"), indexFile);
+          try {
+            const mtimeSeconds = statSync(realIndex).mtimeMs / 1_000;
+            if (Number.isFinite(mtimeSeconds) && mtimeSeconds > 0) {
+              copiedIndexMtime = mtimeSeconds;
+            }
+          } catch {
+            /* timestamp correction is best-effort; the copied index is still a complete seed */
+          }
+          copyFileSync(realIndex, indexFile);
         }
         seeded = true;
       } catch {
-        /* no readable index — fall back to HEAD */
+        // A failed copy can leave a partial destination. Remove it so read-tree starts from a
+        // genuinely absent index and cannot mistake corrupt bytes for a usable fallback seed.
+        if (context.kind === "wsl") {
+          await runContextCommand(context, "rm", ["-f", "--", indexFile], { cwd, timeoutMs: SNAPSHOT_TIMEOUT_MS })
+            .catch(() => {});
+        } else {
+          try {
+            rmSync(indexFile, { force: true });
+          } catch { /* read-tree below will fail closed if the partial index remains */ }
+        }
       }
     }
     if (!seeded) await git(cwd, ["read-tree", "HEAD"], opts);
-    // A copied index can trust a same-size rewrite as clean when its mtime lands in the cached
-    // timestamp tick. First capture deletions/untracked, then best-effort force the remaining
-    // tracked entries through the clean/hash path in the TEMP index. If that corrective pass hits
-    // a transiently unreadable file, retain the complete add -A snapshot instead of losing it.
+    // A copied index gets a new filesystem timestamp, so Git can trust a same-size rewrite as clean
+    // even when it was racy against the REAL index. First capture a complete tree, then restore the
+    // copied index's original timestamp and repeat the normal tracked-file update. This makes Git
+    // re-check only entries that were already racily clean. Those ambiguous entries still pass
+    // through current clean filters, while non-racy untouched entries retain their indexed blobs;
+    // unlike `--renormalize`, this does not re-filter every tracked entry. Both timestamp restoration
+    // and the corrective pass are best-effort: add -A remains a usable complete snapshot if either fails.
     await git(cwd, ["add", "-A"], opts); // stages into the TEMP index only; .gitignore respected
-    await gitSoft(cwd, ["add", "--renormalize", "-u"], opts);
+    if (seeded && (copiedIndexMtime !== null || copiedIndexMtimeReference)) {
+      if (context.kind === "wsl") {
+        await runContextCommand(context, "touch", ["-r", indexMtimeReference, "--", indexFile], {
+          cwd,
+          timeoutMs: SNAPSHOT_TIMEOUT_MS,
+        }).catch(() => {});
+      } else {
+        try {
+          utimesSync(indexFile, copiedIndexMtime as number, copiedIndexMtime as number);
+        } catch {
+          /* timestamp restoration is best-effort; add -A already produced a complete snapshot */
+        }
+      }
+    }
+    await gitSoft(cwd, ["add", "-u"], opts);
     if (context.kind === "wsl") {
       await runContextCommand(context, "rm", ["-f", "--", `${indexFile}.lock`], { cwd, timeoutMs: SNAPSHOT_TIMEOUT_MS })
         .catch(() => {});
@@ -377,7 +424,7 @@ export async function captureWorktreeTree(cwd: string): Promise<string> {
     return (await git(cwd, ["write-tree"], opts)).trim();
   } finally {
     if (context.kind === "wsl") {
-      await runContextCommand(context, "rm", ["-f", "--", indexFile, `${indexFile}.lock`], {
+      await runContextCommand(context, "rm", ["-f", "--", indexFile, `${indexFile}.lock`, indexMtimeReference], {
         cwd, timeoutMs: SNAPSHOT_TIMEOUT_MS,
       }).catch(() => {});
     } else {
