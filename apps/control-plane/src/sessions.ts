@@ -588,6 +588,46 @@ function conductorConfigError(agentId: string | null | undefined, config: Sessio
   return null;
 }
 
+function workflowMemberCapabilityError(
+  agentId: string,
+  config: SessionConfig | undefined,
+  launch: AgentLaunch,
+  orchestrator: boolean,
+): string | null {
+  const effectiveConfig = orchestrator && agentId === CONDUCTOR_AGENT_ID
+    ? { ...config, permissionMode: "default" }
+    : config;
+  const error = capabilityConfigError(effectiveConfig, launch.capabilities);
+  return error ? `${agentId}: ${error}` : null;
+}
+
+/** Resolve the effective workflow members exactly as ordinary dispatch does and reject only
+ * advertised capability conflicts. Unknown definitions, agents, and legacy capability rows remain
+ * subject to the authoritative runtime checks instead of turning admission into a discovery gate. */
+export function workflowRunCapabilityError(
+  db: ControlPlaneDb,
+  req: CreateWorkflowRunRequest,
+): string | null {
+  const definition = db.getWorkflowDefinition(req.workflowId, req.workflowVersion);
+  if (!definition) return null;
+  const logicalAgentIds = [...new Set(definition.nodes
+    .filter((node) => node.kind === "agent")
+    .map((node) => node.agentId!))];
+  const bindings = req.agentBindings ?? {};
+  for (const roleId of logicalAgentIds) {
+    const agentId = Object.hasOwn(bindings, roleId) ? bindings[roleId]! : roleId;
+    const launch = db.getAgentLaunch(req.runnerId, agentId);
+    if (!launch) continue;
+    const error = workflowMemberCapabilityError(agentId, req.config, launch, false);
+    if (error) return error;
+  }
+  if (req.orchestratorAgentId) {
+    const launch = db.getAgentLaunch(req.runnerId, req.orchestratorAgentId);
+    if (launch) return workflowMemberCapabilityError(req.orchestratorAgentId, req.config, launch, true);
+  }
+  return null;
+}
+
 /** Classify exec usage without recording a session/user identifier. Same-context app-server
  * availability means the user explicitly chose Advanced exec; otherwise exec is compatibility. */
 function codexExecFallbackReason(
@@ -800,6 +840,11 @@ export class SessionsService {
     this.ensureBuiltinWorkflows();
     const definition = this.db.getWorkflowDefinition(workflowId, version);
     return definition ? ok(definition) : fail("workflow definition not found", 404);
+  }
+
+  workflowRunCapabilityError(req: CreateWorkflowRunRequest): string | null {
+    this.ensureBuiltinWorkflows();
+    return workflowRunCapabilityError(this.db, req);
   }
 
   createWorkflowDefinition(input: unknown, actor: GovernanceActor = { kind: "human", id: "local" }): ServiceResult<WorkflowDefinition> {
@@ -4790,8 +4835,8 @@ export class SessionsService {
         capabilities: snapshot.spec.capabilities,
       } : this.db.getAgentLaunch(req.runnerId, agentId);
       if (!launch) return fail(`workflow role '${roleId}' is bound to unknown agent '${agentId}'`, 404);
-      const configError = capabilityConfigError(req.config, launch.capabilities);
-      if (configError) return fail(`${agentId}: ${configError}`, 409);
+      const configError = workflowMemberCapabilityError(agentId, req.config, launch, false);
+      if (configError) return fail(configError, 409);
       members.push({ roleId, agentId, launch, orchestrator: false });
     }
     if (req.orchestratorAgentId) {
@@ -4814,11 +4859,8 @@ export class SessionsService {
         capabilities: snapshot.spec.capabilities,
       } : this.db.getAgentLaunch(req.runnerId, req.orchestratorAgentId);
       if (!launch) return fail(`unknown orchestrator agent '${req.orchestratorAgentId}'`, 404);
-      const configError = capabilityConfigError(
-        req.orchestratorAgentId === CONDUCTOR_AGENT_ID ? { ...req.config, permissionMode: "default" } : req.config,
-        launch.capabilities,
-      );
-      if (configError) return fail(`${req.orchestratorAgentId}: ${configError}`, 409);
+      const configError = workflowMemberCapabilityError(req.orchestratorAgentId, req.config, launch, true);
+      if (configError) return fail(configError, 409);
       members.push({ roleId: "__orchestrator__", agentId: req.orchestratorAgentId, launch, orchestrator: true });
     }
 

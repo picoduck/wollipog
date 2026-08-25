@@ -240,25 +240,56 @@ export function validateAutomationSpec(value: unknown): ServiceResult<Automation
   return ok(value as unknown as AutomationSpec);
 }
 
-function automationCapabilityError(db: ControlPlaneDb, spec: AutomationSpec): string | null {
-  if (spec.action.kind !== "create_session") return null;
+function automationCapabilityError(
+  db: ControlPlaneDb,
+  sessions: SessionsService,
+  spec: AutomationSpec,
+): string | null {
+  if (spec.action.kind === "create_session") {
+    const request = spec.action.request;
+    const config = request.config;
+    if (!config) return null;
+    const targets = [
+      { runnerId: request.runnerId, workspaceId: request.workspaceId, agentId: request.agentId },
+      ...(spec.runnerPolicy.kind === "alternate" ? spec.runnerPolicy.targets : []),
+    ];
+    for (const target of targets) {
+      const agentId = target.agentId;
+      if (!agentId) continue; // Shape validation requires this for create-session targets.
+      const agent = db.getRunner(target.runnerId)?.agents.find((candidate) => candidate.id === agentId);
+      if (!agent) continue;
+      const validationConfig = claudeModelConfigForValidation(config, agent.capabilities, agent.driver ?? "acp");
+      const error = capabilityConfigError(validationConfig, agent.capabilities);
+      if (error) {
+        const identity = `${target.runnerId}/${target.workspaceId}/${agentId}`;
+        return `automation target ${JSON.stringify(identity)} cannot honor config: ${error}`;
+      }
+    }
+    return null;
+  }
+  if (spec.action.kind !== "workflow_run") return null;
   const request = spec.action.request;
-  const config = request.config;
-  if (!config) return null;
-  const targets = [
-    { runnerId: request.runnerId, workspaceId: request.workspaceId, agentId: request.agentId },
-    ...(spec.runnerPolicy.kind === "alternate" ? spec.runnerPolicy.targets : []),
-  ];
+  const primary: AutomationRunnerTarget = {
+    runnerId: request.runnerId,
+    workspaceId: request.workspaceId,
+    ...(request.agentBindings ? { agentBindings: request.agentBindings } : {}),
+    ...(request.orchestratorAgentId ? { orchestratorAgentId: request.orchestratorAgentId } : {}),
+  };
+  const targets = spec.runnerPolicy.kind === "alternate"
+    ? [primary, ...spec.runnerPolicy.targets]
+    : [primary];
   for (const target of targets) {
-    const agentId = target.agentId;
-    if (!agentId) continue; // Shape validation requires this for create-session targets.
-    const agent = db.getRunner(target.runnerId)?.agents.find((candidate) => candidate.id === agentId);
-    if (!agent) continue;
-    const validationConfig = claudeModelConfigForValidation(config, agent.capabilities, agent.driver ?? "acp");
-    const error = capabilityConfigError(validationConfig, agent.capabilities);
+    const agentBindings = { ...(request.agentBindings ?? {}), ...(target.agentBindings ?? {}) };
+    const error = sessions.workflowRunCapabilityError({
+      ...request,
+      runnerId: target.runnerId,
+      workspaceId: target.workspaceId,
+      ...(Object.keys(agentBindings).length ? { agentBindings } : {}),
+      ...(target.orchestratorAgentId ? { orchestratorAgentId: target.orchestratorAgentId } : {}),
+    });
     if (error) {
-      const identity = `${target.runnerId}/${target.workspaceId}/${agentId}`;
-      return `automation target ${JSON.stringify(identity)} cannot honor config: ${error}`;
+      const identity = `${target.runnerId}/${target.workspaceId}`;
+      return `automation target ${JSON.stringify(identity)} cannot honor workflow config: ${error}`;
     }
   }
   return null;
@@ -343,7 +374,7 @@ export class AutomationsService {
     const parsed = validateAutomationSpec(input);
     if (!parsed.ok) return fail(parsed.error ?? "automation request is malformed", parsed.status);
     const spec = parsed.data!;
-    const capabilityError = automationCapabilityError(this.db, spec);
+    const capabilityError = automationCapabilityError(this.db, this.sessions, spec);
     if (capabilityError) return fail(capabilityError, 409);
     let nextFireAt: number | null = null;
     try {
@@ -365,7 +396,7 @@ export class AutomationsService {
     if (!parsed.ok) return fail(parsed.error ?? "automation request is malformed", parsed.status);
     const spec = parsed.data!;
     // Always allow disabling so capability drift cannot trap a failing automation in the enabled state.
-    const capabilityError = spec.enabled ? automationCapabilityError(this.db, spec) : null;
+    const capabilityError = spec.enabled ? automationCapabilityError(this.db, this.sessions, spec) : null;
     if (capabilityError) return fail(capabilityError, 409);
     let nextFireAt: number | null = null;
     try {
