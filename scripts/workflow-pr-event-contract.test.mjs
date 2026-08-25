@@ -174,6 +174,11 @@ test("PR workflows keep least-privilege permissions and an always-present requir
   }
 
   const ci = readFileSync(resolve(process.cwd(), WORKFLOWS[0]), "utf8");
+  assert.match(
+    ci,
+    /^    name: Typecheck, Test & Sidecar Bundle$/m,
+    `${WORKFLOWS[0]}: job name is a protected required status context`,
+  );
   assert.doesNotMatch(
     ci,
     /^\s+paths-ignore:/m,
@@ -197,6 +202,39 @@ test("workflow actions use immutable commit pins", () => {
       );
     }
   }
+});
+
+test("CI validates production builds and caches the pinned Playwright browser", () => {
+  const ci = readFileSync(resolve(process.cwd(), WORKFLOWS[0]), "utf8");
+
+  assert.match(
+    ci,
+    /^      - name: Validate Web Production Build\r?\n        run: pnpm --filter @wollipog\/web build$/m,
+    "CI must exercise the web production build",
+  );
+  assert.match(
+    ci,
+    /^      - name: Validate Runner Bundle\r?\n        run: pnpm --filter @wollipog\/runner exec node scripts\/build-binary\.mjs --bundle-only$/m,
+    "CI must exercise the runner esbuild bundle",
+  );
+  assert.match(
+    ci,
+    /^      - name: Resolve Playwright Version\r?\n        id: playwright-version\r?\n        run: \|\r?\n          playwright_version="\$\(pnpm exec playwright --version\)"\r?\n          echo "version=\$\{playwright_version#Version \}" >> "\$GITHUB_OUTPUT"$/m,
+    "the cache key must derive from the installed pinned Playwright version",
+  );
+  assert.match(
+    ci,
+    /^      - name: Cache Playwright Browser\r?\n        id: playwright-cache\r?\n        uses: actions\/cache@[0-9a-f]{40}[^\r\n]*\r?\n        with:\r?\n          path: ~\/\.cache\/ms-playwright\r?\n          key: \$\{\{ runner\.os \}\}-playwright-\$\{\{ steps\.playwright-version\.outputs\.version \}\}$/m,
+    "CI must cache Playwright's browser directory by OS and exact version",
+  );
+  assert.match(
+    ci,
+    /^      - name: Install Playwright Browser\r?\n        if: steps\.playwright-cache\.outputs\.cache-hit != 'true'\r?\n        run: pnpm exec playwright install --with-deps chromium$/m,
+  );
+  assert.match(
+    ci,
+    /^      - name: Install Playwright System Dependencies\r?\n        if: steps\.playwright-cache\.outputs\.cache-hit == 'true'\r?\n        run: pnpm exec playwright install-deps chromium$/m,
+  );
 });
 
 test("PR workflow expressions satisfy the complete event matrix", () => {
