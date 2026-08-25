@@ -33,6 +33,14 @@ function nextTask(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
+async function waitForCondition(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) assert.fail(`condition was not met within ${timeoutMs}ms`);
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 function childItemId(threadId: string, itemId: string): string {
   return `codex-child:${JSON.stringify([threadId, itemId])}`;
 }
@@ -943,8 +951,9 @@ test("real NDJSON transport keeps structured child output live after the parent 
     await driver.initialize();
     assert.equal(await driver.newSession(process.cwd()), "fixture-subagents");
     assert.equal(await driver.prompt("inspect"), "end_turn", "the foreground turn settles first");
-    await new Promise<void>((resolve) => setTimeout(resolve, 30));
     const messageId = childItemId("fixture-child", "fixture-child-message");
+    await waitForCondition(() => events.some((event) => event.kind === "tool_call_update" &&
+      event.toolCallId === "fixture-spawn" && event.subagentLifecycle === "completed"));
     assert.deepEqual(events.find((event) => event.kind === "agent_message" && event.messageId === messageId), {
       kind: "agent_message",
       text: "Background inspection complete.",

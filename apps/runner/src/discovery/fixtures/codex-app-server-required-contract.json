@@ -230,28 +230,24 @@
       "required": [
         "delta",
         "itemId",
-        "summaryIndex",
         "threadId",
         "turnId"
       ],
       "properties": [
         "delta",
         "itemId",
-        "summaryIndex",
         "threadId",
         "turnId"
       ]
     },
     "v2/ReasoningTextDeltaNotification.json": {
       "required": [
-        "contentIndex",
         "delta",
         "itemId",
         "threadId",
         "turnId"
       ],
       "properties": [
-        "contentIndex",
         "delta",
         "itemId",
         "threadId",
