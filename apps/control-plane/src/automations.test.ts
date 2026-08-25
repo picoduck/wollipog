@@ -13,6 +13,7 @@ import { ControlPlaneDb } from "./db.js";
 import type { Hub } from "./hub.js";
 import type { PreStagedDeliveryOptions, SessionsService } from "./sessions.js";
 import { AutomationsService, validateAutomationSpec } from "./automations.js";
+import { workflowRunCapabilityError } from "./sessions.js";
 import { signAutomationTrigger } from "./automation-trigger-ingress.js";
 
 function runner(
@@ -32,6 +33,47 @@ function runner(
       context: { kind: "native" }, available: true, capabilities,
     }],
   };
+}
+
+function runnerWithAgents(
+  runnerId: string,
+  agents: Array<{ id: string; capabilities?: AgentCapabilities; driver?: AgentDriverKind }>,
+): RunnerMetadata {
+  const metadata = runner(runnerId);
+  return {
+    ...metadata,
+    agents: agents.map((agent) => ({
+      id: agent.id, name: agent.id, command: agent.id, args: [], env: {},
+      driver: agent.driver ?? "acp", context: { kind: "native" }, available: true,
+      capabilities: agent.capabilities,
+    })),
+  };
+}
+
+function modelCapabilities(model: string): AgentCapabilities {
+  return {
+    models: [{ id: model, efforts: ["high"] }], effortLevels: ["high"],
+    permissionModes: ["default"], slashCommands: [], supportsImages: true,
+    supportsApprovals: true,
+  };
+}
+
+function installCapabilityWorkflow(db: ControlPlaneDb, workflowId = "workflow-capabilities"): void {
+  db.createWorkflowDefinition({
+    workflowId,
+    name: "Capability Workflow",
+    maxTransitions: 4,
+    nodes: [
+      { nodeId: "build", kind: "agent", role: "builder", agentId: "worker", inputs: [], outputs: [],
+        retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 60_000 },
+      { nodeId: "review", kind: "agent", role: "reviewer", agentId: "reviewer", inputs: [], outputs: [],
+        retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 60_000 },
+    ],
+    edges: [],
+    source: "custom",
+    createdBy: { kind: "system", id: "test" },
+    createdAt: 0,
+  });
 }
 
 function baseSpec(overrides: Partial<AutomationSpec> = {}): AutomationSpec {
@@ -146,6 +188,9 @@ function harness(
             attempts: [], events: [] },
         },
       };
+    },
+    workflowRunCapabilityError(request: CreateWorkflowRunRequest) {
+      return workflowRunCapabilityError(db, request);
     },
   } as unknown as SessionsService;
   const notifications: string[] = [];
@@ -530,6 +575,154 @@ test("create and update reject config unsupported by the primary or any alternat
   assert.match(updated.error ?? "", /runner-3\/ws-1\/agent-1.*model.*opus\[1m\]/);
   assert.equal(db.getAutomation(existing.automationId)?.action.kind, "create_session");
   assert.equal(db.getAutomation(existing.automationId)?.runnerPolicy.kind, "wait");
+});
+
+test("workflow admission rejects unsupported primary workers and orchestrators", () => {
+  const supported = modelCapabilities("gpt-5");
+  const unsupported = modelCapabilities("claude-opus-4-1");
+  const { db, service } = harness(53, [
+    runnerWithAgents("runner-1", [
+      { id: "worker", capabilities: supported },
+      { id: "reviewer", capabilities: unsupported },
+      { id: "orchestrator", capabilities: unsupported },
+    ]),
+  ]);
+  installCapabilityWorkflow(db);
+  const actor = { kind: "human" as const, id: "device" };
+  const request: CreateWorkflowRunRequest = {
+    runnerId: "runner-1",
+    workspaceId: "ws-1",
+    workflowId: "workflow-capabilities",
+    task: "Build and review",
+    config: { model: "gpt-5", effort: "high" },
+  };
+
+  const workerRejected = service.create(baseSpec({
+    action: { kind: "workflow_run", request },
+  }), actor, 0);
+  assert.equal(workerRejected.status, 409);
+  assert.match(workerRejected.error ?? "", /runner-1\/ws-1.*reviewer:.*model.*gpt-5/);
+
+  const orchestratorRejected = service.create(baseSpec({
+    action: { kind: "workflow_run", request: {
+      ...request,
+      agentBindings: { reviewer: "worker" },
+      orchestratorAgentId: "orchestrator",
+    } },
+  }), actor, 1);
+  assert.equal(orchestratorRejected.status, 409);
+  assert.match(orchestratorRejected.error ?? "", /runner-1\/ws-1.*orchestrator:.*model.*gpt-5/);
+});
+
+test("workflow admission checks alternate bindings and orchestrators without partial updates", () => {
+  const supported = modelCapabilities("gpt-5");
+  const unsupported = modelCapabilities("claude-opus-4-1");
+  const { db, service } = harness(53, [
+    runnerWithAgents("runner-1", [
+      { id: "worker", capabilities: supported },
+      { id: "reviewer", capabilities: supported },
+    ]),
+    runnerWithAgents("runner-2", [
+      { id: "worker", capabilities: supported },
+      { id: "alternate-reviewer", capabilities: unsupported },
+      { id: "alternate-orchestrator", capabilities: unsupported },
+    ]),
+  ]);
+  installCapabilityWorkflow(db);
+  const actor = { kind: "human" as const, id: "device" };
+  const request: CreateWorkflowRunRequest = {
+    runnerId: "runner-1",
+    workspaceId: "ws-1",
+    workflowId: "workflow-capabilities",
+    task: "Build and review",
+    config: { model: "gpt-5", effort: "high" },
+  };
+  const alternateSpec = baseSpec({
+    action: { kind: "workflow_run", request },
+    runnerPolicy: { kind: "alternate", targets: [{
+      runnerId: "runner-2", workspaceId: "ws-1",
+      agentBindings: { reviewer: "alternate-reviewer" },
+      orchestratorAgentId: "alternate-orchestrator",
+    }] },
+  });
+
+  const bindingRejected = service.create(alternateSpec, actor, 0);
+  assert.equal(bindingRejected.status, 409);
+  assert.match(bindingRejected.error ?? "", /runner-2\/ws-1.*alternate-reviewer:.*model.*gpt-5/);
+
+  db.registerRunner(runnerWithAgents("runner-2", [
+    { id: "worker", capabilities: supported },
+    { id: "alternate-reviewer", capabilities: supported },
+    { id: "alternate-orchestrator", capabilities: unsupported },
+  ]), 2, 53);
+  const orchestratorRejected = service.create(alternateSpec, actor, 1);
+  assert.equal(orchestratorRejected.status, 409);
+  assert.match(orchestratorRejected.error ?? "", /runner-2\/ws-1.*alternate-orchestrator:.*model.*gpt-5/);
+
+  const existing = service.create(baseSpec({ action: { kind: "workflow_run", request } }), actor, 2).data!;
+  const updated = service.update(existing.automationId, alternateSpec, actor, 3);
+  assert.equal(updated.status, 409);
+  assert.match(updated.error ?? "", /alternate-orchestrator/);
+  const stored = db.getAutomation(existing.automationId)!;
+  assert.equal(stored.runnerPolicy.kind, "wait");
+  assert.equal(stored.action.kind, "workflow_run");
+});
+
+test("workflow admission preserves legacy metadata and allows disabling after capability drift", () => {
+  const explicitConfig = { model: "future-model", effort: "max", permissionMode: "future-mode" };
+  const actor = { kind: "human" as const, id: "device" };
+  const legacy = harness(53, [
+    runnerWithAgents("runner-1", [
+      { id: "worker" },
+      { id: "reviewer" },
+      { id: "orchestrator" },
+    ]),
+  ]);
+  installCapabilityWorkflow(legacy.db);
+  const legacySpec = baseSpec({
+    action: { kind: "workflow_run", request: {
+      runnerId: "runner-1",
+      workspaceId: "ws-1",
+      workflowId: "workflow-capabilities",
+      task: "Use mixed-version discovery",
+      orchestratorAgentId: "orchestrator",
+      config: explicitConfig,
+    } },
+  });
+  assert.equal(legacy.service.create(legacySpec, actor, 0).status, 201);
+
+  const supported = modelCapabilities("gpt-5");
+  const narrowed = modelCapabilities("claude-opus-4-1");
+  const drift = harness(53, [
+    runnerWithAgents("runner-1", [
+      { id: "worker", capabilities: supported },
+      { id: "reviewer", capabilities: supported },
+      { id: "orchestrator", capabilities: supported },
+    ]),
+  ]);
+  installCapabilityWorkflow(drift.db);
+  const supportedRequest: CreateWorkflowRunRequest = {
+    runnerId: "runner-1",
+    workspaceId: "ws-1",
+    workflowId: "workflow-capabilities",
+    task: "Stay recoverable",
+    orchestratorAgentId: "orchestrator",
+    config: { model: "gpt-5", effort: "high" },
+  };
+  const supportedSpec = baseSpec({
+    action: { kind: "workflow_run", request: supportedRequest },
+  });
+  const created = drift.service.create(supportedSpec, actor, 0).data!;
+  drift.db.registerRunner(runnerWithAgents("runner-1", [
+    { id: "worker", capabilities: narrowed },
+    { id: "reviewer", capabilities: narrowed },
+    { id: "orchestrator", capabilities: narrowed },
+  ]), 2, 53);
+
+  assert.match(workflowRunCapabilityError(drift.db, supportedRequest), /worker:.*model.*gpt-5/);
+  const paused = drift.service.update(created.automationId, { ...supportedSpec, enabled: false }, actor, 3);
+  assert.equal(paused.status, 200);
+  assert.equal(drift.db.getAutomation(created.automationId)?.enabled, false);
 });
 
 test("legacy capabilities stay permissive and capability drift cannot prevent pausing", () => {
