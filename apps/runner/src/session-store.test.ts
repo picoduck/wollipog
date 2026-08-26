@@ -118,6 +118,244 @@ test("appendEvent assigns increasing seq and readEvents filters by afterSeq", ()
   }
 });
 
+test("v86 wire projection omits response completions while keeping dense live and hydration cursors", () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta());
+    const first = store.appendEvent("s_abc", { kind: "agent_message", text: "one" }, 1001)!;
+    const completion = store.appendEvent("s_abc", { kind: "agent_response_completed" }, 1002)!;
+    const second = store.appendEvent("s_abc", { kind: "agent_message", text: "two" }, 1003)!;
+
+    assert.deepEqual(store.readEvents("s_abc").map((event) => event.payload.kind), [
+      "agent_message", "agent_response_completed", "agent_message",
+    ], "runner-local history remains exact");
+    assert.equal(store.snapshots(86)[0]?.seq, 2);
+    assert.equal(store.snapshots(86, true)[0]?.seq, 3,
+      "buffered messages retain the exact local high-water until socket send");
+    assert.equal(store.snapshots(87)[0]?.seq, 3);
+    assert.equal(store.snapshots(86)[0]?.historyEpoch, 1);
+    assert.equal(store.snapshots(86, true)[0]?.historyEpoch, 0);
+    assert.equal(store.snapshots(87)[0]?.historyEpoch, 0);
+    assert.deepEqual(store.projectEventForProtocol("s_abc", first, 86), first);
+    assert.equal(store.projectEventForProtocol("s_abc", completion, 86), null);
+    assert.deepEqual(store.projectEventForProtocol("s_abc", second, 86), {
+      ...second,
+      seq: 2,
+    });
+    assert.deepEqual(store.projectEventForProtocol("s_abc", completion, 87), completion);
+
+    let refreshCount = 0;
+    const refresh = (store as any).refreshEventProjectionIndex.bind(store);
+    (store as any).refreshEventProjectionIndex = (...args: unknown[]) => {
+      refreshCount += 1;
+      return refresh(...args);
+    };
+    const legacy = store.readEventsForProtocol("s_abc", 0, 86);
+    assert.equal(refreshCount, 1, "whole-history projection refreshes derived state once per batch");
+    assert.deepEqual(legacy.map((event) => [event.seq, event.payload.kind]), [
+      [1, "agent_message"],
+      [2, "agent_message"],
+    ]);
+    assert.deepEqual(store.readEventsForProtocol("s_abc", 1, 86).map((event) => event.seq), [2]);
+    assert.deepEqual(store.readEventsForProtocol("s_abc", 99, 86), [],
+      "legacy hydration preserves the empty result for a stale cursor beyond the projected tail");
+    assert.deepEqual(store.readEventsForProtocol("s_abc", 0, 87).map((event) => event.seq), [1, 2, 3]);
+
+    refreshCount = 0;
+    const projectionIndexPath = join(root, "s_abc", "events.idx");
+    rmSync(projectionIndexPath, { force: true });
+    assert.equal(existsSync(projectionIndexPath), false);
+    const page1 = store.readEventPageForProtocol("s_abc", { afterSeq: 0, limit: 1 }, 86);
+    assert.equal(refreshCount, 1, "indexed projection refreshes derived state once per page operation");
+    assert.equal(existsSync(projectionIndexPath), true, "the projected first page repairs its sparse index");
+    assert.equal(page1.ok, true);
+    if (!page1.ok) return;
+    assert.deepEqual(page1.events.map((event) => [event.seq, event.payload.kind]), [[1, "agent_message"]]);
+    assert.deepEqual(page1.page, {
+      logEpoch: 1,
+      throughSeq: 2,
+      nextAfterSeq: 1,
+      hasMore: true,
+    });
+
+    const page2 = store.readEventPageForProtocol("s_abc", {
+      afterSeq: page1.page.nextAfterSeq,
+      limit: 1,
+      logEpoch: page1.page.logEpoch,
+      throughSeq: page1.page.throughSeq,
+    }, 86);
+    assert.equal(page2.ok, true);
+    if (!page2.ok) return;
+    assert.deepEqual(page2.events.map((event) => [event.seq, event.payload.kind]), [[2, "agent_message"]]);
+    assert.equal(page2.page.hasMore, false);
+
+    store.appendEvent("s_abc", { kind: "agent_response_completed" }, 1004);
+    store.appendEvent("s_abc", { kind: "agent_message", text: "three" }, 1005);
+    const frozen = store.readEventPageForProtocol("s_abc", {
+      afterSeq: 2,
+      limit: 10,
+      logEpoch: page1.page.logEpoch,
+      throughSeq: page1.page.throughSeq,
+    }, 86);
+    assert.deepEqual(frozen, {
+      ok: true,
+      events: [],
+      page: { logEpoch: 1, throughSeq: 2, nextAfterSeq: 2, hasMore: false },
+    });
+    assert.deepEqual(store.readEventsForProtocol("s_abc", 2, 86).map((event) => [event.seq, event.payload.kind]), [
+      [3, "agent_message"],
+    ], "a new connection/version projection is evaluated from exact local history");
+    appendFileSync(join(root, "s_abc", "events.ndjson"), '{"seq":999');
+    const tornReader = new SessionStore(root);
+    assert.equal(tornReader.projectedEventSeq("s_abc", 5, 86), 3,
+      "wire projection ignores the documented recoverable torn suffix");
+    assert.deepEqual(tornReader.readEventsForProtocol("s_abc", 0, 86).map((event) => event.seq), [1, 2, 3],
+      "legacy hydration remains total with a torn suffix");
+    assert.equal(tornReader.readEventPageForProtocol("s_abc", { afterSeq: 0, limit: 10 }, 86).ok, true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("registration keeps history neutral until one negotiated v86 or v87 generation is published", () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta());
+    store.appendEvent("s_abc", { kind: "agent_message", text: "one" }, 1001);
+    store.appendEvent("s_abc", { kind: "agent_response_completed" }, 1002);
+    store.appendEvent("s_abc", { kind: "agent_message", text: "two" }, 1003);
+
+    const exact = store.snapshots(87, true)[0]!;
+    const historyTail = (store as any).historyTail.bind(store);
+    let historyTailCalls = 0;
+    (store as any).historyTail = (...args: unknown[]) => {
+      historyTailCalls += 1;
+      return historyTail(...args);
+    };
+    const firstRegister = store.registrationSnapshots()[0]!;
+    const reconnectRegister = store.registrationSnapshots()[0]!;
+    assert.equal(historyTailCalls, 0, "pre-negotiation registration never scans event history");
+    assert.equal(firstRegister.seq, 0);
+    assert.equal(firstRegister.historyEpoch, undefined);
+    assert.deepEqual(reconnectRegister, firstRegister, "reconnect does not fabricate another generation");
+
+    const v86 = store.projectSnapshotForProtocol(exact, 86);
+    const v87 = store.projectSnapshotForProtocol(exact, 87);
+    assert.deepEqual([v86.seq, v86.historyEpoch], [2, 1]);
+    assert.deepEqual([v87.seq, v87.historyEpoch], [3, 0]);
+    assert.deepEqual(store.projectSnapshotForProtocol(exact, 86), v86,
+      "a v86 reconnect republishes the same negotiated generation");
+    assert.deepEqual(store.projectSnapshotForProtocol(exact, 87), v87,
+      "a v87 reconnect republishes the same negotiated generation");
+
+    const legacyPage = store.readEventPageForProtocol("s_abc", { afterSeq: 0, limit: 10 }, 86);
+    const currentPage = store.readEventPageForProtocol("s_abc", { afterSeq: 0, limit: 10 }, 87);
+    assert.equal(legacyPage.ok, true);
+    assert.equal(currentPage.ok, true);
+    if (legacyPage.ok && currentPage.ok) {
+      assert.equal(legacyPage.page.logEpoch, v86.historyEpoch);
+      assert.equal(currentPage.page.logEpoch, v87.historyEpoch);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a failed incremental projection scan commits no duplicate omissions on retry", () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta());
+    store.appendEvent("s_abc", { kind: "agent_message", text: "one" }, 1001);
+    store.appendEvent("s_abc", { kind: "agent_response_completed" }, 1002);
+    store.appendEvent("s_abc", { kind: "agent_message", text: "two" }, 1003);
+    assert.equal(store.projectedEventSeq("s_abc", 3, 86), 2, "prime the cached prefix");
+
+    store.appendEvent("s_abc", { kind: "agent_response_completed" }, 1004);
+    store.appendEvent("s_abc", { kind: "agent_message", text: "three" }, 1005);
+    const scan = (store as any).scanHistoryLines.bind(store);
+    let failAfterFirstRecord = true;
+    (store as any).scanHistoryLines = (
+      id: string,
+      startOffset: number,
+      endOffset: number,
+      visit: (line: Buffer, offset: number) => boolean | void,
+    ) => scan(id, startOffset, endOffset, (line: Buffer, offset: number) => {
+      const result = visit(line, offset);
+      if (failAfterFirstRecord) {
+        failAfterFirstRecord = false;
+        throw new Error("transient projection read failure");
+      }
+      return result;
+    });
+
+    assert.throws(() => store.projectedEventSeq("s_abc", 5, 86), /transient projection read failure/);
+    assert.equal(store.projectedEventSeq("s_abc", 5, 86), 3,
+      "retry subtracts each omitted local sequence exactly once");
+    assert.deepEqual(store.readEventsForProtocol("s_abc", 0, 86).map((event) => event.seq), [1, 2, 3]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("projected snapshot corruption fallback never advertises an exact local tail", () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta());
+    store.appendEvent("s_abc", { kind: "agent_message", text: "one" }, 1001);
+    store.appendEvent("s_abc", { kind: "agent_response_completed" }, 1002);
+    store.appendEvent("s_abc", { kind: "agent_message", text: "two" }, 1003);
+    (store as any).projectedEventSeq = () => {
+      throw new Error("projection index unavailable");
+    };
+
+    const legacy = store.snapshots(86)[0]!;
+    assert.deepEqual([legacy.seq, legacy.historyEpoch], [0, 1],
+      "legacy fallback remains in its dense sequence space");
+    const current = store.snapshots(87)[0]!;
+    assert.deepEqual([current.seq, current.historyEpoch], [3, 0],
+      "an exact current peer may retain the metadata high-water");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("projection failure for a removed session is explicit for the socket containment boundary", () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta());
+    const event = store.appendEvent("s_abc", { kind: "agent_message", text: "one" }, 1001)!;
+    store.remove("s_abc");
+    assert.throws(
+      () => store.projectEventForProtocol("s_abc", event, 86),
+      /session history does not exist/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("peer protocol changes fence dense sequence spaces with distinct wire epochs", () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta());
+    store.resetEvents("s_abc");
+    assert.equal(store.snapshots(86)[0]?.historyEpoch, 3);
+    assert.equal(store.snapshots(87)[0]?.historyEpoch, 2);
+
+    const legacy = store.readEventPageForProtocol("s_abc", { afterSeq: 0, limit: 1 }, 86);
+    const current = store.readEventPageForProtocol("s_abc", { afterSeq: 0, limit: 1 }, 87);
+    assert.equal(legacy.ok, true);
+    assert.equal(current.ok, true);
+    if (legacy.ok && current.ok) {
+      assert.equal(legacy.page.logEpoch, 3);
+      assert.equal(current.page.logEpoch, 2);
+      assert.notEqual(legacy.page.logEpoch, current.page.logEpoch);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("resetEvents truncates the log + resets seq/preview but PRESERVES usage (for reprocess re-import)", () => {
   const { store, root } = tmpStore();
   try {
@@ -246,6 +484,7 @@ test("deleted-session markers reap by age while crash-window rows and recent fen
 
 test("metaToSnapshot omits runner-only fields (agentSessionId, repoPath, command provenance)", () => {
   const snap = metaToSnapshot(meta({
+    controlPlaneLaunchId: "launch-proof-1",
     resolvedModel: "claude-opus-5[1m]",
     sessionSlashCommandProvenance: {
       driver: "claude-code",
@@ -261,6 +500,7 @@ test("metaToSnapshot omits runner-only fields (agentSessionId, repoPath, command
   assert.equal((snap as Record<string, unknown>).repoPath, undefined);
   assert.equal((snap as Record<string, unknown>).sessionSlashCommandProvenance, undefined);
   assert.equal(snap.id, "s_abc");
+  assert.equal(snap.controlPlaneLaunchId, "launch-proof-1");
   assert.equal(snap.seq, 0);
   assert.equal(snap.resolvedModel, "claude-opus-5[1m]");
 });
@@ -556,6 +796,23 @@ test("releaseLock is owner-aware: a stale ex-holder cannot delete the new owner'
     assert.equal(store.acquireLock("s_abc", "runner-B"), true);
     store.releaseLock("s_abc", "runner-A"); // stale ex-holder — must be a no-op
     assert.equal(store.acquireLock("s_abc", "runner-C"), false, "B still holds the lock");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("refreshLock is owner-aware: a stale ex-holder cannot overwrite the new owner's lock", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-store-lockrefresh-"));
+  try {
+    const store = new SessionStore(root);
+    store.create(meta());
+    assert.equal(store.acquireLock("s_abc", "runner-A"), true);
+    // Simulate B legitimately taking A's lock after the stale window.
+    store.releaseLock("s_abc", "runner-A");
+    assert.equal(store.acquireLock("s_abc", "runner-B"), true);
+    assert.equal(store.refreshLock("s_abc", "runner-A"), false);
+    assert.equal(store.ownsLock("s_abc", "runner-B"), true, "A's stale refresh must preserve B's lock");
+    assert.equal(store.refreshLock("s_abc", "runner-B"), true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -1051,7 +1308,7 @@ test("registration re-reads metadata after recovering a reset intent published d
 
     const snapshot = new ResetDuringSnapshotsStore(root).snapshots()[0]!;
     assert.equal(snapshot.seq, 0);
-    assert.equal(snapshot.historyEpoch, 1);
+    assert.equal(snapshot.historyEpoch, 2, "local epoch 1 is fenced into current-peer wire epoch 2");
     assert.equal(readFileSync(join(root, "s_abc", "events.ndjson"), "utf8"), "");
     assert.equal(existsSync(join(root, "s_abc", "events.reset.json")), false);
   } finally {

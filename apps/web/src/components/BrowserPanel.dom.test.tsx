@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
+import { Simulate } from "react-dom/test-utils";
 import { Window } from "happy-dom";
 import type { SessionView, WorkflowArtifactView } from "@wollipog/protocol";
 import { api } from "../api.js";
@@ -78,6 +79,45 @@ test("browser panel paginates metadata and fetches exact bodies only after selec
     await act(async () => { root.unmount(); });
     api.sessionWorkflowArtifacts = priorList;
     api.artifactExport = priorExport;
+    container.remove();
+  }
+});
+
+test("web mode renders the allowed preview and an external anchor owned by the desktop link router", async () => {
+  const priorList = api.sessionWorkflowArtifacts;
+  api.sessionWorkflowArtifacts = async () => ({ artifacts: [] });
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(<BrowserPanel session={{ id: "session_1" } as SessionView} />);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const webTab = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent === "Web URL") as HTMLButtonElement;
+    await act(async () => { webTab.click(); });
+
+    const input = container.querySelector("#browser-url") as HTMLInputElement;
+    await act(async () => {
+      input.value = "http://localhost:3000/dashboard";
+      Simulate.change(input);
+    });
+    await act(async () => {
+      Simulate.submit(container.querySelector(".browser-address") as HTMLFormElement);
+    });
+
+    const frame = container.querySelector(".browser-web-frame") as HTMLIFrameElement;
+    assert.equal(frame.getAttribute("src"), "http://localhost:3000/dashboard");
+    const external = Array.from(container.querySelectorAll("a"))
+      .find((anchor) => anchor.textContent === "Open Externally") as HTMLAnchorElement;
+    assert.equal(external.getAttribute("href"), "http://localhost:3000/dashboard");
+    assert.equal(external.getAttribute("target"), "_blank");
+    assert.equal(external.getAttribute("rel"), "noopener noreferrer");
+  } finally {
+    await act(async () => { root.unmount(); });
+    api.sessionWorkflowArtifacts = priorList;
     container.remove();
   }
 });

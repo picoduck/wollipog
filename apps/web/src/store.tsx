@@ -16,6 +16,7 @@ import type {
   RunnerView,
   RunView,
   SessionEvent,
+  SessionReminderView,
   SessionView,
   ShellOutputChunk,
   ShellStatus,
@@ -40,10 +41,7 @@ import {
 } from "./activity.js";
 import { BrowserNavigation, sameView, viewFromNotificationMessage, type View, type ViewNavigation } from "./navigation.js";
 import {
-  INBOX_DEFAULT_RATIO,
   INBOX_SELECTION_STORAGE_KEY,
-  INBOX_SPLIT_RATIO_MAX,
-  INBOX_SPLIT_RATIO_MIN,
   INBOX_SPLIT_RATIO_STORAGE_KEY,
   clampInboxSplitRatio,
   parseInboxSplitRatio,
@@ -82,9 +80,6 @@ export interface Filters {
 
 export const INBOX_SELECTION_KEY = INBOX_SELECTION_STORAGE_KEY;
 export const INBOX_SPLIT_RATIO_KEY = INBOX_SPLIT_RATIO_STORAGE_KEY;
-export const INBOX_DEFAULT_SPLIT_RATIO = INBOX_DEFAULT_RATIO;
-export const INBOX_MIN_SPLIT_RATIO = INBOX_SPLIT_RATIO_MIN;
-export const INBOX_MAX_SPLIT_RATIO = INBOX_SPLIT_RATIO_MAX;
 export { clampInboxSplitRatio, parseInboxSplitRatio };
 
 /** Slightly exceeds the control plane's fixed 10-second admission window. */
@@ -149,6 +144,8 @@ export interface InboxState {
   splitRatio: number;
   /** The last selected session in each split; `null` is the merged All split. */
   selectedBySplit: Map<string | null, string>;
+  /** Transient marker distinguishing an explicit clear from selection awaiting initial repair. */
+  selectionCleared?: boolean;
 }
 
 function parseNullableString(value: unknown): string | null {
@@ -225,6 +222,10 @@ export interface EventWindowState {
   /** The read that produced this window reached the runner's tail. A budget-expired window reports
    * no older rows while still being a prefix, so completeness is tracked separately. */
   complete: boolean;
+  /** Opening-window alignment proves that the visible head is a semantic turn boundary. False
+   * means the bounded safety cap was reached and a response at the head may begin above this
+   * slice; newer complete turns can still follow it. */
+  turnAligned?: boolean;
   loadingOlder: boolean;
   error: string | null;
 }
@@ -254,12 +255,19 @@ export interface State {
   accessScopeManagementSupported: boolean;
   /** True only when New Session can atomically open the separate Native TUI process. */
   nativeTuiLaunchSupported: boolean;
+  /** False against older control planes that archive without first proving runtime Stop. */
+  stopBeforeArchiveSupported: boolean;
+  /** False against older control planes without the correlated Stop recovery route. */
+  stopFailureRecoverySupported: boolean;
+  /** True when the control plane provides durable, user-scoped reminder snapshots and deltas. */
+  sessionRemindersSupported: boolean;
   runners: Map<string, RunnerView>;
   boxes: Map<string, BoxView>;
   /** Authoritative when the snapshot advertises Project support; empty against legacy control
    * planes, whose exact workspace grouping remains a UI-level fallback. */
   projects: Map<string, ProjectView>;
   sessions: Map<string, SessionView>;
+  reminders: Map<string, SessionReminderView>;
   runs: Map<string, RunView>;
   pods: Map<string, PodView>;
   podContext: Map<string, PodContextEntry[]>;
@@ -311,6 +319,9 @@ type Action =
       /** Present only for a bounded opening-window read: whether older cached events remain below
        * this page. Absent marks a forward gap-fill, which never redefines the loaded window. */
       windowHasOlder?: boolean;
+      /** Present only for an aligned opening-window read. False means the server kept its bounded
+       * count boundary because the turn start was beyond the supported extension. */
+      windowTurnAligned?: boolean;
     }
   | { type: "events_older_loading"; sessionId: string; eventEpoch: number; requestedBase: number }
   | { type: "events_older_failed"; sessionId: string; eventEpoch: number; requestedBase: number; error: string }
@@ -348,7 +359,7 @@ type Action =
   | { type: "activity_tick"; now: number }
   | { type: "pod_context_loaded"; podId: string; entries: PodContextEntry[] }
   | { type: "navigate"; view: View }
-  | { type: "inbox_selection"; sessionId: string | null; splitKey: string | null; persist?: boolean }
+  | { type: "inbox_selection"; sessionId: string | null; splitKey: string | null; persist?: boolean; repair?: boolean }
   | { type: "inbox_split"; splitKey: string | null; persist?: boolean }
   | { type: "inbox_ratio"; ratio: number }
   | { type: "filters"; filters: Partial<Filters> };
@@ -489,6 +500,26 @@ function captureRecoveryCursors(state: State, sessionIds: Iterable<string>): Map
   return new Map([...sessionIds].map((sessionId) => [sessionId, eventHighWater(state.events.get(sessionId))]));
 }
 
+/** Drop a session's frozen recovery cursor when its event log is replaced under a new epoch. The
+ * cursor is a seq from the OLD epoch's sequence space and is epoch-less, so carrying it into the
+ * new epoch makes the next recovery page ABOVE a stale seq instead of reading the opening tail
+ * window — silently truncating or emptying the replacement log. Also clears any not-yet-acked
+ * pending cursor so an in-flight subscription cannot republish the stale value. */
+function invalidateRecoveryCursor(
+  state: State,
+  sessionId: string,
+): Pick<State, "streamRecoveryCursors" | "pendingStreamRecovery"> {
+  const streamRecoveryCursors = new Map(state.streamRecoveryCursors);
+  streamRecoveryCursors.delete(sessionId);
+  let pendingStreamRecovery = state.pendingStreamRecovery;
+  if (pendingStreamRecovery?.cursors.has(sessionId)) {
+    const cursors = new Map(pendingStreamRecovery.cursors);
+    cursors.delete(sessionId);
+    pendingStreamRecovery = { ...pendingStreamRecovery, cursors };
+  }
+  return { streamRecoveryCursors, pendingStreamRecovery };
+}
+
 /** Record which slice a bounded opening-window page loaded. Forward gap-fill pages carry no window
  * meaning and leave the map untouched. */
 function applyWindowBase(
@@ -516,6 +547,7 @@ function applyWindowBase(
       baseSeq: 0,
       hasOlder: action.windowHasOlder,
       complete: action.recoveryComplete,
+      ...(action.windowTurnAligned === undefined ? {} : { turnAligned: action.windowTurnAligned }),
       loadingOlder: false,
       error: null,
     });
@@ -532,6 +564,9 @@ function applyWindowBase(
     // Completeness is monotonic within an epoch: a re-read that reaches the tail settles it, and a
     // later partial read cannot unsettle what was already proven complete.
     complete: action.recoveryComplete || (priorValid?.complete ?? false),
+    ...(action.windowTurnAligned === undefined
+      ? (priorValid?.turnAligned === undefined ? {} : { turnAligned: priorValid.turnAligned })
+      : { turnAligned: action.windowTurnAligned }),
     // An older load in flight against the SAME base is still valid — its page will pass the fence.
     // A base change means the fence will reject that page, and nothing else would ever clear the
     // flag, leaving Load Earlier Activity stuck disabled until remount.
@@ -670,6 +705,7 @@ function reducer(state: State, action: Action): State {
     case "inbox_selection": {
       if (state.inbox.splitKey === action.splitKey &&
           state.inbox.selectedSessionId === action.sessionId &&
+          state.inbox.selectionCleared === (action.sessionId === null && action.repair !== true) &&
           (action.sessionId === null
             ? !state.inbox.selectedBySplit.has(action.splitKey)
             : state.inbox.selectedBySplit.get(action.splitKey) === action.sessionId)) return state;
@@ -682,6 +718,7 @@ function reducer(state: State, action: Action): State {
           ...state.inbox,
           selectedSessionId: action.sessionId,
           splitKey: action.splitKey,
+          selectionCleared: action.sessionId === null && action.repair !== true,
           selectedBySplit,
         },
       };
@@ -830,6 +867,12 @@ function reducer(state: State, action: Action): State {
         ...window,
         baseSeq: Math.min(window.baseSeq, action.events[0]?.seq ?? window.baseSeq),
         hasOlder: action.hasOlder,
+        ...(window.turnAligned === undefined ? {} : {
+          turnAligned: window.turnAligned === false &&
+            (action.events.some((event) => event.payload.kind === "user_message") || !action.hasOlder)
+            ? true
+            : window.turnAligned,
+        }),
         loadingOlder: false,
         error: null,
       });
@@ -1006,12 +1049,16 @@ function reducer(state: State, action: Action): State {
             projectLocationCreationSupported: msg.capabilities?.createProjectLocations === true,
             accessScopeManagementSupported: msg.capabilities?.accessScopeManagement === true,
             nativeTuiLaunchSupported: msg.capabilities?.nativeTuiLaunch === true,
+            stopBeforeArchiveSupported: msg.capabilities?.stopBeforeArchive === true,
+            stopFailureRecoverySupported: msg.capabilities?.stopFailureRecovery === true,
+            sessionRemindersSupported: msg.capabilities?.sessionReminders === true,
             runners: new Map(msg.runners.map((r) => [r.runnerId, r])),
             // `boxes` may be absent from an older control plane's snapshot — tolerate it.
             boxes: new Map((msg.boxes ?? []).map((b) => [b.boxId, b])),
             // `projects` is additive: older control planes omit it and retain an empty inventory.
             projects: new Map((msg.projects ?? []).map((project) => [project.id, project])),
             sessions,
+            reminders: new Map((msg.reminders ?? []).map((reminder) => [reminder.sessionId, reminder])),
             runs: new Map(msg.runs.map((r) => [r.id, r])),
             pods,
             events,
@@ -1114,11 +1161,28 @@ function reducer(state: State, action: Action): State {
             eventEpochs,
             eventHistory,
             eventWindows,
+            ...invalidateRecoveryCursor(state, msg.session.id),
           }, msg.session.id);
+        }
+        case "session_reminder_upsert": {
+          const current = state.reminders.get(msg.reminder.sessionId);
+          if (current?.reminderId === msg.reminder.reminderId &&
+              current.revision >= msg.reminder.revision) return state;
+          const reminders = new Map(state.reminders);
+          reminders.set(msg.reminder.sessionId, msg.reminder);
+          return { ...state, reminders };
+        }
+        case "session_reminder_removed": {
+          if (!state.reminders.has(msg.sessionId)) return state;
+          const reminders = new Map(state.reminders);
+          reminders.delete(msg.sessionId);
+          return { ...state, reminders };
         }
         case "session_removed": {
           const sessions = new Map(state.sessions);
           sessions.delete(msg.sessionId);
+          const reminders = new Map(state.reminders);
+          reminders.delete(msg.sessionId);
           const events = new Map(state.events);
           events.delete(msg.sessionId);
           state.activity.delete(msg.sessionId);
@@ -1139,13 +1203,17 @@ function reducer(state: State, action: Action): State {
           const inbox = state.inbox.selectedSessionId === msg.sessionId || selectedBySplit.size !== state.inbox.selectedBySplit.size
             ? {
                 ...state.inbox,
-                selectedSessionId: state.inbox.selectedSessionId === msg.sessionId ? null : state.inbox.selectedSessionId,
+                // Keep the active selection as a short-lived tombstone. InboxView repairs a
+                // vanished selection against its held visual order, which requires the removed
+                // id to locate the vacated slot. The repair dispatch replaces it immediately.
+                selectedSessionId: state.inbox.selectedSessionId,
                 selectedBySplit,
               }
             : state.inbox;
           return clearSessionStall({
             ...state,
             sessions,
+            reminders,
             events,
             activityObservationStartedAt,
             eventEpochs,
@@ -1225,9 +1293,12 @@ function reducer(state: State, action: Action): State {
           ));
           if (!relevantSessions(state).has(msg.sessionId)) {
             if (sessionEventEpoch(currentSession) === eventEpoch) return updateSessionStall({ ...state }, msg.sessionId);
+            // pruneViewStreams does NOT clear streamRecoveryCursors, so a session viewed earlier can
+            // reach this non-relevant branch still holding a frozen cursor from the old epoch. Adopt
+            // the new epoch AND drop that cursor, else reopening pages above a stale seq (issue #78).
             const sessions = new Map(state.sessions);
             sessions.set(msg.sessionId, { ...currentSession, eventEpoch });
-            return updateSessionStall({ ...state, sessions }, msg.sessionId);
+            return updateSessionStall({ ...state, sessions, ...invalidateRecoveryCursor(state, msg.sessionId) }, msg.sessionId);
           }
           const events = new Map(state.events);
           events.set(msg.sessionId, tagRebuilt([...msg.events].sort((a, b) => a.seq - b.seq)));
@@ -1239,9 +1310,10 @@ function reducer(state: State, action: Action): State {
           // a timeline that no longer exists. The next open reads a fresh window at the new tail.
           const eventWindows = new Map(state.eventWindows);
           eventWindows.delete(msg.sessionId);
+          const recoveryReset = invalidateRecoveryCursor(state, msg.sessionId);
           if (sessionEventEpoch(currentSession) === eventEpoch) {
             return updateSessionStall({
-              ...state, events, eventEpochs, eventHistory, eventWindows,
+              ...state, events, eventEpochs, eventHistory, eventWindows, ...recoveryReset,
             }, msg.sessionId);
           }
           // Writer coalescing may move the matching metadata upsert after this durable reset. Move
@@ -1249,7 +1321,7 @@ function reducer(state: State, action: Action): State {
           const sessions = new Map(state.sessions);
           sessions.set(msg.sessionId, { ...currentSession, eventEpoch });
           return updateSessionStall({
-            ...state, sessions, events, eventEpochs, eventHistory, eventWindows,
+            ...state, sessions, events, eventEpochs, eventHistory, eventWindows, ...recoveryReset,
           }, msg.sessionId);
         }
         case "shell_output": {
@@ -1344,10 +1416,14 @@ function initialState(view: View = { name: "inbox" }, inbox = loadInboxState()):
     projectLocationCreationSupported: false,
     accessScopeManagementSupported: false,
     nativeTuiLaunchSupported: false,
+    stopBeforeArchiveSupported: false,
+    stopFailureRecoverySupported: false,
+    sessionRemindersSupported: false,
     runners: new Map(),
     boxes: new Map(),
     projects: new Map(),
     sessions: new Map(),
+    reminders: new Map(),
     runs: new Map(),
     pods: new Map(),
     podContext: new Map(),
@@ -1378,7 +1454,7 @@ interface StoreValue extends State {
   dispatch: Dispatch<Action>;
   navigate: (view: View) => void;
   setInboxPersistenceEnabled: (enabled: boolean) => void;
-  setInboxSelection: (sessionId: string | null, splitKey?: string | null, persist?: boolean) => void;
+  setInboxSelection: (sessionId: string | null, splitKey?: string | null, persist?: boolean, repair?: boolean) => void;
   setInboxSplit: (splitKey: string | null, persist?: boolean) => void;
   setInboxRatio: (ratio: number) => void;
   setFilters: (filters: Partial<Filters>) => void;
@@ -1390,6 +1466,7 @@ interface StoreValue extends State {
     recoveryComplete?: boolean,
     recoveryGeneration?: number,
     windowHasOlder?: boolean,
+    windowTurnAligned?: boolean,
   ) => void;
   loadOlderEvents: (
     sessionId: string,
@@ -1492,7 +1569,8 @@ export class Store {
     sessionId: string | null,
     splitKey = this.state.inbox.splitKey,
     persist = true,
-  ): void => this.dispatch({ type: "inbox_selection", sessionId, splitKey, persist });
+    repair = false,
+  ): void => this.dispatch({ type: "inbox_selection", sessionId, splitKey, persist, repair });
   setInboxSplit = (splitKey: string | null, persist = true): void =>
     this.dispatch({ type: "inbox_split", splitKey, persist });
   setInboxRatio = (ratio: number): void => this.dispatch({ type: "inbox_ratio", ratio });
@@ -1506,9 +1584,11 @@ export class Store {
     recoveryComplete = true,
     recoveryGeneration = this.state.snapshotRevision,
     windowHasOlder?: boolean,
+    windowTurnAligned?: boolean,
   ): void => this.dispatch({
     type: "events_loaded", sessionId, events, eventEpoch, recoveryRevision, recoveryComplete, recoveryGeneration,
     ...(windowHasOlder === undefined ? {} : { windowHasOlder }),
+    ...(windowTurnAligned === undefined ? {} : { windowTurnAligned }),
   });
   beginOlderEventsLoad = (
     sessionId: string,

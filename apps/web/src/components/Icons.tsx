@@ -106,6 +106,15 @@ export function AutomationsIcon(props: IconProps) {
   );
 }
 
+export function SkillsIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M11 3.5 12.9 9.6 19 11.5l-6.1 1.9L11 19.5l-1.9-6.1L3 11.5l6.1-1.9Z" />
+      <path d="M18.5 3.5v4M20.5 5.5h-4" />
+    </IconBase>
+  );
+}
+
 export function UsageIcon(props: IconProps) {
   return (
     <IconBase {...props}>
@@ -152,6 +161,15 @@ export function MoreHorizontalIcon(props: IconProps) {
       <circle cx="5" cy="12" r="1" fill="currentColor" stroke="none" />
       <circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" />
       <circle cx="19" cy="12" r="1" fill="currentColor" stroke="none" />
+    </IconBase>
+  );
+}
+
+export function ShareIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M12 16V4M7.5 8.5 12 4l4.5 4.5" />
+      <path d="M5 13.5V19h14v-5.5" />
     </IconBase>
   );
 }
@@ -414,6 +432,17 @@ export function MicIcon(props: IconProps) {
   );
 }
 
+/** A framed photo — the composer's image attachment action. */
+export function ImageIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <rect x="3" y="4.5" width="18" height="15" rx="2.25" />
+      <circle cx="8.75" cy="10" r="1.6" />
+      <path d="M3.5 16.5 8.5 12l4 3.5 3-2.5 4.5 4" />
+    </IconBase>
+  );
+}
+
 /** Two nodes on a line — the session's context chain. */
 export function ChainIcon(props: IconProps) {
   return (
@@ -429,6 +458,44 @@ export function CodeIcon(props: IconProps) {
   return (
     <IconBase {...props}>
       <path d="M8 9l-4 3 4 3M16 9l4 3-4 3M13 6l-2 12" />
+    </IconBase>
+  );
+}
+
+/** Recognizable editor marks used only beside an explicit text label in the Open destination menu. */
+export function VisualStudioCodeIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="m17.5 4-8 6.2L5.5 7.3 3 9.5l4 2.5-4 2.5 2.5 2.2 4-2.9 8 6.2 3.5-1.7V5.7z" />
+      <path d="M17.5 4v16M9.5 10.2v3.6" />
+    </IconBase>
+  );
+}
+
+export function CursorEditorIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <rect x="3.5" y="3.5" width="17" height="17" rx="4" />
+      <path d="m8 7 8.8 5-4 1.1-1.7 4.2z" />
+    </IconBase>
+  );
+}
+
+export function WindsurfEditorIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M3 8.5c3.2-2 5.7-2 8 0s4.8 2 10 0" />
+      <path d="M3 12c3.2-2 5.7-2 8 0s4.8 2 10 0" />
+      <path d="M3 15.5c3.2-2 5.7-2 8 0s4.8 2 10 0" />
+    </IconBase>
+  );
+}
+
+export function ZedEditorIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <rect x="3.5" y="3.5" width="17" height="17" rx="4" />
+      <path d="M8 8h8l-8 8h8" />
     </IconBase>
   );
 }

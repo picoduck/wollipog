@@ -4,11 +4,15 @@ import {
   AboutPanel,
   AppearancePanel,
   BehaviorPanel,
+  ExperimentalPanel,
   KeyboardPanel,
   NetworkPanel,
   NotificationsPanel,
+  PendingSetting,
+  SettingsGroup,
   SettingsView,
 } from "../components/SettingsView.js";
+import { DEFAULT_EXPERIMENT_FLAGS } from "../experiments.js";
 import {
   COLOR_SCHEMES,
   DENSITY_OPTIONS,
@@ -104,6 +108,7 @@ function Harness() {
    */
   const [scheme, setScheme] = React.useState<ColorScheme>("wollipog");
   const [previewScheme, setPreviewScheme] = React.useState<ColorScheme | null>(null);
+  const [experimentFlags, setExperimentFlags] = React.useState(DEFAULT_EXPERIMENT_FLAGS);
   React.useLayoutEffect(() => {
     applySchemeToDocument(document, previewScheme ?? scheme);
   }, [previewScheme, scheme]);
@@ -155,6 +160,15 @@ function Harness() {
               ),
               keyboard: <KeyboardPanel shortcutLabel="Reference · ?" disabled={disabled} onOpenShortcuts={() => undefined} />,
               behavior: <BehaviorPanel />,
+              "session-naming": (
+                <SettingsGroup title="Session Naming">
+                  <PendingSetting
+                    title="Naming Mode"
+                    description="Controls automatic session titles."
+                    reason="The visual fixture does not connect to a control plane."
+                  />
+                </SettingsGroup>
+              ),
               network: (
                 <NetworkPanel
                   tailnet={{
@@ -169,6 +183,16 @@ function Harness() {
                     error: null,
                     toggle: () => undefined,
                   }}
+                />
+              ),
+              // The production panel with injected state, like Notifications above. Storage is
+              // deliberately not touched: `disabled` doubles as "no runner advertises a
+              // conductor", which is how production reaches the disabled conductor row.
+              experimental: (
+                <ExperimentalPanel
+                  flags={experimentFlags}
+                  onToggle={(id, enabled) => setExperimentFlags((current) => ({ ...current, [id]: enabled }))}
+                  conductorAvailable={!disabled}
                 />
               ),
               about: <AboutPanel />,

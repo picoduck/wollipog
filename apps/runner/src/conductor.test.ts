@@ -5,9 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentDefinition, SessionLaunchSpec } from "@wollipog/protocol";
 import {
+  fenceConductorAdvertisement,
   CONDUCTOR_DISALLOWED_TOOLS,
   CONDUCTOR_READ_TOOLS,
-  applyConductorFeature,
   buildConductorArgs,
   conductorMcpCommand,
   conductorSystemPrompt,
@@ -31,6 +31,14 @@ test("deriveCpHttpUrl: ws->http, wss->https, /runner suffix stripped (local + bo
   assert.equal(deriveCpHttpUrl("ws://127.0.0.1:4317/runner"), "http://127.0.0.1:4317");
   assert.equal(deriveCpHttpUrl("ws://127.0.0.1:39201/runner"), "http://127.0.0.1:39201"); // box tunnel port
   assert.equal(deriveCpHttpUrl("wss://manager.example.com/runner"), "https://manager.example.com");
+  assert.throws(
+    () => deriveCpHttpUrl("ws://manager.example.com/runner"),
+    /--allow-insecure-transport/u,
+  );
+  assert.equal(
+    deriveCpHttpUrl("ws://manager.example.com/runner", true),
+    "http://manager.example.com",
+  );
 });
 
 /* -------------------------------------------------------------------------- */
@@ -342,21 +350,6 @@ test("enabled non-conductor and non-claude-code specs are untouched", () => {
   });
 });
 
-test("disabled conductor provisioning refuses stale starts before writing launch material", () => {
-  withTempDir((dir) => {
-    for (const driver of ["claude-code", "acp", undefined] as const) {
-      const spec = makeSpec({ driver });
-      assert.throws(
-        () => provisionConductor(spec, { ...CP_CONFIG, enabled: false }, () => {}, makeHost(dir)),
-        /WOLLIPOG_CONDUCTOR=1/,
-      );
-      assert.deepEqual(spec.args, []);
-      assert.deepEqual(spec.config, {});
-    }
-    assert.equal(existsSync(join(dir, "s_cond1.mcp.json")), false);
-  });
-});
-
 test("a WSL-context conductor is skipped with a log line (out of scope)", () => {
   withTempDir((dir) => {
     const logs: string[] = [];
@@ -428,23 +421,6 @@ test("withConductorAgent does not widen elicitation when the donor lacks a defau
   const conductor = withConductorAgent([donor]).find((agent) => agent.id === "conductor")!;
   assert.deepEqual(conductor.capabilities!.permissionModes, ["default"]);
   assert.equal(conductor.capabilities!.elicitation, undefined);
-});
-
-test("applyConductorFeature removes synthesized and config-defined conductors while disabled", () => {
-  const configured = claudeAgent({ id: "conductor", name: "Configured Conductor", source: "config" });
-  const logs: string[] = [];
-  const withoutConfigured = applyConductorFeature([configured, claudeAgent()], false, (message) => logs.push(message));
-  assert.deepEqual(withoutConfigured.map((agent) => agent.id), ["claude-code"]);
-  assert.deepEqual(logs, [
-    "Conductor is disabled on this runner; set WOLLIPOG_CONDUCTOR=1 and restart to enable it",
-  ]);
-
-  logs.length = 0;
-  applyConductorFeature([claudeAgent()], false, (message) => logs.push(message));
-  assert.deepEqual(logs, []);
-
-  const enabled = applyConductorFeature([claudeAgent()], true);
-  assert.equal(enabled.some((agent) => agent.id === "conductor"), true);
 });
 
 test("withConductorAgent inherits the donor's base args (node-wrapped nvm installs)", () => {
@@ -552,4 +528,23 @@ test("post-merge synthesis: a configured claude entry sharing the launch key doe
   // The bare "claude" config command adopts discovery's RESOLVED path in the merge (it's a
   // pointer, not an override), so the donor — and hence the conductor — carries the real path.
   assert.equal(conductor!.command, "/usr/local/bin/claude", "donated by the merged (config) entry");
+});
+
+test("conductor advertisement is fenced at send time on a v91+ control plane", () => {
+  // The list is CACHED between reconnects, so the fence must hold for an already-synthesized
+  // list: a v91-merged catalog republished to a v90 control plane must lose the conductor, and
+  // an unknown (pre-registration) version must fail closed.
+  const synthesized = withConductorAgent([claudeAgent()]);
+  assert.equal(synthesized.some((a) => a.id === "conductor"), true, "fixture synthesizes");
+  assert.equal(fenceConductorAdvertisement(synthesized, null).some((a) => a.id === "conductor"), false);
+  assert.equal(fenceConductorAdvertisement(synthesized, 90).some((a) => a.id === "conductor"), false);
+  assert.equal(fenceConductorAdvertisement(synthesized, 91).some((a) => a.id === "conductor"), true);
+  // Non-conductor rows pass untouched in both directions.
+  assert.equal(fenceConductorAdvertisement(synthesized, 90).some((a) => a.id === "claude-code"), true);
+});
+
+test("a config-defined conductor passes the fence untouched: it is explicit operator opt-in", () => {
+  const configured = claudeAgent({ id: "conductor", name: "Configured Conductor", source: "config" });
+  const fenced = fenceConductorAdvertisement([configured], 90);
+  assert.equal(fenced.some((a) => a.id === "conductor"), true);
 });

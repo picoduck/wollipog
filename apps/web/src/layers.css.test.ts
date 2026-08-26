@@ -75,7 +75,7 @@ function tokenValue(name: string): number {
 }
 
 const LADDER = [
-  "--z-sticky", "--z-dock", "--z-panel", "--z-popover",
+  "--z-sticky", "--z-dock", "--z-panel", "--z-popover", "--z-popovercontent",
   "--z-backdrop", "--z-modal", "--z-palette", "--z-toast",
 ] as const;
 

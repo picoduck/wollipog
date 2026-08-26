@@ -49,20 +49,14 @@ test("provider-home ownership is released only after shutdown process trees are 
     hostname: "host-a",
     isProcessAlive: () => false,
   });
-  assert.throws(() => restarted.acquire({
-    driver: "claude-code",
-    command: "claude",
-    context: { kind: "native" },
-    env: { HOME: providerHome },
-  }), /stale lease.*manually quarantine/);
-  assert.equal(manager.releaseProviderHomeLeasesAfterShutdown(true), true);
-  assert.equal(releases, 1);
   restarted.acquire({
     driver: "claude-code",
     command: "claude",
     context: { kind: "native" },
     env: { HOME: providerHome },
   });
+  assert.equal(manager.releaseProviderHomeLeasesAfterShutdown(true), true);
+  assert.equal(releases, 1);
   restarted.releaseAll();
 });
 
@@ -141,4 +135,28 @@ test("native subscription probes create their narrow cwd before isolation resolv
   assert.equal(cwdExistedDuringResolution, true);
   assert.equal(result.cwd, join(root, "subscription-usage-probes", sourceId));
   manager.shutdownAll();
+});
+
+test("shutdownAll disposes every driver even if one throws, and reports unclean so the lease is retained", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-shutdown-dispose-throw-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const manager = new SessionManager(
+    () => {},
+    () => {},
+    new SessionStore(join(root, "sessions")),
+    "runner",
+    undefined,
+    undefined,
+    root,
+  );
+  // Inject two active drivers; the FIRST throws from dispose() before it could register a kill.
+  const disposed: string[] = [];
+  const active = (manager as unknown as { active: Map<string, { sessionId: string; client: { dispose(): void } }> }).active;
+  active.set("s1", { sessionId: "s1", client: { dispose: () => { disposed.push("s1"); throw new Error("dispose fault"); } } });
+  active.set("s2", { sessionId: "s2", client: { dispose: () => { disposed.push("s2"); } } });
+
+  const clean = manager.shutdownAll();
+
+  assert.deepEqual(disposed.sort(), ["s1", "s2"], "a throwing dispose must not abort disposal of the other drivers");
+  assert.equal(clean, false, "an incomplete disposal reports unclean so the caller retains the provider-home lease");
 });

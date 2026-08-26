@@ -10,6 +10,7 @@ import {
   deriveHost,
   deriveSubagents,
   fixChecksPrompt,
+  legacyLocalGitFacts,
   remoteHttpUrl,
   sourceKind,
   type GitPresentation,
@@ -18,9 +19,12 @@ import type { GitStatus, GitSummary } from "./useGitStatus.js";
 import { GitPinnedSection } from "./GitVisibility.js";
 import { AgentIcon } from "./AgentIcon.js";
 import { BranchIcon, ComputerIcon, DialIcon, FolderOutlineIcon, GitHubIcon, GlobeIcon, NotesIcon, PullRequestIcon, TuningIcon } from "./Icons.js";
-import { BackgroundDeliveryBadge, BackgroundNotificationBadge, BackgroundWorkBadge, Spinner, StatusBadge, UntrackedBackgroundWorkBadge } from "./common.js";
-import { relativeTime, resolvedModelLabel } from "../format.js";
+import { BackgroundDeliveryBadge, BackgroundNotificationBadge, BackgroundWorkBadge, ChangeStatusBadge, SessionStatusIndicators, Spinner, UntrackedBackgroundWorkBadge } from "./common.js";
+import { effortLabel, relativeTime, resolvedModelLabel } from "../format.js";
+import { sessionChangeStatus, sessionMayShowChangeStatus } from "../session-status.js";
+import { effectiveModelEffortForDisplay, resolveCaps, resolveEffectiveCaps } from "../caps.js";
 import { sessionAgentLabel } from "./agent-options.js";
+import { safeExternalHref } from "../external-href.js";
 
 const BUSY = ["queued", "starting", "running", "input_required"];
 
@@ -55,19 +59,35 @@ export function PinnedSummary({
   const boxes = useStoreSelector((s) => s.boxes);
   const runs = useStoreSelector((s) => s.runs);
   const sessions = useStoreSelector((s) => s.sessions);
-  const runnerOnline = runners.get(session.runnerId)?.status === "online";
+  const runner = runners.get(session.runnerId);
+  const runnerOnline = runner?.status === "online";
+  const pickerCaps = resolveCaps(runner, session);
+  const effectiveCaps = resolveEffectiveCaps(runner, session);
+  const effective = effectiveModelEffortForDisplay(
+    effectiveCaps, session.driver, session.model, session.effort, pickerCaps,
+  );
+  const effectiveModel = effective.model;
+  const effectiveEffort = effective.effort;
   // SessionDetail owns both reads so compact and pinned presentations share one
   // session-tagged snapshot while status and summary keep independent refresh cycles.
   const summary = gitSummary.summary;
+  const changeStatus = sessionChangeStatus({
+    status: git.status,
+    summary,
+    settled: git.settled || gitSummary.settled,
+    available: sessionMayShowChangeStatus(session.status) &&
+      (gitPresentation.state === "ready" || gitPresentation.state === "updating"),
+  });
 
   const host = deriveHost(session, runners.get(session.runnerId), boxes.values());
   const richFactsVisible = gitPresentation.state !== "offline" &&
     gitPresentation.state !== "loading" &&
     gitPresentation.state !== "unavailable" &&
     gitPresentation.state !== "not_repository";
+  const legacyFacts = legacyLocalGitFacts(git.status, summary);
   const displayedFacts = richGitSupported
     ? richFactsVisible ? gitPresentation.facts : null
-    : summary ?? git.status;
+    : legacyFacts;
   // Review mutations remain linked-worktree-only even though v76 allows read-only facts for a
   // primary checkout. Never render a button that can only open Review's unavailable state.
   const reviewFacts = session.worktreePath ? displayedFacts : null;
@@ -79,9 +99,10 @@ export function PinnedSummary({
   const source = sourceKind(remoteUrl);
   const sourceUrl = remoteHttpUrl(remoteUrl);
   const pane = useMemo(() => deriveSidePaneContent(items), [items]);
-  const branch = summary?.branch ?? git.status?.branch ?? (session.worktreePath ? `agent/${session.id}` : null);
+  const branch = legacyFacts?.branch ?? (session.worktreePath ? `agent/${session.id}` : null);
   const pr = forgeFactsVisible ? summary?.pr ?? null : null;
   const checks = forgeFactsVisible ? summary?.checks ?? null : null;
+  const prHref = safeExternalHref(pr?.url);
   const canPrompt = runnerOnline && !isTerminal(session.status) && !isPolicyApproval(session.pendingApproval);
   const refreshGit = async () => {
     await Promise.all([git.refreshStatusOnly(), gitSummary.refresh()]);
@@ -96,17 +117,18 @@ export function PinnedSummary({
           <span>Session</span>
         </div>
         <div className="ps-row is-static">
-          <StatusBadge status={session.status} />
+          <SessionStatusIndicators session={session} disconnected={!runnerOnline} />
+          <ChangeStatusBadge change={changeStatus} />
           <span className="ps-right ps-detail">Updated {relativeTime(session.updatedAt)}</span>
         </div>
         <div className="ps-row is-static">
           <AgentIcon driver={session.driver} agentName={session.agentName} size={13} />
           <span>{sessionAgentLabel(session.agentName, session.driver, session.agentId)}</span>
-          {(session.resolvedModel || session.model || session.effort) && (
+          {(session.resolvedModel || effectiveModel || effectiveEffort) && (
             <span className="ps-right ps-detail" title={session.resolvedModel ?? undefined}>
               {[
-                session.resolvedModel ? resolvedModelLabel(session.resolvedModel) : session.model,
-                session.effort,
+                session.resolvedModel ? resolvedModelLabel(session.resolvedModel) : (effectiveModel?.displayName ?? effectiveModel?.id),
+                effectiveEffort ? effortLabel(effectiveEffort) : undefined,
               ].filter(Boolean).join(" · ")}
             </span>
           )}
@@ -194,8 +216,8 @@ export function PinnedSummary({
           </button>
         )}
 
-        {pr && (
-          <a className="ps-row ps-source" href={pr.url} target="_blank" rel="noreferrer" title={`#${pr.number} · ${pr.state}`}>
+        {pr && prHref && (
+          <a className="ps-row ps-source" href={prHref} target="_blank" rel="noreferrer" title={`#${pr.number} · ${pr.state}`}>
             <PullRequestIcon className="ps-icon" size={14} />
             <span className="ps-sub-title">{pr.title || `PR #${pr.number}`}</span>
           </a>
@@ -322,6 +344,7 @@ function ChecksRow({
         ? `${checks.pending} running check${checks.pending === 1 ? "" : "s"}`
         : "Checks passing";
   const dotClass = checks.failing > 0 ? "is-fail" : checks.pending > 0 ? "is-pending" : "is-pass";
+  const checksHref = safeExternalHref(checks.url);
   const body = (
     <>
       <span className={`ps-check-dot ${dotClass}`} aria-hidden="true" />
@@ -330,8 +353,8 @@ function ChecksRow({
   );
   return (
     <div className="ps-row is-static ps-checks">
-      {checks.url ? (
-        <a className="ps-checks-link" href={checks.url} target="_blank" rel="noreferrer" title="Open the checks tab">
+      {checksHref ? (
+        <a className="ps-checks-link" href={checksHref} target="_blank" rel="noreferrer" title="Open the checks tab">
           {body}
         </a>
       ) : (

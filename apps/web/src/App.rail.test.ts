@@ -5,6 +5,7 @@ import { test } from "node:test";
 const app = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
 const rail = readFileSync(new URL("./components/Rail.tsx", import.meta.url), "utf8");
 const inbox = readFileSync(new URL("./components/InboxView.tsx", import.meta.url), "utf8");
+const inboxCreateMenu = readFileSync(new URL("./components/InboxCreateMenu.tsx", import.meta.url), "utf8");
 const inboxList = readFileSync(new URL("./components/InboxList.tsx", import.meta.url), "utf8");
 const inboxRow = readFileSync(new URL("./components/InboxRow.tsx", import.meta.url), "utf8");
 const inboxShortcutRail = readFileSync(new URL("./components/InboxShortcutRail.tsx", import.meta.url), "utf8");
@@ -38,11 +39,12 @@ test("the application shell is rail-first and the legacy sidebar is fully retire
   assert.match(rail, /visibleItems\.map/);
   assert.match(rail, /visibleItems = isMobile[\s\S]*?GLOBAL_VIEW_ITEMS/);
   assert.match(rail, /overflowItems = isMobile[\s\S]*?GLOBAL_VIEW_ITEMS/);
-  // Every rail control shares one icon size. On a phone the rail is destinations-only, so the
-  // New Session control does not render here at all — the topbar owns it (see App.tsx).
+  // Creation is an Inbox action, never a navigation destination or breakpoint-specific shell action.
   assert.match(rail, /const RAIL_ICON_SIZE = 26;[\s\S]*<Icon size=\{RAIL_ICON_SIZE\}/);
-  assert.match(rail, /<PlusIcon size=\{RAIL_ICON_SIZE\}/);
-  assert.match(app, /mobileControls=\{isMobile \?/);
+  assert.doesNotMatch(rail, /onNewSession|rail-action|PlusIcon/);
+  assert.doesNotMatch(app, /title="New Session"[\s\S]*aria-label="New Session"/);
+  assert.match(app, /mobileInstanceControl=\{isMobile \?/);
+  assert.match(app, /mobileSettingsControl=\{isMobile \?/);
   assert.match(css, /\.app-rail\s*\{\s*width:\s*66px/);
   assert.match(css, /\.rail-brand img\s*\{[^}]*width:\s*39px;[^}]*height:\s*39px/);
   assert.match(css, /\.app-rail \.rail-item > \.app-icon,[\s\S]*?\.rail-settings \.settings-trigger svg\s*\{[^}]*width:\s*26px;[^}]*height:\s*26px/);
@@ -106,6 +108,7 @@ test("the global keyboard layer wires rail navigation, Inbox search, creation, a
     "navigate-automations",
     "navigate-usage",
     "navigate-connections",
+    "navigate-archived",
   ];
   for (const id of [
     ...navigationIds,
@@ -143,9 +146,10 @@ test("Inbox focus, unread state, and shortcuts use non-overlapping visual treatm
   assert.match(css, /\.inbox-zero\s*\{[^}]*min-height:\s*0;[^}]*flex:\s*1;[^}]*overflow:\s*auto;/,
     "the empty state consumes the flexible list area so the footer remains bottom-pinned");
   assert.match(css, /\.inbox-shortcut-rail\s*\{[\s\S]*?justify-content:\s*flex-end/);
-  assert.match(css, /\.inbox-list:focus-visible,[\s\S]*?background-color:[\s\S]*?box-shadow:/,
-    "active panes use a soft glow instead of a clipped outline");
-  assert.doesNotMatch(css, /\.inbox-list:focus-visible\s*\{\s*box-shadow:\s*inset 0 0 0 2px/);
+  assert.match(css, /\.inbox-list-pane:has\(> \.inbox-list:focus-visible\)::after,[\s\S]*?\.inbox-preview-pane:has\(\.detail-scroll:focus-visible\)::after[\s\S]*?position:\s*absolute;[\s\S]*?inset:\s*0;[\s\S]*?border:\s*2px solid var\(--accent\);[\s\S]*?pointer-events:\s*none;/,
+    "active panes draw one stable overlay above Inbox and transcript contents");
+  assert.match(css, /\.inbox-list:focus-visible,[\s\S]*?\.detail-scroll:focus-visible \{ outline: none; \}/,
+    "scrolling contents must not own the focus boundary");
   assert.match(css, /\.inbox-row-shell\.unread \.inbox-row\s*\{[\s\S]*?linear-gradient[\s\S]*?inset 3px 0 0/,
     "unread sessions need a distinct surface and leading accent");
 });
@@ -191,21 +195,31 @@ test("Inbox project tabs stay balanced, hide overflow chrome, and reveal context
     "mobile overlays must stop above the enlarged bottom rail");
 });
 
-test("durable Project management is a first-class workspace with a compact Inbox creation action", () => {
+test("Inbox unifies Session and Project creation while the shell exposes no duplicate action", () => {
   assert.match(rail, /projects:\s*ProjectsIcon/);
   assert.match(rail, /if \(view\.name === "session"\) return "inbox"/,
     "session detail remains owned by Inbox");
   assert.doesNotMatch(rail, /view\.name === "projects"[\s\S]*return "inbox"/,
     "Projects owns its rail active state");
-  assert.match(inbox, /className="inbox-create-project"[\s\S]*aria-label="Create Project"[\s\S]*<PlusIcon/,
-    "Inbox exposes Project creation without spending space on a management label");
+  assert.doesNotMatch(rail, /onNewSession|rail-action|PlusIcon/,
+    "the desktop rail has no creation action");
+  assert.doesNotMatch(app, /title="New Session"[\s\S]*aria-label="New Session"/,
+    "the mobile top bar has no creation action");
+  assert.match(inbox, /<InboxCreateMenu[\s\S]*onNewSession=\{\(\) => onNewSession\?\.\(activeNewSessionPreset\)\}[\s\S]*onNewProject=\{projectsSupported \? \(\) => setCreatingProject\(true\) : undefined\}/,
+    "the Inbox menu routes each choice into its existing context-aware workflow");
+  assert.match(inboxCreateMenu, /aria-label="Create"[\s\S]*New Session[\s\S]*New Project/,
+    "the control and both visible choices use accessible Title Case names");
+  assert.match(inboxCreateMenu, /useAccessibleMenu[\s\S]*useAnchoredMenuStyle/,
+    "the same focus-managed, viewport-anchored menu works for desktop and touch layouts");
   assert.match(inbox, /creatingProject && \([\s\S]*<CreateProjectDialog/,
-    "the compact action opens Project creation directly");
+    "New Project opens the existing Project creation workflow");
   assert.doesNotMatch(inbox, /inbox-manage-projects|Manage Projects/,
     "Project management lives in the rail instead of the Project bar");
   assert.doesNotMatch(commandPalette, /views\.splice\([^;]*Manage Projects/,
     "the command palette derives its single Projects destination from the global rail vocabulary");
-  assert.match(css, /\.inbox-create-project\s*\{[^}]*width:\s*34px;[^}]*height:\s*34px;/);
+  assert.match(css, /\.inbox-create-control\s*\{[^}]*width:\s*34px;[^}]*height:\s*34px;/);
+  assert.match(css, /@media \(hover: none\), \(pointer: coarse\)[\s\S]*\.inbox-create-control\s*\{[^}]*width:\s*44px;[^}]*height:\s*44px;/,
+    "the shared creation control keeps a touch-sized target");
   assert.match(projectsView, /Projects organize related sessions\. Locations are folders on connected machines where sessions run\./);
   assert.match(projectsView, /className="muted project-detail-meta">Project ID:/);
   assert.match(projectsView, /className="muted project-detail-meta">\{projectAudienceVisibilitySummary/);
@@ -335,6 +349,54 @@ test("the phone topbar cannot push its controls off-screen", () => {
     "and must not grow with the instance name");
   assert.match(css, /\.topbar:has\(\.topbar-mobile-controls\) h1 \{[^}]*text-overflow: ellipsis/,
     "the title must yield before any control does");
+  assert.match(css, /\.topbar-mobile-controls \.settings-trigger,[\s\S]*?\.mobile-session-back \{[^}]*width: 44px;[^}]*height: 44px/,
+    "Settings and the Session Back control must retain full phone touch targets");
+});
+
+test("the phone Session topbar owns Back and the live Session title without Open", () => {
+  assert.match(app, /view\.name === "session" \? \([\s\S]*?className="icon-btn mobile-session-back"[\s\S]*?aria-label="Back to Inbox"[\s\S]*?<h1 id="page-title"[^>]*>\{sessionTitle \?\? title\}<\/h1>/,
+    "the mobile app bar must replace its generic Session heading with Back and the live title");
+  assert.match(app, /sessionTitle=\{view\.name === "session" \? sessions\.get\(view\.id\)\?\.title \?\? "Session" : undefined\}/,
+    "the shell must pass the routed Session title into the app bar");
+  assert.match(app, /\{!isMobile && <EditorSelect key=\{view\.id\} sessionId=\{view\.id\} \/>\}/,
+    "Open destinations must not be mounted on the mobile Session route");
+});
+
+test("Session menu triggers clear popovers without rising to the modal backdrop layer", () => {
+  assert.match(css, /\.detail-actions:has\(\.session-header-action\[aria-expanded="true"\]\) \.session-header-action \{[^}]*z-index: var\(--z-popovercontent\);/,
+    "sibling triggers should clear the menu backdrop but stay below every modal");
+});
+
+test("Settings is the trailing control in the unified phone topbar cluster", () => {
+  const start = app.indexOf('<div className="topbar-actions topbar-mobile-controls">');
+  const end = app.indexOf("</div>", start);
+  assert.ok(start >= 0 && end > start, "the phone controls must share one ordered cluster");
+
+  const mobileCluster = app.slice(start, end);
+  const instanceIndex = mobileCluster.indexOf("mobileInstanceControl");
+  const createIndex = mobileCluster.indexOf("topbar-create");
+  const sessionActionsIndex = mobileCluster.indexOf("sessionActions");
+  const settingsIndex = mobileCluster.indexOf("mobileSettingsControl");
+  assert.ok(instanceIndex >= 0 && createIndex >= 0 && sessionActionsIndex >= 0 && settingsIndex >= 0,
+    "the phone cluster must include every control category");
+  assert.ok(instanceIndex < settingsIndex,
+    "the instance control must precede Settings");
+  assert.ok(createIndex < settingsIndex,
+    "creation actions must precede Settings");
+  assert.ok(sessionActionsIndex < settingsIndex,
+    "session actions must precede Settings");
+  assert.match(css, /\.topbar-mobile-controls \{[^}]*flex-wrap: nowrap/,
+    "the unified control cluster must stay on one line");
+});
+
+test("the Collaboration Pod header action is one accessible plus-icon control across layouts", () => {
+  assert.match(app, /function NewPodHeaderButton[\s\S]*className="icon-btn topbar-create"[\s\S]*title="New Collaboration Pod"[\s\S]*aria-label="New Collaboration Pod"[\s\S]*<PlusIcon/);
+  assert.equal([...app.matchAll(/<NewPodHeaderButton onClick=\{onNewPod\} \/>/g)].length, 2,
+    "mobile and desktop paths must reuse the same pod action");
+  assert.match(css, /\.topbar-create\.icon-btn \{[^}]*width: 32px;[^}]*height: 32px/,
+    "the desktop action must remain compact");
+  assert.match(css, /\.topbar-mobile-controls \.topbar-create\.icon-btn \{[^}]*width: 44px;[^}]*height: 44px/,
+    "the phone action must retain a full touch target");
 });
 
 test("keyboard reachability does not depend on optional viewport metadata alone", () => {
@@ -406,4 +468,21 @@ test("Shortcut Reference restores focus after a breakpoint change", () => {
   // every view in both layouts, so the chain cannot end on <body>.
   assert.match(close, /\?\? document\.getElementById\("page-title"\)/,
     "a fallback chain that can still resolve to nothing is not a fallback");
+});
+
+test("the Inbox reminder filter joins option borders without a wrapper outline", () => {
+  assert.match(inbox, /<SegmentedControl<ReminderInboxMode>[\s\S]*className="inbox-reminder-view"/,
+    "the reminder filter must opt into the scoped joined treatment");
+  assert.match(css, /\.ui-seg\.inbox-reminder-view \{[^}]*isolation: isolate;[^}]*gap: 0;[^}]*padding: 0;[^}]*border: 0;[^}]*background: transparent/,
+    "the reminder wrapper must not paint an outer outline or nested gap");
+  assert.match(css, /\.inbox-reminder-view \.ui-seg-option \{[^}]*border-color: var\(--control-outline\)/,
+    "each reminder choice must carry its own boundary");
+  assert.match(css, /\.inbox-reminder-view \.ui-seg-option \+ \.ui-seg-option \{ margin-left: -1px; \}/,
+    "adjacent reminder borders must collapse to one seam");
+  assert.match(css, /\.inbox-reminder-view \.ui-seg-option\.is-selected \{[^}]*z-index: var\(--z-sticky\);[^}]*border-color: var\(--accent\)/,
+    "the selected boundary must paint above its neighbor");
+  assert.match(css, /\.inbox-reminder-view \.ui-seg-option:focus-visible \{[^}]*z-index: var\(--z-dock\)/,
+    "the keyboard focus ring must paint above every segment");
+  assert.match(css, /\.ui-seg \{[^}]*gap: 2px;[^}]*padding: 2px;[^}]*border: 1px solid var\(--control-outline\)/,
+    "unrelated shared segmented controls must retain their established appearance");
 });

@@ -32,6 +32,8 @@ import {
   type AutomationAuditEvent,
   type AccessScopeChangePreview,
   type AccessScopeAuditView,
+  type ArchiveStatus,
+  type ArchiveStopFailureCode,
   type AutomationAuditEventKind,
   type AutomationCommandState,
   type AutomationCommandView,
@@ -52,8 +54,13 @@ import {
   type BackgroundWorkTracking,
   type ManagedBackgroundJobSnapshot,
   type SessionCapabilities,
+  type StopOperationView,
   type AcpSessionContextConfig,
   type ApprovalQueueProvenance,
+  type DeployedSkillState,
+  type SkillFile,
+  type SkillInvocationPolicy,
+  type UnmanagedSkillInfo,
   type AgentContext,
   type AgentDefinition,
   type AgentDriverKind,
@@ -126,6 +133,9 @@ import {
   type SessionEventPayload,
   type SessionSnapshot,
   type SessionStatus,
+  type SessionReminderView,
+  type SessionReminderWakePolicy,
+  type SessionReminderWakeReason,
   type SessionTitleSource,
   type SessionView,
   type QueuedPromptView,
@@ -163,6 +173,12 @@ import {
   type AuthPrincipal,
   type HumanPrincipal,
 } from "./identity.js";
+import {
+  ARCHIVE_SESSION_PAGE_SIZE,
+  archiveSessionCursorWindow,
+  type ArchiveSessionCandidate,
+  type ArchiveSessionPageQuery,
+} from "./archive-session-page.js";
 import type { DurableBackgroundPushDelivery, PushAudience, PushServiceOutcome } from "./web-push.js";
 import { matchWorkspaceId, matchWorkspaceIds, workspacePathsEqual } from "./workspace-match.js";
 import {
@@ -396,6 +412,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   agent_id       TEXT,
   title          TEXT NOT NULL DEFAULT '',
   title_source   TEXT NOT NULL DEFAULT 'generated',
+  semantic_title INTEGER NOT NULL DEFAULT 0,
   provider_updated_at TEXT,
   background_work_state TEXT,
   background_work_tracking TEXT,
@@ -435,6 +452,31 @@ CREATE TABLE IF NOT EXISTS sessions (
   FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
   FOREIGN KEY (project_location_id) REFERENCES project_locations(id) ON DELETE SET NULL
 );
+
+-- A reminder belongs to one human even when the underlying session is shared. The single row per
+-- (session,user) makes replacement atomic, while state+revision make firing and multi-client edits
+-- idempotent. Absolute instants drive scheduling; zone/expression retain the user's editing intent.
+CREATE TABLE IF NOT EXISTS session_reminders (
+  reminder_id         TEXT NOT NULL UNIQUE,
+  session_id          TEXT NOT NULL,
+  user_id             TEXT NOT NULL,
+  scheduled_for       INTEGER NOT NULL,
+  time_zone           TEXT NOT NULL,
+  original_expression TEXT NOT NULL,
+  wake_policy         TEXT NOT NULL CHECK (wake_policy IN ('until_activity','regardless')),
+  state               TEXT NOT NULL CHECK (state IN ('pending','fired')),
+  revision            INTEGER NOT NULL,
+  baseline_event_seq  INTEGER NOT NULL DEFAULT 0,
+  wake_reason         TEXT,
+  fired_at            INTEGER,
+  created_at          INTEGER NOT NULL,
+  updated_at          INTEGER NOT NULL,
+  PRIMARY KEY (session_id, user_id),
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+  FOREIGN KEY (user_id) REFERENCES identity_users(user_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_session_reminders_due
+  ON session_reminders(state, scheduled_for, session_id, user_id);
 
 -- User-submitted prompts use the runner's durable v53 receipt lane too. Unlike scheduler-owned
 -- automation commands these rows belong directly to a session and remain recoverable across a
@@ -514,6 +556,8 @@ CREATE TABLE IF NOT EXISTS managed_background_deliveries (
   projected_event_seq        INTEGER,
   notification_queued_at     INTEGER,
   dashboard_observed_at      INTEGER,
+  status_settlement_pending_at INTEGER,
+  status_settled_at           INTEGER,
   updated_at                 INTEGER NOT NULL,
   PRIMARY KEY (session_id, continuation_id),
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
@@ -1626,6 +1670,13 @@ CREATE TABLE IF NOT EXISTS usage_retention_policy (
   updated_at          INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS session_naming_preferences (
+  organization_id TEXT PRIMARY KEY,
+  mode            TEXT NOT NULL CHECK (mode IN ('prompt_text_only','custom_model_endpoint')),
+  updated_at      INTEGER NOT NULL,
+  FOREIGN KEY (organization_id) REFERENCES identity_organizations(organization_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS usage_aggregation_meta (
   id                 INTEGER PRIMARY KEY CHECK (id = 1),
   baseline_seeded_at INTEGER NOT NULL
@@ -1644,6 +1695,69 @@ CREATE TABLE IF NOT EXISTS subscription_usage_snapshots (
 );
 CREATE INDEX IF NOT EXISTS idx_subscription_usage_runner
   ON subscription_usage_snapshots(runner_id, provider, agent_id);
+
+-- Managed agent skills (protocol v90). Version files are stored inline as JSON for MVP; the
+-- canonical manifest (path/sha256/size list) is what the version digest commits to.
+CREATE TABLE IF NOT EXISTS skill_groups (
+  id         TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS skills (
+  id                TEXT PRIMARY KEY,
+  name              TEXT NOT NULL UNIQUE,
+  description       TEXT,
+  group_id          TEXT,
+  source            TEXT NOT NULL DEFAULT 'library',
+  latest_version_id TEXT,
+  created_at        INTEGER NOT NULL,
+  updated_at        INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS skill_versions (
+  id         TEXT PRIMARY KEY,
+  skill_id   TEXT NOT NULL,
+  digest     TEXT NOT NULL,
+  manifest   TEXT NOT NULL,
+  files      TEXT NOT NULL,
+  note       TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_skill_versions_skill ON skill_versions(skill_id, created_at DESC, id);
+
+CREATE TABLE IF NOT EXISTS skill_assignments (
+  id             TEXT PRIMARY KEY,
+  skill_id       TEXT NOT NULL,
+  scope_kind     TEXT NOT NULL,
+  runner_id      TEXT,
+  agent_selector TEXT NOT NULL,
+  enabled        INTEGER NOT NULL DEFAULT 1,
+  invocation     TEXT NOT NULL DEFAULT 'agent',
+  created_at     INTEGER NOT NULL,
+  updated_at     INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_skill_assignments_skill ON skill_assignments(skill_id, id);
+
+CREATE TABLE IF NOT EXISTS runner_skill_state (
+  runner_id  TEXT PRIMARY KEY,
+  state      TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS skill_ownership (
+  skill_id        TEXT PRIMARY KEY,
+  organization_id TEXT NOT NULL,
+  owner_kind      TEXT NOT NULL CHECK (owner_kind IN ('organization','user','team')),
+  owner_id        TEXT NOT NULL,
+  created_at      INTEGER NOT NULL,
+  updated_at      INTEGER NOT NULL,
+  FOREIGN KEY (skill_id) REFERENCES skills(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_skill_ownership_scope
+  ON skill_ownership(organization_id, owner_kind, owner_id, skill_id);
 `;
 
 /**
@@ -1726,6 +1840,7 @@ interface SessionRow {
   agent_id: string | null;
   title: string;
   title_source: string | null;
+  semantic_title: number;
   provider_updated_at: string | null;
   background_work_state: string | null;
   background_work_tracking: string | null;
@@ -1767,6 +1882,58 @@ interface SessionRow {
   runner_history_epoch: number | null;
   runner_history_tail_seq: number;
 }
+
+interface SessionStopIntentRow {
+  session_id: string;
+  runner_id: string;
+  created_at: number;
+  restart_launch_id: string | null;
+  archive_after_stop: number;
+  operation_id: string;
+  delivery_attempt_id: string;
+  last_attempt_at: number;
+  attempt_count: number;
+  accepted_at: number | null;
+  failed_at: number | null;
+  failure_code: string | null;
+  failure_message: string | null;
+}
+
+export interface SessionStopIntentRecord {
+  sessionId: string;
+  runnerId: string;
+  restartLaunchId: string | null;
+  deliveryAttemptId: string;
+  archiveAfterStop: boolean;
+  operation: StopOperationView;
+}
+
+interface SessionReminderRow {
+  reminder_id: string;
+  session_id: string;
+  user_id: string;
+  scheduled_for: number;
+  time_zone: string;
+  original_expression: string;
+  wake_policy: SessionReminderWakePolicy;
+  state: "pending" | "fired";
+  revision: number;
+  baseline_event_seq: number;
+  wake_reason: SessionReminderWakeReason | null;
+  fired_at: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export type SessionReminderMutationResult =
+  | { kind: "updated"; reminder: SessionReminderView }
+  | { kind: "conflict"; reminder: SessionReminderView }
+  | { kind: "missing" };
+
+export type RemoveSessionReminderResult =
+  | { kind: "removed" }
+  | { kind: "conflict"; reminder: SessionReminderView }
+  | { kind: "missing" };
 
 interface SteeringAttemptRow {
   request_id: string;
@@ -2048,7 +2215,8 @@ export interface CachedEventTailPage {
   /** Older cached rows exist below `nextBeforeSeq`. */
   hasMoreOlder: boolean;
   /** The page begins at a user-anchored turn start rather than mid-turn. False when no anchor was
-   * requested, none exists below the page, or reaching one would have exceeded the extension cap. */
+   * requested, none exists below the page, or reaching one would have exceeded the extension cap;
+   * it describes the page's leading edge, not necessarily the newest response. */
   turnAligned?: boolean;
 }
 
@@ -2056,7 +2224,11 @@ export interface CachedEventTailPage {
  * started inside. A turn is a semantic unit — splitting one orphans its tool updates from the
  * invocation that explains them — but a single verbose turn is unbounded, so alignment stops here
  * and the page keeps its count boundary rather than growing without limit. */
-export const TAIL_TURN_ALIGNMENT_MAX_EVENTS = 400;
+export const TAIL_TURN_ALIGNMENT_MAX_EVENTS = 2_000;
+/** Serialized event-payload budget for the complete aligned opening page. The ordinary 200-row
+ * window remains available even if it is already large; alignment never amplifies it past this
+ * ceiling while reaching for a semantic turn boundary. */
+export const TAIL_TURN_ALIGNMENT_MAX_PAYLOAD_BYTES = 4 * 1024 * 1024;
 
 interface ReviewFindingRow {
   finding_id: string;
@@ -2342,6 +2514,106 @@ export interface AgentLaunch {
   context: AgentContext;
   version?: string;
   capabilities?: AgentCapabilities;
+}
+
+/* --------------------------- Managed agent skills --------------------------- */
+
+/** Which of a runner's agents a skill assignment addresses. Groups are organizational only in
+ * MVP, so the selector is the complete assignable-unit vocabulary. */
+export type SkillAgentSelector =
+  | { kind: "all" }
+  | { kind: "driver"; driver: AgentDriverKind }
+  | { kind: "agent"; agentId: string };
+
+export type SkillAssignmentScopeKind = "instance" | "runner";
+
+export interface SkillVersionSummary {
+  id: string;
+  digest: string;
+  createdAt: number;
+}
+
+export interface SkillView {
+  id: string;
+  name: string;
+  description: string | null;
+  groupId: string | null;
+  source: string;
+  latestVersion: SkillVersionSummary | null;
+  assignmentCount: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface SkillVersionView extends SkillVersionSummary {
+  skillId: string;
+  /** Canonical manifest JSON (`{"files":[{"path","sha256","size"},...]}`) the digest commits to. */
+  manifest: string;
+  files: SkillFile[];
+  note: string | null;
+}
+
+export interface SkillGroupView {
+  id: string;
+  name: string;
+  sortOrder: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface SkillAssignmentView {
+  id: string;
+  skillId: string;
+  scopeKind: SkillAssignmentScopeKind;
+  runnerId: string | null;
+  agentSelector: SkillAgentSelector;
+  enabled: boolean;
+  invocation: SkillInvocationPolicy;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** The runner-reported deployment state for one machine, stored verbatim (authoritative full
+ * replacement) plus the receipt time. */
+export interface RunnerSkillStateRecord {
+  runnerId: string;
+  deployed: DeployedSkillState[];
+  unmanaged: UnmanagedSkillInfo[];
+  error?: string;
+  updatedAt: number;
+}
+
+interface SkillRow {
+  id: string;
+  name: string;
+  description: string | null;
+  group_id: string | null;
+  source: string;
+  latest_version_id: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+interface SkillVersionRow {
+  id: string;
+  skill_id: string;
+  digest: string;
+  manifest: string;
+  files: string;
+  note: string | null;
+  created_at: number;
+}
+
+interface SkillAssignmentRow {
+  id: string;
+  skill_id: string;
+  scope_kind: string;
+  runner_id: string | null;
+  agent_selector: string;
+  enabled: number;
+  invocation: string;
+  created_at: number;
+  updated_at: number;
 }
 
 export interface DriverTelemetryAggregate {
@@ -2757,6 +3029,16 @@ export class ControlPlaneDb {
       );
     } catch {
       /* column already present */
+    }
+    for (const column of [
+      "status_settlement_pending_at INTEGER",
+      "status_settled_at INTEGER",
+    ]) {
+      try {
+        db.exec(`ALTER TABLE managed_background_deliveries ADD COLUMN ${column}`);
+      } catch {
+        /* column already present */
+      }
     }
     for (const column of [
       "attempt_count INTEGER NOT NULL DEFAULT 0",
@@ -3332,6 +3614,7 @@ export class ControlPlaneDb {
       // Nullable additive form lets the backfill below distinguish legacy rows. Fresh databases
       // use the CREATE TABLE default (`generated`). Existing names are preserved as user-owned.
       "title_source TEXT",
+      "semantic_title INTEGER NOT NULL DEFAULT 0",
       "provider_updated_at TEXT",
       "background_work_state TEXT",
       "background_work_tracking TEXT",
@@ -3495,16 +3778,65 @@ export class ControlPlaneDb {
         "ALTER TABLE session_tombstones ADD COLUMN prune_when_absent INTEGER NOT NULL DEFAULT 1 CHECK (prune_when_absent IN (0, 1))",
       );
     }
-    // Nothing is connected at startup — reset stale online flags.
-    db.exec("UPDATE runners SET status = 'offline', connected_at = NULL;");
-    // Boxes likewise start offline; the orchestrator re-bootstraps auto_reconnect ones.
-    db.exec("UPDATE boxes SET status = 'offline';");
-    // Sessions that were mid-flight when the control plane stopped are orphaned
-    // (we no longer have a live runner link to them) — mark them stopped, not
-    // failed: an interrupted connection isn't an agent error.
+    // User stops are durable commands: a socket write is not delivery proof, so retain the
+    // intent until runner inventory or status proves that the provider session is terminal/gone.
     db.exec(
-      `UPDATE sessions SET status = 'stopped', updated_at = ${Date.now()}
-         WHERE status IN ('queued','starting','running','input_required','idle')`,
+      `CREATE TABLE IF NOT EXISTS session_stop_intents (
+         session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+         runner_id  TEXT NOT NULL,
+         created_at INTEGER NOT NULL,
+         restart_launch_id TEXT,
+         archive_after_stop INTEGER NOT NULL DEFAULT 0 CHECK (archive_after_stop IN (0, 1)),
+         operation_id TEXT,
+         last_attempt_at INTEGER,
+         attempt_count INTEGER NOT NULL DEFAULT 1 CHECK (attempt_count >= 1),
+         delivery_attempt_id TEXT,
+         accepted_at INTEGER,
+         failed_at INTEGER,
+         failure_code TEXT,
+         failure_message TEXT
+       )`,
+    );
+    const stopIntentColumns = db.prepare("PRAGMA table_info(session_stop_intents)")
+      .all() as unknown as Array<{ name: string }>;
+    if (!stopIntentColumns.some((column) => column.name === "restart_launch_id")) {
+      db.exec("ALTER TABLE session_stop_intents ADD COLUMN restart_launch_id TEXT");
+    }
+    if (!stopIntentColumns.some((column) => column.name === "archive_after_stop")) {
+      db.exec("ALTER TABLE session_stop_intents ADD COLUMN archive_after_stop INTEGER NOT NULL DEFAULT 0 CHECK (archive_after_stop IN (0, 1))");
+    }
+    if (!stopIntentColumns.some((column) => column.name === "operation_id")) {
+      db.exec("ALTER TABLE session_stop_intents ADD COLUMN operation_id TEXT");
+    }
+    if (!stopIntentColumns.some((column) => column.name === "last_attempt_at")) {
+      db.exec("ALTER TABLE session_stop_intents ADD COLUMN last_attempt_at INTEGER");
+    }
+    if (!stopIntentColumns.some((column) => column.name === "delivery_attempt_id")) {
+      db.exec("ALTER TABLE session_stop_intents ADD COLUMN delivery_attempt_id TEXT");
+    }
+    if (!stopIntentColumns.some((column) => column.name === "attempt_count")) {
+      db.exec("ALTER TABLE session_stop_intents ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 1 CHECK (attempt_count >= 1)");
+    }
+    if (!stopIntentColumns.some((column) => column.name === "accepted_at")) {
+      db.exec("ALTER TABLE session_stop_intents ADD COLUMN accepted_at INTEGER");
+    }
+    if (!stopIntentColumns.some((column) => column.name === "failed_at")) {
+      db.exec("ALTER TABLE session_stop_intents ADD COLUMN failed_at INTEGER");
+    }
+    if (!stopIntentColumns.some((column) => column.name === "failure_code")) {
+      db.exec("ALTER TABLE session_stop_intents ADD COLUMN failure_code TEXT");
+    }
+    if (!stopIntentColumns.some((column) => column.name === "failure_message")) {
+      db.exec("ALTER TABLE session_stop_intents ADD COLUMN failure_message TEXT");
+    }
+    db.exec(
+      `UPDATE session_stop_intents
+       SET operation_id=COALESCE(operation_id, 'stop_' || lower(hex(randomblob(16)))),
+           delivery_attempt_id=COALESCE(delivery_attempt_id, 'stop_delivery_' || lower(hex(randomblob(16)))),
+           last_attempt_at=COALESCE(last_attempt_at, created_at)`,
+    );
+    db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_session_stop_intents_runner ON session_stop_intents(runner_id, created_at, session_id)",
     );
     const controlPlane = new ControlPlaneDb(db, artifactBlobs, instanceId);
     try {
@@ -3526,6 +3858,41 @@ export class ControlPlaneDb {
   /** Stable identity of this database-backed control-plane installation. */
   instanceId(): string {
     return this.controlPlaneInstanceId;
+  }
+
+  /* ----------------------------- Startup -------------------------------- */
+
+  /** Settle connection-owned state only after the HTTP server has successfully acquired its
+   * listening socket. Opening a shared database is not proof that this process owns the instance:
+   * a duplicate process can open SQLite before its listen fails with EADDRINUSE. */
+  settleStartupState(now = Date.now()): void {
+    this.atomic(() => {
+      // Nothing is connected at startup — reset stale online flags.
+      this.stmt("UPDATE runners SET status = 'offline', connected_at = NULL").run();
+      // Boxes likewise start offline; the orchestrator re-bootstraps auto_reconnect ones.
+      this.stmt("UPDATE boxes SET status = 'offline'").run();
+      // Sessions that were mid-flight when the control plane stopped are orphaned
+      // (we no longer have a live runner link to them) — mark them stopped, not
+      // failed: an interrupted connection isn't an agent error.
+      const midFlight = this.stmt(
+        `SELECT id FROM sessions
+         WHERE status IN ('queued','starting','running','input_required','idle')`,
+      ).all() as Array<{ id: string }>;
+      this.stmt(
+        `UPDATE sessions SET status = 'stopped', updated_at = ?
+         WHERE status IN ('queued','starting','running','input_required','idle')`,
+      ).run(now);
+      // Terminality is the retry fence on every path: a runner disconnect already fences these
+      // commands, and a control-plane restart is no less disruptive — without this the outbox
+      // re-delivers into sessions this settlement just stopped.
+      for (const { id } of midFlight) {
+        this.cancelSessionPromptCommands(
+          id,
+          "session became stopped before durable prompt delivery completed",
+          now,
+        );
+      }
+    });
   }
 
   /* ----------------------------- Runners --------------------------------- */
@@ -4702,6 +5069,363 @@ export class ControlPlaneDb {
     return rows.map((r) => this.runnerView(r));
   }
 
+  /* --------------------------- Managed agent skills --------------------------- */
+
+  private skillView(row: SkillRow): SkillView {
+    const latest = row.latest_version_id
+      ? (this.stmt("SELECT id, digest, created_at FROM skill_versions WHERE id=?")
+        .get(row.latest_version_id) as { id: string; digest: string; created_at: number } | undefined)
+      : undefined;
+    const assignments = this.stmt("SELECT COUNT(*) AS n FROM skill_assignments WHERE skill_id=?")
+      .get(row.id) as { n: number };
+    return {
+      id: row.id,
+      name: row.name,
+      description: row.description,
+      groupId: row.group_id,
+      source: row.source,
+      latestVersion: latest
+        ? { id: latest.id, digest: latest.digest, createdAt: latest.created_at }
+        : null,
+      assignmentCount: Number(assignments.n),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  private skillVersionView(row: SkillVersionRow): SkillVersionView {
+    return {
+      id: row.id,
+      skillId: row.skill_id,
+      digest: row.digest,
+      manifest: row.manifest,
+      files: parseJson<SkillFile[]>(row.files) ?? [],
+      note: row.note,
+      createdAt: row.created_at,
+    };
+  }
+
+  private skillAssignmentView(row: SkillAssignmentRow): SkillAssignmentView {
+    return {
+      id: row.id,
+      skillId: row.skill_id,
+      scopeKind: row.scope_kind === "runner" ? "runner" : "instance",
+      runnerId: row.runner_id,
+      agentSelector: parseJson<SkillAgentSelector>(row.agent_selector) ?? { kind: "all" },
+      enabled: row.enabled === 1,
+      invocation: row.invocation === "manual" ? "manual" : "agent",
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  private insertSkillOwnership(skillId: string, scope: ResourceScope, now: number): void {
+    const ownerId = scope.owner.kind === "organization" ? scope.owner.organizationId
+      : scope.owner.kind === "user" ? scope.owner.userId : scope.owner.teamId;
+    this.stmt(
+      `INSERT INTO skill_ownership
+       (skill_id, organization_id, owner_kind, owner_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(skillId, scope.organizationId, scope.owner.kind, ownerId, now, now);
+  }
+
+  skillScope(skillId: string): ResourceScope | null {
+    const row = this.stmt(
+      "SELECT organization_id, owner_kind, owner_id FROM skill_ownership WHERE skill_id=?",
+    ).get(skillId) as
+      | { organization_id: string; owner_kind: "organization" | "user" | "team"; owner_id: string }
+      | undefined;
+    return row ? this.scopeFromRow(row) : null;
+  }
+
+  /** Per-resource skill authorization, exactly like canAccessProject: a missing ownership row
+   * fails closed. */
+  canAccessSkill(principal: AuthPrincipal, skillId: string): boolean {
+    const scope = this.skillScope(skillId);
+    return scope ? this.principalCanAccessScope(principal, scope) : false;
+  }
+
+  listSkillsForPrincipal(principal: AuthPrincipal): SkillView[] {
+    return this.listSkills().filter((skill) => this.canAccessSkill(principal, skill.id));
+  }
+
+  /** Create a skill together with its first version. Throws on a duplicate name (the caller maps
+   * that to 409); validation of names/files/digest happens in skills.ts before this call. */
+  createSkill(input: {
+    name: string;
+    description?: string | null;
+    groupId?: string | null;
+    files: SkillFile[];
+    manifest: string;
+    digest: string;
+    note?: string | null;
+    scope?: ResourceScope;
+    now?: number;
+  }): SkillView {
+    const now = input.now ?? Date.now();
+    const skillId = `skill_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
+    const versionId = `skillv_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
+    const scope = input.scope ?? {
+      organizationId: PERSONAL_ORGANIZATION_ID,
+      owner: { kind: "organization" as const, organizationId: PERSONAL_ORGANIZATION_ID },
+    };
+    this.atomic(() => {
+      const existing = this.stmt("SELECT 1 FROM skills WHERE name=?").get(input.name);
+      if (existing) throw new Error("a skill with this name already exists");
+      if (input.groupId && !this.stmt("SELECT 1 FROM skill_groups WHERE id=?").get(input.groupId)) {
+        throw new Error("skill group not found");
+      }
+      this.stmt(
+        `INSERT INTO skills (id, name, description, group_id, source, latest_version_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'library', ?, ?, ?)`,
+      ).run(skillId, input.name, input.description ?? null, input.groupId ?? null, versionId, now, now);
+      this.stmt(
+        `INSERT INTO skill_versions (id, skill_id, digest, manifest, files, note, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run(versionId, skillId, input.digest, input.manifest, JSON.stringify(input.files), input.note ?? null, now);
+      this.insertSkillOwnership(skillId, scope, now);
+    });
+    return this.getSkill(skillId)!;
+  }
+
+  getSkill(skillId: string): SkillView | null {
+    const row = this.stmt(
+      "SELECT id, name, description, group_id, source, latest_version_id, created_at, updated_at FROM skills WHERE id=?",
+    ).get(skillId) as unknown as SkillRow | undefined;
+    return row ? this.skillView(row) : null;
+  }
+
+  getSkillByName(name: string): SkillView | null {
+    const row = this.stmt(
+      "SELECT id, name, description, group_id, source, latest_version_id, created_at, updated_at FROM skills WHERE name=?",
+    ).get(name) as unknown as SkillRow | undefined;
+    return row ? this.skillView(row) : null;
+  }
+
+  listSkills(): SkillView[] {
+    const rows = this.stmt(
+      "SELECT id, name, description, group_id, source, latest_version_id, created_at, updated_at FROM skills ORDER BY name",
+    ).all() as unknown as SkillRow[];
+    return rows.map((row) => this.skillView(row));
+  }
+
+  updateSkill(
+    skillId: string,
+    input: { description?: string | null; groupId?: string | null },
+    now = Date.now(),
+  ): SkillView | null {
+    return this.atomic(() => {
+      const current = this.stmt("SELECT description, group_id FROM skills WHERE id=?")
+        .get(skillId) as { description: string | null; group_id: string | null } | undefined;
+      if (!current) return null;
+      if (input.groupId && !this.stmt("SELECT 1 FROM skill_groups WHERE id=?").get(input.groupId)) {
+        throw new Error("skill group not found");
+      }
+      this.stmt("UPDATE skills SET description=?, group_id=?, updated_at=? WHERE id=?").run(
+        input.description === undefined ? current.description : input.description,
+        input.groupId === undefined ? current.group_id : input.groupId,
+        now,
+        skillId,
+      );
+      return this.getSkill(skillId);
+    });
+  }
+
+  /** Append a new version and make it the latest (track-latest only in MVP). */
+  addSkillVersion(
+    skillId: string,
+    input: { files: SkillFile[]; manifest: string; digest: string; note?: string | null },
+    now = Date.now(),
+  ): SkillVersionView | null {
+    const versionId = `skillv_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
+    return this.atomic(() => {
+      if (!this.stmt("SELECT 1 FROM skills WHERE id=?").get(skillId)) return null;
+      this.stmt(
+        `INSERT INTO skill_versions (id, skill_id, digest, manifest, files, note, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run(versionId, skillId, input.digest, input.manifest, JSON.stringify(input.files), input.note ?? null, now);
+      this.stmt("UPDATE skills SET latest_version_id=?, updated_at=? WHERE id=?").run(versionId, now, skillId);
+      return this.getSkillVersion(versionId);
+    });
+  }
+
+  getSkillVersion(versionId: string): SkillVersionView | null {
+    const row = this.stmt(
+      "SELECT id, skill_id, digest, manifest, files, note, created_at FROM skill_versions WHERE id=?",
+    ).get(versionId) as unknown as SkillVersionRow | undefined;
+    return row ? this.skillVersionView(row) : null;
+  }
+
+  deleteSkill(skillId: string): boolean {
+    return this.atomic(() => {
+      if (!this.stmt("SELECT 1 FROM skills WHERE id=?").get(skillId)) return false;
+      this.stmt("DELETE FROM skill_assignments WHERE skill_id=?").run(skillId);
+      this.stmt("DELETE FROM skill_versions WHERE skill_id=?").run(skillId);
+      // skill_ownership cascades from the skills row.
+      this.stmt("DELETE FROM skills WHERE id=?").run(skillId);
+      return true;
+    });
+  }
+
+  listSkillGroups(): SkillGroupView[] {
+    const rows = this.stmt(
+      "SELECT id, name, sort_order, created_at, updated_at FROM skill_groups ORDER BY sort_order, name",
+    ).all() as unknown as Array<{ id: string; name: string; sort_order: number; created_at: number; updated_at: number }>;
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      sortOrder: row.sort_order,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  createSkillGroup(name: string, now = Date.now()): SkillGroupView {
+    const trimmed = name.trim();
+    if (!trimmed) throw new Error("skill group name is required");
+    const id = `skillg_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
+    const order = this.stmt("SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM skill_groups")
+      .get() as { next: number };
+    this.stmt(
+      "INSERT INTO skill_groups (id, name, sort_order, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+    ).run(id, trimmed, Number(order.next), now, now);
+    return { id, name: trimmed, sortOrder: Number(order.next), createdAt: now, updatedAt: now };
+  }
+
+  /** Deleting a group only detaches its member skills (groups organize, never gate deployment). */
+  deleteSkillGroup(groupId: string, now = Date.now()): boolean {
+    return this.atomic(() => {
+      if (!this.stmt("SELECT 1 FROM skill_groups WHERE id=?").get(groupId)) return false;
+      this.stmt("UPDATE skills SET group_id=NULL, updated_at=? WHERE group_id=?").run(now, groupId);
+      this.stmt("DELETE FROM skill_groups WHERE id=?").run(groupId);
+      return true;
+    });
+  }
+
+  listSkillAssignments(skillId?: string): SkillAssignmentView[] {
+    const rows = (skillId
+      ? this.stmt(
+        `SELECT id, skill_id, scope_kind, runner_id, agent_selector, enabled, invocation, created_at, updated_at
+         FROM skill_assignments WHERE skill_id=? ORDER BY created_at, id`,
+      ).all(skillId)
+      : this.stmt(
+        `SELECT id, skill_id, scope_kind, runner_id, agent_selector, enabled, invocation, created_at, updated_at
+         FROM skill_assignments ORDER BY created_at, id`,
+      ).all()) as unknown as SkillAssignmentRow[];
+    return rows.map((row) => this.skillAssignmentView(row));
+  }
+
+  /** Every assignment (including disabled overrides) whose scope covers this machine. */
+  listSkillAssignmentsForRunner(runnerId: string): SkillAssignmentView[] {
+    const rows = this.stmt(
+      `SELECT id, skill_id, scope_kind, runner_id, agent_selector, enabled, invocation, created_at, updated_at
+       FROM skill_assignments
+       WHERE scope_kind='instance' OR (scope_kind='runner' AND runner_id=?)
+       ORDER BY created_at, id`,
+    ).all(runnerId) as unknown as SkillAssignmentRow[];
+    return rows.map((row) => this.skillAssignmentView(row));
+  }
+
+  createSkillAssignment(input: {
+    skillId: string;
+    scopeKind: SkillAssignmentScopeKind;
+    runnerId?: string | null;
+    agentSelector: SkillAgentSelector;
+    invocation?: SkillInvocationPolicy;
+    enabled?: boolean;
+    now?: number;
+  }): SkillAssignmentView {
+    const now = input.now ?? Date.now();
+    const id = `skilla_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
+    return this.atomic(() => {
+      if (!this.stmt("SELECT 1 FROM skills WHERE id=?").get(input.skillId)) {
+        throw new Error("skill not found");
+      }
+      this.stmt(
+        `INSERT INTO skill_assignments
+         (id, skill_id, scope_kind, runner_id, agent_selector, enabled, invocation, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        id,
+        input.skillId,
+        input.scopeKind,
+        input.scopeKind === "runner" ? input.runnerId ?? null : null,
+        JSON.stringify(input.agentSelector),
+        input.enabled === false ? 0 : 1,
+        input.invocation ?? "agent",
+        now,
+        now,
+      );
+      return this.getSkillAssignment(id)!;
+    });
+  }
+
+  getSkillAssignment(assignmentId: string): SkillAssignmentView | null {
+    const row = this.stmt(
+      `SELECT id, skill_id, scope_kind, runner_id, agent_selector, enabled, invocation, created_at, updated_at
+       FROM skill_assignments WHERE id=?`,
+    ).get(assignmentId) as unknown as SkillAssignmentRow | undefined;
+    return row ? this.skillAssignmentView(row) : null;
+  }
+
+  updateSkillAssignment(
+    assignmentId: string,
+    input: { enabled?: boolean; invocation?: SkillInvocationPolicy },
+    now = Date.now(),
+  ): SkillAssignmentView | null {
+    return this.atomic(() => {
+      const current = this.getSkillAssignment(assignmentId);
+      if (!current) return null;
+      this.stmt("UPDATE skill_assignments SET enabled=?, invocation=?, updated_at=? WHERE id=?").run(
+        (input.enabled ?? current.enabled) ? 1 : 0,
+        input.invocation ?? current.invocation,
+        now,
+        assignmentId,
+      );
+      return this.getSkillAssignment(assignmentId);
+    });
+  }
+
+  /** Returns the removed assignment so the caller knows which machines to re-sync. */
+  deleteSkillAssignment(assignmentId: string): SkillAssignmentView | null {
+    return this.atomic(() => {
+      const current = this.getSkillAssignment(assignmentId);
+      if (!current) return null;
+      this.stmt("DELETE FROM skill_assignments WHERE id=?").run(assignmentId);
+      return current;
+    });
+  }
+
+  /** Persist a runner's authoritative skills_state (full replacement for that machine). */
+  setRunnerSkillState(
+    runnerId: string,
+    state: { deployed: DeployedSkillState[]; unmanaged: UnmanagedSkillInfo[]; error?: string },
+    now = Date.now(),
+  ): void {
+    this.stmt(
+      `INSERT INTO runner_skill_state (runner_id, state, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(runner_id) DO UPDATE SET state=excluded.state, updated_at=excluded.updated_at`,
+    ).run(runnerId, JSON.stringify({
+      deployed: state.deployed,
+      unmanaged: state.unmanaged,
+      ...(state.error === undefined ? {} : { error: state.error }),
+    }), now);
+  }
+
+  getRunnerSkillState(runnerId: string): RunnerSkillStateRecord | null {
+    const row = this.stmt("SELECT state, updated_at FROM runner_skill_state WHERE runner_id=?")
+      .get(runnerId) as { state: string; updated_at: number } | undefined;
+    if (!row) return null;
+    const parsed = parseJson<{ deployed?: DeployedSkillState[]; unmanaged?: UnmanagedSkillInfo[]; error?: string }>(row.state);
+    return {
+      runnerId,
+      deployed: parsed?.deployed ?? [],
+      unmanaged: parsed?.unmanaged ?? [],
+      ...(parsed?.error === undefined ? {} : { error: parsed.error }),
+      updatedAt: row.updated_at,
+    };
+  }
+
   /* ------------------------- Runner credentials ------------------------- */
 
   private runnerCredentialView(row: RunnerCredentialRow): RunnerCredentialView {
@@ -5583,6 +6307,26 @@ export class ControlPlaneDb {
     return row ? this.scopeFromRow(row) : null;
   }
 
+  getSessionNamingPreference(
+    organizationId: string,
+  ): { mode: "prompt_text_only" | "custom_model_endpoint"; updatedAt: number } | null {
+    const row = this.stmt(
+      "SELECT mode, updated_at FROM session_naming_preferences WHERE organization_id=?",
+    ).get(organizationId) as { mode: "prompt_text_only" | "custom_model_endpoint"; updated_at: number } | undefined;
+    return row ? { mode: row.mode, updatedAt: row.updated_at } : null;
+  }
+
+  setSessionNamingPreference(
+    organizationId: string,
+    mode: "prompt_text_only" | "custom_model_endpoint",
+    now: number,
+  ): void {
+    this.stmt(
+      `INSERT INTO session_naming_preferences (organization_id, mode, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(organization_id) DO UPDATE SET mode=excluded.mode, updated_at=excluded.updated_at`,
+    ).run(organizationId, mode, now);
+  }
+
   private principalCanAccessScope(principal: AuthPrincipal, scope: ResourceScope): boolean {
     if (principal.kind === "agent") {
       if (principal.organizationId !== scope.organizationId) return false;
@@ -5655,6 +6399,167 @@ export class ControlPlaneDb {
 
   listSessionsForPrincipal(principal: AuthPrincipal, includeArchived = false): SessionView[] {
     return this.listSessions({ includeArchived }).filter((session) => this.canAccessSession(principal, session.id));
+  }
+
+  private sessionAuthorizationSql(principal: AuthPrincipal): { sql: string; params: string[] } {
+    if (principal.kind === "human") {
+      if (principal.role === "owner" || principal.role === "admin") {
+        return { sql: "ownership.organization_id=?", params: [principal.organizationId] };
+      }
+      return {
+        sql: `ownership.organization_id=? AND (
+          (ownership.owner_kind='organization' AND ownership.owner_id=?) OR
+          (ownership.owner_kind='user' AND ownership.owner_id=?) OR
+          (ownership.owner_kind='team' AND EXISTS (
+            SELECT 1 FROM identity_teams team
+            JOIN identity_team_members member ON member.team_id=team.team_id
+            WHERE team.team_id=ownership.owner_id AND team.organization_id=ownership.organization_id
+              AND member.user_id=?
+          ))
+        )`,
+        params: [principal.organizationId, principal.organizationId, principal.userId, principal.userId],
+      };
+    }
+    if (principal.delegatedScope.organizationId !== principal.organizationId) {
+      return { sql: "0", params: [] };
+    }
+    const delegated = principal.delegatedScope.owner;
+    if (delegated.kind === "organization") {
+      return { sql: "ownership.organization_id=?", params: [principal.organizationId] };
+    }
+    return {
+      sql: "ownership.organization_id=? AND ownership.owner_kind=? AND ownership.owner_id=?",
+      params: [
+        principal.organizationId,
+        delegated.kind,
+        delegated.kind === "user" ? delegated.userId : delegated.teamId,
+      ],
+    };
+  }
+
+  /** Principal-scoped archive page candidates. Authorization, filters, transcript matching,
+   * cursor fences, and the page-plus-one bound all execute in SQLite before rows are hydrated. */
+  archiveSessionCandidatePageForPrincipal(
+    principal: AuthPrincipal,
+    query: ArchiveSessionPageQuery,
+  ): {
+    sessions: ArchiveSessionCandidate[];
+    transcriptSessionIds: string[];
+    facets: { projects: string[]; locations: string[]; agents: string[] };
+  } | { error: string } {
+    const window = archiveSessionCursorWindow(query);
+    if ("error" in window) return window;
+    const authorization = this.sessionAuthorizationSql(principal);
+    const projectSql = "COALESCE(project.name, CASE WHEN session.project_id IS NOT NULL THEN 'Unknown Project' ELSE 'No Project' END)";
+    const locationSql = `COALESCE(location.name, workspace_override.display_name, workspace.name,
+      workspace_extra.name, session.workspace_id, 'No Location')`;
+    const agentSql = `CASE
+      WHEN session.agent_id='conductor' OR COALESCE(agent.name, session.agent_id, '') IN
+        ('Conductor (Wollipog)', 'Conductor (Agent Manager)') THEN 'Conductor (Wollipog)'
+      WHEN session.driver='codex-app-server' THEN 'Codex — Interactive'
+      WHEN session.driver='codex' THEN 'Codex — Non-Interactive (codex exec)'
+      ELSE COALESCE(agent.name, session.agent_id, session.driver)
+    END`;
+    const pendingArchiveSql = `EXISTS(SELECT 1 FROM session_stop_intents intent
+      WHERE intent.session_id=session.id AND intent.archive_after_stop=1)`;
+    const stopFailedSql = `EXISTS(SELECT 1 FROM session_stop_intents intent
+      WHERE intent.session_id=session.id AND intent.archive_after_stop=1 AND intent.failed_at IS NOT NULL)`;
+    const joins = `FROM sessions session
+      JOIN session_ownership ownership ON ownership.session_id=session.id
+      LEFT JOIN projects project ON project.id=session.project_id
+      LEFT JOIN project_locations location ON location.id=session.project_location_id
+      LEFT JOIN workspace_overrides workspace_override
+        ON workspace_override.runner_id=session.runner_id
+       AND workspace_override.workspace_id=session.workspace_id
+      LEFT JOIN workspaces workspace
+        ON workspace.runner_id=session.runner_id AND workspace.id=session.workspace_id
+      LEFT JOIN workspace_extras workspace_extra
+        ON workspace_extra.runner_id=session.runner_id AND workspace_extra.id=session.workspace_id
+      LEFT JOIN agent_definitions agent ON agent.id=session.agent_id`;
+    const where = [authorization.sql];
+    const params: Array<string | number> = [...authorization.params];
+    if (window.archive === "archived") where.push(`(session.archived=1 OR ${pendingArchiveSql})`);
+    else if (window.archive === "unarchived") where.push(`session.archived=0 AND NOT ${pendingArchiveSql}`);
+    if (window.lifecycle !== "all") {
+      where.push("session.status=?");
+      params.push(window.lifecycle);
+    }
+    for (const [value, sql] of [[query.project, projectSql], [query.location, locationSql], [query.agent, agentSql]] as const) {
+      if (value) {
+        where.push(`${sql}=?`);
+        params.push(value);
+      }
+    }
+    if (window.cursor) {
+      where.push("(session.created_at<? OR (session.created_at=? AND session.id>?))");
+      params.push(window.cursor.afterCreatedAt, window.cursor.afterCreatedAt, window.cursor.afterId);
+      where.push("(session.created_at<? OR (session.created_at=? AND session.id>=?))");
+      params.push(window.cursor.anchorCreatedAt, window.cursor.anchorCreatedAt, window.cursor.anchorId);
+    }
+    const q = (query.q ?? "").trim().toLocaleLowerCase();
+    const match = q.length >= 2
+      ? q.split(/\s+/).filter(Boolean).slice(0, 16).map((term) => `"${term.replace(/"/g, '""')}"`).join(" ")
+      : "";
+    const transcriptSql = "session.id IN (SELECT session_id FROM session_events_fts WHERE session_events_fts MATCH ?)";
+    if (q) {
+      const escaped = `%${q.replace(/!/g, "!!").replace(/%/g, "!%").replace(/_/g, "!_")}%`;
+      const localSql = `LOWER(session.id || char(10) || session.title || char(10) || ${projectSql} || char(10) ||
+        ${locationSql} || char(10) || ${agentSql} || char(10) ||
+        CASE WHEN session.status='input_required' THEN 'Input Required'
+             ELSE UPPER(SUBSTR(session.status, 1, 1)) || SUBSTR(session.status, 2) END || char(10) ||
+        CASE WHEN session.archived=1 THEN 'Archived' ELSE 'Not Archived' END) LIKE ? ESCAPE '!'`;
+      where.push(match ? `(${localSql} OR ${transcriptSql})` : localSql);
+      params.push(escaped);
+      if (match) params.push(match);
+    }
+    const rows = this.stmt(
+      `SELECT session.id, session.title, session.project_id, project.name AS project_name,
+              session.workspace_id, ${locationSql} AS location_name,
+              session.agent_id, agent.name AS agent_name, session.driver, session.archived,
+              session.status, session.created_at, ${pendingArchiveSql} AS pending_archive,
+              ${stopFailedSql} AS stop_failed,
+              ${match ? transcriptSql : "0"} AS transcript_match
+       ${joins}
+       WHERE ${where.join(" AND ")}
+       ORDER BY session.created_at DESC, session.id ASC
+       LIMIT ${ARCHIVE_SESSION_PAGE_SIZE + 1}`,
+    ).all(...(match ? [match, ...params] : params)) as unknown as Array<{
+      id: string; title: string; project_id: string | null; project_name: string | null;
+      workspace_id: string | null; location_name: string | null; agent_id: string | null;
+      agent_name: string | null; driver: SessionView["driver"]; archived: number;
+      status: SessionStatus; created_at: number; pending_archive: number; stop_failed: number;
+      transcript_match: number;
+    }>;
+    const sessions = rows.map((row) => ({
+      id: row.id,
+      title: row.title,
+      projectId: row.project_id,
+      projectName: row.project_name,
+      workspaceId: row.workspace_id,
+      locationName: row.location_name,
+      agentId: row.agent_id,
+      agentName: row.agent_name ?? row.agent_id,
+      driver: row.driver,
+      archived: row.archived === 1,
+      ...(row.pending_archive === 1
+        ? { archiveStatus: row.stop_failed === 1 ? "stop_failed" as const : "stop_pending" as const }
+        : {}),
+      status: row.status,
+      createdAt: row.created_at,
+    }));
+    const facetValues = (expression: string): string[] => (this.stmt(
+      `SELECT DISTINCT ${expression} AS value ${joins}
+       WHERE ${authorization.sql} ORDER BY value LIMIT 500`,
+    ).all(...authorization.params) as unknown as Array<{ value: string }>).map((row) => row.value);
+    return {
+      sessions,
+      transcriptSessionIds: rows.filter((row) => row.transcript_match === 1).map((row) => row.id),
+      facets: {
+        projects: facetValues(projectSql),
+        locations: facetValues(locationSql),
+        agents: facetValues(agentSql),
+      },
+    };
   }
 
   private accessScopeChangeToken(input: Omit<AccessScopeChangePreview, "confirmationToken">, evidence: unknown): string {
@@ -6582,6 +7487,8 @@ export class ControlPlaneDb {
       this.stmt("DELETE FROM workspace_ownership WHERE runner_id=?").run(runnerId);
       this.stmt("DELETE FROM runner_ownership WHERE runner_id=?").run(runnerId);
       this.stmt("DELETE FROM runner_credentials WHERE runner_id=?").run(runnerId);
+      this.stmt("DELETE FROM runner_skill_state WHERE runner_id=?").run(runnerId);
+      this.stmt("DELETE FROM skill_assignments WHERE scope_kind='runner' AND runner_id=?").run(runnerId);
       this.stmt("DELETE FROM runners WHERE runner_id=?").run(runnerId); // cascades workspaces, agents
       this.db.exec("COMMIT");
     } catch (err) {
@@ -7879,7 +8786,7 @@ export class ControlPlaneDb {
     // runner's snapshot knows nothing of it, so we must not let it revert status→idle +
     // pending→null and resume over-limit work.
     const existing = this.stmt(
-      `SELECT runner_id, workspace_id, project_id, pending_approval, title, title_source,
+      `SELECT runner_id, workspace_id, project_id, pending_approval, title, title_source, semantic_title,
               cost_budget_usd, execution_handoff, adopted, workspace_path
        FROM sessions WHERE id=?`,
     ).get(id) as
@@ -7890,6 +8797,7 @@ export class ControlPlaneDb {
           pending_approval: string | null;
           title: string;
           title_source: string | null;
+          semantic_title: number;
           cost_budget_usd: number | null;
           execution_handoff: string | null;
           adopted: number;
@@ -7944,9 +8852,11 @@ export class ControlPlaneDb {
     // The control plane owns explicit rename order. A runner snapshot can carry an OLDER user
     // title (the runner learned the launch-time title but not a later CP-only rename), so even an
     // incoming `user` source must not replace the existing local user override.
-    const keepUserTitle = existing?.title_source === "user";
-    const title = keepUserTitle ? existing.title : snap.title;
-    const titleSource = keepUserTitle ? "user" : snapshotTitleSource;
+    const keepControlPlaneTitle = existing?.title_source === "user" ||
+      (existing?.semantic_title === 1 && snapshotTitleSource !== "provider");
+    const title = keepControlPlaneTitle ? existing!.title : snap.title;
+    const titleSource = keepControlPlaneTitle ? existing!.title_source ?? "generated" : snapshotTitleSource;
+    const semanticTitle = keepControlPlaneTitle && existing?.semantic_title === 1 ? 1 : 0;
     this.db.exec("BEGIN");
     try {
       if (authoritativeImportPath && authoritativeScope) {
@@ -7975,7 +8885,7 @@ export class ControlPlaneDb {
         );
       }
       this.stmt(
-        `UPDATE sessions SET status=?, title=?, title_source=?, provider_updated_at=?, background_work_state=?, background_work_tracking=COALESCE(?, background_work_tracking), preview=?, pending_approval=?, worktree_path=?, workspace_path=?, use_worktree=?,
+        `UPDATE sessions SET status=?, title=?, title_source=?, semantic_title=?, provider_updated_at=?, background_work_state=?, background_work_tracking=COALESCE(?, background_work_tracking), preview=?, pending_approval=?, worktree_path=?, workspace_path=?, use_worktree=?,
             model=?, resolved_model=?, effort=?, permission_mode=?, agent_capabilities=?, input_tokens=?, output_tokens=?, context_tokens_used=?, context_window=?, cost_usd=?, adopted=?,
             acp_session_context=COALESCE(?, acp_session_context),
             updated_at=? WHERE id=?`,
@@ -7984,6 +8894,7 @@ export class ControlPlaneDb {
         status,
         title,
         titleSource,
+        semanticTitle,
         snap.providerUpdatedAt ?? null,
         snap.backgroundWorkState ?? null,
         snap.backgroundWorkTracking ?? null,
@@ -8027,6 +8938,24 @@ export class ControlPlaneDb {
       }
       this.reconcileUsageSnapshotInTransaction(id, snap, now);
       this.upsertManagedBackgroundJobsInTransaction(id, snap.backgroundJobs, now);
+      // Session terminality is the retry fence regardless of which service path observed it;
+      // snapshots (hydration and runtime updates) must fence in the same transaction so a pending
+      // durable prompt can never be re-delivered into a session this snapshot terminalized.
+      // The same authority orphans any armed settlement marker: a post-restart hydration of a
+      // dead run must not leave it to suppress a later run's Ready.
+      if (isTerminal(status)) {
+        this.cancelSessionPromptCommands(
+          id,
+          `session became ${status} before durable prompt delivery completed`,
+          now,
+        );
+        this.stmt(
+          `UPDATE managed_background_deliveries
+              SET status_settlement_pending_at=NULL, updated_at=MAX(updated_at, ?)
+            WHERE session_id=? AND status_settlement_pending_at IS NOT NULL
+              AND status_settled_at IS NULL`,
+        ).run(now, id);
+      }
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -8157,6 +9086,7 @@ export class ControlPlaneDb {
     ts: number,
     eventEpoch: number,
     eventSeq: number,
+    armStatusSettlement: boolean,
   ): void {
     if (payload.kind !== "background_continuation_delivered" ||
         !validBackgroundIdentity(payload.continuationId) ||
@@ -8165,8 +9095,8 @@ export class ControlPlaneDb {
       `INSERT INTO managed_background_deliveries
         (session_id, continuation_id, parent_turn_id, runner_result_persisted_at,
          transcript_projected_at, projected_event_epoch, projected_event_seq,
-         notification_queued_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         notification_queued_at, status_settlement_pending_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(session_id, continuation_id) DO UPDATE SET
          parent_turn_id=managed_background_deliveries.parent_turn_id,
          runner_result_persisted_at=COALESCE(managed_background_deliveries.runner_result_persisted_at, excluded.runner_result_persisted_at),
@@ -8174,6 +9104,11 @@ export class ControlPlaneDb {
          projected_event_epoch=COALESCE(managed_background_deliveries.projected_event_epoch, excluded.projected_event_epoch),
          projected_event_seq=COALESCE(managed_background_deliveries.projected_event_seq, excluded.projected_event_seq),
          notification_queued_at=COALESCE(managed_background_deliveries.notification_queued_at, excluded.notification_queued_at),
+         status_settlement_pending_at=CASE
+           WHEN managed_background_deliveries.status_settled_at IS NULL
+             THEN COALESCE(managed_background_deliveries.status_settlement_pending_at, excluded.status_settlement_pending_at)
+           ELSE managed_background_deliveries.status_settlement_pending_at
+         END,
          updated_at=MAX(managed_background_deliveries.updated_at, excluded.updated_at)`,
     ).run(
       sessionId,
@@ -8184,6 +9119,12 @@ export class ControlPlaneDb {
       eventEpoch,
       eventSeq,
       ts,
+      armStatusSettlement &&
+        ["queued", "starting", "running"].includes(
+          (this.stmt("SELECT status FROM sessions WHERE id=?").get(sessionId) as
+            | { status: SessionStatus }
+            | undefined)?.status ?? "",
+        ) ? ts : null,
       ts,
     );
     this.stageBackgroundPushDeliveriesInTransaction(
@@ -8245,12 +9186,58 @@ export class ControlPlaneDb {
     ).run(now, now, sessionId, continuationId).changes) > 0;
   }
 
+  /** A live delivery frame diverted through catch-up hydration by a sequence gap must arm its
+   * settlement BEFORE the hydration round-trip: the runner's trailing idle can arrive first, and
+   * once the session is idle the projection-time arming would refuse. Creates the durable row
+   * early with only identity and the pending marker; the later projection fills every other
+   * stage via its COALESCE upsert. */
+  armBackgroundDeliverySettlementEarly(
+    sessionId: string,
+    continuationId: string,
+    parentTurnId: string,
+    now: number,
+  ): void {
+    if (!validBackgroundIdentity(continuationId) || !validBackgroundIdentity(parentTurnId)) return;
+    const busy = ["queued", "starting", "running"].includes(
+      (this.stmt("SELECT status FROM sessions WHERE id=?").get(sessionId) as
+        | { status: SessionStatus }
+        | undefined)?.status ?? "",
+    );
+    if (!busy) return;
+    this.stmt(
+      `INSERT INTO managed_background_deliveries
+        (session_id, continuation_id, parent_turn_id, status_settlement_pending_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(session_id, continuation_id) DO UPDATE SET
+         status_settlement_pending_at=CASE
+           WHEN managed_background_deliveries.status_settled_at IS NULL
+             THEN COALESCE(managed_background_deliveries.status_settlement_pending_at, excluded.status_settlement_pending_at)
+           ELSE managed_background_deliveries.status_settlement_pending_at
+         END,
+         updated_at=MAX(managed_background_deliveries.updated_at, excluded.updated_at)`,
+    ).run(sessionId, continuationId, parentTurnId, now, now);
+  }
+
+  /** Consume live-event provenance for exactly one semantic busy-to-idle completion. Historical
+   * replay never arms this marker, even when the session happens to be running during hydration. */
+  settleManagedBackgroundDeliveryStatus(sessionId: string, now: number): boolean {
+    const result = this.stmt(
+      `UPDATE managed_background_deliveries
+          SET status_settled_at=COALESCE(status_settled_at, ?),
+              status_settlement_pending_at=NULL,
+              updated_at=MAX(updated_at, ?)
+        WHERE session_id=? AND status_settlement_pending_at IS NOT NULL
+          AND status_settled_at IS NULL`,
+    ).run(now, now, sessionId);
+    return Number(result.changes) > 0;
+  }
+
   listBackgroundDeliveries(sessionId: string, status?: SessionStatus): BackgroundDeliveryView[] {
     const rows = this.stmt(
       `SELECT delivery.continuation_id, delivery.parent_turn_id, delivery.queued_at,
               delivery.submitted_at, delivery.accepted_at, delivery.runner_result_persisted_at,
               delivery.transcript_projected_at, delivery.notification_queued_at,
-              delivery.dashboard_observed_at,
+              delivery.dashboard_observed_at, delivery.status_settled_at,
               COUNT(job.job_id) AS job_count,
               COALESCE(SUM(CASE WHEN job.terminal_observed_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS terminal_count,
               COALESCE(SUM(job.source_present), 0) AS active_job_count
@@ -8280,6 +9267,7 @@ export class ControlPlaneDb {
       transcript_projected_at: number | null;
       notification_queued_at: number | null;
       dashboard_observed_at: number | null;
+      status_settled_at: number | null;
       job_count: number;
       terminal_count: number;
       active_job_count: number;
@@ -8311,6 +9299,7 @@ export class ControlPlaneDb {
         ...(row.transcript_projected_at != null ? { transcriptProjectedAt: row.transcript_projected_at } : {}),
         ...(row.notification_queued_at != null ? { notificationQueuedAt: row.notification_queued_at } : {}),
         ...(row.dashboard_observed_at != null ? { dashboardObservedAt: row.dashboard_observed_at } : {}),
+        ...(row.status_settled_at != null ? { statusSettledAt: row.status_settled_at } : {}),
         ...(notificationsByContinuation.get(row.continuation_id)?.length
           ? { notifications: notificationsByContinuation.get(row.continuation_id)! }
           : {}),
@@ -8493,7 +9482,10 @@ export class ControlPlaneDb {
     }
   }
 
-  updateSessionStatus(id: string, status: SessionStatus, now: number): void {
+  updateSessionStatus(id: string, status: SessionStatus, now: number, provisionalStop = false): void {
+    // Terminality couples the status write to its fences below; commit them together so a crash
+    // between statements cannot persist a terminal status with a stale armed marker.
+    this.atomic(() => {
     this.stmt("UPDATE sessions SET status=?, updated_at=? WHERE id=?")
       .run(status, now, id);
     if (status === "completed" || status === "failed" || status === "stopped") {
@@ -8501,6 +9493,19 @@ export class ControlPlaneDb {
       // A never-sent prompt is definitely failed; anything marked before send may have reached
       // the runner and is conservatively uncertain until a later receipt narrows the outcome.
       this.cancelSessionPromptCommands(id, `session became ${status} before durable prompt delivery completed`, now);
+      // An authoritative terminal transition orphans any armed-but-unsettled delivery marker: the
+      // trailing idle it awaited will never belong to this run, and leaving it pending would
+      // suppress the Ready of an unrelated later run. Provisional stops (runner disconnect,
+      // startup settlement) deliberately do NOT clear it — the delivery's idle still arrives
+      // after reconnect, and that restart survival is the feature's core case.
+      if (!provisionalStop) {
+        this.stmt(
+          `UPDATE managed_background_deliveries
+              SET status_settlement_pending_at=NULL, updated_at=MAX(updated_at, ?)
+            WHERE session_id=? AND status_settlement_pending_at IS NOT NULL
+              AND status_settled_at IS NULL`,
+        ).run(now, id);
+      }
     }
     // Swallowed idle belongs only to the CP-owned pause that observed it. Any local or runner
     // transition back into execution (or into a terminal state) invalidates that settle proof,
@@ -8518,6 +9523,7 @@ export class ControlPlaneDb {
     if (status !== "input_required") {
       this.stmt("UPDATE sessions SET pending_approval=NULL WHERE id=?").run(id);
     }
+    });
   }
 
   setSessionColumn(id: string, column: BoardColumn | null, now: number): void {
@@ -8550,7 +9556,189 @@ export class ControlPlaneDb {
   }
 
   setSessionTitle(id: string, title: string, now: number, source: SessionTitleSource = "generated"): void {
-    this.stmt("UPDATE sessions SET title=?, title_source=?, updated_at=? WHERE id=?").run(title, source, now, id);
+    this.stmt("UPDATE sessions SET title=?, title_source=?, semantic_title=0, updated_at=? WHERE id=?").run(title, source, now, id);
+  }
+
+  /** CP task-model result. It remains generated-owned but survives stale non-provider runner state. */
+  setSemanticSessionTitle(id: string, title: string, now: number, source: SessionTitleSource): void {
+    this.stmt("UPDATE sessions SET title=?, title_source=?, semantic_title=1, updated_at=? WHERE id=?")
+      .run(title, source, now, id);
+  }
+
+  private sessionReminderView(row: SessionReminderRow): SessionReminderView {
+    return {
+      reminderId: row.reminder_id,
+      sessionId: row.session_id,
+      scheduledFor: row.scheduled_for,
+      timeZone: row.time_zone,
+      originalExpression: row.original_expression,
+      wakePolicy: row.wake_policy,
+      state: row.state,
+      revision: row.revision,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      ...(row.fired_at == null ? {} : { firedAt: row.fired_at }),
+      ...(row.wake_reason == null ? {} : { wakeReason: row.wake_reason }),
+    };
+  }
+
+  getSessionReminder(sessionId: string, userId: string): SessionReminderView | null {
+    const row = this.stmt(
+      "SELECT * FROM session_reminders WHERE session_id=? AND user_id=?",
+    ).get(sessionId, userId) as unknown as SessionReminderRow | undefined;
+    return row ? this.sessionReminderView(row) : null;
+  }
+
+  listSessionReminders(userId: string): SessionReminderView[] {
+    const rows = this.stmt(
+      `SELECT * FROM session_reminders WHERE user_id=?
+       ORDER BY CASE state WHEN 'pending' THEN 0 ELSE 1 END, scheduled_for, session_id`,
+    ).all(userId) as unknown as SessionReminderRow[];
+    return rows.map((row) => this.sessionReminderView(row));
+  }
+
+  setSessionReminder(input: {
+    sessionId: string;
+    userId: string;
+    scheduledFor: number;
+    timeZone: string;
+    originalExpression: string;
+    wakePolicy: SessionReminderWakePolicy;
+    expectedRevision?: number;
+    expectedReminderId?: string;
+    restoreFired?: { firedAt: number; wakeReason: SessionReminderWakeReason };
+    now: number;
+  }): SessionReminderMutationResult {
+    return this.atomic(() => {
+      const current = this.stmt(
+        "SELECT * FROM session_reminders WHERE session_id=? AND user_id=?",
+      ).get(input.sessionId, input.userId) as unknown as SessionReminderRow | undefined;
+      if (current && (
+        (input.expectedReminderId !== undefined && input.expectedReminderId !== current.reminder_id) ||
+        (input.expectedRevision !== undefined && input.expectedRevision !== current.revision)
+      )) {
+        return { kind: "conflict", reminder: this.sessionReminderView(current) };
+      }
+      if (!current && (
+        input.expectedReminderId !== undefined ||
+        (input.expectedRevision !== undefined && input.expectedRevision !== 0)
+      )) return { kind: "missing" };
+      const session = this.stmt("SELECT 1 AS found FROM sessions WHERE id=?").get(input.sessionId) as
+        | { found: number } | undefined;
+      if (!session) return { kind: "missing" };
+      // Activity wake compares against the control-plane session_events sequence, not the
+      // runner-owned hydration sequence. Capture this baseline in the same transaction as write.
+      const baseline = this.stmt(
+        "SELECT COALESCE(MAX(seq),0) AS seq FROM session_events WHERE session_id=?",
+      ).get(input.sessionId) as { seq: number };
+
+      if (current) {
+        const preservesObservedFiredState = input.restoreFired === undefined &&
+          current.state === "fired" && input.scheduledFor === current.scheduled_for;
+        if (preservesObservedFiredState) {
+          this.stmt(
+            `UPDATE session_reminders SET time_zone=?, original_expression=?, wake_policy=?,
+               revision=revision+1, baseline_event_seq=?, updated_at=?
+             WHERE session_id=? AND user_id=?`,
+          ).run(input.timeZone, input.originalExpression, input.wakePolicy,
+            baseline.seq, input.now, input.sessionId, input.userId);
+        } else {
+          this.stmt(
+            `UPDATE session_reminders SET scheduled_for=?, time_zone=?, original_expression=?,
+               wake_policy=?, state='pending', revision=revision+1, baseline_event_seq=?,
+               wake_reason=NULL, fired_at=NULL, updated_at=? WHERE session_id=? AND user_id=?`,
+          ).run(input.scheduledFor, input.timeZone, input.originalExpression, input.wakePolicy,
+            baseline.seq, input.now, input.sessionId, input.userId);
+        }
+      } else {
+        this.stmt(
+          `INSERT INTO session_reminders
+           (reminder_id,session_id,user_id,scheduled_for,time_zone,original_expression,wake_policy,
+            state,revision,baseline_event_seq,created_at,updated_at)
+           VALUES (?,?,?,?,?,?,?,'pending',1,?,?,?)`,
+        ).run(`rem_${randomUUID().replace(/-/g, "")}`, input.sessionId, input.userId,
+          input.scheduledFor, input.timeZone, input.originalExpression, input.wakePolicy,
+          baseline.seq, input.now, input.now);
+      }
+      if (input.restoreFired) {
+        this.stmt(
+          `UPDATE session_reminders SET state='fired', wake_reason=?, fired_at=?
+           WHERE session_id=? AND user_id=?`,
+        ).run(input.restoreFired.wakeReason, input.restoreFired.firedAt, input.sessionId, input.userId);
+      }
+      return { kind: "updated", reminder: this.getSessionReminder(input.sessionId, input.userId)! };
+    });
+  }
+
+  removeSessionReminder(
+    sessionId: string,
+    userId: string,
+    expectedRevision?: number,
+    expectedReminderId?: string,
+  ): RemoveSessionReminderResult {
+    return this.atomic(() => {
+      const current = this.stmt(
+        "SELECT * FROM session_reminders WHERE session_id=? AND user_id=?",
+      ).get(sessionId, userId) as unknown as SessionReminderRow | undefined;
+      if (!current) return { kind: "missing" };
+      if ((expectedReminderId !== undefined && expectedReminderId !== current.reminder_id) ||
+          (expectedRevision !== undefined && expectedRevision !== current.revision)) {
+        return { kind: "conflict", reminder: this.sessionReminderView(current) };
+      }
+      this.stmt("DELETE FROM session_reminders WHERE session_id=? AND user_id=?").run(sessionId, userId);
+      return { kind: "removed" };
+    });
+  }
+
+  private fireSessionReminderRows(
+    rows: SessionReminderRow[],
+    reason: SessionReminderWakeReason,
+    now: number,
+  ): Array<{ userId: string; reminder: SessionReminderView }> {
+    const fired: Array<{ userId: string; reminder: SessionReminderView }> = [];
+    for (const row of rows) {
+      const changed = this.stmt(
+        `UPDATE session_reminders SET state='fired', wake_reason=?, fired_at=?, updated_at=?, revision=revision+1
+         WHERE session_id=? AND user_id=? AND state='pending' AND revision=?`,
+      ).run(reason, now, now, row.session_id, row.user_id, row.revision);
+      if (!changed.changes) continue;
+      const reminder = this.getSessionReminder(row.session_id, row.user_id);
+      if (reminder) fired.push({ userId: row.user_id, reminder });
+    }
+    return fired;
+  }
+
+  fireDueSessionReminders(now: number): Array<{ userId: string; reminder: SessionReminderView }> {
+    return this.atomic(() => {
+      const rows = this.stmt(
+        `SELECT r.* FROM session_reminders r JOIN sessions s ON s.id=r.session_id
+         WHERE r.state='pending' AND r.scheduled_for<=? AND s.archived=0
+         ORDER BY r.scheduled_for,r.session_id,r.user_id`,
+      ).all(now) as unknown as SessionReminderRow[];
+      return this.fireSessionReminderRows(rows, "scheduled", now);
+    });
+  }
+
+  fireSessionRemindersForActivity(
+    sessionId: string,
+    eventSeq: number,
+    reason: Exclude<SessionReminderWakeReason, "scheduled">,
+    now: number,
+  ): Array<{ userId: string; reminder: SessionReminderView }> {
+    // Avoid a write transaction on the session-event hot path when there is no eligible reminder.
+    const eligible = this.stmt(
+      `SELECT 1 AS found FROM session_reminders r JOIN sessions s ON s.id=r.session_id
+       WHERE r.session_id=? AND r.state='pending' AND r.wake_policy='until_activity' AND s.archived=0 LIMIT 1`,
+    ).get(sessionId) as { found: number } | undefined;
+    if (!eligible) return [];
+    return this.atomic(() => {
+      const rows = this.stmt(
+        `SELECT r.* FROM session_reminders r JOIN sessions s ON s.id=r.session_id
+         WHERE r.session_id=? AND r.state='pending' AND r.wake_policy='until_activity'
+           AND r.baseline_event_seq<? AND s.archived=0`,
+      ).all(sessionId, eventSeq) as unknown as SessionReminderRow[];
+      return this.fireSessionReminderRows(rows, reason, now);
+    });
   }
 
   setSessionArchived(id: string, archived: boolean, now: number): void {
@@ -9534,7 +10722,7 @@ export class ControlPlaneDb {
    * Results are grouped to DISTINCT sessions (best-ranked hit each) by overfetching raw
    * rows — one chatty session would otherwise consume the whole row budget and collapse to
    * a single visible result, hiding every other matching session. */
-  searchEvents(q: string, limit = 20): { sessionId: string; seq: number; snippet: string }[] {
+  searchEvents(q: string, limit = 20, authorizedSessionIds?: readonly string[]): { sessionId: string; seq: number; snippet: string }[] {
     const match = q
       .split(/\s+/)
       .filter(Boolean)
@@ -9542,10 +10730,14 @@ export class ControlPlaneDb {
       .map((t) => `"${t.replace(/"/g, '""')}"`)
       .join(" ");
     if (!match) return [];
+    if (authorizedSessionIds?.length === 0) return [];
+    const authorization = authorizedSessionIds
+      ? " AND session_id IN (SELECT value FROM json_each(?))"
+      : "";
     const rows = this.stmt(
       `SELECT session_id, seq, snippet(session_events_fts, 0, '⟪', '⟫', '…', 10) AS snip
-         FROM session_events_fts WHERE session_events_fts MATCH ? ORDER BY rank LIMIT ?`,
-    ).all(match, limit * 10) as unknown as { session_id: string; seq: number; snip: string }[];
+         FROM session_events_fts WHERE session_events_fts MATCH ?${authorization} ORDER BY rank LIMIT ?`,
+    ).all(...(authorizedSessionIds ? [match, JSON.stringify(authorizedSessionIds), limit * 10] : [match, limit * 10])) as unknown as { session_id: string; seq: number; snip: string }[];
     const out: { sessionId: string; seq: number; snippet: string }[] = [];
     const seen = new Set<string>();
     for (const r of rows) {
@@ -9557,7 +10749,259 @@ export class ControlPlaneDb {
     return out;
   }
 
+  /** Bounded transcript search with principal authorization inside the ranked FTS query. */
+  searchEventsForPrincipal(
+    q: string,
+    limit: number,
+    principal: AuthPrincipal,
+  ): { sessionId: string; seq: number; snippet: string }[] {
+    const match = q
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 16)
+      .map((term) => `"${term.replace(/"/g, '""')}"`)
+      .join(" ");
+    if (!match) return [];
+    const boundedLimit = Math.max(1, Math.min(50, Math.trunc(limit)));
+    const authorization = this.sessionAuthorizationSql(principal);
+    const rows = this.stmt(
+      `SELECT session_events_fts.session_id, session_events_fts.seq,
+              snippet(session_events_fts, 0, '⟪', '⟫', '…', 10) AS snip
+       FROM session_events_fts
+       JOIN session_ownership ownership ON ownership.session_id=session_events_fts.session_id
+       WHERE session_events_fts MATCH ? AND ${authorization.sql}
+       ORDER BY rank LIMIT ?`,
+    ).all(match, ...authorization.params, boundedLimit * 10) as unknown as Array<{
+      session_id: string; seq: number; snip: string;
+    }>;
+    const results: { sessionId: string; seq: number; snippet: string }[] = [];
+    const seen = new Set<string>();
+    for (const row of rows) {
+      if (seen.has(row.session_id)) continue;
+      seen.add(row.session_id);
+      results.push({ sessionId: row.session_id, seq: row.seq, snippet: row.snip });
+      if (results.length >= boundedLimit) break;
+    }
+    return results;
+  }
+
   /* ---- Phase 2: tombstones so the runner store can't resurrect a UI-deleted session ---- */
+
+
+  private sessionStopIntentRecord(row: SessionStopIntentRow): SessionStopIntentRecord {
+    const failed = row.failed_at !== null;
+    const code = row.failure_code as ArchiveStopFailureCode | null;
+    const status: ArchiveStatus = failed ? "stop_failed" : "stop_pending";
+    return {
+      sessionId: row.session_id,
+      runnerId: row.runner_id,
+      restartLaunchId: row.restart_launch_id,
+      archiveAfterStop: row.archive_after_stop === 1,
+      deliveryAttemptId: row.delivery_attempt_id,
+      operation: {
+        operationId: row.operation_id,
+        status,
+        requestedAt: row.created_at,
+        lastAttemptAt: row.last_attempt_at,
+        attemptCount: row.attempt_count,
+        ...(row.accepted_at !== null ? { acceptedAt: row.accepted_at } : {}),
+        capacityReleased: false,
+        ...(failed && code && row.failure_message
+          ? { failure: { code, message: row.failure_message, failedAt: row.failed_at! } }
+          : {}),
+      },
+    };
+  }
+
+  sessionStopIntent(sessionId: string): SessionStopIntentRecord | undefined {
+    const row = this.stmt("SELECT * FROM session_stop_intents WHERE session_id=?")
+      .get(sessionId) as unknown as SessionStopIntentRow | undefined;
+    return row ? this.sessionStopIntentRecord(row) : undefined;
+  }
+
+  addSessionStopIntent(
+    sessionId: string,
+    runnerId: string,
+    now: number,
+    archiveAfterStop = false,
+  ): SessionStopIntentRecord {
+    const operationId = "stop_" + randomUUID();
+    const deliveryAttemptId = "stop_delivery_" + randomUUID();
+    this.stmt(
+      "INSERT INTO session_stop_intents " +
+      "(session_id, runner_id, created_at, archive_after_stop, operation_id, last_attempt_at, attempt_count, delivery_attempt_id) " +
+      "VALUES (?, ?, ?, ?, ?, ?, 1, ?) " +
+      "ON CONFLICT(session_id) DO UPDATE SET " +
+      "runner_id=excluded.runner_id, restart_launch_id=NULL, " +
+      "created_at=CASE WHEN session_stop_intents.archive_after_stop=0 " +
+        "AND excluded.archive_after_stop=1 AND session_stop_intents.failed_at IS NULL " +
+        "THEN excluded.created_at ELSE session_stop_intents.created_at END, " +
+      "last_attempt_at=CASE WHEN session_stop_intents.archive_after_stop=0 " +
+        "AND excluded.archive_after_stop=1 AND session_stop_intents.failed_at IS NULL " +
+        "THEN excluded.last_attempt_at ELSE session_stop_intents.last_attempt_at END, " +
+      "attempt_count=CASE WHEN session_stop_intents.archive_after_stop=0 " +
+        "AND excluded.archive_after_stop=1 AND session_stop_intents.failed_at IS NULL " +
+        "THEN 1 ELSE session_stop_intents.attempt_count END, " +
+      "delivery_attempt_id=CASE WHEN session_stop_intents.archive_after_stop=0 " +
+        "AND excluded.archive_after_stop=1 AND session_stop_intents.failed_at IS NULL " +
+        "THEN excluded.delivery_attempt_id ELSE session_stop_intents.delivery_attempt_id END, " +
+      "accepted_at=CASE WHEN session_stop_intents.archive_after_stop=0 " +
+        "AND excluded.archive_after_stop=1 AND session_stop_intents.failed_at IS NULL " +
+        "THEN NULL ELSE session_stop_intents.accepted_at END, " +
+      "archive_after_stop=MAX(session_stop_intents.archive_after_stop, excluded.archive_after_stop)",
+    ).run(sessionId, runnerId, now, archiveAfterStop ? 1 : 0, operationId, now, deliveryAttemptId);
+    return this.sessionStopIntent(sessionId)!;
+  }
+
+  hasSessionStopIntent(sessionId: string): boolean {
+    return this.stmt("SELECT 1 FROM session_stop_intents WHERE session_id=?").get(sessionId) != null;
+  }
+
+  removeSessionStopIntent(sessionId: string): void {
+    this.stmt("DELETE FROM session_stop_intents WHERE session_id=?").run(sessionId);
+  }
+
+  sessionArchiveOperation(sessionId: string): StopOperationView | undefined {
+    const intent = this.sessionStopIntent(sessionId);
+    return intent?.archiveAfterStop ? intent.operation : undefined;
+  }
+
+  private sessionStopIntents(): Map<string, SessionStopIntentRecord> {
+    const rows = this.stmt(
+      "SELECT * FROM session_stop_intents",
+    ).all() as unknown as SessionStopIntentRow[];
+    return new Map(rows.map((row) => [row.session_id, this.sessionStopIntentRecord(row)]));
+  }
+
+  sessionArchiveStatus(sessionId: string): ArchiveStatus | undefined {
+    return this.sessionArchiveOperation(sessionId)?.status;
+  }
+
+  /** Re-arm one failed operation without changing its durable identity. Duplicate requests that
+   * observe it pending are no-ops, so concurrent clients cannot multiply attempts. */
+  retrySessionStopIntent(sessionId: string, now: number): SessionStopIntentRecord | undefined {
+    return this.atomic(() => {
+      const existing = this.sessionStopIntent(sessionId);
+      if (!existing) return undefined;
+      if (existing.operation.status === "stop_failed") {
+        const deliveryAttemptId = "stop_delivery_" + randomUUID();
+        this.stmt(
+          "UPDATE session_stop_intents " +
+          "SET created_at=?, failed_at=NULL, failure_code=NULL, failure_message=NULL, delivery_attempt_id=?, " +
+          "last_attempt_at=?, attempt_count=1, accepted_at=NULL, restart_launch_id=NULL " +
+          "WHERE session_id=? AND failed_at IS NOT NULL",
+        ).run(now, deliveryAttemptId, now, sessionId);
+      }
+      return this.sessionStopIntent(sessionId);
+    });
+  }
+
+  recordSessionStopAttempt(sessionId: string, now: number): SessionStopIntentRecord | undefined {
+    const deliveryAttemptId = "stop_delivery_" + randomUUID();
+    this.stmt(
+      "UPDATE session_stop_intents " +
+      "SET last_attempt_at=?, attempt_count=attempt_count+1, delivery_attempt_id=? " +
+      "WHERE session_id=? AND failed_at IS NULL AND accepted_at IS NULL",
+    ).run(now, deliveryAttemptId, sessionId);
+    return this.sessionStopIntent(sessionId);
+  }
+
+  /** Persist correlated runner acceptance for the current delivery. A late acceptance may repair
+   * a local timeout/exhaustion projection, but never overrides an explicit runner rejection. */
+  recordSessionStopAcceptance(
+    sessionId: string,
+    operationId: string,
+    deliveryAttemptId: string,
+    now: number,
+  ): boolean {
+    const changed = this.stmt(
+      "UPDATE session_stop_intents " +
+      "SET accepted_at=?, failed_at=NULL, failure_code=NULL, failure_message=NULL " +
+      "WHERE session_id=? AND operation_id=? AND delivery_attempt_id=? AND accepted_at IS NULL AND " +
+      "(failed_at IS NULL OR failure_code IN ('timeout', 'retry_exhausted'))",
+    ).run(now, sessionId, operationId, deliveryAttemptId);
+    return Number(changed.changes) === 1;
+  }
+
+  failSessionStopIntent(
+    sessionId: string,
+    operationId: string,
+    deliveryAttemptId: string,
+    code: ArchiveStopFailureCode,
+    message: string,
+    now: number,
+  ): boolean {
+    if (!["timeout", "retry_exhausted", "runner_rejected"].includes(code)) return false;
+    const bounded = message.replace(/[\u0000-\u001f\u007f]/gu, " ").trim().slice(0, 240);
+    const changed = this.stmt(
+      "UPDATE session_stop_intents " +
+      "SET failed_at=?, failure_code=?, failure_message=? " +
+      "WHERE session_id=? AND operation_id=? AND delivery_attempt_id=? AND " +
+      "(failed_at IS NULL OR (?='runner_rejected' AND failure_code IN ('timeout', 'retry_exhausted')))",
+    ).run(
+      now,
+      code,
+      bounded || "The runner could not confirm that the session stopped.",
+      sessionId,
+      operationId,
+      deliveryAttemptId,
+      code,
+    );
+    return Number(changed.changes) === 1;
+  }
+
+  pendingSessionStopIntents(): SessionStopIntentRecord[] {
+    const rows = this.stmt(
+      "SELECT * FROM session_stop_intents " +
+      "WHERE archive_after_stop=1 AND failed_at IS NULL " +
+      "ORDER BY last_attempt_at, session_id",
+    ).all() as unknown as SessionStopIntentRow[];
+    return rows.map((row) => this.sessionStopIntentRecord(row));
+  }
+
+  /** Undo/unarchive cancels only the follow-up filing action. The durable Stop remains armed and
+   * cannot silently restart runtime work. */
+  cancelSessionArchiveAfterStop(sessionId: string): void {
+    this.stmt("UPDATE session_stop_intents SET archive_after_stop=0 WHERE session_id=?").run(sessionId);
+  }
+
+  /** Terminal/absence evidence settles the stop fence and, in the same transaction, performs the
+   * requested archive mutation. This is the only path that hides an active archive request. */
+  settleSessionStopIntent(sessionId: string, now: number): { archived: boolean } {
+    return this.atomic(() => {
+      const row = this.stmt(
+        "SELECT archive_after_stop FROM session_stop_intents WHERE session_id=?",
+      ).get(sessionId) as { archive_after_stop: number } | undefined;
+      if (!row) return { archived: false };
+      this.stmt("DELETE FROM session_stop_intents WHERE session_id=?").run(sessionId);
+      if (row.archive_after_stop === 1) {
+        this.stmt("UPDATE sessions SET archived=1, updated_at=? WHERE id=?").run(now, sessionId);
+        return { archived: true };
+      }
+      return { archived: false };
+    });
+  }
+
+  setSessionStopRestartLaunchId(sessionId: string, launchId: string): void {
+    this.stmt("UPDATE session_stop_intents SET restart_launch_id=? WHERE session_id=?")
+      .run(launchId, sessionId);
+  }
+
+  clearSessionStopRestartLaunchId(sessionId: string): void {
+    this.stmt("UPDATE session_stop_intents SET restart_launch_id=NULL WHERE session_id=?")
+      .run(sessionId);
+  }
+
+  sessionStopRestartLaunchId(sessionId: string): string | null {
+    return this.sessionStopIntent(sessionId)?.restartLaunchId ?? null;
+  }
+
+  sessionStopIntentIds(runnerId: string): string[] {
+    const rows = this.stmt(
+      "SELECT session_id FROM session_stop_intents WHERE runner_id=? ORDER BY created_at, session_id",
+    ).all(runnerId) as unknown as Array<{ session_id: string }>;
+    return rows.map((row) => row.session_id);
+  }
 
   addTombstone(
     sessionId: string,
@@ -10798,7 +12242,7 @@ export class ControlPlaneDb {
     const row = this.stmt("SELECT * FROM sessions WHERE id=?").get(id) as unknown as
       | SessionRow
       | undefined;
-    return row ? this.sessionView(row) : null;
+    return row ? this.sessionView(row, undefined, this.sessionStopIntent(id)) : null;
   }
 
   recordSideChat(parentSessionId: string, childSessionId: string, now: number): void {
@@ -10866,7 +12310,8 @@ export class ControlPlaneDb {
     const rows = this.stmt(`SELECT * FROM sessions ${where} ORDER BY created_at DESC`)
       .all() as unknown as SessionRow[];
     const legacyTargets = new Map<string, ExecutionTargetDefinition[] | undefined>();
-    return rows.map((r) => this.sessionView(r, legacyTargets));
+    const stopIntents = this.sessionStopIntents();
+    return rows.map((r) => this.sessionView(r, legacyTargets, stopIntents.get(r.id)));
   }
 
   private legacyExecutionTargets(runnerId: string): ExecutionTargetDefinition[] | undefined {
@@ -10889,6 +12334,7 @@ export class ControlPlaneDb {
   private sessionView(
     row: SessionRow,
     legacyTargetCache?: Map<string, ExecutionTargetDefinition[] | undefined>,
+    stopIntent?: SessionStopIntentRecord,
   ): SessionView {
     const agentName = row.agent_id
       ? ((this.stmt("SELECT name FROM agent_definitions WHERE id=?").get(row.agent_id) as
@@ -10981,6 +12427,9 @@ export class ControlPlaneDb {
         }
       })(),
       archived: row.archived === 1,
+      archiveStatus: stopIntent?.archiveAfterStop ? stopIntent.operation.status : undefined,
+      archiveOperation: stopIntent?.archiveAfterStop ? stopIntent.operation : undefined,
+      stopOperation: stopIntent?.operation,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       lastEventAt: row.last_event_at,
@@ -11154,8 +12603,14 @@ export class ControlPlaneDb {
       searchPayload?: SessionEventPayload;
       /** Event-only artifact chunks committed atomically with this cached event row. */
       artifactIds?: readonly string[];
+      /** Only a live runner event may correlate this delivery with a future trailing idle. */
+      armBackgroundStatusSettlement?: boolean;
     },
   ): SessionEvent {
+    if (options?.runnerSeq !== undefined &&
+        (!Number.isSafeInteger(options.runnerSeq) || options.runnerSeq < 0)) {
+      throw new RangeError("runnerSeq must be a non-negative safe integer when present");
+    }
     // One transaction for the seq read + insert + session-row maintenance: this is the hottest
     // write path (one call per streamed delta) and was previously 5 separate auto-commit
     // statements — 5 WAL commits per token chunk, and a torn crash could desync seq/counters.
@@ -11169,14 +12624,22 @@ export class ControlPlaneDb {
         ).m ?? 0) + 1;
 
       const info = this.stmt(
-          "INSERT INTO session_events (session_id, seq, ts, kind, payload) VALUES (?, ?, ?, ?, ?)",
+          `INSERT INTO session_events (session_id, seq, runner_seq, ts, kind, payload)
+           VALUES (?, ?, ?, ?, ?, ?)`,
         )
-        .run(sessionId, seq, ts, payload.kind, JSON.stringify(payload));
+        .run(sessionId, seq, options?.runnerSeq ?? null, ts, payload.kind, JSON.stringify(payload));
       if (payload.kind === "background_continuation_delivered") {
         const eventEpoch = (this.stmt("SELECT event_epoch FROM sessions WHERE id=?").get(sessionId) as
           | { event_epoch: number }
           | undefined)?.event_epoch ?? 0;
-        this.projectBackgroundContinuationInTransaction(sessionId, payload, ts, eventEpoch, seq);
+        this.projectBackgroundContinuationInTransaction(
+          sessionId,
+          payload,
+          ts,
+          eventEpoch,
+          seq,
+          options?.armBackgroundStatusSettlement === true,
+        );
       }
       this.linkSessionEventArtifacts(
         Number(info.lastInsertRowid),
@@ -11225,6 +12688,11 @@ export class ControlPlaneDb {
           .run(ts, sessionId);
       }
 
+      if (options?.runnerSeq !== undefined) {
+        this.stmt("UPDATE sessions SET hydrated_seq=? WHERE id=? AND hydrated_seq < ?")
+          .run(options.runnerSeq, sessionId, options.runnerSeq);
+      }
+
       if (options?.accrueUsage) {
         this.recordUsageEventInTransaction(
           sessionId,
@@ -11258,6 +12726,7 @@ export class ControlPlaneDb {
     sessionId: string,
     expected: { afterSeq: number; historyEpoch: number; eventEpoch: number },
     events: readonly HydratedRunnerEvent[],
+    options: { armBackgroundStatusSettlement?: boolean } = {},
   ): AppendHydratedPageResult {
     for (const [name, value] of Object.entries(expected)) {
       if (!Number.isSafeInteger(value) || value < 0) {
@@ -11361,6 +12830,7 @@ export class ControlPlaneDb {
           event.ts,
           state.event_epoch,
           cpSeq,
+          options.armBackgroundStatusSettlement === true,
         );
         this.recordUsageEventInTransaction(
           sessionId,
@@ -11407,6 +12877,38 @@ export class ControlPlaneDb {
       seq: r.seq,
       ts: r.ts,
       payload: JSON.parse(r.payload) as SessionEventPayload,
+    }));
+  }
+
+  hasCompletedUserMessage(sessionId: string): boolean {
+    return Boolean(this.stmt(
+      `SELECT 1 FROM session_events
+       WHERE session_id=? AND kind='user_message'
+         AND COALESCE(json_extract(payload, '$.final'), 1) != 0
+         AND json_type(payload, '$.commandInvocation') IS NULL
+       LIMIT 1`,
+    ).get(sessionId));
+  }
+
+  /** Original objective plus a bounded recent semantic tail, returned chronologically. */
+  listSessionTitleContextEvents(sessionId: string, recentLimit = 8): SessionEvent[] {
+    const predicate = `session_id=? AND (
+      (kind='user_message' AND COALESCE(json_extract(payload, '$.final'), 1) != 0
+        AND json_type(payload, '$.commandInvocation') IS NULL)
+      OR (kind='agent_message' AND json_extract(payload, '$.final') = 1
+        AND json_type(payload, '$.parentToolUseId') IS NULL))`;
+    type TitleEventRow = { id: number; session_id: string; seq: number; ts: number; payload: string };
+    const first = this.stmt(
+      `SELECT id, session_id, seq, ts, payload FROM session_events WHERE ${predicate} ORDER BY seq LIMIT 1`,
+    ).get(sessionId) as TitleEventRow | undefined;
+    const recent = this.stmt(
+      `SELECT id, session_id, seq, ts, payload FROM session_events WHERE ${predicate} ORDER BY seq DESC LIMIT ?`,
+    ).all(sessionId, recentLimit) as unknown as TitleEventRow[];
+    const rows = [...new Map([...(first ? [first] : []), ...recent].map((row) => [row.id, row])).values()]
+      .sort((left, right) => left.seq - right.seq);
+    return rows.map((row) => ({
+      id: row.id, sessionId: row.session_id, seq: row.seq, ts: row.ts,
+      payload: JSON.parse(row.payload) as SessionEventPayload,
     }));
   }
 
@@ -11486,7 +12988,8 @@ export class ControlPlaneDb {
         ts: number;
         payload: string;
       }>;
-    const events = rows.slice(0, limit).map((row) => ({
+    const pageRows = rows.slice(0, limit);
+    const events = pageRows.map((row) => ({
       id: row.id,
       sessionId: row.session_id,
       seq: row.seq,
@@ -11499,7 +13002,9 @@ export class ControlPlaneDb {
       hasMoreOlder: rows.length > limit,
     };
     if (options.alignToTurn !== true || !page.hasMoreOlder || events[0] === undefined) return page;
-    return this.alignTailPageToTurn(sessionId, page, events[0].seq);
+    const pagePayloadBytes = pageRows.reduce((total, row) =>
+      total + Buffer.byteLength(row.payload, "utf8"), 0);
+    return this.alignTailPageToTurn(sessionId, page, events[0].seq, pagePayloadBytes);
   }
 
   /** Extend a count-bounded tail page down to the start of the turn it begins inside, so its first
@@ -11509,6 +13014,7 @@ export class ControlPlaneDb {
     sessionId: string,
     page: CachedEventTailPage,
     windowStartSeq: number,
+    windowPayloadBytes: number,
   ): CachedEventTailPage {
     // The anchor search includes the page's own first row: a page that already begins at a user
     // message is aligned, and reaching past it would drag in an entire extra turn.
@@ -11521,6 +13027,16 @@ export class ControlPlaneDb {
     // No anchor within reach: an adopted transcript, a resumed session, or a turn longer than the
     // cap. The count boundary stands, and the page says it is unaligned.
     if (!anchor) return { ...page, turnAligned: false };
+    // The count boundary itself is already a semantic boundary, so no extension (or extension
+    // budget) is needed even when the requested page's own payload exceeds the safety ceiling.
+    if (anchor.seq === windowStartSeq) return { ...page, turnAligned: true };
+    const extension = this.stmt(
+      `SELECT COALESCE(SUM(LENGTH(CAST(payload AS BLOB))), 0) AS payload_bytes
+        FROM session_events WHERE session_id=? AND seq>=? AND seq<?`,
+    ).get(sessionId, anchor.seq, windowStartSeq) as { payload_bytes: number };
+    if (windowPayloadBytes + Number(extension.payload_bytes) > TAIL_TURN_ALIGNMENT_MAX_PAYLOAD_BYTES) {
+      return { ...page, turnAligned: false };
+    }
     const rows = this.stmt(
       `SELECT id, session_id, seq, ts, payload FROM session_events
         WHERE session_id=? AND seq>=? AND seq<? ORDER BY seq`,

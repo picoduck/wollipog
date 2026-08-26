@@ -9,7 +9,7 @@
  * input_required status frame for the same request must stay silent.
  */
 
-import type { SessionStatus, SessionView } from "@wollipog/protocol";
+import { sessionAttentionStatus, type SessionStatus, type SessionView } from "@wollipog/protocol";
 import type { PushMessage } from "./web-push.js";
 
 const BUSY: SessionStatus[] = ["queued", "starting", "running"];
@@ -22,7 +22,14 @@ function clamp(s: string, max: number): string {
 const TITLE_MAX = 120;
 const BODY_MAX = 400;
 
-export type PushDecisionPrev = Pick<SessionView, "status" | "pendingApproval">;
+export type PushDecisionPrev = Pick<SessionView, "status" | "pendingApproval" | "backgroundDeliveries">;
+
+function newlySettledBackgroundDelivery(prev: PushDecisionPrev, next: SessionView): boolean {
+  const settled = new Set((prev.backgroundDeliveries ?? []).flatMap((delivery) =>
+    delivery.statusSettledAt != null ? [delivery.continuationId] : []));
+  return (next.backgroundDeliveries ?? []).some((delivery) =>
+    delivery.statusSettledAt != null && !settled.has(delivery.continuationId));
+}
 
 export function pushDecision(prev: PushDecisionPrev, next: SessionView): PushMessage | null {
   const name = clamp(next.title?.trim() || "Session", 60);
@@ -32,9 +39,13 @@ export function pushDecision(prev: PushDecisionPrev, next: SessionView): PushMes
       return null;
     }
     const what = next.pendingApproval?.title ? `: ${next.pendingApproval.title}` : "";
+    const attention = sessionAttentionStatus(next);
+    const label = attention?.kind === "answer_required" ? "Answer required"
+      : attention?.kind === "authentication_required" ? "Authentication required"
+        : attention?.kind === "approval_required" ? "Approval required" : "Input required";
     return {
       title: `${name} needs your input`,
-      body: clamp(`${next.pendingApproval?.kind === "question" ? "Question" : next.pendingApproval?.kind === "authentication" ? "Sign-in required" : "Approval requested"}${what}`, BODY_MAX),
+      body: clamp(`${label}${what}`, BODY_MAX),
       sessionId: next.id,
       urgency: "high",
     };
@@ -51,7 +62,8 @@ export function pushDecision(prev: PushDecisionPrev, next: SessionView): PushMes
     case "idle":
       // Turn settled: the agent is waiting on the next prompt / review.
       if (BUSY.includes(prev.status)) {
-        return { title: clamp(`${name} is ready`, TITLE_MAX), body: "The agent finished a turn and is ready for review.", sessionId: next.id, urgency: "normal" };
+        if (newlySettledBackgroundDelivery(prev, next)) return null;
+        return { title: clamp(`${name} is awaiting a prompt`, TITLE_MAX), body: "The agent finished a turn and is awaiting another prompt.", sessionId: next.id, urgency: "normal" };
       }
       return null;
     default:

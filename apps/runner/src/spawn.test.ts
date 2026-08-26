@@ -299,8 +299,6 @@ test("spawnAgent scrubs inherited env keys but explicit env still wins", async (
 
 test("spawnAgent always scrubs runner-only conductor and hook policy environment", async () => {
   const keys = [
-    "WOLLIPOG_CONDUCTOR",
-    "MAM_CONDUCTOR",
     "WOLLIPOG_CLAUDE_HOOKS",
     "MAM_CLAUDE_HOOKS",
     "WOLLIPOG_POLICY_HOOK_CP_URL",

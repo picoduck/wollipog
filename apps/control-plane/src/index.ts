@@ -12,6 +12,19 @@ import websocket from "@fastify/websocket";
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import {
+  archiveSessionPage,
+  parseArchiveSessionPageQuery,
+  type ArchiveSessionPageQuery,
+} from "./archive-session-page.js";
+import {
+  MAX_RUNNER_CLIENT_MESSAGE_BYTES,
+  MAX_RUNNER_CONNECTIONS,
+  MAX_RUNNER_CONNECTIONS_PER_IP,
+  RunnerConnectionLimits,
+  runnerAuthTimeoutMs,
+} from "./runner-channel.js";
+import { installStartupReadinessGate } from "./startup-readiness.js";
+import {
   AUTOMATION_TRIGGER_MAX_BODY_BYTES,
   registerAutomationTriggerContentTypeParser,
 } from "./automation-trigger-ingress.js";
@@ -66,6 +79,7 @@ import {
   type RunnerProtocolCapability,
   type ResolveWorkflowGateRequest,
   type SetArchivedRequest,
+  type SetSessionReminderRequest,
   type SetColumnRequest,
   type SetSessionTitleRequest,
   type SetWorkspaceRequest,
@@ -122,6 +136,8 @@ import { RUNNER_RELEASE_TAG } from "./release-version.js";
 import { readSshConfigHosts } from "./ssh-config.js";
 import { ControlPlaneDb, GOVERNANCE_AUDIT_RETENTION_MS } from "./db.js";
 import { registerSessionLookupRoute } from "./session-lookup-route.js";
+import { SessionNamingSettings } from "./session-naming-settings.js";
+import { registerSessionNamingRoutes } from "./session-naming-route.js";
 import { registerRunnerAttestationRoute } from "./runner-attestation-route.js";
 import {
   canAssignSessionProject,
@@ -156,6 +172,7 @@ import { registerAuthGate } from "./http-auth.js";
 import { pushDecision } from "./push-decision.js";
 import { validateSubscription, WebPushSender } from "./web-push.js";
 import {
+  appShellSecurityHeaders,
   injectSameOriginMarker,
   readWebIndexHtml,
   isIndexHtmlPath,
@@ -175,6 +192,7 @@ import { buildAuthorizedSessionTranscriptExport, type TranscriptExportFormat } f
 import { principalCanReadWorkflowArtifact } from "./artifact-exports.js";
 import { registerWorkflowArtifactExportRoute } from "./artifact-export-route.js";
 import { registerRunnerCredentialRoutes } from "./runner-credential-route.js";
+import { makeSkillsSyncPusher, registerSkillRoutes } from "./skills-route.js";
 import { registerPromptImageRoutes } from "./prompt-image-route.js";
 import {
   makeManagedBoxRunnerCredentialIssuer,
@@ -222,6 +240,12 @@ const TOKEN = process.env.CONTROL_PLANE_TOKEN ?? "dev-local-token";
 const DB_PATH = process.env.CONTROL_PLANE_DB ?? "data/control-plane.db";
 const ARTIFACT_BLOB_DIR = process.env.CONTROL_PLANE_ARTIFACT_DIR;
 const HEARTBEAT_INTERVAL_MS = Number(process.env.CONTROL_PLANE_HEARTBEAT_MS ?? 10_000);
+const RUNNER_PRE_AUTH_TIMEOUT_MS = runnerAuthTimeoutMs(process.env.CONTROL_PLANE_RUNNER_AUTH_TIMEOUT_MS);
+// A runner heartbeat every HEARTBEAT_INTERVAL_MS refreshes last_seen. If none lands within three
+// intervals the socket is presumed half-open (laptop sleep / Wi-Fi drop / NAT rebind leaves it
+// readyState=OPEN with no FIN/RST): the liveness sweep terminates it so the normal onGone cleanup
+// runs, instead of keeping the runner "online" with lost prompts until the OS TCP timeout fires.
+const RUNNER_HEARTBEAT_TIMEOUT_MS = HEARTBEAT_INTERVAL_MS * 3;
 const LOCAL_DEVICE_TOKEN_PATH = localDeviceTokenPath(DB_PATH);
 
 // Recovery is read-only: wrong coordinates must fail loudly instead of minting a plausible but
@@ -265,7 +289,6 @@ if (legacyCredentialMigration.blocked > 0) {
 db.scrubLegacyAgentSecrets(Date.now());
 const hub = new Hub(db);
 const shellRegistry = new ShellRegistry(db);
-shellRegistry.reconcileStartup(Date.now());
 // Larger body limit so pasted screenshots (base64) fit comfortably.
 const app = Fastify({
   bodyLimit: 32 * 1024 * 1024,
@@ -279,6 +302,7 @@ const app = Fastify({
     },
   },
 });
+const markStartupReady = installStartupReadinessGate(app);
 const warnedLegacyRunnerCredentialIds = new Set<string>();
 
 // The packaged desktop's "Enable Tailnet Access" setting binds the sidecar to IPv4 wildcard so
@@ -503,12 +527,20 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
   if (!principal) return null;
 
   const memberScopedRoute = routePath === "/api/instance" || routePath === "/api/identity" || routePath === "/api/runners" ||
+    routePath === "/api/session-naming" ||
     routePath === "/api/projects" || routePath.startsWith("/api/projects/") ||
     routePath === "/api/sessions" || routePath.startsWith("/api/sessions/") ||
-    routePath === "/api/usage" || routePath === "/api/usage/retention" ||
+    routePath === "/api/search" || routePath === "/api/usage" || routePath === "/api/usage/retention" ||
     routePath === "/api/push/vapid-public-key" || routePath === "/api/push/subscriptions" ||
     routePath === "/api/push/unsubscribe" ||
     routePath === "/api/artifacts/:artifactId/export" ||
+    // Skills record per-resource ownership rows, so like /api/projects they are member-scoped
+    // rather than personal-organization-global resources.
+    routePath === "/api/skills" || routePath.startsWith("/api/skills/") ||
+    routePath === "/api/skill-groups" || routePath.startsWith("/api/skill-groups/") ||
+    routePath === "/api/skill-assignments" || routePath.startsWith("/api/skill-assignments/") ||
+    routePath === "/api/runners/:id/skills" ||
+    routePath === "/api/runners/:id/skills/sync" ||
     routePath === "/api/runners/:runnerId/host-action" ||
     routePath === "/api/runners/:runnerId/workspaces/:workspaceId/rename" ||
     routePath === "/api/runners/:runnerId/workspaces/:workspaceId/access-scope";
@@ -701,7 +733,7 @@ app.setNotFoundHandler((req, reply) => {
   // client-side navigation, and rendering the shell would leave that reusable credential in
   // history/referrers instead of taking the redacting 404 path below.
   if (html && !carriesTokenParam(rawUrl) && isSpaNavigation(req.method, pathname)) {
-    return reply.type("text/html; charset=utf-8").send(html);
+    return reply.headers(appShellSecurityHeaders(html)).type("text/html; charset=utf-8").send(html);
   }
   req.log.info({ url: redactTokenInUrl(rawUrl) }, "route not found");
   reply.code(404).send({ error: "not found" });
@@ -740,6 +772,8 @@ app.post("/api/public/push-receipt", async (req, reply) => {
   return reply.code(204).send();
 });
 
+const sessionNamingSettings = new SessionNamingSettings(db);
+
 const svc = new SessionsService(
   db,
   hub,
@@ -754,7 +788,14 @@ const svc = new SessionsService(
     const msg = pushDecision(prevStatus, view);
     if (msg) pushSender.send(msg, { kind: "session", sessionId: view.id });
   },
+  undefined,
+  sessionNamingSettings.generator,
+  sessionNamingSettings.timeoutForSession,
+  sessionNamingSettings.enabledForSession,
+  sessionNamingSettings.revisionForSession,
 );
+
+registerSessionNamingRoutes(app, sessionNamingSettings, requestPrincipal);
 
 registerPromptImageRoutes(app, {
   db,
@@ -801,6 +842,18 @@ function runnerCapabilityError(
     : runnerCapabilityRequirement(protocolVersion, capability, label);
 }
 
+// Push-on-change/push-on-registration for managed skills: fire-and-forget the authoritative
+// desired set; no-ops (with a debug log) for offline or capability-lacking runners.
+const pushSkillsSync = makeSkillsSyncPusher({
+  db,
+  hub,
+  log: {
+    debug: (message) => app.log.debug(message),
+    warn: (message) => app.log.warn(message),
+    error: (message) => app.log.error(message),
+  },
+});
+
 // Bootstraps + supervises runners on remote machines over SSH ("boxes"). The runner binary it
 // deploys is found in $WOLLIPOG_RUNNER_BIN_DIR / apps/runner/dist-bin (explicit overrides) / a
 // release-identified cache, else downloaded from this packaged control plane's exact release.
@@ -836,21 +889,46 @@ app.register(cors, { origin: isLocalOrigin });
 // guaranteed, and the await is not module-level (keeps the CP bundlable as a CJS single
 // executable for the Tauri sidecar — see the cors note above).
 app.register(async (instance) => {
-  await instance.register(websocket);
+  await instance.register(websocket, { options: { maxPayload: MAX_RUNNER_CLIENT_MESSAGE_BYTES } });
+
+  const runnerConnectionLimits = new RunnerConnectionLimits({
+    maxConnections: MAX_RUNNER_CONNECTIONS,
+    maxConnectionsPerIp: MAX_RUNNER_CONNECTIONS_PER_IP,
+  });
 
   /* ----------------------------- Runner channel ---------------------------- */
-  instance.get("/runner", { websocket: true }, (socket) => {
+  instance.get("/runner", { websocket: true }, (socket, req) => {
+  const connectionAdmission = runnerConnectionLimits.acquire(req.ip);
+  if (!connectionAdmission) {
+    // Do not wait for a hostile peer to acknowledge a close handshake: rejected transports are
+    // deliberately untracked, so retaining them for ws's close timeout would bypass this cap.
+    socket.terminate();
+    return;
+  }
   let runnerId: string | null = null;
   let credentialId: string | null = null;
+  let authenticationTimer: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
+    authenticationTimer = undefined;
+    // A silent unauthenticated peer cannot be trusted to complete a graceful close handshake.
+    socket.terminate();
+  }, RUNNER_PRE_AUTH_TIMEOUT_MS);
   const runnerClient = {
     send: (d: string) => socket.send(d),
     close: (code?: number, reason?: string) => socket.close(code, reason),
+    // Force-drop for the liveness sweep: a half-open socket never completes a graceful close.
+    terminate: () => socket.terminate(),
   };
 
   socket.on("message", (raw: Buffer) => {
     const msg = parseMessage<RunnerToControlPlane>(raw.toString());
     if (!msg) return;
 
+    // A malformed frame (missing/mistyped fields survive the cast-only parseMessage) or a
+    // transient persistence error must not escape this listener: an uncaught throw here becomes a
+    // fatal uncaughtException that drops EVERY runner/session/dashboard connection. Isolate the
+    // failure to the offending socket — log it, then close only this runner (the `register` case
+    // already handles its own rejections and returns, so it never reaches this catch).
+    try {
     // Nothing but `register` is accepted until this socket has authenticated — an
     // unregistered client must not be able to inject events, queue overlays, or
     // shell output for sessions it doesn't own. And once REPLACED by a reconnect,
@@ -902,6 +980,11 @@ app.register(async (instance) => {
         }
         runnerId = msg.runner.runnerId;
         credentialId = credential.credentialId;
+        if (authenticationTimer) {
+          clearTimeout(authenticationTimer);
+          authenticationTimer = undefined;
+        }
+        connectionAdmission.authenticated();
         hub.attachRunner(runnerId, runnerClient);
         hub.clearRunnerQueues(runnerId); // a fresh connection has no in-flight queues — drop stale ones
         send(socket, {
@@ -937,6 +1020,9 @@ app.register(async (instance) => {
         for (const projectId of db.projectIdsForRunner(runnerId)) hub.projectChangedById(projectId);
         // If this runner is a box's runner (connected through the SSH tunnel), flip it online.
         orchestrator.onRunnerRegistered(runnerId, credential.credentialId);
+        // Registration completes with the machine's authoritative desired skill set so a fresh
+        // (or reconnected) runner converges without waiting for the next library mutation.
+        pushSkillsSync(runnerId);
         app.log.info(
           `runner online: ${runnerId} (${msg.runner.hostname}, ${msg.runner.os}) ` +
             `agents=[${msg.runner.agents.map((a) => a.id).join(", ")}]`,
@@ -947,7 +1033,17 @@ app.register(async (instance) => {
         if (runnerId) db.touch(runnerId, Date.now());
         break;
       case "session_status":
-        svc.onSessionStatus(msg.sessionId, msg.status, msg.detail, msg.worktreePath, runnerId ?? undefined);
+        svc.onSessionStatus(
+          msg.sessionId,
+          msg.status,
+          msg.detail,
+          msg.worktreePath,
+          runnerId ?? undefined,
+          msg.controlPlaneLaunchId,
+        );
+        break;
+      case "stop_session_result":
+        if (runnerId) svc.onStopSessionResult(runnerId, msg);
         break;
       case "policy_hook_credential":
         {
@@ -987,6 +1083,11 @@ app.register(async (instance) => {
         if (runnerId === msg.runnerId) {
           db.updateRunnerAgents(msg.runnerId, msg.agents, Date.now(), msg.editors);
           hub.runnerChanged(msg.runnerId);
+          // A runner may register with an empty or stale agent list and only discover its
+          // harnesses afterward — the registration-time skills_sync then resolved no targets.
+          // Re-push after the new inventory persists; the runner reconciler is idempotent, so a
+          // repeated identical sync is harmless.
+          pushSkillsSync(msg.runnerId);
           app.log.info(`runner ${msg.runnerId} agents: [${msg.agents.map((a) => a.id).join(", ")}]`);
         }
         break;
@@ -1085,6 +1186,21 @@ app.register(async (instance) => {
       case "interrupt_turn_result":
         hub.resolveRunnerRequest(msg, runnerId!);
         break;
+      case "skills_state": {
+        // Authoritative full replacement for one machine — persist solicited and unsolicited
+        // reports alike, then settle any awaiting sync request via the shared correlator.
+        if (runnerId !== msg.runnerId) {
+          app.log.warn(`runner ${runnerId} sent a mismatched skills state`);
+          break;
+        }
+        if (!runnerSupportsProtocol(db.getRunner(runnerId)?.protocolVersion, "agentSkills")) {
+          app.log.warn(`runner ${runnerId} sent skills state without negotiated support`);
+          break;
+        }
+        db.setRunnerSkillState(runnerId, msg, Date.now());
+        if (msg.requestId) hub.resolveRunnerRequest({ ...msg, requestId: msg.requestId }, runnerId);
+        break;
+      }
       case "steer_session_result":
         svc.onSteerSessionResult(runnerId!, msg);
         break;
@@ -1118,9 +1234,27 @@ app.register(async (instance) => {
         break;
       }
     }
+    } catch (error) {
+      app.log.error(
+        { err: error, runnerId, messageType: msg.type },
+        "runner frame handler threw — closing offending runner socket",
+      );
+      // ws close() is idempotent: if the register error path (or a prior throw) already closed
+      // this socket, this is a no-op and never double-fires the close handshake.
+      try {
+        socket.close(1008, "malformed runner frame");
+      } catch {
+        /* socket already tearing down */
+      }
+    }
   });
 
   const onGone = () => {
+    if (authenticationTimer) {
+      clearTimeout(authenticationTimer);
+      authenticationTimer = undefined;
+    }
+    connectionAdmission.release();
     if (!runnerId) return;
     // A stale close (the runner already reconnected on a NEW socket) must be a no-op:
     // marking offline / clearing queues / failing sessions here would clobber the live
@@ -1130,33 +1264,46 @@ app.register(async (instance) => {
       runnerId = null;
       return;
     }
-    db.markOffline(runnerId, Date.now());
-    hub.clearRunnerQueues(runnerId); // in-memory queues die with the runner
-    svc.failRunnerSessions(runnerId);
-    // Preserve v57 shell rows while the runner transport reconnects. Older runners have no
-    // authoritative inventory and therefore resolve as exited at disconnect.
-    const reconnectingShells = shellRegistry.markReconnecting(runnerId, Date.now());
-    if (!runnerSupportsProtocol(db.getRunner(runnerId)?.protocolVersion, "durableSessionShells")) {
-      const exited = shellRegistry.inventoryComplete(runnerId, [], Date.now());
-      for (const shell of exited) hub.shellExit(shell.sessionId, shell.shellId, null, shell.outputEndSeq);
-    } else if (reconnectingShells.length > 0) {
-      hub.shellRegistryReconciled(runnerId, reconnectingShells.map((shell) => shell.sessionId));
+    // Disconnect cleanup touches the DB (markOffline / failRunnerSessions). If the very error that
+    // closed this socket persists (e.g. a full disk failing every write), those calls throw — and
+    // this runs on the socket 'close'/'error' event, OUTSIDE the message handler's try/catch, so an
+    // escape here becomes a process-fatal uncaughtException that drops the whole control plane. The
+    // runner is already detached from the hub; contain any cleanup failure to keep the CP alive.
+    try {
+      db.markOffline(runnerId, Date.now());
+      hub.clearRunnerQueues(runnerId); // in-memory queues die with the runner
+      svc.failRunnerSessions(runnerId);
+      // Preserve v57 shell rows while the runner transport reconnects. Older runners have no
+      // authoritative inventory and therefore resolve as exited at disconnect.
+      const reconnectingShells = shellRegistry.markReconnecting(runnerId, Date.now());
+      if (!runnerSupportsProtocol(db.getRunner(runnerId)?.protocolVersion, "durableSessionShells")) {
+        const exited = shellRegistry.inventoryComplete(runnerId, [], Date.now());
+        for (const shell of exited) hub.shellExit(shell.sessionId, shell.shellId, null, shell.outputEndSeq);
+      } else if (reconnectingShells.length > 0) {
+        hub.shellRegistryReconciled(runnerId, reconnectingShells.map((shell) => shell.sessionId));
+      }
+      hub.runnerChanged(runnerId);
+      for (const projectId of db.projectIdsForRunner(runnerId)) hub.projectChangedById(projectId);
+      // If this runner is a box's, mark the box offline too (the SSH child may still be alive).
+      orchestrator.onRunnerDisconnected(runnerId);
+      app.log.info(`runner offline: ${runnerId}`);
+    } catch (error) {
+      app.log.error(
+        { err: error, runnerId },
+        "runner disconnect cleanup threw — runner detached but offline/session state may be incomplete until it reconnects or the CP restarts",
+      );
+    } finally {
+      runnerId = null;
     }
-    hub.runnerChanged(runnerId);
-    for (const projectId of db.projectIdsForRunner(runnerId)) hub.projectChangedById(projectId);
-    // If this runner is a box's, mark the box offline too (the SSH child may still be alive).
-    orchestrator.onRunnerDisconnected(runnerId);
-    app.log.info(`runner offline: ${runnerId}`);
-    runnerId = null;
   };
   socket.on("close", onGone);
   socket.on("error", onGone);
 });
 });
 
-// Register the browser channel in a separate encapsulated plugin so ws enforces its small payload
-// cap while assembling fragments. The runner sibling intentionally retains the default larger
-// allowance for images and history frames.
+// Register the browser channel in a separate encapsulated plugin so ws enforces its much smaller
+// payload cap while assembling fragments. The runner sibling has its own bounded allowance for
+// image and history frames.
 app.register(async (instance) => {
   await instance.register(websocket, { options: { maxPayload: MAX_UI_CLIENT_MESSAGE_BYTES } });
 
@@ -1257,7 +1404,7 @@ const serveShell = async (req: FastifyRequest, reply: FastifyReply) => {
   // so nothing functional is lost.
   const rawUrl = req.raw.url ?? "";
   if (carriesTokenParam(rawUrl)) return reply.redirect(rawUrl.split("?")[0] || "/", 303);
-  return reply.type("text/html; charset=utf-8").send(html);
+  return reply.headers(appShellSecurityHeaders(html)).type("text/html; charset=utf-8").send(html);
 };
 app.get("/", serveShell);
 app.get("/index.html", serveShell);
@@ -1620,12 +1767,14 @@ app.post("/api/projects/:id/archive-sessions", async (req, reply) => {
   if (!canManageAffectedSessions(principal, (session) => session.projectId === id)) {
     return reply.code(409).send({ error: "project contains sessions you cannot manage" });
   }
-  const sessions = db.archiveProjectSessions(id, true);
-  const archivedSessionIds = sessions.map((session) => session.id);
-  for (const session of sessions) hub.sessionChanged(session, false);
+  const outcome = svc.archiveProjectSessions(id);
+  if (!outcome.ok || !outcome.data) return respond(reply, outcome);
   const project = db.getProject(id)!;
   hub.projectChanged(project);
-  return { project: db.getProjectForPrincipal(principal, id)!, sessions, archivedSessionIds };
+  return {
+    project: db.getProjectForPrincipal(principal, id)!,
+    ...outcome.data,
+  };
 });
 
 registerInstanceRoute(app, {
@@ -1649,6 +1798,10 @@ app.get("/api/onboarding", async (): Promise<OnboardingInfo> => {
 });
 
 registerRunnerCredentialRoutes(app, { db, hub, requestHuman });
+
+/* ------------------------------- Skills ---------------------------------- */
+
+registerSkillRoutes(app, { db, hub, requestHuman, requestPrincipal, pushSkillsSync });
 
 /* ------------------------------- Devices --------------------------------- */
 
@@ -2443,6 +2596,40 @@ app.get("/api/sessions", async (req) => {
   return { sessions: principal ? db.listSessionsForPrincipal(principal, includeArchived) : [] };
 });
 
+app.get("/api/sessions/archive-page", async (req, reply) => {
+  const raw = req.query as Record<string, unknown>;
+  const query = parseArchiveSessionPageQuery(raw);
+  if ("error" in query) return reply.code(400).send(query);
+  const q = (query.q ?? "").trim();
+  if (q.length > 256) return reply.code(400).send({ error: "q is too long (max 256 characters)" });
+  const principal = requestPrincipal(req);
+  const candidatePage = principal
+    ? db.archiveSessionCandidatePageForPrincipal(principal, query)
+    : { sessions: [], transcriptSessionIds: [], facets: { projects: [], locations: [], agents: [] } };
+  if ("error" in candidatePage) return reply.code(400).send(candidatePage);
+  const page = archiveSessionPage({
+    sessions: candidatePage.sessions,
+    query,
+    transcriptHits: new Map(candidatePage.transcriptSessionIds.map((sessionId) => [sessionId, ""])),
+  });
+  if ("error" in page) return reply.code(400).send(page);
+  const sessions = page.sessionIds.flatMap((sessionId) => {
+    const session = db.getSession(sessionId);
+    return session ? [session] : [];
+  });
+  const snippets = q.length >= 2
+    ? Object.fromEntries(db.searchEvents(q, Math.max(1, sessions.length), sessions.map((session) => session.id))
+      .map((hit) => [hit.sessionId, hit.snippet]))
+    : {};
+  const { sessionIds: _sessionIds, ...pagination } = page;
+  return {
+    ...pagination,
+    facets: candidatePage.facets,
+    sessions,
+    snippets,
+  };
+});
+
 registerSessionLookupRoute(app, { db, requestPrincipal });
 
 app.get("/api/sessions/:id", async (req, reply) => {
@@ -2861,21 +3048,29 @@ app.post("/api/governance/approval-queue/reject", async (req, reply) => {
   }));
 });
 
-// Full-text transcript search (Cmd+K palette). Hits carry the owning session's title so the
-// palette renders without a per-hit lookup.
+// Full-text transcript search (Cmd+K palette and Archived Sessions). Hits carry the owning
+// session metadata so archive and lifecycle state never depend on a racing catalog request.
 app.get("/api/search", async (req, reply) => {
   const q = String((req.query as { q?: string })?.q ?? "").trim();
   if (q.length < 2) return reply.code(400).send({ error: "q must be at least 2 characters" });
   // Bound the work: FTS parsing/ranking runs synchronously on this thread.
   if (q.length > 256) return reply.code(400).send({ error: "q is too long (max 256 characters)" });
-  const hits = db.searchEvents(q, 20);
+  const principal = requestPrincipal(req);
+  const hits = principal ? db.searchEventsForPrincipal(q, 20, principal) : [];
   const results = hits.flatMap((h) => {
     const session = db.getSession(h.sessionId);
-    // Archived sessions are absent from the UI snapshot — a hit would navigate to
-    // "Session Not Found". Filter them (matches the palette's local session matching).
-    return session && !session.archived
-      ? [{ ...h, title: session.title, workspaceName: session.workspaceName }]
-      : [];
+    if (!session) return [];
+    return [{
+      ...h,
+      title: session.title,
+      workspaceName: session.workspaceName,
+      projectName: session.projectName,
+      archived: session.archived,
+      status: session.status,
+      agentId: session.agentId,
+      agentName: session.agentName,
+      driver: session.driver,
+    }];
   });
   return { results };
 });
@@ -3037,14 +3232,21 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
 // differ — N answers keyed by question id vs one optionId decision.
 app.post("/api/sessions/:id/answer", async (req, reply) => {
   const id = (req.params as { id: string }).id;
-  const body = req.body as { requestId?: string; answers?: Record<string, string | string[]> };
-  if (typeof body?.requestId !== "string" || body.answers == null || typeof body.answers !== "object") {
-    return reply.code(400).send({ error: "requestId and answers are required" });
+  const body = req.body as { requestId?: string; answers?: Record<string, string | string[]>; action?: "submit" | "dismiss" };
+  if (
+    typeof body?.requestId !== "string" ||
+    body.answers == null ||
+    typeof body.answers !== "object" ||
+    Array.isArray(body.answers) ||
+    (body.action != null && body.action !== "submit" && body.action !== "dismiss")
+  ) {
+    return reply.code(400).send({ error: "requestId and answers are required; action must be submit or dismiss" });
   }
+  const action = body.action ?? (Object.keys(body.answers).length > 0 ? "submit" : "dismiss");
   return respond(reply, svc.answerQuestion(id, body.requestId, body.answers, {
     kind: "human",
     id: humanActorId(req),
-  }));
+  }, action));
 });
 
 // Git/PR workflow: run a git action (status/commit/open_pr) in the session's
@@ -3353,6 +3555,11 @@ app.post("/api/sessions/:id/title", async (req, reply) => {
   return respond(reply, svc.setTitle(id, body?.title));
 });
 
+app.post("/api/sessions/:id/retitle", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  return respond(reply, svc.retitleSession(id));
+});
+
 app.post("/api/sessions/:id/workspace", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const body = (req.body ?? {}) as Partial<SetWorkspaceRequest>;
@@ -3367,10 +3574,41 @@ app.post("/api/sessions/:id/workspace", async (req, reply) => {
   return respond(reply, svc.setWorkspace(id, body.workspaceId ?? null));
 });
 
+app.put("/api/sessions/:id/reminder", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const human = requestHuman(req);
+  if (!human) return reply.code(403).send({ error: "session reminders require a human user" });
+  return respond(reply, svc.setReminder(id, human.userId,
+    (req.body ?? {}) as Partial<SetSessionReminderRequest>));
+});
+
+app.delete("/api/sessions/:id/reminder", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const human = requestHuman(req);
+  if (!human) return reply.code(403).send({ error: "session reminders require a human user" });
+  const rawRevision = (req.query as { revision?: string }).revision;
+  const revision = rawRevision === undefined ? undefined : Number(rawRevision);
+  if (revision !== undefined && (!Number.isSafeInteger(revision) || revision < 0)) {
+    return reply.code(400).send({ error: "revision must be a non-negative integer" });
+  }
+  const rawReminderId = (req.query as { reminderId?: unknown }).reminderId;
+  if (rawReminderId !== undefined && (
+    typeof rawReminderId !== "string" || !rawReminderId || rawReminderId.length > 128 || revision === undefined
+  )) {
+    return reply.code(400).send({ error: "reminderId must be a bounded string paired with revision" });
+  }
+  return respond(reply, svc.removeReminder(id, human.userId, revision, rawReminderId));
+});
+
 app.post("/api/sessions/:id/archive", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const body = req.body as SetArchivedRequest;
   return respond(reply, svc.setArchived(id, body.archived));
+});
+
+app.post("/api/sessions/:id/retry-stop", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  return respond(reply, svc.retryStop(id));
 });
 
 app.post("/api/sessions/:id/config", async (req, reply) => {
@@ -3692,6 +3930,16 @@ const workflowRecoveryTimer = setInterval(() => svc.recoverExpiredWorkflowAttemp
 workflowRecoveryTimer.unref();
 const automationTimer = setInterval(() => automations.tick(Date.now()), 5_000);
 automationTimer.unref();
+const sweepSessionReminders = () => {
+  try {
+    hub.fireDueSessionReminders(Date.now());
+  } catch (error) {
+    app.log.warn({ error: error instanceof Error ? error.message : String(error) }, "session reminder sweep deferred");
+  }
+};
+sweepSessionReminders();
+const sessionReminderTimer = setInterval(sweepSessionReminders, 1_000);
+sessionReminderTimer.unref();
 const sessionCommandRetryTimer = setInterval(() => {
   try {
     svc.retryDueSessionCommands(Date.now());
@@ -3702,6 +3950,15 @@ const sessionCommandRetryTimer = setInterval(() => {
   }
 }, 5_000);
 sessionCommandRetryTimer.unref();
+const sessionStopMaintenanceTimer = setInterval(() => {
+  try {
+    svc.maintainSessionStopIntents(Date.now());
+  } catch (error) {
+    app.log.warn({ error: error instanceof Error ? error.message : String(error) },
+      "session Stop recovery deferred");
+  }
+}, 1_000);
+sessionStopMaintenanceTimer.unref();
 void pushSender.retryDurableBackground().catch((error) => {
   app.log.warn({ error: error instanceof Error ? error.message : String(error) },
     "background push recovery deferred");
@@ -3736,26 +3993,116 @@ const artifactMaintenanceTimer = setInterval(() => {
   }
 }, 60_000);
 artifactMaintenanceTimer.unref();
+// Half-open-socket liveness sweep. A runner whose socket silently died (sleep / Wi-Fi drop / NAT
+// rebind) stays readyState=OPEN with no FIN/RST, so onGone never fires: the runner reads 'online'
+// and its sessions 'running' forever, and prompts written to the dead socket are lost. The app-level
+// heartbeat refreshes last_seen; here we act on it. Any online runner whose socket the hub still
+// holds but whose last_seen is older than RUNNER_HEARTBEAT_TIMEOUT_MS is presumed dead — terminate it
+// so the EXISTING onGone path (markOffline / failRunnerSessions / shell + box cleanup) runs exactly
+// as for a clean disconnect. pendingStaleClose stops a second terminate before onGone detaches the
+// socket; onGone's own stale-socket guard (detachRunner returning false) keeps cleanup single-shot.
+const pendingStaleClose = new Set<string>();
+const runnerLivenessTimer = setInterval(() => {
+  try {
+    const now = Date.now();
+    for (const runner of db.listRunners()) {
+      const runnerId = runner.runnerId;
+      // Only sweep sockets the hub actually holds: a runner left 'online' in the DB from a prior
+      // process (no live socket) must not be terminated here — there is nothing to close, and
+      // hub.closeRunner would no-op anyway.
+      if (runner.status !== "online" || !hub.isRunnerOnline(runnerId)) {
+        pendingStaleClose.delete(runnerId);
+        continue;
+      }
+      // connected_at seeds last_seen at registration, so lastSeen is always populated for an online
+      // runner; fall back defensively so a null can never read as "infinitely fresh".
+      const lastSeen = runner.lastSeen ?? runner.connectedAt ?? 0;
+      if (now - lastSeen <= RUNNER_HEARTBEAT_TIMEOUT_MS) {
+        pendingStaleClose.delete(runnerId);
+        continue;
+      }
+      if (pendingStaleClose.has(runnerId)) continue;
+      pendingStaleClose.add(runnerId);
+      app.log.warn(
+        { runnerId, lastSeen, staleForMs: now - lastSeen },
+        "runner heartbeat timed out — terminating presumed half-open socket",
+      );
+      hub.closeRunner(runnerId, "runner heartbeat timed out", { terminate: true });
+    }
+  } catch (error) {
+    app.log.warn({ error: error instanceof Error ? error.message : String(error) },
+      "runner liveness sweep deferred");
+  }
+}, HEARTBEAT_INTERVAL_MS);
+runnerLivenessTimer.unref();
 app.addHook("onClose", async () => {
   clearInterval(workflowRecoveryTimer);
   clearInterval(automationTimer);
+  clearInterval(sessionReminderTimer);
   clearInterval(sessionCommandRetryTimer);
+  clearInterval(sessionStopMaintenanceTimer);
   clearInterval(backgroundPushRetryTimer);
   clearInterval(policyHookApprovalTimer);
   clearInterval(artifactMaintenanceTimer);
+  clearInterval(runnerLivenessTimer);
   orchestrator.shutdown();
 });
-for (const sig of ["SIGINT", "SIGTERM"] as const) {
-  process.once(sig, () => {
-    app.log.info(`${sig} — shutting down`);
-    void app.close().finally(() => process.exit(0));
+// Re-entrancy guard: a second signal (or an uncaughtException raised WHILE app.close() drains)
+// must not kick off a second shutdown and race two process.exit() calls.
+let controlPlaneShuttingDown = false;
+function gracefulShutdown(exitCode: number, reason: string): void {
+  if (controlPlaneShuttingDown) return;
+  controlPlaneShuttingDown = true;
+  try {
+    app.log.info(`${reason} — shutting down`);
+  } catch {
+    /* a broken logger must never abort the shutdown */
+  }
+  // app.close() fires the onClose hook, which runs orchestrator.shutdown() to kill the box SSH
+  // children — the same path SIGINT/SIGTERM use. Force-exit on a bounded failsafe so a hung close
+  // (possible after an uncaughtException left state corrupt) can never wedge the process forever.
+  const failsafe = setTimeout(() => process.exit(exitCode), 5_000);
+  void app.close().finally(() => {
+    clearTimeout(failsafe);
+    process.exit(exitCode);
   });
 }
+for (const sig of ["SIGINT", "SIGTERM"] as const) {
+  process.once(sig, () => gracefulShutdown(0, sig));
+}
+// A synchronous uncaughtException leaves the process in an unknown, possibly corrupt state: run the
+// graceful shutdown (fires onClose -> orchestrator.shutdown(), killing box SSH children) before
+// exiting non-zero rather than letting Node's default crash orphan them.
+process.on("uncaughtException", (error) => {
+  try {
+    app.log.error({ err: error }, "uncaughtException — running graceful shutdown");
+  } catch {
+    /* logging must never mask the exit */
+  }
+  gracefulShutdown(1, "uncaughtException");
+});
+// An unhandled rejection is a LAST-RESORT net, NOT a shutdown trigger: the control plane is the
+// single point every runner and dashboard depends on, so one stray async fault must not drop all of
+// them. Node would otherwise terminate by default; log and keep serving. The /runner message handler
+// and onGone already contain their own throws at the source, so this only catches paths not
+// enumerated there.
+process.on("unhandledRejection", (reason) => {
+  try {
+    app.log.error({ err: reason }, "unhandledRejection (continuing)");
+  } catch {
+    /* logging must never mask survival */
+  }
+});
 
 // Wrapped in an async IIFE (not a top-level await) so the module bundles to CJS.
 void (async () => {
   try {
     await app.listen({ port: PORT, host: HOST });
+    // Shell reconciliation is connection-owned state like the reset above: a duplicate process
+    // that loses the port race must not flip the survivor's running shells to reconnecting.
+    db.settleStartupState(Date.now());
+    shellRegistry.reconcileStartup(Date.now());
+    markStartupReady();
     app.log.info(`control plane listening on http://${HOST}:${PORT}`);
     // Normal service stdout is commonly captured as a log. Reveal the credential automatically
     // only to an interactive terminal; `--print-pair-url` is the explicit non-interactive path.

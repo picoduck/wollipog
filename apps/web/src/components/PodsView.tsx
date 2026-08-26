@@ -16,7 +16,7 @@ import {
 import { useApi } from "../api-context.js";
 import { relativeTime, titleCaseLabel } from "../format.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
-import { Empty, StatusBadge } from "./common.js";
+import { Empty, SessionStatusIndicators } from "./common.js";
 import { EventTimeline } from "./EventTimeline.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { useTimeline } from "./useTimeline.js";
@@ -140,6 +140,7 @@ function PodMemberColumn({
   sharing: boolean;
 }) {
   const events = useStoreSelector((state) => state.events.get(session.id));
+  const runnerOnline = useStoreSelector((state) => state.runners.get(session.runnerId)?.status === "online");
   const canShare = session.status !== "starting" && session.status !== "running" &&
     Boolean(events?.some((event) => event.payload.kind === "agent_message" && !event.payload.parentToolUseId && event.payload.text));
   return (
@@ -149,7 +150,7 @@ function PodMemberColumn({
           <span className="compare-agent">{sessionAgentLabel(session.agentName, session.driver, session.agentId)}</span>
           <span className="muted sm">{session.title}</span>
         </button>
-        <StatusBadge status={session.status} />
+        <SessionStatusIndicators session={session} disconnected={!runnerOnline} />
         <label className="pod-member-setting">
           <span>Role</span>
           <select

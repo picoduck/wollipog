@@ -13,6 +13,7 @@ import {
   displayBaseRef,
   fixChecksPrompt,
   formatGitOperation,
+  legacyLocalGitFacts,
   remoteHttpUrl,
   sourceKind,
 } from "./pinned-summary.js";
@@ -66,6 +67,40 @@ test("deriveHost: no box → Local with the runner hostname (runnerId fallback)"
   const runner = { hostname: "T14s" } as RunnerView;
   assert.deepEqual(deriveHost(session({}), runner, []), { kind: "local", label: "Local", detail: "T14s" });
   assert.deepEqual(deriveHost(session({}), undefined, []), { kind: "local", label: "Local", detail: "r1" });
+});
+
+test("legacy local Git facts stay aligned across response order, mixed versions, and session reset", () => {
+  const initialSummary = summary({
+    branch: "older-summary",
+    hasChanges: true,
+    addedLines: 12,
+    deletedLines: 3,
+    pr: { number: 221, title: "Keep forge facts", url: "https://example.test/221", state: "OPEN" },
+  });
+  assert.equal(legacyLocalGitFacts(null, initialSummary), initialSummary,
+    "summary is the initial fallback before status settles");
+
+  const freshStatus = status({ branch: "fresh-status", hasChanges: false, addedLines: 0, deletedLines: 0 });
+  assert.equal(legacyLocalGitFacts(freshStatus, initialSummary), freshStatus);
+  assert.deepEqual(deriveChanges(legacyLocalGitFacts(freshStatus, initialSummary)), {
+    kind: "lines", added: 0, deleted: 0,
+  });
+
+  const lateSummary = summary({
+    branch: "late-but-stale",
+    hasChanges: true,
+    addedLines: 50,
+    deletedLines: 25,
+  });
+  assert.equal(legacyLocalGitFacts(freshStatus, lateSummary), freshStatus,
+    "a later summary completion cannot replace the status sample");
+
+  const legacyStatus = status({ branch: "pre-numstat", hasChanges: true, files: [{ status: "M", path: "src/app.ts" }] });
+  assert.deepEqual(deriveChanges(legacyLocalGitFacts(legacyStatus, lateSummary), legacyStatus.files.length), {
+    kind: "files", count: 1,
+  }, "a pre-numstat status still owns local facts on an older runner");
+  assert.equal(legacyLocalGitFacts(null, lateSummary), lateSummary,
+    "clearing status for a session change restores summary-only fallback");
 });
 
 test("deriveChanges: line totals when meaningful", () => {

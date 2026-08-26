@@ -20,11 +20,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentContext, PlanEntry, PromptImage, SessionConfig } from "@wollipog/protocol";
 import { killTree, spawnAgent, type AgentProcess } from "../spawn.js";
+import { BoundedNdjsonBuffer } from "../bounded-ndjson.js";
 import type { Driver, DriverCallbacks, DriverOptions, StopReason } from "./driver.js";
 import { isProviderAuthenticationFailure } from "./provider-auth-failure.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Json = any;
+
+interface CodexDriverDeps {
+  spawn: typeof spawnAgent;
+  kill: typeof killTree;
+}
 
 const SANDBOX_MODES = new Set(["read-only", "workspace-write", "danger-full-access"]);
 const MIME_EXT: Record<string, string> = {
@@ -82,6 +88,7 @@ export class CodexDriver implements Driver {
   private disposed = false;
   private cancelled = false;
   private config: SessionConfig;
+  private readonly deps: CodexDriverDeps;
   /** track tool items we've announced so updates map to the same toolCallId */
   private readonly seenItems = new Set<string>();
   /** temp image files staged for the in-flight turn, removed when it ends. */
@@ -102,9 +109,14 @@ export class CodexDriver implements Driver {
   constructor(
     private readonly opts: DriverOptions,
     private readonly cb: DriverCallbacks,
+    deps: Partial<CodexDriverDeps> = {},
   ) {
     this.cwd = opts.cwd;
     this.config = opts.config;
+    this.deps = {
+      spawn: deps.spawn ?? spawnAgent,
+      kill: deps.kill ?? killTree,
+    };
     // Phase 2 resume: a persisted threadId makes the first turn use `codex resume <id>`.
     if (opts.resumeId) this.threadId = opts.resumeId;
   }
@@ -167,7 +179,7 @@ export class CodexDriver implements Driver {
         // Subscription auth comes from ~/.codex/auth.json; a stray OPENAI_API_KEY in the
         // daemon's environment would silently switch billing to the API. An explicit
         // agent-config env entry still wins (a deliberately API-keyed agent keeps working).
-        child = spawnAgent({
+        child = this.deps.spawn({
           command: this.opts.command,
           args,
           cwd: this.cwd,
@@ -194,7 +206,6 @@ export class CodexDriver implements Driver {
         }
       };
 
-      let buf = "";
       const processLine = (raw: string) => {
         const line = raw.trim();
         if (!line) return;
@@ -207,16 +218,14 @@ export class CodexDriver implements Driver {
         const r = this.handleEvent(msg);
         if (r) stopReason = r;
       };
+      const stdout = new BoundedNdjsonBuffer(processLine, () => {
+        this.cb.onStderr("discarded oversized NDJSON record from Codex stdout");
+      });
 
       child.stdout.setEncoding("utf8");
       child.stdout.on("data", (chunk: string) => {
         if (this.disposed || this.cancelled) return;
-        buf += chunk;
-        let nl: number;
-        while ((nl = buf.indexOf("\n")) >= 0) {
-          processLine(buf.slice(0, nl));
-          buf = buf.slice(nl + 1);
-        }
+        stdout.push(chunk);
       });
 
       child.stderr.setEncoding("utf8");
@@ -236,14 +245,15 @@ export class CodexDriver implements Driver {
         finish("refusal");
       });
 
-      child.on("exit", (code) => {
+      // `close`, not `exit`: stdout can still deliver the final NDJSON record after
+      // the process exits. Finalize only once every stdio stream has drained.
+      child.on("close", (code) => {
         this.child = null;
         this.cleanupImages();
         if (this.disposed || this.cancelled) return finish("cancelled");
         // Flush a trailing partial line — `turn.completed` (token_usage) may arrive
         // without a trailing newline.
-        processLine(buf);
-        buf = "";
+        processLine(stdout.takeTrailing());
         if (code && code !== 0 && !settled) {
           this.cb.onEvent({ kind: "error", message: `codex exited with code ${code}` });
           return finish("refusal");
@@ -263,7 +273,7 @@ export class CodexDriver implements Driver {
 
   cancel(): void {
     this.cancelled = true;
-    if (this.child) killTree(this.child);
+    if (this.child) this.deps.kill(this.child);
     this.cleanupImages();
   }
 
@@ -274,7 +284,7 @@ export class CodexDriver implements Driver {
 
   dispose(): void {
     this.disposed = true;
-    if (this.child) killTree(this.child);
+    if (this.child) this.deps.kill(this.child);
     this.child = null;
     // Synchronous cleanup so files are gone before a shutdown process.exit().
     this.cleanupImages();

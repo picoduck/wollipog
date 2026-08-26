@@ -90,6 +90,26 @@ async function distanceFromTail(page: Page) {
     reader.scrollHeight - reader.scrollTop - reader.clientHeight);
 }
 
+async function waitForStableReaderGeometry(page: Page) {
+  const reader = page.getByTestId("reader");
+  await expect.poll(async () => {
+    const first = await reader.evaluate((element) => ({
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+      scrollTop: element.scrollTop,
+    }));
+    await settleLayout(page, 3);
+    const second = await reader.evaluate((element) => ({
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+      scrollTop: element.scrollTop,
+    }));
+    return Math.abs(first.clientHeight - second.clientHeight) < 0.5
+      && Math.abs(first.scrollHeight - second.scrollHeight) < 0.5
+      && Math.abs(first.scrollTop - second.scrollTop) < 0.5;
+  }).toBe(true);
+}
+
 async function moveToStableReadingAnchor(page: Page, ratio = 0.4) {
   const reader = page.getByTestId("reader");
   await reader.evaluate((element, position) => {
@@ -283,6 +303,116 @@ async function stopSessionReturnRecorder(page: Page) {
       overlapExamples: recorder.overlapExamples,
     };
   });
+}
+
+interface StreamedGrowthRecorder {
+  active: boolean;
+  frames: number;
+  overlapFrames: number;
+  maxOverlapPx: number;
+  overlapExamples: Array<{
+    frame: number;
+    previous: string | undefined;
+    current: string | undefined;
+    pixels: number;
+  }>;
+  /** Frames whose painted row layout flipped back to the layout from two frames earlier. */
+  alternationFrames: number;
+  signatures: string[];
+  finished: Promise<void>;
+}
+
+/** Samples every painted frame for row overlap and for alternation between incompatible layouts
+ * (the same rows repainting at two different sets of offsets on consecutive frames). */
+async function startStreamedGrowthRecorder(page: Page) {
+  await page.evaluate(() => {
+    const host = window as typeof window & { __streamedGrowthRecorder?: StreamedGrowthRecorder };
+    let finish!: () => void;
+    const recorder: StreamedGrowthRecorder = {
+      active: true,
+      frames: 0,
+      overlapFrames: 0,
+      maxOverlapPx: 0,
+      overlapExamples: [],
+      alternationFrames: 0,
+      signatures: [],
+      finished: new Promise<void>((resolve) => { finish = resolve; }),
+    };
+    host.__streamedGrowthRecorder = recorder;
+    const scheduleSample = () => requestAnimationFrame(() => setTimeout(sample, 0));
+    const sample = () => {
+      // Estimate-backed geometry is deliberately unpainted (opacity 0) until its first seed; the
+      // dedicated session-return test asserts that invariant. This recorder samples only frames a
+      // reader could actually see.
+      const root = document.querySelector<HTMLElement>("[data-virtual-measurements]");
+      if (!root || root.dataset.virtualMeasurements !== "ready" || getComputedStyle(root).opacity === "0") {
+        if (recorder.active) scheduleSample();
+        else finish();
+        return;
+      }
+      recorder.frames += 1;
+      const rows = [...document.querySelectorAll<HTMLElement>("[data-virtual-row]")]
+        .map((row) => ({
+          index: Number(row.dataset.index),
+          key: row.dataset.virtualKey,
+          rect: row.getBoundingClientRect(),
+        }))
+        .sort((left, right) => left.index - right.index);
+      const overlapIndex = rows.findIndex((row, index) =>
+        index > 0 && row.rect.top + 0.5 < rows[index - 1]!.rect.bottom);
+      if (overlapIndex > 0) {
+        recorder.overlapFrames += 1;
+        const pixels = rows[overlapIndex - 1]!.rect.bottom - rows[overlapIndex]!.rect.top;
+        recorder.maxOverlapPx = Math.max(recorder.maxOverlapPx, pixels);
+        if (recorder.overlapExamples.length < 3) recorder.overlapExamples.push({
+          frame: recorder.frames,
+          previous: rows[overlapIndex - 1]!.key,
+          current: rows[overlapIndex]!.key,
+          pixels,
+        });
+      }
+      const signature = rows.map((row) => `${row.key}@${Math.round(row.rect.top)}`).join("|");
+      const signatures = recorder.signatures;
+      signatures.push(signature);
+      const length = signatures.length;
+      if (length >= 4 &&
+          signatures[length - 1] === signatures[length - 3] &&
+          signatures[length - 2] === signatures[length - 4] &&
+          signatures[length - 1] !== signatures[length - 2]) {
+        recorder.alternationFrames += 1;
+      }
+      if (signatures.length > 8) signatures.shift();
+      if (recorder.active) scheduleSample();
+      else finish();
+    };
+    scheduleSample();
+  });
+}
+
+async function stopStreamedGrowthRecorder(page: Page) {
+  await settleLayout(page, 8);
+  return page.evaluate(async () => {
+    const recorder = (window as typeof window & { __streamedGrowthRecorder?: StreamedGrowthRecorder })
+      .__streamedGrowthRecorder;
+    if (!recorder) throw new Error("Streamed growth recorder is missing.");
+    recorder.active = false;
+    await recorder.finished;
+    return {
+      frames: recorder.frames,
+      overlapFrames: recorder.overlapFrames,
+      maxOverlapPx: recorder.maxOverlapPx,
+      overlapExamples: recorder.overlapExamples,
+      alternationFrames: recorder.alternationFrames,
+    };
+  });
+}
+
+/** Streams several chunks a couple of frames apart, like live output settling into the timeline. */
+async function streamChunks(page: Page, control: string, chunks: number) {
+  for (let chunk = 0; chunk < chunks; chunk += 1) {
+    await page.getByTestId(control).click();
+    await settleLayout(page, 2);
+  }
 }
 
 async function dragPanelResizer(page: Page) {
@@ -846,6 +976,7 @@ test("width reflow and tail streaming honor following, paused, and previewing st
   await expect(reader).toHaveAttribute("data-follow-tail-state", "following");
   await expect.poll(() => distanceFromTail(page)).toBeLessThanOrEqual(2);
 
+  await waitForStableReaderGeometry(page);
   await page.getByTestId("pause-follow").click();
   await expect(reader).toHaveAttribute("data-follow-tail-state", "paused");
   const pausedAnchor = await moveToStableReadingAnchor(page);
@@ -1035,10 +1166,9 @@ test("composer growth and shrink are layout-owned: following re-pins and a near-
   // onto the new bottom with its native ResizeObserver/scroll delivery order. That landing is the
   // browser's, not the reader's — the pause must survive it.
   await page.getByTestId("shrink-composer").click();
-  await settleLayout(page, 16);
   await expect.poll(() => distanceFromTail(page)).toBeLessThanOrEqual(2);
   await expect(reader).toHaveAttribute("data-follow-tail-state", "paused");
-  await page.waitForTimeout(200);
+  await waitForStableReaderGeometry(page);
   await expect(reader).toHaveAttribute("data-follow-tail-state", "paused");
 });
 
@@ -1067,4 +1197,103 @@ test("a reader-driven return to a streaming tail resumes following", async ({ pa
   });
   await expect(reader).toHaveAttribute("data-follow-tail-state", "following");
   await expect.poll(() => distanceFromTail(page)).toBeLessThanOrEqual(2);
+});
+
+test("streamed growth above later rows keeps every painted frame disjoint", async ({ page }) => {
+  await page.goto("/timeline-reflow-e2e.html");
+  await expect(page.locator("[data-virtual-row]").first()).toBeVisible();
+  await settleLayout(page);
+  const before = await rowGeometry(page);
+
+  await startStreamedGrowthRecorder(page);
+  await streamChunks(page, "stream", 8);
+  await waitForSharedHeightChange(page, before, "greater");
+  const sampled = await stopStreamedGrowthRecorder(page);
+
+  expect(sampled.frames).toBeGreaterThan(12);
+  expect(sampled.overlapFrames, JSON.stringify(sampled.overlapExamples)).toBe(0);
+  expect(sampled.alternationFrames).toBe(0);
+  await expectNoOverlap(page);
+});
+
+test("deferred measurement commits expose overlapping frames during streamed growth", async ({ page }) => {
+  await page.goto("/timeline-reflow-e2e.html?defer=1");
+  await expect(page.locator("[data-virtual-row]").first()).toBeVisible();
+  await settleLayout(page);
+
+  await startStreamedGrowthRecorder(page);
+  await streamChunks(page, "stream", 8);
+  const sampled = await stopStreamedGrowthRecorder(page);
+
+  expect(sampled.frames).toBeGreaterThan(12);
+  expect(sampled.overlapFrames, "the fault-injected deferred commit must prove the sampler can fail")
+    .toBeGreaterThan(0);
+});
+
+test.describe("phone viewport", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  test("session return and settling live output keep painted frames disjoint on a touch phone", async ({ page }) => {
+    await page.goto("/timeline-reflow-e2e.html?follow=1");
+    const reader = page.getByTestId("reader");
+    await expect(page.locator("[data-virtual-row]").first()).toBeVisible();
+    await expect(reader).toHaveAttribute("data-follow-tail-state", "following");
+    await expect.poll(() => distanceFromTail(page)).toBeLessThanOrEqual(2);
+    await settleLayout(page);
+
+    // A touch reader pauses near the transcript head so a saved logical anchor exists for the
+    // return and the streamed head row stays mounted with later rows below it — the geometry the
+    // reported flashing needs.
+    await page.getByTestId("pause-follow").tap();
+    await expect(reader).toHaveAttribute("data-follow-tail-state", "paused");
+    const anchor = await moveToStableReadingAnchor(page, 0.04);
+    expect(anchor).not.toBeNull();
+
+    // Another session streams while this one is away.
+    await page.getByTestId("session-beta").tap();
+    await expect(reader).toHaveAttribute("data-session-id", "beta");
+    const ticks = Number(await reader.getAttribute("data-tail-stream-ticks"));
+    await page.getByTestId("stream-tail").tap();
+    await expect(reader).toHaveAttribute("data-tail-stream-ticks", String(ticks + 1));
+    await settleLayout(page);
+
+    // Return, then let fresh output settle while sampling every painted frame.
+    await startStreamedGrowthRecorder(page);
+    await page.getByTestId("session-alpha").tap();
+    await expect(reader).toHaveAttribute("data-session-id", "alpha");
+    await streamChunks(page, "stream", 4);
+    await streamChunks(page, "stream-tail", 2);
+    // Browser-chrome geometry change: mobile URL bars resize the layout viewport mid-read.
+    await page.setViewportSize({ width: 390, height: 780 });
+    await settleLayout(page, 6);
+    await page.setViewportSize({ width: 390, height: 844 });
+    const sampled = await stopStreamedGrowthRecorder(page);
+
+    expect(sampled.frames).toBeGreaterThan(20);
+    expect(sampled.overlapFrames, JSON.stringify(sampled.overlapExamples)).toBe(0);
+    expect(sampled.alternationFrames).toBe(0);
+    await expectNoOverlap(page);
+    await expect(reader).toHaveAttribute("data-follow-tail-state", "paused");
+    await expect.poll(async () => (await visibleAnchor(page))?.key).toBe(anchor!.key);
+    expect(Math.abs((await visibleAnchor(page))!.offset - anchor!.offset)).toBeLessThan(1);
+  });
+
+  test("following live tail growth on a touch phone never paints overlapping rows", async ({ page }) => {
+    await page.goto("/timeline-reflow-e2e.html?follow=1");
+    const reader = page.getByTestId("reader");
+    await expect(page.locator("[data-virtual-row]").first()).toBeVisible();
+    await expect(reader).toHaveAttribute("data-follow-tail-state", "following");
+    await expect.poll(() => distanceFromTail(page)).toBeLessThanOrEqual(2);
+    await settleLayout(page);
+
+    await startStreamedGrowthRecorder(page);
+    await streamChunks(page, "stream-tail", 6);
+    const sampled = await stopStreamedGrowthRecorder(page);
+
+    expect(sampled.frames).toBeGreaterThan(12);
+    expect(sampled.overlapFrames, JSON.stringify(sampled.overlapExamples)).toBe(0);
+    expect(sampled.alternationFrames).toBe(0);
+    await expect(reader).toHaveAttribute("data-follow-tail-state", "following");
+    await expect.poll(() => distanceFromTail(page)).toBeLessThanOrEqual(2);
+  });
 });

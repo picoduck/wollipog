@@ -8,6 +8,7 @@ import {
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { archiveProjectWithFeedback } from "../project-actions.js";
+import { sessionArchiveRequiresStop } from "../archive-actions.js";
 import {
   filterManagedProjects,
   locationSessionCount,
@@ -83,9 +84,11 @@ export function ProjectsView({
   const { confirm, showToast, showUndo } = useFeedback();
   const { navigate } = useStoreActions();
   const storedProjects = useStoreSelector((state) => state.projects);
+  const sessions = useStoreSelector((state) => state.sessions);
   const projectsSupported = useStoreSelector((state) => state.projectsSupported);
   const projectLocationCreationSupported = useStoreSelector((state) => state.projectLocationCreationSupported);
   const accessScopeManagementSupported = useStoreSelector((state) => state.accessScopeManagementSupported);
+  const stopBeforeArchiveSupported = useStoreSelector((state) => state.stopBeforeArchiveSupported);
   const snapshotLoaded = useStoreSelector((state) => state.snapshotLoaded);
   const runners = useStoreSelector((state) => state.runners);
   const boxes = useStoreSelector((state) => state.boxes);
@@ -110,6 +113,9 @@ export function ProjectsView({
   const visibleProjects = useMemo(() => filterManagedProjects(projectMap.values(), query, visibility), [projectMap, query, visibility]);
   const selected = selectedProjectId ? projectMap.get(selectedProjectId) ?? null : null;
   const boxByRunner = useMemo(() => new Map([...boxes.values()].map((box: BoxView) => [box.runnerId, box])), [boxes]);
+  const selectedStopsRuntime = selected ? [...sessions.values()].some((session) =>
+    session.projectId === selected.id && !session.archived && sessionArchiveRequiresStop(session, stopBeforeArchiveSupported)
+  ) : false;
 
   useEffect(() => {
     if (!selected && selectedProjectId && snapshotLoaded) {
@@ -178,9 +184,12 @@ export function ProjectsView({
   const archiveSessions = async () => {
     if (!selected || selected.unarchivedSessionCount === 0) return;
     const accepted = await confirm({
-      title: `Archive ${selected.unarchivedSessionCount} Session${selected.unarchivedSessionCount === 1 ? "" : "s"}?`,
-      message: `Archive every unarchived session in “${selected.name}”? The Project and its Locations will remain.`,
-      confirmLabel: "Archive Sessions",
+      title: `${selectedStopsRuntime ? "Archive and stop" : "Archive"} ${selected.unarchivedSessionCount} session${selected.unarchivedSessionCount === 1 ? "" : "s"}?`,
+      message: selectedStopsRuntime
+        ? `Sessions will move to Archived Sessions after their runtimes stop. Queued work will be canceled and runtime capacity will be released. To keep work running outside the Inbox, use Snooze instead. The “${selected.name}” Project and its Locations will remain.`
+        : `Archive every unarchived session in “${selected.name}”? The Project and its Locations will remain.`,
+      confirmLabel: selectedStopsRuntime ? "Archive and Stop" : "Archive Sessions",
+      ...(selectedStopsRuntime ? { tone: "danger" as const } : {}),
     });
     if (!accepted) return;
     setBusy("archive");
@@ -499,7 +508,7 @@ export function ProjectsView({
               <section className="project-detail-section" aria-labelledby="project-session-actions-heading">
                 <div className="project-section-heading"><div><h3 id="project-session-actions-heading">Session Actions</h3><p>Archiving sessions leaves this Project and its Locations in place.</p></div></div>
                 <button type="button" className="btn" disabled={selected.canManage === false || selected.unarchivedSessionCount === 0 || busy !== null} onClick={() => void archiveSessions()}>
-                  {busy === "archive" ? "Archiving…" : "Archive Sessions"}
+                  {busy === "archive" ? "Archiving…" : selectedStopsRuntime ? "Archive and Stop Sessions" : "Archive Sessions"}
                 </button>
               </section>
               <section className="project-detail-section project-danger-zone" aria-labelledby="project-danger-heading">

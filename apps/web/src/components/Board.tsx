@@ -5,10 +5,11 @@ import { useApi } from "../api-context.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { relativeTime } from "../format.js";
 import { machineOptionLabels, runnerDisplay } from "../runners.js";
-import { StatusBadge, Empty } from "./common.js";
+import { SessionStatusIndicators, Empty } from "./common.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { ReviewQueue } from "./ReviewQueue.js";
 import { MeasuredVirtualList } from "./MeasuredVirtualList.js";
+import { useExperiments } from "../use-experiments.js";
 
 const sessionCardKey = (session: SessionView) => session.id;
 const estimateSessionCard = (session: SessionView) => session.pendingApproval ? 230 : session.preview ? 155 : 120;
@@ -19,6 +20,10 @@ export function Board({ onOpenReview, onNewSession }: {
 }) {
   const api = useApi();
   const { setFilters, navigate } = useStoreActions();
+  // The empty state's hint names Multi-Agent Run; with the experiment off that destination has
+  // been removed everywhere else, and a hint pointing at a control that does not exist teaches
+  // the reader the app is broken rather than configured.
+  const multiAgentEnabled = useExperiments().flags.multiAgent;
   const sessions = useStoreSelector((s) => s.sessions);
   const runners = useStoreSelector((s) => s.runners);
   const boxes = useStoreSelector((s) => s.boxes);
@@ -198,7 +203,9 @@ export function Board({ onOpenReview, onNewSession }: {
               if (filtered) setFilters({ runnerId: null, agentId: null });
               onNewSession();
             }}>New Session</button>}
-            hint={<>Click “New Session” to start an agent, or “Multi-Agent Run” to compare several.</>}
+            hint={multiAgentEnabled
+              ? <>Click “New Session” to start an agent, or “Multi-Agent Run” to compare several.</>
+              : <>Click “New Session” to start an agent.</>}
           />
         )
       ) : (
@@ -311,7 +318,7 @@ function SessionCard({
       onDragEnd={onDragEnd}
     >
       <div className="card-top">
-        <StatusBadge status={session.status} />
+        <SessionStatusIndicators session={session} disconnected={!runnerOnline} />
         <span className="card-time">{relativeTime(session.lastEventAt ?? session.updatedAt)}</span>
       </div>
       <button

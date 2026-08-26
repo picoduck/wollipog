@@ -68,13 +68,17 @@ import type {
   UpdateReviewFindingRequest,
   BundleReviewFindingsRequest,
   SessionConfig,
+  SessionNamingSettingsView,
+  UpdateSessionNamingSettingsRequest,
   SessionEventsResponse,
   SessionFileEntry,
   SessionView,
+  SessionReminderView,
   SessionCommandInvocationView,
   SteerRequest,
   SteeringAttemptView,
   SetProjectRequest,
+  SetSessionReminderRequest,
   SideChatResponse,
   SideChatView,
   ShellHistoryPage,
@@ -100,7 +104,18 @@ import type {
   UpdateAutomationRequest,
   DispatchWorkflowNodeResult,
 } from "@wollipog/protocol";
-import { isPromptImageReference } from "@wollipog/protocol";
+import { isPromptImageReference, type SkillFile, type SkillInvocationPolicy } from "@wollipog/protocol";
+import type {
+  RunnerSkillsResponse,
+  ReportedSkillsState,
+  SkillAgentSelector,
+  SkillAssignmentListPayload,
+  SkillAssignmentPayload,
+  SkillDetailPayload,
+  SkillGroupListPayload,
+  SkillGroupView,
+  SkillListPayload,
+} from "./skills.js";
 import { CONTROL_PLANE_HTTP } from "./config.js";
 import { deviceToken } from "./device-token.js";
 import { createBrowserApiTransport, type ApiTransport } from "./api-transport.js";
@@ -245,6 +260,14 @@ export function createApiClient(transport: ApiTransport) {
     return req<UsageAggregationResponse>(`/api/usage?${query.toString()}`);
   },
 
+  sessionNamingSettings: () => req<SessionNamingSettingsView>("/api/session-naming"),
+
+  updateSessionNamingSettings: (input: UpdateSessionNamingSettingsRequest) =>
+    req<SessionNamingSettingsView>("/api/session-naming", {
+      method: "PUT",
+      body: JSON.stringify(input),
+    }),
+
   subscriptionUsage: () => req<SubscriptionUsageResponse>("/api/usage/subscriptions"),
 
   refreshSubscriptionUsage: () => req<SubscriptionUsageResponse>("/api/usage/subscriptions/refresh", {
@@ -379,6 +402,76 @@ export function createApiClient(transport: ApiTransport) {
       { method: "DELETE" },
     ),
 
+  /* Managed agent skills. List payloads are typed wrapped-or-bare and normalized by the
+   * `*FromPayload` helpers in skills.ts, because the routes are versioned separately from this
+   * dashboard. */
+  listSkills: () => req<SkillListPayload>("/api/skills"),
+
+  createSkill: (body: { name: string; description?: string; groupId?: string; files: SkillFile[]; note?: string }) =>
+    req<SkillDetailPayload>("/api/skills", { method: "POST", body: JSON.stringify(body) }),
+
+  getSkill: (id: string) => req<SkillDetailPayload>(`/api/skills/${encodeURIComponent(id)}`),
+
+  updateSkill: (id: string, body: { description?: string; groupId?: string | null }) =>
+    req<SkillDetailPayload>(`/api/skills/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+
+  deleteSkill: (id: string) => req<void>(`/api/skills/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  createSkillVersion: (id: string, body: { files: SkillFile[]; note?: string }) =>
+    req<SkillDetailPayload>(`/api/skills/${encodeURIComponent(id)}/versions`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  listSkillGroups: () => req<SkillGroupListPayload>("/api/skill-groups"),
+
+  createSkillGroup: (body: { name: string }) =>
+    req<SkillGroupView>("/api/skill-groups", { method: "POST", body: JSON.stringify(body) }),
+
+  deleteSkillGroup: (id: string) =>
+    req<void>(`/api/skill-groups/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  listSkillAssignments: (skillId?: string) =>
+    req<SkillAssignmentListPayload>(`/api/skill-assignments${
+      skillId ? `?${new URLSearchParams({ skillId }).toString()}` : ""
+    }`),
+
+  createSkillAssignment: (body: {
+    skillId: string;
+    scopeKind: "instance" | "runner";
+    runnerId?: string;
+    agentSelector: SkillAgentSelector;
+    invocation?: SkillInvocationPolicy;
+  }) => req<SkillAssignmentPayload>("/api/skill-assignments", {
+    method: "POST",
+    body: JSON.stringify(body),
+  }),
+
+  updateSkillAssignment: (id: string, body: { enabled?: boolean; invocation?: SkillInvocationPolicy }) =>
+    req<SkillAssignmentPayload>(`/api/skill-assignments/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+
+  deleteSkillAssignment: (id: string) =>
+    req<void>(`/api/skill-assignments/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  runnerSkills: (runnerId: string) =>
+    req<RunnerSkillsResponse>(`/api/runners/${encodeURIComponent(runnerId)}/skills`),
+
+  syncRunnerSkills: (runnerId: string) =>
+    req<ReportedSkillsState | { state?: ReportedSkillsState | null }>(
+      `/api/runners/${encodeURIComponent(runnerId)}/skills/sync`,
+      { method: "POST" },
+    ).then((payload): ReportedSkillsState =>
+      payload && typeof payload === "object" && "state" in payload
+        ? ((payload as { state?: ReportedSkillsState | null }).state ?? {})
+        : ((payload as ReportedSkillsState | null) ?? {}),
+    ),
+
   getSessionEvents: (id: string, after = 0) =>
     req<SessionEventsResponse>(`/api/sessions/${encodeURIComponent(id)}/events?after=${after}`),
 
@@ -475,6 +568,9 @@ export function createApiClient(transport: ApiTransport) {
       body: JSON.stringify({ title }),
     }),
 
+  retitleSession: (id: string) =>
+    req<{ accepted: true }>(`/api/sessions/${id}/retitle`, { method: "POST" }),
+
   stop: (id: string) => req<SessionView>(`/api/sessions/${id}/stop`, { method: "POST" }),
 
   cancelTurn: (id: string) =>
@@ -535,7 +631,7 @@ export function createApiClient(transport: ApiTransport) {
       body: JSON.stringify(body),
     }),
 
-  answerQuestion: (id: string, body: { requestId: string; answers: Record<string, string | string[]> }) =>
+  answerQuestion: (id: string, body: { requestId: string; answers: Record<string, string | string[]>; action?: "submit" | "dismiss" }) =>
     req<SessionView>(`/api/sessions/${id}/answer`, {
       method: "POST",
       body: JSON.stringify(body),
@@ -554,7 +650,12 @@ export function createApiClient(transport: ApiTransport) {
     }),
 
   search: (q: string) =>
-    req<{ results: { sessionId: string; seq: number; snippet: string; title: string; workspaceName?: string | null }[] }>(
+    req<{ results: Array<{
+      sessionId: string;
+      seq: number;
+      snippet: string;
+      title: string;
+    } & Pick<SessionView, "workspaceName" | "projectName" | "archived" | "status" | "agentId" | "agentName" | "driver">> }>(
       `/api/search?q=${encodeURIComponent(q)}`,
     ),
 
@@ -568,6 +669,33 @@ export function createApiClient(transport: ApiTransport) {
    * sessions, while archived sessions remain reachable through search and direct links. */
   listAllSessions: () => req<{ sessions: SessionView[] }>("/api/sessions?archived=true"),
 
+  archiveSessionPage: (input: {
+    cursor?: string;
+    project?: string;
+    location?: string;
+    agent?: string;
+    archive: "archived" | "unarchived" | "all";
+    lifecycle: SessionView["status"] | "all";
+    q?: string;
+  }) => {
+    const query = new URLSearchParams();
+    if (input.cursor !== undefined) query.set("cursor", input.cursor);
+    if (input.project !== undefined) query.set("project", input.project);
+    if (input.location !== undefined) query.set("location", input.location);
+    if (input.agent !== undefined) query.set("agent", input.agent);
+    query.set("archive", input.archive);
+    if (input.lifecycle !== "all") query.set("lifecycle", input.lifecycle);
+    if (input.q !== undefined) query.set("q", input.q);
+    return req<{
+      sessions: SessionView[];
+      snippets: Record<string, string>;
+      metadata: Record<string, { project: string; location: string; agent: string }>;
+      nextCursor: string | null;
+      hasMore: boolean;
+      facets: { projects: string[]; locations: string[]; agents: string[] };
+    }>(`/api/sessions/archive-page?${query.toString()}`);
+  },
+
   /** Exact authorized lookup used by direct links, including archived sessions omitted from the
    * live dashboard snapshot. */
   session: (id: string) => req<{ session: SessionView }>(sessionLookupPath(id)),
@@ -577,6 +705,25 @@ export function createApiClient(transport: ApiTransport) {
       method: "POST",
       body: JSON.stringify({ archived }),
     }),
+
+  retryStop: (id: string) =>
+    req<SessionView>(`/api/sessions/${id}/retry-stop`, { method: "POST" }),
+
+  setReminder: (id: string, body: SetSessionReminderRequest) =>
+    req<SessionReminderView>(`/api/sessions/${encodeURIComponent(id)}/reminder`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+
+  removeReminder: (id: string, revision?: number, reminderId?: string) => {
+    const query = new URLSearchParams();
+    if (revision !== undefined) query.set("revision", String(revision));
+    if (reminderId !== undefined) query.set("reminderId", reminderId);
+    const serialized = query.toString();
+    return req<{ removed: true }>(`/api/sessions/${encodeURIComponent(id)}/reminder${
+      serialized ? `?${serialized}` : ""
+    }`, { method: "DELETE" });
+  },
 
   /** Legacy compatibility adapter: re-file by workspace identity (null means no workspace group). */
   setWorkspace: (id: string, workspaceId: string | null) =>

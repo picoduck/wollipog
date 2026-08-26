@@ -38,6 +38,7 @@ import { AgentIcon } from "./AgentIcon.js";
 import { Modal } from "./common.js";
 import { DirectoryPicker } from "./DirectoryPicker.js";
 import { conductorAgentId, type SessionWorkMode } from "../workflow-presets.js";
+import { useExperiments } from "../use-experiments.js";
 import { handleRovingChoiceKeyDown, rovingChoiceTabIndex } from "./interactions.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { CreateProjectDialog } from "./CreateProjectDialog.js";
@@ -157,7 +158,12 @@ export function NewSessionDialog({
         ? initialProjectLocation.workspaceId
       : runner?.workspaces[0]?.id) ?? "",
   );
-  const initialAgentOptions = agentOptions(runner?.agents ?? []);
+  // With the experiment off, no conductor exists anywhere in this dialog — not in the plain
+  // agent picker and not as the Conductor-Led Work preset; the guard effect below also resets
+  // a stranded conductor work mode back to an agent session. Read before the initial options
+  // because the first agent selection must already respect it.
+  const conductorExperimentEnabled = useExperiments().flags.conductor;
+  const initialAgentOptions = agentOptions(runner?.agents ?? [], { includeConductor: conductorExperimentEnabled });
   const initialAgentSelection = savedAgentSelection(initialAgentOptions, agentDefaults[runnerId]);
   const [agentId, setAgentId] = useState(initialAgentSelection.agentId);
   const [workMode, setWorkMode] = useState<SessionWorkMode>("agent");
@@ -184,7 +190,10 @@ export function NewSessionDialog({
   const projectLocationsAvailable = selectedProject?.locations.filter((location) =>
     isLaunchableProjectLocation(location, runners)) ?? [];
 
-  const agentOpts = useMemo(() => agentOptions(runner?.agents ?? []), [runner?.agents]);
+  const agentOpts = useMemo(
+    () => agentOptions(runner?.agents ?? [], { includeConductor: conductorExperimentEnabled }),
+    [runner?.agents, conductorExperimentEnabled],
+  );
   const primaryOpts = useMemo(() => primaryAgentOptions(agentOpts), [agentOpts]);
   const advancedOpts = useMemo(() => advancedAgentOptions(agentOpts), [agentOpts]);
   const selectedAgentOption = agentOpts.find((option) => option.agent.id === agentId);
@@ -195,7 +204,7 @@ export function NewSessionDialog({
   const executionTarget = executionTargets.find((target) => target.id === executionTargetId) ??
     executionTargets.find((target) => target.adapter === "host" &&
       target.workspaceStrategy === (useWorktree ? "worktree" : "in_place"));
-  const availableConductorId = conductorAgentId(runner?.agents ?? []);
+  const availableConductorId = conductorExperimentEnabled ? conductorAgentId(runner?.agents ?? []) : undefined;
   const agent = selectedAgentOption?.agent;
   const nativeTuiRunnerSupported = supportsAgentTui(agent?.driver, runner?.protocolVersion, runner?.os);
   const nativeTuiStartFenceSupported = runnerSupportsProtocol(
@@ -274,7 +283,7 @@ export function NewSessionDialog({
     setRunnerId(id);
     const r = runners.get(id);
     setWorkspaceId(r?.workspaces[0]?.id ?? "");
-    const options = agentOptions(r?.agents ?? []);
+    const options = agentOptions(r?.agents ?? [], { includeConductor: conductorExperimentEnabled });
     const selection = savedAgentSelection(options, agentDefaults[id]);
     setAgentId(workMode === "conductor" ? (conductorAgentId(r?.agents ?? []) ?? selection.agentId) : selection.agentId);
     setAdvancedOpen(isAdvancedAgentId(options, selection.agentId));
@@ -294,7 +303,7 @@ export function NewSessionDialog({
     if (!r?.workspaces.some((w) => w.id === loc.workspaceId)) return;
     setRunnerId(loc.runnerId);
     setWorkspaceId(loc.workspaceId);
-    const options = agentOptions(r.agents);
+    const options = agentOptions(r.agents, { includeConductor: conductorExperimentEnabled });
     const selection = savedAgentSelection(options, agentDefaults[loc.runnerId]);
     setAgentId(workMode === "conductor" ? (conductorAgentId(r.agents) ?? selection.agentId) : selection.agentId);
     setAdvancedOpen(isAdvancedAgentId(options, selection.agentId));
@@ -701,7 +710,10 @@ export function NewSessionDialog({
             </fieldset>
           )}
 
-          <div className="field">
+          {/* Hidden entirely — not disabled-with-a-reason — when the experiment is off: unlike a
+              missing runner conductor, absence here is this device's own choice, made on the
+              Experimental settings page, and a one-option radiogroup would remain. */}
+          {conductorExperimentEnabled && <div className="field">
             <span>Preset</span>
             <div className="workflow-preset-grid" role="radiogroup" aria-label="Session Preset" onKeyDown={(event) => handleRovingChoiceKeyDown(event, "radio")}>
               <button type="button" role="radio" aria-checked={workMode === "agent"} tabIndex={workMode === "agent" || !availableConductorId ? 0 : -1} className={`workflow-preset ${workMode === "agent" ? "on" : ""}`} onClick={() => selectWorkMode("agent")}>
@@ -713,7 +725,7 @@ export function NewSessionDialog({
                 <span>{availableConductorId ? "Delegate sessions, workflows, gates, and guardrails." : "Requires an available native Claude conductor."}</span>
               </button>
             </div>
-          </div>
+          </div>}
 
           {workMode === "agent" ? <div className="field">
             <label htmlFor="new-session-agent">Agent</label>

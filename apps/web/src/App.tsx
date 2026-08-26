@@ -28,11 +28,13 @@ import { Board } from "./components/Board.js";
 import { RunnersView } from "./components/RunnersView.js";
 import { RunsView, RunDetail } from "./components/RunsView.js";
 import { InboxView } from "./components/InboxView.js";
+import { ArchivedSessionsView } from "./components/ArchivedSessionsView.js";
 import { NewSessionDialog, type NewSessionPreset } from "./components/NewSessionDialog.js";
 import { NewRunDialog } from "./components/NewRunDialog.js";
 import { NewPodDialog } from "./components/NewPodDialog.js";
 import { PodDetail, PodsView } from "./components/PodsView.js";
 import { AutomationsView } from "./components/AutomationsView.js";
+import { SkillsView } from "./components/SkillsView.js";
 import { UsageView } from "./components/UsageView.js";
 import { ShellDock } from "./components/ShellDock.js";
 import { useRightPanelState, type RightPanelState } from "./components/RightPanel.js";
@@ -63,8 +65,8 @@ import {
   saveBrowserStorageValue,
 } from "./instance-storage.js";
 import { FeedbackProvider } from "./components/FeedbackProvider.js";
-import { Modal } from "./components/common.js";
-import { DockBottomIcon, KeyboardIcon, LockIcon, PanelRightIcon, PinnedPanelIcon, PlusIcon, WarningTriangleIcon } from "./components/Icons.js";
+import { Empty, Modal } from "./components/common.js";
+import { ChevronLeftIcon, DockBottomIcon, KeyboardIcon, LockIcon, PanelRightIcon, PinnedPanelIcon, PlusIcon, WarningTriangleIcon } from "./components/Icons.js";
 import { NavRow, SwitchRow } from "./components/ui/SettingsRows.js";
 import { viewPath, viewTitle } from "./navigation.js";
 import { handleSettingsNavigationKey } from "./settings-navigation.js";
@@ -78,12 +80,17 @@ import {
   AboutPanel,
   AppearancePanel,
   BehaviorPanel,
+  ExperimentalPanel,
   KeyboardPanel,
   NetworkPanel,
   NotificationsPanel,
   SettingsView,
+  SessionNamingPanel,
   useNotifySetting,
 } from "./components/SettingsView.js";
+import { EXPERIMENT_TITLES, experimentForViewName, type ExperimentId } from "./experiments.js";
+import { useExperiments } from "./use-experiments.js";
+import { conductorAgentId } from "./workflow-presets.js";
 import {
   isTauriRuntime,
   readTailnetAccess,
@@ -254,6 +261,21 @@ function Shell() {
   const runners = useStoreSelector((s) => s.runners);
   const sessions = useStoreSelector((s) => s.sessions);
   const stalledSessions = useStoreSelector((s) => s.stalledCount);
+  const experiments = useExperiments();
+  // The Conductor switch needs to say when the runner side is missing. ONLINE runners only:
+  // the store keeps a disconnected runner's advertised agents, and a row calling the conductor
+  // available on the strength of a runner that cannot start anything would be a false claim.
+  const conductorAvailable = useMemo(
+    () => [...runners.values()].some((runner) =>
+      runner.status === "online" && conductorAgentId(runner.agents ?? []) !== undefined),
+    [runners],
+  );
+  // A route into a feature this device has switched off renders the explanation instead of the
+  // feature: removing the branch entirely would make a bookmarked /runs a silent Inbox redirect.
+  const disabledExperimentView = (() => {
+    const experiment = experimentForViewName(view.name);
+    return experiment !== null && !experiments.flags[experiment] ? experiment : null;
+  })();
   const activeSession = view.name === "session" ? sessions.get(view.id) : undefined;
   const activeRunnerProtocol = activeSession ? runners.get(activeSession.runnerId)?.protocolVersion : undefined;
   const terminalSupported = runnerSupportsProtocol(activeRunnerProtocol, "sessionShells");
@@ -367,7 +389,7 @@ function Shell() {
     navigate({ name: "session", id: sessionId });
   }, [navigate]);
   const isMobile = useIsMobile();
-  // The breakpoint-specific controls (the gear, the New Session button) are unmounted by a
+  // The breakpoint-specific controls (the instance selector and gear) are unmounted by a
   // crossing, and a keyboard user standing on one is left on <body>. Accessibility zoom crosses
   // 760px too, so this is not only a window-drag case.
   //
@@ -475,11 +497,16 @@ function Shell() {
       ["navigate-automations", { name: "automations" }],
       ["navigate-usage", { name: "usage" }],
       ["navigate-connections", { name: "runners" }],
+      ["navigate-archived", { name: "archived" }],
     ] as const;
     const onKey = (event: KeyboardEvent) => {
       if (event.defaultPrevented || shortcutLayerActive(document) || xtermOwnsKey(event.target)) return;
       for (const [shortcutId, destination] of destinations) {
         if (!matchesShortcut(event, shortcutId)) continue;
+        // A number for a switched-off experiment does nothing rather than opening the
+        // explanation page: the rail hides the destination, so the binding is unadvertised.
+        const experiment = experimentForViewName(destination.name);
+        if (experiment !== null && !experiments.flags[experiment]) return;
         event.preventDefault();
         navigate(destination);
         return;
@@ -500,7 +527,7 @@ function Shell() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [isMobile, navigate]);
+  }, [isMobile, navigate, experiments.flags]);
 
   // Ctrl+K / Cmd+K opens the global search palette (sessions + transcripts + views).
   // Deliberately ALSO from inputs/textareas (the Slack/Linear convention — jumping mid-typing
@@ -565,14 +592,14 @@ function Shell() {
     [sessions],
   );
 
-  // Codex-style session panel-control cluster. On desktop it renders inside the unified session
-  // bar (via InboxView → SessionDetail); on phone widths it stays in the topbar, which the phone
-  // layout keeps for the instance/new/settings controls anyway.
+  // Codex-style session control cluster. Desktop includes the host-side Open destination picker
+  // inside SessionDetail. Mobile keeps only panel toggles in the app topbar: launching an editor
+  // or file manager on the runner host is intentionally not a phone action.
   const sessionPanelControls = view.name === "session" ? (
     <>
       {/* Keyed by session: transient state (open menu, in-flight launch, error note)
           must not leak from one session's bar into the next. */}
-      <EditorSelect key={view.id} sessionId={view.id} />
+      {!isMobile && <EditorSelect key={view.id} sessionId={view.id} />}
       <button
         type="button"
         className={`icon-btn${pinnedOpen ? " is-on" : ""}`}
@@ -592,7 +619,7 @@ function Shell() {
         }}
         title={terminalSupported ? `${dockVisible ? "Hide" : "Show"} terminal (${shortcutDisplay("toggle-terminal")})` : terminalHint}
         aria-label={
-          terminalSupported ? (dockVisible ? "Hide terminal" : "Show terminal") : "Terminal unavailable: update runner"
+          terminalSupported ? (dockVisible ? "Hide Terminal" : "Show Terminal") : "Terminal Unavailable: Update Runner"
         }
         aria-pressed={terminalSupported && dockVisible}
       >
@@ -603,7 +630,7 @@ function Shell() {
         className={`icon-btn${rightPanel.open ? " is-on" : ""}`}
         onClick={rightPanel.toggle}
         title={rightPanel.open ? "Hide side panel" : "Show side panel"}
-        aria-label={rightPanel.open ? "Hide side panel" : "Show side panel"}
+        aria-label={rightPanel.open ? "Hide Side Panel" : "Show Side Panel"}
         aria-pressed={rightPanel.open}
       >
         <PanelRightIcon size={15} />
@@ -619,7 +646,6 @@ function Shell() {
         stalledCount={stalledSessions}
         onlineConnections={onlineRunners}
         onNavigate={navigate}
-        onNewSession={openContextualNewSession}
         {...(isMobile ? {} : {
           instanceControl: <InstanceSelector compact />,
           settingsControl: <SettingsTrigger active={view.name === "settings"} onOpen={() => navigate({ name: "settings" })} />,
@@ -629,27 +655,20 @@ function Shell() {
         {!(view.name === "session" && !isMobile) && (
           <Header
             view={view}
-            mobileControls={isMobile ? (
+            mobileInstanceControl={isMobile ? (
               /* The phone rail has room for five destinations and nothing else, so these live here.
                  The topbar is fixed and uncontested — unlike the bottom band, which an open shell
                  dock and the toast stack both occupy. */
-              <>
-                <button
-                  type="button"
-                  className="icon-btn"
-                  onClick={openContextualNewSession}
-                  title="New Session"
-                  aria-label="New Session"
-                >
-                  <PlusIcon size={18} />
-                </button>
-                <InstanceSelector compact />
-                <SettingsTrigger active={view.name === "settings"} onOpen={() => navigate({ name: "settings" })} />
-              </>
+              <InstanceSelector compact />
+            ) : null}
+            mobileSettingsControl={isMobile ? (
+              <SettingsTrigger active={view.name === "settings"} onOpen={() => navigate({ name: "settings" })} />
             ) : null}
             onNewRun={() => setDialog({ kind: "run" })}
             onNewPod={() => setDialog({ kind: "pod" })}
             sessionActions={isMobile ? sessionPanelControls : null}
+            sessionTitle={view.name === "session" ? sessions.get(view.id)?.title ?? "Session" : undefined}
+            onSessionBack={() => navigate({ name: "inbox" })}
           />
         )}
         {/* Once a 1008 latched authRequired, the pairing card stays mounted through the
@@ -697,10 +716,18 @@ function Shell() {
             />
           )}
           {view.name === "runners" && <RunnersView />}
-          {view.name === "runs" && <RunsView onNewRun={() => setDialog({ kind: "run" })} />}
-          {view.name === "pods" && <PodsView onNewPod={() => setDialog({ kind: "pod" })} />}
+          {disabledExperimentView && (
+            <ExperimentDisabledNotice
+              experiment={disabledExperimentView}
+              onOpenSettings={() => navigate({ name: "settings", section: "experimental" })}
+            />
+          )}
+          {view.name === "runs" && !disabledExperimentView && <RunsView onNewRun={() => setDialog({ kind: "run" })} />}
+          {view.name === "pods" && !disabledExperimentView && <PodsView onNewPod={() => setDialog({ kind: "pod" })} />}
           {view.name === "automations" && <AutomationsView />}
+          {view.name === "skills" && <SkillsView />}
           {view.name === "usage" && <UsageView />}
+          {view.name === "archived" && <ArchivedSessionsView />}
           {view.name === "settings" && (
             <SettingsView
               section={view.section ?? "appearance"}
@@ -733,7 +760,15 @@ function Shell() {
                   />
                 ),
                 behavior: <BehaviorPanel />,
+                "session-naming": <SessionNamingPanel />,
                 network: <NetworkPanel tailnet={tailnet} />,
+                experimental: (
+                  <ExperimentalPanel
+                    flags={experiments.flags}
+                    onToggle={experiments.setFlag}
+                    conductorAvailable={conductorAvailable}
+                  />
+                ),
                 about: <AboutPanel />,
               }}
             />
@@ -744,8 +779,8 @@ function Shell() {
               onNewSession={(preset) => setDialog({ kind: "session", preset })}
             />
           )}
-          {view.name === "run" && <RunDetail runId={view.id} />}
-          {view.name === "pod" && <PodDetail podId={view.id} />}
+          {view.name === "run" && !disabledExperimentView && <RunDetail runId={view.id} />}
+          {view.name === "pod" && !disabledExperimentView && <PodDetail podId={view.id} />}
           </ErrorBoundary>
         </div>
         {/* Bottom shell dock: session-scoped terminals in the compact desktop layout. Mounted only
@@ -812,39 +847,113 @@ function BannerStatusIcon({ kind }: { kind: "lock" | "warning" }) {
   return <Icon className="offline-icon" />;
 }
 
-function Header({
+export function Header({
   view,
-  mobileControls,
+  mobileInstanceControl,
+  mobileSettingsControl,
   onNewRun,
   onNewPod,
   sessionActions,
+  sessionTitle,
+  onSessionBack,
 }: {
   view: View;
-  /** Instance switcher, New Session, and Settings on phone widths, where the rail has no room. */
-  mobileControls?: React.ReactNode;
+  /** Global controls moved out of the rail on phone widths. */
+  mobileInstanceControl?: React.ReactNode;
+  mobileSettingsControl?: React.ReactNode;
   onNewRun: () => void;
   onNewPod: () => void;
-  /** Session panel-control cluster; rendered here only on phone widths, where the unified
-   * session bar has no room for it (Shell owns the desktop placement inside SessionDetail). */
+  /** Session panel-control cluster rendered here only on phone widths. */
   sessionActions?: React.ReactNode;
+  sessionTitle?: string;
+  onSessionBack?: () => void;
 }) {
   const title = viewTitle(view);
+  const { flags } = useExperiments();
   return (
     <header className="topbar">
       {/* Focusable only programmatically: the rescue below moves focus here when a layout swap
           drops it, so the next Tab continues from the page rather than from the document top. */}
-      <h1 id="page-title" tabIndex={-1}>{title}</h1>
-      {mobileControls && <div className="topbar-actions topbar-mobile-controls">{mobileControls}</div>}
-      {view.name === "runs" && (
+      {view.name === "session" ? (
+        <>
+          <button
+            type="button"
+            className="icon-btn mobile-session-back"
+            onClick={onSessionBack}
+            title="Back to inbox"
+            aria-label="Back to Inbox"
+          >
+            <ChevronLeftIcon size={22} />
+          </button>
+          <h1 id="page-title" tabIndex={-1} title={sessionTitle}>{sessionTitle ?? title}</h1>
+        </>
+      ) : (
+        <h1 id="page-title" tabIndex={-1}>{title}</h1>
+      )}
+      {mobileInstanceControl && mobileSettingsControl && (
+        <div className="topbar-actions topbar-mobile-controls">
+          {mobileInstanceControl}
+          {view.name === "runs" && flags.multiAgent && (
+            <button type="button" className="btn primary sm topbar-create" onClick={onNewRun}>New Multi-Agent Run</button>
+          )}
+          {view.name === "pods" && flags.pods && (
+            <NewPodHeaderButton onClick={onNewPod} />
+          )}
+          {view.name === "session" && sessionActions}
+          {mobileSettingsControl}
+        </div>
+      )}
+      {!mobileInstanceControl && view.name === "runs" && flags.multiAgent && (
         <button type="button" className="btn primary sm topbar-create" onClick={onNewRun}>New Multi-Agent Run</button>
       )}
-      {view.name === "pods" && (
-        <button type="button" className="btn primary sm topbar-create" onClick={onNewPod}>New Collaboration Pod</button>
+      {!mobileInstanceControl && view.name === "pods" && flags.pods && (
+        <NewPodHeaderButton onClick={onNewPod} />
       )}
-      {view.name === "session" && sessionActions && (
+      {!mobileInstanceControl && view.name === "session" && sessionActions && (
         <div className="topbar-actions">{sessionActions}</div>
       )}
     </header>
+  );
+}
+
+function NewPodHeaderButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      className="icon-btn topbar-create"
+      onClick={onClick}
+      title="New Collaboration Pod"
+      aria-label="New Collaboration Pod"
+    >
+      <PlusIcon size={16} />
+    </button>
+  );
+}
+
+/**
+ * What a direct route into a switched-off experiment renders.
+ *
+ * The route still parses — a bookmark must not silently become the Inbox — but the feature's
+ * views stay unmounted, and the page says which switch governs it and where that switch lives.
+ */
+function ExperimentDisabledNotice({
+  experiment,
+  onOpenSettings,
+}: {
+  experiment: ExperimentId;
+  onOpenSettings: () => void;
+}) {
+  return (
+    <Empty
+      headingLevel={2}
+      title={`${EXPERIMENT_TITLES[experiment]} Is Turned Off`}
+      hint="This experimental feature is hidden on this device."
+      action={
+        <button type="button" className="btn sm" onClick={onOpenSettings}>
+          Open Experimental Settings
+        </button>
+      }
+    />
   );
 }
 

@@ -9,15 +9,16 @@ import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-t
 import { SessionDetail } from "../components/SessionDetail.js";
 import "../styles.css";
 
-/** Real-browser geometry harness for the transcript recovery notice (issue #56):
- * `?mode=preview|expanded` picks the SessionDetail surface, `?height=<px>` fixes the harness
- * frame (standing in for an inbox splitter position), and `?pinned=1` opens the pinned summary.
- * Recovery stays ACTIVE for the whole page life: the history endpoint never resolves. */
+/** Real-browser SessionDetail harness for recovery geometry and earlier-history pagination:
+ * `?mode=preview|expanded`, `?height=<px>`, and `?pinned=1` configure the recovery fixture.
+ * By default recovery stays active for the page life; `?pagination=1` resolves a bounded opening
+ * window and then holds the automatic earlier-page request in flight for inspection. */
 const params = new URLSearchParams(window.location.search);
 const mode = params.get("mode") === "preview" ? ("preview" as const) : ("expanded" as const);
 const frameHeight = Number(params.get("height") ?? "600");
 const frameWidth = Number(params.get("width") ?? "900");
 const pinnedOpen = params.get("pinned") === "1";
+const pagination = params.get("pagination") === "1";
 
 const SESSION_ID = "recovery-e2e-session";
 
@@ -122,14 +123,23 @@ const navigation: ViewNavigation = {
   listen: () => () => {},
 };
 
-/** Recovery must stay visibly active: the cached transcript is seeded over the socket while the
- * history endpoints below never answer — both the tail-first opening window and the forward
- * fallback — holding `refreshing` for the whole page life. */
+/** The default endpoints never answer, keeping recovery active for geometry tests. Pagination mode
+ * resolves only the opening window; its next request stays pending so loading state is observable. */
+let tailRequestCount = 0;
 const client = {
   ...api,
   session: () => new Promise<never>(() => {}),
   getSessionEventPage: () => new Promise<never>(() => {}),
-  getSessionEventTailPage: () => new Promise<never>(() => {}),
+  getSessionEventTailPage: (_id: string, before: number | undefined, eventEpoch: number) => {
+    tailRequestCount += 1;
+    document.body.dataset.tailRequestCount = String(tailRequestCount);
+    if (!pagination || before !== undefined) return new Promise<never>(() => {});
+    const openingWindow = fixtureEvents.slice(-16);
+    return Promise.resolve({
+      events: openingWindow, eventEpoch, nextBefore: openingWindow[0]?.seq ?? 0,
+      hasMoreOlder: true, cacheComplete: true,
+    });
+  },
 } as unknown as ApiClient;
 
 const payloads: SessionEvent["payload"][] = [];
@@ -137,21 +147,22 @@ for (let turn = 0; turn < 12; turn += 1) {
   payloads.push({ kind: "user_message", text: `cached question ${turn + 1}`, images: [] });
   payloads.push({ kind: "agent_message", text: `cached answer ${turn + 1}`, final: true });
 }
+const fixtureEvents: SessionEvent[] = payloads.map((payload, index) => ({
+  id: index + 1,
+  sessionId: SESSION_ID,
+  seq: index + 1,
+  ts: index + 1,
+  payload,
+}));
 
 function EventSeeder() {
   const ready = useStoreSelector((state) => state.sessions.has(SESSION_ID));
   const { dispatch } = useStoreActions();
   React.useEffect(() => {
     if (!ready) return;
-    payloads.forEach((payload, index) => {
-      dispatch({
-        type: "msg",
-        msg: {
-          type: "session_event",
-          event: { id: index + 1, sessionId: SESSION_ID, seq: index + 1, ts: index + 1, payload },
-        },
-      });
-    });
+    for (const event of fixtureEvents) {
+      dispatch({ type: "msg", msg: { type: "session_event", event } });
+    }
   }, [dispatch, ready]);
   return null;
 }

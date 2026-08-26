@@ -11,7 +11,9 @@ export type View =
   | { name: "runs" }
   | { name: "pods" }
   | { name: "automations" }
+  | { name: "skills" }
   | { name: "usage" }
+  | { name: "archived" }
   | { name: "projects"; id?: string }
   | { name: "session"; id: string; location?: SourceLocation }
   | { name: "run"; id: string }
@@ -26,20 +28,22 @@ export type View =
  * section is deep-linkable, which is what makes "see Settings → Appearance" a thing you can send
  * someone.
  */
-export type SettingsSection = "appearance" | "notifications" | "keyboard" | "behavior" | "network" | "about";
+export type SettingsSection = "appearance" | "notifications" | "keyboard" | "behavior" | "session-naming" | "network" | "experimental" | "about";
 
 export const SETTINGS_SECTIONS: ReadonlyArray<{ id: SettingsSection; title: string }> = [
   { id: "appearance", title: "Appearance" },
   { id: "notifications", title: "Notifications" },
   { id: "keyboard", title: "Keyboard" },
   { id: "behavior", title: "Behavior" },
+  { id: "session-naming", title: "Session Naming" },
   { id: "network", title: "Network" },
+  { id: "experimental", title: "Experimental" },
   { id: "about", title: "About" },
 ];
 
 export type ConnectionSection = "instances" | "machines" | "people";
 
-export type GlobalViewName = Extract<View["name"], "inbox" | "projects" | "board" | "runs" | "pods" | "automations" | "usage" | "runners">;
+export type GlobalViewName = Extract<View["name"], "inbox" | "projects" | "board" | "runs" | "pods" | "automations" | "usage" | "runners" | "archived" | "skills">;
 
 /** One vocabulary for every global destination, shared by the rail, header, and palette. */
 export const GLOBAL_VIEW_ITEMS: ReadonlyArray<{
@@ -56,6 +60,10 @@ export const GLOBAL_VIEW_ITEMS: ReadonlyArray<{
   { name: "automations", label: "Automations", title: "Automations", paletteLabel: "Automations" },
   { name: "usage", label: "Usage", title: "Usage & Cost", paletteLabel: "Usage & Cost" },
   { name: "runners", label: "Connections", title: "Connections", paletteLabel: "Connections" },
+  { name: "archived", label: "Archived", title: "Archived Sessions", paletteLabel: "Archived Sessions" },
+  // Appended rather than slotted beside Automations: the rail numbers double as the bare digit
+  // shortcuts, so inserting mid-list would silently rebind every later destination.
+  { name: "skills", label: "Skills", title: "Agent Skills", paletteLabel: "Agent Skills" },
 ];
 
 /**
@@ -76,6 +84,8 @@ export function viewTitle(view: View): string {
     case "automations":
     case "usage":
     case "runners":
+    case "archived":
+    case "skills":
       // Named once, in the list the rail and palette already read, so the three surfaces cannot
       // drift apart.
       return GLOBAL_VIEW_ITEMS.find((item) => item.name === view.name)!.title;
@@ -166,7 +176,9 @@ export function viewPath(view: View): string {
     case "runs": return "/runs";
     case "pods": return "/pods";
     case "automations": return "/automations";
+    case "skills": return "/skills";
     case "usage": return "/usage";
+    case "archived": return "/archived";
     case "projects": return view.id ? `/projects/~${encodeResourceId(view.id)}` : "/projects";
     case "session": return view.location
       ? `/sessions/~${encodeResourceId(view.id)}/files/~${encodeOpaque(view.location.path)}${sourceLocationSearch(view.location)}`
@@ -224,9 +236,11 @@ export function viewFromPath(pathname: string, search = ""): View | null {
   if (path === "/runs") return { name: "runs" };
   if (path === "/pods") return { name: "pods" };
   if (path === "/automations") return { name: "automations" };
+  if (path === "/skills") return { name: "skills" };
   if (path === "/usage") return { name: "usage" };
+  if (path === "/archived") return { name: "archived" };
   if (path === "/settings") return { name: "settings", section: "appearance" };
-  const settingsMatch = /^\/settings\/(appearance|notifications|keyboard|behavior|network|about)$/.exec(path);
+  const settingsMatch = /^\/settings\/(appearance|notifications|keyboard|behavior|session-naming|network|experimental|about)$/.exec(path);
   if (settingsMatch) return { name: "settings", section: settingsMatch[1] as SettingsSection };
   if (path === "/projects") return { name: "projects" };
   const projectMatch = /^\/projects\/~([^/]+)$/.exec(path);

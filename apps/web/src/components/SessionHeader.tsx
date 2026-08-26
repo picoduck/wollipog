@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, type ReactNode } from "react";
+import React, { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import {
   isTerminal,
   runnerCapabilityRequirement,
@@ -8,6 +8,7 @@ import {
   type TranscriptShareView,
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
+import { sessionArchiveActionLabel, sessionArchiveRequiresStop } from "../archive-actions.js";
 import { titleCaseLabel } from "../format.js";
 import { removeFromInstanceKeySet, SESSION_PIN_KEY } from "../pins.js";
 import { discardComposerDraft } from "../composer-drafts.js";
@@ -15,12 +16,14 @@ import { useInstanceScope } from "../instance-scope.js";
 import { instancePublicOrigin, useInstances } from "../instances-context.js";
 import { absoluteViewUrl } from "../navigation.js";
 import { requestTranscriptDownload } from "../transcript-download.js";
+import type { SessionChangeStatus } from "../session-status.js";
 import { CONTROL_PLANE_HTTP, DASHBOARD_ORIGIN, hasSameOriginMarker } from "../config.js";
 import { reachableTranscriptShareOrigin, transcriptShareUrl } from "../transcript-share-client.js";
-import { StatusBadge, Modal, CopyButton } from "./common.js";
+import { ChangeStatusBadge, SessionStatusIndicators, Modal, CopyButton } from "./common.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { useFeedback } from "./FeedbackProvider.js";
-import { ChevronLeftIcon } from "./Icons.js";
+import { ChevronLeftIcon, MoreHorizontalIcon, ShareIcon } from "./Icons.js";
+import { useIsMobile } from "./useIsMobile.js";
 
 const BACKGROUND_WORK_DOT_LABELS: Record<BackgroundWorkState, string> = {
   running: "Waiting on External Job",
@@ -30,9 +33,9 @@ const BACKGROUND_WORK_DOT_LABELS: Record<BackgroundWorkState, string> = {
 };
 
 /**
- * The unified session bar: one compact row owning navigation (back, project breadcrumb, title),
- * live status, and every session action behind one ⋯ menu. The spec-bar facts this row used to
- * carry live in the pinned summary; model/effort/git context live at the composer edge.
+ * The responsive Session header. Desktop keeps one compact row for identity, status, Share / More
+ * Actions, and shell controls. Mobile identity moves into the app topbar, leaving this component
+ * as the single status/action line above the transcript.
  */
 export function SessionHeader({
   session,
@@ -40,10 +43,17 @@ export function SessionHeader({
   runnerOnline,
   runnerProtocolVersion,
   providerLogoutSupported,
+  stopBeforeArchiveSupported,
   exportReady,
   onArchive,
+  onSnooze,
   projectCrumb,
+  projectName,
+  projectLabel = "Project",
+  onManageProject,
+  renderMoveProjectDialog,
   topbarControls,
+  changeStatus,
   titleId,
 }: {
   session: SessionView;
@@ -51,22 +61,37 @@ export function SessionHeader({
   runnerOnline: boolean;
   runnerProtocolVersion: number | null | undefined;
   providerLogoutSupported: boolean;
+  stopBeforeArchiveSupported: boolean;
   exportReady: boolean;
   onArchive?: () => void;
+  onSnooze?: () => void;
   /** The interactive Project chip, rendered as the breadcrumb's first segment. */
   projectCrumb?: ReactNode;
+  /** Current Project identity shown in the mobile More Actions menu header. */
+  projectName?: string;
+  /** Compatibility control planes group sessions by Workspace instead of Project. */
+  projectLabel?: "Project" | "Workspace";
+  onManageProject?: () => void;
+  renderMoveProjectDialog?: (options: {
+    onClose: () => void;
+    returnFocusRef: RefObject<HTMLButtonElement | null>;
+  }) => ReactNode;
   /** App-shell control cluster (editor, pinned summary, terminal, side panel) when this bar
    * replaces the top-level app bar on desktop. */
   topbarControls?: ReactNode;
+  changeStatus?: SessionChangeStatus | null;
   /** Set when this bar owns the page heading (`page-title` focus-rescue anchor). */
   titleId?: string;
 }) {
   const api = useApi();
   const instances = useInstances();
   const instanceScope = useInstanceScope();
+  const isMobile = useIsMobile();
   const { confirm, showUndo } = useFeedback();
   const [busy, setBusy] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [shareMenuOpen, setShareMenuOpen] = useState(false);
+  const [moveProjectOpen, setMoveProjectOpen] = useState(false);
   const [shareDialogOpen, setShareDialogOpen] = useState(false);
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
   const [renameDraft, setRenameDraft] = useState(session.title);
@@ -75,6 +100,7 @@ export function SessionHeader({
   const renameSubmittingRef = useRef(false);
   const [note, setNote] = useState<string | null>(null);
   const menu = useAccessibleMenu(menuOpen, setMenuOpen, "session-actions-menu");
+  const shareMenu = useAccessibleMenu(shareMenuOpen, setShareMenuOpen, "session-share-menu");
   const terminal = isTerminal(session.status);
   const reprocessSupported = runnerSupportsProtocol(runnerProtocolVersion, "sessionReprocess");
   const logoutSupported = runnerSupportsProtocol(runnerProtocolVersion, "acpLogout");
@@ -87,7 +113,14 @@ export function SessionHeader({
     menu.close(restoreFocus);
   };
 
-  const run = async (fn: () => Promise<unknown>) => {
+  const closeShareMenu = (restoreFocus = false) => {
+    shareMenu.close(restoreFocus);
+  };
+
+  const run = async (
+    fn: () => Promise<unknown>,
+    returnFocusRef: RefObject<HTMLButtonElement | null> = menu.triggerRef,
+  ) => {
     setBusy(true);
     try {
       await fn();
@@ -99,7 +132,7 @@ export function SessionHeader({
       // was actually dropped, so a user who moved on is not yanked back (regression coverage).
       window.setTimeout(() => {
         if (document.activeElement === document.body || document.activeElement === null) {
-          menu.triggerRef.current?.focus();
+          returnFocusRef.current?.focus();
         }
       }, 0);
     }
@@ -124,7 +157,7 @@ export function SessionHeader({
 
   const downloadTranscript = (format: "json" | "markdown") =>
     run(async () => {
-      closeMenu(true);
+      closeShareMenu(true);
       setNote("Preparing export…");
       try {
         const { blob, filename } = await api.transcriptExport(session.id, format);
@@ -133,12 +166,12 @@ export function SessionHeader({
       } catch (e) {
         setNote((e as Error).message);
       } finally {
-        window.setTimeout(() => menu.triggerRef.current?.focus(), 0);
+        window.setTimeout(() => shareMenu.triggerRef.current?.focus(), 0);
       }
-    });
+    }, shareMenu.triggerRef);
 
-  // Focus restoration after dialogs is owned by Modal's returnFocusRef (the durable ⋯ trigger);
-  // the menu item that launched them unmounts with the menu, so it can never take focus back.
+  // Focus restoration after dialogs is owned by Modal's returnFocusRef (the durable header
+  // trigger); the menu item that launched them unmounts with the menu and cannot take focus back.
   const closeShareDialog = () => {
     setShareDialogOpen(false);
   };
@@ -179,57 +212,153 @@ export function SessionHeader({
 
   return (
     <div className="detail-head">
-      <button className="icon-btn back" onClick={onBack} title="Back to Inbox" aria-label="Back to Inbox">
-        <ChevronLeftIcon size={22} />
-      </button>
-      <div className="detail-crumbs">
-        {projectCrumb && (
-          <>
-            {projectCrumb}
-            <span className="detail-crumb-sep" aria-hidden="true">/</span>
-          </>
+      {!isMobile && (
+        <>
+          <button className="icon-btn back" onClick={onBack} title="Back to inbox" aria-label="Back to Inbox">
+            <ChevronLeftIcon size={22} />
+          </button>
+          <div className="detail-crumbs">
+            {projectCrumb && (
+              <>
+                {projectCrumb}
+                <span className="detail-crumb-sep" aria-hidden="true">/</span>
+              </>
+            )}
+            <h1 className="detail-title" id={titleId} tabIndex={titleId ? -1 : undefined} title={session.title}>
+              {session.title}
+            </h1>
+          </div>
+        </>
+      )}
+      <div className="session-header-statuses">
+        <SessionStatusIndicators session={session} disconnected={!runnerOnline} />
+        <ChangeStatusBadge change={changeStatus ?? null} />
+        {session.backgroundWorkState && (
+          <span
+            className={session.backgroundWorkState === "orphaned"
+              ? "bgwork-indicator bgwork-orphaned"
+              : session.backgroundWorkState === "resumed"
+                ? "bgwork-indicator bgwork-resumed"
+                : "bgwork-indicator bgwork-running"}
+            role="img"
+            title={BACKGROUND_WORK_DOT_LABELS[session.backgroundWorkState]}
+            aria-label={BACKGROUND_WORK_DOT_LABELS[session.backgroundWorkState]}
+          />
         )}
-        <h1 className="detail-title" id={titleId} tabIndex={titleId ? -1 : undefined} title={session.title}>
-          {session.title}
-        </h1>
+        {!session.backgroundWorkState && session.backgroundWorkTracking === "untracked" && (
+          <span
+            className="bgwork-indicator bgwork-untracked"
+            title="Detached Work: Untracked"
+            aria-label="Detached Work: Untracked"
+          />
+        )}
       </div>
-      <StatusBadge status={session.status} />
-      {session.backgroundWorkState && (
-        <span
-          className={session.backgroundWorkState === "orphaned"
-            ? "bgwork-indicator bgwork-orphaned"
-            : session.backgroundWorkState === "resumed"
-              ? "bgwork-indicator bgwork-resumed"
-              : "bgwork-indicator bgwork-running"}
-          role="img"
-          title={BACKGROUND_WORK_DOT_LABELS[session.backgroundWorkState]}
-          aria-label={BACKGROUND_WORK_DOT_LABELS[session.backgroundWorkState]}
-        />
-      )}
-      {!session.backgroundWorkState && session.backgroundWorkTracking === "untracked" && (
-        <span
-          className="bgwork-indicator bgwork-untracked"
-          title="Detached Work: Untracked"
-          aria-label="Detached Work: Untracked"
-        />
-      )}
-      {!runnerOnline && <span className="tag tag-offline">Runner Offline</span>}
+      {note && <span className="detail-note session-header-note" role="status" aria-live="polite">{note}</span>}
       <div className="detail-actions">
-        {note && <span className="detail-note" role="status" aria-live="polite">{note}</span>}
+        <div className="overflow-menu">
+          <button
+            ref={shareMenu.triggerRef}
+            className="icon-btn session-header-action"
+            onClick={() => {
+              if (!shareMenuOpen) closeMenu(false);
+              shareMenu.toggle();
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "ArrowDown" || event.key === "ArrowUp") closeMenu(false);
+              shareMenu.onTriggerKeyDown(event);
+            }}
+            disabled={busy}
+            title="Share"
+            aria-label="Share"
+            aria-haspopup="menu"
+            aria-expanded={shareMenuOpen}
+            aria-controls={shareMenu.menuId}
+          >
+            <ShareIcon size={16} />
+          </button>
+          {shareMenuOpen && (
+            <>
+              <div className="menu-backdrop" onClick={() => closeShareMenu(true)} />
+              <div
+                className="menu-pop"
+                id={shareMenu.menuId}
+                ref={shareMenu.menuRef}
+                role="menu"
+                aria-label="Session Sharing"
+                onKeyDown={shareMenu.onMenuKeyDown}
+              >
+                <div className="menu-label" role="presentation">Share</div>
+                <div className="menu-caution" id="transcript-share-caution" role="presentation">
+                  {exportReady ? "Cached and possibly partial. Message text is operationally redacted but may still contain secrets or source." : "Sharing becomes available after the initial timeline load."}
+                </div>
+                <button
+                  className="menu-item"
+                  role="menuitem"
+                  aria-describedby="transcript-share-caution"
+                  disabled={busy || !exportReady}
+                  onClick={() => {
+                    closeShareMenu(false);
+                    setShareDialogOpen(true);
+                  }}
+                >
+                  Share Transcript…
+                </button>
+                <div className="menu-caution" id="internal-session-link-caution" role="presentation">
+                  {internalSessionUrl
+                    ? "Internal links require access to this dashboard and do not grant transcript access."
+                    : "Configure VITE_DASHBOARD_ORIGIN or open the browser-hosted dashboard to copy a usable link."}
+                </div>
+                {internalSessionUrl ? (
+                  <CopyButton
+                    text={internalSessionUrl}
+                    label="Copy Internal Session Link"
+                    className="menu-item"
+                    role="menuitem"
+                    describedBy="internal-session-link-caution"
+                    onResult={(copied) => {
+                      setNote(copied ? "Session link copied" : "Unable to copy session link");
+                      closeShareMenu(true);
+                    }}
+                  />
+                ) : (
+                  <button className="menu-item" type="button" role="menuitem" disabled aria-describedby="internal-session-link-caution">
+                    Copy Internal Session Link
+                  </button>
+                )}
+                <div className="menu-label" role="presentation">Export</div>
+                <div className="menu-caution" id="transcript-export-caution" role="presentation">
+                  {exportReady ? "Cached and possibly partial. Message text is operationally redacted but may still contain secrets or source." : "Export becomes available after the initial timeline load."}
+                </div>
+                <button className="menu-item" role="menuitem" aria-describedby="transcript-export-caution" onClick={() => void downloadTranscript("markdown")} disabled={busy || !exportReady}>
+                  Export Markdown
+                </button>
+                <button className="menu-item" role="menuitem" aria-describedby="transcript-export-caution" onClick={() => void downloadTranscript("json")} disabled={busy || !exportReady}>
+                  Export JSON
+                </button>
+              </div>
+            </>
+          )}
+        </div>
         <div className="overflow-menu">
             <button
               ref={menu.triggerRef}
-              className="btn ghost sm"
-              onClick={menu.toggle}
-              onKeyDown={menu.onTriggerKeyDown}
+              className="icon-btn session-header-action"
+              onClick={() => {
+                if (!menuOpen) closeShareMenu(false);
+                menu.toggle();
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "ArrowDown" || event.key === "ArrowUp") closeShareMenu(false);
+                menu.onTriggerKeyDown(event);
+              }}
               disabled={busy}
-              title="More Actions"
+              title="More actions"
               aria-label="More Actions"
               aria-haspopup="menu"
               aria-expanded={menuOpen}
               aria-controls={menu.menuId}
             >
-              ⋯
+              <MoreHorizontalIcon size={16} />
             </button>
             {menuOpen && (
               <>
@@ -242,6 +371,40 @@ export function SessionHeader({
                   aria-label="Session Actions"
                   onKeyDown={menu.onMenuKeyDown}
                 >
+                  {isMobile && projectName && (
+                    <>
+                      <div className="menu-label session-project-menu-header" role="presentation">
+                        {projectLabel} · {projectName}
+                      </div>
+                      {onManageProject && (
+                        <button
+                          className="menu-item"
+                          type="button"
+                          role="menuitem"
+                          onClick={() => {
+                            closeMenu(false);
+                            onManageProject();
+                          }}
+                        >
+                          Manage Project
+                        </button>
+                      )}
+                      {renderMoveProjectDialog && (
+                        <button
+                          className="menu-item"
+                          type="button"
+                          role="menuitem"
+                          onClick={() => {
+                            closeMenu(false);
+                            setMoveProjectOpen(true);
+                          }}
+                        >
+                          Move Session…
+                        </button>
+                      )}
+                    </>
+                  )}
+                  <div className="menu-label" role="presentation">Session</div>
                   <button
                     className="menu-item"
                     type="button"
@@ -268,59 +431,56 @@ export function SessionHeader({
                       }
                       void run(async () => {
                         const nextArchived = !session.archived;
-                        await api.setArchived(session.id, nextArchived);
-                        showUndo(nextArchived ? "Session archived." : "Session restored.", async () => {
+                        if (nextArchived && sessionArchiveRequiresStop(session, stopBeforeArchiveSupported)) {
+                          const retrying = session.archiveStatus === "stop_failed";
+                          const accepted = await confirm({
+                            title: retrying ? "Retry stopping this session?" : "Archive and stop this session?",
+                            message: retrying
+                              ? "The previous Stop failed and runtime capacity may still be held. Retry the same archive operation?"
+                              : "The session will move to Archived Sessions after its runtime stops. Queued work will be canceled and runtime capacity will be released. To keep work running outside the Inbox, use Snooze instead.",
+                            confirmLabel: retrying ? "Retry Stop" : "Archive and Stop",
+                            tone: "danger",
+                          });
+                          if (!accepted) return;
+                        }
+                        const updated = nextArchived && session.archiveStatus === "stop_failed"
+                          ? await api.retryStop(session.id)
+                          : await api.setArchived(session.id, nextArchived);
+                        const message = !nextArchived
+                          ? "Session restored."
+                          : updated.archiveStatus === "stop_pending"
+                            ? "Archive requested. Stop is pending until runtime capacity is released."
+                            : updated.archiveStatus === "stop_failed"
+                              ? "Stop failed. Runtime capacity may still be held."
+                              : "Session archived.";
+                        showUndo(message, async () => {
                           await api.setArchived(session.id, !nextArchived);
                         });
                       });
                     }}
                   >
-                    {session.archived ? "Unarchive" : "Archive"}
+                    {sessionArchiveActionLabel(session, stopBeforeArchiveSupported)}
                   </button>
-                  <div className="menu-label" id="transcript-export-warning" role="presentation">Operational Transcript</div>
-                  <div className="menu-caution" id="transcript-export-caution" role="presentation">
-                    {exportReady ? "Cached and possibly partial. Message text is operationally redacted but may still contain secrets or source." : "Export becomes available after the initial timeline load."}
-                  </div>
-                  <button className="menu-item" role="menuitem" aria-describedby="transcript-export-caution" onClick={() => void downloadTranscript("json")} disabled={busy || !exportReady}>
-                    Export JSON
-                  </button>
-                  <button className="menu-item" role="menuitem" aria-describedby="transcript-export-caution" onClick={() => void downloadTranscript("markdown")} disabled={busy || !exportReady}>
-                    Export Markdown
-                  </button>
-                  <div className="menu-caution" id="internal-session-link-caution" role="presentation">
-                    {internalSessionUrl
-                      ? "Internal links require access to this dashboard and do not grant transcript access."
-                      : "Configure VITE_DASHBOARD_ORIGIN or open the browser-hosted dashboard to copy a usable link."}
-                  </div>
-                  {internalSessionUrl ? (
-                    <CopyButton
-                      text={internalSessionUrl}
-                      label="Copy Internal Session Link"
+                  {onSnooze && (
+                    <button
                       className="menu-item"
+                      type="button"
                       role="menuitem"
-                      describedBy="internal-session-link-caution"
-                      onResult={(copied) => setNote(copied ? "Session link copied" : "Unable to copy session link")}
-                    />
-                  ) : (
-                    <button className="menu-item" type="button" role="menuitem" disabled aria-describedby="internal-session-link-caution">
-                      Copy Internal Session Link
+                      disabled={busy}
+                      onClick={() => {
+                        closeMenu(false);
+                        onSnooze();
+                      }}
+                    >
+                      Snooze Session…
                     </button>
                   )}
-                  <button
-                    className="menu-item menu-separated"
-                    role="menuitem"
-                    aria-describedby="transcript-export-caution"
-                    disabled={busy || !exportReady}
-                    onClick={() => {
-                      closeMenu(false);
-                      setShareDialogOpen(true);
-                    }}
-                  >
-                    Share Transcript…
-                  </button>
+                  {(session.adopted || (session.driver === "acp" && !terminal && runnerOnline && logoutSupported && providerLogoutSupported)) && (
+                    <div className="menu-label" role="presentation">Maintenance</div>
+                  )}
                   {session.adopted && (
                     <button
-                      className="menu-item menu-separated"
+                      className="menu-item"
                       role="menuitem"
                       onClick={reprocess}
                       disabled={busy || !reprocessSupported}
@@ -335,7 +495,7 @@ export function SessionHeader({
                   )}
                   {session.driver === "acp" && !terminal && runnerOnline && logoutSupported && providerLogoutSupported && (
                     <button
-                      className="menu-item menu-separated"
+                      className="menu-item"
                       type="button"
                       role="menuitem"
                       disabled={busy || session.status !== "idle" || (session.queued?.length ?? 0) > 0}
@@ -359,9 +519,29 @@ export function SessionHeader({
                       Sign Out
                     </button>
                   )}
-                  {terminal && runnerOnline && (
+                  {((session.stopOperation?.status === "stop_failed" && !session.archiveStatus) ||
+                    (terminal && runnerOnline && session.stopOperation?.status !== "stop_failed") ||
+                    !terminal || session.archived) && (
+                    <div className="menu-label" role="presentation">Runtime</div>
+                  )}
+                  {session.stopOperation?.status === "stop_failed" && !session.archiveStatus && (
                     <button
-                      className="menu-item menu-separated"
+                      className="menu-item menu-danger"
+                      type="button"
+                      role="menuitem"
+                      disabled={busy}
+                      title="Retry the same Stop operation without archiving the session"
+                      onClick={() => {
+                        closeMenu(true);
+                        void run(() => api.retryStop(session.id));
+                      }}
+                    >
+                      Retry Stop
+                    </button>
+                  )}
+                  {terminal && runnerOnline && session.stopOperation?.status !== "stop_failed" && (
+                    <button
+                      className="menu-item"
                       type="button"
                       role="menuitem"
                       disabled={busy}
@@ -425,7 +605,7 @@ export function SessionHeader({
                         })();
                       }}
                     >
-                      Delete
+                      Delete Session
                     </button>
                   )}
                 </div>
@@ -438,7 +618,7 @@ export function SessionHeader({
             <div className="topbar-actions">{topbarControls}</div>
           </>
         )}
-        {shareDialogOpen && <TranscriptShareDialog sessionId={session.id} onClose={closeShareDialog} returnFocusRef={menu.triggerRef} />}
+        {shareDialogOpen && <TranscriptShareDialog sessionId={session.id} onClose={closeShareDialog} returnFocusRef={shareMenu.triggerRef} />}
         {renameDialogOpen && (
           <Modal
             title="Rename Session"
@@ -474,6 +654,10 @@ export function SessionHeader({
             </form>
           </Modal>
         )}
+        {moveProjectOpen && renderMoveProjectDialog?.({
+          onClose: () => setMoveProjectOpen(false),
+          returnFocusRef: menu.triggerRef,
+        })}
       </div>
     </div>
   );

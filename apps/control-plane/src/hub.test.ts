@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { GitActionRequestMessage, ProjectView, SessionEvent, SessionView } from "@wollipog/protocol";
+import type { GitActionRequestMessage, ProjectView, SessionEvent, SessionReminderView, SessionView } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
+import { LOCAL_OWNER_USER_ID } from "./identity.js";
 import {
   Hub,
   isRunnerRequestTimeoutError,
@@ -17,10 +18,21 @@ import {
   UI_SUBSCRIPTION_ADMISSION_TTL_MS,
   UI_SUBSCRIPTION_RATE_WINDOW_MS,
   type Socket,
+  reminderWakeReasonForEvent,
 } from "./hub.js";
 
 // The runner request/response methods don't touch the DB, so a bare stub is fine.
 const fakeDb = {} as ControlPlaneDb;
+
+test("reminder activity recognizes only authoritative agent response completion", () => {
+  assert.equal(reminderWakeReasonForEvent({ kind: "agent_message", text: "partial" }), null);
+  assert.equal(reminderWakeReasonForEvent({ kind: "agent_response_completed" }), "agent_response");
+  assert.equal(
+    reminderWakeReasonForEvent({ kind: "agent_message", text: "completion-only", final: true }),
+    "agent_response",
+  );
+  assert.equal(reminderWakeReasonForEvent({ kind: "turn_interrupted" }), null);
+});
 
 function gitReq(requestId: string): GitActionRequestMessage {
   return { type: "git_action", requestId, sessionId: "s", worktreePath: "/w", action: { kind: "status" } };
@@ -120,6 +132,7 @@ const snapshotDb = {
   listProjectsForPrincipal: () => [],
   listRuns: () => [],
   listPods: () => [],
+  listSessionReminders: () => [],
 } as unknown as ControlPlaneDb;
 
 test("dashboard background delivery acknowledgements are session-authorized and idempotent", () => {
@@ -708,6 +721,95 @@ test("subscription admission uses deterministic LRU eviction at its hard key cei
   );
 });
 
+test("reminder snapshots and live fan-out require exact owner and session access", () => {
+  const reminder = (userId: string): SessionReminderView => ({
+    reminderId: "reminder-" + userId,
+    sessionId: "shared-session",
+    scheduledFor: 10_000,
+    timeZone: "UTC",
+    originalExpression: userId,
+    wakePolicy: "until_activity",
+    state: "pending",
+    revision: 1,
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  const db = {
+    ...snapshotDb,
+    listSessionReminders: (userId: string) => [reminder(userId)],
+    canAccessSession: (principal: { organizationId: string }, sessionId: string) =>
+      sessionId === "shared-session" && principal.organizationId !== "denied",
+  } as unknown as ControlPlaneDb;
+  const hub = new Hub(db);
+  const messages = new Map<string, Array<Record<string, unknown>>>();
+  const add = (name: string, userId?: string, organizationId = "allowed") => {
+    const received: Array<Record<string, unknown>> = [];
+    messages.set(name, received);
+    const socket: Socket = { send: (data) => received.push(JSON.parse(data) as Record<string, unknown>) };
+    hub.addUiClient(socket, {
+      deviceId: name,
+      ...(userId === undefined ? {} : {
+        principal: { kind: "human" as const, organizationId, userId, deviceId: name },
+      }),
+      close: () => {},
+    });
+    return socket;
+  };
+
+  add("owner", "user-a");
+  add("other-authorized-user", "user-b");
+  add("owner-without-session-access", "user-a", "denied");
+  add("local-owner");
+  assert.deepEqual(
+    [...messages].map(([name, received]) => [
+      name,
+      (received[0]?.reminders as SessionReminderView[] | undefined)?.map((item) => item.originalExpression),
+    ]),
+    [
+      ["owner", ["user-a"]],
+      ["other-authorized-user", ["user-b"]],
+      ["owner-without-session-access", []],
+      ["local-owner", [LOCAL_OWNER_USER_ID]],
+    ],
+    "reconnect snapshots remain exactly user-scoped and session-authorized",
+  );
+  for (const received of messages.values()) received.length = 0;
+
+  hub.sessionReminderChanged("user-a", reminder("user-a"));
+  assert.deepEqual(messages.get("owner")?.map((item) => item.type), ["session_reminder_upsert"]);
+  assert.deepEqual(messages.get("other-authorized-user"), []);
+  assert.deepEqual(messages.get("owner-without-session-access"), []);
+  assert.deepEqual(messages.get("local-owner"), []);
+
+  for (const received of messages.values()) received.length = 0;
+  hub.sessionReminderRemoved("user-b", "shared-session");
+  assert.deepEqual(messages.get("other-authorized-user")?.map((item) => item.type), ["session_reminder_removed"]);
+  assert.deepEqual(messages.get("owner"), []);
+
+  for (const received of messages.values()) received.length = 0;
+  hub.sessionReminderChanged(LOCAL_OWNER_USER_ID, reminder(LOCAL_OWNER_USER_ID));
+  assert.deepEqual(messages.get("local-owner")?.map((item) => item.type), ["session_reminder_upsert"]);
+  assert.deepEqual(messages.get("owner"), []);
+});
+
+test("generic reminder fan-out fails closed without exact ownership", () => {
+  const db = { ...snapshotDb, canAccessSession: () => true } as unknown as ControlPlaneDb;
+  const hub = new Hub(db);
+  const received: string[] = [];
+  hub.addUiClient({ send: (data) => received.push(data) }, {
+    deviceId: "owner",
+    principal: { kind: "human", organizationId: "org", userId: "user-a", deviceId: "owner" },
+    close: () => {},
+  });
+  received.length = 0;
+  const unsafeBroadcast = hub as unknown as { broadcast(message: unknown): void };
+  unsafeBroadcast.broadcast({
+    type: "session_reminder_removed",
+    sessionId: "shared-session",
+  });
+  assert.deepEqual(received, []);
+});
+
 test("unsubscribed high-volume events skip authorization database reads", () => {
   let authorizationReads = 0;
   const scopedDb = {
@@ -717,6 +819,7 @@ test("unsubscribed high-volume events skip authorization database reads", () => 
     listBoxes: () => [],
     listRuns: () => [],
     listPods: () => [],
+    listSessionReminders: () => [],
     canAccessSession: () => { authorizationReads++; return true; },
   } as unknown as ControlPlaneDb;
   const hub = new Hub(scopedDb);
@@ -936,6 +1039,46 @@ test("closeRunner preserves current identity until the shared close teardown run
   await assert.rejects(() => pending, /disconnected/);
   assert.equal(hub.detachRunner("r1", socket), false, "a duplicate close/error event is stale");
   assert.equal(hub.closeRunner("r1"), false);
+});
+
+test("sendToRunner failure closes through the shared current-socket teardown", async () => {
+  const closed: Array<[number | undefined, string | undefined]> = [];
+  const hub = new Hub(fakeDb);
+  let teardowns = 0;
+  let socket!: Socket;
+  socket = {
+    send: () => { throw new Error("serialize or transport failure"); },
+    close: (code, reason) => {
+      closed.push([code, reason]);
+      // Faithfully model index.ts onGone: durable teardown only runs for the current socket.
+      if (hub.detachRunner("r1", socket)) teardowns += 1;
+    },
+  };
+  hub.attachRunner("r1", socket);
+
+  const pending = hub.requestFromRunner("r1", "req-send-failed", gitReq("req-send-failed"), 30_000);
+
+  assert.equal(await pending.then(() => true, () => false), false);
+  assert.deepEqual(closed, [[1011, "runner send failed"]]);
+  assert.equal(teardowns, 1, "send failure must reach ordinary disconnect cleanup exactly once");
+  assert.equal(hub.isRunnerOnline("r1"), false);
+  assert.equal(hub.detachRunner("r1", socket), false, "a later close/error event is stale");
+});
+
+test("sendToRunner failure terminates a runner socket that has no graceful close", () => {
+  const hub = new Hub(fakeDb);
+  let terminated = 0;
+  const socket: Socket = {
+    send: () => { throw new Error("send failed"); },
+    terminate: () => { terminated += 1; },
+  };
+  hub.attachRunner("r1", socket);
+
+  assert.equal(hub.sendToRunner("r1", { type: "rediscover", runnerId: "r1" }), false);
+  assert.equal(terminated, 1);
+  assert.equal(hub.isCurrentRunnerSocket("r1", socket), true,
+    "identity stays current until terminate emits the ordinary close event");
+  assert.equal(hub.detachRunner("r1", socket), true);
 });
 
 test("a stale socket detach does not reject in-flight requests riding the replacement", async () => {

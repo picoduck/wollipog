@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GitOpError, captureWorktreeTree, commitAll, discardFile, gitDiff, runGitAction, stageHunk, stageLines } from "./git-ops.js";
@@ -319,19 +319,31 @@ test("last_turn (real git): shows exactly the turn's changes; untouched pre-exis
   const repo = mkdtempSync(join(tmpdir(), "wollipog-lastturn-"));
   try {
     initRepo(repo);
-    writeFileSync(join(repo, "tracked.txt"), "v1\n");
+    git(repo, ["config", "core.trustctime", "false"]);
+    const trackedPath = join(repo, "tracked.txt");
+    writeFileSync(trackedPath, "v1\n");
     writeFileSync(join(repo, "doomed.txt"), "delete me\n");
     git(repo, ["add", "-A"]);
     git(repo, ["commit", "-q", "-m", "baseline"]);
+    // Put the cached entry and real index on the exact same timestamp. With ctime deliberately
+    // ignored, rewriting the same-size file onto this timestamp exercises Git's racy-clean guard
+    // deterministically instead of depending on the CI filesystem's timestamp granularity.
+    const racyTime = new Date(1_700_000_000_000);
+    utimesSync(trackedPath, racyTime, racyTime);
+    git(repo, ["update-index", "--refresh"]);
+    utimesSync(join(repo, ".git", "index"), racyTime, racyTime);
     writeFileSync(join(repo, "pre-untracked.txt"), "was here before the turn\n");
     writeFileSync(join(repo, "pre-edited.txt"), "untracked v1\n");
 
-    const porcelainBefore = git(repo, ["status", "--porcelain"]);
+    // Mirror production status reads: optional-lock suppression keeps the deliberately racy index
+    // timestamp intact instead of letting an observation rewrite the fixture's cache metadata.
+    const porcelainBefore = git(repo, ["--no-optional-locks", "status", "--porcelain"]);
     const snap = await captureWorktreeTree(repo);
-    assert.equal(git(repo, ["status", "--porcelain"]), porcelainBefore, "capture leaves the real index untouched");
+    assert.equal(git(repo, ["--no-optional-locks", "status", "--porcelain"]), porcelainBefore, "capture leaves the real index untouched");
 
     // "The turn": modify tracked, edit a pre-existing untracked file, create a file, delete one.
-    writeFileSync(join(repo, "tracked.txt"), "v2\n");
+    writeFileSync(trackedPath, "v2\n");
+    utimesSync(trackedPath, racyTime, racyTime);
     writeFileSync(join(repo, "pre-edited.txt"), "untracked v2\n");
     writeFileSync(join(repo, "born-this-turn.txt"), "new content\n");
     rmSync(join(repo, "doomed.txt"));

@@ -5,19 +5,6 @@ import { resolve } from "node:path";
 import { homedir } from "node:os";
 import type { AcpEnvironmentReference, AcpMcpServerConfig, AgentContext, AgentDriverKind } from "@wollipog/protocol";
 import { resolveAcpSessionContext } from "./acp-session-context.js";
-import { readCompatibleEnv, type LegacyEnvironmentWarning } from "./env-compat.js";
-
-/** Runner-only opt-in for the shelved native Claude conductor. */
-export const CONDUCTOR_FLAG = "WOLLIPOG_CONDUCTOR";
-export const LEGACY_CONDUCTOR_FLAG = "MAM_CONDUCTOR";
-
-/** Only an exact `1` enables the conductor; every other value preserves the default-off state. */
-export function conductorEnabled(
-  env: NodeJS.ProcessEnv = process.env,
-  warn?: LegacyEnvironmentWarning,
-): boolean {
-  return readCompatibleEnv(env, CONDUCTOR_FLAG, LEGACY_CONDUCTOR_FLAG, warn) === "1";
-}
 
 export interface RunnerConfigAgent {
   id: string;
@@ -149,6 +136,8 @@ export interface ParsedArgs {
   showVersion: boolean;
   /** Explicit one-time acknowledgement for claiming a populated pre-ownership data root. */
   adoptLegacyDataDir: boolean;
+  /** Explicit acknowledgement that a remote ws:// connection exposes the runner credential. */
+  allowInsecureTransport: boolean;
 }
 
 /**
@@ -164,6 +153,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let tokenFile: string | undefined;
   let showVersion = false;
   let adoptLegacyDataDir = false;
+  let allowInsecureTransport = false;
   const overrides: Partial<RunnerConfig> = {};
   const workspaces: RunnerConfigWorkspace[] = [];
 
@@ -177,6 +167,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       showVersion = true;
     } else if (arg === "--adopt-legacy-data-dir") {
       adoptLegacyDataDir = true;
+    } else if (arg === "--allow-insecure-transport") {
+      allowInsecureTransport = true;
     } else if (arg === "--config" || arg === "-c" || arg.startsWith("--config=")) {
       const [v, ni] = valueOf(arg, i);
       if (v) { configPath = v; explicitConfig = true; i = ni; }
@@ -212,6 +204,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     tokenFile,
     showVersion,
     adoptLegacyDataDir,
+    allowInsecureTransport,
   };
 }
 

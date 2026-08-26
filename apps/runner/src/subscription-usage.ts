@@ -373,7 +373,7 @@ export async function probeCodexSubscriptionUsage(
     deps.onSpawn?.(child);
     child.stderr.resume();
     peer = new JsonRpcPeer(child.stdin, child.stdout);
-    child.on("exit", () => peer?.dispose("codex app-server usage probe exited"));
+    child.on("close", () => peer?.dispose("codex app-server usage probe exited"));
     child.on("error", (error) => peer?.dispose(`codex app-server usage probe failed: ${errorText(error)}`));
     const deadlineAt = deps.now() + timeoutMs;
     await peer.requestWithDeadline("initialize", {

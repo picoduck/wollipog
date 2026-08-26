@@ -1,7 +1,8 @@
-import type { SessionView } from "@wollipog/protocol";
+import { sessionAttentionStatus, type SessionReminderView, type SessionView } from "@wollipog/protocol";
 import { memo } from "react";
 import { isHeartbeatBusy, type SessionActivity } from "../activity.js";
 import { relativeTime, statusMeta } from "../format.js";
+import { reminderBadgeLabel } from "../session-reminders.js";
 import { AgentIcon } from "./AgentIcon.js";
 import { ActivityStrip } from "./ActivityStrip.js";
 import { sessionAgentLabel } from "./agent-options.js";
@@ -24,6 +25,7 @@ export interface InboxRowProps {
   activity?: SessionActivity;
   stalled: boolean;
   activityNow: number;
+  reminder?: SessionReminderView;
   /** Take the id, so the parent can pass ONE stable callback to every row. */
   onSelect: (sessionId: string) => void;
   onExpand: (sessionId: string) => void;
@@ -40,13 +42,19 @@ function InboxRowInner({
   activity,
   stalled,
   activityNow,
+  reminder,
   onSelect,
   onExpand,
 }: InboxRowProps) {
-  const status = statusMeta(session.status);
-  const blocked = session.pendingApproval != null || session.status === "input_required";
+  const stopStatus = session.stopOperation?.status ?? session.archiveStatus;
+  const stopFailed = stopStatus === "stop_failed";
+  const status = stopStatus === "stop_pending"
+    ? { label: "Stopping", className: "st-running", busy: true }
+    : stopFailed
+      ? { label: "Stop Failed", className: "st-failed", busy: false }
+      : statusMeta(session.status);
+  const attention = sessionAttentionStatus(session);
   const active = isHeartbeatBusy(session.status);
-  const diffReady = session.column === "review" && !blocked && !status.busy;
   const agent = sessionAgentLabel(session.agentName, session.driver, session.agentId);
   const lastActivityAt = Math.max(session.lastEventAt ?? 0, activity?.lastEventAt ?? 0) || null;
 
@@ -78,15 +86,25 @@ function InboxRowInner({
             {active && <ActivityStrip activity={activity} now={activityNow} compact className="inbox-row-activity" />}
           </span>
           <span className="inbox-row-signals">
-            {blocked ? (
-              <span className="inbox-status-pill blocked">
-                {session.pendingApproval?.kind === "authentication" ? "Authentication Required" : "Approval"}
+            <span
+              className={"inbox-status-pill " + (stopFailed ? "failed" : status.busy ? "running" : "activity")}
+              title={"Activity: " + status.label}
+              aria-label={"Activity: " + status.label}
+            >
+              {status.label}
+            </span>
+            {attention && (
+              <span
+                className="inbox-status-pill blocked"
+                title={attention.description}
+                aria-label={"Attention: " + attention.label}
+              >
+                {attention.label}
               </span>
-            ) : status.busy ? (
-              <span className="inbox-status-pill running">{status.label}</span>
-            ) : diffReady ? (
-              <span className="inbox-diff-chip">Diff Ready</span>
-            ) : null}
+            )}
+            {reminder && (
+              <span className="inbox-status-pill reminder">{reminderBadgeLabel(reminder, activityNow || Date.now())}</span>
+            )}
             {stalled && (
               <span className="inbox-status-pill stalled" aria-label="Stalled: No Activity for at Least 10 Minutes">
                 Stalled

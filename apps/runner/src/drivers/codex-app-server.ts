@@ -12,7 +12,15 @@
  * Approval decisions: "accept" (allow) / "decline" (deny).
  */
 
-import type { PlanEntry, PromptImage, ReviewDecision, SessionConfig } from "@wollipog/protocol";
+import {
+  DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH,
+  type AgentQuestion,
+  type AuthoritativeSubagentLifecycle,
+  type PlanEntry,
+  type PromptImage,
+  type ReviewDecision,
+  type SessionConfig,
+} from "@wollipog/protocol";
 import { JsonRpcPeer } from "../jsonrpc.js";
 import { killTree, spawnAgent, type AgentProcess } from "../spawn.js";
 import type {
@@ -30,6 +38,42 @@ import { stagePromptImages, type StagedPromptImages } from "./prompt-images.js";
 type Json = any;
 type ToolStatus = "in_progress" | "completed" | "failed";
 
+const CODEX_SUBAGENT_LIFECYCLES: Record<string, AuthoritativeSubagentLifecycle> = {
+  pendingInit: "starting",
+  running: "running",
+  interrupted: "interrupted",
+  completed: "completed",
+  errored: "failed",
+  shutdown: "interrupted",
+  notFound: "unreachable",
+};
+
+function codexSubagentLifecycle(value: unknown): AuthoritativeSubagentLifecycle | undefined {
+  return typeof value === "string" ? CODEX_SUBAGENT_LIFECYCLES[value] : undefined;
+}
+
+function subagentToolStatus(lifecycle: AuthoritativeSubagentLifecycle): string {
+  switch (lifecycle) {
+    case "starting": return "pending";
+    case "running":
+    case "waiting": return "in_progress";
+    case "completed": return "completed";
+    case "failed":
+    case "unreachable": return "failed";
+    case "interrupted": return "cancelled";
+  }
+}
+
+function collabToolTitle(tool: unknown): string {
+  switch (tool) {
+    case "sendInput": return "Send Input to Agent";
+    case "resumeAgent": return "Resume Agent";
+    case "wait": return "Wait for Agent";
+    case "closeAgent": return "Close Agent";
+    default: return "Agent Collaboration";
+  }
+}
+
 /** Map our approval-mode ids to the app-server SandboxPolicy `type`. */
 const SANDBOX_TYPE: Record<string, string> = {
   "read-only": "readOnly",
@@ -44,6 +88,15 @@ function normalizedCodexItemId(value: unknown): string | undefined {
   if (typeof value === "number" && Number.isFinite(value)) return `item-${value}`;
   return undefined;
 }
+
+/** Item ids are documented only as thread-item identities, not as globally unique across the
+ * App Server's multiplexed threads. Keep root ids stable for compatibility and scope every admitted
+ * child id by its thread so a valid per-thread counter cannot update or suppress a root item. */
+function scopedCodexItemId(value: unknown, threadId: unknown, rootThreadId: string | null): string | undefined {
+  const id = normalizedCodexItemId(value);
+  if (!id || typeof threadId !== "string" || !threadId || threadId === rootThreadId) return id;
+  return `codex-child:${JSON.stringify([threadId, id])}`;
+}
 /**
  * "auto-review" = the Guardian subagent reviews each action. It is on-request approvals
  * with the reviewer swapped to `auto_review`: low-risk actions run automatically and risky
@@ -52,6 +105,23 @@ function normalizedCodexItemId(value: unknown): string | undefined {
 const AUTO_REVIEW_MODE = "auto-review";
 const PERMISSIONS_METHOD = "item/permissions/requestApproval";
 const APPROVAL_METHODS = ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", PERMISSIONS_METHOD];
+const USER_INPUT_METHOD = "item/tool/requestUserInput";
+const MCP_ELICITATION_METHOD = "mcpServer/elicitation/request";
+export const DEFAULT_MODE_QUESTION_FEATURE = "default_mode_request_user_input";
+
+/** Place the global feature override before the subcommand. Codex currently has separate global
+ * and app-server config parsers, and keeping the override global works across both old and new
+ * app-server argument surfaces. */
+export function codexAppServerArgs(baseArgs: string[], enableDefaultModeQuestions = true): string[] {
+  return enableDefaultModeQuestions
+    ? [...baseArgs, "--enable", DEFAULT_MODE_QUESTION_FEATURE, "app-server"]
+    : [...baseArgs, "app-server"];
+}
+
+function defaultModeQuestionFeatureUnsupported(stderr: string): boolean {
+  return /unknown feature flag:\s*default_mode_request_user_input/i.test(stderr) ||
+    /(?:unexpected argument|unrecognized (?:option|argument)).*--enable/is.test(stderr);
+}
 
 /** A parked server->client approval request awaiting the UI's verdict. */
 interface PendingApproval {
@@ -70,13 +140,21 @@ interface PendingApproval {
  * with a `decision` would leave the grant unapplied even after the user clicks Allow.
  * Exported for tests.
  */
-export function approvalResponse(method: string, params: Json, allow: boolean): Json {
+export function approvalResponse(method: string, params: Json, choice: string | boolean | null): Json {
+  const allow = choice === true || choice === "allow" || choice === "accept" || choice === "acceptForSession";
   if (method === PERMISSIONS_METHOD) {
     // RequestPermissionProfile and GrantedPermissionProfile are structurally identical
     // ({fileSystem?, network?}), so on allow we grant exactly what was requested.
     return allow ? { permissions: params?.permissions ?? {}, scope: "session" } : { permissions: {}, scope: "turn" };
   }
-  return { decision: allow ? "accept" : "decline" };
+  const decision = choice === true || choice === "allow"
+    ? "accept"
+    : choice === false || choice === "deny"
+      ? "decline"
+      : choice === "accept" || choice === "acceptForSession" || choice === "decline" || choice === "cancel"
+        ? choice
+        : "cancel";
+  return { decision };
 }
 
 /**
@@ -162,24 +240,50 @@ export class CodexAppServerDriver implements Driver {
   private turnUsageClosed = false;
   private readonly seenItems = new Set<string>();
   private readonly emittedErrors = new Set<string>();
+  /** True after the active turn emits agent-message deltas. Successful turn settlement consumes
+   * it into one content-free completion event; cancellation/failure clears it. */
+  private streamedAgentResponse = false;
   /** approval correlation id -> the parked JSON-RPC approval request. */
   private readonly pendingApprovals = new Map<string, PendingApproval>();
+  /** question correlation id -> the parked provider request and native response mapper. */
+  private readonly pendingQuestions = new Map<string, PendingQuestion>();
+  /** Monotonic fallback correlation sequence for app-server schemas without approval ids. */
+  private approvalSeq = 0;
   private stagedImages: StagedPromptImages | null = null;
   /** Steering image paths must remain live until the active turn settles after accepted or
    * uncertain delivery. Keyed independently so one steer cannot overwrite another's cleanup. */
   private readonly stagedSteerImages = new Map<string, StagedPromptImages>();
   /** Codex echoes steered input as userMessage items. SessionManager owns the canonical event. */
   private readonly steerClientIds = new Set<string>();
+  /** App-server multiplexes parent and spawned threads over one notification stream. A child
+   * thread is admitted to this session only after a structured spawn item binds it to the exact
+   * spawning collaboration tool. */
+  private readonly subagentToolByThread = new Map<string, string>();
+  private readonly subagentParentByTool = new Map<string, string | undefined>();
+  private readonly subagentLifecycleByThread = new Map<string, AuthoritativeSubagentLifecycle>();
+  /** Latest per-child turn usage. Like root usage, it is emitted once when that child turn settles,
+   * not once per cumulative update notification. */
+  private readonly pendingSubagentUsage = new Map<string, ReturnType<typeof flattenUsage>>();
   private promptGeneration = 0;
   private promptBusy = false;
+  /** Provider diagnostics are held until startup succeeds so an expected unsupported-feature
+   * retry does not surface a false session error. */
+  private initializationStderr: string[] | null = null;
+  private initializationExit: { code: number | null } | null = null;
+  private initializing = false;
+  private readonly spawn: typeof spawnAgent;
+  private readonly kill: typeof killTree;
 
   constructor(
     private readonly opts: DriverOptions,
     private readonly cb: DriverCallbacks,
     private readonly imageStager: typeof stagePromptImages = stagePromptImages,
+    deps: Partial<{ spawn: typeof spawnAgent; kill: typeof killTree }> = {},
   ) {
     this.cwd = opts.cwd;
     this.config = opts.config;
+    this.spawn = deps.spawn ?? spawnAgent;
+    this.kill = deps.kill ?? killTree;
   }
 
   get pid(): number | undefined {
@@ -211,10 +315,25 @@ export class CodexAppServerDriver implements Driver {
     this.config = config;
   }
 
-  async initialize(): Promise<void> {
-    const child = spawnAgent({
+  private emitProviderStderr(text: string): void {
+    if (this.initializationStderr) this.initializationStderr.push(text);
+    else this.cb.onStderr(text);
+  }
+
+  private flushInitializationStderr(): void {
+    for (const line of this.initializationStderr ?? []) this.cb.onStderr(line);
+    this.initializationStderr = [];
+  }
+
+  private takeInitializationExit(): { code: number | null } | null {
+    const exit = this.initializationExit;
+    this.initializationExit = null;
+    return exit;
+  }
+  private async startAppServer(enableDefaultModeQuestions: boolean): Promise<void> {
+    const child = this.spawn({
       command: this.opts.command,
-      args: [...this.opts.args, "app-server"],
+      args: codexAppServerArgs(this.opts.args, enableDefaultModeQuestions),
       cwd: this.cwd,
       env: this.opts.env,
       context: this.opts.context,
@@ -226,35 +345,85 @@ export class CodexAppServerDriver implements Driver {
       cloudAgentLaunch: true,
     });
     this.child = child;
-    const peer = new JsonRpcPeer(child.stdin, child.stdout, (err) => this.cb.onStderr(`transport: ${err.message}`));
+    const peer = new JsonRpcPeer(child.stdin, child.stdout, (err) => this.emitProviderStderr(`transport: ${err.message}`));
     this.peer = peer;
 
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (t: string) => {
-      if (this.disposed) return;
+      if (this.disposed || this.child !== child) return;
       const s = String(t).trim();
       if (s && !/DeprecationWarning|trace-deprecation/.test(s)) {
         if (isProviderAuthenticationFailure(s)) this.signalAuthenticationFailure();
-        else this.cb.onStderr(s);
+        else this.emitProviderStderr(s);
       }
     });
-    child.on("exit", (code) => {
+    // JSON-RPC stdout may still contain a response or final notification when
+    // `exit` fires. Tear the peer down only at the post-stdio `close` boundary.
+    child.on("close", (code) => {
       peer.dispose("codex app-server exited");
+      // A rejected feature probe can be replaced before its delayed close event arrives.
+      // Only the current launch may tear down session state or report an exit.
+      if (this.peer !== peer && this.child !== child) return;
       // The persistent server is gone: drop our handles so a later prompt() fails fast
       // instead of parking a turn/start request that never settles.
       if (this.peer === peer) this.peer = null;
-      this.child = null;
-      this.pendingApprovals.clear();
+      if (this.child === child) this.child = null;
+      this.declinePendingRequests();
       this.closeTurnUsage();
       this.settleTurn(this.cancelled ? "cancelled" : this.turnResolve ? "refusal" : this.turnStop);
       // Tell SessionManager the process died (it removes the session and marks it failed),
       // unless this exit was our own dispose()/restart.
-      if (!this.disposed) this.cb.onExit(code);
+      if (!this.disposed) {
+        if (this.initializing) this.initializationExit = { code };
+        else this.cb.onExit(code);
+      }
     });
 
     this.registerHandlers(peer);
     await peer.request("initialize", { clientInfo: { name: "wollipog", version: "0.4.0" } });
     peer.notify("initialized", {});
+  }
+
+  async initialize(): Promise<void> {
+    this.initializing = true;
+    this.initializationStderr = [];
+    this.initializationExit = null;
+    try {
+      try {
+        await this.startAppServer(true);
+      } catch (error) {
+        const startupDiagnostics = this.initializationStderr.join("\n");
+        if (this.disposed || !defaultModeQuestionFeatureUnsupported(startupDiagnostics)) {
+          this.flushInitializationStderr();
+          throw error;
+        }
+        // Unsupported Codex versions have already exited after rejecting the flag. Their close
+        // callback normally clears the exact child/peer handles. A transport error can reject the
+        // initialize request before close, so explicitly stop that probe before replacing it; its
+        // identity-guarded close callback cannot tear down the fallback launch.
+        const rejectedChild = this.child;
+        this.child = null;
+        this.peer = null;
+        if (rejectedChild) this.kill(rejectedChild);
+        this.initializationStderr = [];
+        this.initializationExit = null;
+        this.cb.onStderr(
+          "Codex does not support " + DEFAULT_MODE_QUESTION_FEATURE +
+            "; continuing without Default-mode structured questions.",
+        );
+        await this.startAppServer(false);
+      }
+      this.flushInitializationStderr();
+    } catch (error) {
+      this.flushInitializationStderr();
+      throw error;
+    } finally {
+      const initializationExit = this.takeInitializationExit();
+      this.initializationStderr = null;
+      this.initializationExit = null;
+      this.initializing = false;
+      if (initializationExit && !this.disposed) this.cb.onExit(initializationExit.code);
+    }
   }
 
   async newSession(cwd: string): Promise<string> {
@@ -333,7 +502,8 @@ export class CodexAppServerDriver implements Driver {
     return new Promise<StopReason>((resolve) => {
       this.seenItems.clear();
       this.emittedErrors.clear();
-      this.pendingApprovals.clear();
+      this.streamedAgentResponse = false;
+      this.declinePendingRequests();
       this.pendingTurnUsage = null;
       this.turnUsageClosed = false;
       this.turnResolve = resolve;
@@ -433,9 +603,9 @@ export class CodexAppServerDriver implements Driver {
         /* ignore */
       }
     }
-    // Decline any in-flight approvals (with the shape each method expects) so the
+    // Cancel any in-flight requests (with the shape each method expects) so the
     // server-side turn unblocks instead of waiting on a response we'll never send.
-    this.declinePendingApprovals();
+    this.declinePendingRequests();
     this.closeTurnUsage();
     this.settleTurn("cancelled");
   }
@@ -444,7 +614,17 @@ export class CodexAppServerDriver implements Driver {
     const pending = this.pendingApprovals.get(requestId);
     if (!pending) return false;
     this.pendingApprovals.delete(requestId);
-    pending.resolve(approvalResponse(pending.method, pending.params, optionId === "allow"));
+    pending.resolve(pending.method === MCP_ELICITATION_METHOD
+      ? mcpElicitationResponse(optionId === "accept" ? "accept" : optionId === "decline" ? "decline" : "cancel")
+      : approvalResponse(pending.method, pending.params, optionId));
+    return true;
+  }
+
+  answerQuestion(requestId: string, answers: Record<string, string | string[]>, action?: "submit" | "dismiss"): boolean {
+    const pending = this.pendingQuestions.get(requestId);
+    if (!pending) return false;
+    this.pendingQuestions.delete(requestId);
+    pending.resolve(pending.response(answers, action ?? (Object.keys(answers).length > 0 ? "submit" : "dismiss")));
     return true;
   }
 
@@ -461,18 +641,39 @@ export class CodexAppServerDriver implements Driver {
         /* ignore */
       }
     }
-    this.declinePendingApprovals();
+    // The Codex thread remains durable, but this driver can no longer observe or control any
+    // children that were active on its transport. Persist that loss of reachability so a later
+    // replay cannot present stale work as live; a successful resume/sendInput collaboration item
+    // will establish a fresh live boundary if the durable child is reattached.
+    for (const [threadId, lifecycle] of this.subagentLifecycleByThread) {
+      if (lifecycle === "starting" || lifecycle === "running" || lifecycle === "waiting") {
+        this.updateSubagentLifecycle(threadId, "unreachable");
+      }
+    }
+    this.declinePendingRequests();
     this.closeTurnUsage();
     this.settleTurn("cancelled");
     void this.cleanupStagedImages();
     this.peer?.dispose("disposed");
-    if (this.child) killTree(this.child);
+    if (this.child) this.kill(this.child);
     this.child = null;
   }
 
-  private declinePendingApprovals(): void {
-    for (const [, p] of this.pendingApprovals) p.resolve(approvalResponse(p.method, p.params, false));
+  private declinePendingRequests(resolutionReason?: "replaced"): void {
+    for (const [requestId, p] of this.pendingApprovals) {
+      p.resolve(p.method === MCP_ELICITATION_METHOD ? mcpElicitationResponse("cancel") : approvalResponse(p.method, p.params, null));
+      if (resolutionReason) {
+        this.cb.onEvent({ kind: "permission_resolved", requestId, optionId: null, resolutionReason });
+      }
+    }
     this.pendingApprovals.clear();
+    for (const [requestId, p] of this.pendingQuestions) {
+      p.resolve(p.response({}, "dismiss"));
+      if (resolutionReason) {
+        this.cb.onEvent({ kind: "question_resolved", requestId, answered: false, resolutionReason });
+      }
+    }
+    this.pendingQuestions.clear();
   }
 
   private settleTurn(r: StopReason): void {
@@ -510,23 +711,138 @@ export class CodexAppServerDriver implements Driver {
     }
   }
 
+  /** Admit only the root thread and descendants bound by a structured collaboration item. App
+   * Server can multiplex unrelated loaded threads over the same transport, so treating every
+   * notification as parent-session output would cross conversation boundaries. */
+  private eventContext(threadId: unknown): { accepted: boolean; parentToolUseId?: string } {
+    if (threadId == null || threadId === "") return { accepted: true };
+    if (typeof threadId !== "string") return { accepted: false };
+    if (threadId === this.threadId) return { accepted: true };
+    const parentToolUseId = this.subagentToolByThread.get(threadId);
+    return parentToolUseId ? { accepted: true, parentToolUseId } : { accepted: false };
+  }
+
+  private updateSubagentStates(states: unknown): void {
+    if (!states || typeof states !== "object" || Array.isArray(states)) return;
+    for (const [threadId, raw] of Object.entries(states as Record<string, Json>)) {
+      const lifecycle = codexSubagentLifecycle(raw?.status);
+      if (lifecycle) this.updateSubagentLifecycle(threadId, lifecycle);
+    }
+  }
+
+  private updateSubagentLifecycle(threadId: string, lifecycle: AuthoritativeSubagentLifecycle): void {
+    const toolCallId = this.subagentToolByThread.get(threadId);
+    if (!toolCallId) return;
+    if (this.subagentLifecycleByThread.get(threadId) === lifecycle) return;
+    this.subagentLifecycleByThread.set(threadId, lifecycle);
+    this.cb.onEvent({
+      kind: "tool_call_update",
+      toolCallId,
+      status: subagentToolStatus(lifecycle),
+      subagentLifecycle: lifecycle,
+      ...(this.subagentParentByTool.get(toolCallId)
+        ? { parentToolUseId: this.subagentParentByTool.get(toolCallId) }
+        : {}),
+    });
+  }
+
+  private flushSubagentUsage(threadId: string): void {
+    const usage = this.pendingSubagentUsage.get(threadId);
+    const parentToolUseId = this.subagentToolByThread.get(threadId);
+    if (!usage || !parentToolUseId) return;
+    this.pendingSubagentUsage.delete(threadId);
+    this.cb.onEvent({
+      kind: "token_usage",
+      inputTokens: usage.input,
+      outputTokens: usage.output,
+      cachedInputTokens: usage.cached,
+      parentToolUseId,
+    });
+  }
+
+  private onCollabItem(item: Json, completed: boolean, id: string, notificationParent?: string): void {
+    const senderParent = typeof item?.senderThreadId === "string"
+      ? this.subagentToolByThread.get(item.senderThreadId)
+      : undefined;
+    const parentToolUseId = senderParent ?? notificationParent;
+    const failed = item?.status === "failed";
+    const receivers = Array.isArray(item?.receiverThreadIds)
+      ? item.receiverThreadIds.filter((value: unknown): value is string => typeof value === "string" && value.length > 0)
+      : [];
+
+    if (item?.tool !== "spawnAgent") {
+      // A restarted App Server can report resume/sendInput for a durable child before this driver
+      // has seen its original spawn item. That collaboration item is authoritative reattachment
+      // evidence; bind only previously unknown receivers and represent them as a fresh selectable
+      // agent boundary rather than dropping their subsequent multiplexed output.
+      const reattached = !failed && (item?.tool === "resumeAgent" || item?.tool === "sendInput")
+        ? receivers.filter((threadId: string) => !this.subagentToolByThread.has(threadId))
+        : [];
+      if (reattached.length > 0) {
+        const firstState = reattached.map((threadId: string) => item?.agentsStates?.[threadId])
+          .find((state: Json) => codexSubagentLifecycle(state?.status));
+        const lifecycle = codexSubagentLifecycle(firstState?.status) ?? "starting";
+        this.emitTool(id, collabToolTitle(item?.tool), "agent", subagentToolStatus(lifecycle), parentToolUseId, lifecycle);
+        this.subagentParentByTool.set(id, parentToolUseId);
+        for (const threadId of reattached) {
+          this.subagentToolByThread.set(threadId, id);
+          this.subagentLifecycleByThread.set(threadId, lifecycle);
+        }
+      } else {
+        this.emitTool(
+          id,
+          collabToolTitle(item?.tool),
+          "other",
+          completed ? (failed ? "failed" : "completed") : "in_progress",
+          parentToolUseId,
+        );
+      }
+      this.updateSubagentStates(item?.agentsStates);
+      return;
+    }
+
+    const prompt = typeof item?.prompt === "string" ? item.prompt.trim() : "";
+    const title = prompt ? `Agent: ${truncate(prompt, 80)}` : "Agent";
+    const firstState = receivers.map((threadId: string) => item?.agentsStates?.[threadId])
+      .find((state: Json) => codexSubagentLifecycle(state?.status));
+    const lifecycle = failed ? "failed" : codexSubagentLifecycle(firstState?.status) ?? "starting";
+    this.emitTool(id, title, "agent", subagentToolStatus(lifecycle), parentToolUseId, lifecycle);
+    this.subagentParentByTool.set(id, parentToolUseId);
+    for (const threadId of receivers) {
+      this.subagentToolByThread.set(threadId, id);
+      this.subagentLifecycleByThread.set(threadId, lifecycle);
+    }
+    this.updateSubagentStates(item?.agentsStates);
+  }
+
   private registerHandlers(peer: JsonRpcPeer): void {
     // Server -> client approval requests: park a promise until the UI answers. The
     // method is captured so the response is built in the shape that method expects
     // (command/file -> {decision}; permissions -> {permissions, scope}).
-    const makeApprover = (method: string) => (params: Json) =>
+    const makeApprover = (method: string) => (params: Json, rpcRequestId: number | string) =>
       new Promise<Json>((resolve) => {
-        if (this.disposed || this.cancelled) return resolve(approvalResponse(method, params, false));
-        const id = String(params?.approvalId ?? params?.itemId ?? `${params?.turnId}:${this.pendingApprovals.size}`);
+        if (this.disposed || this.cancelled) return resolve(approvalResponse(method, params, null));
+        const id = String(rpcRequestId ?? params?.approvalId ?? params?.itemId ?? `${params?.turnId}:${++this.approvalSeq}`);
+        this.declinePendingRequests("replaced");
+        if (this.disposed || this.cancelled) {
+          return resolve(approvalResponse(method, params, null));
+        }
         this.pendingApprovals.set(id, { method, params, resolve });
         this.cb.onEvent({
           kind: "permission_request",
           requestId: id,
           title: approvalTitle(params),
-          options: [
-            { optionId: "allow", name: "Allow", kind: "allow_once" },
-            { optionId: "deny", name: "Reject", kind: "reject_once" },
-          ],
+          options: method === PERMISSIONS_METHOD
+            ? [
+                { optionId: "allow", name: "Allow", kind: "allow_once" },
+                { optionId: "deny", name: "Reject", kind: "reject_once" },
+              ]
+            : [
+                { optionId: "accept", name: "Allow Once", kind: "allow_once" },
+                { optionId: "acceptForSession", name: "Allow for Session", kind: "allow_always" },
+                { optionId: "decline", name: "Reject", kind: "reject_once" },
+                { optionId: "cancel", name: "Cancel", kind: "cancel" },
+              ],
           context: approvalContext(
             method,
             params,
@@ -536,23 +852,127 @@ export class CodexAppServerDriver implements Driver {
       });
     for (const m of APPROVAL_METHODS) peer.onRequest(m, makeApprover(m));
 
+    peer.onRequest(USER_INPUT_METHOD, (params: Json, rpcRequestId: number | string) =>
+      new Promise<Json>((resolve) => {
+        if (this.disposed || this.cancelled) return resolve({ answers: {} });
+        const normalized = normalizeCodexUserInput(params);
+        if (!normalized) {
+          this.cb.onStderr("Codex requestUserInput arrived with no safely answerable questions — auto-dismissing");
+          return resolve({ answers: {} });
+        }
+        const id = String(rpcRequestId ?? params?.itemId ?? `${params?.turnId}:${++this.approvalSeq}`);
+        this.declinePendingRequests("replaced");
+        if (this.disposed || this.cancelled) {
+          return resolve(normalized.response({}, "dismiss"));
+        }
+        this.pendingQuestions.set(id, { resolve, response: normalized.response });
+        this.cb.onEvent({ kind: "question_request", requestId: id, questions: normalized.questions });
+      }));
+
+    peer.onRequest(MCP_ELICITATION_METHOD, (params: Json, rpcRequestId: number | string) =>
+      new Promise<Json>((resolve) => {
+        if (this.disposed || this.cancelled) return resolve(mcpElicitationResponse("cancel"));
+        const id = String(rpcRequestId ?? params?.elicitationId ?? `${params?.turnId}:${++this.approvalSeq}`);
+        if (params?.mode === "url") {
+          const message = boundedString(params?.message, MAX_QUESTION_TEXT);
+          const serverName = boundedString(params?.serverName, MAX_QUESTION_HEADER);
+          const url = boundedString(params?.url, MAX_QUESTION_TEXT);
+          if (!message || !serverName || !url) {
+            this.cb.onStderr("Codex MCP URL elicitation was malformed — cancelling it");
+            return resolve(mcpElicitationResponse("cancel"));
+          }
+          this.declinePendingRequests("replaced");
+          if (this.disposed || this.cancelled) return resolve(mcpElicitationResponse("cancel"));
+          this.pendingApprovals.set(id, { method: MCP_ELICITATION_METHOD, params, resolve });
+          this.cb.onEvent({
+            kind: "permission_request",
+            requestId: id,
+            title: `${serverName} requests a browser flow`,
+            options: [
+              { optionId: "accept", name: "Accept", kind: "allow_once" },
+              { optionId: "decline", name: "Decline", kind: "reject_once" },
+              { optionId: "cancel", name: "Cancel", kind: "cancel" },
+            ],
+            context: { toolName: serverName, input: message, network: url },
+          });
+          return;
+        }
+        const normalized = normalizeMcpFormElicitation(params);
+        if (!normalized) {
+          this.cb.onStderr(`unsupported or malformed Codex MCP elicitation mode=${diagnosticValue(params?.mode)} — cancelling it`);
+          return resolve(mcpElicitationResponse("cancel"));
+        }
+        this.declinePendingRequests("replaced");
+        if (this.disposed || this.cancelled) {
+          return resolve(normalized.response({}, "dismiss"));
+        }
+        this.pendingQuestions.set(id, { resolve, response: normalized.response });
+        this.cb.onEvent({ kind: "question_request", requestId: id, questions: normalized.questions });
+      }));
+
+    peer.onNotification("serverRequest/resolved", (params: Json) => {
+      const id = String(params?.requestId ?? "");
+      const question = this.pendingQuestions.get(id);
+      if (question) {
+        this.pendingQuestions.delete(id);
+        question.resolve(question.response({}, "dismiss"));
+        this.cb.onEvent({
+          kind: "question_resolved",
+          requestId: id,
+          answered: false,
+          resolutionReason: "provider_resolved",
+        });
+      }
+      const approval = this.pendingApprovals.get(id);
+      if (approval) {
+        this.pendingApprovals.delete(id);
+        approval.resolve(approval.method === MCP_ELICITATION_METHOD ? mcpElicitationResponse("cancel") : approvalResponse(approval.method, approval.params, null));
+        this.cb.onEvent({
+          kind: "permission_resolved",
+          requestId: id,
+          optionId: null,
+          resolutionReason: "provider_resolved",
+        });
+      }
+    });
+
     // Streamed turn events. Record the streamed item id so the matching item/completed
     // doesn't re-emit the same text (deltas are the source of truth; completed is the
     // fallback only when nothing streamed).
     peer.onNotification("item/agentMessage/delta", (p: Json) => {
       if (!p?.delta) return;
-      const messageId = normalizedCodexItemId(p.itemId);
+      const context = this.eventContext(p?.threadId);
+      if (!context.accepted) return;
+      const messageId = scopedCodexItemId(p.itemId, p?.threadId, this.threadId);
+      if (!context.parentToolUseId) this.streamedAgentResponse = true;
       if (messageId) this.seenItems.add(`msg:${messageId}`);
-      this.cb.onEvent({ kind: "agent_message", text: String(p.delta), ...(messageId ? { messageId } : {}) });
+      this.cb.onEvent({
+        kind: "agent_message",
+        text: String(p.delta),
+        ...(messageId ? { messageId } : {}),
+        ...(context.parentToolUseId ? { parentToolUseId: context.parentToolUseId } : {}),
+      });
     });
-    peer.onNotification("item/reasoning/delta", (p: Json) => {
+    const onReasoningDelta = (p: Json) => {
       if (!p?.delta) return;
-      const messageId = normalizedCodexItemId(p.itemId);
+      const context = this.eventContext(p?.threadId);
+      if (!context.accepted) return;
+      const messageId = scopedCodexItemId(p.itemId, p?.threadId, this.threadId);
       if (messageId) this.seenItems.add(`think:${messageId}`);
-      this.cb.onEvent({ kind: "agent_thought", text: String(p.delta), ...(messageId ? { messageId } : {}) });
-    });
-    peer.onNotification("item/started", (p: Json) => this.onItem(p?.item, false));
-    peer.onNotification("item/completed", (p: Json) => this.onItem(p?.item, true));
+      this.cb.onEvent({
+        kind: "agent_thought",
+        text: String(p.delta),
+        ...(messageId ? { messageId } : {}),
+        ...(context.parentToolUseId ? { parentToolUseId: context.parentToolUseId } : {}),
+      });
+    };
+    // summaryTextDelta/textDelta are the stable v2 notifications. Keep the older generic method as
+    // a compatibility alias; all three share the same required attribution envelope.
+    peer.onNotification("item/reasoning/summaryTextDelta", onReasoningDelta);
+    peer.onNotification("item/reasoning/textDelta", onReasoningDelta);
+    peer.onNotification("item/reasoning/delta", onReasoningDelta);
+    peer.onNotification("item/started", (p: Json) => this.onItem(p?.item, false, p?.threadId));
+    peer.onNotification("item/completed", (p: Json) => this.onItem(p?.item, true, p?.threadId));
     // Guardian auto-review (approvalsReviewer=auto_review): surface the model's verdict so
     // the user can see that a boundary-crossing action was AI-reviewed rather than silently
     // auto-approved. One thought per review; genuine escalations arrive as requestApproval
@@ -563,6 +983,8 @@ export class CodexAppServerDriver implements Driver {
       if (decision) this.cb.onEvent({ kind: "review_decision", ...decision });
     });
     peer.onNotification("turn/started", (p: Json) => {
+      if (p?.threadId && p.threadId !== this.threadId) return;
+      this.declinePendingRequests();
       const id = p?.turn?.id;
       if (typeof id === "string" && id) {
         this.turnId = id;
@@ -576,24 +998,55 @@ export class CodexAppServerDriver implements Driver {
       // to SessionMeta would double-count restored history. Keep only the latest update and emit
       // once at settlement because app-server may publish several updates during one turn.
       const u = flattenUsage(p?.tokenUsage?.last ?? p?.tokenUsage?.lastTurn ?? p?.tokenUsage?.last_turn);
-      if (u && !this.turnUsageClosed) this.pendingTurnUsage = u;
+      if (!u) return;
+      const context = this.eventContext(p?.threadId);
+      if (!context.accepted) return;
+      if (context.parentToolUseId) {
+        this.pendingSubagentUsage.set(String(p.threadId), u);
+      } else if (!this.turnUsageClosed) {
+        this.pendingTurnUsage = u;
+      }
     });
     peer.onNotification("account/rateLimits/updated", (payload: Json) => {
       this.cb.onSubscriptionUsage?.({ provider: "codex", kind: "sparse", payload });
     });
     peer.onNotification("turn/completed", (p: Json) => {
+      if (p?.threadId && p.threadId !== this.threadId) {
+        if (this.subagentToolByThread.has(p.threadId)) {
+          this.flushSubagentUsage(p.threadId);
+          if (p?.turn?.status === "failed") this.updateSubagentLifecycle(p.threadId, "failed");
+          if (p?.turn?.status === "interrupted") this.updateSubagentLifecycle(p.threadId, "interrupted");
+        }
+        return;
+      }
+      this.declinePendingRequests();
       this.closeTurnUsage();
       const status = p?.turn?.status;
       if (status === "failed") {
+        this.streamedAgentResponse = false;
         this.emitDriverError(p?.turn?.error);
         this.settleTurn("refusal");
       } else if (status === "interrupted") {
+        this.streamedAgentResponse = false;
         this.settleTurn("cancelled");
       } else {
+        if (status === "completed" && this.turnResolve && this.streamedAgentResponse) {
+          this.streamedAgentResponse = false;
+          this.cb.onEvent({ kind: "agent_response_completed" });
+        }
         this.settleTurn(this.turnStop);
       }
     });
     peer.onNotification("turn/failed", (p: Json) => {
+      if (p?.threadId && p.threadId !== this.threadId) {
+        if (this.subagentToolByThread.has(p.threadId)) {
+          this.flushSubagentUsage(p.threadId);
+          this.updateSubagentLifecycle(p.threadId, "failed");
+        }
+        return;
+      }
+      this.declinePendingRequests();
+      this.streamedAgentResponse = false;
       this.emitDriverError(p?.error);
       this.closeTurnUsage();
       this.settleTurn("refusal");
@@ -639,9 +1092,12 @@ export class CodexAppServerDriver implements Driver {
   }
 
   /** Map an item.started/completed payload to our normalized events. */
-  private onItem(item: Json, completed: boolean): void {
+  private onItem(item: Json, completed: boolean, threadId?: unknown): void {
     if (!item || this.disposed) return;
-    const id = normalizedCodexItemId(item.id) ?? "item";
+    const context = this.eventContext(threadId);
+    if (!context.accepted) return;
+    const parentToolUseId = context.parentToolUseId;
+    const id = scopedCodexItemId(item.id, threadId, this.threadId) ?? "item";
     switch (item.type) {
       case "userMessage": {
         // A steered user message can arrive before the turn/steer response. Suppress both item
@@ -658,31 +1114,62 @@ export class CodexAppServerDriver implements Driver {
         // messageId, so emitting a second authoritative completion after deltas would duplicate
         // the bubble. A completion-only item is already whole and may be marked final safely.
         if (completed && item.text && !this.seenItems.has(`msg:${id}`)) {
-          this.cb.onEvent({ kind: "agent_message", text: String(item.text), messageId: id, final: true });
+          this.cb.onEvent({
+            kind: "agent_message",
+            text: String(item.text),
+            messageId: id,
+            final: true,
+            ...(parentToolUseId ? { parentToolUseId } : {}),
+          });
         }
         break;
       case "reasoning":
         if (completed && item.text && !this.seenItems.has(`think:${id}`)) {
-          this.cb.onEvent({ kind: "agent_thought", text: String(item.text), messageId: id, final: true });
+          this.cb.onEvent({
+            kind: "agent_thought",
+            text: String(item.text),
+            messageId: id,
+            final: true,
+            ...(parentToolUseId ? { parentToolUseId } : {}),
+          });
         }
         break;
       case "commandExecution": {
         const status: ToolStatus = completed ? (item.exitCode === 0 || item.status === "completed" ? "completed" : "failed") : "in_progress";
-        this.emitTool(id, `$ ${truncate(String(item.command ?? ""), 80)}`, "execute", status);
+        this.emitTool(id, `$ ${truncate(String(item.command ?? ""), 80)}`, "execute", status, parentToolUseId);
         const out = item.aggregatedOutput ?? item.output;
-        if (completed && out) this.cb.onEvent({ kind: "command_output", text: truncate(String(out), 2000) });
+        if (completed && out) {
+          this.cb.onEvent({
+            kind: "command_output",
+            text: truncate(String(out), 2000),
+            ...(parentToolUseId ? { parentToolUseId } : {}),
+          });
+        }
         break;
       }
       case "fileChange": {
         const changes: Json[] = item.changes ?? [];
-        for (const ch of changes) if (ch?.path) this.cb.onEvent({ kind: "file_edit", path: ch.path, diff: ch.diff });
-        this.emitTool(id, `edit ${changes.length} file(s)`, "edit", completed ? "completed" : "in_progress");
+        for (const ch of changes) if (ch?.path) {
+          this.cb.onEvent({
+            kind: "file_edit",
+            path: ch.path,
+            diff: ch.diff,
+            ...(parentToolUseId ? { parentToolUseId } : {}),
+          });
+        }
+        this.emitTool(id, `edit ${changes.length} file(s)`, "edit", completed ? "completed" : "in_progress", parentToolUseId);
         break;
       }
       case "mcpToolCall":
       case "webSearch": {
         const title = item.type === "webSearch" ? `web_search: ${item.query ?? ""}` : `${item.server ?? ""}/${item.tool ?? ""}`;
-        this.emitTool(id, title, item.type === "webSearch" ? "fetch" : "other", completed ? "completed" : "in_progress");
+        this.emitTool(
+          id,
+          title,
+          item.type === "webSearch" ? "fetch" : "other",
+          completed ? "completed" : "in_progress",
+          parentToolUseId,
+        );
         break;
       }
       case "todoList": {
@@ -691,18 +1178,44 @@ export class CodexAppServerDriver implements Driver {
           content: String(t.text ?? t.content ?? ""),
           status: t.completed || t.status === "completed" ? "completed" : t.status === "in_progress" ? "in_progress" : "pending",
         }));
-        if (entries.length) this.cb.onEvent({ kind: "plan", entries });
+        if (entries.length) {
+          this.cb.onEvent({ kind: "plan", entries, ...(parentToolUseId ? { parentToolUseId } : {}) });
+        }
         break;
       }
+      case "collabAgentToolCall":
+        this.onCollabItem(item, completed, id, parentToolUseId);
+        break;
     }
   }
 
-  private emitTool(id: string, title: string, toolKind: string, status: ToolStatus): void {
+  private emitTool(
+    id: string,
+    title: string,
+    toolKind: string,
+    status: string,
+    parentToolUseId?: string,
+    subagentLifecycle?: AuthoritativeSubagentLifecycle,
+  ): void {
     if (!this.seenItems.has(id)) {
       this.seenItems.add(id);
-      this.cb.onEvent({ kind: "tool_call", toolCallId: id, title, toolKind, status });
+      this.cb.onEvent({
+        kind: "tool_call",
+        toolCallId: id,
+        title,
+        toolKind,
+        status,
+        ...(parentToolUseId ? { parentToolUseId } : {}),
+        ...(subagentLifecycle ? { subagentLifecycle } : {}),
+      });
     } else {
-      this.cb.onEvent({ kind: "tool_call_update", toolCallId: id, status });
+      this.cb.onEvent({
+        kind: "tool_call_update",
+        toolCallId: id,
+        status,
+        ...(parentToolUseId ? { parentToolUseId } : {}),
+        ...(subagentLifecycle ? { subagentLifecycle } : {}),
+      });
     }
   }
 }
@@ -799,4 +1312,270 @@ function flattenUsage(tu: Json): { input?: number; output?: number; cached?: num
 
 function truncate(s: string, n: number): string {
   return s.length > n ? s.slice(0, n) + "..." : s;
+}
+
+/** A parked structured question awaiting the normalized answer_question route. */
+interface PendingQuestion {
+  resolve: (response: Json) => void;
+  response: (answers: Record<string, string | string[]>, action?: "submit" | "dismiss") => Json;
+}
+
+interface NormalizedQuestionRequest {
+  questions: AgentQuestion[];
+  response: (answers: Record<string, string | string[]>, action?: "submit" | "dismiss") => Json;
+}
+
+type McpElicitationAction = "accept" | "decline" | "cancel";
+const MAX_STRUCTURED_QUESTIONS = 20;
+const MAX_QUESTION_OPTIONS = 20;
+const MAX_QUESTION_ID = 256;
+const MAX_QUESTION_HEADER = 80;
+const MAX_QUESTION_TEXT = 2000;
+/** Provider free-text bound. The shared protocol default keeps the driver, the dashboard's submit
+ * gate, and the control plane's authoritative validation on one number. */
+const MAX_FREE_TEXT = DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH;
+const MAX_DIAGNOSTIC_VALUE = 120;
+
+function boundedString(value: unknown, max: number): string | null {
+  return typeof value === "string" && value.length > 0 && value.length <= max ? value : null;
+}
+
+/** Render a provider-controlled value for a diagnostic. The value reaches stderr and the durable
+ * runner log, so it is always bounded and objects are never stringified in full. */
+export function diagnosticValue(value: unknown): string {
+  if (value == null) return "?";
+  const text = typeof value === "string" ? value : typeof value === "object" ? "[object]" : String(value);
+  return text.length > MAX_DIAGNOSTIC_VALUE ? `${text.slice(0, MAX_DIAGNOSTIC_VALUE)}…` : text;
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function nonnegativeInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : undefined;
+}
+
+function distinctQuestionIds(questions: AgentQuestion[]): boolean {
+  return new Set(questions.map((question) => question.id)).size === questions.length;
+}
+
+function normalizedOptions(raw: unknown): AgentQuestion["options"] | null {
+  if (!Array.isArray(raw) || raw.length > MAX_QUESTION_OPTIONS) return null;
+  const options = raw.map((option: Json) => {
+    const label = boundedString(option?.label, MAX_QUESTION_ID);
+    const description = boundedString(option?.description, MAX_QUESTION_TEXT);
+    if (!label || !description) return null;
+    return { label, description };
+  });
+  if (options.some((option) => option == null)) return null;
+  const valid = options as AgentQuestion["options"];
+  return new Set(valid.map((option) => option.label)).size === valid.length ? valid : null;
+}
+
+/** Normalize Codex's item/tool/requestUserInput request without synthesizing a user message. */
+export function normalizeCodexUserInput(params: Json): NormalizedQuestionRequest | null {
+  if (!Array.isArray(params?.questions) || params.questions.length === 0 || params.questions.length > 3) return null;
+  const questions: AgentQuestion[] = [];
+  for (const raw of params.questions) {
+    if (raw?.multiSelect === true && raw?.isOther === true) return null;
+    const id = boundedString(raw?.id, MAX_QUESTION_ID);
+    const question = boundedString(raw?.question, MAX_QUESTION_TEXT);
+    const header = boundedString(raw?.header, MAX_QUESTION_HEADER);
+    if (!id || !question || !header || (raw?.options != null && !Array.isArray(raw?.options))) return null;
+    const options = raw.options == null ? [] : normalizedOptions(raw.options);
+    if (!options || (options.length === 0 && raw?.isOther !== true)) return null;
+    questions.push({
+      id,
+      header,
+      question,
+      options,
+      ...(raw?.isOther === true ? { allowOther: true, inputFormat: "text" as const, maxLength: MAX_FREE_TEXT } : {}),
+      ...(raw?.isSecret === true ? { secret: true } : {}),
+    });
+  }
+  if (!distinctQuestionIds(questions)) return null;
+  return {
+    questions,
+    response: (answers) => ({
+      answers: Object.fromEntries(Object.entries(answers).map(([id, answer]) => [
+        id,
+        { answers: Array.isArray(answer) ? answer : [answer] },
+      ])),
+    }),
+  };
+}
+
+interface NativeChoice {
+  label: string;
+  value: Json;
+}
+
+function enumChoices(schema: Json): NativeChoice[] | null {
+  let choices: NativeChoice[];
+  const titled = Array.isArray(schema?.oneOf) ? schema.oneOf : Array.isArray(schema?.anyOf) ? schema.anyOf : null;
+  if (titled) {
+    choices = titled.map((entry: Json) => ({
+      label: boundedString(entry?.title, MAX_QUESTION_ID) ?? "",
+      value: entry?.const,
+    }));
+  } else if (Array.isArray(schema?.enum)) {
+    const names = Array.isArray(schema.enumNames) && schema.enumNames.length === schema.enum.length
+      ? schema.enumNames
+      : schema.enum;
+    choices = schema.enum.map((value: Json, index: number) => ({
+      label: boundedString(names[index], MAX_QUESTION_ID) ?? "",
+      value,
+    }));
+  } else {
+    return null;
+  }
+  if (
+    choices.length === 0 || choices.length > MAX_QUESTION_OPTIONS ||
+    choices.some((choice) => !choice.label || typeof choice.value !== "string") ||
+    new Set(choices.map((choice) => choice.label)).size !== choices.length
+  ) return null;
+  return choices;
+}
+
+function inputFormat(value: unknown): AgentQuestion["inputFormat"] | null {
+  if (value == null) return "text";
+  return value === "email" || value === "uri" || value === "date" || value === "date-time"
+    ? value === "uri" ? "url" : value
+    : null;
+}
+
+/** Normalize the stable MCP form elicitation schema into Wollipog's structured question surface. */
+export function normalizeMcpFormElicitation(params: Json): NormalizedQuestionRequest | null {
+  const schema = params?.requestedSchema;
+  const properties = schema?.properties;
+  if (params?.mode !== "form" || schema?.type !== "object" || !properties || typeof properties !== "object" || Array.isArray(properties)) {
+    return null;
+  }
+  const entries = Object.entries(properties);
+  if (entries.length === 0 || entries.length > MAX_STRUCTURED_QUESTIONS) return null;
+  if (schema.required != null && (!Array.isArray(schema.required) || schema.required.some((key: unknown) => typeof key !== "string"))) {
+    return null;
+  }
+  const requiredKeys = (schema.required ?? []) as string[];
+  const propertyKeys = new Set(entries.map(([key]) => key));
+  if (new Set(requiredKeys).size !== requiredKeys.length || requiredKeys.some((key) => !propertyKeys.has(key))) return null;
+  const required = new Set(requiredKeys);
+  const questions: AgentQuestion[] = [];
+  const nativeValues = new Map<string, Map<string, Json>>();
+  const message = boundedString(params?.message, MAX_QUESTION_TEXT);
+  const serverName = boundedString(params?.serverName, MAX_QUESTION_HEADER);
+  if (!message || !serverName) return null;
+
+  for (const [id, raw] of entries) {
+    if (!boundedString(id, MAX_QUESTION_ID) || !raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+    const property = raw as Json;
+    const title = property.title == null ? undefined : boundedString(property.title, MAX_QUESTION_HEADER);
+    const description = property.description == null ? undefined : boundedString(property.description, MAX_QUESTION_TEXT);
+    if ((property.title != null && !title) || (property.description != null && !description)) return null;
+    const base = {
+      id,
+      ...(title ? { header: title } : {}),
+      question: description ?? title ?? id,
+      options: [] as AgentQuestion["options"],
+      required: required.has(id),
+      ...(questions.length === 0 ? { context: `${serverName}: ${message}` } : {}),
+    };
+
+    if (property.type === "boolean") {
+      const choices = [{ label: "True", value: true }, { label: "False", value: false }];
+      nativeValues.set(id, new Map(choices.map((choice) => [choice.label, choice.value])));
+      questions.push({ ...base, options: choices.map(({ label }) => ({ label })) });
+      continue;
+    }
+
+    if (property.type === "array") {
+      const choices = enumChoices(property.items);
+      if (!choices) return null;
+      const minSelections = nonnegativeInteger(property.minItems) ?? 0;
+      const maxSelections = nonnegativeInteger(property.maxItems);
+      if (
+        (property.minItems != null && nonnegativeInteger(property.minItems) == null) ||
+        (property.maxItems != null && maxSelections == null) ||
+        (maxSelections != null && maxSelections < minSelections)
+      ) return null;
+      nativeValues.set(id, new Map(choices.map((choice) => [choice.label, choice.value])));
+      questions.push({
+        ...base,
+        multiSelect: true,
+        options: choices.map(({ label }) => ({ label })),
+        minSelections,
+        ...(maxSelections != null ? { maxSelections } : {}),
+      });
+      continue;
+    }
+
+    if (property.type === "string") {
+      const choices = enumChoices(property);
+      if (choices) {
+        nativeValues.set(id, new Map(choices.map((choice) => [choice.label, choice.value])));
+        questions.push({ ...base, options: choices.map(({ label }) => ({ label })) });
+        continue;
+      }
+      if (property.enum !== undefined || property.oneOf !== undefined || property.anyOf !== undefined) return null;
+      const minLength = nonnegativeInteger(property.minLength);
+      const providerMaxLength = nonnegativeInteger(property.maxLength);
+      if (
+        (property.minLength != null && minLength == null) ||
+        (property.maxLength != null && providerMaxLength == null)
+      ) return null;
+      const maxLength = Math.min(providerMaxLength ?? MAX_FREE_TEXT, MAX_FREE_TEXT);
+      if (minLength != null && minLength > maxLength) return null;
+      const format = inputFormat(property.format);
+      if (!format) return null;
+      questions.push({
+        ...base,
+        allowOther: true,
+        inputFormat: format,
+        ...(minLength != null ? { minLength } : {}),
+        maxLength,
+      });
+      continue;
+    }
+
+    if (property.type === "number" || property.type === "integer") {
+      const minimum = finiteNumber(property.minimum);
+      const maximum = finiteNumber(property.maximum);
+      if (
+        (property.minimum != null && minimum == null) ||
+        (property.maximum != null && maximum == null) ||
+        (minimum != null && maximum != null && minimum > maximum)
+      ) return null;
+      questions.push({
+        ...base,
+        allowOther: true,
+        inputFormat: property.type,
+        ...(minimum != null ? { minimum } : {}),
+        ...(maximum != null ? { maximum } : {}),
+      });
+      continue;
+    }
+    return null;
+  }
+
+  return {
+    questions,
+    response: (answers, action) => {
+      if (action === "dismiss" || (action == null && Object.keys(answers).length === 0)) {
+        return mcpElicitationResponse("cancel");
+      }
+      const content = Object.fromEntries(Object.entries(answers).map(([id, answer]) => {
+        const values = nativeValues.get(id);
+        if (Array.isArray(answer)) return [id, answer.map((label) => values?.get(label) ?? label)];
+        if (values) return [id, values.get(answer) ?? answer];
+        const question = questions.find((candidate) => candidate.id === id);
+        return [id, question?.inputFormat === "number" || question?.inputFormat === "integer" ? Number(answer) : answer];
+      }));
+      return mcpElicitationResponse("accept", content);
+    },
+  };
+}
+
+export function mcpElicitationResponse(action: McpElicitationAction, content: Json = null): Json {
+  return { action, content: action === "accept" ? content : null, _meta: null };
 }

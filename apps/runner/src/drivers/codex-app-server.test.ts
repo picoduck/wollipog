@@ -1,18 +1,49 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import type { SessionConfig, SessionEventPayload } from "@wollipog/protocol";
 import {
   approvalContext,
   approvalResponse,
+  codexAppServerArgs,
   buildCodexTurnParams,
   CodexAppServerDriver,
   CodexAppServerResumeError,
+  DEFAULT_MODE_QUESTION_FEATURE,
+  diagnosticValue,
   parseReviewDecision,
   reviewSummary,
 } from "./codex-app-server.js";
 import type { DriverCallbacks, DriverOptions } from "./driver.js";
 import type { StagedPromptImages } from "./prompt-images.js";
+import type { AgentProcess } from "../spawn.js";
+
+function fakeAgentProcess(): AgentProcess {
+  return Object.assign(new EventEmitter(), {
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    pid: 12345,
+  }) as unknown as AgentProcess;
+}
+
+function nextTask(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+async function waitForCondition(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) assert.fail(`condition was not met within ${timeoutMs}ms`);
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+function childItemId(threadId: string, itemId: string): string {
+  return `codex-child:${JSON.stringify([threadId, itemId])}`;
+}
 
 /**
  * Unit tests for the app-server item -> SessionEventPayload mapping and the
@@ -24,11 +55,12 @@ function makeHarness(
   imageStager?: (images: any[], context: any) => Promise<StagedPromptImages>,
 ) {
   const events: SessionEventPayload[] = [];
+  const stderr: string[] = [];
   let authenticationFailures = 0;
   const subscriptionUsage: unknown[] = [];
   const cb: DriverCallbacks = {
     onEvent: (p) => events.push(p),
-    onStderr: () => {},
+    onStderr: (line) => stderr.push(line),
     onExit: () => {},
     onAuthenticationFailure: () => { authenticationFailures += 1; },
     onSubscriptionUsage: (update) => subscriptionUsage.push(update),
@@ -47,8 +79,126 @@ function makeHarness(
     : new CodexAppServerDriver(opts, cb);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const onItem = (item: unknown, completed: boolean) => (driver as any).onItem(item, completed);
-  return { driver, events, subscriptionUsage, onItem, authenticationFailures: () => authenticationFailures };
+  return { driver, events, stderr, subscriptionUsage, onItem, authenticationFailures: () => authenticationFailures };
 }
+
+test("app-server launch enables Default-mode questions before the subcommand", () => {
+  const base = ["/opt/codex.js", "-c", "model=default"];
+  assert.deepEqual(codexAppServerArgs(base), [
+    ...base,
+    "--enable",
+    DEFAULT_MODE_QUESTION_FEATURE,
+    "app-server",
+  ]);
+  assert.deepEqual(codexAppServerArgs(base, false), [...base, "app-server"]);
+  assert.deepEqual(base, ["/opt/codex.js", "-c", "model=default"], "configured arguments remain immutable");
+});
+
+test("unsupported Default-mode question feature retries the unchanged app-server launch", async () => {
+  const launches: string[][] = [];
+  const stderr: string[] = [];
+  const exits: Array<number | null> = [];
+  const driver = new CodexAppServerDriver({
+    command: "codex",
+    args: ["--config", "model=default"],
+    cwd: "/tmp/work",
+    env: {},
+    config: {},
+    context: { kind: "native" },
+  }, {
+    onEvent: () => {},
+    onStderr: (line) => stderr.push(line),
+    onExit: (code) => exits.push(code),
+  }, undefined, {
+    spawn: (opts) => {
+      launches.push([...opts.args]);
+      const child = fakeAgentProcess();
+      if (launches.length === 1) {
+        setImmediate(() => {
+          child.stderr.write("Error: Unknown feature flag: default_mode_request_user_input\n");
+          child.emit("close", 1);
+        });
+      } else {
+        child.stdin.on("data", (chunk) => {
+          for (const line of String(chunk).trim().split(/\r?\n/)) {
+            if (!line) continue;
+            const message = JSON.parse(line) as { id?: number; method?: string };
+            if (message.method === "initialize") {
+              child.stdout.write(JSON.stringify({ id: message.id, result: { userAgent: "old-codex" } }) + "\n");
+            }
+          }
+        });
+      }
+      return child;
+    },
+    kill: () => {},
+  });
+
+  try {
+    await driver.initialize();
+    assert.deepEqual(launches, [
+      ["--config", "model=default", "--enable", DEFAULT_MODE_QUESTION_FEATURE, "app-server"],
+      ["--config", "model=default", "app-server"],
+    ]);
+    assert.equal(stderr.length, 1);
+    assert.match(stderr[0]!, /continuing without Default-mode structured questions/);
+    assert.doesNotMatch(stderr[0]!, /Unknown feature flag/);
+    assert.deepEqual(exits, [], "the rejected probe launch must not fail the managed session");
+  } finally {
+    driver.dispose();
+  }
+});
+
+test("a late rejected-probe close cannot fail or tear down the healthy fallback", async () => {
+  const children: AgentProcess[] = [];
+  const exits: Array<number | null> = [];
+  const killed: AgentProcess[] = [];
+  const stderr: string[] = [];
+  const driver = new CodexAppServerDriver({
+    command: "codex",
+    args: [],
+    cwd: "/tmp/work",
+    env: {},
+    config: {},
+    context: { kind: "native" },
+  }, {
+    onEvent: () => {},
+    onStderr: (line) => stderr.push(line),
+    onExit: (code) => exits.push(code),
+  }, undefined, {
+    spawn: () => {
+      const child = fakeAgentProcess();
+      children.push(child);
+      child.stdin.on("data", (chunk) => {
+        const message = JSON.parse(String(chunk).trim()) as { id?: number; method?: string };
+        if (message.method !== "initialize") return;
+        if (children.length === 1) {
+          child.stderr.write("Error: Unknown feature flag: default_mode_request_user_input\n");
+          child.stdin.emit("error", new Error("EPIPE"));
+          return;
+        }
+        child.stdout.write(JSON.stringify({ id: message.id, result: { userAgent: "old-codex" } }) + "\n");
+        children[0]!.stderr.write("Usage: codex [OPTIONS]\n");
+        children[0]!.emit("close", 1);
+      });
+      return child;
+    },
+    kill: (child) => killed.push(child),
+  });
+
+  try {
+    await driver.initialize();
+    assert.equal(children.length, 2);
+    assert.deepEqual(killed, [children[0]]);
+    assert.deepEqual(exits, []);
+    assert.equal(stderr.length, 1);
+    assert.match(stderr[0]!, /continuing without Default-mode structured questions/);
+    assert.doesNotMatch(stderr[0]!, /Usage:/);
+    assert.equal(driver.pid, children[1]!.pid, "the fallback remains the managed child");
+  } finally {
+    driver.dispose();
+  }
+});
 
 test("app-server auth errors emit a secret-free auth signal", () => {
   const h = makeHarness();
@@ -56,6 +206,43 @@ test("app-server auth errors emit a secret-free auth signal", () => {
   (h.driver as any).emitDriverError(raw);
   assert.equal(h.authenticationFailures(), 1);
   assert.deepEqual(h.events, []);
+});
+
+test("Codex app-server accepts a final JSON-RPC response delivered after exit", async () => {
+  const child = fakeAgentProcess();
+  const writes: string[] = [];
+  const exits: Array<number | null> = [];
+  child.stdin.on("data", (chunk: Buffer) => writes.push(chunk.toString("utf8")));
+  const driver = new CodexAppServerDriver({
+    command: "codex",
+    args: [],
+    cwd: "/tmp/work",
+    env: {},
+    config: {},
+    context: { kind: "native" },
+  }, {
+    onEvent: () => {},
+    onStderr: () => {},
+    onExit: (code) => exits.push(code),
+  }, undefined, {
+    spawn: () => child,
+    kill: () => {},
+  });
+
+  const initialized = driver.initialize();
+  const request = JSON.parse(writes.join("").trim()) as { id: number };
+  let settled = false;
+  void initialized.then(() => { settled = true; }, () => { settled = true; });
+  child.emit("exit", 0, null);
+  await nextTask();
+  assert.equal(settled, false, "exit must not dispose a response still buffered in stdout");
+  assert.deepEqual(exits, []);
+  child.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: {} }) + "\n");
+  child.emit("close", 0, null);
+
+  await initialized;
+  assert.deepEqual(exits, [0]);
+  driver.dispose();
 });
 
 function activateSteer(
@@ -531,7 +718,7 @@ test("resume id mismatch is non-retryable and never falls back to thread/start",
   assert.deepEqual(calls, ["thread/read"]);
 });
 
-test("dispose interrupts, declines parked approvals, then closes transport without deleting the thread", () => {
+test("dispose interrupts, cancels parked approvals, then closes transport without deleting the thread", () => {
   const h = makeHarness({ resumeId: "thread-1" });
   const order: string[] = [];
   (h.driver as any).threadId = "thread-1";
@@ -545,7 +732,31 @@ test("dispose interrupts, declines parked approvals, then closes transport witho
     resolve: (result: { decision: string }) => order.push(result.decision),
   });
   h.driver.dispose();
-  assert.deepEqual(order, ["turn/interrupt", "decline", "dispose"]);
+  assert.deepEqual(order, ["turn/interrupt", "cancel", "dispose"]);
+});
+
+test("dispose records active subagents as unreachable without deleting their durable threads", () => {
+  const h = makeHarness({ resumeId: "thread-1" });
+  (h.driver as any).threadId = "thread-1";
+  (h.driver as any).peer = { notify: () => {}, dispose: () => {} };
+  const notifications = notificationHandlers(h.driver);
+  notifications.get("item/completed")!({
+    threadId: "thread-1",
+    item: {
+      type: "collabAgentToolCall",
+      id: "spawn-child",
+      tool: "spawnAgent",
+      status: "completed",
+      senderThreadId: "thread-1",
+      receiverThreadIds: ["child-thread"],
+      agentsStates: { "child-thread": { status: "running" } },
+    },
+  });
+
+  h.driver.dispose();
+
+  assert.ok(h.events.some((event) => event.kind === "tool_call_update" &&
+    event.toolCallId === "spawn-child" && event.subagentLifecycle === "unreachable"));
 });
 
 test("cancel emits already-consumed per-turn usage once before settling", () => {
@@ -609,8 +820,25 @@ test("interrupted turn/completed maps to cancelled", async () => {
     onNotification: (method: string, handler: (params: any) => void) => notifications.set(method, handler),
   });
   const reason = new Promise<string>((resolve) => { (h.driver as any).turnResolve = resolve; });
+  notifications.get("item/agentMessage/delta")!({ itemId: "interrupted", delta: "partial" });
   notifications.get("turn/completed")!({ turn: { status: "interrupted" } });
   assert.equal(await reason, "cancelled");
+  assert.equal(h.events.some((event) => event.kind === "agent_response_completed"), false);
+});
+
+test("unknown Codex terminal status cannot complete a streamed response", async () => {
+  const h = makeHarness();
+  const notifications = notificationHandlers(h.driver);
+  const reason = new Promise<string>((resolve) => { (h.driver as any).turnResolve = resolve; });
+  notifications.get("item/agentMessage/delta")!({ itemId: "unknown-status", delta: "partial" });
+  notifications.get("turn/completed")!({ turn: { status: "aborted" } });
+
+  assert.equal(await reason, "end_turn", "unknown statuses retain the existing tolerant settlement");
+  assert.equal(
+    h.events.some((event) => event.kind === "agent_response_completed"),
+    false,
+    "only the explicit completed status is authoritative completion evidence",
+  );
 });
 
 test("turn settlement closes the active id but retains the provider turn used by conversation forks", () => {
@@ -705,6 +933,41 @@ test("real NDJSON child resumes and continues without replaying history or cumul
   }
 });
 
+test("real NDJSON transport keeps structured child output live after the parent turn settles", async () => {
+  const events: SessionEventPayload[] = [];
+  const fixture = fileURLToPath(new URL("./fixtures/fake-codex-app-server.mjs", import.meta.url));
+  const driver = new CodexAppServerDriver(
+    {
+      command: process.execPath,
+      args: [fixture, "subagents"],
+      cwd: process.cwd(),
+      env: {},
+      config: {} as SessionConfig,
+      context: { kind: "native" },
+    },
+    { onEvent: (event) => events.push(event), onStderr: () => {}, onExit: () => {} },
+  );
+  try {
+    await driver.initialize();
+    assert.equal(await driver.newSession(process.cwd()), "fixture-subagents");
+    assert.equal(await driver.prompt("inspect"), "end_turn", "the foreground turn settles first");
+    const messageId = childItemId("fixture-child", "fixture-child-message");
+    await waitForCondition(() => events.some((event) => event.kind === "tool_call_update" &&
+      event.toolCallId === "fixture-spawn" && event.subagentLifecycle === "completed"));
+    assert.deepEqual(events.find((event) => event.kind === "agent_message" && event.messageId === messageId), {
+      kind: "agent_message",
+      text: "Background inspection complete.",
+      messageId,
+      final: true,
+      parentToolUseId: "fixture-spawn",
+    });
+    assert.ok(events.some((event) => event.kind === "tool_call_update" &&
+      event.toolCallId === "fixture-spawn" && event.subagentLifecycle === "completed"));
+  } finally {
+    driver.dispose();
+  }
+});
+
 test("commandExecution: started -> tool_call, completed -> tool_call_update + command_output", () => {
   const h = makeHarness();
   h.onItem({ type: "commandExecution", id: "c1", command: "echo hi" }, false);
@@ -731,6 +994,268 @@ test("agentMessage completed -> agent_message; reasoning -> agent_thought; todoL
     h.events.map((e) => e.kind),
     ["agent_message", "agent_thought", "plan"],
   );
+});
+
+test("structured Codex collaboration items expose recursive live subagent output and lifecycle", () => {
+  const h = makeHarness();
+  (h.driver as any).threadId = "root-thread";
+  const notifications = notificationHandlers(h.driver);
+
+  notifications.get("item/started")!({
+    threadId: "root-thread",
+    item: {
+      type: "collabAgentToolCall",
+      id: "spawn-outer",
+      tool: "spawnAgent",
+      status: "inProgress",
+      senderThreadId: "root-thread",
+      receiverThreadIds: ["child-thread"],
+      prompt: "Inspect parser behavior",
+      agentsStates: { "child-thread": { status: "pendingInit" } },
+    },
+  });
+  notifications.get("item/completed")!({
+    threadId: "child-thread",
+    item: { type: "agentMessage", id: "child-message", text: "Inspecting parser events." },
+  });
+  notifications.get("item/reasoning/summaryTextDelta")!({
+    threadId: "child-thread",
+    turnId: "child-turn",
+    itemId: "child-reasoning",
+    summaryIndex: 0,
+    delta: "Checking nested behavior.",
+  });
+  notifications.get("item/completed")!({
+    threadId: "child-thread",
+    item: {
+      type: "collabAgentToolCall",
+      id: "spawn-inner",
+      tool: "spawnAgent",
+      status: "completed",
+      senderThreadId: "child-thread",
+      receiverThreadIds: ["grandchild-thread"],
+      prompt: "Check nested attribution",
+      agentsStates: { "grandchild-thread": { status: "running" } },
+    },
+  });
+  notifications.get("item/started")!({
+    threadId: "grandchild-thread",
+    item: { type: "commandExecution", id: "grandchild-command", command: "pnpm test" },
+  });
+  notifications.get("item/completed")!({
+    threadId: "grandchild-thread",
+    item: {
+      type: "commandExecution",
+      id: "grandchild-command",
+      command: "pnpm test",
+      status: "completed",
+      aggregatedOutput: "passed",
+    },
+  });
+  notifications.get("thread/tokenUsage/updated")!({
+    threadId: "grandchild-thread",
+    tokenUsage: { last: { inputTokens: 9, outputTokens: 4, cachedInputTokens: 2 } },
+  });
+  notifications.get("thread/tokenUsage/updated")!({
+    threadId: "grandchild-thread",
+    tokenUsage: { last: { inputTokens: 11, outputTokens: 5, cachedInputTokens: 3 } },
+  });
+  notifications.get("turn/completed")!({
+    threadId: "grandchild-thread",
+    turn: { id: "grandchild-turn", status: "completed" },
+  });
+  notifications.get("item/completed")!({
+    threadId: "root-thread",
+    item: {
+      type: "collabAgentToolCall",
+      id: "wait-outer",
+      tool: "wait",
+      status: "completed",
+      senderThreadId: "root-thread",
+      receiverThreadIds: ["child-thread"],
+      agentsStates: { "child-thread": { status: "completed", message: "Parser audit complete." } },
+    },
+  });
+  notifications.get("item/completed")!({
+    threadId: "unrelated-thread",
+    item: { type: "agentMessage", id: "private-other-thread", text: "must not cross sessions" },
+  });
+
+  assert.deepEqual(h.events[0], {
+    kind: "tool_call",
+    toolCallId: "spawn-outer",
+    title: "Agent: Inspect parser behavior",
+    toolKind: "agent",
+    status: "pending",
+    subagentLifecycle: "starting",
+  });
+  const childMessageId = childItemId("child-thread", "child-message");
+  const innerSpawnId = childItemId("child-thread", "spawn-inner");
+  assert.deepEqual(h.events.find((event) => event.kind === "agent_message" && event.messageId === childMessageId), {
+    kind: "agent_message",
+    text: "Inspecting parser events.",
+    messageId: childMessageId,
+    final: true,
+    parentToolUseId: "spawn-outer",
+  });
+  assert.deepEqual(h.events.find((event) => event.kind === "agent_thought"), {
+    kind: "agent_thought",
+    text: "Checking nested behavior.",
+    messageId: childItemId("child-thread", "child-reasoning"),
+    parentToolUseId: "spawn-outer",
+  });
+  assert.deepEqual(h.events.find((event) => event.kind === "tool_call" && event.toolCallId === innerSpawnId), {
+    kind: "tool_call",
+    toolCallId: innerSpawnId,
+    title: "Agent: Check nested attribution",
+    toolKind: "agent",
+    status: "in_progress",
+    parentToolUseId: "spawn-outer",
+    subagentLifecycle: "running",
+  });
+  assert.deepEqual(h.events.find((event) => event.kind === "command_output"), {
+    kind: "command_output",
+    text: "passed",
+    parentToolUseId: innerSpawnId,
+  });
+  assert.deepEqual(h.events.find((event) => event.kind === "token_usage"), {
+    kind: "token_usage",
+    inputTokens: 11,
+    outputTokens: 5,
+    cachedInputTokens: 3,
+    parentToolUseId: innerSpawnId,
+  });
+  assert.ok(h.events.some((event) => event.kind === "tool_call_update" &&
+    event.toolCallId === "spawn-outer" && event.subagentLifecycle === "completed"));
+  assert.equal(h.events.filter((event) => event.kind === "token_usage").length, 1,
+    "repeated cumulative child updates emit only the latest settled usage");
+  assert.equal(h.events.some((event) => event.kind === "agent_message" && event.text.includes("must not cross")), false);
+});
+
+test("multiplexed child item ids cannot collide with root item ids", () => {
+  const h = makeHarness();
+  (h.driver as any).threadId = "root-thread";
+  const notifications = notificationHandlers(h.driver);
+  notifications.get("item/started")!({
+    threadId: "root-thread",
+    item: { type: "commandExecution", id: "shared-counter", command: "root command" },
+  });
+  notifications.get("item/completed")!({
+    threadId: "root-thread",
+    item: {
+      type: "collabAgentToolCall",
+      id: "spawn-child",
+      tool: "spawnAgent",
+      status: "completed",
+      senderThreadId: "root-thread",
+      receiverThreadIds: ["child-thread"],
+      agentsStates: { "child-thread": { status: "running" } },
+    },
+  });
+  notifications.get("item/started")!({
+    threadId: "child-thread",
+    item: { type: "commandExecution", id: "shared-counter", command: "child command" },
+  });
+
+  const calls = h.events.filter((event) => event.kind === "tool_call" && event.toolKind === "execute");
+  assert.deepEqual(calls.map((event) => ({ id: event.toolCallId, parent: event.parentToolUseId })), [
+    { id: "shared-counter", parent: undefined },
+    { id: childItemId("child-thread", "shared-counter"), parent: "spawn-child" },
+  ]);
+});
+
+test("resume collaboration re-admits a durable child after driver restart", () => {
+  const h = makeHarness();
+  (h.driver as any).threadId = "root-thread";
+  const notifications = notificationHandlers(h.driver);
+  notifications.get("item/completed")!({
+    threadId: "root-thread",
+    item: {
+      type: "collabAgentToolCall",
+      id: "resume-child",
+      tool: "resumeAgent",
+      status: "completed",
+      senderThreadId: "root-thread",
+      receiverThreadIds: ["durable-child-thread"],
+      agentsStates: { "durable-child-thread": { status: "running" } },
+    },
+  });
+  notifications.get("item/completed")!({
+    threadId: "durable-child-thread",
+    item: { type: "agentMessage", id: "resumed-output", text: "Continued after restart." },
+  });
+
+  assert.deepEqual(h.events[0], {
+    kind: "tool_call",
+    toolCallId: "resume-child",
+    title: "Resume Agent",
+    toolKind: "agent",
+    status: "in_progress",
+    subagentLifecycle: "running",
+  });
+  assert.deepEqual(h.events[1], {
+    kind: "agent_message",
+    text: "Continued after restart.",
+    messageId: childItemId("durable-child-thread", "resumed-output"),
+    final: true,
+    parentToolUseId: "resume-child",
+  });
+});
+
+test("subagent turn notifications cannot replace or settle the parent turn", async () => {
+  const h = makeHarness();
+  (h.driver as any).threadId = "root-thread";
+  (h.driver as any).turnId = "root-turn";
+  const notifications = notificationHandlers(h.driver);
+  notifications.get("item/completed")!({
+    threadId: "root-thread",
+    item: {
+      type: "collabAgentToolCall",
+      id: "spawn-child",
+      tool: "spawnAgent",
+      status: "completed",
+      senderThreadId: "root-thread",
+      receiverThreadIds: ["child-thread"],
+      agentsStates: { "child-thread": { status: "running" } },
+    },
+  });
+  let settled = false;
+  (h.driver as any).turnResolve = () => { settled = true; };
+  notifications.get("turn/started")!({ threadId: "child-thread", turn: { id: "child-turn" } });
+  notifications.get("turn/completed")!({ threadId: "child-thread", turn: { id: "child-turn", status: "completed" } });
+  await nextTask();
+  assert.equal((h.driver as any).turnId, "root-turn");
+  assert.equal(settled, false);
+});
+
+test("an admitted child turn failure updates only that subagent lifecycle", async () => {
+  const h = makeHarness();
+  (h.driver as any).threadId = "root-thread";
+  (h.driver as any).turnId = "root-turn";
+  const notifications = notificationHandlers(h.driver);
+  notifications.get("item/completed")!({
+    threadId: "root-thread",
+    item: {
+      type: "collabAgentToolCall",
+      id: "spawn-child",
+      tool: "spawnAgent",
+      status: "completed",
+      senderThreadId: "root-thread",
+      receiverThreadIds: ["child-thread"],
+      agentsStates: { "child-thread": { status: "running" } },
+    },
+  });
+  let settled = false;
+  (h.driver as any).turnResolve = () => { settled = true; };
+  notifications.get("turn/failed")!({ threadId: "child-thread", error: { message: "child failed" } });
+  await nextTask();
+
+  assert.ok(h.events.some((event) => event.kind === "tool_call_update" &&
+    event.toolCallId === "spawn-child" && event.subagentLifecycle === "failed"));
+  assert.equal((h.driver as any).turnId, "root-turn");
+  assert.equal(settled, false);
+  assert.equal(h.events.some((event) => event.kind === "error"), false,
+    "a child failure does not become the foreground turn error");
 });
 
 test("numeric app-server item identities normalize to safe distinct strings", () => {
@@ -772,8 +1297,443 @@ test("resolvePermission for an unknown id is a no-op", () => {
   assert.ok(true);
 });
 
+test("a newer provider request cancels the previous parked approval and keeps unique fallback ids", async () => {
+  const h = makeHarness();
+  const requests = new Map<string, (params: any) => Promise<any>>();
+  (h.driver as any).registerHandlers({
+    onRequest: (method: string, handler: (params: any) => Promise<any>) => requests.set(method, handler),
+    onNotification: () => {},
+  });
+  const approve = requests.get("item/commandExecution/requestApproval")!;
+
+  const first = approve({ turnId: "turn-fallback", command: "one" });
+  const second = approve({ turnId: "turn-fallback", command: "two" });
+  assert.deepEqual(await first, { decision: "cancel" });
+  assert.deepEqual(
+    h.events.filter((event) => event.kind === "permission_request").map((event) => event.requestId),
+    ["turn-fallback:1", "turn-fallback:2"],
+  );
+
+  assert.equal(h.driver.resolvePermission("turn-fallback:1", "allow"), false);
+  assert.equal(h.driver.resolvePermission("turn-fallback:2", "allow"), true);
+  assert.deepEqual(await second, { decision: "accept" });
+});
+
+test("a repeated provider approval id cancels the replaced parked RPC", async () => {
+  const h = makeHarness();
+  const requests = new Map<string, (params: any) => Promise<any>>();
+  (h.driver as any).registerHandlers({
+    onRequest: (method: string, handler: (params: any) => Promise<any>) => requests.set(method, handler),
+    onNotification: () => {},
+  });
+  const approve = requests.get("item/commandExecution/requestApproval")!;
+
+  const replaced = approve({ approvalId: "duplicate", command: "old" });
+  const current = approve({ approvalId: "duplicate", command: "new" });
+  assert.deepEqual(await replaced, { decision: "cancel" });
+  assert.equal(h.driver.resolvePermission("duplicate", "allow"), true);
+  assert.deepEqual(await current, { decision: "accept" });
+});
+
 const cfg = (permissionMode: string, extra: Partial<SessionConfig> = {}): SessionConfig =>
   ({ permissionMode, ...extra }) as SessionConfig;
+
+test("command approvals expose and deliver every stable provider decision", async () => {
+  const h = makeHarness();
+  const requests = new Map<string, (params: any, requestId: number | string) => Promise<any>>();
+  (h.driver as any).registerHandlers({
+    onRequest: (method: string, handler: (params: any, requestId: number | string) => Promise<any>) => requests.set(method, handler),
+    onNotification: () => {},
+  });
+  const pending = requests.get("item/commandExecution/requestApproval")!({ command: "pnpm test" }, "command-choice");
+  const event = h.events.at(-1);
+  assert.equal(event?.kind, "permission_request");
+  if (event?.kind !== "permission_request") assert.fail("expected a permission request");
+  assert.deepEqual(event.options, [
+    { optionId: "accept", name: "Allow Once", kind: "allow_once" },
+    { optionId: "acceptForSession", name: "Allow for Session", kind: "allow_always" },
+    { optionId: "decline", name: "Reject", kind: "reject_once" },
+    { optionId: "cancel", name: "Cancel", kind: "cancel" },
+  ]);
+  assert.equal(h.driver.resolvePermission("command-choice", "acceptForSession"), true);
+  assert.deepEqual(await pending, { decision: "acceptForSession" });
+});
+
+test("Codex tool user input keeps the provider request id and returns native answers", async () => {
+  const h = makeHarness();
+  const requests = new Map<string, (params: any, requestId: number | string) => Promise<any>>();
+  (h.driver as any).registerHandlers({
+    onRequest: (method: string, handler: (params: any, requestId: number | string) => Promise<any>) => requests.set(method, handler),
+    onNotification: () => {},
+  });
+
+  const pending = requests.get("item/tool/requestUserInput")!({
+    threadId: "thread-1",
+    turnId: "turn-1",
+    itemId: "item-1",
+    isBlocking: true,
+    questions: [
+      {
+        id: "framework",
+        header: "Framework",
+        question: "Which framework should I use?",
+        isOther: true,
+        options: [{ label: "React", description: "Use React" }],
+      },
+      {
+        id: "token",
+        header: "Token",
+        question: "Enter the temporary token",
+        isOther: true,
+        isSecret: true,
+        options: null,
+      },
+    ],
+  }, 701);
+
+  assert.deepEqual(h.events.at(-1), {
+    kind: "question_request",
+    requestId: "701",
+    questions: [
+      {
+        id: "framework",
+        header: "Framework",
+        question: "Which framework should I use?",
+        options: [{ label: "React", description: "Use React" }],
+        allowOther: true,
+        inputFormat: "text",
+        maxLength: 4000,
+      },
+      {
+        id: "token",
+        header: "Token",
+        question: "Enter the temporary token",
+        options: [],
+        allowOther: true,
+        inputFormat: "text",
+        maxLength: 4000,
+        secret: true,
+      },
+    ],
+  });
+  assert.equal(h.driver.answerQuestion("provider-item-id", { framework: "React" }), false);
+  assert.equal(h.driver.answerQuestion("701", { framework: "React", token: "secret" }), true);
+  assert.deepEqual(await pending, {
+    answers: {
+      framework: { answers: ["React"] },
+      token: { answers: ["secret"] },
+    },
+  });
+
+  const freeText = requests.get("item/tool/requestUserInput")!({
+    questions: [{
+      id: "details",
+      header: "Details",
+      question: "Add details",
+      isOther: true,
+    }],
+  }, "free-text-without-options");
+  assert.equal(h.driver.answerQuestion("free-text-without-options", { details: "Ready" }), true);
+  assert.deepEqual(await freeText, { answers: { details: { answers: ["Ready"] } } });
+
+  const eventCount = h.events.length;
+  assert.deepEqual(await requests.get("item/tool/requestUserInput")!({
+    questions: [{
+      id: "malformed",
+      header: "Malformed",
+      question: "Missing the schema-required option description",
+      isOther: false,
+      options: [{ label: "A" }],
+    }],
+  }, 702), { answers: {} });
+  assert.equal(h.events.length, eventCount);
+
+  assert.deepEqual(await requests.get("item/tool/requestUserInput")!({
+    questions: [{
+      id: "unsupported",
+      header: "Features",
+      question: "Choose features or add another",
+      multiSelect: true,
+      isOther: true,
+      options: [{ label: "Audit", description: "Audit events" }],
+    }],
+  }, 703), { answers: {} });
+  assert.equal(h.events.length, eventCount);
+});
+
+test("MCP form elicitation maps primitive controls and returns provider-native content", async () => {
+  const h = makeHarness();
+  const requests = new Map<string, (params: any, requestId: number | string) => Promise<any>>();
+  (h.driver as any).registerHandlers({
+    onRequest: (method: string, handler: (params: any, requestId: number | string) => Promise<any>) => requests.set(method, handler),
+    onNotification: () => {},
+  });
+
+  const pending = requests.get("mcpServer/elicitation/request")!({
+    mode: "form",
+    serverName: "Deploy MCP",
+    threadId: "thread-2",
+    turnId: "turn-2",
+    message: "Choose deployment settings",
+    requestedSchema: {
+      type: "object",
+      required: ["region", "confirm", "retries", "features"],
+      properties: {
+        region: { type: "string", title: "Region", enum: ["iad", "fra"], enumNames: ["US East", "Europe"] },
+        confirm: { type: "boolean", title: "Confirm" },
+        retries: { type: "integer", title: "Retries", minimum: 1, maximum: 5 },
+        features: { type: "array", title: "Features", items: { anyOf: [{ const: "audit", title: "Audit Trail" }, { const: "alerts", title: "Alerts" }] }, minItems: 1, maxItems: 2 },
+        note: { type: "string", title: "Note", maxLength: 120 },
+      },
+    },
+  }, "mcp-form-9");
+
+  const event = h.events.at(-1);
+  assert.equal(event?.kind, "question_request");
+  if (event?.kind !== "question_request") assert.fail("expected a structured question request");
+  assert.equal(event.requestId, "mcp-form-9");
+  assert.equal(event.questions[0]?.context, "Deploy MCP: Choose deployment settings");
+  assert.deepEqual(event.questions.map((question) => ({
+    id: question.id,
+    options: question.options.map((option) => option.label),
+    required: question.required,
+    multiSelect: question.multiSelect,
+    inputFormat: question.inputFormat,
+  })), [
+    { id: "region", options: ["US East", "Europe"], required: true, multiSelect: undefined, inputFormat: undefined },
+    { id: "confirm", options: ["True", "False"], required: true, multiSelect: undefined, inputFormat: undefined },
+    { id: "retries", options: [], required: true, multiSelect: undefined, inputFormat: "integer" },
+    { id: "features", options: ["Audit Trail", "Alerts"], required: true, multiSelect: true, inputFormat: undefined },
+    { id: "note", options: [], required: false, multiSelect: undefined, inputFormat: "text" },
+  ]);
+
+  assert.equal(h.driver.answerQuestion("mcp-form-9", {
+    region: "US East",
+    confirm: "True",
+    retries: "3",
+    features: ["Audit Trail", "Alerts"],
+  }), true);
+  assert.deepEqual(await pending, {
+    action: "accept",
+    content: { region: "iad", confirm: true, retries: 3, features: ["audit", "alerts"] },
+    _meta: null,
+  });
+});
+
+test("MCP all-optional forms distinguish accepting empty content from dismissal", async () => {
+  const h = makeHarness();
+  const requests = new Map<string, (params: any, requestId: number | string) => Promise<any>>();
+  (h.driver as any).registerHandlers({
+    onRequest: (method: string, handler: (params: any, requestId: number | string) => Promise<any>) => requests.set(method, handler),
+    onNotification: () => {},
+  });
+  const params = {
+    mode: "form",
+    serverName: "Optional MCP",
+    threadId: "thread-optional",
+    turnId: "turn-optional",
+    message: "Optional settings",
+    requestedSchema: {
+      type: "object",
+      properties: { note: { type: "string", title: "Note" } },
+    },
+  };
+
+  const submitted = requests.get("mcpServer/elicitation/request")!(params, "mcp-empty-submit");
+  assert.equal(h.driver.answerQuestion("mcp-empty-submit", {}, "submit"), true);
+  assert.deepEqual(await submitted, { action: "accept", content: {}, _meta: null });
+
+  const dismissed = requests.get("mcpServer/elicitation/request")!(params, "mcp-empty-dismiss");
+  assert.equal(h.driver.answerQuestion("mcp-empty-dismiss", {}, "dismiss"), true);
+  assert.deepEqual(await dismissed, { action: "cancel", content: null, _meta: null });
+});
+
+test("MCP required multi-select fields honor an explicit zero-item constraint", async () => {
+  const h = makeHarness();
+  const requests = new Map<string, (params: any, requestId: number | string) => Promise<any>>();
+  (h.driver as any).registerHandlers({
+    onRequest: (method: string, handler: (params: any, requestId: number | string) => Promise<any>) => requests.set(method, handler),
+    onNotification: () => {},
+  });
+
+  const pending = requests.get("mcpServer/elicitation/request")!({
+    mode: "form",
+    serverName: "Tags MCP",
+    message: "Choose no tags",
+    requestedSchema: {
+      type: "object",
+      properties: {
+        tags: { type: "array", items: { type: "string", enum: ["A"] }, minItems: 0, maxItems: 0 },
+      },
+      required: ["tags"],
+    },
+  }, "mcp-zero-items");
+  assert.equal(h.driver.answerQuestion("mcp-zero-items", { tags: [] }, "submit"), true);
+  assert.deepEqual(await pending, { action: "accept", content: { tags: [] }, _meta: null });
+});
+
+test("MCP URL elicitation exposes Accept, Decline, and Cancel and uses the selected native action", async () => {
+  const h = makeHarness();
+  const requests = new Map<string, (params: any, requestId: number | string) => Promise<any>>();
+  (h.driver as any).registerHandlers({
+    onRequest: (method: string, handler: (params: any, requestId: number | string) => Promise<any>) => requests.set(method, handler),
+    onNotification: () => {},
+  });
+
+  const pending = requests.get("mcpServer/elicitation/request")!({
+    mode: "url",
+    serverName: "Payments MCP",
+    threadId: "thread-3",
+    message: "Authorize access in your browser",
+    url: "https://example.test/authorize",
+    elicitationId: "provider-elicitation",
+  }, "mcp-url-5");
+  assert.deepEqual(h.events.at(-1), {
+    kind: "permission_request",
+    requestId: "mcp-url-5",
+    title: "Payments MCP requests a browser flow",
+    options: [
+      { optionId: "accept", name: "Accept", kind: "allow_once" },
+      { optionId: "decline", name: "Decline", kind: "reject_once" },
+      { optionId: "cancel", name: "Cancel", kind: "cancel" },
+    ],
+    context: {
+      toolName: "Payments MCP",
+      input: "Authorize access in your browser",
+      network: "https://example.test/authorize",
+    },
+  });
+  assert.equal(h.driver.resolvePermission("mcp-url-5", "decline"), true);
+  assert.deepEqual(await pending, { action: "decline", content: null, _meta: null });
+});
+
+test("unsupported MCP modes cancel safely and provider resolution clears a parked question", async () => {
+  const h = makeHarness();
+  const requests = new Map<string, (params: any, requestId: number | string) => Promise<any>>();
+  const notifications = new Map<string, (params: any) => void>();
+  (h.driver as any).registerHandlers({
+    onRequest: (method: string, handler: (params: any, requestId: number | string) => Promise<any>) => requests.set(method, handler),
+    onNotification: (method: string, handler: (params: any) => void) => notifications.set(method, handler),
+  });
+
+  const parkedApproval = requests.get("item/commandExecution/requestApproval")!({ command: "pnpm test" }, "still-live");
+  const eventsBeforeUnsupported = h.events.length;
+  assert.deepEqual(await requests.get("mcpServer/elicitation/request")!({
+    mode: "openai/form",
+    serverName: "Unsupported MCP",
+    message: "Extended schema",
+    requestedSchema: { type: "object", properties: { value: { type: "string" } } },
+  }, 800), { action: "cancel", content: null, _meta: null });
+  assert.equal(h.events.length, eventsBeforeUnsupported, "invalid elicitation must not displace the parked approval");
+  assert.equal(h.driver.resolvePermission("still-live", "accept"), true);
+  assert.deepEqual(await parkedApproval, { decision: "accept" });
+
+  const eventsBeforeMalformedEnum = h.events.length;
+  assert.deepEqual(await requests.get("mcpServer/elicitation/request")!({
+    mode: "form",
+    serverName: "Oversized MCP",
+    message: "Choose a region",
+    requestedSchema: {
+      type: "object",
+      properties: { region: { type: "string", enum: Array.from({ length: 21 }, (_, index) => `region-${index}`) } },
+      required: ["region"],
+    },
+  }, "malformed-enum"), { action: "cancel", content: null, _meta: null });
+  assert.equal(h.events.length, eventsBeforeMalformedEnum, "malformed enum must not emit an unconstrained question");
+
+  assert.deepEqual(await requests.get("mcpServer/elicitation/request")!({
+    mode: "form",
+    serverName: "Malformed MCP",
+    message: "Invalid constraints",
+    requestedSchema: {
+      type: "object",
+      properties: { retries: { type: "integer", minimum: "zero" } },
+      required: ["retries"],
+    },
+  }, "malformed-constraints"), { action: "cancel", content: null, _meta: null });
+
+  const pending = requests.get("item/tool/requestUserInput")!({
+    questions: [{ id: "choice", header: "Choice", question: "Choose", isOther: false, options: [{ label: "A", description: "A" }] }],
+  }, 801);
+  notifications.get("serverRequest/resolved")!({ threadId: "thread-4", requestId: 801 });
+  assert.deepEqual(await pending, { answers: {} });
+  assert.equal(h.driver.answerQuestion("801", { choice: "A" }), false);
+  assert.deepEqual(h.events.at(-1), {
+    kind: "question_resolved",
+    requestId: "801",
+    answered: false,
+    resolutionReason: "provider_resolved",
+  });
+});
+
+test("a newer structured request settles and resolves the displaced request exactly once", async () => {
+  const h = makeHarness();
+  const requests = new Map<string, (params: any, requestId: number | string) => Promise<any>>();
+  const notifications = new Map<string, (params: any) => void>();
+  (h.driver as any).registerHandlers({
+    onRequest: (method: string, handler: (params: any, requestId: number | string) => Promise<any>) => requests.set(method, handler),
+    onNotification: (method: string, handler: (params: any) => void) => notifications.set(method, handler),
+  });
+
+  const oldQuestion = requests.get("item/tool/requestUserInput")!({
+    questions: [{ id: "choice", header: "Choice", question: "Choose", isOther: false, options: [{ label: "A", description: "A" }] }],
+  }, "old-question");
+  const replacementApproval = requests.get("item/commandExecution/requestApproval")!({ command: "pnpm test" }, "replacement-approval");
+  assert.deepEqual(await oldQuestion, { answers: {} });
+  assert.deepEqual(h.events.filter((event) => event.kind === "question_resolved"), [{
+    kind: "question_resolved",
+    requestId: "old-question",
+    answered: false,
+    resolutionReason: "replaced",
+  }]);
+
+  const replacementQuestion = requests.get("item/tool/requestUserInput")!({
+    questions: [{ id: "confirm", header: "Confirm", question: "Continue?", isOther: false, options: [{ label: "Yes", description: "Continue" }] }],
+  }, "replacement-question");
+  assert.deepEqual(await replacementApproval, { decision: "cancel" });
+  assert.deepEqual(h.events.filter((event) => event.kind === "permission_resolved"), [{
+    kind: "permission_resolved",
+    requestId: "replacement-approval",
+    optionId: null,
+    resolutionReason: "replaced",
+  }]);
+
+  const resolutionCount = h.events.filter(
+    (event) => event.kind === "question_resolved" || event.kind === "permission_resolved",
+  ).length;
+  notifications.get("serverRequest/resolved")!({ requestId: "old-question" });
+  notifications.get("serverRequest/resolved")!({ requestId: "replacement-approval" });
+  assert.equal(h.events.filter(
+    (event) => event.kind === "question_resolved" || event.kind === "permission_resolved",
+  ).length, resolutionCount, "late provider notifications must not duplicate replacement events");
+
+  assert.equal(h.driver.answerQuestion("replacement-question", { confirm: "Yes" }, "submit"), true);
+  assert.deepEqual(await replacementQuestion, { answers: { confirm: { answers: ["Yes"] } } });
+});
+
+test("re-entrant cancellation while resolving a replacement cannot strand the new provider request", async () => {
+  const h = makeHarness();
+  const requests = new Map<string, (params: any, requestId: number | string) => Promise<any>>();
+  (h.driver as any).registerHandlers({
+    onRequest: (method: string, handler: (params: any, requestId: number | string) => Promise<any>) => requests.set(method, handler),
+    onNotification: () => {},
+  });
+  const approve = requests.get("item/commandExecution/requestApproval")!;
+  const first = approve({ command: "first" }, "first-approval");
+  const originalOnEvent = (h.driver as any).cb.onEvent;
+  (h.driver as any).cb.onEvent = (event: SessionEventPayload) => {
+    originalOnEvent(event);
+    if (event.kind === "permission_resolved") h.driver.cancel();
+  };
+
+  const second = approve({ command: "second" }, "second-approval");
+  assert.deepEqual(await first, { decision: "cancel" });
+  assert.deepEqual(await Promise.race([
+    second,
+    new Promise((resolve) => setImmediate(() => resolve("still-pending"))),
+  ]), { decision: "cancel" });
+  assert.equal((h.driver as any).pendingApprovals.size, 0);
+});
 
 test("buildCodexTurnParams: default and 'auto-review' use Guardian with an escapable workspace sandbox", () => {
   const p = buildCodexTurnParams(cfg("auto-review"), "t1", "/w", [{ type: "text", text: "hi" }]);
@@ -976,6 +1936,31 @@ test("streamed text preserves provider ids and completion never adds an old-web 
   });
 });
 
+test("streamed Codex response emits one content-free completion at successful turn settlement", async () => {
+  const h = makeHarness();
+  const notifications = notificationHandlers(h.driver);
+  const reason = new Promise<string>((resolve) => { (h.driver as any).turnResolve = resolve; });
+  notifications.get("item/agentMessage/delta")!({ itemId: "m-streamed", delta: "answer" });
+  h.onItem({ type: "agentMessage", id: "m-streamed", text: "answer" }, true);
+  assert.deepEqual(h.events, [
+    { kind: "agent_message", text: "answer", messageId: "m-streamed" },
+  ], "chunks remain the only transcript content before turn completion");
+
+  notifications.get("turn/completed")!({ turn: { status: "completed" } });
+  assert.equal(await reason, "end_turn");
+  assert.deepEqual(h.events, [
+    { kind: "agent_message", text: "answer", messageId: "m-streamed" },
+    { kind: "agent_response_completed" },
+  ]);
+
+  notifications.get("turn/completed")!({ turn: { status: "completed" } });
+  assert.equal(
+    h.events.filter((event) => event.kind === "agent_response_completed").length,
+    1,
+    "duplicate or replayed terminal evidence cannot emit a second marker",
+  );
+});
+
 test("prompt() fails fast (refusal + error) when the app-server is not running", async () => {
   const h = makeHarness(); // constructed but never initialize()d -> peer is null
   const reason = await h.driver.prompt("do something");
@@ -984,4 +1969,48 @@ test("prompt() fails fast (refusal + error) when the app-server is not running",
     h.events.some((e) => (e as { kind: string }).kind === "error"),
     true,
   );
+});
+
+test("provider-controlled diagnostics are bounded before reaching stderr", async () => {
+  const h = makeHarness();
+  const requests = new Map<string, (params: any, requestId: number | string) => Promise<any>>();
+  (h.driver as any).registerHandlers({
+    onRequest: (method: string, handler: (params: any, requestId: number | string) => Promise<any>) => requests.set(method, handler),
+    onNotification: () => {},
+  });
+
+  const parkedApproval = requests.get("item/commandExecution/requestApproval")!({ command: "pnpm test" }, "parked");
+  const eventsBeforeOversizedMode = h.events.length;
+  assert.deepEqual(await requests.get("mcpServer/elicitation/request")!({
+    mode: "z".repeat(50_000),
+    serverName: "Oversized MCP",
+    threadId: "thread-diagnostic",
+    message: "Extended schema",
+    requestedSchema: { type: "object", properties: { value: { type: "string" } } },
+  }, "oversized-mode"), { action: "cancel", content: null, _meta: null });
+  const oversized = h.stderr.at(-1)!;
+  assert.match(oversized, /unsupported or malformed Codex MCP elicitation mode=z+…/);
+  assert.ok(oversized.length < 200, `diagnostic must stay bounded, got ${oversized.length} characters`);
+  assert.equal(h.events.length, eventsBeforeOversizedMode, "a malformed elicitation must not displace the parked approval");
+
+  // A non-primitive mode is never stringified in full: the provider controls its size.
+  assert.deepEqual(await requests.get("mcpServer/elicitation/request")!({
+    mode: { nested: "x".repeat(50_000) },
+    serverName: "Structured MCP",
+    threadId: "thread-diagnostic",
+    message: "Extended schema",
+  }, "object-mode"), { action: "cancel", content: null, _meta: null });
+  assert.equal(h.stderr.at(-1), "unsupported or malformed Codex MCP elicitation mode=[object] — cancelling it");
+
+  assert.equal(h.driver.resolvePermission("parked", "accept"), true);
+  assert.deepEqual(await parkedApproval, { decision: "accept" });
+});
+
+test("diagnosticValue bounds every provider-controlled shape", () => {
+  assert.equal(diagnosticValue(undefined), "?");
+  assert.equal(diagnosticValue(null), "?");
+  assert.equal(diagnosticValue("form"), "form");
+  assert.equal(diagnosticValue(7), "7");
+  assert.equal(diagnosticValue(["a".repeat(50_000)]), "[object]");
+  assert.equal(diagnosticValue("a".repeat(500)), `${"a".repeat(120)}…`);
 });

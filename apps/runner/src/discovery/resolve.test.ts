@@ -17,7 +17,7 @@ test("run distinguishes actual timeouts from max-buffer termination", async () =
   const overflow = await run(process.execPath, ["-e", "process.stdout.write('x'.repeat(4096))"], { maxBuffer: 32 });
   assert.equal(overflow.timedOut, undefined);
   assert.equal(overflow.errorCode, "ERR_CHILD_PROCESS_STDIO_MAXBUFFER");
-  assert.equal(interpretCodexAppServerProbe("0.144.1", overflow).failure?.code, "probe_failed");
+  assert.equal(interpretCodexAppServerProbe("0.147.0", overflow).failure?.code, "probe_failed");
 });
 
 test("sortVersionsDesc: numeric semver order, not lexicographic", () => {

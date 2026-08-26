@@ -8,6 +8,8 @@ import {
   BackgroundNotificationBadge,
   BackgroundWorkBadge,
   CopyButton,
+  ChangeStatusBadge,
+  SessionStatusIndicators,
   UntrackedBackgroundWorkBadge,
 } from "./common.js";
 
@@ -155,6 +157,58 @@ test("Untracked capability and push receipt badges expose honest Title Case boun
       ["Detached Work: Untracked", "Push Service Accepted", "Notification Displayed", "Notification Clicked"],
     );
     assert.match(container.querySelector(".background-work-untracked")?.getAttribute("title") ?? "", /cannot promise/i);
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
+
+test("session indicators preserve simultaneous lifecycle, attention, and change dimensions", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(<>
+        <SessionStatusIndicators disconnected session={{
+          status: "running",
+          pendingApproval: {
+            requestId: "question",
+            title: "Choose a database",
+            options: [],
+            kind: "question",
+          },
+        }} />
+        <ChangeStatusBadge change={{
+          kind: "ready_for_review",
+          label: "Ready for Review",
+          description: "Git confirms reviewable commits.",
+          supplement: {
+            kind: "uncommitted_changes",
+            label: "Uncommitted Changes",
+            description: "Git confirms additional local work outside the pull request.",
+          },
+        }} />
+      </>);
+    });
+    assert.match(container.textContent ?? "", /Running/);
+    assert.match(container.textContent ?? "", /Answer Required/);
+    assert.match(container.textContent ?? "", /Ready for Review/);
+    assert.match(container.textContent ?? "", /Uncommitted Changes/);
+    assert.match(container.textContent ?? "", /Disconnected/);
+    assert.equal(container.querySelector('[aria-label="Answer Required"]')?.textContent?.trim(), "Answer Required");
+    assert.equal(container.querySelector('[aria-label="Ready for Review"]')?.textContent?.trim(), "Ready for Review");
+    assert.equal(container.querySelector('[aria-label="Uncommitted Changes"]')?.textContent?.trim(), "Uncommitted Changes");
+    assert.equal(container.querySelectorAll(".change-status-indicators > .status-badge").length, 2,
+      "compact surfaces preserve both facts as separate badges");
+    const changeBadges = [...container.querySelectorAll(".change-status-indicators > .status-badge")];
+    assert.equal(changeBadges[0]?.classList.contains("st-done"), true,
+      "review readiness keeps its successful status tone and primary position");
+    assert.equal(changeBadges[1]?.classList.contains("st-idle"), true,
+      "uncommitted work keeps its neutral attention tone and supplemental position");
+    assert.equal(container.querySelector('[aria-label="Disconnected"]')?.textContent?.trim(), "Disconnected");
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();

@@ -6,7 +6,11 @@ import {
   type RunnerView,
 } from "@wollipog/protocol";
 import type { InboxSplit } from "../inbox.js";
-import { archiveSessionsWithCompensation, setArchivedForSessions } from "../archive-actions.js";
+import {
+  archiveSessionsWithCompensation,
+  sessionArchiveRequiresStop,
+  setArchivedForSessions,
+} from "../archive-actions.js";
 import { archiveProjectWithFeedback } from "../project-actions.js";
 import { useApi } from "../api-context.js";
 import { useFeedback } from "./FeedbackProvider.js";
@@ -19,6 +23,7 @@ export interface ProjectSplitMenuProps {
   split: InboxSplit;
   active?: boolean;
   runner: RunnerView | undefined;
+  stopBeforeArchiveSupported?: boolean;
   pinned: boolean;
   onPinnedChange: (pinned: boolean) => void;
   onNewSession: (preset: NewSessionPreset) => void;
@@ -30,6 +35,7 @@ export function ProjectSplitMenu({
   split,
   active = true,
   runner,
+  stopBeforeArchiveSupported = true,
   pinned,
   onPinnedChange,
   onNewSession,
@@ -58,6 +64,8 @@ export function ProjectSplitMenu({
   if (!durableProject && !legacyLocation) return null;
   const entityLabel = durableProject ? "Project" : "Workspace";
   const actionsLabel = `${entityLabel} Actions for ${split.name}`;
+  const archiveStopsRuntime = split.sessions.some((session) =>
+    sessionArchiveRequiresStop(session, stopBeforeArchiveSupported));
   const runnerId = durableLocation?.runnerId ?? legacyLocation?.runnerId ?? null;
   const workspaceId = durableLocation?.workspaceId ?? legacyLocation?.workspaceId ?? null;
   const canManageProject = durableProject?.canManage !== false;
@@ -160,9 +168,12 @@ export function ProjectSplitMenu({
     const sessionCount = durableProject ? split.count : sessionIds.length;
     if (sessionCount === 0) return;
     const accepted = await confirm({
-      title: `Archive ${sessionCount} Session${sessionCount === 1 ? "" : "s"}?`,
-      message: `Move every session in “${split.name}” to Archived?`,
-      confirmLabel: "Archive Sessions",
+      title: `${archiveStopsRuntime ? "Archive and stop" : "Archive"} ${sessionCount} session${sessionCount === 1 ? "" : "s"}?`,
+      message: archiveStopsRuntime
+        ? `Sessions will move to Archived Sessions after their runtimes stop. Queued work will be canceled and runtime capacity will be released.${durableProject ? " The server applies the same stop-before-archive rule to Project sessions that are not currently loaded." : ""} To keep work running outside the Inbox, use Snooze instead.`
+        : `Move every session in “${split.name}” to Archived. The server will still stop any session that can hold runtime capacity before archiving it.`,
+      confirmLabel: archiveStopsRuntime ? "Archive and Stop" : "Archive Sessions",
+      ...(archiveStopsRuntime ? { tone: "danger" as const } : {}),
     });
     if (!accepted) return;
     try {
@@ -192,7 +203,13 @@ export function ProjectSplitMenu({
           `Could not archive ${outcome.archiveFailures} session${outcome.archiveFailures === 1 ? "" : "s"}; ${outcome.rollbackFailures > 0 ? `${outcome.rollbackFailures} still need recovery` : "successful changes were rolled back"}.`,
         );
       }
-      showUndo(`${sessionIds.length} session${sessionIds.length === 1 ? "" : "s"} archived from ${split.name}.`, async () => {
+      const pendingCount = outcome.pendingSessionIds.length;
+      const failedCount = outcome.failedSessionIds.length;
+      showUndo(failedCount > 0
+        ? `${failedCount} session Stop${failedCount === 1 ? " has" : "s have"} failed in ${split.name}. Runtime capacity may still be held; use Retry Stop.`
+        : pendingCount > 0
+          ? `${pendingCount} session${pendingCount === 1 ? " is" : "s are"} waiting for runtime capacity to be released before archiving from ${split.name}.`
+        : `${sessionIds.length} session${sessionIds.length === 1 ? "" : "s"} archived from ${split.name}.`, async () => {
         const failures = await setArchivedForSessions(sessionIds, false, api.setArchived);
         if (failures > 0) throw new Error(`${failures} session${failures === 1 ? "" : "s"} could not be restored`);
       });
@@ -334,7 +351,7 @@ export function ProjectSplitMenu({
               title={archiveUnavailableReason ?? undefined}
               onClick={() => void archiveAll()}
             >
-              Archive All Sessions
+              {archiveStopsRuntime ? "Archive and Stop All Sessions" : "Archive All Sessions"}
             </button>
             {hasActionStatus && (
               <div id={statusId} className="inbox-project-location-status" role="note">

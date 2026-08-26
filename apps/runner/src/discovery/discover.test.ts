@@ -34,7 +34,7 @@ test("parseVersion falls back to the first line, or undefined when empty", () =>
 
 const SUPPORTED_APP_SERVER = {
   status: "supported" as const,
-  installedVersion: "0.144.1",
+  installedVersion: "0.147.0",
   appServerAvailable: true,
   transport: "stdio" as const,
   contractFingerprint: "contract",
@@ -42,7 +42,7 @@ const SUPPORTED_APP_SERVER = {
 
 test("supported Codex discovery emits app-server primary then stable exec compatibility target", () => {
   const native = codexAgentDefinitions(
-    cfg({ id: "codex", name: "Codex", driver: "codex", bin: "codex", version: "0.144.1", source: "discovered" }),
+    cfg({ id: "codex", name: "Codex", driver: "codex", bin: "codex", version: "0.147.0", source: "discovered" }),
     SUPPORTED_APP_SERVER,
     [{ name: "review", source: "user" }],
   );
@@ -593,7 +593,7 @@ test("verified app-server discovery enables steering on a matching config", () =
 test("explicit app-server config enriches from the primary without duplicating its launch", () => {
   const config = [cfg({ id: "my-interactive-codex", driver: "codex-app-server", command: "codex" })];
   const discovered = codexAgentDefinitions(
-    cfg({ id: "codex", name: "Codex", driver: "codex", command: "/usr/bin/codex", bin: "codex", source: "discovered", version: "0.144.1" }),
+    cfg({ id: "codex", name: "Codex", driver: "codex", command: "/usr/bin/codex", bin: "codex", source: "discovered", version: "0.147.0" }),
     SUPPORTED_APP_SERVER,
     [],
   );
@@ -602,14 +602,14 @@ test("explicit app-server config enriches from the primary without duplicating i
     ["my-interactive-codex", "codex-app-server"],
     ["codex-exec", "codex"],
   ]);
-  assert.equal(merged[0]!.version, "0.144.1");
+  assert.equal(merged[0]!.version, "0.147.0");
   assert.equal(merged[0]!.codexAppServer?.status, "supported");
 });
 
 test("explicit legacy exec config survives while the colliding primary gets an app-server id", () => {
   const config = [cfg({ id: "codex", name: "My Codex Exec", driver: "codex", command: "codex" })];
   const discovered = codexAgentDefinitions(
-    cfg({ id: "codex", name: "Codex", driver: "codex", command: "/usr/bin/codex", bin: "codex", source: "discovered", version: "0.144.1" }),
+    cfg({ id: "codex", name: "Codex", driver: "codex", command: "/usr/bin/codex", bin: "codex", source: "discovered", version: "0.147.0" }),
     SUPPORTED_APP_SERVER,
     [],
   );

@@ -1,6 +1,7 @@
 import { devices, expect, test, type Locator, type Page } from "@playwright/test";
 import { GLOBAL_VIEW_ITEMS, viewPath, type View } from "../src/navigation.js";
 import { MOBILE_PRIMARY_VIEWS } from "../src/components/Rail.js";
+import { KEYBOARD_DISMISS_BLUR_EVENT } from "../src/mobile-viewport.js";
 
 /**
  * The software keyboard, end to end.
@@ -499,7 +500,7 @@ test("every destination is painted with blocked and stalled sessions", async ({ 
  *
  * A pixel count cannot tell an inbox glyph from a rectangle — replacing every icon's path with
  * `<rect x="6.5" y="2.5" width="11" height="19" fill="currentColor"/>` clears every floor here
- * while reducing the bar to eight identical slabs. Proving each glyph is the RIGHT one needs
+ * while reducing the bar to nine identical slabs. Proving each glyph is the RIGHT one needs
  * committed per-icon baselines, which is a larger piece of work than this suite; proving they are
  * DISTINCT costs one comparison and rules out the whole family of mutations that collapses them,
  * which is what actually makes a tab bar unusable.
@@ -512,9 +513,9 @@ test("no two destinations render the same glyph", async ({ page }) => {
 
   const icons = page.locator(".rail-destinations > .rail-item > svg, .rail-more-item > svg");
   const count = await icons.count();
-  expect(count, "every destination must carry an icon").toBe(8);
-  // The MASK, not the screenshot. Comparing raw captures compares the backdrop too, so eight
-  // identical rectangles over eight `nth-child` background tints five levels apart differed by
+  expect(count, "every destination must carry an icon").toBe(GLOBAL_VIEW_ITEMS.length);
+  // The MASK, not the screenshot. Comparing raw captures compares the backdrop too, so nine
+  // identical rectangles over nine `nth-child` background tints five levels apart differed by
   // hundreds of pixels and passed. A mask holds only the positions the glyph itself paints, which
   // is what the difference measurement already isolates, so a backdrop cannot contribute to it.
   const masks: { key: string; positions: number[] }[] = [];
@@ -935,6 +936,249 @@ test("closing the keyboard puts everything back", async ({ page }) => {
   // back to `none` put the closed rail 100px below the screen with the whole suite green: every
   // keyboard-open assertion saw the override, and closing returned to the same off-screen place.
   await expectRailAt(page, 0);
+});
+
+/**
+ * The rail yields while the user is typing.
+ *
+ * A focused text field is when the software keyboard is up — on BOTH engine families, which no
+ * geometric signal covers: browsers honouring `interactive-widget=resizes-content` shrink the
+ * layout viewport and never publish `--keyboard-inset`, so a rule keyed on the inset would hide
+ * nothing on them. With the keyboard holding ~300px and the topbar 50px, the rail's 56px is a
+ * meaningful slice of what remains for the transcript, and no one is tapping navigation mid-word.
+ */
+test.describe("while a text field is focused", () => {
+  test("the rail is removed and the freed band goes to the content", async ({ page }) => {
+    await useHarness(page);
+    // The gate the rule hangs on. The Pixel 7 emulation reports a coarse pointer; if it stopped,
+    // every assertion below would pass vacuously against a rule that never applies in it.
+    expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches),
+      "this emulation must report the coarse pointer the rule is gated to").toBe(true);
+
+    await page.locator(".main-body textarea").focus();
+    await expect(page.locator(".app-rail")).toBeHidden();
+    // Removed, not merely invisible: `visibility: hidden` or `opacity: 0` satisfies toBeHidden
+    // while the 56px band still belongs to the rail. The content must reach the bottom edge.
+    const main = (await page.locator(".main").boundingBox())!;
+    const height = page.viewportSize()!.height;
+    expect(main.y + main.height, "the content must take over the band the rail held")
+      .toBeGreaterThan(height - 2);
+
+    await page.locator(".main-body textarea").blur();
+    await expectRailAt(page, 0);
+    await expectEveryPrimaryDestinationUsable(page);
+  });
+
+  test("blur while the inset is still published puts the rail on the occluded band", async ({ page }) => {
+    await useHarness(page);
+    await page.locator(".main-body textarea").focus();
+    await openKeyboard(page);
+    await expect(page.locator(".app-rail")).toBeHidden();
+    // The keyboard animates out AFTER blur, so for those frames the inset is still published with
+    // nothing focused. The returning rail must sit on the occluded band, not under it — hiding
+    // while typing does not repeal #207.
+    await page.locator(".main-body textarea").blur();
+    await expectRailAt(page, KEYBOARD);
+  });
+
+  test("a keyboard dismissed without blur gives the rail back", async ({ page }) => {
+    await useHarness(page);
+    // The blur must be ANNOUNCED as well as performed: composer focus recovery (SessionDetail)
+    // refocuses any unannounced background blur one frame later, and on Android that refocus
+    // re-summons the keyboard the user just collapsed.
+    await page.evaluate((eventName) => {
+      const w = window as unknown as { dismissAnnouncements: number };
+      w.dismissAnnouncements = 0;
+      window.addEventListener(eventName, () => { w.dismissAnnouncements += 1; });
+    }, KEYBOARD_DISMISS_BLUR_EVENT);
+    await page.locator(".main-body textarea").focus();
+    await openKeyboard(page);
+    await expect(page.locator(".app-rail")).toBeHidden();
+
+    // Android Back closes the keyboard and leaves the field focused — no blur event ever fires,
+    // so the focus-keyed rule alone would hold the navigation hidden over an empty band. The
+    // viewport growing back by a keyboard's height while a text field holds focus IS that
+    // dismissal, and the fallback answers it by blurring the field.
+    await applyViewport(page, () => page.evaluate(() => window.setKeyboard(0)));
+    await expect.poll(() => page.evaluate(() => document.activeElement === document.body),
+      { message: "the fallback must blur the field the dismissed keyboard belonged to" }).toBe(true);
+    expect(await page.evaluate(() => (window as unknown as { dismissAnnouncements: number }).dismissAnnouncements),
+      "exactly one announcement, exactly for the dismissal blur").toBe(1);
+    await expectRailAt(page, 0);
+    await expectEveryPrimaryDestinationUsable(page);
+  });
+
+  test("an animated dismissal accumulates to the blur", async ({ page }) => {
+    await useHarness(page);
+    await page.locator(".main-body textarea").focus();
+    await openKeyboard(page);
+    await expect(page.locator(".app-rail")).toBeHidden();
+
+    // A closing keyboard animates: several resize frames each growing less than any threshold,
+    // whose SUM is the keyboard. A detector comparing single-frame deltas never fires on this
+    // sequence and the field stays focused over an empty band — round 2's P1.
+    for (const remaining of [240, 180, 120, 60, 0]) {
+      await applyViewport(page, () => page.evaluate((step) => window.setKeyboard(step), remaining));
+    }
+    await expect.poll(() => page.evaluate(() => document.activeElement === document.body),
+      { message: "the accumulated growth must be read as the dismissal it is" }).toBe(true);
+    await expectRailAt(page, 0);
+  });
+
+  test("a partly-receded keyboard is not a dismissal", async ({ page }) => {
+    await useHarness(page);
+    await page.locator(".main-body textarea").focus();
+    // The visual-only engine family, where the bottom occlusion is a DIRECT keyboard signal. A
+    // 120px landscape keyboard recedes in same-width steps — 56, then to the last 20px, which is
+    // past every height threshold two earlier revisions released at (the peak band, then the
+    // shared 100px growth number). While ANY occlusion remains the keyboard is still there, and
+    // releasing blurred the field mid-word.
+    await openKeyboard(page, 120);
+    await expect(page.locator(".app-rail")).toBeHidden();
+    await applyViewport(page, () => page.evaluate(() => window.setKeyboard(64)));
+    expect(await page.evaluate(() => document.activeElement?.tagName),
+      "a partly-receded keyboard must not steal focus from the field").toBe("TEXTAREA");
+    await expect(page.locator(".app-rail")).toBeHidden();
+    await applyViewport(page, () => page.evaluate(() => window.setKeyboard(20)));
+    expect(await page.evaluate(() => document.activeElement?.tagName),
+      "the last 20px of keyboard must still hold the release").toBe("TEXTAREA");
+    await expect(page.locator(".app-rail")).toBeHidden();
+
+    // The real dismissal afterwards still lands: the occlusion is gone.
+    await applyViewport(page, () => page.evaluate(() => window.setKeyboard(0)));
+    await expect.poll(() => page.evaluate(() => document.activeElement === document.body),
+      { message: "the genuine dismissal after the partial recessions must still blur" }).toBe(true);
+    await expectRailAt(page, 0);
+  });
+
+  test("chrome collapse interleaved with a live keyboard is not a dismissal", async ({ page }) => {
+    await useHarness(page);
+    await page.locator(".main-body textarea").focus();
+    // Round 5's construction: a 140px keyboard, then 100px of chrome collapsing WHILE its
+    // accessory row gives back 20px. Total same-width growth from the lowest armed height is 120
+    // — a keyboard's worth, so every height predicate reads a dismissal — but chrome moves both
+    // viewports together and cancels out of the occlusion, which still shows 120px of keyboard.
+    await openKeyboard(page, 140);
+    await expect(page.locator(".app-rail")).toBeHidden();
+    await applyViewport(page, () => page.evaluate(() => window.shiftChrome(100)));
+    expect(await page.evaluate(() => document.activeElement?.tagName),
+      "chrome collapse must not steal focus from the field").toBe("TEXTAREA");
+    await applyViewport(page, () => page.evaluate(() => window.setKeyboard(20)));
+    expect(await page.evaluate(() => document.activeElement?.tagName),
+      "keyboard-scale growth that is really chrome plus accessory row must not release").toBe("TEXTAREA");
+    await expect(page.locator(".app-rail")).toBeHidden();
+
+    // The genuine dismissal, with the chrome still collapsed: the visual viewport meets the
+    // (shifted) layout viewport and the occlusion reads zero.
+    await applyViewport(page, () => page.evaluate(() => window.setKeyboard(-100)));
+    await expect.poll(() => page.evaluate(() => document.activeElement === document.body),
+      { message: "the dismissal under collapsed chrome must still blur" }).toBe(true);
+  });
+
+  test("a fully panned keyboard is not a dismissal", async ({ page }) => {
+    await useHarness(page);
+    await page.locator(".main-body textarea").focus();
+    await openKeyboard(page);
+    await expect(page.locator(".app-rail")).toBeHidden();
+
+    // Panning toward the focused field can drive the BOTTOM GAP inside the noise floor with the
+    // keyboard fully open — the height never grew, only the origin moved. Reading the residual
+    // gap alone as closure blurred the field just as the user started typing.
+    await applyViewport(page, () => page.evaluate(() => window.panKeyboard(295)));
+    expect(await page.evaluate(() => document.activeElement?.tagName),
+      "a panned-away bottom gap must not read as a dismissal").toBe("TEXTAREA");
+    await expect(page.locator(".app-rail")).toBeHidden();
+
+    // The genuine dismissal restores both the height and the origin.
+    await applyViewport(page, () => page.evaluate(() => window.setKeyboard(0)));
+    await expect.poll(() => page.evaluate(() => document.activeElement === document.body),
+      { message: "the unpanned dismissal must still blur" }).toBe(true);
+    await expectRailAt(page, 0);
+  });
+
+  test("the resizes-content family still blurs on a dismissal", async ({ page }) => {
+    await useHarness(page);
+    await page.locator(".main-body textarea").focus();
+    // The engine family that shrinks the LAYOUT viewport with the keyboard: no occlusion is ever
+    // published, so the height predicates are the only release path this family can take —
+    // deleting them strands every Android Back dismissal with the suite otherwise green.
+    await applyViewport(page, () => page.evaluate(() => window.setLayoutKeyboard(300)));
+    await expectInset(page, "");
+    await expect(page.locator(".app-rail")).toBeHidden();
+    // A partial recovery — the accessory row hiding — is not the dismissal.
+    await applyViewport(page, () => page.evaluate(() => window.setLayoutKeyboard(250)));
+    expect(await page.evaluate(() => document.activeElement?.tagName),
+      "a partial layout-viewport recovery must not steal focus").toBe("TEXTAREA");
+
+    await applyViewport(page, () => page.evaluate(() => window.setLayoutKeyboard(0)));
+    await expect.poll(() => page.evaluate(() => document.activeElement === document.body),
+      { message: "the layout-viewport dismissal must blur without any occlusion signal" }).toBe(true);
+    await expectRailAt(page, 0);
+  });
+
+  test("growth with no keyboard behind it is not a dismissal", async ({ page }) => {
+    await useHarness(page);
+    await page.locator(".main-body textarea").focus();
+    await expect(page.locator(".app-rail")).toBeHidden();
+
+    // Same-width growth alone: a split-screen pane being enlarged while composing. No keyboard
+    // was ever open — nothing shrank first — so blurring here would dismiss the real keyboard
+    // and interrupt the user for a window change they made on purpose.
+    await applyViewport(page, () => page.evaluate(() =>
+      window.resizeViewport(window.innerWidth, window.innerHeight + 150)));
+    expect(await page.evaluate(() => document.activeElement?.tagName),
+      "growth the keyboard cannot explain must not steal focus").toBe("TEXTAREA");
+    await expect(page.locator(".app-rail")).toBeHidden();
+  });
+
+  test("a rotation is not read as a keyboard dismissal", async ({ page }) => {
+    await useHarness(page);
+    await page.locator(".main-body textarea").focus();
+    await openKeyboard(page);
+
+    // Rotating with the keyboard up also grows the height past the close threshold — landscape
+    // to portrait is hundreds of pixels — but it moves the WIDTH too, which a keyboard cannot.
+    // Blurring here would dismiss the keyboard mid-word; the field must keep focus and the rail
+    // must stay yielded.
+    await applyViewport(page, () => page.evaluate(() => window.resizeViewport(915, 892)));
+    expect(await page.evaluate(() => document.activeElement?.tagName),
+      "a rotation must not steal focus from the field").toBe("TEXTAREA");
+    await expect(page.locator(".app-rail")).toBeHidden();
+  });
+
+  test("focus that summons no keyboard leaves the rail in place", async ({ page }) => {
+    await useHarness(page);
+    // A checkbox holds focus after a tap and opens nothing; hiding on it strands the navigation
+    // hidden until the user happens to focus something else.
+    await page.locator(".main-body input[type=checkbox]").focus();
+    await expectRailAt(page, 0);
+    // A read-only text input likewise: production's Share Link field is one, tapped exactly to
+    // select and copy — no keyboard appears and no viewport event would ever restore the rail.
+    await page.locator(".main-body input[readonly]").focus();
+    await expectRailAt(page, 0);
+    // The rail's own destinations too: a selector loosened to `.app:has(:focus)` removes the bar
+    // in response to the user reaching for it.
+    await page.locator(".rail-destinations > .rail-item").first().focus();
+    await expectRailAt(page, 0);
+    await expectEveryPrimaryDestinationUsable(page);
+  });
+});
+
+/**
+ * The same width without the touch emulation, which is a narrow DESKTOP window: no software
+ * keyboard exists there, so focusing the composer must not cost the navigation.
+ */
+test.describe("with a fine pointer", () => {
+  test.use({ hasTouch: false, isMobile: false });
+
+  test("a narrow desktop window keeps its rail while typing", async ({ page }) => {
+    await useHarness(page);
+    expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches),
+      "without touch emulation this context must report a fine pointer").toBe(false);
+    await page.locator(".main-body textarea").focus();
+    await expectRailAt(page, 0);
+    await expectEveryPrimaryDestinationUsable(page);
+  });
 });
 
 /**

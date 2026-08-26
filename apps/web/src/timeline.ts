@@ -1,6 +1,7 @@
 import type {
   AgentQuestion,
   ApprovalContext,
+  AuthoritativeSubagentLifecycle,
   EventPayloadReference,
   GovernanceReviewer,
   PermissionOption,
@@ -10,6 +11,7 @@ import type {
   ReviewRiskLevel,
   SessionCommandExecutionMode,
   SessionEvent,
+  StructuredRequestResolutionReason,
 } from "@wollipog/protocol";
 
 
@@ -70,7 +72,7 @@ export type TimelineItem =
       /** Runner-recorded authoritative final, when the provider emits one. */
       completedAt?: number;
     }
-  | { kind: "command_output"; id: number; sourceEndId?: number; text: string; textRefs?: EventPayloadReference[] }
+  | { kind: "command_output"; id: number; sourceEndId?: number; text: string; textRefs?: EventPayloadReference[]; parentToolUseId?: string }
   | { kind: "stderr"; id: number; sourceEndId?: number; text: string; textRefs?: EventPayloadReference[] }
   | {
       kind: "tool_call";
@@ -83,6 +85,8 @@ export type TimelineItem =
       referencedText?: Array<{ preview: string; refs: EventPayloadReference[] }>;
       /** The Task tool call that spawned this one (v26+); absent ⇒ a top-level call. */
       parentToolUseId?: string;
+      /** Provider-observed lifecycle that remains independent of foreground session state. */
+      subagentLifecycle?: AuthoritativeSubagentLifecycle;
       /** Subagent items nested under this Task call — populated only by nestSubagents(). */
       children?: TimelineItem[];
       /** Event timestamps keep duration available even when the provider has no explicit metric. */
@@ -113,6 +117,7 @@ export type TimelineItem =
       title: string;
       options: PermissionOption[];
       resolvedOptionId?: string | null;
+      resolutionReason?: StructuredRequestResolutionReason;
       context?: ApprovalContext;
     }
   | {
@@ -122,6 +127,7 @@ export type TimelineItem =
       questions: AgentQuestion[];
       /** undefined = still pending; true = answered; false = dismissed. */
       answered?: boolean;
+      resolutionReason?: StructuredRequestResolutionReason;
     }
   | { kind: "checkpoint"; id: number; turn: number }
   | { kind: "checkpoint_restored"; id: number; turn: number }
@@ -211,7 +217,14 @@ export function groupTimeline(items: TimelineItem[]): TimelineGroup[] {
 }
 
 /** Item kinds a subagent emits, which the recursive projection may re-parent under an agent tool. */
-const NESTABLE_CHILD_KINDS = new Set(["agent_message", "agent_thought", "tool_call", "plan", "file_edit"]);
+const NESTABLE_CHILD_KINDS = new Set([
+  "agent_message",
+  "agent_thought",
+  "command_output",
+  "tool_call",
+  "plan",
+  "file_edit",
+]);
 
 type ToolItem = Extract<TimelineItem, { kind: "tool_call" }>;
 
@@ -377,6 +390,9 @@ export class TimelineBuilder {
   // subagent's). tool ids are globally unique, so toolIndex needs no such scoping.
   private readonly fileIndex = new Map<string, number>();
   private readonly permIndex = new Map<string, number>();
+  /** Authentication recovery may rotate request ids while one provider-owned recovery remains
+   * active. Keep that episode anchored to its first transcript row; only a resolution ends it. */
+  private activeAuthenticationIndex: number | null = null;
   private readonly planIndex = new Map<string, number>();
   private readonly pendingSubagentRollups = new Map<string, SubagentRollup>();
   private activeUserIndex: number | null = null;
@@ -591,7 +607,7 @@ export class TimelineBuilder {
         }) - 1);
         break;
       case "command_output":
-        this.pushText("command_output", ev.seq, p.text, undefined, undefined, undefined, p.textRefs);
+        this.pushText("command_output", ev.seq, p.text, undefined, p.parentToolUseId, undefined, p.textRefs);
         break;
       case "stderr":
         if (p.runnerMarker === "background_continuation_delivery") {
@@ -603,6 +619,10 @@ export class TimelineBuilder {
       case "background_continuation_delivered":
         // Durable control-plane evidence; the visible assistant result is represented by the
         // preceding agent-message chunks.
+        this.breakText();
+        break;
+      case "agent_response_completed":
+        // Completion evidence wakes reminders without replaying transcript content.
         this.breakText();
         break;
       case "tool_call": {
@@ -623,6 +643,9 @@ export class TimelineBuilder {
               referencedText: [...(item.referencedText ?? []), { preview: p.text ?? "", refs: p.textRefs }],
             } : {}),
             parentToolUseId: item.parentToolUseId ?? p.parentToolUseId,
+            ...((p.subagentLifecycle ?? item.subagentLifecycle)
+              ? { subagentLifecycle: p.subagentLifecycle ?? item.subagentLifecycle }
+              : {}),
             ...(activityAt != null ? { lastActivityAt: activityAt } : {}),
           };
           if (isTerminalToolStatus(p.status) && activityAt != null) updated.completedAt = activityAt;
@@ -642,6 +665,7 @@ export class TimelineBuilder {
             text: p.text ?? "",
             ...(p.textRefs?.length ? { referencedText: [{ preview: p.text ?? "", refs: p.textRefs }] } : {}),
             parentToolUseId: p.parentToolUseId,
+            ...(p.subagentLifecycle ? { subagentLifecycle: p.subagentLifecycle } : {}),
             ...(Number.isFinite(ev.ts) ? { startedAt: ev.ts, lastActivityAt: ev.ts } : {}),
             ...(isTerminalToolStatus(p.status) && Number.isFinite(ev.ts) ? { completedAt: ev.ts } : {}),
             subagentRollup: this.pendingSubagentRollups.get(p.toolCallId),
@@ -667,6 +691,9 @@ export class TimelineBuilder {
               referencedText: [...(it.referencedText ?? []), { preview: p.text ?? "", refs: p.textRefs }],
             } : {}),
             parentToolUseId: it.parentToolUseId ?? p.parentToolUseId,
+            ...((p.subagentLifecycle ?? it.subagentLifecycle)
+              ? { subagentLifecycle: p.subagentLifecycle ?? it.subagentLifecycle }
+              : {}),
             ...(activityAt != null ? { lastActivityAt: activityAt } : {}),
             subagentRollup: isTerminalToolStatus(p.status) && it.startedAt != null
               ? { ...it.subagentRollup, durationMs: it.subagentRollup?.durationMs ?? Math.max(0, (activityAt ?? it.startedAt) - it.startedAt) }
@@ -688,6 +715,7 @@ export class TimelineBuilder {
               text: p.text ?? "",
               ...(p.textRefs?.length ? { referencedText: [{ preview: p.text ?? "", refs: p.textRefs }] } : {}),
               parentToolUseId: p.parentToolUseId,
+              ...(p.subagentLifecycle ? { subagentLifecycle: p.subagentLifecycle } : {}),
               ...(Number.isFinite(ev.ts) ? { startedAt: ev.ts, lastActivityAt: ev.ts } : {}),
               ...(isTerminalToolStatus(p.status) && Number.isFinite(ev.ts) ? { completedAt: ev.ts } : {}),
               subagentRollup: this.pendingSubagentRollups.get(p.toolCallId),
@@ -789,7 +817,27 @@ export class TimelineBuilder {
       }
       case "permission_request": {
         this.breakText();
-        const i =
+        const indexed = this.permIndex.get(p.requestId);
+        const authIndex = p.purpose === "authentication" ? this.activeAuthenticationIndex : null;
+        const i = indexed ?? authIndex;
+        if (i != null && this.items[i]?.kind === "permission") {
+          const prior = this.items[i];
+          if (prior.requestId !== p.requestId) this.permIndex.delete(prior.requestId);
+          this.items[i] = {
+            ...prior,
+            requestId: p.requestId,
+            title: p.title,
+            options: p.options,
+            context: p.context,
+            resolvedOptionId: undefined,
+            resolutionReason: undefined,
+          };
+          this.permIndex.set(p.requestId, i);
+          if (p.purpose === "authentication") this.activeAuthenticationIndex = i;
+          this.markDirty(i);
+          break;
+        }
+        const appended =
           this.items.push({
             kind: "permission",
             id: ev.seq,
@@ -798,15 +846,18 @@ export class TimelineBuilder {
             options: p.options,
             context: p.context,
           }) - 1;
-        this.permIndex.set(p.requestId, i);
-        this.markDirty(i);
+        this.permIndex.set(p.requestId, appended);
+        if (p.purpose === "authentication") this.activeAuthenticationIndex = appended;
+        this.markDirty(appended);
         break;
       }
       case "permission_resolved": {
         const idx = this.permIndex.get(p.requestId);
         if (idx != null) {
           const it = this.items[idx] as Extract<TimelineItem, { kind: "permission" }>;
-          this.items[idx] = { ...it, resolvedOptionId: p.optionId };
+          this.items[idx] = { ...it, resolvedOptionId: p.optionId, resolutionReason: p.resolutionReason };
+          this.permIndex.delete(p.requestId);
+          if (this.activeAuthenticationIndex === idx) this.activeAuthenticationIndex = null;
           this.markDirty(idx);
         }
         break;
@@ -823,7 +874,7 @@ export class TimelineBuilder {
         const idx = this.permIndex.get(p.requestId);
         if (idx != null && this.items[idx]!.kind === "question") {
           const it = this.items[idx] as Extract<TimelineItem, { kind: "question" }>;
-          this.items[idx] = { ...it, answered: p.answered };
+          this.items[idx] = { ...it, answered: p.answered, resolutionReason: p.resolutionReason };
           this.markDirty(idx);
         }
         break;

@@ -67,6 +67,22 @@ test("notification dispatch preserves frame order around a response in one chunk
   }
 });
 
+test("an oversized stdout record is isolated and the next JSON-RPC response still resolves", async () => {
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  const transportErrors: string[] = [];
+  const peer = new JsonRpcPeer(stdin, stdout, (err) => transportErrors.push(err.message), 128);
+  const response = peer.request("survive_noise");
+  const sent = JSON.parse(String(stdin.read()).trim());
+
+  stdout.write("x".repeat(128));
+  stdout.write("one-byte-overflow");
+  stdout.write(`\n${JSON.stringify({ jsonrpc: "2.0", id: sent.id, result: "alive" })}\n`);
+
+  assert.deepEqual(transportErrors, ["discarded oversized JSON-RPC stdout record"]);
+  assert.equal(await response, "alive");
+});
+
 test("request() rejects immediately once the peer is disposed (no hang)", async () => {
   const { peer } = makePeer();
   peer.dispose("process exited");
@@ -113,5 +129,22 @@ test("an async writable error rejects every in-flight request", async () => {
     assert.match(String(err.message), /connection closed/);
     assert.equal(err.transportFailure, true);
     return true;
+  });
+});
+
+test("incoming request handlers receive the provider correlation id", async () => {
+  const { peer, stdin, stdout } = makePeer();
+  let seen: unknown;
+  peer.onRequest("ask", (params, requestId) => {
+    seen = { params, requestId };
+    return { accepted: true };
+  });
+  stdout.write(JSON.stringify({ jsonrpc: "2.0", id: "provider-7", method: "ask", params: { value: 1 } }) + "\n");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(seen, { params: { value: 1 }, requestId: "provider-7" });
+  assert.deepEqual(JSON.parse(String(stdin.read()).trim()), {
+    jsonrpc: "2.0",
+    id: "provider-7",
+    result: { accepted: true },
   });
 });

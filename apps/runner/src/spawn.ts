@@ -21,8 +21,6 @@ import { encodeWindowsJobSpec } from "./windows-job.js";
 const isWindows = process.platform === "win32";
 /** Runner policy switches are daemon input and must never become agent input. */
 const RUNNER_ONLY_ENV = [
-  "WOLLIPOG_CONDUCTOR",
-  "MAM_CONDUCTOR",
   "WOLLIPOG_CLAUDE_HOOKS",
   "MAM_CLAUDE_HOOKS",
   "WOLLIPOG_POLICY_HOOK_CP_URL",

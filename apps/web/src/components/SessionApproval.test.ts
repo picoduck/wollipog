@@ -32,10 +32,31 @@ test("question choices expose labelled radio and checkbox semantics with one rad
     ],
   }));
   assert.match(html, /role="radiogroup" aria-labelledby=/);
+  assert.match(html, /role="radiogroup"[^>]*aria-describedby="[^"]+-requirement-0"[^>]*aria-required="true"/);
   assert.equal((html.match(/role="radio"/g) ?? []).length, 2);
   assert.equal((html.match(/role="checkbox"/g) ?? []).length, 2);
-  assert.equal((html.match(/role="radio" aria-checked="false" tabindex="0"/g) ?? []).length, 1);
-  assert.equal((html.match(/role="radio" aria-checked="false" tabindex="-1"/g) ?? []).length, 1);
+  assert.equal((html.match(/role="radio"[^>]*aria-checked="false"[^>]*tabindex="0"/g) ?? []).length, 1);
+  assert.equal((html.match(/role="radio"[^>]*aria-checked="false"[^>]*tabindex="-1"/g) ?? []).length, 1);
+});
+
+test("unsupported multi-select Other questions hide the unusable field and disable Submit", () => {
+  const html = renderToStaticMarkup(React.createElement(SessionQuestionBanner, {
+    sessionId: "s1",
+    requestId: "ask-unsupported",
+    runnerOnline: true,
+    questions: [{
+      id: "features",
+      question: "Choose features or add another",
+      multiSelect: true,
+      allowOther: true,
+      options: [{ label: "Audit" }],
+    }],
+  }));
+
+  assert.doesNotMatch(html, /class="input question-input"/);
+  assert.match(html, /This question format is unsupported\. Dismiss the question to continue\./);
+  assert.match(html, /<button[^>]*disabled=""[^>]*>Submit<\/button>/);
+  assert.match(html, /role="checkbox"/);
 });
 
 test("approval key hints appear only for one unambiguous one-time option", () => {
@@ -84,3 +105,57 @@ for (const selector of [
     assert.match(html, new RegExp(`<dt>${selector.label}</dt><dd>${selector.value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}</dd>`));
   });
 }
+
+test("provider form questions render context and constrained free-text controls", () => {
+  const html = renderToStaticMarkup(React.createElement(SessionQuestionBanner, {
+    sessionId: "s-form",
+    requestId: "ask-form",
+    runnerOnline: true,
+    questions: [
+      {
+        id: "token",
+        header: "Token",
+        question: "Enter the temporary token",
+        context: "Deploy MCP: Choose deployment settings",
+        options: [],
+        allowOther: true,
+        secret: true,
+        maxLength: 120,
+      },
+      {
+        id: "retries",
+        header: "Retries",
+        question: "How many retries?",
+        context: "Retry policy for the deployment",
+        options: [],
+        allowOther: true,
+        inputFormat: "integer",
+        minimum: 1,
+        maximum: 5,
+      },
+      {
+        id: "note",
+        header: "Note",
+        question: "Optional note",
+        context: "This note is stored with the deployment",
+        options: [],
+        allowOther: true,
+        required: false,
+      },
+    ],
+  }));
+  assert.match(html, /Deploy MCP: Choose deployment settings/);
+  assert.match(html, /Retry policy for the deployment/);
+  assert.match(html, /This note is stored with the deployment/);
+  assert.equal((html.match(/class="question-context"/g) ?? []).length, 3);
+  assert.match(html, /<span[^>]*>Response<\/span>/);
+  assert.match(html, /type="password"[^>]*maxLength="120"/);
+  assert.match(html, /type="number"[^>]*inputMode="numeric"[^>]*step="1"[^>]*min="1"[^>]*max="5"/);
+  assert.match(html, /<span class="muted sm"> \(optional\)<\/span>/);
+  assert.match(html, /aria-labelledby="[^"]+-question-0 [^"]+-response-0"/);
+  assert.match(html, /aria-labelledby="[^"]+-question-1 [^"]+-response-1"/);
+  assert.match(html, /aria-labelledby="[^"]+-question-2 [^"]+-response-2"/);
+  assert.equal((html.match(/aria-required="true" required=""/g) ?? []).length, 2);
+  assert.equal((html.match(/aria-required="false"/g) ?? []).length, 1);
+  assert.equal((html.match(/aria-describedby="[^"]+-context-[0-2] [^"]+-requirement-[0-2]"/g) ?? []).length, 3);
+});

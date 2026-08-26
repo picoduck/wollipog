@@ -163,8 +163,8 @@ test("sequence matching completes inside 600ms and cancels on mismatch, timeout,
 test("PR2 Inbox shortcuts are registered under the Inbox scope", () => {
   const expected = [
     "inbox-next", "inbox-previous", "inbox-expand", "inbox-next-split", "inbox-previous-split",
-    "inbox-approve", "inbox-deny", "inbox-archive", "inbox-pin", "inbox-unread", "inbox-reply",
-    "inbox-page-down", "inbox-page-up", "inbox-follow-latest", "inbox-follow-latest-end",
+    "inbox-approve", "inbox-deny", "inbox-archive", "inbox-snooze", "inbox-pin", "inbox-unread",
+    "inbox-reply", "inbox-page-down", "inbox-page-up", "inbox-follow-latest", "inbox-follow-latest-end",
   ];
   assert.deepEqual(SHORTCUTS.filter((item) => item.scope === "Inbox").map((item) => item.id), expected);
   assert.equal(SHORTCUTS.filter((item) => expected.includes(item.id)).every((item) => item.group === "Inbox"), true);
@@ -180,7 +180,8 @@ test("Session Reading shortcuts are registered in their contextual reference gro
     "session-reading-page-down", "session-reading-page-up",
     "session-reading-start", "session-reading-latest", "session-reading-latest-end",
     "session-reading-next-session", "session-reading-previous-session",
-    "session-reading-approve", "session-reading-deny", "session-reading-archive", "session-reading-reply",
+    "session-reading-approve", "session-reading-deny", "session-reading-archive",
+    "session-reading-snooze", "session-reading-reply",
   ];
   const reading = SHORTCUTS.filter((item) => item.scope === "Session Reading");
   assert.deepEqual(reading.map((item) => item.id), expected);
@@ -203,6 +204,7 @@ test("PR4 rail, search, create, and focus-zone shortcuts replace the retired sid
     ["navigate-automations", "6"],
     ["navigate-usage", "7"],
     ["navigate-connections", "8"],
+    ["navigate-archived", "9"],
     ["focus-inbox-search", "/"],
     ["new-session", "c"],
     ["focus-next-zone", "F6"],
@@ -212,6 +214,8 @@ test("PR4 rail, search, create, and focus-zone shortcuts replace the retired sid
 });
 
 test("global rail numbering stays aligned with its navigation shortcuts", () => {
+  // null = past the nine bare digit keys: the destination exists but no number is advertised.
+  // The rail's RAIL_SHORTCUT_DIGITS gate keeps its keycaps aligned with this same boundary.
   const shortcutIdByView = {
     inbox: "navigate-inbox",
     projects: "navigate-projects",
@@ -221,9 +225,16 @@ test("global rail numbering stays aligned with its navigation shortcuts", () => 
     automations: "navigate-automations",
     usage: "navigate-usage",
     runners: "navigate-connections",
+    archived: "navigate-archived",
+    skills: null,
   } as const;
   for (const [index, item] of GLOBAL_VIEW_ITEMS.entries()) {
-    assert.equal(shortcut(shortcutIdByView[item.name]).binding.key, String(index + 1), item.name);
+    const id = shortcutIdByView[item.name];
+    if (id === null) {
+      assert.ok(index >= 9, `${item.name} has no digit shortcut, so it must sit past the numbered nine`);
+      continue;
+    }
+    assert.equal(shortcut(id).binding.key, String(index + 1), item.name);
   }
 });
 

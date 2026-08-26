@@ -375,6 +375,16 @@ export function deriveHost(
   return { kind: "local", label: "Local", detail: runner?.hostname ?? session.runnerId };
 }
 
+/** Legacy pinned cards use status for every overlapping local repository fact once that faster
+ * read settles. Summary remains the initial fallback because its later completion can reflect
+ * forge latency rather than a fresher repository sample. */
+export function legacyLocalGitFacts(
+  status: GitStatusInfo | null,
+  summary: GitSummaryInfo | null,
+): GitStatusInfo | GitSummaryInfo | null {
+  return status ?? summary;
+}
+
 /** The Changes row model: line totals when they're meaningful, else a changed-file-count
  * fallback. Accepts either a GitStatusInfo or a GitSummaryInfo. */
 export type ChangesRow = { kind: "lines"; added: number; deleted: number } | { kind: "files"; count: number | null };

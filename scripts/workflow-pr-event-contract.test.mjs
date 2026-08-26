@@ -9,6 +9,7 @@ const WORKFLOWS = [
   ".github/workflows/desktop-native.yml",
   ".github/workflows/platform-isolation.yml",
 ];
+const RELEASE_WORKFLOW = ".github/workflows/release.yml";
 
 const EXPECTED_PULL_REQUEST_TYPES = ["opened", "synchronize", "reopened", "ready_for_review"];
 const EXPECTED_GROUP_TEMPLATE =
@@ -159,6 +160,80 @@ test("PR workflows share the ready-for-review concurrency contract", () => {
     new Set(contracts.map(({ jobGuard }) => jobGuard)).size,
     1,
     "job guards must remain identical across PR workflows",
+  );
+});
+
+test("PR workflows keep least-privilege permissions and an always-present required check", () => {
+  for (const path of WORKFLOWS) {
+    const text = readFileSync(resolve(process.cwd(), path), "utf8");
+    assert.match(
+      text,
+      /^permissions:\r?\n  contents: read$/m,
+      `${path}: expected explicit read-only contents permission`,
+    );
+  }
+
+  const ci = readFileSync(resolve(process.cwd(), WORKFLOWS[0]), "utf8");
+  assert.match(
+    ci,
+    /^    name: Typecheck, Test & Sidecar Bundle$/m,
+    `${WORKFLOWS[0]}: job name is a protected required status context`,
+  );
+  assert.doesNotMatch(
+    ci,
+    /^\s+paths-ignore:/m,
+    `${WORKFLOWS[0]}: path filters can suppress the required status check`,
+  );
+});
+
+test("workflow actions use immutable commit pins", () => {
+  for (const path of [...WORKFLOWS, RELEASE_WORKFLOW]) {
+    const text = readFileSync(resolve(process.cwd(), path), "utf8");
+    const actionRefs = [...text.matchAll(/^\s*(?:-\s*)?uses:\s*([^\s#]+)/gm)].map(
+      (match) => match[1],
+    );
+
+    assert.notEqual(actionRefs.length, 0, `${path}: expected at least one action reference`);
+    for (const actionRef of actionRefs) {
+      assert.match(
+        actionRef,
+        /^[^@\s]+@[0-9a-f]{40}$/,
+        `${path}: action reference must use a full commit SHA: ${actionRef}`,
+      );
+    }
+  }
+});
+
+test("CI validates production builds and caches the pinned Playwright browser", () => {
+  const ci = readFileSync(resolve(process.cwd(), WORKFLOWS[0]), "utf8");
+
+  assert.match(
+    ci,
+    /^      - name: Validate Web Production Build\r?\n        run: pnpm --filter @wollipog\/web build$/m,
+    "CI must exercise the web production build",
+  );
+  assert.match(
+    ci,
+    /^      - name: Validate Runner Bundle\r?\n        run: pnpm --filter @wollipog\/runner exec node scripts\/build-binary\.mjs --bundle-only$/m,
+    "CI must exercise the runner esbuild bundle",
+  );
+  assert.match(
+    ci,
+    /^      - name: Resolve Playwright Version\r?\n        id: playwright-version\r?\n        run: \|\r?\n          playwright_version="\$\(pnpm exec playwright --version\)"\r?\n          echo "version=\$\{playwright_version#Version \}" >> "\$GITHUB_OUTPUT"$/m,
+    "the cache key must derive from the installed pinned Playwright version",
+  );
+  assert.match(
+    ci,
+    /^      - name: Cache Playwright Browser\r?\n        id: playwright-cache\r?\n        uses: actions\/cache@[0-9a-f]{40}[^\r\n]*\r?\n        with:\r?\n          path: ~\/\.cache\/ms-playwright\r?\n          key: \$\{\{ runner\.os \}\}-playwright-\$\{\{ steps\.playwright-version\.outputs\.version \}\}$/m,
+    "CI must cache Playwright's browser directory by OS and exact version",
+  );
+  assert.match(
+    ci,
+    /^      - name: Install Playwright Browser\r?\n        if: steps\.playwright-cache\.outputs\.cache-hit != 'true'\r?\n        run: pnpm exec playwright install --with-deps chromium$/m,
+  );
+  assert.match(
+    ci,
+    /^      - name: Install Playwright System Dependencies\r?\n        if: steps\.playwright-cache\.outputs\.cache-hit == 'true'\r?\n        run: pnpm exec playwright install-deps chromium$/m,
   );
 });
 

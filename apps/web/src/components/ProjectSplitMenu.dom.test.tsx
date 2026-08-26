@@ -128,7 +128,7 @@ test("project split menu is fixed, keyboard-managed, and restores trigger focus"
       new domWindow.KeyboardEvent("keydown", { key: "End", bubbles: true }),
     );
   });
-  assert.equal(domWindow.document.activeElement?.textContent?.trim(), "Archive All Sessions");
+  assert.equal(domWindow.document.activeElement?.textContent?.trim(), "Archive and Stop All Sessions");
   await act(async () => {
     domWindow.document.activeElement?.dispatchEvent(
       new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
@@ -157,7 +157,11 @@ test("project actions preserve presets, pin state, rename, reveal, and compensat
     },
     setArchived: async (sessionId: string, value: boolean) => {
       archived.push([sessionId, value]);
-      return session(sessionId);
+      return {
+        ...session(sessionId),
+        status: "stopped" as const,
+        archiveStatus: sessionId === "session-1" ? "stop_failed" as const : "stop_pending" as const,
+      };
     },
   } as ApiClient;
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
@@ -207,10 +211,13 @@ test("project actions preserve presets, pin state, rename, reveal, and compensat
   assert.deepEqual(renamed, [["runner-1", "workspace-1", "Renamed Project"]]);
 
   await openMenu(container);
-  await act(async () => { button(container, "Archive All Sessions").click(); await tick(); });
-  await act(async () => { button(container, "Archive Sessions").click(); await tick(); await tick(); });
+  await act(async () => { button(container, "Archive and Stop All Sessions").click(); await tick(); });
+  assert.match(container.textContent ?? "", /Archive and stop 2 sessions\?/);
+  assert.match(container.textContent ?? "", /runtime capacity will be released/);
+  assert.match(container.textContent ?? "", /use Snooze instead/);
+  await act(async () => { button(container, "Archive and Stop").click(); await tick(); await tick(); });
   assert.deepEqual(archived, [["session-1", true], ["session-2", true]]);
-  assert.match(container.textContent ?? "", /2 sessions archived from Project One/);
+  assert.match(container.textContent ?? "", /1 session Stop has failed in Project One. Runtime capacity may still be held; use Retry Stop/);
 
   await act(async () => { root.unmount(); });
   container.remove();
@@ -601,7 +608,7 @@ test("durable Project archive is atomic, restores only changed sessions, and hon
   await render(false);
   await openMenu(container);
   assert.equal(button(container, "Rename Project").disabled, true);
-  assert.equal(button(container, "Archive All Sessions").disabled, true);
+  assert.equal(button(container, "Archive and Stop All Sessions").disabled, true);
   const permissionStatus = domWindow.document.querySelector('[role="note"]') as unknown as HTMLElement;
   assert.match(permissionStatus.textContent ?? "", /Project Management: Project management permission is required\./);
   assert.equal(domWindow.document.querySelector('[role="menu"]')?.getAttribute("aria-describedby"), permissionStatus.id);
@@ -609,9 +616,11 @@ test("durable Project archive is atomic, restores only changed sessions, and hon
 
   await render(true);
   await openMenu(container);
-  await act(async () => { button(container, "Archive All Sessions").click(); await tick(); });
-  assert.match(container.textContent ?? "", /Archive 2 Sessions\?/);
-  await act(async () => { button(container, "Archive Sessions").click(); await tick(); await tick(); });
+  await act(async () => { button(container, "Archive and Stop All Sessions").click(); await tick(); });
+  assert.match(container.textContent ?? "", /Archive and stop 2 sessions\?/);
+  assert.match(container.textContent ?? "", /server applies the same stop-before-archive rule/);
+  assert.match(container.textContent ?? "", /use Snooze instead/);
+  await act(async () => { button(container, "Archive and Stop").click(); await tick(); await tick(); });
   assert.deepEqual(archivedProjects, ["project-1"]);
   assert.match(container.textContent ?? "", /2 sessions archived from Project One/);
   await act(async () => { button(container, "Undo").click(); await tick(); await tick(); });
@@ -622,8 +631,8 @@ test("durable Project archive is atomic, restores only changed sessions, and hon
     return { project, sessions: [] };
   };
   await openMenu(container);
-  await act(async () => { button(container, "Archive All Sessions").click(); await tick(); });
-  await act(async () => { button(container, "Archive Sessions").click(); await tick(); await tick(); });
+  await act(async () => { button(container, "Archive and Stop All Sessions").click(); await tick(); });
+  await act(async () => { button(container, "Archive and Stop").click(); await tick(); await tick(); });
   assert.deepEqual(archivedProjects, ["project-1", "project-1"]);
   assert.match(container.textContent ?? "", /Sessions archived from Project One\. Exact undo is unavailable/);
 

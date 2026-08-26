@@ -51,6 +51,7 @@ function makeHarness(deliver: boolean | "none") {
   if (deliver !== "none") {
     const stub = {
       resolvePermission: () => deliver,
+      answerQuestion: () => deliver,
       cancel: () => {},
       dispose: () => {},
       prompt: () => Promise.resolve("end_turn" as const),
@@ -82,6 +83,7 @@ test("delivered approval emits exactly one permission_resolved and flips box met
     sm.resolvePermission("s_perm", "req-1", "allow");
     const resolved = eventsOf(sent, "permission_resolved");
     assert.equal(resolved.length, 1);
+    assert.equal((resolved[0] as { payload: { resolutionReason?: string } }).payload.resolutionReason, "submitted");
     assert.equal(store.readMeta("s_perm")!.status, "running");
   } finally {
     cleanup();
@@ -106,6 +108,163 @@ test("approval turnaround telemetry contains duration and dimensions, never sess
     assert.ok((telemetry.durationMs ?? -1) >= 0);
     const wire = JSON.stringify(telemetry);
     assert.doesNotMatch(wire, /s_perm|secret-request-id|sensitive command/);
+  } finally {
+    cleanup();
+  }
+});
+
+test("an explicit Cancel option records cancelled telemetry and a dismissed lifecycle reason", () => {
+  const { sm, sent, cleanup } = makeHarness(true);
+  try {
+    (sm as any).emitEvent("s_perm", {
+      kind: "permission_request",
+      requestId: "req-cancel-option",
+      title: "approval",
+      options: [{ optionId: "cancel", name: "Cancel", kind: "cancel" }],
+    });
+    sm.resolvePermission("s_perm", "req-cancel-option", "cancel");
+    const telemetry = sent.find(
+      (message) => message.type === "driver_telemetry" && message.metric === "approval",
+    );
+    assert.ok(telemetry && telemetry.type === "driver_telemetry");
+    assert.equal(telemetry.outcome, "cancelled");
+    const resolved = eventsOf(sent, "permission_resolved");
+    assert.equal(resolved.length, 1);
+    assert.deepEqual((resolved[0] as { payload: unknown }).payload, {
+      kind: "permission_resolved",
+      requestId: "req-cancel-option",
+      optionId: "cancel",
+      resolutionReason: "dismissed",
+    });
+  } finally {
+    cleanup();
+  }
+});
+
+test("a delivered Cancel remains dismissed after its approval card was cleared", () => {
+  const { sm, sent, store, cleanup } = makeHarness(true);
+  try {
+    (sm as any).emitEvent("s_perm", {
+      kind: "permission_request",
+      requestId: "req-cleared-cancel",
+      title: "approval",
+      options: [{ optionId: "choice", name: "Cancel", kind: "cancel" }],
+    });
+    store.patchMeta("s_perm", { pendingApproval: null, status: "idle" });
+
+    sm.resolvePermission("s_perm", "req-cleared-cancel", "choice");
+
+    const telemetry = sent.find(
+      (message) => message.type === "driver_telemetry" && message.metric === "approval",
+    );
+    assert.ok(telemetry && telemetry.type === "driver_telemetry");
+    assert.equal(telemetry.outcome, "cancelled");
+    assert.deepEqual((eventsOf(sent, "permission_resolved").at(-1) as { payload: unknown }).payload, {
+      kind: "permission_resolved",
+      requestId: "req-cleared-cancel",
+      optionId: "choice",
+      resolutionReason: "dismissed",
+    });
+  } finally {
+    cleanup();
+  }
+});
+
+test("a delivered Cancel uses its own semantics when another approval card is current", () => {
+  const { sm, sent, store, cleanup } = makeHarness(true);
+  try {
+    (sm as any).emitEvent("s_perm", {
+      kind: "permission_request",
+      requestId: "req-original-cancel",
+      title: "original approval",
+      options: [{ optionId: "shared-choice", name: "Cancel", kind: "cancel" }],
+    });
+    store.patchMeta("s_perm", {
+      pendingApproval: {
+        requestId: "req-current-allow",
+        title: "current approval",
+        options: [{ optionId: "shared-choice", name: "Allow", kind: "allow_once" }],
+      },
+      status: "input_required",
+    });
+
+    sm.resolvePermission("s_perm", "req-original-cancel", "shared-choice");
+
+    const telemetry = sent.find(
+      (message) => message.type === "driver_telemetry" && message.metric === "approval",
+    );
+    assert.ok(telemetry && telemetry.type === "driver_telemetry");
+    assert.equal(telemetry.outcome, "cancelled");
+    assert.deepEqual((eventsOf(sent, "permission_resolved").at(-1) as { payload: unknown }).payload, {
+      kind: "permission_resolved",
+      requestId: "req-original-cancel",
+      optionId: "shared-choice",
+      resolutionReason: "dismissed",
+    });
+  } finally {
+    cleanup();
+  }
+});
+
+test("delivered allow and reject options do not borrow Cancel semantics from another card", () => {
+  for (const [optionKind, expectedOutcome] of [
+    ["allow_always", "allowed"],
+    ["reject_once", "denied"],
+  ] as const) {
+    const { sm, sent, store, cleanup } = makeHarness(true);
+    try {
+      (sm as any).emitEvent("s_perm", {
+        kind: "permission_request",
+        requestId: `req-original-${optionKind}`,
+        title: "original approval",
+        options: [{ optionId: "shared-choice", name: "Choose", kind: optionKind }],
+      });
+      store.patchMeta("s_perm", {
+        pendingApproval: {
+          requestId: "req-current-cancel",
+          title: "current approval",
+          options: [{ optionId: "shared-choice", name: "Cancel", kind: "cancel" }],
+        },
+        status: "input_required",
+      });
+
+      sm.resolvePermission("s_perm", `req-original-${optionKind}`, "shared-choice");
+
+      const telemetry = sent.find(
+        (message) => message.type === "driver_telemetry" && message.metric === "approval",
+      );
+      assert.ok(telemetry && telemetry.type === "driver_telemetry");
+      assert.equal(telemetry.outcome, expectedOutcome);
+      const resolved = eventsOf(sent, "permission_resolved").at(-1) as {
+        payload: { resolutionReason?: string };
+      };
+      assert.equal(resolved.payload.resolutionReason, "submitted");
+    } finally {
+      cleanup();
+    }
+  }
+});
+
+test("explicit question dismissal records cancelled telemetry and a dismissed lifecycle reason", () => {
+  const { sm, sent, cleanup } = makeHarness(true);
+  try {
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request",
+      requestId: "question-dismiss",
+      questions: [{ id: "note", question: "Optional note", options: [], required: false }],
+    });
+    sm.answerQuestion("s_perm", "question-dismiss", {}, "dismiss");
+    const telemetry = sent.find(
+      (message) => message.type === "driver_telemetry" && message.metric === "approval",
+    );
+    assert.ok(telemetry && telemetry.type === "driver_telemetry");
+    assert.equal(telemetry.outcome, "cancelled");
+    assert.deepEqual((eventsOf(sent, "question_resolved")[0] as { payload: unknown }).payload, {
+      kind: "question_resolved",
+      requestId: "question-dismiss",
+      answered: false,
+      resolutionReason: "dismissed",
+    });
   } finally {
     cleanup();
   }

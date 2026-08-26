@@ -6,23 +6,24 @@ import {
   BoardIcon,
   ConnectionsIcon,
   InboxIcon,
+  FolderSolidIcon,
   MoreHorizontalIcon,
-  PlusIcon,
   PodsIcon,
   ProjectsIcon,
   RunsIcon,
+  SkillsIcon,
   UsageIcon,
 } from "./Icons.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { useIsMobile } from "./useIsMobile.js";
+import { experimentForViewName } from "../experiments.js";
+import { useExperiments } from "../use-experiments.js";
 
 /**
  * The four destinations that stay on the phone tab bar. Everything else moves behind "More".
  *
- * Eight destinations at 44px plus the instance, New Session, and Settings controls measured 536px
- * of content in a 375px viewport — so those last three sat entirely off-screen, in a bar whose
- * scrollbars are hidden, with the New Session keyboard shortcut disabled on mobile. There was no
- * discoverable way to start a session on a phone. Five items is the platform convention.
+ * Eight destinations at 44px plus the instance and Settings controls exceeded a 375px viewport.
+ * Five items is the platform convention; creation is owned by the Inbox toolbar.
  */
 export const MOBILE_PRIMARY_VIEWS: readonly GlobalViewName[] = ["inbox", "projects", "board", "runners"];
 
@@ -35,7 +36,13 @@ const VIEW_ICONS: Record<GlobalViewName, (props: { size?: number; className?: st
   automations: AutomationsIcon,
   usage: UsageIcon,
   runners: ConnectionsIcon,
+  archived: FolderSolidIcon,
+  skills: SkillsIcon,
 };
+
+/** The bare digit shortcuts stop at 9. A destination past that limit gets no number, because the
+ * number IS the advertised binding and a "(10)" keycap names a key that cannot be pressed. */
+const RAIL_SHORTCUT_DIGITS = 9;
 
 const RAIL_ICON_SIZE = 26;
 
@@ -52,7 +59,6 @@ export function Rail({
   stalledCount,
   onlineConnections,
   onNavigate,
-  onNewSession,
   instanceControl,
   settingsControl,
 }: {
@@ -61,7 +67,6 @@ export function Rail({
   stalledCount: number;
   onlineConnections: number;
   onNavigate: (view: View) => void;
-  onNewSession: () => void;
   instanceControl?: ReactNode;
   /** Omitted on mobile, where the topbar owns these controls (see the note by .rail-spacer). */
   settingsControl?: ReactNode;
@@ -109,11 +114,19 @@ export function Rail({
     });
   }, [isMobile, moreOpen, more]);
 
+  // Filtered before the mobile split so a hidden experiment is absent from BOTH the primary bar
+  // and the More sheet. The Ctrl+N numbers stay anchored to the canonical list below, so hiding
+  // a destination never renumbers the survivors' advertised shortcuts.
+  const { flags } = useExperiments();
+  const enabledItems = GLOBAL_VIEW_ITEMS.filter((item) => {
+    const experiment = experimentForViewName(item.name);
+    return experiment === null || flags[experiment];
+  });
   const visibleItems = isMobile
-    ? GLOBAL_VIEW_ITEMS.filter((item) => MOBILE_PRIMARY_VIEWS.includes(item.name))
-    : GLOBAL_VIEW_ITEMS;
+    ? enabledItems.filter((item) => MOBILE_PRIMARY_VIEWS.includes(item.name))
+    : enabledItems;
   const overflowItems = isMobile
-    ? GLOBAL_VIEW_ITEMS.filter((item) => !MOBILE_PRIMARY_VIEWS.includes(item.name))
+    ? enabledItems.filter((item) => !MOBILE_PRIMARY_VIEWS.includes(item.name))
     : [];
   // A destination hidden behind More still has to read as current, or the bar looks like nothing
   // is selected while the user is standing on Usage.
@@ -139,7 +152,8 @@ export function Rail({
           // Anchored to the canonical list, not the filtered one: the number IS the Ctrl+N
           // shortcut, so renumbering it on mobile would advertise a binding that does not exist.
           const index = GLOBAL_VIEW_ITEMS.findIndex((entry) => entry.name === item.name);
-          const shortcutSuffix = isMobile ? "" : ` (${index + 1})`;
+          const shortcutDigit = index < RAIL_SHORTCUT_DIGITS ? index + 1 : null;
+          const shortcutSuffix = isMobile || shortcutDigit === null ? "" : ` (${shortcutDigit})`;
           const Icon = VIEW_ICONS[item.name];
           const active = selected === item.name;
           const badge = item.name === "runners" ? onlineConnections : 0;
@@ -171,7 +185,9 @@ export function Rail({
                 <span className="rail-badge stalled" aria-hidden="true">{stalledCount}</span>
               )}
               {item.name === "runners" && badge > 0 && <span className="rail-badge" aria-hidden="true">{badge}</span>}
-              {!isMobile && <span className="rail-number" aria-hidden="true">{index + 1}</span>}
+              {!isMobile && shortcutDigit !== null && (
+                <span className="rail-number" aria-hidden="true">{shortcutDigit}</span>
+              )}
             </a>
           );
         })}
@@ -251,23 +267,15 @@ export function Rail({
         </span>
       </div>
       <div className="rail-spacer" />
-      {/* On a phone the instance switcher, New Session, and Settings move to the TOPBAR (see
-          App.tsx). They are not in the More sheet and not a floating button, both of which were
+      {/* On a phone the instance switcher and Settings move to the TOPBAR (see App.tsx).
+          They are not in the More sheet and not floating buttons, both of which were
           tried and reviewed out:
             - Nested inside a role="menu" sheet, InstanceSelector and SettingsDialog bubbled their
               own Tab/Escape into the outer roving controller, so one Tab tore down both layers and
               one Escape peeled two — and neither control was reachable by keyboard at all, since
               only the destination links carried a menuitem role.
-            - A floating action button lands in the 68-120px band above the bottom edge, which is
-              inside an open shell dock and underneath the phone toast stack, so a persistent toast
-              could indefinitely cover the only mobile way to start a session.
           The topbar is a fixed, uncontested strip that no overlay occupies. */}
       {!isMobile && instanceControl && <div className="rail-instance">{instanceControl}</div>}
-      {!isMobile && (
-        <button type="button" className="rail-item rail-action" onClick={onNewSession} title="New Session (C)" aria-label="New Session (C)">
-          <PlusIcon size={RAIL_ICON_SIZE} />
-        </button>
-      )}
       {!isMobile && <div className="rail-settings">{settingsControl}</div>}
     </nav>
   );

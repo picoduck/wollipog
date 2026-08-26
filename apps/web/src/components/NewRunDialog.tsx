@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { type BoxView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
+import { useExperiments } from "../use-experiments.js";
 import { useStore } from "../store.js";
 import { AgentIcon } from "./AgentIcon.js";
 import {
@@ -73,6 +74,9 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
 
   const [runnerId, setRunnerId] = useState(projectsSupported ? "" : online[0]?.runnerId ?? "");
   const runner = runners.get(runnerId);
+  // The conductor orchestrator is offered only behind the device-local experiment; the plain
+  // agent lists exclude it via agentOptions' default.
+  const conductorEnabled = useExperiments().flags.conductor;
   const options = useMemo(() => agentOptions(runner?.agents ?? []), [runner?.agents]);
   const primaryOptions = useMemo(() => primaryAgentOptions(options).filter((option) => !option.disabled), [options]);
   const advancedOptions = useMemo(() => advancedAgentOptions(options).filter((option) => !option.disabled), [options]);
@@ -193,7 +197,7 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
     ? projectAudienceVisibilitySummary(selectedProject.audience)
     : null;
   const workflowHasExternalConductor = mode === "workflow"
-    && conductorAgentId(runner?.agents ?? []) !== undefined
+    && conductorEnabled && conductorAgentId(runner?.agents ?? []) !== undefined
     && selectedProject?.audience !== "organization";
   const projectVisibilityCopy = projectSelection === NO_PROJECT_SELECTION
     ? "This run will use the selected folder without being added to a Project."
@@ -239,7 +243,7 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
             title: title.trim() || undefined,
             useWorktree: true,
             agentBindings,
-            orchestratorAgentId: conductorAgentId(runner?.agents ?? []),
+            orchestratorAgentId: conductorEnabled ? conductorAgentId(runner?.agents ?? []) : undefined,
           });
       navigate({ name: "run", id: run.id });
       onClose();
@@ -291,7 +295,7 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
           <p className="muted">
             {mode === "parallel"
               ? "The same task runs against every selected agent, each in its own isolated worktree, so you can compare results side by side."
-              : conductorAgentId(runner?.agents ?? [])
+              : conductorEnabled && conductorAgentId(runner?.agents ?? [])
                 ? "Workers start idle. The conductor receives the workflow instance and advances only the graph's ready roles."
                 : "Workers start idle. Use the workflow controls in the run or an existing conductor to advance ready roles."}
           </p>

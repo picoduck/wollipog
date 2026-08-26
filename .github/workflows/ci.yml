@@ -6,15 +6,12 @@ name: CI
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-    paths-ignore:
-      - "docs/**"
-      - "**/*.md"
   push:
     branches: [main]
-    paths-ignore:
-      - "docs/**"
-      - "**/*.md"
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
   # A draft synchronize event can be delivered after ready_for_review. Keep stale
@@ -28,13 +25,13 @@ jobs:
     name: Typecheck, Test & Sidecar Bundle
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
 
       - name: Setup Node 24
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
           cache: pnpm
@@ -48,11 +45,38 @@ jobs:
       - name: Unit Tests
         run: pnpm test
 
+      - name: Resolve Playwright Version
+        id: playwright-version
+        run: |
+          playwright_version="$(pnpm exec playwright --version)"
+          echo "version=${playwright_version#Version }" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright Browser
+        id: playwright-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
+
       - name: Install Playwright Browser
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
         run: pnpm exec playwright install --with-deps chromium
+
+      - name: Install Playwright System Dependencies
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: pnpm exec playwright install-deps chromium
 
       - name: Remote-Instance Browser End-to-End Tests
         run: pnpm test:e2e
+
+      - name: Validate Web Production Build
+        run: pnpm --filter @wollipog/web build
+
+      # esbuild-only pass (build-binary.mjs --bundle-only): proves the runner and its
+      # dependencies still bundle into one CJS file. Skips SEA/postject packaging, so no
+      # rustc or target triple is needed here.
+      - name: Validate Runner Bundle
+        run: pnpm --filter @wollipog/runner exec node scripts/build-binary.mjs --bundle-only
 
       # esbuild-only pass (build-sidecar.mjs --bundle-only): proves the control plane and
       # its deps still bundle into one CJS file. Skips the SEA/postject/Tauri steps, so no

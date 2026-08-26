@@ -89,6 +89,21 @@ Describe effects on credentials, authentication, networks, shells, filesystems, 
 stored data, upgrades, or mixed-version deployments. Write `None` when no boundary changes.
 ```
 
+## Approval Preview Formatting
+
+When an agent presents the exact issue payload for approval, it must preserve both the body text and
+its Markdown structure:
+
+- Do not enclose the body in a fixed-length fenced code block. Prefer presenting it as rendered
+  Markdown under a clearly labeled **Body** section.
+- When a literal-source fence is useful, choose an outer fence delimiter longer than every
+  consecutive run of that delimiter character in the body. For example, use four backticks around
+  a body containing triple-backtick code fences. Use the same delimiter for the opening and closing
+  fence.
+- Verify before requesting approval that headings, lists, and embedded code fences remain within
+  the body preview. Presentation fencing must not escape, rewrite, or otherwise change the payload
+  that will be published.
+
 ## Agent Publication Gate
 
 Before an agent publishes an issue, it must show the exact sanitized repository, title, body, and

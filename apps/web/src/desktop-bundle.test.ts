@@ -41,6 +41,22 @@ test("the packaging flag is actually set by the packaging path", () => {
     "the Tauri build must go through the script that sets the flag, not the plain web build");
 });
 
+test("desktop content security policies allow the Browser panel's supported external previews", () => {
+  const conf = JSON.parse(readFileSync(fileURLToPath(new URL("../../desktop/src-tauri/tauri.conf.json", import.meta.url)), "utf8")) as {
+    app?: { security?: { csp?: string; devCsp?: string } };
+  };
+  for (const [name, policy] of Object.entries({
+    csp: conf.app?.security?.csp,
+    devCsp: conf.app?.security?.devCsp,
+  })) {
+    assert.match(
+      policy ?? "",
+      /(?:^|;\s*)frame-src 'self' http:\/\/localhost:\* http:\/\/127\.0\.0\.1:\* https:(?:;|$)/,
+      `${name} must preserve same-origin frames and permit loopback HTTP and HTTPS without arbitrary HTTP frames`,
+    );
+  }
+});
+
 test("the flag is read from the environment, exactly", () => {
   assert.equal(isDesktopBuild({ [DESKTOP_BUILD_ENV]: "1" }), true);
   assert.equal(isDesktopBuild({}), false, "an ordinary web build keeps its PWA assets");

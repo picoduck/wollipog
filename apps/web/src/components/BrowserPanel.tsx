@@ -113,7 +113,7 @@ export function BrowserPanel({ session }: { session: SessionView }) {
             <>
               <div className="browser-web-actions">
                 <span className="muted sm" title={url}>{new URL(url).host}</span>
-                <button className="btn ghost sm" type="button" onClick={() => window.open(url, "_blank", "noopener,noreferrer")}>Open Externally</button>
+                <a className="btn ghost sm" href={url} target="_blank" rel="noopener noreferrer">Open Externally</a>
               </div>
               <iframe
                 key={url}

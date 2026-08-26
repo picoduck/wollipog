@@ -1,3 +1,5 @@
+import type { ExperimentFlags, ExperimentId } from "./experiments.js";
+
 export type ShortcutId =
   | "search"
   | "navigate-inbox"
@@ -8,6 +10,7 @@ export type ShortcutId =
   | "navigate-automations"
   | "navigate-usage"
   | "navigate-connections"
+  | "navigate-archived"
   | "open-settings"
   | "focus-inbox-search"
   | "new-session"
@@ -27,6 +30,7 @@ export type ShortcutId =
   | "inbox-approve"
   | "inbox-deny"
   | "inbox-archive"
+  | "inbox-snooze"
   | "inbox-pin"
   | "inbox-unread"
   | "inbox-reply"
@@ -46,6 +50,7 @@ export type ShortcutId =
   | "session-reading-approve"
   | "session-reading-deny"
   | "session-reading-archive"
+  | "session-reading-snooze"
   | "session-reading-reply"
   | "steer-turn"
   | "stop-turn"
@@ -149,6 +154,14 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     description: "Open Connections",
     scope: "Global",
     binding: { key: "8", bare: true },
+  },
+  {
+    id: "navigate-archived",
+    group: "Navigation",
+    label: "Archived Sessions",
+    description: "Open Archived Sessions",
+    scope: "Global",
+    binding: { key: "9", bare: true },
   },
   {
     id: "open-settings",
@@ -305,6 +318,14 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     binding: { key: "e", bare: true },
   },
   {
+    id: "inbox-snooze",
+    group: "Inbox",
+    label: "Snooze Session",
+    description: "Schedule or edit a reminder for the selected session",
+    scope: "Inbox",
+    binding: { key: "h", bare: true },
+  },
+  {
     id: "inbox-pin",
     group: "Inbox",
     label: "Pin Session",
@@ -457,6 +478,14 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     binding: { key: "e", bare: true },
   },
   {
+    id: "session-reading-snooze",
+    group: "Session Reading",
+    label: "Snooze Session",
+    description: "Schedule or edit a reminder for this session",
+    scope: "Session Reading",
+    binding: { key: "h", bare: true },
+  },
+  {
     id: "session-reading-reply",
     group: "Session Reading",
     label: "Reply to Session",
@@ -596,6 +625,16 @@ export function advanceShortcutSequence(
   return { matched: false, state: { index: index + 1, expiresAt: now + windowMs } };
 }
 
+/** Shortcuts whose feature can be switched off in Settings → Experimental. Their handlers all
+ * live inside the gated surfaces, so the binding is already dead when the flag is off — this
+ * mapping exists so the reference says why instead of advertising a working key. */
+const EXPERIMENT_SHORTCUT_IDS: Partial<Record<ShortcutId, ExperimentId>> = {
+  "navigate-runs": "multiAgent",
+  "submit-run": "multiAgent",
+  "navigate-pods": "pods",
+  "relay-pod-note": "pods",
+};
+
 export function shortcutUnavailableReason(
   definition: ShortcutDefinition,
   context: {
@@ -604,8 +643,13 @@ export function shortcutUnavailableReason(
     filesSupported: boolean;
     conversationSteeringSupported?: boolean;
     turnInterruptionSupported?: boolean;
+    experimentFlags?: ExperimentFlags;
   },
 ): string | null {
+  const experiment = EXPERIMENT_SHORTCUT_IDS[definition.id];
+  if (experiment && context.experimentFlags && !context.experimentFlags[experiment]) {
+    return "Turned off in Settings → Experimental";
+  }
   if ((definition.scope === "Session" || definition.scope === "Session Reading") && !context.sessionOpen) {
     return "Open a session to use this binding";
   }

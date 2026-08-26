@@ -183,7 +183,21 @@ a CLI self-update changes capabilities without a runner restart.
 Cloud-provider flags follow Claude's documented credential precedence ahead of direct API/OAuth
 configuration: [Claude Code authentication](https://code.claude.com/docs/en/team#authentication-precedence).
 
-### 2.2 Spawn command and persistent process
+### 2.2 Effective Model and Effort
+
+Before launching a session that advertises both model and reasoning-effort controls, Wollipog
+resolves and persists a concrete pair. Explicit selections win, followed by a concrete
+harness-advertised default, then the preferred driver pair (Claude Opus 5 with High effort or
+GPT-5.6 Sol with High effort), then a deterministic compatible advertised fallback. Unsupported
+persisted values are healed on the next configuration change or prompt. If no compatible concrete
+pair exists, submission is rejected with a rediscovery or selection hint instead of launching an
+ambiguous Default.
+
+The resolved values are passed explicitly to the driver and shown in both the composer control and
+pinned summary. Effort names use presentation labels such as **Extra High** rather than raw tokens
+such as `xhigh`.
+
+### 2.3 Spawn command and persistent process
 
 The default is one persistent process per session. The `WOLLIPOG_CLAUDE_PERSISTENT=0` circuit breaker
 uses one process per turn with this base argv:
@@ -196,8 +210,10 @@ claude -p \
   --effort <discovered-level> \                 # from DriverConfig.effort (omit if unset)
 ```
 
-plus per-mode flags (`claudePermissionArgs`; runtime default is `acceptEdits` when
-`permissionMode` is unset):
+plus per-mode flags (`claudePermissionArgs`). New non-conductor sessions persist `auto` when the
+connected installation advertises it, or `acceptEdits` as the compatibility fallback. Existing
+sessions whose persisted `permissionMode` is unset retain the driver's `acceptEdits` fallback and
+are not migrated automatically:
 
 | `permissionMode` | extra argv | prompt delivery |
 |---|---|---|
@@ -317,7 +333,7 @@ The lifetime policy is quiescence-aware and fail-safe:
 - All three lifetime controls are runner-only and are scrubbed from native, WSL, and standalone
   TUI child environments.
 
-### 2.2.1 Per-session policy hook transport
+### 2.3.1 Per-session policy hook transport
 
 `WOLLIPOG_CLAUDE_HOOKS=1` enables the default-off Phase 3 transport for native Claude Code agents in
 fixed-rule permission modes (`acceptEdits`, `plan`, and `bypassPermissions`) after the connected
@@ -387,7 +403,7 @@ This rollout follows Anthropic's documented Agent SDK streaming-input contract w
 CLI transport and subscription authentication unchanged. It does not migrate to the TypeScript SDK;
 that decision remains Phase 2.5.
 
-### 2.3 Turn I/O (stdin/stdout JSONL)
+### 2.4 Turn I/O (stdin/stdout JSONL)
 
 - In default mode, one process runs per turn (`--session-id` on turn 1, `--resume` after). In
   persistent mode the same input/output process spans result boundaries until eviction, config
@@ -400,7 +416,7 @@ that decision remains Phase 2.5.
 - **Slash commands**: include `/name [args]` directly in `content` — `-p` expands it before running.
 - Parse stdout line-by-line as JSONL (reuse the line-buffering approach from `jsonrpc.ts`'s `onData`).
 
-### 2.4 stream-json output → SessionEventPayload mapping
+### 2.5 stream-json output → SessionEventPayload mapping
 
 | claude stream-json event | fields read | → `SessionEventPayload` |
 |---|---|---|
@@ -418,7 +434,7 @@ that decision remains Phase 2.5.
 | `control_request` (`subtype:"can_use_tool"`) | `request_id`, `request.tool_name`, `request.description`, `request.input` | `{kind:"permission_request", requestId, title:"<tool_name>: <description ≤80>", options:[allow_once,reject_once]}` (input stashed for the reply) |
 | `control_request` (unrecognized subtype) | `request_id` | no event — stderr canary + auto-decline `subtype:"error"` control_response |
 
-### 2.4.1 Provider Authentication Recovery
+### 2.5.1 Provider Authentication Recovery
 
 Native Claude and Codex sessions run provider-native status checks in the runner's exact launch
 context. The runner strips daemon-only environment variables with the same policy as the provider
@@ -433,8 +449,10 @@ may retry once only when failure occurred before provider creation; the retry to
 before enqueue. Uncertain turns and terminalized durable commands are never retried automatically.
 
 Use **Recheck Authentication** after completing `claude auth login` or `codex login` in the exact
-Machine and provider context described on the card. **Start Sign-In** remains fail-closed until
-issue #17/PR42's cross-process provider-home ownership lease is available on this branch. Configured
+Machine and provider context described on the card. **Start Sign-In** remains fail-closed even though the
+cross-process provider-home lease is available: the login path does not yet acquire that lease for
+its freshly resolved isolation, supervise and cancel a correlated provider child, or protect
+credential roots overridden outside HOME. Configured
 environment credentials and WSL remain revalidation/manual-login only. Container/cloud adapters do
 not yet expose an exact-context status probe, so they keep the process-local fail-closed behavior and
 do not claim durable recovery.
@@ -451,7 +469,7 @@ message, thought, tool/update, plan, file edit, and historical transcript record
 spawning `parentToolUseId`; the web resolves the full chain with orphan/cycle protection. Parented
 usage and provider duration are optional v31 fields. Tool timestamps provide a duration fallback.
 
-### 2.5 Approvals mapping
+### 2.6 Approvals mapping
 
 | our `optionId` | `control_response` written to stdin |
 |---|---|
@@ -485,7 +503,7 @@ Localhost works native and WSL-mirrored; on WSL-NAT the approver is disabled and
 fixed-rule `--permission-mode` (surfaced as a capabilities downgrade). Never a per-distro stdio MCP
 child — that needs a Linux-side node plus an env side channel `spawn.ts` cannot deliver.
 
-### 2.6 Model / effort / continuation
+### 2.7 Model / effort / continuation
 
 - **Model**: `--model` per spawn. Resolved model reported back in `result.modelUsage`.
 - **Effort**: `--effort` per spawn; availability is model-dependent (UI gates). Unsupported level
@@ -495,7 +513,7 @@ child — that needs a Linux-side node plus an env side channel `spawn.ts` canno
 - **Continuation across runner restarts**: persist the pinned `session_id`; resume with
   `--resume <id>` from the same cwd.
 
-### 2.7 Conversation fork and file rewind
+### 2.8 Conversation fork and file rewind
 
 Discovery exposes conversation fork only when the resolved Claude installation advertises
 `--fork-session`. The provider-neutral fork operation creates the target worktree from the exact
@@ -530,15 +548,31 @@ wire). It is the only surface with **interactive approvals**, so it is the defau
 
 Discovery runs `app-server --help` through the already-resolved native or WSL launch target and
 records an additive `AgentDefinition.codexAppServer` result. Supported means the CLI version is at
-least the repository's verified floor (`0.144.1`) and the bounded probe exposes app-server, stdio,
+least the repository's verified floor (`0.147.0`) and the bounded probe exposes app-server, stdio,
 and JSON-schema generation. Older, timed-out, missing, or contract-incompatible installations keep
 the exec driver and surface a structured fallback reason. Pre-v27 runners omit the result.
 
 The floor is deliberately a **verified floor**, not a claim that older Codex versions cannot run
 app-server: official docs publish the current protocol and per-version schema generator but no
 minimum CLI release. `pnpm check:codex-schema` generates the installed CLI's schema into a temporary
-directory and compares required stable request/notification properties against the pinned fixture.
-Additive fields are tolerated; removal or shape loss produces a focused drift report.
+directory and compares the pinned fixture against it. Additive fields are tolerated; removal or
+shape loss produces a focused drift report.
+
+The fixture pins the **consumed surface**, not the whole generated schema: every required property,
+request variant, and enum value the driver reads or sends. That includes both supported
+`mcpServer/elicitation/request` modes (identified by their `mode` discriminator rather than a
+variant title), structured `collabAgentToolCall` items and their tool/lifecycle enums, the nested
+`McpElicitation*` form-control schemas the normalizer reads, and the
+native decision/action/scope enums Wollipog sends back. It also pins **reachability**, not only each
+definition's own shape: the unions and property references that make a form control valid under
+`requestedSchema`, down to each control's own type and format definitions, plus the definition every
+response property must still resolve to. Dropping `McpElicitationBooleanSchema` from the primitive
+union, or repointing the form variant's `requestedSchema` at a single control type, leaves every
+definition intact while making those forms unsendable, so the reference edges are checked directly —
+whether Codex expresses one as a direct `$ref`, a map value, array items, or a single-branch union. A compatible-looking upgrade that renames a mode, drops a decision
+value, or disconnects a control therefore fails the check instead of silently losing structured
+interactions at runtime. Fields Wollipog never consumes are deliberately left unpinned so the
+contract stays a compatibility boundary rather than a change detector.
 
 ### 3.1 Auth
 
@@ -549,8 +583,20 @@ Additive fields are tolerated; removal or shape loss produces a focused drift re
 ### 3.2 Spawn + lifecycle (app-server)
 
 ```
-codex app-server          # stdio NDJSON; reuse JsonRpcPeer-style framing
+codex --enable default_mode_request_user_input app-server
 ```
+
+Wollipog enables Codex's `default_mode_request_user_input` feature on every managed app-server
+launch so Default collaboration mode can use the same structured `item/tool/requestUserInput` path
+as Plan mode. Codex `0.149.1` is the first release verified by this repository to advertise the
+flag; operators can confirm another installed build with `codex features list` (the output must
+contain `default_mode_request_user_input`). The flag is passed as a global option before
+`app-server`, which preserves configured launch arguments and Codex config precedence.
+
+Compatibility is fail-safe. A CLI that rejects the named feature, or predates the global `--enable`
+option, exits before initialization; the driver suppresses that expected probe error and retries
+exactly once as `codex app-server`. The session then retains the prior prose-question behavior and
+all existing app-server capabilities. Other startup failures are not retried or hidden.
 
 1. `initialize` (request) `{clientInfo, capabilities:{experimentalApi:true}}` → result; then send
    `initialized` (notification). Any call before this errors "Not initialized".
@@ -571,7 +617,7 @@ codex app-server          # stdio NDJSON; reuse JsonRpcPeer-style framing
    with mode 0600 and Linux paths—never through a Windows/UNC translation. Files survive until the
    turn request settles and are removed on completion, failure, cancellation, process exit, and
    dispose.
-4. `turn/interrupt` for `cancel`. Shutdown interrupts an active turn, declines parked approvals,
+4. `turn/interrupt` for `cancel`. Shutdown interrupts an active turn, safely cancels parked requests,
    then closes transport without archiving/deleting the thread. Runner/app-server restarts resume
    through the stored id. An ambiguously delivered in-flight prompt is never replayed; only prompts
    that were still queued before `turn/start` are safe to continue automatically.
@@ -593,27 +639,60 @@ their `supportedReasoningEfforts` come from the `model/list` request (also used 
 | `item/started`/`completed` `fileChange {changes:[{path,kind,diff}],status}` | per change: `{kind:"file_edit", path, diff}` + `{kind:"tool_call_update", toolCallId, status}` |
 | `item/*` `mcpToolCall {server,tool,arguments,result?,error?,status}` | `{kind:"tool_call"/"tool_call_update", toolCallId:id, title:`${server}/${tool}`, status, text}` |
 | `item/*` `webSearch {query}` | `{kind:"tool_call", toolCallId:id, title:`web_search: ${query}`, status:"completed"}` |
+| `item/*` `collabAgentToolCall {tool:"spawnAgent",senderThreadId,receiverThreadIds,agentsStates}` | `{kind:"tool_call"/"tool_call_update", toolCallId:id, toolKind:"agent", parentToolUseId?, subagentLifecycle}`; receiver thread ids bind subsequent structured child output to this exact call |
+| child-thread item/delta notifications | the ordinary mapped payload plus `parentToolUseId` for the spawning collaboration call; nested `spawnAgent` calls recursively preserve that ownership |
 | `turn/plan/updated {plan:[{step,status}]}` | `{kind:"plan", entries: plan.map(p=>({content:p.step,status:p.status}))}` |
 | `turn/diff/updated {diff}` | `{kind:"file_edit", path:"worktree", diff}` |
 | `thread/tokenUsage/updated {…}` | retain latest schema-pinned `last`, then emit one `{kind:"token_usage",…}` at turn settlement; never add restored cumulative `total` usage |
 | `turn/completed {turn.status}` | end turn → `StopReason` (`completed`→`end_turn`, `interrupted`→`cancelled`, `failed`→`refusal`); `{kind:"status", status:"idle"}` |
 | `error {error:{message,codexErrorInfo?}}` | `{kind:"error", message}` |
 
-### 3.4 Approval server-requests → permission events
+App-server is a multiplexed transport: the root thread and every structured child thread share one
+stdio stream. The driver accepts the root thread plus only child ids introduced by a root-or-known-
+child `spawnAgent` item, and ignores unrelated thread notifications. Child turn boundaries cannot
+replace or settle the foreground turn. `agentsStates` is authoritative for the states its stable
+schema distinguishes: starting, running, completed, failed, interrupted, and unreachable. The shared
+model also supports waiting when a harness reports that state, but the current stable Codex enum does
+not distinguish it. A detached child can stay visibly active after the foreground turn becomes idle.
+These normalized events are stored in the ordinary runner event log, preserving the recorded
+subagent tree across browser reconnect, replay, and manager resume.
+After an App Server process restart, a structured `resumeAgent` or `sendInput` item can re-admit an
+otherwise unknown durable receiver thread as a new selectable agent boundary; already-known receivers
+keep their original spawn identity.
 
-When `approvalPolicy` is `on-request`/`untrusted`, codex sends **server→client JSON-RPC requests** the
-driver must answer (this is exactly what `JsonRpcPeer.onRequest` already supports):
+### 3.4 Approval and elicitation server requests to pending actions
 
-| server request | our `permission_request` options | reply on `resolvePermission` |
+Codex 0.147.0's stable schema defines five interactive server-to-client JSON-RPC request methods.
+Wollipog correlates every pending action with the request envelope's exact string-or-integer `id`;
+item or turn ids are fallback display identifiers only for older malformed test clients. Replies settle
+that original request directly. The driver never converts arbitrary assistant text into authority and
+never injects an ordinary user message for a structured response.
+
+| server request | actionable Wollipog control | native reply |
 |---|---|---|
-| `item/commandExecution/requestApproval {command,cwd,itemId}` | `[{optionId:"accept"},{optionId:"acceptForSession"},{optionId:"decline"}]` (title = command) | `{result:{decision: optionId ?? "cancel"}}` |
-| `item/fileChange/requestApproval {itemId,reason}` | accept / acceptForSession / decline | `{result:{decision}}` (optional `grantRoot`) |
-| `item/permissions/requestApproval {…}` | derived from requested perms | `{result:{scope:"session", permissions:{…granted subset…}}}` |
-| `mcpServer/elicitation/request {…}` | accept / decline | `{action: optionId, content?}` |
+| `item/commandExecution/requestApproval` | command, cwd, reason, and network context; **Allow Once** (`accept`), **Allow for Session** (`acceptForSession`), **Reject** (`decline`), **Cancel** (`cancel`) | `{decision}` |
+| `item/fileChange/requestApproval` | file/reason context with the same four exact stable decisions | `{decision}` |
+| `item/permissions/requestApproval` | requested filesystem/network profile with **Allow** or **Reject** | allow: `{permissions:<requested>,scope:"session"}`; reject: `{permissions:{},scope:"turn"}` |
+| `item/tool/requestUserInput` | up to three choice questions, optional **Other Response**, bounded free text, and secret entry when declared | `{answers:{<questionId>:{answers:[...]}}}` |
+| `mcpServer/elicitation/request` mode `form` | bounded string/number/integer/boolean/single-enum/multi-enum controls with required, length, range, and selection constraints | submit: `{action:"accept",content:{...},_meta:null}`; dismiss: `{action:"cancel",content:null,_meta:null}` |
+| `mcpServer/elicitation/request` mode `url` | server/message/URL context with **Accept**, **Decline**, and **Cancel** | `{action:"accept"\|"decline"\|"cancel",content:null,_meta:null}` |
 
-`optionId` from the UI maps to codex `decision`: `allow_once`→`accept`, `allow_always`→
-`acceptForSession`, `reject_*`/`null`→`decline`/`cancel`. After replying, expect
-`serverRequest/resolved` then `item/completed` (status `completed|failed|declined`).
+Wollipog supports the stable MCP `form` and `url` modes. It does not advertise the extended
+`openai/form` capability; extended or malformed schemas are canceled instead of being guessed.
+Enum display labels map back to their provider-native values, booleans remain booleans, and numeric
+text is converted back to a finite number only after shared validation succeeds. Secret answers live
+only in the request-keyed dashboard draft and the direct response path, and are excluded from the
+durable audit digest. Free text is bounded at 4000 characters
+(`DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH`) whenever a provider declares no smaller `maxLength`, and
+provider-controlled values are truncated before they reach a diagnostic.
+
+Only one provider request can own the session's pending-action surface. A newer request cancels and
+settles the previous parked request before it is displayed. `serverRequest/resolved`, turn
+replacement/completion/failure, cancellation, provider shutdown, and driver disposal clear the exact
+pending id and settle it with the method's safe cancel/empty response. Resolved or stale ids return
+false from `resolvePermission`/`answerQuestion`, so the runner emits a delivery error instead of
+inventing a resolution. Runner-offline cards remain visible for context but their response controls
+are disabled until the authenticated runner is available.
 
 ### 3.5 `codex exec --json` fallback (no approvals)
 
@@ -627,6 +706,9 @@ NDJSON `ThreadEvent`s (**snake_case**): `thread.started{thread_id}`, `turn.start
 (`agent_message`, `reasoning`, `command_execution`, `file_change`, `mcp_tool_call`, `web_search`,
 `todo_list`) map to the same `SessionEventPayload`s as §3.3 (just snake_case field names). No approval
 channel — only when the manager can pre-grant via sandbox. Final answer = last `agent_message.text`.
+The exec transcript surface does not provide durable structured child-thread ownership. Imported raw
+Codex transcripts therefore keep provider completion summaries in the parent activity and do not
+invent independently selectable subagents.
 
 ### 3.6 Model / effort enumeration (feeds discovery)
 

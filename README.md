@@ -190,6 +190,7 @@ scripts/          Development, installation, and release helpers
 
 ## Documentation
 
+- [Session Status Taxonomy](docs/session-status-taxonomy.md)
 - [Concepts and Glossary](docs/concepts-and-glossary.md)
 - [Scope](docs/SCOPE.md)
 - [Drivers](docs/DRIVERS.md)

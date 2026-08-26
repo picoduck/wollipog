@@ -20,10 +20,12 @@ import type {
   WorkflowArtifactView,
 } from "@wollipog/protocol";
 import { PROTOCOL_VERSION } from "@wollipog/protocol";
+import { archiveSessionPage } from "./archive-session-page.js";
 import {
   ControlPlaneDb,
   GOVERNANCE_AUDIT_RETENTION_MS,
   TAIL_TURN_ALIGNMENT_MAX_EVENTS,
+  TAIL_TURN_ALIGNMENT_MAX_PAYLOAD_BYTES,
   type NewSessionInput,
 } from "./db.js";
 import type { HumanPrincipal } from "./identity.js";
@@ -675,6 +677,168 @@ test("legacy session tombstones migrate to the durable pruning policy", () => {
   }
 });
 
+test("session stop intents survive control-plane restart and cascade with their session", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-session-stop-intent-"));
+  const path = join(root, "control-plane.db");
+  try {
+    const initial = ControlPlaneDb.open(path);
+    initial.registerRunner(meta(), 500);
+    initial.createSession(newSession());
+    initial.addSessionStopIntent("sess-1", "runner-1", 1_100);
+    assert.equal(initial.sessionArchiveStatus("sess-1"), undefined);
+    initial.setSessionStopRestartLaunchId("sess-1", "launch-proof-1");
+    initial.addSessionStopIntent("sess-1", "runner-1", 1_200, true);
+    assert.equal(initial.listSessions()[0]?.archiveStatus, "stop_pending");
+    assert.equal(initial.sessionStopRestartLaunchId("sess-1"), null);
+    initial.setSessionStopRestartLaunchId("sess-1", "launch-proof-2");
+    assert.deepEqual(initial.sessionStopIntentIds("runner-1"), ["sess-1"]);
+    const operation = initial.getSession("sess-1")?.archiveOperation;
+    assert.ok(operation?.operationId.startsWith("stop_"));
+    assert.equal(operation?.attemptCount, 1);
+    assert.equal(operation?.capacityReleased, false);
+    initial.close();
+
+    const reopened = ControlPlaneDb.open(path);
+    assert.equal(reopened.hasSessionStopIntent("sess-1"), true);
+    assert.equal(reopened.getSession("sess-1")?.archiveStatus, "stop_pending");
+    assert.deepEqual(reopened.getSession("sess-1")?.archiveOperation, operation);
+    reopened.cancelSessionArchiveAfterStop("sess-1");
+    assert.equal(reopened.getSession("sess-1")?.archiveStatus, undefined);
+    assert.equal(reopened.sessionStopRestartLaunchId("sess-1"), "launch-proof-2");
+    assert.deepEqual(reopened.sessionStopIntentIds("runner-1"), ["sess-1"]);
+    reopened.deleteSession("sess-1");
+    assert.equal(reopened.hasSessionStopIntent("sess-1"), false);
+    reopened.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("accepted Stop completion state survives restart and explicit recovery clears it", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-session-stop-accepted-"));
+  const path = join(root, "control-plane.db");
+  try {
+    const initial = ControlPlaneDb.open(path);
+    initial.registerRunner(meta(), 500, PROTOCOL_VERSION);
+    initial.createSession(newSession());
+    const intent = initial.addSessionStopIntent("sess-1", "runner-1", 1_100, true);
+    assert.equal(initial.recordSessionStopAcceptance(
+      "sess-1",
+      intent.operation.operationId,
+      intent.deliveryAttemptId,
+      1_200,
+    ), true);
+    assert.equal(initial.getSession("sess-1")?.archiveOperation?.acceptedAt, 1_200);
+    assert.equal(initial.getSession("sess-1")?.archiveOperation?.capacityReleased, false);
+    initial.close();
+
+    const reopened = ControlPlaneDb.open(path);
+    const accepted = reopened.sessionStopIntent("sess-1")!;
+    assert.equal(accepted.operation.acceptedAt, 1_200);
+    assert.equal(accepted.operation.status, "stop_pending");
+    assert.equal(reopened.failSessionStopIntent(
+      "sess-1",
+      accepted.operation.operationId,
+      accepted.deliveryAttemptId,
+      "timeout",
+      "Accepted Stop completion timed out.",
+      1_300,
+    ), true);
+    const retried = reopened.retrySessionStopIntent("sess-1", 1_400)!;
+    assert.equal(retried.operation.operationId, accepted.operation.operationId);
+    assert.equal(retried.operation.acceptedAt, undefined);
+    assert.equal(retried.operation.requestedAt, 1_400);
+    assert.equal(retried.operation.attemptCount, 1);
+    assert.notEqual(retried.deliveryAttemptId, accepted.deliveryAttemptId);
+    reopened.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Stop Failed metadata and idempotent recovery survive control-plane restart", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-session-stop-failure-"));
+  const path = join(root, "control-plane.db");
+  try {
+    const initial = ControlPlaneDb.open(path);
+    initial.registerRunner(meta(), 500, PROTOCOL_VERSION);
+    initial.createSession(newSession());
+    const intent = initial.addSessionStopIntent("sess-1", "runner-1", 1_100, true);
+    assert.match(intent.deliveryAttemptId, /^stop_delivery_/u);
+    assert.equal(initial.failSessionStopIntent(
+      "sess-1",
+      intent.operation.operationId,
+      intent.deliveryAttemptId,
+      "runner_rejected",
+      "The runner rejected the Stop request.",
+      1_200,
+    ), true);
+    assert.equal(initial.getSession("sess-1")?.archiveStatus, "stop_failed");
+    initial.close();
+
+    const reopened = ControlPlaneDb.open(path);
+    const failed = reopened.getSession("sess-1")?.archiveOperation;
+    assert.equal(failed?.operationId, intent.operation.operationId);
+    assert.equal(failed?.failure?.code, "runner_rejected");
+    assert.equal(failed?.failure?.failedAt, 1_200);
+    assert.equal(reopened.sessionStopIntent("sess-1")?.deliveryAttemptId, intent.deliveryAttemptId);
+    const retried = reopened.retrySessionStopIntent("sess-1", 1_300);
+    assert.equal(retried?.operation.operationId, intent.operation.operationId);
+    assert.notEqual(retried?.deliveryAttemptId, intent.deliveryAttemptId);
+    assert.equal(retried?.operation.status, "stop_pending");
+    assert.equal(retried?.operation.attemptCount, 1, "explicit recovery receives a fresh retry budget");
+    assert.equal(retried?.operation.requestedAt, 1_300, "explicit recovery receives a fresh timeout window");
+    const duplicate = reopened.retrySessionStopIntent("sess-1", 1_400);
+    assert.equal(duplicate?.operation.attemptCount, 1);
+    assert.equal(duplicate?.deliveryAttemptId, retried?.deliveryAttemptId);
+    reopened.close();
+
+    const restartedAgain = ControlPlaneDb.open(path);
+    assert.equal(restartedAgain.sessionStopIntent("sess-1")?.deliveryAttemptId, retried?.deliveryAttemptId);
+    restartedAgain.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("plain Stop Failed metadata and idempotent recovery survive control-plane restart", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-plain-session-stop-failure-"));
+  const path = join(root, "control-plane.db");
+  try {
+    const initial = ControlPlaneDb.open(path);
+    initial.registerRunner(meta(), 500, PROTOCOL_VERSION);
+    initial.createSession(newSession());
+    const intent = initial.addSessionStopIntent("sess-1", "runner-1", 1_100);
+    assert.equal(initial.failSessionStopIntent(
+      "sess-1",
+      intent.operation.operationId,
+      intent.deliveryAttemptId,
+      "runner_rejected",
+      "The runner rejected the Stop request.",
+      1_200,
+    ), true);
+    const projected = initial.getSession("sess-1");
+    assert.equal(projected?.stopOperation?.status, "stop_failed");
+    assert.equal(projected?.archiveStatus, undefined);
+    assert.equal(projected?.archiveOperation, undefined);
+    initial.close();
+
+    const reopened = ControlPlaneDb.open(path);
+    const failed = reopened.getSession("sess-1")?.stopOperation;
+    assert.equal(failed?.operationId, intent.operation.operationId);
+    assert.equal(failed?.failure?.code, "runner_rejected");
+    assert.equal(failed?.failure?.failedAt, 1_200);
+    const retried = reopened.retrySessionStopIntent("sess-1", 1_300);
+    assert.equal(retried?.operation.operationId, intent.operation.operationId);
+    assert.equal(retried?.operation.status, "stop_pending");
+    assert.equal(retried?.operation.attemptCount, 1);
+    assert.equal(reopened.retrySessionStopIntent("sess-1", 1_400)?.operation.attemptCount, 1);
+    reopened.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 function localOwner(): HumanPrincipal {
   return {
     kind: "human",
@@ -716,6 +880,59 @@ test("independent control-plane databases receive distinct instance identities",
   } finally {
     first.close();
     second.close();
+  }
+});
+
+test("startup settlement waits for explicit ownership and still settles a genuine cold start", () => {
+  const temp = mkdtempSync(join(tmpdir(), "wollipog-startup-settlement-"));
+  const location = join(temp, "control-plane.db");
+  let db: ControlPlaneDb | undefined;
+  try {
+    db = ControlPlaneDb.open(location);
+    db.createBox({
+      boxId: "box-1",
+      runnerId: "runner-1",
+      sshTarget: "test@host",
+      sshPort: 22,
+      workspaces: [],
+      autoReconnect: false,
+      runnerDataDir: null,
+      now: 900,
+    });
+    db.registerRunner(meta(), 1_000);
+    db.createSession(newSession());
+    db.setBoxStatus("box-1", "online", 1_001);
+    db.updateSessionStatus("sess-1", "running", 1_002);
+    db.stageSessionPromptCommand({
+      commandId: "cmd-startup-fence",
+      sessionId: "sess-1",
+      runnerId: "runner-1",
+      payloadJson: JSON.stringify({ text: "undelivered" }),
+      payloadSha256: "0".repeat(64),
+      expiresAt: 100_000,
+      now: 1_003,
+    });
+    db.close();
+    db = undefined;
+
+    db = ControlPlaneDb.open(location);
+    assert.equal(db.getRunner("runner-1")?.status, "online", "opening SQLite alone does not claim the instance");
+    assert.equal(db.getBox("box-1")?.status, "online");
+    assert.equal(db.getSession("sess-1")?.status, "running");
+
+    db.settleStartupState(2_000);
+    assert.equal(db.getRunner("runner-1")?.status, "offline");
+    assert.equal(db.getRunner("runner-1")?.connectedAt, null);
+    assert.equal(db.getBox("box-1")?.status, "offline");
+    assert.equal(db.getSession("sess-1")?.status, "stopped");
+    assert.equal(db.getSession("sess-1")?.updatedAt, 2_000);
+    const fenced = db.getSessionPromptCommand("cmd-startup-fence")!;
+    assert.equal(fenced.state, "failed", "a never-sent prompt is fenced when settlement stops its session");
+    assert.equal(fenced.errorCode, "COMMAND_CANCELLED");
+    assert.deepEqual(db.dueSessionPromptCommands(100_000, "runner-1"), []);
+  } finally {
+    db?.close();
+    rmSync(temp, { recursive: true, force: true });
   }
 });
 
@@ -2599,6 +2816,45 @@ test("snapshot context gauges round-trip while a user title resists provider rep
   assert.equal(session.providerUpdatedAt, "2026-07-13T00:00:00.000Z");
 });
 
+test("semantic titles survive stale generated snapshots but yield to provider metadata", () => {
+  const db = withRunner();
+  db.createSessionFromSnapshot(snapshot({
+    id: "semantic-title", title: "Initial fallback", titleSource: "generated",
+  }), "runner-1", 2_000);
+  db.setSemanticSessionTitle("semantic-title", "Semantic objective", 2_100, "generated");
+
+  db.updateSessionFromSnapshot("semantic-title", snapshot({
+    id: "semantic-title", title: "Initial fallback", titleSource: "generated",
+  }), 2_200);
+  assert.equal(db.getSession("semantic-title")?.title, "Semantic objective");
+  assert.equal(db.getSession("semantic-title")?.titleSource, "generated");
+
+  db.updateSessionFromSnapshot("semantic-title", snapshot({
+    id: "semantic-title", title: "Provider objective", titleSource: "provider",
+  }), 2_300);
+  assert.equal(db.getSession("semantic-title")?.title, "Provider objective");
+  assert.equal(db.getSession("semantic-title")?.titleSource, "provider");
+});
+
+test("session title context queries keep the original objective and a bounded semantic tail", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "title-context" }));
+  db.appendEvent("title-context", { kind: "user_message", text: "Original", final: true }, 1);
+  db.appendEvent("title-context", { kind: "agent_thought", text: "Excluded", final: true }, 2);
+  db.appendEvent("title-context", { kind: "user_message", text: "Partial", final: false }, 3);
+  for (let index = 0; index < 5; index += 1) {
+    db.appendEvent("title-context", { kind: "agent_message", text: `Answer ${index}`, final: true }, 4 + index);
+  }
+
+  assert.equal(db.hasCompletedUserMessage("title-context"), true);
+  assert.deepEqual(
+    db.listSessionTitleContextEvents("title-context", 2).map((entry) => entry.payload.kind === "user_message"
+      ? entry.payload.text
+      : entry.payload.kind === "agent_message" ? entry.payload.text : "excluded"),
+    ["Original", "Answer 3", "Answer 4"],
+  );
+});
+
 test("createSessionFromSnapshot auto-files an adopted session by its workspacePath", () => {
   const db = withRunner();
   // Adopted from ANOTHER dashboard (or delete-then-rehydrate): the snapshot carries no workspaceId
@@ -2822,6 +3078,49 @@ test("appendEvent seq is per-session", () => {
   assert.equal(db.listEvents("sess-2").length, 1);
 });
 
+test("legacy runner event append atomically persists provenance and advances hydration", () => {
+  const db = withRunner();
+  db.createSession(newSession());
+
+  db.appendEvent(
+    "sess-1",
+    { kind: "agent_message", text: "committed once" },
+    100,
+    { runnerSeq: 1, historyEpoch: null },
+  );
+
+  assert.equal(db.getHydratedSeq("sess-1"), 1);
+  const persisted = db.raw().prepare(
+    "SELECT seq, runner_seq FROM session_events WHERE session_id=?",
+  ).get("sess-1") as unknown as { seq: number; runner_seq: number | null };
+  assert.equal(persisted.seq, 1);
+  assert.equal(persisted.runner_seq, 1);
+
+  db.raw().exec(
+    `CREATE TRIGGER fail_legacy_cursor_update BEFORE UPDATE OF hydrated_seq ON sessions
+     WHEN NEW.id='sess-1' AND NEW.hydrated_seq=2
+     BEGIN SELECT RAISE(ABORT, 'simulated cursor failure'); END;`,
+  );
+  assert.throws(() => db.appendEvent(
+    "sess-1",
+    { kind: "agent_message", text: "must roll back" },
+    200,
+    { runnerSeq: 2, historyEpoch: null },
+  ), /simulated cursor failure/);
+  assert.equal(db.getHydratedSeq("sess-1"), 1);
+  assert.equal(db.listEvents("sess-1").length, 1, "cursor failure rolls back the event row");
+
+  db.raw().exec("DROP TRIGGER fail_legacy_cursor_update");
+  db.raw().prepare("UPDATE sessions SET hydrated_seq=0 WHERE id=?").run("sess-1");
+  assert.throws(() => db.appendEvent(
+    "sess-1",
+    { kind: "agent_message", text: "replayed after crash" },
+    300,
+    { runnerSeq: 1, historyEpoch: null },
+  ), /UNIQUE/);
+  assert.equal(db.listEvents("sess-1").length, 1, "runner provenance rejects a replay despite a stale cursor");
+});
+
 test("runner history snapshots persist epoch/tail and replace cache only on a known epoch change", () => {
   const db = withRunner();
   db.createSessionFromSnapshot(snapshot({ id: "history", historyEpoch: 4, seq: 2 }), "runner-1", 2_000);
@@ -2861,6 +3160,41 @@ test("runner history snapshots persist epoch/tail and replace cache only on a kn
   assert.equal(db.getSession("history")?.messageCount, 0);
   assert.equal(db.getSession("history")?.preview, "new generation", "the fresh snapshot replaces cleared preview state");
   assert.equal(db.searchEvents("world").length, 0, "epoch replacement clears transcript FTS rows");
+});
+
+test("neutral registration followed by negotiated history does not re-fence reconnects", () => {
+  for (const negotiated of [
+    { id: "handshake-v86", historyEpoch: 1, seq: 2 },
+    { id: "handshake-v87", historyEpoch: 0, seq: 3 },
+  ]) {
+    const db = withRunner();
+    db.createSessionFromSnapshot(snapshot({ ...negotiated, historyEpoch: undefined, seq: 0 }), "runner-1", 1_000);
+
+    const firstNegotiated = db.reconcileRunnerHistory(
+      negotiated.id,
+      negotiated.historyEpoch,
+      negotiated.seq,
+    );
+    assert.equal(firstNegotiated?.reset, false, `${negotiated.id}: first known generation is adopted`);
+    const eventEpoch = firstNegotiated?.eventEpoch;
+
+    const reconnectRegister = db.reconcileRunnerHistory(negotiated.id, undefined, 0);
+    assert.equal(reconnectRegister?.reset, false, `${negotiated.id}: neutral reconnect preserves generation`);
+    assert.deepEqual(
+      [reconnectRegister?.historyEpoch, reconnectRegister?.tailSeq, reconnectRegister?.eventEpoch],
+      [negotiated.historyEpoch, negotiated.seq, eventEpoch],
+      `${negotiated.id}: neutral history cannot lower or replace the negotiated fence`,
+    );
+
+    const reconnectNegotiated = db.reconcileRunnerHistory(
+      negotiated.id,
+      negotiated.historyEpoch,
+      negotiated.seq,
+    );
+    assert.equal(reconnectNegotiated?.reset, false, `${negotiated.id}: negotiated republish is idempotent`);
+    assert.equal(reconnectNegotiated?.eventEpoch, eventEpoch);
+    db.close();
+  }
 });
 
 test("appendHydratedPage is atomic, crash-idempotent, stale-safe, and keeps CP seq independent", () => {
@@ -3021,6 +3355,65 @@ test("a turn-aligned tail page begins at an invocation rather than orphaned upda
   assert.equal(whole.hasMoreOlder, false);
 });
 
+test("turn alignment includes a streamed Markdown response beyond the former opening bound", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "long-markdown-cache" }));
+  db.appendEvent("long-markdown-cache", { kind: "user_message", text: "Draft the issue" }, 1);
+  const markdownChunks = [
+    "## Summary\n\n",
+    "- [x] Complete\n\n",
+    "> Context\n\n",
+    "| Area | Status |\n| --- | --- |\n| History | Fixed |\n\n",
+    "```ts\n",
+    ...Array.from({ length: 644 }, (_, index) => `const line${index} = true;\n`),
+    "```\n",
+  ];
+  for (const [index, text] of markdownChunks.entries()) {
+    db.appendEvent("long-markdown-cache", {
+      kind: "agent_message",
+      text,
+      messageId: "formatted-draft",
+      final: false,
+    }, index + 2);
+  }
+
+  const page = db.listCachedEventTailPage("long-markdown-cache", undefined, 200, { alignToTurn: true });
+  assert.equal(markdownChunks.length, 650);
+  assert.equal(page.events.length, 651,
+    "one bounded response includes the whole semantic turn instead of a 200-event suffix");
+  assert.equal(page.events[0]!.payload.kind, "user_message");
+  assert.equal(page.turnAligned, true);
+  assert.equal(page.hasMoreOlder, false);
+  assert.equal(
+    page.events.slice(1).map((entry) =>
+      entry.payload.kind === "agent_message" ? entry.payload.text : "").join(""),
+    markdownChunks.join(""),
+    "Markdown delimiters on both sides of the former boundary remain in one response",
+  );
+});
+
+test("turn alignment keeps a payload-byte safety bound even within the event cap", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "large-turn-cache" }));
+  db.appendEvent("large-turn-cache", { kind: "user_message", text: "go" }, 1);
+  const chunk = "x".repeat(16 * 1024);
+  for (let index = 0; index < 300; index += 1) {
+    db.appendEvent("large-turn-cache", {
+      kind: "agent_message",
+      text: chunk,
+      messageId: "large-response",
+      final: false,
+    }, index + 2);
+  }
+  assert.ok(300 * Buffer.byteLength(chunk, "utf8") > TAIL_TURN_ALIGNMENT_MAX_PAYLOAD_BYTES);
+
+  const page = db.listCachedEventTailPage("large-turn-cache", undefined, 200, { alignToTurn: true });
+  assert.equal(page.events.length, 200, "the count-bounded page stands when extension is too large");
+  assert.equal(page.events[0]!.seq, 102);
+  assert.equal(page.turnAligned, false);
+  assert.equal(page.hasMoreOlder, true);
+});
+
 test("a page already starting at a user message is left as it is", () => {
   const db = withRunner();
   db.createSession(newSession({ id: "boundary-cache" }));
@@ -3037,6 +3430,31 @@ test("a page already starting at a user message is left as it is", () => {
   assert.equal(page.hasMoreOlder, true);
 });
 
+test("an oversized page already starting at a user message is still aligned", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "large-boundary-cache" }));
+  db.appendEvent("large-boundary-cache", { kind: "agent_message", text: "older turn" }, 1);
+  db.appendEvent("large-boundary-cache", { kind: "user_message", text: "second" }, 2);
+  const chunk = "x".repeat(22 * 1024);
+  for (let seq = 3; seq <= 201; seq += 1) {
+    db.appendEvent("large-boundary-cache", {
+      kind: "agent_message",
+      text: chunk,
+      messageId: "large-response",
+      final: false,
+    }, seq);
+  }
+  assert.ok(199 * Buffer.byteLength(chunk, "utf8") > TAIL_TURN_ALIGNMENT_MAX_PAYLOAD_BYTES);
+
+  const page = db.listCachedEventTailPage(
+    "large-boundary-cache", undefined, 200, { alignToTurn: true },
+  );
+  assert.equal(page.events.length, 200);
+  assert.equal(page.events[0]!.seq, 2);
+  assert.equal(page.turnAligned, true, "the byte cap only limits extension beyond the base page");
+  assert.equal(page.hasMoreOlder, true);
+});
+
 test("turn alignment stops at its cap and never extends a page without bound", () => {
   const db = withRunner();
   db.createSession(newSession({ id: "verbose-turn" }));
@@ -3050,6 +3468,45 @@ test("turn alignment stops at its cap and never extends a page without bound", (
   const page = db.listCachedEventTailPage("verbose-turn", undefined, 10, { alignToTurn: true });
   assert.equal(page.events.length, 10);
   assert.equal(page.turnAligned, false);
+  assert.equal(page.hasMoreOlder, true);
+});
+
+test("an unaligned opening window can split an older response and retain complete newer turns", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "older-split-cache" }));
+  db.appendEvent("older-split-cache", { kind: "user_message", text: "start the long response" }, 1);
+  const longResponseEvents = TAIL_TURN_ALIGNMENT_MAX_EVENTS + 200;
+  for (let seq = 2; seq <= longResponseEvents + 1; seq += 1) {
+    db.appendEvent("older-split-cache", {
+      kind: "agent_message",
+      text: String(seq),
+      messageId: "older-long-response",
+      final: seq === longResponseEvents + 1,
+    }, seq);
+  }
+  const newerTurns = [
+    { kind: "user_message", text: "first newer question" },
+    { kind: "agent_message", text: "first newer answer", final: true },
+    { kind: "user_message", text: "second newer question" },
+    { kind: "agent_message", text: "second newer answer", final: true },
+  ] as const;
+  for (const [index, payload] of newerTurns.entries()) {
+    db.appendEvent("older-split-cache", payload, longResponseEvents + index + 2);
+  }
+
+  const page = db.listCachedEventTailPage(
+    "older-split-cache", undefined, 200, { alignToTurn: true },
+  );
+  const newestSeq = longResponseEvents + newerTurns.length + 1;
+  assert.equal(page.events.length, 200, "the unaligned page retains its count boundary");
+  assert.equal(page.events[0]?.seq, newestSeq - 199);
+  assert.equal(page.events[0]?.payload.kind, "agent_message",
+    "the count boundary splits the older exceptionally long response");
+  assert.deepEqual(page.events.slice(-4).map((entry) => entry.payload.kind), [
+    "user_message", "agent_message", "user_message", "agent_message",
+  ], "both newer complete turns remain in the opening window");
+  assert.equal(page.turnAligned, false,
+    "alignment metadata describes the split at the window's leading edge");
   assert.equal(page.hasMoreOlder, true);
 });
 
@@ -4079,4 +4536,74 @@ test("searchEvents groups hits to distinct sessions and indexes stderr/thought t
   const sessions = new Set(hits.map((h) => h.sessionId));
   assert.equal(hits.length, sessions.size, "one hit per session");
   assert.ok(sessions.has("s_other"), "a chatty session must not crowd out other sessions");
+});
+
+test("searchEvents applies authorized session scope before its ranking window and limit", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "authorized" }));
+  db.createSession(newSession({ id: "inaccessible" }));
+  for (let i = 0; i < 30; i++) {
+    db.appendEvent("inaccessible", { kind: "agent_message", text: `needle inaccessible ${i}` }, i);
+  }
+  db.appendEvent("authorized", { kind: "agent_message", text: "needle authorized result" }, 100);
+
+  assert.deepEqual(
+    db.searchEvents("needle", 1, ["authorized"]).map((hit) => hit.sessionId),
+    ["authorized"],
+    "inaccessible higher-ranked rows cannot consume the authorized result bound",
+  );
+  assert.deepEqual(db.searchEvents("needle", 1, []), []);
+  assert.deepEqual(
+    new Set(db.searchEventsForPrincipal("needle", 20, localOwner()).map((hit) => hit.sessionId)),
+    new Set(["authorized", "inaccessible"]),
+    "principal authorization runs inside the ranked FTS query without a catalog-id materialization",
+  );
+});
+
+test("archive page SQL bounds candidate materialization before cursor hydration", () => {
+  const db = withRunner();
+  for (let index = 0; index < 60; index++) {
+    const id = `archive-${String(index).padStart(2, "0")}`;
+    db.createSession(newSession({ id, title: `Archive ${index}`, now: 1_000 + index }));
+    db.setSessionArchived(id, true, 2_000 + index);
+  }
+  const firstCandidates = db.archiveSessionCandidatePageForPrincipal(localOwner(), {});
+  assert.ok(!("error" in firstCandidates));
+  if ("error" in firstCandidates) throw new Error(firstCandidates.error);
+  assert.equal(firstCandidates.sessions.length, 51, "SQLite returns one bounded page plus lookahead");
+  const first = archiveSessionPage({ sessions: firstCandidates.sessions, query: {} });
+  assert.ok(!("error" in first));
+  if ("error" in first) throw new Error(first.error);
+  assert.equal(first.sessionIds.length, 50);
+  assert.ok(first.nextCursor);
+
+  const secondQuery = { cursor: first.nextCursor! };
+  const secondCandidates = db.archiveSessionCandidatePageForPrincipal(localOwner(), secondQuery);
+  assert.ok(!("error" in secondCandidates));
+  if ("error" in secondCandidates) throw new Error(secondCandidates.error);
+  assert.equal(secondCandidates.sessions.length, 10);
+  const second = archiveSessionPage({ sessions: secondCandidates.sessions, query: secondQuery });
+  assert.ok(!("error" in second));
+  if ("error" in second) throw new Error(second.error);
+  assert.equal(second.sessionIds.length, 10);
+  assert.equal(second.hasMore, false);
+  assert.equal(new Set([...first.sessionIds, ...second.sessionIds]).size, 60);
+});
+
+test("archive page SQL preserves Stop Failed recovery state", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "stop-failed" }));
+  const intent = db.addSessionStopIntent("stop-failed", "runner-1", 1_100, true);
+  assert.equal(db.failSessionStopIntent(
+    "stop-failed",
+    intent.operation.operationId,
+    intent.deliveryAttemptId,
+    "retry_exhausted",
+    "Automatic retries were exhausted.",
+    1_200,
+  ), true);
+  const candidates = db.archiveSessionCandidatePageForPrincipal(localOwner(), {});
+  assert.ok(!("error" in candidates));
+  if ("error" in candidates) throw new Error(candidates.error);
+  assert.equal(candidates.sessions[0]?.archiveStatus, "stop_failed");
 });

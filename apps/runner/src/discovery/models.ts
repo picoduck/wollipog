@@ -466,10 +466,10 @@ export async function queryClaudeModels(
   }
 }
 
-/** Spawn failures on POSIX emit `error` without `exit`; always settle pending RPCs instead of crashing. */
+/** Spawn failures on POSIX emit `error` without `close`; always settle pending RPCs instead of crashing. */
 export function attachModelProbeLifecycle(child: AgentProcess, peer: Pick<JsonRpcPeer, "dispose">): void {
   child.once("error", (error) => peer.dispose(`codex app-server model probe spawn failed: ${error.message}`));
-  child.once("exit", (code) => peer.dispose(`codex app-server model probe exited (${code ?? "signal"})`));
+  child.once("close", (code) => peer.dispose(`codex app-server model probe exited (${code ?? "signal"})`));
 }
 
 export interface AgentModelDiscovery {

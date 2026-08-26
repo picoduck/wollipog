@@ -111,7 +111,7 @@ export function SlashCommandMenu({
                     }}
                   >
                     <span className="slash-item-main">
-                      <span className="slash-name">{command.label}</span>
+                      <span className="slash-name">{command.displayName ?? command.label}</span>
                       {command.description && <span className="slash-desc">{command.description}</span>}
                     </span>
                     <span className="slash-src">{command.sourceLabel}</span>
@@ -127,7 +127,7 @@ export function SlashCommandMenu({
       ) && (
         <div className="slash-detail" id={detailId}>
           <div className="slash-detail-head">
-            <span className="slash-detail-name">{activeCommand.label}</span>
+            <span className="slash-detail-name">{activeCommand.displayName ?? activeCommand.label}</span>
             <span className="slash-detail-source">{activeCommand.sourceLabel}</span>
           </div>
           {activeCommand.description && <p className="slash-detail-description">{activeCommand.description}</p>}

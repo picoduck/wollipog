@@ -19,7 +19,7 @@ test("Connections separates machines from people and exposes durable machine rec
   assert.match(view, /id: "people", label: <>People &amp; Devices/);
   assert.match(view, /instances\.desktopMultiInstance/);
   assert.match(view, /<PeopleDevicesPanel identity=\{identity\}/);
-  assert.match(view, /Repair Credential…/);
+  assert.match(view, /Repair Credentials/);
   assert.match(view, /canRepair=\{canManage\}/);
   assert.match(view, /<NativeRunnerCard[\s\S]*canManage=\{canManageMachines\}/);
   assert.match(view, /Ask an organization owner or admin to repair this connection/);

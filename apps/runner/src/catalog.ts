@@ -57,7 +57,7 @@ export const CAPABILITY_CATALOG: Partial<Record<AgentDriverKind, AgentCapabiliti
       "read-only": ["app-server"],
       "on-request": ["app-server"],
       "auto-review": ["app-server"],
-      "danger-full-access": ["none"],
+      "danger-full-access": ["app-server"],
     },
   },
 };

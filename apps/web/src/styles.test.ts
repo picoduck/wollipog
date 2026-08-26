@@ -129,15 +129,35 @@ test("the global focus ring does not restyle the focused element", () => {
     "border-radius in :focus-visible changes the element's shape, not the outline's");
 });
 
-test("the permission-mode popover gives visible descriptions readable inline space", () => {
+test("the permission-mode popover keeps rows compact while long labels can wrap", () => {
   assert.equal(soleRuleBody(".cbar-pop.permission-mode-pop"),
-    "width: min(360px, calc(100vw - 64px));");
-  assert.match(soleRuleBody(".cbar-permission-copy"), /flex: 1 1 0;/);
-  assert.match(soleRuleBody(".cbar-permission-description"), /overflow-wrap: anywhere;/);
+    "width: min(390px, calc(100vw - 32px));");
+  assert.match(soleRuleBody(".cbar-permission-row"), /grid-template-columns: minmax\(0, 1fr\) 30px;/);
+  assert.match(soleRuleBody(".cbar-permission-label"), /overflow-wrap: anywhere;/);
+  assert.doesNotMatch(css, /\.cbar-permission-description/,
+    "full explanations belong in deliberate disclosure, not every menu row");
+  assert.match(soleRuleBody(".cbar-permission-details-trigger"), /width: 28px;/);
+});
+
+test("review-ready and uncommitted badges wrap together at narrow widths", () => {
+  const group = soleRuleBody(".change-status-indicators");
+  assert.match(group, /display: inline-flex;/);
+  assert.match(group, /min-width: 0;/);
+  assert.match(group, /flex-wrap: wrap;/,
+    "the shared header and pinned-summary group must not hide either compact status on mobile");
   const phoneRule = mediaBlocks(css).find((block) =>
-    block.maxWidths.includes(760) && block.containsSelector(".cbar-opt.permission-mode"));
-  assert.ok(phoneRule, "the permission-mode row must stack inside the 760px phone query");
-  assert.deepEqual(phoneRule.declarationsForSelector(".cbar-opt.permission-mode").get("flex-direction"), ["column"]);
+    block.maxWidths.includes(760) &&
+    block.containsSelector(".session-detail > .detail-head .change-status-indicators"));
+  assert.ok(phoneRule, "the phone layout must flatten the change group into the shared status row");
+  assert.deepEqual(
+    phoneRule.declarationsForSelector(".session-detail > .detail-head .change-status-indicators").get("display"),
+    ["contents"],
+  );
+  assert.deepEqual(
+    phoneRule.declarationsForSelector(".session-detail > .detail-head > .session-header-statuses")
+      .get("grid-column"),
+    ["1 / -1"],
+  );
 });
 
 /**

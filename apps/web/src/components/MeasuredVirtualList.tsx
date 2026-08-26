@@ -532,6 +532,76 @@ function VirtualList<T>({
     };
   }, [commitVirtualMeasurements, deferInitialMeasurements, scrollRef]);
 
+  // TanStack delivers its row ResizeObserver measurements through an animation frame, so they
+  // land after the browser has already painted the resized row against its neighbours' old
+  // offsets. A row growing mid-list without a width change — a streaming tool row, late-loading
+  // content — therefore paints one frame of overlapping text per change, and continuous updates
+  // read as transcript flashing. Observe the mounted rows here and commit their measurements in
+  // the same pre-paint ResizeObserver phase; TanStack's deferred delivery then finds no delta.
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    let cancelPendingCommit: CancelVirtualMeasurementCommit | null = null;
+    // Keyed by element so a fault-injected deferred commit merges later deliveries instead of
+    // dropping them, and so row indexes are resolved at commit time rather than delivery time.
+    const pendingSizes = new Map<HTMLElement, number>();
+    const commitPendingSizes = () => {
+      cancelPendingCommit = null;
+      // A scroller width change means these row sizes are a rewrap, not content growth. That
+      // delivery is owned by the width epoch: its reseed re-reads every mounted row after the
+      // logical anchor has been captured, while committing here first would apply TanStack's raw
+      // scroll compensation before anchor preservation engages and drag the anchored row.
+      const scroll = scrollRef.current;
+      if (!scroll || viewportWidthRef.current !== Math.round(scroll.getBoundingClientRect().width)) {
+        pendingSizes.clear();
+        return;
+      }
+      const virtualizer = initialMeasurementVirtualizerRef.current;
+      // TanStack's own delivery skips measurements while `isScrolling`, but a logical-anchor
+      // correction raises that flag too, and skipping a mounted row whose content just changed
+      // paints it over its neighbours for every frame until the flag resets. A pure scroll never
+      // resizes a row, so committing every delivery only affects frames that must repaint anyway;
+      // scroll compensation policy stays with `shouldAdjustScrollPositionOnItemSizeChange`.
+      for (const [row, size] of pendingSizes) {
+        if (!row.isConnected) continue;
+        const index = Number(row.dataset.index);
+        if (!Number.isSafeInteger(index)) continue;
+        virtualizer.resizeItem(index, size);
+      }
+      pendingSizes.clear();
+    };
+    const observer = new ResizeObserver((entries) => {
+      if (!initialMeasurementsReadyRef.current) return;
+      for (const entry of entries) {
+        const row = entry.target;
+        if (!(row instanceof HTMLElement) || !row.isConnected) continue;
+        const box = entry.borderBoxSize?.[0];
+        pendingSizes.set(row, box ? Math.round(box.blockSize) : row.offsetHeight);
+      }
+      if (pendingSizes.size === 0) return;
+      cancelPendingCommit?.();
+      cancelPendingCommit = commitVirtualMeasurements(commitPendingSizes) ?? null;
+    });
+    for (const row of root.querySelectorAll<HTMLElement>("[data-virtual-row]")) {
+      observer.observe(row, { box: "border-box" });
+    }
+    const isRow = (node: Node): node is HTMLElement =>
+      node instanceof HTMLElement && node.dataset.virtualRow != null;
+    const MutationObserverConstructor = root.ownerDocument.defaultView?.MutationObserver;
+    const mutationObserver = MutationObserverConstructor ? new MutationObserverConstructor((records) => {
+      for (const record of records) {
+        for (const node of record.addedNodes) if (isRow(node)) observer.observe(node, { box: "border-box" });
+        for (const node of record.removedNodes) if (isRow(node)) observer.unobserve(node);
+      }
+    }) : null;
+    mutationObserver?.observe(root, { childList: true });
+    return () => {
+      cancelPendingCommit?.();
+      mutationObserver?.disconnect();
+      observer.disconnect();
+    };
+  }, [commitVirtualMeasurements, scrollRef]);
+
   useLayoutEffect(() => {
     if (!initialMeasurementsReady) return;
     if (revealKey == null || revealRequestId == null) {

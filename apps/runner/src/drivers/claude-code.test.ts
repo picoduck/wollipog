@@ -378,7 +378,7 @@ test("initialize reconciles persisted task seeds before the first recovery turn"
   driver.dispose();
 });
 
-test("graceful persistent shutdown is tracked until the child confirms exit", async () => {
+test("graceful persistent shutdown is tracked until the child confirms close", async () => {
   const child = fakeProcess();
   const tracked: Promise<void>[] = [];
   const driver = new ClaudeCodeDriver(
@@ -397,7 +397,7 @@ test("graceful persistent shutdown is tracked until the child confirms exit", as
 
   driver.dispose();
   assert.equal(tracked.length, 1);
-  child.emit("exit", 0);
+  child.emit("close", 0);
   await tracked[0];
 });
 
@@ -425,7 +425,7 @@ test("explicit disposal kills a persistent child without the shutdown grace inte
   assert.equal(await turn, "cancelled");
   assert.deepEqual(killed, [child]);
   assert.deepEqual(delays, [6_500]);
-  child.emit("exit", 0);
+  child.emit("close", 0);
 });
 
 test("explicit disposal escalates a transport already inside graceful retirement", async () => {
@@ -459,7 +459,7 @@ test("explicit disposal escalates a transport already inside graceful retirement
   assert.deepEqual(killed, [child]);
   assert.equal(timers.some((timer) => timer.active && timer.delay === 5_000), false);
   assert.ok(timers.some((timer) => timer.active && timer.delay === 6_500));
-  child.emit("exit", 0);
+  child.emit("close", 0);
 });
 
 test("zero idle TTL keeps a quiescent persistent process alive indefinitely", async () => {
@@ -525,7 +525,7 @@ test("persistent mode reuses one process across correlated turns and keeps featu
   driver.dispose();
   assert.equal(children[0].stdin.writableEnded, true);
   assert.equal(killed.length, 0, "a clean EOF gets a grace interval before the backstop");
-  children[0].emit("exit", 0);
+  children[0].emit("close", 0);
   assert.equal(killed.length, 0, "a graceful exit cancels the kill-tree backstop");
 });
 
@@ -580,8 +580,8 @@ test("persistent cost baseline resets when an evicted process resumes", async ()
 
   const resumed = driver.prompt("two");
   await nextTask();
-  assert.equal(children.length, 1, "the replacement waits for confirmed old-process exit");
-  children[0].emit("exit", 0);
+  assert.equal(children.length, 1, "the replacement waits for confirmed old-process close");
+  children[0].emit("close", 0);
   await nextTask();
   children[1].stdout.write(JSON.stringify({ type: "result", subtype: "success", total_cost_usd: 0.02 }) + "\n");
   await resumed;
@@ -690,8 +690,8 @@ test("trailing control request at persistent exit cannot surface a phantom card"
     type: "control_request",
     request_id: "dead-approval",
     request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: "pwd" } },
-  })); // deliberately no newline; exit flushes this trailing frame
-  child.emit("exit", 1);
+  })); // deliberately no newline; close flushes this trailing frame
+  child.emit("close", 1);
   assert.equal(await turn, "refusal");
   assert.equal(events.some((event) => event.kind === "permission_request" || event.kind === "question_request"), false);
   assert.equal(driver.resolvePermission("dead-approval", "allow"), false);
@@ -717,7 +717,7 @@ test("malformed trailing output at pre-ack exit schedules exactly one prompt ret
   );
   const turn = driver.prompt("run once");
   children[0].stdout.write('{"type":"resu');
-  children[0].emit("exit", 1);
+  children[0].emit("close", 1);
   await nextTask();
   assert.equal(children.length, 2, "only one recovery process is spawned");
   assert.equal(recoveredWrites.filter((write) => write.includes("\"type\":\"user\"")).length, 1);
@@ -736,8 +736,13 @@ test("a valid trailing result settles the persistent turn without a spurious fai
   );
   const turn = driver.prompt("finish in trailing buffer");
   await nextTask();
-  child.stdout.write(JSON.stringify({ type: "result", subtype: "success", usage: { output_tokens: 3 } }));
+  let settled = false;
+  void turn.then(() => { settled = true; }, () => { settled = true; });
   child.emit("exit", 0);
+  await nextTask();
+  assert.equal(settled, false, "process exit must not settle before stdout closes");
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success", usage: { output_tokens: 3 } }));
+  child.emit("close", 0);
   assert.equal(await turn, "end_turn");
   assert.equal(events.filter((event) => event.kind === "token_usage").length, 1);
   assert.equal(events.some((event) => event.kind === "error"), false);
@@ -791,10 +796,10 @@ test("persistent config changes restart and resume instead of mutating live argv
   driver.setConfig({ permissionMode: "plan" });
   const second = driver.prompt("two");
   await nextTask();
-  assert.equal(launches.length, 1, "the replacement waits for confirmed old-process exit");
+  assert.equal(launches.length, 1, "the replacement waits for confirmed old-process close");
   assert.equal(children[0].stdin.writableEnded, true);
   assert.equal(killed.length, 0, "the old transport receives a grace interval");
-  children[0].emit("exit", 0);
+  children[0].emit("close", 0);
   await nextTask();
   assert.equal(launches.length, 2);
   assert.ok(launches[1].args.includes("--resume"));
@@ -1064,7 +1069,7 @@ test("one-shot task completion never arms persistent idle eviction during the li
     "a Task completed inside a one-shot turn must not trigger a second provider turn",
   );
   child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
-  child.emit("exit", 0);
+  child.emit("close", 0);
   assert.equal(await turn, "end_turn");
   driver.dispose();
 });
@@ -1090,7 +1095,7 @@ test("one-shot recovery publishes its reconciled orphan set after settling unsee
     task_id: "live-seed",
   }) + "\n");
   child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
-  child.emit("exit", 0);
+  child.emit("close", 0);
   assert.equal(await turn, "end_turn");
   assert.deepEqual(background.at(-1), {
     state: "orphaned",
@@ -1364,7 +1369,7 @@ test("the one-shot circuit breaker orphans pending work when its process exits",
     task_id: "one-shot-task",
   }) + "\n");
   child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
-  child.emit("exit", 0);
+  child.emit("close", 0);
   assert.equal(await turn, "end_turn");
   assert.deepEqual(background.at(-1)?.pendingTaskIds, ["one-shot-task"]);
   assert.equal(background.at(-1)?.state, "orphaned");
@@ -1388,7 +1393,7 @@ test("one-shot cancellation marks pending work orphaned before killing the proce
   assert.equal(background.at(-1)?.state, "orphaned");
   assert.deepEqual(background.at(-1)?.pendingTaskIds, ["cancelled-task"]);
   assert.deepEqual(killed, [child]);
-  child.emit("exit", null);
+  child.emit("close", null);
   driver.dispose();
 });
 
@@ -1505,7 +1510,7 @@ test("an agent-authored hold cannot outlive the configured pending-work ceiling"
   assert.equal(timers[0]?.delay, 30_000);
   timers[0]?.callback();
   assert.equal(timers[1]?.delay, 1_000);
-  child.emit("exit", 0);
+  child.emit("close", 0);
   driver.dispose();
 });
 
@@ -1529,7 +1534,7 @@ test("an unsolicited idle process exit is transparently resumed by the next prom
   await nextTask();
   children[0].stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
   await first;
-  children[0].emit("exit", 0);
+  children[0].emit("close", 0);
   const second = driver.prompt("two");
   await nextTask();
   assert.equal(children.length, 2);
@@ -1560,7 +1565,7 @@ test("an acknowledged prompt is never resent after transport termination", async
   await nextTask(); // PassThrough acknowledged the write.
   children[0].stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: driver.agentSessionId() }) + "\n");
   await nextTask();
-  children[0].emit("exit", 7);
+  children[0].emit("close", 7);
   assert.equal(await turn, "refusal");
   await nextTask();
   assert.equal(children.length, 1, "no automatic resend/spawn after an acknowledged prompt");
@@ -1576,7 +1581,7 @@ test("an acknowledged prompt is never resent after transport termination", async
 
   const secondFailure = driver.prompt("another distinct prompt");
   await nextTask();
-  children[1].emit("exit", 8);
+  children[1].emit("close", 8);
   assert.equal(await secondFailure, "refusal");
   assert.ok(events.some((event) => event.kind === "error" && /disabled/.test(event.message)));
 
@@ -1585,7 +1590,7 @@ test("an acknowledged prompt is never resent after transport termination", async
   assert.equal(children.length, 3);
   assert.equal(launches[2].args.includes("--input-format"), false, "circuit-open session uses one-shot fallback");
   children[2].stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
-  children[2].emit("exit", 0);
+  children[2].emit("close", 0);
   assert.equal(await fallback, "end_turn");
   driver.dispose();
 });
@@ -1608,7 +1613,7 @@ test("an acknowledged first-turn exit before init retains session-id for the rec
   );
   const first = driver.prompt("first");
   await nextTask(); // stdin write acknowledged, but no system/init was observed
-  children[0].emit("exit", 1);
+  children[0].emit("close", 1);
   assert.equal(await first, "refusal");
 
   const recovery = driver.prompt("distinct recovery prompt");
@@ -1642,7 +1647,7 @@ test("a pre-acknowledgement transport failure retries exactly once", async () =>
   );
   const turn = driver.prompt("safe retry");
   assert.ok(firstWriteCallback, "first write remains unacknowledged");
-  children[0].emit("exit", 1);
+  children[0].emit("close", 1);
   await nextTask();
   assert.equal(children.length, 2);
   children[1].stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
@@ -1701,7 +1706,7 @@ test("cancel settles only the active persistent turn and kills its process immed
   assert.equal(await turn, "cancelled");
   assert.equal(children[0].stdin.writableEnded, true);
   assert.deepEqual(killed, [children[0]]);
-  children[0].emit("exit", 0);
+  children[0].emit("close", 0);
 
   const next = driver.prompt("still usable");
   await nextTask();
@@ -1737,7 +1742,7 @@ test("cancel fences an idle persistent child before an immediate new prompt", as
   const second = driver.prompt("two"); // must not reuse the dying child
   await nextTask();
   assert.equal(children.length, 1, "cancelled transport must exit before replacement");
-  children[0].emit("exit", 1); // stale provider handlers are generation-fenced
+  children[0].emit("close", 1); // stale provider handlers are generation-fenced
   await nextTask();
   assert.equal(children.length, 2);
   children[1].stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
@@ -1767,8 +1772,13 @@ test("one-shot fixed-rule mode delivers multiline prompts through stdin, never a
   assert.equal(child.stdin.writableEnded, true);
   assert.equal(acceptedPrompts, 1, "one-shot acceptance is emitted from the stdin end callback");
 
-  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  let settled = false;
+  void turn.then(() => { settled = true; }, () => { settled = true; });
   child.emit("exit", 0);
+  await nextTask();
+  assert.equal(settled, false, "process exit must not settle before final one-shot stdout");
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  child.emit("close", 0);
   assert.equal(await turn, "end_turn");
   driver.dispose();
 });
@@ -1803,7 +1813,7 @@ test("one-shot first/resume turns heal managed hook settings and circuit-open pe
     await nextTask();
     assert.ok(oneShotLaunches[0].args.includes(settings));
     oneShotChildren[0].stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
-    oneShotChildren[0].emit("exit", 0);
+    oneShotChildren[0].emit("close", 0);
     await first;
     rmSync(settings);
     const resumed = oneShot.prompt("resumed");
@@ -1811,7 +1821,7 @@ test("one-shot first/resume turns heal managed hook settings and circuit-open pe
     assert.ok(oneShotLaunches[1].args.includes("--resume"));
     assert.ok(oneShotLaunches[1].args.includes(settings));
     oneShotChildren[1].stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
-    oneShotChildren[1].emit("exit", 0);
+    oneShotChildren[1].emit("close", 0);
     await resumed;
     oneShot.dispose();
 
@@ -1841,7 +1851,7 @@ test("one-shot first/resume turns heal managed hook settings and circuit-open pe
     const fallback = persistent.prompt("fallback");
     await nextTask();
     assert.equal(persistentLaunches.length, 1, "hook fingerprint restart waits for old transport exit");
-    persistentChildren[0].emit("exit", 0);
+    persistentChildren[0].emit("close", 0);
     await nextTask();
     assert.equal(persistentLaunches.length, 2, "fingerprint change restarts the persistent process");
     assert.equal(persistentLaunches[1].args.includes(settings), false, "new process is hook-less");
@@ -1894,7 +1904,7 @@ test("a successful cooldown re-probe publishes runner-owned hook elicitation rec
     await nextTask();
     assert.equal(launches[0].args.includes(settings), false);
     children[0].stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
-    children[0].emit("exit", 0);
+    children[0].emit("close", 0);
     await fallback;
 
     writeHookCircuitState(
@@ -1909,7 +1919,7 @@ test("a successful cooldown re-probe publishes runner-owned hook elicitation rec
       { consecutiveFailures: 0, open: false, lastDurationMs: 1 },
     );
     children[1].stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
-    children[1].emit("exit", 0);
+    children[1].emit("close", 0);
     await recovered;
 
     assert.deepEqual(events.filter((event) => event.kind === "policy_transport"), [
@@ -1977,9 +1987,14 @@ test("Claude fork mints a deterministic target session with a zero-cost local bo
   assert.equal(args[args.indexOf("--resume") + 1], source);
   assert.equal(args[args.indexOf("--tools") + 1], "");
   assert.ok(writes.some((write) => write.includes("/context")), "local zero-cost bootstrap is sent");
+  let settled = false;
+  void fork.then(() => { settled = true; }, () => { settled = true; });
+  child.emit("exit", 0);
+  await nextTask();
+  assert.equal(settled, false, "process exit must not reject before fork confirmation drains");
   child.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: target }) + "\n");
   child.stdout.write(JSON.stringify({ type: "result", subtype: "success", session_id: target, total_cost_usd: 0 }) + "\n");
-  child.emit("exit", 0);
+  child.emit("close", 0);
   assert.equal(await fork, target);
   assert.equal(driver.agentSessionId(), source, "source driver id is immutable");
   driver.dispose();
@@ -2017,7 +2032,7 @@ test("Claude fork bootstrap heals and carries the managed hook settings", async 
     const target = args[args.indexOf("--session-id") + 1]!;
     child.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: target }) + "\n");
     child.stdout.write(JSON.stringify({ type: "result", subtype: "success", session_id: target, total_cost_usd: 0 }) + "\n");
-    child.emit("exit", 0);
+    child.emit("close", 0);
     await fork;
     driver.dispose();
   } finally {
@@ -2141,6 +2156,71 @@ test("stream_event text_delta -> agent_message", () => {
   });
   assert.equal(r, null);
   assert.deepEqual(h.events, [{ kind: "agent_message", text: "Hello" }]);
+});
+
+test("streamed Claude response completes only at one successful result boundary", () => {
+  const h = makeHarness();
+  h.feed({
+    type: "stream_event",
+    event: {
+      type: "content_block_delta",
+      delta: { type: "text_delta", text: "Hello" },
+    },
+  });
+  assert.equal(h.events.some((event) => event.kind === "agent_response_completed"), false);
+
+  assert.equal(h.feed({ type: "result", subtype: "success" }), "end_turn");
+  assert.equal(
+    h.events.filter((event) => event.kind === "agent_response_completed").length,
+    1,
+  );
+
+  h.feed({ type: "result", subtype: "success" });
+  assert.equal(
+    h.events.filter((event) => event.kind === "agent_response_completed").length,
+    1,
+    "duplicate terminal evidence cannot emit a second completion marker",
+  );
+});
+
+test("failed Claude result never completes a streamed response", () => {
+  const h = makeHarness();
+  h.feed({
+    type: "stream_event",
+    event: {
+      type: "content_block_delta",
+      delta: { type: "text_delta", text: "partial" },
+    },
+  });
+  assert.equal(h.feed({ type: "result", is_error: true }), "refusal");
+  assert.equal(h.events.some((event) => event.kind === "agent_response_completed"), false);
+});
+
+test("subagent results cannot complete or consume the top-level streamed response", () => {
+  const h = makeHarness();
+  h.feed({
+    type: "stream_event",
+    parent_tool_use_id: "task-1",
+    event: {
+      type: "content_block_delta",
+      delta: { type: "text_delta", text: "child" },
+    },
+  });
+  h.feed({
+    type: "stream_event",
+    event: {
+      type: "content_block_delta",
+      delta: { type: "text_delta", text: "top-level" },
+    },
+  });
+  h.feed({ type: "result", subtype: "success", parent_tool_use_id: "task-1" });
+  assert.equal(h.events.some((event) => event.kind === "agent_response_completed"), false);
+
+  h.feed({ type: "result", subtype: "success" });
+  assert.equal(
+    h.events.filter((event) => event.kind === "agent_response_completed").length,
+    1,
+  );
 });
 
 test("stream_event thinking_delta -> agent_thought", () => {
@@ -2620,7 +2700,7 @@ test("control_request with a non-permission subtype is auto-declined loudly (dri
 
 test("a control_request surfacing after process exit is dropped (no phantom card for a dead process)", () => {
   const h = makeHarness();
-  // The exit handler nulls child before the trailing-line flush — an ask parsed then is
+  // The close handler nulls child before the trailing-line flush — an ask parsed then is
   // unanswerable and must not mint a card or repopulate the just-cleared map.
   const r = h.feed({
     type: "control_request",
@@ -2798,6 +2878,14 @@ test("normalizeQuestions tolerates malformed input", () => {
   assert.deepEqual(normalizeQuestions(null), []);
   assert.deepEqual(normalizeQuestions({}), []);
   assert.deepEqual(normalizeQuestions({ questions: "nope" }), []);
+  assert.deepEqual(normalizeQuestions({
+    questions: [{
+      question: "Choose features or add another",
+      multiSelect: true,
+      allowOther: true,
+      options: [{ label: "Audit" }],
+    }],
+  }), []);
 });
 
 test("renderApprovalInput shows the command for Bash and path+content for Write, bounded", () => {

@@ -38,6 +38,7 @@ const TITLE_CASE_MINOR_WORDS = new Set([
 const TITLE_CASE_OVERRIDES: Record<string, string> = {
   chatops: "Chat-Ops",
   github: "GitHub",
+  intellij: "IntelliJ",
   macos: "macOS",
 };
 
@@ -133,25 +134,24 @@ export interface StatusMeta {
   busy: boolean;
 }
 
+const STATUS_META: Record<SessionStatus, StatusMeta> = {
+  queued: { label: "Queued", className: "st-queued", busy: false },
+  starting: { label: "Starting", className: "st-running", busy: true },
+  running: { label: "Running", className: "st-running", busy: true },
+  input_required: { label: "Awaiting Input", className: "st-input", busy: false },
+  idle: { label: "Awaiting Prompt", className: "st-idle", busy: false },
+  completed: { label: "Completed", className: "st-done", busy: false },
+  failed: { label: "Failed", className: "st-failed", busy: false },
+  stopped: { label: "Stopped", className: "st-stopped", busy: false },
+};
+
 export function statusMeta(status: SessionStatus): StatusMeta {
-  switch (status) {
-    case "queued":
-      return { label: "Queued", className: "st-queued", busy: false };
-    case "starting":
-      return { label: "Starting", className: "st-running", busy: true };
-    case "running":
-      return { label: "Running", className: "st-running", busy: true };
-    case "input_required":
-      return { label: "Needs Input", className: "st-input", busy: false };
-    case "idle":
-      return { label: "Ready for Review", className: "st-idle", busy: false };
-    case "completed":
-      return { label: "Completed", className: "st-done", busy: false };
-    case "failed":
-      return { label: "Failed", className: "st-failed", busy: false };
-    case "stopped":
-      return { label: "Stopped", className: "st-stopped", busy: false };
-  }
+  if (Object.hasOwn(STATUS_META, status)) return STATUS_META[status];
+  return {
+    label: "Status Unavailable",
+    className: "st-stopped",
+    busy: false,
+  };
 }
 
 /**
@@ -237,6 +237,11 @@ const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   "danger-full-access": "No sandbox — the agent can do anything. Use with caution.",
   "on-request": "Reads, writes, and commands inside the workspace run automatically; external files and network access require approval.",
 };
+
+export function effortLabel(value: string): string {
+  const labels: Record<string, string> = { minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra High", max: "Max" };
+  return labels[value] ?? value.charAt(0).toUpperCase() + value.slice(1);
+}
 
 export function permissionModeLabel(id: string, driver?: AgentDriverKind): string {
   if (driver === "codex" && id === "workspace-write") return "Auto (Workspace Sandbox)";

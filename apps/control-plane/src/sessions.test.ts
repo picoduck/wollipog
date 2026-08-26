@@ -13,6 +13,8 @@ import type {
   RunnerMetadata,
   RunView,
   SessionEvent,
+  SessionReminderView,
+  SetSessionReminderRequest,
   SessionSnapshot,
   SessionView,
   SteerRequest,
@@ -24,23 +26,58 @@ import {
   MAX_UI_SESSION_SUBSCRIPTIONS,
   POLICY_HOOK_ABANDONMENT_MS,
   PROTOCOL_VERSION,
+  RUNNER_CAPABILITY_MIN_PROTOCOL,
 } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { automationCommandDigest, canonicalAutomationCommandJson } from "./automation-command-outbox.js";
 import { Hub, RunnerRequestNotSentError, type RunnerRequestResult } from "./hub.js";
 import { agentDelegationAuthorizationError, type AgentPrincipal } from "./identity.js";
 import { pushDecision } from "./push-decision.js";
+import type { SessionTitleGenerator } from "./session-title-generator.js";
 import {
   SessionsService,
   EXTERNAL_SESSION_ADOPTION_TIMEOUT_MS,
   EXTERNAL_SESSION_ENUMERATION_TIMEOUT_MS,
+  SESSION_STOP_MAX_ATTEMPTS,
+  SESSION_STOP_RETRY_INTERVAL_MS,
+  SESSION_STOP_TIMEOUT_MS,
   budgetDecision,
   capabilityConfigError,
   claudeModelConfigForValidation,
+  defaultPermissionModeForNewSession,
   normalizeClaudePersistedConfig,
+  resolveEffectiveModelEffort,
   sessionBlocksConversationFork,
   type PreStagedDeliveryPlan,
 } from "./sessions.js";
+
+test("new Claude sessions choose Auto only when the connected installation advertises it", () => {
+  const base = { models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true };
+  assert.equal(defaultPermissionModeForNewSession("claude-code", { ...base, permissionModes: ["default", "auto", "acceptEdits"] }), "auto");
+  assert.equal(defaultPermissionModeForNewSession("claude-code", { ...base, permissionModes: ["default", "acceptEdits"] }), "acceptEdits");
+  assert.equal(defaultPermissionModeForNewSession("claude-code", { ...base, permissionModes: ["default"] }), undefined);
+  assert.equal(defaultPermissionModeForNewSession("claude-code", { ...base, permissionModes: [] }), undefined);
+  assert.equal(defaultPermissionModeForNewSession("claude-code", undefined), undefined);
+  assert.equal(defaultPermissionModeForNewSession("codex-app-server", { ...base, permissionModes: ["auto-review"] }), undefined);
+});
+
+test("effective model and effort resolution follows explicit, advertised, preferred, and deterministic fallbacks", () => {
+  const caps = {
+    models: [
+      { id: "default", default: true },
+      { id: "zeta", efforts: ["low"] },
+      { id: "gpt-5.6-sol", efforts: ["medium", "high"], defaultEffort: "medium" },
+    ],
+    effortLevels: ["low", "medium", "high"], slashCommands: [], supportsImages: true, supportsApprovals: true,
+  };
+  assert.deepEqual(resolveEffectiveModelEffort({ model: "zeta", effort: "low" }, caps, "codex-app-server").value, { model: "zeta", effort: "low" });
+  assert.deepEqual(resolveEffectiveModelEffort({}, caps, "codex-app-server").value, { model: "gpt-5.6-sol", effort: "medium" });
+  const noAdvertisedDefault = { ...caps, models: caps.models.map((model) => ({ ...model, default: false })) };
+  assert.deepEqual(resolveEffectiveModelEffort({}, noAdvertisedDefault, "codex-app-server").value, { model: "gpt-5.6-sol", effort: "medium" });
+  const noPreferred = { ...caps, models: [{ id: "hidden", hidden: true, efforts: ["high"] }, { id: "zeta", efforts: ["low"] }, { id: "alpha", efforts: ["medium"] }] };
+  assert.deepEqual(resolveEffectiveModelEffort({}, noPreferred, "codex-app-server").value, { model: "alpha", effort: "medium" });
+  assert.deepEqual(resolveEffectiveModelEffort({ model: "missing", effort: "xhigh" }, noPreferred, "codex-app-server").value, { model: "alpha", effort: "medium" });
+});
 
 test("conversation forks fail closed for every in-progress source lifecycle", () => {
   for (const status of ["queued", "starting", "running", "input_required"] as const) {
@@ -60,6 +97,12 @@ test("capability config validation rejects unverified effort and permission mode
   assert.match(capabilityConfigError({ model: "missing" }, { ...caps, models: [{ id: "known" }] })!, /model/);
   assert.match(capabilityConfigError({ permissionMode: "auto" }, caps)!, /permission mode/);
   assert.equal(capabilityConfigError({ effort: "low", permissionMode: "acceptEdits" }, caps), null);
+  const perModelCaps = {
+    ...caps,
+    models: [{ id: "visible", efforts: ["low"] }, { id: "legacy", hidden: true, efforts: ["minimal"] }],
+  };
+  assert.equal(capabilityConfigError({ model: "legacy", effort: "minimal" }, perModelCaps), null);
+  assert.match(capabilityConfigError({ model: "legacy", effort: "low" }, perModelCaps)!, /effort/);
 });
 
 test("persisted Claude config normalization drops stale knobs and preserves the conductor gate", () => {
@@ -196,15 +239,23 @@ class FakeHub {
     else this.activeTurnIds.delete(sessionId);
   }
 
-  sessionChanged(session: SessionView): void {
-    this.calls.push({ method: "sessionChanged", args: [session] });
+  sessionChanged(session: SessionView, refreshProject = true): void {
+    this.calls.push({ method: "sessionChanged", args: [session, refreshProject] });
     this.sessionChangedCalls.push(session);
-    if (session.projectId) this.projectChangedById(session.projectId);
+    if (refreshProject && session.projectId) this.projectChangedById(session.projectId);
   }
 
   sessionChangedById(sessionId: string): void {
     this.calls.push({ method: "sessionChangedById", args: [sessionId] });
     this.sessionChangedByIdCalls.push(sessionId);
+  }
+
+  sessionReminderChanged(userId: string, reminder: SessionReminderView): void {
+    this.calls.push({ method: "sessionReminderChanged", args: [userId, reminder] });
+  }
+
+  sessionReminderRemoved(userId: string, sessionId: string): void {
+    this.calls.push({ method: "sessionReminderRemoved", args: [userId, sessionId] });
   }
 
   sessionEvent(event: SessionEvent): void {
@@ -344,7 +395,12 @@ function runnerMeta(): RunnerMetadata {
 }
 
 /** Fresh in-memory DB seeded with one online-capable runner + its agent/workspace. */
-function makeHarness() {
+function makeHarness(
+  titleGenerator?: SessionTitleGenerator,
+  titleGenerationTimeoutMs = 1_000,
+  titleGenerationEnabled?: (sessionId: string) => boolean,
+  titleGenerationRevision?: (sessionId: string) => string,
+) {
   const db = ControlPlaneDb.open(":memory:");
   db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);
   const hub = new FakeHub();
@@ -383,7 +439,17 @@ function makeHarness() {
       }),
     };
   };
-  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG);
+  const svc = new SessionsService(
+    db,
+    hub as unknown as Hub,
+    NOOP_LOG,
+    undefined,
+    undefined,
+    titleGenerator,
+    titleGenerationTimeoutMs,
+    titleGenerationEnabled,
+    titleGenerationRevision,
+  );
   return { db, hub, svc };
 }
 
@@ -438,6 +504,228 @@ function seedReadyPodSession(
   db.updateSessionStatus(id, "idle", Date.now());
   return id;
 }
+
+test("fired reminder policy edits and removal Undo can restore their observed past instant", () => {
+  const { db, hub, svc } = makeHarness();
+  const sessionId = seedSession(svc, hub);
+  const userId = db.localIdentityContext().userId;
+  const now = Date.now();
+  const scheduledFor = now - 1_000;
+  const schedule = {
+    sessionId,
+    userId,
+    scheduledFor,
+    timeZone: "UTC",
+    originalExpression: "one second ago",
+    wakePolicy: "until_activity" as const,
+  };
+  assert.equal(db.setSessionReminder({ ...schedule, expectedRevision: 0, now: now - 2_000 }).kind, "updated");
+  assert.equal(db.fireDueSessionReminders(now).length, 1);
+  const fired = db.getSessionReminder(sessionId, userId)!;
+  assert.equal(fired.state, "fired");
+
+  const policyEdit = svc.setReminder(sessionId, userId, {
+    scheduledFor,
+    timeZone: "UTC",
+    originalExpression: "one second ago",
+    wakePolicy: "regardless",
+    expectedRevision: fired.revision,
+  });
+  assert.equal(policyEdit.ok, true);
+  assert.equal(policyEdit.data?.scheduledFor, scheduledFor);
+  assert.equal(policyEdit.data?.wakePolicy, "regardless");
+  assert.equal(policyEdit.data?.state, "fired");
+  assert.equal(db.fireDueSessionReminders(now + 1).length, 0,
+    "a policy-only edit must not reset an already-fired instant to pending");
+
+  const policyUndo = svc.setReminder(sessionId, userId, {
+    scheduledFor,
+    timeZone: "UTC",
+    originalExpression: "one second ago",
+    wakePolicy: "until_activity",
+    expectedRevision: policyEdit.data!.revision,
+  });
+  assert.equal(policyUndo.ok, true);
+  assert.equal(policyUndo.data?.state, "fired");
+
+  const futureEdit = svc.setReminder(sessionId, userId, {
+    scheduledFor: now + 60_000,
+    timeZone: "UTC",
+    originalExpression: "in one minute",
+    wakePolicy: "regardless",
+    expectedRevision: policyUndo.data!.revision,
+  });
+  assert.equal(futureEdit.ok, true);
+  const futureEditUndo = svc.setReminder(sessionId, userId, {
+    scheduledFor,
+    timeZone: "UTC",
+    originalExpression: "one second ago",
+    wakePolicy: "until_activity",
+    expectedRevision: futureEdit.data!.revision,
+  });
+  assert.equal(futureEditUndo.ok, true, "Undo may restore the prior fired instant after a future edit");
+
+  const removed = svc.removeReminder(sessionId, userId, futureEditUndo.data!.revision);
+  assert.equal(removed.ok, true);
+  const restored = svc.setReminder(sessionId, userId, {
+    scheduledFor,
+    timeZone: "UTC",
+    originalExpression: "one second ago",
+    wakePolicy: "until_activity",
+    expectedRevision: 0,
+  });
+  assert.equal(restored.ok, true);
+  assert.equal(restored.data?.scheduledFor, scheduledFor);
+
+  const unguardedPast = svc.setReminder(sessionId, userId, {
+    scheduledFor: now - 2_000,
+    timeZone: "UTC",
+    originalExpression: "two seconds ago",
+    wakePolicy: "until_activity",
+  });
+  assert.equal(unguardedPast.ok, false);
+  assert.equal(unguardedPast.status, 400);
+  db.close();
+});
+
+test("reminder identity validation is paired and stale-safe at the service boundary", () => {
+  const { db, hub, svc } = makeHarness();
+  const sessionId = seedSession(svc, hub);
+  const userId = db.localIdentityContext().userId;
+  const schedule = {
+    scheduledFor: Date.now() + 60_000,
+    timeZone: "UTC",
+    originalExpression: "in one minute",
+    wakePolicy: "until_activity" as const,
+  };
+
+  const unpaired = svc.setReminder(sessionId, userId, {
+    ...schedule,
+    expectedReminderId: "rem_stale",
+  });
+  assert.equal(unpaired.ok, false);
+  assert.equal(unpaired.status, 400);
+
+  const oversized = svc.setReminder(sessionId, userId, {
+    ...schedule,
+    expectedRevision: 0,
+    expectedReminderId: "x".repeat(129),
+  });
+  assert.equal(oversized.ok, false);
+  assert.equal(oversized.status, 400);
+
+  const created = svc.setReminder(sessionId, userId, { ...schedule, expectedRevision: 0 });
+  assert.equal(created.ok, true);
+  const staleIdentity = svc.setReminder(sessionId, userId, {
+    ...schedule,
+    scheduledFor: schedule.scheduledFor + 60_000,
+    expectedRevision: created.data!.revision,
+    expectedReminderId: "rem_stale",
+  });
+  assert.equal(staleIdentity.ok, false);
+  assert.equal(staleIdentity.status, 409);
+  assert.equal(db.getSessionReminder(sessionId, userId)?.reminderId, created.data!.reminderId);
+  db.close();
+});
+
+test("activity-fired reminder edits and Undo preserve their future fired state", () => {
+  const { db, hub, svc } = makeHarness();
+  const sessionId = seedSession(svc, hub);
+  const userId = db.localIdentityContext().userId;
+  const now = Date.now();
+  const scheduledFor = now + 60_000;
+  assert.equal(db.setSessionReminder({
+    sessionId, userId, scheduledFor, timeZone: "UTC", originalExpression: "in one minute",
+    wakePolicy: "until_activity", expectedRevision: 0, now,
+  }).kind, "updated");
+  assert.equal(db.fireSessionRemindersForActivity(sessionId, 1, "agent_response", now + 1).length, 1);
+  const fired = db.getSessionReminder(sessionId, userId)!;
+  assert.equal(fired.state, "fired");
+  assert.equal(fired.wakeReason, "agent_response");
+
+  const edited = svc.setReminder(sessionId, userId, {
+    scheduledFor, timeZone: "UTC", originalExpression: "in one minute",
+    wakePolicy: "regardless", expectedRevision: fired.revision,
+  });
+  assert.equal(edited.ok, true);
+  assert.equal(edited.data?.state, "fired");
+  assert.equal(edited.data?.wakeReason, "agent_response");
+
+  const futureReschedule = svc.setReminder(sessionId, userId, {
+    scheduledFor: scheduledFor + 60_000, timeZone: "UTC", originalExpression: "in two minutes",
+    wakePolicy: "regardless", expectedRevision: edited.data!.revision,
+  });
+  assert.equal(futureReschedule.ok, true);
+  const editUndo = svc.setReminder(sessionId, userId, {
+    scheduledFor, timeZone: "UTC", originalExpression: "in one minute",
+    wakePolicy: "until_activity", expectedRevision: futureReschedule.data!.revision,
+    restoreFired: { firedAt: fired.firedAt!, wakeReason: fired.wakeReason! },
+  });
+  assert.equal(editUndo.ok, true);
+  assert.equal(editUndo.data?.state, "fired");
+  assert.equal(editUndo.data?.wakeReason, "agent_response");
+
+  assert.equal(svc.removeReminder(sessionId, userId, editUndo.data!.revision).ok, true);
+  const removeUndo = svc.setReminder(sessionId, userId, {
+    scheduledFor, timeZone: "UTC", originalExpression: "in one minute",
+    wakePolicy: "until_activity", expectedRevision: 0,
+    restoreFired: { firedAt: fired.firedAt!, wakeReason: fired.wakeReason! },
+  });
+  assert.equal(removeUndo.ok, true);
+  assert.equal(removeUndo.data?.state, "fired");
+  assert.equal(removeUndo.data?.firedAt, fired.firedAt);
+  db.close();
+});
+
+test("malformed fired-reminder restore facts fail without mutation or broadcast", () => {
+  const { db, hub, svc } = makeHarness();
+  const sessionId = seedSession(svc, hub);
+  const userId = db.localIdentityContext().userId;
+  const now = Date.now();
+  const created = svc.setReminder(sessionId, userId, {
+    scheduledFor: now + 60_000,
+    timeZone: "UTC",
+    originalExpression: "in one minute",
+    wakePolicy: "until_activity",
+    expectedRevision: 0,
+  });
+  assert.equal(created.ok, true);
+  const before = db.getSessionReminder(sessionId, userId);
+  assert.ok(before);
+  const broadcastsBefore = hub.calls.filter((call) => call.method === "sessionReminderChanged").length;
+  const malformed: unknown[] = [
+    null,
+    [],
+    1,
+    "facts",
+    {},
+    { firedAt: now },
+    { wakeReason: "scheduled" },
+    { firedAt: Number.MAX_SAFE_INTEGER, wakeReason: "scheduled" },
+    { firedAt: now, wakeReason: "unknown" },
+  ];
+
+  for (const restoreFired of malformed) {
+    const result = svc.setReminder(sessionId, userId, {
+      scheduledFor: now + 120_000,
+      timeZone: "UTC",
+      originalExpression: "in two minutes",
+      wakePolicy: "regardless",
+      expectedRevision: before.revision,
+      restoreFired,
+    } as Partial<SetSessionReminderRequest>);
+    assert.equal(result.ok, false, "accepted malformed restoreFired");
+    assert.equal(result.status, 400);
+    assert.match(result.error ?? "", /restoreFired/);
+    assert.deepEqual(db.getSessionReminder(sessionId, userId), before);
+  }
+  assert.equal(
+    hub.calls.filter((call) => call.method === "sessionReminderChanged").length,
+    broadcastsBefore,
+    "rejected restore payloads emit no live update",
+  );
+  db.close();
+});
 
 /* -------------------------------------------------------------------------- */
 /* createSession                                                             */
@@ -1062,6 +1350,71 @@ test("createRun rejects member counts that cannot be represented by the live UI 
   assert.equal(db.listRuns().length, 0);
   assert.equal(db.listSessions({ includeArchived: true }).length, 0);
   assert.equal(hub.sentOfType("start_session").length, 0);
+});
+
+test("createSession persists and launches the capability-dependent Claude permission default", () => {
+  const { db, hub, svc } = makeHarness();
+  const updateModes = (permissionModes: string[]) => db.updateRunnerAgents(
+    RUNNER_ID,
+    runnerMeta().agents.map((agent) => agent.id === AGENT_ID ? {
+      ...agent,
+      capabilities: {
+        models: [], effortLevels: [], slashCommands: [], supportsImages: true,
+        supportsApprovals: true, permissionModes,
+      },
+    } : agent),
+    Date.now(),
+  );
+
+  updateModes(["default", "auto", "acceptEdits", "plan"]);
+  const supported = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
+  assert.ok(supported.ok && supported.data);
+  assert.equal(db.getSession(supported.data.id)!.permissionMode, "auto");
+  assert.equal(hub.sentOfType("start_session").at(-1)!.spec.config.permissionMode, "auto");
+
+  const explicit = svc.createSession({
+    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, config: { permissionMode: "plan" },
+  });
+  assert.ok(explicit.ok && explicit.data);
+  assert.equal(db.getSession(explicit.data.id)!.permissionMode, "plan");
+
+  updateModes(["default", "acceptEdits", "plan"]);
+  const unsupported = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
+  assert.ok(unsupported.ok && unsupported.data);
+  assert.equal(db.getSession(unsupported.data.id)!.permissionMode, "acceptEdits");
+  assert.equal(hub.sentOfType("start_session").at(-1)!.spec.config.permissionMode, "acceptEdits");
+
+  updateModes([]);
+  const undiscovered = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
+  assert.ok(undiscovered.ok && undiscovered.data);
+  assert.equal(db.getSession(undiscovered.data.id)!.permissionMode, null);
+  assert.equal(hub.sentOfType("start_session").at(-1)!.spec.config.permissionMode, undefined);
+});
+
+test("createSession persists and launches the resolved concrete model and effort", () => {
+  const { db, hub, svc } = makeHarness();
+  db.updateRunnerAgents(
+    RUNNER_ID,
+    runnerMeta().agents.map((agent) => agent.id === AGENT_ID ? {
+      ...agent,
+      capabilities: {
+        models: [
+          { id: "default", displayName: "Default (Sonnet)", default: true },
+          { id: "opus", displayName: "Opus 5", efforts: ["low", "high"] },
+        ],
+        effortLevels: ["low", "high"], slashCommands: [], supportsImages: true,
+        supportsApprovals: true, permissionModes: ["acceptEdits"],
+      },
+    } : agent),
+    Date.now(),
+  );
+
+  const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
+  assert.ok(created.ok && created.data, created.error);
+  assert.equal(db.getSession(created.data.id)?.model, "opus");
+  assert.equal(db.getSession(created.data.id)?.effort, "high");
+  assert.equal(hub.sentOfType("start_session").at(-1)?.spec.config.model, "opus");
+  assert.equal(hub.sentOfType("start_session").at(-1)?.spec.config.effort, "high");
 });
 
 test("createSession online → 201 and sends start_session with the right launch spec", () => {
@@ -2299,16 +2652,41 @@ test("admission-queued prompts persist before success, survive service restart, 
   }), true);
   assert.equal(db.getSessionPromptCommand(commandIds[0]!)?.state, "queued", "late retries cannot regress state");
 
-  assert.equal(svc.setArchived(id, true).ok, true);
-  assert.equal(db.getSessionPromptCommand(commandIds[1]!)?.state, "sent",
-    "archiving is display-only and preserves queued delivery");
-  assert.equal(restarted.stop(id).ok, true);
+  const archive = svc.setArchived(id, true);
+  assert.equal(archive.status, 202);
+  assert.equal(archive.data?.archiveStatus, "stop_pending");
+  assert.equal(archive.data?.archived, false, "queued work stays discoverable until stop confirmation");
   assert.equal(db.getSessionPromptCommand(commandIds[0]!)?.state, "uncertain");
   assert.equal(db.getSessionPromptCommand(commandIds[1]!)?.state, "uncertain");
+  assert.equal(hub.sentOfType("stop_session").at(-1)?.sessionId, id);
   hub.sentToRunner.length = 0;
   restarted.retryDuePrompts(Date.now() + 120_000);
   assert.equal(hub.sentOfType("durable_session_command").length, 0,
     "stopped sessions never replay retained prompts");
+});
+
+test("terminal hydration and runtime snapshots fence every durable prompt from replay", () => {
+  for (const source of ["hydration", "runtime"] as const) {
+    const { db, hub, svc } = makeHarness();
+    const id = seedSession(svc, hub);
+    hub.sentToRunner.length = 0;
+    assert.equal(svc.prompt(id, `${source} terminal prompt`).ok, true);
+    const command = hub.sentOfType("durable_session_command")[0]!;
+    assert.equal(db.getSessionPromptCommand(command.commandId)?.state, "sent");
+
+    const terminal = snapshot({
+      id,
+      status: source === "hydration" ? "failed" : "completed",
+    });
+    if (source === "hydration") svc.hydrateRunnerSessions(RUNNER_ID, [terminal]);
+    else svc.applySessionRuntimeUpdate(RUNNER_ID, terminal);
+
+    const fenced = db.getSessionPromptCommand(command.commandId)!;
+    assert.equal(fenced.state, "uncertain", source);
+    assert.equal(fenced.errorCode, "COMMAND_CANCELLED", source);
+    assert.match(fenced.error ?? "", /session became (failed|completed)/u, source);
+    assert.deepEqual(db.dueSessionPromptCommands(Date.now() + 60_000, RUNNER_ID), [], source);
+  }
 });
 
 test("a staged admission prompt fails closed instead of replaying after runner downgrade", () => {
@@ -2856,9 +3234,9 @@ test("prompt heals persisted Claude knobs without rewriting a compatible model a
   const res = svc.prompt(id, "continue");
   assert.equal(res.ok, true);
   assert.equal(db.getSession(id)!.model, "opus");
-  assert.equal(db.getSession(id)!.effort, null);
+  assert.equal(db.getSession(id)!.effort, "low");
   assert.equal(db.getSession(id)!.permissionMode, null);
-  assert.deepEqual(sentPromptCommands(hub)[0]!.config, { model: "opus" });
+  assert.deepEqual(sentPromptCommands(hub)[0]!.config, { model: "opus", effort: "low" });
 });
 
 test("explicit unsupported Claude effort and permission values still fail capability validation", () => {
@@ -2927,6 +3305,62 @@ test("fallback family compatibility never rewrites a persisted live Claude model
   assert.equal(result.ok, true, result.error);
   assert.equal(db.getSession(id)?.model, "opus[1m]");
   assert.equal(hub.sentOfType("prompt_session")[0]?.config?.model, "opus[1m]");
+});
+
+test("prompt accepts a persisted hidden model effort advertised by that model", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { config: { model: "legacy", effort: "minimal" } });
+  db.updateSessionStatus(id, "idle", Date.now());
+  db.updateRunnerAgents(
+    RUNNER_ID,
+    runnerMeta().agents.map((agent) => agent.id === AGENT_ID ? {
+      ...agent,
+      capabilities: {
+        models: [
+          { id: "visible", efforts: ["low", "high"] },
+          { id: "legacy", hidden: true, efforts: ["minimal"] },
+        ],
+        effortLevels: ["low", "high"], slashCommands: [], supportsImages: true,
+        supportsApprovals: true, permissionModes: ["acceptEdits"],
+      },
+    } : agent),
+    Date.now(),
+  );
+  hub.sentToRunner.length = 0;
+
+  const result = svc.prompt(id, "continue");
+  assert.equal(result.ok, true, result.error);
+  assert.equal(hub.sentOfType("prompt_session")[0]?.config?.model, "legacy");
+  assert.equal(hub.sentOfType("prompt_session")[0]?.config?.effort, "minimal");
+});
+
+test("stale Claude family ids heal to an advertised concrete model instead of stranding prompts", () => {
+  for (const [staleModel, advertisedModel] of [
+    ["claude-opus-4-20250514", "opus"],
+    ["opus-plan", "opus-fast"],
+  ] as const) {
+    const { db, hub, svc } = makeHarness();
+    const id = seedSession(svc, hub, { config: { model: staleModel } });
+    db.updateSessionStatus(id, "idle", Date.now());
+    db.updateRunnerAgents(
+      RUNNER_ID,
+      runnerMeta().agents.map((agent) => agent.id === AGENT_ID ? {
+        ...agent,
+        capabilities: {
+          models: [{ id: "default", default: true }, { id: advertisedModel }],
+          effortLevels: ["low"], slashCommands: [], supportsImages: true,
+          supportsApprovals: true, permissionModes: ["acceptEdits"],
+        },
+      } : agent),
+      Date.now(),
+    );
+    hub.sentToRunner.length = 0;
+
+    const result = svc.prompt(id, "continue");
+    assert.equal(result.ok, true, result.error);
+    assert.equal(db.getSession(id)?.model, advertisedModel);
+    assert.equal(hub.sentOfType("prompt_session")[0]?.config?.model, advertisedModel);
+  }
 });
 
 test("prompt is rejected while a cost-budget approval is pending (no bypass)", () => {
@@ -3058,6 +3492,152 @@ test("onSessionEvent names an Untitled session from its first user message", () 
   // A later message must not rename it.
   svc.onSessionEvent(id, { kind: "user_message", text: "and now do the next thing" });
   assert.equal(db.getSession(id)!.title, "Fix the parser bug");
+});
+
+test("semantic naming keeps the fallback immediate and applies an isolated result asynchronously", async () => {
+  let finish: ((value: string) => void) | undefined;
+  const generator: SessionTitleGenerator = ({ messages }) => {
+    assert.deepEqual(messages, [{ role: "user", text: "Investigate this long pasted context" }]);
+    return new Promise((resolve) => { finish = resolve; });
+  };
+  const { db, hub, svc } = makeHarness(generator);
+  const id = seedSession(svc, hub);
+
+  svc.onSessionEvent(id, { kind: "user_message", text: "Investigate this long pasted context", final: true });
+  assert.equal(db.getSession(id)?.title, "Investigate this long pasted context");
+  finish!("Investigate Pasted Context");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(db.getSession(id)?.title, "Investigate Pasted Context");
+  assert.equal(db.getSession(id)?.titleSource, "generated");
+
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+    id, title: "Investigate this long pasted context", titleSource: "generated",
+  })]);
+  assert.equal(db.getSession(id)?.title, "Investigate Pasted Context",
+    "stale runner fallback does not revert a CP semantic title");
+
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+    id, title: "Provider Semantic Title", titleSource: "provider",
+  })]);
+  assert.equal(db.getSession(id)?.title, "Provider Semantic Title", "provider title metadata remains authoritative");
+  assert.equal(db.getSession(id)?.titleSource, "provider");
+});
+
+test("a prompt-created fallback also schedules semantic naming on its first durable message", async () => {
+  const requested: string[][] = [];
+  const generator: SessionTitleGenerator = async ({ messages }) => {
+    requested.push(messages.map((message) => message.text));
+    return "Semantic Prompt Title";
+  };
+  const { db, hub, svc } = makeHarness(generator);
+  const id = seedSession(svc, hub, { prompt: "Prompt-created fallback title" });
+  assert.notEqual(db.getSession(id)?.title, "Untitled session");
+
+  svc.onSessionEvent(id, { kind: "user_message", text: "Prompt-created fallback title", final: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(requested, [["Prompt-created fallback title"]]);
+  assert.equal(db.getSession(id)?.title, "Semantic Prompt Title");
+});
+
+test("runtime naming mode changes apply to subsequent first messages without a restart", async () => {
+  let enabled = false;
+  const requested: string[] = [];
+  const generator: SessionTitleGenerator = async ({ sessionId }) => {
+    requested.push(sessionId ?? "missing");
+    return "Runtime Semantic Title";
+  };
+  const { db, hub, svc } = makeHarness(generator, 1_000, () => enabled);
+  const promptOnlyId = seedSession(svc, hub);
+  svc.onSessionEvent(promptOnlyId, { kind: "user_message", text: "Prompt fallback", final: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(db.getSession(promptOnlyId)?.title, "Prompt fallback");
+  assert.deepEqual(requested, []);
+
+  enabled = true;
+  const semanticId = seedSession(svc, hub);
+  svc.onSessionEvent(semanticId, { kind: "user_message", text: "Custom endpoint request", final: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(requested, [semanticId]);
+  assert.equal(db.getSession(semanticId)?.title, "Runtime Semantic Title");
+});
+
+test("runtime naming availability is resolved only for a completed first user message", async () => {
+  let checks = 0;
+  const generator: SessionTitleGenerator = async () => "Runtime Semantic Title";
+  const { hub, svc } = makeHarness(generator, 1_000, () => {
+    checks += 1;
+    return true;
+  });
+  const id = seedSession(svc, hub);
+
+  svc.onSessionEvent(id, { kind: "agent_message", text: "streamed response", final: false });
+  svc.onSessionEvent(id, { kind: "user_message", text: "partial request", final: false });
+  assert.equal(checks, 0, "unrelated and partial events must not query runtime naming settings");
+
+  svc.onSessionEvent(id, { kind: "user_message", text: "completed request", final: true });
+  assert.ok(checks > 0, "the completed first user message resolves the runtime setting");
+});
+
+test("retitle reports an unknown session before resolving its runtime naming setting", () => {
+  let checks = 0;
+  const { svc } = makeHarness(async () => "Unused", 1_000, () => {
+    checks += 1;
+    return true;
+  });
+  const result = svc.retitleSession("missing-session");
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.status, 404);
+    assert.equal(result.error, "session not found");
+  }
+  assert.equal(checks, 0);
+});
+
+test("a runtime naming setting revision fences an older in-flight result", async () => {
+  let revision = "custom:1";
+  let finish: ((title: string) => void) | undefined;
+  const generator: SessionTitleGenerator = () => new Promise((resolve) => { finish = resolve; });
+  const { db, hub, svc } = makeHarness(generator, 1_000, () => true, () => revision);
+  const id = seedSession(svc, hub);
+  svc.onSessionEvent(id, { kind: "user_message", text: "Original fallback", final: true });
+  revision = "custom:2";
+  finish!("Stale Semantic Title");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(db.getSession(id)?.title, "Original fallback");
+});
+
+test("a manual rename fences late initial and explicit semantic title results", async () => {
+  const pending: Array<(value: string) => void> = [];
+  const signals: AbortSignal[] = [];
+  const generator: SessionTitleGenerator = ({ signal }) => {
+    signals.push(signal);
+    return new Promise((resolve) => pending.push(resolve));
+  };
+  const { db, hub, svc } = makeHarness(generator);
+  const id = seedSession(svc, hub);
+  svc.onSessionEvent(id, { kind: "user_message", text: "Initial task", final: true });
+  assert.ok(svc.retitleSession(id).ok);
+  assert.equal(pending.length, 2);
+  assert.equal(signals[0]?.aborted, true, "a newer request cancels the superseded model call");
+
+  assert.ok(svc.setTitle(id, "Manual Name").ok);
+  pending[1]!("Explicit Semantic Name");
+  pending[0]!("Initial Semantic Name");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(db.getSession(id)?.title, "Manual Name");
+  assert.equal(db.getSession(id)?.titleSource, "user");
+});
+
+test("a generator that ignores abort cannot apply a result after timeout", async () => {
+  let finish: ((value: string) => void) | undefined;
+  const generator: SessionTitleGenerator = () => new Promise((resolve) => { finish = resolve; });
+  const { db, hub, svc } = makeHarness(generator, 1);
+  const id = seedSession(svc, hub);
+  svc.onSessionEvent(id, { kind: "user_message", text: "Timeout task", final: true });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  finish!("Late Semantic Title");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(db.getSession(id)?.title, "Timeout task");
 });
 
 test("onSessionEvent does not title an Untitled session from a provider command", () => {
@@ -4062,6 +4642,23 @@ test("governance audit records permission request and device resolution without 
   assert.equal(db.getSession(id)!.pendingApproval, null);
 });
 
+test("governance audit records explicit cancellation as dismissed", () => {
+  const { hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  svc.onSessionEvent(id, {
+    kind: "permission_request",
+    requestId: "perm-cancel",
+    title: "Run command?",
+    options: [{ optionId: "cancel", name: "Cancel", kind: "cancel" }],
+  });
+
+  assert.ok(svc.approve(id, "perm-cancel", "cancel").ok);
+  assert.deepEqual(
+    svc.governanceAudit(id).map((entry) => [entry.stage, entry.outcome]),
+    [["request", "pending"], ["resolution", "dismissed"]],
+  );
+});
+
 test("governance audit records reviewer decisions and human escalation provenance without rationale", () => {
   const { hub, svc } = makeHarness();
   const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
@@ -4836,6 +5433,7 @@ test("a provider question cannot overwrite a parked policy-hook card", () => {
     sessionId: id,
     requestId: "parallel-question",
     answers: {},
+    action: "dismiss",
   });
   assert.ok(svc.governanceAudit(id).some((entry) =>
     entry.requestId === "parallel-question" &&
@@ -5808,6 +6406,134 @@ test("workflow artifact service rejects cross-run association, unknown owners, a
   assert.equal(svc.sessionWorkflowArtifacts("missing").status, 404);
 });
 
+test("an explicit empty question submission remains distinct from dismissal", () => {
+  const { hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  svc.onSessionEvent(id, {
+    kind: "question_request",
+    requestId: "optional-form",
+    questions: [{
+      id: "note",
+      question: "Optional note",
+      options: [],
+      allowOther: true,
+      required: false,
+    }],
+  });
+
+  const ambiguousDismissal = svc.answerQuestion(
+    id,
+    "optional-form",
+    { note: "must not ride with dismissal" },
+    { kind: "human", id: "device-empty-submit" },
+    "dismiss",
+  );
+  assert.equal(ambiguousDismissal.status, 400);
+
+  const result = svc.answerQuestion(
+    id,
+    "optional-form",
+    {},
+    { kind: "human", id: "device-empty-submit" },
+    "submit",
+  );
+  assert.ok(result.ok);
+  assert.deepEqual(hub.sentOfType("answer_question").at(-1), {
+    type: "answer_question",
+    sessionId: id,
+    requestId: "optional-form",
+    answers: {},
+    action: "submit",
+  });
+});
+
+test("mixed-version multi-select Other requests reject submission but remain safely dismissible", () => {
+  const { hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  svc.onSessionEvent(id, {
+    kind: "question_request",
+    requestId: "unsupported-question",
+    questions: [{
+      id: "features",
+      question: "Choose features or add another",
+      multiSelect: true,
+      allowOther: true,
+      options: [{ label: "Audit" }],
+    }],
+  });
+  const deliveriesBeforeSubmit = hub.sentOfType("answer_question").length;
+
+  const submission = svc.answerQuestion(
+    id,
+    "unsupported-question",
+    { features: ["Audit"] },
+    { kind: "human", id: "device-unsupported" },
+    "submit",
+  );
+
+  assert.equal(submission.status, 400);
+  assert.match(submission.error ?? "", /cannot combine multi-select and Other responses/);
+  assert.equal(hub.sentOfType("answer_question").length, deliveriesBeforeSubmit);
+
+  const dismissal = svc.answerQuestion(
+    id,
+    "unsupported-question",
+    {},
+    { kind: "human", id: "device-unsupported" },
+    "dismiss",
+  );
+  assert.ok(dismissal.ok);
+  assert.deepEqual(hub.sentOfType("answer_question").at(-1), {
+    type: "answer_question",
+    sessionId: id,
+    requestId: "unsupported-question",
+    answers: {},
+    action: "dismiss",
+  });
+});
+
+test("question governance audit distinguishes explicit dismissal from submission", () => {
+  const { hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  const question = {
+    id: "note",
+    question: "Optional note",
+    options: [],
+    allowOther: true,
+    required: false,
+  };
+
+  svc.onSessionEvent(id, {
+    kind: "question_request",
+    requestId: "submitted-question",
+    questions: [question],
+  });
+  assert.ok(svc.answerQuestion(
+    id,
+    "submitted-question",
+    {},
+    { kind: "human", id: "device-audit" },
+    "submit",
+  ).ok);
+
+  svc.onSessionEvent(id, {
+    kind: "question_request",
+    requestId: "dismissed-question",
+    questions: [question],
+  });
+  assert.ok(svc.answerQuestion(
+    id,
+    "dismissed-question",
+    {},
+    { kind: "human", id: "device-audit" },
+    "dismiss",
+  ).ok);
+
+  const resolutions = svc.governanceAudit(id).filter((entry) => entry.stage === "resolution");
+  assert.equal(resolutions.find((entry) => entry.requestId === "submitted-question")?.outcome, "answered");
+  assert.equal(resolutions.find((entry) => entry.requestId === "dismissed-question")?.outcome, "dismissed");
+});
+
 test("governance audit distinguishes authentication, question answers, and policy decisions", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);
@@ -5825,9 +6551,17 @@ test("governance audit distinguishes authentication, question answers, and polic
   svc.onSessionEvent(id, {
     kind: "question_request",
     requestId: "question-1",
-    questions: [{ id: "color", question: "Choose a color", options: [{ label: "Blue" }] }],
+    questions: [
+      { id: "color", question: "Choose a color", options: [{ label: "Blue" }] },
+      { id: "token", question: "Enter a token", options: [], allowOther: true, secret: true },
+    ],
   });
-  svc.answerQuestion(id, "question-1", { color: "Blue" }, { kind: "human", id: "device-9" });
+  svc.answerQuestion(
+    id,
+    "question-1",
+    { color: "Blue", token: "low-entropy-secret" },
+    { kind: "human", id: "device-9" },
+  );
 
   svc.setConfig(id, { costBudgetUsd: 1 });
   db.updateSessionStatus(id, "running", Date.now());
@@ -5840,8 +6574,13 @@ test("governance audit distinguishes authentication, question answers, and polic
   assert.equal(authRequest.approvalKind, "authentication");
   const answer = entries.find((entry) => entry.requestId === "question-1" && entry.stage === "resolution")!;
   assert.equal(answer.outcome, "answered");
-  assert.match(answer.contentDigest ?? "", /^[a-f0-9]{64}$/);
+  assert.equal(
+    answer.contentDigest,
+    createHash("sha256").update(JSON.stringify({ color: "Blue" }), "utf8").digest("hex"),
+    "secret answers must not influence the durable audit hash",
+  );
   assert.equal(JSON.stringify(answer).includes("Blue"), false);
+  assert.equal(JSON.stringify(answer).includes("low-entropy-secret"), false);
   const policyAsk = entries.find((entry) => entry.stage === "policy_decision")!;
   assert.equal(policyAsk.outcome, "asked");
   assert.deepEqual(policyAsk.actor, { kind: "policy", id: "cost_budget" });
@@ -5883,6 +6622,538 @@ test("approve fails 409 when the requestId does not match the pending one", () =
 /* stop / restart                                                            */
 /* -------------------------------------------------------------------------- */
 
+test("archive directly files terminal sessions without unnecessary lifecycle work", () => {
+  for (const status of ["completed", "failed", "stopped"] as const) {
+    const { db, hub, svc } = makeHarness();
+    const id = seedSession(svc, hub);
+    db.updateSessionStatus(id, status, Date.now());
+    hub.sentToRunner.length = 0;
+
+    const result = svc.setArchived(id, true);
+
+    assert.equal(result.status, 200, status);
+    assert.equal(result.data?.archived, true, status);
+    assert.equal(result.data?.archiveStatus, undefined, status);
+    assert.equal(db.hasSessionStopIntent(id), false, status);
+    assert.equal(hub.sentOfType("stop_session").length, 0, status);
+  }
+});
+
+test("restart rejects an archived session before sending a replacement launch", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "completed", Date.now());
+  db.setSessionArchived(id, true, Date.now());
+  hub.sentToRunner.length = 0;
+
+  const result = svc.restart(id);
+
+  assert.equal(result.status, 409);
+  assert.match(result.error ?? "", /unarchive/u);
+  assert.equal(db.getSession(id)?.archived, true);
+  assert.equal(db.getSession(id)?.status, "completed");
+  assert.equal(hub.sentOfType("start_session").length, 0);
+  assert.equal(hub.sentOfType("stop_session").length, 0);
+});
+
+test("archive is idempotently stop-pending until terminal runner evidence confirms capacity release", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.sentToRunner.length = 0;
+
+  const first = svc.setArchived(id, true);
+  const duplicate = svc.setArchived(id, true);
+
+  assert.equal(first.status, 202);
+  assert.equal(duplicate.status, 202);
+  assert.equal(db.getSession(id)?.archived, false);
+  assert.equal(db.getSession(id)?.archiveStatus, "stop_pending");
+  assert.equal(db.getSession(id)?.status, "stopped");
+  assert.equal(hub.sentOfType("stop_session").length, 2, "a retry reissues the idempotent stop");
+  assert.equal(svc.restart(id).status, 409, "pending archive cannot race a replacement launch");
+
+  svc.onSessionStatus(id, "stopped", undefined, undefined, RUNNER_ID);
+  assert.equal(db.hasSessionStopIntent(id), false);
+  assert.equal(db.getSession(id)?.archiveStatus, undefined);
+  assert.equal(db.getSession(id)?.archived, true);
+  assert.ok(hub.sessionChangedByIdCalls.includes(id));
+});
+
+test("supported Stop operations time out durably and retry the same operation idempotently", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "running", Date.now());
+
+  const pending = svc.setArchived(id, true).data!;
+  const operation = pending.archiveOperation!;
+  assert.equal(operation.status, "stop_pending");
+  assert.equal(operation.attemptCount, 1);
+  assert.equal(operation.capacityReleased, false);
+
+  hub.sessionChangedByIdCalls.length = 0;
+  assert.equal(svc.maintainSessionStopIntents(operation.requestedAt + SESSION_STOP_TIMEOUT_MS), 1);
+  const failed = db.getSession(id)!;
+  assert.equal(failed.archiveStatus, "stop_failed");
+  assert.equal(failed.archived, false);
+  assert.equal(failed.archiveOperation?.capacityReleased, false);
+  assert.equal(failed.archiveOperation?.failure?.code, "timeout");
+  assert.match(failed.archiveOperation?.failure?.message ?? "", /capacity was released/u);
+  assert.ok(hub.sessionChangedByIdCalls.includes(id), "every client receives the failed projection");
+
+  const hidden = svc.setArchived(id, false).data!;
+  assert.equal(hidden.archiveOperation, undefined);
+  assert.equal(db.hasSessionStopIntent(id), true, "unarchive keeps the underlying Stop intent");
+  assert.equal(svc.setArchived(id, true).data?.archiveStatus, "stop_failed",
+    "reattaching archive does not implicitly restart failed runtime work");
+
+  const firstRetry = svc.retryStop(id).data!;
+  const duplicateRetry = svc.retryStop(id).data!;
+  assert.equal(firstRetry.archiveStatus, "stop_pending");
+  assert.equal(firstRetry.archiveOperation?.operationId, operation.operationId);
+  assert.equal(duplicateRetry.archiveOperation?.operationId, operation.operationId);
+  assert.equal(firstRetry.archiveOperation?.attemptCount, 1,
+    "explicit recovery starts a fresh bounded attempt budget");
+  assert.equal(duplicateRetry.archiveOperation?.attemptCount, firstRetry.archiveOperation?.attemptCount);
+  assert.equal(hub.sentOfType("stop_session").at(-1)?.operationId, operation.operationId);
+  assert.equal(svc.maintainSessionStopIntents(firstRetry.archiveOperation!.requestedAt + 1), 0,
+    "explicit recovery must not inherit the expired timeout window");
+  assert.equal(db.getSession(id)?.archiveStatus, "stop_pending");
+
+  assert.equal(svc.maintainSessionStopIntents(
+    firstRetry.archiveOperation!.requestedAt + SESSION_STOP_RETRY_INTERVAL_MS,
+  ), 1);
+  assert.equal(svc.maintainSessionStopIntents(
+    firstRetry.archiveOperation!.requestedAt + 2 * SESSION_STOP_RETRY_INTERVAL_MS,
+  ), 1);
+  assert.equal(db.getSession(id)?.archiveStatus, "stop_pending",
+    "manual recovery receives all three bounded deliveries before exhaustion");
+  const latestDeliveryAttemptId = hub.sentOfType("stop_session").at(-1)?.deliveryAttemptId;
+  assert.ok(latestDeliveryAttemptId);
+  assert.equal(svc.onStopSessionResult(RUNNER_ID, {
+    type: "stop_session_result",
+    sessionId: id,
+    operationId: operation.operationId,
+    deliveryAttemptId: latestDeliveryAttemptId,
+    accepted: true,
+  }), true);
+  assert.equal(db.getSession(id)?.archiveStatus, "stop_pending", "acceptance is not capacity-release proof");
+
+  svc.onSessionStatus(id, "stopped", undefined, undefined, RUNNER_ID);
+  assert.equal(db.getSession(id)?.archived, true);
+  assert.equal(db.getSession(id)?.archiveOperation, undefined);
+});
+
+test("accepted Stops get a persisted bounded completion phase instead of delivery exhaustion", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "running", Date.now());
+  const operation = svc.setArchived(id, true).data!.archiveOperation!;
+
+  for (let attempt = 1; attempt <= SESSION_STOP_MAX_ATTEMPTS; attempt++) {
+    svc.maintainSessionStopIntents(
+      operation.requestedAt + attempt * SESSION_STOP_RETRY_INTERVAL_MS,
+    );
+  }
+  const exhausted = db.sessionStopIntent(id)!;
+  assert.equal(exhausted.operation.failure?.code, "retry_exhausted");
+  const deliveryAttemptId = exhausted.deliveryAttemptId;
+
+  assert.equal(svc.onStopSessionResult(RUNNER_ID, {
+    type: "stop_session_result",
+    sessionId: id,
+    operationId: operation.operationId,
+    deliveryAttemptId,
+    accepted: true,
+  }), true, "late correlated acceptance repairs local delivery exhaustion");
+  const accepted = db.getSession(id)!.archiveOperation!;
+  assert.equal(accepted.status, "stop_pending");
+  assert.equal(accepted.failure, undefined);
+  assert.equal(accepted.capacityReleased, false);
+  assert.ok(accepted.acceptedAt);
+  const acceptedAttemptCount = accepted.attemptCount;
+
+  assert.equal(svc.maintainSessionStopIntents(
+    accepted.acceptedAt + SESSION_STOP_MAX_ATTEMPTS * SESSION_STOP_RETRY_INTERVAL_MS,
+  ), 0);
+  assert.equal(db.getSession(id)?.archiveOperation?.status, "stop_pending",
+    "delivery retry exhaustion no longer applies after acceptance");
+  assert.equal(db.getSession(id)?.archiveOperation?.attemptCount, acceptedAttemptCount,
+    "accepted execution is not redelivered while completion evidence is pending");
+  assert.equal(svc.maintainSessionStopIntents(
+    accepted.acceptedAt + SESSION_STOP_TIMEOUT_MS,
+  ), 1);
+  const timedOut = db.getSession(id)!.archiveOperation!;
+  assert.equal(timedOut.failure?.code, "timeout");
+  assert.match(timedOut.failure?.message ?? "", /accepted Stop.*completion timeout/u);
+  assert.equal(timedOut.capacityReleased, false);
+  assert.equal(db.getSession(id)?.archived, false);
+
+  const previousDeliveryAttemptId = db.sessionStopIntent(id)!.deliveryAttemptId;
+  const retried = svc.retryStop(id).data!.archiveOperation!;
+  assert.equal(retried.operationId, operation.operationId);
+  assert.equal(retried.acceptedAt, undefined);
+  assert.equal(retried.status, "stop_pending");
+  assert.equal(retried.attemptCount, 1);
+  assert.notEqual(db.sessionStopIntent(id)!.deliveryAttemptId, previousDeliveryAttemptId);
+
+  svc.onSessionStatus(id, "stopped", undefined, undefined, RUNNER_ID);
+  assert.equal(db.getSession(id)?.archived, true);
+  assert.equal(db.getSession(id)?.archiveOperation, undefined);
+});
+
+test("attaching archive to an older non-archive Stop intent opens a fresh recovery window", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "stopped", 1);
+  const olderIntent = db.addSessionStopIntent(id, RUNNER_ID, 1, false);
+  assert.equal(db.recordSessionStopAcceptance(
+    id,
+    olderIntent.operation.operationId,
+    olderIntent.deliveryAttemptId,
+    2,
+  ), true);
+
+  const pending = svc.setArchived(id, true).data!;
+  assert.equal(pending.archiveStatus, "stop_pending");
+  assert.equal(pending.archiveOperation!.requestedAt > 1, true);
+  assert.equal(pending.archiveOperation!.acceptedAt, undefined);
+  assert.notEqual(db.sessionStopIntent(id)!.deliveryAttemptId, olderIntent.deliveryAttemptId);
+  assert.equal(svc.maintainSessionStopIntents(pending.archiveOperation!.requestedAt + 1), 0);
+  assert.equal(db.getSession(id)?.archiveStatus, "stop_pending");
+});
+
+test("exhausted retries and explicit runner rejection become bounded Stop Failed states", () => {
+  const exhaustedHarness = makeHarness();
+  const exhaustedId = seedSession(exhaustedHarness.svc, exhaustedHarness.hub);
+  exhaustedHarness.db.updateSessionStatus(exhaustedId, "running", Date.now());
+  const exhaustedOperation = exhaustedHarness.svc.setArchived(exhaustedId, true).data!.archiveOperation!;
+
+  for (let attempt = 1; attempt < SESSION_STOP_MAX_ATTEMPTS; attempt++) {
+    exhaustedHarness.svc.maintainSessionStopIntents(
+      exhaustedOperation.requestedAt + attempt * SESSION_STOP_RETRY_INTERVAL_MS,
+    );
+  }
+  exhaustedHarness.svc.maintainSessionStopIntents(
+    exhaustedOperation.requestedAt + SESSION_STOP_MAX_ATTEMPTS * SESSION_STOP_RETRY_INTERVAL_MS,
+  );
+  assert.equal(exhaustedHarness.db.getSession(exhaustedId)?.archiveOperation?.failure?.code, "retry_exhausted");
+  assert.equal(exhaustedHarness.db.getSession(exhaustedId)?.archived, false);
+
+  const rejectedHarness = makeHarness();
+  const rejectedId = seedSession(rejectedHarness.svc, rejectedHarness.hub);
+  rejectedHarness.db.updateSessionStatus(rejectedId, "running", Date.now());
+  const rejectedOperation = rejectedHarness.svc.setArchived(rejectedId, true).data!.archiveOperation!;
+  const rejectedDeliveryAttemptId = rejectedHarness.hub.sentOfType("stop_session").at(-1)?.deliveryAttemptId;
+  assert.ok(rejectedDeliveryAttemptId);
+  assert.equal(rejectedHarness.svc.onStopSessionResult("intruder", {
+    type: "stop_session_result", sessionId: rejectedId,
+    operationId: rejectedOperation.operationId, deliveryAttemptId: rejectedDeliveryAttemptId,
+    accepted: false, error: "private output",
+  }), false);
+  assert.equal(rejectedHarness.svc.onStopSessionResult(RUNNER_ID, {
+    type: "stop_session_result", sessionId: rejectedId,
+    operationId: "stale-operation", deliveryAttemptId: rejectedDeliveryAttemptId,
+    accepted: false, error: "private output",
+  }), false);
+  assert.equal(rejectedHarness.svc.onStopSessionResult(RUNNER_ID, {
+    type: "stop_session_result", sessionId: rejectedId,
+    operationId: rejectedOperation.operationId, deliveryAttemptId: rejectedDeliveryAttemptId,
+    accepted: false, error: "/private/provider/path and runtime output",
+  }), true);
+  const rejected = rejectedHarness.db.getSession(rejectedId)!;
+  assert.equal(rejected.archiveOperation?.failure?.code, "runner_rejected");
+  assert.doesNotMatch(rejected.archiveOperation?.failure?.message ?? "", /private|provider\/path/u);
+  assert.equal(rejected.archiveOperation?.failure?.message.length! <= 240, true);
+  assert.equal(rejected.archived, false);
+  assert.equal(rejectedHarness.svc.onStopSessionResult(RUNNER_ID, {
+    type: "stop_session_result", sessionId: rejectedId,
+    operationId: rejectedOperation.operationId, deliveryAttemptId: rejectedDeliveryAttemptId,
+    accepted: true,
+  }), true);
+  const stillRejected = rejectedHarness.db.getSession(rejectedId)!;
+  assert.equal(stillRejected.archiveOperation?.failure?.code, "runner_rejected");
+  assert.equal(stillRejected.archiveOperation?.acceptedAt, undefined);
+});
+
+test("reconnect replays only recoverable failed archive Stops without clearing failure", () => {
+  for (const failureCode of ["timeout", "retry_exhausted", "runner_rejected"] as const) {
+    const { db, hub, svc } = makeHarness();
+    const id = seedSession(svc, hub);
+    db.updateSessionStatus(id, "running", Date.now());
+    const operation = svc.setArchived(id, true).data!.archiveOperation!;
+
+    if (failureCode === "timeout") {
+      svc.maintainSessionStopIntents(operation.requestedAt + SESSION_STOP_TIMEOUT_MS);
+    } else if (failureCode === "retry_exhausted") {
+      for (let attempt = 1; attempt <= SESSION_STOP_MAX_ATTEMPTS; attempt++) {
+        svc.maintainSessionStopIntents(
+          operation.requestedAt + attempt * SESSION_STOP_RETRY_INTERVAL_MS,
+        );
+      }
+    } else {
+      svc.onStopSessionResult(RUNNER_ID, {
+        type: "stop_session_result",
+        sessionId: id,
+        operationId: operation.operationId,
+        deliveryAttemptId: db.sessionStopIntent(id)!.deliveryAttemptId,
+        accepted: false,
+      });
+    }
+
+    const failed = db.getSession(id)!.archiveOperation!;
+    const failedDeliveryAttemptId = db.sessionStopIntent(id)!.deliveryAttemptId;
+    assert.equal(failed.status, "stop_failed", failureCode);
+    assert.equal(failed.failure?.code, failureCode);
+    hub.sentToRunner.length = 0;
+
+    svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, status: "running" })]);
+
+    const replayed = hub.sentOfType("stop_session");
+    assert.equal(replayed.length, failureCode === "runner_rejected" ? 0 : 1, failureCode);
+    if (failureCode !== "runner_rejected") {
+      assert.equal(replayed[0]?.operationId, operation.operationId, failureCode);
+      assert.equal(replayed[0]?.deliveryAttemptId, failedDeliveryAttemptId, failureCode);
+    }
+    const afterReconnect = db.getSession(id)!;
+    assert.equal(afterReconnect.archiveStatus, "stop_failed", failureCode);
+    assert.equal(afterReconnect.archiveOperation?.failure?.code, failureCode);
+    assert.equal(afterReconnect.archiveOperation?.capacityReleased, false, failureCode);
+    assert.equal(afterReconnect.archived, false, failureCode);
+
+    if (failureCode === "timeout") {
+      svc.onSessionStatus(id, "stopped", undefined, undefined, RUNNER_ID);
+    } else {
+      svc.hydrateRunnerSessions(RUNNER_ID, []);
+    }
+    assert.equal(db.getSession(id)?.archiveOperation, undefined, failureCode);
+    assert.equal(db.getSession(id)?.archived, true, failureCode);
+  }
+});
+
+test("late runner rejection overrides recoverable Stop failures and suppresses reconnect replay", () => {
+  for (const initialFailure of ["timeout", "retry_exhausted"] as const) {
+    const { db, hub, svc } = makeHarness();
+    const id = seedSession(svc, hub);
+    db.updateSessionStatus(id, "running", Date.now());
+    const operation = svc.setArchived(id, true).data!.archiveOperation!;
+
+    if (initialFailure === "timeout") {
+      svc.maintainSessionStopIntents(operation.requestedAt + SESSION_STOP_TIMEOUT_MS);
+    } else {
+      for (let attempt = 1; attempt <= SESSION_STOP_MAX_ATTEMPTS; attempt++) {
+        svc.maintainSessionStopIntents(
+          operation.requestedAt + attempt * SESSION_STOP_RETRY_INTERVAL_MS,
+        );
+      }
+    }
+    assert.equal(db.getSession(id)?.archiveOperation?.failure?.code, initialFailure);
+    const failedDeliveryAttemptId = db.sessionStopIntent(id)!.deliveryAttemptId;
+
+    assert.equal(svc.onStopSessionResult("intruder", {
+      type: "stop_session_result",
+      sessionId: id,
+      operationId: operation.operationId,
+      deliveryAttemptId: failedDeliveryAttemptId,
+      accepted: false,
+    }), false, initialFailure);
+    assert.equal(svc.onStopSessionResult(RUNNER_ID, {
+      type: "stop_session_result",
+      sessionId: id,
+      operationId: "stale-operation",
+      deliveryAttemptId: failedDeliveryAttemptId,
+      accepted: false,
+    }), false, initialFailure);
+    assert.equal(db.getSession(id)?.archiveOperation?.failure?.code, initialFailure);
+
+    assert.equal(svc.onStopSessionResult(RUNNER_ID, {
+      type: "stop_session_result",
+      sessionId: id,
+      operationId: operation.operationId,
+      deliveryAttemptId: failedDeliveryAttemptId,
+      accepted: false,
+    }), true, initialFailure);
+    const rejected = db.getSession(id)!;
+    assert.equal(rejected.archiveStatus, "stop_failed", initialFailure);
+    assert.equal(rejected.archiveOperation?.failure?.code, "runner_rejected", initialFailure);
+    assert.equal(rejected.archiveOperation?.capacityReleased, false, initialFailure);
+    assert.equal(rejected.archived, false, initialFailure);
+
+    hub.sentToRunner.length = 0;
+    svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, status: "running" })]);
+
+    assert.equal(hub.sentOfType("stop_session").length, 0, initialFailure);
+    const afterReconnect = db.getSession(id)!;
+    assert.equal(afterReconnect.archiveStatus, "stop_failed", initialFailure);
+    assert.equal(afterReconnect.archiveOperation?.failure?.code, "runner_rejected", initialFailure);
+    assert.equal(afterReconnect.archiveOperation?.capacityReleased, false, initialFailure);
+    assert.equal(afterReconnect.archived, false, initialFailure);
+  }
+});
+
+test("a pre-v89 runner cannot replay a failed archive Stop without attempt correlation", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "running", Date.now());
+  const operation = svc.setArchived(id, true).data!.archiveOperation!;
+  svc.maintainSessionStopIntents(operation.requestedAt + SESSION_STOP_TIMEOUT_MS);
+  assert.equal(db.getSession(id)?.archiveOperation?.failure?.code, "timeout");
+
+  db.registerRunner(runnerMeta(), Date.now(), 88);
+  hub.sentToRunner.length = 0;
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, status: "running" })]);
+
+  assert.equal(hub.sentOfType("stop_session").length, 0);
+  assert.equal(db.getSession(id)?.archiveOperation?.status, "stop_failed");
+  assert.equal(db.getSession(id)?.archiveOperation?.capacityReleased, false);
+  assert.equal(db.getSession(id)?.archived, false);
+});
+
+test("offline current runners exhaust bounded automatic Stop recovery without hiding capacity", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.deliver = false;
+
+  const operation = svc.setArchived(id, true).data!.archiveOperation!;
+  db.markOffline(RUNNER_ID, operation.requestedAt + 1);
+  for (let attempt = 1; attempt <= SESSION_STOP_MAX_ATTEMPTS; attempt++) {
+    svc.maintainSessionStopIntents(
+      operation.requestedAt + attempt * SESSION_STOP_RETRY_INTERVAL_MS,
+    );
+  }
+
+  const failed = db.getSession(id)!;
+  assert.equal(failed.archiveOperation?.failure?.code, "retry_exhausted");
+  assert.equal(failed.archiveOperation?.capacityReleased, false);
+  assert.equal(failed.archived, false);
+});
+
+test("pre-v89 runners remain conservatively Stop Pending without attempt correlation", () => {
+  const { db, hub, svc } = makeHarness();
+  db.registerRunner(runnerMeta(), Date.now(), 88);
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "running", Date.now());
+
+  const pending = svc.setArchived(id, true).data!;
+  const command = hub.sentOfType("stop_session").at(-1)!;
+  assert.equal(command.operationId, pending.archiveOperation?.operationId);
+  assert.equal(command.deliveryAttemptId, undefined);
+  assert.equal(svc.onStopSessionResult(RUNNER_ID, {
+    type: "stop_session_result", sessionId: id,
+    operationId: command.operationId!, accepted: false,
+  }), false);
+  assert.equal(svc.maintainSessionStopIntents(
+    pending.archiveOperation!.requestedAt + SESSION_STOP_TIMEOUT_MS * 2,
+  ), 0);
+  assert.equal(db.getSession(id)?.archiveStatus, "stop_pending");
+  assert.equal(db.getSession(id)?.archived, false);
+});
+
+test("repeated archive fences a legacy archived session that is still consuming capacity", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "running", Date.now());
+  db.setSessionArchived(id, true, Date.now());
+  hub.sentToRunner.length = 0;
+
+  const result = svc.setArchived(id, true);
+
+  assert.equal(result.status, 202);
+  assert.equal(result.data?.archived, true);
+  assert.equal(result.data?.archiveStatus, "stop_pending");
+  assert.equal(db.getSession(id)?.status, "stopped");
+  assert.equal(hub.sentOfType("stop_session").at(-1)?.sessionId, id);
+});
+
+test("runner reconciliation fences hidden legacy capacity consumers without a new client request", () => {
+  for (const source of ["legacy", "snapshot", "runtime"] as const) {
+    const { db, hub, svc } = makeHarness();
+    const id = seedSession(svc, hub);
+    db.updateSessionStatus(id, "stopped", Date.now());
+    db.setSessionArchived(id, true, Date.now());
+    hub.sentToRunner.length = 0;
+
+    if (source === "legacy") svc.reconcileRunnerSessions(RUNNER_ID, [id]);
+    else if (source === "snapshot") svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, status: "running" })]);
+    else svc.applySessionRuntimeUpdate(RUNNER_ID, snapshot({ id, status: "running" }));
+
+    assert.equal(db.getSession(id)?.archived, true, source);
+    assert.equal(db.getSession(id)?.archiveStatus, "stop_pending", source);
+    assert.equal(db.hasSessionStopIntent(id), true, source);
+    assert.equal(hub.sentOfType("stop_session").at(-1)?.sessionId, id, source);
+  }
+});
+
+test("unarchive cancels pending filing without restarting the durable stop", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "idle", Date.now());
+  assert.equal(svc.setArchived(id, true).data?.archiveStatus, "stop_pending");
+  hub.sentToRunner.length = 0;
+
+  const restored = svc.setArchived(id, false);
+
+  assert.equal(restored.data?.archived, false);
+  assert.equal(restored.data?.archiveStatus, undefined);
+  assert.equal(db.hasSessionStopIntent(id), true, "undo preserves the already-requested Stop");
+  assert.equal(hub.sentOfType("start_session").length, 0);
+  svc.onSessionStatus(id, "stopped", undefined, undefined, RUNNER_ID);
+  assert.equal(db.getSession(id)?.archived, false);
+});
+
+test("runner absence settles archive and broadcasts it for legacy and snapshot reconnect paths", () => {
+  for (const source of ["legacy", "snapshot"] as const) {
+    const { db, hub, svc } = makeHarness();
+    const id = seedSession(svc, hub);
+    db.updateSessionStatus(id, "running", Date.now());
+    assert.equal(svc.setArchived(id, true).data?.archiveStatus, "stop_pending");
+    hub.sessionChangedByIdCalls.length = 0;
+
+    if (source === "legacy") svc.reconcileRunnerSessions(RUNNER_ID, []);
+    else svc.hydrateRunnerSessions(RUNNER_ID, []);
+
+    assert.equal(db.getSession(id)?.archived, true, source);
+    assert.equal(db.getSession(id)?.archiveStatus, undefined, source);
+    assert.ok(hub.sessionChangedByIdCalls.includes(id), `${source} settlement is broadcast`);
+  }
+});
+
+test("Project bulk archive uses the same stop-and-archive lifecycle for mixed states", () => {
+  const { db, hub, svc } = makeHarness();
+  const running = seedSession(svc, hub);
+  const completed = seedSession(svc, hub);
+  db.updateSessionStatus(running, "running", Date.now());
+  db.updateSessionStatus(completed, "completed", Date.now());
+  const projectId = db.getSession(running)?.projectId;
+  assert.ok(projectId);
+  hub.sentToRunner.length = 0;
+  hub.projectChangedByIdCalls.length = 0;
+
+  const result = svc.archiveProjectSessions(projectId!);
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.data?.archivedSessionIds, [completed]);
+  assert.deepEqual(result.data?.pendingSessionIds, [running]);
+  assert.equal(db.getSession(completed)?.archived, true);
+  assert.equal(db.getSession(running)?.archiveStatus, "stop_pending");
+  assert.deepEqual(hub.sentOfType("stop_session").map((message) => message.sessionId), [running]);
+  assert.deepEqual(hub.projectChangedByIdCalls, [], "the route owns the one batched Project refresh");
+
+  const operationId = db.getSession(running)?.archiveOperation?.operationId;
+  const deliveryAttemptId = hub.sentOfType("stop_session").at(-1)?.deliveryAttemptId;
+  assert.ok(operationId);
+  assert.ok(deliveryAttemptId);
+  svc.onStopSessionResult(RUNNER_ID, {
+    type: "stop_session_result", sessionId: running, operationId, deliveryAttemptId,
+    accepted: false, error: "runner rejection detail",
+  });
+  const failed = svc.archiveProjectSessions(projectId!);
+  assert.deepEqual(failed.data?.pendingSessionIds, []);
+  assert.deepEqual(failed.data?.failedSessionIds, [running]);
+  assert.equal(db.getSession(running)?.archived, false);
+});
+
 test("stop sends stop_session and marks the session stopped", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);
@@ -5894,6 +7165,366 @@ test("stop sends stop_session and marks the session stopped", () => {
   assert.equal(msg.sessionId, id);
   assert.equal(db.getSession(id)!.status, "stopped");
   assert.ok(hub.sessionChangedByIdCalls.includes(id));
+});
+
+test("correlated plain Stop rejection fences stale attempts and settles terminally", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  const otherId = seedSession(svc, hub);
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.sentToRunner.length = 0;
+
+  const stopped = svc.stop(id).data!;
+  const operation = stopped.stopOperation!;
+  const initialDeliveryAttemptId = hub.sentOfType("stop_session").at(-1)?.deliveryAttemptId;
+  assert.ok(initialDeliveryAttemptId);
+  assert.equal(operation.status, "stop_pending");
+  assert.equal(operation.capacityReleased, false);
+  assert.equal(stopped.archived, false);
+  assert.equal(stopped.archiveStatus, undefined);
+  assert.equal(stopped.archiveOperation, undefined);
+
+  assert.equal(svc.onStopSessionResult("intruder", {
+    type: "stop_session_result", sessionId: id,
+    operationId: operation.operationId, deliveryAttemptId: initialDeliveryAttemptId,
+    accepted: false, error: "private output",
+  }), false);
+  assert.equal(svc.onStopSessionResult(RUNNER_ID, {
+    type: "stop_session_result", sessionId: id,
+    operationId: "stale-operation", deliveryAttemptId: initialDeliveryAttemptId,
+    accepted: false, error: "private output",
+  }), false);
+  assert.equal(svc.onStopSessionResult(RUNNER_ID, {
+    type: "stop_session_result", sessionId: otherId,
+    operationId: operation.operationId, deliveryAttemptId: initialDeliveryAttemptId,
+    accepted: false, error: "private output",
+  }), false);
+  assert.equal(db.getSession(id)?.stopOperation?.status, "stop_pending");
+
+  assert.equal(svc.onStopSessionResult(RUNNER_ID, {
+    type: "stop_session_result", sessionId: id,
+    operationId: operation.operationId, deliveryAttemptId: initialDeliveryAttemptId,
+    accepted: false, error: "/private/provider/path and runtime output",
+  }), true);
+  assert.equal(svc.onStopSessionResult(RUNNER_ID, {
+    type: "stop_session_result", sessionId: id,
+    operationId: operation.operationId, deliveryAttemptId: initialDeliveryAttemptId,
+    accepted: false,
+  }), true, "a duplicate rejection for the current delivery is idempotent");
+  const failed = db.getSession(id)!;
+  assert.equal(failed.stopOperation?.status, "stop_failed");
+  assert.equal(failed.stopOperation?.failure?.code, "runner_rejected");
+  assert.doesNotMatch(failed.stopOperation?.failure?.message ?? "", /private|provider\/path/u);
+  assert.equal(failed.stopOperation?.capacityReleased, false);
+  assert.equal(failed.archived, false);
+  assert.equal(failed.archiveStatus, undefined);
+  assert.equal(svc.restart(id).status, 409);
+  assert.equal(hub.sentOfType("start_session").length, 0);
+
+  const beforeReconnect = hub.sentOfType("stop_session").length;
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, status: "running" })]);
+  assert.equal(hub.sentOfType("stop_session").length, beforeReconnect,
+    "a failed Stop remains fenced but is not invisibly replayed");
+  assert.equal(db.getSession(id)?.status, "stopped");
+  assert.equal(db.getSession(id)?.stopOperation?.status, "stop_failed");
+
+  const repeatedStop = svc.stop(id).data!;
+  const repeatedDeliveryAttemptId = hub.sentOfType("stop_session").at(-1)?.deliveryAttemptId;
+  assert.ok(repeatedDeliveryAttemptId);
+  assert.equal(repeatedStop.stopOperation?.status, "stop_pending");
+  assert.equal(repeatedStop.stopOperation?.operationId, operation.operationId);
+  assert.notEqual(repeatedDeliveryAttemptId, initialDeliveryAttemptId,
+    "an authorized recovery retains the operation id but opens a fresh delivery attempt");
+  assert.equal(hub.sentOfType("stop_session").length, beforeReconnect + 1,
+    "a fresh explicit Stop re-arms and reissues the same durable operation");
+  assert.equal(svc.onStopSessionResult(RUNNER_ID, {
+    type: "stop_session_result", sessionId: id,
+    operationId: operation.operationId, deliveryAttemptId: initialDeliveryAttemptId, accepted: false,
+  }), false, "a delayed rejection from the superseded delivery is ignored");
+  assert.equal(db.getSession(id)?.stopOperation?.status, "stop_pending");
+  assert.equal(svc.onStopSessionResult(RUNNER_ID, {
+    type: "stop_session_result", sessionId: id,
+    operationId: operation.operationId, deliveryAttemptId: repeatedDeliveryAttemptId, accepted: false,
+  }), true);
+
+  const firstRetry = svc.retryStop(id).data!;
+  const retryDeliveryAttemptId = hub.sentOfType("stop_session").at(-1)?.deliveryAttemptId;
+  const duplicateRetry = svc.retryStop(id).data!;
+  const duplicateRetryDeliveryAttemptId = hub.sentOfType("stop_session").at(-1)?.deliveryAttemptId;
+  assert.ok(retryDeliveryAttemptId);
+  assert.equal(duplicateRetryDeliveryAttemptId, retryDeliveryAttemptId,
+    "concurrent recovery requests re-deliver one logical attempt");
+  assert.equal(firstRetry.stopOperation?.status, "stop_pending");
+  assert.equal(firstRetry.stopOperation?.operationId, operation.operationId);
+  assert.equal(duplicateRetry.stopOperation?.operationId, operation.operationId);
+  assert.equal(duplicateRetry.stopOperation?.attemptCount, firstRetry.stopOperation?.attemptCount);
+  assert.equal(hub.sentOfType("stop_session").at(-1)?.operationId, operation.operationId);
+  assert.equal(svc.onStopSessionResult(RUNNER_ID, {
+    type: "stop_session_result", sessionId: id,
+    operationId: operation.operationId, deliveryAttemptId: repeatedDeliveryAttemptId, accepted: false,
+  }), false, "the retry remains pending when the prior attempt rejects late");
+  assert.equal(db.getSession(id)?.stopOperation?.status, "stop_pending");
+
+  svc.onSessionStatus(id, "stopped", undefined, undefined, RUNNER_ID);
+  const settled = db.getSession(id)!;
+  assert.equal(settled.stopOperation, undefined);
+  assert.equal(settled.archived, false);
+});
+
+test("late rejection from before Retry Stop cannot block Restart", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "running", Date.now());
+
+  const operation = svc.stop(id).data!.stopOperation!;
+  const firstDeliveryAttemptId = hub.sentOfType("stop_session").at(-1)?.deliveryAttemptId;
+  assert.ok(firstDeliveryAttemptId);
+  assert.equal(svc.onStopSessionResult(RUNNER_ID, {
+    type: "stop_session_result", sessionId: id,
+    operationId: operation.operationId, deliveryAttemptId: firstDeliveryAttemptId, accepted: false,
+  }), true);
+
+  assert.equal(svc.retryStop(id).status, 202);
+  const retryDeliveryAttemptId = hub.sentOfType("stop_session").at(-1)?.deliveryAttemptId;
+  assert.ok(retryDeliveryAttemptId);
+  assert.notEqual(retryDeliveryAttemptId, firstDeliveryAttemptId);
+  assert.equal(svc.onStopSessionResult(RUNNER_ID, {
+    type: "stop_session_result", sessionId: id,
+    operationId: operation.operationId, deliveryAttemptId: firstDeliveryAttemptId, accepted: false,
+  }), false);
+  assert.equal(db.getSession(id)?.stopOperation?.status, "stop_pending");
+
+  assert.equal(svc.restart(id).status, 200);
+  const launchId = hub.sentOfType("start_session").at(-1)?.spec.controlPlaneLaunchId;
+  assert.ok(launchId);
+  svc.onSessionStatus(id, "running", undefined, undefined, RUNNER_ID, launchId);
+  assert.equal(db.getSession(id)?.stopOperation, undefined);
+});
+
+test("plain Stop stays pending while offline and reconnect reissues it after the archive failure window", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "running", Date.now());
+  hub.online = false;
+
+  const pending = svc.stop(id).data!.stopOperation!;
+  assert.equal(svc.maintainSessionStopIntents(
+    pending.requestedAt + SESSION_STOP_TIMEOUT_MS * 2,
+  ), 0);
+  assert.equal(db.getSession(id)?.stopOperation?.status, "stop_pending");
+
+  const beforeReconnect = hub.sentOfType("stop_session").length;
+  hub.online = true;
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, status: "running" })]);
+  assert.equal(hub.sentOfType("stop_session").length, beforeReconnect + 1);
+  assert.equal(hub.sentOfType("stop_session").at(-1)?.operationId, pending.operationId);
+});
+
+test("archive after a rejected plain Stop opens and delivers a fresh recovery window", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "running", Date.now());
+  const plain = svc.stop(id).data!.stopOperation!;
+  const plainDeliveryAttemptId = hub.sentOfType("stop_session").at(-1)?.deliveryAttemptId;
+  assert.ok(plainDeliveryAttemptId);
+  assert.equal(svc.onStopSessionResult(RUNNER_ID, {
+    type: "stop_session_result", sessionId: id,
+    operationId: plain.operationId, deliveryAttemptId: plainDeliveryAttemptId, accepted: false,
+  }), true);
+  const beforeArchive = hub.sentOfType("stop_session").length;
+
+  const archived = svc.setArchived(id, true).data!;
+
+  assert.equal(archived.archived, false);
+  assert.equal(archived.archiveStatus, "stop_pending");
+  assert.equal(archived.archiveOperation?.operationId, plain.operationId);
+  assert.equal(archived.archiveOperation?.failure, undefined);
+  assert.equal(archived.archiveOperation?.attemptCount, 1);
+  assert.equal(hub.sentOfType("stop_session").length, beforeArchive + 1);
+  assert.equal(hub.sentOfType("stop_session").at(-1)?.operationId, plain.operationId);
+});
+
+test("protocol-v84 plain Stop intents retain conservative pending behavior", () => {
+  const { db, hub, svc } = makeHarness();
+  db.registerRunner(runnerMeta(), Date.now(), 84);
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "running", Date.now());
+
+  const pending = svc.stop(id).data!;
+  assert.equal(pending.stopOperation?.status, "stop_pending");
+  assert.equal(hub.sentOfType("stop_session").at(-1)?.operationId, undefined);
+  assert.equal(svc.maintainSessionStopIntents(
+    pending.stopOperation!.requestedAt + SESSION_STOP_TIMEOUT_MS * 2,
+  ), 0);
+  assert.equal(db.getSession(id)?.stopOperation?.status, "stop_pending");
+  assert.equal(db.getSession(id)?.archived, false);
+});
+
+test("stop persists an offline intent and reconnect reissues it without resurrecting the session", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  hub.online = false;
+  hub.sentToRunner.length = 0;
+  hub.sessionChangedByIdCalls.length = 0;
+
+  const res = svc.stop(id);
+
+  assert.equal(res.ok, true);
+  assert.equal(db.hasSessionStopIntent(id), true);
+  assert.equal(db.getSession(id)!.status, "stopped");
+  assert.equal(hub.sentOfType("stop_session").length, 1, "the best-effort initial send remains harmless offline");
+
+  hub.online = true;
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, status: "running" })]);
+  assert.equal(hub.sentOfType("stop_session").length, 2, "reconnect retries the durable intent");
+  assert.equal(db.getSession(id)!.status, "stopped");
+  assert.equal(db.hasSessionStopIntent(id), true);
+});
+
+test("half-open accepted-but-lost stop remains fenced until terminal runner evidence", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  hub.online = true;
+  hub.deliver = false;
+  hub.sentToRunner.length = 0;
+  hub.sessionChangedByIdCalls.length = 0;
+
+  const res = svc.stop(id);
+
+  assert.equal(res.ok, true);
+  assert.equal(hub.sentOfType("stop_session").length, 1, "delivery was attempted before the socket failed");
+  assert.equal(db.hasSessionStopIntent(id), true);
+
+  hub.deliver = true;
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, status: "running" })]);
+  assert.equal(db.getSession(id)!.status, "stopped", "a stale live snapshot cannot resurrect the stop");
+  assert.equal(hub.sentOfType("stop_session").length, 2);
+  svc.onSessionStatus(id, "stopped", undefined, undefined, RUNNER_ID);
+  assert.equal(db.hasSessionStopIntent(id), false);
+  assert.equal(db.getSession(id)!.status, "stopped");
+});
+
+test("legacy reconnect inventory retries a durable stop and clears it only when absent", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  svc.stop(id);
+  hub.sentToRunner.length = 0;
+
+  svc.reconcileRunnerSessions(RUNNER_ID, [id]);
+  assert.equal(hub.sentOfType("stop_session").length, 1);
+  assert.equal(db.hasSessionStopIntent(id), true);
+  assert.equal(db.getSession(id)!.status, "stopped");
+
+  svc.reconcileRunnerSessions(RUNNER_ID, []);
+  assert.equal(db.hasSessionStopIntent(id), false);
+});
+
+test("restart retains a durable stop until correlated runner evidence proves replacement", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  svc.stop(id);
+  assert.equal(db.hasSessionStopIntent(id), true);
+
+  hub.online = true;
+  hub.deliver = false;
+  assert.equal(svc.restart(id).ok, false);
+  assert.equal(db.hasSessionStopIntent(id), true, "a rejected restart cannot discard the stop fence");
+  assert.equal(db.sessionStopRestartLaunchId(id), null, "a definitive write failure cannot leave ambiguous proof");
+  assert.equal(db.getSession(id)!.status, "stopped", "a failed write cannot publish a starting lifecycle");
+  svc.onSessionStatus(id, "stopped", undefined, undefined, RUNNER_ID);
+  assert.equal(db.hasSessionStopIntent(id), false, "terminal evidence settles the ordinary Stop fence");
+
+  hub.deliver = true;
+  svc.stop(id);
+  assert.equal(svc.restart(id).ok, true);
+  const launchId = hub.sentOfType("start_session").at(-1)!.spec.controlPlaneLaunchId;
+  assert.ok(launchId);
+  assert.equal(db.hasSessionStopIntent(id), true, "an accepted socket write is not delivery proof");
+  assert.equal(db.getSession(id)!.status, "starting");
+
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, status: "running" })]);
+  assert.equal(db.hasSessionStopIntent(id), true);
+  assert.equal(db.getSession(id)!.status, "stopped", "the old runtime cannot cross the restart fence");
+  assert.ok(hub.sentOfType("stop_session").length >= 2);
+
+  svc.hydrateRunnerSessions(RUNNER_ID, [
+    snapshot({ id, status: "running", controlPlaneLaunchId: launchId }),
+  ]);
+  assert.equal(db.hasSessionStopIntent(id), false, "matching runner evidence admits the replacement");
+  assert.equal(db.getSession(id)!.status, "running");
+});
+
+test("a new explicit Stop invalidates an ambiguous restart proof", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  svc.stop(id);
+  assert.equal(svc.restart(id).ok, true);
+  const staleLaunchId = hub.sentOfType("start_session").at(-1)!.spec.controlPlaneLaunchId;
+  assert.ok(staleLaunchId);
+
+  svc.stop(id);
+  assert.equal(db.sessionStopRestartLaunchId(id), null);
+  svc.onSessionStatus(id, "starting", undefined, undefined, RUNNER_ID, staleLaunchId);
+  assert.equal(db.hasSessionStopIntent(id), true, "proof from before the new Stop is stale");
+  assert.equal(db.getSession(id)!.status, "stopped");
+  assert.equal(hub.sentOfType("stop_session").at(-1)?.sessionId, id);
+});
+
+test("late approval events remain historical but cannot cross a durable Stop fence", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  svc.stop(id);
+  hub.sentToRunner.length = 0;
+
+  svc.onSessionEvent(id, {
+    kind: "permission_request",
+    requestId: "late-permission",
+    title: "Run a dangerous tool?",
+    options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+  });
+
+  assert.equal(db.getSession(id)!.status, "stopped");
+  assert.equal(db.getSession(id)!.pendingApproval, null);
+  assert.equal(db.listEvents(id).at(-1)?.payload.kind, "permission_request");
+  const replay = hub.sentOfType("stop_session");
+  assert.equal(replay.length, 1);
+  assert.deepEqual({ type: replay[0]?.type, sessionId: replay[0]?.sessionId }, { type: "stop_session", sessionId: id });
+});
+
+test("restart-after-stop requires correlated restart echo support before mutation or send", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  svc.stop(id);
+  hub.sentToRunner.length = 0;
+  hub.sessionChangedByIdCalls.length = 0;
+  db.registerRunner(runnerMeta(), Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.correlatedRestartEcho - 1);
+
+  const result = svc.restart(id);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, 409);
+  assert.match(result.error ?? "", /requires protocol v84.*Update and restart the runner/i);
+  assert.equal(db.sessionStopRestartLaunchId(id), null);
+  assert.equal(db.getSession(id)!.status, "stopped");
+  assert.equal(hub.sentOfType("start_session").length, 0);
+  assert.equal(hub.sessionChangedByIdCalls.length, 0);
+});
+
+test("a stale terminal update cannot clear a pending correlated restart fence", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  svc.stop(id);
+  assert.equal(svc.restart(id).ok, true);
+  const launchId = hub.sentOfType("start_session").at(-1)!.spec.controlPlaneLaunchId;
+  assert.ok(launchId);
+
+  svc.onSessionStatus(id, "stopped", undefined, undefined, RUNNER_ID);
+  assert.equal(db.hasSessionStopIntent(id), true);
+  assert.equal(db.getSession(id)!.status, "stopped");
+
+  svc.onSessionStatus(id, "starting", undefined, undefined, RUNNER_ID, launchId);
+  assert.equal(db.hasSessionStopIntent(id), false);
+  assert.equal(db.getSession(id)!.status, "starting");
 });
 
 test("stop fails 404 for an unknown session", () => {
@@ -6697,6 +8328,243 @@ test("live structured continuation evidence projects delivery stages and rebroad
   assert.ok(hub.sessionChangedByIdCalls.includes("s_box1"));
 });
 
+test("only live continuation provenance suppresses its trailing Ready across restart", async () => {
+  const db = ControlPlaneDb.open(":memory:");
+  db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);
+  const hub = new FakeHub();
+  const sent: string[] = [];
+  const notify = (prev: SessionView, view: SessionView) => {
+    const message = pushDecision(prev, view);
+    if (message) sent.push(message.title);
+  };
+  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG, notify);
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+    status: "running",
+    seq: 1,
+    historyEpoch: 7,
+    backgroundJobs: [{
+      id: "old-job", parentTurnId: "old-turn", runnerId: RUNNER_ID, workspaceId: "workspace",
+      launchType: "agent", registeredAt: 1, terminalStatus: "completed", terminalObservedAt: 2,
+      continuationRequired: true, continuationQueuedAt: 3, continuationId: "bgcont-old",
+    }],
+  })]);
+  hub.requestHandler = (message) => {
+    assert.equal(message.type, "session_history_page");
+    return {
+      type: "session_history_page_result",
+      requestId: message.requestId,
+      sessionId: message.sessionId,
+      ok: true,
+      events: [{
+        seq: 1,
+        ts: 100,
+        payload: { kind: "background_continuation_delivered", continuationId: "bgcont-old", parentTurnId: "old-turn" },
+      }],
+      page: { logEpoch: 7, throughSeq: 1, nextAfterSeq: 1, hasMore: false },
+    };
+  };
+  await svc.hydrateHistory("s_box1");
+  assert.equal(db.getSession("s_box1")?.backgroundDeliveries?.[0]?.statusSettledAt, undefined,
+    "historical delivery replay cannot arm the currently running foreground turn");
+  svc.onSessionStatus("s_box1", "idle");
+  assert.match(sent.at(-1) ?? "", /is awaiting a prompt/, "the unrelated later foreground idle still notifies");
+
+  db.updateSessionStatus("s_box1", "running", Date.now());
+  svc.onSessionEvent("s_box1", {
+    kind: "background_continuation_delivered",
+    continuationId: "bgcont-live-restart",
+    parentTurnId: "live-turn",
+  });
+  const restarted = new SessionsService(db, hub as unknown as Hub, NOOP_LOG, notify);
+  const before = sent.length;
+  restarted.onSessionStatus("s_box1", "idle");
+  assert.equal(sent.length, before, "durable live correlation suppresses the duplicate Ready after CP restart");
+  assert.ok(db.getSession("s_box1")?.backgroundDeliveries?.some((delivery) =>
+    delivery.continuationId === "bgcont-live-restart" && delivery.statusSettledAt != null));
+});
+
+test("a live delivery diverted through gap hydration still settles its trailing Ready", async () => {
+  const db = ControlPlaneDb.open(":memory:");
+  db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);
+  const hub = new FakeHub();
+  const sent: string[] = [];
+  const notify = (prev: SessionView, view: SessionView) => {
+    const message = pushDecision(prev, view);
+    if (message) sent.push(message.title);
+  };
+  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG, notify);
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ status: "running", seq: 1, historyEpoch: 7 })]);
+  hub.requestHandler = (message) => {
+    assert.equal(message.type, "session_history_page");
+    return {
+      type: "session_history_page_result",
+      requestId: message.requestId,
+      sessionId: message.sessionId,
+      ok: true,
+      events: [{ seq: 1, ts: 100, payload: { kind: "agent_message", text: "one" } }],
+      page: { logEpoch: 7, throughSeq: 1, nextAfterSeq: 1, hasMore: false },
+    };
+  };
+  await svc.hydrateHistory("s_box1");
+
+  // The live delivery frame arrives ahead of the hydrated cursor (seq 3 over a cursor of 1), so
+  // it is diverted through catch-up hydration. The runner's trailing idle races that round-trip:
+  // hold the page response until AFTER the idle is projected, mirroring production ordering.
+  let releasePage!: () => void;
+  const pageGate = new Promise<void>((resolve) => { releasePage = resolve; });
+  hub.requestHandler = async (message) => {
+    assert.equal(message.type, "session_history_page");
+    await pageGate;
+    return {
+      type: "session_history_page_result",
+      requestId: message.requestId,
+      sessionId: message.sessionId,
+      ok: true,
+      events: [
+        { seq: 2, ts: 101, payload: { kind: "agent_message", text: "two" } },
+        { seq: 3, ts: 102, payload: {
+          kind: "background_continuation_delivered", continuationId: "bgcont-gap", parentTurnId: "turn-gap",
+        } },
+      ],
+      page: { logEpoch: 7, throughSeq: 3, nextAfterSeq: 3, hasMore: false },
+    };
+  };
+  svc.onSessionEvent("s_box1", {
+    kind: "background_continuation_delivered", continuationId: "bgcont-gap", parentTurnId: "turn-gap",
+  }, 3, 102);
+
+  const before = sent.length;
+  svc.onSessionStatus("s_box1", "idle");
+  assert.equal(sent.length, before,
+    "the trailing idle that beat the hydration round-trip is still suppressed");
+  assert.ok(db.getSession("s_box1")?.backgroundDeliveries?.some((d) =>
+    d.continuationId === "bgcont-gap" && d.statusSettledAt != null),
+    "the diverted live delivery armed durably before hydration completed");
+
+  releasePage();
+  for (let index = 0; index < 200; index += 1) {
+    if (db.getSession("s_box1")?.backgroundDeliveries?.some((d) =>
+      d.continuationId === "bgcont-gap" && d.transcriptProjectedAt != null)) break;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  const projected = db.getSession("s_box1")?.backgroundDeliveries?.find((d) => d.continuationId === "bgcont-gap");
+  assert.ok(projected?.transcriptProjectedAt != null, "hydration still projects the full delivery stages");
+  assert.ok(projected?.statusSettledAt != null, "idle-time projection does not disturb the settled marker");
+  assert.equal(sent.length, before, "no additional notification was emitted by the catch-up projection");
+});
+
+test("a restoration-replayed idle consumes the armed settlement instead of duplicating Ready", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);
+  const hub = new FakeHub();
+  const sent: string[] = [];
+  const notify = (prev: SessionView, view: SessionView) => {
+    const message = pushDecision(prev, view);
+    if (message) sent.push(message.title);
+  };
+  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG, notify);
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ status: "running" })]);
+  db.updateSessionStatus("s_box1", "running", Date.now());
+  svc.onSessionEvent("s_box1", {
+    kind: "background_continuation_delivered", continuationId: "bgcont-restored", parentTurnId: "turn-r",
+  });
+  const previous = db.getSession("s_box1")!;
+
+  // Policy restoration replays the swallowed running -> idle edge through notifyTransition without
+  // passing onSessionStatus (see replayRestoredPolicyHookIdle); the settle must still happen there.
+  db.updateSessionStatus("s_box1", "idle", Date.now());
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (svc as any).notifyTransition({ ...previous, status: "running" }, "s_box1");
+  assert.equal(sent.filter((title) => /is awaiting a prompt/.test(title)).length, 0,
+    "the restoration replay consumes the settlement instead of emitting the duplicate Ready");
+  assert.ok(db.getSession("s_box1")?.backgroundDeliveries?.some((d) =>
+    d.continuationId === "bgcont-restored" && d.statusSettledAt != null));
+
+  // The next genuine busy -> idle is unrelated and must notify again.
+  db.updateSessionStatus("s_box1", "running", Date.now());
+  svc.onSessionStatus("s_box1", "idle");
+  assert.equal(sent.filter((title) => /is awaiting a prompt/.test(title)).length, 1);
+});
+
+test("a terminal transition orphans an armed settlement so a later run's Ready is not suppressed", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);
+  const hub = new FakeHub();
+  const sent: string[] = [];
+  const notify = (prev: SessionView, view: SessionView) => {
+    const message = pushDecision(prev, view);
+    if (message) sent.push(message.title);
+  };
+  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG, notify);
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ status: "running" })]);
+  db.updateSessionStatus("s_box1", "running", Date.now());
+  svc.onSessionEvent("s_box1", {
+    kind: "background_continuation_delivered", continuationId: "bgcont-orphaned", parentTurnId: "turn-o",
+  });
+
+  // The run dies before its trailing idle: the armed marker must not survive to suppress the
+  // Ready of a later, unrelated run after restart.
+  svc.onSessionStatus("s_box1", "failed");
+  db.updateSessionStatus("s_box1", "running", Date.now());
+  svc.onSessionStatus("s_box1", "idle");
+  assert.equal(sent.filter((title) => /is awaiting a prompt/.test(title)).length, 1,
+    "the later run's Ready is emitted; the stale marker was cleared at terminality");
+  assert.ok(db.getSession("s_box1")?.backgroundDeliveries?.every((d) =>
+    d.continuationId !== "bgcont-orphaned" || d.statusSettledAt == null),
+    "the orphaned delivery is never marked settled");
+});
+
+test("an armed settlement survives a runner disconnect and still suppresses after reconnect", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);
+  const hub = new FakeHub();
+  const sent: string[] = [];
+  const notify = (prev: SessionView, view: SessionView) => {
+    const message = pushDecision(prev, view);
+    if (message) sent.push(message.title);
+  };
+  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG, notify);
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ status: "running" })]);
+  db.updateSessionStatus("s_box1", "running", Date.now());
+  svc.onSessionEvent("s_box1", {
+    kind: "background_continuation_delivered", continuationId: "bgcont-flap", parentTurnId: "turn-f",
+  });
+
+  // Transient disconnect: the stop is provisional and reconnect hydration restores the same run.
+  svc.failRunnerSessions(RUNNER_ID);
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ status: "running" })]);
+  const before = sent.filter((title) => /is awaiting a prompt/.test(title)).length;
+  svc.onSessionStatus("s_box1", "idle");
+  assert.equal(sent.filter((title) => /is awaiting a prompt/.test(title)).length, before,
+    "the delivery's trailing Ready stays suppressed across the disconnect flap");
+  assert.ok(db.getSession("s_box1")?.backgroundDeliveries?.some((d) =>
+    d.continuationId === "bgcont-flap" && d.statusSettledAt != null));
+});
+
+test("a terminal snapshot orphans an armed settlement like a terminal status event", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);
+  const hub = new FakeHub();
+  const sent: string[] = [];
+  const notify = (prev: SessionView, view: SessionView) => {
+    const message = pushDecision(prev, view);
+    if (message) sent.push(message.title);
+  };
+  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG, notify);
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ status: "running" })]);
+  db.updateSessionStatus("s_box1", "running", Date.now());
+  svc.onSessionEvent("s_box1", {
+    kind: "background_continuation_delivered", continuationId: "bgcont-snap", parentTurnId: "turn-s",
+  });
+
+  // The run's death arrives as an authoritative terminal snapshot rather than a status event.
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ status: "failed" })]);
+  db.updateSessionStatus("s_box1", "running", Date.now());
+  svc.onSessionStatus("s_box1", "idle");
+  assert.equal(sent.filter((title) => /is awaiting a prompt/.test(title)).length, 1,
+    "a later run's Ready is emitted; the terminal snapshot orphaned the stale marker");
+});
+
 test("large live event payloads persist and broadcast only a bounded artifact-backed preview", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);
@@ -6836,6 +8704,100 @@ test("legacy history hydration externalizes large payloads before cache persiste
   assert.notEqual(event.payload.diff, original);
   assert.ok(event.payload.diffRefs?.length);
   assert.equal(JSON.stringify(event).includes(original), false);
+});
+
+test("indexed history hydration preserves runner-owned authentication recovery semantics", async () => {
+  const { db, hub, svc } = makeHarness();
+  const requestId = "provider-auth:indexed-recovery";
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+    status: "input_required",
+    pendingApproval: null,
+    seq: 1,
+    historyEpoch: 7,
+  })]);
+  hub.requestHandler = (msg) => {
+    assert.equal(msg.type, "session_history_page");
+    if (msg.type !== "session_history_page") throw new Error("unexpected request");
+    return {
+      type: "session_history_page_result",
+      requestId: msg.requestId,
+      sessionId: msg.sessionId,
+      ok: true,
+      events: [{
+        seq: 1,
+        ts: 100,
+        payload: {
+          kind: "permission_request",
+          requestId,
+          title: "Authentication Required — Claude",
+          options: [{ optionId: "auth:revalidate", name: "Recheck", kind: "allow_once" }],
+          purpose: "authentication",
+        },
+      }],
+      page: { logEpoch: 7, throughSeq: 1, nextAfterSeq: 1, hasMore: false },
+    };
+  };
+
+  await svc.hydrateHistory("s_box1");
+
+  assert.equal(db.getSession("s_box1")?.pendingApproval?.kind, "authentication");
+  const approved = svc.approve("s_box1", requestId, "auth:revalidate");
+  assert.equal(approved.ok, true, approved.error);
+  assert.equal(db.getSession("s_box1")?.status, "input_required");
+  assert.equal(db.getSession("s_box1")?.pendingApproval?.requestId, requestId);
+  assert.deepEqual(hub.sentOfType("resolve_permission").at(-1), {
+    type: "resolve_permission",
+    sessionId: "s_box1",
+    requestId,
+    optionId: "auth:revalidate",
+  });
+});
+
+test("legacy history hydration preserves runner-owned authentication recovery semantics", async () => {
+  const { db, hub, svc } = makeHarness();
+  const requestId = "provider-auth:legacy-recovery";
+  db.registerRunner(runnerMeta(), Date.now(), 53);
+  hub.requestHandler = (msg) => {
+    assert.equal(msg.type, "session_history");
+    if (msg.type !== "session_history") throw new Error("unexpected request");
+    return {
+      type: "session_history_result",
+      requestId: msg.requestId,
+      sessionId: msg.sessionId,
+      ok: true,
+      events: [{
+        seq: 1,
+        ts: 100,
+        payload: {
+          kind: "permission_request",
+          requestId,
+          title: "Authentication Required — Claude",
+          options: [{ optionId: "auth:revalidate", name: "Recheck", kind: "allow_once" }],
+          purpose: "authentication",
+        },
+      }],
+    };
+  };
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+    status: "input_required",
+    pendingApproval: null,
+    seq: 1,
+    historyEpoch: undefined,
+  })]);
+
+  await svc.hydrateHistory("s_box1");
+
+  assert.equal(db.getSession("s_box1")?.pendingApproval?.kind, "authentication");
+  const approved = svc.approve("s_box1", requestId, "auth:revalidate");
+  assert.equal(approved.ok, true, approved.error);
+  assert.equal(db.getSession("s_box1")?.status, "input_required");
+  assert.equal(db.getSession("s_box1")?.pendingApproval?.requestId, requestId);
+  assert.deepEqual(hub.sentOfType("resolve_permission").at(-1), {
+    type: "resolve_permission",
+    sessionId: "s_box1",
+    requestId,
+    optionId: "auth:revalidate",
+  });
 });
 
 test("delete tombstones the session so a later snapshot cannot resurrect it (H2)", () => {
@@ -8143,7 +10105,7 @@ test("notify hook: fires with the ask on input_required, on settle, on failure �
   assert.equal(sent.length, 1, "approving is the user's own action — no notification");
   svc.onSessionStatus(id, "idle");
   assert.equal(sent.length, 2);
-  assert.match(sent[1]!.title, /is ready/);
+  assert.match(sent[1]!.title, /is awaiting a prompt/);
 
   // Failure notifies; a stale post-terminal status does not (early return preserves terminal).
   svc.onSessionStatus(id, "failed", "boom");

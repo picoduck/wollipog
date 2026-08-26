@@ -1,12 +1,15 @@
 import React, { useEffect, useRef, useState, type ReactNode } from "react";
-import { PROTOCOL_VERSION } from "@wollipog/protocol";
+import { PROTOCOL_VERSION, type SessionNamingMode, type SessionNamingSettingsView } from "@wollipog/protocol";
+import { useApi } from "../api-context.js";
 import { notifier } from "../notify.js";
 import { tailnetAccessDescription, type TailnetAccessSetting } from "../tailnet-access.js";
 import { type PushSetting } from "../push.js";
 import { KeyboardIcon } from "./Icons.js";
 import { NavRow, SegmentedRow, SelectRow, StaticRow, SwitchRow } from "./ui/SettingsRows.js";
 import { SCHEME_SWATCHES, type ColorScheme, type ResolvedTheme } from "../theme.js";
+import { setEnterKeyBehavior, useEnterKeyBehavior, type EnterKeyBehavior } from "../enter-key.js";
 import { SETTINGS_SECTIONS, type SettingsSection, type View } from "../navigation.js";
+import type { ExperimentFlags, ExperimentId } from "../experiments.js";
 
 /**
  * Settings as a ROUTE, not a dialog.
@@ -234,8 +237,29 @@ export function PendingSetting({ title, description, reason }: { title: string; 
 }
 
 export function BehaviorPanel() {
+  const enterKey = useEnterKeyBehavior();
   return (
     <SettingsGroup title="Defaults">
+      {/* Stored per device and only on an explicit choice; the unstored default derives from the
+          device class (touch phones get newline, everything else send), so this row shows each
+          device's own effective behavior. The pair swaps as a unit — see enter-key.ts. */}
+      <SegmentedRow
+        title="Enter Key"
+        options={[
+          {
+            value: "send",
+            label: "Send Message",
+            description: "Enter sends; Shift+Enter inserts a new line. Stored on this device.",
+          },
+          {
+            value: "newline",
+            label: "Insert New Line",
+            description: "Enter inserts a new line; Shift+Enter sends. Stored on this device.",
+          },
+        ]}
+        value={enterKey}
+        onChange={(value) => setEnterKeyBehavior(value as EnterKeyBehavior)}
+      />
       <PendingSetting
         title="Reduce Motion"
         description="Follows your system setting."
@@ -255,6 +279,171 @@ export function BehaviorPanel() {
         title="Default Agent and Model"
         description="What a new session starts with."
         reason="Chosen per session when you create it; a default is not built yet."
+      />
+    </SettingsGroup>
+  );
+}
+
+const SESSION_NAMING_OPTIONS: ReadonlyArray<{
+  value: SessionNamingMode;
+  label: string;
+  description: string;
+}> = [
+  {
+    value: "prompt_text_only",
+    label: "Prompt Text Only",
+    description: "Use the first completed user message. No model or provider credentials are required.",
+  },
+  {
+    value: "session_agent_account",
+    label: "Use Session Agent Account",
+    description: "Use the authenticated provider account on the session's Machine.",
+  },
+  {
+    value: "custom_model_endpoint",
+    label: "Custom Model Endpoint",
+    description: "Send selected session text to the operator-configured OpenAI-compatible endpoint.",
+  },
+];
+
+/** Organization-scoped semantic naming choice. The API projection is deliberately secret-free:
+ * the panel can report whether a bearer key exists but never receives its value. */
+export function SessionNamingPanel() {
+  const api = useApi();
+  const activeApi = useRef(api);
+  activeApi.current = api;
+  const mounted = useRef(true);
+  const [settings, setSettings] = useState<SessionNamingSettingsView | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<{ action: "load" | "update"; message: string } | null>(null);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    setSettings(null);
+    setBusy(false);
+    setError(null);
+    void api.sessionNamingSettings().then((next) => {
+      if (!disposed) setSettings(next);
+    }).catch((cause: unknown) => {
+      if (!disposed) setError({ action: "load", message: cause instanceof Error ? cause.message : String(cause) });
+    });
+    return () => { disposed = true; };
+  }, [api]);
+
+  const changeMode = (mode: string) => {
+    if (!settings || busy) return;
+    const requestApi = api;
+    setBusy(true);
+    setError(null);
+    void requestApi.updateSessionNamingSettings({ mode: mode as SessionNamingMode }).then((next) => {
+      if (mounted.current && activeApi.current === requestApi) setSettings(next);
+    }).catch((cause: unknown) => {
+      if (mounted.current && activeApi.current === requestApi) {
+        setError({ action: "update", message: cause instanceof Error ? cause.message : String(cause) });
+      }
+    }).finally(() => {
+      if (mounted.current && activeApi.current === requestApi) setBusy(false);
+    });
+  };
+
+  const options = SESSION_NAMING_OPTIONS.map((option) => {
+    const availability = settings?.modes[option.value];
+    const disabledReason = !settings
+      ? "Loading the organization setting."
+      : !settings.canManage
+        ? "Organization owner or admin permission is required."
+        : availability?.reason;
+    return {
+      ...option,
+      disabled: !settings || !settings.canManage || !availability?.available,
+      ...(disabledReason ? { disabledReason } : {}),
+    };
+  });
+  const custom = settings?.customModel;
+  const status = error
+    ? `Could not ${error.action} session naming: ${error.message}`
+    : !settings
+      ? "Loading the organization setting…"
+      : settings.mode !== settings.effectiveMode
+        ? "The selected model mode is unavailable, so new sessions fall back to prompt text."
+        : settings.source === "environment"
+          ? "Inherited from the legacy control-plane environment. Save another mode to override it for this organization."
+          : settings.source === "organization"
+            ? "Saved for this organization. Changes apply to new naming requests without a restart."
+            : "Using the credential-free default.";
+
+  return (
+    <SettingsGroup title="Session Naming">
+      <SelectRow
+        title="Naming Mode"
+        description={status}
+        options={options}
+        value={settings?.mode ?? "prompt_text_only"}
+        disabled={busy}
+        onChange={changeMode}
+        menuWidth={460}
+        estimatedOptionHeight={72}
+      />
+      {custom && (
+        <StaticRow
+          title="Custom Model"
+          description={`${custom.endpointOrigin} · ${custom.model} · ${custom.timeoutMs} ms · ${custom.apiKeyConfigured ? "API key configured" : "No API key"}. Managed through the control-plane environment.`}
+        />
+      )}
+    </SettingsGroup>
+  );
+}
+
+/**
+ * Untested features, each behind its own switch.
+ *
+ * These gate UI EXPOSURE on this device and this instance, never capability: the control
+ * plane keeps serving the underlying APIs, and turning a feature back on restores every
+ * surface without a reload. The exception to "never hide a setting that could exist" is
+ * deliberate here — hiding is the setting.
+ */
+export function ExperimentalPanel({
+  flags,
+  onToggle,
+  conductorAvailable,
+}: {
+  flags: ExperimentFlags;
+  onToggle: (id: ExperimentId, enabled: boolean) => void;
+  /** Whether any connected runner advertises an available conductor agent. */
+  conductorAvailable: boolean;
+}) {
+  return (
+    <SettingsGroup title="Untested Features">
+      <SwitchRow
+        title="Multi-Agent Runs"
+        description="Runs and workflow graphs that coordinate several agents. Off hides Multi-Agent from navigation and search on this device."
+        checked={flags.multiAgent}
+        onClick={() => onToggle("multiAgent", !flags.multiAgent)}
+      />
+      <SwitchRow
+        title="Collaboration Pods"
+        description="Shared-context groups of sessions. Off hides Pods from navigation and search on this device."
+        checked={flags.pods}
+        onClick={() => onToggle("pods", !flags.pods)}
+      />
+      {/* The switch stays operable even with no runner able to supply a conductor: it is the
+          feature's only gate now, and the preference must be settable before the runner that
+          can host one connects. The pending reason says what is missing and that it self-heals. */}
+      <SwitchRow
+        title="Conductor-Led Work"
+        description={conductorAvailable
+          ? "The Conductor preset when creating a session. This switch is the feature's only gate on this device."
+          : <>The Conductor preset when creating a session.{" "}
+            <small className="settings-pending-reason">
+              No online runner can host a conductor yet; the preset appears once a runner with a native Claude Code installation connects.
+            </small></>}
+        checked={flags.conductor}
+        onClick={() => onToggle("conductor", !flags.conductor)}
       />
     </SettingsGroup>
   );

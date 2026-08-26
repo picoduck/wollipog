@@ -194,6 +194,7 @@ export function FilesBrowser({
     setEditorBusy(true);
     setSelectedEditor(chosenEditor.id);
     saveBrowserStorageValue("wollipog.editor.lastUsed", chosenEditor.id);
+    saveBrowserStorageValue("wollipog.openDestination.lastUsed", `editor:${chosenEditor.id}`);
     try {
       await api.hostAction(session.id, {
         kind: "open_editor_location", editorId: chosenEditor.id, location: editorLocation,

@@ -1,13 +1,29 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import {
   NativeProviderAuthRecovery,
   describeProviderCredentialScope,
 } from "./provider-auth-recovery.js";
 import type { SessionMeta } from "./session-store.js";
+import type { AgentProcess } from "./spawn.js";
+
+function fakeAgentProcess(): AgentProcess {
+  return Object.assign(new EventEmitter(), {
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    pid: 12345,
+  }) as unknown as AgentProcess;
+}
+
+function nextTask(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
 
 function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
   return {
@@ -103,6 +119,23 @@ test("production auth probe spawn scrubs daemon-only credentials", async () => {
   }
 });
 
+test("provider auth probe drains the final status payload after process exit", async () => {
+  const child = fakeAgentProcess();
+  const controller = new NativeProviderAuthRecovery(undefined, "runner-local-hmac-key", {
+    spawn: () => child,
+    kill: () => {},
+  });
+  const observation = controller.revalidate(meta({ driver: "claude-code", command: "claude" }));
+  let settled = false;
+  void observation.then(() => { settled = true; }, () => { settled = true; });
+  child.emit("exit", 0, null);
+  await nextTask();
+  assert.equal(settled, false, "exit must not resolve before provider stdout closes");
+  child.stdout.write(JSON.stringify({ loggedIn: true, email: "account@example.test" }));
+  child.emit("close", 0, null);
+  assert.equal((await observation).status, "authenticated");
+});
+
 test("only structured provider denial is unauthenticated while exit and context failures remain unknown", async () => {
   const denied = new NativeProviderAuthRecovery(async () => {
     throw Object.assign(new Error("logged out"), {
@@ -123,7 +156,8 @@ test("only structured provider denial is unauthenticated while exit and context 
 });
 
 test("in-app login is fail-closed and remote targets do not claim runner-owned recovery", () => {
-  assert.equal(describeProviderCredentialScope(meta())?.canStartLogin, false, "awaits the issue #17 provider-home lease");
+  assert.equal(describeProviderCredentialScope(meta())?.canStartLogin, false,
+    "login still needs exact-isolation lease acquisition and child supervision");
   assert.equal(describeProviderCredentialScope(meta({ context: { kind: "wsl", distro: "Ubuntu" } }))?.canStartLogin, false);
   assert.equal(describeProviderCredentialScope(meta({ env: { OPENAI_API_KEY: "secret" } }))?.canStartLogin, false);
   assert.equal(describeProviderCredentialScope(meta({

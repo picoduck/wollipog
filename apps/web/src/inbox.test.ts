@@ -327,6 +327,8 @@ test("status predicates distinguish active, running, and blocked states", () => 
     assert.equal(isInboxActiveStatus(status), false, status);
   }
   assert.equal(isInboxRunning(session("running", { status: "running" })), true);
+  assert.equal(isInboxRunning(session("queued", { status: "queued" })), false);
+  assert.equal(isInboxRunning(session("starting", { status: "starting" })), false);
   assert.equal(isInboxRunning(session("blocked", { status: "input_required" })), false);
   assert.equal(isInboxBlocked(session("blocked", { status: "input_required" })), true);
   assert.equal(isInboxBlocked(session("approval", {
@@ -407,6 +409,16 @@ test("successive arrivals append without moving an earlier arrival", () => {
   assert.deepEqual(reconcileInboxOrder(afterSecond, ["arrival-2", "arrival-1", "newest", "older"]), afterSecond);
 });
 
+test("a held order drops departed rows but keeps a vanished selection for repair", () => {
+  const afterRemoval = extendInboxHeldOrder(["removed", "kept", "newest"], ["kept", "newest"], "removed");
+  assert.deepEqual(afterRemoval, ["removed", "kept", "newest"]);
+  // Once the selection has been repaired off the removed row, nothing pins the tombstone: a
+  // day-long desktop lease must not accumulate one entry per departed session.
+  assert.deepEqual(extendInboxHeldOrder(afterRemoval, ["kept", "newest", "arrival"], "kept"),
+    ["kept", "newest", "arrival"]);
+  assert.deepEqual(extendInboxHeldOrder(["gone-1", "gone-2"], ["kept"], null), ["kept"]);
+});
+
 test("interaction order uses current row data instead of freezing live content", () => {
   const current = [{ id: "older", status: "idle" }, { id: "newest", status: "idle" }];
   const next = [{ id: "newest", status: "needs-input" }, { id: "older", status: "failed" }];
@@ -423,6 +435,10 @@ test("selection repair follows the held visual slot after external removal", () 
   assert.equal(repairInboxSelectionForHeldOrder(true, ["last", "first"], held, "first"), "first");
   assert.equal(repairInboxSelectionForHeldOrder(true, ["hidden", "first"], ["first", "selected"], "selected"), "first");
   assert.equal(repairInboxSelectionForHeldOrder(false, [], held, "selected"), "selected");
+  assert.equal(repairInboxSelectionForHeldOrder(true, ["third", "fourth"],
+    ["first-tombstone", "selected", "third", "fourth"], "selected"), "third");
+  assert.equal(repairInboxSelectionForHeldOrder(true, ["first", "last"], held, null, true), null,
+    "a deliberately cleared selection must stay cleared");
 });
 
 test("approval keyboard intents require one exact semantic option and never guess", () => {

@@ -134,6 +134,22 @@ function fetchWithBearer(url: string, token: string, init: RequestInit = {}): Pr
   return fetch(url, { ...init, headers });
 }
 
+async function waitForValue<T>(
+  read: () => T | Promise<T>,
+  predicate: (value: T) => boolean,
+  description: string,
+  timeoutMs = 5_000,
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  let value = await read();
+  while (!predicate(value)) {
+    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${description}`);
+    await delay(10);
+    value = await read();
+  }
+  return value;
+}
+
 function authenticatedUiUrl(wsBase: string, token: string): string {
   return `${wsBase}/ui?token=${encodeURIComponent(token)}`;
 }
@@ -358,23 +374,33 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   const invalidLegacy = await openSocketWithInbox(`${wsBase}/runner`);
   sockets.add(invalidLegacy.socket);
   invalidLegacy.socket.send(JSON.stringify(runnerRegistration(
-    "runner-legacy-warning",
+    "runner-legacy-rejected",
     `mamr_${"b".repeat(43)}`,
   )));
   await invalidLegacy.inbox.take((message) => message.type === "register_rejected");
-  await delay(50);
-  assert.equal(output.includes("runner authenticated with a legacy credential"), false);
 
   const firstLegacy = await openSocketWithInbox(`${wsBase}/runner`);
   sockets.add(firstLegacy.socket);
   firstLegacy.socket.send(JSON.stringify(runnerRegistration("runner-legacy-warning", legacyRunnerToken)));
   await firstLegacy.inbox.take((message) => message.type === "registered");
+  const onlineLegacyRunnerLineCount = () => output
+    .split(/\r?\n/u)
+    .filter((line) => line.includes("runner online: runner-legacy-warning")).length;
+  await waitForValue(
+    onlineLegacyRunnerLineCount,
+    (count) => count >= 1,
+    "the log sentinel after the first legacy runner registration",
+  );
 
   const repeatedLegacy = await openSocketWithInbox(`${wsBase}/runner`);
   sockets.add(repeatedLegacy.socket);
   repeatedLegacy.socket.send(JSON.stringify(runnerRegistration("runner-legacy-warning", legacyRunnerToken)));
   await repeatedLegacy.inbox.take((message) => message.type === "registered");
-  await delay(50);
+  await waitForValue(
+    onlineLegacyRunnerLineCount,
+    (count) => count >= 2,
+    "the log sentinel after the repeated legacy runner registration",
+  );
   const legacyWarningLines = output
     .split(/\r?\n/u)
     .filter((line) => line.includes("a runner authenticated with a legacy credential"));
@@ -425,10 +451,15 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     sessionSnapshots: [
       sessionSnapshot("session-target"),
       sessionSnapshot("session-other"),
-      { ...sessionSnapshot("session-history"), seq: 3, historyEpoch: 9 },
+      { ...sessionSnapshot("session-history"), status: "stopped", seq: 3, historyEpoch: 9 },
     ],
   }));
   await runnerInbox.take((message) => message.type === "registered");
+
+  const memberSearch = await fetch(`${httpBase}/api/search?q=session`, {
+    headers: { authorization: `Bearer ${operatorToken}` },
+  });
+  assert.equal(memberSearch.status, 200, "an authorized scoped member can search accessible transcripts");
 
   const scopedReveal = fetch(`${httpBase}/api/runners/runner-ui-route/host-action`, {
     method: "POST",
@@ -610,6 +641,9 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     createProjectLocations: true,
     accessScopeManagement: true,
     nativeTuiLaunch: true,
+    stopFailureRecovery: true,
+    stopBeforeArchive: true,
+    sessionReminders: true,
   });
   const initialProjects = snapshot.projects as Array<{
     id: string;
@@ -635,6 +669,126 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     "snapshot",
     "a paired device can authenticate the real /ui WebSocket route",
   );
+
+  const plainStopResponse = await ownerFetch("/api/sessions/session-other/stop", { method: "POST" });
+  assert.equal(plainStopResponse.status, 200);
+  const plainStopPayload = await plainStopResponse.json() as {
+    archived: boolean;
+    archiveStatus?: string;
+    stopOperation: {
+      operationId: string;
+      status: string;
+      attemptCount: number;
+      capacityReleased: boolean;
+    };
+  };
+  assert.equal(plainStopPayload.archived, false);
+  assert.equal(plainStopPayload.archiveStatus, undefined);
+  assert.equal(plainStopPayload.stopOperation.status, "stop_pending");
+  assert.equal(plainStopPayload.stopOperation.capacityReleased, false);
+  const plainStopCommand = await runnerInbox.take((message) =>
+    message.type === "stop_session" && message.sessionId === "session-other");
+  assert.equal(
+    plainStopCommand.type === "stop_session" ? plainStopCommand.operationId : undefined,
+    plainStopPayload.stopOperation.operationId,
+  );
+  assert.ok(plainStopCommand.type === "stop_session" && plainStopCommand.deliveryAttemptId);
+  for (const inbox of [uiInbox, operatorUiInbox]) {
+    await inbox.take((message) => message.type === "session_upsert" &&
+      (message.session as { id?: string; stopOperation?: { status?: string } } | undefined)?.id === "session-other" &&
+      (message.session as { stopOperation?: { status?: string } } | undefined)
+        ?.stopOperation?.status === "stop_pending");
+  }
+
+  runner.send(JSON.stringify({
+    type: "stop_session_result",
+    sessionId: "session-other",
+    operationId: plainStopPayload.stopOperation.operationId,
+    deliveryAttemptId: plainStopCommand.type === "stop_session"
+      ? plainStopCommand.deliveryAttemptId
+      : undefined,
+    accepted: false,
+    error: "/private/provider/path and runtime output",
+  }));
+  for (const inbox of [uiInbox, operatorUiInbox]) {
+    const failedUpsert = await inbox.take((message) => message.type === "session_upsert" &&
+      (message.session as { id?: string; stopOperation?: { status?: string } } | undefined)?.id === "session-other" &&
+      (message.session as { stopOperation?: { status?: string } } | undefined)
+        ?.stopOperation?.status === "stop_failed");
+    const failedSession = failedUpsert.session as {
+      archived: boolean;
+      archiveStatus?: string;
+      stopOperation: { capacityReleased: boolean; failure?: { message?: string } };
+    };
+    assert.equal(failedSession.archived, false);
+    assert.equal(failedSession.archiveStatus, undefined);
+    assert.equal(failedSession.stopOperation.capacityReleased, false);
+    assert.doesNotMatch(failedSession.stopOperation.failure?.message ?? "", /private|provider\/path/u);
+  }
+
+  assert.equal(
+    (await fetch(`${httpBase}/api/sessions/session-other/retry-stop`, { method: "POST" })).status,
+    401,
+    "an unauthenticated caller cannot recover a failed Stop",
+  );
+  const authorizedRetryResponse = await fetchWithBearer(
+    `${httpBase}/api/sessions/session-other/retry-stop`,
+    operatorToken,
+    { method: "POST" },
+  );
+  assert.equal(authorizedRetryResponse.status, 202);
+  const authorizedRetry = await authorizedRetryResponse.json() as {
+    stopOperation: { operationId: string; status: string; attemptCount: number };
+  };
+  assert.equal(authorizedRetry.stopOperation.operationId, plainStopPayload.stopOperation.operationId);
+  assert.equal(authorizedRetry.stopOperation.status, "stop_pending");
+  assert.equal(authorizedRetry.stopOperation.attemptCount, 1);
+  const authorizedRetryCommand = await runnerInbox.take((message) =>
+    message.type === "stop_session" && message.sessionId === "session-other");
+  assert.equal(
+    authorizedRetryCommand.type === "stop_session" ? authorizedRetryCommand.operationId : undefined,
+    plainStopPayload.stopOperation.operationId,
+  );
+  assert.ok(authorizedRetryCommand.type === "stop_session" && authorizedRetryCommand.deliveryAttemptId);
+  assert.notEqual(authorizedRetryCommand.deliveryAttemptId, plainStopCommand.deliveryAttemptId);
+  const duplicateRetryResponse = await ownerFetch(
+    "/api/sessions/session-other/retry-stop",
+    { method: "POST" },
+  );
+  assert.equal(duplicateRetryResponse.status, 202);
+  const duplicateRetry = await duplicateRetryResponse.json() as {
+    stopOperation: { operationId: string; attemptCount: number };
+  };
+  assert.equal(duplicateRetry.stopOperation.operationId, authorizedRetry.stopOperation.operationId);
+  assert.equal(duplicateRetry.stopOperation.attemptCount, authorizedRetry.stopOperation.attemptCount);
+  const duplicateRetryCommand = await runnerInbox.take((message) =>
+    message.type === "stop_session" && message.sessionId === "session-other");
+  assert.equal(
+    duplicateRetryCommand.type === "stop_session" ? duplicateRetryCommand.operationId : undefined,
+    plainStopPayload.stopOperation.operationId,
+  );
+  assert.equal(
+    duplicateRetryCommand.type === "stop_session" ? duplicateRetryCommand.deliveryAttemptId : undefined,
+    authorizedRetryCommand.deliveryAttemptId,
+  );
+  for (const inbox of [uiInbox, operatorUiInbox]) {
+    await inbox.take((message) => message.type === "session_upsert" &&
+      (message.session as { id?: string; stopOperation?: { status?: string } } | undefined)?.id === "session-other" &&
+      (message.session as { stopOperation?: { status?: string } } | undefined)
+        ?.stopOperation?.status === "stop_pending");
+  }
+
+  runner.send(JSON.stringify({
+    type: "session_status",
+    sessionId: "session-other",
+    status: "stopped",
+  }));
+  for (const inbox of [uiInbox, operatorUiInbox]) {
+    const settledUpsert = await inbox.take((message) => message.type === "session_upsert" &&
+      (message.session as { id?: string; stopOperation?: unknown } | undefined)?.id === "session-other" &&
+      (message.session as { stopOperation?: unknown } | undefined)?.stopOperation === undefined);
+    assert.equal((settledUpsert.session as { archived?: boolean }).archived, false);
+  }
 
   const renameResponse = await ownerFetch("/api/sessions/session-target/title", {
     method: "POST",
@@ -691,10 +845,19 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     events: [{ seq: 3, ts: 23, payload: { kind: "agent_message", text: "three" } }],
     page: { logEpoch: 9, throughSeq: 3, nextAfterSeq: 3, hasMore: false },
   }));
-  await delay(25);
-  const hydratedPage = await (await ownerFetch(
-    "/api/sessions/session-history/events?after=0&limit=2&eventEpoch=0",
-  )).json() as { events: Array<{ seq: number }>; nextAfter: number; hasMoreCached: boolean; cacheComplete: boolean };
+  type HydratedHistoryPage = {
+    events: Array<{ seq: number }>;
+    nextAfter: number;
+    hasMoreCached: boolean;
+    cacheComplete: boolean;
+  };
+  const hydratedPage = await waitForValue(
+    async () => await (await ownerFetch(
+      "/api/sessions/session-history/events?after=0&limit=2&eventEpoch=0",
+    )).json() as HydratedHistoryPage,
+    (page) => page.cacheComplete,
+    "session history ingest to complete",
+  );
   assert.deepEqual(hydratedPage.events.map((event) => event.seq), [1, 2]);
   assert.equal(hydratedPage.nextAfter, 2);
   assert.equal(hydratedPage.hasMoreCached, true);
@@ -735,7 +898,6 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     (message.event as { sessionId?: string } | undefined)?.sessionId === "session-target",
   );
   assert.equal(((targeted.event as { payload: { text: string } }).payload).text, "targeted delivery");
-  await delay(100);
   assert.equal(uiInbox.has((message) =>
     message.type === "session_event" &&
     (message.event as { sessionId?: string } | undefined)?.sessionId === "session-other"), false);
@@ -1126,13 +1288,6 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     }),
   });
   assert.equal(deniedOperatorLocation.status, 403);
-  await delay(50);
-  assert.equal(
-    runnerInbox.has((message) =>
-      message.type === "list_directory" && message.path === "/repos/operator-host-path"),
-    false,
-    "a non-admin Project member must not reach the runner with an arbitrary host path",
-  );
 
   const createLocationRequest = ownerFetch(`/api/projects/${createdProject.id}/locations/new`, {
     method: "POST",
@@ -1143,7 +1298,14 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
       path: "/repos/browsed-location",
     }),
   });
-  const browseRequest = await runnerInbox.take((message) => message.type === "list_directory");
+  const browseRequest = await runnerInbox.take((message) =>
+    message.type === "list_directory" && message.path === "/repos/browsed-location");
+  assert.equal(
+    runnerInbox.has((message) =>
+      message.type === "list_directory" && message.path === "/repos/operator-host-path"),
+    false,
+    "a non-admin Project member must not reach the runner with an arbitrary host path",
+  );
   assert.deepEqual(
     { context: browseRequest.context, path: browseRequest.path },
     { context: { kind: "native" }, path: "/repos/browsed-location" },
@@ -1262,23 +1424,52 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   const archivePayload = (await archiveResponse.json() as {
     project: { id: string; unarchivedSessionCount: number; totalSessionCount: number };
     archivedSessionIds: string[];
+    pendingSessionIds: string[];
   });
   const archivedProject = archivePayload.project;
   assert.deepEqual(
     [archivedProject.id, archivedProject.unarchivedSessionCount, archivedProject.totalSessionCount],
-    [createdProject.id, 0, 1],
-    "archiving the Project's sessions leaves the durable Project in the inventory",
+    [createdProject.id, 1, 1],
+    "a Project session remains visible while its Stop is pending",
   );
   assert.deepEqual(
-    archivePayload.archivedSessionIds.sort(),
-    ["session-target"],
-    "the atomic response reports only sessions changed by this archive operation",
+    archivePayload.archivedSessionIds,
+    [],
+    "active sessions are not reported as archived before Stop evidence",
   );
-  for (const sessionId of ["session-target"]) {
-    await uiInbox.take((message) => message.type === "session_upsert" &&
-      (message.session as { id?: string; archived?: boolean } | undefined)?.id === sessionId &&
-      (message.session as { archived?: boolean } | undefined)?.archived === true);
-  }
+  assert.deepEqual(archivePayload.pendingSessionIds, ["session-target"]);
+  const stopRequest = await runnerInbox.take((message) =>
+    message.type === "stop_session" && message.sessionId === "session-target");
+  assert.ok(stopRequest.type === "stop_session" && stopRequest.operationId && stopRequest.deliveryAttemptId);
+  await uiInbox.take((message) => message.type === "session_upsert" &&
+    (message.session as { id?: string; archived?: boolean; archiveStatus?: string } | undefined)?.id === "session-target" &&
+    (message.session as { archived?: boolean } | undefined)?.archived === false &&
+    (message.session as { archiveStatus?: string } | undefined)?.archiveStatus === "stop_pending");
+  runner.send(JSON.stringify({
+    type: "stop_session_result",
+    sessionId: "session-target",
+    operationId: stopRequest.operationId,
+    deliveryAttemptId: stopRequest.deliveryAttemptId,
+    accepted: false,
+    error: "private runner detail",
+  }));
+  await uiInbox.take((message) => message.type === "session_upsert" &&
+    (message.session as { id?: string; archiveStatus?: string } | undefined)?.id === "session-target" &&
+    (message.session as { archiveStatus?: string } | undefined)?.archiveStatus === "stop_failed");
+  const retryStopResponse = await ownerFetch("/api/sessions/session-target/retry-stop", { method: "POST" });
+  assert.equal(retryStopResponse.status, 202);
+  const retryPayload = await retryStopResponse.json() as {
+    archived: boolean;
+    archiveStatus: string;
+    archiveOperation: { operationId: string; capacityReleased: boolean };
+  };
+  assert.equal(retryPayload.archived, false);
+  assert.equal(retryPayload.archiveStatus, "stop_pending");
+  assert.equal(retryPayload.archiveOperation.operationId, stopRequest.operationId);
+  assert.equal(retryPayload.archiveOperation.capacityReleased, false);
+  const retryCommand = await runnerInbox.take((message) =>
+    message.type === "stop_session" && message.sessionId === "session-target");
+  assert.equal(retryCommand.type === "stop_session" ? retryCommand.operationId : undefined, stopRequest.operationId);
   assert.equal(
     uiInbox.has((message) => message.type === "session_upsert" &&
       (message.session as { id?: string; archived?: boolean } | undefined)?.id === "session-history" &&

@@ -1,5 +1,5 @@
 import { forwardRef, useCallback, useRef, type MutableRefObject } from "react";
-import type { SessionView } from "@wollipog/protocol";
+import type { SessionReminderView, SessionView } from "@wollipog/protocol";
 import { isHeartbeatBusy, type SessionActivity } from "../activity.js";
 import { encodeResourceId } from "../navigation.js";
 import { useStoreSelector } from "../store.js";
@@ -16,6 +16,7 @@ export interface InboxListEntry {
   session: SessionView;
   projectName: string;
   unread: boolean;
+  reminder?: SessionReminderView;
 }
 
 export interface InboxEmptyState {
@@ -42,6 +43,8 @@ export const InboxList = forwardRef<HTMLDivElement, {
   /** Test/story override paired with `activityBySession`. */
   activityNow?: number;
   runningCount: number;
+  queuedCount: number;
+  startingCount: number;
   filtered: boolean;
   emptyState?: InboxEmptyState;
   onNewSession: () => void;
@@ -58,6 +61,8 @@ export const InboxList = forwardRef<HTMLDivElement, {
   stalledSessionIds,
   activityNow,
   runningCount,
+  queuedCount,
+  startingCount,
   filtered,
   emptyState,
   onNewSession,
@@ -95,7 +100,7 @@ export const InboxList = forwardRef<HTMLDivElement, {
         <strong>{filtered ? "No Matching Sessions" : emptyState?.title ?? "All Agents Unblocked"}</strong>
         <span>{filtered
           ? "Try a different search."
-          : emptyState?.description ?? `${runningCount} ${runningCount === 1 ? "session is" : "sessions are"} still running.`}</span>
+          : emptyState?.description ?? `Running: ${runningCount}. Queued: ${queuedCount}. Starting: ${startingCount}.`}</span>
         {!filtered && (emptyState?.showNewSession ?? true) && (
           <button type="button" className="btn primary sm" onClick={onNewSession}>
             New Session <kbd aria-hidden="true">C</kbd>
@@ -143,7 +148,7 @@ export const InboxList = forwardRef<HTMLDivElement, {
         overscan={6}
         rootRole="rowgroup"
         rowRole="presentation"
-        renderItem={({ session, projectName, unread }, { index }) => {
+        renderItem={({ session, projectName, unread, reminder }, { index }) => {
           // The callbacks are passed THROUGH, not wrapped. `onSelect: () => onSelect(session.id)`
           // builds a new closure on every render, so every row's props differ by identity and the
           // memo compares unequal every time — the memoisation looked applied and did nothing.
@@ -154,6 +159,7 @@ export const InboxList = forwardRef<HTMLDivElement, {
             projectName,
             selected: session.id === selectedSessionId,
             unread,
+            reminder,
             pinned: pinnedSessionIds.has(session.id),
             stalled: stalledSessionIds.has(session.id),
             onSelect,

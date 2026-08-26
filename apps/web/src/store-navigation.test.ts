@@ -101,6 +101,22 @@ test("Inbox state preserves one selection per split and clamps the persisted rat
   assert.equal(parseInboxSplitRatio("not-a-number"), 0.4);
 });
 
+test("Inbox removal preserves an active tombstone while explicit clearing remains distinct", () => {
+  const store = new Store({ name: "inbox" });
+  store.setInboxSelection("selected");
+  store.dispatch({ type: "msg", msg: { type: "session_removed", sessionId: "selected" } });
+  assert.equal(store.getState().inbox.selectedSessionId, "selected",
+    "the view needs the removed id to repair against its visual slot");
+  assert.equal(store.getState().inbox.selectionCleared, false);
+
+  store.setInboxSelection(null);
+  assert.equal(store.getState().inbox.selectionCleared, true);
+
+  store.setInboxSelection(null, null, true, true);
+  assert.equal(store.getState().inbox.selectionCleared, false,
+    "automatic empty-state repair must not be mistaken for a user clear");
+});
+
 test("Inbox selection persistence is defensive and isolated by control-plane instance", () => {
   const values = new Map<string, string>();
   const storage: KeyValueStorage = {

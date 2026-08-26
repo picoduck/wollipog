@@ -395,9 +395,9 @@ test("archiving the final session keeps its Project selected live and after relo
   const alpha = page.getByRole("tab", { name: /Alpha/ });
   await alpha.click();
   await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
-  await page.getByRole("menuitem", { name: "Archive All Sessions" }).click();
-  const confirmation = page.getByRole("dialog", { name: "Archive 1 Session?" });
-  await confirmation.getByRole("button", { name: "Archive Sessions" }).click();
+  await page.getByRole("menuitem", { name: "Archive and Stop All Sessions" }).click();
+  const confirmation = page.getByRole("dialog", { name: "Archive and stop 1 session?" });
+  await confirmation.getByRole("button", { name: "Archive and Stop" }).click();
 
   await expect(alpha).toHaveAttribute("aria-selected", "true");
   await expect(alpha).toContainText("0");
@@ -465,6 +465,49 @@ test("Native TUI launch sends the harness intent and opens Terminal only after c
   await expect(page.getByRole("status").filter({ hasText: "Manager policy hooks remain active" })).toHaveText(
     "No structured events or approval cards. Manager policy hooks remain active.",
   );
+});
+
+test("unified Inbox creation opens both existing workflows with the active Project context", async ({ page }) => {
+  await page.getByRole("tab", { name: /Alpha/ }).click();
+  const create = page.getByRole("button", { name: "Create", exact: true });
+
+  await create.click();
+  const choices = page.getByRole("menu", { name: "Create" });
+  await expect(choices.getByRole("menuitem").allTextContents()).resolves.toEqual(["New Session", "New Project"]);
+  await choices.getByRole("menuitem", { name: "New Session", exact: true }).click();
+  const sessionDialog = page.getByRole("dialog", { name: "New Session" });
+  await expect(sessionDialog.getByLabel("Project", { exact: true })).toHaveValue("alpha");
+  await page.keyboard.press("Escape");
+  await expect(sessionDialog).toBeHidden();
+  await expect(create).toBeFocused();
+
+  await create.click();
+  await page.getByRole("menuitem", { name: "New Project", exact: true }).click();
+  const projectDialog = page.getByRole("dialog", { name: "Create Project" });
+  await expect(projectDialog).toBeVisible();
+  await projectDialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(create).toBeFocused();
+});
+
+test("unified Inbox creation choices remain usable at a mobile viewport", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const create = page.getByRole("button", { name: "Create", exact: true });
+  await expect(create).toBeVisible();
+
+  await create.click();
+  await page.getByRole("menuitem", { name: "New Session", exact: true }).click();
+  const sessionDialog = page.getByRole("dialog", { name: "New Session" });
+  await expect(sessionDialog).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(sessionDialog).toBeHidden();
+  await expect(create).toBeFocused();
+
+  await create.click();
+  await page.getByRole("menuitem", { name: "New Project", exact: true }).click();
+  const projectDialog = page.getByRole("dialog", { name: "Create Project" });
+  await expect(projectDialog).toBeVisible();
+  await projectDialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(create).toBeFocused();
 });
 
 test("C defaults New Session to the active single-Project Inbox tab", async ({ page }) => {
@@ -931,7 +974,8 @@ test.describe("coarse pointer Project actions", () => {
 });
 
 test("Project management creates, hides, reloads, and reveals durable empty Projects", async ({ page }) => {
-  await page.getByRole("button", { name: "Create Project" }).click();
+  await page.getByRole("button", { name: "Create", exact: true }).click();
+  await page.getByRole("menuitem", { name: "New Project", exact: true }).click();
   const createDialog = page.getByRole("dialog", { name: "Create Project" });
   await createDialog.getByLabel("Project Name").fill("Durable Empty");
   await createDialog.getByRole("button", { name: "Create Project" }).click();

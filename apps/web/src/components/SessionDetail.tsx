@@ -13,6 +13,7 @@ import {
 } from "react";
 import {
   CODEX_APP_SERVER_IMAGE_MIME_TYPES,
+  MAX_PROMPT_IMAGES,
   PROMPT_IMAGE_MIME_TYPES,
   isPolicyApproval,
   isTerminal,
@@ -41,12 +42,13 @@ import {
   Empty,
   Modal,
   Spinner,
-  StatusBadge,
+  SessionStatusIndicators,
 } from "./common.js";
 import { EventTimeline, type TimelineRevealRequest } from "./EventTimeline.js";
 import { isTimelineSessionActive } from "../timeline-clock.js";
 import { RightPanel, type RightPanelState } from "./RightPanel.js";
 import { useGitStatus, useGitSummary } from "./useGitStatus.js";
+import { sessionChangeStatus, sessionMayShowChangeStatus } from "../session-status.js";
 import { ImageStrip, usePastedImages } from "./images.js";
 import { PromptImageView } from "./PromptImageView.js";
 import {
@@ -115,8 +117,9 @@ import {
   useFollowTail,
 } from "../useFollowTail.js";
 import { useSessionReadingKeys, type SessionReadingKeyActions } from "../useSessionReadingKeys.js";
+import { VIRTUAL_VIEWPORT_INTENT_EVENT } from "../viewport-intent.js";
 import { matchesShortcut, shortcutDisplay, shortcutLayerActive } from "../shortcuts.js";
-import { useIsMobile } from "./useIsMobile.js";
+import { useIsMobile, useIsTouchPhone } from "./useIsMobile.js";
 import {
   usePreviewNavigationRegistration,
   type PreviewNavigationControls,
@@ -129,7 +132,7 @@ import {
 } from "../conversation-steering.js";
 import { SteeringReceipts } from "./SteeringReceipts.js";
 import { SessionCommandReceipts } from "./SessionCommandReceipts.js";
-import { ArrowUpIcon, ChevronLeftIcon, FolderSolidIcon, MicIcon, MoreHorizontalIcon, StopTurnIcon } from "./Icons.js";
+import { ArrowUpIcon, ChevronLeftIcon, FolderSolidIcon, ImageIcon, MicIcon, MoreHorizontalIcon, StopTurnIcon } from "./Icons.js";
 import {
   DURABLE_COMMAND_ATTACHMENT_NOTICE,
   buildComposerCommandRegistry,
@@ -153,6 +156,8 @@ import {
   restoreComposerFocus,
   restoreRememberedComposerFocus,
 } from "../composer-focus.js";
+import { enterKeystrokeSends, useEnterKeyBehavior } from "../enter-key.js";
+import { KEYBOARD_DISMISS_BLUR_EVENT } from "../mobile-viewport.js";
 import { resizeComposerToContent } from "../composer-autogrow.js";
 import { IncrementalActiveTurnProgress } from "../turn-progress.js";
 import { WorkingIndicator } from "./WorkingIndicator.js";
@@ -168,6 +173,12 @@ import { ChoiceCards, type ChoiceCardOption } from "./ui/ChoiceControls.js";
 
 const NO_IMAGE_MIME_TYPES: readonly string[] = [];
 const STOP_TURN_RETRY_MS = 8_000;
+const EARLIER_ACTIVITY_TRIGGER_PX = 160;
+const EARLIER_ACTIVITY_REARM_DISTANCE_PX = 32;
+const EARLIER_ACTIVITY_REARM_FRAMES = 8;
+const EARLIER_ACTIVITY_TOUCH_IDLE_MS = 180;
+
+type EarlierActivityIntent = "single-scroll" | "touch-traversal";
 
 type ComposerMutationKind = "send" | "steer" | "promote" | "stop";
 type ComposerMutationEntry = {
@@ -291,6 +302,7 @@ export type SessionDetailProps = {
   onApprove?: () => void;
   onDeny?: () => void;
   onArchive?: () => void;
+  onSnooze?: () => void;
   /** App-shell control cluster (editor, pinned/terminal/panel toggles) rendered in the unified
    * session bar when it replaces the app-level top bar on desktop. */
   topbarControls?: ReactNode;
@@ -371,12 +383,12 @@ export function SessionDetail(props: SessionDetailProps) {
     const ownsPageTitle = props.mode !== "preview" && !isMobile;
     return (
       <div className="session-detail expanded" data-session-surface-id={sessionId}>
-        {props.mode !== "preview" && (
+        {props.mode !== "preview" && !isMobile && (
           <div className="detail-head">
             <button
               className="icon-btn back"
               onClick={props.onBack ?? (() => navigate({ name: "inbox" }))}
-              title="Back to Inbox"
+              title="Back to inbox"
               aria-label="Back to Inbox"
             >
               <ChevronLeftIcon size={22} />
@@ -416,6 +428,7 @@ function SessionDetailLoaded({
   onApprove,
   onDeny,
   onArchive,
+  onSnooze,
   topbarControls,
   providerCommandAttachmentPolicy = "send",
   onPreviewNavigationReady,
@@ -425,6 +438,8 @@ function SessionDetailLoaded({
 }: SessionDetailProps & { session: SessionView }) {
   const api = useApi();
   const isMobile = useIsMobile();
+  const projectsSupported = useStoreSelector((state) => state.projectsSupported);
+  const projects = useStoreSelector((state) => state.projects);
   const instanceScope = useInstanceScope();
   const mutationKey = composerMutationKey(instanceScope, sessionId);
   const subscribeMutation = useCallback(
@@ -479,6 +494,7 @@ function SessionDetailLoaded({
   });
   const runner = useStoreSelector((s) => s.runners.get(session.runnerId));
   const runnerOnline = runner?.status === "online";
+  const stopBeforeArchiveSupported = useStoreSelector((s) => s.stopBeforeArchiveSupported);
   const richGitSupported = runnerSupportsProtocol(runner?.protocolVersion, "gitVisibility");
   const box = useStoreSelector((s) => [...s.boxes.values()].find((candidate) => candidate.runnerId === session.runnerId));
   const conn = useStoreSelector((s) => s.conn);
@@ -518,6 +534,7 @@ function SessionDetailLoaded({
   const forkInFlightRef = useRef(false);
   const viewGenerationRef = useRef(0);
   const [historyRetry, setHistoryRetry] = useState(0);
+  const [olderRequestSettled, setOlderRequestSettled] = useState(0);
   const [optimisticModel, setOptimisticModel] = useState<string | undefined>();
   const [activeSlashCommandId, setActiveSlashCommandId] = useState<string | null>(null);
   const [timelineRevealRequest, setTimelineRevealRequest] = useState<TimelineRevealRequest | null>(null);
@@ -525,6 +542,22 @@ function SessionDetailLoaded({
   const timelineRevealRestoreState = useRef<{ requestId: number; state: FollowTailState } | null>(null);
   const timelineRevealRequestId = useRef(0);
   const timelineHistoryKey = `${session.id}:${session.eventEpoch ?? 0}`;
+  const automaticEarlierLoadRef = useRef({
+    historyKey: timelineHistoryKey,
+    requestedBase: null as number | null,
+    nextTriggerTop: null as number | null,
+    readerStarted: false,
+    settling: false,
+    settleFrame: null as number | null,
+    readerIntent: null as EarlierActivityIntent | null,
+    readerIntentTop: null as number | null,
+    touchActive: false,
+    nativeTouchActive: false,
+    touchInputY: null as number | null,
+    touchTraversalStarted: false,
+    touchEndTimer: null as number | null,
+    readerIntentMovedUp: false,
+  });
   const [composerSelection, setComposerSelection] = useState({ start: 0, end: 0 });
   const [slashDismissedFor, setSlashDismissedFor] = useState<string | null>(null);
   const slashListboxId = `session-slash-${useId().replace(/:/g, "")}`;
@@ -656,11 +689,17 @@ function SessionDetailLoaded({
     document.addEventListener("keydown", markExplicitKeyboardTransfer, true);
     window.addEventListener("blur", markWindowTransfer);
     window.addEventListener("focus", clearExplicitTransfer);
+    // The keyboard-dismissal detector (mobile-viewport.ts) blurs the composer when the software
+    // keyboard closes without one — Android Back — and a programmatic blur has no pointerdown or
+    // keydown to mark it. Unmarked, it reads as accidental background loss, and the recovery
+    // refocus re-summons on Android the very keyboard the user just collapsed.
+    window.addEventListener(KEYBOARD_DISMISS_BLUR_EVENT, markExplicitTransfer);
     return () => {
       document.removeEventListener("pointerdown", markExplicitPointerTransfer, true);
       document.removeEventListener("keydown", markExplicitKeyboardTransfer, true);
       window.removeEventListener("blur", markWindowTransfer);
       window.removeEventListener("focus", clearExplicitTransfer);
+      window.removeEventListener(KEYBOARD_DISMISS_BLUR_EVENT, markExplicitTransfer);
       if (clearExplicitTransferTimer) clearTimeout(clearExplicitTransferTimer);
     };
   }, []);
@@ -827,6 +866,13 @@ function SessionDetailLoaded({
       errorCode: gitSummary.errorCode,
     },
   }), [git, gitSummary, runnerOnline, session.worktreePath]);
+  const changeStatus = sessionChangeStatus({
+    status: git.status,
+    summary: gitSummary.summary,
+    settled: git.settled || gitSummary.settled,
+    available: sessionMayShowChangeStatus(session.status) &&
+      (gitPresentation.state === "ready" || gitPresentation.state === "updating"),
+  });
 
   useEffect(() => {
     const generation = ++viewGenerationRef.current;
@@ -1058,8 +1104,8 @@ function SessionDetailLoaded({
         { sessionId, eventEpoch: epoch, recoveryRevision },
         {
           fetchTailPage: api.getSessionEventTailPage,
-          applyWindow: (id, events, pageEpoch, revision, complete, hasOlder) =>
-            loadEvents(id, events, pageEpoch, revision, complete, generation, hasOlder),
+          applyWindow: (id, events, pageEpoch, revision, complete, hasOlder, turnAligned) =>
+            loadEvents(id, events, pageEpoch, revision, complete, generation, hasOlder, turnAligned),
           isCurrent,
         },
       ).then((result) => (result.supported ? result.complete : forwardRecovery()))
@@ -1084,7 +1130,7 @@ function SessionDetailLoaded({
   // ask for it. `preserveAnchor` keeps their row fixed while the prepend re-measures.
   const loadOlder = useCallback(() => {
     const base = eventWindowBase(sessionId);
-    if (base <= 1 || olderInFlightRef.current) return;
+    if (base <= 1 || olderInFlightRef.current) return false;
     const epoch = recoveryEventEpoch;
     olderInFlightRef.current = true;
     // Every dispatch carries the base this page was requested below. A reopen re-reads the tail,
@@ -1098,8 +1144,264 @@ function SessionDetailLoaded({
       .catch(() => failOlderEventsLoad(sessionId, "Could not load earlier activity.", base, epoch))
       .finally(() => {
         olderInFlightRef.current = false;
+        setOlderRequestSettled((version) => version + 1);
       });
+    return true;
   }, [api, sessionId, recoveryEventEpoch, eventWindowBase, beginOlderEventsLoad, loadOlderEvents, failOlderEventsLoad]);
+
+  const cancelEarlierActivitySettle = useCallback(() => {
+    const state = automaticEarlierLoadRef.current;
+    if (state.settleFrame !== null) window.cancelAnimationFrame(state.settleFrame);
+    state.settleFrame = null;
+    state.settling = false;
+  }, []);
+
+  const clearEarlierActivityIntent = useCallback(() => {
+    const state = automaticEarlierLoadRef.current;
+    if (state.touchEndTimer !== null) window.clearTimeout(state.touchEndTimer);
+    state.touchEndTimer = null;
+    state.readerIntent = null;
+    state.readerIntentTop = null;
+    state.readerIntentMovedUp = false;
+    state.touchActive = false;
+    state.nativeTouchActive = false;
+    state.touchInputY = null;
+    state.touchTraversalStarted = false;
+  }, []);
+
+  const markEarlierActivityIntent = useCallback((
+    intent: EarlierActivityIntent,
+    touchInputY: number | null = null,
+  ) => {
+    const state = automaticEarlierLoadRef.current;
+    if (state.touchEndTimer !== null) window.clearTimeout(state.touchEndTimer);
+    state.touchEndTimer = null;
+    state.readerIntent = intent;
+    state.readerIntentTop = scrollRef.current?.scrollTop ?? null;
+    state.readerIntentMovedUp = false;
+    state.touchActive = intent === "touch-traversal";
+    state.touchInputY = touchInputY;
+    state.touchTraversalStarted = false;
+    cancelEarlierActivitySettle();
+  }, [cancelEarlierActivitySettle]);
+
+  const markSingleEarlierActivityIntent = useCallback(() => {
+    markEarlierActivityIntent("single-scroll");
+  }, [markEarlierActivityIntent]);
+
+  const markTouchEarlierActivityIntent = useCallback((clientY: number | null = null) => {
+    markEarlierActivityIntent("touch-traversal", clientY);
+  }, [markEarlierActivityIntent]);
+
+  const markNativeTouchEarlierActivityIntent = useCallback((clientY: number | null) => {
+    const state = automaticEarlierLoadRef.current;
+    if (state.nativeTouchActive) return;
+    markTouchEarlierActivityIntent(clientY);
+    state.nativeTouchActive = true;
+  }, [markTouchEarlierActivityIntent]);
+
+  const markTouchEarlierActivityMovement = useCallback((clientY: number | null) => {
+    const state = automaticEarlierLoadRef.current;
+    if (state.readerIntent !== "touch-traversal" || clientY === null) return;
+    if (state.touchInputY !== null && clientY > state.touchInputY + 1) {
+      state.touchTraversalStarted = true;
+    }
+    state.touchInputY = clientY;
+  }, []);
+
+  const deferTouchEarlierActivityEnd = useCallback(() => {
+    const state = automaticEarlierLoadRef.current;
+    if (state.readerIntent !== "touch-traversal") return;
+    if (state.touchEndTimer !== null) window.clearTimeout(state.touchEndTimer);
+    state.touchEndTimer = window.setTimeout(() => {
+      state.touchEndTimer = null;
+      if (!state.touchActive && state.readerIntent === "touch-traversal") {
+        clearEarlierActivityIntent();
+      }
+    }, EARLIER_ACTIVITY_TOUCH_IDLE_MS);
+  }, [clearEarlierActivityIntent]);
+
+  const finishTouchEarlierActivityIntent = useCallback(() => {
+    const state = automaticEarlierLoadRef.current;
+    if (state.readerIntent !== "touch-traversal") return;
+    state.touchActive = false;
+    deferTouchEarlierActivityEnd();
+  }, [deferTouchEarlierActivityEnd]);
+
+  const finishPointerTouchEarlierActivityIntent = useCallback(() => {
+    if (automaticEarlierLoadRef.current.nativeTouchActive) return;
+    finishTouchEarlierActivityIntent();
+  }, [finishTouchEarlierActivityIntent]);
+
+  const finishNativeTouchEarlierActivityIntent = useCallback((remainingTouches: number) => {
+    if (remainingTouches > 0) return;
+    automaticEarlierLoadRef.current.nativeTouchActive = false;
+    finishTouchEarlierActivityIntent();
+  }, [finishTouchEarlierActivityIntent]);
+
+  const rearmEarlierActivityAfterMeasurements = useCallback(() => {
+    cancelEarlierActivitySettle();
+    const state = automaticEarlierLoadRef.current;
+    state.settling = true;
+    const settle = (frames: number) => {
+      state.settleFrame = window.requestAnimationFrame(() => {
+        if (state.historyKey !== timelineHistoryKey) {
+          state.settleFrame = null;
+          state.settling = false;
+          return;
+        }
+        const scroll = scrollRef.current;
+        if (scroll) {
+          state.nextTriggerTop = Math.max(0, scroll.scrollTop - EARLIER_ACTIVITY_REARM_DISTANCE_PX);
+        }
+        if (frames > 1) settle(frames - 1);
+        else {
+          state.settleFrame = null;
+          state.settling = false;
+        }
+      });
+    };
+    settle(EARLIER_ACTIVITY_REARM_FRAMES);
+  }, [cancelEarlierActivitySettle, timelineHistoryKey]);
+
+  useEffect(() => cancelEarlierActivitySettle, [cancelEarlierActivitySettle, timelineHistoryKey]);
+  useEffect(() => clearEarlierActivityIntent, [clearEarlierActivityIntent, timelineHistoryKey]);
+
+  const maybeLoadEarlier = useCallback((scroll: HTMLElement) => {
+    const state = automaticEarlierLoadRef.current;
+    if (state.historyKey !== timelineHistoryKey) {
+      cancelEarlierActivitySettle();
+      state.historyKey = timelineHistoryKey;
+      state.requestedBase = null;
+      state.nextTriggerTop = null;
+      clearEarlierActivityIntent();
+      state.readerStarted = false;
+    }
+    const readerIntent = state.readerIntent;
+    if (eventWindow?.hasOlder !== true || eventWindow.loadingOlder || eventWindow.error ||
+        eventWindow.baseSeq <= 1 || state.requestedBase !== null || state.settling ||
+        !readerIntent) {
+      clearEarlierActivityIntent();
+      return;
+    }
+
+    const previousIntentTop = state.readerIntentTop;
+    const movedUp = previousIntentTop !== null && scroll.scrollTop < previousIntentTop - 1;
+    const movedDown = previousIntentTop !== null && scroll.scrollTop > previousIntentTop + 1;
+    if (readerIntent === "touch-traversal" && movedUp &&
+        (state.touchActive || state.touchTraversalStarted)) {
+      state.touchTraversalStarted = true;
+      state.readerIntentMovedUp = true;
+    }
+
+    // A transcript waits until the reader is genuinely near its head, rather than treating every
+    // follow-tail scroll as a request for history. A zero-range viewport cannot produce real
+    // reader scrolling, so it remains bounded until the explicit control starts paging.
+    const maxScrollTop = Math.max(0, scroll.scrollHeight - scroll.clientHeight);
+    // A zero-range scroll event can be a browser layout clamp, but cannot be produced by reader
+    // navigation. Keep a bounded opening inert until the reader has started from scrollable
+    // geometry (or used the explicit control).
+    if (!state.readerStarted && maxScrollTop <= 1) {
+      clearEarlierActivityIntent();
+      return;
+    }
+    const initialTriggerTop = Math.min(EARLIER_ACTIVITY_TRIGGER_PX, maxScrollTop * 0.25);
+    // Rearming proves fresh upward traversal; it never replaces the requirement to remain near
+    // the newly loaded window head after an anchor-preserved prepend.
+    const triggerTop = Math.min(
+      state.nextTriggerTop ?? Number.POSITIVE_INFINITY,
+      initialTriggerTop,
+    );
+    if (scroll.scrollTop > triggerTop) {
+      // A wheel tick or reading-key scroll is a single scroll. Touch, however, emits a stream of
+      // scroll events for one drag and its momentum. Keep that traversal armed while it continues
+      // upward so the first event cannot consume intent before a later event reaches the head.
+      if (readerIntent === "touch-traversal" && !movedDown) {
+        state.readerIntentTop = scroll.scrollTop;
+        if (state.touchEndTimer !== null) deferTouchEarlierActivityEnd();
+      } else {
+        clearEarlierActivityIntent();
+      }
+      return;
+    }
+    if (readerIntent === "touch-traversal" && (!state.readerIntentMovedUp || movedDown)) {
+      if (movedDown) clearEarlierActivityIntent();
+      return;
+    }
+
+    clearEarlierActivityIntent();
+    state.readerStarted = true;
+    state.nextTriggerTop = null;
+    if (loadOlder()) state.requestedBase = eventWindow.baseSeq;
+  }, [cancelEarlierActivitySettle, clearEarlierActivityIntent, deferTouchEarlierActivityEnd, eventWindow, loadOlder, timelineHistoryKey]);
+
+  const loadEarlierFromControl = useCallback(() => {
+    const state = automaticEarlierLoadRef.current;
+    if (state.historyKey !== timelineHistoryKey) {
+      cancelEarlierActivitySettle();
+      state.historyKey = timelineHistoryKey;
+      state.requestedBase = null;
+      state.nextTriggerTop = null;
+      clearEarlierActivityIntent();
+      state.readerStarted = false;
+    }
+    const base = eventWindow?.baseSeq;
+    if (base === undefined || !loadOlder()) return;
+    clearEarlierActivityIntent();
+    state.readerStarted = true;
+    state.nextTriggerTop = null;
+    state.requestedBase = base;
+  }, [cancelEarlierActivitySettle, clearEarlierActivityIntent, eventWindow?.baseSeq, loadOlder, timelineHistoryKey]);
+
+  // Once a prepend settles, require a fresh upward traversal before requesting another page. The
+  // only exception is a reader-initiated window that still cannot scroll at all: keep filling that
+  // viewport until navigation becomes possible or history is exhausted.
+  useEffect(() => {
+    const state = automaticEarlierLoadRef.current;
+    if (state.historyKey !== timelineHistoryKey) {
+      cancelEarlierActivitySettle();
+      state.historyKey = timelineHistoryKey;
+      state.requestedBase = null;
+      state.nextTriggerTop = null;
+      clearEarlierActivityIntent();
+      state.readerStarted = false;
+      return;
+    }
+    if (state.requestedBase === null || eventWindow?.loadingOlder ||
+        eventWindow?.baseSeq === undefined || olderInFlightRef.current) return;
+
+    const scroll = scrollRef.current;
+    if (!scroll) return;
+    const madeProgress = eventWindow.baseSeq < state.requestedBase;
+    const hasUsableGeometry = scroll.clientHeight > 0 && scroll.scrollHeight > 0;
+    const cannotScroll = hasUsableGeometry && scroll.scrollHeight <= scroll.clientHeight + 1;
+    if (madeProgress && state.readerStarted && cannotScroll && eventWindow.hasOlder && !eventWindow.error) {
+      if (loadOlder()) {
+        state.requestedBase = eventWindow.baseSeq;
+        return;
+      }
+    }
+    // A failed or empty page still settles this exact request. Release the base gate so a manual
+    // retry or later reader traversal can try again instead of wedging automatic pagination.
+    state.nextTriggerTop = Math.max(0, scroll.scrollTop - EARLIER_ACTIVITY_REARM_DISTANCE_PX);
+    state.requestedBase = null;
+    if (!eventWindow.error) rearmEarlierActivityAfterMeasurements();
+  }, [
+    cancelEarlierActivitySettle,
+    clearEarlierActivityIntent,
+    eventWindow,
+    loadOlder,
+    olderRequestSettled,
+    rearmEarlierActivityAfterMeasurements,
+    timelineHistoryKey,
+  ]);
+
+  useEffect(() => {
+    const scroll = scrollRef.current;
+    if (!scroll) return;
+    scroll.addEventListener(VIRTUAL_VIEWPORT_INTENT_EVENT, markSingleEarlierActivityIntent);
+    return () => scroll.removeEventListener(VIRTUAL_VIEWPORT_INTENT_EVENT, markSingleEarlierActivityIntent);
+  }, [markSingleEarlierActivityIntent]);
 
   // Incremental derivation: streamed chunks push only the NEW events into a per-session
   // builder instead of re-folding the whole array (O(n²) over a long session).
@@ -1374,10 +1676,11 @@ function SessionDetailLoaded({
     approve: () => onApprove?.(),
     deny: () => onDeny?.(),
     archive: () => onArchive?.(),
+    snooze: () => onSnooze?.(),
     reply: focusComposerAtDraftEnd,
     pauseFollow: followTail.pause,
     resumeFollow: followTail.follow,
-  }), [focusComposerAtDraftEnd, followTail.follow, followTail.pause, onApprove, onArchive, onDeny, onNextSession, onPreviousSession]);
+  }), [focusComposerAtDraftEnd, followTail.follow, followTail.pause, onApprove, onArchive, onDeny, onNextSession, onPreviousSession, onSnooze]);
   useSessionReadingKeys({
     enabled: mode === "expanded" && !isMobile,
     sessionId,
@@ -1656,7 +1959,7 @@ function SessionDetailLoaded({
       const args = invocation.arguments.trim().toLowerCase();
       const validArguments = invocation.command.name === "plan"
         ? !args || args === "on" || args === "off"
-        : invocation.command.name === "stop"
+        : invocation.command.name === "stop" || invocation.command.name === "rename-session"
           ? !args
           : true;
       if (!validArguments) invocation = { kind: "plaintext", text: outgoing };
@@ -1675,6 +1978,15 @@ function SessionDetailLoaded({
         if (invocation.command.name === "stop") {
           if (!await stopTurn()) return;
           clearAppCommandText();
+          return;
+        }
+        if (invocation.command.name === "rename-session") {
+          try {
+            await api.retitleSession(sessionId);
+            clearAppCommandText();
+          } catch (cause) {
+            setError((cause as Error).message);
+          }
           return;
         }
         if (invocation.command.name === "plan") {
@@ -2006,6 +2318,12 @@ function SessionDetailLoaded({
     insertSlashCommand(command);
   };
 
+  // The tooltip advertises whichever binding actually sends under the Enter-key setting; on a
+  // touch phone in newline mode it stays plain "Send" — the software keyboard has no Shift+Enter
+  // to advertise, and the button itself is the affordance there.
+  const isTouchPhone = useIsTouchPhone();
+  const enterKeySetting = useEnterKeyBehavior();
+
   const onKeyDown = (e: KeyboardEvent) => {
     composerInteractionVersionRef.current += 1;
     // While an IME owns the key sequence, the app owns nothing: not submission, shortcuts, menu
@@ -2071,14 +2389,24 @@ function SessionDetailLoaded({
         return;
       }
     }
-    // Enter sends; Shift+Enter inserts a newline. (Ctrl/Cmd+Enter intentionally does NOT send.)
-    if (e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey && !composing) {
+    // Enter and Shift+Enter split send from newline; WHICH is which is the per-device Enter-key
+    // setting (Settings > Behavior), whose unstored default derives from the device class —
+    // send on a hardware-keyboard layout, newline on a touch phone, where a software keyboard
+    // has no Shift to hold and send-on-Enter made multi-line drafts unwritable. The pair swaps
+    // as a unit so a keyboard send always exists without touching Ctrl+Enter, which is steering.
+    // Read at keydown, not render: the settings panel can flip it while this composer is mounted.
+    // (Ctrl/Cmd+Enter intentionally does NOT send.)
+    if (e.key === "Enter" && !e.metaKey && !e.ctrlKey && !composing) {
+      if (!enterKeystrokeSends(e.shiftKey)) return; // the other half of the pair is the newline
       e.preventDefault();
       void send();
     }
   };
 
   const usage = sessionPreviewUsage(session);
+  const currentProjectName = projectsSupported
+    ? (session.projectId ? projects.get(session.projectId)?.name : undefined) ?? session.projectName ?? "No Project"
+    : session.workspaceName ?? "No Workspace";
 
   return (
     <div className={`session-detail ${mode}`} data-session-surface-id={session.id}>
@@ -2087,12 +2415,25 @@ function SessionDetailLoaded({
           session={session}
           runnerOnline={runnerOnline}
           runnerProtocolVersion={runner?.protocolVersion}
+          stopBeforeArchiveSupported={stopBeforeArchiveSupported}
           providerLogoutSupported={runner?.agents.find((agent) => agent.id === session.agentId)?.acp?.logout === true}
           exportReady={eventHistory?.everComplete === true}
           onBack={onBack ?? (() => navigate({ name: "inbox" }))}
           onArchive={onArchive}
+          onSnooze={onSnooze}
           projectCrumb={<ProjectChip session={session} onOpenInbox={onBack ?? (() => navigate({ name: "inbox" }))} />}
+          projectName={currentProjectName}
+          projectLabel={projectsSupported ? "Project" : "Workspace"}
+          onManageProject={projectsSupported ? () => {
+            navigate(session.projectId ? { name: "projects", id: session.projectId } : { name: "projects" });
+          } : undefined}
+          renderMoveProjectDialog={({ onClose, returnFocusRef }) => projectsSupported ? (
+            <MoveToProjectDialog session={session} onClose={onClose} returnFocusRef={returnFocusRef} />
+          ) : (
+            <LegacyWorkspaceMoveDialog session={session} onClose={onClose} returnFocusRef={returnFocusRef} />
+          )}
           topbarControls={topbarControls}
+          changeStatus={changeStatus}
           // The unified bar replaces the app-level top bar on desktop, so it owns the page-title
           // focus-rescue anchor there; the mobile layout keeps the app bar and its own anchor.
           titleId={!isMobile ? "page-title" : undefined}
@@ -2102,7 +2443,7 @@ function SessionDetailLoaded({
           <div className="session-preview-heading">
             <h2 className="session-preview-title">{session.title}</h2>
             <div className="session-preview-meta">
-              <StatusBadge status={session.status} />
+              <SessionStatusIndicators session={session} disconnected={!runnerOnline} />
               {session.backgroundWorkState && <BackgroundWorkBadge state={session.backgroundWorkState} />}
               {!session.backgroundWorkState && session.backgroundWorkTracking === "untracked" && (
                 <UntrackedBackgroundWorkBadge />
@@ -2122,7 +2463,6 @@ function SessionDetailLoaded({
               {session.workspaceName && <span className="tag tag-workspace">{session.workspaceName}</span>}
               <ContextWindowMeter session={session} />
               {usage && <span className="tag tag-usage" aria-label={`Usage: ${usage}`}>{usage}</span>}
-              {!runner || runner.status !== "online" ? <span className="tag tag-offline">Runner Offline</span> : null}
               {isHeartbeatBusy(session.status) && (
                 <ActivityStrip activity={activity} now={activityNow} />
               )}
@@ -2166,7 +2506,16 @@ function SessionDetailLoaded({
             className="detail-main"
             data-active-pane={activePane}
             onFocusCapture={() => setActivePane("reader")}
-            onPointerDownCapture={() => setActivePane("reader")}
+            onPointerDownCapture={(event) => {
+              setActivePane("reader");
+              const composer = inputRef.current;
+              // Mobile browsers can defer native textarea blur while recognizing a tap, scroll,
+              // or long-press. Relinquish focus inside React's reader event boundary so transcript
+              // selection cannot be followed by stale focus recovery or a reopened keyboard.
+              if (event.pointerType !== "mouse" && composer && composer.ownerDocument.activeElement === composer) {
+                composer.blur();
+              }
+            }}
           >
             {/* The reader region: the scroller and its floating pinned summary, and NOTHING
                 below them. It is the summary's containing block, so the card's bounds can never
@@ -2196,10 +2545,37 @@ function SessionDetailLoaded({
               aria-label={mode === "expanded" ? "Session Activity" : "Session Preview Activity"}
               aria-busy={transcript.busy}
               tabIndex={0}
-              onScroll={followTail.onScroll}
-              onWheel={followTail.onWheel}
-              onPointerMove={followTail.onPointerMove}
-              onTouchStart={followTail.onTouchStart}
+              onScroll={(event) => {
+                followTail.onScroll();
+                maybeLoadEarlier(event.currentTarget);
+              }}
+              onWheel={(event) => {
+                markSingleEarlierActivityIntent();
+                followTail.onWheel(event);
+              }}
+              onPointerDown={(event) => {
+                if (event.pointerType === "touch") markTouchEarlierActivityIntent(event.clientY);
+                else markSingleEarlierActivityIntent();
+              }}
+              onPointerMove={(event) => {
+                if (event.pointerType === "touch") markTouchEarlierActivityMovement(event.clientY);
+                followTail.onPointerMove(event);
+              }}
+              onPointerUp={(event) => {
+                if (event.pointerType === "touch") finishPointerTouchEarlierActivityIntent();
+              }}
+              onPointerCancel={(event) => {
+                if (event.pointerType === "touch") finishPointerTouchEarlierActivityIntent();
+              }}
+              onTouchStart={(event) => {
+                markNativeTouchEarlierActivityIntent(event.touches[0]?.clientY ?? null);
+                followTail.onTouchStart();
+              }}
+              onTouchMove={(event) => {
+                markTouchEarlierActivityMovement(event.touches[0]?.clientY ?? null);
+              }}
+              onTouchEnd={(event) => finishNativeTouchEarlierActivityIntent(event.touches.length)}
+              onTouchCancel={(event) => finishNativeTouchEarlierActivityIntent(event.touches.length)}
               onKeyDown={(event) => {
                 if (event.defaultPrevented) return;
                 if (mode !== "expanded" && !isFollowTailResumeKey(event)) return;
@@ -2219,7 +2595,8 @@ function SessionDetailLoaded({
                 <EarlierActivityControl
                   loading={eventWindow.loadingOlder}
                   error={eventWindow.error}
-                  onLoad={loadOlder}
+                  leadingResponsePartial={eventWindow.turnAligned === false}
+                  onLoad={loadEarlierFromControl}
                 />
               )}
               {transcript.body === "skeleton" ? (
@@ -2380,7 +2757,7 @@ function SessionDetailLoaded({
               onFocusCapture={() => setActivePane("composer")}
               onPointerDownCapture={() => setActivePane("composer")}
             >
-            {error && <div className="composer-error">{error}</div>}
+            {error && <div className="composer-error" role="alert">{error}</div>}
             {/* Active-turn progress renders in the transcript's Working row, not as a card here —
                 the composer area keeps only composer concerns (receipts, queue, input). */}
             <SessionCommandReceipts
@@ -2590,6 +2967,8 @@ function SessionDetailLoaded({
                     onTogglePlan={togglePlan}
                     onApply={applyConfig}
                     disabled={!canPrompt}
+                    imageMimeTypes={allowedImageMimeTypes}
+                    onAttachImages={addFiles}
                   />
                   <ApprovalsControl session={session} apply={applyConfig} />
                   {planActive && (
@@ -2636,9 +3015,18 @@ function SessionDetailLoaded({
                   {primaryComposerAction === "send" ? (
                     <button
                       className="send-btn"
+                      /* Keep focus in the textarea, like the dictation button above. On a phone
+                         the tap otherwise blurs the composer, and the blur closes the keyboard
+                         and brings the bottom rail back — a layout shift between touchstart and
+                         click that moved this button out from under the finger, so the first tap
+                         collapsed the keyboard instead of sending. Retained focus also keeps the
+                         keyboard open after sending, which is the chat convention. */
+                      onPointerDown={(e) => e.preventDefault()}
                       onClick={send}
                       disabled={!canSend || composerRequestBusy}
-                      title="Send (Enter)"
+                      title={enterKeySetting === "send"
+                        ? "Send (Enter)"
+                        : isTouchPhone ? "Send" : "Send (Shift+Enter)"}
                       aria-label="Send"
                     >
                       {busy ? <Spinner /> : <ArrowUpIcon size={14} />}
@@ -2646,6 +3034,8 @@ function SessionDetailLoaded({
                   ) : (
                     <button
                       className={`send-btn stop-turn-btn${primaryComposerAction === "stopping" ? " is-stopping" : ""}`}
+                      /* Same tap-vs-reflow race as the Send button it replaces in this slot. */
+                      onPointerDown={(e) => e.preventDefault()}
                       onClick={() => void stopTurn()}
                       disabled={primaryComposerAction === "stopping"}
                       title={primaryComposerAction === "stopping"
@@ -3002,6 +3392,183 @@ function MoveToProjectDialog({ session, onClose, returnFocusRef }: {
   );
 }
 
+/** Preserves compatibility-only Workspace re-filing when the mobile Project crumb is absent. */
+function LegacyWorkspaceMoveDialog({ session, onClose, returnFocusRef }: {
+  session: SessionView;
+  onClose: () => void;
+  returnFocusRef?: { current: HTMLElement | null };
+}) {
+  const api = useApi();
+  const runner = useStoreSelector((state) => state.runners.get(session.runnerId));
+  const workspaces = runner?.workspaces ?? [];
+  const runnerOnline = runner?.status === "online";
+  const browseSupported = runnerSupportsProtocol(runner?.protocolVersion, "directoryListing");
+  const sessionAgent = runner?.agents.find((agent) => agent.id === session.agentId);
+  const browseDistro = sessionAgent?.context?.kind === "wsl" ? sessionAgent.context.distro : undefined;
+  const [creating, setCreating] = useState(false);
+  const [name, setName] = useState("");
+  const [browsedPath, setBrowsedPath] = useState<string | null>(null);
+  const [browsing, setBrowsing] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const resetCreate = () => {
+    setCreating(false);
+    setName("");
+    setBrowsedPath(null);
+    setBrowsing(false);
+    setError(null);
+  };
+
+  const pick = async (workspaceId: string | null) => {
+    if (busy || workspaceId === session.workspaceId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.setWorkspace(session.id, workspaceId);
+      onClose();
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const createWorkspaceGroup = async () => {
+    const trimmed = name.trim();
+    if (busy || !trimmed || !browsedPath) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const { workspace } = await api.createWorkspace(session.runnerId, { name: trimmed, path: browsedPath });
+      await api.setWorkspace(session.id, workspace.id);
+      onClose();
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const options: ChoiceCardOption<string>[] = [
+    {
+      value: "",
+      title: "No Workspace",
+      description: "Keep this session outside legacy Workspace grouping.",
+      disabled: busy,
+    },
+    ...workspaces.map((workspace) => ({
+      value: workspace.id,
+      title: workspace.name,
+      description: shortenPath(workspace.path),
+      disabled: busy,
+    })),
+  ];
+
+  return (
+    <Modal
+      title={creating ? "Create Workspace" : "Move to Workspace"}
+      onClose={() => { if (!busy) onClose(); }}
+      returnFocusRef={returnFocusRef}
+      footer={creating ? (
+        <>
+          <button className="btn ghost" type="button" onClick={resetCreate} disabled={busy}>Cancel</button>
+          <button
+            className="btn primary"
+            type="button"
+            onClick={() => void createWorkspaceGroup()}
+            disabled={busy || !name.trim() || !browsedPath}
+          >
+            {busy ? "Creating…" : "Create Workspace"}
+          </button>
+        </>
+      ) : (
+        <>
+          <button
+            className="btn ghost"
+            type="button"
+            onClick={() => {
+              setCreating(true);
+              setError(null);
+            }}
+            disabled={!runnerOnline}
+            title={runnerOnline ? undefined : "Runner offline — start it to browse for a folder"}
+          >
+            New Workspace…
+          </button>
+          <button className="btn ghost" type="button" onClick={onClose} disabled={busy}>Cancel</button>
+        </>
+      )}
+    >
+      {creating ? (
+        <div className="project-assignment-menu project-move-list">
+          <label className="field-label" htmlFor="legacy-workspace-name">Workspace Name</label>
+          <input
+            id="legacy-workspace-name"
+            className="input"
+            value={name}
+            autoFocus
+            spellCheck={false}
+            placeholder="Workspace Name"
+            onChange={(event) => setName(event.target.value)}
+          />
+          {browsedPath ? (
+            <div className="ws-chosen">
+              <span className="ws-chosen-path" title={browsedPath}>{shortenPath(browsedPath)}</span>
+              <button
+                type="button"
+                className="icon-btn"
+                aria-label="Clear Workspace Selection"
+                title="Clear — pick another folder"
+                onClick={() => setBrowsedPath(null)}
+              >
+                ✕
+              </button>
+            </div>
+          ) : browsing ? (
+            <DirectoryPicker
+              runnerId={session.runnerId}
+              protocolVersion={runner?.protocolVersion}
+              distro={browseDistro}
+              onPick={(path) => {
+                setBrowsedPath(path);
+                setBrowsing(false);
+              }}
+              onCancel={() => setBrowsing(false)}
+            />
+          ) : (
+            <button
+              type="button"
+              className="btn ghost"
+              onClick={() => setBrowsing(true)}
+              disabled={!browseSupported}
+              title={browseSupported
+                ? "Browse the runner for a workspace folder"
+                : runnerCapabilityRequirement(runner?.protocolVersion, "directoryListing", "Directory browsing")}
+            >
+              Browse for a Folder…
+            </button>
+          )}
+          {error && <div className="form-error" role="alert">{error}</div>}
+        </div>
+      ) : (
+        <div className="project-assignment-menu project-move-list">
+          <p className="muted project-assignment-note">
+            Changing this legacy grouping does not move files or change the session's execution path.
+          </p>
+          <ChoiceCards
+            label="Workspace"
+            options={options}
+            value={session.workspaceId ?? ""}
+            onChange={(picked) => { void pick(picked === "" ? null : picked); }}
+          />
+          {error && <div className="form-error" role="alert">{error}</div>}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
 /** The legacy composer footer workspace chip shows the session's old workspace grouping and opens
  * a small popover to re-file it. The assignment is CP-owned view state (no runner round-trip), so
  * it works even while the runner is offline — the store's last-registered workspace list is fine. */
@@ -3235,7 +3802,7 @@ function LegacyWorkspaceChip({ session }: { session: SessionView }) {
   );
 }
 
-/** Codex-style "+" menu in the composer: Plan mode + the cost budget; home for future modes/attach. */
+/** Codex-style "+" menu in the composer: Attach Image, Plan mode, and the cost budget. */
 function ComposerPlusMenu({
   session,
   planActive,
@@ -3243,6 +3810,8 @@ function ComposerPlusMenu({
   onTogglePlan,
   onApply,
   disabled,
+  imageMimeTypes,
+  onAttachImages,
 }: {
   session: SessionView;
   planActive: boolean;
@@ -3250,11 +3819,50 @@ function ComposerPlusMenu({
   onTogglePlan: (on?: boolean) => void;
   onApply: (patch: Partial<SessionConfig>) => void;
   disabled: boolean;
+  /** Exactly the types the connected runner and selected model accept; empty when images cannot be sent. */
+  imageMimeTypes: readonly string[];
+  onAttachImages: (files: File[]) => void | Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
   const popover = useDismissiblePopover(open, setOpen, "composer-modes-popover");
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const attachDescriptionId = useId();
+  const imagesSupported = imageMimeTypes.length > 0;
+  // Attachment follows the composer, exactly as paste (a disabled textarea) and drop (its own
+  // `canPrompt` guard) already do. `disabled` can flip while the panel — or the native chooser —
+  // is already open, so the item and the change handler are gated separately.
+  const canAttach = !disabled && imagesSupported;
   return (
     <div className="plus-menu">
+      {/*
+        The one image ingress that works on a phone: paste and drag-and-drop have no reliable
+        mobile equivalent. Mounted OUTSIDE the `open &&` panel so activating the item can close the
+        menu without unmounting the input the native chooser is attached to, and clipped rather
+        than `display: none`, which some browsers refuse to open a picker for.
+      */}
+      <input
+        ref={fileInputRef}
+        className="composer-attach-input"
+        type="file"
+        multiple
+        tabIndex={-1}
+        aria-hidden="true"
+        // No `capture`: it would force the camera and hide the photo library and file browser.
+        // `accept` mirrors the session capability, so the chooser cannot offer a type that
+        // validation would reject downstream.
+        accept={imageMimeTypes.join(",")}
+        onChange={(event) => {
+          const input = event.currentTarget;
+          const files = Array.from(input.files ?? []);
+          // Clear before dispatching so re-picking the same file after removing it still fires
+          // `change`; a cancelled picker fires nothing and leaves the draft untouched.
+          input.value = "";
+          // The runner can go offline, or the session end, while the chooser is up: a re-render
+          // has already installed this handler with the new `canAttach`, so the late selection is
+          // dropped rather than landing in a composer that cannot send it.
+          if (canAttach && files.length) void onAttachImages(files);
+        }}
+      />
       <button
         ref={popover.triggerRef}
         type="button"
@@ -3264,7 +3872,7 @@ function ComposerPlusMenu({
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-controls={popover.panelId}
-        title="Modes & Budget"
+        title="Attach, Modes & Budget"
         onClick={popover.toggle}
         onKeyDown={popover.onTriggerKeyDown}
       >
@@ -3278,9 +3886,36 @@ function ComposerPlusMenu({
             id={popover.panelId}
             ref={popover.panelRef}
             role="dialog"
-            aria-label="Session Modes and Guardrails"
+            aria-label="Session Attachments, Modes, and Guardrails"
             onKeyDown={popover.onPanelKeyDown}
           >
+            <div className="plus-section">Attach</div>
+            <button
+              type="button"
+              className="plus-item"
+              // The item carries its own explanation, so the name is set explicitly rather than
+              // computed from the row's text.
+              aria-label="Attach Image"
+              aria-describedby={attachDescriptionId}
+              disabled={!canAttach}
+              onClick={() => {
+                fileInputRef.current?.click();
+                popover.close(true);
+              }}
+            >
+              <span className="plus-check"><ImageIcon size={14} /></span>
+              <span className="plus-item-body">
+                <span className="plus-item-title">Attach Image</span>
+                <span className="plus-item-desc" id={attachDescriptionId}>
+                  {!imagesSupported
+                    ? "The selected model does not support image input."
+                    : disabled
+                      ? "This session cannot accept a prompt right now."
+                      : `Photos, camera, or files · up to ${MAX_PROMPT_IMAGES}`}
+                </span>
+              </span>
+            </button>
+
             {planSupported && (
               <>
                 <div className="plus-section">Modes</div>
@@ -3397,15 +4032,29 @@ function TranscriptSkeleton() {
 function EarlierActivityControl({
   loading,
   error,
+  leadingResponsePartial,
   onLoad,
 }: {
   loading: boolean;
   error: string | null;
+  leadingResponsePartial: boolean;
   onLoad: () => void;
 }) {
+  const partialDescriptionId = useId();
   return (
     <div className="transcript-earlier-activity">
-      <button className="btn ghost sm" type="button" disabled={loading} onClick={onLoad}>
+      {leadingResponsePartial && (
+        <span id={partialDescriptionId}>
+          A response near the beginning of the loaded activity may be incomplete.
+        </span>
+      )}
+      <button
+        className="btn ghost sm"
+        type="button"
+        disabled={loading}
+        aria-describedby={leadingResponsePartial ? partialDescriptionId : undefined}
+        onClick={onLoad}
+      >
         {loading ? "Loading Earlier Activity…" : "Load Earlier Activity"}
       </button>
       {error && <span role="status">{error}</span>}

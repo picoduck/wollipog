@@ -191,9 +191,14 @@ export interface Driver {
   resolvePermission(requestId: string, optionId: string | null): boolean;
 
   /** Answer a structured agent question (question_request event). Answers are keyed by
-   * AgentQuestion.id verbatim; empty answers = dismiss. Same truthiness contract as
-   * resolvePermission. Optional — only drivers with a question channel implement it. */
-  answerQuestion?(requestId: string, answers: Record<string, string | string[]>): boolean;
+   * AgentQuestion.id verbatim. Explicit action distinguishes an accepted all-optional form from
+   * dismissal; absent action retains the legacy empty-map convention. Same truthiness contract
+   * as resolvePermission. Optional — only drivers with a question channel implement it. */
+  answerQuestion?(
+    requestId: string,
+    answers: Record<string, string | string[]>,
+    action?: "submit" | "dismiss",
+  ): boolean;
 
   /** Sign out through a negotiated provider capability. Unsupported drivers omit this method. */
   logout?(): Promise<void>;

@@ -27,6 +27,7 @@ import type { GitStatus } from "./useGitStatus.js";
 import { handleRovingChoiceKeyDown } from "./interactions.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { sessionAgentLabel } from "./agent-options.js";
+import { safeExternalHref } from "../external-href.js";
 
 /**
  * Git / PR workflow for a worktree session: review the worktree status, commit the
@@ -418,6 +419,7 @@ export function ReviewPanel({
   // stage (the runner queues mutations) and silently become a staged-only commit under a
   // plain "Commit" label.
   const disabled = !!busy || git.busy || hunkBusy !== null || !runnerOnline;
+  const prHref = safeExternalHref(pr?.url);
 
   // Never render a diff under the wrong tab: a scope switch keeps the previous response in state
   // until the new one lands, so gate the viewer on the response's own scope. A same-scope refresh
@@ -768,9 +770,11 @@ export function ReviewPanel({
         {pr && (
           <div className="git-ok">
             ✓ {pr.createdWithGh ? "PR opened" : "Branch pushed — click to open the PR"}:{" "}
-            <a href={pr.url} target="_blank" rel="noreferrer">
-              {pr.url}
-            </a>
+            {prHref ? (
+              <a href={prHref} target="_blank" rel="noreferrer">{pr.url}</a>
+            ) : (
+              <code>{pr.url}</code>
+            )}
           </div>
         )}
       </div>

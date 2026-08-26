@@ -1,4 +1,4 @@
-import type { SessionView } from "@wollipog/protocol";
+import { sessionAttentionStatus, type SessionView } from "@wollipog/protocol";
 import { loadBrowserStorageValue, saveBrowserStorageValue } from "./instance-storage.js";
 
 /** A notification to surface for a session transition. */
@@ -12,6 +12,13 @@ export interface NotifyPayload {
 
 const BUSY = new Set<SessionView["status"]>(["queued", "starting", "running"]);
 
+function newlySettledBackgroundDelivery(prev: SessionView, next: SessionView): boolean {
+  const settled = new Set((prev.backgroundDeliveries ?? []).flatMap((delivery) =>
+    delivery.statusSettledAt != null ? [delivery.continuationId] : []));
+  return (next.backgroundDeliveries ?? []).some((delivery) =>
+    delivery.statusSettledAt != null && !settled.has(delivery.continuationId));
+}
+
 /**
  * Decide whether a session status TRANSITION deserves a desktop notification. Pure:
  * returns the payload, or null. Requires a known previous status (so the initial
@@ -23,7 +30,10 @@ export function notifyDecision(prev: SessionView | undefined, next: SessionView)
   switch (next.status) {
     case "input_required": {
       const what = next.pendingApproval?.title ? `: ${next.pendingApproval.title}` : "";
-      const label = next.pendingApproval?.kind === "authentication" ? "Sign-in required" : "Approval requested";
+      const attention = sessionAttentionStatus(next);
+      const label = attention?.kind === "answer_required" ? "Answer required"
+        : attention?.kind === "authentication_required" ? "Authentication required"
+          : attention?.kind === "approval_required" ? "Approval required" : "Input required";
       return { title: `${name} needs your input`, body: `${label}${what}`, sessionId: next.id };
     }
     case "completed":
@@ -32,8 +42,11 @@ export function notifyDecision(prev: SessionView | undefined, next: SessionView)
     case "failed":
       return { title: `${name} failed`, body: "The agent run failed — open it to see why.", sessionId: next.id };
     case "idle":
-      // A turn finished and the agent is waiting for the next prompt / review.
-      if (BUSY.has(prev.status)) return { title: `${name} is ready`, body: "The agent finished a turn and is ready for review.", sessionId: next.id };
+      // A turn finished and the agent is waiting for the next prompt.
+      if (BUSY.has(prev.status)) {
+        if (newlySettledBackgroundDelivery(prev, next)) return null;
+        return { title: `${name} is awaiting a prompt`, body: "The agent finished a turn and is awaiting another prompt.", sessionId: next.id };
+      }
       return null;
     default:
       return null;

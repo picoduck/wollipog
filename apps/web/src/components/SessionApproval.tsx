@@ -1,6 +1,9 @@
 import React, { useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import {
+  DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH,
   isPolicyApproval,
+  isSupportedAgentQuestion,
+  validateQuestionFreeText,
   type AgentQuestion,
   type ApprovalContext,
   type SessionView,
@@ -79,8 +82,15 @@ export function SessionApprovalRegion({
   const regionRef = useRef<HTMLDivElement>(null);
   const focusOwnedRef = useRef(false);
   const previousRequestRef = useRef<string | null>(null);
+  const previousRunnerOnlineRef = useRef(runnerOnline);
   const [announcement, setAnnouncement] = useState("");
   const requestId = session.pendingApproval?.requestId ?? null;
+  const requestWasUnchangedBeforeRender = previousRequestRef.current === requestId;
+  const focusedElementBeforeRender = typeof document !== "undefined"
+    && focusOwnedRef.current
+    && document.activeElement instanceof HTMLElement
+    ? document.activeElement
+    : null;
   const focusFallback = () => {
     const primary = fallbackFocusRef.current;
     const target = primary && !primary.matches(":disabled") ? primary : alternateFallbackFocusRef?.current;
@@ -96,7 +106,7 @@ export function SessionApprovalRegion({
     setAnnouncement(requestId ? (hadRequest ? "Agent request updated" : "Agent response required") : "Agent request resolved");
     if (focusDestination === "request") {
       const target = regionRef.current?.querySelector<HTMLElement>(
-        'button:not(:disabled), [role="radio"][tabindex="0"], [role="checkbox"]:not([aria-disabled="true"])',
+        'button:not(:disabled):not([aria-disabled="true"]), [role="radio"][tabindex="0"]:not(:disabled):not([aria-disabled="true"]), [role="checkbox"]:not([aria-disabled="true"]), input:not(:disabled)',
       );
       if (target) {
         target.focus();
@@ -112,6 +122,16 @@ export function SessionApprovalRegion({
       focusOwnedRef.current = false;
     }
   }, [alternateFallbackFocusRef, fallbackFocusRef, requestId]);
+
+  useIsomorphicLayoutEffect(() => {
+    const wentOffline = previousRunnerOnlineRef.current && !runnerOnline;
+    previousRunnerOnlineRef.current = runnerOnline;
+    if (!wentOffline || !requestWasUnchangedBeforeRender || !focusedElementBeforeRender) return;
+    if (!focusedElementBeforeRender.matches(":disabled")
+      && focusedElementBeforeRender.getAttribute("aria-disabled") !== "true") return;
+    focusFallback();
+    focusOwnedRef.current = false;
+  }, [alternateFallbackFocusRef, fallbackFocusRef, focusedElementBeforeRender, requestWasUnchangedBeforeRender, runnerOnline]);
 
   return (
     <div
@@ -254,20 +274,33 @@ export function SessionQuestionBanner({
   showKeyHints?: boolean;
 }) {
   const api = useApi();
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<"submit" | "dismiss" | null>(null);
   const [selection, setSelection] = useState<QuestionSelectionState>({ requestId, picked: {} });
+  const [drafts, setDrafts] = useState<{ requestId: string; values: Record<string, string> }>({ requestId, values: {} });
   const [error, setError] = useState<string | null>(null);
   const labelPrefix = useId();
+  const availabilityId = `${labelPrefix}-availability`;
 
   useEffect(() => {
     setSelection({ requestId, picked: {} });
-    setBusy(false);
+    setDrafts({ requestId, values: {} });
+    setBusy(null);
     setError(null);
   }, [requestId]);
 
   const picked = questionSelectionForRequest(selection, requestId);
+  const draftValues = drafts.requestId === requestId ? drafts.values : {};
+  const unsupportedQuestionFormat = questions.some((question) => !isSupportedAgentQuestion(question));
+  const controlsDisabled = busy !== null || !runnerOnline || unsupportedQuestionFormat;
+  const fixedChoicesNativelyDisabled = busy !== null || unsupportedQuestionFormat;
 
   const toggle = (question: AgentQuestion, label: string) => {
+    if (!question.multiSelect) {
+      setDrafts((current) => ({
+        requestId,
+        values: { ...(current.requestId === requestId ? current.values : {}), [question.id]: "" },
+      }));
+    }
     setSelection((current) => {
       const currentPicked = questionSelectionForRequest(current, requestId);
       const previous = currentPicked[question.id] ?? [];
@@ -285,41 +318,77 @@ export function SessionQuestionBanner({
       return { requestId, picked: { ...currentPicked, [question.id]: [label] } };
     });
   };
-  const complete = questions.every((question) => (picked[question.id] ?? []).length > 0);
+
+  const updateDraft = (question: AgentQuestion, value: string) => {
+    setDrafts((current) => ({
+      requestId,
+      values: { ...(current.requestId === requestId ? current.values : {}), [question.id]: value },
+    }));
+    if (value && !question.multiSelect) {
+      setSelection((current) => {
+        const currentPicked = questionSelectionForRequest(current, requestId);
+        return { requestId, picked: { ...currentPicked, [question.id]: [] } };
+      });
+    }
+  };
+
+  const complete = !unsupportedQuestionFormat && questions.every((question) => {
+    const selected = picked[question.id] ?? [];
+    const draft = draftValues[question.id]?.trim() ?? "";
+    if (question.multiSelect) {
+      if (selected.length === 0 && question.required === false) return true;
+      const minimum = question.minSelections ?? (question.required === false ? 0 : 1);
+      return selected.length >= minimum && (question.maxSelections == null || selected.length <= question.maxSelections);
+    }
+    if (selected.length > 0) return true;
+    if (!draft) return question.required === false;
+    return question.allowOther === true && validateQuestionFreeText(question, draft) == null;
+  });
+  const freeTextErrors = new Map<string, string>();
+  for (const question of questions) {
+    const selected = picked[question.id] ?? [];
+    const draft = draftValues[question.id]?.trim() ?? "";
+    if (!draft || selected.length > 0 || question.multiSelect || !question.allowOther) continue;
+    const validationError = validateQuestionFreeText(question, draft);
+    if (validationError) freeTextErrors.set(question.id, `Response ${validationError}.`);
+  }
 
   const submit = async () => {
-    setBusy(true);
+    setBusy("submit");
     setError(null);
     try {
       const answers: Record<string, string | string[]> = {};
       for (const question of questions) {
         const selected = picked[question.id] ?? [];
-        answers[question.id] = question.multiSelect ? selected : (selected[0] ?? "");
+        const draft = draftValues[question.id]?.trim() ?? "";
+        if (selected.length > 0) answers[question.id] = question.multiSelect ? selected : selected[0]!;
+        else if (question.allowOther && draft) answers[question.id] = draft;
+        else if (question.required !== false) answers[question.id] = question.multiSelect ? [] : "";
       }
-      const updated = await api.answerQuestion(sessionId, { requestId, answers });
+      const updated = await api.answerQuestion(sessionId, { requestId, answers, action: "submit" });
       onSessionUpdate?.(updated);
     } catch (cause) {
       setError((cause as Error).message);
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   };
 
   const dismiss = async () => {
-    setBusy(true);
+    setBusy("dismiss");
     setError(null);
     try {
-      const updated = await api.answerQuestion(sessionId, { requestId, answers: {} });
+      const updated = await api.answerQuestion(sessionId, { requestId, answers: {}, action: "dismiss" });
       onSessionUpdate?.(updated);
     } catch (cause) {
       setError((cause as Error).message);
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   };
 
   return (
-    <section className="approval-bar question-bar" aria-label="Agent Questions">
+    <section className="approval-bar question-bar" aria-label="Agent Questions" aria-busy={busy !== null}>
       <div className="approval-main">
         <span className="approval-icon" aria-hidden="true">❓</span>
         <span className="approval-text">
@@ -327,20 +396,58 @@ export function SessionQuestionBanner({
           {!runnerOnline && <span className="muted"> · Runner Offline</span>}
         </span>
         <div className="approval-actions">
-          <button className="btn ghost sm" type="button" disabled={busy || !runnerOnline} onClick={() => void dismiss()}>
-            Dismiss {showKeyHints && <kbd className="inbox-key-hint">D</kbd>}
+          <button
+            className="btn ghost sm"
+            type="button"
+            aria-describedby={!runnerOnline ? availabilityId : undefined}
+            disabled={busy !== null || !runnerOnline}
+            onClick={() => void dismiss()}
+          >
+            {busy === "dismiss" ? "Dismissing…" : "Dismiss"} {showKeyHints && busy === null && <kbd className="inbox-key-hint">D</kbd>}
           </button>
           {questions.length > 0 && (
-            <button className="btn sm primary" type="button" disabled={busy || !runnerOnline || !complete} onClick={() => void submit()}>
-              Submit
+            <button
+              className="btn sm primary"
+              type="button"
+              aria-describedby={!runnerOnline ? availabilityId : undefined}
+              disabled={busy !== null || !runnerOnline || !complete}
+              onClick={() => void submit()}
+            >
+              {busy === "submit" ? "Submitting…" : "Submit"}
             </button>
           )}
         </div>
       </div>
+      <div id={availabilityId} className="question-availability" role="status" aria-atomic="true">
+        {runnerOnline ? "" : "Responses are unavailable until the runner reconnects."}
+      </div>
+      {runnerOnline && busy === null && questions.length > 0 && !complete && (
+        <div className="question-submit-hint">
+          {unsupportedQuestionFormat
+            ? "This question format is unsupported. Dismiss the question to continue."
+            : freeTextErrors.size > 0
+              ? "Correct the response errors before submitting."
+              : "Complete all required responses before submitting."}
+        </div>
+      )}
       <div className="question-list">
         {questions.map((question, questionIndex) => {
           const questionLabelId = `${labelPrefix}-question-${questionIndex}`;
+          const responseLabelId = `${labelPrefix}-response-${questionIndex}`;
+          const contextId = `${labelPrefix}-context-${questionIndex}`;
+          const requirementId = `${labelPrefix}-requirement-${questionIndex}`;
+          const responseErrorId = `${labelPrefix}-response-error-${questionIndex}`;
           const selected = picked[question.id] ?? [];
+          const freeTextError = freeTextErrors.get(question.id);
+          const controlDescriptionIds = [
+            question.context ? contextId : null,
+            requirementId,
+            !runnerOnline ? availabilityId : null,
+          ]
+            .filter((value): value is string => value !== null);
+          const inputDescriptionIds = [...controlDescriptionIds, freeTextError ? responseErrorId : null]
+            .filter((value): value is string => value !== null)
+            .join(" ");
           return (
             <div className="question-block" key={question.id}>
               <div className="question-text" id={questionLabelId}>
@@ -348,34 +455,86 @@ export function SessionQuestionBanner({
                 {question.question}
                 {question.multiSelect && <span className="muted sm"> (select all that apply)</span>}
               </div>
-              <div
-                className="question-options"
-                role={question.multiSelect ? "group" : "radiogroup"}
-                aria-labelledby={questionLabelId}
-                onKeyDown={question.multiSelect ? undefined : (event) => handleRovingChoiceKeyDown(event, "radio")}
-              >
-                {question.options.map((option, optionIndex) => {
-                  const on = selected.includes(option.label);
-                  return (
-                    <button
-                      key={option.label}
-                      type="button"
-                      role={question.multiSelect ? "checkbox" : "radio"}
-                      aria-checked={on}
-                      tabIndex={question.multiSelect ? 0 : on || (selected.length === 0 && optionIndex === 0) ? 0 : -1}
-                      className={`question-option${on ? " on" : ""}`}
-                      title={option.description}
-                      onClick={() => toggle(question, option.label)}
-                    >
-                      <span className="question-mark" aria-hidden="true">{question.multiSelect ? (on ? "☑" : "☐") : on ? "●" : "○"}</span>
-                      <span>
-                        <span className="question-label">{option.label}</span>
-                        {option.description && <span className="question-desc">{option.description}</span>}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
+              <span className="sr-only" id={requirementId}>
+                {question.required === false ? "This question is optional." : "An answer to this question is required."}
+              </span>
+              {question.context && <div className="question-context" id={contextId}>{question.context}</div>}
+              {question.options.length > 0 && (
+                <div
+                  className="question-options"
+                  role={question.multiSelect ? "group" : "radiogroup"}
+                  aria-labelledby={questionLabelId}
+                  aria-describedby={controlDescriptionIds.join(" ")}
+                  aria-required={question.multiSelect ? undefined : question.required !== false}
+                  onKeyDown={question.multiSelect ? undefined : (event) => handleRovingChoiceKeyDown(
+                    event,
+                    "radio",
+                    { includeAriaDisabled: !runnerOnline, activate: runnerOnline },
+                  )}
+                >
+                  {question.options.map((option, optionIndex) => {
+                    const on = selected.includes(option.label);
+                    return (
+                      <button
+                        key={option.label}
+                        type="button"
+                        role={question.multiSelect ? "checkbox" : "radio"}
+                        aria-checked={on}
+                        aria-disabled={controlsDisabled || undefined}
+                        disabled={fixedChoicesNativelyDisabled}
+                        tabIndex={fixedChoicesNativelyDisabled
+                          ? -1
+                          : question.multiSelect ? 0 : on || (selected.length === 0 && optionIndex === 0) ? 0 : -1}
+                        className={`question-option${on ? " on" : ""}`}
+                        title={option.description}
+                        onClick={() => { if (!controlsDisabled) toggle(question, option.label); }}
+                      >
+                        <span className="question-mark" aria-hidden="true">{question.multiSelect ? (on ? "☑" : "☐") : on ? "●" : "○"}</span>
+                        <span>
+                          <span className="question-label">{option.label}</span>
+                          {option.description && <span className="question-desc">{option.description}</span>}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              {question.allowOther && !question.multiSelect && (
+                <label className="question-input-label">
+                  <span id={responseLabelId}>{question.options.length > 0 ? "Other Response" : "Response"}</span>
+                  {question.required === false && <span className="muted sm"> (optional)</span>}
+                  <input
+                    className="input question-input"
+                    aria-labelledby={`${questionLabelId} ${responseLabelId}`}
+                    aria-describedby={inputDescriptionIds}
+                    aria-invalid={freeTextError ? true : undefined}
+                    aria-required={question.options.length === 0 ? question.required !== false : undefined}
+                    required={question.options.length === 0 && question.required !== false}
+                    disabled={controlsDisabled}
+                    type={question.secret
+                      ? "password"
+                      : question.inputFormat === "date-time"
+                        ? "datetime-local"
+                        : question.inputFormat === "integer" || question.inputFormat === "number"
+                          ? "number"
+                          : question.inputFormat ?? "text"}
+                    inputMode={question.inputFormat === "integer" ? "numeric" : question.inputFormat === "number" ? "decimal" : undefined}
+                    step={question.inputFormat === "integer" ? 1 : question.inputFormat === "number" ? "any" : undefined}
+                    min={question.minimum}
+                    max={question.maximum}
+                    minLength={question.minLength}
+                    maxLength={question.maxLength ?? DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH}
+                    value={draftValues[question.id] ?? ""}
+                    autoComplete="off"
+                    onChange={(event) => updateDraft(question, event.target.value)}
+                  />
+                  {freeTextError && (
+                    <span className="form-error question-field-error" id={responseErrorId} role="alert">
+                      {freeTextError}
+                    </span>
+                  )}
+                </label>
+              )}
             </div>
           );
         })}

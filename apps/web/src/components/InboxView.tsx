@@ -1,5 +1,6 @@
 import { type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { SessionView, SourceLocation } from "@wollipog/protocol";
+import { type SessionView, type SetSessionReminderRequest, type SourceLocation } from "@wollipog/protocol";
+import { sessionArchiveRequiresStop } from "../archive-actions.js";
 import {
   INBOX_REORDER_SETTLE_MS,
   approvalOptionForIntent,
@@ -9,7 +10,6 @@ import {
   newSessionPresetForInboxSplit,
   inboxSelectionAfterMove,
   inboxSelectionAfterArchive,
-  isInboxRunning,
   inboxSplitByKey,
   nextInboxSplitKey,
   repairInboxSelectionAfterSnapshot,
@@ -31,17 +31,24 @@ import { useFeedback } from "./FeedbackProvider.js";
 import { InboxList, type InboxListEntry } from "./InboxList.js";
 import { InboxShortcutRail } from "./InboxShortcutRail.js";
 import { CreateProjectDialog } from "./CreateProjectDialog.js";
+import { InboxCreateMenu } from "./InboxCreateMenu.js";
 import { ProjectSplitMenu } from "./ProjectSplitMenu.js";
 import { SessionDetail } from "./SessionDetail.js";
 import type { RightPanelState } from "./RightPanel.js";
 import { useIsMobile } from "./useIsMobile.js";
 import { useInboxKeys, type InboxKeyActions } from "../useInboxKeys.js";
+import {
+  sessionVisibleForReminderMode,
+  sortSessionsForReminders,
+  type ReminderInboxMode,
+} from "../session-reminders.js";
+import { SnoozeDialog } from "./SnoozeDialog.js";
 import type { NewSessionPreset } from "./NewSessionDialog.js";
-import { isHeartbeatBusy } from "../activity.js";
-import { PlusIcon, SearchIcon } from "./Icons.js";
+import { SearchIcon } from "./Icons.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { dispatchVirtualViewportIntent } from "../viewport-intent.js";
 import type { PreviewNavigationControls } from "./usePreviewNavigationRegistration.js";
+import { SegmentedControl } from "./ui/ChoiceControls.js";
 
 const PROJECT_PIN_KEY = "wollipog.projects.pinned";
 const SEEN_DWELL_MS = 1_500;
@@ -112,11 +119,14 @@ export function InboxView({
   onShortcutNewSessionPresetChange,
 }: InboxViewProps) {
   const api = useApi();
-  const { showToast, showUndo } = useFeedback();
+  const { confirm, showToast, showUndo } = useFeedback();
   const sessions = useStoreSelector((state) => state.sessions);
   const projects = useStoreSelector((state) => state.projects);
   const projectsSupported = useStoreSelector((state) => state.projectsSupported);
+  const sessionRemindersSupported = useStoreSelector((state) => state.sessionRemindersSupported);
+  const reminders = useStoreSelector((state) => state.reminders);
   const accessScopeManagementSupported = useStoreSelector((state) => state.accessScopeManagementSupported);
+  const stopBeforeArchiveSupported = useStoreSelector((state) => state.stopBeforeArchiveSupported);
   const stalledIndex = useStoreSelector((state) => state.stalledSessionIds);
   const stalledRevision = useStoreSelector((state) => state.stalledRevision);
   const runners = useStoreSelector((state) => state.runners);
@@ -132,6 +142,22 @@ export function InboxView({
   } = useStoreActions();
   const instanceScope = useInstanceScope();
   const isMobile = useIsMobile();
+  // Rows must not move while the user is reading or aiming at the list, and neither breakpoint can
+  // key that on live input: touch has no pre-contact hover signal, and a desktop pointer rests
+  // still for long stretches while its owner scans the Inbox. So the collapsed Inbox holds its
+  // displayed order for the whole browsing interval on both. Canonical recency ordering is
+  // re-adopted only at boundaries where the user cannot be aiming at a row: leaving the tab or
+  // window (`inboxAway`), expanding a session, and the deliberate structural actions folded into
+  // structuralOrderKey below.
+  // Focus and visibility are tracked apart, not folded into one flag: a page can be made visible
+  // again while its window stays unfocused, and a shared flag would let that visibility event
+  // re-arm the lease and turn the eventual focus into a no-op, stranding a stale order.
+  const [windowBlurred, setWindowBlurred] = useState(() => !document.hasFocus());
+  const [documentHidden, setDocumentHidden] = useState(() => document.visibilityState === "hidden");
+  const inboxAway = windowBlurred || documentHidden;
+  const browsingOrderLease = expandedSessionId === null && !inboxAway;
+  const browsingOrderLeaseRef = useRef(browsingOrderLease);
+  browsingOrderLeaseRef.current = browsingOrderLease;
   const [seen, setSeen] = useState(() => loadSeen(instanceScope));
   const [pinnedProjects, setPinnedProjects] = useState(() => loadKeySet(PROJECT_PIN_KEY, instanceScope));
   const [pinnedSessions, setPinnedSessions] = useState(() => loadKeySet(SESSION_PIN_KEY, instanceScope));
@@ -141,6 +167,8 @@ export function InboxView({
   // the list before the character appears.
   const deferredQuery = useDeferredValue(query);
   const [creatingProject, setCreatingProject] = useState(false);
+  const [reminderMode, setReminderMode] = useState<ReminderInboxMode>("ordinary");
+  const [snoozeSessionId, setSnoozeSessionId] = useState<string | null>(null);
   const [dragRatio, setDragRatio] = useState<number | null>(null);
   const [heldOrder, setHeldOrder] = useState<string[] | null>(null);
   const [busySessionIds, setBusySessionIds] = useState<Set<string>>(() => new Set());
@@ -185,8 +213,8 @@ export function InboxView({
     setBusySessionIds(new Set(busySessionIdsRef.current));
   }, []);
 
-  const selectSession = useCallback((sessionId: string | null, splitKey: string | null) => {
-    setInboxSelection(sessionId, splitKey, !isMobile);
+  const selectSession = useCallback((sessionId: string | null, splitKey: string | null, repair = false) => {
+    setInboxSelection(sessionId, splitKey, !isMobile, repair);
   }, [isMobile, setInboxSelection]);
   const selectSplit = useCallback((splitKey: string | null) => {
     clearHeldOrder();
@@ -265,15 +293,46 @@ export function InboxView({
   // when membership changes; ordinary heartbeat pulses never rebuild Inbox splits or rows.
   const stalledSessionIds = useMemo(() => new Set(stalledIndex), [stalledIndex, stalledRevision]);
 
-  const splits = useMemo(() => buildInboxSplits(
-    sessions.values(),
-    pinnedProjects,
-    pinnedSessions,
-    stalledSessionIds,
-    projects.values(),
-    projectsSupported,
-  ), [pinnedProjects, pinnedSessions, projects, projectsSupported, sessions, stalledSessionIds]);
+  const snoozedCount = useMemo(() => [...reminders.values()].filter((reminder) => {
+    const session = sessions.get(reminder.sessionId);
+    return reminder.state === "pending" && session !== undefined && !session.archived;
+  }).length, [reminders, sessions]);
+  const splits = useMemo(() => {
+    const baseSplits = buildInboxSplits(
+      sessions.values(),
+      pinnedProjects,
+      pinnedSessions,
+      stalledSessionIds,
+      projects.values(),
+      projectsSupported,
+    );
+    return baseSplits.map((split) => {
+      const visibleSessions = split.sessions.filter((session) => sessionVisibleForReminderMode(
+        session, reminders.get(session.id), reminderMode,
+      ));
+      // Durable Project counts can exceed the locally loaded catalog. Preserve that server-owned
+      // total in the ordinary Inbox, subtracting only reminder-hidden rows we can prove locally.
+      const hiddenLocalCount = split.sessions.length - visibleSessions.length;
+      const count = reminderMode === "snoozed"
+        ? visibleSessions.length
+        : Math.max(0, split.count - hiddenLocalCount);
+      return {
+        ...split,
+        sessions: sortSessionsForReminders(visibleSessions, reminders, reminderMode),
+        count,
+      };
+    });
+  }, [pinnedProjects, pinnedSessions, projects, projectsSupported, reminderMode, reminders, sessions, stalledSessionIds]);
   const activeSplit = inboxSplitByKey(splits, inbox.splitKey);
+  const activityCounts = useMemo(() => (activeSplit?.sessions ?? []).reduce(
+    (counts, session) => {
+      if (session.status === "running") counts.running += 1;
+      else if (session.status === "queued") counts.queued += 1;
+      else if (session.status === "starting") counts.starting += 1;
+      return counts;
+    },
+    { running: 0, queued: 0, starting: 0 },
+  ), [activeSplit?.sessions]);
   const activeNewSessionPreset = useMemo<NewSessionPreset | undefined>(
     () => newSessionPresetForInboxSplit(activeSplit),
     [activeSplit],
@@ -287,7 +346,9 @@ export function InboxView({
     [activeSplit?.sessions],
   );
   const repairedSelection = heldOrder
-    ? repairInboxSelectionForHeldOrder(snapshotLoaded, activeSessionIds, heldOrder, inbox.selectedSessionId)
+    ? repairInboxSelectionForHeldOrder(
+        snapshotLoaded, activeSessionIds, heldOrder, inbox.selectedSessionId, inbox.selectionCleared,
+      )
     : repairInboxSelectionAfterSnapshot(snapshotLoaded, activeSplit, inbox.selectedSessionId);
 
   useEffect(() => {
@@ -306,14 +367,14 @@ export function InboxView({
     }
     if (activeSplit?.key !== inbox.splitKey) {
       const shouldRestoreTabFocus = document.activeElement === document.body;
-      selectSession(repairedSelection, activeSplit?.key ?? null);
+      selectSession(repairedSelection, activeSplit?.key ?? null, true);
       if (shouldRestoreTabFocus) {
         window.requestAnimationFrame(() => tabRefs.current.get(activeSplit?.key ?? "all")?.focus());
       }
       return;
     }
     if (repairedSelection !== inbox.selectedSessionId) {
-      selectSession(repairedSelection, activeSplit?.key ?? null);
+      selectSession(repairedSelection, activeSplit?.key ?? null, true);
     }
   }, [activeSplit, expandedSessionId, inbox.selectedSessionId, inbox.splitKey, repairedSelection, selectSession, selectSplit, sessions, snapshotLoaded]);
 
@@ -348,11 +409,14 @@ export function InboxView({
       session,
       projectName: inboxProjectName(session, projectsSupported ? projects : undefined),
       unread: seen[session.id] != null && session.lastEventAt != null && session.lastEventAt > seen[session.id]!,
-    })), [activeSplit?.sessions, normalizedQuery, projects, projectsSupported, seen]);
+      reminder: reminders.get(session.id),
+    })), [activeSplit?.sessions, normalizedQuery, projects, projectsSupported, reminders, seen]);
   const liveIds = useMemo(() => liveEntries.map((entry) => entry.session.id), [liveEntries]);
   liveIdsRef.current = liveIds;
   const structuralOrderKey = JSON.stringify([
     instanceScope,
+    isMobile,
+    reminderMode,
     activeSplit?.key ?? null,
     normalizedQuery,
     [...pinnedSessions].sort(),
@@ -367,18 +431,24 @@ export function InboxView({
     structuralOrderKeyRef.current = structuralOrderKey;
     if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
     settleTimerRef.current = null;
-    setHeldOrder(targetPointerIdsRef.current.size > 0 || activePointerIdsRef.current.size > 0
+    setHeldOrder(browsingOrderLease
+      || targetPointerIdsRef.current.size > 0 || activePointerIdsRef.current.size > 0
       ? liveIdsRef.current
       : null);
-  }, [structuralOrderKey]);
+  }, [browsingOrderLease, structuralOrderKey]);
 
   useLayoutEffect(() => {
     setHeldOrder((current) => {
-      if (!current) return current;
-      const extended = extendInboxHeldOrder(current, liveIds);
-      return extended.length === current.length ? current : extended;
+      // Capture the order the browsing interval starts with. Every later live update is projected
+      // through it, so incoming activity changes row content without moving rows. Deliberate
+      // group, filter, and pin changes still replace the lease through structuralOrderKey above.
+      if (!current) return browsingOrderLease ? liveIds : current;
+      const extended = extendInboxHeldOrder(current, liveIds, selectedSessionIdRef.current);
+      return extended.length === current.length && extended.every((id, index) => id === current[index])
+        ? current
+        : extended;
     });
-  }, [liveIds]);
+  }, [liveIds, browsingOrderLease]);
 
   const entries = useMemo(() => {
     if (!heldOrder) return liveEntries;
@@ -419,6 +489,10 @@ export function InboxView({
   const scheduleOrderRelease = useCallback(() => {
     if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
     settleTimerRef.current = window.setTimeout(() => {
+      if (browsingOrderLeaseRef.current) {
+        settleTimerRef.current = null;
+        return;
+      }
       if (targetPointerIdsRef.current.size > 0 || activePointerIdsRef.current.size > 0) {
         settleTimerRef.current = null;
         return;
@@ -427,6 +501,22 @@ export function InboxView({
       settleTimerRef.current = null;
     }, INBOX_REORDER_SETTLE_MS);
   }, []);
+
+  useLayoutEffect(() => {
+    if (browsingOrderLease) return;
+    // Leaving ends pointer ownership outright. A pointer resting over the list keeps its entry
+    // until a pointerout that a backgrounded page never delivers, and platforms that hide a page
+    // without a window blur would otherwise strand the hold and skip the boundary entirely.
+    if (inboxAway) {
+      activePointerIdsRef.current.clear();
+      targetPointerIdsRef.current.clear();
+      clearHeldOrder();
+      return;
+    }
+    if (targetPointerIdsRef.current.size > 0 || activePointerIdsRef.current.size > 0) return;
+    clearHeldOrder();
+  }, [clearHeldOrder, browsingOrderLease, inboxAway]);
+
 
   const holdDisplayedOrder = useCallback(() => {
     if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
@@ -459,6 +549,28 @@ export function InboxView({
     if (pointerType === "touch") targetPointerIdsRef.current.delete(pointerId);
     if (targetPointerIdsRef.current.size === 0 && activePointerIdsRef.current.size === 0) scheduleOrderRelease();
   }, [holdDisplayedOrder, scheduleOrderRelease]);
+
+  // A hidden tab or an unfocused window is not a browsing interval, so it is the desktop Inbox's
+  // safe boundary: the hold is dropped there and re-established on return, which is when canonical
+  // recency ordering is re-adopted. Nothing snaps out from under a returning click, because a
+  // pointer entering the list re-holds the order at `pointerover`, before focus follows the press.
+  useEffect(() => {
+    const leaveInbox = () => setWindowBlurred(true);
+    const enterInbox = () => setWindowBlurred(false);
+    const trackVisibility = () => setDocumentHidden(document.visibilityState === "hidden");
+    // Seed from the document as well as the events: a window reloaded in the background, or one
+    // hidden before this mounted, gets no blur or hidden event to announce the state it is in.
+    setWindowBlurred(!document.hasFocus());
+    trackVisibility();
+    window.addEventListener("blur", leaveInbox);
+    window.addEventListener("focus", enterInbox);
+    document.addEventListener("visibilitychange", trackVisibility);
+    return () => {
+      window.removeEventListener("blur", leaveInbox);
+      window.removeEventListener("focus", enterInbox);
+      document.removeEventListener("visibilitychange", trackVisibility);
+    };
+  }, []);
 
   useEffect(() => {
     const finishPointer = (event: PointerEvent) => {
@@ -562,12 +674,83 @@ export function InboxView({
     setSeen(next);
   }, [instanceScope, sessions]);
 
+  const saveReminder = useCallback(async (sessionId: string, request: SetSessionReminderRequest) => {
+    const previous = reminders.get(sessionId);
+    const updated = await api.setReminder(sessionId, request);
+    showUndo(previous ? "Reminder updated." : "Session snoozed.", async () => {
+      if (previous) {
+        await api.setReminder(sessionId, {
+          scheduledFor: previous.scheduledFor,
+          timeZone: previous.timeZone,
+          originalExpression: previous.originalExpression,
+          wakePolicy: previous.wakePolicy,
+          expectedRevision: updated.revision,
+          expectedReminderId: updated.reminderId,
+          ...(previous.state === "fired" && previous.firedAt !== undefined && previous.wakeReason !== undefined
+            ? { restoreFired: { firedAt: previous.firedAt, wakeReason: previous.wakeReason } }
+            : {}),
+        });
+      } else {
+        await api.removeReminder(sessionId, updated.revision, updated.reminderId);
+      }
+    });
+  }, [api, reminders, showUndo]);
+
+  const removeReminder = useCallback(async (
+    sessionId: string,
+    expectedRevision: number,
+    expectedReminderId: string,
+  ) => {
+    const previous = reminders.get(sessionId);
+    if (!previous) return;
+    await api.removeReminder(sessionId, expectedRevision, expectedReminderId);
+    showUndo("Reminder removed.", async () => {
+      await api.setReminder(sessionId, {
+        scheduledFor: previous.scheduledFor,
+        timeZone: previous.timeZone,
+        originalExpression: previous.originalExpression,
+        wakePolicy: previous.wakePolicy,
+        expectedRevision: 0,
+        ...(previous.state === "fired" && previous.firedAt !== undefined && previous.wakeReason !== undefined
+          ? { restoreFired: { firedAt: previous.firedAt, wakeReason: previous.wakeReason } }
+          : {}),
+      });
+    });
+  }, [api, reminders, showUndo]);
+
   const archive = useCallback(async (sessionId: string) => {
+    const session = sessions.get(sessionId);
+    if (!session) return;
     if (!beginBusy(sessionId)) return;
     const selectionAtRequest = selectedSessionIdRef.current;
     try {
-      const updated = await api.setArchived(sessionId, true);
+      if (sessionArchiveRequiresStop(session, stopBeforeArchiveSupported)) {
+        const retrying = session.archiveStatus === "stop_failed";
+        const accepted = await confirm({
+          title: retrying ? "Retry stopping this session?" : "Archive and stop this session?",
+          message: retrying
+            ? "The previous Stop failed and runtime capacity may still be held. Retry the same archive operation?"
+            : "The session will move to Archived Sessions after its runtime stops. Queued work will be canceled and runtime capacity will be released. To keep work running outside the Inbox, use Snooze instead.",
+          confirmLabel: retrying ? "Retry Stop" : "Archive and Stop",
+          tone: "danger",
+        });
+        if (!accepted) return;
+      }
+      const updated = session.archiveStatus === "stop_failed"
+        ? await api.retryStop(sessionId)
+        : await api.setArchived(sessionId, true);
       loadSession(updated);
+      if (updated.archiveStatus === "stop_pending") {
+        showUndo("Archive requested. Stop is pending until runtime capacity is released.", async () => {
+          const restored = await api.setArchived(sessionId, false);
+          loadSession(restored);
+        });
+        return;
+      }
+      if (updated.archiveStatus === "stop_failed") {
+        showToast("Stop failed. Runtime capacity may still be held. Use Retry Stop.");
+        return;
+      }
       const archiveSelection = inboxSelectionAfterArchive(
         displayedIds,
         sessionId,
@@ -590,7 +773,7 @@ export function InboxView({
     } finally {
       endBusy(sessionId);
     }
-  }, [activeSplit?.key, api, beginBusy, displayedIds, endBusy, loadSession, onCollapse, onExpand, selectSession, showToast, showUndo]);
+  }, [activeSplit?.key, api, beginBusy, confirm, displayedIds, endBusy, loadSession, onCollapse, onExpand, selectSession, sessions, showToast, showUndo, stopBeforeArchiveSupported]);
 
   const decide = useCallback(async (sessionId: string, intent: InboxApprovalIntent) => {
     const targetSession = sessions.get(sessionId);
@@ -603,7 +786,7 @@ export function InboxView({
           showToast("Choose answers in the preview before submitting this request.");
           return;
         }
-        const updated = await api.answerQuestion(targetSession.id, { requestId: approval.requestId, answers: {} });
+        const updated = await api.answerQuestion(targetSession.id, { requestId: approval.requestId, answers: {}, action: "dismiss" });
         loadSession(updated);
         return;
       }
@@ -637,6 +820,7 @@ export function InboxView({
     approve: () => { if (displayedSelection) void decide(displayedSelection, "approve").catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" })); },
     deny: () => { if (displayedSelection) void decide(displayedSelection, "deny").catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" })); },
     archive: () => { if (displayedSelection) void archive(displayedSelection); },
+    snooze: () => { if (displayedSelection && sessionRemindersSupported) setSnoozeSessionId(displayedSelection); },
     pin: () => { if (displayedSelection) togglePin(displayedSelection); },
     unread: () => { if (displayedSelection) setUnread(displayedSelection); },
     reply: () => { if (displayedSelection) expand(displayedSelection, true); },
@@ -656,7 +840,7 @@ export function InboxView({
       const scroll = viewRef.current?.querySelector<HTMLElement>(".detail-scroll");
       pageInboxPreview(scroll, "previous", previewNavigationRef.current?.beginProgrammaticScroll);
     },
-  }), [activeSplit?.key, archive, decide, displayedSelection, expand, moveSelection, selectSplit, setUnread, showToast, splits, togglePin]);
+  }), [activeSplit?.key, archive, decide, displayedSelection, expand, moveSelection, selectSplit, sessionRemindersSupported, setUnread, showToast, splits, togglePin]);
   useInboxKeys(!isMobile && !expanded, keyActions);
 
   const ratio = dragRatio ?? inbox.splitRatio;
@@ -740,6 +924,7 @@ export function InboxView({
                           ? split.project.primaryLocation?.runnerId ?? ""
                           : split.project?.runnerId ?? "",
                       )}
+                      stopBeforeArchiveSupported={stopBeforeArchiveSupported}
                       pinned={pinned}
                       onPinnedChange={(enabled) => setProjectPinned(split, enabled)}
                       onNewSession={(preset) => onNewSession?.(preset)}
@@ -751,17 +936,22 @@ export function InboxView({
             })}
           </div>
           <div className="inbox-toolbar-actions">
-            {projectsSupported && (
-              <button
-                type="button"
-                className="inbox-create-project"
-                onClick={() => setCreatingProject(true)}
-                aria-label="Create Project"
-                title="Create Project"
-              >
-                <PlusIcon size={16} />
-              </button>
+            {sessionRemindersSupported && (
+              <SegmentedControl<ReminderInboxMode>
+                className="inbox-reminder-view"
+                label="Reminder View"
+                value={reminderMode}
+                options={[
+                  { value: "ordinary", label: "Inbox" },
+                  { value: "snoozed", label: `Snoozed (${snoozedCount})` },
+                ]}
+                onChange={setReminderMode}
+              />
             )}
+            <InboxCreateMenu
+              onNewSession={() => onNewSession?.(activeNewSessionPreset)}
+              onNewProject={projectsSupported ? () => setCreatingProject(true) : undefined}
+            />
             <label className={`inbox-search${query ? " has-query" : ""}`}>
               <span className="sr-only">Search Sessions</span>
               <SearchIcon size={15} />
@@ -786,9 +976,16 @@ export function InboxView({
           selectedSessionId={displayedSelection}
           pinnedSessionIds={pinnedSessions}
           stalledSessionIds={stalledSessionIds}
-          runningCount={(activeSplit?.sessions ?? []).filter(isInboxRunning).length}
+          runningCount={activityCounts.running}
+          queuedCount={activityCounts.queued}
+          startingCount={activityCounts.starting}
           filtered={normalizedQuery.length > 0}
-          emptyState={activeSplit?.kind === "project"
+          emptyState={reminderMode === "snoozed"
+            ? {
+              title: "No Snoozed Sessions",
+              description: "Snoozed sessions and their pending reminder times appear here.",
+              showNewSession: false,
+            } : activeSplit?.kind === "project"
             ? activeDurableProject && activeDurableProject.locations.length === 0
               ? {
                 title: "No Project Locations",
@@ -832,13 +1029,16 @@ export function InboxView({
         />
         <footer className="inbox-activity-footer" aria-label="Inbox Status and Shortcuts">
           <div className="inbox-activity-summary" aria-label="Inbox Activity Summary">
-            <span>{(activeSplit?.sessions ?? []).filter((session) => isHeartbeatBusy(session.status)).length} Active</span>
+            <span>{activityCounts.running} Running</span>
+            <span>{activityCounts.queued} Queued</span>
+            <span>{activityCounts.starting} Starting</span>
             <span className="blocked">{activeSplit?.blockedCount ?? 0} Blocked</span>
             <span className="stalled" aria-live="polite">{activeSplit?.stalledCount ?? 0} Stalled</span>
           </div>
           <InboxShortcutRail
             session={displayedSelectedSession}
             pinned={displayedSelection ? pinnedSessions.has(displayedSelection) : false}
+            stopBeforeArchiveSupported={stopBeforeArchiveSupported}
             busy={displayedSelection ? busySessionIds.has(displayedSelection) : false}
             onApprove={() => {
               if (displayedSelection) void decide(displayedSelection, "approve")
@@ -853,6 +1053,9 @@ export function InboxView({
             onTogglePin={() => { if (displayedSelection) togglePin(displayedSelection); }}
             onMarkUnread={() => { if (displayedSelection) setUnread(displayedSelection); }}
             onArchive={() => { if (displayedSelection) void archive(displayedSelection); }}
+            {...(sessionRemindersSupported ? {
+              onSnooze: () => { if (displayedSelection) setSnoozeSessionId(displayedSelection); },
+            } : {})}
           />
         </footer>
       </section>
@@ -904,6 +1107,9 @@ export function InboxView({
                 onApprove={() => { void decide(surfaceSessionId, "approve").catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" })); }}
                 onDeny={() => { void decide(surfaceSessionId, "deny").catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" })); }}
                 onArchive={() => { void archive(surfaceSessionId); }}
+                {...(sessionRemindersSupported ? {
+                  onSnooze: () => setSnoozeSessionId(surfaceSessionId),
+                } : {})}
                 onPreviewNavigationReady={expanded ? undefined : registerPreviewNavigation}
               />
             ) : (
@@ -923,6 +1129,16 @@ export function InboxView({
             setCreatingProject(false);
             showToast(`Created ${project.name}.`);
           }}
+        />
+      )}
+      {snoozeSessionId && sessionRemindersSupported && (
+        <SnoozeDialog
+          key={snoozeSessionId}
+          reminder={reminders.get(snoozeSessionId)}
+          onClose={() => setSnoozeSessionId(null)}
+          onSave={(request) => saveReminder(snoozeSessionId, request)}
+          onRemove={(expectedRevision, expectedReminderId) =>
+            removeReminder(snoozeSessionId, expectedRevision, expectedReminderId)}
         />
       )}
     </div>

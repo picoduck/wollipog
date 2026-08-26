@@ -124,6 +124,7 @@ test("master-detail list is labelled, Title Case, depth-aware, and keeps selecti
 
 test("output copy stays neutral about follow-tail while distinguishing current and recorded activity", () => {
   assert.equal(subagentOutputLabel({ availability: "live", lifecycle: "running" }, true), "Current Activity");
+  assert.equal(subagentOutputLabel({ availability: "live", lifecycle: "waiting" }, true), "Current Activity");
   assert.equal(subagentOutputLabel({ availability: "live", lifecycle: "completed" }, true), "Subagent Activity");
   assert.equal(subagentOutputLabel({ availability: "live", lifecycle: "running" }, false), "Subagent Activity");
   assert.equal(subagentOutputLabel({ availability: "recorded", lifecycle: "completed" }, false), "Recorded Activity");
@@ -285,10 +286,44 @@ test("a duplicate provider identity is reported as ambiguous instead of unavaila
   }
 });
 
-test("Codex empty copy distinguishes live unavailability from imported summaries", () => {
-  assert.match(subagentEmptyMessage({ driver: "codex-app-server", status: "running" }, true), /does not currently expose live subagent identity/);
+test("Codex empty copy distinguishes App Server support from imported raw transcripts", () => {
+  assert.match(subagentEmptyMessage({ driver: "codex-app-server", status: "running" }, true), /No subagents have been recorded/);
   assert.match(subagentEmptyMessage({ driver: "codex", status: "completed" }, false), /Recorded Codex transcripts retain subagent completion summaries/);
   assert.match(subagentEmptyMessage({ driver: "claude-code", status: "running" }, true), /No subagents have been recorded/);
+});
+
+test("Codex App Server structured children render as selectable live agents", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const codexSession = { ...session, driver: "codex-app-server", status: "idle" } as SessionView;
+  const codexItems: TimelineItem[] = [
+    {
+      kind: "tool_call",
+      id: 1,
+      toolCallId: "codex-child",
+      title: "Agent: Inspect Background Work",
+      text: "",
+      toolKind: "agent",
+      status: "in_progress",
+      subagentLifecycle: "running",
+    },
+    { kind: "agent_message", id: 2, text: "Still inspecting", parentToolUseId: "codex-child" },
+  ];
+  try {
+    await act(async () => root.render(
+      <SubagentsPanel session={codexSession} items={codexItems} runnerOnline requestedId={null} onSelect={() => {}} />,
+    ));
+    assert.match(container.querySelector(".subagent-list-row")?.textContent ?? "", /Running/);
+    assert.match(container.querySelector(".subagent-detail-title")?.textContent ?? "", /Inspect Background Work/);
+    assert.match(container.querySelector(".subagent-detail-meta")?.textContent ?? "", /Running · Current Activity/);
+    assert.doesNotMatch(container.querySelector(".subagent-list-row")?.textContent ?? "", /Recorded/);
+    assert.match(container.querySelector(".subagent-output")?.textContent ?? "", /Still inspecting/);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
 });
 
 test("transcript disclosure and Subagents panel action are separate accessible controls", async () => {

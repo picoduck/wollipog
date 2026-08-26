@@ -8,7 +8,7 @@
     irm https://raw.githubusercontent.com/picoduck/wollipog/main/scripts/install-runner.ps1 | iex
 
   Usage (remote dashboard — pass params via a scriptblock):
-    & ([scriptblock]::Create((irm https://raw.githubusercontent.com/picoduck/wollipog/main/scripts/install-runner.ps1))) -Url ws://HOST:4317/runner -Token YOUR_TOKEN
+    & ([scriptblock]::Create((irm https://raw.githubusercontent.com/picoduck/wollipog/main/scripts/install-runner.ps1))) -Url wss://HOST:4317/runner -Token YOUR_TOKEN
 #>
 param(
   [string]$Url = 'ws://127.0.0.1:4317/runner',

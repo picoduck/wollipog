@@ -17,10 +17,8 @@ function scrubInheritedEnv(driver: SessionMeta["driver"]): string[] {
         "MAM_CLAUDE_PERSISTENT",
         "MAM_CLAUDE_PERSISTENT_IDLE_MS",
         "MAM_CLAUDE_PENDING_MAX_MS",
-        "WOLLIPOG_CONDUCTOR",
-        "MAM_CONDUCTOR",
       ]
-    : ["OPENAI_API_KEY", "WOLLIPOG_CONDUCTOR", "MAM_CONDUCTOR"];
+    : ["OPENAI_API_KEY"];
 }
 
 function cmdTailQuoteArg(arg: string, command = false): string {

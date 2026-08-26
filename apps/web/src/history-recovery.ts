@@ -222,6 +222,7 @@ export interface SessionHistoryWindowOptions {
     recoveryRevision: number,
     complete: boolean,
     hasOlder: boolean,
+    turnAligned?: boolean,
   ) => void;
   isCurrent: () => boolean;
   wait?: (ms: number) => Promise<void>;
@@ -279,6 +280,7 @@ export async function recoverSessionHistoryWindow(
       request.recoveryRevision,
       complete,
       page.hasMoreOlder === true,
+      page.turnAligned,
     );
     if (page.cacheComplete === true) {
       applyPage(true);

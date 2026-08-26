@@ -196,6 +196,7 @@ function publicMessages(
         break;
       case "agent_thought":
       case "tool_call":
+      case "agent_response_completed":
       case "tool_call_update":
       case "plan":
       case "command_output":

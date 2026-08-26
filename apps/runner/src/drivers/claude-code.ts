@@ -20,6 +20,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentQuestion, PlanEntry, PromptImage, SessionConfig } from "@wollipog/protocol";
 import { approvalScopeContext } from "../approval-scope.js";
+import { BoundedNdjsonBuffer } from "../bounded-ndjson.js";
 import { inspectClaudeBackgroundWork, inspectClaudeBackgroundWorkInContext, type ClaudeBackgroundWorkInspection } from "../claude-background-work.js";
 import { effectiveClaudePermissionMode } from "../claude-permission.js";
 import { prepareClaudeHookArgs } from "../hook-settings.js";
@@ -290,7 +291,7 @@ export class ClaudeCodeDriver implements Driver {
   private persistentGeneration = 0;
   /** Claude's total_cost_usd is cumulative within one streaming-input process. */
   private persistentLastCostUsd = 0;
-  private persistentBuffer = "";
+  private persistentBuffer: BoundedNdjsonBuffer | null = null;
   /** Monotonic across persistent and one-shot transports so late lifecycle events cannot alias a
    * turn from the transport used before a circuit fallback. */
   private providerTurnSeq = 0;
@@ -319,6 +320,9 @@ export class ClaudeCodeDriver implements Driver {
   /** Claude's message_start id scoped by parent Task. Entries close on message_stop/result, so
    * provider block identity never becomes transcript-lifetime state. */
   private readonly streamingMessageIds = new Map<string, string>();
+  /** Whether the active turn delivered assistant text as deltas. A successful result consumes this
+   * flag into one content-free completion event; failures and interruptions never do. */
+  private streamedAgentResponse = false;
   private hookCircuitReported = false;
   private hookCircuitOpenedAt: number | null = null;
 
@@ -444,7 +448,6 @@ export class ClaudeCodeDriver implements Driver {
     this.auxiliaryChildren.add(child);
 
     return new Promise<string>((resolve, reject) => {
-      let buffer = "";
       let initSeen = false;
       let resultSeen = false;
       let settled = false;
@@ -494,17 +497,15 @@ export class ClaudeCodeDriver implements Driver {
           }
         }
       };
+      const stdout = new BoundedNdjsonBuffer(processLine, () => {
+        fail(new Error("Claude fork emitted an oversized NDJSON record"));
+      });
 
       child.stdin.on("error", () => {});
       child.stdout.setEncoding("utf8");
       child.stdout.on("data", (chunk: string) => {
         if (settled) return;
-        buffer += chunk;
-        let nl: number;
-        while ((nl = buffer.indexOf("\n")) >= 0) {
-          processLine(buffer.slice(0, nl));
-          buffer = buffer.slice(nl + 1);
-        }
+        stdout.push(chunk);
       });
       child.stderr.setEncoding("utf8");
       child.stderr.on("data", (chunk: string) => {
@@ -512,9 +513,10 @@ export class ClaudeCodeDriver implements Driver {
         if (text) this.cb.onStderr(`Claude fork: ${text}`);
       });
       child.on("error", (err: Error) => fail(new Error(`Claude fork spawn error: ${err.message}`)));
-      child.on("exit", (code) => {
+      child.on("close", (code) => {
         if (settled) return;
-        if (buffer.trim()) processLine(buffer);
+        const trailing = stdout.takeTrailing();
+        if (trailing.trim()) processLine(trailing);
         if (settled) return;
         cleanup();
         settled = true;
@@ -576,6 +578,7 @@ export class ClaudeCodeDriver implements Driver {
     return new Promise<StopReason>((resolve) => {
       this.cancelled = false;
       this.pendingApprovals.clear();
+      this.streamedAgentResponse = false;
       const promptText = slashCommand ? `/${slashCommand}${text ? " " + text : ""}`.trim() : text;
       const imgs = images ?? [];
 
@@ -655,7 +658,6 @@ export class ClaudeCodeDriver implements Driver {
         resolve(r);
       };
 
-      let buf = "";
       const processLine = (raw: string) => {
         const line = raw.trim();
         if (!line) return;
@@ -671,22 +673,20 @@ export class ClaudeCodeDriver implements Driver {
           if (this.activeOneShotTurnId === turnId) this.activeOneShotTurnId = null;
         }
       };
+      const stdout = new BoundedNdjsonBuffer(processLine, () => {
+        this.cb.onStderr("discarded oversized NDJSON record from Claude stdout");
+      });
 
       // A write to a dying process (mid-turn control_response, prompt delivery) does NOT throw
       // synchronously — Node emits an async 'error' (EPIPE/ERR_STREAM_DESTROYED) on the stream,
-      // which is FATAL to the whole runner process if unhandled. Swallow it; the child 'exit'
+      // which is FATAL to the whole runner process if unhandled. Swallow it; the child 'close'
       // handler owns the failure path. (Same guard jsonrpc.ts and git-ops.ts already carry.)
       child.stdin.on("error", () => {});
 
       child.stdout.setEncoding("utf8");
       child.stdout.on("data", (chunk: string) => {
         if (this.disposed || this.cancelled) return;
-        buf += chunk;
-        let nl: number;
-        while ((nl = buf.indexOf("\n")) >= 0) {
-          processLine(buf.slice(0, nl));
-          buf = buf.slice(nl + 1);
-        }
+        stdout.push(chunk);
       });
 
       child.stderr.setEncoding("utf8");
@@ -703,7 +703,9 @@ export class ClaudeCodeDriver implements Driver {
         finish("refusal");
       });
 
-      child.on("exit", (code) => {
+      // `close`, not `exit`: the final result frame may still be buffered in stdout
+      // after process exit. Close is the boundary after every stdio stream drains.
+      child.on("close", (code) => {
         this.child = null;
         // A naturally-exited process can no longer answer its asks — clear them so a stale
         // requestId is never "found" later and phantom-resolved into thin air.
@@ -711,8 +713,7 @@ export class ClaudeCodeDriver implements Driver {
         if (this.disposed || this.cancelled) return finish("cancelled");
         // Flush a trailing partial line — the final `result` event (token_usage +
         // terminal stopReason) can arrive without a trailing newline.
-        processLine(buf);
-        buf = "";
+        processLine(stdout.takeTrailing());
         // Successful one-shot recovery gets exactly one chance to re-observe restart seeds.
         // Settle unseen seeds before publishing the dead process's authoritative orphan set;
         // otherwise settleUnverifiedBackgroundTasks() can emit a later, false `running` state.
@@ -757,6 +758,7 @@ export class ClaudeCodeDriver implements Driver {
     this.clearIdleTimer();
     this.cancelled = false;
     this.pendingApprovals.clear();
+    this.streamedAgentResponse = false;
     const promptText = slashCommand ? `/${slashCommand}${text ? " " + text : ""}`.trim() : text;
     return new Promise<StopReason>((resolve) => {
       const turn: PersistentTurn = {
@@ -855,7 +857,10 @@ export class ClaudeCodeDriver implements Driver {
       this.child = child;
       this.persistentTransport = true;
       this.persistentFingerprint = fingerprint;
-      this.persistentBuffer = "";
+      this.persistentBuffer = new BoundedNdjsonBuffer(
+        (line) => this.processPersistentLine(line),
+        () => this.cb.onStderr("discarded oversized NDJSON record from persistent Claude stdout"),
+      );
       this.persistentLastCostUsd = 0;
       this.intentionalPersistentStop = false;
       this.attachPersistentTransport(child, ++this.persistentGeneration);
@@ -897,12 +902,7 @@ export class ClaudeCodeDriver implements Driver {
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
       if (this.disposed || generation !== this.persistentGeneration) return;
-      this.persistentBuffer += chunk;
-      let nl: number;
-      while ((nl = this.persistentBuffer.indexOf("\n")) >= 0) {
-        this.processPersistentLine(this.persistentBuffer.slice(0, nl));
-        this.persistentBuffer = this.persistentBuffer.slice(nl + 1);
-      }
+      this.persistentBuffer?.push(chunk);
     });
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => {
@@ -917,14 +917,15 @@ export class ClaudeCodeDriver implements Driver {
       const turn = this.activePersistentTurn;
       if (turn && !turn.settled) this.handlePersistentFailure(`persistent claude spawn error: ${err.message}`, turn);
     });
-    child.on("exit", (code) => {
+    child.on("close", (code) => {
       if (generation !== this.persistentGeneration) return;
       // Mirror the one-shot ordering: a trailing, unterminated control_request belongs to a
       // process that is already dead and must not mint an approval card nobody can answer.
       if (this.child === child) this.child = null;
       this.pendingApprovals.clear();
-      if (this.persistentBuffer.trim()) this.processPersistentLine(this.persistentBuffer, true);
-      this.persistentBuffer = "";
+      const trailing = this.persistentBuffer?.takeTrailing() ?? "";
+      if (trailing.trim()) this.processPersistentLine(trailing, true);
+      this.persistentBuffer = null;
       this.persistentTransport = false;
       this.persistentFingerprint = null;
       if (this.disposed || this.intentionalPersistentStop) return;
@@ -1384,7 +1385,7 @@ export class ClaudeCodeDriver implements Driver {
     const child = this.child;
     // Fence handlers even when the exit path already nulled child before flushing a trailing
     // frame. Otherwise a malformed trailing frame can schedule a retry, fall through the same
-    // exit handler, and schedule the identical prompt a second time before either microtask runs.
+    // close handler, and schedule the identical prompt a second time before either microtask runs.
     this.intentionalPersistentStop = true;
     this.child = null;
     this.persistentTransport = false;
@@ -1429,7 +1430,7 @@ export class ClaudeCodeDriver implements Driver {
     const clear = () => {
       if (settled) return;
       settled = true;
-      child.off("exit", clear);
+      child.off("close", clear);
       const timer = this.gracefulStopTimers.get(child);
       if (timer) this.deps.clearTimer(timer);
       this.gracefulStopTimers.delete(child);
@@ -1438,7 +1439,7 @@ export class ClaudeCodeDriver implements Driver {
       if (this.retiringPersistentChild === child) this.retiringPersistentChild = null;
       resolveStop();
     };
-    child.once("exit", clear);
+    child.once("close", clear);
     const force = () => {
       if (settled || forced) return;
       forced = true;
@@ -1584,13 +1585,13 @@ export class ClaudeCodeDriver implements Driver {
   }
 
   /** Answer a pending AskUserQuestion: allow with `updatedInput = {questions, answers}` (the
-   * T3-proven wire shape — answers keyed by question TEXT; multiSelect ⇒ label array). Empty
-   * answers = dismiss (deny), so the agent knows the user declined rather than hanging. */
-  answerQuestion(requestId: string, answers: Record<string, string | string[]>): boolean {
+   * T3-proven wire shape — answers keyed by question TEXT; multiSelect ⇒ label array). An
+   * explicit dismiss, or a legacy empty answer map, denies the ask so the agent does not hang. */
+  answerQuestion(requestId: string, answers: Record<string, string | string[]>, action?: "submit" | "dismiss"): boolean {
     const original = this.pendingApprovals.get(requestId);
     if (original === undefined) return false;
     this.pendingApprovals.delete(requestId);
-    const response = Object.keys(answers).length
+    const response = action === "submit" || (action == null && Object.keys(answers).length > 0)
       ? { behavior: "allow", updatedInput: { ...(original as Json), answers } }
       : { behavior: "deny", message: "The user dismissed the question." };
     const msg = { type: "control_response", response: { subtype: "success", request_id: requestId, response } };
@@ -1669,7 +1670,7 @@ export class ClaudeCodeDriver implements Driver {
         // Interactive permission ask (--permission-prompt-tool stdio). Surface it to the
         // UI as a permission_request; resolvePermission answers with a control_response.
         // A dead process can't receive a response, so an ask surfacing after exit (the
-        // trailing-line flush runs AFTER the exit handler cleared pendingApprovals) must
+        // trailing-line flush runs AFTER the close handler cleared pendingApprovals) must
         // not mint a phantom card for a process that no longer exists.
         if (!this.child) return null;
         const req = msg.request;
@@ -1770,6 +1771,7 @@ export class ClaudeCodeDriver implements Driver {
             : undefined;
           if (d?.type === "text_delta" && d.text) {
             this.cb.onEvent({ kind: "agent_message", text: d.text, ...(messageId ? { messageId } : {}), ...pp });
+            if (!parentId) this.streamedAgentResponse = true;
           } else if (d?.type === "thinking_delta" && d.thinking) {
             this.cb.onEvent({ kind: "agent_thought", text: d.thinking, ...(messageId ? { messageId } : {}), ...pp });
           }
@@ -1866,8 +1868,18 @@ export class ClaudeCodeDriver implements Driver {
             /* ignore */
           }
         }
-        if (msg.is_error || msg.subtype === "error_during_execution") return "refusal";
-        if (msg.subtype === "error_max_turns") return "max_turn_requests";
+        if (msg.is_error || msg.subtype === "error_during_execution") {
+          if (!parentId) this.streamedAgentResponse = false;
+          return "refusal";
+        }
+        if (msg.subtype === "error_max_turns") {
+          if (!parentId) this.streamedAgentResponse = false;
+          return "max_turn_requests";
+        }
+        if (!parentId && this.streamedAgentResponse) {
+          this.streamedAgentResponse = false;
+          this.cb.onEvent({ kind: "agent_response_completed" });
+        }
         return "end_turn";
       }
 
@@ -1927,6 +1939,9 @@ function driverBackgroundJob(task: PendingBackgroundTask): DriverBackgroundJob {
 
 export function normalizeQuestions(input: Json): AgentQuestion[] {
   const raw = Array.isArray(input?.questions) ? input.questions : [];
+  if (raw.some((question: Json) => question?.multiSelect === true && question?.allowOther === true)) {
+    return [];
+  }
   const out: AgentQuestion[] = raw
     .filter((q: Json) => typeof q?.question === "string" && q.question)
     .map((q: Json) => ({

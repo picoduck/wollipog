@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
+  AgentDefinition,
   AutomationAction,
   AutomationExecution,
-  AutomationNotificationEvent,
   AutomationSchedule,
   AutomationSpec,
   AutomationTriggerCredential,
@@ -18,66 +18,20 @@ import { titleCaseLabel } from "../format.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { machineOptionLabels } from "../runners.js";
+import { useExperiments } from "../use-experiments.js";
 import { agentDisplayName } from "../agent-presentation.js";
+import { Select } from "./ui/ChoiceControls.js";
 import {
-  automationProjectPlacement,
-  validateAutomationAlternatePlacement,
-} from "../automation-project-placement.js";
+  buildSpec,
+  defaults,
+  formFrom,
+  specOf,
+  withAgent,
+  withModel,
+  type FormState,
+} from "../automation-form.js";
 
 type ActionKind = AutomationAction["kind"];
-
-interface FormState {
-  name: string;
-  cron: string;
-  timezone: string;
-  enabled: boolean;
-  actionKind: ActionKind;
-  runnerId: string;
-  workspaceId: string;
-  agentId: string;
-  prompt: string;
-  sessionId: string;
-  workflowId: string;
-  misfire: "skip" | "fire_once" | "catch_up";
-  catchUpRuns: string;
-  runnerPolicy: "wait" | "expire" | "alternate";
-  expiryMinutes: string;
-  fallbackRunnerId: string;
-  fallbackWorkspaceId: string;
-  fallbackAgentId: string;
-  concurrency: AutomationSpec["concurrencyPolicy"];
-  maxCostUsd: string;
-  maxToolCalls: string;
-  pushEvents: AutomationNotificationEvent[];
-}
-
-function localTimezone(): string {
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
-  } catch {
-    return "UTC";
-  }
-}
-
-function defaults(): FormState {
-  return {
-    name: "", cron: "0 9 * * 1-5", timezone: localTimezone(), enabled: true,
-    actionKind: "create_session", runnerId: "", workspaceId: "", agentId: "", prompt: "",
-    sessionId: "", workflowId: "build-review", misfire: "skip", catchUpRuns: "2",
-    runnerPolicy: "wait", expiryMinutes: "60", fallbackRunnerId: "", fallbackWorkspaceId: "",
-    fallbackAgentId: "", concurrency: "wait", maxCostUsd: "5", maxToolCalls: "50",
-    pushEvents: ["failed", "expired"],
-  };
-}
-
-function specOf(schedule: AutomationSchedule): AutomationSpec {
-  return {
-    name: schedule.name, cron: schedule.cron, timezone: schedule.timezone, enabled: schedule.enabled,
-    misfirePolicy: schedule.misfirePolicy, runnerPolicy: schedule.runnerPolicy,
-    concurrencyPolicy: schedule.concurrencyPolicy, limits: schedule.limits,
-    notifications: schedule.notifications, action: schedule.action,
-  };
-}
 
 function formatTime(value: number | undefined): string {
   return value === undefined ? "—" : new Date(value).toLocaleString();
@@ -89,49 +43,24 @@ function actionSummary(action: AutomationAction): string {
   return `Create ${action.request.agentId} session on ${action.request.runnerId}`;
 }
 
-function formFrom(schedule: AutomationSchedule): FormState {
-  const form = defaults();
-  form.name = schedule.name;
-  form.cron = schedule.cron;
-  form.timezone = schedule.timezone;
-  form.enabled = schedule.enabled;
-  form.actionKind = schedule.action.kind;
-  form.misfire = schedule.misfirePolicy.kind;
-  form.catchUpRuns = schedule.misfirePolicy.kind === "catch_up" ? String(schedule.misfirePolicy.maxRuns) : "2";
-  form.runnerPolicy = schedule.runnerPolicy.kind;
-  form.expiryMinutes = schedule.runnerPolicy.kind === "expire"
-    ? String(schedule.runnerPolicy.afterMinutes)
-    : schedule.runnerPolicy.kind === "alternate" ? String(schedule.runnerPolicy.expireAfterMinutes ?? 60) : "60";
-  form.concurrency = schedule.concurrencyPolicy;
-  form.maxCostUsd = String(schedule.limits.maxCostUsd);
-  form.maxToolCalls = String(schedule.limits.maxToolCalls);
-  form.pushEvents = schedule.notifications.pushEvents;
-  if (schedule.action.kind === "prompt_session") {
-    form.sessionId = schedule.action.sessionId;
-    form.prompt = schedule.action.request.text;
-  } else {
-    form.runnerId = schedule.action.request.runnerId;
-    form.workspaceId = schedule.action.request.workspaceId;
-    form.prompt = schedule.action.kind === "workflow_run" ? schedule.action.request.task : (schedule.action.request.prompt ?? "");
-    if (schedule.action.kind === "create_session") form.agentId = schedule.action.request.agentId;
-    else form.workflowId = schedule.action.request.workflowId;
-    if (schedule.runnerPolicy.kind === "alternate") {
-      const target = schedule.runnerPolicy.targets[0];
-      if (target) {
-        form.fallbackRunnerId = target.runnerId;
-        form.fallbackWorkspaceId = target.workspaceId;
-        form.fallbackAgentId = target.agentId ?? "";
-      }
-    }
-  }
-  return form;
-}
-
 export function AutomationsView() {
   const api = useApi();
   const instances = useInstances();
   const publicOrigin = instancePublicOrigin(instances);
   const { confirm } = useFeedback();
+  // Workflow runs belong to the Multi-Agent experiment: with it off, this view must not offer
+  // creating one. An automation that ALREADY uses the action keeps its option so editing it
+  // renders truthfully — the flag hides surfaces, it does not orphan stored data.
+  const multiAgentEnabled = useExperiments().flags.multiAgent;
+  // The conductor is advertised by every runner that can host one, but it is a feature behind
+  // the device-local Conductor-Led Work experiment. With the switch off it must not be
+  // schedulable here — while an automation ALREADY targeting it keeps its stored agent visible,
+  // the same never-silently-rewrite rule the rest of this form follows.
+  const conductorEnabled = useExperiments().flags.conductor;
+  const automationAgents = (agents: readonly AgentDefinition[] | undefined, keepId: string) =>
+    (agents ?? []).filter((agent) => conductorEnabled || agent.id !== "conductor" || agent.id === keepId);
+  const defaultAgentId = (agents: readonly AgentDefinition[] | undefined) =>
+    automationAgents(agents, "")[0]?.id ?? "";
   const runners = useStoreSelector((state) => state.runners);
   const boxes = useStoreSelector((state) => state.boxes);
   // Passing the correlated Box matters for an SSH Machine left unnamed: runnerDisplay falls back
@@ -151,6 +80,9 @@ export function AutomationsView() {
   const [workflows, setWorkflows] = useState<WorkflowDefinition[]>([]);
   const [form, setForm] = useState<FormState>(defaults);
   const [editingId, setEditingId] = useState<string | null>(null);
+  // The exact stored spec behind `editingId`. Saving replaces the whole spec, so the builder needs
+  // the original to carry across every field this form does not render.
+  const [editingSpec, setEditingSpec] = useState<AutomationSpec | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -209,6 +141,38 @@ export function AutomationsView() {
 
   const selectedRunner = runners.get(form.runnerId);
   const selectedFallback = runners.get(form.fallbackRunnerId);
+  const carriedAlternateRunnerIds = new Set(editingSpec?.runnerPolicy.kind === "alternate" &&
+      editingSpec.action.kind === form.actionKind &&
+      form.runnerPolicy === "alternate"
+    ? editingSpec.runnerPolicy.targets.slice(1).map((target) => target.runnerId)
+    : []);
+  // Model, effort, and permission mode are agent-scoped: the runner advertises them per agent, and
+  // the pickers must never offer a value the selected agent cannot honour. A value already stored
+  // but no longer advertised is still listed, so editing an automation cannot silently rewrite it.
+  const agentCapabilities = selectedRunner?.agents.find((agent) => agent.id === form.agentId)?.capabilities;
+  // An explicit alternate runs the SAME stored config on a different agent, so the finished spec is
+  // validated against it on save. Narrowing the pickers instead was tried and reverted; see
+  // `alternateConfigError`.
+  const alternateCapabilities = form.actionKind === "create_session" && form.runnerPolicy === "alternate"
+    ? selectedFallback?.agents.find((agent) => agent.id === form.fallbackAgentId)?.capabilities
+    : undefined;
+  const modelOptions = useMemo(() => {
+    const advertised = (agentCapabilities?.models ?? []).filter((model) => !model.hidden);
+    return form.model && !advertised.some((model) => model.id === form.model)
+      ? [{ id: form.model, displayName: form.model }, ...advertised]
+      : advertised;
+  }, [agentCapabilities, form.model]);
+  const effortOptions = useMemo(() => {
+    const model = agentCapabilities?.models.find((candidate) => candidate.id === form.model);
+    const advertised = (model?.efforts?.length ? model.efforts : agentCapabilities?.effortLevels) ?? [];
+    return form.effort && !advertised.includes(form.effort) ? [form.effort, ...advertised] : advertised;
+  }, [agentCapabilities, form.model, form.effort]);
+  const permissionModeOptions = useMemo(() => {
+    const advertised = agentCapabilities?.permissionModes ?? [];
+    return form.permissionMode && !advertised.includes(form.permissionMode)
+      ? [form.permissionMode, ...advertised]
+      : advertised;
+  }, [agentCapabilities, form.permissionMode]);
   const editableSessions = useMemo(() => [...sessions.values()]
     .filter((session) => !session.archived && !["completed", "failed", "stopped"].includes(session.status))
     .sort((a, b) => a.title.localeCompare(b.title)), [sessions]);
@@ -224,7 +188,7 @@ export function AutomationsView() {
       const runner = [...runners.values()][0]!;
       setForm((current) => ({
         ...current, runnerId: runner.runnerId, workspaceId: runner.workspaces[0]?.id ?? "",
-        agentId: runner.agents[0]?.id ?? "",
+        agentId: defaultAgentId(runner.agents),
       }));
     }
   }, [form.runnerId, runners]);
@@ -232,71 +196,22 @@ export function AutomationsView() {
   const patch = <K extends keyof FormState>(key: K, value: FormState[K]) =>
     setForm((current) => ({ ...current, [key]: value }));
 
-  const buildSpec = (): AutomationSpec => {
-    const projectList = [...projects.values()];
-    const primaryPlacement = form.actionKind === "prompt_session"
-      ? {}
-      : automationProjectPlacement(projectsSupported, projectList, {
-          runnerId: form.runnerId,
-          workspaceId: form.workspaceId,
-        });
-    let action: AutomationAction;
-    if (form.actionKind === "prompt_session") {
-      action = { kind: "prompt_session", sessionId: form.sessionId, request: { text: form.prompt } };
-    } else if (form.actionKind === "workflow_run") {
-      action = { kind: "workflow_run", request: {
-        runnerId: form.runnerId, workspaceId: form.workspaceId, workflowId: form.workflowId, task: form.prompt,
-        ...primaryPlacement,
-      } };
-    } else {
-      action = { kind: "create_session", request: {
-        runnerId: form.runnerId, workspaceId: form.workspaceId, agentId: form.agentId,
-        prompt: form.prompt, useWorktree: true, ...primaryPlacement,
-      } };
-    }
-    const alternatePlacement = form.runnerPolicy === "alternate"
-      ? automationProjectPlacement(projectsSupported, projectList, {
-          runnerId: form.fallbackRunnerId,
-          workspaceId: form.fallbackWorkspaceId,
-        })
-      : {};
-    if (form.runnerPolicy === "alternate") {
-      validateAutomationAlternatePlacement(projectsSupported, primaryPlacement, alternatePlacement);
-    }
-    const runnerPolicy: AutomationSpec["runnerPolicy"] = form.runnerPolicy === "wait"
-      ? { kind: "wait" }
-      : form.runnerPolicy === "expire"
-        ? { kind: "expire", afterMinutes: Number(form.expiryMinutes) }
-        : {
-            kind: "alternate",
-            targets: [{
-              runnerId: form.fallbackRunnerId, workspaceId: form.fallbackWorkspaceId,
-              ...alternatePlacement,
-              ...(form.actionKind === "create_session" ? { agentId: form.fallbackAgentId } : {}),
-            }],
-            expireAfterMinutes: Number(form.expiryMinutes),
-          };
-    return {
-      name: form.name, cron: form.cron, timezone: form.timezone, enabled: form.enabled,
-      action,
-      misfirePolicy: form.misfire === "catch_up"
-        ? { kind: "catch_up", maxRuns: Number(form.catchUpRuns) }
-        : { kind: form.misfire },
-      runnerPolicy,
-      concurrencyPolicy: form.actionKind === "prompt_session" && form.concurrency === "parallel" ? "wait" : form.concurrency,
-      limits: { maxCostUsd: Number(form.maxCostUsd), maxToolCalls: Number(form.maxToolCalls) },
-      notifications: { pushEvents: form.pushEvents },
-    };
-  };
+  const currentSpec = (): AutomationSpec => buildSpec(form, {
+    projectsSupported,
+    projects: projects.values(),
+    ...(editingSpec ? { base: editingSpec } : {}),
+    ...(alternateCapabilities ? { alternateCapabilities } : {}),
+  });
 
   const save = async () => {
     setBusy(true);
     setError(null);
     try {
-      const spec = buildSpec();
+      const spec = currentSpec();
       if (editingId) await api.updateAutomation(editingId, spec);
       else await api.createAutomation(spec);
       setEditingId(null);
+      setEditingSpec(null);
       setForm(defaults());
       setShowForm(false);
       await refresh();
@@ -319,11 +234,13 @@ export function AutomationsView() {
   const closeEditor = () => {
     setShowForm(false);
     setEditingId(null);
+    setEditingSpec(null);
     setForm(defaults());
   };
 
   const openNewAutomation = () => {
     setEditingId(null);
+    setEditingSpec(null);
     setForm(defaults());
     setShowForm(true);
   };
@@ -419,7 +336,7 @@ export function AutomationsView() {
               setForm((current) => ({ ...current, actionKind: kind,
                 runnerPolicy: kind === "prompt_session" && current.runnerPolicy === "alternate" ? "wait" : current.runnerPolicy,
                 concurrency: kind === "prompt_session" && current.concurrency === "parallel" ? "wait" : current.concurrency }));
-            }}><option value="create_session">Create Session</option><option value="prompt_session">Prompt Existing Session</option><option value="workflow_run">Start Workflow Run</option></select></label>
+            }}><option value="create_session">Create Session</option><option value="prompt_session">Prompt Existing Session</option>{(multiAgentEnabled || form.actionKind === "workflow_run") && <option value="workflow_run">Start Workflow Run</option>}</select></label>
 
             {form.actionKind === "prompt_session" ? (
               <label className="automation-span">Session<select value={form.sessionId} onChange={(event) => patch("sessionId", event.target.value)}>
@@ -430,19 +347,55 @@ export function AutomationsView() {
               <>
                 <label>Machine<select value={form.runnerId} onChange={(event) => {
                   const runner = runners.get(event.target.value);
-                  setForm((current) => ({ ...current, runnerId: event.target.value,
-                    workspaceId: runner?.workspaces[0]?.id ?? "", agentId: runner?.agents[0]?.id ?? "" }));
-                }}>{[...runners.values()].map((runner) => <option key={runner.runnerId} value={runner.runnerId}>{machineLabels.get(runner.runnerId)}</option>)}</select></label>
+                  setForm((current) => ({ ...withAgent(current, defaultAgentId(runner?.agents)),
+                    runnerId: event.target.value, workspaceId: runner?.workspaces[0]?.id ?? "" }));
+                }}>{[...runners.values()].map((runner) => <option
+                  key={runner.runnerId} value={runner.runnerId}
+                  disabled={runner.runnerId !== form.runnerId && carriedAlternateRunnerIds.has(runner.runnerId)}
+                >{machineLabels.get(runner.runnerId)}</option>)}</select></label>
                 <label>Workspace<select value={form.workspaceId} onChange={(event) => patch("workspaceId", event.target.value)}>
                   {(selectedRunner?.workspaces ?? []).map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}
                 </select></label>
-                {form.actionKind === "create_session" ? <label>Agent<select value={form.agentId} onChange={(event) => patch("agentId", event.target.value)}>
-                  {(selectedRunner?.agents ?? []).map((agent) => <option key={agent.id} value={agent.id}>{agentDisplayName(agent)}</option>)}
+                {form.actionKind === "create_session" ? <label>Agent<select value={form.agentId} onChange={(event) => setForm((current) => withAgent(current, event.target.value))}>
+                  {automationAgents(selectedRunner?.agents, form.agentId).map((agent) => <option key={agent.id} value={agent.id}>{agentDisplayName(agent)}</option>)}
                 </select></label> : <label>Workflow<select value={form.workflowId} onChange={(event) => patch("workflowId", event.target.value)}>
                   {workflows.map((workflow) => <option key={`${workflow.workflowId}:${workflow.version}`} value={workflow.workflowId}>{workflow.name} · v{workflow.version}</option>)}
                 </select></label>}
               </>
             )}
+            {form.actionKind === "create_session" && <>
+              {modelOptions.length > 0 && <div className="automation-field">
+                <span className="field-label">Model</span>
+                <Select label="Model" value={form.model} onChange={(value) => setForm((current) => withModel(current, value, agentCapabilities))}
+                  options={[{ value: "", label: "Agent Default" },
+                    ...modelOptions.map((model) => ({
+                      value: model.id,
+                      label: model.displayName ?? model.id,
+                      ...(model.description ? { description: model.description } : {}),
+                    }))]} />
+              </div>}
+              {effortOptions.length > 0 && <div className="automation-field">
+                <span className="field-label">Reasoning Effort</span>
+                <Select label="Reasoning Effort" value={form.effort} onChange={(value) => patch("effort", value)}
+                  options={[{ value: "", label: "Agent Default" },
+                    ...effortOptions.map((effort) => ({ value: effort, label: titleCaseLabel(effort) }))]} />
+              </div>}
+              {permissionModeOptions.length > 0 && <div className="automation-field">
+                <span className="field-label">Permission Mode</span>
+                <Select label="Permission Mode" value={form.permissionMode} onChange={(value) => patch("permissionMode", value)}
+                  options={[{ value: "", label: "Agent Default" },
+                    ...permissionModeOptions.map((mode) => ({ value: mode, label: titleCaseLabel(mode) }))]} />
+              </div>}
+              <div className="automation-field">
+                <span className="field-label">Workspace Strategy</span>
+                <Select label="Workspace Strategy" value={form.useWorktree ? "worktree" : "in_place"}
+                  onChange={(value) => patch("useWorktree", value === "worktree")}
+                  options={[
+                    { value: "worktree", label: "Worktree", description: "Each run gets an isolated checkout." },
+                    { value: "in_place", label: "In Place", description: "Each run works directly in the workspace." },
+                  ]} />
+              </div>
+            </>}
             <label className="automation-span">{form.actionKind === "workflow_run" ? "Task" : "Prompt"}<textarea value={form.prompt} maxLength={65_536} rows={4} onChange={(event) => patch("prompt", event.target.value)} /></label>
             <label>Misfire<select value={form.misfire} onChange={(event) => patch("misfire", event.target.value as FormState["misfire"])}><option value="skip">Skip Missed Fires</option><option value="fire_once">Run Once</option><option value="catch_up">Bounded Catch-Up</option></select></label>
             {form.misfire === "catch_up" && <label>Catch-Up Cap<input type="number" min="1" max="10" value={form.catchUpRuns} onChange={(event) => patch("catchUpRuns", event.target.value)} /></label>}
@@ -452,10 +405,17 @@ export function AutomationsView() {
               <label>Alternate Machine<select value={form.fallbackRunnerId} onChange={(event) => {
                 const runner = runners.get(event.target.value);
                 setForm((current) => ({ ...current, fallbackRunnerId: event.target.value,
-                  fallbackWorkspaceId: runner?.workspaces[0]?.id ?? "", fallbackAgentId: runner?.agents[0]?.id ?? "" }));
-              }}><option value="">Select…</option>{[...runners.values()].filter((runner) => runner.runnerId !== form.runnerId).map((runner) => <option key={runner.runnerId} value={runner.runnerId}>{machineLabels.get(runner.runnerId)}</option>)}</select></label>
+                  fallbackWorkspaceId: runner?.workspaces[0]?.id ?? "", fallbackAgentId: defaultAgentId(runner?.agents) }));
+              }}><option value="">Select…</option>{[...runners.values()]
+                .filter((runner) => runner.runnerId !== form.runnerId && !carriedAlternateRunnerIds.has(runner.runnerId))
+                .map((runner) => <option key={runner.runnerId} value={runner.runnerId}>{machineLabels.get(runner.runnerId)}</option>)}</select></label>
               <label>Alternate Workspace<select value={form.fallbackWorkspaceId} onChange={(event) => patch("fallbackWorkspaceId", event.target.value)}>{(selectedFallback?.workspaces ?? []).map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}</select></label>
-              {form.actionKind === "create_session" && <label>Alternate Agent<select value={form.fallbackAgentId} onChange={(event) => patch("fallbackAgentId", event.target.value)}>{(selectedFallback?.agents ?? []).map((agent) => <option key={agent.id} value={agent.id}>{agentDisplayName(agent)}</option>)}</select></label>}
+              {form.actionKind === "create_session" && <label>Alternate Agent<select value={form.fallbackAgentId} onChange={(event) => patch("fallbackAgentId", event.target.value)}>{automationAgents(selectedFallback?.agents, form.fallbackAgentId).map((agent) => <option key={agent.id} value={agent.id}>{agentDisplayName(agent)}</option>)}</select></label>}
+              {carriedAlternateRunnerIds.size > 0 && <p className="automation-hint automation-span">
+                Additional stored alternate machines are preserved: {[...carriedAlternateRunnerIds]
+                  .map((runnerId) => machineLabels.get(runnerId) ?? runnerId)
+                  .join(", ")}.
+              </p>}
             </>}
             <label>Concurrency<select value={form.concurrency} onChange={(event) => patch("concurrency", event.target.value as FormState["concurrency"])}><option value="wait">Wait for Previous</option><option value="skip">Skip While Active</option>{form.actionKind !== "prompt_session" && <option value="parallel">Allow Parallel</option>}</select></label>
             <label>Max Additional Cost (USD)<input type="number" min="0.01" max="10000" step="0.01" value={form.maxCostUsd} onChange={(event) => patch("maxCostUsd", event.target.value)} /></label>
@@ -503,7 +463,7 @@ export function AutomationsView() {
               const revealed = credential?.trigger.triggerId === trigger.triggerId ? credential : null;
               return <div className="automation-trigger" key={trigger.triggerId}><div><strong>{trigger.name}</strong><span>{titleCaseLabel(trigger.kind)} · Key Generation {trigger.generation} · {trigger.invocationCount === 1 ? "1 Delivery" : `${trigger.invocationCount} Deliveries`}</span>{trigger.lastInvokedAt && <small>Last Signed Delivery {formatTime(trigger.lastInvokedAt)}</small>}</div><code>{endpoint}</code>{revealed && <div className="automation-trigger-secret" role="status"><strong>Copy this signing secret now. It will not be shown again.</strong><code>{revealed.secret}</code><button className="btn ghost sm" type="button" onClick={() => void navigator.clipboard.writeText(revealed.secret)}>Copy Secret</button><button className="btn ghost sm" type="button" onClick={() => setCredential(null)}>Hide</button></div>}<p>{trigger.kind === "chatops" ? 'Signed body: {"eventId":"...","command":"run","sender":"opaque actor"}' : 'Signed body: {"eventId":"..."}'}</p><div className="automation-trigger-actions"><button className="btn ghost sm" disabled={busy} onClick={() => void (async () => { if (await confirm({ title: "Rotate signing secret?", message: "The previous secret stops working immediately.", confirmLabel: "Rotate Secret", tone: "danger" })) await rotateTrigger(item.automationId, trigger.triggerId); })()}>Rotate Secret</button><button className="btn danger sm" disabled={busy} onClick={() => void (async () => { if (await confirm({ title: "Revoke signed trigger?", message: "Pending unclaimed deliveries will be rejected.", confirmLabel: "Revoke Trigger", tone: "danger" })) await revokeTrigger(item.automationId, trigger.triggerId); })()}>Revoke</button></div></div>;
             })}<p className="automation-hint">Send <code>application/vnd.wollipog.automation-trigger+json</code> with X-Wollipog-Timestamp, X-Wollipog-Nonce, and X-Wollipog-Signature. Signed deliveries only select this fixed automation; they cannot override prompts, runners, paths, or ceilings.</p></div>}
-            <div className="automation-card-actions"><button className="btn ghost sm" disabled={busy} onClick={() => void mutate(() => api.updateAutomation(item.automationId, { ...specOf(item), enabled: !item.enabled }))}>{item.enabled ? "Pause" : "Enable"}</button><button className="btn ghost sm" onClick={() => { setEditingId(item.automationId); setForm(formFrom(item)); setShowForm(true); }}>Edit</button><button className="btn danger sm" disabled={busy} onClick={() => void (async () => { if (await confirm({ title: `Delete “${item.name}”?`, message: "The automation is removed permanently. Execution history remains in the audit database.", confirmLabel: "Delete Automation", tone: "danger" })) { if (editingId === item.automationId) closeEditor(); await mutate(() => api.deleteAutomation(item.automationId)); } })()}>Delete</button></div>
+            <div className="automation-card-actions"><button className="btn ghost sm" disabled={busy} onClick={() => void mutate(() => api.updateAutomation(item.automationId, { ...specOf(item), enabled: !item.enabled }))}>{item.enabled ? "Pause" : "Enable"}</button><button className="btn ghost sm" onClick={() => { setEditingId(item.automationId); setEditingSpec(specOf(item)); setForm(formFrom(specOf(item))); setShowForm(true); }}>Edit</button><button className="btn danger sm" disabled={busy} onClick={() => void (async () => { if (await confirm({ title: `Delete “${item.name}”?`, message: "The automation is removed permanently. Execution history remains in the audit database.", confirmLabel: "Delete Automation", tone: "danger" })) { if (editingId === item.automationId) closeEditor(); await mutate(() => api.deleteAutomation(item.automationId)); } })()}>Delete</button></div>
             {executions.length > 0 && <details className="automation-history"><summary>Execution History ({executions.length})</summary><div className="automation-history-list">{executions.map((execution) => <div className="automation-execution" key={execution.executionId}><div><strong>{titleCaseLabel(execution.status)}</strong><span>{formatTime(execution.scheduledFor)}</span></div><code>{execution.idempotencyKey}</code>{execution.commands?.length ? <ul className="automation-command-list" aria-label="Durable Runner Command Receipts">{execution.commands.map((command) => <li key={command.commandId}><span>{titleCaseLabel(command.kind.replace("_", " "))} · {titleCaseLabel(command.state)}</span><small>{command.attemptCount} delivery attempt{command.attemptCount === 1 ? "" : "s"}</small>{command.lastError && <em>{command.lastError}</em>}</li>)}</ul> : execution.deliveryMode === "legacy_at_most_once" ? <small className="automation-legacy-delivery">Legacy At-Most-Once Delivery</small> : null}{execution.error && <p>{execution.error}</p>}{execution.sessionId && <button className="link-button" type="button" onClick={() => navigate({ name: "session", id: execution.sessionId! })}>Open Session</button>}</div>)}</div></details>}
           </article>;
         })}

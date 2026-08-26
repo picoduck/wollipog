@@ -197,12 +197,13 @@ export interface SessionCommandInvocationLifecycle {
   uncertain(error: string): void;
 }
 
-/** Resolve the box's CURRENT launch params for a driver/context (null = no such agent). Injected by
+/** Resolve the box's CURRENT launch params for an exact agent/driver/context (null = no such agent). Injected by
  * the daemon (closing over its live agent list) so a read-only adopt can heal once the box gains a
  * matching agent — discovery finishing after the adopt, or the user installing the CLI later. */
 export type LaunchResolver = (
   driver: AgentDriverKind,
   context: AgentContext,
+  agentId?: string | null,
 ) => { command: string; args: string[]; env: Record<string, string> } | null;
 
 interface QueuedPrompt {
@@ -320,6 +321,12 @@ interface ActiveSession {
   toolCallIds?: Set<string>;
   /** A runner-side threshold cancelled this turn. Queued prompts remain held until CP re-arms. */
   governanceTripped?: "cost_budget" | "max_tool_calls";
+  /** Request-scoped option semantics for live permission asks. The current approval card can be
+   * cleared by a settled status or replaced while this driver still owns the original request, so
+   * it cannot classify a later successful resolution. This retains only option ids/kinds in the
+   * exact live process generation; disposing the entry discards them without durable provider
+   * content or a cross-generation leak. */
+  permissionOptionKinds?: Map<string, Map<string, string>>;
   /** Continue can arrive while driver cancellation is still unwinding (especially for live usage
    * events). Defer release until drain() has observed the trip and released the session lock. */
   governanceRearmPending?: "resume" | "cost_budget" | "max_tool_calls";
@@ -771,10 +778,16 @@ export class SessionManager {
   }
 
   /** Phase 2: full metadata for every session the box holds (sent on register for hydration). */
-  sessionSnapshots() {
+  sessionSnapshots(exactEventSeq = false) {
     const protocolVersion = this.controlPlaneProtocolVersion();
-    return this.store.snapshots(protocolVersion).map((snapshot) =>
+    return this.store.snapshots(protocolVersion, exactEventSeq).map((snapshot) =>
       this.sessionCommandAuthority.overlaySnapshot(snapshot, protocolVersion));
+  }
+
+  /** Pre-negotiation register metadata. History is published only after the peer version is known. */
+  registrationSessionSnapshots() {
+    return this.store.registrationSnapshots().map((snapshot) =>
+      this.sessionCommandAuthority.overlaySnapshot(snapshot, null));
   }
 
   private snapshot(meta: SessionMeta) {
@@ -782,6 +795,10 @@ export class SessionManager {
     return this.sessionCommandAuthority.overlaySnapshot(metaToSnapshot(meta, protocolVersion), protocolVersion);
   }
 
+  /** One negotiated snapshot for correlated result messages assembled by the socket layer. */
+  snapshotForControlPlane(meta: SessionMeta) {
+    return this.snapshot(meta);
+  }
   /** Revoke process-local command authority and immediately replace any executable coordinates at
    * the control plane with the persisted display-only catalog. */
   private revokeSessionCommandAuthority(sessionId: string): boolean {
@@ -800,14 +817,16 @@ export class SessionManager {
 
   /** Phase 2: a session's event history from the store (control plane lazy-hydrates the timeline). */
   history(sessionId: string, afterSeq: number) {
-    return this.store.readEvents(sessionId, afterSeq);
+    return this.store.readEventsForProtocol(sessionId, afterSeq, this.controlPlaneProtocolVersion());
   }
 
   historyPage(
     sessionId: string,
     request: { afterSeq: number; limit: number; logEpoch?: number; throughSeq?: number },
   ) {
-    return this.store.readEventPage(sessionId, request);
+    return this.store.readEventPageForProtocol(
+      sessionId, request, this.controlPlaneProtocolVersion(),
+    );
   }
 
   /** On startup, demote sessions left mid-flight (their agent process is gone) to `idle` so the
@@ -1285,6 +1304,35 @@ export class SessionManager {
     }
   }
 
+  private authorizeHostLaunch(spec: SessionLaunchSpec): {
+    spec: SessionLaunchSpec;
+    error?: string;
+  } {
+    if ((spec.executionTarget && spec.executionTarget.adapter !== "host") || !this.resolveLaunch) {
+      return { spec };
+    }
+    const context = spec.context ?? { kind: "native" as const };
+    const localLaunch = this.resolveLaunch(spec.driver ?? "acp", context, spec.agentId);
+    const mismatch = localLaunch && (localLaunch.command !== spec.command ||
+      localLaunch.args.length !== spec.args.length ||
+      localLaunch.args.some((arg, index) => arg !== spec.args[index]));
+    const authorized = localLaunch
+      ? { ...spec, command: localLaunch.command, args: [...localLaunch.args] }
+      : { ...spec, command: "", args: [] };
+    if (!localLaunch) {
+      return {
+        spec: authorized,
+        error: `agent ${spec.agentId ?? "(missing)"} is not configured or available in the requested context`,
+      };
+    }
+    return mismatch
+      ? {
+          spec: authorized,
+          error: `launch command for agent ${spec.agentId ?? "(missing)"} does not match runner-local configuration`,
+        }
+      : { spec: authorized };
+  }
+
   async start(
     spec: SessionLaunchSpec,
     initialPrompt?: string,
@@ -1318,6 +1366,16 @@ export class SessionManager {
         return false;
       }
     }
+    const authorization = this.authorizeHostLaunch(spec);
+    spec = authorization.spec;
+    if (authorization.error && this.store.has(spec.sessionId)) {
+      // Validate Restart before allocating a replacement generation: rejection cannot supersede
+      // the live provider or overwrite its known-good launch metadata.
+      this.emitEvent(spec.sessionId, { kind: "error", message: authorization.error });
+      durable?.failed(authorization.error, "INVALID_COMMAND");
+      reportMaterialized(false);
+      return false;
+    }
     const launchGeneration = this.beginLaunchGeneration(spec.sessionId);
     this.preLaunchAdmissionGenerations.set(spec.sessionId, launchGeneration);
     try {
@@ -1328,6 +1386,7 @@ export class SessionManager {
         durable,
         launchGeneration,
         reportMaterialized,
+        authorization.error,
       );
     } finally {
       reportMaterialized(false);
@@ -1348,6 +1407,7 @@ export class SessionManager {
     durable: DurableCommandLifecycle | undefined,
     launchGeneration: number,
     reportMaterialized: (ready: boolean) => void,
+    launchAssertionError?: string,
   ): Promise<boolean> {
     const targetError = executionTargetLaunchError(spec, this.runnerId, this.executionIsolation, this.containerTargets, this.cloudTargets);
     if (targetError) {
@@ -1356,6 +1416,7 @@ export class SessionManager {
       durable?.failed(targetError, "INVALID_COMMAND");
       return false;
     }
+    const context = spec.context ?? { kind: "native" as const };
     if (this.forking.has(spec.sessionId)) {
       this.emitEvent(spec.sessionId, { kind: "error", message: "conversation fork is in progress — wait before restarting" });
       this.emitStatus(spec.sessionId, "idle");
@@ -1393,7 +1454,6 @@ export class SessionManager {
       this.log(`restarting ${spec.sessionId} — replacing existing process`);
     }
 
-    const context = spec.context ?? { kind: "native" as const };
     const isWsl = context.kind === "wsl";
     const repoPath = isWsl ? spec.workspacePath : resolve(spec.workspacePath);
 
@@ -1441,6 +1501,7 @@ export class SessionManager {
     }
     const meta: SessionMeta = {
       sessionId: spec.sessionId,
+      controlPlaneLaunchId: spec.controlPlaneLaunchId,
       agentId: spec.agentId,
       agentVersion: spec.agentVersion ?? prior?.agentVersion,
       capabilities: spec.capabilities ?? prior?.capabilities,
@@ -1505,6 +1566,12 @@ export class SessionManager {
     // so a restart keeps the timeline while re-spawning a fresh agent.
     this.store.create(meta);
     durable?.queued();
+    if (launchAssertionError) {
+      this.emitEvent(spec.sessionId, { kind: "error", message: launchAssertionError });
+      this.emitStatus(spec.sessionId, "failed", launchAssertionError);
+      durable?.failed(launchAssertionError, "INVALID_COMMAND");
+      return false;
+    }
     if (meta.driver === "codex") {
       this.emitTelemetry(meta, {
         metric: "fallback",
@@ -2277,6 +2344,7 @@ export class SessionManager {
       providerReady: false,
       running: false,
       queue: [],
+      permissionOptionKinds: new Map(),
       ...(meta.providerAuthBlock ? { authenticationBlocked: true } : {}),
       steerFenceIds: new Set(
         [...retainedPromotions.values()]
@@ -2845,7 +2913,11 @@ export class SessionManager {
         slashCommand,
         config: effectiveConfig, durable, syntheticRecovery, backgroundJobIds,
       });
-      if (!this.recoveryLaunching.has(sessionId)) setImmediate(() => void this.recoverQueuedAppServer(sessionId));
+      if (!this.recoveryLaunching.has(sessionId)) {
+        setImmediate(() => void this.recoverQueuedAppServer(sessionId).catch((error) =>
+          this.log(`queued app-server recovery failed for ${sessionId}: ${errText(error)}`),
+        ));
+      }
       return true;
     }
     const entry = this.active.get(sessionId);
@@ -2880,7 +2952,20 @@ export class SessionManager {
         ordinal,
         queueBeforeLaunch,
         backgroundJobIds,
-      );
+      ).catch((error) => {
+        // resumeAndPrompt handles EXPECTED failures internally (durable.failed / error events). An
+        // UNEXPECTED throw (e.g. a JSON.stringify RangeError writing a pathological config) escapes
+        // as an unobserved rejection; prompt() has already returned. Surface it as a session error.
+        // Reporting is itself wrapped: emitEvent can reach failHistoryIntegrity whose metadata write
+        // can throw under the SAME fault, and that secondary throw must not escape this catch.
+        try {
+          this.log(`resume-and-prompt failed for ${sessionId}: ${errText(error)}`);
+          this.emitEvent(sessionId, { kind: "error", message: `resume failed: ${errText(error)}` });
+          durable?.failed(`resume failed: ${errText(error)}`, "INVALID_COMMAND");
+        } catch (reportError) {
+          this.log(`resume failure reporting also failed for ${sessionId}: ${errText(reportError)}`);
+        }
+      });
       return true;
     }
     if (entry.historyIntegrityFailure) {
@@ -3885,9 +3970,16 @@ export class SessionManager {
   private rejectPreLaunchQueue(sessionId: string, error: string): boolean {
     const queue = this.preLaunchQueues.get(sessionId);
     if (!queue) return false;
+    const droppedContinuation = queue.some((prompt) => prompt.backgroundJobIds?.length);
     this.rejectQueued(queue, error);
     this.preLaunchQueues.delete(sessionId);
     this.emitQueue(sessionId);
+    // A continuation merged into this admission was dropped with it; its durable jobs are still
+    // queued, and dedup suppressed the retry timer while the prompt sat here — re-arm it.
+    if (droppedContinuation &&
+        this.queuedBackgroundJobIds(this.store.readMeta(sessionId)).length > 0) {
+      this.scheduleBackgroundContinuation(sessionId, ORPHAN_RECOVERY_RETRY_MS);
+    }
     return true;
   }
 
@@ -4258,8 +4350,13 @@ export class SessionManager {
       entry.activeTurnId = undefined;
       this.emitQueue(sessionId);
       clearInterval(refresh);
-      this.lockTimers.delete(sessionId);
-      this.store.releaseLock(sessionId, this.lockOwner);
+      // Restart can install a replacement drain under the same process-wide lock owner before this
+      // superseded drain settles. Only the drain whose timer is still current may tear down that
+      // generation's refresh interval and lock.
+      if (this.lockTimers.get(sessionId) === refresh) {
+        this.lockTimers.delete(sessionId);
+        this.store.releaseLock(sessionId, this.lockOwner);
+      }
       if (
         !entry.historyIntegrityFailure &&
         entry.governanceRearmPending &&
@@ -5305,6 +5402,7 @@ export class SessionManager {
 
   stop(sessionId: string): void {
     this.revokeSessionCommandAuthority(sessionId);
+    this.cancelBackgroundContinuationTimer(sessionId);
     this.discardRecovery(sessionId);
     this.cancelApprovalTelemetry(sessionId);
     this.clearSteeringState(sessionId, "session stopped before steering settled");
@@ -5315,6 +5413,8 @@ export class SessionManager {
     const entry = this.active.get(sessionId);
     if (!entry) {
       this.rejectPreLaunchQueue(sessionId, "session stopped before runner admission");
+      // The rejection re-arm is for failed admissions; this stop is a lifecycle end, so drop it.
+      this.cancelBackgroundContinuationTimer(sessionId);
       this.cancelAdmissionWait(sessionId);
       // Not in-process but may exist in the store — record the stop there too.
       if (this.store.has(sessionId)) {
@@ -5399,6 +5499,7 @@ export class SessionManager {
 
       this.beginLaunchGeneration(sessionId);
       this.rejectPreLaunchQueue(sessionId, "session deleted before runner admission");
+      this.cancelBackgroundContinuationTimer(sessionId);
       // Deletion is terminal, not a replacement launch. Stale continuations may perform only
       // idempotent lock/admission release; the deletion journal exclusively owns destructive
       // worktree/provider cleanup.
@@ -5679,25 +5780,36 @@ export class SessionManager {
       const started = this.approvalStarted.get(`${sessionId}:${requestId}`);
       this.approvalStarted.delete(`${sessionId}:${requestId}`);
       const meta = this.store.readMeta(sessionId);
+      const trackedOptionKind = this.takePermissionOptionKind(sessionId, requestId, optionId);
+      const optionKind = trackedOptionKind ?? (
+        meta?.pendingApproval?.requestId === requestId
+          ? meta.pendingApproval.options.find((option) => option.optionId === optionId)?.kind
+          : undefined
+      );
       if (meta && started != null) {
-        const optionKind = meta.pendingApproval?.options.find((option) => option.optionId === optionId)?.kind;
         this.emitTelemetry(meta, {
           metric: "approval",
           outcome:
             optionId == null
               ? "cancelled"
               : optionKind != null
-                ? optionKind.startsWith("allow") ? "allowed" : "denied"
+                ? optionKind === "cancel" ? "cancelled" : optionKind.startsWith("allow") ? "allowed" : "denied"
                 : optionId === "allow" ? "allowed" : optionId === "deny" ? "denied" : "observed",
           durationMs: Date.now() - started,
         });
       }
       // Record the resolution in the box log (the runner owns the timeline now) and clear the card
       // via accrueMeta, so a hydrating dashboard sees both the decision and an empty approval slot.
-      this.emitEvent(sessionId, { kind: "permission_resolved", requestId, optionId });
+      this.emitEvent(sessionId, {
+        kind: "permission_resolved",
+        requestId,
+        optionId,
+        resolutionReason: optionId == null || optionKind === "cancel" ? "dismissed" : "submitted",
+      });
       return;
     }
     this.approvalStarted.delete(`${sessionId}:${requestId}`);
+    this.forgetPermissionOptionKinds(sessionId, requestId);
     if (!this.store.has(sessionId)) return;
     // The ask is gone (process exited / turn settled / runner restarted between card render and
     // click). Emitting permission_resolved here would phantom-flip the session to "running" with
@@ -5711,9 +5823,9 @@ export class SessionManager {
     this.emitStatus(sessionId, status);
   }
 
-  answerQuestion(sessionId: string, requestId: string, answers: Record<string, string | string[]>): void {
+  answerQuestion(sessionId: string, requestId: string, answers: Record<string, string | string[]>, action?: "submit" | "dismiss"): void {
     const entry = this.active.get(sessionId);
-    const delivered = entry?.client.answerQuestion ? entry.client.answerQuestion(requestId, answers) : false;
+    const delivered = entry?.client.answerQuestion ? entry.client.answerQuestion(requestId, answers, action) : false;
     if (delivered) {
       const started = this.approvalStarted.get(`${sessionId}:${requestId}`);
       this.approvalStarted.delete(`${sessionId}:${requestId}`);
@@ -5721,11 +5833,17 @@ export class SessionManager {
       if (meta && started != null) {
         this.emitTelemetry(meta, {
           metric: "approval",
-          outcome: Object.keys(answers).length ? "allowed" : "cancelled",
+          outcome: action === "dismiss" || (action == null && Object.keys(answers).length === 0) ? "cancelled" : "allowed",
           durationMs: Date.now() - started,
         });
       }
-      this.emitEvent(sessionId, { kind: "question_resolved", requestId, answered: Object.keys(answers).length > 0 });
+      const answered = action !== "dismiss" && (action === "submit" || Object.keys(answers).length > 0);
+      this.emitEvent(sessionId, {
+        kind: "question_resolved",
+        requestId,
+        answered,
+        resolutionReason: answered ? "submitted" : "dismissed",
+      });
       return;
     }
     this.approvalStarted.delete(`${sessionId}:${requestId}`);
@@ -5987,7 +6105,10 @@ export class SessionManager {
     this.recoveryLaunching.delete(sessionId);
   }
 
-  shutdownAll(): void {
+  /** Returns whether every provider driver was disposed cleanly. When false, some provider process
+   * may still be alive without a registered pending kill, so the caller MUST retain the provider-home
+   * lease (fail closed) — releasing it could let a replacement runner share the same HOME. */
+  shutdownAll(): boolean {
     this.shuttingDown = true;
     this.sessionCommandAuthority.clearAll();
     this.launchGenerations.clear();
@@ -5996,12 +6117,35 @@ export class SessionManager {
     clearInterval(this.historyMaintenanceTimer);
     if (this.historyMaintenanceKickoff) clearTimeout(this.historyMaintenanceKickoff);
     this.historyMaintenanceKickoff = null;
+    // Dispose EVERY driver even if one throws: aborting here would leave later drivers' provider
+    // processes alive AND unregistered for reaping, so waitForPendingKills would falsely report
+    // "reaped" and the caller would release the lease over a live provider. Track clean completion.
+    let clean = true;
     for (const entry of this.active.values()) {
-      entry.client.dispose();
-      this.clearLock(entry.sessionId);
+      try {
+        entry.client.dispose();
+      } catch (error) {
+        clean = false;
+        this.log(`shutdown dispose failed for ${entry.sessionId}: ${errText(error)}`);
+        // Its provider may still be alive; leave the session-store lock so no replacement runner
+        // adopts the session and writes concurrently.
+        continue;
+      }
+      try {
+        this.clearLock(entry.sessionId);
+      } catch (error) {
+        this.log(`shutdown clearLock failed for ${entry.sessionId}: ${errText(error)}`);
+      }
     }
     this.active.clear();
-    for (const { client } of this.closing.values()) client.dispose();
+    for (const { client } of this.closing.values()) {
+      try {
+        client.dispose();
+      } catch (error) {
+        clean = false;
+        this.log(`shutdown dispose failed for a closing session: ${errText(error)}`);
+      }
+    }
     this.closing.clear();
     this.deleting.clear();
     this.recoveryQueues.clear();
@@ -6029,8 +6173,15 @@ export class SessionManager {
     this.admitted.clear();
     this.boxAdmission.releaseAll();
     // Debounced meta writes (seq/preview/usage) must land before the process exits — a lost
-    // seq flush would only self-heal on the next append, and usage totals would be dropped.
-    this.store.flushAll();
+    // seq flush would only self-heal on the next append, and usage totals would be dropped. A flush
+    // fault must not abort the return: it does not by itself leave a provider alive, so it is logged
+    // rather than folded into `clean` (which gates lease release on provider-liveness only).
+    try {
+      this.store.flushAll();
+    } catch (error) {
+      this.log(`shutdown flushAll failed: ${errText(error)}`);
+    }
+    return clean;
   }
 
   /** Release mutable provider HOME ownership only after every spawned provider/TUI process tree
@@ -6059,7 +6210,14 @@ export class SessionManager {
     // a shared box store). Mirrors the CP rule: LEAVING input_required clears the card.
     const settled = status !== "running" && status !== "starting" && status !== "input_required";
     this.store.patchMeta(sessionId, settled ? { status, pendingApproval: null } : { status });
-    this.send({ type: "session_status", sessionId, status, detail, worktreePath });
+    this.send({
+      type: "session_status",
+      sessionId,
+      status,
+      detail,
+      worktreePath,
+      controlPlaneLaunchId: this.store.readMeta(sessionId)?.controlPlaneLaunchId,
+    });
   }
 
   /** Contain authoritative history failures to one session. History itself remains strict: this
@@ -6444,6 +6602,15 @@ export class SessionManager {
     return queued.filter((job) => job.continuationId === continuationId).map((job) => job.id);
   }
 
+  /** Lifecycle rejection (Stop/delete) must also drop any pending continuation timer: a stale
+   * timer entry would suppress scheduling for a restarted session's fresh background work. */
+  private cancelBackgroundContinuationTimer(sessionId: string): void {
+    const timer = this.backgroundContinuationTimers.get(sessionId);
+    if (!timer) return;
+    clearTimeout(timer);
+    this.backgroundContinuationTimers.delete(sessionId);
+  }
+
   private scheduleBackgroundContinuation(sessionId: string, delay = 0): void {
     if (this.shuttingDown || this.backgroundContinuationTimers.has(sessionId)) return;
     const timer = setTimeout(() => {
@@ -6461,7 +6628,9 @@ export class SessionManager {
     if (!meta || meta.status === "stopped" || !automaticClaudeRecoveryAllowed(meta) || jobIds.length === 0) return;
     const entry = this.active.get(sessionId);
     if (entry?.currentBackgroundJobIds?.some((id) => jobIds.includes(id)) ||
-        entry?.queue.some((prompt) => prompt.backgroundJobIds?.some((id) => jobIds.includes(id)))) return;
+        entry?.queue.some((prompt) => prompt.backgroundJobIds?.some((id) => jobIds.includes(id))) ||
+        this.preLaunchQueues.get(sessionId)?.some((prompt) =>
+          prompt.backgroundJobIds?.some((id) => jobIds.includes(id)))) return;
     this.backgroundContinuationLaunching.add(sessionId);
     try {
       const selected = (meta.backgroundJobs ?? []).filter((job) => jobIds.includes(job.id));
@@ -6472,7 +6641,13 @@ export class SessionManager {
         terminalAt: job.terminalObservedAt!,
       }));
       const prompt = `${BACKGROUND_CONTINUATION_PROMPT}\n\nRunner-managed terminal results:\n${JSON.stringify(resultSummary)}`;
-      if (entry) {
+      const currentGeneration = this.launchGenerations.get(sessionId);
+      const admissionInFlight = !entry && currentGeneration !== undefined &&
+        this.preLaunchAdmissionGenerations.get(sessionId) === currentGeneration;
+      if (entry || admissionInFlight) {
+        // With a launch mid-admission (e.g. a retained authentication retry between clearing the
+        // block and reaching the provider), prompt() merges into its pre-launch queue. Calling
+        // resumeAndPrompt here instead would begin a competing generation and drop that retry.
         this.prompt(
           sessionId,
           prompt,
@@ -6502,8 +6677,10 @@ export class SessionManager {
     } finally {
       this.backgroundContinuationLaunching.delete(sessionId);
       const remaining = this.queuedBackgroundJobIds(this.store.readMeta(sessionId));
-      if (remaining.length > 0 && !this.active.get(sessionId)?.queue.some((prompt) =>
-        prompt.backgroundJobIds?.some((id) => remaining.includes(id)))) {
+      const alreadyQueued = (prompt: { backgroundJobIds?: string[] }) =>
+        prompt.backgroundJobIds?.some((id) => remaining.includes(id));
+      if (remaining.length > 0 && !this.active.get(sessionId)?.queue.some(alreadyQueued) &&
+          !this.preLaunchQueues.get(sessionId)?.some(alreadyQueued)) {
         this.scheduleBackgroundContinuation(sessionId, ORPHAN_RECOVERY_RETRY_MS);
       }
     }
@@ -7232,6 +7409,35 @@ export class SessionManager {
     }
   }
 
+  private rememberPermissionOptionKinds(
+    sessionId: string,
+    requestId: string,
+    options: Extract<SessionEventPayload, { kind: "permission_request" }>["options"],
+  ): void {
+    const entry = this.active.get(sessionId);
+    if (!entry) return;
+    entry.permissionOptionKinds ??= new Map();
+    entry.permissionOptionKinds.set(requestId, new Map(
+      options.flatMap((option) => option.kind == null ? [] : [[option.optionId, option.kind]]),
+    ));
+  }
+
+  private takePermissionOptionKind(
+    sessionId: string,
+    requestId: string,
+    optionId: string | null,
+  ): string | undefined {
+    const kind = optionId == null
+      ? undefined
+      : this.active.get(sessionId)?.permissionOptionKinds?.get(requestId)?.get(optionId);
+    this.forgetPermissionOptionKinds(sessionId, requestId);
+    return kind;
+  }
+
+  private forgetPermissionOptionKinds(sessionId: string, requestId: string): void {
+    this.active.get(sessionId)?.permissionOptionKinds?.delete(requestId);
+  }
+
   /** Keep the cheap snapshot fields (preview, token/cost totals, pending approval) current so the
    * register snapshot — and therefore any hydrating dashboard — stays accurate. */
   private accrueMeta(sessionId: string, payload: SessionEventPayload, trackApprovalLatency = true): void {
@@ -7242,7 +7448,10 @@ export class SessionManager {
     } else if (payload.kind === "permission_request") {
       const prior = this.store.readMeta(sessionId)?.pendingApproval?.requestId;
       if (prior && prior !== payload.requestId) this.approvalStarted.delete(`${sessionId}:${prior}`);
-      if (trackApprovalLatency) this.approvalStarted.set(`${sessionId}:${payload.requestId}`, Date.now());
+      if (trackApprovalLatency) {
+        this.approvalStarted.set(`${sessionId}:${payload.requestId}`, Date.now());
+        this.rememberPermissionOptionKinds(sessionId, payload.requestId, payload.options);
+      }
       // Persist the pending approval AND the input_required status so a hydrating dashboard files
       // the card under Needs Input (not Running) and fires its notification.
       this.store.patchMeta(sessionId, {
@@ -7273,6 +7482,9 @@ export class SessionManager {
       });
     } else if (payload.kind === "permission_resolved" || payload.kind === "question_resolved") {
       this.approvalStarted.delete(`${sessionId}:${payload.requestId}`);
+      if (payload.kind === "permission_resolved") {
+        this.forgetPermissionOptionKinds(sessionId, payload.requestId);
+      }
       // Card answered — the turn resumes, so clear the approval and restore the running status.
       this.store.patchMeta(sessionId, { pendingApproval: null, status: "running" });
     } else if (payload.kind === "token_usage" && !payload.parentToolUseId) {

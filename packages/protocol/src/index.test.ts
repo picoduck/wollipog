@@ -11,6 +11,8 @@ import {
   PROTOCOL_VERSION,
   providerAuthenticationReceiptCode,
   projectRunnerMessageForProtocol,
+  projectSessionEventPayloadForProtocol,
+  sessionEventWireProjectionRequiredForProtocol,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   WOLLIPOG_CONTROL_PLANE_SERVICE,
   WOLLIPOG_POLICY_HOOK_POLL_CAPABILITY_HEADER,
@@ -19,11 +21,15 @@ import {
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
   BOARD_COLUMNS,
+  archiveRequiresStop,
   columnForStatus,
   isTerminal,
+  isSupportedAgentQuestion,
   TERMINAL_STATUSES,
   parseMessage,
+  DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH,
   validateQuestionAnswers,
+  validateQuestionFreeText,
   validatePromptImageInputs,
   providerSupportsConversationFork,
   mergeSessionCapabilities,
@@ -97,8 +103,8 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 83", () => {
-  assert.equal(PROTOCOL_VERSION, 83);
+test("PROTOCOL_VERSION is 92", () => {
+  assert.equal(PROTOCOL_VERSION, 92);
 });
 
 test("slash-command argument hints remain additive metadata", () => {
@@ -528,6 +534,14 @@ test("runner command capability gates fail closed for unknown/old protocols", ()
   assert.equal(runnerSupportsProtocol(81, "backgroundWorkTracking"), false);
   assert.equal(runnerSupportsProtocol(82, "backgroundWorkTracking"), false);
   assert.equal(runnerSupportsProtocol(83, "backgroundWorkTracking"), true);
+  assert.equal(runnerSupportsProtocol(83, "correlatedRestartEcho"), false);
+  assert.equal(runnerSupportsProtocol(84, "correlatedRestartEcho"), true);
+  assert.equal(runnerSupportsProtocol(84, "stopFailureRecovery"), false);
+  assert.equal(runnerSupportsProtocol(85, "stopFailureRecovery"), true);
+  assert.equal(runnerSupportsProtocol(88, "stopAttemptCorrelation"), false);
+  assert.equal(runnerSupportsProtocol(89, "stopAttemptCorrelation"), true);
+  assert.equal(runnerSupportsProtocol(89, "agentSkills"), false);
+  assert.equal(runnerSupportsProtocol(90, "agentSkills"), true);
   assert.equal(runnerSupportsProtocol(Number.NaN, "externalSessions"), false);
   assert.equal(runnerSupportsProtocol(6.5, "externalSessions"), false);
   assert.match(runnerCapabilityRequirement(null, "sessionFiles", "Files"), /unknown.*requires protocol v16/i);
@@ -558,6 +572,22 @@ test("provider-authentication receipts are projected for the peer only at send t
   );
   assert.equal(exact.type === "durable_session_command_update" ? exact.code : undefined,
     "PROVIDER_AUTHENTICATION_REQUIRED", "the buffered runner message retains exact local truth");
+});
+
+test("additive session-event kinds use explicit older-peer policies without mutating local truth", () => {
+  const completion = { kind: "agent_response_completed" } as const;
+  assert.equal(projectSessionEventPayloadForProtocol(completion, 86), null);
+  assert.equal(projectSessionEventPayloadForProtocol(completion, undefined), null);
+  assert.equal(projectSessionEventPayloadForProtocol(completion, 87), completion);
+  assert.equal(sessionEventWireProjectionRequiredForProtocol(undefined), true);
+  assert.equal(sessionEventWireProjectionRequiredForProtocol(86), true);
+  assert.equal(sessionEventWireProjectionRequiredForProtocol(87), false);
+
+  const required = { kind: "error", message: "still required" } as const;
+  assert.equal(projectSessionEventPayloadForProtocol(required, 1), required,
+    "event kinds without an omission policy fail closed by remaining exact on the wire");
+  assert.deepEqual(completion, { kind: "agent_response_completed" },
+    "wire projection never rewrites runner-local event history");
 });
 
 test("source locations normalize canonical root-relative paths and reject escapes", () => {
@@ -660,6 +690,16 @@ test("isTerminal is false for non-terminal statuses", () => {
   }
 });
 
+test("archive requires a confirmed stop for every non-terminal lifecycle", () => {
+  for (const status of ALL_STATUSES) {
+    assert.equal(
+      archiveRequiresStop(status),
+      ["queued", "starting", "running", "input_required", "idle"].includes(status),
+      status,
+    );
+  }
+});
+
 test("BOARD_COLUMNS covers exactly the set of columns columnForStatus can return", () => {
   const produced = new Set(ALL_STATUSES.map(columnForStatus));
   const declared = new Set(BOARD_COLUMNS.map((c) => c.id));
@@ -718,6 +758,23 @@ test("validateQuestionAnswers accepts valid, empty (dismiss), rejects unknown/un
   assert.match(validateQuestionAnswers(questions, { "Lang?": "TS" })!, /missing answer/);
 });
 
+test("the normalized question contract rejects multi-select Other responses but remains dismissible", () => {
+  const unsupported = {
+    id: "features",
+    question: "Choose features or add another",
+    multiSelect: true,
+    allowOther: true,
+    options: [{ label: "Audit" }],
+  };
+
+  assert.equal(isSupportedAgentQuestion(unsupported), false);
+  assert.match(
+    validateQuestionAnswers([unsupported], { features: ["Audit"] }, "submit")!,
+    /cannot combine multi-select and Other responses/,
+  );
+  assert.equal(validateQuestionAnswers([unsupported], {}, "dismiss"), null);
+});
+
 test("validateQuestionAnswers: duplicate multi-select labels + prototype-chain ids are rejected", () => {
   const multi = [{ id: "Feats?", question: "Feats?", multiSelect: true, options: [{ label: "Auth" }, { label: "API" }] }];
   assert.match(validateQuestionAnswers(multi, { "Feats?": ["Auth", "Auth"] })!, /duplicate/);
@@ -730,4 +787,68 @@ test("validateQuestionAnswers: duplicate multi-select labels + prototype-chain i
   ];
   assert.match(validateQuestionAnswers(proto, { "Lang?": "TS" })!, /missing answer/);
   assert.equal(validateQuestionAnswers(proto, { "Lang?": "TS", constructor: "X" }), null);
+});
+
+test("validateQuestionAnswers accepts bounded free text and optional provider form fields", () => {
+  const questions = [
+    { id: "name", question: "Name", options: [], allowOther: true, minLength: 2, maxLength: 8 },
+    { id: "count", question: "Count", options: [], allowOther: true, inputFormat: "integer" as const, minimum: 1, maximum: 4 },
+    { id: "note", question: "Note", options: [], allowOther: true, required: false },
+  ];
+  assert.equal(validateQuestionAnswers(questions, { name: "Ada", count: "3" }), null);
+  assert.match(validateQuestionAnswers(questions, {}, "submit")!, /missing answer/);
+  assert.equal(validateQuestionAnswers(questions, {}, "dismiss"), null);
+  assert.match(validateQuestionAnswers(questions, { name: "Ada", count: "3" }, "dismiss")!, /dismissal/);
+  assert.match(validateQuestionAnswers(questions, { name: "A", count: "3" })!, /at least 2/);
+  assert.match(validateQuestionAnswers(questions, { name: "Ada", count: "3.5" })!, /valid integer/);
+  assert.match(validateQuestionAnswers(questions, { name: "Ada", count: "5" })!, /above its maximum/);
+});
+
+test("free-text validation bounds answers when the provider declares no maxLength", () => {
+  const question = { id: "note", question: "Note", options: [], allowOther: true };
+  const atLimit = "n".repeat(DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH);
+  assert.equal(validateQuestionFreeText(question, atLimit), null);
+  assert.match(
+    validateQuestionFreeText(question, `${atLimit}n`)!,
+    new RegExp(`at most ${DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH} character`),
+  );
+  assert.match(
+    validateQuestionAnswers([question], { note: `${atLimit}n` })!,
+    new RegExp(`at most ${DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH} character`),
+  );
+  // A provider-declared bound still wins when it is present.
+  const bounded = { ...question, maxLength: 8 };
+  assert.match(validateQuestionFreeText(bounded, "n".repeat(9))!, /at most 8 character/);
+});
+
+test("validateQuestionAnswers enforces provider primitive formats", () => {
+  const question = (id: string, inputFormat: "email" | "url" | "date" | "date-time") => [{
+    id,
+    question: id,
+    options: [],
+    allowOther: true,
+    inputFormat,
+  }];
+  assert.equal(validateQuestionAnswers(question("email", "email"), { email: "ada@example.com" }), null);
+  assert.match(validateQuestionAnswers(question("email", "email"), { email: "not-an-email" })!, /email address/);
+  assert.equal(validateQuestionAnswers(question("url", "url"), { url: "urn:example:wollipog" }), null);
+  assert.match(validateQuestionAnswers(question("url", "url"), { url: "not a uri" })!, /valid URI/);
+  assert.equal(validateQuestionAnswers(question("date", "date"), { date: "2024-02-29" }), null);
+  assert.match(validateQuestionAnswers(question("date", "date"), { date: "2024-02-30" })!, /valid date/);
+  assert.equal(validateQuestionAnswers(question("date-time", "date-time"), { "date-time": "2026-08-22T12:30" }), null);
+  assert.match(validateQuestionAnswers(question("date-time", "date-time"), { "date-time": "tomorrowish" })!, /date and time/);
+});
+
+test("validateQuestionAnswers enforces provider multi-select cardinality", () => {
+  const questions = [{
+    id: "features",
+    question: "Features",
+    multiSelect: true,
+    options: [{ label: "A" }, { label: "B" }, { label: "C" }],
+    minSelections: 2,
+    maxSelections: 2,
+  }];
+  assert.equal(validateQuestionAnswers(questions, { features: ["A", "B"] }), null);
+  assert.match(validateQuestionAnswers(questions, { features: ["A"] })!, /at least 2/);
+  assert.match(validateQuestionAnswers(questions, { features: ["A", "B", "C"] })!, /at most 2/);
 });

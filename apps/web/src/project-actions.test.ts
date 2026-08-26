@@ -20,6 +20,53 @@ test("durable Project archive offers exact undo only for sessions changed by the
   assert.deepEqual(restored, [["a", false], ["b", false]]);
 });
 
+test("Project archive undo includes sessions whose stops are still pending", async () => {
+  const restored: Array<[string, boolean]> = [];
+  const messages: string[] = [];
+  let undo: (() => void | Promise<void>) | undefined;
+  const count = await archiveProjectWithFeedback({
+    projectId: "p1",
+    projectName: "Alpha",
+    api: {
+      archiveProjectSessions: async () => ({
+        project: {} as never, sessions: [], archivedSessionIds: ["done"], pendingSessionIds: ["running"],
+      }),
+      setArchived: async (id, archived) => { restored.push([id, archived]); return {} as never; },
+    },
+    showToast: () => -1,
+    showUndo: (message, action) => { messages.push(message); undo = action; return 1; },
+  });
+  assert.equal(count, 2);
+  assert.match(messages[0] ?? "", /waiting for runtime capacity/i);
+  await undo?.();
+  assert.deepEqual(restored, [["done", false], ["running", false]]);
+});
+
+test("Project archive reports failed Stops without claiming capacity release", async () => {
+  const restored: Array<[string, boolean]> = [];
+  const messages: string[] = [];
+  let undo: (() => void | Promise<void>) | undefined;
+  const count = await archiveProjectWithFeedback({
+    projectId: "p1",
+    projectName: "Alpha",
+    api: {
+      archiveProjectSessions: async () => ({
+        project: {} as never,
+        sessions: [],
+        archivedSessionIds: ["done"],
+        failedSessionIds: ["failed-stop"],
+      }),
+      setArchived: async (id, archived) => { restored.push([id, archived]); return {} as never; },
+    },
+    showToast: () => -1,
+    showUndo: (message, action) => { messages.push(message); undo = action; return 1; },
+  });
+  assert.equal(count, 2);
+  assert.match(messages[0] ?? "", /Runtime capacity may still be held.*Retry Stop/i);
+  await undo?.();
+  assert.deepEqual(restored, [["done", false], ["failed-stop", false]]);
+});
+
 test("older control planes report success without exposing unsafe broad undo", async () => {
   const messages: string[] = [];
   let undoOffered = false;

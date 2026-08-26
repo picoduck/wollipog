@@ -1,18 +1,21 @@
 import { expect, test, type Page } from "@playwright/test";
 import { join } from "node:path";
 
-async function openSession(page: Page) {
-  await page.goto("/command-inbox-projects-e2e.html?scenario=preview-follow");
+async function openSession(page: Page, scenario = "preview-follow", params: Record<string, string> = {}) {
+  const query = new URLSearchParams({ scenario, ...params });
+  await page.goto(`/command-inbox-projects-e2e.html?${query.toString()}`);
   await page.evaluate(() => localStorage.clear());
   await page.reload();
   await page.getByRole("button", { name: /Alpha Session/ }).click();
   const expand = page.getByRole("button", { name: "Expand Session" });
   if (await expand.isVisible()) await expand.click();
   await expect(page.locator(".detail-head")).toBeVisible();
-  await expect(page.locator(".inbox-preview-pane")).toHaveCount(1);
+  if (scenario === "preview-follow") {
+    await expect(page.locator(".inbox-preview-pane")).toHaveCount(1);
+  }
 }
 
-async function capture(page: Page, viewport: "desktop" | "narrow") {
+async function capture(page: Page, viewport: string) {
   const directory = process.env.SESSION_HEADER_SCREENSHOT_DIR;
   const phase = process.env.SESSION_HEADER_SCREENSHOT_PHASE;
   if (!directory || !phase) return;
@@ -27,7 +30,7 @@ test("the unified session bar balances navigation, breadcrumb, status, and actio
   const header = page.locator(".detail-head");
   const back = header.locator(".back");
   await expect(back).toHaveAccessibleName("Back to Inbox");
-  await expect(back).toHaveAttribute("title", "Back to Inbox");
+  await expect(back).toHaveAttribute("title", "Back to inbox");
   await expect(header.locator(".status-badge")).toBeVisible();
 
   const geometry = await header.evaluate((element) => {
@@ -95,11 +98,14 @@ test("the unified session bar balances navigation, breadcrumb, status, and actio
   const moreActions = header.getByRole("button", { name: "More Actions" });
   await moreActions.focus();
   await page.keyboard.press("Shift+Tab");
+  await expect(header.getByRole("button", { name: "Share" })).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
   // The ⋯ trigger overlays the crumb (no layout footprint) but stays in the tab order even
   // while faded out; focusing it reveals it over the crumb's trailing text.
   await expect(header.getByRole("button", { name: "Project Actions" })).toBeFocused();
   await page.keyboard.press("Shift+Tab");
   await expect(header.locator(".detail-crumbs .cctx-chip")).toBeFocused();
+  await page.keyboard.press("Tab");
   await page.keyboard.press("Tab");
   await page.keyboard.press("Tab");
   await expect(moreActions).toBeFocused();
@@ -125,7 +131,9 @@ test("the unified session bar balances navigation, breadcrumb, status, and actio
   // The former standalone header actions live here now; the process-destructive item stays last
   // and visually distinct.
   await expect(menu.getByRole("menuitem", { name: "Rename Session…" })).toBeVisible();
-  await expect(menu.getByRole("menuitem", { name: "Archive" })).toBeVisible();
+  await expect(menu.getByRole("menuitem", { name: "Archive and Stop" })).toBeVisible();
+  await expect(menu.getByRole("menuitem", { name: "Share Transcript…" })).toHaveCount(0);
+  await expect(menu.getByRole("menuitem", { name: "Export Markdown" })).toHaveCount(0);
   const stopSession = menu.getByRole("menuitem", { name: "Stop Session" });
   await expect(stopSession).toBeVisible();
   await expect(stopSession).toHaveClass(/menu-danger/);
@@ -139,51 +147,180 @@ test("the unified session bar balances navigation, breadcrumb, status, and actio
     return Math.min(window.innerWidth, clippingBox.right) - box.right;
   });
   expect(menuClearance).toBeGreaterThanOrEqual(11.5);
+
+  await header.getByRole("button", { name: "Share" }).click();
+  await expect(menu).toHaveCount(0);
+  const shareMenu = page.getByRole("menu", { name: "Session Sharing" });
+  await expect(shareMenu.getByRole("menuitem", { name: "Share Transcript…" })).toBeVisible();
+  await expect(shareMenu.getByRole("menuitem", { name: "Copy Internal Session Link" })).toBeVisible();
+  await expect(shareMenu.getByRole("menuitem", { name: "Export Markdown" })).toBeVisible();
+  await expect(shareMenu.getByRole("menuitem", { name: "Export JSON" })).toBeVisible();
+  await expect(shareMenu.getByRole("menuitem", { name: "Rename Session…" })).toHaveCount(0);
 });
 
-test("the session bar keeps one row and 44-pixel targets at narrow widths", async ({ page }) => {
-  await page.setViewportSize({ width: 520, height: 800 });
-  await openSession(page);
-  await capture(page, "narrow");
+for (const viewport of [
+  { name: "320-pixel phone", width: 320 },
+  { name: "390-pixel phone", width: 390 },
+]) {
+  test(`the session bar gives simultaneous statuses a second row on a ${viewport.name}`, async ({ page }) => {
+    await page.setViewportSize({ width: viewport.width, height: 800 });
+    await openSession(page, "git-visibility", { reviewReady: "1", sessionShell: "1" });
+    await page.evaluate(() => {
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
+        backgroundWorkState: "running",
+      });
+    });
+    await capture(page, `narrow-${viewport.width}`);
 
-  const header = page.locator(".detail-head");
-  const metrics = await header.evaluate((element) => {
-    const rect = (node: Element) => {
-      const value = node.getBoundingClientRect();
-      return { x: value.x, y: value.y, width: value.width, height: value.height };
-    };
-    const clippingPane = element.closest(".inbox-preview-pane");
-    if (!clippingPane) throw new Error("expanded Session bar is not mounted in the clipping pane");
-    return {
-      back: rect(element.querySelector(".back")!),
-      crumbs: rect(element.querySelector(".detail-crumbs")!),
-      actions: rect(element.querySelector(".detail-actions")!),
-      moreActions: rect(element.querySelector('[aria-label="More Actions"]')!),
-      headerRight: element.getBoundingClientRect().right,
-      clippingRight: Math.min(window.innerWidth, clippingPane.getBoundingClientRect().right),
-      paddingRight: Number.parseFloat(getComputedStyle(element).paddingRight),
-    };
+    const header = page.locator(".session-detail > .detail-head");
+    const topbar = page.locator(".topbar");
+    await expect(page.locator(".topbar, .session-detail > .detail-head")).toHaveCount(2);
+    await expect(topbar.getByRole("button", { name: "Back to Inbox" })).toBeVisible();
+    await expect(topbar.getByRole("heading", { name: "Alpha Session", exact: true })).toBeVisible();
+    await expect(topbar.getByRole("button", { name: /^Open/ })).toHaveCount(0);
+    await expect(topbar.getByRole("button", { name: "Settings" })).toBeVisible();
+    await expect(header.locator(".back, .detail-crumbs, .editor-select")).toHaveCount(0);
+    await expect(header.getByText("Awaiting Prompt", { exact: true })).toBeVisible();
+    await expect(header.getByText("Ready for Review", { exact: true })).toBeVisible();
+    await expect(header.getByText("Uncommitted Changes", { exact: true })).toBeVisible();
+    await expect(header.getByRole("img", { name: "Waiting on External Job" })).toBeVisible();
+    const metrics = await header.evaluate((element) => {
+      const rect = (node: Element) => {
+        const value = node.getBoundingClientRect();
+        return {
+          x: value.x, y: value.y, right: value.right, bottom: value.bottom,
+          width: value.width, height: value.height,
+        };
+      };
+      const clippingPane = element.closest(".inbox-preview-pane");
+      const badges = [...element.querySelectorAll(
+        ".session-header-statuses > .status-badge, " +
+        ".session-header-statuses .session-status-indicators > .status-badge, " +
+        ".session-header-statuses .change-status-indicators > .status-badge, " +
+        ".session-header-statuses > .bgwork-indicator",
+      )].map(rect);
+      return {
+        display: getComputedStyle(element).display,
+        statuses: rect(element.querySelector(".session-header-statuses")!),
+        actions: rect(element.querySelector(".detail-actions")!),
+        share: rect(element.querySelector('[aria-label="Share"]')!),
+        moreActions: rect(element.querySelector('[aria-label="More Actions"]')!),
+        badges,
+        headerHeight: element.getBoundingClientRect().height,
+        hasHorizontalOverflow: element.scrollWidth > element.clientWidth,
+        headerRight: element.getBoundingClientRect().right,
+        clippingRight: Math.min(
+          window.innerWidth, clippingPane?.getBoundingClientRect().right ?? window.innerWidth,
+        ),
+        paddingRight: Number.parseFloat(getComputedStyle(element).paddingRight),
+      };
+    });
+    const shellMetrics = await topbar.evaluate((element) => {
+      const topbarBox = element.getBoundingClientRect();
+      const settings = element.querySelector('[aria-label="Settings"]')!.getBoundingClientRect();
+      const back = element.querySelector('[aria-label="Back to Inbox"]')!.getBoundingClientRect();
+      const title = element.querySelector("h1")!.getBoundingClientRect();
+      const controls = [...element.querySelectorAll(".topbar-mobile-controls > *, .topbar-mobile-controls > button")]
+        .map((node) => node.getBoundingClientRect());
+      return {
+        top: topbarBox.top,
+        bottom: topbarBox.bottom,
+        right: topbarBox.right,
+        settings: { width: settings.width, height: settings.height, right: settings.right },
+        back: { width: back.width, height: back.height, right: back.right },
+        title: { x: title.x, right: title.right, width: title.width },
+        controlsLeft: Math.min(...controls.map((box) => box.left)),
+        furthestControlRight: Math.max(...controls.map((box) => box.right)),
+      };
+    });
+    const subheaderBottom = await header.evaluate((element) => element.getBoundingClientRect().bottom);
+
+    expect(metrics.display).toBe("grid");
+    expect(shellMetrics.back.width).toBeGreaterThanOrEqual(44);
+    expect(shellMetrics.back.height).toBeGreaterThanOrEqual(44);
+    expect(shellMetrics.settings.width).toBeGreaterThanOrEqual(44);
+    expect(shellMetrics.settings.height).toBeGreaterThanOrEqual(44);
+    expect(shellMetrics.settings.right).toBeCloseTo(shellMetrics.furthestControlRight, 0);
+    expect(shellMetrics.title.x).toBeGreaterThanOrEqual(shellMetrics.back.right);
+    expect(shellMetrics.title.right).toBeLessThanOrEqual(shellMetrics.controlsLeft);
+    expect(shellMetrics.title.width).toBeGreaterThanOrEqual(72);
+    // Four simultaneous statuses require three badge lines at 320px; they remain inside the
+    // second header bar without overlap or horizontal overflow.
+    expect(subheaderBottom - shellMetrics.top).toBeLessThan(156);
+    expect(metrics.share.width).toBeGreaterThanOrEqual(44);
+    expect(metrics.share.height).toBeGreaterThanOrEqual(44);
+    expect(metrics.moreActions.width).toBeGreaterThanOrEqual(44);
+    expect(metrics.moreActions.height).toBeGreaterThanOrEqual(44);
+    expect(metrics.statuses.right).toBeLessThanOrEqual(metrics.actions.x - 6);
+    expect(metrics.headerHeight).toBeLessThanOrEqual(104);
+    expect(metrics.hasHorizontalOverflow).toBe(false);
+    expect(metrics.paddingRight).toBeGreaterThanOrEqual(12);
+    expect(metrics.clippingRight - metrics.moreActions.right).toBeGreaterThanOrEqual(11.5);
+    expect(metrics.badges.length).toBeGreaterThanOrEqual(4);
+    const center = (box: { y: number; height: number }) => box.y + box.height / 2;
+    expect(Math.abs(center(metrics.actions) - center(metrics.statuses))).toBeLessThanOrEqual(12);
+    for (let index = 0; index < metrics.badges.length; index += 1) {
+      for (let other = index + 1; other < metrics.badges.length; other += 1) {
+        const left = metrics.badges[index]!;
+        const right = metrics.badges[other]!;
+        const overlaps = left.x < right.right && left.right > right.x &&
+          left.y < right.bottom && left.bottom > right.y;
+        expect(overlaps).toBe(false);
+      }
+    }
+
+    await header.getByRole("button", { name: "More Actions" }).click();
+    const menu = page.getByRole("menu", { name: "Session Actions" });
+    await expect(menu).toBeVisible();
+    const projectHeader = menu.locator(".session-project-menu-header");
+    await expect(projectHeader).toContainText("Project");
+    expect(await projectHeader.evaluate((element) => getComputedStyle(element).textTransform)).toBe("none");
+    await expect(menu.getByRole("menuitem", { name: "Manage Project" })).toBeVisible();
+    await expect(menu.getByRole("menuitem", { name: "Move Session…" })).toBeVisible();
+    await expect(menu.getByRole("menuitem", { name: "Copy Internal Session Link" })).toHaveCount(0);
+    for (const item of await menu.getByRole("menuitem").all()) {
+      const box = await item.boundingBox();
+      expect(box?.height).toBeGreaterThanOrEqual(44);
+    }
+    if (viewport.width === 390) {
+      await menu.getByRole("menuitem", { name: "Move Session…" }).click();
+      const moveDialog = page.getByRole("dialog", { name: "Move to Project" });
+      await expect(moveDialog).toBeVisible();
+      await moveDialog.getByRole("button", { name: "Cancel" }).click();
+      await expect(header.getByRole("button", { name: "More Actions" })).toBeFocused();
+      await header.getByRole("button", { name: "Share" }).click();
+      await expect(menu).toHaveCount(0);
+      const shareMenu = page.getByRole("menu", { name: "Session Sharing" });
+      const copyLink = shareMenu.getByRole("menuitem", { name: "Copy Internal Session Link" });
+      await expect(copyLink).toBeEnabled();
+      await copyLink.click();
+      const note = header.locator(":scope > .session-header-note");
+      await expect(note).toContainText(/session link/i);
+      await expect(header.locator(".detail-actions .detail-note")).toHaveCount(0);
+      const noteMetrics = await header.evaluate((element) => {
+        const noteBox = element.querySelector(".session-header-note")!.getBoundingClientRect();
+        const statusBox = element.querySelector(".session-header-statuses")!.getBoundingClientRect();
+        const headerBox = element.getBoundingClientRect();
+        return {
+          width: noteBox.width,
+          x: noteBox.x,
+          right: noteBox.right,
+          y: noteBox.y,
+          statusBottom: statusBox.bottom,
+          headerX: headerBox.x,
+          headerRight: headerBox.right,
+          paddingRight: Number.parseFloat(getComputedStyle(element).paddingRight),
+          hasHorizontalOverflow: element.scrollWidth > element.clientWidth,
+        };
+      });
+      expect(noteMetrics.width).toBeGreaterThanOrEqual(140);
+      expect(noteMetrics.x).toBeGreaterThanOrEqual(noteMetrics.headerX);
+      expect(noteMetrics.y).toBeGreaterThanOrEqual(noteMetrics.statusBottom);
+      expect(noteMetrics.right).toBeLessThanOrEqual(noteMetrics.headerRight - noteMetrics.paddingRight + 1);
+      expect(noteMetrics.hasHorizontalOverflow).toBe(false);
+    }
   });
-
-  expect(metrics.back.width).toBeGreaterThanOrEqual(44);
-  expect(metrics.back.height).toBeGreaterThanOrEqual(44);
-  expect(metrics.moreActions.width).toBeGreaterThanOrEqual(44);
-  expect(metrics.moreActions.height).toBeGreaterThanOrEqual(44);
-  expect(metrics.paddingRight).toBeGreaterThanOrEqual(12);
-  expect(metrics.headerRight - (metrics.actions.x + metrics.actions.width)).toBeGreaterThanOrEqual(metrics.paddingRight - 1);
-  expect(metrics.clippingRight - (metrics.moreActions.x + metrics.moreActions.width)).toBeGreaterThanOrEqual(11.5);
-  // Still one row: the compact bar truncates instead of stacking actions under the title.
-  const center = (box: { y: number; height: number }) => box.y + box.height / 2;
-  expect(Math.abs(center(metrics.actions) - center(metrics.crumbs))).toBeLessThanOrEqual(1);
-
-  await header.getByRole("button", { name: "More Actions" }).click();
-  const menu = page.getByRole("menu", { name: "Session Actions" });
-  await expect(menu).toBeVisible();
-  for (const item of await menu.getByRole("menuitem").all()) {
-    const box = await item.boundingBox();
-    expect(box?.height).toBeGreaterThanOrEqual(44);
-  }
-});
+}
 
 test("long session titles truncate inside the breadcrumb without hiding actions", async ({ page }) => {
   await page.setViewportSize({ width: 780, height: 800 });
@@ -284,12 +421,12 @@ test("unbroken 120-character session titles truncate without overlapping bar act
   expect(metrics.clippingRight - metrics.moreActionsRight).toBeGreaterThanOrEqual(11.5);
 });
 
-test("the session bar keeps 44-pixel targets and a bounded menu above the phone breakpoint", async ({ page }) => {
+test("the two mobile Session bars keep 44-pixel targets and a bounded menu near the breakpoint", async ({ page }) => {
   await page.setViewportSize({ width: 700, height: 800 });
-  await openSession(page);
+  await openSession(page, "preview-follow", { sessionShell: "1" });
   const header = page.locator(".session-detail > .detail-head");
   const actions = header.locator(".detail-actions");
-  const backBox = await header.locator(".back").boundingBox();
+  const backBox = await page.locator(".topbar").getByRole("button", { name: "Back to Inbox" }).boundingBox();
 
   expect(backBox?.width).toBeGreaterThanOrEqual(44);
   expect(backBox?.height).toBeGreaterThanOrEqual(44);
@@ -313,6 +450,63 @@ test("the session bar keeps 44-pixel targets and a bounded menu above the phone 
     const box = await item.boundingBox();
     expect(box?.height).toBeGreaterThanOrEqual(44);
   }
+});
+
+test("the Share menu scrolls inside a short landscape-phone viewport", async ({ page }) => {
+  await page.setViewportSize({ width: 568, height: 320 });
+  await openSession(page, "git-visibility", { sessionShell: "1" });
+  await page.locator(".session-detail > .detail-head").getByRole("button", { name: "Share" }).click();
+  const menu = page.getByRole("menu", { name: "Session Sharing" });
+  await expect(menu).toBeVisible();
+  const geometry = await menu.evaluate((element) => {
+    const box = element.getBoundingClientRect();
+    return {
+      top: box.top,
+      bottom: box.bottom,
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+      overflowY: getComputedStyle(element).overflowY,
+    };
+  });
+  expect(geometry.top).toBeGreaterThanOrEqual(0);
+  expect(geometry.bottom).toBeLessThanOrEqual(320);
+  expect(geometry.scrollHeight).toBeGreaterThan(geometry.clientHeight);
+  expect(geometry.overflowY).toBe("auto");
+  await menu.getByRole("menuitem", { name: "Export JSON" }).scrollIntoViewIfNeeded();
+  await expect(menu.getByRole("menuitem", { name: "Export JSON" })).toBeVisible();
+});
+
+test("legacy control planes keep mobile Workspace re-filing in More Actions", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 800 });
+  await openSession(page, "preview-follow", { sessionShell: "1", legacyWorkspaces: "1" });
+  const moreActions = page.locator(".session-detail > .detail-head").getByRole("button", { name: "More Actions" });
+  await moreActions.click();
+  const menu = page.getByRole("menu", { name: "Session Actions" });
+  await expect(menu.locator(".session-project-menu-header")).toHaveText("Workspace · alpha-workspace");
+  await expect(menu.getByRole("menuitem", { name: "Manage Project" })).toHaveCount(0);
+  await menu.getByRole("menuitem", { name: "Move Session…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Move to Workspace" });
+  await expect(dialog.getByRole("radio", { name: /Alpha Secondary/ })).toBeVisible();
+  await dialog.getByRole("button", { name: "New Workspace…" }).click();
+  const createDialog = page.getByRole("dialog", { name: "Create Workspace" });
+  await expect(createDialog.getByRole("textbox", { name: "Workspace Name" })).toBeVisible();
+  await expect(createDialog.getByRole("button", { name: "Browse for a Folder…" })).toBeVisible();
+  await createDialog.getByRole("button", { name: "Cancel" }).click();
+  const returnedDialog = page.getByRole("dialog", { name: "Move to Workspace" });
+  await returnedDialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(moreActions).toBeFocused();
+});
+
+test("legacy unfiled sessions use the Workspace vocabulary in More Actions", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 800 });
+  await openSession(page, "preview-follow", {
+    sessionShell: "1",
+    legacyWorkspaces: "1",
+    unfiledWorkspace: "1",
+  });
+  await page.locator(".session-detail > .detail-head").getByRole("button", { name: "More Actions" }).click();
+  await expect(page.getByRole("menu", { name: "Session Actions" }).locator(".session-project-menu-header"))
+    .toHaveText("Workspace · No Workspace");
 });
 
 test("shared Pod headers keep their trailing controls out of the back-button track", async ({ page }) => {

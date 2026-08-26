@@ -137,6 +137,17 @@ test("turn interruption is a standalone non-error transcript outcome with record
   assert.deepEqual(groupTimeline(items).map((group) => group.kind), ["item", "item", "item"]);
 });
 
+test("streamed response completion evidence stays hidden and does not duplicate content", () => {
+  const items = deriveTimeline([
+    ev({ kind: "agent_message", text: "streamed answer" }),
+    ev({ kind: "agent_response_completed" }),
+    ev({ kind: "agent_message", text: "later response" }),
+  ]);
+  assert.deepEqual(items.map((item) => item.kind), ["agent_message", "agent_message"]);
+  assert.equal((items[0] as Extract<TimelineItem, { kind: "agent_message" }>).text, "streamed answer");
+  assert.equal((items[1] as Extract<TimelineItem, { kind: "agent_message" }>).text, "later response");
+});
+
 test("managed continuation delivery markers remain durable but hidden from the timeline", () => {
   const items = deriveTimeline([
     ev({ kind: "stderr", text: "before" }),
@@ -375,6 +386,13 @@ test("artifact-backed output remains a standalone preview and keeps its ordered 
   assert.deepEqual(backed.textRefs, refs);
 });
 
+test("command output keeps structured subagent parent attribution", () => {
+  const item = deriveTimeline([
+    ev({ kind: "command_output", text: "child output", parentToolUseId: "child-agent" }),
+  ])[0] as Extract<TimelineItem, { kind: "command_output" }>;
+  assert.equal(item.parentToolUseId, "child-agent");
+});
+
 test("tool-call projections preserve every artifact-backed text fragment", () => {
   const first = [payloadRef("tool-1")];
   const second = [payloadRef("tool-2")];
@@ -526,6 +544,26 @@ test("stream start + authoritative tool call upsert by id instead of duplicating
   });
 });
 
+test("tool updates preserve authoritative subagent lifecycle", () => {
+  const item = deriveTimeline([
+    ev({
+      kind: "tool_call",
+      toolCallId: "agent",
+      title: "Spawn Agent",
+      toolKind: "agent",
+      status: "in_progress",
+      subagentLifecycle: "starting",
+    }),
+    ev({
+      kind: "tool_call_update",
+      toolCallId: "agent",
+      status: "in_progress",
+      subagentLifecycle: "waiting",
+    }),
+  ])[0] as Extract<TimelineItem, { kind: "tool_call" }>;
+  assert.equal(item.subagentLifecycle, "waiting");
+});
+
 test("groupTimeline folds reasoning + tool calls into a work block, messages stay standalone", () => {
   const items = deriveTimeline([
     ev({ kind: "user_message", text: "go" }),
@@ -605,19 +643,41 @@ test("side pane collapses per-turn worktree deltas into one Files entry", () => 
   );
 });
 
-test("question_request renders a question item; question_resolved marks it answered", () => {
+test("question resolution projection preserves submitted and replacement outcomes", () => {
+  const questions = [{ id: "Which?", question: "Which?", options: [{ label: "A" }, { label: "B" }] }];
+  const items = deriveTimeline([
+    ev({ kind: "question_request", requestId: "submitted", questions }),
+    ev({ kind: "question_resolved", requestId: "submitted", answered: true, resolutionReason: "submitted" }),
+    ev({ kind: "question_request", requestId: "replaced", questions }),
+    ev({ kind: "question_resolved", requestId: "replaced", answered: false, resolutionReason: "replaced" }),
+  ]);
+  assert.equal(items.length, 2);
+  const submitted = items[0] as Extract<import("./timeline.js").TimelineItem, { kind: "question" }>;
+  const replaced = items[1] as Extract<import("./timeline.js").TimelineItem, { kind: "question" }>;
+  assert.equal(submitted.answered, true);
+  assert.equal(submitted.resolutionReason, "submitted");
+  assert.equal(replaced.answered, false);
+  assert.equal(replaced.resolutionReason, "replaced");
+});
+
+test("permission resolution reasons survive timeline projection", () => {
   const items = deriveTimeline([
     ev({
-      kind: "question_request",
-      requestId: "q1",
-      questions: [{ id: "Which?", question: "Which?", options: [{ label: "A" }, { label: "B" }] }],
+      kind: "permission_request",
+      requestId: "p-provider",
+      title: "Approve command",
+      options: [{ optionId: "allow", name: "Allow" }],
     }),
-    ev({ kind: "question_resolved", requestId: "q1", answered: true }),
+    ev({
+      kind: "permission_resolved",
+      requestId: "p-provider",
+      optionId: null,
+      resolutionReason: "provider_resolved",
+    }),
   ]);
-  assert.equal(items.length, 1);
-  const q = items[0] as Extract<import("./timeline.js").TimelineItem, { kind: "question" }>;
-  assert.equal(q.kind, "question");
-  assert.equal(q.answered, true);
+  const permission = items[0] as Extract<import("./timeline.js").TimelineItem, { kind: "permission" }>;
+  assert.equal(permission.resolvedOptionId, null);
+  assert.equal(permission.resolutionReason, "provider_resolved");
 });
 
 test("permission context rides into the timeline item", () => {
@@ -632,6 +692,128 @@ test("permission context rides into the timeline item", () => {
   ]);
   const p = items[0] as Extract<import("./timeline.js").TimelineItem, { kind: "permission" }>;
   assert.equal(p.context?.input, "rm -rf build");
+});
+
+test("repeated pending permission requests update one stable transcript row", () => {
+  const builder = new TimelineBuilder();
+  builder.push(ev({
+    kind: "permission_request",
+    requestId: "p1",
+    title: "First Title",
+    options: [{ optionId: "first", name: "First" }],
+    context: { toolName: "Bash", input: "first guidance" },
+  }));
+  const first = builder.snapshot();
+  builder.push(ev({
+    kind: "permission_request",
+    requestId: "p1",
+    title: "Updated Title",
+    options: [{ optionId: "updated", name: "Updated" }],
+    context: { toolName: "Bash", input: "updated guidance" },
+  }));
+  const updated = builder.snapshot();
+
+  assert.equal(updated.length, 1);
+  assert.equal(updated[0]?.id, first[0]?.id, "the transcript position retains its original identity");
+  assert.deepEqual(updated[0], {
+    kind: "permission",
+    id: first[0]!.id,
+    requestId: "p1",
+    title: "Updated Title",
+    options: [{ optionId: "updated", name: "Updated" }],
+    context: { toolName: "Bash", input: "updated guidance" },
+    resolvedOptionId: undefined,
+    resolutionReason: undefined,
+  });
+  assert.deepEqual(timelineSnapshotDelta(updated)?.dirtyIndexes, [0]);
+});
+
+test("authentication request identity changes coalesce until the current request resolves", () => {
+  const events = [
+    ev({
+      kind: "permission_request",
+      requestId: "provider-auth:recovery",
+      title: "Authentication Required — Claude Code",
+      options: [{ optionId: "auth:login", name: "Start Sign-In" }],
+      purpose: "authentication",
+      context: { toolName: "Claude Code", input: "Sign in." },
+    }),
+    ev({ kind: "agent_message", text: "The row must stay before this message.", final: true }),
+    ev({
+      kind: "permission_request",
+      requestId: "provider-auth:recovery:login-operation",
+      title: "Signing In — Claude Code",
+      options: [{ optionId: "auth:cancel", name: "Cancel Sign-In" }],
+      purpose: "authentication",
+      context: { toolName: "Claude Code", input: "Provider-owned sign-in is active." },
+    }),
+    ev({
+      kind: "permission_resolved",
+      requestId: "provider-auth:recovery",
+      optionId: "auth:login",
+    }),
+    ev({
+      kind: "permission_request",
+      requestId: "provider-auth:recovery",
+      title: "Authentication Required — Claude Code",
+      options: [{ optionId: "auth:revalidate", name: "Recheck Authentication" }],
+      purpose: "authentication",
+      context: { toolName: "Claude Code", input: "Sign-in finished; recheck authentication." },
+    }),
+    ev({
+      kind: "permission_resolved",
+      requestId: "provider-auth:recovery",
+      optionId: "auth:revalidate",
+      resolutionReason: "submitted",
+    }),
+  ];
+
+  const projected = deriveTimeline(events);
+  const permissions = projected.filter(
+    (item): item is Extract<TimelineItem, { kind: "permission" }> => item.kind === "permission",
+  );
+  assert.equal(permissions.length, 1);
+  assert.equal(projected[0]?.kind, "permission", "updates do not move the original row");
+  assert.deepEqual(permissions[0], {
+    kind: "permission",
+    id: events[0]!.seq,
+    requestId: "provider-auth:recovery",
+    title: "Authentication Required — Claude Code",
+    options: [{ optionId: "auth:revalidate", name: "Recheck Authentication" }],
+    context: { toolName: "Claude Code", input: "Sign-in finished; recheck authentication." },
+    resolvedOptionId: "auth:revalidate",
+    resolutionReason: "submitted",
+  });
+
+  const live = new TimelineBuilder();
+  for (const event of events) live.push(event);
+  assert.deepEqual(live.snapshot(), projected, "live streaming and replay produce the same timeline");
+});
+
+test("a later authentication recovery creates a new historical card after resolution", () => {
+  const items = deriveTimeline([
+    ev({
+      kind: "permission_request",
+      requestId: "provider-auth:first",
+      title: "Authentication Required — Claude Code",
+      options: [{ optionId: "auth:dismiss", name: "Dismiss Recovery" }],
+      purpose: "authentication",
+    }),
+    ev({ kind: "permission_resolved", requestId: "provider-auth:first", optionId: "auth:dismiss" }),
+    ev({
+      kind: "permission_request",
+      requestId: "provider-auth:second",
+      title: "Authentication Required — Claude Code",
+      options: [{ optionId: "auth:revalidate", name: "Recheck Authentication" }],
+      purpose: "authentication",
+    }),
+  ]);
+  const permissions = items.filter((item) => item.kind === "permission");
+  assert.equal(permissions.length, 2);
+  assert.deepEqual(
+    permissions.map((item) => [item.requestId, item.resolvedOptionId]),
+    [["provider-auth:first", "auth:dismiss"], ["provider-auth:second", undefined]],
+  );
 });
 
 test("review_decision renders as a standalone visible timeline item", () => {
@@ -705,6 +887,7 @@ test("nestSubagents: a subagent's items nest under the Task tool call that spawn
     ev({ kind: "agent_message", text: "looking around", parentToolUseId: "task1" }),
     ev({ kind: "tool_call", toolCallId: "grep1", title: "Grep", status: "in_progress", parentToolUseId: "task1" }),
     ev({ kind: "tool_call_update", toolCallId: "grep1", status: "completed", parentToolUseId: "task1" }),
+    ev({ kind: "command_output", text: "child command output", parentToolUseId: "task1" }),
     ev({ kind: "agent_message", text: "done exploring" }), // top-level, after the subagent
   ]);
   const nested = nestSubagents(items);
@@ -713,8 +896,8 @@ test("nestSubagents: a subagent's items nest under the Task tool call that spawn
   assert.deepEqual(nested.map((i) => i.kind), ["tool_call", "agent_message"]);
   const task = nested[0] as Extract<TimelineItem, { kind: "tool_call" }>;
   assert.equal(task.toolCallId, "task1");
-  assert.equal(task.children?.length, 2, "message + the (merged) grep call");
-  assert.deepEqual(task.children?.map((c) => c.kind), ["agent_message", "tool_call"]);
+  assert.equal(task.children?.length, 3, "message + the (merged) grep call + attributed command output");
+  assert.deepEqual(task.children?.map((c) => c.kind), ["agent_message", "tool_call", "command_output"]);
   assert.equal((nested[1] as { text: string }).text, "done exploring");
 });
 

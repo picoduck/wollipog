@@ -233,7 +233,36 @@
 // 83: runners explicitly classify provider background-work tracking. Providers without a
 //     lifecycle signal report `untracked` instead of letting an absent field imply safety.
 //     Structured continuation evidence carries bounded provider-neutral terminal summaries.
-export const PROTOCOL_VERSION = 83;
+// 84: replacement starts carry a control-plane launch identity that runners persist and echo in
+//     live status and reconnect snapshots, proving which runtime crossed a durable Stop fence.
+// 85: stop_session carries a durable operation identity and correlated acceptance or rejection.
+//     Older runners retain the conservative Stop Pending behavior.
+// 86: structured questions may include provider-declared free-text input, optional fields,
+//     secret entry, primitive format/length/range constraints, and multi-select cardinality.
+//     All fields are additive; pre-v86 peers retain the original required-choice behavior.
+// 87: streamed agent responses gain a content-free completion event. New runners emit it only at
+//     an authoritative successful turn boundary; older runners omit it and reminders retain their
+//     scheduled fallback. The separate event avoids replaying message text for legacy consumers.
+// 88: structured request resolution events gain an optional bounded reason so replacement,
+//     provider-side settlement, explicit submission, and dismissal remain distinguishable in
+//     durable history. Pre-v88 peers retain the existing optionId/answered presentation.
+// 89: Stop delivery attempts carry a distinct durable identity in addition to their stable
+//     operation identity, so delayed results cannot cross an authorized retry boundary. Older
+//     peers retain conservative Stop Pending behavior because they cannot prove the attempt.
+// 90: Managed agent skills: the control plane pushes the authoritative desired skill set for a
+//     machine (skills_sync) and the runner reports authoritative deployment state (skills_state).
+//     Pre-v90 runners never receive the new messages because the capability gate fails closed.
+// 91: the Conductor's runner env gate (WOLLIPOG_CONDUCTOR) is removed; the device-local
+//     Conductor-Led Work experiment (default off, versioned client storage) becomes the only
+//     gate. A runner synthesizes and advertises the conductor only to a v91+ control plane:
+//     older deployments serve web bundles that both default the experiment ON and cannot
+//     distinguish a legacy stored opt-in, so unconditional advertisement to them would surface
+//     the feature to users who never chose it.
+// 92: authoritative cross-harness subagent lifecycle. Tool events may carry a provider-observed
+//     subagentLifecycle independent of the foreground session lifecycle, and command output can be
+//     attributed to its spawning agent. Pre-v92 runners omit both fields; dashboards retain the
+//     existing conservative session/tool inference and flat command-output presentation.
+export const PROTOCOL_VERSION = 92;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
@@ -347,8 +376,15 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   durablePromptQueueIdentity: 78,
   providerAuthenticationReceipts: 79,
   subscriptionUsage: 80,
+  /** The control plane serves an experiment-gated web bundle (versioned conductor storage,
+   * default off). Runners fence unconditional conductor advertisement on this floor. */
+  ungatedConductorAdvertisement: 91,
   managedBackgroundDelivery: 82,
   backgroundWorkTracking: 83,
+  correlatedRestartEcho: 84,
+  stopFailureRecovery: 85,
+  stopAttemptCorrelation: 89,
+  agentSkills: 90,
 } as const;
 
 /* ========================================================================== */
@@ -480,6 +516,41 @@ export function providerAuthenticationReceiptCode(
     : "COMMAND_CANCELLED";
 }
 
+/** Additive event kinds that have an explicit older-peer wire policy. Kinds absent from this
+ * table are sent unchanged: an unreviewed event must fail closed at an older consumer rather than
+ * being silently discarded. */
+const SESSION_EVENT_WIRE_POLICIES = {
+  agent_response_completed: { minProtocol: 87, legacy: "omit" },
+} as const satisfies Partial<Record<SessionEventKind, {
+  minProtocol: number;
+  legacy: "omit";
+}>>;
+
+/** Whether this peer needs any explicit additive session-event compatibility projection.
+ * Keeping policy inspection beside the policy table avoids callers probing it with a fabricated
+ * payload and automatically covers future reviewed event policies. */
+export function sessionEventWireProjectionRequiredForProtocol(
+  protocolVersion: number | null | undefined,
+): boolean {
+  return Object.values(SESSION_EVENT_WIRE_POLICIES).some(
+    (policy) => !Number.isInteger(protocolVersion) || protocolVersion! < policy.minProtocol,
+  );
+}
+
+/** Project one exact runner-local event payload for the currently connected control plane.
+ * `null` means that this explicitly reviewed event kind is safe to omit from the older peer's
+ * dense wire history. Callers remain responsible for projecting its runner sequence. */
+export function projectSessionEventPayloadForProtocol(
+  payload: SessionEventPayload,
+  protocolVersion: number | null | undefined,
+): SessionEventPayload | null {
+  const policy = SESSION_EVENT_WIRE_POLICIES[payload.kind as keyof typeof SESSION_EVENT_WIRE_POLICIES];
+  if (policy && (!Number.isInteger(protocolVersion) || protocolVersion! < policy.minProtocol)) {
+    if (policy.legacy === "omit") return null;
+  }
+  return payload;
+}
+
 /** Project additive receipt codes at the actual socket-send boundary. Keeping buffered messages
  * exact until then makes reconnecting to an older control plane safe. */
 export function projectRunnerMessageForProtocol(
@@ -560,6 +631,79 @@ export interface AgentSlashCommand {
 }
 
 export type SessionCommandExecutionMode = "passthrough" | "structured";
+
+/* --- Managed agent skills (control-plane-owned skill deployment, protocol v90) --- */
+
+/** One file inside a managed skill, addressed by a validated POSIX-relative path. */
+export interface SkillFile {
+  path: string;
+  content: string;
+  encoding: "utf8" | "base64";
+}
+
+/** Whether the deployed variant lets the model invoke the skill or reserves it for manual use. */
+export type SkillInvocationPolicy = "agent" | "manual";
+
+/** One exact runner agent that should receive a harness link for a skill. */
+export interface SkillSyncTarget {
+  agentId: string;
+  invocation: SkillInvocationPolicy;
+}
+
+/** Complete desired deployment of one skill version on one machine. */
+export interface SkillSyncEntry {
+  /** Kebab-case directory name; must equal the SKILL.md frontmatter name. */
+  name: string;
+  /** sha256 hex of the canonical file manifest (see skillVersionDigest in skills-digest.ts). */
+  versionDigest: string;
+  files: SkillFile[];
+  targets: SkillSyncTarget[];
+}
+
+export type SkillLinkStatus = "linked" | "conflict" | "unsupported" | "error";
+
+/** Deployment outcome for one (skill, agent) harness link on the runner host. */
+export interface SkillLinkState {
+  agentId: string;
+  status: SkillLinkStatus;
+  /** Sanitized human-readable reason for a non-linked status. */
+  detail?: string;
+}
+
+export interface DeployedSkillState {
+  name: string;
+  digest: string;
+  links: SkillLinkState[];
+  error?: string;
+}
+
+/** A skill found in a harness skill directory that the control plane does not manage. */
+export interface UnmanagedSkillInfo {
+  agentId: string;
+  name: string;
+  description?: string;
+}
+
+export const SKILL_MAX_FILES = 64;
+export const SKILL_MAX_TOTAL_BYTES = 2 * 1024 * 1024;
+export const SKILL_MAX_FILE_BYTES = 512 * 1024;
+
+/** A skill name is also its on-disk directory name: the leading character class rejects ".",
+ * "..", and every hidden-file spelling, and the class as a whole rejects path separators. */
+export function validSkillName(name: string): boolean {
+  return /^[a-z0-9][a-z0-9._-]{0,63}$/.test(name);
+}
+
+/** Validate a relative POSIX path inside a skill directory without ever allowing an absolute,
+ * parent-relative, backslashed, or drive-lettered target. Unlike normalizeSourcePath this never
+ * rewrites: the exact wire path participates in the version digest and must already be canonical. */
+export function validSkillFilePath(p: string): boolean {
+  if (!p || p.length > 256 || /[\0-\x1f\x7f]/.test(p) || p.includes("\\")) return false;
+  if (p.startsWith("/") || /^[A-Za-z]:/.test(p)) return false;
+  const parts = p.split("/");
+  if (parts.length > 8) return false;
+  return parts.every((part) => part !== "" && part !== "." && part !== "..");
+}
 
 /** How an agent can deliver a permission decision for one permission mode. */
 export type ElicitationTransport =
@@ -1221,6 +1365,41 @@ export type SessionStatus =
   | "failed"
   | "stopped";
 
+/** Server-owned archive lifecycle. An active archive request stays visible until the runner
+ * proves that its provider process is terminal or absent. Omitted means no archive operation is
+ * pending (including older control planes). */
+export type ArchiveStatus = "stop_pending" | "stop_failed";
+
+export type ArchiveStopFailureCode = "timeout" | "retry_exhausted" | "runner_rejected";
+
+/** Structured, server-owned Stop operation. Failure never proves that runtime capacity was
+ * released, and the operation identity remains stable across idempotent retries. */
+export interface StopOperationView {
+  operationId: string;
+  status: ArchiveStatus;
+  requestedAt: number;
+  lastAttemptAt: number;
+  attemptCount: number;
+  /** When the runner accepted the current delivery attempt. Acceptance starts a bounded
+   * completion window but is not evidence that runtime capacity was released. */
+  acceptedAt?: number;
+  capacityReleased: false;
+  failure?: {
+    code: ArchiveStopFailureCode;
+    message: string;
+    failedAt: number;
+  };
+}
+
+/** Compatibility name retained for clients that consume archive-specific Stop state. */
+export type ArchiveOperationView = StopOperationView;
+
+/** Archive must release runtime capacity for every non-terminal provider lifecycle. Idle is
+ * intentionally included: it can retain a resident provider process and runner/target leases. */
+export function archiveRequiresStop(status: SessionStatus): boolean {
+  return !isTerminal(status);
+}
+
 /** Kanban board columns. A session's column is derived from status unless the
  * user has manually filed it (e.g. moved to "review" or archived). */
 export type BoardColumn = "queued" | "running" | "input_required" | "review" | "done";
@@ -1266,6 +1445,14 @@ export interface PermissionOption {
   /** ACP option kind, e.g. allow_once / allow_always / reject_once / reject_always */
   kind?: string;
 }
+
+/** Bounded lifecycle reason shared by question and permission history. The selected option and
+ * answered flag retain provider-neutral decision detail; this field explains how the ask ended. */
+export type StructuredRequestResolutionReason =
+  | "submitted"
+  | "dismissed"
+  | "replaced"
+  | "provider_resolved";
 
 /** Bounded rendering of WHAT is being approved (tool name + its input) — the trust surface:
  * an Allow button without the command/diff it authorizes defeats confirm-before-apply. */
@@ -1318,6 +1505,57 @@ export interface PolicyHookEvaluationResponse {
   expiresAt?: number;
 }
 
+/** User attention is orthogonal to lifecycle: a paused turn may need an answer, authentication,
+ * or approval, while an older runner may expose only the undifferentiated input_required state. */
+export type SessionAttentionKind =
+  | "approval_required"
+  | "answer_required"
+  | "authentication_required"
+  | "review_requested"
+  | "input_required";
+
+export interface SessionAttentionStatus {
+  kind: SessionAttentionKind;
+  label: string;
+  description: string;
+}
+
+/** Canonical, compatibility-safe projection of the concrete action a person must take. */
+export function sessionAttentionStatus(
+  session: Pick<SessionView, "status" | "pendingApproval">,
+): SessionAttentionStatus | null {
+  const pending = session.pendingApproval;
+  if (pending?.kind === "question") {
+    return {
+      kind: "answer_required",
+      label: "Answer Required",
+      description: "The agent asked a question and is waiting for an answer.",
+    };
+  }
+  if (pending?.kind === "authentication") {
+    return {
+      kind: "authentication_required",
+      label: "Authentication Required",
+      description: "The agent is waiting for authentication.",
+    };
+  }
+  if (pending) {
+    return {
+      kind: "approval_required",
+      label: "Approval Required",
+      description: "The agent is waiting for an approval decision.",
+    };
+  }
+  if (session.status === "input_required") {
+    return {
+      kind: "input_required",
+      label: "Input Required",
+      description: "This session needs user input, but an older or incomplete update did not identify the action.",
+    };
+  }
+  return null;
+}
+
 /** One option in a structured agent question. The normalized contract preserves provider-native
  * labels and descriptions without exposing provider-specific wire shapes to the UI. */
 export interface QuestionOption {
@@ -1326,28 +1564,109 @@ export interface QuestionOption {
 }
 
 export interface AgentQuestion {
+  /** Provider-supplied context for this question. */
+  context?: string;
   /** Opaque answer key. For native Claude this is the question TEXT (the SDK looks answers up
    * by text) — the UI must treat it as opaque and key answers by it verbatim. */
   id: string;
   /** Short chip label, e.g. "Language". */
   header?: string;
   question: string;
+  /** Multi-select answers contain offered labels only. This is mutually exclusive with
+   * `allowOther`; custom values have no unambiguous array representation on the normalized wire. */
   multiSelect?: boolean;
   options: QuestionOption[];
+  /** Whether the provider accepts a free-form string instead of one of options[]. Mutually
+   * exclusive with `multiSelect`; producers must reject that unsupported combination. */
+  allowOther?: boolean;
+  /** Optional provider form fields may be omitted. Absence keeps the legacy required behavior. */
+  required?: boolean;
+  /** Render free-form input without echoing its value on screen. Answers remain transient. */
+  secret?: boolean;
+  /** Provider primitive expected for free-form input. Values cross the normalized boundary as
+   * strings and the owning driver converts them back to its native wire type. */
+  inputFormat?: "text" | "email" | "url" | "date" | "date-time" | "number" | "integer";
+  minLength?: number;
+  /** Absent means the provider declared no bound; validators fall back to
+   * DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH rather than accepting an unbounded answer. */
+  maxLength?: number;
+  minimum?: number;
+  maximum?: number;
+  minSelections?: number;
+  maxSelections?: number;
+}
+
+export function isSupportedAgentQuestion(question: AgentQuestion): boolean {
+  return !(question.multiSelect === true && question.allowOther === true);
+}
+
+/** Upper bound applied to any provider free-text answer that declares no `maxLength`. Providers
+ * are not obliged to bound their own fields, and an unbounded answer rides verbatim into the
+ * provider response and the durable event log, so the shared validators impose this default. */
+export const DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH = 4000;
+
+/** Validate one provider-declared free-text value. Shared by the UI's submit gate and the
+ * control plane's authoritative answer validation so both layers enforce the same constraints. */
+export function validateQuestionFreeText(question: AgentQuestion, value: string): string | null {
+  if (!value.length) return "expects a non-empty response";
+  if (question.minLength != null && value.length < question.minLength) {
+    return `expects at least ${question.minLength} character(s)`;
+  }
+  const maxLength = question.maxLength ?? DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH;
+  if (value.length > maxLength) {
+    return `expects at most ${maxLength} character(s)`;
+  }
+  if (question.inputFormat === "number" || question.inputFormat === "integer") {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || (question.inputFormat === "integer" && !Number.isInteger(parsed))) {
+      return `expects a valid ${question.inputFormat}`;
+    }
+    if (question.minimum != null && parsed < question.minimum) return "is below its minimum";
+    if (question.maximum != null && parsed > question.maximum) return "is above its maximum";
+  }
+  if (question.inputFormat === "email" && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
+    return "expects a valid email address";
+  }
+  if (question.inputFormat === "url" && !/^[A-Za-z][A-Za-z0-9+.-]*:[^\s]+$/.test(value)) {
+    return "expects a valid URI";
+  }
+  if (question.inputFormat === "date" && !isValidDate(value)) return "expects a valid date";
+  if (
+    question.inputFormat === "date-time" &&
+    (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(value) || !isValidDate(value.slice(0, 10)) || Number.isNaN(Date.parse(value)))
+  ) {
+    return "expects a valid date and time";
+  }
+  return null;
+}
+
+function isValidDate(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  return parsed.getUTCFullYear() === year && parsed.getUTCMonth() === month - 1 && parsed.getUTCDate() === day;
 }
 
 /**
  * Validate a submitted answer map against the questions it answers. Returns null when valid,
- * else a human-readable reason. An EMPTY map is valid — it means dismiss. Guards the /answer
- * route: answers ride verbatim into the agent's updatedInput, so unknown keys, wrong shapes
+ * else a human-readable reason. An EMPTY map is valid: legacy callers use it for dismissal,
+ * while an explicit submit action may accept an all-optional form. Guards the /answer route:
+ * answers ride verbatim into the agent's updatedInput, so unknown keys, wrong shapes
  * (array for single-select), or labels that were never offered must be rejected server-side.
  */
 export function validateQuestionAnswers(
   questions: AgentQuestion[],
   answers: Record<string, string | string[]>,
+  action?: "submit" | "dismiss",
 ): string | null {
   const keys = Object.keys(answers);
-  if (keys.length === 0) return null; // dismiss
+  if (action === "dismiss" && keys.length > 0) return "a dismissal cannot include answers";
+  if (keys.length === 0 && action !== "submit") return null; // legacy or explicit dismiss
+  const unsupported = questions.find((question) => !isSupportedAgentQuestion(question));
+  if (unsupported) return `"${unsupported.id.slice(0, 80)}" cannot combine multi-select and Other responses`;
   const byId = new Map(questions.map((q) => [q.id, q]));
   for (const key of keys) {
     const q = byId.get(key);
@@ -1355,8 +1674,8 @@ export function validateQuestionAnswers(
     const value = answers[key];
     const offered = new Set(q.options.map((o) => o.label));
     if (q.multiSelect) {
-      if (!Array.isArray(value) || value.length === 0) {
-        return `"${q.id.slice(0, 80)}" expects a non-empty array of labels`;
+      if (!Array.isArray(value)) {
+        return `"${q.id.slice(0, 80)}" expects an array of labels`;
       }
       if (value.some((v) => typeof v !== "string" || !offered.has(v))) {
         return `"${q.id.slice(0, 80)}" got a label that was not offered`;
@@ -1364,9 +1683,19 @@ export function validateQuestionAnswers(
       if (new Set(value).size !== value.length) {
         return `"${q.id.slice(0, 80)}" got duplicate labels`;
       }
+      const minimum = q.minSelections ?? (q.required === false ? 0 : 1);
+      if (value.length < minimum) return `"${q.id.slice(0, 80)}" expects at least ${minimum} selection(s)`;
+      if (q.maxSelections != null && value.length > q.maxSelections) {
+        return `"${q.id.slice(0, 80)}" expects at most ${q.maxSelections} selection(s)`;
+      }
     } else {
-      if (typeof value !== "string" || !offered.has(value)) {
+      if (typeof value !== "string") return `"${q.id.slice(0, 80)}" expects one offered label`;
+      if (!offered.has(value) && !q.allowOther) {
         return `"${q.id.slice(0, 80)}" expects one offered label`;
+      }
+      if (!offered.has(value)) {
+        const freeTextError = validateQuestionFreeText(q, value);
+        if (freeTextError) return `"${q.id.slice(0, 80)}" ${freeTextError}`;
       }
     }
   }
@@ -1374,7 +1703,7 @@ export function validateQuestionAnswers(
     // Object.hasOwn, not `in`: question ids come from agent-controlled text, and an id like
     // "constructor" would satisfy an `in` check via the prototype chain — passing validation
     // with no actual answer for that question.
-    if (!Object.hasOwn(answers, q.id)) return `missing answer for: ${q.id.slice(0, 80)}`;
+    if (q.required !== false && !Object.hasOwn(answers, q.id)) return `missing answer for: ${q.id.slice(0, 80)}`;
   }
   return null;
 }
@@ -1892,6 +2221,18 @@ export function validatePromptImageInputs(
 
 /* ---------------------------- Session events ------------------------------ */
 
+/** Provider-observed subagent lifecycle. Unlike a generic tool status, this may remain active
+ * after the foreground parent turn becomes idle. Consumers must not synthesize it when the
+ * provider exposes only an unstructured task summary. */
+export type AuthoritativeSubagentLifecycle =
+  | "starting"
+  | "running"
+  | "waiting"
+  | "completed"
+  | "failed"
+  | "interrupted"
+  | "unreachable";
+
 /**
  * Normalized streaming event taxonomy (brief-aligned). The runner maps ACP
  * `session/update` notifications onto these; the control plane assigns id/seq/ts.
@@ -1926,6 +2267,9 @@ export type SessionEventPayload =
       };
     }
   | { kind: "agent_message"; text: string; final?: boolean; messageId?: string; parentToolUseId?: string }
+  /** Content-free evidence that a response delivered as message chunks reached a successful turn
+   * boundary. Completion-only responses continue to use `agent_message.final` instead. */
+  | { kind: "agent_response_completed" }
   | { kind: "agent_thought"; text: string; final?: boolean; messageId?: string; parentToolUseId?: string }
   | {
       kind: "tool_call";
@@ -1938,6 +2282,8 @@ export type SessionEventPayload =
       // Set (v26+) when this call was made by a subagent — the id of the spawning Task tool
       // call. The UI nests it under that Task block; absent ⇒ a top-level call.
       parentToolUseId?: string;
+      /** Provider-observed lifecycle for an agent-spawning tool (v92+). */
+      subagentLifecycle?: AuthoritativeSubagentLifecycle;
     }
   | {
       kind: "tool_call_update";
@@ -1947,9 +2293,11 @@ export type SessionEventPayload =
       text?: string;
       textRefs?: EventPayloadReference[];
       parentToolUseId?: string;
+      /** Provider-observed lifecycle for an agent-spawning tool (v92+). */
+      subagentLifecycle?: AuthoritativeSubagentLifecycle;
     }
   | { kind: "plan"; entries: PlanEntry[]; parentToolUseId?: string }
-  | { kind: "command_output"; text: string; textRefs?: EventPayloadReference[] }
+  | { kind: "command_output"; text: string; textRefs?: EventPayloadReference[]; parentToolUseId?: string }
   | { kind: "file_edit"; path: string; diff?: string; diffRefs?: EventPayloadReference[]; parentToolUseId?: string }
   | {
       kind: "stderr";
@@ -1977,9 +2325,19 @@ export type SessionEventPayload =
     }
   | ({ kind: "review_decision" } & ReviewDecision)
   | { kind: "permission_request"; requestId: string; title: string; options: PermissionOption[]; context?: ApprovalContext; purpose?: "authentication" }
-  | { kind: "permission_resolved"; requestId: string; optionId: string | null }
+  | {
+      kind: "permission_resolved";
+      requestId: string;
+      optionId: string | null;
+      resolutionReason?: StructuredRequestResolutionReason;
+    }
   | { kind: "question_request"; requestId: string; questions: AgentQuestion[] }
-  | { kind: "question_resolved"; requestId: string; answered: boolean }
+  | {
+      kind: "question_resolved";
+      requestId: string;
+      answered: boolean;
+      resolutionReason?: StructuredRequestResolutionReason;
+    }
   | { kind: "checkpoint"; turn: number; tree: string }
   | { kind: "checkpoint_restored"; turn: number }
   | { kind: "conversation_checkpoint"; turn: number }
@@ -2046,6 +2404,39 @@ export interface UsageAggregationResponse {
   byDriver: UsageBreakdown[];
   byAgent: UsageBreakdown[];
   byRunner: UsageBreakdown[];
+}
+
+/* -------------------------- Session naming ----------------------------- */
+
+export type SessionNamingMode =
+  | "prompt_text_only"
+  | "session_agent_account"
+  | "custom_model_endpoint";
+
+export interface SessionNamingModeAvailability {
+  available: boolean;
+  reason?: string;
+}
+
+/** Secret-free organization setting. Legacy environment configuration is reported only as
+ * endpoint/model metadata; bearer credentials never cross the control-plane API boundary. */
+export interface SessionNamingSettingsView {
+  mode: SessionNamingMode;
+  effectiveMode: "prompt_text_only" | "custom_model_endpoint";
+  source: "default" | "environment" | "organization";
+  canManage: boolean;
+  modes: Record<SessionNamingMode, SessionNamingModeAvailability>;
+  customModel?: {
+    endpointOrigin: string;
+    model: string;
+    timeoutMs: number;
+    apiKeyConfigured: boolean;
+    configurationSource: "environment";
+  };
+}
+
+export interface UpdateSessionNamingSettingsRequest {
+  mode: SessionNamingMode;
 }
 
 /* ---------------- Provider subscription usage (account-level) ---------- */
@@ -2263,6 +2654,8 @@ export interface BackgroundDeliveryView {
   transcriptProjectedAt?: number;
   notificationQueuedAt?: number;
   dashboardObservedAt?: number;
+  /** Durable proof that this delivery consumed its correlated trailing busy-to-idle status. */
+  statusSettledAt?: number;
   /** Separate service, display, and click acknowledgements for each push subscription. */
   notifications?: BackgroundNotificationReceiptView[];
   watchdogState?: BackgroundDeliveryWatchdogState;
@@ -2437,6 +2830,15 @@ export interface SessionView {
   /** Protocol-v62 cloud acceptance proof. Absent until the runner's adapter accepts the handoff. */
   executionHandoff?: ExecutionHandoffReceipt;
   archived: boolean;
+  /** Durable server-owned stop-and-archive state. While pending, `archived` remains false so the
+   * session cannot disappear from ordinary clients before capacity release is confirmed. */
+  archiveStatus?: ArchiveStatus;
+  /** Structured operation state for clients that support Stop failure recovery. Omitted by older
+   * control planes and when no archive follow-up remains attached to the durable Stop intent. */
+  archiveOperation?: ArchiveOperationView;
+  /** Structured state for every durable Stop intent, including a plain Stop without an archive
+   * follow-up. Terminal or absence evidence removes the operation. */
+  stopOperation?: StopOperationView;
   createdAt: number;
   updatedAt: number;
   lastEventAt: number | null;
@@ -2491,6 +2893,33 @@ export interface SessionView {
   commandInvocations?: SessionCommandInvocationView[];
 }
 
+/** Control-plane-owned, per-user inbox visibility and reminder state. This is deliberately
+ * orthogonal to session lifecycle and archive state: snoozing never stops or detaches work. */
+export type SessionReminderWakePolicy = "until_activity" | "regardless";
+export type SessionReminderState = "pending" | "fired";
+export type SessionReminderWakeReason =
+  | "scheduled"
+  | "agent_response"
+  | "approval"
+  | "question"
+  | "failure"
+  | "background_job";
+
+export interface SessionReminderView {
+  reminderId: string;
+  sessionId: string;
+  scheduledFor: number;
+  timeZone: string;
+  originalExpression: string;
+  wakePolicy: SessionReminderWakePolicy;
+  state: SessionReminderState;
+  revision: number;
+  createdAt: number;
+  updatedAt: number;
+  firedAt?: number;
+  wakeReason?: SessionReminderWakeReason;
+}
+
 /** A provider-neutral auxiliary conversation attached to one primary session. The child is a
  * separate session (and therefore has separate transcript, accounting, and worktree state); this
  * relationship deliberately does not confer provider-fork or artifact ancestry. */
@@ -2507,6 +2936,8 @@ export interface SideChatView {
  */
 export interface SessionSnapshot {
   id: string;
+  /** Opaque CP launch identity echoed by runners that accepted a replacement start. */
+  controlPlaneLaunchId?: string;
   workspaceId: string | null;
   agentId: string | null;
   title: string;
@@ -3262,6 +3693,19 @@ export interface SessionStatusMessage {
   detail?: string;
   /** Set once when the runner creates an isolated worktree for the session. */
   worktreePath?: string | null;
+  /** Opaque identity of the accepted start_session command that owns this lifecycle. */
+  controlPlaneLaunchId?: string;
+}
+
+export interface StopSessionResultMessage {
+  type: "stop_session_result";
+  sessionId: string;
+  operationId: string;
+  /** Added in v89. Identifies the exact durable delivery attempt within the stable operation. */
+  deliveryAttemptId?: string;
+  accepted: boolean;
+  /** Bounded, provider-neutral rejection detail. Present only when accepted is false. */
+  error?: string;
 }
 
 /** Hash-only binding for one per-session Claude policy-hook credential. The plaintext remains in a
@@ -3474,6 +3918,7 @@ export type RunnerToControlPlane =
   | RegisterMessage
   | HeartbeatMessage
   | SessionStatusMessage
+  | StopSessionResultMessage
   | PolicyHookCredentialMessage
   | SessionRuntimeUpdatedMessage
   | SessionEventMessage
@@ -3507,6 +3952,7 @@ export type RunnerToControlPlane =
   | ForkResultMessage
   | LogoutAgentResultMessage
   | AcpRegistryApprovalResultMessage
+  | SkillsStateMessage
   | DurableSessionCommandResultMessage
   | DurableSessionCommandUpdateMessage
   | HostActionResultMessage;
@@ -3530,6 +3976,8 @@ export interface RegisterRejectedMessage {
 /** Everything the runner needs to launch an agent session locally. */
 export interface SessionLaunchSpec {
   sessionId: string;
+  /** Opaque identity used to prove that an ambiguous replacement start reached the runner. */
+  controlPlaneLaunchId?: string;
   workspaceId: string | null;
   workspacePath: string;
   agentId: string;
@@ -3742,6 +4190,10 @@ export interface CancelQueuedPromptMessage {
 export interface StopSessionMessage {
   type: "stop_session";
   sessionId: string;
+  /** Added in v85. Older runners ignore this optional field and emit no correlated result. */
+  operationId?: string;
+  /** Added in v89. Older runners omit this from their result and therefore fail conservatively. */
+  deliveryAttemptId?: string;
 }
 
 /** Re-arm runner-side governance after the user continues past a threshold. Values are absolute
@@ -3769,6 +4221,9 @@ export interface AnswerQuestionMessage {
   sessionId: string;
   requestId: string;
   answers: Record<string, string | string[]>;
+  /** Explicit UI intent distinguishes accepting an all-optional form from dismissing it.
+   * Optional for rolling compatibility; absent peers retain the legacy empty-map convention. */
+  action?: "submit" | "dismiss";
 }
 
 /** Restore a worktree session's FILES to the checkpoint taken before `turn` (T3-style rewind).
@@ -3860,6 +4315,30 @@ export interface AcpRegistryApprovalResultMessage {
   agentId: string;
   action: AcpRegistryApprovalAction;
   ok: boolean;
+  error?: string;
+}
+
+/* --- Managed agent skills (protocol v90) --- */
+
+/** Authoritative desired skill state for the whole machine. The runner reconciles against this
+ * complete list; anything managed but absent here is removed. */
+export interface SkillsSyncMessage {
+  type: "skills_sync";
+  runnerId: string;
+  /** Present when sent via requestFromRunner; fire-and-forget push syncs omit it. */
+  requestId?: string;
+  skills: SkillSyncEntry[];
+}
+
+/** Authoritative full replacement of one machine's skill deployment state. Sent as the correlated
+ * reply to a solicited sync and unsolicited after push syncs or discovery-time rescans. */
+export interface SkillsStateMessage {
+  type: "skills_state";
+  runnerId: string;
+  /** Echoes SkillsSyncMessage.requestId when this state answers a solicited sync. */
+  requestId?: string;
+  deployed: DeployedSkillState[];
+  unmanaged: UnmanagedSkillInfo[];
   error?: string;
 }
 
@@ -4549,6 +5028,7 @@ export type ControlPlaneToRunner =
   | RefreshSubscriptionUsageMessage
   | LogoutAgentMessage
   | AcpRegistryApprovalMessage
+  | SkillsSyncMessage
   | GitActionRequestMessage
   | SessionHistoryRequestMessage
   | SessionHistoryPageRequestMessage
@@ -4584,12 +5064,20 @@ export interface UiSnapshotMessage {
     accessScopeManagement?: boolean;
     /** New Session can atomically create a session and open its separate provider TUI. */
     nativeTuiLaunch?: boolean;
+    /** Archive keeps nonterminal sessions visible until durable Stop evidence releases capacity. */
+    stopBeforeArchive?: boolean;
+    /** Durable Stop operations expose bounded failure metadata and an idempotent recovery API. */
+    stopFailureRecovery?: boolean;
+    /** Per-user durable session reminders and scoped live reminder events are available. */
+    sessionReminders?: boolean;
   };
   runners: RunnerView[];
   boxes: BoxView[];
   sessions: SessionView[];
   /** Optional for rolling compatibility with control planes predating durable Projects. */
   projects?: ProjectView[];
+  /** Current user's pending and recently fired reminders. Absent on older control planes. */
+  reminders?: SessionReminderView[];
   runs: RunView[];
   /** Optional only for compatibility with pre-pod control planes. */
   pods?: PodView[];
@@ -4622,6 +5110,20 @@ export interface UiSessionUpsertMessage {
 
 export interface UiSessionRemovedMessage {
   type: "session_removed";
+  sessionId: string;
+}
+
+export interface UiSessionReminderUpsertMessage {
+  type: "session_reminder_upsert";
+  /** Exact reminder owner used by the control plane's fail-closed fan-out boundary. */
+  userId: string;
+  reminder: SessionReminderView;
+}
+
+export interface UiSessionReminderRemovedMessage {
+  type: "session_reminder_removed";
+  /** Exact reminder owner used by the control plane's fail-closed fan-out boundary. */
+  userId: string;
   sessionId: string;
 }
 
@@ -4720,6 +5222,8 @@ export type ControlPlaneToUi =
   | UiBoxRemovedMessage
   | UiSessionUpsertMessage
   | UiSessionRemovedMessage
+  | UiSessionReminderUpsertMessage
+  | UiSessionReminderRemovedMessage
   | UiProjectUpsertMessage
   | UiProjectRemovedMessage
   | UiSessionEventMessage
@@ -4841,6 +5345,30 @@ export interface SetColumnRequest {
 
 export interface SetArchivedRequest {
   archived: boolean;
+}
+
+export interface SnoozeScheduleInput {
+  /** Absolute Unix time in milliseconds. The server never reparses the user's expression. */
+  scheduledFor: number;
+  /** IANA time-zone identifier used to explain the instant and preserve edit intent. */
+  timeZone: string;
+  /** The exact bounded expression or local datetime entered by the user. */
+  originalExpression: string;
+}
+
+export interface SetSessionReminderRequest extends SnoozeScheduleInput {
+  wakePolicy: SessionReminderWakePolicy;
+  /** Required when replacing an existing reminder; rejects stale multi-client edits. */
+  expectedRevision?: number;
+  /** Identity paired with expectedRevision so a removed-and-recreated reminder cannot be mistaken
+   * for the caller's prior reminder when both happen to have the same revision. */
+  expectedReminderId?: string;
+  /** Fired-state facts copied from the caller's observed reminder only when Undo restores it.
+   * The server requires an optimistic revision and validates both bounded fields. */
+  restoreFired?: {
+    firedAt: number;
+    wakeReason: SessionReminderWakeReason;
+  };
 }
 
 /** Body for POST /api/sessions/:id/workspace — re-file a session under a workspace ("Move to
@@ -5030,6 +5558,10 @@ export interface ArchiveProjectSessionsResponse {
   /** Exact sessions changed from unarchived to archived by this atomic operation.
    * Absent on Project-capable control planes released before exact archive undo support. */
   archivedSessionIds?: string[];
+  /** Sessions whose provider stop must be confirmed before the server files them as archived. */
+  pendingSessionIds?: string[];
+  /** Sessions whose Stop operation failed without proving runtime capacity was released. */
+  failedSessionIds?: string[];
 }
 
 export interface SessionEventsResponse {

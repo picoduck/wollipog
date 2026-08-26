@@ -4,7 +4,7 @@
  * ACP agent sessions on behalf of the control plane.
  */
 
-import { hostname } from "node:os";
+import { homedir, hostname } from "node:os";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -13,6 +13,7 @@ import {
   parseMessage,
   PROTOCOL_VERSION,
   projectRunnerMessageForProtocol,
+  projectSessionEventPayloadForProtocol,
   runnerSupportsProtocol,
   validatePromptImageInputs,
   type AdoptSessionMessage,
@@ -40,10 +41,11 @@ import {
   type SessionCommandInvocationResultMessage,
   type SessionCommandInvocationUpdateMessage,
   type SessionEventPayload,
+  type SessionSnapshot,
+  type SkillSyncEntry,
   type StartSessionMessage,
 } from "@wollipog/protocol";
 import {
-  conductorEnabled,
   loadConfig,
   parseArgs,
   parseEnv,
@@ -51,7 +53,8 @@ import {
   type RunnerConfig,
 } from "./config.js";
 import {
-  applyConductorFeature,
+  fenceConductorAdvertisement,
+  withConductorAgent,
   defaultConductorHost,
   provisionConductor,
   removeConductorMcpConfig,
@@ -77,6 +80,7 @@ import {
   validatePodReconciliationMetadata,
   withGitExecutionContext,
 } from "./git-ops.js";
+import { flushProjectedOutbox, Outbox } from "./outbox.js";
 import { SessionManager } from "./session-manager.js";
 import { NativeProviderAuthRecovery } from "./provider-auth-recovery.js";
 import { handleResolveSteeringAttemptMessage, handleSteerSessionMessage } from "./steering-handler.js";
@@ -85,13 +89,14 @@ import {
   warnLegacyClaudeLifetimeEnvironment,
 } from "./drivers/claude-code.js";
 import { resolveAcpSessionContext } from "./acp-session-context.js";
-import { SessionStore, isAdoptedSession, metaToSnapshot, type SessionMeta } from "./session-store.js";
+import { SessionStore, isAdoptedSession, type SessionMeta } from "./session-store.js";
 import { waitForPendingKills } from "./spawn.js";
 import {
   findExternalSession,
   listExternalSessions,
   readExternalTranscript,
   retargetExternalSession,
+  resolveLaunchForAgent,
   resolveLaunchForDriver,
 } from "./external/sources.js";
 import {
@@ -108,11 +113,17 @@ import { ShellManager } from "./shell-manager.js";
 import { agentTuiLaunch } from "./agent-tui.js";
 import { capabilitiesFor } from "./catalog.js";
 import { createPromptImageFetcher } from "./prompt-image-fetch.js";
+import {
+  publishNegotiatedSessionSnapshots,
+  registrationSessionSnapshots,
+  validateControlPlaneUrl,
+} from "./control-plane-transport.js";
 import { discoverAgents, enrichAgentModels, mergeAgents } from "./discovery/discover.js";
 import {
   prepareClaudeSlashCommandCatalog,
 } from "./discovery/claude-commands.js";
 import { discoverRegistryAgents, updateRegistryApproval } from "./discovery/acp-registry.js";
+import { reconcileSkills } from "./skills.js";
 import { VERSION } from "./version.js";
 import { overlayAcpAuthStatus, type AcpAuthRuntime } from "./acp-auth-status.js";
 import {
@@ -149,6 +160,12 @@ import {
 
 const INITIAL_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 30_000;
+// Half-open-socket liveness: after a laptop sleep / Wi-Fi drop / NAT rebind the control-plane socket
+// can sit readyState=OPEN with no FIN/RST, so frames written into it are silently lost until the OS
+// TCP timeout finally errors it (many minutes). Piggy-back a ws-level ping on every heartbeat and
+// terminate once this many consecutive pings go unanswered — at the ~10s heartbeat that surfaces a
+// dead peer in ~30s, dropping us straight into the existing reconnect/backoff/outbox path.
+const MAX_MISSED_HEARTBEAT_PONGS = 2;
 
 function detectOs(): OS {
   switch (process.platform) {
@@ -195,10 +212,10 @@ try {
   process.exit(1);
 }
 
-async function startRunner(config: RunnerConfig): Promise<void> {
+async function startRunner(config: RunnerConfig, allowInsecureTransport: boolean): Promise<void> {
 const log = (msg: string) => console.log(`[runner ${config.runnerId}] ${msg}`);
+validateControlPlaneUrl(config.controlPlaneUrl, allowInsecureTransport);
 const warnLegacyEnvironment = (message: string) => console.warn(`[runner ${config.runnerId}] ${message}`);
-const conductorFeatureEnabled = conductorEnabled(process.env, warnLegacyEnvironment);
 const claudeHookFeatureEnabled = claudeHooksEnabled(process.env, warnLegacyEnvironment);
 warnLegacyClaudeLifetimeEnvironment(process.env, warnLegacyEnvironment);
 const v1Credential = readV1RunnerCredentialForAttestation(config.dataDir, {
@@ -212,6 +229,7 @@ const attestation = await waitForRunnerControlPlaneAttestation({
   controlPlaneUrl: config.controlPlaneUrl,
   runnerId: config.runnerId,
   token: config.token,
+  allowInsecureTransport,
   ...(v1CredentialHash
     ? { priorCredentialHash: v1CredentialHash }
     : {}),
@@ -300,12 +318,9 @@ const metadata: RunnerMetadata = {
   hostname: runnerHostname,
   os: detectOs(),
   version: VERSION,
-  // With the feature enabled, preserve the pre-discovery config rows verbatim so live discovery
-  // can still authoritatively fill availability and capabilities. Disabled runners filter even
-  // an explicitly configured conductor before the initial registration can advertise it.
-  agents: conductorFeatureEnabled
-    ? configuredAgentDefinitions
-    : applyConductorFeature(configuredAgentDefinitions, false, log),
+  // Pre-discovery config rows go out verbatim so live discovery can still authoritatively
+  // fill availability and capabilities; conductor synthesis happens after every merge.
+  agents: configuredAgentDefinitions,
   workspaces: config.workspaces.map((w) => ({
     id: w.id,
     name: w.name,
@@ -327,9 +342,13 @@ const metadata: RunnerMetadata = {
 const configAgents = metadata.agents;
 const acpAuthStatus = new Map<string, AcpAuthRuntime>();
 
-/** The control plane receives neither values nor fromEnv reference names. */
+/** The control plane receives neither values nor fromEnv reference names. The synthesized
+ * conductor is fenced here — at send time, with the CURRENT socket's negotiated version — so a
+ * cached list can never carry it to a pre-v91 control plane, and a list merged before
+ * registration still advertises it to a v91+ control plane on the post-register re-push. */
 function agentsForControlPlane() {
-  return metadata.agents.map((agent) => ({ ...agent, env: {} }));
+  return fenceConductorAdvertisement(metadata.agents, controlPlaneProtocolVersion)
+    .map((agent) => ({ ...agent, env: {} }));
 }
 
 /** Resolve exact configured/discovered agent env at the last responsible moment. */
@@ -405,8 +424,10 @@ sessionCommandReceipts.prune();
 // metadata.agents). It's the same shared resolver as the `resumable` flag and handleAdopt — resume,
 // listing, and adoption can never disagree — and it lets a read-only adopt heal once the box gains
 // a matching agent (discovery finished after the adopt, or the user installed the CLI later).
-const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driver, context) =>
-  resolveLaunchForDriver(metadata.agents, driver, context),
+const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driver, context, agentId) =>
+  agentId
+    ? resolveLaunchForAgent(metadata.agents, agentId, driver, context)
+    : resolveLaunchForDriver(metadata.agents, driver, context),
   undefined,
   config.dataDir,
   config.maxConcurrentSessions,
@@ -439,7 +460,7 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
       {
         controlPlaneUrl: config.controlPlaneUrl,
         tokenFile: runnerCredentialFile,
-        enabled: conductorFeatureEnabled,
+        allowInsecureTransport,
       },
       log,
       conductorHost,
@@ -450,6 +471,7 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
         controlPlaneUrl: config.controlPlaneUrl,
         controlPlaneProtocolVersion,
         enabled: claudeHookFeatureEnabled,
+        allowInsecureTransport,
         registerCredential: registerPolicyHookCredential,
       },
       log,
@@ -472,6 +494,7 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
     controlPlaneUrl: config.controlPlaneUrl,
     runnerId: config.runnerId,
     tokenFile: runnerCredentialFile,
+    allowInsecureTransport,
   }),
   containerTargets,
   cloudTargets,
@@ -503,33 +526,110 @@ const shells = new ShellManager({
     sendUp({ type: "shell_exit", sessionId, shellId, code, outputSeq }),
 });
 
-// Buffer outbound events while the control-plane socket is down or mid-reconnect
-// so a terminal status or permission request produced during a blip is not lost.
-const outbox: RunnerToControlPlane[] = [];
-const MAX_OUTBOX = 1000;
+// Buffer outbound events while the control-plane socket is down or mid-reconnect so a terminal
+// status or permission request produced during a blip is not lost. The buffering/coalescing/overflow
+// policy lives in outbox.ts; the online-decision and the actual protocol-projected send stay here.
+const outbox = new Outbox<RunnerToControlPlane>();
+
+function projectSnapshotForCurrentProtocol(snapshot: SessionSnapshot): SessionSnapshot {
+  return store.projectSnapshotForProtocol(snapshot, controlPlaneProtocolVersion);
+}
+
+function projectStoredEventsForCurrentProtocol(
+  sessionId: string,
+  events: Array<{ seq: number; ts: number; payload: SessionEventPayload }>,
+) {
+  return store.projectEventsForProtocol(sessionId, events, controlPlaneProtocolVersion);
+}
+
+function projectMessageForCurrentProtocol(msg: RunnerToControlPlane): RunnerToControlPlane | null {
+  if (msg.type === "session_event") {
+    if (msg.seq === undefined) {
+      const payload = projectSessionEventPayloadForProtocol(msg.payload, controlPlaneProtocolVersion);
+      return payload ? { ...msg, payload } : null;
+    }
+    const event = store.projectEventForProtocol(
+      msg.sessionId,
+      { seq: msg.seq, ts: msg.ts ?? Date.now(), payload: msg.payload },
+      controlPlaneProtocolVersion,
+    );
+    return event
+      ? { ...msg, seq: event.seq, ts: msg.ts, payload: event.payload }
+      : null;
+  }
+  if (msg.type === "session_runtime_updated") {
+    return projectRunnerMessageForProtocol({
+      ...msg,
+      snapshot: projectSnapshotForCurrentProtocol(msg.snapshot),
+    }, controlPlaneProtocolVersion);
+  }
+  if (msg.type === "reprocess_session_result") {
+    const snapshot = msg.snapshot
+      ? projectSnapshotForCurrentProtocol(msg.snapshot)
+      : undefined;
+    const events = msg.events
+      ? projectStoredEventsForCurrentProtocol(msg.sessionId, msg.events)
+      : undefined;
+    return projectRunnerMessageForProtocol({
+      ...msg,
+      ...(snapshot ? { snapshot } : {}),
+      ...(events
+        ? { events, eventCount: events.length }
+        : snapshot && msg.eventCount !== undefined
+          ? { eventCount: snapshot.seq }
+          : {}),
+    }, controlPlaneProtocolVersion);
+  }
+  if (msg.type === "fork_result") {
+    const events = msg.events && msg.snapshot
+      ? projectStoredEventsForCurrentProtocol(msg.snapshot.id, msg.events)
+      : undefined;
+    return projectRunnerMessageForProtocol({
+      ...msg,
+      ...(msg.snapshot ? { snapshot: projectSnapshotForCurrentProtocol(msg.snapshot) } : {}),
+      ...(events ? { events } : {}),
+    }, controlPlaneProtocolVersion);
+  }
+  if (msg.type === "adopt_session_result" && msg.snapshot) {
+    return projectRunnerMessageForProtocol({
+      ...msg,
+      snapshot: projectSnapshotForCurrentProtocol(msg.snapshot),
+    }, controlPlaneProtocolVersion);
+  }
+  return projectRunnerMessageForProtocol(msg, controlPlaneProtocolVersion);
+}
 
 function sendUp(msg: RunnerToControlPlane): void {
   if (ws && ws.readyState === WebSocket.OPEN && registered) {
-    ws.send(JSON.stringify(projectRunnerMessageForProtocol(msg, controlPlaneProtocolVersion)));
+    let projected: RunnerToControlPlane | null;
+    try {
+      projected = projectMessageForCurrentProtocol(msg);
+    } catch (error) {
+      log(`dropping ${msg.type}: wire projection failed (${errText(error)})`);
+      return;
+    }
+    if (!projected) return;
+    try {
+      ws.send(JSON.stringify(projected));
+    } catch (error) {
+      outbox.enqueue(msg);
+      log(`buffering ${msg.type}: socket send failed (${errText(error)})`);
+    }
     return;
   }
-  // Coalesce redundant session_status / session_queue for the same session to bound growth —
-  // only the LATEST of either matters (a queue snapshot fully replaces the previous one), and
-  // queue snapshots carry prompt previews, so letting them stack during a blip wastes the
-  // outbox on payloads the flush would immediately supersede.
-  if (msg.type === "session_status" || msg.type === "session_queue") {
-    const i = outbox.findIndex((m) => m.type === msg.type && m.sessionId === msg.sessionId);
-    if (i !== -1) outbox.splice(i, 1);
-  }
-  outbox.push(msg);
-  if (outbox.length > MAX_OUTBOX) outbox.splice(0, outbox.length - MAX_OUTBOX);
+  outbox.enqueue(msg);
 }
 
 function flushOutbox(): void {
   if (!ws || ws.readyState !== WebSocket.OPEN || !registered) return;
-  for (const m of outbox.splice(0)) {
-    ws.send(JSON.stringify(projectRunnerMessageForProtocol(m, controlPlaneProtocolVersion)));
-  }
+  const socket = ws;
+  flushProjectedOutbox(
+    outbox,
+    projectMessageForCurrentProtocol,
+    (message) => socket.send(JSON.stringify(message)),
+    (error, message) => log(`dropping ${message.type}: wire projection failed (${errText(error)})`),
+    (error, message) => log(`retaining ${message.type}: socket send failed (${errText(error)})`),
+  );
 }
 
 function sendDurableUpdate(receipt: DurableCommandReceipt): void {
@@ -655,6 +755,49 @@ function startTrackedSession(
   });
 }
 
+/** Last authoritative desired skill list from the control plane. Null until the first skills_sync
+ * arrives on this process; removal sweeps and store GC never run before then, so a fresh runner
+ * cannot tear down links deployed by its previous incarnation on a scan-only pass. */
+let lastDesiredSkills: SkillSyncEntry[] | null = null;
+/** Serializes reconcile passes so concurrent syncs and discovery rescans cannot interleave the
+ * link-replacement and removal steps. */
+let skillsReconcileQueue: Promise<void> = Promise.resolve();
+
+function queueSkillsReconcile(requestId?: string): void {
+  const run = async () => {
+    // Read at run time, not queue time: a pass queued behind another always applies the freshest
+    // authoritative list, and replaying it under an older requestId still reports converged truth.
+    const desired = lastDesiredSkills;
+    try {
+      const result = await reconcileSkills({
+        dataDir: config.dataDir,
+        home: homedir(),
+        agents: metadata.agents,
+        desired: desired ?? [],
+        allowRemovals: desired !== null,
+        log,
+      });
+      sendUp({
+        type: "skills_state",
+        runnerId: config.runnerId,
+        ...(requestId !== undefined ? { requestId } : {}),
+        deployed: result.deployed,
+        unmanaged: result.unmanaged,
+      });
+    } catch (error) {
+      sendUp({
+        type: "skills_state",
+        runnerId: config.runnerId,
+        ...(requestId !== undefined ? { requestId } : {}),
+        deployed: [],
+        unmanaged: [],
+        error: `skill reconcile failed: ${errText(error)}`,
+      });
+    }
+  };
+  skillsReconcileQueue = skillsReconcileQueue.then(run, run);
+}
+
 let discovering = false;
 let rediscoverPending = false;
 let rediscoverRefreshModels = false;
@@ -717,9 +860,8 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
     // The conductor is synthesized AFTER the merge — inside discovery, a configured claude entry
     // sharing the launch key would silently suppress it via the merge's usedKeys check.
     metadata.agents = applyClaudeHookCapability(
-      await enrichAgentModels(applyConductorFeature(
+      await enrichAgentModels(withConductorAgent(
         mergeAgents(configAgents, discovered),
-        conductorFeatureEnabled,
       ), {
         refresh: refreshModels,
       }),
@@ -756,6 +898,11 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
       editors,
     };
     sendUp(update);
+    // Discovery may have changed the agent list, and harness skill dirs drift out of band: heal
+    // links against the last authoritative desired list (scan-only, no removals, before the first
+    // sync) and report fresh deployment + unmanaged state. Gated so a pre-v90 control plane never
+    // receives an unsolicited message type it cannot parse.
+    if (runnerSupportsProtocol(controlPlaneProtocolVersion, "agentSkills")) queueSkillsReconcile();
     if (registered) publishSubscriptionUsageInventory(refreshSubscriptionUsage);
   } catch (err) {
     log(`discovery failed: ${(err as Error).message}`);
@@ -776,6 +923,9 @@ let backoff = INITIAL_BACKOFF_MS;
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let shuttingDown = false;
+// Consecutive heartbeat pings sent without a pong reply on the current socket. Reset by the 'pong'
+// handler attached in connect() and by startHeartbeat() when a fresh socket registers.
+let missedHeartbeatPongs = 0;
 const sessionCommandRecoveryTimer = setInterval(recoverStaleSessionCommands, 10_000);
 sessionCommandRecoveryTimer.unref?.();
 recoverStaleSessionCommands();
@@ -789,10 +939,24 @@ function stopHeartbeat(): void {
 
 function startHeartbeat(socket: WebSocket, intervalMs: number): void {
   stopHeartbeat();
+  missedHeartbeatPongs = 0;
   heartbeatTimer = setInterval(() => {
     if (socket.readyState !== WebSocket.OPEN) return;
+    // Half-open detection: the socket still reads OPEN, but if the last several ws-level pings went
+    // unanswered the peer is gone. Terminate now — ws emits 'close' immediately, so the close handler
+    // enters the reconnect/backoff/outbox path instead of us writing frames into a dead socket until
+    // the OS TCP timeout finally errors it (many minutes).
+    if (missedHeartbeatPongs >= MAX_MISSED_HEARTBEAT_PONGS) {
+      log(`control plane heartbeat unanswered (${missedHeartbeatPongs} missed pongs) — terminating socket to reconnect`);
+      socket.terminate();
+      return;
+    }
+    missedHeartbeatPongs++;
     const beat: HeartbeatMessage = { type: "heartbeat", runnerId: config.runnerId, ts: Date.now() };
     socket.send(JSON.stringify(beat));
+    // A pong resets missedHeartbeatPongs via the connect() handler; a live peer therefore never
+    // accumulates toward the terminate threshold.
+    socket.ping();
   }, intervalMs);
 }
 
@@ -801,6 +965,14 @@ function scheduleReconnect(): void {
   log(`reconnecting in ${Math.round(backoff / 1000)}s`);
   reconnectTimer = setTimeout(connect, backoff);
   backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
+}
+
+// Contain a fire-and-forget async command handler. A malformed frame that reaches one of these
+// (e.g. `git_action` with no `action`) rejects AFTER handleCommand's synchronous try/catch has
+// returned, so without this the rejection reaches the process-level unhandledRejection net and
+// shuts the runner down — defeating the whole point of isolating a bad frame. Log and drop instead.
+function runCommandTask(kind: string, task: Promise<void>): void {
+  void task.catch((error) => log(`dropping unhandled control-plane frame (${kind}): ${errText(error)}`));
 }
 
 function handleCommand(msg: ControlPlaneToRunner): void {
@@ -822,9 +994,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       // Registration snapshots are sent before the control plane's protocol version is known, so
       // they conservatively omit native capability overlays. Re-publish negotiated snapshots now;
       // v65 peers continue to receive no overlay, while v66+ peers get the hook transport truth.
-      for (const snapshot of sessions.sessionSnapshots()) {
-        sendUp({ type: "session_runtime_updated", snapshot });
-      }
+      publishNegotiatedSessionSnapshots(sessions, sendUp);
       // The CP may have restarted or missed live frames. Reconcile retained terminal processes
       // from bounded, sequence-addressed snapshots, then close the inventory with a fence.
       const shellSnapshots = shells.snapshots();
@@ -881,7 +1051,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           {
             controlPlaneUrl: config.controlPlaneUrl,
             tokenFile: runnerCredentialFile,
-            enabled: conductorFeatureEnabled,
+                allowInsecureTransport,
           },
           log,
           conductorHost,
@@ -892,6 +1062,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             controlPlaneUrl: config.controlPlaneUrl,
             controlPlaneProtocolVersion,
             enabled: claudeHookFeatureEnabled,
+            allowInsecureTransport,
             registerCredential: registerPolicyHookCredential,
           },
           log,
@@ -1003,7 +1174,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             {
               controlPlaneUrl: config.controlPlaneUrl,
               tokenFile: runnerCredentialFile,
-              enabled: conductorFeatureEnabled,
+                    allowInsecureTransport,
             },
             log,
             conductorHost,
@@ -1014,6 +1185,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
               controlPlaneUrl: config.controlPlaneUrl,
               controlPlaneProtocolVersion,
               enabled: claudeHookFeatureEnabled,
+              allowInsecureTransport,
               registerCredential: registerPolicyHookCredential,
             },
             log,
@@ -1062,7 +1234,27 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       sessions.removeQueuedPrompt(msg.sessionId, msg.promptId);
       break;
     case "stop_session":
-      sessions.stop(msg.sessionId);
+      try {
+        sessions.stop(msg.sessionId);
+        if (msg.operationId) {
+          sendUp({
+            type: "stop_session_result",
+            sessionId: msg.sessionId,
+            operationId: msg.operationId,
+            ...(msg.deliveryAttemptId ? { deliveryAttemptId: msg.deliveryAttemptId } : {}),
+            accepted: true,
+          });
+        }
+      } catch (error) {
+        const detail = errText(error).replace(/[\u0000-\u001f\u007f]/gu, " ").slice(0, 240);
+        if (msg.operationId) {
+          sendUp({
+            type: "stop_session_result", sessionId: msg.sessionId,
+            operationId: msg.operationId, accepted: false, error: detail,
+            ...(msg.deliveryAttemptId ? { deliveryAttemptId: msg.deliveryAttemptId } : {}),
+          });
+        } else log("session stop failed for " + msg.sessionId + ": " + detail);
+      }
       break;
     case "rearm_governance":
       sessions.rearmGovernance(msg.sessionId, msg.config, msg.holdFor);
@@ -1082,7 +1274,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       sessions.resolvePermission(msg.sessionId, msg.requestId, msg.optionId);
       break;
     case "answer_question":
-      sessions.answerQuestion(msg.sessionId, msg.requestId, msg.answers);
+      sessions.answerQuestion(msg.sessionId, msg.requestId, msg.answers, msg.action);
       break;
     case "rewind_session": {
       // Serialize behind the same per-session queue as mutating git actions: a rewind
@@ -1115,9 +1307,14 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         sendUp({ type: "rewind_result", requestId: msg.requestId, ok: r.ok, error: r.error });
       });
       gitActionQueues.set(msg.sessionId, run);
-      void run.finally(() => {
-        if (gitActionQueues.get(msg.sessionId) === run) gitActionQueues.delete(msg.sessionId);
-      });
+      void run
+        // A rewind that rejects (an I/O fault in rewind(), or a malformed frame that slipped past
+        // the fenceRewind guard) must not reach the process unhandledRejection net. Contain it on
+        // the void-discarded branch; the stored `run` used for queue chaining is left untouched.
+        .catch((error) => log(`dropping unhandled control-plane frame (rewind_session): ${errText(error)}`))
+        .finally(() => {
+          if (gitActionQueues.get(msg.sessionId) === run) gitActionQueues.delete(msg.sessionId);
+        });
       break;
     }
     case "fork_session": {
@@ -1167,14 +1364,14 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         }));
       break;
     case "logout_agent":
-      void sessions.logoutAgent(msg.sessionId).then((result) =>
+      runCommandTask("logout_agent", sessions.logoutAgent(msg.sessionId).then((result) =>
         sendUp({
           type: "logout_agent_result",
           requestId: msg.requestId,
           ok: result.ok,
           error: result.error,
         }),
-      );
+      ));
       break;
     case "acp_registry_approval":
       void (async () => {
@@ -1211,13 +1408,33 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         }
       })();
       break;
+    case "skills_sync":
+      if (msg.runnerId !== config.runnerId) {
+        sendUp({
+          type: "skills_state",
+          runnerId: config.runnerId,
+          ...(msg.requestId !== undefined ? { requestId: msg.requestId } : {}),
+          deployed: [],
+          unmanaged: [],
+          error: "skills sync targeted a different runner",
+        });
+        break;
+      }
+      lastDesiredSkills = msg.skills;
+      queueSkillsReconcile(msg.requestId);
+      break;
     case "git_action":
-      void handleGitAction(msg);
+      runCommandTask("git_action", handleGitAction(msg));
       break;
     case "session_history": {
       // Reply with the session's event log from the box store (control plane lazy-hydration).
-      const events = sessions.history(msg.sessionId, msg.afterSeq);
-      sendUp({ type: "session_history_result", requestId: msg.requestId, sessionId: msg.sessionId, ok: true, events });
+      try {
+        const events = sessions.history(msg.sessionId, msg.afterSeq);
+        sendUp({ type: "session_history_result", requestId: msg.requestId, sessionId: msg.sessionId, ok: true, events });
+      } catch (error) {
+        const detail = errText(error).replace(/[\u0000-\u001f\u007f]/gu, " ").slice(0, 240);
+        sendUp({ type: "session_history_result", requestId: msg.requestId, sessionId: msg.sessionId, ok: false, error: detail });
+      }
       break;
     }
     case "session_history_page": {
@@ -1247,25 +1464,25 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       break;
     }
     case "list_external_sessions":
-      void handleListExternal(msg.requestId, msg.agentId);
+      runCommandTask("list_external_sessions", handleListExternal(msg.requestId, msg.agentId));
       break;
     case "adopt_session":
-      void handleAdopt(msg);
+      runCommandTask("adopt_session", handleAdopt(msg));
       break;
     case "reprocess_session":
-      void handleReprocess(msg);
+      runCommandTask("reprocess_session", handleReprocess(msg));
       break;
     case "list_directory":
-      void handleListDirectory(msg);
+      runCommandTask("list_directory", handleListDirectory(msg));
       break;
     case "list_session_files":
-      void handleListSessionFiles(msg);
+      runCommandTask("list_session_files", handleListSessionFiles(msg));
       break;
     case "read_session_file":
-      void handleReadSessionFile(msg);
+      runCommandTask("read_session_file", handleReadSessionFile(msg));
       break;
     case "shell_open": {
-      void handleShellOpenCommand(msg, {
+      runCommandTask("shell_open", handleShellOpenCommand(msg, {
         waitForSessionStart: (sessionId) => sessionStarts.wait(sessionId),
         registerPending: (shellId) => pendingShellOpenCancellations.register(shellId),
         unregisterPending: (shellId) => pendingShellOpenCancellations.unregister(shellId),
@@ -1287,7 +1504,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         ),
         send: (result) => sendUp(result),
         errorText: (error) => errText(error),
-      });
+      }));
       break;
     }
     case "shell_resize":
@@ -1305,7 +1522,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       shells.close(msg.shellId);
       break;
     case "host_action":
-      void handleHostAction(msg);
+      runCommandTask("host_action", handleHostAction(msg));
       break;
   }
 }
@@ -1427,9 +1644,9 @@ async function handleReprocess(msg: ReprocessSessionMessage): Promise<void> {
       requestId,
       sessionId,
       ok: true,
-      snapshot: metaToSnapshot(updated, controlPlaneProtocolVersion),
+      snapshot: sessions.snapshotForControlPlane(updated),
       ...(msg.deferHistory ? {} : {
-        events: sessions.history(sessionId, 0), // legacy CP swaps in the complete re-issued log
+        events: store.readEvents(sessionId), // exact until the socket-send peer projection
       }),
       eventCount: events.length,
     });
@@ -1551,7 +1768,7 @@ async function handleAdopt(msg: AdoptSessionMessage): Promise<void> {
       requestId,
       ok: true,
       descriptor,
-      snapshot: metaToSnapshot(meta, controlPlaneProtocolVersion),
+      snapshot: sessions.snapshotForControlPlane(meta),
     });
   }
 
@@ -1650,7 +1867,7 @@ function connect(): void {
   log(`connecting to ${config.controlPlaneUrl}`);
   registered = false;
   controlPlaneProtocolVersion = null;
-  const socket = new WebSocket(config.controlPlaneUrl);
+  const socket = new WebSocket(validateControlPlaneUrl(config.controlPlaneUrl, allowInsecureTransport));
   ws = socket;
 
   socket.on("open", () => {
@@ -1664,14 +1881,25 @@ function connect(): void {
       liveSessions: sessions.liveSessionIds(),
       // Phase 2: full metadata for every session in the box store, so this dashboard hydrates
       // sessions it didn't create (and ones from before a runner restart).
-      sessionSnapshots: sessions.sessionSnapshots(),
+      // The peer profile is unknown until `registered`. Advertise complete metadata but no history
+      // generation here; the ordered negotiated runtime updates below become authoritative.
+      sessionSnapshots: registrationSessionSnapshots(sessions),
     };
     socket.send(JSON.stringify(register));
   });
 
   socket.on("message", (raw: Buffer) => {
     const msg = parseMessage<ControlPlaneToRunner>(raw.toString());
-    if (msg) handleCommand(msg);
+    if (!msg) return;
+    // A malformed frame (missing/mistyped fields survive the cast-only parseMessage) must not
+    // throw out of this listener: an uncaught throw here becomes a fatal uncaughtException that
+    // bypasses the graceful shutdown/lease-release path and strands the provider-home lease.
+    // Drop the bad frame instead — one poisoned command can't take the runner down.
+    try {
+      handleCommand(msg);
+    } catch (error) {
+      log(`dropping unhandled control-plane frame (${msg.type}): ${errText(error)}`);
+    }
   });
 
   socket.on("close", () => {
@@ -1688,20 +1916,47 @@ function connect(): void {
   socket.on("error", (err: Error) => {
     log(`socket error: ${err.message}`);
   });
+
+  // Liveness: every heartbeat sends a ws-level ping; a pong proves the peer is still reachable, so
+  // clear the missed-ping counter. Silence across MAX_MISSED_HEARTBEAT_PONGS pings terminates the
+  // socket in startHeartbeat.
+  socket.on("pong", () => {
+    missedHeartbeatPongs = 0;
+  });
 }
 
-function shutdown(): void {
+function shutdown(exitCode = 0): void {
   // Second signal while draining = the user really means it — exit hard.
   if (shuttingDown) process.exit(1);
   shuttingDown = true;
-  stagedRunnerCredential.discard();
-  stopHeartbeat();
-  clearInterval(sessionCommandRecoveryTimer);
-  if (discoveryTimer) clearInterval(discoveryTimer);
-  if (reconnectTimer) clearTimeout(reconnectTimer);
-  subscriptionUsage.shutdown();
-  sessions.shutdownAll();
-  shells.dispose();
+  // shutdown() is also the uncaughtException path, so the triggering fault (e.g. a storage failure)
+  // can make one of these cleanup steps throw. NONE of them may abort before the pending-kill drain
+  // and provider-home lease release run: a throw out of the uncaughtException listener makes Node
+  // exit IMMEDIATELY, stranding the lease and orphaning agent process trees — the exact failure this
+  // path exists to prevent. Run each best-effort so control always reaches waitForPendingKills below.
+  const bestEffort = (label: string, fn: () => void): void => {
+    try {
+      fn();
+    } catch (error) {
+      log(`shutdown step '${label}' failed: ${errText(error)}`);
+    }
+  };
+  bestEffort("discard staged credential", () => stagedRunnerCredential.discard());
+  bestEffort("stop heartbeat", () => stopHeartbeat());
+  bestEffort("clear timers", () => {
+    clearInterval(sessionCommandRecoveryTimer);
+    if (discoveryTimer) clearInterval(discoveryTimer);
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+  });
+  bestEffort("stop subscription usage", () => subscriptionUsage.shutdown());
+  // Track whether every provider driver was disposed. If not (a dispose threw), a provider may still
+  // be alive with no registered kill, so we must NOT release its provider-home lease below even if
+  // waitForPendingKills reports "reaped" — releasing it could let a replacement runner share the HOME.
+  let sessionsCleanlyShutDown = false;
+  bestEffort("shut down sessions", () => {
+    sessionsCleanlyShutDown = sessions.shutdownAll();
+  });
+  bestEffort("dispose shells", () => shells.dispose());
   log("shutting down");
   // process.exit() cancels pending timers/exec callbacks — exiting immediately would drop
   // the SIGKILL escalation and the WSL in-distro reap, letting TERM-ignoring agents survive
@@ -1709,18 +1964,55 @@ function shutdown(): void {
   // sequence is pidfile retries + TERM + 2s + KILL. The deadline covers Claude's 5s clean-exit
   // interval plus the reap's 6s safety cap.
   // No active sessions ⇒ zero pending kills ⇒ instant exit (dev restarts stay snappy).
-  void waitForPendingKills(CLAUDE_GRACEFUL_STOP_BUDGET_MS + 500).then((processTreesReaped) => {
-    try {
-      sessions.releaseProviderHomeLeasesAfterShutdown(processTreesReaped);
-    } finally {
-      process.exit(0);
-    }
-  });
+  void waitForPendingKills(CLAUDE_GRACEFUL_STOP_BUDGET_MS + 500)
+    .then((processTreesReaped) => {
+      // Never let a throw here skip the exit. Only release the lease when session cleanup completed
+      // cleanly AND every tracked process tree was reaped; otherwise retain it (fail closed) so a
+      // possibly-still-alive provider cannot share its HOME with a replacement runner.
+      try {
+        if (sessionsCleanlyShutDown) {
+          sessions.releaseProviderHomeLeasesAfterShutdown(processTreesReaped);
+        } else {
+          log("session cleanup was incomplete — retaining provider-home lease to avoid concurrent HOME use");
+        }
+      } catch (error) {
+        log(`provider-home lease release failed: ${errText(error)}`);
+      }
+    })
+    .catch((error) => log(`pending-kill drain failed: ${errText(error)}`))
+    .finally(() => process.exit(exitCode));
 }
 
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
-process.on("SIGHUP", shutdown);
+// Wrapped so the signal name Node passes as the listener's first argument is never mistaken for
+// shutdown()'s exitCode.
+process.on("SIGINT", () => shutdown());
+process.on("SIGTERM", () => shutdown());
+process.on("SIGHUP", () => shutdown());
+// A synchronous uncaughtException leaves the process in an unknown, possibly corrupt state, so run
+// the graceful shutdown() (waits for pending kills, releases provider-home leases) before exiting —
+// a hard crash would strand the lease and block every future agent. shutdown()'s own `shuttingDown`
+// flag makes re-entry safe; a second fault exits immediately.
+process.on("uncaughtException", (error) => {
+  try {
+    log(`uncaughtException — shutting down: ${errText(error)}`);
+  } catch {
+    /* logging must never mask the exit */
+  }
+  shutdown(1);
+});
+// An unhandled rejection is a LAST-RESORT net, NOT a shutdown trigger: this daemon supervises every
+// session on the box, and one session's stray async fault (an unobserved rejection in a fire-and-
+// forget command handler this file cannot enumerate exhaustively) must not tear down all the others.
+// Node would otherwise terminate by default; log and keep running instead. Frame-dispatched handlers
+// still contain their own errors at the source (runCommandTask / per-dispatch .catch) so expected
+// failures surface as proper session errors rather than a bare log here.
+process.on("unhandledRejection", (reason) => {
+  try {
+    log(`unhandledRejection (continuing) — ${errText(reason)}`);
+  } catch {
+    /* logging must never mask survival */
+  }
+});
 
 log(
   `starting v${VERSION} — host=${metadata.hostname} os=${metadata.os} ` +
@@ -1748,7 +2040,7 @@ void Promise.all([containerTargets.initialize(), cloudTargets.initialize()]).the
 });
 }
 
-void startRunner(config).catch((error) => {
+void startRunner(config, parsed.allowInsecureTransport).catch((error) => {
   console.error(`[runner ${config.runnerId}] startup blocked: ${(error as Error).message}`);
   process.exit(1);
 });

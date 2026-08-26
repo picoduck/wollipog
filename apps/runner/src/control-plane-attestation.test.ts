@@ -63,6 +63,33 @@ test("runner attestation never retries deterministic URL or header configuration
   }
 });
 
+test("runner attestation refuses remote plaintext before sending the credential unless opted in", async () => {
+  let calls = 0;
+  const fetchImpl = (async (input: URL | RequestInfo) => {
+    calls++;
+    assert.equal(String(input), "http://manager.example.test/runner/attestation/runner-one");
+    return new Response(JSON.stringify(valid));
+  }) as typeof fetch;
+  await assert.rejects(
+    () => attestRunnerControlPlane({
+      controlPlaneUrl: "ws://manager.example.test/runner",
+      runnerId: "runner-one",
+      token: "token",
+      fetchImpl,
+    }),
+    /--allow-insecure-transport/u,
+  );
+  assert.equal(calls, 0);
+  await assert.doesNotReject(() => attestRunnerControlPlane({
+    controlPlaneUrl: "ws://manager.example.test/runner",
+    runnerId: "runner-one",
+    token: "token",
+    fetchImpl,
+    allowInsecureTransport: true,
+  }));
+  assert.equal(calls, 1);
+});
+
 test("runner attestation retries transient failures but rejects credentials permanently", async () => {
   let calls = 0;
   const delays: number[] = [];

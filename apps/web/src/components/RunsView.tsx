@@ -4,7 +4,7 @@ import type { WorkflowArtifactView, WorkflowInstanceDetail } from "@wollipog/pro
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { relativeTime, titleCaseLabel } from "../format.js";
 import { useApi } from "../api-context.js";
-import { StatusBadge, Empty } from "./common.js";
+import { SessionStatusIndicators, Empty } from "./common.js";
 import { EventTimeline } from "./EventTimeline.js";
 import { useTimeline } from "./useTimeline.js";
 import { sessionAgentLabel } from "./agent-options.js";
@@ -29,6 +29,9 @@ function MemberColumn({ sessionId }: { sessionId: string }) {
   const session = useStoreSelector((state) => selectComparisonSession(state, sessionId));
   const evs = useStoreSelector((state) => selectComparisonEvents(state, sessionId));
   const history = useStoreSelector((state) => selectComparisonHistory(state, sessionId));
+  const runnerOnline = useStoreSelector((state) => session
+    ? state.runners.get(session.runnerId)?.status === "online"
+    : true);
   const conn = useStoreSelector((state) => state.conn);
   const items = useTimeline(sessionId, evs);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -39,7 +42,7 @@ function MemberColumn({ sessionId }: { sessionId: string }) {
     <div className="compare-col">
       <button className="compare-head" type="button" onClick={() => navigate({ name: "session", id: sessionId })}>
         <div className="compare-agent">{agentLabel}</div>
-        <StatusBadge status={session.status} />
+        <SessionStatusIndicators session={session} disconnected={!runnerOnline} />
       </button>
       <div className="compare-body" ref={scrollRef} role="region" aria-label={`${agentLabel} activity`} aria-busy={presentation.busy} tabIndex={0}>
         {presentation.notice === "refreshing" && <div className="muted sm" role="status">Checking for missed activity…</div>}

@@ -10,7 +10,7 @@ function script(name: string): string {
 test("release installers retain authenticated gh fallback for private repositories", () => {
   for (const name of ["install-runner.sh", "install-runner.ps1", "install.sh", "install.ps1"]) {
     const body = script(name);
-    if (name === "install-runner.ps1" || name === "install-runner.sh") {
+    if (name.endsWith(".ps1") || name.endsWith(".sh")) {
       assert.match(body, /gh api "repos\/\$repo\/releases\/latest"/,
         `${name}: raw authenticated metadata lookup retains publisher digests`);
       assert.doesNotMatch(
@@ -18,13 +18,20 @@ test("release installers retain authenticated gh fallback for private repositori
         name.endsWith(".ps1") ? /& gh release view/ : /^\s*gh release view/m,
         `${name}: projected gh metadata drops digests`,
       );
-    } else {
-      assert.match(body, /gh release view/, `${name}: authenticated metadata lookup`);
     }
     assert.match(body, /gh release download/, `${name}: authenticated asset download`);
+    assert.match(body, /digest/, `${name}: publisher digest metadata is retained`);
     assert.match(body, /GH_TOKEN/, `${name}: actionable private-repository guidance`);
     assert.doesNotMatch(body, /Write-(Host|Output).*\$Token/, `${name}: token must not be printed`);
   }
+  const desktopPosix = script("install.sh");
+  assert.match(desktopPosix, /gh release download "\$release_tag".*--pattern "\$download_asset"/,
+    "authenticated desktop downloads are bound to the resolved release tag");
+  assert.match(desktopPosix, /staged="\$\{dest\}\.download\.\$\$"/,
+    "Linux desktop bytes stage beside the live destination");
+  assert.ok(desktopPosix.indexOf('verify_sha256 "$staged"') <
+    desktopPosix.indexOf('mv -f "$staged" "$dest"'),
+    "Linux desktop digest verification precedes atomic same-filesystem promotion");
 });
 
 test("standalone runner installers download beside the live binary and promote atomically", () => {

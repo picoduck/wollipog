@@ -8,6 +8,8 @@ import type { ControlPlaneToUi, RunnerView, SessionEvent, SessionView, SideChatV
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { COMPOSER_FOCUS_DIAGNOSTIC_EVENT } from "../composer-focus.js";
+import { ENTER_KEY_STORAGE_KEY } from "../enter-key.js";
+import { KEYBOARD_DISMISS_BLUR_EVENT, TOUCH_PHONE_MEDIA } from "../mobile-viewport.js";
 import {
   deleteComposerDraftIfMatches,
   loadComposerDraft,
@@ -856,7 +858,7 @@ test("focus recovery distinguishes background loss from explicit transfer and IM
 
     await act(async () => {
       fixture.composer.focus();
-      transcript.dispatchEvent(new domWindow.PointerEvent("pointerdown", { bubbles: true }) as never);
+      fixture.container.dispatchEvent(new domWindow.PointerEvent("pointerdown", { bubbles: true }) as never);
     });
     await flushAsyncWork();
     await act(async () => {
@@ -864,7 +866,7 @@ test("focus recovery distinguishes background loss from explicit transfer and IM
       flushFrames();
     });
     assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer,
-      "an old pointer intent must not suppress a later background-loss recovery");
+      "an old pointer intent outside the reader must not suppress a later background-loss recovery");
 
     await act(async () => {
       fixture.composer.focus();
@@ -878,6 +880,334 @@ test("focus recovery distinguishes background loss from explicit transfer and IM
       "focus recovery must not interrupt or resurrect an ended IME composition");
   } finally {
     await unmountFixture(fixture);
+  }
+});
+
+test("a delayed mobile transcript gesture relinquishes composer focus through selection and copy", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await resolveComposerDraft(draft, { text: "preserved mobile draft", images: [], updatedAt: 1 });
+    await fixture.pushEvent({ kind: "agent_message", text: "Selectable transcript prose", final: true });
+    await focusRequestedComposer(fixture);
+
+    const transcript = fixture.container.querySelector('[aria-label="Session Activity"]') as HTMLElement;
+    await act(async () => {
+      assert.equal(transcript.dispatchEvent(new domWindow.PointerEvent("pointerdown", {
+        bubbles: true,
+        cancelable: true,
+        pointerType: "touch",
+      }) as never), true, "the transcript touch gesture must remain uncanceled");
+    });
+    assert.notEqual(fixture.composer.ownerDocument.activeElement, fixture.composer,
+      "touching transcript prose must dismiss composer focus before mobile gesture recognition");
+
+    await flushAsyncWork();
+    await act(async () => {
+      transcript.dispatchEvent(new domWindow.Event("selectionchange", { bubbles: true }) as never);
+      transcript.dispatchEvent(new domWindow.Event("copy", { bubbles: true }) as never);
+      transcript.dispatchEvent(new domWindow.Event("scroll", { bubbles: true }) as never);
+      transcript.dispatchEvent(new domWindow.PointerEvent("pointerup", {
+        bubbles: true,
+        pointerType: "touch",
+      }) as never);
+      flushFrames();
+    });
+    await fixture.pushEvent({ kind: "agent_message", text: "Live update during selection", final: true });
+    await act(async () => { flushFrames(); });
+    assert.notEqual(fixture.composer.ownerDocument.activeElement, fixture.composer,
+      "selection, copy, scrolling, and live updates must not reclaim composer focus");
+
+    await act(async () => { fixture.composer.focus(); });
+    assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer);
+    assert.equal(fixture.composer.value, "preserved mobile draft");
+
+    await act(async () => {
+      transcript.dispatchEvent(new domWindow.PointerEvent("pointerdown", {
+        bubbles: true,
+        pointerType: "mouse",
+      }) as never);
+    });
+    assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer,
+      "desktop mouse gestures must retain the browser's native focus behavior");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("the keyboard-dismissal blur is announced and allowed to stand", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await resolveComposerDraft(draft, { text: "dismissed by the detector", images: [], updatedAt: 1 });
+    await focusRequestedComposer(fixture);
+
+    // mobile-viewport.ts announces its programmatic blur with this event so the recovery
+    // machinery treats it like any user-initiated transfer. Unannounced, the blur reads as
+    // background loss, the composer is refocused a frame later, and on Android that refocus
+    // re-summons the keyboard the user just collapsed — an instant reopen loop.
+    await act(async () => {
+      domWindow.dispatchEvent(new domWindow.Event(KEYBOARD_DISMISS_BLUR_EVENT));
+      fixture.composer.blur();
+      flushFrames();
+    });
+    assert.notEqual(fixture.composer.ownerDocument.activeElement, fixture.composer,
+      "the detector's announced blur must stand");
+
+    // The mark is consumed by the blur it announced: an ordinary background loss afterwards is
+    // still recovered, so the announcement cannot latch recovery off.
+    await act(async () => { fixture.composer.focus(); });
+    await flushAsyncWork();
+    await act(async () => {
+      fixture.composer.blur();
+      flushFrames();
+    });
+    assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer,
+      "a later unannounced background loss must still be recovered");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("the send button's press keeps focus in the composer", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await resolveComposerDraft(draft, { text: "ready to send", images: [], updatedAt: 1 });
+    await focusRequestedComposer(fixture);
+    const sendButton = fixture.container.querySelector(".send-btn") as HTMLElement;
+    assert.ok(sendButton, "the composer must render its send button");
+    // Cancelling the press's default is what stops the tap from blurring the textarea. On a
+    // phone that blur closed the keyboard and brought the bottom rail back BETWEEN touchstart
+    // and click, moving this button out from under the finger — so the first tap collapsed the
+    // keyboard instead of sending. The dictation button already presses this way.
+    const uncanceled = sendButton.dispatchEvent(new domWindow.PointerEvent("pointerdown", {
+      bubbles: true,
+      cancelable: true,
+    }) as never);
+    assert.equal(uncanceled, false, "the send press must cancel the focus-stealing default");
+    assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer,
+      "the composer keeps focus through the press");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("the stop-turn button's press keeps focus in the composer", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  // An active turn with an EMPTY composer is what renders Stop Turn in the send slot — the state
+  // the send-button case never reaches, so reverting only this branch's cancellation left every
+  // other test green.
+  const fixture = await mountFixture(draft, {
+    // turnInterruptionAck arrived at protocol 72; the fixture's default runner predates it.
+    runnerProtocolVersion: 73,
+    sessionPatch: { status: "running", activeTurnId: "turn-1" },
+  });
+  try {
+    await resolveComposerDraft(draft, { text: "", images: [], updatedAt: 1 });
+    await focusRequestedComposer(fixture);
+    const stopButton = fixture.container.querySelector(".stop-turn-btn") as HTMLElement;
+    assert.ok(stopButton, "an active turn with an empty composer must render Stop Turn");
+    const uncanceled = stopButton.dispatchEvent(new domWindow.PointerEvent("pointerdown", {
+      bubbles: true,
+      cancelable: true,
+    }) as never);
+    assert.equal(uncanceled, false, "the stop-turn press must cancel the focus-stealing default");
+    assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer,
+      "the composer keeps focus through the press");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("Enter falls through to a newline on the touch-phone layout and still sends elsewhere", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const calls: string[] = [];
+  const fixture = await mountFixture(draft, {
+    client: {
+      prompt: async (_sessionId, text) => {
+        calls.push(text);
+        return undefined as never;
+      },
+    },
+  });
+  try {
+    await resolveComposerDraft(draft, { text: "line one", images: [], updatedAt: 1 });
+    await focusRequestedComposer(fixture);
+
+    // The touch-phone layout, by the same shared media string the rail hiding and the dismissal
+    // blur are gated on. A software keyboard offers no held Shift, so send-on-Enter made a
+    // multi-line draft unwritable on a phone; Enter must reach the textarea's native newline.
+    const priorMatchMedia = domWindow.matchMedia;
+    domWindow.matchMedia = ((query: string) => ({
+      matches: query === TOUCH_PHONE_MEDIA,
+      media: query,
+      onchange: null,
+      addEventListener() {},
+      removeEventListener() {},
+      addListener() {},
+      removeListener() {},
+      dispatchEvent: () => false,
+    })) as never;
+    let uncanceled = false;
+    try {
+      await act(async () => {
+        uncanceled = fixture.composer.dispatchEvent(new domWindow.KeyboardEvent("keydown", {
+          key: "Enter",
+          bubbles: true,
+          cancelable: true,
+        }) as never);
+      });
+    } finally {
+      domWindow.matchMedia = priorMatchMedia;
+    }
+    await flushAsyncWork();
+    assert.equal(uncanceled, true, "Enter must fall through to the textarea's native newline");
+    assert.deepEqual(calls, [], "Enter must not send on the touch-phone layout");
+
+    // Elsewhere the contract is unchanged: plain Enter is claimed and sends.
+    let canceled = false;
+    await act(async () => {
+      canceled = !fixture.composer.dispatchEvent(new domWindow.KeyboardEvent("keydown", {
+        key: "Enter",
+        bubbles: true,
+        cancelable: true,
+      }) as never);
+    });
+    await flushAsyncWork();
+    assert.equal(canceled, true, "Enter must still be claimed for send off the phone layout");
+    assert.deepEqual(calls, ["line one"], "Enter must still send off the phone layout");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("the Enter pair swaps as a unit and a stored choice beats the device class", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const calls: string[] = [];
+  const fixture = await mountFixture(draft, {
+    client: {
+      prompt: async (_sessionId, text) => {
+        calls.push(text);
+        return undefined as never;
+      },
+    },
+  });
+  const phoneMatchMedia = ((query: string) => ({
+    matches: query === TOUCH_PHONE_MEDIA,
+    media: query,
+    onchange: null,
+    addEventListener() {},
+    removeEventListener() {},
+    addListener() {},
+    removeListener() {},
+    dispatchEvent: () => false,
+  })) as never;
+  const pressEnter = async (shiftKey: boolean) => {
+    let uncanceled = true;
+    await act(async () => {
+      uncanceled = fixture.composer.dispatchEvent(new domWindow.KeyboardEvent("keydown", {
+        key: "Enter",
+        shiftKey,
+        bubbles: true,
+        cancelable: true,
+      }) as never);
+    });
+    await flushAsyncWork();
+    return !uncanceled;
+  };
+  const seed = async (text: string) => {
+    await act(async () => {
+      fixture.composer.value = text;
+      Simulate.change(fixture.composer);
+    });
+  };
+  const priorMatchMedia = domWindow.matchMedia;
+  try {
+    await resolveComposerDraft(draft, { text: "swap draft", images: [], updatedAt: 1 });
+    await focusRequestedComposer(fixture);
+    domWindow.matchMedia = phoneMatchMedia;
+
+    // Newline mode (the phone default): Shift+Enter is the SEND half of the swapped pair. This is
+    // also what a hardware keyboard on a phone uses, which no detection could rescue.
+    assert.equal(await pressEnter(true), true, "newline mode: Shift+Enter must be claimed for send");
+    assert.deepEqual(calls, ["swap draft"], "newline mode: Shift+Enter must send");
+
+    // A stored "send" beats the phone's derived default — the setting is the escape hatch.
+    domWindow.localStorage.setItem(ENTER_KEY_STORAGE_KEY, "send");
+    await seed("stored send on a phone");
+    assert.equal(await pressEnter(false), true, "a stored send must reclaim plain Enter on a phone");
+    assert.deepEqual(calls.at(-1), "stored send on a phone");
+    assert.equal(await pressEnter(true), false, "and Shift+Enter goes back to being the newline");
+
+    // A stored "newline" beats the desktop's derived default, and the swap holds there too.
+    domWindow.matchMedia = priorMatchMedia;
+    domWindow.localStorage.setItem(ENTER_KEY_STORAGE_KEY, "newline");
+    await seed("stored newline on a desktop");
+    assert.equal(await pressEnter(false), false, "a stored newline must release plain Enter off the phone");
+    assert.equal(calls.length, 2, "plain Enter must not send in stored newline mode");
+    assert.equal(await pressEnter(true), true, "Shift+Enter must send in stored newline mode");
+    assert.deepEqual(calls.at(-1), "stored newline on a desktop");
+  } finally {
+    domWindow.matchMedia = priorMatchMedia;
+    domWindow.localStorage.removeItem(ENTER_KEY_STORAGE_KEY);
+    await unmountFixture(fixture);
+  }
+});
+
+test("the send tooltip stops advertising Enter on the touch-phone layout", async () => {
+  // Stubbed BEFORE mount: the tooltip is render-time copy, not a keydown-time read.
+  const priorMatchMedia = domWindow.matchMedia;
+  domWindow.matchMedia = ((query: string) => ({
+    matches: query === TOUCH_PHONE_MEDIA,
+    media: query,
+    onchange: null,
+    addEventListener() {},
+    removeEventListener() {},
+    addListener() {},
+    removeListener() {},
+    dispatchEvent: () => false,
+  })) as never;
+  try {
+    const draft = deferred<ComposerDraft | null>();
+    const fixture = await mountFixture(draft);
+    try {
+      await resolveComposerDraft(draft, { text: "draft", images: [], updatedAt: 1 });
+      assert.equal(fixture.container.querySelector(".send-btn")?.getAttribute("title"), "Send",
+        "the tooltip must not advertise an Enter that inserts a newline here");
+    } finally {
+      await unmountFixture(fixture);
+    }
+  } finally {
+    domWindow.matchMedia = priorMatchMedia;
+  }
+
+  // And elsewhere the shortcut is real, so it stays advertised.
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await resolveComposerDraft(draft, { text: "draft", images: [], updatedAt: 1 });
+    assert.equal(fixture.container.querySelector(".send-btn")?.getAttribute("title"), "Send (Enter)",
+      "off the phone layout the Enter shortcut exists and stays advertised");
+  } finally {
+    await unmountFixture(fixture);
+  }
+
+  // Stored newline off the phone: Shift+Enter is the live send binding, and a hover surface
+  // exists there, so it is advertised rather than suppressed.
+  domWindow.localStorage.setItem(ENTER_KEY_STORAGE_KEY, "newline");
+  try {
+    const storedDraft = deferred<ComposerDraft | null>();
+    const storedFixture = await mountFixture(storedDraft);
+    try {
+      await resolveComposerDraft(storedDraft, { text: "draft", images: [], updatedAt: 1 });
+      assert.equal(storedFixture.container.querySelector(".send-btn")?.getAttribute("title"), "Send (Shift+Enter)",
+        "the tooltip must advertise the binding that actually sends");
+    } finally {
+      await unmountFixture(storedFixture);
+    }
+  } finally {
+    domWindow.localStorage.removeItem(ENTER_KEY_STORAGE_KEY);
   }
 });
 
