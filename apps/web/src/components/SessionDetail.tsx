@@ -1527,6 +1527,7 @@ function SessionDetailLoaded({
     activeTurnId: session.activeTurnId,
     supportsSteering: sessionCaps?.supportsSteering,
     policyPaused,
+    inputPending: session.pendingApproval != null,
     queueHeld: session.queueHeld === true,
     stopPending: stopRequestPending,
   } as const;

@@ -25,6 +25,7 @@ const available: ConversationSteeringAvailabilityInput = {
   activeTurnId: "turn-a",
   supportsSteering: true,
   policyPaused: false,
+  inputPending: false,
   queueHeld: false,
   stopPending: false,
 };
@@ -55,6 +56,7 @@ test("direct steering availability requires every UI-known affirmative gate", ()
     [{ supportsSteering: false }, /has not verified/i],
     [{ supportsSteering: undefined }, /has not verified/i],
     [{ policyPaused: true }, /guardrail decision/i],
+    [{ inputPending: true }, /pending agent input/i],
     [{ queueHeld: true }, /resume the held queue/i],
     [{ stopPending: true }, /stop request to settle/i],
     [{ sessionStatus: "idle" }, /active provider turn/i],
@@ -68,11 +70,9 @@ test("direct steering availability requires every UI-known affirmative gate", ()
     if (!result.available) assert.match(result.reason, reason);
   }
 
-  assert.deepEqual(
-    conversationSteeringAvailability({ ...available, sessionStatus: "input_required" }),
-    { available: true },
-    "non-policy input-required turns remain eligible like the control-plane route",
-  );
+  const inputRequired = conversationSteeringAvailability({ ...available, sessionStatus: "input_required" });
+  assert.equal(inputRequired.available, false);
+  if (!inputRequired.available) assert.match(inputRequired.reason, /pending agent input/i);
 });
 
 test("queued promotion requires explicit per-entry eligibility and blocks reservations", () => {

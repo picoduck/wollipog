@@ -13,6 +13,7 @@ export interface ConversationSteeringAvailabilityInput {
   activeTurnId: string | null | undefined;
   supportsSteering: boolean | null | undefined;
   policyPaused: boolean;
+  inputPending: boolean;
   queueHeld: boolean;
   stopPending: boolean;
 }
@@ -69,6 +70,12 @@ export function conversationSteeringAvailability(
       reason: "Resolve the guardrail decision before steering the active turn.",
     };
   }
+  if (input.inputPending || input.sessionStatus === "input_required") {
+    return {
+      available: false,
+      reason: "Resolve the pending agent input before steering the active turn.",
+    };
+  }
   if (input.stopPending) {
     return {
       available: false,
@@ -81,8 +88,7 @@ export function conversationSteeringAvailability(
       reason: "Send a normal prompt to resume the held queue before steering.",
     };
   }
-  if ((input.sessionStatus !== "running" && input.sessionStatus !== "input_required") ||
-      typeof input.activeTurnId !== "string" || !input.activeTurnId.trim()) {
+  if (input.sessionStatus !== "running" || typeof input.activeTurnId !== "string" || !input.activeTurnId.trim()) {
     return { available: false, reason: "Wait for an active provider turn before steering." };
   }
   return { available: true };

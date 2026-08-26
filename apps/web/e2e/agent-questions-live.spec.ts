@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { chmodSync, copyFileSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -92,6 +92,48 @@ async function fetchSession(stack: Pick<LiveStack, "httpBase" | "ownerToken" | "
   );
   if (!response.ok) throw new Error(`session lookup failed: ${response.status} ${await response.text()}`);
   return ((await response.json()) as { session: SessionView }).session;
+}
+
+async function queuePrompt(
+  stack: Pick<LiveStack, "httpBase" | "ownerToken" | "sessionId">,
+  text: string,
+): Promise<void> {
+  const response = await fetch(`${stack.httpBase}/api/sessions/${stack.sessionId}/prompt`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${stack.ownerToken}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ text }),
+  });
+  if (!response.ok) throw new Error(`prompt queue failed: ${response.status} ${await response.text()}`);
+}
+
+async function expectQuestionControlsInsideCard(page: Page): Promise<void> {
+  const card = page.getByRole("region", { name: "Agent Questions" });
+  const cardRect = await card.evaluate((element) => element.getBoundingClientRect().toJSON());
+  const list = page.locator(".question-list");
+  const overflow = await list.evaluate((element) => ({
+    clientWidth: element.clientWidth,
+    scrollLeft: element.scrollLeft,
+    scrollWidth: element.scrollWidth,
+  }));
+  expect(overflow.scrollLeft).toBe(0);
+  expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth + 1);
+
+  const rects = await page.locator(
+    ".question-list, .question-block, .question-text, .question-option, .question-input",
+  ).evaluateAll((elements) =>
+    elements.map((element) => ({
+      className: element.className,
+      rect: element.getBoundingClientRect().toJSON(),
+    })),
+  );
+  expect(rects.length).toBeGreaterThan(0);
+  for (const { className, rect } of rects) {
+    expect(rect.left, `${className} starts inside the question card`).toBeGreaterThanOrEqual(cardRect.left - 0.5);
+    expect(rect.right, `${className} ends inside the question card`).toBeLessThanOrEqual(cardRect.right + 0.5);
+  }
 }
 
 async function startLiveStack(
@@ -277,7 +319,7 @@ test("Claude AskUserQuestion answers cross the live browser, control plane, runn
     await page.getByRole("checkbox", { name: /Browser Tests/ }).click();
     await expect(submit).toBeEnabled();
     await submit.click();
-    await expect(page.getByRole("status")).toHaveText("Question Answered");
+    await expect(page.getByText("Question Answered", { exact: true })).toBeVisible();
 
     await expect.poll(async () => {
       try {
@@ -334,7 +376,7 @@ test("Codex structured questions cross the live browser, control plane, runner, 
     await page.getByLabel("Response").fill("Ship after checks pass");
     await expect(submit).toBeEnabled();
     await submit.click();
-    await expect(page.getByRole("status")).toHaveText("Question Answered");
+    await expect(page.getByText("Question Answered", { exact: true })).toBeVisible();
 
     await expect.poll(async () => {
       try {
@@ -383,6 +425,12 @@ for (const viewport of [
       test.setTimeout(120_000);
       const stack = await startLiveStack("codex", "dogfood-question");
       try {
+        const queuedMessages = [
+          "Keep this long message queued until both structured questions are answered.",
+          "The complete two-question form must remain visible and reachable above the composer.",
+        ];
+        for (const message of queuedMessages) await queuePrompt(stack, message);
+
         const pending = await fetchSession(stack);
         expect(pending.pendingApproval).toMatchObject({
           kind: "question",
@@ -417,6 +465,7 @@ for (const viewport of [
           origin: stack.httpBase,
           token: stack.ownerToken,
           sessionId: stack.sessionId,
+          queued: "1",
         });
         await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
 
@@ -427,6 +476,9 @@ for (const viewport of [
         const keepBranch = page.getByRole("radio", { name: /Keep Branch/ });
         const otherResponses = page.getByLabel("Other Response");
         await expect(page.getByRole("region", { name: "Agent Questions" })).toBeVisible();
+        await expect(page.getByLabel("Queued Messages").locator(".queued-item")).toHaveCount(queuedMessages.length);
+        await expect(page.getByLabel("Queued Messages").locator(".queued-text")).toHaveText(queuedMessages);
+        await expectQuestionControlsInsideCard(page);
         await expect(page.getByText("Should I squash-merge pull request #342 now?")).toBeVisible();
         await expect(mergeNow).toBeVisible();
         await expect(leaveOpen).toBeVisible();
@@ -457,7 +509,7 @@ for (const viewport of [
         await expect(submit).toBeEnabled();
         if (viewport.touch) await submit.tap();
         else await submit.click();
-        await expect(page.getByRole("status")).toHaveText("Question Answered");
+        await expect(page.getByText("Question Answered", { exact: true })).toBeVisible();
 
         await expect.poll(async () => {
           try {
@@ -483,7 +535,7 @@ for (const viewport of [
         }).toBe("idle");
         await expect.poll(async () => (await fetchSession(stack)).preview, {
           timeout: 30_000,
-        }).toContain("Question answers received by Codex.");
+        }).toContain("Queued prompt delivered after the questions.");
       } catch (error) {
         throw new Error(`${error instanceof Error ? error.stack : String(error)}\n${stack.logs()}`);
       } finally {

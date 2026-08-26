@@ -9480,9 +9480,11 @@ body.shell-dock-dragging * {
   flex-wrap: wrap;
 }
 
-.question-bar {
+.approval-bar.question-bar {
   flex-direction: column;
+  flex-wrap: nowrap;
   align-items: stretch;
+  min-width: 0;
   min-height: 0;
   max-height: min(560px, 60dvh);
   overflow: hidden;
@@ -9513,6 +9515,7 @@ body.shell-dock-dragging * {
   flex-direction: column;
   flex: 1 1 auto;
   gap: 10px;
+  min-width: 0;
   min-height: 0;
   margin-top: 10px;
   padding-right: 4px;

@@ -12,6 +12,11 @@ const threadId = scenario === "fresh"
 const questionRequestId = scenario === "dogfood-question"
   ? 5
   : "live-codex-question-1";
+let dogfoodTurnCount = 0;
+const expectedQueuedDogfoodPrompts = [
+  "Keep this long message queued until both structured questions are answered.",
+  "The complete two-question form must remain visible and reachable above the composer.",
+];
 const expectedLaunchArgs = ["--enable", "default_mode_request_user_input", "app-server"];
 if (JSON.stringify(process.argv.slice(3)) !== JSON.stringify(expectedLaunchArgs)) {
   process.stderr.write("unexpected app-server launch arguments: " + JSON.stringify(process.argv.slice(3)) + "\n");
@@ -73,8 +78,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     return;
   }
   if (message.method === "turn/start") {
-    send({ id: message.id, result: { turn: { id: "fixture-turn" } } });
-    send({ method: "turn/started", params: { threadId, turn: { id: "fixture-turn" } } });
+    if (scenario === "dogfood-question") dogfoodTurnCount += 1;
+    const turnId = dogfoodTurnCount > 1 ? `fixture-turn-${dogfoodTurnCount}` : "fixture-turn";
+    send({ id: message.id, result: { turn: { id: turnId } } });
+    send({ method: "turn/started", params: { threadId, turn: { id: turnId } } });
     if (scenario === "question") {
       send({
         id: questionRequestId,
@@ -110,6 +117,26 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       return;
     }
     if (scenario === "dogfood-question") {
+      if (dogfoodTurnCount > 1) {
+        const expected = expectedQueuedDogfoodPrompts[dogfoodTurnCount - 2];
+        const actual = message.params?.input?.find((input) => input?.type === "text")?.text;
+        if (actual !== expected) {
+          process.stderr.write("unexpected queued prompt: " + JSON.stringify(actual) + "\n");
+          process.exitCode = 2;
+          return;
+        }
+        send({
+          method: "item/agentMessage/delta",
+          params: {
+            threadId,
+            turnId,
+            itemId: `queued-${dogfoodTurnCount}`,
+            delta: "Queued prompt delivered after the questions.",
+          },
+        });
+        send({ method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed" } } });
+        return;
+      }
       send({
         id: questionRequestId,
         method: "item/tool/requestUserInput",

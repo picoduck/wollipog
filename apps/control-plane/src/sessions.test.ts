@@ -3186,6 +3186,28 @@ test("prompt status moves the session to running", () => {
   assert.equal(db.getSession(id)!.status, "running");
 });
 
+test("prompt queues without clearing an authoritative structured question", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  db.setPendingApproval(id, {
+    kind: "question",
+    requestId: "question-6",
+    title: "The agent has 2 questions",
+    options: [],
+  });
+  db.updateSessionStatus(id, "input_required", Date.now());
+  hub.sentToRunner.length = 0;
+
+  const result = svc.prompt(id, "wait behind the structured question");
+
+  assert.equal(result.ok, true, result.error);
+  assert.equal(db.getSession(id)?.status, "input_required");
+  assert.equal(db.getSession(id)?.pendingApproval?.requestId, "question-6");
+  assert.deepEqual(sentPromptCommands(hub).map((command) => command.text), [
+    "wait behind the structured question",
+  ]);
+});
+
 test("prompt with a config arg merges + persists it BEFORE sending (atomic change+send)", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub, { config: { model: "sonnet", effort: "low" } });

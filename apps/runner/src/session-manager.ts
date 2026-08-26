@@ -3484,6 +3484,13 @@ export class SessionManager {
         message: "Resolve the governance limit before steering.",
       };
     }
+    if (this.hasPendingAgentInput(entry.sessionId)) {
+      return {
+        eligible: false,
+        reason: "policy_blocked",
+        message: "Resolve the pending agent input before steering the active turn.",
+      };
+    }
     if (entry.cancelRequested || entry.interruptRequested) {
       return {
         eligible: false,
@@ -3561,6 +3568,13 @@ export class SessionManager {
       return this.handleDefiniteSteeringFailure(operation, "no_active_provider_turn");
     }
     if (entry.activeTurnId !== request.turnId) return this.handleDefiniteSteeringFailure(operation, "stale_turn");
+    if (this.hasPendingAgentInput(request.sessionId)) {
+      return this.handleDefiniteSteeringFailure(
+        operation,
+        "policy_blocked",
+        "Resolve the pending agent input before steering the active turn.",
+      );
+    }
     if (entry.currentDurable) return this.handleDefiniteSteeringFailure(operation, "policy_blocked", "automation-owned turns cannot be steered");
     if (entry.cancelRequested || entry.interruptRequested || entry.holdQueuedPromptsAfterInterrupt) {
       return this.handleDefiniteSteeringFailure(operation, "policy_blocked");
@@ -3596,6 +3610,13 @@ export class SessionManager {
       return this.handleDefiniteSteeringFailure(operation, "no_active_provider_turn");
     }
     if (entry.activeTurnId !== request.turnId) return this.handleDefiniteSteeringFailure(operation, "stale_turn");
+    if (this.hasPendingAgentInput(request.sessionId)) {
+      return this.handleDefiniteSteeringFailure(
+        operation,
+        "policy_blocked",
+        "Resolve the pending agent input before steering the active turn.",
+      );
+    }
     if (entry.currentDurable) return this.handleDefiniteSteeringFailure(operation, "policy_blocked", "automation-owned turns cannot be steered");
     if (entry.cancelRequested || entry.interruptRequested || entry.holdQueuedPromptsAfterInterrupt) {
       return this.handleDefiniteSteeringFailure(operation, "policy_blocked");
@@ -4318,7 +4339,8 @@ export class SessionManager {
   private async drain(sessionId: string): Promise<void> {
     const entry = this.active.get(sessionId);
     if (!entry || entry.running || entry.governanceTripped || entry.holdQueuedPromptsAfterInterrupt ||
-        this.steerFences(entry).size || this.reservedPromotionPrecedesQueue(sessionId, entry)) return;
+        this.hasPendingApproval(sessionId) || this.steerFences(entry).size ||
+        this.reservedPromotionPrecedesQueue(sessionId, entry)) return;
     if (!this.store.acquireLock(sessionId, this.lockOwner)) {
       if (!this.emitEvent(sessionId, { kind: "error", message: "this session is being driven by another dashboard" })) {
         return;
@@ -4335,7 +4357,8 @@ export class SessionManager {
     this.lockTimers.set(sessionId, refresh);
     entry.running = true;
     try {
-      while (this.active.has(sessionId) && entry.queue.length && !entry.authenticationBlocked) {
+      while (this.active.has(sessionId) && entry.queue.length && !entry.authenticationBlocked &&
+          !this.hasPendingApproval(sessionId)) {
         if (this.steerFences(entry).size || this.reservedPromotionPrecedesQueue(sessionId, entry)) break;
         const next = entry.queue.shift()!;
         this.ensureQueueOrdinal(sessionId, next);
@@ -4435,6 +4458,15 @@ export class SessionManager {
         if (!entry.governanceTripped && entry.queue.length) setImmediate(() => this.scheduleDrain(sessionId));
       }
     }
+  }
+
+  private hasPendingAgentInput(sessionId: string): boolean {
+    const meta = this.store.readMeta(sessionId);
+    return meta?.status === "input_required" || meta?.pendingApproval != null;
+  }
+
+  private hasPendingApproval(sessionId: string): boolean {
+    return this.store.readMeta(sessionId)?.pendingApproval != null;
   }
 
   private async recordConversationForkPoint(
