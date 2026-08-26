@@ -91,12 +91,8 @@ test("background-work badges expose every durable state with Title Case visible 
 
     const badges = [...container.querySelectorAll(".background-work-badge")];
     assert.deepEqual(
-      badges.map((badge) => badge.querySelector(".background-work-label-full")?.textContent),
+      badges.map((badge) => badge.textContent),
       ["Background Work: Waiting on External Job", "Background Work: Continuation Pending", "Background Work: Orphaned", "Background Work: Resumed"],
-    );
-    assert.deepEqual(
-      badges.map((badge) => badge.querySelector(".background-work-label-compact")?.textContent?.trim()),
-      ["Background Work Active", "Continuation Pending", "Background Work Orphaned", "Background Work Resumed"],
     );
     assert.deepEqual(
       badges.map((badge) => badge.getAttribute("aria-label")),
@@ -114,6 +110,25 @@ test("background-work badges expose every durable state with Title Case visible 
   }
 });
 
+test("compact background-work badges retain full live-region content", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(<BackgroundWorkBadge state="running" compact />);
+    });
+    const badge = container.querySelector('[role="status"]');
+    assert.equal(badge?.getAttribute("aria-label"), "Background Work: Waiting on External Job");
+    assert.equal(badge?.querySelector(".sr-only")?.textContent, "Background Work: Waiting on External Job");
+    assert.equal(badge?.querySelector('[aria-hidden="true"]:last-child')?.textContent, "Background Work Active");
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
 test("active subagent badges expose their count and open the active work", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
@@ -125,8 +140,8 @@ test("active subagent badges expose their count and open the active work", async
       root.render(<ActiveSubagentsBadge count={2} onOpen={() => { opens += 1; }} />);
     });
     const badge = container.querySelector<HTMLButtonElement>('button[aria-label="2 Subagents Active"]');
-    assert.equal(badge?.querySelector(".background-work-label-full")?.textContent, "2 Subagents Active");
-    assert.equal(badge?.querySelector(".background-work-label-compact")?.textContent, "2 Subagents");
+    assert.equal(badge?.querySelector(".sr-only")?.textContent, "2 Subagents Active");
+    assert.equal(badge?.querySelector('[aria-hidden="true"]:last-child')?.textContent, "2 Subagents");
     assert.equal(badge?.title, "2 Subagents Active");
     await act(async () => { badge?.click(); });
     assert.equal(opens, 1);

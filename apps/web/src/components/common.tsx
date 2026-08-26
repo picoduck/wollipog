@@ -261,7 +261,10 @@ const COMPACT_BACKGROUND_WORK_LABELS: Record<BackgroundWorkState, string> = {
   resumed: "Background Work Resumed",
 };
 
-export function BackgroundWorkBadge({ state }: { state: BackgroundWorkState }) {
+export function BackgroundWorkBadge({ state, compact = false }: {
+  state: BackgroundWorkState;
+  compact?: boolean;
+}) {
   const label = `Background Work: ${BACKGROUND_WORK_LABELS[state]}`;
   return (
     <span
@@ -274,10 +277,12 @@ export function BackgroundWorkBadge({ state }: { state: BackgroundWorkState }) {
       aria-label={label}
     >
       <span className="background-work-dot" aria-hidden="true" />
-      <span className="background-work-label-full">{label}</span>
-      <span className="background-work-label-compact" aria-hidden="true">
-        {COMPACT_BACKGROUND_WORK_LABELS[state]}
-      </span>
+      {compact ? (
+        <>
+          <span className="sr-only">{label}</span>
+          <span aria-hidden="true">{COMPACT_BACKGROUND_WORK_LABELS[state]}</span>
+        </>
+      ) : label}
     </span>
   );
 }
@@ -286,7 +291,6 @@ export function UntrackedBackgroundWorkBadge() {
   return (
     <span
       className="background-work-badge background-work-untracked"
-      role="status"
       aria-label="Detached Work: Untracked"
       title="This provider does not expose a durable detached-work lifecycle. Wollipog cannot promise automatic completion, cancellation, or recovery."
     >
@@ -309,8 +313,8 @@ export function ActiveSubagentsBadge({ count, onOpen }: { count: number; onOpen:
       title={label}
     >
       <span className="background-work-dot" aria-hidden="true" />
-      <span className="background-work-label-full">{label}</span>
-      <span className="background-work-label-compact" aria-hidden="true">{visibleLabel}</span>
+      <span className="sr-only">{label}</span>
+      <span aria-hidden="true">{visibleLabel}</span>
     </button>
   );
 }

@@ -31,7 +31,7 @@ test("the unified session bar balances navigation, breadcrumb, status, and actio
   const back = header.locator(".back");
   await expect(back).toHaveAccessibleName("Back to Inbox");
   await expect(back).toHaveAttribute("title", "Back to inbox");
-  await expect(header.locator(".status-badge")).toBeVisible();
+  await expect(header.locator(".status-badge").first()).toBeVisible();
 
   const geometry = await header.evaluate((element) => {
     const rect = (node: Element) => {
@@ -58,6 +58,7 @@ test("the unified session bar balances navigation, breadcrumb, status, and actio
       paddingTop: Number.parseFloat(style.paddingTop),
       paddingBottom: Number.parseFloat(style.paddingBottom),
       paddingRight: Number.parseFloat(style.paddingRight),
+      hasHorizontalOverflow: element.scrollWidth > element.clientWidth,
     };
   });
 
@@ -68,6 +69,7 @@ test("the unified session bar balances navigation, breadcrumb, status, and actio
   expect(geometry.paddingTop).toBeGreaterThanOrEqual(6);
   expect(geometry.paddingTop).toBe(geometry.paddingBottom);
   expect(geometry.paddingRight).toBeGreaterThanOrEqual(12);
+  expect(geometry.hasHorizontalOverflow).toBe(false);
   expect(geometry.headerRight - (geometry.actions.x + geometry.actions.width)).toBeGreaterThanOrEqual(geometry.paddingRight - 1);
   expect(geometry.clippingRight - geometry.moreActionsRight).toBeGreaterThanOrEqual(11.5);
   const center = (box: { y: number; height: number }) => box.y + box.height / 2;
@@ -156,6 +158,46 @@ test("the unified session bar balances navigation, breadcrumb, status, and actio
   await expect(shareMenu.getByRole("menuitem", { name: "Export Markdown" })).toBeVisible();
   await expect(shareMenu.getByRole("menuitem", { name: "Export JSON" })).toBeVisible();
   await expect(shareMenu.getByRole("menuitem", { name: "Rename Session…" })).toHaveCount(0);
+});
+
+test("desktop Session actions stay contained with five concurrent status indicators", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 800 });
+  await openSession(page, "git-visibility", { reviewReady: "1" });
+  await page.evaluate(() => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
+      status: "idle",
+      backgroundWorkState: "running",
+    });
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitActiveSubagent("session-alpha", "active-desktop-subagent");
+  });
+
+  const header = page.locator(".session-detail > .detail-head");
+  await expect(header.getByText("Awaiting Prompt", { exact: true })).toBeVisible();
+  await expect(header.getByText("Ready for Review", { exact: true })).toBeVisible();
+  await expect(header.getByText("Uncommitted Changes", { exact: true })).toBeVisible();
+  await expect(header.getByRole("status", { name: "Background Work: Waiting on External Job" })).toBeVisible();
+  await expect(header.getByRole("button", { name: "1 Subagent Active" })).toBeVisible();
+
+  const geometry = await header.evaluate((element) => {
+    const headerBox = element.getBoundingClientRect();
+    const actions = element.querySelector(".detail-actions")!.getBoundingClientRect();
+    const moreActions = element.querySelector('[aria-label="More Actions"]')!.getBoundingClientRect();
+    const clippingPane = element.closest(".inbox-preview-pane");
+    return {
+      hasHorizontalOverflow: element.scrollWidth > element.clientWidth,
+      headerRight: headerBox.right,
+      actionsRight: actions.right,
+      clippingRight: Math.min(
+        window.innerWidth,
+        clippingPane?.getBoundingClientRect().right ?? window.innerWidth,
+      ),
+      moreActionsRight: moreActions.right,
+      paddingRight: Number.parseFloat(getComputedStyle(element).paddingRight),
+    };
+  });
+  expect(geometry.hasHorizontalOverflow).toBe(false);
+  expect(geometry.headerRight - geometry.actionsRight).toBeGreaterThanOrEqual(geometry.paddingRight - 1);
+  expect(geometry.clippingRight - geometry.moreActionsRight).toBeGreaterThanOrEqual(11.5);
 });
 
 for (const viewport of [
@@ -354,7 +396,7 @@ test("wrapped background work clears phone actions when no change status is avai
   });
 
   const header = page.locator(".session-detail > .detail-head");
-  await expect(header.getByRole("group", { name: "Change Status" })).toHaveCount(0);
+  await expect(header.locator(".change-status-indicators")).toHaveCount(0);
   await expect(header.getByRole("status", { name: "Background Work: Waiting on External Job" })).toBeVisible();
   const overlapsActions = await header.evaluate((element) => {
     const badge = element.querySelector(".background-work-badge")!.getBoundingClientRect();

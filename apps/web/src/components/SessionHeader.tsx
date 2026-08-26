@@ -54,8 +54,7 @@ export function SessionHeader({
   renderMoveProjectDialog,
   topbarControls,
   changeStatus,
-  activeSubagentCount = 0,
-  onOpenActiveSubagents,
+  activeSubagents,
   titleId,
 }: {
   session: SessionView;
@@ -83,8 +82,7 @@ export function SessionHeader({
   topbarControls?: ReactNode;
   changeStatus?: SessionChangeStatus | null;
   /** Live structured subagents remain visible even while the parent awaits its next prompt. */
-  activeSubagentCount?: number;
-  onOpenActiveSubagents?: () => void;
+  activeSubagents?: { count: number; onOpen: () => void };
   /** Set when this bar owns the page heading (`page-title` focus-rescue anchor). */
   titleId?: string;
 }) {
@@ -238,12 +236,12 @@ export function SessionHeader({
       <div className="session-header-statuses">
         <SessionStatusIndicators session={session} disconnected={!runnerOnline} />
         <ChangeStatusBadge change={changeStatus ?? null} />
-        {session.backgroundWorkState && <BackgroundWorkBadge state={session.backgroundWorkState} />}
+        {session.backgroundWorkState && <BackgroundWorkBadge state={session.backgroundWorkState} compact />}
         {!session.backgroundWorkState && session.backgroundWorkTracking === "untracked" && (
           <UntrackedBackgroundWorkBadge />
         )}
-        {onOpenActiveSubagents && (
-          <ActiveSubagentsBadge count={activeSubagentCount} onOpen={onOpenActiveSubagents} />
+        {activeSubagents && (
+          <ActiveSubagentsBadge count={activeSubagents.count} onOpen={activeSubagents.onOpen} />
         )}
       </div>
       {note && <span className="detail-note session-header-note" role="status" aria-live="polite">{note}</span>}

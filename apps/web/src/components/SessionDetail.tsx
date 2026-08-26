@@ -2447,10 +2447,10 @@ function SessionDetailLoaded({
           )}
           topbarControls={topbarControls}
           changeStatus={changeStatus}
-          activeSubagentCount={activeSubagents.length}
-          onOpenActiveSubagents={preferredActiveSubagentId
-            ? () => openSubagent(preferredActiveSubagentId)
-            : undefined}
+          activeSubagents={preferredActiveSubagentId ? {
+            count: activeSubagents.length,
+            onOpen: () => openSubagent(preferredActiveSubagentId),
+          } : undefined}
           // The unified bar replaces the app-level top bar on desktop, so it owns the page-title
           // focus-rescue anchor there; the mobile layout keeps the app bar and its own anchor.
           titleId={!isMobile ? "page-title" : undefined}

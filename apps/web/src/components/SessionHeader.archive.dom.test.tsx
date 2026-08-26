@@ -91,8 +91,7 @@ test("Unarchive on an archived Stop Failed session cancels the archive follow-up
             exportReady={false}
             onSnooze={() => undefined}
             changeStatus={{ kind: "changes_present", label: "Changes Present", description: "Git confirms changes." }}
-            activeSubagentCount={1}
-            onOpenActiveSubagents={() => { activeSubagentOpens += 1; }}
+            activeSubagents={{ count: 1, onOpen: () => { activeSubagentOpens += 1; } }}
           />
         </FeedbackContext.Provider>
       </ApiProvider>,
