@@ -1676,10 +1676,17 @@ textarea {
   position: relative;
   display: inline-flex;
   align-items: center;
-  /* A flex child of the crumbs row: never yield to the (ellipsizing) title. The chip inside
-     still caps itself at the cctx-item max-width. */
-  flex: none;
+  /* Yield before the authoritative status cluster or trailing actions. Font metrics differ
+     across platforms, so a fixed-width Project crumb can otherwise overflow the unified bar
+     even when the Session title has already collapsed. */
+  flex: 0 1 220px;
+  max-width: 220px;
   min-width: 0;
+}
+.crumb-project > .cctx-item {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
 }
 .crumb-project-actions {
   position: absolute;
@@ -1733,7 +1740,8 @@ textarea {
 .session-header-statuses {
   display: flex;
   align-items: center;
-  flex: none;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
   min-width: 0;
   gap: 5px;
 }
@@ -1749,6 +1757,7 @@ textarea {
 .detail-actions {
   display: flex;
   align-items: center;
+  flex: none;
   gap: 7px;
 }
 /* Keep both sibling menu buttons reachable above the active menu's dismissing backdrop. This lets

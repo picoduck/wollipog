@@ -178,26 +178,29 @@ test("desktop Session actions stay contained with five concurrent status indicat
   await expect(header.getByRole("status", { name: "Background Work: Waiting on External Job" })).toBeVisible();
   await expect(header.getByRole("button", { name: "1 Subagent Active" })).toBeVisible();
 
-  const geometry = await header.evaluate((element) => {
-    const headerBox = element.getBoundingClientRect();
-    const actions = element.querySelector(".detail-actions")!.getBoundingClientRect();
-    const moreActions = element.querySelector('[aria-label="More Actions"]')!.getBoundingClientRect();
-    const clippingPane = element.closest(".inbox-preview-pane");
-    return {
-      hasHorizontalOverflow: element.scrollWidth > element.clientWidth,
-      headerRight: headerBox.right,
-      actionsRight: actions.right,
-      clippingRight: Math.min(
-        window.innerWidth,
-        clippingPane?.getBoundingClientRect().right ?? window.innerWidth,
-      ),
-      moreActionsRight: moreActions.right,
-      paddingRight: Number.parseFloat(getComputedStyle(element).paddingRight),
-    };
-  });
-  expect(geometry.hasHorizontalOverflow).toBe(false);
-  expect(geometry.headerRight - geometry.actionsRight).toBeGreaterThanOrEqual(geometry.paddingRight - 1);
-  expect(geometry.clippingRight - geometry.moreActionsRight).toBeGreaterThanOrEqual(11.5);
+  for (const width of [900, 761]) {
+    await page.setViewportSize({ width, height: 800 });
+    const geometry = await header.evaluate((element) => {
+      const headerBox = element.getBoundingClientRect();
+      const actions = element.querySelector(".detail-actions")!.getBoundingClientRect();
+      const moreActions = element.querySelector('[aria-label="More Actions"]')!.getBoundingClientRect();
+      const clippingPane = element.closest(".inbox-preview-pane");
+      return {
+        hasHorizontalOverflow: element.scrollWidth > element.clientWidth,
+        headerRight: headerBox.right,
+        actionsRight: actions.right,
+        clippingRight: Math.min(
+          window.innerWidth,
+          clippingPane?.getBoundingClientRect().right ?? window.innerWidth,
+        ),
+        moreActionsRight: moreActions.right,
+        paddingRight: Number.parseFloat(getComputedStyle(element).paddingRight),
+      };
+    });
+    expect(geometry.hasHorizontalOverflow, `${width}px header overflow`).toBe(false);
+    expect(geometry.headerRight - geometry.actionsRight).toBeGreaterThanOrEqual(geometry.paddingRight - 1);
+    expect(geometry.clippingRight - geometry.moreActionsRight).toBeGreaterThanOrEqual(11.5);
+  }
 });
 
 for (const viewport of [
@@ -306,7 +309,11 @@ for (const viewport of [
     expect(shellMetrics.title.width).toBeGreaterThanOrEqual(72);
     // Five simultaneous statuses require multiple badge lines at 320px; they remain inside the
     // second header bar without overlap or horizontal overflow.
-    expect(subheaderBottom - shellMetrics.top).toBeLessThan(184);
+    // The Session topbar is 40px tall, the main body adds 12px of leading space, and this header
+    // has an
+    // explicit 132px ceiling below. Keep the combined stack within that same cross-platform
+    // contract; Linux fallback fonts can require one additional badge line.
+    expect(subheaderBottom - shellMetrics.top).toBeLessThanOrEqual(184);
     expect(metrics.share.width).toBeGreaterThanOrEqual(36);
     expect(metrics.share.height).toBeGreaterThanOrEqual(36);
     expect(metrics.moreActions.width).toBeGreaterThanOrEqual(36);
