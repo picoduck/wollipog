@@ -274,7 +274,7 @@ export function SessionHeader({
             aria-expanded={shareMenuOpen}
             aria-controls={shareMenu.menuId}
           >
-            <ShareIcon size={16} />
+            <ShareIcon size={15} />
           </button>
           {shareMenuOpen && (
             <>
@@ -358,7 +358,7 @@ export function SessionHeader({
               aria-expanded={menuOpen}
               aria-controls={menu.menuId}
             >
-              <MoreHorizontalIcon size={16} />
+              <MoreHorizontalIcon size={15} />
             </button>
             {menuOpen && (
               <>

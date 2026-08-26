@@ -883,7 +883,7 @@ export function Header({
             title="Back to inbox"
             aria-label="Back to Inbox"
           >
-            <ChevronLeftIcon size={22} />
+            <ChevronLeftIcon size={18} />
           </button>
           <h1 id="page-title" tabIndex={-1} title={sessionTitle}>{sessionTitle ?? title}</h1>
         </>

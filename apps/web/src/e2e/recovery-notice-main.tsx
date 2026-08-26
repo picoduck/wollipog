@@ -11,14 +11,16 @@ import "../styles.css";
 
 /** Real-browser SessionDetail harness for recovery geometry and earlier-history pagination:
  * `?mode=preview|expanded`, `?height=<px>`, and `?pinned=1` configure the recovery fixture.
- * By default recovery stays active for the page life; `?pagination=1` resolves a bounded opening
- * window and then holds the automatic earlier-page request in flight for inspection. */
+ * By default recovery stays active for the page life; `?settled=1` completes it, while
+ * `?pagination=1` resolves a bounded opening window and then holds the automatic earlier-page
+ * request in flight for inspection. */
 const params = new URLSearchParams(window.location.search);
 const mode = params.get("mode") === "preview" ? ("preview" as const) : ("expanded" as const);
 const frameHeight = Number(params.get("height") ?? "600");
 const frameWidth = Number(params.get("width") ?? "900");
 const pinnedOpen = params.get("pinned") === "1";
 const pagination = params.get("pagination") === "1";
+const settled = params.get("settled") === "1";
 
 const SESSION_ID = "recovery-e2e-session";
 
@@ -133,6 +135,11 @@ const client = {
   getSessionEventTailPage: (_id: string, before: number | undefined, eventEpoch: number) => {
     tailRequestCount += 1;
     document.body.dataset.tailRequestCount = String(tailRequestCount);
+    if (settled && before === undefined) {
+      return Promise.resolve({
+        events: fixtureEvents, eventEpoch, nextBefore: 0, hasMoreOlder: false, cacheComplete: true,
+      });
+    }
     if (!pagination || before !== undefined) return new Promise<never>(() => {});
     const openingWindow = fixtureEvents.slice(-16);
     return Promise.resolve({

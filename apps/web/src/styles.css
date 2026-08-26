@@ -9932,6 +9932,34 @@ body.shell-dock-dragging * {
     padding: env(safe-area-inset-top, 0px) calc(10px + env(safe-area-inset-right, 0px)) 0
       calc(10px + env(safe-area-inset-left, 0px));
   }
+  /* A Session has a dense, two-surface header: identity and pane controls above statuses and
+     actions. Keep the route's semantic h1, but present it at label scale and give every icon in
+     this cluster the same compact geometry. Thirty-six CSS pixels remains comfortably above the
+     24px WCAG target minimum while recovering room for the user-authored Session name. */
+  .topbar:has(.mobile-session-back) {
+    height: calc(40px + env(safe-area-inset-top, 0px));
+    padding-right: calc(8px + env(safe-area-inset-right, 0px));
+    padding-left: calc(8px + env(safe-area-inset-left, 0px));
+  }
+  .topbar:has(.mobile-session-back) h1 {
+    font-size: var(--text-base);
+    font-weight: var(--weight-medium);
+    letter-spacing: 0;
+  }
+  .topbar:has(.mobile-session-back) .mobile-session-back,
+  .topbar:has(.mobile-session-back) .topbar-mobile-controls .instance-selector-trigger,
+  .topbar:has(.mobile-session-back) .topbar-mobile-controls .icon-btn,
+  .topbar:has(.mobile-session-back) .topbar-mobile-controls .settings-trigger {
+    width: 36px;
+    min-width: 36px;
+    height: 36px;
+    min-height: 36px;
+    padding: 0;
+  }
+  .topbar:has(.mobile-session-back) .topbar-mobile-controls svg {
+    width: 15px;
+    height: 15px;
+  }
   .topbar-mobile-controls .topbar-create.icon-btn { width: 44px; height: 44px; }
   .main-body {
     padding: 12px calc(12px + env(safe-area-inset-right, 0px)) calc(14px + env(safe-area-inset-bottom, 0px))
@@ -10087,23 +10115,25 @@ body.shell-dock-dragging * {
   .session-detail > .detail-head {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-rows: minmax(44px, auto) auto;
+    grid-template-rows: minmax(36px, auto) auto;
     column-gap: 7px;
     row-gap: 4px;
+    padding: 4px var(--space-3);
   }
   .session-detail > .detail-head > .session-header-statuses {
     /* Span the shared status row so flattened change badges can wrap independently, while
-       reserving two 44px action targets plus their three 7px gaps (between buttons and columns). */
+       reserving two compact action targets plus the gaps between buttons and columns. */
     grid-column: 1 / -1;
     grid-row: 1;
-    width: calc(100% - 102px);
+    width: calc(100% - 86px);
     align-self: center;
     flex-wrap: wrap;
   }
   .session-detail > .detail-head .change-status-indicators {
     display: contents;
   }
-  .session-header-action { width: 44px; height: 44px; }
+  .session-header-action { width: 36px; height: 36px; }
+  .session-header-action svg { width: 15px; height: 15px; }
   .detail-actions {
     flex-wrap: nowrap;
   }
@@ -10128,9 +10158,14 @@ body.shell-dock-dragging * {
     padding: 12px 0;
   }
   .transcript-status-strip {
-    min-height: 42px;
-    padding: 6px 10px;
+    min-height: 36px;
+    padding: 4px 8px;
   }
+  /* Full-height phone Sessions use the same stable compact recovery presentation as previews and
+     height-constrained panes. The slot and echo stay in one mode whether recovery is active or
+     inactive, so the reader never changes dimensions and no empty band is reserved. */
+  .session-detail .transcript-recovery-slot { display: none; }
+  .session-detail .transcript-recovery-strip-echo { display: inline-flex; }
 
   /* The floating pinned summary would cover the whole transcript — make it a normal block
      above the scroll area (it is already the first child of .detail-reader). */
@@ -10165,6 +10200,9 @@ body.shell-dock-dragging * {
     padding-left: env(safe-area-inset-left, 0px);
     padding-right: env(safe-area-inset-right, 0px);
     padding-bottom: 0;
+  }
+  .app:has(.mobile-session-back) .right-panel {
+    top: calc(40px + env(safe-area-inset-top, 0px));
   }
   .right-panel-resizer {
     display: none;

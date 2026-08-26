@@ -251,6 +251,22 @@ test("short panes keep the status strip, and the pinned summary is bounded by th
   assert.match(soleRuleBody(".session-detail.preview .transcript-recovery-slot"), /display:\s*none;/);
   assert.match(soleRuleBody(".session-detail.preview .transcript-recovery-strip-echo"), /display:\s*inline-flex;/);
 
+  // Full-height phone Sessions deliberately stay in this same compact mode. Both declarations are
+  // conditioned on layout, never recovery activity, so active/inactive transitions cannot resize
+  // the reader and normal operation reserves no empty slot outside the strip.
+  const phone = mediaBlocks(css).find((block) =>
+    block.maxWidths.includes(760) &&
+    block.containsSelector(".session-detail .transcript-recovery-slot"));
+  assert.ok(phone, "the phone layout must collapse the dedicated recovery slot");
+  assert.deepEqual(
+    phone.declarationsForSelector(".session-detail .transcript-recovery-slot").get("display"),
+    ["none"],
+  );
+  assert.deepEqual(
+    phone.declarationsForSelector(".session-detail .transcript-recovery-strip-echo").get("display"),
+    ["inline-flex"],
+  );
+
   // The pinned summary's containing block is the reader region — which the DOM tests pin as
   // containing the scroller and neither the slot nor the strip — so no pixel reservation for
   // siblings may reappear in its max-height.

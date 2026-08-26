@@ -64,6 +64,52 @@ test("a tall pane shows the in-flow pill and the pinned summary can never inters
   await expect(page.locator(".transcript-recovery-strip-echo")).toBeHidden();
 });
 
+test("a full-height mobile Session keeps recovery in the persistent strip without an empty band", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 800 });
+
+  const readGeometry = async (settled: boolean) => {
+    await page.goto(`/recovery-notice-e2e.html?mode=expanded&height=640&width=390${settled ? "&settled=1" : ""}`);
+    const slot = page.locator(".transcript-recovery-slot");
+    const echo = page.locator(".transcript-recovery-strip-echo");
+    const strip = page.locator(".transcript-status-strip");
+    await expect(slot).toBeHidden();
+    await expect(slot).toHaveClass(settled ? /transcript-recovery-slot$/ : /active/);
+    if (settled) await expect(echo).toBeHidden();
+    else {
+      await expect(echo).toBeVisible();
+      await expect(echo).toContainText("Checking for Missed Activity…");
+    }
+    await expect(page.locator(".follow-tail-chip")).toContainText("Following Live Output");
+
+    return page.locator("#frame").evaluate((frame) => {
+      const rect = (selector: string) => {
+        const box = frame.querySelector(selector)!.getBoundingClientRect();
+        return { top: box.top, bottom: box.bottom, height: box.height };
+      };
+      const slotBox = rect(".transcript-recovery-slot");
+      const reader = rect(".detail-reader");
+      const stripBox = rect(".transcript-status-strip");
+      return {
+        reader,
+        strip: stripBox,
+        slot: slotBox,
+        hasHorizontalOverflow: frame.scrollWidth > frame.clientWidth,
+      };
+    });
+  };
+
+  const active = await readGeometry(false);
+  const inactive = await readGeometry(true);
+  for (const state of [active, inactive]) {
+    expect(state.slot.height).toBe(0);
+    expect(state.strip.top).toBeCloseTo(state.reader.bottom, 0);
+    expect(state.strip.height).toBeLessThanOrEqual(37.5);
+    expect(state.hasHorizontalOverflow).toBe(false);
+  }
+  expect(active.reader.height).toBeCloseTo(inactive.reader.height, 0);
+  expect(active.strip.top).toBeCloseTo(inactive.strip.top, 0);
+});
+
 test("a compressed expanded pane hides the pinned summary instead of letting it cover the strip", async ({ page }) => {
   await page.setViewportSize({ width: 800, height: 720 });
   await page.goto("/recovery-notice-e2e.html?mode=expanded&height=250&pinned=1");
