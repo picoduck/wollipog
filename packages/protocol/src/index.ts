@@ -265,7 +265,10 @@
 // 93: runner-hosted semantic session naming. A correlated metadata request executes through the
 //     session's exact native Codex or Claude account on its owning runner, with ephemeral/no-tool
 //     provider state and a bounded secret-free result. Older runners are never sent the request.
-export const PROTOCOL_VERSION = 93;
+// 94: runner-local custom session-naming endpoints. Owners/admins provision a write-only API key
+//     to one selected runner, while the control plane persists only secret-free configuration and
+//     readiness. Configuration, deletion, testing, and title generation are capability-gated.
+export const PROTOCOL_VERSION = 94;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
@@ -389,6 +392,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   stopAttemptCorrelation: 89,
   agentSkills: 90,
   sessionAgentNaming: 93,
+  sessionCustomModelNaming: 94,
 } as const;
 
 /* ========================================================================== */
@@ -1128,6 +1132,13 @@ export interface RunnerMetadata {
   /** Protocol v61+ runner-checked non-host targets. The control plane validates and persists only
    * exact runner-owned container/cloud definitions here; host targets remain topology-derived. */
   executionTargets?: ExecutionTargetDefinition[];
+  /** Protocol v94+ secret-free restart reconciliation for the runner-local naming endpoint. */
+  sessionNamingCustomModel?: {
+    configured: boolean;
+    apiKeyConfigured: boolean;
+    /** SHA-256 of canonical endpoint/model/timeout configuration. Never includes the API key. */
+    configDigest?: string;
+  };
 }
 
 export interface RunnerRuntimeInfo {
@@ -2435,6 +2446,15 @@ export interface SessionNamingAccountBoundary {
   machineCount: number;
 }
 
+export interface SessionNamingCustomModelTarget {
+  runnerId: string;
+  machineName: string;
+  online: boolean;
+  available: boolean;
+  configured: boolean;
+  reason?: string;
+}
+
 /** Secret-free organization setting. Legacy environment configuration is reported only as
  * endpoint/model metadata; bearer credentials never cross the control-plane API boundary. */
 export interface SessionNamingSettingsView {
@@ -2448,14 +2468,38 @@ export interface SessionNamingSettingsView {
     model: string;
     timeoutMs: number;
     apiKeyConfigured: boolean;
-    configurationSource: "environment";
+    configurationSource: "environment" | "runner";
+    runnerId?: string;
+    machineName?: string;
+    online?: boolean;
   };
+  /** Secret-free candidate Machines for runner-local custom endpoint provisioning. */
+  customModelTargets?: SessionNamingCustomModelTarget[];
   /** Organization-wide availability summary. The session still uses only its own Machine/account. */
   sessionAgentAccounts?: SessionNamingAccountBoundary[];
 }
 
 export interface UpdateSessionNamingSettingsRequest {
   mode: SessionNamingMode;
+}
+
+/** The API key is write-only. It is accepted by the control plane only long enough to relay the
+ * correlated request to the selected runner and is never included in a settings response. */
+export interface ConfigureSessionNamingCustomModelRequest {
+  runnerId: string;
+  endpoint: string;
+  model: string;
+  timeoutMs: number;
+  apiKey?: string;
+}
+
+export interface ReplaceSessionNamingCustomModelApiKeyRequest {
+  apiKey: string;
+}
+
+export interface SessionNamingConnectionTestResult {
+  ok: boolean;
+  status: "available" | "authentication_failed" | "endpoint_failed" | "timed_out" | "unavailable";
 }
 
 /* ---------------- Provider subscription usage (account-level) ---------- */
@@ -3948,9 +3992,32 @@ export interface GenerateSessionTitleResultMessage {
   requestId: string;
   ok: boolean;
   title?: string;
-  provider?: "codex" | "claude";
+  provider?: "codex" | "claude" | "custom";
   billingSource?: SessionNamingAccountBoundary["billingSource"];
   code?: SessionNamingRunnerErrorCode;
+}
+
+export type SessionNamingCustomModelOperation = "configure" | "delete_api_key" | "test";
+export type SessionNamingCustomModelErrorCode =
+  | "invalid_configuration"
+  | "authentication_failed"
+  | "endpoint_failed"
+  | "timed_out"
+  | "rate_limited"
+  | "unavailable";
+
+/** Correlated, secret-free acknowledgement for provisioning, deletion, and connection testing. */
+export interface SessionNamingCustomModelResultMessage {
+  type: "session_naming_custom_model_result";
+  requestId: string;
+  operation: SessionNamingCustomModelOperation;
+  ok: boolean;
+  status?: {
+    configured: boolean;
+    apiKeyConfigured: boolean;
+    configDigest?: string;
+  };
+  code?: SessionNamingCustomModelErrorCode;
 }
 
 export type RunnerToControlPlane =
@@ -3987,6 +4054,7 @@ export type RunnerToControlPlane =
   | SessionCommandInvocationUpdateMessage
   | DriverTelemetryMessage
   | GenerateSessionTitleResultMessage
+  | SessionNamingCustomModelResultMessage
   | GitActionResultMessage
   | RewindResultMessage
   | ForkResultMessage
@@ -4331,9 +4399,31 @@ export interface GenerateSessionTitleMessage {
   type: "generate_session_title";
   requestId: string;
   sessionId: string;
+  /** Absent is the v93 session-account behavior. Custom endpoint execution requires protocol v94. */
+  mode?: "session_agent_account" | "custom_model_endpoint";
   messages: SessionNamingPromptMessage[];
   /** Complete runner-side wall-clock budget, clamped again by the runner. */
   timeoutMs: number;
+}
+
+export interface ConfigureSessionNamingCustomModelMessage {
+  type: "configure_session_naming_custom_model";
+  requestId: string;
+  endpoint: string;
+  model: string;
+  timeoutMs: number;
+  /** Write-only replacement. Omission preserves an existing runner-local key. */
+  apiKey?: string;
+}
+
+export interface DeleteSessionNamingCustomModelKeyMessage {
+  type: "delete_session_naming_custom_model_key";
+  requestId: string;
+}
+
+export interface TestSessionNamingCustomModelMessage {
+  type: "test_session_naming_custom_model";
+  requestId: string;
 }
 
 export interface LogoutAgentMessage {
@@ -5082,6 +5172,9 @@ export type ControlPlaneToRunner =
   | RediscoverMessage
   | RefreshSubscriptionUsageMessage
   | GenerateSessionTitleMessage
+  | ConfigureSessionNamingCustomModelMessage
+  | DeleteSessionNamingCustomModelKeyMessage
+  | TestSessionNamingCustomModelMessage
   | LogoutAgentMessage
   | AcpRegistryApprovalMessage
   | SkillsSyncMessage

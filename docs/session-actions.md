@@ -62,24 +62,36 @@ not carry enough delivery correlation to identify a safe prompt retry.
 
 ## Semantic Session Names
 
-The prompt-derived title remains the immediate fallback. Deployments opt into isolated semantic
-naming with `WOLLIPOG_TITLE_MODEL_URL` and `WOLLIPOG_TITLE_MODEL`. The URL must be an explicit
-OpenAI-compatible chat-completions endpoint. `WOLLIPOG_TITLE_MODEL_API_KEY` supplies an optional
-bearer credential, and `WOLLIPOG_TITLE_MODEL_TIMEOUT_MS` sets a 250–30,000 ms timeout (5,000 ms by
-default). `WOLLIPOG_TITLE_GENERATION=disabled` disables generation even when a model is configured.
+The prompt-derived title remains the immediate fallback. **Settings → Session Naming** offers
+**Prompt Text Only**, **Use Session Agent Account**, and **Custom Model Endpoint**. Only an
+organization owner or admin can change the mode or custom endpoint. Changes apply to later naming
+requests without restarting Wollipog.
 
-Both URL and model are required, so content is never silently routed across a new provider or
-privacy boundary. The custom-endpoint request has no tools, bounded completed user/assistant input,
-a 40-token output limit, zero temperature, minimal reasoning, and a short timeout. It never enters
-the runner, transcript, agent context, prompt queue, or session lifecycle.
+**Custom Model Endpoint** provisions one selected protocol-v94 Machine. Endpoint, model, timeout,
+selected runner id, and secret-free readiness are persisted by the control plane. The API key is a
+write-only value: the control plane relays it over the authenticated runner channel, never writes it
+to SQLite, and never returns it to the browser. The runner stores it separately from endpoint
+metadata under its leased, identity-bound data directory using a protected 0700 directory and an
+atomically replaced 0600 file (with the owning Windows account's ACL on Windows). Symlinked files
+are refused. **Replace API Key** and **Delete API Key** mutate only that runner-local value;
+**Test Connection** returns a normalized status without provider text.
 
-Settings → Session Naming exposes this legacy endpoint as **Custom Model Endpoint** and also keeps
-the credential-free **Prompt Text Only** mode available. An organization with no saved choice
-inherits the environment behavior above, preserving existing deployments during migration. Once an
-owner or admin saves a mode, that organization setting takes precedence and applies to subsequent
-naming requests without restarting Wollipog. Endpoint/model/key changes still come from the startup
-environment in this compatibility phase; the API returns only the endpoint origin, model, timeout,
-and whether a key is configured, never the key itself.
+The endpoint must be an explicit HTTP or HTTPS OpenAI-compatible chat-completions URL without URL
+credentials, a query string, or a fragment. Bearer keys require HTTPS except for loopback-only
+endpoints. The model is required and the timeout is 250–30,000 ms.
+Requests refuse redirects, bound the response to 64 KiB, request at most 40 output tokens, and
+return only a normalized 120-character title. Missing configuration, an offline or old runner,
+authentication failure, timeout, malformed output, and endpoint errors all retain prompt text.
+
+Legacy deployments may continue using `WOLLIPOG_TITLE_MODEL_URL`, `WOLLIPOG_TITLE_MODEL`, optional
+`WOLLIPOG_TITLE_MODEL_API_KEY`, and `WOLLIPOG_TITLE_MODEL_TIMEOUT_MS`; setting
+`WOLLIPOG_TITLE_GENERATION=disabled` disables that legacy generator. An organization with no saved
+choice or runner-local custom configuration inherits this environment behavior. Any saved mode
+takes precedence. Once runner-local custom configuration is provisioned, it takes precedence over
+the environment endpoint and fails closed to prompt text when its selected Machine is unavailable;
+it never silently crosses back to the legacy provider. The environment path remains
+control-plane-hosted for migration compatibility and its API projection still exposes only origin,
+model, timeout, and key-present state.
 
 **Use Session Agent Account** is available when an online protocol-v93 runner reports a verified,
 authenticated native Codex or Claude account. Each naming request targets the session's existing

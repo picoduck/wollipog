@@ -158,6 +158,7 @@ import {
   type SubscriptionUsageManagerOptions,
 } from "./subscription-usage.js";
 import { SessionNamingExecutor } from "./session-naming.js";
+import { RunnerSessionNamingCustomModel } from "./session-naming-custom-model.js";
 
 const INITIAL_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 30_000;
@@ -290,6 +291,7 @@ sweepConductorMcpConfigs(conductorHost.configDir);
 sweepClaudeHookFiles(claudeHookHost.configDir);
 
 const runnerHostname = hostname();
+const sessionNamingCustomModel = new RunnerSessionNamingCustomModel(resolve(config.dataDir, "session-naming"));
 const containerTargets = new ContainerTargetRegistry(config.runnerId, runnerHostname, config.containerTargets);
 const cloudTargets = new CloudTargetRegistry(config.runnerId, runnerHostname, config.cloudTargets);
 const configuredAgentDefinitions = config.agents.map((a) => {
@@ -337,6 +339,7 @@ const metadata: RunnerMetadata = {
     admission: config.admission,
     executionIsolation: config.executionIsolation,
   },
+  sessionNamingCustomModel: sessionNamingCustomModel.status(),
 };
 
 // Configured agents are the baseline; discovery augments them (config wins on conflict).
@@ -1368,6 +1371,22 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         }));
       break;
     case "generate_session_title": {
+      if (msg.mode === "custom_model_endpoint") {
+        if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "sessionCustomModelNaming")) {
+          sendUp({
+            type: "generate_session_title_result",
+            requestId: msg.requestId,
+            ok: false,
+            code: "provider_unsupported",
+          });
+          break;
+        }
+        runCommandTask(
+          "generate_session_title",
+          sessionNamingCustomModel.generateResult(msg).then((result) => sendUp(result)),
+        );
+        break;
+      }
       const meta = store.readMeta(msg.sessionId);
       const agent = meta?.agentId
         ? metadata.agents.find((candidate) =>
@@ -1380,6 +1399,32 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       runCommandTask("generate_session_title", sessionNaming.execute(msg, agent, env).then((result) => sendUp(result)));
       break;
     }
+    case "configure_session_naming_custom_model": {
+      if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "sessionCustomModelNaming")) break;
+      const result = sessionNamingCustomModel.result(msg.requestId, "configure", () =>
+        sessionNamingCustomModel.configure({ endpoint: msg.endpoint, model: msg.model, timeoutMs: msg.timeoutMs }, msg.apiKey),
+      );
+      metadata.sessionNamingCustomModel = sessionNamingCustomModel.status();
+      sendUp(result);
+      break;
+    }
+    case "delete_session_naming_custom_model_key": {
+      if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "sessionCustomModelNaming")) break;
+      const result = sessionNamingCustomModel.result(msg.requestId, "delete_api_key", () =>
+        sessionNamingCustomModel.deleteApiKey(),
+      );
+      metadata.sessionNamingCustomModel = sessionNamingCustomModel.status();
+      sendUp(result);
+      break;
+    }
+    case "test_session_naming_custom_model":
+      if (runnerSupportsProtocol(controlPlaneProtocolVersion, "sessionCustomModelNaming")) {
+        runCommandTask(
+          "test_session_naming_custom_model",
+          sessionNamingCustomModel.testResult(msg.requestId).then((result) => sendUp(result)),
+        );
+      }
+      break;
     case "logout_agent":
       runCommandTask("logout_agent", sessions.logoutAgent(msg.sessionId).then((result) =>
         sendUp({

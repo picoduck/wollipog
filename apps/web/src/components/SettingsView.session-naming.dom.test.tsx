@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
+import { Simulate } from "react-dom/test-utils";
 import { Window } from "happy-dom";
 import type { SessionNamingMode, SessionNamingSettingsView } from "@wollipog/protocol";
 import { createApiClient } from "../api.js";
@@ -218,5 +219,99 @@ test("Session Naming reports secret-free runner provider and billing availabilit
   } finally {
     await act(async () => root.unmount());
     container.remove();
+  }
+});
+
+test("Session Naming provisions runner configuration and keeps API keys write-only", async () => {
+  const runnerView: SessionNamingSettingsView = {
+    ...view("custom_model_endpoint"),
+    effectiveMode: "custom_model_endpoint",
+    customModel: {
+      endpointOrigin: "https://models.example",
+      model: "title-model",
+      timeoutMs: 900,
+      apiKeyConfigured: true,
+      configurationSource: "runner",
+      runnerId: "runner-one",
+      machineName: "Build Machine",
+      online: true,
+    },
+    customModelTargets: [{
+      runnerId: "runner-one",
+      machineName: "Build Machine",
+      online: true,
+      available: true,
+      configured: true,
+    }],
+  };
+  const calls: Array<{ path: string; method: string; body?: string }> = [];
+  const transport: ApiTransport = {
+    instanceId: "test-custom-runner",
+    publicOrigin: "http://localhost",
+    close() {},
+    async request(path, init) {
+      const method = init?.method ?? "GET";
+      calls.push({ path, method, ...(typeof init?.body === "string" ? { body: init.body } : {}) });
+      if (path.endsWith("/test")) {
+        return new Response(JSON.stringify({ ok: true, status: "available" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify(runnerView), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  };
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(
+        <ApiProvider client={createApiClient(transport)}>
+          <SessionNamingPanel />
+        </ApiProvider>,
+      );
+    });
+    assert.match(container.textContent ?? "", /Stored on Build Machine/);
+    for (const label of ["Endpoint", "Model", "Timeout", "API Key"]) {
+      assert.ok(container.querySelector(`[aria-label="${label}"]`), `${label} field is visible`);
+    }
+    assert.ok(container.querySelector('[aria-label^="Machine: "]'), "Machine field is visible");
+    for (const label of ["Save Configuration", "Replace API Key", "Delete API Key", "Test Connection"]) {
+      assert.ok([...container.querySelectorAll("button")].some((button) => button.textContent?.trim() === label));
+    }
+
+    const key = container.querySelector<HTMLInputElement>('[aria-label="API Key"]');
+    assert.ok(key);
+    await act(async () => {
+      key.value = "write-only-browser-sentinel";
+      Simulate.change(key);
+    });
+    const replace = [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.trim() === "Replace API Key");
+    assert.ok(replace);
+    assert.equal(replace.disabled, false);
+    await act(async () => replace.click());
+    const replaceCall = calls.find((call) =>
+      call.path === "/api/session-naming/custom-model/api-key" && call.method === "POST");
+    assert.ok(replaceCall);
+    assert.deepEqual(JSON.parse(replaceCall.body ?? "{}"), { apiKey: "write-only-browser-sentinel" });
+    assert.equal(key.value, "");
+    assert.doesNotMatch(container.textContent ?? "", /write-only-browser-sentinel/);
+    assert.equal(domWindow.localStorage.length, 0);
+
+    const testConnection = [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.trim() === "Test Connection");
+    assert.ok(testConnection);
+    await act(async () => testConnection.click());
+    assert.ok(calls.some((call) => call.path === "/api/session-naming/custom-model/test" && call.method === "POST"));
+    assert.match(container.textContent ?? "", /Connection succeeded/);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    domWindow.localStorage.clear();
   }
 });

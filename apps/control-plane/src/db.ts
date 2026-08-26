@@ -1677,6 +1677,19 @@ CREATE TABLE IF NOT EXISTS session_naming_preferences (
   FOREIGN KEY (organization_id) REFERENCES identity_organizations(organization_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS session_naming_custom_models (
+  organization_id    TEXT PRIMARY KEY,
+  runner_id          TEXT NOT NULL,
+  endpoint           TEXT NOT NULL,
+  model              TEXT NOT NULL,
+  timeout_ms         INTEGER NOT NULL,
+  runner_configured  INTEGER NOT NULL DEFAULT 0 CHECK (runner_configured IN (0, 1)),
+  api_key_configured INTEGER NOT NULL DEFAULT 0 CHECK (api_key_configured IN (0, 1)),
+  updated_at         INTEGER NOT NULL,
+  FOREIGN KEY (organization_id) REFERENCES identity_organizations(organization_id) ON DELETE CASCADE,
+  FOREIGN KEY (runner_id) REFERENCES runners(runner_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS usage_aggregation_meta (
   id                 INTEGER PRIMARY KEY CHECK (id = 1),
   baseline_seeded_at INTEGER NOT NULL
@@ -6352,6 +6365,84 @@ export class ControlPlaneDb {
       `INSERT INTO session_naming_preferences (organization_id, mode, updated_at) VALUES (?, ?, ?)
        ON CONFLICT(organization_id) DO UPDATE SET mode=excluded.mode, updated_at=excluded.updated_at`,
     ).run(organizationId, mode, now);
+  }
+
+  getSessionNamingCustomModel(organizationId: string): {
+    runnerId: string;
+    endpoint: string;
+    model: string;
+    timeoutMs: number;
+    runnerConfigured: boolean;
+    apiKeyConfigured: boolean;
+    updatedAt: number;
+  } | null {
+    const row = this.stmt(
+      `SELECT runner_id, endpoint, model, timeout_ms, runner_configured, api_key_configured, updated_at
+       FROM session_naming_custom_models WHERE organization_id=?`,
+    ).get(organizationId) as {
+      runner_id: string;
+      endpoint: string;
+      model: string;
+      timeout_ms: number;
+      runner_configured: number;
+      api_key_configured: number;
+      updated_at: number;
+    } | undefined;
+    return row ? {
+      runnerId: row.runner_id,
+      endpoint: row.endpoint,
+      model: row.model,
+      timeoutMs: row.timeout_ms,
+      runnerConfigured: row.runner_configured === 1,
+      apiKeyConfigured: row.api_key_configured === 1,
+      updatedAt: row.updated_at,
+    } : null;
+  }
+
+  setSessionNamingCustomModel(
+    organizationId: string,
+    value: {
+      runnerId: string;
+      endpoint: string;
+      model: string;
+      timeoutMs: number;
+      runnerConfigured: boolean;
+      apiKeyConfigured: boolean;
+    },
+    now: number,
+  ): void {
+    this.stmt(
+      `INSERT INTO session_naming_custom_models
+         (organization_id, runner_id, endpoint, model, timeout_ms, runner_configured, api_key_configured, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(organization_id) DO UPDATE SET
+         runner_id=excluded.runner_id, endpoint=excluded.endpoint, model=excluded.model,
+         timeout_ms=excluded.timeout_ms, runner_configured=excluded.runner_configured,
+         api_key_configured=excluded.api_key_configured,
+         updated_at=excluded.updated_at`,
+    ).run(
+      organizationId,
+      value.runnerId,
+      value.endpoint,
+      value.model,
+      value.timeoutMs,
+      value.runnerConfigured ? 1 : 0,
+      value.apiKeyConfigured ? 1 : 0,
+      now,
+    );
+  }
+
+  reconcileSessionNamingCustomModelRunnerStatus(
+    runnerId: string,
+    configured: boolean,
+    apiKeyConfigured: boolean,
+    now: number,
+  ): boolean {
+    const result = this.stmt(
+      `UPDATE session_naming_custom_models
+       SET runner_configured=?, api_key_configured=?, updated_at=? WHERE runner_id=?`,
+    ).run(configured ? 1 : 0, apiKeyConfigured ? 1 : 0, now, runnerId);
+    return Number(result.changes) > 0;
   }
 
   private principalCanAccessScope(principal: AuthPrincipal, scope: ResourceScope): boolean {

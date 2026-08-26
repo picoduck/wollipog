@@ -152,4 +152,17 @@ test("the real auth gate admits organization members and non-personal administra
   const foreignWrite = await api(base, FOREIGN_ADMIN_TOKEN, "PUT");
   assert.equal(foreignWrite.status, 200, "a non-personal-organization admin can update its setting");
   assert.equal((await foreignWrite.json() as { source: string }).source, "organization");
+
+  const memberCustom = await fetch(`${base}/api/session-naming/custom-model`, {
+    method: "PUT",
+    headers: { authorization: `Bearer ${MEMBER_TOKEN}`, "content-type": "application/json" },
+    body: "{}",
+  });
+  assert.equal(memberCustom.status, 403, "an ordinary member cannot provision a runner-local key");
+  const foreignCustom = await fetch(`${base}/api/session-naming/custom-model`, {
+    method: "PUT",
+    headers: { authorization: `Bearer ${FOREIGN_ADMIN_TOKEN}`, "content-type": "application/json" },
+    body: "{}",
+  });
+  assert.equal(foreignCustom.status, 400, "a non-personal-organization admin reaches the scoped custom-model route");
 });

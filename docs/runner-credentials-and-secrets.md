@@ -227,6 +227,11 @@ without changing the current journal.
 ## Backup and operational boundary
 
 The control-plane database contains credential hashes and ownership metadata, not recoverable
-runner plaintext. Runner hosts contain the protected active token and any provider API values named
-by local configuration, so their state directories and host environments remain sensitive. A
-database restore cannot reveal the runner secret; rotate or reissue when the runner copy is lost.
+runner plaintext. Runner hosts contain the protected active token, runner-local Session Naming API
+key, and any provider API values named by local configuration, so their state directories and host
+environments remain sensitive. Session Naming stores its endpoint metadata and key in separate
+protected files under the leased runner data directory; normal settings reads expose only the
+endpoint origin and key-present state. A database restore cannot recover either runner-local
+secret. Rotate or reissue it when the runner copy is lost, and expect Session Naming readiness to
+fail closed until the runner's secret-free configuration digest reconciles with the restored
+control-plane metadata.
