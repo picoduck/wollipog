@@ -4,13 +4,13 @@ import { createInterface } from "node:readline";
 const scenario = process.argv[2] ?? "resume";
 const threadId = scenario === "fresh"
   ? "fixture-fresh"
-  : scenario === "question" || scenario === "diff-review-question"
+  : scenario === "question" || scenario === "dogfood-question"
     ? "fixture-question"
     : scenario === "subagents"
       ? "fixture-subagents"
       : "fixture-resume";
-const questionRequestId = scenario === "diff-review-question"
-  ? "live-codex-diff-review-1"
+const questionRequestId = scenario === "dogfood-question"
+  ? 5
   : "live-codex-question-1";
 const expectedLaunchArgs = ["--enable", "default_mode_request_user_input", "app-server"];
 if (JSON.stringify(process.argv.slice(3)) !== JSON.stringify(expectedLaunchArgs)) {
@@ -24,9 +24,14 @@ function send(message) {
 
 createInterface({ input: process.stdin }).on("line", (line) => {
   const message = JSON.parse(line);
-  if ((scenario === "question" || scenario === "diff-review-question") && message.method == null && message.id === questionRequestId) {
-    const expected = scenario === "diff-review-question"
-      ? { answers: { diff_review: { answers: ["Approve"] } } }
+  if ((scenario === "question" || scenario === "dogfood-question") && message.method == null && message.id === questionRequestId) {
+    const expected = scenario === "dogfood-question"
+      ? {
+          answers: {
+            merge_pr_342: { answers: ["Merge Now (Recommended)"] },
+            delete_remote_branch: { answers: ["Delete Branch (Recommended)"] },
+          },
+        }
       : {
           answers: {
             environment: { answers: ["Staging"] },
@@ -62,7 +67,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     return;
   }
   if (message.method === "thread/start" && (
-    scenario === "fresh" || scenario === "question" || scenario === "diff-review-question" || scenario === "subagents"
+    scenario === "fresh" || scenario === "question" || scenario === "dogfood-question" || scenario === "subagents"
   )) {
     send({ id: message.id, result: { thread: { id: threadId } } });
     return;
@@ -104,7 +109,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       });
       return;
     }
-    if (scenario === "diff-review-question") {
+    if (scenario === "dogfood-question") {
       send({
         id: questionRequestId,
         method: "item/tool/requestUserInput",
@@ -115,14 +120,25 @@ createInterface({ input: process.stdin }).on("line", (line) => {
           isBlocking: true,
           questions: [
             {
-              id: "diff_review",
-              header: "Review Diff",
-              question: "Send the sanitized diff to Claude Code for an independent review?",
-              isOther: false,
+              id: "merge_pr_342",
+              header: "Merge PR",
+              question: "Should I squash-merge pull request #342 now?",
+              isOther: true,
               isSecret: false,
               options: [
-                { label: "Approve", description: "Send the sanitized diff for review." },
-                { label: "Reject", description: "Do not send the diff." },
+                { label: "Merge Now (Recommended)", description: "Squash-merge the pull request now." },
+                { label: "Leave Open", description: "Leave the pull request open." },
+              ],
+            },
+            {
+              id: "delete_remote_branch",
+              header: "Delete Branch",
+              question: "Should I delete the remote branch after merging?",
+              isOther: true,
+              isSecret: false,
+              options: [
+                { label: "Delete Branch (Recommended)", description: "Delete the remote branch after merging." },
+                { label: "Keep Branch", description: "Keep the remote branch." },
               ],
             },
           ],

@@ -96,7 +96,7 @@ async function fetchSession(stack: Pick<LiveStack, "httpBase" | "ownerToken" | "
 
 async function startLiveStack(
   provider: "claude" | "codex" = "claude",
-  codexScenario: "question" | "diff-review-question" = "question",
+  codexScenario: "question" | "dogfood-question" = "question",
 ): Promise<LiveStack> {
   const port = await reservePort();
   const httpBase = `http://127.0.0.1:${port}`;
@@ -379,27 +379,39 @@ for (const viewport of [
       viewport: { width: viewport.width, height: viewport.height },
     });
 
-    test(`Codex diff-review approval resolves its exact live request on ${viewport.name}`, async ({ page }) => {
+    test(`Codex dogfood approval resolves its exact live request on ${viewport.name}`, async ({ page }) => {
       test.setTimeout(120_000);
-      const stack = await startLiveStack("codex", "diff-review-question");
+      const stack = await startLiveStack("codex", "dogfood-question");
       try {
         const pending = await fetchSession(stack);
         expect(pending.pendingApproval).toMatchObject({
           kind: "question",
-          requestId: "live-codex-diff-review-1",
-          questions: [{
-            id: "diff_review",
-            header: "Review Diff",
-            question: "Send the sanitized diff to Claude Code for an independent review?",
-            options: [
-              { label: "Approve", description: "Send the sanitized diff for review." },
-              { label: "Reject", description: "Do not send the diff." },
-            ],
-          }],
+          requestId: "5",
+          questions: [
+            {
+              id: "merge_pr_342",
+              header: "Merge PR",
+              question: "Should I squash-merge pull request #342 now?",
+              allowOther: true,
+              inputFormat: "text",
+              options: [
+                { label: "Merge Now (Recommended)", description: "Squash-merge the pull request now." },
+                { label: "Leave Open", description: "Leave the pull request open." },
+              ],
+            },
+            {
+              id: "delete_remote_branch",
+              header: "Delete Branch",
+              question: "Should I delete the remote branch after merging?",
+              allowOther: true,
+              inputFormat: "text",
+              options: [
+                { label: "Delete Branch (Recommended)", description: "Delete the remote branch after merging." },
+                { label: "Keep Branch", description: "Keep the remote branch." },
+              ],
+            },
+          ],
         });
-        expect(pending.pendingApproval?.kind === "question"
-          ? pending.pendingApproval.questions[0]?.allowOther ?? false
-          : null).toBe(false);
 
         const fragment = new URLSearchParams({
           origin: stack.httpBase,
@@ -409,23 +421,39 @@ for (const viewport of [
         await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
 
         const submit = page.getByRole("button", { name: "Submit" });
-        const approve = page.getByRole("radio", { name: /Approve/ });
-        const reject = page.getByRole("radio", { name: /Reject/ });
+        const mergeNow = page.getByRole("radio", { name: /Merge Now \(Recommended\)/ });
+        const leaveOpen = page.getByRole("radio", { name: /Leave Open/ });
+        const deleteBranch = page.getByRole("radio", { name: /Delete Branch \(Recommended\)/ });
+        const keepBranch = page.getByRole("radio", { name: /Keep Branch/ });
+        const otherResponses = page.getByLabel("Other Response");
         await expect(page.getByRole("region", { name: "Agent Questions" })).toBeVisible();
-        await expect(approve).toBeVisible();
-        await expect(reject).toBeVisible();
-        await expect(approve).toBeInViewport();
-        await expect(reject).toBeInViewport();
-        await expect(page.getByLabel("Other Response")).toHaveCount(0);
+        await expect(page.getByText("Should I squash-merge pull request #342 now?")).toBeVisible();
+        await expect(mergeNow).toBeVisible();
+        await expect(leaveOpen).toBeVisible();
+        await expect(mergeNow).toBeInViewport();
+        await expect(leaveOpen).toBeInViewport();
+        await expect(otherResponses).toHaveCount(2);
         await expect(submit).toBeDisabled();
 
-        await reject.focus();
+        await otherResponses.nth(0).fill("Merge after another review");
+        await expect(submit).toBeDisabled();
+        await mergeNow.focus();
         await page.keyboard.press("Space");
-        await expect(reject).toHaveAttribute("aria-checked", "true");
-        if (viewport.touch) await approve.tap();
-        else await approve.click();
-        await expect(approve).toHaveAttribute("aria-checked", "true");
-        await expect(reject).toHaveAttribute("aria-checked", "false");
+        await expect(mergeNow).toHaveAttribute("aria-checked", "true");
+        await expect(otherResponses.nth(0)).toHaveValue("");
+        await expect(submit).toBeDisabled();
+
+        await deleteBranch.scrollIntoViewIfNeeded();
+        await expect(page.getByText("Should I delete the remote branch after merging?")).toBeVisible();
+        await expect(deleteBranch).toBeVisible();
+        await expect(keepBranch).toBeVisible();
+        await expect(deleteBranch).toBeInViewport();
+        await expect(keepBranch).toBeInViewport();
+        await otherResponses.nth(1).fill("Keep it for a follow-up");
+        if (viewport.touch) await deleteBranch.tap();
+        else await deleteBranch.click();
+        await expect(deleteBranch).toHaveAttribute("aria-checked", "true");
+        await expect(otherResponses.nth(1)).toHaveValue("");
         await expect(submit).toBeEnabled();
         if (viewport.touch) await submit.tap();
         else await submit.click();
@@ -438,10 +466,11 @@ for (const viewport of [
             return null;
           }
         }, { timeout: 30_000 }).toEqual({
-          requestId: "live-codex-diff-review-1",
+          requestId: 5,
           result: {
             answers: {
-              diff_review: { answers: ["Approve"] },
+              merge_pr_342: { answers: ["Merge Now (Recommended)"] },
+              delete_remote_branch: { answers: ["Delete Branch (Recommended)"] },
             },
           },
         });
