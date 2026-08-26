@@ -1,8 +1,11 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type {
   AgentDefinition,
+  ConfigureSessionNamingCustomModelRequest,
   GenerateSessionTitleResultMessage,
   SessionNamingAccountBoundary,
+  SessionNamingConnectionTestResult,
+  SessionNamingCustomModelResultMessage,
   SessionNamingMode,
   SessionNamingSettingsView,
 } from "@wollipog/protocol";
@@ -17,6 +20,12 @@ import {
 
 type PersistedSessionNamingMode = SessionNamingMode;
 
+const CUSTOM_MODEL_MIN_TIMEOUT_MS = 250;
+const CUSTOM_MODEL_MAX_TIMEOUT_MS = 30_000;
+const CUSTOM_MODEL_MAX_ENDPOINT_LENGTH = 2_048;
+const CUSTOM_MODEL_MAX_MODEL_LENGTH = 200;
+const CUSTOM_MODEL_MAX_API_KEY_BYTES = 8 * 1024;
+
 /** A user-selectable mode cannot currently run. Its messages are deliberately safe for clients. */
 export class SessionNamingModeUnavailableError extends Error {
   override readonly name = "SessionNamingModeUnavailableError";
@@ -25,6 +34,84 @@ export class SessionNamingModeUnavailableError extends Error {
 function publicEndpointOrigin(value: string): string {
   const endpoint = new URL(value);
   return endpoint.origin;
+}
+
+function endpointProtectsApiKey(value: string | URL): boolean {
+  const endpoint = typeof value === "string" ? new URL(value) : value;
+  return endpoint.protocol === "https:" || endpoint.hostname === "localhost" || endpoint.hostname === "[::1]" ||
+    /^127(?:\.\d{1,3}){3}$/u.test(endpoint.hostname);
+}
+
+export function validateSessionNamingCustomModelInput(input: ConfigureSessionNamingCustomModelRequest): {
+  runnerId: string;
+  endpoint: string;
+  model: string;
+  timeoutMs: number;
+  apiKey?: string;
+} {
+  if (typeof input.runnerId !== "string" || !input.runnerId || input.runnerId.length > 256) {
+    throw new Error("a valid Machine is required");
+  }
+  if (typeof input.endpoint !== "string" || !input.endpoint.trim() || input.endpoint.length > CUSTOM_MODEL_MAX_ENDPOINT_LENGTH) {
+    throw new Error("a valid endpoint is required");
+  }
+  let endpoint: URL;
+  try {
+    endpoint = new URL(input.endpoint.trim());
+  } catch {
+    throw new Error("a valid endpoint is required");
+  }
+  if ((endpoint.protocol !== "https:" && endpoint.protocol !== "http:") || endpoint.username || endpoint.password ||
+      endpoint.hash || endpoint.search) {
+    throw new Error("the endpoint must be an HTTP or HTTPS URL without credentials, query parameters, or a fragment");
+  }
+  const model = typeof input.model === "string" ? input.model.trim() : "";
+  if (!model || model.length > CUSTOM_MODEL_MAX_MODEL_LENGTH || /[\0-\x1f\x7f]/u.test(model)) {
+    throw new Error("a valid model is required");
+  }
+  if (!Number.isInteger(input.timeoutMs) || input.timeoutMs < CUSTOM_MODEL_MIN_TIMEOUT_MS ||
+      input.timeoutMs > CUSTOM_MODEL_MAX_TIMEOUT_MS) {
+    throw new Error(`timeout must be between ${CUSTOM_MODEL_MIN_TIMEOUT_MS} and ${CUSTOM_MODEL_MAX_TIMEOUT_MS} milliseconds`);
+  }
+  if (input.apiKey !== undefined && (
+    typeof input.apiKey !== "string" || !input.apiKey ||
+    Buffer.byteLength(input.apiKey, "utf8") > CUSTOM_MODEL_MAX_API_KEY_BYTES || /[\0\r\n]/u.test(input.apiKey)
+  )) {
+    throw new Error("the API key is invalid");
+  }
+  if (input.apiKey !== undefined && !endpointProtectsApiKey(endpoint)) {
+    throw new Error("an API key requires HTTPS unless the endpoint is loopback-only");
+  }
+  return {
+    runnerId: input.runnerId,
+    endpoint: endpoint.toString(),
+    model,
+    timeoutMs: input.timeoutMs,
+    ...(input.apiKey !== undefined ? { apiKey: input.apiKey } : {}),
+  };
+}
+
+function customModelDigest(value: { endpoint: string; model: string; timeoutMs: number }): string {
+  return createHash("sha256").update(`${value.endpoint}\0${value.model}\0${value.timeoutMs}`).digest("hex");
+}
+
+export function sanitizeSessionNamingCustomModelResult(
+  message: SessionNamingCustomModelResultMessage,
+  operation: SessionNamingCustomModelResultMessage["operation"],
+): SessionNamingCustomModelResultMessage | null {
+  if (message.type !== "session_naming_custom_model_result" || message.operation !== operation ||
+      typeof message.requestId !== "string" || !message.requestId) return null;
+  if (message.ok !== true) {
+    return message.ok === false && [
+      "invalid_configuration", "authentication_failed", "endpoint_failed", "timed_out", "rate_limited", "unavailable",
+    ].includes(message.code ?? "")
+      ? { type: message.type, requestId: message.requestId, operation, ok: false, code: message.code }
+      : null;
+  }
+  const status = message.status;
+  if (!status || typeof status.configured !== "boolean" || typeof status.apiKeyConfigured !== "boolean" ||
+      (status.configDigest !== undefined && !/^[0-9a-f]{64}$/u.test(status.configDigest))) return null;
+  return { type: message.type, requestId: message.requestId, operation, ok: true, status: { ...status } };
 }
 
 function accountForAgent(agent: AgentDefinition | undefined): Omit<SessionNamingAccountBoundary, "machineCount"> | null {
@@ -59,7 +146,8 @@ export function sanitizeSessionNamingRunnerResult(
     return { type: "generate_session_title_result", requestId: message.requestId, ok: false, code: message.code };
   }
   if (message.ok !== true || typeof message.title !== "string" || !message.title || message.title.length > 120 ||
-      /[\r\n]/.test(message.title) || (message.provider !== "codex" && message.provider !== "claude") ||
+      /[\r\n]/.test(message.title) ||
+      (message.provider !== "codex" && message.provider !== "claude" && message.provider !== "custom") ||
       typeof message.billingSource !== "string" || !SESSION_NAMING_BILLING_SOURCES.has(message.billingSource)) return null;
   return {
     type: "generate_session_title_result",
@@ -119,9 +207,52 @@ export class SessionNamingSettings {
     }).sort((left, right) => left.provider.localeCompare(right.provider) || left.billingSource.localeCompare(right.billingSource));
   }
 
+  private customModelTargets(organizationId: string): NonNullable<SessionNamingSettingsView["customModelTargets"]> {
+    const selected = this.db.getSessionNamingCustomModel(organizationId);
+    return this.db.listRunners()
+      .filter((runner) => this.db.runnerScope(runner.runnerId)?.organizationId === organizationId)
+      .map((runner) => {
+        const current = runnerSupportsProtocol(runner.protocolVersion, "sessionCustomModelNaming");
+        const online = runner.status === "online";
+        return {
+          runnerId: runner.runnerId,
+          machineName: runner.displayName ?? runner.hostname ?? runner.runnerId,
+          online,
+          available: online && current && Boolean(this.hub),
+          configured: selected?.runnerId === runner.runnerId,
+          ...(!online
+            ? { reason: "This Machine is offline." }
+            : !current
+              ? { reason: "Update this Machine runner to configure a custom naming endpoint." }
+              : !this.hub
+                ? { reason: "Runner requests are unavailable." }
+                : {}),
+        };
+      })
+      .sort((left, right) => left.machineName.localeCompare(right.machineName));
+  }
+
+  private runnerCustomModel(organizationId: string): {
+    config: NonNullable<ReturnType<ControlPlaneDb["getSessionNamingCustomModel"]>>;
+    runner: NonNullable<ReturnType<ControlPlaneDb["getRunner"]>>;
+  } | null {
+    const config = this.db.getSessionNamingCustomModel(organizationId);
+    if (!config || !config.runnerConfigured) return null;
+    const runner = this.db.getRunner(config.runnerId);
+    if (!runner || runner.status !== "online" ||
+        !runnerSupportsProtocol(runner.protocolVersion, "sessionCustomModelNaming") || !this.hub) return null;
+    return { config, runner };
+  }
+
+  private customModelAvailable(organizationId: string): boolean {
+    const saved = this.db.getSessionNamingCustomModel(organizationId);
+    if (saved) return this.runnerCustomModel(organizationId) !== null;
+    return Boolean(this.environment.generator && this.environment.customModel);
+  }
+
   private effectiveMode(organizationId: string): PersistedSessionNamingMode {
     const selected = this.selectedMode(organizationId);
-    if (selected.mode === "custom_model_endpoint" && this.environment.generator && this.environment.customModel) {
+    if (selected.mode === "custom_model_endpoint" && this.customModelAvailable(organizationId)) {
       return "custom_model_endpoint";
     }
     if (selected.mode === "session_agent_account" && this.hub && this.accountBoundaries(organizationId).length) {
@@ -132,7 +263,10 @@ export class SessionNamingSettings {
 
   view(organizationId: string, canManage: boolean): SessionNamingSettingsView {
     const selected = this.selectedMode(organizationId);
-    const customAvailable = Boolean(this.environment.generator && this.environment.customModel);
+    const savedCustom = this.db.getSessionNamingCustomModel(organizationId);
+    const runnerCustom = this.runnerCustomModel(organizationId);
+    const customAvailable = this.customModelAvailable(organizationId);
+    const customModelTargets = this.customModelTargets(organizationId);
     const sessionAgentAccounts = this.hub ? this.accountBoundaries(organizationId) : [];
     const effectiveMode = selected.mode === "custom_model_endpoint" && customAvailable
       ? "custom_model_endpoint"
@@ -156,10 +290,24 @@ export class SessionNamingSettings {
           ? { available: true }
           : {
               available: false,
-              reason: "Configure WOLLIPOG_TITLE_MODEL_URL and WOLLIPOG_TITLE_MODEL on the control plane first.",
+              reason: savedCustom
+                ? "The selected Machine is offline, outdated, or no longer has the matching endpoint configuration."
+                : "Configure a runner-local custom endpoint or the legacy control-plane environment first.",
             },
       },
-      ...(this.environment.customModel ? {
+      ...(savedCustom ? {
+        customModel: {
+          endpointOrigin: publicEndpointOrigin(savedCustom.endpoint),
+          model: savedCustom.model,
+          apiKeyConfigured: savedCustom.apiKeyConfigured,
+          timeoutMs: savedCustom.timeoutMs,
+          configurationSource: "runner" as const,
+          runnerId: savedCustom.runnerId,
+          machineName: this.db.getRunner(savedCustom.runnerId)?.displayName ??
+            this.db.getRunner(savedCustom.runnerId)?.hostname ?? savedCustom.runnerId,
+          online: runnerCustom !== null,
+        },
+      } : this.environment.customModel ? {
         customModel: {
           endpointOrigin: publicEndpointOrigin(this.environment.customModel.endpoint),
           model: this.environment.customModel.model,
@@ -168,6 +316,7 @@ export class SessionNamingSettings {
           configurationSource: "environment" as const,
         },
       } : {}),
+      ...(customModelTargets.length ? { customModelTargets } : {}),
       ...(sessionAgentAccounts.length ? { sessionAgentAccounts } : {}),
     };
   }
@@ -176,8 +325,8 @@ export class SessionNamingSettings {
     if (mode === "session_agent_account" && (!this.hub || this.accountBoundaries(organizationId).length === 0)) {
       throw new SessionNamingModeUnavailableError("no eligible authenticated runner agent account is currently available");
     }
-    if (mode === "custom_model_endpoint" && !this.environment.generator) {
-      throw new SessionNamingModeUnavailableError("a custom model endpoint and model must be configured in the control-plane environment");
+    if (mode === "custom_model_endpoint" && !this.customModelAvailable(organizationId)) {
+      throw new SessionNamingModeUnavailableError("an available runner-local or legacy environment custom model must be configured");
     }
     const previousRevision = this.db.getSessionNamingPreference(organizationId)?.updatedAt ?? 0;
     this.db.setSessionNamingPreference(organizationId, mode, Math.max(now, previousRevision + 1));
@@ -194,9 +343,8 @@ export class SessionNamingSettings {
 
   timeoutForSession = (sessionId: string): number => {
     const organizationId = this.organizationIdForSession(sessionId);
-    return organizationId && this.effectiveMode(organizationId) === "custom_model_endpoint"
-      ? this.environment.timeoutMs
-      : 5_000;
+    if (!organizationId || this.effectiveMode(organizationId) !== "custom_model_endpoint") return 5_000;
+    return this.db.getSessionNamingCustomModel(organizationId)?.timeoutMs ?? this.environment.timeoutMs;
   };
 
   revisionForSession = (sessionId: string): string => {
@@ -204,12 +352,194 @@ export class SessionNamingSettings {
     if (!organizationId) return "unowned";
     const preference = this.db.getSessionNamingPreference(organizationId);
     const selected = preference ? `${preference.mode}:${preference.updatedAt}` : `inherited:${this.selectedMode(organizationId).mode}`;
+    if (this.effectiveMode(organizationId) === "custom_model_endpoint") {
+      const custom = this.db.getSessionNamingCustomModel(organizationId);
+      return custom
+        ? `${selected}:${custom.runnerId}:${custom.updatedAt}:${custom.runnerConfigured}:${custom.apiKeyConfigured}`
+        : selected;
+    }
     if (this.effectiveMode(organizationId) !== "session_agent_account") return selected;
     const target = this.sessionAgentTarget(sessionId);
     return target
       ? `${selected}:${target.runner.runnerId}:${target.runner.protocolVersion}:${target.agent.id}:${target.agent.authStatus}:${target.agent.available}`
       : `${selected}:no-session-account`;
   };
+
+  private manageableCustomRunner(organizationId: string, runnerId: string) {
+    const runner = this.db.getRunner(runnerId);
+    if (!runner || this.db.runnerScope(runnerId)?.organizationId !== organizationId) {
+      throw new SessionNamingModeUnavailableError("the selected Machine is unavailable");
+    }
+    if (runner.status !== "online" || !runnerSupportsProtocol(runner.protocolVersion, "sessionCustomModelNaming") || !this.hub) {
+      throw new SessionNamingModeUnavailableError("the selected Machine must be online and running a current runner");
+    }
+    return runner;
+  }
+
+  async configureCustomModel(
+    organizationId: string,
+    raw: ConfigureSessionNamingCustomModelRequest,
+    now = Date.now(),
+    activateMode = true,
+  ): Promise<SessionNamingSettingsView> {
+    const input = validateSessionNamingCustomModelInput(raw);
+    const previous = this.db.getSessionNamingCustomModel(organizationId);
+    if (previous && previous.runnerId !== input.runnerId && previous.apiKeyConfigured) {
+      throw new SessionNamingModeUnavailableError(
+        "delete the API key from the currently selected Machine before selecting another Machine",
+      );
+    }
+    if (previous?.runnerId === input.runnerId && previous.apiKeyConfigured &&
+        input.apiKey === undefined && !endpointProtectsApiKey(input.endpoint)) {
+      throw new Error("an API key already configured on this Machine requires HTTPS unless the endpoint is loopback-only");
+    }
+    const runner = this.manageableCustomRunner(organizationId, input.runnerId);
+    const stagedAt = Math.max(now, (previous?.updatedAt ?? 0) + 1);
+    // Persist only secret-free intent before relaying a key. If delivery becomes ambiguous, the
+    // runner's next registration can reconcile this digest instead of leaving an untracked secret.
+    this.db.setSessionNamingCustomModel(organizationId, {
+      runnerId: runner.runnerId,
+      endpoint: input.endpoint,
+      model: input.model,
+      timeoutMs: input.timeoutMs,
+      runnerConfigured: false,
+      apiKeyConfigured: input.apiKey !== undefined ||
+        (previous?.runnerId === runner.runnerId && previous.apiKeyConfigured),
+    }, stagedAt);
+    const requestId = `session_naming_config_${randomUUID()}`;
+    const response = await this.hub!.requestFromRunner(runner.runnerId, requestId, {
+      type: "configure_session_naming_custom_model",
+      requestId,
+      endpoint: input.endpoint,
+      model: input.model,
+      timeoutMs: input.timeoutMs,
+      ...(input.apiKey !== undefined ? { apiKey: input.apiKey } : {}),
+    }, 10_000);
+    if (response.type !== "session_naming_custom_model_result") {
+      throw new Error("runner returned an invalid custom model result");
+    }
+    const result = sanitizeSessionNamingCustomModelResult(response, "configure");
+    if (!result?.ok || !result.status?.configured ||
+        result.status.configDigest !== customModelDigest(input)) {
+      throw new SessionNamingModeUnavailableError(
+        `the selected Machine rejected the custom model configuration (${result?.code ?? "unavailable"})`,
+      );
+    }
+    this.db.setSessionNamingCustomModel(organizationId, {
+      runnerId: runner.runnerId,
+      endpoint: input.endpoint,
+      model: input.model,
+      timeoutMs: input.timeoutMs,
+      runnerConfigured: true,
+      apiKeyConfigured: result.status.apiKeyConfigured,
+    }, stagedAt + 1);
+    if (activateMode) {
+      const priorPreference = this.db.getSessionNamingPreference(organizationId)?.updatedAt ?? 0;
+      this.db.setSessionNamingPreference(
+        organizationId,
+        "custom_model_endpoint",
+        Math.max(now, priorPreference + 1),
+      );
+    }
+    return this.view(organizationId, true);
+  }
+
+  async deleteCustomModelApiKey(organizationId: string, now = Date.now()): Promise<SessionNamingSettingsView> {
+    const saved = this.db.getSessionNamingCustomModel(organizationId);
+    if (!saved) throw new SessionNamingModeUnavailableError("no runner-local custom model is configured");
+    const runner = this.manageableCustomRunner(organizationId, saved.runnerId);
+    const requestId = `session_naming_delete_key_${randomUUID()}`;
+    const response = await this.hub!.requestFromRunner(runner.runnerId, requestId, {
+      type: "delete_session_naming_custom_model_key",
+      requestId,
+    }, 10_000);
+    if (response.type !== "session_naming_custom_model_result") {
+      throw new Error("runner returned an invalid custom model result");
+    }
+    const result = sanitizeSessionNamingCustomModelResult(response, "delete_api_key");
+    const matchingConfig = result?.status?.configured === true &&
+      result.status.configDigest === customModelDigest(saved);
+    if (!result?.ok || !result.status || result.status.apiKeyConfigured) {
+      throw new SessionNamingModeUnavailableError("the selected Machine could not delete the API key");
+    }
+    this.db.reconcileSessionNamingCustomModelRunnerStatus(
+      runner.runnerId,
+      matchingConfig,
+      false,
+      Math.max(now, saved.updatedAt + 1),
+    );
+    return this.view(organizationId, true);
+  }
+
+  async replaceCustomModelApiKey(
+    organizationId: string,
+    apiKey: string,
+    now = Date.now(),
+  ): Promise<SessionNamingSettingsView> {
+    const saved = this.db.getSessionNamingCustomModel(organizationId);
+    if (!saved) throw new SessionNamingModeUnavailableError("no runner-local custom model is configured");
+    return this.configureCustomModel(organizationId, {
+      runnerId: saved.runnerId,
+      endpoint: saved.endpoint,
+      model: saved.model,
+      timeoutMs: saved.timeoutMs,
+      apiKey,
+    }, now, false);
+  }
+
+  async testCustomModel(organizationId: string): Promise<SessionNamingConnectionTestResult> {
+    const saved = this.db.getSessionNamingCustomModel(organizationId);
+    if (!saved) throw new SessionNamingModeUnavailableError("no runner-local custom model is configured");
+    const runner = this.manageableCustomRunner(organizationId, saved.runnerId);
+    const requestId = `session_naming_test_${randomUUID()}`;
+    const response = await this.hub!.requestFromRunner(runner.runnerId, requestId, {
+      type: "test_session_naming_custom_model",
+      requestId,
+    }, saved.timeoutMs + 2_000);
+    if (response.type !== "session_naming_custom_model_result") {
+      return { ok: false, status: "unavailable" };
+    }
+    const result = sanitizeSessionNamingCustomModelResult(response, "test");
+    if (result?.ok && result.status?.configured &&
+        result.status.configDigest === customModelDigest(saved)) {
+      this.db.reconcileSessionNamingCustomModelRunnerStatus(
+        runner.runnerId,
+        true,
+        result.status.apiKeyConfigured,
+        Math.max(Date.now(), saved.updatedAt + 1),
+      );
+      return { ok: true, status: "available" };
+    }
+    return {
+      ok: false,
+      status: result?.code === "authentication_failed"
+        ? "authentication_failed"
+        : result?.code === "timed_out"
+          ? "timed_out"
+          : result?.code === "endpoint_failed"
+            ? "endpoint_failed"
+            : "unavailable",
+    };
+  }
+
+  reconcileRunnerCustomModelStatus(
+    runnerId: string,
+    status: { configured: boolean; apiKeyConfigured: boolean; configDigest?: string } | undefined,
+    now = Date.now(),
+  ): void {
+    const organizationId = this.db.runnerScope(runnerId)?.organizationId;
+    if (!organizationId) return;
+    const saved = this.db.getSessionNamingCustomModel(organizationId);
+    if (!saved || saved.runnerId !== runnerId) return;
+    const matches = status?.configured === true && typeof status.apiKeyConfigured === "boolean" &&
+      status.configDigest === customModelDigest(saved);
+    this.db.reconcileSessionNamingCustomModelRunnerStatus(
+      runnerId,
+      matches,
+      matches && status.apiKeyConfigured,
+      Math.max(now, saved.updatedAt + 1),
+    );
+  }
 
   private sessionAgentTarget(sessionId: string): {
     runner: NonNullable<ReturnType<ControlPlaneDb["getRunner"]>>;
@@ -234,8 +564,47 @@ export class SessionNamingSettings {
     const organizationId = this.organizationIdForSession(request.sessionId);
     if (!organizationId) throw new Error("semantic session naming is disabled or not configured");
     if (this.effectiveMode(organizationId) === "custom_model_endpoint") {
-      if (!this.environment.generator) throw new Error("semantic session naming is disabled or not configured");
-      return this.environment.generator(request);
+      const custom = this.db.getSessionNamingCustomModel(organizationId);
+      if (!custom) {
+        if (!this.environment.generator) throw new Error("semantic session naming is disabled or not configured");
+        return this.environment.generator(request);
+      }
+      const target = this.runnerCustomModel(organizationId);
+      if (!target || !this.hub) throw new Error("runner custom model naming is unavailable");
+      const requestId = `session_name_${randomUUID()}`;
+      const resultPromise = this.hub.requestFromRunner(target.runner.runnerId, requestId, {
+        type: "generate_session_title",
+        requestId,
+        sessionId: request.sessionId,
+        mode: "custom_model_endpoint",
+        messages: request.messages.map((message) => ({ role: message.role, text: message.text })),
+        timeoutMs: custom.timeoutMs,
+      }, custom.timeoutMs + 1_000);
+      const result = await new Promise<GenerateSessionTitleResultMessage>((resolve, reject) => {
+        const aborted = () => {
+          this.hub?.cancelRunnerRequest?.(target.runner.runnerId, requestId);
+          reject(new Error("runner custom model naming was cancelled"));
+        };
+        if (request.signal.aborted) {
+          aborted();
+          void resultPromise.catch(() => {});
+          return;
+        }
+        request.signal.addEventListener("abort", aborted, { once: true });
+        void resultPromise.then((value) => {
+          request.signal.removeEventListener("abort", aborted);
+          if (value.type !== "generate_session_title_result" || (value.ok && value.provider !== "custom")) {
+            reject(new Error("runner returned an invalid custom model naming result"));
+          } else resolve(value);
+        }, (error) => {
+          request.signal.removeEventListener("abort", aborted);
+          reject(error);
+        });
+      });
+      if (!result.ok || typeof result.title !== "string") {
+        throw new Error(`runner custom model naming failed (${result.code ?? "provider_failed"})`);
+      }
+      return result.title;
     }
     const target = this.sessionAgentTarget(request.sessionId);
     if (!target || !this.hub) throw new Error("runner session naming is unavailable");
@@ -254,6 +623,7 @@ export class SessionNamingSettings {
       };
       if (request.signal.aborted) {
         aborted();
+        void resultPromise.catch(() => {});
         return;
       }
       request.signal.addEventListener("abort", aborted, { once: true });

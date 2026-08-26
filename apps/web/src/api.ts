@@ -68,6 +68,9 @@ import type {
   UpdateReviewFindingRequest,
   BundleReviewFindingsRequest,
   SessionConfig,
+  ConfigureSessionNamingCustomModelRequest,
+  ReplaceSessionNamingCustomModelApiKeyRequest,
+  SessionNamingConnectionTestResult,
   SessionNamingSettingsView,
   UpdateSessionNamingSettingsRequest,
   SessionEventsResponse,
@@ -267,6 +270,24 @@ export function createApiClient(transport: ApiTransport) {
       method: "PUT",
       body: JSON.stringify(input),
     }),
+
+  configureSessionNamingCustomModel: (input: ConfigureSessionNamingCustomModelRequest) =>
+    req<SessionNamingSettingsView>("/api/session-naming/custom-model", {
+      method: "PUT",
+      body: JSON.stringify(input),
+    }),
+
+  deleteSessionNamingCustomModelApiKey: () =>
+    req<SessionNamingSettingsView>("/api/session-naming/custom-model/api-key", { method: "DELETE" }),
+
+  replaceSessionNamingCustomModelApiKey: (input: ReplaceSessionNamingCustomModelApiKeyRequest) =>
+    req<SessionNamingSettingsView>("/api/session-naming/custom-model/api-key", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+
+  testSessionNamingCustomModel: () =>
+    req<SessionNamingConnectionTestResult>("/api/session-naming/custom-model/test", { method: "POST" }),
 
   subscriptionUsage: () => req<SubscriptionUsageResponse>("/api/usage/subscriptions"),
 

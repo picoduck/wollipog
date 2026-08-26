@@ -14,6 +14,7 @@ import type {
   AdoptSessionResultMessage,
   GitActionResultMessage,
   GenerateSessionTitleResultMessage,
+  SessionNamingCustomModelResultMessage,
   ForkResultMessage,
   HostActionResultMessage,
   InterruptTurnResultMessage,
@@ -182,7 +183,8 @@ export type RunnerRequestResult =
   | ResolveSteeringAttemptResultMessage
   | SubscriptionUsageRefreshResultMessage
   | SteerSessionResultMessage
-  | GenerateSessionTitleResultMessage;
+  | GenerateSessionTitleResultMessage
+  | SessionNamingCustomModelResultMessage;
 
 interface PendingRequest {
   runnerId: string;

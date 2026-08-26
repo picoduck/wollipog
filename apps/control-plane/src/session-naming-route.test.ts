@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -12,9 +13,14 @@ import { ControlPlaneDb } from "./db.js";
 import { registerSessionNamingRoutes } from "./session-naming-route.js";
 import {
   sanitizeSessionNamingRunnerResult,
+  sanitizeSessionNamingCustomModelResult,
   SessionNamingModeUnavailableError,
   SessionNamingSettings,
 } from "./session-naming-settings.js";
+
+function customDigest(endpoint: string, model: string, timeoutMs: number): string {
+  return createHash("sha256").update(`${endpoint}\0${model}\0${timeoutMs}`).digest("hex");
+}
 
 function human(role: HumanPrincipal["role"]): HumanPrincipal {
   return {
@@ -182,6 +188,7 @@ test("runtime eligibility does not construct the public settings projection", ()
       preferenceReads += 1;
       return { mode: "custom_model_endpoint" as const, updatedAt: 1 };
     },
+    getSessionNamingCustomModel: () => null,
   } as unknown as ControlPlaneDb;
   const settings = new SessionNamingSettings(db, {
     WOLLIPOG_TITLE_MODEL_URL: "https://models.example/v1/chat/completions",
@@ -234,6 +241,7 @@ test("runner-account mode is capability-gated, reports only billing boundaries, 
     sessionScope: () => ({ organizationId: "org_personal" }),
     runnerScope: () => ({ organizationId: "org_personal" }),
     getSessionNamingPreference: () => preference,
+    getSessionNamingCustomModel: () => null,
     setSessionNamingPreference: (_organizationId: string, mode: "session_agent_account", updatedAt: number) => {
       preference = { mode, updatedAt };
     },
@@ -262,7 +270,7 @@ test("runner-account mode is capability-gated, reports only billing boundaries, 
   assert.deepEqual(available.sessionAgentAccounts, [{
     provider: "claude", billingSource: "subscription", machineCount: 1,
   }]);
-  assert.equal(JSON.stringify(available).includes("machine-one"), false);
+  assert.equal(JSON.stringify(available.sessionAgentAccounts).includes("machine-one"), false);
   settings.setMode("org_personal", "session_agent_account", 10);
   assert.equal(settings.enabledForSession("session-one"), true);
 
@@ -364,4 +372,362 @@ test("runner naming result validation strips extra fields and rejects secret-bea
     provider: "claude",
     billingSource: "subscription",
   }), null);
+});
+
+test("runner-local custom model routes relay keys once, persist only metadata, and enforce admin authority", async () => {
+  type Saved = {
+    runnerId: string;
+    endpoint: string;
+    model: string;
+    timeoutMs: number;
+    runnerConfigured: boolean;
+    apiKeyConfigured: boolean;
+    updatedAt: number;
+  };
+  let saved: Saved | null = null;
+  let preference: { mode: "prompt_text_only" | "custom_model_endpoint"; updatedAt: number } | null = null;
+  let protocolVersion = 94;
+  const runner = (): RunnerView => ({
+    runnerId: "runner-custom",
+    displayName: "Naming Machine",
+    hostname: "naming-host",
+    os: "linux",
+    version: "test",
+    status: "online",
+    connectedAt: 1,
+    lastSeen: 1,
+    protocolVersion,
+    workspaces: [],
+    agents: [],
+  });
+  const db = {
+    sessionScope: () => ({ organizationId: "org_personal" }),
+    runnerScope: () => ({ organizationId: "org_personal" }),
+    listRunners: () => [runner()],
+    getRunner: () => runner(),
+    getSessionNamingPreference: () => preference,
+    setSessionNamingPreference: (
+      _organizationId: string,
+      mode: "prompt_text_only" | "custom_model_endpoint",
+      updatedAt: number,
+    ) => {
+      preference = { mode, updatedAt };
+    },
+    getSessionNamingCustomModel: () => saved,
+    setSessionNamingCustomModel: (_organizationId: string, value: Omit<Saved, "updatedAt">, updatedAt: number) => {
+      saved = { ...value, updatedAt };
+    },
+    reconcileSessionNamingCustomModelRunnerStatus: (
+      _runnerId: string,
+      runnerConfigured: boolean,
+      apiKeyConfigured: boolean,
+      updatedAt: number,
+    ) => {
+      if (!saved) return false;
+      saved = { ...saved, runnerConfigured, apiKeyConfigured, updatedAt };
+      return true;
+    },
+  } as unknown as ControlPlaneDb;
+  const sent: ControlPlaneToRunner[] = [];
+  const hub = {
+    requestFromRunner: async (_runnerId: string, requestId: string, message: ControlPlaneToRunner) => {
+      sent.push(message);
+      if (message.type === "configure_session_naming_custom_model") {
+        return {
+          type: "session_naming_custom_model_result" as const,
+          requestId,
+          operation: "configure" as const,
+          ok: true,
+          status: {
+            configured: true,
+            apiKeyConfigured: message.apiKey !== undefined || saved?.apiKeyConfigured === true,
+            configDigest: customDigest(message.endpoint, message.model, message.timeoutMs),
+          },
+        };
+      }
+      if (message.type === "delete_session_naming_custom_model_key") {
+        return {
+          type: "session_naming_custom_model_result" as const,
+          requestId,
+          operation: "delete_api_key" as const,
+          ok: true,
+          status: {
+            configured: true,
+            apiKeyConfigured: false,
+            configDigest: customDigest(saved!.endpoint, saved!.model, saved!.timeoutMs),
+          },
+        };
+      }
+      if (message.type === "generate_session_title") {
+        return {
+          type: "generate_session_title_result" as const,
+          requestId,
+          ok: true,
+          title: "Runner Custom Naming",
+          provider: "custom" as const,
+          billingSource: "api" as const,
+        };
+      }
+      return {
+        type: "session_naming_custom_model_result" as const,
+        requestId,
+        operation: "test" as const,
+        ok: false,
+        code: "authentication_failed" as const,
+        internal: "provider-secret-diagnostic",
+      };
+    },
+  } as unknown as Pick<Hub, "requestFromRunner">;
+  const settings = new SessionNamingSettings(db, {}, hub);
+  const app = Fastify();
+  registerSessionNamingRoutes(app, settings, (request) =>
+    request.headers.authorization === "Bearer admin" ? human("admin") : human("viewer"));
+
+  for (const request of [
+    { method: "PUT", url: "/api/session-naming/custom-model", payload: {} },
+    { method: "POST", url: "/api/session-naming/custom-model/api-key", payload: { apiKey: "secret" } },
+    { method: "DELETE", url: "/api/session-naming/custom-model/api-key" },
+    { method: "POST", url: "/api/session-naming/custom-model/test" },
+  ]) {
+    assert.equal((await app.inject({ ...request, headers: { authorization: "Bearer viewer" } })).statusCode, 403);
+  }
+
+  const invalid = await app.inject({
+    method: "PUT",
+    url: "/api/session-naming/custom-model",
+    headers: { authorization: "Bearer admin" },
+    payload: {
+      runnerId: "runner-custom",
+      endpoint: "https://models.example/v1?key=query-secret",
+      model: "title-model",
+      timeoutMs: 900,
+      apiKey: "write-only-sentinel",
+    },
+  });
+  assert.equal(invalid.statusCode, 400);
+  assert.equal(invalid.body.includes("query-secret"), false);
+  assert.equal(invalid.body.includes("write-only-sentinel"), false);
+  assert.equal(sent.length, 0);
+
+  const configured = await app.inject({
+    method: "PUT",
+    url: "/api/session-naming/custom-model",
+    headers: { authorization: "Bearer admin" },
+    payload: {
+      runnerId: "runner-custom",
+      endpoint: "https://models.example/v1/chat/completions",
+      model: "title-model",
+      timeoutMs: 900,
+      apiKey: "write-only-sentinel",
+    },
+  });
+  assert.equal(configured.statusCode, 200);
+  assert.equal(configured.body.includes("write-only-sentinel"), false);
+  assert.equal(configured.json().customModel.configurationSource, "runner");
+  assert.equal(configured.json().customModel.endpointOrigin, "https://models.example");
+  assert.equal(JSON.stringify(saved).includes("write-only-sentinel"), false);
+  assert.equal(sent[0]?.type, "configure_session_naming_custom_model");
+  if (sent[0]?.type === "configure_session_naming_custom_model") {
+    assert.equal(sent[0].apiKey, "write-only-sentinel");
+  }
+  assert.equal(await settings.generator({
+    sessionId: "session-custom",
+    messages: [{ role: "user", text: "Name through the selected Machine" }],
+    signal: new AbortController().signal,
+  }), "Runner Custom Naming");
+  const generation = sent.find((message) => message.type === "generate_session_title");
+  assert.equal(generation?.type, "generate_session_title");
+  if (generation?.type === "generate_session_title") {
+    assert.equal(generation.mode, "custom_model_endpoint");
+    assert.equal(generation.sessionId, "session-custom");
+  }
+
+  const savedBeforeRejectedEdit = { ...saved! };
+  const sentBeforeRejectedEdit = sent.length;
+  const rejectedRetainedKeyEdit = await app.inject({
+    method: "PUT",
+    url: "/api/session-naming/custom-model",
+    headers: { authorization: "Bearer admin" },
+    payload: {
+      runnerId: "runner-custom",
+      endpoint: "http://models.internal/v1/chat/completions",
+      model: "title-model",
+      timeoutMs: 900,
+    },
+  });
+  assert.equal(rejectedRetainedKeyEdit.statusCode, 400);
+  assert.deepEqual(saved, savedBeforeRejectedEdit, "prevalidation preserves the working secret-free configuration");
+  assert.equal(sent.length, sentBeforeRejectedEdit, "an unsafe retained-key edit never reaches the runner");
+
+  preference = { mode: "prompt_text_only", updatedAt: Date.now() };
+  const replaced = await app.inject({
+    method: "POST",
+    url: "/api/session-naming/custom-model/api-key",
+    headers: { authorization: "Bearer admin" },
+    payload: { apiKey: "replacement-sentinel" },
+  });
+  assert.equal(replaced.statusCode, 200);
+  assert.equal(replaced.body.includes("replacement-sentinel"), false);
+  assert.equal(replaced.json().mode, "prompt_text_only", "rotating a key does not activate custom naming");
+  assert.equal(preference.mode, "prompt_text_only");
+  assert.equal(sent.filter((message) => message.type === "configure_session_naming_custom_model").length, 2);
+
+  const tested = await app.inject({
+    method: "POST",
+    url: "/api/session-naming/custom-model/test",
+    headers: { authorization: "Bearer admin" },
+  });
+  assert.deepEqual(tested.json(), { ok: false, status: "authentication_failed" });
+  assert.equal(tested.body.includes("provider-secret-diagnostic"), false);
+
+  const deleted = await app.inject({
+    method: "DELETE",
+    url: "/api/session-naming/custom-model/api-key",
+    headers: { authorization: "Bearer admin" },
+  });
+  assert.equal(deleted.statusCode, 200);
+  assert.equal(deleted.json().customModel.apiKeyConfigured, false);
+
+  protocolVersion = 93;
+  const unavailable = await app.inject({
+    method: "PUT",
+    url: "/api/session-naming/custom-model",
+    headers: { authorization: "Bearer admin" },
+    payload: {
+      runnerId: "runner-custom",
+      endpoint: "https://models.example/v1/chat/completions",
+      model: "title-model",
+      timeoutMs: 900,
+    },
+  });
+  assert.equal(unavailable.statusCode, 409);
+  await app.close();
+});
+
+test("custom model result sanitizer strips runner diagnostics and rejects malformed readiness", () => {
+  assert.deepEqual(sanitizeSessionNamingCustomModelResult({
+    type: "session_naming_custom_model_result",
+    requestId: "config-1",
+    operation: "configure",
+    ok: true,
+    status: { configured: true, apiKeyConfigured: true, configDigest: "a".repeat(64) },
+    internal: "secret-path-and-token",
+  } as never, "configure"), {
+    type: "session_naming_custom_model_result",
+    requestId: "config-1",
+    operation: "configure",
+    ok: true,
+    status: { configured: true, apiKeyConfigured: true, configDigest: "a".repeat(64) },
+  });
+  assert.equal(sanitizeSessionNamingCustomModelResult({
+    type: "session_naming_custom_model_result",
+    requestId: "config-2",
+    operation: "configure",
+    ok: true,
+    status: { configured: true, apiKeyConfigured: true, configDigest: "secret" },
+  }, "configure"), null);
+});
+
+test("runner custom model metadata survives control-plane restart and registration reconciliation fails closed", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-session-naming-custom-restart-"));
+  const path = join(root, "control-plane.sqlite");
+  const config = {
+    runnerId: "runner-restart",
+    endpoint: "https://models.example/v1/chat/completions",
+    model: "title-model",
+    timeoutMs: 700,
+    runnerConfigured: true,
+    apiKeyConfigured: true,
+  };
+  try {
+    let db = ControlPlaneDb.open(path);
+    db.registerRunner({
+      runnerId: config.runnerId,
+      hostname: "restart-machine",
+      os: "linux",
+      version: "test",
+      agents: [],
+      workspaces: [],
+    }, 1, 94);
+    db.setSessionNamingCustomModel("org_personal", config, 2);
+    db.setSessionNamingPreference("org_personal", "custom_model_endpoint", 3);
+    db.close();
+
+    db = ControlPlaneDb.open(path);
+    const hub = { requestFromRunner: async () => { throw new Error("not used"); } } as unknown as Pick<Hub, "requestFromRunner">;
+    const settings = new SessionNamingSettings(db, {}, hub);
+    assert.equal(settings.view("org_personal", true).effectiveMode, "custom_model_endpoint");
+
+    settings.reconcileRunnerCustomModelStatus(config.runnerId, {
+      configured: true,
+      apiKeyConfigured: true,
+      configDigest: "0".repeat(64),
+    }, 4);
+    assert.equal(settings.view("org_personal", true).effectiveMode, "prompt_text_only");
+    assert.deepEqual(db.getSessionNamingCustomModel("org_personal"), {
+      ...config,
+      runnerConfigured: false,
+      apiKeyConfigured: false,
+      updatedAt: 4,
+    });
+
+    settings.reconcileRunnerCustomModelStatus(config.runnerId, {
+      configured: true,
+      apiKeyConfigured: false,
+      configDigest: customDigest(config.endpoint, config.model, config.timeoutMs),
+    }, 5);
+    assert.equal(settings.view("org_personal", true).effectiveMode, "custom_model_endpoint");
+    assert.equal(db.getSessionNamingCustomModel("org_personal")?.apiKeyConfigured, false);
+    db.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("one-time custom model API keys never enter the control-plane SQLite file", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-session-naming-key-redaction-"));
+  const path = join(root, "control-plane.sqlite");
+  const endpoint = "https://models.example/v1/chat/completions";
+  try {
+    const db = ControlPlaneDb.open(path);
+    db.registerRunner({
+      runnerId: "runner-key-redaction",
+      hostname: "key-machine",
+      os: "linux",
+      version: "test",
+      agents: [],
+      workspaces: [],
+    }, 1, 94);
+    const hub = {
+      requestFromRunner: async (_runnerId: string, requestId: string, message: ControlPlaneToRunner) => {
+        assert.equal(message.type, "configure_session_naming_custom_model");
+        return {
+          type: "session_naming_custom_model_result" as const,
+          requestId,
+          operation: "configure" as const,
+          ok: true,
+          status: {
+            configured: true,
+            apiKeyConfigured: true,
+            configDigest: customDigest(endpoint, "title-model", 800),
+          },
+        };
+      },
+    } as unknown as Pick<Hub, "requestFromRunner">;
+    const settings = new SessionNamingSettings(db, {}, hub);
+    await settings.configureCustomModel("org_personal", {
+      runnerId: "runner-key-redaction",
+      endpoint,
+      model: "title-model",
+      timeoutMs: 800,
+      apiKey: "sqlite-secret-sentinel",
+    }, 2);
+    db.close();
+    for (const entry of readdirSync(root, { withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+      assert.equal(readFileSync(join(root, entry.name)).includes(Buffer.from("sqlite-secret-sentinel")), false, entry.name);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

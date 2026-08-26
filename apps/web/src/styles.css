@@ -11109,6 +11109,29 @@ body.shell-dock-dragging * {
 .settings-panel > h2 { margin: 0; font-size: var(--text-xl); }
 .settings-group { display: flex; flex-direction: column; gap: var(--space-2); }
 .settings-group > h3 { margin: 0; font-size: var(--text-sm); text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-dim); }
+
+.session-naming-custom-model {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elev-1);
+}
+.session-naming-custom-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+.session-naming-custom-fields .field { margin: 0; }
+.session-naming-key-field { grid-column: 1 / -1; }
+.session-naming-custom-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.session-naming-custom-model > p { margin: 0; }
+@media (max-width: 680px) {
+  .session-naming-custom-fields { grid-template-columns: minmax(0, 1fr); }
+  .session-naming-key-field { grid-column: auto; }
+}
 .settings-pending-reason { display: block; margin-top: 2px; color: var(--amber-on-tint); font-size: var(--text-xs); }
 .settings-about { display: grid; grid-template-columns: auto 1fr; gap: 4px var(--space-4); margin: 0; }
 .settings-about dt { color: var(--text-dim); font-size: var(--text-sm); }

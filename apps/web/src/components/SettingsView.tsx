@@ -6,6 +6,7 @@ import { tailnetAccessDescription, type TailnetAccessSetting } from "../tailnet-
 import { type PushSetting } from "../push.js";
 import { KeyboardIcon } from "./Icons.js";
 import { NavRow, SegmentedRow, SelectRow, StaticRow, SwitchRow } from "./ui/SettingsRows.js";
+import { Select } from "./ui/ChoiceControls.js";
 import { SCHEME_SWATCHES, type ColorScheme, type ResolvedTheme } from "../theme.js";
 import { setEnterKeyBehavior, useEnterKeyBehavior, type EnterKeyBehavior } from "../enter-key.js";
 import { SETTINGS_SECTIONS, type SettingsSection, type View } from "../navigation.js";
@@ -317,6 +318,13 @@ export function SessionNamingPanel() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<{ action: "load" | "update"; message: string } | null>(null);
   const [loadRevision, setLoadRevision] = useState(0);
+  const [customBusy, setCustomBusy] = useState(false);
+  const [customStatus, setCustomStatus] = useState<string | null>(null);
+  const [customRunnerId, setCustomRunnerId] = useState("");
+  const [customEndpoint, setCustomEndpoint] = useState("");
+  const [customModel, setCustomModel] = useState("");
+  const [customTimeout, setCustomTimeout] = useState("5000");
+  const [customApiKey, setCustomApiKey] = useState("");
 
   useEffect(() => {
     mounted.current = true;
@@ -328,8 +336,17 @@ export function SessionNamingPanel() {
     setSettings(null);
     setBusy(false);
     setError(null);
+    setCustomBusy(false);
+    setCustomStatus(null);
+    setCustomEndpoint("");
+    setCustomApiKey("");
     void api.sessionNamingSettings().then((next) => {
-      if (!disposed) setSettings(next);
+      if (!disposed) {
+        setSettings(next);
+        setCustomRunnerId(next.customModel?.runnerId ?? next.customModelTargets?.find((target) => target.available)?.runnerId ?? "");
+        setCustomModel(next.customModel?.configurationSource === "runner" ? next.customModel.model : "");
+        setCustomTimeout(String(next.customModel?.configurationSource === "runner" ? next.customModel.timeoutMs : 5_000));
+      }
     }).catch((cause: unknown) => {
       if (!disposed) setError({ action: "load", message: cause instanceof Error ? cause.message : String(cause) });
     });
@@ -368,6 +385,89 @@ export function SessionNamingPanel() {
     };
   });
   const custom = settings?.customModel;
+  const requestIsCurrent = (requestApi: typeof api) => mounted.current && activeApi.current === requestApi;
+  const applyCustomSettings = (next: SessionNamingSettingsView, message: string) => {
+    setSettings(next);
+    setCustomRunnerId(next.customModel?.runnerId ?? customRunnerId);
+    setCustomModel(next.customModel?.model ?? customModel);
+    setCustomTimeout(String(next.customModel?.timeoutMs ?? customTimeout));
+    setCustomApiKey("");
+    setCustomStatus(message);
+  };
+  const configureCustom = () => {
+    if (customBusy) return;
+    const requestApi = api;
+    setCustomBusy(true);
+    setCustomStatus(null);
+    void requestApi.configureSessionNamingCustomModel({
+      runnerId: customRunnerId,
+      endpoint: customEndpoint,
+      model: customModel,
+      timeoutMs: Number(customTimeout),
+      ...(customApiKey ? { apiKey: customApiKey } : {}),
+    }).then((next) => {
+      if (!requestIsCurrent(requestApi)) return;
+      applyCustomSettings(next, "Custom model configuration saved on the selected Machine.");
+      setCustomEndpoint("");
+    }).catch((cause: unknown) => {
+      if (requestIsCurrent(requestApi)) {
+        setCustomStatus(`Could not save the custom model: ${cause instanceof Error ? cause.message : String(cause)}`);
+      }
+    }).finally(() => {
+      if (requestIsCurrent(requestApi)) {
+        setCustomApiKey("");
+        setCustomBusy(false);
+      }
+    });
+  };
+  const replaceApiKey = () => {
+    if (customBusy || !customApiKey) return;
+    const requestApi = api;
+    setCustomBusy(true);
+    setCustomStatus(null);
+    void requestApi.replaceSessionNamingCustomModelApiKey({ apiKey: customApiKey }).then((next) => {
+      if (requestIsCurrent(requestApi)) applyCustomSettings(next, "API key replaced on the selected Machine.");
+    }).catch((cause: unknown) => {
+      if (requestIsCurrent(requestApi)) {
+        setCustomStatus(`Could not replace the API key: ${cause instanceof Error ? cause.message : String(cause)}`);
+      }
+    }).finally(() => {
+      if (requestIsCurrent(requestApi)) {
+        setCustomApiKey("");
+        setCustomBusy(false);
+      }
+    });
+  };
+  const deleteApiKey = () => {
+    if (customBusy || !window.confirm("Delete the runner-local API key? Endpoints that require it will stop working.")) return;
+    const requestApi = api;
+    setCustomBusy(true);
+    setCustomStatus(null);
+    void requestApi.deleteSessionNamingCustomModelApiKey().then((next) => {
+      if (requestIsCurrent(requestApi)) applyCustomSettings(next, "API key deleted from the selected Machine.");
+    }).catch((cause: unknown) => {
+      if (requestIsCurrent(requestApi)) {
+        setCustomStatus(`Could not delete the API key: ${cause instanceof Error ? cause.message : String(cause)}`);
+      }
+    }).finally(() => { if (requestIsCurrent(requestApi)) setCustomBusy(false); });
+  };
+  const testCustom = () => {
+    if (customBusy) return;
+    const requestApi = api;
+    setCustomBusy(true);
+    setCustomStatus(null);
+    void requestApi.testSessionNamingCustomModel().then((result) => {
+      if (requestIsCurrent(requestApi)) {
+        setCustomStatus(result.ok
+          ? "Connection succeeded."
+          : `Connection failed (${result.status.replace(/_/g, " ")}).`);
+      }
+    }).catch((cause: unknown) => {
+      if (requestIsCurrent(requestApi)) {
+        setCustomStatus(`Could not test the connection: ${cause instanceof Error ? cause.message : String(cause)}`);
+      }
+    }).finally(() => { if (requestIsCurrent(requestApi)) setCustomBusy(false); });
+  };
   const status = error
     ? `Could not ${error.action} session naming: ${error.message}`
     : !settings
@@ -408,8 +508,117 @@ export function SessionNamingPanel() {
       {custom && (
         <StaticRow
           title="Custom Model"
-          description={`${custom.endpointOrigin} · ${custom.model} · ${custom.timeoutMs} ms · ${custom.apiKeyConfigured ? "API key configured" : "No API key"}. Managed through the control-plane environment.`}
+          description={`${custom.endpointOrigin} · ${custom.model} · ${custom.timeoutMs} ms · ${custom.apiKeyConfigured ? "API key configured" : "No API key"}. ${custom.configurationSource === "runner" ? `Stored on ${custom.machineName ?? "the selected Machine"}.` : "Managed through the control-plane environment."}`}
         />
+      )}
+      {!!settings?.customModelTargets?.length && (
+        <div className="session-naming-custom-model" aria-busy={customBusy || undefined}>
+          <div className="session-naming-custom-fields">
+            <label className="field">
+              <span>Machine</span>
+              <Select
+                label="Machine"
+                value={customRunnerId || null}
+                disabled={!settings.canManage || customBusy}
+                placeholder="Select a Machine"
+                options={settings.customModelTargets.map((target) => ({
+                  value: target.runnerId,
+                  label: target.machineName,
+                  disabled: !target.available,
+                  disabledReason: target.available ? undefined : target.reason ?? "Unavailable",
+                }))}
+                onChange={setCustomRunnerId}
+              />
+            </label>
+            <label className="field">
+              <span>Endpoint</span>
+              <input
+                aria-label="Endpoint"
+                type="url"
+                maxLength={2048}
+                value={customEndpoint}
+                placeholder={custom?.configurationSource === "runner" ? custom.endpointOrigin : "https://models.example/v1/chat/completions"}
+                disabled={!settings.canManage || customBusy}
+                onChange={(event) => setCustomEndpoint(event.target.value)}
+              />
+            </label>
+            <label className="field">
+              <span>Model</span>
+              <input
+                aria-label="Model"
+                maxLength={200}
+                value={customModel}
+                disabled={!settings.canManage || customBusy}
+                onChange={(event) => setCustomModel(event.target.value)}
+              />
+            </label>
+            <label className="field">
+              <span>Timeout</span>
+              <input
+                aria-label="Timeout"
+                type="number"
+                min={250}
+                max={30000}
+                value={customTimeout}
+                disabled={!settings.canManage || customBusy}
+                onChange={(event) => setCustomTimeout(event.target.value)}
+              />
+            </label>
+            <label className="field session-naming-key-field">
+              <span>API Key</span>
+              <input
+                aria-label="API Key"
+                type="password"
+                autoComplete="off"
+                value={customApiKey}
+                placeholder={custom?.apiKeyConfigured ? "Enter a replacement key" : "Optional for endpoints without authentication"}
+                disabled={!settings.canManage || customBusy}
+                onChange={(event) => setCustomApiKey(event.target.value)}
+              />
+            </label>
+          </div>
+          <p className="ui-row-desc">
+            The API key is sent once to the selected Machine and is never returned to this browser or stored by the control plane.
+            {" "}When this mode is active, bounded session text is sent through that Machine to the configured provider.
+          </p>
+          <div className="session-naming-custom-actions">
+            <button
+              type="button"
+              className="btn sm"
+              disabled={!settings.canManage || customBusy || !customRunnerId || !customEndpoint || !customModel}
+              onClick={configureCustom}
+            >
+              Save Configuration
+            </button>
+            <button
+              type="button"
+              className="btn ghost sm"
+              disabled={!settings.canManage || customBusy || custom?.configurationSource !== "runner" ||
+                custom.online === false || !customApiKey}
+              onClick={replaceApiKey}
+            >
+              Replace API Key
+            </button>
+            <button
+              type="button"
+              className="btn ghost sm"
+              disabled={!settings.canManage || customBusy || custom?.configurationSource !== "runner" ||
+                custom.online === false || !custom.apiKeyConfigured}
+              onClick={deleteApiKey}
+            >
+              Delete API Key
+            </button>
+            <button
+              type="button"
+              className="btn ghost sm"
+              disabled={!settings.canManage || customBusy || custom?.configurationSource !== "runner" || custom.online === false}
+              onClick={testCustom}
+            >
+              Test Connection
+            </button>
+          </div>
+          {customStatus && <p role="status" className="ui-row-desc">{customStatus}</p>}
+        </div>
       )}
       {!!settings?.sessionAgentAccounts?.length && (
         <StaticRow

@@ -1,4 +1,6 @@
 import type {
+  ConfigureSessionNamingCustomModelRequest,
+  ReplaceSessionNamingCustomModelApiKeyRequest,
   SessionNamingMode,
   UpdateSessionNamingSettingsRequest,
 } from "@wollipog/protocol";
@@ -51,6 +53,85 @@ export function registerSessionNamingRoutes(
       }
       request.log.error({ err: error }, "could not update session naming settings");
       return reply.code(500).send({ error: "could not update session naming settings" });
+    }
+  });
+
+  app.put("/api/session-naming/custom-model", async (request, reply) => {
+    const principal = requestPrincipal(request);
+    if (!principal || principal.kind !== "human" || !canAdministerIdentity(principal.role)) {
+      return reply.code(403).send({ error: "organization owner or admin permission is required" });
+    }
+    const body = request.body as Partial<ConfigureSessionNamingCustomModelRequest> | null;
+    if (!body || typeof body !== "object") {
+      return reply.code(400).send({ error: "custom model configuration is required" });
+    }
+    try {
+      return await settings.configureCustomModel(
+        principal.organizationId,
+        body as ConfigureSessionNamingCustomModelRequest,
+      );
+    } catch (error) {
+      if (error instanceof SessionNamingModeUnavailableError) {
+        return reply.code(409).send({ error: error.message });
+      }
+      if (error instanceof Error && /^(a valid|the endpoint|timeout|the API key|an API key)/u.test(error.message)) {
+        return reply.code(400).send({ error: error.message });
+      }
+      request.log.error({ err: error }, "could not configure runner-local session naming");
+      return reply.code(500).send({ error: "could not configure runner-local session naming" });
+    }
+  });
+
+  app.delete("/api/session-naming/custom-model/api-key", async (request, reply) => {
+    const principal = requestPrincipal(request);
+    if (!principal || principal.kind !== "human" || !canAdministerIdentity(principal.role)) {
+      return reply.code(403).send({ error: "organization owner or admin permission is required" });
+    }
+    try {
+      return await settings.deleteCustomModelApiKey(principal.organizationId);
+    } catch (error) {
+      if (error instanceof SessionNamingModeUnavailableError) {
+        return reply.code(409).send({ error: error.message });
+      }
+      request.log.error({ err: error }, "could not delete runner-local session naming API key");
+      return reply.code(500).send({ error: "could not delete runner-local session naming API key" });
+    }
+  });
+
+  app.post("/api/session-naming/custom-model/api-key", async (request, reply) => {
+    const principal = requestPrincipal(request);
+    if (!principal || principal.kind !== "human" || !canAdministerIdentity(principal.role)) {
+      return reply.code(403).send({ error: "organization owner or admin permission is required" });
+    }
+    const apiKey = (request.body as Partial<ReplaceSessionNamingCustomModelApiKeyRequest> | null)?.apiKey;
+    if (typeof apiKey !== "string") return reply.code(400).send({ error: "an API key is required" });
+    try {
+      return await settings.replaceCustomModelApiKey(principal.organizationId, apiKey);
+    } catch (error) {
+      if (error instanceof SessionNamingModeUnavailableError) {
+        return reply.code(409).send({ error: error.message });
+      }
+      if (error instanceof Error && error.message === "the API key is invalid") {
+        return reply.code(400).send({ error: error.message });
+      }
+      request.log.error({ err: error }, "could not replace runner-local session naming API key");
+      return reply.code(500).send({ error: "could not replace runner-local session naming API key" });
+    }
+  });
+
+  app.post("/api/session-naming/custom-model/test", async (request, reply) => {
+    const principal = requestPrincipal(request);
+    if (!principal || principal.kind !== "human" || !canAdministerIdentity(principal.role)) {
+      return reply.code(403).send({ error: "organization owner or admin permission is required" });
+    }
+    try {
+      return await settings.testCustomModel(principal.organizationId);
+    } catch (error) {
+      if (error instanceof SessionNamingModeUnavailableError) {
+        return reply.code(409).send({ error: error.message });
+      }
+      request.log.error({ err: error }, "could not test runner-local session naming");
+      return reply.code(500).send({ error: "could not test runner-local session naming" });
     }
   });
 }
