@@ -2265,6 +2265,82 @@ test("rejected steering receipt dismissal is durable and does not depend on runn
   assert.equal((await svc.resolveSteeringAttempt(id, "submission-dismiss-rejected", "dismiss")).ok, true);
 });
 
+test("a Clear All sequence dismisses compacted and fresh rejections without touching live steering", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  const retention = 30 * 24 * 60 * 60_000;
+  db.createSteeringAttempt({
+    requestId: "steer-clear-compacted", sessionId: id, submissionId: "submission-clear-compacted",
+    turnId: "turn-old", source: "direct", requestSha256: "1".repeat(64), text: "old rejection", now: 1,
+  });
+  assert.equal(db.recordSteeringResult(RUNNER_ID, {
+    type: "steer_session_result", requestId: "steer-clear-compacted", sessionId: id,
+    submissionId: "submission-clear-compacted", turnId: "turn-old", disposition: "rejected",
+    reason: "provider_rejected",
+  }, 2)?.state, "rejected");
+  assert.equal(db.compactSteeringAttempts(retention + 2), 1);
+
+  db.createSteeringAttempt({
+    requestId: "steer-clear-fresh", sessionId: id, submissionId: "submission-clear-fresh",
+    turnId: "turn-fresh", source: "direct", requestSha256: "2".repeat(64), text: "fresh rejection",
+    now: retention + 3,
+  });
+  assert.equal(db.recordSteeringResult(RUNNER_ID, {
+    type: "steer_session_result", requestId: "steer-clear-fresh", sessionId: id,
+    submissionId: "submission-clear-fresh", turnId: "turn-fresh", disposition: "rejected",
+    reason: "provider_rejected",
+  }, retention + 4)?.state, "rejected");
+  db.createSteeringAttempt({
+    requestId: "steer-clear-pending", sessionId: id, submissionId: "submission-clear-pending",
+    turnId: "turn-live", source: "direct", requestSha256: "3".repeat(64), text: "pending", now: retention + 5,
+  });
+  db.createSteeringAttempt({
+    requestId: "steer-clear-queued", sessionId: id, submissionId: "submission-clear-queued",
+    turnId: "turn-live", source: "queued", sourceQueueId: "queued-live", requestSha256: "4".repeat(64),
+    now: retention + 6,
+  });
+  db.createSteeringAttempt({
+    requestId: "steer-clear-uncertain", sessionId: id, submissionId: "submission-clear-uncertain",
+    turnId: "turn-live", source: "direct", requestSha256: "5".repeat(64), text: "uncertain",
+    now: retention + 7,
+  });
+  db.markSteeringAttemptUncertain("steer-clear-uncertain", retention + 8);
+  hub.sessionChangedByIdCalls.length = 0;
+
+  for (const submissionId of ["submission-clear-compacted", "submission-clear-fresh"]) {
+    const dismissed = await svc.resolveSteeringAttempt(id, submissionId, "dismiss");
+    assert.equal(dismissed.ok, true, dismissed.error);
+    assert.notEqual(dismissed.status, 409, "projected compacted rejections must remain actionable");
+    assert.deepEqual(dismissed.data?.resolution, { action: "dismiss", state: "applied" });
+  }
+  assert.equal(hub.sentOfType("resolve_steering_attempt").length, 0,
+    "terminal rejection acknowledgements never disturb runner work");
+  assert.deepEqual(hub.sessionChangedByIdCalls, [id, id]);
+
+  for (const [submissionId, state] of [
+    ["submission-clear-pending", "pending"],
+    ["submission-clear-queued", "pending"],
+    ["submission-clear-uncertain", "uncertain"],
+  ] as const) {
+    const live = db.findSteeringAttemptBySubmission(id, submissionId)?.attempt;
+    assert.equal(live?.state, state);
+    assert.equal(live?.resolution, undefined);
+  }
+
+  const refreshed = new SessionsService(db, hub as unknown as Hub, NOOP_LOG);
+  assert.equal((await refreshed.resolveSteeringAttempt(id, "submission-clear-compacted", "dismiss")).ok, true,
+    "repeated dismissal remains safe after a service reconnect");
+  const attempts = new Map(
+    db.getSession(id)?.steeringAttempts?.map((attempt) => [attempt.submissionId, attempt] as const),
+  );
+  assert.deepEqual(attempts.get("submission-clear-compacted")?.resolution, {
+    action: "dismiss", state: "applied",
+  });
+  assert.deepEqual(attempts.get("submission-clear-fresh")?.resolution, {
+    action: "dismiss", state: "applied",
+  });
+});
+
 test("a lost steering-resolution reply preserves one action and safely replays its request id", async () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
