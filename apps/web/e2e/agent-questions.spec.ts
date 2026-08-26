@@ -46,6 +46,48 @@ test("desktop questions select and submit the exact current answers", async ({ p
   }]);
 });
 
+test("desktop Text Entry submits exact structured form answers using only the keyboard", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/agent-questions-e2e.html?set=forms&style=text");
+
+  const responses = page.locator(".question-text-input");
+  await expect(responses).toHaveCount(5);
+  await responses.nth(0).fill("2");
+  await responses.nth(0).press("Tab");
+  await responses.nth(1).fill("1, Browser Tests");
+  await responses.nth(2).fill("");
+  await responses.nth(3).fill("s3cret");
+  await responses.nth(4).fill("3");
+  await responses.nth(4).press("Control+Enter");
+
+  await expect(page.getByRole("status")).toHaveText("Question Answered");
+  expect(await page.evaluate(() => window.agentQuestionCalls[0]?.answers)).toEqual({
+    target: "Production",
+    checks: ["Unit Tests", "Browser Tests"],
+    token: "s3cret",
+    retries: "3",
+  });
+});
+
+test("mobile Text Entry preserves invalid responses, focuses the first error, and resets replacements", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/agent-questions-e2e.html?style=text");
+  const response = page.locator(".question-text-input");
+  await response.fill("not offered");
+  await response.press("Control+Enter");
+  await expect(page.getByRole("alert")).toContainText("displayed number or unambiguous option label");
+  await expect(response).toHaveValue("not offered");
+  await expect(response).toBeFocused();
+
+  await page.evaluate(() => window.replaceAgentQuestion());
+  const replacement = page.locator(".question-text-input");
+  await expect(replacement).toHaveValue("");
+  await replacement.fill("1");
+  await replacement.press("Control+Enter");
+  await expect(page.getByRole("status")).toHaveText("Question Answered");
+  expect(await page.evaluate(() => window.agentQuestionCalls[0]?.answers)).toEqual({ replacement: "Fresh Answer" });
+});
+
 for (const viewport of [
   { name: "mobile portrait", width: 390, height: 844 },
   { name: "mobile landscape", width: 844, height: 390 },

@@ -9,6 +9,11 @@ import { NavRow, SegmentedRow, SelectRow, StaticRow, SwitchRow } from "./ui/Sett
 import { Select } from "./ui/ChoiceControls.js";
 import { SCHEME_SWATCHES, type ColorScheme, type ResolvedTheme } from "../theme.js";
 import { setEnterKeyBehavior, useEnterKeyBehavior, type EnterKeyBehavior } from "../enter-key.js";
+import {
+  setQuestionResponseStyle,
+  useQuestionResponseStyle,
+  type QuestionResponseStyle,
+} from "../question-response-style.js";
 import { SETTINGS_SECTIONS, type SettingsSection, type View } from "../navigation.js";
 import type { ExperimentFlags, ExperimentId } from "../experiments.js";
 
@@ -239,6 +244,7 @@ export function PendingSetting({ title, description, reason }: { title: string; 
 
 export function BehaviorPanel() {
   const enterKey = useEnterKeyBehavior();
+  const questionResponseStyle = useQuestionResponseStyle();
   return (
     <SettingsGroup title="Defaults">
       {/* Stored per device and only on an explicit choice; the unstored default derives from the
@@ -260,6 +266,23 @@ export function BehaviorPanel() {
         ]}
         value={enterKey}
         onChange={(value) => setEnterKeyBehavior(value as EnterKeyBehavior)}
+      />
+      <SegmentedRow
+        title="Question Response Style"
+        options={[
+          {
+            value: "interactive",
+            label: "Interactive Form",
+            description: "Choose options directly with keyboard-accessible form controls. Stored on this device.",
+          },
+          {
+            value: "text",
+            label: "Text Entry",
+            description: "Enter displayed numbers or option labels in one response field per question. Stored on this device.",
+          },
+        ]}
+        value={questionResponseStyle}
+        onChange={(value) => setQuestionResponseStyle(value as QuestionResponseStyle)}
       />
       <PendingSetting
         title="Reduce Motion"

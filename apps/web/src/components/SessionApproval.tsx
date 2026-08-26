@@ -3,12 +3,20 @@ import {
   DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH,
   isPolicyApproval,
   isSupportedAgentQuestion,
-  validateQuestionFreeText,
   type AgentQuestion,
   type ApprovalContext,
   type SessionView,
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
+import {
+  clearQuestionDrafts,
+  questionAnswers,
+  resolveQuestionResponse,
+  storedQuestionDrafts,
+  storeQuestionDrafts,
+  toggleQuestionChoice,
+} from "../question-response.js";
+import { useQuestionResponseStyle } from "../question-response-style.js";
 import { handleRovingChoiceKeyDown } from "./interactions.js";
 
 const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
@@ -102,6 +110,7 @@ export function SessionApprovalRegion({
     const hadFocus = focusOwnedRef.current;
     const hadRequest = previousRequestRef.current !== null;
     const focusDestination = approvalFocusDestination(previousRequestRef.current, requestId, hadFocus);
+    if (previousRequestRef.current) clearQuestionDrafts(session.id, previousRequestRef.current);
     previousRequestRef.current = requestId;
     setAnnouncement(requestId ? (hadRequest ? "Agent request updated" : "Agent response required") : "Agent request resolved");
     if (focusDestination === "request") {
@@ -257,7 +266,7 @@ export function SessionApprovalBanner({
   );
 }
 
-/** Structured agent questions with explicit radio/checkbox semantics and request-keyed state. */
+/** Structured agent questions with two presentations over one request-keyed canonical draft. */
 export function SessionQuestionBanner({
   sessionId,
   requestId,
@@ -274,121 +283,113 @@ export function SessionQuestionBanner({
   showKeyHints?: boolean;
 }) {
   const api = useApi();
+  const responseStyle = useQuestionResponseStyle();
   const [busy, setBusy] = useState<"submit" | "dismiss" | null>(null);
-  const [selection, setSelection] = useState<QuestionSelectionState>({ requestId, picked: {} });
-  const [drafts, setDrafts] = useState<{ requestId: string; values: Record<string, string> }>({ requestId, values: {} });
+  const [drafts, setDrafts] = useState<{ requestId: string; values: Record<string, string> }>(() => ({
+    requestId,
+    values: storedQuestionDrafts(sessionId, requestId),
+  }));
+  const [validationAttempted, setValidationAttempted] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const labelPrefix = useId();
+  const operationPendingRef = useRef(false);
+  const questionBlockRefs = useRef(new Map<string, HTMLDivElement | null>());
+  const previousDraftRequestRef = useRef({ sessionId, requestId });
+  // React's opaque useId contains colons. They are valid in HTML ids but break the selector-based
+  // HTMLInputElement.list lookup used by some DOM implementations, so keep this idref family plain.
+  const labelPrefix = useId().replace(/:/g, "");
   const availabilityId = `${labelPrefix}-availability`;
 
   useEffect(() => {
-    setSelection({ requestId, picked: {} });
-    setDrafts({ requestId, values: {} });
+    const previous = previousDraftRequestRef.current;
+    if (previous.sessionId !== sessionId || previous.requestId !== requestId) {
+      clearQuestionDrafts(previous.sessionId, previous.requestId);
+      clearQuestionDrafts(sessionId, requestId);
+      previousDraftRequestRef.current = { sessionId, requestId };
+      setDrafts({ requestId, values: {} });
+    } else {
+      setDrafts({ requestId, values: storedQuestionDrafts(sessionId, requestId) });
+    }
+    setValidationAttempted(false);
     setBusy(null);
     setError(null);
-  }, [requestId]);
+  }, [requestId, sessionId]);
 
-  const picked = questionSelectionForRequest(selection, requestId);
   const draftValues = drafts.requestId === requestId ? drafts.values : {};
+  const draftValue = (questionId: string) => Object.hasOwn(draftValues, questionId) ? draftValues[questionId]! : "";
+  const resolved = questionAnswers(questions, draftValues);
   const unsupportedQuestionFormat = questions.some((question) => !isSupportedAgentQuestion(question));
   const controlsDisabled = busy !== null || !runnerOnline || unsupportedQuestionFormat;
   const fixedChoicesNativelyDisabled = busy !== null || unsupportedQuestionFormat;
 
-  const toggle = (question: AgentQuestion, label: string) => {
-    if (!question.multiSelect) {
-      setDrafts((current) => ({
-        requestId,
-        values: { ...(current.requestId === requestId ? current.values : {}), [question.id]: "" },
-      }));
-    }
-    setSelection((current) => {
-      const currentPicked = questionSelectionForRequest(current, requestId);
-      const previous = currentPicked[question.id] ?? [];
-      if (question.multiSelect) {
-        return {
-          requestId,
-          picked: {
-            ...currentPicked,
-            [question.id]: previous.includes(label)
-              ? previous.filter((item) => item !== label)
-              : [...previous, label],
-          },
-        };
-      }
-      return { requestId, picked: { ...currentPicked, [question.id]: [label] } };
+  const updateDraft = (question: AgentQuestion, value: string) => {
+    setDrafts((current) => {
+      const values = { ...(current.requestId === requestId ? current.values : {}), [question.id]: value };
+      storeQuestionDrafts(sessionId, requestId, values);
+      return { requestId, values };
     });
   };
 
-  const updateDraft = (question: AgentQuestion, value: string) => {
-    setDrafts((current) => ({
-      requestId,
-      values: { ...(current.requestId === requestId ? current.values : {}), [question.id]: value },
-    }));
-    if (value && !question.multiSelect) {
-      setSelection((current) => {
-        const currentPicked = questionSelectionForRequest(current, requestId);
-        return { requestId, picked: { ...currentPicked, [question.id]: [] } };
-      });
-    }
+  const toggle = (question: AgentQuestion, label: string) => {
+    updateDraft(question, toggleQuestionChoice(question, draftValue(question.id), label));
   };
 
-  const complete = !unsupportedQuestionFormat && questions.every((question) => {
-    const selected = picked[question.id] ?? [];
-    const draft = draftValues[question.id]?.trim() ?? "";
-    if (question.multiSelect) {
-      if (selected.length === 0 && question.required === false) return true;
-      const minimum = question.minSelections ?? (question.required === false ? 0 : 1);
-      return selected.length >= minimum && (question.maxSelections == null || selected.length <= question.maxSelections);
-    }
-    if (selected.length > 0) return true;
-    if (!draft) return question.required === false;
-    return question.allowOther === true && validateQuestionFreeText(question, draft) == null;
-  });
-  const freeTextErrors = new Map<string, string>();
-  for (const question of questions) {
-    const selected = picked[question.id] ?? [];
-    const draft = draftValues[question.id]?.trim() ?? "";
-    if (!draft || selected.length > 0 || question.multiSelect || !question.allowOther) continue;
-    const validationError = validateQuestionFreeText(question, draft);
-    if (validationError) freeTextErrors.set(question.id, `Response ${validationError}.`);
-  }
+  const complete = !unsupportedQuestionFormat && Object.keys(resolved.errors).length === 0;
 
   const submit = async () => {
+    if (operationPendingRef.current || busy !== null || !runnerOnline || unsupportedQuestionFormat) return;
+    if (Object.keys(resolved.errors).length > 0) {
+      setValidationAttempted(true);
+      const firstInvalid = questions.find((question) => Object.hasOwn(resolved.errors, question.id));
+      window.requestAnimationFrame(() => {
+        questionBlockRefs.current.get(firstInvalid?.id ?? "")
+          ?.querySelector<HTMLElement>("input:not(:disabled), button:not(:disabled):not([aria-disabled=true])")
+          ?.focus();
+      });
+      return;
+    }
+    operationPendingRef.current = true;
     setBusy("submit");
     setError(null);
     try {
-      const answers: Record<string, string | string[]> = {};
-      for (const question of questions) {
-        const selected = picked[question.id] ?? [];
-        const draft = draftValues[question.id]?.trim() ?? "";
-        if (selected.length > 0) answers[question.id] = question.multiSelect ? selected : selected[0]!;
-        else if (question.allowOther && draft) answers[question.id] = draft;
-        else if (question.required !== false) answers[question.id] = question.multiSelect ? [] : "";
-      }
-      const updated = await api.answerQuestion(sessionId, { requestId, answers, action: "submit" });
+      const updated = await api.answerQuestion(sessionId, { requestId, answers: resolved.answers, action: "submit" });
+      clearQuestionDrafts(sessionId, requestId);
       onSessionUpdate?.(updated);
     } catch (cause) {
       setError((cause as Error).message);
     } finally {
+      operationPendingRef.current = false;
       setBusy(null);
     }
   };
 
   const dismiss = async () => {
+    if (operationPendingRef.current || busy !== null || !runnerOnline) return;
+    operationPendingRef.current = true;
     setBusy("dismiss");
     setError(null);
     try {
       const updated = await api.answerQuestion(sessionId, { requestId, answers: {}, action: "dismiss" });
+      clearQuestionDrafts(sessionId, requestId);
       onSessionUpdate?.(updated);
     } catch (cause) {
       setError((cause as Error).message);
     } finally {
+      operationPendingRef.current = false;
       setBusy(null);
     }
   };
 
   return (
-    <section className="approval-bar question-bar" aria-label="Agent Questions" aria-busy={busy !== null}>
+    <section
+      className={`approval-bar question-bar question-style-${responseStyle}`}
+      aria-label="Agent Questions"
+      aria-busy={busy !== null}
+      onKeyDown={(event) => {
+        if (event.key !== "Enter" || (!event.ctrlKey && !event.metaKey)) return;
+        event.preventDefault();
+        void submit();
+      }}
+    >
       <div className="approval-main">
         <span className="approval-icon" aria-hidden="true">❓</span>
         <span className="approval-text">
@@ -425,7 +426,7 @@ export function SessionQuestionBanner({
         <div className="question-submit-hint">
           {unsupportedQuestionFormat
             ? "This question format is unsupported. Dismiss the question to continue."
-            : freeTextErrors.size > 0
+            : validationAttempted || Object.keys(resolved.errors).some((id) => draftValue(id).trim())
               ? "Correct the response errors before submitting."
               : "Complete all required responses before submitting."}
         </div>
@@ -437,19 +438,28 @@ export function SessionQuestionBanner({
           const contextId = `${labelPrefix}-context-${questionIndex}`;
           const requirementId = `${labelPrefix}-requirement-${questionIndex}`;
           const responseErrorId = `${labelPrefix}-response-error-${questionIndex}`;
-          const selected = picked[question.id] ?? [];
-          const freeTextError = freeTextErrors.get(question.id);
+          const rawValue = draftValue(question.id);
+          const answer = resolveQuestionResponse(question, rawValue).answer;
+          const selected = Array.isArray(answer)
+            ? answer
+            : question.options.some((option) => option.label === answer) ? [answer as string] : [];
+          const responseError = Object.hasOwn(resolved.errors, question.id) ? resolved.errors[question.id] : undefined;
+          const showResponseError = Boolean(responseError && (validationAttempted || rawValue.trim()));
           const controlDescriptionIds = [
             question.context ? contextId : null,
             requirementId,
             !runnerOnline ? availabilityId : null,
           ]
             .filter((value): value is string => value !== null);
-          const inputDescriptionIds = [...controlDescriptionIds, freeTextError ? responseErrorId : null]
+          const inputDescriptionIds = [...controlDescriptionIds, showResponseError ? responseErrorId : null]
             .filter((value): value is string => value !== null)
             .join(" ");
           return (
-            <div className="question-block" key={question.id}>
+            <div
+              className="question-block"
+              key={question.id}
+              ref={(element) => { questionBlockRefs.current.set(question.id, element); }}
+            >
               <div className="question-text" id={questionLabelId}>
                 {question.header && <span className="question-chip">{question.header}</span>}
                 {question.question}
@@ -459,7 +469,7 @@ export function SessionQuestionBanner({
                 {question.required === false ? "This question is optional." : "An answer to this question is required."}
               </span>
               {question.context && <div className="question-context" id={contextId}>{question.context}</div>}
-              {question.options.length > 0 && (
+              {responseStyle === "interactive" && question.options.length > 0 && (
                 <div
                   className="question-options"
                   role={question.multiSelect ? "group" : "radiogroup"}
@@ -499,7 +509,7 @@ export function SessionQuestionBanner({
                   })}
                 </div>
               )}
-              {question.allowOther && !question.multiSelect && (
+              {responseStyle === "interactive" && question.allowOther && !question.multiSelect && (
                 <label className="question-input-label">
                   <span id={responseLabelId}>{question.options.length > 0 ? "Other Response" : "Response"}</span>
                   {question.required === false && <span className="muted sm"> (optional)</span>}
@@ -507,7 +517,7 @@ export function SessionQuestionBanner({
                     className="input question-input"
                     aria-labelledby={`${questionLabelId} ${responseLabelId}`}
                     aria-describedby={inputDescriptionIds}
-                    aria-invalid={freeTextError ? true : undefined}
+                    aria-invalid={showResponseError ? true : undefined}
                     aria-required={question.options.length === 0 ? question.required !== false : undefined}
                     required={question.options.length === 0 && question.required !== false}
                     disabled={controlsDisabled}
@@ -524,16 +534,63 @@ export function SessionQuestionBanner({
                     max={question.maximum}
                     minLength={question.minLength}
                     maxLength={question.maxLength ?? DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH}
-                    value={draftValues[question.id] ?? ""}
+                    value={selected.length > 0 ? "" : rawValue}
                     autoComplete="off"
                     onChange={(event) => updateDraft(question, event.target.value)}
                   />
-                  {freeTextError && (
+                  {showResponseError && (
                     <span className="form-error question-field-error" id={responseErrorId} role="alert">
-                      {freeTextError}
+                      {responseError}
                     </span>
                   )}
                 </label>
+              )}
+              {responseStyle === "text" && (
+                <>
+                  {question.options.length > 0 && (
+                    <ol className="question-text-options" aria-label="Offered Choices">
+                      {question.options.map((option) => (
+                        <li key={option.label}>
+                          <span className="question-label">{option.label}</span>
+                          {option.description && <span className="question-desc">{option.description}</span>}
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+                  <label className="question-input-label">
+                    <span id={responseLabelId}>Response</span>
+                    {question.required === false && <span className="muted sm"> (optional)</span>}
+                    <input
+                      className="input question-input question-text-input"
+                      aria-labelledby={`${questionLabelId} ${responseLabelId}`}
+                      aria-describedby={inputDescriptionIds}
+                      aria-invalid={showResponseError ? true : undefined}
+                      aria-required={question.required !== false}
+                      required={question.required !== false}
+                      disabled={controlsDisabled}
+                      type={question.secret ? "password" : "text"}
+                      inputMode={question.inputFormat === "integer" ? "numeric" : question.inputFormat === "number" ? "decimal" : undefined}
+                      maxLength={question.allowOther ? question.maxLength ?? DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH : undefined}
+                      value={rawValue}
+                      autoComplete="off"
+                      list={!question.secret && question.options.length > 0 ? `${labelPrefix}-choices-${questionIndex}` : undefined}
+                      placeholder={question.multiSelect ? "Numbers or labels, separated by commas" : question.options.length > 0 ? "Number or label" : undefined}
+                      onChange={(event) => updateDraft(question, event.target.value)}
+                    />
+                    {!question.secret && question.options.length > 0 && (
+                      <datalist id={`${labelPrefix}-choices-${questionIndex}`}>
+                        {question.options.map((option, optionIndex) => (
+                          <option key={option.label} value={option.label}>{optionIndex + 1}. {option.label}</option>
+                        ))}
+                      </datalist>
+                    )}
+                    {showResponseError && (
+                      <span className="form-error question-field-error" id={responseErrorId} role="alert">
+                        {responseError}
+                      </span>
+                    )}
+                  </label>
+                </>
               )}
             </div>
           );

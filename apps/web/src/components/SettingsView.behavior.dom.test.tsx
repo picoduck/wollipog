@@ -4,6 +4,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import { ENTER_KEY_STORAGE_KEY } from "../enter-key.js";
+import { QUESTION_RESPONSE_STYLE_STORAGE_KEY } from "../question-response-style.js";
 import { BehaviorPanel } from "./SettingsView.js";
 
 /**
@@ -81,6 +82,34 @@ test("the Enter Key row stores the choice and reflects it back", async () => {
     assert.equal(optionByName("Send Message").getAttribute("aria-checked"), "true");
   } finally {
     domWindow.localStorage.removeItem(ENTER_KEY_STORAGE_KEY);
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("the Question Response Style row defaults to Interactive Form and announces same-tab changes", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<BehaviorPanel />));
+    const optionByName = (name: string) => {
+      const match = [...container.querySelectorAll<HTMLElement>("[role=radio]")].find((option) =>
+        (option.getAttribute("aria-label") ?? option.textContent ?? "").includes(name));
+      assert.ok(match, `the Question Response Style row must offer "${name}"`);
+      return match;
+    };
+
+    assert.equal(domWindow.localStorage.getItem(QUESTION_RESPONSE_STYLE_STORAGE_KEY), null);
+    assert.equal(optionByName("Interactive Form").getAttribute("aria-checked"), "true");
+    await act(async () => { optionByName("Text Entry").click(); });
+    assert.equal(domWindow.localStorage.getItem(QUESTION_RESPONSE_STYLE_STORAGE_KEY), "text");
+    assert.equal(optionByName("Text Entry").getAttribute("aria-checked"), "true");
+    await act(async () => { optionByName("Interactive Form").click(); });
+    assert.equal(domWindow.localStorage.getItem(QUESTION_RESPONSE_STYLE_STORAGE_KEY), "interactive");
+    assert.equal(optionByName("Interactive Form").getAttribute("aria-checked"), "true");
+  } finally {
+    domWindow.localStorage.removeItem(QUESTION_RESPONSE_STYLE_STORAGE_KEY);
     await act(async () => root.unmount());
     container.remove();
   }

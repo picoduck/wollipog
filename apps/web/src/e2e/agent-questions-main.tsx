@@ -4,6 +4,7 @@ import type { AgentQuestion, SessionView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { SessionQuestionBanner } from "../components/SessionApproval.js";
+import { setQuestionResponseStyle } from "../question-response-style.js";
 import "../styles.css";
 
 interface AnswerCall {
@@ -22,6 +23,7 @@ declare global {
 }
 
 const params = new URLSearchParams(window.location.search);
+setQuestionResponseStyle(params.get("style") === "text" ? "text" : "interactive");
 const initialOnline = params.get("offline") !== "1";
 const shouldFail = params.get("failure") === "1";
 let shouldHold = params.get("hold") === "1";
@@ -89,11 +91,60 @@ const replacementQuestions: AgentQuestion[] = [{
   ],
 }];
 
+const formQuestions: AgentQuestion[] = [
+  {
+    id: "target",
+    header: "Target",
+    question: "Choose a deployment target.",
+    options: [{ label: "Staging" }, { label: "Production" }],
+  },
+  {
+    id: "checks",
+    header: "Checks",
+    question: "Choose exactly two checks.",
+    multiSelect: true,
+    minSelections: 2,
+    maxSelections: 2,
+    options: [{ label: "Unit Tests" }, { label: "Browser Tests" }, { label: "Smoke Test" }],
+  },
+  {
+    id: "note",
+    header: "Note",
+    question: "Add an optional note.",
+    options: [],
+    allowOther: true,
+    required: false,
+    maxLength: 40,
+  },
+  {
+    id: "token",
+    header: "Token",
+    question: "Enter the temporary token.",
+    options: [],
+    allowOther: true,
+    secret: true,
+    minLength: 3,
+    maxLength: 12,
+  },
+  {
+    id: "retries",
+    header: "Retries",
+    question: "Choose the retry count.",
+    options: [],
+    allowOther: true,
+    inputFormat: "integer",
+    minimum: 1,
+    maximum: 5,
+  },
+];
+
 window.agentQuestionCalls = [];
 
 function Fixture() {
   const [requestId, setRequestId] = useState("ask-1");
-  const [questions, setQuestions] = useState(params.get("set") === "long" ? longQuestions : shortQuestions);
+  const [questions, setQuestions] = useState(
+    params.get("set") === "long" ? longQuestions : params.get("set") === "forms" ? formQuestions : shortQuestions,
+  );
   const [runnerOnline, setRunnerOnline] = useState(initialOnline);
   const [resolved, setResolved] = useState(false);
 
