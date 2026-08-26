@@ -66,7 +66,7 @@ import {
 } from "./instance-storage.js";
 import { FeedbackProvider } from "./components/FeedbackProvider.js";
 import { Empty, Modal } from "./components/common.js";
-import { DockBottomIcon, KeyboardIcon, LockIcon, PanelRightIcon, PinnedPanelIcon, PlusIcon, WarningTriangleIcon } from "./components/Icons.js";
+import { ChevronLeftIcon, DockBottomIcon, KeyboardIcon, LockIcon, PanelRightIcon, PinnedPanelIcon, PlusIcon, WarningTriangleIcon } from "./components/Icons.js";
 import { NavRow, SwitchRow } from "./components/ui/SettingsRows.js";
 import { viewPath, viewTitle } from "./navigation.js";
 import { handleSettingsNavigationKey } from "./settings-navigation.js";
@@ -592,14 +592,14 @@ function Shell() {
     [sessions],
   );
 
-  // Codex-style session panel-control cluster. On desktop it renders inside the unified session
-  // bar (via InboxView → SessionDetail); on phone widths it stays in the topbar, which the phone
-  // layout keeps for the instance/new/settings controls anyway.
+  // Codex-style session control cluster. Desktop includes the host-side Open destination picker
+  // inside SessionDetail. Mobile keeps only panel toggles in the app topbar: launching an editor
+  // or file manager on the runner host is intentionally not a phone action.
   const sessionPanelControls = view.name === "session" ? (
     <>
       {/* Keyed by session: transient state (open menu, in-flight launch, error note)
           must not leak from one session's bar into the next. */}
-      <EditorSelect key={view.id} sessionId={view.id} />
+      {!isMobile && <EditorSelect key={view.id} sessionId={view.id} />}
       <button
         type="button"
         className={`icon-btn${pinnedOpen ? " is-on" : ""}`}
@@ -619,7 +619,7 @@ function Shell() {
         }}
         title={terminalSupported ? `${dockVisible ? "Hide" : "Show"} terminal (${shortcutDisplay("toggle-terminal")})` : terminalHint}
         aria-label={
-          terminalSupported ? (dockVisible ? "Hide terminal" : "Show terminal") : "Terminal unavailable: update runner"
+          terminalSupported ? (dockVisible ? "Hide Terminal" : "Show Terminal") : "Terminal Unavailable: Update Runner"
         }
         aria-pressed={terminalSupported && dockVisible}
       >
@@ -630,7 +630,7 @@ function Shell() {
         className={`icon-btn${rightPanel.open ? " is-on" : ""}`}
         onClick={rightPanel.toggle}
         title={rightPanel.open ? "Hide side panel" : "Show side panel"}
-        aria-label={rightPanel.open ? "Hide side panel" : "Show side panel"}
+        aria-label={rightPanel.open ? "Hide Side Panel" : "Show Side Panel"}
         aria-pressed={rightPanel.open}
       >
         <PanelRightIcon size={15} />
@@ -667,6 +667,8 @@ function Shell() {
             onNewRun={() => setDialog({ kind: "run" })}
             onNewPod={() => setDialog({ kind: "pod" })}
             sessionActions={isMobile ? sessionPanelControls : null}
+            sessionTitle={view.name === "session" ? sessions.get(view.id)?.title ?? "Session" : undefined}
+            onSessionBack={() => navigate({ name: "inbox" })}
           />
         )}
         {/* Once a 1008 latched authRequired, the pairing card stays mounted through the
@@ -845,13 +847,15 @@ function BannerStatusIcon({ kind }: { kind: "lock" | "warning" }) {
   return <Icon className="offline-icon" />;
 }
 
-function Header({
+export function Header({
   view,
   mobileInstanceControl,
   mobileSettingsControl,
   onNewRun,
   onNewPod,
   sessionActions,
+  sessionTitle,
+  onSessionBack,
 }: {
   view: View;
   /** Global controls moved out of the rail on phone widths. */
@@ -859,9 +863,10 @@ function Header({
   mobileSettingsControl?: React.ReactNode;
   onNewRun: () => void;
   onNewPod: () => void;
-  /** Session panel-control cluster; rendered here only on phone widths, where the unified
-   * session bar has no room for it (Shell owns the desktop placement inside SessionDetail). */
+  /** Session panel-control cluster rendered here only on phone widths. */
   sessionActions?: React.ReactNode;
+  sessionTitle?: string;
+  onSessionBack?: () => void;
 }) {
   const title = viewTitle(view);
   const { flags } = useExperiments();
@@ -869,7 +874,22 @@ function Header({
     <header className="topbar">
       {/* Focusable only programmatically: the rescue below moves focus here when a layout swap
           drops it, so the next Tab continues from the page rather than from the document top. */}
-      <h1 id="page-title" tabIndex={-1}>{title}</h1>
+      {view.name === "session" ? (
+        <>
+          <button
+            type="button"
+            className="icon-btn mobile-session-back"
+            onClick={onSessionBack}
+            title="Back to inbox"
+            aria-label="Back to Inbox"
+          >
+            <ChevronLeftIcon size={22} />
+          </button>
+          <h1 id="page-title" tabIndex={-1} title={sessionTitle}>{sessionTitle ?? title}</h1>
+        </>
+      ) : (
+        <h1 id="page-title" tabIndex={-1}>{title}</h1>
+      )}
       {mobileInstanceControl && mobileSettingsControl && (
         <div className="topbar-actions topbar-mobile-controls">
           {mobileInstanceControl}

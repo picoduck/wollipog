@@ -165,6 +165,15 @@ export function MoreHorizontalIcon(props: IconProps) {
   );
 }
 
+export function ShareIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M12 16V4M7.5 8.5 12 4l4.5 4.5" />
+      <path d="M5 13.5V19h14v-5.5" />
+    </IconBase>
+  );
+}
+
 export function RefreshIcon(props: IconProps) {
   return (
     <IconBase {...props}>

@@ -383,12 +383,12 @@ export function SessionDetail(props: SessionDetailProps) {
     const ownsPageTitle = props.mode !== "preview" && !isMobile;
     return (
       <div className="session-detail expanded" data-session-surface-id={sessionId}>
-        {props.mode !== "preview" && (
+        {props.mode !== "preview" && !isMobile && (
           <div className="detail-head">
             <button
               className="icon-btn back"
               onClick={props.onBack ?? (() => navigate({ name: "inbox" }))}
-              title="Back to Inbox"
+              title="Back to inbox"
               aria-label="Back to Inbox"
             >
               <ChevronLeftIcon size={22} />
@@ -438,6 +438,8 @@ function SessionDetailLoaded({
 }: SessionDetailProps & { session: SessionView }) {
   const api = useApi();
   const isMobile = useIsMobile();
+  const projectsSupported = useStoreSelector((state) => state.projectsSupported);
+  const projects = useStoreSelector((state) => state.projects);
   const instanceScope = useInstanceScope();
   const mutationKey = composerMutationKey(instanceScope, sessionId);
   const subscribeMutation = useCallback(
@@ -2402,6 +2404,9 @@ function SessionDetailLoaded({
   };
 
   const usage = sessionPreviewUsage(session);
+  const currentProjectName = projectsSupported
+    ? (session.projectId ? projects.get(session.projectId)?.name : undefined) ?? session.projectName ?? "No Project"
+    : session.workspaceName ?? "No Workspace";
 
   return (
     <div className={`session-detail ${mode}`} data-session-surface-id={session.id}>
@@ -2417,6 +2422,16 @@ function SessionDetailLoaded({
           onArchive={onArchive}
           onSnooze={onSnooze}
           projectCrumb={<ProjectChip session={session} onOpenInbox={onBack ?? (() => navigate({ name: "inbox" }))} />}
+          projectName={currentProjectName}
+          projectLabel={projectsSupported ? "Project" : "Workspace"}
+          onManageProject={projectsSupported ? () => {
+            navigate(session.projectId ? { name: "projects", id: session.projectId } : { name: "projects" });
+          } : undefined}
+          renderMoveProjectDialog={({ onClose, returnFocusRef }) => projectsSupported ? (
+            <MoveToProjectDialog session={session} onClose={onClose} returnFocusRef={returnFocusRef} />
+          ) : (
+            <LegacyWorkspaceMoveDialog session={session} onClose={onClose} returnFocusRef={returnFocusRef} />
+          )}
           topbarControls={topbarControls}
           changeStatus={changeStatus}
           // The unified bar replaces the app-level top bar on desktop, so it owns the page-title
@@ -3373,6 +3388,183 @@ function MoveToProjectDialog({ session, onClose, returnFocusRef }: {
         )}
         {error && <div className="form-error" role="alert">{error}</div>}
       </div>
+    </Modal>
+  );
+}
+
+/** Preserves compatibility-only Workspace re-filing when the mobile Project crumb is absent. */
+function LegacyWorkspaceMoveDialog({ session, onClose, returnFocusRef }: {
+  session: SessionView;
+  onClose: () => void;
+  returnFocusRef?: { current: HTMLElement | null };
+}) {
+  const api = useApi();
+  const runner = useStoreSelector((state) => state.runners.get(session.runnerId));
+  const workspaces = runner?.workspaces ?? [];
+  const runnerOnline = runner?.status === "online";
+  const browseSupported = runnerSupportsProtocol(runner?.protocolVersion, "directoryListing");
+  const sessionAgent = runner?.agents.find((agent) => agent.id === session.agentId);
+  const browseDistro = sessionAgent?.context?.kind === "wsl" ? sessionAgent.context.distro : undefined;
+  const [creating, setCreating] = useState(false);
+  const [name, setName] = useState("");
+  const [browsedPath, setBrowsedPath] = useState<string | null>(null);
+  const [browsing, setBrowsing] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const resetCreate = () => {
+    setCreating(false);
+    setName("");
+    setBrowsedPath(null);
+    setBrowsing(false);
+    setError(null);
+  };
+
+  const pick = async (workspaceId: string | null) => {
+    if (busy || workspaceId === session.workspaceId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.setWorkspace(session.id, workspaceId);
+      onClose();
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const createWorkspaceGroup = async () => {
+    const trimmed = name.trim();
+    if (busy || !trimmed || !browsedPath) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const { workspace } = await api.createWorkspace(session.runnerId, { name: trimmed, path: browsedPath });
+      await api.setWorkspace(session.id, workspace.id);
+      onClose();
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const options: ChoiceCardOption<string>[] = [
+    {
+      value: "",
+      title: "No Workspace",
+      description: "Keep this session outside legacy Workspace grouping.",
+      disabled: busy,
+    },
+    ...workspaces.map((workspace) => ({
+      value: workspace.id,
+      title: workspace.name,
+      description: shortenPath(workspace.path),
+      disabled: busy,
+    })),
+  ];
+
+  return (
+    <Modal
+      title={creating ? "Create Workspace" : "Move to Workspace"}
+      onClose={() => { if (!busy) onClose(); }}
+      returnFocusRef={returnFocusRef}
+      footer={creating ? (
+        <>
+          <button className="btn ghost" type="button" onClick={resetCreate} disabled={busy}>Cancel</button>
+          <button
+            className="btn primary"
+            type="button"
+            onClick={() => void createWorkspaceGroup()}
+            disabled={busy || !name.trim() || !browsedPath}
+          >
+            {busy ? "Creating…" : "Create Workspace"}
+          </button>
+        </>
+      ) : (
+        <>
+          <button
+            className="btn ghost"
+            type="button"
+            onClick={() => {
+              setCreating(true);
+              setError(null);
+            }}
+            disabled={!runnerOnline}
+            title={runnerOnline ? undefined : "Runner offline — start it to browse for a folder"}
+          >
+            New Workspace…
+          </button>
+          <button className="btn ghost" type="button" onClick={onClose} disabled={busy}>Cancel</button>
+        </>
+      )}
+    >
+      {creating ? (
+        <div className="project-assignment-menu project-move-list">
+          <label className="field-label" htmlFor="legacy-workspace-name">Workspace Name</label>
+          <input
+            id="legacy-workspace-name"
+            className="input"
+            value={name}
+            autoFocus
+            spellCheck={false}
+            placeholder="Workspace Name"
+            onChange={(event) => setName(event.target.value)}
+          />
+          {browsedPath ? (
+            <div className="ws-chosen">
+              <span className="ws-chosen-path" title={browsedPath}>{shortenPath(browsedPath)}</span>
+              <button
+                type="button"
+                className="icon-btn"
+                aria-label="Clear Workspace Selection"
+                title="Clear — pick another folder"
+                onClick={() => setBrowsedPath(null)}
+              >
+                ✕
+              </button>
+            </div>
+          ) : browsing ? (
+            <DirectoryPicker
+              runnerId={session.runnerId}
+              protocolVersion={runner?.protocolVersion}
+              distro={browseDistro}
+              onPick={(path) => {
+                setBrowsedPath(path);
+                setBrowsing(false);
+              }}
+              onCancel={() => setBrowsing(false)}
+            />
+          ) : (
+            <button
+              type="button"
+              className="btn ghost"
+              onClick={() => setBrowsing(true)}
+              disabled={!browseSupported}
+              title={browseSupported
+                ? "Browse the runner for a workspace folder"
+                : runnerCapabilityRequirement(runner?.protocolVersion, "directoryListing", "Directory browsing")}
+            >
+              Browse for a Folder…
+            </button>
+          )}
+          {error && <div className="form-error" role="alert">{error}</div>}
+        </div>
+      ) : (
+        <div className="project-assignment-menu project-move-list">
+          <p className="muted project-assignment-note">
+            Changing this legacy grouping does not move files or change the session's execution path.
+          </p>
+          <ChoiceCards
+            label="Workspace"
+            options={options}
+            value={session.workspaceId ?? ""}
+            onChange={(picked) => { void pick(picked === "" ? null : picked); }}
+          />
+          {error && <div className="form-error" role="alert">{error}</div>}
+        </div>
+      )}
     </Modal>
   );
 }

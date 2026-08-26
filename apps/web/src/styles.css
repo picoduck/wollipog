@@ -411,6 +411,7 @@
   --z-dock: 20;
   --z-panel: 30;
   --z-popover: 40;
+  --z-popovercontent: 45;
   --z-backdrop: 50;
   --z-modal: 60;
   --z-palette: 70;
@@ -643,9 +644,18 @@ pre {
 }
 .topbar-mobile-controls .instance-selector-label,
 .topbar-mobile-controls .instance-selector-chevron { display: none; }
+.topbar-mobile-controls .settings-trigger,
+.mobile-session-back {
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
+  min-height: 44px;
+  padding: 0;
+}
 
 /* And the title yields before any control does, rather than the controls being pushed off. */
 .topbar:has(.topbar-mobile-controls) h1 {
+  flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1743,12 +1753,12 @@ textarea {
   background: var(--text-dim);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--text-dim) 14%, transparent);
 }
-.session-more-actions { width: 32px; height: 32px; padding: 0; }
-.session-more-actions:disabled {
+.session-header-action { width: 32px; height: 32px; padding: 0; }
+.session-header-action:disabled {
   cursor: not-allowed;
   opacity: 0.5;
 }
-.session-more-actions:disabled:hover {
+.session-header-action:disabled:hover {
   color: var(--text-dim);
   background: transparent;
 }
@@ -1756,6 +1766,12 @@ textarea {
   display: flex;
   align-items: center;
   gap: 7px;
+}
+/* Keep both sibling menu buttons reachable above the active menu's dismissing backdrop. This lets
+   one trigger replace the other menu in a single click while the rest of the page still dismisses. */
+.detail-actions:has(.session-header-action[aria-expanded="true"]) .session-header-action {
+  position: relative;
+  z-index: var(--z-popovercontent);
 }
 .detail-actions-divider {
   width: 1px;
@@ -1771,6 +1787,13 @@ textarea {
 .session-detail > .detail-head > .session-header-note {
   flex: 0 1 260px;
   min-width: 0;
+}
+.menu-label.session-project-menu-header {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-transform: none;
+  white-space: nowrap;
 }
 /* "⋯" overflow menu for infrequent actions (e.g. Reprocess) */
 .overflow-menu {
@@ -9992,55 +10015,47 @@ body.shell-dock-dragging * {
   .review-signals { flex-direction: column; }
   .review-exact-input summary { min-height: 44px; display: flex; align-items: center; }
 
-  /* Session detail: identity and actions own the first row; statuses get a compact second row. */
+  /* The app topbar owns mobile Session identity. This is the only second bar: statuses at the
+     leading edge, Share / More Actions trailing, and transient notes on a follow-up line. */
   .detail-head {
     flex-wrap: wrap;
   }
   .session-detail > .detail-head {
     display: grid;
-    grid-template-columns: 44px minmax(0, 1fr) 44px;
-    grid-template-rows: minmax(44px, auto) auto auto;
-    column-gap: 10px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: minmax(44px, auto) auto;
+    column-gap: 7px;
     row-gap: 4px;
   }
-  .session-detail > .detail-head > .back {
-    grid-column: 1;
-    grid-row: 1;
-    width: 44px;
-    min-width: 44px;
-    height: 44px;
-    min-height: 44px;
-  }
-  .session-detail > .detail-head > .detail-crumbs {
-    grid-column: 2;
-    grid-row: 1;
-  }
-  .session-detail > .detail-head .detail-crumbs .cctx-item {
-    max-width: 96px;
-  }
   .session-detail > .detail-head > .session-header-statuses {
+    /* Span the shared status row so flattened change badges can wrap independently, while
+       reserving two 44px action targets plus their three 7px gaps (between buttons and columns). */
     grid-column: 1 / -1;
-    grid-row: 2;
+    grid-row: 1;
+    width: calc(100% - 102px);
+    align-self: center;
     flex-wrap: wrap;
   }
   .session-detail > .detail-head .change-status-indicators {
     display: contents;
   }
-  .session-more-actions { width: 44px; height: 44px; }
+  .session-header-action { width: 44px; height: 44px; }
   .detail-actions {
-    flex-wrap: wrap;
-    row-gap: 6px;
+    flex-wrap: nowrap;
   }
   .session-detail > .detail-head > .detail-actions {
-    grid-column: 3;
+    grid-column: 2;
     grid-row: 1;
     min-width: 0;
   }
   .session-detail > .detail-head > .session-header-note {
-    grid-column: 2 / -1;
-    grid-row: 3;
+    grid-column: 1 / -1;
+    grid-row: 2;
     width: 100%;
     max-width: none;
+  }
+  .session-detail > .detail-head > .detail-actions .menu-pop {
+    max-height: calc(100dvh - 128px - env(safe-area-inset-bottom, 0px));
   }
   .session-detail > .detail-head > .detail-actions .menu-item {
     min-height: 44px;
