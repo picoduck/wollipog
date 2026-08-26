@@ -9576,6 +9576,25 @@ body.shell-dock-dragging * {
   color: var(--text-dim);
   font-size: 12px;
 }
+.question-text-options {
+  margin: 0;
+  padding-left: 32px;
+  color: var(--text);
+}
+.question-text-options li {
+  padding: 3px 6px;
+}
+.question-text-options .question-label {
+  font-weight: 500;
+}
+.question-text-options .question-desc {
+  display: block;
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+}
+.question-text-input {
+  font-family: var(--font-mono);
+}
 .question-input-label {
   display: block;
   margin-top: 8px;

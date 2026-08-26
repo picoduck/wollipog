@@ -293,7 +293,7 @@ async function startLiveStack(
   }
 }
 
-test("Claude AskUserQuestion answers cross the live browser, control plane, runner, and provider", async ({ page }) => {
+for (const style of ["interactive", "text"] as const) test(`Claude AskUserQuestion answers cross the live stack in ${style} style`, async ({ page }) => {
   test.setTimeout(120_000);
   const stack = await startLiveStack();
   try {
@@ -308,15 +308,25 @@ test("Claude AskUserQuestion answers cross the live browser, control plane, runn
       token: stack.ownerToken,
       sessionId: stack.sessionId,
     });
+    await page.addInitScript((responseStyle) => {
+      localStorage.setItem("wollipog.question-response-style", responseStyle);
+    }, style);
     await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
 
     const submit = page.getByRole("button", { name: "Submit" });
     await expect(page.getByRole("region", { name: "Agent Questions" })).toBeVisible();
     await expect(submit).toBeDisabled();
-    await page.getByRole("radio", { name: /Canary/ }).click();
-    await expect(submit).toBeDisabled();
-    await page.getByRole("checkbox", { name: /Unit Tests/ }).click();
-    await page.getByRole("checkbox", { name: /Browser Tests/ }).click();
+    if (style === "interactive") {
+      await page.getByRole("radio", { name: /Canary/ }).click();
+      await expect(submit).toBeDisabled();
+      await page.getByRole("checkbox", { name: /Unit Tests/ }).click();
+      await page.getByRole("checkbox", { name: /Browser Tests/ }).click();
+    } else {
+      const responses = page.locator(".question-text-input");
+      await expect(responses).toHaveCount(2);
+      await responses.nth(0).fill("1");
+      await responses.nth(1).fill("1, 2");
+    }
     await expect(submit).toBeEnabled();
     await submit.click();
     await expect(page.getByText("Question Answered", { exact: true })).toBeVisible();
@@ -352,7 +362,7 @@ test("Claude AskUserQuestion answers cross the live browser, control plane, runn
   }
 });
 
-test("Codex structured questions cross the live browser, control plane, runner, and provider", async ({ page }) => {
+for (const style of ["interactive", "text"] as const) test(`Codex structured questions cross the live stack in ${style} style`, async ({ page }) => {
   test.setTimeout(120_000);
   const stack = await startLiveStack("codex");
   try {
@@ -367,13 +377,23 @@ test("Codex structured questions cross the live browser, control plane, runner, 
       token: stack.ownerToken,
       sessionId: stack.sessionId,
     });
+    await page.addInitScript((responseStyle) => {
+      localStorage.setItem("wollipog.question-response-style", responseStyle);
+    }, style);
     await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
 
     const submit = page.getByRole("button", { name: "Submit" });
     await expect(page.getByRole("region", { name: "Agent Questions" })).toBeVisible();
     await expect(submit).toBeDisabled();
-    await page.getByRole("radio", { name: /Staging/ }).click();
-    await page.getByLabel("Response").fill("Ship after checks pass");
+    if (style === "interactive") {
+      await page.getByRole("radio", { name: /Staging/ }).click();
+      await page.getByLabel("Response").fill("Ship after checks pass");
+    } else {
+      const responses = page.locator(".question-text-input");
+      await expect(responses).toHaveCount(2);
+      await responses.nth(0).fill("1");
+      await responses.nth(1).fill("Ship after checks pass");
+    }
     await expect(submit).toBeEnabled();
     await submit.click();
     await expect(page.getByText("Question Answered", { exact: true })).toBeVisible();
