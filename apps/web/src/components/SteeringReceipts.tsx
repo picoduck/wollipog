@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { SteeringAttemptView } from "@wollipog/protocol";
 import { steeringReceiptPresentation, type SteeringReceiptTone } from "../conversation-steering.js";
 import type { TimelineItem } from "../timeline.js";
@@ -15,7 +16,7 @@ export interface SteeringReceiptsProps {
   historyPartial?: boolean;
   pendingActions?: ReadonlyMap<string, SteeringResolutionAction>;
   onQueueAgain: (submissionId: string) => void;
-  onDismiss: (submissionId: string) => void;
+  onDismiss: (submissionId: string) => void | Promise<void>;
 }
 
 export type SteeringReceiptStatus =
@@ -111,7 +112,7 @@ interface SteeringReceiptCardProps {
   receipt: SteeringReceiptPresentation;
   pendingActions?: ReadonlyMap<string, SteeringResolutionAction>;
   onQueueAgain: (submissionId: string) => void;
-  onDismiss: (submissionId: string) => void;
+  onDismiss: (submissionId: string) => void | Promise<void>;
 }
 
 function SteeringReceiptCard({
@@ -192,6 +193,8 @@ export function SteeringReceipts({
   onQueueAgain,
   onDismiss,
 }: SteeringReceiptsProps) {
+  const [terminalReceiptsExpanded, setTerminalReceiptsExpanded] = useState(false);
+  const [clearingRejected, setClearingRejected] = useState(false);
   const receipts = deriveSteeringReceipts(attempts, timelineItems, activeTurnId, historyPartial);
   if (!receipts.length) return null;
   const rejected = receipts.filter(({ attempt }) => attempt.state === "rejected");
@@ -214,37 +217,50 @@ export function SteeringReceipts({
         />
       ))}
       {rejected.length > 1 && (
-        <details className="steering-terminal-receipts">
-          <summary>
-            <span className="steering-terminal-summary">
+        <div className="steering-terminal-receipts">
+          <div className="steering-terminal-controls" aria-busy={clearingRejected || undefined}>
+            <button
+              className="steering-terminal-summary"
+              type="button"
+              aria-expanded={terminalReceiptsExpanded}
+              aria-controls="rejected-steering-receipts"
+              onClick={() => setTerminalReceiptsExpanded((expanded) => !expanded)}
+            >
               <span className="steering-receipt-status" data-status="rejected">Rejected</span>
               <span>{rejected.length} Rejected Receipts</span>
-            </span>
+            </button>
             <button
               className="btn ghost sm steering-receipt-action"
               type="button"
-              disabled={clearableRejected.length === 0}
-              onClick={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                for (const { attempt } of clearableRejected) onDismiss(attempt.submissionId);
+              disabled={clearingRejected || clearableRejected.length === 0}
+              onClick={async () => {
+                setClearingRejected(true);
+                try {
+                  for (const { attempt } of clearableRejected) {
+                    await onDismiss(attempt.submissionId);
+                  }
+                } finally {
+                  setClearingRejected(false);
+                }
               }}
             >
               Clear All
             </button>
-          </summary>
-          <div className="steering-terminal-list">
-            {rejected.map((receipt) => (
-              <SteeringReceiptCard
-                key={receipt.attempt.submissionId}
-                receipt={receipt}
-                pendingActions={pendingActions}
-                onQueueAgain={onQueueAgain}
-                onDismiss={onDismiss}
-              />
-            ))}
           </div>
-        </details>
+          {terminalReceiptsExpanded && (
+            <div className="steering-terminal-list" id="rejected-steering-receipts">
+              {rejected.map((receipt) => (
+                <SteeringReceiptCard
+                  key={receipt.attempt.submissionId}
+                  receipt={receipt}
+                  pendingActions={pendingActions}
+                  onQueueAgain={onQueueAgain}
+                  onDismiss={onDismiss}
+                />
+              ))}
+            </div>
+          )}
+        </div>
       )}
     </section>
   );

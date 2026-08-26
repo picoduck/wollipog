@@ -2773,7 +2773,7 @@ function SessionDetailLoaded({
               historyPartial={isPartialHistory(eventWindow)}
               pendingActions={steeringResolutionPending}
               onQueueAgain={(submissionId) => void resolveSteeringAttempt(submissionId, "queue_again")}
-              onDismiss={(submissionId) => void resolveSteeringAttempt(submissionId, "dismiss")}
+              onDismiss={(submissionId) => resolveSteeringAttempt(submissionId, "dismiss")}
             />
             {queuedPromptControls.length > 0 && (
               <div className="queued-list" aria-label="Queued Messages">

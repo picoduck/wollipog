@@ -197,7 +197,7 @@ test("uncertain receipt actions call the matching callback and local pending sta
       timelineItems={[]}
       pendingActions={pendingAction ? new Map([["actionable", pendingAction]]) : undefined}
       onQueueAgain={(submissionId) => queueAgain.push(submissionId)}
-      onDismiss={(submissionId) => dismissed.push(submissionId)}
+      onDismiss={(submissionId) => { dismissed.push(submissionId); }}
     />
   );
 
@@ -231,7 +231,7 @@ test("one rejected receipt can be durably dismissed", async () => {
     attempts={[attempt("rejected-one", "rejected", { reason: "no_active_provider_turn" })]}
     timelineItems={[]}
     onQueueAgain={() => {}}
-    onDismiss={(submissionId) => dismissed.push(submissionId)}
+    onDismiss={(submissionId) => { dismissed.push(submissionId); }}
   />));
   const button = container.querySelector("button") as HTMLButtonElement;
   assert.equal(button.textContent?.trim(), "Dismiss");
@@ -248,6 +248,8 @@ test("multiple rejected receipts collapse and clear together without touching ac
   const container = happyContainer as unknown as HTMLDivElement;
   const root = createRoot(container);
   const dismissed: string[] = [];
+  let dismissalsInFlight = 0;
+  let maxDismissalsInFlight = 0;
 
   await act(async () => root.render(<SteeringReceipts
     attempts={[
@@ -260,19 +262,31 @@ test("multiple rejected receipts collapse and clear together without touching ac
     timelineItems={[]}
     pendingActions={new Map([["rejected-b", "dismiss"]])}
     onQueueAgain={() => {}}
-    onDismiss={(submissionId) => dismissed.push(submissionId)}
+    onDismiss={async (submissionId) => {
+      dismissalsInFlight += 1;
+      maxDismissalsInFlight = Math.max(maxDismissalsInFlight, dismissalsInFlight);
+      await Promise.resolve();
+      dismissed.push(submissionId);
+      dismissalsInFlight -= 1;
+    }}
   />));
 
-  const group = container.querySelector(".steering-terminal-receipts") as HTMLDetailsElement;
+  const group = container.querySelector(".steering-terminal-receipts") as HTMLDivElement;
   assert.ok(group);
-  assert.equal(group.open, false, "the terminal group has a bounded collapsed footprint by default");
-  assert.match(group.querySelector("summary")?.textContent ?? "", /3 Rejected Receipts/);
+  const toggle = group.querySelector('[aria-controls="rejected-steering-receipts"]') as HTMLButtonElement;
+  assert.equal(toggle.getAttribute("aria-expanded"), "false",
+    "the terminal group has a bounded collapsed footprint by default");
+  assert.match(toggle.textContent ?? "", /3 Rejected Receipts/);
   assert.ok(container.querySelector('[data-testid="steering-attempt-pending-actionable"]'));
   assert.ok(container.querySelector('[data-testid="steering-attempt-uncertain-actionable"]'));
   const clearAll = [...group.querySelectorAll("button")]
     .find((button) => button.textContent?.trim() === "Clear All") as HTMLButtonElement;
-  await act(async () => clearAll.click());
+  await act(async () => {
+    clearAll.click();
+    for (let index = 0; index < 6; index += 1) await Promise.resolve();
+  });
   assert.deepEqual(dismissed, ["rejected-a", "rejected-c"]);
+  assert.equal(maxDismissalsInFlight, 1, "bulk dismissal applies bounded backpressure");
 
   await act(async () => root.unmount());
   container.remove();

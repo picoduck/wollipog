@@ -2252,12 +2252,13 @@ test("rejected steering receipt dismissal is durable and does not depend on runn
     turnId: "turn-rejected", source: "direct", requestSha256: "9".repeat(64), text: "reject me", now: 1,
   });
   db.markSteeringAttemptNotSent("steer-dismiss-rejected", 2);
-  hub.online = false;
+  hub.sessionChangedByIdCalls.length = 0;
 
   const dismissed = await svc.resolveSteeringAttempt(id, "submission-dismiss-rejected", "dismiss");
   assert.equal(dismissed.ok, true, dismissed.error);
   assert.deepEqual(dismissed.data?.resolution, { action: "dismiss", state: "applied" });
   assert.equal(hub.sentOfType("resolve_steering_attempt").length, 0);
+  assert.deepEqual(hub.sessionChangedByIdCalls, [id], "the applied dismissal reaches every UI client");
   assert.deepEqual(db.getSession(id)?.steeringAttempts?.[0]?.resolution, {
     action: "dismiss", state: "applied",
   });

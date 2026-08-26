@@ -529,7 +529,7 @@ test("rejected receipts stay compact on mobile and clear durably without touchin
 
   const group = page.locator(".steering-terminal-receipts");
   await expect(group).toBeVisible();
-  await expect(group).not.toHaveAttribute("open", "");
+  await expect(group.getByRole("button", { name: /Rejected Receipts/ })).toHaveAttribute("aria-expanded", "false");
   await expect(group).toContainText("8 Rejected Receipts");
   expect((await group.boundingBox())!.height).toBeLessThanOrEqual(48);
   await expect(receipt(page, "pending-stays")).toBeVisible();
@@ -579,7 +579,7 @@ test("desktop rejected receipt grouping retains individual dismissal", async ({ 
   });
 
   const group = page.locator(".steering-terminal-receipts");
-  await group.locator("summary").click();
+  await group.getByRole("button", { name: /Rejected Receipts/ }).click();
   await expect(receipt(page, "desktop-rejected-a")).toBeVisible();
   await receipt(page, "desktop-rejected-a").getByRole("button", { name: "Dismiss" }).click();
   await expect(receipt(page, "desktop-rejected-a")).toHaveCount(0);

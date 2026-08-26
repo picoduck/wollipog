@@ -2893,29 +2893,32 @@ textarea {
   font-size: var(--text-sm);
   overflow: hidden;
 }
-.steering-terminal-receipts > summary {
+.steering-terminal-controls {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   min-height: 38px;
   padding: 4px 6px 4px 10px;
-  cursor: pointer;
-  list-style: none;
 }
-.steering-terminal-receipts > summary::-webkit-details-marker { display: none; }
 .steering-terminal-summary {
   display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
 }
 .steering-terminal-summary::after {
   content: "▸";
   color: var(--text-faint);
   font-size: var(--text-xs);
 }
-.steering-terminal-receipts[open] .steering-terminal-summary::after { content: "▾"; }
+.steering-terminal-summary[aria-expanded="true"]::after { content: "▾"; }
 .steering-terminal-list {
   display: grid;
   gap: 6px;
