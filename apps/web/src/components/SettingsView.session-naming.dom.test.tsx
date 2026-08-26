@@ -242,6 +242,13 @@ test("Session Naming provisions runner configuration and keeps API keys write-on
       online: true,
       available: true,
       configured: true,
+    }, {
+      runnerId: "runner-old",
+      machineName: "Old Machine",
+      online: true,
+      available: false,
+      configured: false,
+      reason: "Update this Machine runner to configure a custom naming endpoint.",
     }],
   };
   const calls: Array<{ path: string; method: string; body?: string }> = [];
@@ -280,6 +287,10 @@ test("Session Naming provisions runner configuration and keeps API keys write-on
       assert.ok(container.querySelector(`[aria-label="${label}"]`), `${label} field is visible`);
     }
     assert.ok(container.querySelector('[aria-label^="Machine: "]'), "Machine field is visible");
+    const machine = container.querySelector<HTMLButtonElement>('[aria-label^="Machine: "]');
+    assert.ok(machine);
+    await act(async () => machine.click());
+    assert.match(container.querySelector('[role="listbox"][aria-label="Machine"]')?.textContent ?? "", /Update this Machine runner/);
     for (const label of ["Save Configuration", "Replace API Key", "Delete API Key", "Test Connection"]) {
       assert.ok([...container.querySelectorAll("button")].some((button) => button.textContent?.trim() === label));
     }
@@ -313,5 +324,98 @@ test("Session Naming provisions runner configuration and keeps API keys write-on
     await act(async () => root.unmount());
     container.remove();
     domWindow.localStorage.clear();
+  }
+});
+
+test("Session Naming ignores custom-model responses from a previous control-plane instance", async () => {
+  const first = {
+    ...view("custom_model_endpoint"),
+    effectiveMode: "custom_model_endpoint" as const,
+    customModel: {
+      endpointOrigin: "https://first.example",
+      model: "first-model",
+      timeoutMs: 900,
+      apiKeyConfigured: false,
+      configurationSource: "runner" as const,
+      runnerId: "runner-first",
+      machineName: "First Machine",
+      online: true,
+    },
+    customModelTargets: [{
+      runnerId: "runner-first",
+      machineName: "First Machine",
+      online: true,
+      available: true,
+      configured: true,
+    }],
+  } satisfies SessionNamingSettingsView;
+  const second = {
+    ...first,
+    customModel: { ...first.customModel, runnerId: "runner-second", machineName: "Second Machine" },
+    customModelTargets: [{
+      runnerId: "runner-second",
+      machineName: "Second Machine",
+      online: true,
+      available: true,
+      configured: true,
+    }],
+  } satisfies SessionNamingSettingsView;
+  let resolveOldSave!: (response: Response) => void;
+  const oldSave = new Promise<Response>((resolve) => { resolveOldSave = resolve; });
+  const firstTransport: ApiTransport = {
+    instanceId: "first-instance",
+    publicOrigin: "http://first.local",
+    close() {},
+    async request(_path, init) {
+      return (init?.method ?? "GET") === "PUT"
+        ? oldSave
+        : new Response(JSON.stringify(first), { headers: { "content-type": "application/json" } });
+    },
+  };
+  const secondTransport: ApiTransport = {
+    instanceId: "second-instance",
+    publicOrigin: "http://second.local",
+    close() {},
+    async request() {
+      return new Response(JSON.stringify(second), { headers: { "content-type": "application/json" } });
+    },
+  };
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(
+        <ApiProvider client={createApiClient(firstTransport)}>
+          <SessionNamingPanel />
+        </ApiProvider>,
+      );
+    });
+    const endpoint = container.querySelector<HTMLInputElement>('[aria-label="Endpoint"]');
+    assert.ok(endpoint);
+    await act(async () => {
+      endpoint.value = "https://first.example/v1/chat/completions";
+      Simulate.change(endpoint);
+    });
+    const save = [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.trim() === "Save Configuration");
+    assert.ok(save);
+    await act(async () => save.click());
+
+    await act(async () => {
+      root.render(
+        <ApiProvider client={createApiClient(secondTransport)}>
+          <SessionNamingPanel />
+        </ApiProvider>,
+      );
+    });
+    assert.match(container.textContent ?? "", /Stored on Second Machine/);
+    resolveOldSave(new Response(JSON.stringify(first), { headers: { "content-type": "application/json" } }));
+    await act(async () => { await oldSave; });
+    assert.match(container.textContent ?? "", /Stored on Second Machine/);
+    assert.doesNotMatch(container.textContent ?? "", /Custom model configuration saved on the selected Machine/);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
   }
 });

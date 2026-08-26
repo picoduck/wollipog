@@ -385,7 +385,7 @@ test("runner-local custom model routes relay keys once, persist only metadata, a
     updatedAt: number;
   };
   let saved: Saved | null = null;
-  let preference: { mode: "custom_model_endpoint"; updatedAt: number } | null = null;
+  let preference: { mode: "prompt_text_only" | "custom_model_endpoint"; updatedAt: number } | null = null;
   let protocolVersion = 94;
   const runner = (): RunnerView => ({
     runnerId: "runner-custom",
@@ -406,7 +406,11 @@ test("runner-local custom model routes relay keys once, persist only metadata, a
     listRunners: () => [runner()],
     getRunner: () => runner(),
     getSessionNamingPreference: () => preference,
-    setSessionNamingPreference: (_organizationId: string, mode: "custom_model_endpoint", updatedAt: number) => {
+    setSessionNamingPreference: (
+      _organizationId: string,
+      mode: "prompt_text_only" | "custom_model_endpoint",
+      updatedAt: number,
+    ) => {
       preference = { mode, updatedAt };
     },
     getSessionNamingCustomModel: () => saved,
@@ -538,6 +542,24 @@ test("runner-local custom model routes relay keys once, persist only metadata, a
     assert.equal(generation.sessionId, "session-custom");
   }
 
+  const savedBeforeRejectedEdit = { ...saved! };
+  const sentBeforeRejectedEdit = sent.length;
+  const rejectedRetainedKeyEdit = await app.inject({
+    method: "PUT",
+    url: "/api/session-naming/custom-model",
+    headers: { authorization: "Bearer admin" },
+    payload: {
+      runnerId: "runner-custom",
+      endpoint: "http://models.internal/v1/chat/completions",
+      model: "title-model",
+      timeoutMs: 900,
+    },
+  });
+  assert.equal(rejectedRetainedKeyEdit.statusCode, 400);
+  assert.deepEqual(saved, savedBeforeRejectedEdit, "prevalidation preserves the working secret-free configuration");
+  assert.equal(sent.length, sentBeforeRejectedEdit, "an unsafe retained-key edit never reaches the runner");
+
+  preference = { mode: "prompt_text_only", updatedAt: Date.now() };
   const replaced = await app.inject({
     method: "POST",
     url: "/api/session-naming/custom-model/api-key",
@@ -546,6 +568,8 @@ test("runner-local custom model routes relay keys once, persist only metadata, a
   });
   assert.equal(replaced.statusCode, 200);
   assert.equal(replaced.body.includes("replacement-sentinel"), false);
+  assert.equal(replaced.json().mode, "prompt_text_only", "rotating a key does not activate custom naming");
+  assert.equal(preference.mode, "prompt_text_only");
   assert.equal(sent.filter((message) => message.type === "configure_session_naming_custom_model").length, 2);
 
   const tested = await app.inject({

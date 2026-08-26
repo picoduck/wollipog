@@ -152,6 +152,34 @@ test("custom model test classifies authentication failure without returning prov
   }
 });
 
+test("custom model failures cancel provider response bodies without consuming diagnostics", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wollipog-naming-cancel-"));
+  const originalFetch = globalThis.fetch;
+  let cancelled = false;
+  try {
+    const store = new RunnerSessionNamingCustomModel(root);
+    store.configure({
+      endpoint: "https://models.example/v1/chat/completions",
+      model: "title-model",
+      timeoutMs: 1_000,
+    }, "key");
+    globalThis.fetch = async () => new Response(new ReadableStream({
+      cancel() { cancelled = true; },
+    }), { status: 401 });
+    assert.deepEqual(await store.testResult("cancel-1"), {
+      type: "session_naming_custom_model_result",
+      requestId: "cancel-1",
+      operation: "test",
+      ok: false,
+      code: "authentication_failed",
+    });
+    assert.equal(cancelled, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("custom model naming admits at most two concurrent requests", async () => {
   const responses: Array<import("node:http").ServerResponse> = [];
   const remote = await endpoint((_request, response) => {

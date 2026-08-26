@@ -72,8 +72,8 @@ selected runner id, and secret-free readiness are persisted by the control plane
 write-only value: the control plane relays it over the authenticated runner channel, never writes it
 to SQLite, and never returns it to the browser. The runner stores it separately from endpoint
 metadata under its leased, identity-bound data directory using a protected 0700 directory and an
-atomically replaced 0600 file (with the owning Windows account's ACL on Windows). Symlinked files
-are refused. **Replace API Key** and **Delete API Key** mutate only that runner-local value;
+atomically replaced 0600 file on POSIX systems; on Windows it inherits the runner data directory's
+account ACL. Symlinked files are refused. **Replace API Key** and **Delete API Key** mutate only that runner-local value;
 **Test Connection** returns a normalized status without provider text.
 
 The endpoint must be an explicit HTTP or HTTPS OpenAI-compatible chat-completions URL without URL

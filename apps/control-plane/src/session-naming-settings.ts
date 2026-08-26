@@ -36,6 +36,12 @@ function publicEndpointOrigin(value: string): string {
   return endpoint.origin;
 }
 
+function endpointProtectsApiKey(value: string | URL): boolean {
+  const endpoint = typeof value === "string" ? new URL(value) : value;
+  return endpoint.protocol === "https:" || endpoint.hostname === "localhost" || endpoint.hostname === "[::1]" ||
+    /^127(?:\.\d{1,3}){3}$/u.test(endpoint.hostname);
+}
+
 export function validateSessionNamingCustomModelInput(input: ConfigureSessionNamingCustomModelRequest): {
   runnerId: string;
   endpoint: string;
@@ -73,9 +79,7 @@ export function validateSessionNamingCustomModelInput(input: ConfigureSessionNam
   )) {
     throw new Error("the API key is invalid");
   }
-  const loopback = endpoint.hostname === "localhost" || endpoint.hostname === "[::1]" ||
-    /^127(?:\.\d{1,3}){3}$/u.test(endpoint.hostname);
-  if (input.apiKey !== undefined && endpoint.protocol !== "https:" && !loopback) {
+  if (input.apiKey !== undefined && !endpointProtectsApiKey(endpoint)) {
     throw new Error("an API key requires HTTPS unless the endpoint is loopback-only");
   }
   return {
@@ -376,6 +380,7 @@ export class SessionNamingSettings {
     organizationId: string,
     raw: ConfigureSessionNamingCustomModelRequest,
     now = Date.now(),
+    activateMode = true,
   ): Promise<SessionNamingSettingsView> {
     const input = validateSessionNamingCustomModelInput(raw);
     const previous = this.db.getSessionNamingCustomModel(organizationId);
@@ -383,6 +388,10 @@ export class SessionNamingSettings {
       throw new SessionNamingModeUnavailableError(
         "delete the API key from the currently selected Machine before selecting another Machine",
       );
+    }
+    if (previous?.runnerId === input.runnerId && previous.apiKeyConfigured &&
+        input.apiKey === undefined && !endpointProtectsApiKey(input.endpoint)) {
+      throw new Error("an API key already configured on this Machine requires HTTPS unless the endpoint is loopback-only");
     }
     const runner = this.manageableCustomRunner(organizationId, input.runnerId);
     const stagedAt = Math.max(now, (previous?.updatedAt ?? 0) + 1);
@@ -424,12 +433,14 @@ export class SessionNamingSettings {
       runnerConfigured: true,
       apiKeyConfigured: result.status.apiKeyConfigured,
     }, stagedAt + 1);
-    const priorPreference = this.db.getSessionNamingPreference(organizationId)?.updatedAt ?? 0;
-    this.db.setSessionNamingPreference(
-      organizationId,
-      "custom_model_endpoint",
-      Math.max(now, priorPreference + 1),
-    );
+    if (activateMode) {
+      const priorPreference = this.db.getSessionNamingPreference(organizationId)?.updatedAt ?? 0;
+      this.db.setSessionNamingPreference(
+        organizationId,
+        "custom_model_endpoint",
+        Math.max(now, priorPreference + 1),
+      );
+    }
     return this.view(organizationId, true);
   }
 
@@ -451,7 +462,12 @@ export class SessionNamingSettings {
     if (!result?.ok || !result.status || result.status.apiKeyConfigured) {
       throw new SessionNamingModeUnavailableError("the selected Machine could not delete the API key");
     }
-    this.db.reconcileSessionNamingCustomModelRunnerStatus(runner.runnerId, matchingConfig, false, now);
+    this.db.reconcileSessionNamingCustomModelRunnerStatus(
+      runner.runnerId,
+      matchingConfig,
+      false,
+      Math.max(now, saved.updatedAt + 1),
+    );
     return this.view(organizationId, true);
   }
 
@@ -468,7 +484,7 @@ export class SessionNamingSettings {
       model: saved.model,
       timeoutMs: saved.timeoutMs,
       apiKey,
-    }, now);
+    }, now, false);
   }
 
   async testCustomModel(organizationId: string): Promise<SessionNamingConnectionTestResult> {

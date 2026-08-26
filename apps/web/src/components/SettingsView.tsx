@@ -336,6 +336,10 @@ export function SessionNamingPanel() {
     setSettings(null);
     setBusy(false);
     setError(null);
+    setCustomBusy(false);
+    setCustomStatus(null);
+    setCustomEndpoint("");
+    setCustomApiKey("");
     void api.sessionNamingSettings().then((next) => {
       if (!disposed) {
         setSettings(next);
@@ -381,6 +385,7 @@ export function SessionNamingPanel() {
     };
   });
   const custom = settings?.customModel;
+  const requestIsCurrent = (requestApi: typeof api) => mounted.current && activeApi.current === requestApi;
   const applyCustomSettings = (next: SessionNamingSettingsView, message: string) => {
     setSettings(next);
     setCustomRunnerId(next.customModel?.runnerId ?? customRunnerId);
@@ -391,58 +396,77 @@ export function SessionNamingPanel() {
   };
   const configureCustom = () => {
     if (customBusy) return;
+    const requestApi = api;
     setCustomBusy(true);
     setCustomStatus(null);
-    void api.configureSessionNamingCustomModel({
+    void requestApi.configureSessionNamingCustomModel({
       runnerId: customRunnerId,
       endpoint: customEndpoint,
       model: customModel,
       timeoutMs: Number(customTimeout),
       ...(customApiKey ? { apiKey: customApiKey } : {}),
     }).then((next) => {
+      if (!requestIsCurrent(requestApi)) return;
       applyCustomSettings(next, "Custom model configuration saved on the selected Machine.");
       setCustomEndpoint("");
     }).catch((cause: unknown) => {
-      setCustomStatus(`Could not save the custom model: ${cause instanceof Error ? cause.message : String(cause)}`);
+      if (requestIsCurrent(requestApi)) {
+        setCustomStatus(`Could not save the custom model: ${cause instanceof Error ? cause.message : String(cause)}`);
+      }
     }).finally(() => {
-      setCustomApiKey("");
-      setCustomBusy(false);
+      if (requestIsCurrent(requestApi)) {
+        setCustomApiKey("");
+        setCustomBusy(false);
+      }
     });
   };
   const replaceApiKey = () => {
     if (customBusy || !customApiKey) return;
+    const requestApi = api;
     setCustomBusy(true);
     setCustomStatus(null);
-    void api.replaceSessionNamingCustomModelApiKey({ apiKey: customApiKey }).then((next) => {
-      applyCustomSettings(next, "API key replaced on the selected Machine.");
+    void requestApi.replaceSessionNamingCustomModelApiKey({ apiKey: customApiKey }).then((next) => {
+      if (requestIsCurrent(requestApi)) applyCustomSettings(next, "API key replaced on the selected Machine.");
     }).catch((cause: unknown) => {
-      setCustomStatus(`Could not replace the API key: ${cause instanceof Error ? cause.message : String(cause)}`);
+      if (requestIsCurrent(requestApi)) {
+        setCustomStatus(`Could not replace the API key: ${cause instanceof Error ? cause.message : String(cause)}`);
+      }
     }).finally(() => {
-      setCustomApiKey("");
-      setCustomBusy(false);
+      if (requestIsCurrent(requestApi)) {
+        setCustomApiKey("");
+        setCustomBusy(false);
+      }
     });
   };
   const deleteApiKey = () => {
     if (customBusy || !window.confirm("Delete the runner-local API key? Endpoints that require it will stop working.")) return;
+    const requestApi = api;
     setCustomBusy(true);
     setCustomStatus(null);
-    void api.deleteSessionNamingCustomModelApiKey().then((next) => {
-      applyCustomSettings(next, "API key deleted from the selected Machine.");
+    void requestApi.deleteSessionNamingCustomModelApiKey().then((next) => {
+      if (requestIsCurrent(requestApi)) applyCustomSettings(next, "API key deleted from the selected Machine.");
     }).catch((cause: unknown) => {
-      setCustomStatus(`Could not delete the API key: ${cause instanceof Error ? cause.message : String(cause)}`);
-    }).finally(() => setCustomBusy(false));
+      if (requestIsCurrent(requestApi)) {
+        setCustomStatus(`Could not delete the API key: ${cause instanceof Error ? cause.message : String(cause)}`);
+      }
+    }).finally(() => { if (requestIsCurrent(requestApi)) setCustomBusy(false); });
   };
   const testCustom = () => {
     if (customBusy) return;
+    const requestApi = api;
     setCustomBusy(true);
     setCustomStatus(null);
-    void api.testSessionNamingCustomModel().then((result) => {
-      setCustomStatus(result.ok
-        ? "Connection succeeded."
-        : `Connection failed (${result.status.replace(/_/g, " ")}).`);
+    void requestApi.testSessionNamingCustomModel().then((result) => {
+      if (requestIsCurrent(requestApi)) {
+        setCustomStatus(result.ok
+          ? "Connection succeeded."
+          : `Connection failed (${result.status.replace(/_/g, " ")}).`);
+      }
     }).catch((cause: unknown) => {
-      setCustomStatus(`Could not test the connection: ${cause instanceof Error ? cause.message : String(cause)}`);
-    }).finally(() => setCustomBusy(false));
+      if (requestIsCurrent(requestApi)) {
+        setCustomStatus(`Could not test the connection: ${cause instanceof Error ? cause.message : String(cause)}`);
+      }
+    }).finally(() => { if (requestIsCurrent(requestApi)) setCustomBusy(false); });
   };
   const status = error
     ? `Could not ${error.action} session naming: ${error.message}`
@@ -501,7 +525,7 @@ export function SessionNamingPanel() {
                   value: target.runnerId,
                   label: target.machineName,
                   disabled: !target.available,
-                  disabledReason: target.available ? undefined : "Unavailable",
+                  disabledReason: target.available ? undefined : target.reason ?? "Unavailable",
                 }))}
                 onChange={setCustomRunnerId}
               />

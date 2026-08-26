@@ -172,6 +172,14 @@ async function boundedJson(response: Response): Promise<unknown> {
   }
 }
 
+async function discardResponseBody(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // Failure diagnostics are deliberately ignored and never returned or logged.
+  }
+}
+
 export class RunnerSessionNamingCustomModel {
   private readonly configFile: string;
   private readonly apiKeyFile: string;
@@ -278,8 +286,14 @@ export class RunnerSessionNamingCustomModel {
         if (controller.signal.aborted) throw new CustomModelFailure("timed_out");
         throw new CustomModelFailure("endpoint_failed");
       }
-      if (response.status === 401 || response.status === 403) throw new CustomModelFailure("authentication_failed");
-      if (!response.ok) throw new CustomModelFailure("endpoint_failed");
+      if (response.status === 401 || response.status === 403) {
+        await discardResponseBody(response);
+        throw new CustomModelFailure("authentication_failed");
+      }
+      if (!response.ok) {
+        await discardResponseBody(response);
+        throw new CustomModelFailure("endpoint_failed");
+      }
       const body = await boundedJson(response) as { choices?: Array<{ message?: { content?: unknown } }> };
       const title = normalizeRunnerSessionTitle(body.choices?.[0]?.message?.content);
       if (!title) throw new CustomModelFailure("endpoint_failed");

@@ -234,4 +234,6 @@ protected files under the leased runner data directory; normal settings reads ex
 endpoint origin and key-present state. A database restore cannot recover either runner-local
 secret. Rotate or reissue it when the runner copy is lost, and expect Session Naming readiness to
 fail closed until the runner's secret-free configuration digest reconciles with the restored
-control-plane metadata.
+control-plane metadata. Removing an offline Machine registration does not erase its host data;
+delete its Session Naming API key while the Machine is online before removing the registration, or
+securely retire the runner data directory as part of decommissioning that host.
