@@ -87,6 +87,7 @@ test("Unarchive on an archived Stop Failed session cancels the archive follow-up
             providerLogoutSupported={false}
             stopBeforeArchiveSupported
             exportReady={false}
+            onSnooze={() => undefined}
             changeStatus={{ kind: "changes_present", label: "Changes Present", description: "Git confirms changes." }}
           />
         </FeedbackContext.Provider>
@@ -98,9 +99,19 @@ test("Unarchive on an archived Stop Failed session cancels the archive follow-up
   assert.match(container.textContent ?? "", /Changes Present/);
   const moreActions = button(container, "More Actions");
   assert.ok(moreActions.classList.contains("session-header-action"), "the trigger carries the fixed-geometry class");
-  assert.ok(moreActions.querySelector("svg"), "the trigger uses the shared icon instead of a text glyph");
+  const moreIcon = moreActions.querySelector("svg");
+  assert.ok(moreIcon, "the trigger uses the shared icon instead of a text glyph");
+  const dots = [...moreIcon.querySelectorAll("circle")]
+    .map((dot) => [dot.getAttribute("cx"), dot.getAttribute("cy")]);
+  assert.deepEqual(dots, [["12", "5"], ["12", "12"], ["12", "19"]],
+    "More Actions uses the intended vertical overflow icon");
   assert.equal(moreActions.textContent?.trim(), "", "the trigger has no font-dependent ellipsis text");
   await act(async () => { button(container, "More Actions").click(); await tick(); });
+  const actionLabels = [...container.querySelectorAll<HTMLElement>('[role="menuitem"]')]
+    .map((item) => item.textContent?.trim());
+  assert.ok(actionLabels.indexOf("Rename Session…") < actionLabels.indexOf("Snooze Session…"));
+  assert.ok(actionLabels.indexOf("Snooze Session…") < actionLabels.indexOf("Unarchive"),
+    "Session actions progress from least to more disruptive when Snooze is supported");
   assert.equal(container.textContent?.includes("Export Markdown"), false,
     "operational actions must not retain sharing or export commands");
   await act(async () => { button(container, "Share").click(); await tick(); });
