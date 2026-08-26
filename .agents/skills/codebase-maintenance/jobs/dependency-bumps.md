@@ -7,7 +7,13 @@ would actually require.
 
 - `pnpm outdated -r` for the version gap across every workspace package.
 - `pnpm audit --json` for known advisories. Do not run `pnpm audit --fix`; it changes the tree.
-- For the desktop crate, `cargo update --dry-run --manifest-path apps/desktop/src-tauri/Cargo.toml`.
+- For the desktop crate, `cargo update --dry-run --manifest-path apps/desktop/src-tauri/Cargo.toml`
+  for the version gap and `cargo audit` (run from `apps/desktop/src-tauri/`) for advisories. If
+  `cargo` is absent on this machine, fall back to comparing `Cargo.lock` against the crates.io API
+  for the version gap, and state plainly that Rust advisories are UNKNOWN — the fallback has no
+  advisory source, and an unknown must never read as a clean result. (The first run faced exactly
+  this; the toolchain gap was closed on 2026-08-26, and the first `cargo audit` immediately
+  surfaced two high-severity advisories the fallback could not see.)
 - For each candidate, read the changelog or release notes between the installed and latest version
   and identify breaking changes concretely, rather than inferring risk from the version number.
 
