@@ -554,10 +554,6 @@ function titleFromPrompt(text: string): string {
   return clean.length > 80 ? clean.slice(0, 79).trimEnd() + "…" : clean;
 }
 
-// Phase 8: the cost-budget decision generalized into the policy engine; re-exported so existing
-// imports (and tests) keep working.
-export { budgetDecision } from "./policy-engine.js";
-
 /** The conductor's agent id — a contract constant shared with the runner's agent synthesis and
  * provisioning (apps/runner/src/conductor.ts). Renaming one side breaks the enforcement pairing. */
 const CONDUCTOR_AGENT_ID = "conductor";
