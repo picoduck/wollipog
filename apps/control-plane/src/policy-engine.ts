@@ -348,9 +348,8 @@ export function rulesFromSession(s: { costBudgetUsd?: number | null; maxToolCall
 }
 
 /**
- * Cost-budget decision (Phase 7, moved here verbatim — sessions.ts re-exports it). Returns "ask"
- * once accumulated cost reaches the budget, else "ok". No budget (null/≤0) or an already-ended
- * session ⇒ "ok".
+ * Cost-budget decision. Returns "ask" once accumulated cost reaches the budget, else "ok". No
+ * budget (null/≤0) or an already-ended session ⇒ "ok".
  */
 export function budgetDecision(
   costUsd: number,
