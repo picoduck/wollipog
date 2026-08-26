@@ -254,6 +254,7 @@ for (const viewport of [
         moreActions: rect(element.querySelector('[aria-label="More Actions"]')!),
         moreActionsIcon: rect(element.querySelector('[aria-label="More Actions"] svg')!),
         badges,
+        badgeRows: new Set(badges.map((badge) => Math.round(badge.y))).size,
         headerHeight: element.getBoundingClientRect().height,
         hasHorizontalOverflow: element.scrollWidth > element.clientWidth,
         headerRight: element.getBoundingClientRect().right,
@@ -324,6 +325,7 @@ for (const viewport of [
     expect(metrics.paddingRight).toBeGreaterThanOrEqual(12);
     expect(metrics.clippingRight - metrics.moreActions.right).toBeGreaterThanOrEqual(11.5);
     expect(metrics.badges.length).toBe(5);
+    expect(metrics.badgeRows).toBeLessThanOrEqual(3);
     const center = (box: { y: number; height: number }) => box.y + box.height / 2;
     expect(Math.abs(center(metrics.actions) - center(metrics.lifecycle))).toBeLessThanOrEqual(12);
     for (let index = 0; index < metrics.badges.length; index += 1) {

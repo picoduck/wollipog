@@ -10124,6 +10124,7 @@ body.shell-dock-dragging * {
     width: 100%;
     align-self: center;
     flex-wrap: wrap;
+    gap: 4px;
   }
   .session-detail > .detail-head .session-status-indicators {
     flex: 0 0 100%;
@@ -10135,7 +10136,8 @@ body.shell-dock-dragging * {
   }
   .session-detail > .detail-head .status-badge,
   .session-detail > .detail-head .background-work-badge {
-    padding-inline: 7px;
+    gap: 4px;
+    padding-inline: 5px;
     font-size: var(--text-xs);
   }
   .session-header-action { width: 36px; height: 36px; }
