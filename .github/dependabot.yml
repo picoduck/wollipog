@@ -1,0 +1,87 @@
+# Dependabot version updates.
+#
+# Security updates run without this file and are unaffected by it. This file exists only to make
+# routine version bumps arrive as reviewable pull requests instead of accumulating until a manual
+# sweep finds them.
+#
+# Grouping is the point, not cadence. Several of these dependencies cannot move independently, and
+# ungrouped pull requests for them would each fail on their own.
+version: 2
+
+updates:
+  - package-ecosystem: "npm"
+    # The pnpm workspace root. `pnpm-workspace.yaml` enumerates apps/* and packages/*, so the
+    # manifests below the root are covered from here rather than listed individually.
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+    groups:
+      # `@vitejs/plugin-react` 6.x declares `"vite": "^8.0.0"`. Bumped alone, either half installs
+      # against an unsatisfied peer.
+      vite:
+        patterns:
+          - "vite"
+          - "@vitejs/plugin-react"
+      # `@types/react` 19 requires the React 19 runtime — `useRef` gained a required argument, and
+      # `react-dom/test-utils` is gone. Types and runtime move together or not at all.
+      react:
+        patterns:
+          - "react"
+          - "react-dom"
+          - "@types/react"
+          - "@types/react-dom"
+      # addon-fit 0.11 and addon-search 0.16 dropped their `@xterm/xterm` peer constraint, so a
+      # mismatched pairing installs silently. Group them so the pairing stays deliberate.
+      xterm:
+        patterns:
+          - "@xterm/*"
+      fastify:
+        patterns:
+          - "fastify"
+          - "@fastify/*"
+      # Everything else type-only, minor and patch only. Listed after the react group so the React
+      # types match there first.
+      types:
+        patterns:
+          - "@types/*"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # Pinned at 1.2.1 and enforced by tests. `apps/runner/src/acp-contract.ts` declares
+      # ACP_SDK_VERSION and ships it on the wire as `schemaAuthority`; acp-contract.test.ts and
+      # acp-session-context.test.ts both assert the value, including that it matches the manifest.
+      # A bump is a deliberate protocol-attestation change, not a dependency refresh.
+      - dependency-name: "@agentclientprotocol/sdk"
+      # Pinned with a recorded rationale in pnpm-workspace.yaml: the runner loads the exact 1.1
+      # signed-package prebuild as an SEA asset, which is why its install scripts stay disabled.
+      - dependency-name: "node-pty"
+
+  - package-ecosystem: "cargo"
+    directory: "/apps/desktop/src-tauri"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+    groups:
+      # sha2 0.11 and hmac 0.13 are one coordinated RustCrypto `digest` generation change.
+      rustcrypto:
+        patterns:
+          - "sha2"
+          - "hmac"
+          - "digest"
+      tauri:
+        patterns:
+          - "tauri"
+          - "tauri-build"
+          - "tauri-plugin-*"
