@@ -467,7 +467,7 @@ test("durable receipts render every disposition and uncertain recovery actions",
     .toMatchObject({ submissionId: "receipt-uncertain-queue", action: "queue_again" });
 
   await receipt(page, "receipt-uncertain-dismiss").getByRole("button", { name: "Dismiss" }).click();
-  await expect(receipt(page, "receipt-uncertain-dismiss")).toContainText("Dismissed");
+  await expect(receipt(page, "receipt-uncertain-dismiss")).toHaveCount(0);
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringResolutionRequests()[1]))
     .toMatchObject({ submissionId: "receipt-uncertain-dismiss", action: "dismiss" });
 });
@@ -503,7 +503,87 @@ test("concurrent uncertainty resolutions retain independent pending UI", async (
   await expect(dismissReceipt).toContainText("Dismiss is pending.");
 
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleDeferredSteeringResolution("resolve-dismiss"));
-  await expect(dismissReceipt).toContainText("Dismissed");
+  await expect(dismissReceipt).toHaveCount(0);
+});
+
+test("rejected receipts stay compact on mobile and clear durably without touching actionable work", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.evaluate(() => {
+    const base = { turnId: "turn-active", source: "direct" as const, createdAt: 10 };
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
+      queued: [{ id: "queued-stays", text: "Keep this queued prompt" }],
+      steeringAttempts: [
+        ...Array.from({ length: 8 }, (_, index) => ({
+          ...base,
+          submissionId: `rejected-mobile-${index}`,
+          text: `Rejected mobile ${index}`,
+          state: "rejected" as const,
+          reason: "no_active_provider_turn" as const,
+          updatedAt: 20 + index,
+        })),
+        { ...base, submissionId: "pending-stays", text: "Pending stays", state: "pending" as const, updatedAt: 30 },
+        { ...base, submissionId: "uncertain-stays", text: "Uncertain stays", state: "uncertain" as const, reason: "transport_uncertain" as const, updatedAt: 31 },
+      ],
+    });
+  });
+
+  const group = page.locator(".steering-terminal-receipts");
+  await expect(group).toBeVisible();
+  await expect(group.getByRole("button", { name: /Rejected Receipts/ })).toHaveAttribute("aria-expanded", "false");
+  await expect(group).toContainText("8 Rejected Receipts");
+  expect((await group.boundingBox())!.height).toBeLessThanOrEqual(48);
+  await expect(receipt(page, "pending-stays")).toBeVisible();
+  await expect(receipt(page, "uncertain-stays")).toBeVisible();
+  await expect(page.getByTestId("queued-prompt-queued-stays")).toBeVisible();
+
+  await group.getByRole("button", { name: "Clear All" }).click();
+  await expect(group).toHaveCount(0);
+  await expect(receipt(page, "pending-stays")).toBeVisible();
+  await expect(receipt(page, "uncertain-stays")).toBeVisible();
+  await expect(page.getByTestId("queued-prompt-queued-stays")).toBeVisible();
+  await expect.poll(() => page.evaluate(() =>
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringResolutionRequests()
+      .filter((request) => request.action === "dismiss" && request.submissionId.startsWith("rejected-mobile-"))
+      .length
+  )).toBe(8);
+
+  await page.evaluate(() => {
+    const base = { turnId: "turn-active", source: "direct" as const, createdAt: 10 };
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
+      queued: [{ id: "queued-stays", text: "Keep this queued prompt" }],
+      steeringAttempts: Array.from({ length: 8 }, (_, index) => ({
+        ...base,
+        submissionId: `rejected-mobile-${index}`,
+        text: `Rejected mobile ${index}`,
+        state: "rejected" as const,
+        reason: "no_active_provider_turn" as const,
+        resolution: { action: "dismiss" as const, state: "applied" as const },
+        updatedAt: 40 + index,
+      })),
+    });
+  });
+  await expect(page.locator(".steering-terminal-receipts")).toHaveCount(0);
+  await expect(page.getByTestId("queued-prompt-queued-stays")).toBeVisible();
+});
+
+test("desktop rejected receipt grouping retains individual dismissal", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.evaluate(() => {
+    const base = { turnId: "turn-active", source: "direct" as const, createdAt: 10 };
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
+      steeringAttempts: [
+        { ...base, submissionId: "desktop-rejected-a", text: "Rejected A", state: "rejected", reason: "provider_rejected", updatedAt: 11 },
+        { ...base, submissionId: "desktop-rejected-b", text: "Rejected B", state: "rejected", reason: "provider_rejected", updatedAt: 12 },
+      ],
+    });
+  });
+
+  const group = page.locator(".steering-terminal-receipts");
+  await group.getByRole("button", { name: /Rejected Receipts/ }).click();
+  await expect(receipt(page, "desktop-rejected-a")).toBeVisible();
+  await receipt(page, "desktop-rejected-a").getByRole("button", { name: "Dismiss" }).click();
+  await expect(receipt(page, "desktop-rejected-a")).toHaveCount(0);
+  await expect(receipt(page, "desktop-rejected-b")).toBeVisible();
 });
 
 test("authoritative snapshot replacement restores uncertainty and canonical acceptance without resubmission or duplication", async ({ page }) => {

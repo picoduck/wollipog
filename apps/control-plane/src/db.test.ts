@@ -447,6 +447,32 @@ test("steering resolution results validate and correlate before resolving recove
   assert.equal(db.steeringRecoveryAdmissionCount("sess-1"), 0);
 });
 
+test("rejected steering receipts can be durably acknowledged without a runner round trip", () => {
+  const db = withRunner();
+  db.createSession(newSession());
+  db.createSteeringAttempt({
+    requestId: "steer-rejected-db", sessionId: "sess-1", submissionId: "submission-rejected-db",
+    turnId: "turn-1", source: "direct", requestSha256: "8".repeat(64), text: "rejected", now: 1,
+  });
+  db.markSteeringAttemptNotSent("steer-rejected-db", 2);
+
+  const dismissed = db.stageSteeringResolution(
+    "sess-1", "submission-rejected-db", "dismiss", "resolve-rejected-db", 3,
+  );
+  assert.equal(dismissed.kind, "staged");
+  assert.deepEqual(dismissed.attempt?.resolution, { action: "dismiss", state: "applied" });
+  assert.deepEqual(db.findSteeringAttemptBySubmission("sess-1", "submission-rejected-db")?.attempt.resolution, {
+    action: "dismiss", state: "applied",
+  });
+  assert.deepEqual(db.pendingSteeringResolutionMessages("runner-1"), []);
+
+  const replayed = db.stageSteeringResolution(
+    "sess-1", "submission-rejected-db", "dismiss", "different-request-id", 4,
+  );
+  assert.equal(replayed.kind, "existing");
+  assert.equal(replayed.requestId, "resolve-rejected-db");
+});
+
 test("pending steering resolution commands survive a control-plane database restart", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-steering-resolution-restart-"));
   const path = join(root, "control-plane.db");

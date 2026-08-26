@@ -11320,6 +11320,30 @@ export class ControlPlaneDb {
           attempt: this.steeringAttemptView(row),
         };
       }
+      // Rejection is already terminal, so dismissing it is a durable acknowledgement rather than
+      // a runner-side recovery operation. Persist the same resolution shape locally: it survives
+      // snapshot refreshes without asking an older runner to resolve a disposition it never
+      // treated as uncertain.
+      if (action === "dismiss" && row.disposition === "rejected" &&
+          row.resolved_at === null && row.compacted_at === null) {
+        const receipt: ResolveSteeringAttemptResultMessage = {
+          type: "resolve_steering_attempt_result",
+          requestId,
+          sessionId,
+          submissionId,
+          action,
+          applied: true,
+        };
+        this.stmt(
+          `UPDATE session_steering_attempts SET resolution_action=?,resolution_request_id=?,
+           resolution_receipt_json=?,resolution_requested_at=?,resolved_at=?,updated_at=?
+           WHERE request_id=? AND resolution_action IS NULL`,
+        ).run(action, requestId, JSON.stringify(receipt), now, now, now, row.request_id);
+        const dismissed = this.stmt("SELECT * FROM session_steering_attempts WHERE request_id=?")
+          .get(row.request_id) as unknown as SteeringAttemptRow;
+        this.db.exec("COMMIT");
+        return { kind: "staged", requestId, attempt: this.steeringAttemptView(dismissed) };
+      }
       if (row.disposition !== "uncertain" || row.resolved_at !== null || row.compacted_at !== null) {
         this.db.exec("COMMIT");
         return { kind: "not_uncertain", attempt: this.steeringAttemptView(row) };

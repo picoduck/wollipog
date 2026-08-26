@@ -3655,7 +3655,10 @@ export class SessionsService {
     if (staged.kind !== "staged" && staged.kind !== "existing") {
       return fail("steering attempt resolution could not be staged", 500);
     }
-    if (staged.attempt.resolution?.state === "applied") return ok(staged.attempt);
+    if (staged.attempt.resolution?.state === "applied") {
+      this.hub.sessionChangedById(sessionId);
+      return ok(staged.attempt);
+    }
     if (!this.hub.isRunnerOnline(session.runnerId)) {
       this.hub.sessionChangedById(sessionId);
       return ok(staged.attempt, 202);
