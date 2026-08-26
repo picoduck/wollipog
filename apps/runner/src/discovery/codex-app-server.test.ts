@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   CODEX_APP_SERVER_CONTRACT_FINGERPRINT,
+  MIN_VERIFIED_CODEX_SESSION_NAMING_VERSION,
   interpretCodexAppServerProbe,
   unavailableCodexAppServer,
   versionAtLeast,
@@ -26,15 +27,20 @@ test("versionAtLeast compares semantic versions and rejects malformed values", (
   assert.equal(versionAtLeast("dev-build"), false);
 });
 
-test("compatible verified Codex reports supported stdio with the pinned fingerprint", () => {
-  assert.deepEqual(interpretCodexAppServerProbe("0.147.0", { code: 0, stdout: compatibleHelp, stderr: "" }), {
+test("compatible verified Codex reports supported stdio and the separately gated naming surface", () => {
+  assert.deepEqual(interpretCodexAppServerProbe("0.149.1", { code: 0, stdout: compatibleHelp, stderr: "" }), {
     status: "supported",
-    installedVersion: "0.147.0",
+    installedVersion: "0.149.1",
     appServerAvailable: true,
     transport: "stdio",
     verification: "help-and-version",
     contractFingerprint: CODEX_APP_SERVER_CONTRACT_FINGERPRINT,
+    sessionNaming: true,
   });
+  const prior = interpretCodexAppServerProbe("0.147.0", { code: 0, stdout: compatibleHelp, stderr: "" });
+  assert.equal(prior.status, "supported");
+  assert.equal(prior.sessionNaming, false);
+  assert.equal(MIN_VERIFIED_CODEX_SESSION_NAMING_VERSION, "0.149.1");
 });
 
 test("older and unknown versions remain explicit exec fallbacks", () => {
@@ -48,19 +54,19 @@ test("older and unknown versions remain explicit exec fallbacks", () => {
 });
 
 test("timeout, missing command, and malformed help are distinct safe failures", () => {
-  const timeout = interpretCodexAppServerProbe("0.147.0", { code: 1, stdout: "", stderr: "", timedOut: true });
+  const timeout = interpretCodexAppServerProbe("0.149.1", { code: 1, stdout: "", stderr: "", timedOut: true });
   assert.equal(timeout.failure?.code, "probe_timeout");
   assert.equal(timeout.failure?.retryable, true);
 
-  const spawnFailure = interpretCodexAppServerProbe("0.147.0", { code: 1, stdout: "", stderr: "secret path", errorCode: "ENOENT" });
+  const spawnFailure = interpretCodexAppServerProbe("0.149.1", { code: 1, stdout: "", stderr: "secret path", errorCode: "ENOENT" });
   assert.equal(spawnFailure.failure?.code, "probe_failed");
   assert.equal(spawnFailure.failure?.retryable, true);
   assert.doesNotMatch(spawnFailure.failure?.message ?? "", /secret path|ENOENT/);
 
-  const missing = interpretCodexAppServerProbe("0.147.0", { code: 1, stdout: "", stderr: "unknown command" });
+  const missing = interpretCodexAppServerProbe("0.149.1", { code: 1, stdout: "", stderr: "unknown command" });
   assert.equal(missing.failure?.code, "app_server_unavailable");
 
-  const malformed = interpretCodexAppServerProbe("0.147.0", { code: 0, stdout: "usage: something else", stderr: "" });
+  const malformed = interpretCodexAppServerProbe("0.149.1", { code: 0, stdout: "usage: something else", stderr: "" });
   assert.equal(malformed.failure?.code, "contract_mismatch");
   assert.match(malformed.failure?.message ?? "", /app-server command.*stdio transport.*schema generator/);
 });

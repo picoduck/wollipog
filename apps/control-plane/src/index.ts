@@ -136,7 +136,7 @@ import { RUNNER_RELEASE_TAG } from "./release-version.js";
 import { readSshConfigHosts } from "./ssh-config.js";
 import { ControlPlaneDb, GOVERNANCE_AUDIT_RETENTION_MS } from "./db.js";
 import { registerSessionLookupRoute } from "./session-lookup-route.js";
-import { SessionNamingSettings } from "./session-naming-settings.js";
+import { sanitizeSessionNamingRunnerResult, SessionNamingSettings } from "./session-naming-settings.js";
 import { registerSessionNamingRoutes } from "./session-naming-route.js";
 import { registerRunnerAttestationRoute } from "./runner-attestation-route.js";
 import {
@@ -772,7 +772,7 @@ app.post("/api/public/push-receipt", async (req, reply) => {
   return reply.code(204).send();
 });
 
-const sessionNamingSettings = new SessionNamingSettings(db);
+const sessionNamingSettings = new SessionNamingSettings(db, process.env, hub);
 
 const svc = new SessionsService(
   db,
@@ -1156,6 +1156,20 @@ app.register(async (instance) => {
         } else {
           app.log.warn(`runner ${runnerId} sent malformed driver telemetry — ignored`);
         }
+        break;
+      }
+      case "generate_session_title_result": {
+        if (!runnerSupportsProtocol(db.getRunner(runnerId!)?.protocolVersion, "sessionAgentNaming")) {
+          app.log.warn(`runner ${runnerId} sent a session naming result without negotiated support`);
+          break;
+        }
+        const sanitized = sanitizeSessionNamingRunnerResult(msg);
+        hub.resolveRunnerRequest(sanitized ?? {
+          type: "generate_session_title_result",
+          requestId: msg.requestId,
+          ok: false,
+          code: "invalid_result",
+        }, runnerId!);
         break;
       }
       case "durable_session_command_result":

@@ -192,6 +192,7 @@ export function codexAgentDefinitions(
     available: supported && signedIn,
     capabilities: verifiedCodexAppServerCapabilities(slashCommands, compatibility),
     codexAppServer: compatibility,
+    ...(base.authStatus === "authenticated" ? { codexBillingSource: "provider_account" as const } : {}),
   };
   const exec: AgentDefinition = {
     ...base,
@@ -201,6 +202,7 @@ export function codexAgentDefinitions(
     available: signedIn,
     capabilities: withSlashCommands("codex", slashCommands),
     codexAppServer: compatibility,
+    ...(base.authStatus === "authenticated" ? { codexBillingSource: "provider_account" as const } : {}),
   };
   return [primary, exec];
 }
@@ -219,6 +221,7 @@ export function applyCodexAgentEnvironment(agent: AgentDefinition, preserveAvail
   return {
     ...agent,
     authStatus: "authenticated",
+    ...(agent.env?.OPENAI_API_KEY ? { codexBillingSource: "api" as const } : {}),
     available: preserveAvailability
       ? agent.available
       : agent.driver === "codex-app-server"
@@ -511,6 +514,7 @@ export function mergeAgents(configAgents: AgentDefinition[], discovered: AgentDe
       // Diagnostics describe the live resolved launch, so fresh discovery wins over a stale
       // config/persisted value. Old runners simply omit the field and keep the config value.
       codexAppServer: d.codexAppServer ?? c.codexAppServer,
+      codexBillingSource: c.codexBillingSource ?? d.codexBillingSource,
       claudeCode: d.claudeCode ?? c.claudeCode,
       registry: d.registry ?? c.registry,
       acp: d.acp ?? c.acp,

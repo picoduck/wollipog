@@ -113,6 +113,11 @@ import {
   type WorktreeHandle,
 } from "./worktree.js";
 
+export interface SessionNamingExecutionAuthorization {
+  isolation?: SpawnIsolation;
+  cleanup(): Promise<void>;
+}
+
 type Send = (msg: RunnerToControlPlane) => void;
 type Logger = (msg: string) => void;
 export type AcpContextResolver = (spec: SessionLaunchSpec) => SessionLaunchSpec["acpSessionContext"];
@@ -741,6 +746,67 @@ export class SessionManager {
       isolation,
     });
     return { cwd, ...(isolation ? { isolation } : {}) };
+  }
+
+  /** Put metadata-only naming helpers behind the same runner-owned process and provider-HOME
+   * boundaries as ordinary sessions. Seatbelt's shared provider store also uses its existing
+   * cross-process exclusive admission group; overload fails closed instead of queueing a title. */
+  async prepareSessionNamingExecution(
+    agent: AgentDefinition,
+    env: Record<string, string>,
+    cwd: string,
+  ): Promise<SessionNamingExecutionAuthorization> {
+    const context = agent.context ?? { kind: "native" as const };
+    const driver = agent.driver ?? "acp";
+    const taskId = `session-naming:${randomUUID()}`;
+    const provider = driver === "claude-code"
+      ? "claude"
+      : driver === "codex" || driver === "codex-app-server"
+        ? "codex"
+        : null;
+    let seatbeltAdmitted = false;
+    const cleanup = async () => {
+      try {
+        await this.removeIsolationState(
+          this.executionIsolation,
+          context,
+          driver,
+          this.stateDir,
+          taskId,
+          {},
+          this.runnerOwnerHash,
+        );
+      } finally {
+        if (seatbeltAdmitted) this.boxAdmission.release(taskId);
+      }
+    };
+    try {
+      if (this.executionIsolation.mode === "seatbelt" && provider) {
+        seatbeltAdmitted = this.boxAdmission.acquire({
+          sessionId: taskId,
+          agentId: agent.id,
+          weight: this.admissionPolicy.agentWeights[agent.id] ?? 1,
+          ...(this.admissionPolicy.agentLimits[agent.id] !== undefined
+            ? { agentLimit: this.admissionPolicy.agentLimits[agent.id] }
+            : {}),
+          exclusiveGroup: `seatbelt:${provider}`,
+        });
+        if (!seatbeltAdmitted) throw new Error("provider isolation is currently busy");
+      }
+      const isolation = await this.resolveIsolation(this.executionIsolation, context, {}, {
+        driver,
+        dataDir: this.stateDir,
+        env,
+        sessionId: taskId,
+        cwd,
+        ...(this.runnerOwnerHash ? { ownerHash: this.runnerOwnerHash } : {}),
+      });
+      this.providerHomeLeases?.acquire({ driver, command: agent.command, context, env, isolation });
+      return { ...(isolation ? { isolation } : {}), cleanup };
+    } catch (error) {
+      await cleanup().catch(() => {});
+      throw error;
+    }
   }
 
   /** Re-scan durable Claude work after each successful control-plane registration/reconnect. */

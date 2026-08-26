@@ -137,6 +137,80 @@ test("native subscription probes create their narrow cwd before isolation resolv
   manager.shutdownAll();
 });
 
+test("session naming resolves runner isolation, leases provider HOME, and cleans task state", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-session-naming-isolation-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const manager = new SessionManager(
+    () => {},
+    () => {},
+    new SessionStore(join(root, "sessions")),
+    "runner",
+    undefined,
+    undefined,
+    root,
+  );
+  const policy = { mode: "bwrap" as const, network: "deny" as const };
+  const isolation = { backend: "bwrap" as const, command: "bwrap", args: [], network: "deny" as const };
+  let resolvedState: { sessionId: string; cwd: string } | undefined;
+  let leaseRequest: unknown;
+  let removedSessionId: string | undefined;
+  (manager as unknown as { executionIsolation: typeof policy }).executionIsolation = policy;
+  (manager as unknown as { resolveIsolation: (...args: unknown[]) => Promise<typeof isolation> }).resolveIsolation =
+    async (...args: unknown[]) => {
+      resolvedState = args[3] as { sessionId: string; cwd: string };
+      return isolation;
+    };
+  (manager as unknown as { removeIsolationState: (...args: unknown[]) => Promise<void> }).removeIsolationState =
+    async (...args: unknown[]) => { removedSessionId = args[4] as string; };
+  (manager as unknown as { providerHomeLeases: { acquire(request: unknown): void } }).providerHomeLeases = {
+    acquire: (request) => { leaseRequest = request; },
+  };
+  const agent: AgentDefinition = {
+    id: "codex", name: "Codex", command: "codex", args: [], env: {},
+    driver: "codex-app-server", context: { kind: "native" },
+  };
+  const authorization = await manager.prepareSessionNamingExecution(agent, { HOME: "/home/alice" }, "/neutral");
+  assert.equal(authorization.isolation, isolation);
+  assert.equal(resolvedState?.cwd, "/neutral");
+  assert.match(resolvedState?.sessionId ?? "", /^session-naming:/);
+  assert.deepEqual(leaseRequest, {
+    driver: "codex-app-server", command: "codex", context: { kind: "native" },
+    env: { HOME: "/home/alice" }, isolation,
+  });
+  await authorization.cleanup();
+  assert.equal(removedSessionId, resolvedState?.sessionId);
+  manager.shutdownAll();
+});
+
+test("Seatbelt session naming shares the provider-exclusive admission group", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-session-naming-seatbelt-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const manager = new SessionManager(
+    () => {}, () => {}, new SessionStore(join(root, "sessions")), "runner", undefined, undefined, root,
+  );
+  const policy = { mode: "seatbelt" as const, network: "inherit" as const };
+  const isolation = { backend: "seatbelt" as const, command: "sandbox-exec", args: [],
+    network: "inherit" as const, profile: "(version 1)" };
+  let admission: { sessionId: string; exclusiveGroup?: string } | undefined;
+  let released: string | undefined;
+  (manager as unknown as { executionIsolation: typeof policy }).executionIsolation = policy;
+  (manager as unknown as { resolveIsolation: () => Promise<typeof isolation> }).resolveIsolation = async () => isolation;
+  (manager as unknown as { boxAdmission: { acquire(request: unknown): boolean; release(id: string): void; releaseAll(): void } }).boxAdmission = {
+    acquire: (request) => { admission = request as typeof admission; return true; },
+    release: (id) => { released = id; },
+    releaseAll: () => {},
+  };
+  const authorization = await manager.prepareSessionNamingExecution({
+    id: "claude-code", name: "Claude Code", command: "claude", args: [], env: {},
+    driver: "claude-code", context: { kind: "native" },
+  }, {}, "/neutral");
+  assert.equal(admission?.exclusiveGroup, "seatbelt:claude");
+  assert.match(admission?.sessionId ?? "", /^session-naming:/);
+  await authorization.cleanup();
+  assert.equal(released, admission?.sessionId);
+  manager.shutdownAll();
+});
+
 test("shutdownAll disposes every driver even if one throws, and reports unclean so the lease is retained", (t) => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-shutdown-dispose-throw-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));

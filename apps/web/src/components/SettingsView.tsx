@@ -373,7 +373,7 @@ export function SessionNamingPanel() {
     : !settings
       ? "Loading the organization setting…"
       : settings.mode !== settings.effectiveMode
-        ? "The selected model mode is unavailable, so new sessions fall back to prompt text."
+        ? "The selected naming mode is unavailable, so new sessions fall back to prompt text."
         : settings.source === "environment"
           ? "Inherited from the legacy control-plane environment. Save another mode to override it for this organization."
           : settings.source === "organization"
@@ -409,6 +409,18 @@ export function SessionNamingPanel() {
         <StaticRow
           title="Custom Model"
           description={`${custom.endpointOrigin} · ${custom.model} · ${custom.timeoutMs} ms · ${custom.apiKeyConfigured ? "API key configured" : "No API key"}. Managed through the control-plane environment.`}
+        />
+      )}
+      {!!settings?.sessionAgentAccounts?.length && (
+        <StaticRow
+          title="Runner Accounts"
+          description={settings.sessionAgentAccounts.map((account) => {
+            const provider = account.provider === "codex" ? "Codex" : "Claude";
+            const billing = account.billingSource === "provider_account"
+              ? "provider account"
+              : account.billingSource.replace(/_/g, " ");
+            return `${provider} · ${billing} · ${account.machineCount} ${account.machineCount === 1 ? "Machine" : "Machines"}`;
+          }).join("; ") + ". Each session uses only its own Machine and provider account."}
         />
       )}
     </SettingsGroup>

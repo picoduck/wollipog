@@ -98,6 +98,16 @@ test("requestFromRunner exposes a typed timeout without relying on message text"
   );
 });
 
+test("cancelRunnerRequest releases one exact in-flight correlation immediately", async () => {
+  const hub = new Hub(fakeDb);
+  hub.attachRunner("r1", { send() {} });
+  const pending = hub.requestFromRunner("r1", "req-cancel", gitReq("req-cancel"), 30_000);
+  assert.equal(hub.cancelRunnerRequest("r2", "req-cancel"), false);
+  assert.equal(hub.cancelRunnerRequest("r1", "req-cancel"), true);
+  await assert.rejects(() => pending, /cancelled/);
+  assert.equal(hub.cancelRunnerRequest("r1", "req-cancel"), false);
+});
+
 test("detachRunner rejects in-flight requests for that runner (no hang until timeout)", async () => {
   const socket: Socket = { send: () => {} };
   const hub = new Hub(fakeDb);

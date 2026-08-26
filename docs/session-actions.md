@@ -69,9 +69,9 @@ bearer credential, and `WOLLIPOG_TITLE_MODEL_TIMEOUT_MS` sets a 250–30,000 ms 
 default). `WOLLIPOG_TITLE_GENERATION=disabled` disables generation even when a model is configured.
 
 Both URL and model are required, so content is never silently routed across a new provider or
-privacy boundary. The request has no tools, bounded completed user/assistant input, a 40-token
-output limit, zero temperature, minimal reasoning, and a short timeout. It never enters the runner, transcript, agent
-context, prompt queue, or session lifecycle.
+privacy boundary. The custom-endpoint request has no tools, bounded completed user/assistant input,
+a 40-token output limit, zero temperature, minimal reasoning, and a short timeout. It never enters
+the runner, transcript, agent context, prompt queue, or session lifecycle.
 
 Settings → Session Naming exposes this legacy endpoint as **Custom Model Endpoint** and also keeps
 the credential-free **Prompt Text Only** mode available. An organization with no saved choice
@@ -79,8 +79,38 @@ inherits the environment behavior above, preserving existing deployments during 
 owner or admin saves a mode, that organization setting takes precedence and applies to subsequent
 naming requests without restarting Wollipog. Endpoint/model/key changes still come from the startup
 environment in this compatibility phase; the API returns only the endpoint origin, model, timeout,
-and whether a key is configured, never the key itself. **Use Session Agent Account** remains visible
-but unavailable until runner-hosted provider integrations are implemented.
+and whether a key is configured, never the key itself.
+
+**Use Session Agent Account** is available when an online protocol-v93 runner reports a verified,
+authenticated native Codex or Claude account. Each naming request targets the session's existing
+Machine and exact agent definition; an organization-wide selection never moves content to another
+Machine or provider. Settings reports only provider, billing classification, and an aggregate
+Machine count. It never reports account identifiers, credential values, credential paths, or raw
+provider status.
+
+The runner owns this metadata task independently of the agent turn and prompt queue:
+
+- Codex runs through the verified app-server interface using an ephemeral thread, read-only
+  sandbox, `never` approvals, no dynamic tools, and empty environment/capability roots. Wollipog
+  does not read or copy cached Codex authentication tokens. General app-server sessions retain the
+  repository's existing Codex version floor; this narrower naming surface requires Codex 0.149.1
+  or newer and is advertised separately by runner discovery.
+- Claude runs noninteractively with Safe Mode, Plan permissions, an empty tool set, strict empty
+  MCP configuration, disabled setting sources, slash commands, browser integration, and session
+  persistence. Authentication remains owned by Claude Code; an explicitly configured runner-local
+  credential retains the same precedence as ordinary sessions.
+- Both providers run from a disposable neutral temporary directory, receive at most nine completed
+  semantic messages and 12,000 characters, have an 8 KiB output ceiling and a 15-second hard
+  timeout clamp, and return only a normalized 120-character title plus a sanitized status. Provider
+  processes also inherit the runner's configured execution-isolation, network, provider-HOME lease,
+  and shared-store admission boundaries; an unavailable boundary fails back to prompt text.
+- Each runner admits at most two concurrent naming tasks and twelve starts per minute. Overload,
+  timeouts, provider errors, missing accounts, unsupported providers, and older runners all fail
+  closed to the prompt-derived title.
+
+Initial automatic naming still sends only the first completed user message. The explicit
+**Rename Session** action may send the bounded, redacted context described below. Neither path
+alters the provider transcript or blocks the normal turn.
 
 The reserved `/rename-session` command has the visible label **Rename Session**. It derives a title from the
 original objective and recent completed semantic context. Images, reasoning, tool and shell output,

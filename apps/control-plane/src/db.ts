@@ -1672,7 +1672,7 @@ CREATE TABLE IF NOT EXISTS usage_retention_policy (
 
 CREATE TABLE IF NOT EXISTS session_naming_preferences (
   organization_id TEXT PRIMARY KEY,
-  mode            TEXT NOT NULL CHECK (mode IN ('prompt_text_only','custom_model_endpoint')),
+  mode            TEXT NOT NULL CHECK (mode IN ('prompt_text_only','session_agent_account','custom_model_endpoint')),
   updated_at      INTEGER NOT NULL,
   FOREIGN KEY (organization_id) REFERENCES identity_organizations(organization_id) ON DELETE CASCADE
 );
@@ -3021,6 +3021,33 @@ export class ControlPlaneDb {
     db.exec("PRAGMA secure_delete = ON;");
     db.exec("PRAGMA foreign_keys = ON;");
     db.exec(SCHEMA);
+    const namingPreferenceSchema = db.prepare(
+      "SELECT sql FROM sqlite_master WHERE type='table' AND name='session_naming_preferences'",
+    ).get() as { sql?: string } | undefined;
+    if (!namingPreferenceSchema?.sql?.includes("session_agent_account")) {
+      db.exec("PRAGMA foreign_keys = OFF;");
+      try {
+        db.exec(`
+          BEGIN;
+          CREATE TABLE session_naming_preferences_v2 (
+            organization_id TEXT PRIMARY KEY,
+            mode TEXT NOT NULL CHECK (mode IN ('prompt_text_only','session_agent_account','custom_model_endpoint')),
+            updated_at INTEGER NOT NULL,
+            FOREIGN KEY (organization_id) REFERENCES identity_organizations(organization_id) ON DELETE CASCADE
+          );
+          INSERT INTO session_naming_preferences_v2 (organization_id, mode, updated_at)
+            SELECT organization_id, mode, updated_at FROM session_naming_preferences;
+          DROP TABLE session_naming_preferences;
+          ALTER TABLE session_naming_preferences_v2 RENAME TO session_naming_preferences;
+          COMMIT;
+        `);
+      } catch (error) {
+        try { db.exec("ROLLBACK;"); } catch { /* no active transaction */ }
+        throw error;
+      } finally {
+        db.exec("PRAGMA foreign_keys = ON;");
+      }
+    }
     db.prepare("INSERT OR IGNORE INTO background_push_receipt_secret (id, secret) VALUES (1, ?)")
       .run(randomBytes(32).toString("base64url"));
     try {
@@ -6309,16 +6336,16 @@ export class ControlPlaneDb {
 
   getSessionNamingPreference(
     organizationId: string,
-  ): { mode: "prompt_text_only" | "custom_model_endpoint"; updatedAt: number } | null {
+  ): { mode: "prompt_text_only" | "session_agent_account" | "custom_model_endpoint"; updatedAt: number } | null {
     const row = this.stmt(
       "SELECT mode, updated_at FROM session_naming_preferences WHERE organization_id=?",
-    ).get(organizationId) as { mode: "prompt_text_only" | "custom_model_endpoint"; updated_at: number } | undefined;
+    ).get(organizationId) as { mode: "prompt_text_only" | "session_agent_account" | "custom_model_endpoint"; updated_at: number } | undefined;
     return row ? { mode: row.mode, updatedAt: row.updated_at } : null;
   }
 
   setSessionNamingPreference(
     organizationId: string,
-    mode: "prompt_text_only" | "custom_model_endpoint",
+    mode: "prompt_text_only" | "session_agent_account" | "custom_model_endpoint",
     now: number,
   ): void {
     this.stmt(

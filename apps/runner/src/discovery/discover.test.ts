@@ -75,6 +75,7 @@ test("a signed-out Codex is discovered but not ready, and signing in restores bo
   assert.deepEqual(unknown.map((agent) => agent.available), [true, true]);
   const signedIn = codexAgentDefinitions({ ...base, authStatus: "authenticated" }, SUPPORTED_APP_SERVER, []);
   assert.deepEqual(signedIn.map((agent) => agent.available), [true, true]);
+  assert.deepEqual(signedIn.map((agent) => agent.codexBillingSource), ["provider_account", "provider_account"]);
 });
 
 test("a config-declared OPENAI_API_KEY keeps Codex available despite a missing auth file", () => {
@@ -86,11 +87,13 @@ test("a config-declared OPENAI_API_KEY keeps Codex available despite a missing a
   // Production shape: the runner redacts config env to {} and carries the declared key only as
   // a non-secret auth assertion, so the merge must honor the assertion, not the key value.
   const apiKeyed = mergeAgents(
-    [cfg({ id: "codex", command: "/usr/bin/codex", driver: "codex-app-server", env: {}, authStatus: "authenticated" })],
+    [cfg({ id: "codex", command: "/usr/bin/codex", driver: "codex-app-server", env: {},
+      authStatus: "authenticated", codexBillingSource: "api" })],
     discovered,
   )[0]!;
   assert.equal(apiKeyed.available, true, "deliberate API-billing config stays selectable");
   assert.equal(apiKeyed.authStatus, "authenticated");
+  assert.equal(apiKeyed.codexBillingSource, "api");
   const disabled = mergeAgents(
     [cfg({ id: "codex", command: "/usr/bin/codex", driver: "codex-app-server", env: {}, authStatus: "authenticated", available: false })],
     discovered,

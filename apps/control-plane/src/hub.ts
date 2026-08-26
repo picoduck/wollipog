@@ -13,6 +13,7 @@ import type {
   ControlPlaneToUi,
   AdoptSessionResultMessage,
   GitActionResultMessage,
+  GenerateSessionTitleResultMessage,
   ForkResultMessage,
   HostActionResultMessage,
   InterruptTurnResultMessage,
@@ -180,7 +181,8 @@ export type RunnerRequestResult =
   | InterruptTurnResultMessage
   | ResolveSteeringAttemptResultMessage
   | SubscriptionUsageRefreshResultMessage
-  | SteerSessionResultMessage;
+  | SteerSessionResultMessage
+  | GenerateSessionTitleResultMessage;
 
 interface PendingRequest {
   runnerId: string;
@@ -368,6 +370,16 @@ export class Hub {
       }
       pending.waiters.push({ resolve, reject });
     });
+  }
+
+  /** Cancel one exact correlated request without waiting for its transport timeout. */
+  cancelRunnerRequest(runnerId: string, requestId: string, error = new Error("runner request was cancelled")): boolean {
+    const pending = this.pendingRequests.get(requestId);
+    if (!pending || pending.runnerId !== runnerId) return false;
+    clearTimeout(pending.timer);
+    this.pendingRequests.delete(requestId);
+    for (const waiter of pending.waiters) waiter.reject(error);
+    return true;
   }
 
   /** Resolve a pending runner request with its result (git_result / session_history_result). */

@@ -50,19 +50,26 @@ function optionBlock(help: string, option: string): string {
 
 /** Project only flags and enumerated values present in this installation's own help output. */
 export function parseClaudeHelp(help: string): Pick<ClaudeCodeCapabilities,
-  "effortLevels" | "permissionModes" | "streamJsonInput" | "forkSession" | "replayUserMessages"
+  "effortLevels" | "permissionModes" | "streamJsonInput" | "forkSession" | "replayUserMessages" | "sessionNaming"
 > {
   const effortBlock = optionBlock(help, "--effort");
   const permissionBlock = optionBlock(help, "--permission-mode");
   const inputBlock = optionBlock(help, "--input-format");
+  const permissionModes = permissionBlock
+    ? PERMISSION_MODES.filter((value) => new RegExp(`(?:[\"']${value}[\"']|\\b${value}\\b)`).test(permissionBlock))
+    : [];
+  const namingFlags = [
+    "--output-format", "--tools", "--safe-mode", "--strict-mcp-config", "--mcp-config",
+    "--setting-sources", "--no-session-persistence", "--disable-slash-commands", "--no-chrome",
+    "--system-prompt",
+  ];
   return {
     effortLevels: effortBlock ? EFFORTS.filter((value) => new RegExp(`\\b${value}\\b`).test(effortBlock)) : [],
-    permissionModes: permissionBlock
-      ? PERMISSION_MODES.filter((value) => new RegExp(`(?:[\"']${value}[\"']|\\b${value}\\b)`).test(permissionBlock))
-      : [],
+    permissionModes,
     streamJsonInput: /--input-format/.test(inputBlock) && /stream-json/.test(inputBlock) && /--output-format/.test(help),
     forkSession: /--fork-session\b/.test(help),
     replayUserMessages: /--replay-user-messages\b/.test(help),
+    sessionNaming: permissionModes.includes("plan") && namingFlags.every((flag) => help.includes(flag)),
   };
 }
 

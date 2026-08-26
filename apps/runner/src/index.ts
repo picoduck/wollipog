@@ -157,6 +157,7 @@ import {
   SubscriptionUsageManager,
   type SubscriptionUsageManagerOptions,
 } from "./subscription-usage.js";
+import { SessionNamingExecutor } from "./session-naming.js";
 
 const INITIAL_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 30_000;
@@ -304,7 +305,7 @@ const configuredAgentDefinitions = config.agents.map((a) => {
     // assertion, or the auth gate would disable a deliberately API-keyed Codex whose
     // ~/.codex/auth.json is absent.
     ...((driver === "codex" || driver === "codex-app-server") && a.env && "OPENAI_API_KEY" in a.env
-      ? { authStatus: "authenticated" as const }
+      ? { authStatus: "authenticated" as const, codexBillingSource: "api" as const }
       : {}),
     driver,
     ...(driver === "acp" ? { acpTransport: "stdio" as const } : {}),
@@ -420,6 +421,9 @@ const sessionCommandReceipts = new SessionCommandReceiptStore(
   resolve(config.dataDir, "session-command-receipts"),
 );
 sessionCommandReceipts.prune();
+const sessionNaming = new SessionNamingExecutor({
+  authorize: (agent, env, cwd) => sessions.prepareSessionNamingExecution(agent, env, cwd),
+});
 // The resolver closes over `metadata`, so it always sees the LIVE agent list (discovery replaces
 // metadata.agents). It's the same shared resolver as the `resumable` flag and handleAdopt — resume,
 // listing, and adoption can never disagree — and it lets a read-only adopt heal once the box gains
@@ -1363,6 +1367,19 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           error: `subscription usage refresh failed: ${errText(error)}`,
         }));
       break;
+    case "generate_session_title": {
+      const meta = store.readMeta(msg.sessionId);
+      const agent = meta?.agentId
+        ? metadata.agents.find((candidate) =>
+            candidate.id === meta.agentId &&
+            (candidate.driver ?? "acp") === meta.driver &&
+            JSON.stringify(candidate.context ?? { kind: "native" }) === JSON.stringify(meta.context),
+          )
+        : undefined;
+      const env = meta?.agentId ? runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context) : {};
+      runCommandTask("generate_session_title", sessionNaming.execute(msg, agent, env).then((result) => sendUp(result)));
+      break;
+    }
     case "logout_agent":
       runCommandTask("logout_agent", sessions.logoutAgent(msg.sessionId).then((result) =>
         sendUp({
