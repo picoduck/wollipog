@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { extractBearer } from "./auth.js";
-import { isApiRoute, isPublicPushReceiptAck, isPublicTranscriptShareRead, registerAuthGate } from "./http-auth.js";
+import cors from "@fastify/cors";
+import { CORS_METHODS, isApiRoute, isPublicPushReceiptAck, isPublicTranscriptShareRead, registerAuthGate } from "./http-auth.js";
 import { isAllowedOrigin } from "./net.js";
 import { mutationAuthorizationError, type HumanPrincipal } from "./identity.js";
 
@@ -310,4 +312,88 @@ test("role authorization runs after body parsing and blocks viewer mutations", a
     headers: { authorization: "Bearer operator", "content-type": "application/json" }, body: { value: 1 },
   });
   assert.equal(operator.statusCode, 200);
+});
+
+/**
+ * The preflight contract, exercised through the REAL @fastify/cors plugin rather than by reading
+ * the constant back. @fastify/cors v11 narrows its default `methods` to the CORS-safelisted set
+ * (GET, HEAD, POST); this asserts the control plane does not inherit that default, so the upgrade
+ * cannot silently stop browsers from issuing the API's PUT/PATCH/DELETE requests.
+ */
+test("a cross-origin preflight advertises the non-safelisted methods the API serves", async (t) => {
+  const app = Fastify();
+  await app.register(cors, {
+    origin: (origin: string | undefined, cb: (err: Error | null, allow: boolean) => void) =>
+      cb(null, isAllowedOrigin(origin)),
+    methods: [...CORS_METHODS],
+  });
+  app.delete("/api/sessions/:id", async () => ({ deleted: true }));
+  t.after(() => app.close());
+
+  const preflight = await app.inject({
+    method: "OPTIONS",
+    url: "/api/sessions/s1",
+    headers: { origin: "http://localhost:5173", "access-control-request-method": "DELETE" },
+  });
+
+  assert.equal(preflight.statusCode, 204);
+  const advertised = String(preflight.headers["access-control-allow-methods"] ?? "")
+    .split(",")
+    .map((method) => method.trim().toUpperCase());
+  // The three the safelist omits. A default-inherited policy advertises none of them.
+  for (const method of ["PUT", "PATCH", "DELETE"]) {
+    assert.ok(advertised.includes(method), `preflight must advertise ${method}, got: ${advertised.join(",")}`);
+  }
+
+  // And the request the preflight authorizes actually succeeds cross-origin.
+  const deleted = await app.inject({
+    method: "DELETE",
+    url: "/api/sessions/s1",
+    headers: { origin: "http://localhost:5173" },
+  });
+  assert.equal(deleted.statusCode, 200);
+  assert.equal(deleted.headers["access-control-allow-origin"], "http://localhost:5173");
+});
+
+test("a disallowed origin is not granted the non-safelisted methods", async (t) => {
+  const app = Fastify();
+  await app.register(cors, {
+    origin: (origin: string | undefined, cb: (err: Error | null, allow: boolean) => void) =>
+      cb(null, isAllowedOrigin(origin)),
+    methods: [...CORS_METHODS],
+  });
+  app.delete("/api/sessions/:id", async () => ({ deleted: true }));
+  t.after(() => app.close());
+
+  const preflight = await app.inject({
+    method: "OPTIONS",
+    url: "/api/sessions/s1",
+    headers: { origin: "http://evil.example", "access-control-request-method": "DELETE" },
+  });
+
+  // Stating the methods explicitly must not widen who may use them: no allow-origin, no grant.
+  assert.equal(preflight.headers["access-control-allow-origin"], undefined);
+});
+
+/**
+ * The preflight tests above pass on @fastify/cors v10 whether or not `methods` is supplied,
+ * because v10's default already includes the non-safelisted methods. That makes them a contract
+ * for the future, not a guard for today: dropping `methods` would go unnoticed until the v11
+ * upgrade, which is exactly the failure this policy exists to prevent. So assert the registration
+ * site itself, the way acp-contract.test.ts pins the SDK version it attests to.
+ */
+test("the CORS registration states its methods instead of inheriting the plugin default", async () => {
+  const source = await readFile(new URL("./index.ts", import.meta.url), "utf8");
+  const registration = /app\.register\(cors,\s*\{([^}]*)\}\)/.exec(source);
+  assert.ok(registration, "could not locate the @fastify/cors registration in index.ts");
+  assert.match(
+    registration[1]!,
+    /methods:\s*\[\.\.\.CORS_METHODS\]/,
+    "index.ts must pass CORS_METHODS; inheriting the plugin default breaks on @fastify/cors v11",
+  );
+
+  // The safelist omits these three, so they are the ones a default-inherited policy would drop.
+  for (const method of ["PUT", "PATCH", "DELETE"]) {
+    assert.ok(CORS_METHODS.includes(method as (typeof CORS_METHODS)[number]), `CORS_METHODS must include ${method}`);
+  }
 });
