@@ -94,7 +94,10 @@ async function fetchSession(stack: Pick<LiveStack, "httpBase" | "ownerToken" | "
   return ((await response.json()) as { session: SessionView }).session;
 }
 
-async function startLiveStack(provider: "claude" | "codex" = "claude"): Promise<LiveStack> {
+async function startLiveStack(
+  provider: "claude" | "codex" = "claude",
+  codexScenario: "question" | "diff-review-question" = "question",
+): Promise<LiveStack> {
   const port = await reservePort();
   const httpBase = `http://127.0.0.1:${port}`;
   const wsBase = `ws://127.0.0.1:${port}`;
@@ -163,7 +166,7 @@ async function startLiveStack(provider: "claude" | "codex" = "claude"): Promise<
           id: "codex-question",
           name: "Codex Question E2E",
           command: process.execPath,
-          args: [FAKE_CODEX, "question"],
+          args: [FAKE_CODEX, codexScenario],
           driver: "codex-app-server",
           context: { kind: "native" },
           env: { WOLLIPOG_FAKE_CODEX_RECEIPT: receiptPath },
@@ -364,3 +367,95 @@ test("Codex structured questions cross the live browser, control plane, runner, 
     await stack.stop();
   }
 });
+
+for (const viewport of [
+  { name: "mobile portrait", width: 390, height: 844 },
+  { name: "mobile landscape", width: 844, height: 390 },
+  { name: "desktop", width: 1280, height: 800 },
+]) {
+  test(`Codex diff-review approval resolves its exact live request on ${viewport.name}`, async ({ browser }) => {
+    test.setTimeout(120_000);
+    const context = await browser.newContext({
+      baseURL: "http://127.0.0.1:4174",
+      ...(viewport.name === "desktop" ? {} : { hasTouch: true }),
+      viewport: { width: viewport.width, height: viewport.height },
+    });
+    const page = await context.newPage();
+    const stack = await startLiveStack("codex", "diff-review-question");
+    try {
+      const pending = await fetchSession(stack);
+      expect(pending.pendingApproval).toMatchObject({
+        kind: "question",
+        requestId: "live-codex-diff-review-1",
+        questions: [{
+          id: "diff_review",
+          header: "Review Diff",
+          question: "Send the sanitized diff to Claude Code for an independent review?",
+          options: [
+            { label: "Approve", description: "Send the sanitized diff for review." },
+            { label: "Reject", description: "Do not send the diff." },
+          ],
+        }],
+      });
+
+      const fragment = new URLSearchParams({
+        origin: stack.httpBase,
+        token: stack.ownerToken,
+        sessionId: stack.sessionId,
+      });
+      await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
+
+      const submit = page.getByRole("button", { name: "Submit" });
+      const approve = page.getByRole("radio", { name: /Approve/ });
+      const reject = page.getByRole("radio", { name: /Reject/ });
+      await expect(page.getByRole("region", { name: "Agent Questions" })).toBeVisible();
+      await expect(approve).toBeVisible();
+      await expect(reject).toBeVisible();
+      await expect(approve).toBeInViewport();
+      await expect(reject).toBeInViewport();
+      await expect(submit).toBeDisabled();
+
+      await reject.focus();
+      await page.keyboard.press("Space");
+      await expect(reject).toHaveAttribute("aria-checked", "true");
+      if (viewport.name === "desktop") await approve.click();
+      else await approve.tap();
+      await expect(approve).toHaveAttribute("aria-checked", "true");
+      await expect(reject).toHaveAttribute("aria-checked", "false");
+      await expect(submit).toBeEnabled();
+      if (viewport.name === "desktop") await submit.click();
+      else await submit.tap();
+      await expect(page.getByRole("status")).toHaveText("Question Answered");
+
+      await expect.poll(async () => {
+        try {
+          return JSON.parse(await readFile(stack.receiptPath, "utf8"));
+        } catch {
+          return null;
+        }
+      }, { timeout: 30_000 }).toEqual({
+        requestId: "live-codex-diff-review-1",
+        result: {
+          answers: {
+            diff_review: { answers: ["Approve"] },
+          },
+        },
+      });
+
+      await expect.poll(async () => (await fetchSession(stack)).pendingApproval, {
+        timeout: 30_000,
+      }).toBeNull();
+      await expect.poll(async () => (await fetchSession(stack)).status, {
+        timeout: 30_000,
+      }).toBe("idle");
+      await expect.poll(async () => (await fetchSession(stack)).preview, {
+        timeout: 30_000,
+      }).toContain("Question answers received by Codex.");
+    } catch (error) {
+      throw new Error(`${error instanceof Error ? error.stack : String(error)}\n${stack.logs()}`);
+    } finally {
+      await context.close();
+      await stack.stop();
+    }
+  });
+}

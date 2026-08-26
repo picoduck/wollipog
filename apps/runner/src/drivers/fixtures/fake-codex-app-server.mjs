@@ -4,12 +4,14 @@ import { createInterface } from "node:readline";
 const scenario = process.argv[2] ?? "resume";
 const threadId = scenario === "fresh"
   ? "fixture-fresh"
-  : scenario === "question"
+  : scenario === "question" || scenario === "diff-review-question"
     ? "fixture-question"
     : scenario === "subagents"
       ? "fixture-subagents"
       : "fixture-resume";
-const questionRequestId = "live-codex-question-1";
+const questionRequestId = scenario === "diff-review-question"
+  ? "live-codex-diff-review-1"
+  : "live-codex-question-1";
 const expectedLaunchArgs = ["--enable", "default_mode_request_user_input", "app-server"];
 if (JSON.stringify(process.argv.slice(3)) !== JSON.stringify(expectedLaunchArgs)) {
   process.stderr.write("unexpected app-server launch arguments: " + JSON.stringify(process.argv.slice(3)) + "\n");
@@ -22,13 +24,15 @@ function send(message) {
 
 createInterface({ input: process.stdin }).on("line", (line) => {
   const message = JSON.parse(line);
-  if (scenario === "question" && message.method == null && message.id === questionRequestId) {
-    const expected = {
-      answers: {
-        environment: { answers: ["Staging"] },
-        note: { answers: ["Ship after checks pass"] },
-      },
-    };
+  if ((scenario === "question" || scenario === "diff-review-question") && message.method == null && message.id === questionRequestId) {
+    const expected = scenario === "diff-review-question"
+      ? { answers: { diff_review: { answers: ["Approve"] } } }
+      : {
+          answers: {
+            environment: { answers: ["Staging"] },
+            note: { answers: ["Ship after checks pass"] },
+          },
+        };
     if (JSON.stringify(message.result) !== JSON.stringify(expected)) {
       process.stderr.write("unexpected structured answer: " + JSON.stringify(message.result) + "\n");
       process.exitCode = 2;
@@ -57,7 +61,9 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     send({ id: message.id, result: { thread: { id: threadId, turns: [{ id: "historical" }] } } });
     return;
   }
-  if (message.method === "thread/start" && (scenario === "fresh" || scenario === "question" || scenario === "subagents")) {
+  if (message.method === "thread/start" && (
+    scenario === "fresh" || scenario === "question" || scenario === "diff-review-question" || scenario === "subagents"
+  )) {
     send({ id: message.id, result: { thread: { id: threadId } } });
     return;
   }
@@ -92,6 +98,32 @@ createInterface({ input: process.stdin }).on("line", (line) => {
               isOther: true,
               isSecret: false,
               options: null,
+            },
+          ],
+        },
+      });
+      return;
+    }
+    if (scenario === "diff-review-question") {
+      send({
+        id: questionRequestId,
+        method: "item/tool/requestUserInput",
+        params: {
+          threadId,
+          turnId: "fixture-turn",
+          itemId: "question-tool",
+          isBlocking: true,
+          questions: [
+            {
+              id: "diff_review",
+              header: "Review Diff",
+              question: "Send the sanitized diff to Claude Code for an independent review?",
+              isOther: false,
+              isSecret: false,
+              options: [
+                { label: "Approve", description: "Send the sanitized diff for review." },
+                { label: "Reject", description: "Do not send the diff." },
+              ],
             },
           ],
         },
