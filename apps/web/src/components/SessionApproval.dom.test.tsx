@@ -302,7 +302,11 @@ test("style changes preserve compatible drafts and submit exact labels with Ctrl
     assert.ok(input);
     assert.equal(input.value, "TypeScript");
     assert.ok(input.list, "fixed choices expose native keyboard autocomplete suggestions");
-    assert.deepEqual([...container.querySelectorAll(".question-text-options li")].map((item) => item.textContent?.trim()), [
+    const offeredChoices = container.querySelector<HTMLOListElement>(".question-text-options");
+    assert.ok(offeredChoices?.id);
+    assert.ok(input.getAttribute("aria-describedby")?.split(" ").includes(offeredChoices.id),
+      "the response field describes the visible number and label choices");
+    assert.deepEqual([...offeredChoices.querySelectorAll("li")].map((item) => item.textContent?.trim()), [
       "TypeScript",
       "Python",
     ]);
@@ -540,6 +544,64 @@ test("Interactive Other intent survives an exact option prefix while fixed click
     assert.deepEqual(calls[1], {
       requestId: "question-1",
       answers: { target: "Production" },
+      action: "submit",
+    });
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
+test("Interactive numeric Other submits prose without applying hidden ordinal syntax", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const questions: AgentQuestion[] = [{
+    id: "workers",
+    question: "Choose a worker count",
+    options: [{ label: "Auto" }, { label: "Two Workers" }],
+    allowOther: true,
+    inputFormat: "integer",
+    minimum: 1,
+    maximum: 10,
+  }];
+  const calls: Array<Parameters<ApiClient["answerQuestion"]>[1]> = [];
+  const client = {
+    ...api,
+    answerQuestion: async (_sessionId: string, action: Parameters<ApiClient["answerQuestion"]>[1]) => {
+      calls.push(structuredClone(action));
+      return {} as SessionView;
+    },
+  } as ApiClient;
+
+  try {
+    setQuestionResponseStyle("interactive", domWindow as never);
+    await renderBanner(root, questions, true, client);
+    const input = container.querySelector<HTMLInputElement>('.question-input[type="number"]');
+    assert.ok(input);
+    await act(async () => { setInputValue(input, "2"); });
+    assert.equal(container.querySelector('[role="radio"][aria-checked="true"]'), null);
+    await act(async () => {
+      submitButton(container).click();
+      await tick();
+    });
+    assert.deepEqual(calls[0], {
+      requestId: "question-1",
+      answers: { workers: "2" },
+      action: "submit",
+    });
+
+    const fixedChoice = [...container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
+      .find((choice) => choice.textContent?.includes("Two Workers"));
+    assert.ok(fixedChoice);
+    await act(async () => { fixedChoice.click(); });
+    await act(async () => {
+      submitButton(container).click();
+      await tick();
+    });
+    assert.deepEqual(calls[1], {
+      requestId: "question-1",
+      answers: { workers: "Two Workers" },
       action: "submit",
     });
   } finally {

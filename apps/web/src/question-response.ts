@@ -122,6 +122,18 @@ export function resolveQuestionResponse(question: AgentQuestion, rawValue: strin
   return freeTextError ? { error: `Response ${freeTextError}.` } : { answer: value };
 }
 
+/** Validate an explicit Interactive Form Other response without applying Text Entry's displayed
+ * number or offered-label syntax. */
+function resolveQuestionOtherResponse(question: AgentQuestion, rawValue: string): ResolvedQuestionResponse {
+  if (!isAnswerableAgentQuestion(question) || question.multiSelect || !question.allowOther) {
+    return { error: "This question format is unsupported." };
+  }
+  const value = rawValue.trim();
+  if (!value) return question.required === false ? {} : { error: "Enter a response." };
+  const freeTextError = validateQuestionFreeText(question, value);
+  return freeTextError ? { error: `Response ${freeTextError}.` } : { answer: value };
+}
+
 export function questionAnswers(
   questions: AgentQuestion[],
   values: Record<string, string>,
@@ -175,7 +187,9 @@ export function questionDraftAnswers(
   for (const question of questions) {
     const draft = Object.hasOwn(drafts, question.id) ? drafts[question.id] : undefined;
     let resolved: ResolvedQuestionResponse;
-    if (draft?.kind !== "choice") {
+    if (draft?.kind === "other") {
+      resolved = resolveQuestionOtherResponse(question, draft.value);
+    } else if (draft?.kind !== "choice") {
       resolved = resolveQuestionResponse(question, questionDraftText(draft));
     } else if (!isAnswerableAgentQuestion(question)) {
       resolved = { error: "This question format is unsupported." };

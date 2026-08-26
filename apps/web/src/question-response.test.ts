@@ -96,6 +96,22 @@ test("choice and Other draft intents validate to provider values without becomin
   assert.deepEqual(questionDraftAnswers([question], {
     language: { kind: "other", value: "Production west region" },
   }).answers, { language: "Production west region" });
+
+  const numericOther: AgentQuestion = {
+    id: "workers",
+    question: "Choose a worker count",
+    options: [{ label: "Auto" }, { label: "Two Workers" }],
+    allowOther: true,
+    inputFormat: "integer",
+    minimum: 1,
+    maximum: 10,
+  };
+  assert.deepEqual(questionDraftAnswers([numericOther], {
+    workers: { kind: "other", value: "2" },
+  }).answers, { workers: "2" }, "Interactive Other does not apply Text Entry's ordinal syntax");
+  assert.deepEqual(questionDraftAnswers([numericOther], {
+    workers: { kind: "choice", labels: ["Two Workers"] },
+  }).answers, { workers: "Two Workers" }, "fixed choices still retain exact provider labels");
 });
 
 test("Interactive choices retain exact provider labels without reparsing them as text syntax", () => {

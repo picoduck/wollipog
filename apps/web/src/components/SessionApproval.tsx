@@ -456,6 +456,7 @@ export function SessionQuestionBanner({
           const contextId = `${labelPrefix}-context-${questionIndex}`;
           const requirementId = `${labelPrefix}-requirement-${questionIndex}`;
           const responseErrorId = `${labelPrefix}-response-error-${questionIndex}`;
+          const offeredChoicesId = `${labelPrefix}-offered-choices-${questionIndex}`;
           const draft = draftValue(question.id);
           const rawValue = questionDraftText(draft);
           const selected = questionDraftSelections(question, draft);
@@ -468,6 +469,13 @@ export function SessionQuestionBanner({
           ]
             .filter((value): value is string => value !== null);
           const inputDescriptionIds = [...controlDescriptionIds, showResponseError ? responseErrorId : null]
+            .filter((value): value is string => value !== null)
+            .join(" ");
+          const textInputDescriptionIds = [
+            ...controlDescriptionIds,
+            question.options.length > 0 ? offeredChoicesId : null,
+            showResponseError ? responseErrorId : null,
+          ]
             .filter((value): value is string => value !== null)
             .join(" ");
           return (
@@ -569,7 +577,7 @@ export function SessionQuestionBanner({
               {responseStyle === "text" && (
                 <>
                   {question.options.length > 0 && (
-                    <ol className="question-text-options" aria-label="Offered Choices">
+                    <ol className="question-text-options" id={offeredChoicesId} aria-label="Offered Choices">
                       {question.options.map((option) => (
                         <li key={option.label}>
                           <span className="question-label">{option.label}</span>
@@ -584,7 +592,7 @@ export function SessionQuestionBanner({
                     <input
                       className="input question-input question-text-input"
                       aria-labelledby={`${questionLabelId} ${responseLabelId}`}
-                      aria-describedby={inputDescriptionIds}
+                      aria-describedby={textInputDescriptionIds}
                       aria-invalid={showResponseError ? true : undefined}
                       aria-required={question.required !== false}
                       required={question.required !== false}
