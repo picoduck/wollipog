@@ -473,6 +473,62 @@ test("rejected steering receipts can be durably acknowledged without a runner ro
   assert.equal(replayed.requestId, "resolve-rejected-db");
 });
 
+test("compacted rejected steering receipts remain dismissible without restoring retained payloads", () => {
+  const db = withRunner();
+  db.createSession(newSession());
+  db.createSteeringAttempt({
+    requestId: "steer-compacted-rejected-db", sessionId: "sess-1",
+    submissionId: "submission-compacted-rejected-db", turnId: "turn-1", source: "direct",
+    requestSha256: "9".repeat(64), text: "remove after retention",
+    images: [{ artifactId: "removed-image", mimeType: "image/png", sizeBytes: 1, sha256: "a".repeat(64) }],
+    config: { model: "retained-model", effort: "high" }, now: 1,
+  });
+  assert.equal(db.recordSteeringResult("runner-1", {
+    type: "steer_session_result", requestId: "steer-compacted-rejected-db", sessionId: "sess-1",
+    submissionId: "submission-compacted-rejected-db", turnId: "turn-1", disposition: "rejected",
+    reason: "provider_rejected",
+  }, 2)?.state, "rejected");
+
+  const retention = 30 * 24 * 60 * 60_000;
+  assert.equal(db.compactSteeringAttempts(retention + 2), 1);
+  const beforeDismissal = db.raw().prepare(
+    `SELECT text_snapshot,images_json,config_json,receipt_json,resolution_receipt_json,compacted_at
+     FROM session_steering_attempts WHERE request_id=?`,
+  ).get("steer-compacted-rejected-db") as unknown as Record<string, unknown>;
+  assert.equal(beforeDismissal.compacted_at, retention + 2);
+  for (const field of ["text_snapshot", "images_json", "config_json", "receipt_json", "resolution_receipt_json"]) {
+    assert.equal(beforeDismissal[field], null, `${field} stays removed after compaction`);
+  }
+
+  const dismissed = db.stageSteeringResolution(
+    "sess-1", "submission-compacted-rejected-db", "dismiss", "resolve-compacted-rejected-db", retention + 3,
+  );
+  assert.equal(dismissed.kind, "staged");
+  assert.deepEqual(dismissed.attempt?.resolution, { action: "dismiss", state: "applied" });
+  assert.deepEqual(db.pendingSteeringResolutionMessages("runner-1"), []);
+
+  const afterDismissal = db.raw().prepare(
+    `SELECT text_snapshot,images_json,config_json,receipt_json,resolution_receipt_json,
+            resolution_action,resolution_request_id,resolved_at
+     FROM session_steering_attempts WHERE request_id=?`,
+  ).get("steer-compacted-rejected-db") as unknown as Record<string, unknown>;
+  for (const field of ["text_snapshot", "images_json", "config_json", "receipt_json", "resolution_receipt_json"]) {
+    assert.equal(afterDismissal[field], null, `${field} is not rehydrated by dismissal`);
+  }
+  assert.equal(afterDismissal.resolution_action, "dismiss");
+  assert.equal(afterDismissal.resolution_request_id, "resolve-compacted-rejected-db");
+  assert.equal(afterDismissal.resolved_at, retention + 3);
+
+  const replayed = db.stageSteeringResolution(
+    "sess-1", "submission-compacted-rejected-db", "dismiss", "different-request-id", retention + 4,
+  );
+  assert.equal(replayed.kind, "existing");
+  assert.equal(replayed.requestId, "resolve-compacted-rejected-db");
+  assert.equal(db.stageSteeringResolution(
+    "sess-1", "submission-compacted-rejected-db", "queue_again", "conflicting-request-id", retention + 5,
+  ).kind, "conflict");
+});
+
 test("pending steering resolution commands survive a control-plane database restart", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-steering-resolution-restart-"));
   const path = join(root, "control-plane.db");
