@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { chmodSync, copyFileSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -94,7 +94,52 @@ async function fetchSession(stack: Pick<LiveStack, "httpBase" | "ownerToken" | "
   return ((await response.json()) as { session: SessionView }).session;
 }
 
-async function startLiveStack(provider: "claude" | "codex" = "claude"): Promise<LiveStack> {
+async function queuePrompt(
+  stack: Pick<LiveStack, "httpBase" | "ownerToken" | "sessionId">,
+  text: string,
+): Promise<void> {
+  const response = await fetch(`${stack.httpBase}/api/sessions/${stack.sessionId}/prompt`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${stack.ownerToken}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ text }),
+  });
+  if (!response.ok) throw new Error(`prompt queue failed: ${response.status} ${await response.text()}`);
+}
+
+async function expectQuestionControlsInsideCard(page: Page): Promise<void> {
+  const card = page.getByRole("region", { name: "Agent Questions" });
+  const cardRect = await card.evaluate((element) => element.getBoundingClientRect().toJSON());
+  const list = page.locator(".question-list");
+  const overflow = await list.evaluate((element) => ({
+    clientWidth: element.clientWidth,
+    scrollLeft: element.scrollLeft,
+    scrollWidth: element.scrollWidth,
+  }));
+  expect(overflow.scrollLeft).toBe(0);
+  expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth + 1);
+
+  const rects = await page.locator(
+    ".question-list, .question-block, .question-text, .question-option, .question-input",
+  ).evaluateAll((elements) =>
+    elements.map((element) => ({
+      className: element.className,
+      rect: element.getBoundingClientRect().toJSON(),
+    })),
+  );
+  expect(rects.length).toBeGreaterThan(0);
+  for (const { className, rect } of rects) {
+    expect(rect.left, `${className} starts inside the question card`).toBeGreaterThanOrEqual(cardRect.left - 0.5);
+    expect(rect.right, `${className} ends inside the question card`).toBeLessThanOrEqual(cardRect.right + 0.5);
+  }
+}
+
+async function startLiveStack(
+  provider: "claude" | "codex" = "claude",
+  codexScenario: "question" | "dogfood-question" = "question",
+): Promise<LiveStack> {
   const port = await reservePort();
   const httpBase = `http://127.0.0.1:${port}`;
   const wsBase = `ws://127.0.0.1:${port}`;
@@ -163,7 +208,7 @@ async function startLiveStack(provider: "claude" | "codex" = "claude"): Promise<
           id: "codex-question",
           name: "Codex Question E2E",
           command: process.execPath,
-          args: [FAKE_CODEX, "question"],
+          args: [FAKE_CODEX, codexScenario],
           driver: "codex-app-server",
           context: { kind: "native" },
           env: { WOLLIPOG_FAKE_CODEX_RECEIPT: receiptPath },
@@ -274,7 +319,7 @@ test("Claude AskUserQuestion answers cross the live browser, control plane, runn
     await page.getByRole("checkbox", { name: /Browser Tests/ }).click();
     await expect(submit).toBeEnabled();
     await submit.click();
-    await expect(page.getByRole("status")).toHaveText("Question Answered");
+    await expect(page.getByText("Question Answered", { exact: true })).toBeVisible();
 
     await expect.poll(async () => {
       try {
@@ -331,7 +376,7 @@ test("Codex structured questions cross the live browser, control plane, runner, 
     await page.getByLabel("Response").fill("Ship after checks pass");
     await expect(submit).toBeEnabled();
     await submit.click();
-    await expect(page.getByRole("status")).toHaveText("Question Answered");
+    await expect(page.getByText("Question Answered", { exact: true })).toBeVisible();
 
     await expect.poll(async () => {
       try {
@@ -364,3 +409,138 @@ test("Codex structured questions cross the live browser, control plane, runner, 
     await stack.stop();
   }
 });
+
+for (const viewport of [
+  { name: "mobile portrait", width: 390, height: 844, touch: true },
+  { name: "mobile landscape", width: 844, height: 390, touch: true },
+  { name: "desktop", width: 1280, height: 800, touch: false },
+]) {
+  test.describe(viewport.name, () => {
+    test.use({
+      hasTouch: viewport.touch,
+      viewport: { width: viewport.width, height: viewport.height },
+    });
+
+    test(`Codex dogfood approval resolves its exact live request on ${viewport.name}`, async ({ page }) => {
+      test.setTimeout(120_000);
+      const stack = await startLiveStack("codex", "dogfood-question");
+      try {
+        const queuedMessages = [
+          "Keep this long message queued until both structured questions are answered.",
+          "The complete two-question form must remain visible and reachable above the composer.",
+        ];
+        for (const message of queuedMessages) await queuePrompt(stack, message);
+
+        const pending = await fetchSession(stack);
+        expect(pending.pendingApproval).toMatchObject({
+          kind: "question",
+          requestId: "5",
+          questions: [
+            {
+              id: "merge_pr_342",
+              header: "Merge PR",
+              question: "Should I squash-merge pull request #342 now?",
+              allowOther: true,
+              inputFormat: "text",
+              options: [
+                { label: "Merge Now (Recommended)", description: "Squash-merge the pull request now." },
+                { label: "Leave Open", description: "Leave the pull request open." },
+              ],
+            },
+            {
+              id: "delete_remote_branch",
+              header: "Delete Branch",
+              question: "Should I delete the remote branch after merging?",
+              allowOther: true,
+              inputFormat: "text",
+              options: [
+                { label: "Delete Branch (Recommended)", description: "Delete the remote branch after merging." },
+                { label: "Keep Branch", description: "Keep the remote branch." },
+              ],
+            },
+          ],
+        });
+
+        const fragment = new URLSearchParams({
+          origin: stack.httpBase,
+          token: stack.ownerToken,
+          sessionId: stack.sessionId,
+          queued: "1",
+        });
+        await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
+
+        const submit = page.getByRole("button", { name: "Submit" });
+        const mergeNow = page.getByRole("radio", { name: /Merge Now \(Recommended\)/ });
+        const leaveOpen = page.getByRole("radio", { name: /Leave Open/ });
+        const deleteBranch = page.getByRole("radio", { name: /Delete Branch \(Recommended\)/ });
+        const keepBranch = page.getByRole("radio", { name: /Keep Branch/ });
+        const otherResponses = page.getByLabel("Other Response");
+        await expect(page.getByRole("region", { name: "Agent Questions" })).toBeVisible();
+        await expect(page.getByLabel("Queued Messages").locator(".queued-item")).toHaveCount(queuedMessages.length);
+        await expect(page.getByLabel("Queued Messages").locator(".queued-text")).toHaveText(queuedMessages);
+        await expectQuestionControlsInsideCard(page);
+        await expect(page.getByText("Should I squash-merge pull request #342 now?")).toBeVisible();
+        await expect(mergeNow).toBeVisible();
+        await expect(leaveOpen).toBeVisible();
+        await expect(mergeNow).toBeInViewport();
+        await expect(leaveOpen).toBeInViewport();
+        await expect(otherResponses).toHaveCount(2);
+        await expect(submit).toBeDisabled();
+
+        await otherResponses.nth(0).fill("Merge after another review");
+        await expect(submit).toBeDisabled();
+        await mergeNow.focus();
+        await page.keyboard.press("Space");
+        await expect(mergeNow).toHaveAttribute("aria-checked", "true");
+        await expect(otherResponses.nth(0)).toHaveValue("");
+        await expect(submit).toBeDisabled();
+
+        await deleteBranch.scrollIntoViewIfNeeded();
+        await expect(page.getByText("Should I delete the remote branch after merging?")).toBeVisible();
+        await expect(deleteBranch).toBeVisible();
+        await expect(keepBranch).toBeVisible();
+        await expect(deleteBranch).toBeInViewport();
+        await expect(keepBranch).toBeInViewport();
+        await otherResponses.nth(1).fill("Keep it for a follow-up");
+        if (viewport.touch) await deleteBranch.tap();
+        else await deleteBranch.click();
+        await expect(deleteBranch).toHaveAttribute("aria-checked", "true");
+        await expect(otherResponses.nth(1)).toHaveValue("");
+        await expect(submit).toBeEnabled();
+        if (viewport.touch) await submit.tap();
+        else await submit.click();
+        await expect(page.getByText("Question Answered", { exact: true })).toBeVisible();
+
+        await expect.poll(async () => {
+          try {
+            return JSON.parse(await readFile(stack.receiptPath, "utf8"));
+          } catch {
+            return null;
+          }
+        }, { timeout: 30_000 }).toEqual({
+          requestId: 5,
+          result: {
+            answers: {
+              merge_pr_342: { answers: ["Merge Now (Recommended)"] },
+              delete_remote_branch: { answers: ["Delete Branch (Recommended)"] },
+            },
+          },
+        });
+
+        await expect.poll(async () => (await fetchSession(stack)).pendingApproval, {
+          timeout: 30_000,
+        }).toBeNull();
+        await expect.poll(async () => (await fetchSession(stack)).status, {
+          timeout: 30_000,
+        }).toBe("idle");
+        await expect.poll(async () => (await fetchSession(stack)).preview, {
+          timeout: 30_000,
+        }).toContain("Queued prompt delivered after the questions.");
+      } catch (error) {
+        throw new Error(`${error instanceof Error ? error.stack : String(error)}\n${stack.logs()}`);
+      } finally {
+        await stack.stop();
+      }
+    });
+  });
+}

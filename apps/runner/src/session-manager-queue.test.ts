@@ -69,7 +69,7 @@ function harness() {
     queue: [],
   });
   const queues = () => sent.filter((m): m is SessionQueueMessage => m.type === "session_queue");
-  return { sm, queues, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+  return { sm, store, queues, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
 async function waitFor(predicate: () => boolean, message = "condition should settle"): Promise<void> {
@@ -110,6 +110,41 @@ test("queued prompts are reported with ids and are individually cancelable", () 
     const count = queues().length;
     sm.removeQueuedPrompt("s_q", "nope");
     assert.equal(queues().length, count);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a queued prompt cannot drain while authoritative structured input is pending", async () => {
+  const { sm, store, queues, cleanup } = harness();
+  let providerCalls = 0;
+  try {
+    const entry = (sm as unknown as {
+      active: Map<string, { running: boolean; client: { prompt: () => Promise<string> } }>;
+    }).active.get("s_q")!;
+    entry.running = false;
+    entry.client.prompt = async () => {
+      providerCalls += 1;
+      return "end_turn";
+    };
+    store.patchMeta("s_q", {
+      status: "input_required",
+      pendingApproval: {
+        kind: "question",
+        requestId: "question-6",
+        title: "The agent has 2 questions",
+        options: [],
+      },
+    });
+
+    assert.equal(sm.prompt("s_q", "queued while the questions remain answerable"), true);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    assert.equal(providerCalls, 0);
+    assert.equal(store.readMeta("s_q")?.pendingApproval?.requestId, "question-6");
+    assert.deepEqual(queues().at(-1)!.queue.map((prompt) => prompt.text), [
+      "queued while the questions remain answerable",
+    ]);
   } finally {
     cleanup();
   }

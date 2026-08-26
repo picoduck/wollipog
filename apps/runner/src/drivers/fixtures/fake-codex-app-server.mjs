@@ -4,12 +4,19 @@ import { createInterface } from "node:readline";
 const scenario = process.argv[2] ?? "resume";
 const threadId = scenario === "fresh"
   ? "fixture-fresh"
-  : scenario === "question"
+  : scenario === "question" || scenario === "dogfood-question"
     ? "fixture-question"
     : scenario === "subagents"
       ? "fixture-subagents"
       : "fixture-resume";
-const questionRequestId = "live-codex-question-1";
+const questionRequestId = scenario === "dogfood-question"
+  ? 5
+  : "live-codex-question-1";
+let dogfoodTurnCount = 0;
+const expectedQueuedDogfoodPrompts = [
+  "Keep this long message queued until both structured questions are answered.",
+  "The complete two-question form must remain visible and reachable above the composer.",
+];
 const expectedLaunchArgs = ["--enable", "default_mode_request_user_input", "app-server"];
 if (JSON.stringify(process.argv.slice(3)) !== JSON.stringify(expectedLaunchArgs)) {
   process.stderr.write("unexpected app-server launch arguments: " + JSON.stringify(process.argv.slice(3)) + "\n");
@@ -22,13 +29,20 @@ function send(message) {
 
 createInterface({ input: process.stdin }).on("line", (line) => {
   const message = JSON.parse(line);
-  if (scenario === "question" && message.method == null && message.id === questionRequestId) {
-    const expected = {
-      answers: {
-        environment: { answers: ["Staging"] },
-        note: { answers: ["Ship after checks pass"] },
-      },
-    };
+  if ((scenario === "question" || scenario === "dogfood-question") && message.method == null && message.id === questionRequestId) {
+    const expected = scenario === "dogfood-question"
+      ? {
+          answers: {
+            merge_pr_342: { answers: ["Merge Now (Recommended)"] },
+            delete_remote_branch: { answers: ["Delete Branch (Recommended)"] },
+          },
+        }
+      : {
+          answers: {
+            environment: { answers: ["Staging"] },
+            note: { answers: ["Ship after checks pass"] },
+          },
+        };
     if (JSON.stringify(message.result) !== JSON.stringify(expected)) {
       process.stderr.write("unexpected structured answer: " + JSON.stringify(message.result) + "\n");
       process.exitCode = 2;
@@ -57,13 +71,17 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     send({ id: message.id, result: { thread: { id: threadId, turns: [{ id: "historical" }] } } });
     return;
   }
-  if (message.method === "thread/start" && (scenario === "fresh" || scenario === "question" || scenario === "subagents")) {
+  if (message.method === "thread/start" && (
+    scenario === "fresh" || scenario === "question" || scenario === "dogfood-question" || scenario === "subagents"
+  )) {
     send({ id: message.id, result: { thread: { id: threadId } } });
     return;
   }
   if (message.method === "turn/start") {
-    send({ id: message.id, result: { turn: { id: "fixture-turn" } } });
-    send({ method: "turn/started", params: { threadId, turn: { id: "fixture-turn" } } });
+    if (scenario === "dogfood-question") dogfoodTurnCount += 1;
+    const turnId = dogfoodTurnCount > 1 ? `fixture-turn-${dogfoodTurnCount}` : "fixture-turn";
+    send({ id: message.id, result: { turn: { id: turnId } } });
+    send({ method: "turn/started", params: { threadId, turn: { id: turnId } } });
     if (scenario === "question") {
       send({
         id: questionRequestId,
@@ -92,6 +110,63 @@ createInterface({ input: process.stdin }).on("line", (line) => {
               isOther: true,
               isSecret: false,
               options: null,
+            },
+          ],
+        },
+      });
+      return;
+    }
+    if (scenario === "dogfood-question") {
+      if (dogfoodTurnCount > 1) {
+        const expected = expectedQueuedDogfoodPrompts[dogfoodTurnCount - 2];
+        const actual = message.params?.input?.find((input) => input?.type === "text")?.text;
+        if (actual !== expected) {
+          process.stderr.write("unexpected queued prompt: " + JSON.stringify(actual) + "\n");
+          process.exitCode = 2;
+          return;
+        }
+        send({
+          method: "item/agentMessage/delta",
+          params: {
+            threadId,
+            turnId,
+            itemId: `queued-${dogfoodTurnCount}`,
+            delta: "Queued prompt delivered after the questions.",
+          },
+        });
+        send({ method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed" } } });
+        return;
+      }
+      send({
+        id: questionRequestId,
+        method: "item/tool/requestUserInput",
+        params: {
+          threadId,
+          turnId: "fixture-turn",
+          itemId: "question-tool",
+          isBlocking: true,
+          questions: [
+            {
+              id: "merge_pr_342",
+              header: "Merge PR",
+              question: "Should I squash-merge pull request #342 now?",
+              isOther: true,
+              isSecret: false,
+              options: [
+                { label: "Merge Now (Recommended)", description: "Squash-merge the pull request now." },
+                { label: "Leave Open", description: "Leave the pull request open." },
+              ],
+            },
+            {
+              id: "delete_remote_branch",
+              header: "Delete Branch",
+              question: "Should I delete the remote branch after merging?",
+              isOther: true,
+              isSecret: false,
+              options: [
+                { label: "Delete Branch (Recommended)", description: "Delete the remote branch after merging." },
+                { label: "Keep Branch", description: "Keep the remote branch." },
+              ],
             },
           ],
         },

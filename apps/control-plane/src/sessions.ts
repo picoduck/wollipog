@@ -2868,6 +2868,7 @@ export class SessionsService {
     }
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    const pendingInputBarrier = session.status === "input_required" || session.pendingApproval != null;
     const reconciliationBlock = this.podReconciliationMutationError(sessionId);
     if (reconciliationBlock) return fail(reconciliationBlock, 409);
     if (isTerminal(session.status)) return fail(`session is ${session.status}`, 409);
@@ -3029,9 +3030,10 @@ export class SessionsService {
         return fail(`prompt could not be persisted: ${(error as Error).message}`, 500);
       }
     }
-    // Preserve runner-authoritative admission state while its provider slot is still queued.
-    // Once admitted, the runner's status/event stream advances this normally.
-    if (!durablePrompt || (session.status !== "queued" && session.status !== "starting")) {
+    // A prompt admitted behind authoritative input is runner-queued work, not a new turn. Keep the
+    // input card intact; the runner advances status only after the input resolves and this dequeues.
+    // Otherwise preserve runner-authoritative admission state while its provider slot is queued.
+    if (!pendingInputBarrier && (!durablePrompt || (session.status !== "queued" && session.status !== "starting"))) {
       this.db.updateSessionStatus(sessionId, "running", now);
     }
     if (delivery) {

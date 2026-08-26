@@ -1,16 +1,17 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { SessionView } from "@wollipog/protocol";
 import { createApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { createBrowserApiTransport } from "../api-transport.js";
-import { SessionApprovalBanner } from "../components/SessionApproval.js";
+import { SessionApprovalRegion } from "../components/SessionApproval.js";
 import "../styles.css";
 
 const params = new URLSearchParams(window.location.hash.slice(1));
 const origin = params.get("origin") ?? "";
 const token = params.get("token") ?? "";
 const sessionId = params.get("sessionId") ?? "";
+const showQueuedPrompts = params.get("queued") === "1";
 
 function LiveQuestionFixture() {
   const client = useMemo(() => createApiClient(createBrowserApiTransport({
@@ -20,6 +21,11 @@ function LiveQuestionFixture() {
   })), []);
   const [session, setSession] = useState<SessionView | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const fallbackFocusRef = useRef<HTMLTextAreaElement>(null);
+  const queuedPrompts = [
+    { id: "queued-1", text: "Keep this long message queued until both structured questions are answered." },
+    { id: "queued-2", text: "The complete two-question form must remain visible and reachable above the composer." },
+  ];
 
   useEffect(() => {
     let active = true;
@@ -33,20 +39,45 @@ function LiveQuestionFixture() {
 
   return (
     <ApiProvider client={client}>
-      <main id="question-frame">
+      <main id="question-frame" className="session-detail">
         {error ? (
           <p role="alert">{error}</p>
         ) : !session ? (
           <p role="status">Loading Agent Questions…</p>
-        ) : session.pendingApproval?.kind === "question" ? (
-          <SessionApprovalBanner
-            session={session}
-            runnerOnline
-            onSessionUpdate={setSession}
-            showKeyHints={false}
-          />
         ) : (
-          <p role="status">Question Answered</p>
+          <div className="detail-columns">
+            <div className="detail-chat">
+              <SessionApprovalRegion
+                session={session}
+                runnerOnline
+                fallbackFocusRef={fallbackFocusRef}
+                onSessionUpdate={setSession}
+                showKeyHints={false}
+              />
+              <div className="detail-main">
+                <div className="detail-reader">
+                  <div className="detail-scroll">
+                    {!session.pendingApproval && <p role="status">Question Answered</p>}
+                  </div>
+                </div>
+              </div>
+              <div className="composer">
+                {showQueuedPrompts && queuedPrompts.length > 0 && (
+                  <div className="queued-list" aria-label="Queued Messages">
+                    {queuedPrompts.map((prompt) => (
+                      <div className="queued-item" key={prompt.id}>
+                        <span className="queued-badge">Queued</span>
+                        <span className="queued-text">{prompt.text}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div className="composer-box">
+                  <textarea ref={fallbackFocusRef} className="composer-input" placeholder="Do anything" />
+                </div>
+              </div>
+            </div>
+          </div>
         )}
       </main>
     </ApiProvider>

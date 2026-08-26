@@ -160,6 +160,56 @@ test("accepted steering is serialized, deduplicated, and authored once by the ru
   }
 });
 
+test("pending agent input blocks direct steering and queued promotion authoritatively", async () => {
+  let providerCalls = 0;
+  const h = harness({
+    steer: async () => {
+      providerCalls += 1;
+      return { outcome: "accepted", providerTurnId: "provider-turn-a" };
+    },
+  });
+  try {
+    h.store.patchMeta("s_steer", {
+      status: "input_required",
+      pendingApproval: {
+        kind: "question",
+        requestId: "question-6",
+        title: "The agent has 2 questions",
+        options: [],
+      },
+    });
+    h.manager.prompt("s_steer", "wait behind the structured question");
+    const queued = h.queues().at(-1)!.queue[0]!;
+    assert.equal(queued.steerable, false);
+    assert.match(queued.steerDisabledReason ?? "", /pending agent input/i);
+
+    const direct = await h.manager.steerSession({
+      submissionId: "pending-input-direct",
+      sessionId: "s_steer",
+      turnId: "turn-a",
+      text: "interrupt the question",
+    });
+    assert.equal(direct.disposition, "rejected");
+    assert.equal(direct.reason, "policy_blocked");
+    assert.match(direct.message ?? "", /pending agent input/i);
+
+    const promoted = await h.manager.steerSession({
+      submissionId: "pending-input-promotion",
+      sessionId: "s_steer",
+      turnId: "turn-a",
+      promotePromptId: queued.id,
+    });
+    assert.equal(promoted.disposition, "rejected");
+    assert.equal(promoted.reason, "policy_blocked");
+    assert.equal(providerCalls, 0);
+    assert.deepEqual(h.queues().at(-1)!.queue.map((prompt) => prompt.text), [
+      "wait behind the structured question",
+    ]);
+  } finally {
+    h.cleanup();
+  }
+});
+
 test("provider acceptance followed by history flush failure is uncertain", async () => {
   const h = harness({
     steer: async () => ({ outcome: "accepted", providerTurnId: "provider-turn-a" }),
