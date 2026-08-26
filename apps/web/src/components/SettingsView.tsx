@@ -316,6 +316,7 @@ export function SessionNamingPanel() {
   const [settings, setSettings] = useState<SessionNamingSettingsView | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<{ action: "load" | "update"; message: string } | null>(null);
+  const [loadRevision, setLoadRevision] = useState(0);
 
   useEffect(() => {
     mounted.current = true;
@@ -333,7 +334,7 @@ export function SessionNamingPanel() {
       if (!disposed) setError({ action: "load", message: cause instanceof Error ? cause.message : String(cause) });
     });
     return () => { disposed = true; };
-  }, [api]);
+  }, [api, loadRevision]);
 
   const changeMode = (mode: string) => {
     if (!settings || busy) return;
@@ -354,7 +355,9 @@ export function SessionNamingPanel() {
   const options = SESSION_NAMING_OPTIONS.map((option) => {
     const availability = settings?.modes[option.value];
     const disabledReason = !settings
-      ? "Loading the organization setting."
+      ? error?.action === "load"
+        ? "Session naming settings could not be loaded."
+        : "Loading the organization setting."
       : !settings.canManage
         ? "Organization owner or admin permission is required."
         : availability?.reason;
@@ -389,6 +392,19 @@ export function SessionNamingPanel() {
         menuWidth={460}
         estimatedOptionHeight={72}
       />
+      {error?.action === "load" && (
+        <StaticRow
+          title="Load Failed"
+          description={
+            <>
+              The organization setting could not be loaded.{" "}
+              <button type="button" className="btn ghost sm" onClick={() => setLoadRevision((value) => value + 1)}>
+                Retry
+              </button>
+            </>
+          }
+        />
+      )}
       {custom && (
         <StaticRow
           title="Custom Model"

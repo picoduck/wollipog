@@ -3561,7 +3561,7 @@ test("runtime naming mode changes apply to subsequent first messages without a r
   assert.equal(db.getSession(semanticId)?.title, "Runtime Semantic Title");
 });
 
-test("runtime naming availability is resolved only for a completed first user message", async () => {
+test("runtime naming availability is resolved only for an eligible completed first user message", async () => {
   let checks = 0;
   const generator: SessionTitleGenerator = async () => "Runtime Semantic Title";
   const { hub, svc } = makeHarness(generator, 1_000, () => {
@@ -3572,10 +3572,29 @@ test("runtime naming availability is resolved only for a completed first user me
 
   svc.onSessionEvent(id, { kind: "agent_message", text: "streamed response", final: false });
   svc.onSessionEvent(id, { kind: "user_message", text: "partial request", final: false });
+  svc.onSessionEvent(id, {
+    kind: "user_message",
+    text: "command result",
+    final: true,
+    commandInvocation: {
+      invocationId: "invocation-one",
+      submissionId: "submission-one",
+      commandName: "/review",
+      executionMode: "command",
+    },
+  });
   assert.equal(checks, 0, "unrelated and partial events must not query runtime naming settings");
 
   svc.onSessionEvent(id, { kind: "user_message", text: "completed request", final: true });
   assert.ok(checks > 0, "the completed first user message resolves the runtime setting");
+  const firstMessageChecks = checks;
+  svc.onSessionEvent(id, { kind: "user_message", text: "later request", final: true });
+  assert.equal(checks, firstMessageChecks, "later completed messages must not query runtime naming settings");
+
+  const manuallyNamed = seedSession(svc, hub);
+  assert.ok(svc.setTitle(manuallyNamed, "Manual Title").ok);
+  svc.onSessionEvent(manuallyNamed, { kind: "user_message", text: "first request", final: true });
+  assert.equal(checks, firstMessageChecks, "manually titled sessions must not query runtime naming settings");
 });
 
 test("retitle reports an unknown session before resolving its runtime naming setting", () => {

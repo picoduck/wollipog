@@ -4,7 +4,10 @@ import Fastify from "fastify";
 import type { AuthPrincipal, HumanPrincipal } from "./identity.js";
 import { ControlPlaneDb } from "./db.js";
 import { registerSessionNamingRoutes } from "./session-naming-route.js";
-import { SessionNamingSettings } from "./session-naming-settings.js";
+import {
+  SessionNamingModeUnavailableError,
+  SessionNamingSettings,
+} from "./session-naming-settings.js";
 
 function human(role: HumanPrincipal["role"]): HumanPrincipal {
   return {
@@ -117,4 +120,68 @@ test("custom mode fails closed when legacy endpoint configuration disappears", (
   assert.equal(view.effectiveMode, "prompt_text_only");
   assert.equal(view.modes.custom_model_endpoint.available, false);
   db.close();
+});
+
+test("session naming routes sanitize load and unexpected update failures", async () => {
+  const admin = human("admin");
+  let failure: "load" | "unavailable" | "update" = "load";
+  const settings = {
+    view() {
+      if (failure === "load") throw new Error("database path and query detail");
+      throw new Error("unexpected view call");
+    },
+    setMode() {
+      if (failure === "unavailable") {
+        throw new SessionNamingModeUnavailableError("the requested naming mode is unavailable");
+      }
+      throw new Error("database path and query detail");
+    },
+  } as unknown as SessionNamingSettings;
+  const app = Fastify();
+  registerSessionNamingRoutes(app, settings, () => admin);
+
+  const load = await app.inject({ method: "GET", url: "/api/session-naming" });
+  assert.equal(load.statusCode, 500);
+  assert.deepEqual(load.json(), { error: "could not load session naming settings" });
+  assert.equal(load.body.includes("database path"), false);
+
+  failure = "unavailable";
+  const unavailable = await app.inject({
+    method: "PUT",
+    url: "/api/session-naming",
+    payload: { mode: "session_agent_account" },
+  });
+  assert.equal(unavailable.statusCode, 409);
+  assert.deepEqual(unavailable.json(), { error: "the requested naming mode is unavailable" });
+
+  failure = "update";
+  const update = await app.inject({
+    method: "PUT",
+    url: "/api/session-naming",
+    payload: { mode: "prompt_text_only" },
+  });
+  assert.equal(update.statusCode, 500);
+  assert.deepEqual(update.json(), { error: "could not update session naming settings" });
+  assert.equal(update.body.includes("database path"), false);
+
+  await app.close();
+});
+
+test("runtime eligibility does not construct the public settings projection", () => {
+  let preferenceReads = 0;
+  const db = {
+    sessionScope: () => ({ organizationId: "org_personal" }),
+    getSessionNamingPreference: () => {
+      preferenceReads += 1;
+      return { mode: "custom_model_endpoint" as const, updatedAt: 1 };
+    },
+  } as unknown as ControlPlaneDb;
+  const settings = new SessionNamingSettings(db, {
+    WOLLIPOG_TITLE_MODEL_URL: "https://models.example/v1/chat/completions",
+    WOLLIPOG_TITLE_MODEL: "small-title-model",
+  });
+  settings.view = () => { throw new Error("public projection must not run"); };
+
+  assert.equal(settings.enabledForSession("session-one"), true);
+  assert.equal(preferenceReads, 1);
 });

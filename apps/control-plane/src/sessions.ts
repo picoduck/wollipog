@@ -6227,8 +6227,8 @@ export class SessionsService {
       payload.final !== false && !payload.commandInvocation;
     const generatedOwnership = (session.titleSource ?? "generated") === "generated";
     const shouldGenerateInitialTitle = Boolean(this.titleGenerator) && isCompletedUserMessage &&
-      generatedOwnership && (!this.titleGenerationEnabled || this.titleGenerationEnabled(sessionId)) &&
-      !this.db.hasCompletedUserMessage(sessionId);
+      generatedOwnership && !this.db.hasCompletedUserMessage(sessionId) &&
+      (!this.titleGenerationEnabled || this.titleGenerationEnabled(sessionId));
     // Keep the runner-seq cursor gap-free: if a live event is ahead of our high-water (we hydrated a
     // session whose earlier history we haven't pulled yet), don't append it out of order and skip
     // past the gap — pull the ordered history from the box (which includes this event) instead.

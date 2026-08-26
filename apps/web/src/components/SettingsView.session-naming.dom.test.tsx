@@ -120,3 +120,58 @@ test("Session Naming shows every mode, explains unavailable agent accounts, and 
     container.remove();
   }
 });
+
+test("Session Naming identifies load failure and retries in place", async () => {
+  let requests = 0;
+  const transport: ApiTransport = {
+    instanceId: "test-retry",
+    publicOrigin: "http://localhost",
+    close() {},
+    async request() {
+      requests += 1;
+      if (requests === 1) {
+        return new Response(JSON.stringify({ error: "could not load session naming settings" }), {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify(view("prompt_text_only")), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  };
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(
+        <ApiProvider client={createApiClient(transport)}>
+          <SessionNamingPanel />
+        </ApiProvider>,
+      );
+    });
+    assert.match(container.textContent ?? "", /Could not load session naming: could not load session naming settings/);
+    const retry = [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.trim() === "Retry");
+    assert.ok(retry);
+
+    const trigger = container.querySelector<HTMLButtonElement>('[aria-haspopup="listbox"]');
+    assert.ok(trigger);
+    await act(async () => trigger.click());
+    const options = [...container.querySelectorAll<HTMLButtonElement>('[role="option"]')];
+    assert.ok(options.length > 0);
+    for (const option of options) {
+      assert.match(option.textContent ?? "", /Session naming settings could not be loaded/);
+    }
+
+    await act(async () => retry.click());
+    assert.equal(requests, 2);
+    assert.match(container.textContent ?? "", /Saved for this organization/);
+    assert.doesNotMatch(container.textContent ?? "", /Load Failed/);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});

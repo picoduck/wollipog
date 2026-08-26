@@ -11,6 +11,11 @@ import {
 
 type PersistedSessionNamingMode = "prompt_text_only" | "custom_model_endpoint";
 
+/** A user-selectable mode cannot currently run. Its messages are deliberately safe for clients. */
+export class SessionNamingModeUnavailableError extends Error {
+  override readonly name = "SessionNamingModeUnavailableError";
+}
+
 function publicEndpointOrigin(value: string): string {
   const endpoint = new URL(value);
   return endpoint.origin;
@@ -41,6 +46,13 @@ export class SessionNamingSettings {
     return this.environment.generator
       ? { mode: "custom_model_endpoint", source: "environment" }
       : { mode: "prompt_text_only", source: "default" };
+  }
+
+  private effectiveMode(organizationId: string): PersistedSessionNamingMode {
+    const selected = this.selectedMode(organizationId);
+    return selected.mode === "custom_model_endpoint" && this.environment.generator && this.environment.customModel
+      ? "custom_model_endpoint"
+      : "prompt_text_only";
   }
 
   view(organizationId: string, canManage: boolean): SessionNamingSettingsView {
@@ -80,10 +92,10 @@ export class SessionNamingSettings {
 
   setMode(organizationId: string, mode: SessionNamingMode, now = Date.now()): SessionNamingSettingsView {
     if (mode === "session_agent_account") {
-      throw new Error("runner-hosted agent account naming is not available in this release");
+      throw new SessionNamingModeUnavailableError("runner-hosted agent account naming is not available in this release");
     }
     if (mode === "custom_model_endpoint" && !this.environment.generator) {
-      throw new Error("a custom model endpoint and model must be configured in the control-plane environment");
+      throw new SessionNamingModeUnavailableError("a custom model endpoint and model must be configured in the control-plane environment");
     }
     const previousRevision = this.db.getSessionNamingPreference(organizationId)?.updatedAt ?? 0;
     this.db.setSessionNamingPreference(organizationId, mode, Math.max(now, previousRevision + 1));
@@ -93,7 +105,7 @@ export class SessionNamingSettings {
   enabledForSession = (sessionId: string): boolean => {
     const organizationId = this.organizationIdForSession(sessionId);
     if (!organizationId) return false;
-    return this.view(organizationId, false).effectiveMode === "custom_model_endpoint";
+    return this.effectiveMode(organizationId) === "custom_model_endpoint";
   };
 
   timeoutForSession = (sessionId: string): number => {
