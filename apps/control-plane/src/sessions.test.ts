@@ -637,7 +637,7 @@ test("activity-fired reminder edits and Undo preserve their future fired state",
     sessionId, userId, scheduledFor, timeZone: "UTC", originalExpression: "in one minute",
     wakePolicy: "until_activity", expectedRevision: 0, now,
   }).kind, "updated");
-  assert.equal(db.fireSessionRemindersForActivity(sessionId, 1, "agent_response", now + 1).length, 1);
+  assert.equal(db.fireSessionRemindersForActivity(sessionId, 1, "agent_response", now).length, 1);
   const fired = db.getSessionReminder(sessionId, userId)!;
   assert.equal(fired.state, "fired");
   assert.equal(fired.wakeReason, "agent_response");
