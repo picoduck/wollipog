@@ -848,6 +848,8 @@ export interface ClaudeCodeCapabilities {
   controlProtocol: boolean;
   forkSession: boolean;
   replayUserMessages: boolean;
+  /** The installed CLI advertises every fail-closed flag required by runner-hosted title generation. */
+  sessionNaming?: boolean;
   auth: ClaudeCodeAuth;
   failure?: ClaudeCodeFailure;
 }
@@ -934,6 +936,8 @@ export interface AgentDefinition {
   version?: string;
   available?: boolean;
   authStatus?: "authenticated" | "unauthenticated" | "unknown";
+  /** Secret-free Codex billing boundary derived locally from configured auth or CLI account state. */
+  codexBillingSource?: "api" | "provider_account";
   /** Runtime-negotiated ACP capabilities safe for presentation; absent for native/legacy agents. */
   acp?: AcpRuntimeCapabilities;
   capabilities?: AgentCapabilities;

@@ -32,6 +32,7 @@ function claudeAgent(): AgentDefinition {
       controlProtocol: true,
       forkSession: true,
       replayUserMessages: true,
+      sessionNaming: true,
       auth: { status: "authenticated", billingSource: "subscription" },
     },
   };
@@ -77,6 +78,10 @@ test("provider eligibility requires verified authenticated native account surfac
   assert.deepEqual(sessionNamingAccountForAgent(codexAgent()), {
     provider: "codex",
     billingSource: "provider_account",
+  });
+  assert.deepEqual(sessionNamingAccountForAgent({ ...codexAgent(), codexBillingSource: "api" }), {
+    provider: "codex",
+    billingSource: "api",
   });
   assert.equal(sessionNamingAccountForAgent({ ...claudeAgent(), authStatus: "unknown" }), null);
   assert.equal(sessionNamingAccountForAgent({
@@ -146,14 +151,22 @@ test("runner title normalization rejects multiline, oversized, and malformed mod
 
 test("executor returns only a bounded title and secret-free provider boundary", async () => {
   let cleaned = 0;
+  let boundaryCleaned = 0;
+  const isolation = { backend: "bwrap" as const, command: "bwrap", args: [], network: "inherit" as const };
   const executor = new SessionNamingExecutor({
     prepareDirectory: async () => ({ cwd: "/neutral", cleanup: async () => { cleaned += 1; } }),
-    generate: async (account, _agent, cwd, env, prompt, timeoutMs) => {
+    authorize: async (_agent, env, cwd) => {
+      assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, "runner-secret");
+      assert.equal(cwd, "/neutral");
+      return { isolation, cleanup: async () => { boundaryCleaned += 1; } };
+    },
+    generate: async (account, _agent, cwd, env, prompt, timeoutMs, actualIsolation) => {
       assert.deepEqual(account, { provider: "claude", billingSource: "subscription" });
       assert.equal(cwd, "/neutral");
       assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, "runner-secret");
       assert.match(prompt, /Fix the session naming flow/);
       assert.ok(timeoutMs <= 5_000 && timeoutMs >= 4_900, `unexpected remaining timeout ${timeoutMs}`);
+      assert.equal(actualIsolation, isolation);
       return "Runner-Hosted Session Naming";
     },
   });
@@ -168,6 +181,7 @@ test("executor returns only a bounded title and secret-free provider boundary", 
   });
   assert.equal(JSON.stringify(result).includes("runner-secret"), false);
   assert.equal(cleaned, 1);
+  assert.equal(boundaryCleaned, 1);
 });
 
 test("executor fails closed under concurrency/rate pressure and sanitizes provider errors", async () => {

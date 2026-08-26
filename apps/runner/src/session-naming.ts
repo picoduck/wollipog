@@ -11,7 +11,7 @@ import type {
 } from "@wollipog/protocol";
 import { JsonRpcPeer } from "./jsonrpc.js";
 import { run } from "./discovery/resolve.js";
-import { killTree, spawnAgent, type AgentProcess, type SpawnAgentOptions } from "./spawn.js";
+import { killTree, spawnAgent, type AgentProcess, type SpawnAgentOptions, type SpawnIsolation } from "./spawn.js";
 
 const TITLE_MAX_LENGTH = 120;
 const INPUT_MAX_MESSAGES = 9;
@@ -61,10 +61,10 @@ export function sessionNamingAccountForAgent(agent: AgentDefinition | undefined)
   const driver = agent.driver ?? "acp";
   if ((driver === "codex" || driver === "codex-app-server") && agent.codexAppServer?.status === "supported" &&
       agent.codexAppServer.sessionNaming === true) {
-    return { provider: "codex", billingSource: "provider_account" };
+    return { provider: "codex", billingSource: agent.codexBillingSource ?? "provider_account" };
   }
   if (driver === "claude-code" && agent.claudeCode?.status === "ready" &&
-      agent.claudeCode.auth.status === "authenticated") {
+      agent.claudeCode.sessionNaming === true && agent.claudeCode.auth.status === "authenticated") {
     return { provider: "claude", billingSource: agent.claudeCode.auth.billingSource };
   }
   return null;
@@ -214,6 +214,7 @@ function collectClaudeTitle(
   env: Record<string, string>,
   prompt: string,
   timeoutMs: number,
+  isolation: SpawnIsolation | undefined,
   spawn: (options: SpawnAgentOptions) => AgentProcess,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -226,6 +227,7 @@ function collectClaudeTitle(
         env: claudeEnvironment(env),
         context: agent.context,
         scrubInheritedEnv: ["ANTHROPIC_API_KEY"],
+        isolation,
       });
     } catch {
       reject(new SessionNamingFailure("provider_failed"));
@@ -271,6 +273,7 @@ async function collectCodexTitle(
   env: Record<string, string>,
   prompt: string,
   timeoutMs: number,
+  isolation: SpawnIsolation | undefined,
   spawn: (options: SpawnAgentOptions) => AgentProcess,
 ): Promise<string> {
   let child: AgentProcess;
@@ -282,6 +285,7 @@ async function collectCodexTitle(
       env,
       context: agent.context,
       scrubInheritedEnv: ["OPENAI_API_KEY"],
+      isolation,
     });
   } catch {
     throw new SessionNamingFailure("provider_failed");
@@ -365,6 +369,11 @@ export interface SessionNamingExecutorOptions {
   now?: () => number;
   spawn?: (options: SpawnAgentOptions) => AgentProcess;
   prepareDirectory?: (agent: AgentDefinition) => Promise<NeutralDirectory>;
+  authorize?: (
+    agent: AgentDefinition,
+    env: Record<string, string>,
+    cwd: string,
+  ) => Promise<{ isolation?: SpawnIsolation; cleanup(): Promise<void> }>;
   generate?: (
     account: SessionNamingAccount,
     agent: AgentDefinition,
@@ -372,6 +381,7 @@ export interface SessionNamingExecutorOptions {
     env: Record<string, string>,
     prompt: string,
     timeoutMs: number,
+    isolation: SpawnIsolation | undefined,
   ) => Promise<string>;
 }
 
@@ -385,6 +395,7 @@ export class SessionNamingExecutor {
   private readonly now: () => number;
   private readonly spawn: (options: SpawnAgentOptions) => AgentProcess;
   private readonly prepareDirectory: (agent: AgentDefinition) => Promise<NeutralDirectory>;
+  private readonly authorize?: SessionNamingExecutorOptions["authorize"];
   private readonly generateOverride?: SessionNamingExecutorOptions["generate"];
 
   constructor(options: SessionNamingExecutorOptions = {}) {
@@ -394,6 +405,7 @@ export class SessionNamingExecutor {
     this.now = options.now ?? Date.now;
     this.spawn = options.spawn ?? spawnAgent;
     this.prepareDirectory = options.prepareDirectory ?? prepareNeutralDirectory;
+    this.authorize = options.authorize;
     this.generateOverride = options.generate;
   }
 
@@ -425,18 +437,20 @@ export class SessionNamingExecutor {
     this.active++;
     this.recent.push(now);
     let neutral: NeutralDirectory | undefined;
+    let authorization: Awaited<ReturnType<NonNullable<SessionNamingExecutorOptions["authorize"]>>> | undefined;
     try {
       const totalTimeoutMs = validatedTimeout(message.timeoutMs);
       const deadlineAt = Date.now() + totalTimeoutMs;
       neutral = await this.prepareDirectory(agent);
+      authorization = await this.authorize?.(agent, env, neutral.cwd);
       const prompt = sessionNamingPrompt(message.messages);
       const timeoutMs = Math.max(0, deadlineAt - Date.now());
       if (timeoutMs < MIN_TIMEOUT_MS) throw new SessionNamingFailure("timed_out");
       const generated = this.generateOverride
-        ? await this.generateOverride(account, agent, neutral.cwd, env, prompt, timeoutMs)
+        ? await this.generateOverride(account, agent, neutral.cwd, env, prompt, timeoutMs, authorization?.isolation)
         : account.provider === "claude"
-          ? await collectClaudeTitle(agent, neutral.cwd, env, prompt, timeoutMs, this.spawn)
-          : await collectCodexTitle(agent, neutral.cwd, env, prompt, timeoutMs, this.spawn);
+          ? await collectClaudeTitle(agent, neutral.cwd, env, prompt, timeoutMs, authorization?.isolation, this.spawn)
+          : await collectCodexTitle(agent, neutral.cwd, env, prompt, timeoutMs, authorization?.isolation, this.spawn);
       const title = normalizeRunnerSessionTitle(generated);
       if (!title) return fail("invalid_result");
       return {
@@ -451,6 +465,7 @@ export class SessionNamingExecutor {
       return fail(error instanceof SessionNamingFailure ? error.code : "provider_failed");
     } finally {
       this.active--;
+      await authorization?.cleanup().catch(() => {});
       await neutral?.cleanup().catch(() => {});
     }
   }

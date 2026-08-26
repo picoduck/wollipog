@@ -305,7 +305,7 @@ const configuredAgentDefinitions = config.agents.map((a) => {
     // assertion, or the auth gate would disable a deliberately API-keyed Codex whose
     // ~/.codex/auth.json is absent.
     ...((driver === "codex" || driver === "codex-app-server") && a.env && "OPENAI_API_KEY" in a.env
-      ? { authStatus: "authenticated" as const }
+      ? { authStatus: "authenticated" as const, codexBillingSource: "api" as const }
       : {}),
     driver,
     ...(driver === "acp" ? { acpTransport: "stdio" as const } : {}),
@@ -421,7 +421,9 @@ const sessionCommandReceipts = new SessionCommandReceiptStore(
   resolve(config.dataDir, "session-command-receipts"),
 );
 sessionCommandReceipts.prune();
-const sessionNaming = new SessionNamingExecutor();
+const sessionNaming = new SessionNamingExecutor({
+  authorize: (agent, env, cwd) => sessions.prepareSessionNamingExecution(agent, env, cwd),
+});
 // The resolver closes over `metadata`, so it always sees the LIVE agent list (discovery replaces
 // metadata.agents). It's the same shared resolver as the `resumable` flag and handleAdopt — resume,
 // listing, and adoption can never disagree — and it lets a read-only adopt heal once the box gains

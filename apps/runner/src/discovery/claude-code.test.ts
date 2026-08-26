@@ -10,6 +10,15 @@ test("parseClaudeHelp gates flags and enumerated values from the resolved CLI", 
   --input-format <format>  text or stream-json
   --output-format <format> text, json, stream-json
   --permission-mode <mode> (choices: "acceptEdits", "auto", "plan")
+  --tools <tools>
+  --safe-mode
+  --strict-mcp-config
+  --mcp-config <config>
+  --setting-sources <sources>
+  --no-session-persistence
+  --disable-slash-commands
+  --no-chrome
+  --system-prompt <prompt>
   --fork-session fork it
   --replay-user-messages replay
 `);
@@ -18,6 +27,8 @@ test("parseClaudeHelp gates flags and enumerated values from the resolved CLI", 
   assert.equal(parsed.streamJsonInput, true);
   assert.equal(parsed.forkSession, true);
   assert.equal(parsed.replayUserMessages, true);
+  assert.equal(parsed.sessionNaming, true);
+  assert.equal(parseClaudeHelp("--permission-mode (choices: plan)\n--output-format text").sessionNaming, false);
 });
 
 test("normalized Claude capabilities expose fork and per-mode elicitation only when verified", () => {

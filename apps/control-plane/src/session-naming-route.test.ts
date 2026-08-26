@@ -196,6 +196,7 @@ test("runtime eligibility does not construct the public settings projection", ()
 test("runner-account mode is capability-gated, reports only billing boundaries, and targets the session runner", async () => {
   let preference: { mode: "session_agent_account"; updatedAt: number } | null = null;
   let protocolVersion = 93;
+  let claudeNaming = true;
   const runner = (): RunnerView => ({
     runnerId: "runner-one",
     hostname: "machine-one",
@@ -224,6 +225,7 @@ test("runner-account mode is capability-gated, reports only billing boundaries, 
         controlProtocol: true,
         forkSession: true,
         replayUserMessages: true,
+        sessionNaming: claudeNaming,
         auth: { status: "authenticated", billingSource: "subscription" },
       },
     }],
@@ -283,6 +285,10 @@ test("runner-account mode is capability-gated, reports only billing boundaries, 
   assert.equal(mixedVersion.effectiveMode, "prompt_text_only");
   assert.equal(mixedVersion.modes.session_agent_account.available, false);
   assert.match(mixedVersion.modes.session_agent_account.reason ?? "", /current runner/);
+  protocolVersion = 93;
+  claudeNaming = false;
+  const unsupportedClaude = settings.view("org_personal", true);
+  assert.equal(unsupportedClaude.modes.session_agent_account.available, false);
 });
 
 test("session naming preference migration preserves legacy choices and admits runner-account mode", () => {

@@ -32,10 +32,10 @@ function accountForAgent(agent: AgentDefinition | undefined): Omit<SessionNaming
   const driver = agent.driver ?? "acp";
   if ((driver === "codex" || driver === "codex-app-server") && agent.codexAppServer?.status === "supported" &&
       agent.codexAppServer.sessionNaming === true) {
-    return { provider: "codex", billingSource: "provider_account" };
+    return { provider: "codex", billingSource: agent.codexBillingSource ?? "provider_account" };
   }
   if (driver === "claude-code" && agent.claudeCode?.status === "ready" &&
-      agent.claudeCode.auth.status === "authenticated") {
+      agent.claudeCode.sessionNaming === true && agent.claudeCode.auth.status === "authenticated") {
     return { provider: "claude", billingSource: agent.claudeCode.auth.billingSource };
   }
   return null;
@@ -79,7 +79,7 @@ export class SessionNamingSettings {
   constructor(
     private readonly db: ControlPlaneDb,
     env: NodeJS.ProcessEnv = process.env,
-    private readonly hub?: Pick<Hub, "requestFromRunner">,
+    private readonly hub?: Pick<Hub, "requestFromRunner"> & Partial<Pick<Hub, "cancelRunnerRequest">>,
   ) {
     this.environment = sessionTitleGeneratorFromEnv(env);
   }
@@ -248,7 +248,10 @@ export class SessionNamingSettings {
       timeoutMs: this.timeoutForSession(request.sessionId),
     }, this.timeoutForSession(request.sessionId) + 1_000);
     const result = await new Promise<GenerateSessionTitleResultMessage>((resolve, reject) => {
-      const aborted = () => reject(new Error("runner session naming was cancelled"));
+      const aborted = () => {
+        this.hub?.cancelRunnerRequest?.(target.runner.runnerId, requestId);
+        reject(new Error("runner session naming was cancelled"));
+      };
       if (request.signal.aborted) {
         aborted();
         return;

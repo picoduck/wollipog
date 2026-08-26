@@ -101,7 +101,9 @@ The runner owns this metadata task independently of the agent turn and prompt qu
   credential retains the same precedence as ordinary sessions.
 - Both providers run from a disposable neutral temporary directory, receive at most nine completed
   semantic messages and 12,000 characters, have an 8 KiB output ceiling and a 15-second hard
-  timeout clamp, and return only a normalized 120-character title plus a sanitized status.
+  timeout clamp, and return only a normalized 120-character title plus a sanitized status. Provider
+  processes also inherit the runner's configured execution-isolation, network, provider-HOME lease,
+  and shared-store admission boundaries; an unavailable boundary fails back to prompt text.
 - Each runner admits at most two concurrent naming tasks and twelve starts per minute. Overload,
   timeouts, provider errors, missing accounts, unsupported providers, and older runners all fail
   closed to the prompt-derived title.

@@ -372,6 +372,16 @@ export class Hub {
     });
   }
 
+  /** Cancel one exact correlated request without waiting for its transport timeout. */
+  cancelRunnerRequest(runnerId: string, requestId: string, error = new Error("runner request was cancelled")): boolean {
+    const pending = this.pendingRequests.get(requestId);
+    if (!pending || pending.runnerId !== runnerId) return false;
+    clearTimeout(pending.timer);
+    this.pendingRequests.delete(requestId);
+    for (const waiter of pending.waiters) waiter.reject(error);
+    return true;
+  }
+
   /** Resolve a pending runner request with its result (git_result / session_history_result). */
   resolveRunnerRequest(result: RunnerRequestResult, sourceRunnerId?: string): boolean {
     const pending = this.pendingRequests.get(result.requestId);
