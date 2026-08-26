@@ -40,6 +40,26 @@ async function settlePreviewLayout(page: Page, frames = 12) {
   }), frames);
 }
 
+async function settledPreviewScrollMetrics(page: Page) {
+  const reader = page.getByRole("region", { name: "Session Preview Activity" });
+  await expect.poll(async () => {
+    const samples = await reader.evaluate((element) => new Promise<Array<[number, number]>>((resolve) => {
+      const measurements: Array<[number, number]> = [];
+      const sample = () => {
+        measurements.push([element.clientHeight, element.scrollHeight]);
+        if (measurements.length === 3) resolve(measurements);
+        else requestAnimationFrame(sample);
+      };
+      requestAnimationFrame(sample);
+    }));
+    const [[clientHeight, scrollHeight], ...rest] = samples;
+    return clientHeight >= 100 && scrollHeight > clientHeight &&
+      rest.every(([nextClientHeight, nextScrollHeight]) =>
+        nextClientHeight === clientHeight && nextScrollHeight === scrollHeight);
+  }).toBe(true);
+  return previewScrollMetrics(page);
+}
+
 async function pausePreviewAt(page: Page, ratio: number) {
   const reader = page.getByRole("region", { name: "Session Preview Activity" });
   await reader.evaluate((element, position) => {
@@ -70,12 +90,12 @@ test("real Inbox preview paging keeps ownership while live output streams", asyn
   await expect.poll(async () => (await previewScrollMetrics(page)).distanceFromTail).toBeLessThanOrEqual(2);
   await page.locator(".inbox-list").focus();
 
-  const before = await previewScrollMetrics(page);
+  const before = await settledPreviewScrollMetrics(page);
   await page.keyboard.press("Shift+Space");
   await expect(follow).toHaveAttribute("data-follow-tail-state", "previewing");
   await expect.poll(async () => (await previewScrollMetrics(page)).scrollTop)
     .toBeLessThan(before.scrollTop - before.clientHeight * 0.35);
-  const paged = await previewScrollMetrics(page);
+  await settledPreviewScrollMetrics(page);
   const anchor = await previewVisibleAnchor(page);
   expect(anchor).not.toBeNull();
 
@@ -92,9 +112,10 @@ test("real Inbox preview paging keeps ownership while live output streams", asyn
   await expect.poll(async () => Math.abs((await previewVisibleAnchor(page))!.offset - anchor!.offset)).toBeLessThan(2);
   await expect.poll(async () => (await previewScrollMetrics(page)).distanceFromTail).toBeGreaterThan(2);
 
+  const streamed = await settledPreviewScrollMetrics(page);
   await page.keyboard.press("Shift+Space");
   await expect.poll(async () => (await previewScrollMetrics(page)).scrollTop)
-    .toBeLessThan(paged.scrollTop - paged.clientHeight * 0.35);
+    .toBeLessThan(streamed.scrollTop - streamed.clientHeight * 0.35);
   await expect(follow).toHaveAttribute("data-follow-tail-state", "previewing");
 });
 
@@ -106,7 +127,7 @@ test("real Inbox preview paging preserves ownership with reduced motion", async 
   await expect(reader.locator("[data-virtual-row]").first()).toBeVisible();
   await expect.poll(async () => (await previewScrollMetrics(page)).distanceFromTail).toBeLessThanOrEqual(2);
   await page.locator(".inbox-list").focus();
-  const before = await previewScrollMetrics(page);
+  const before = await settledPreviewScrollMetrics(page);
 
   await page.keyboard.press("Shift+Space");
   await expect(follow).toHaveAttribute("data-follow-tail-state", "previewing");
