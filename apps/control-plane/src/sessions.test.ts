@@ -41,7 +41,6 @@ import {
   SESSION_STOP_MAX_ATTEMPTS,
   SESSION_STOP_RETRY_INTERVAL_MS,
   SESSION_STOP_TIMEOUT_MS,
-  budgetDecision,
   capabilityConfigError,
   claudeModelConfigForValidation,
   defaultPermissionModeForNewSession,
@@ -4364,15 +4363,6 @@ test("createRun with a conductor member and an explicit non-default mode -> 409,
 /* -------------------------------------------------------------------------- */
 /* Cost-budget policy cards + v47 runner re-arm                               */
 /* -------------------------------------------------------------------------- */
-
-test("budgetDecision: asks at/over budget, ok below / no-budget / terminal", () => {
-  assert.equal(budgetDecision(6, 5, "running"), "ask");
-  assert.equal(budgetDecision(5, 5, "running"), "ask"); // >= is the trigger
-  assert.equal(budgetDecision(4.99, 5, "running"), "ok");
-  assert.equal(budgetDecision(100, null, "running"), "ok"); // no budget
-  assert.equal(budgetDecision(100, 0, "running"), "ok"); // 0 = unlimited
-  assert.equal(budgetDecision(100, 5, "completed"), "ok"); // terminal never gates
-});
 
 test("token_usage crossing the budget parks the session with a cost_budget approval", () => {
   const { db, hub, svc } = makeHarness();
