@@ -262,7 +262,10 @@
 //     subagentLifecycle independent of the foreground session lifecycle, and command output can be
 //     attributed to its spawning agent. Pre-v92 runners omit both fields; dashboards retain the
 //     existing conservative session/tool inference and flat command-output presentation.
-export const PROTOCOL_VERSION = 92;
+// 93: runner-hosted semantic session naming. A correlated metadata request executes through the
+//     session's exact native Codex or Claude account on its owning runner, with ephemeral/no-tool
+//     provider state and a bounded secret-free result. Older runners are never sent the request.
+export const PROTOCOL_VERSION = 93;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
@@ -385,6 +388,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   stopFailureRecovery: 85,
   stopAttemptCorrelation: 89,
   agentSkills: 90,
+  sessionAgentNaming: 93,
 } as const;
 
 /* ========================================================================== */
@@ -801,6 +805,8 @@ export interface CodexAppServerCapabilities {
   contractFingerprint?: string;
   /** Hash/fingerprint of a schema actually generated from this installation, when performed. */
   schemaFingerprint?: string;
+  /** This installation satisfies the separately verified ephemeral, no-tool session-naming contract. */
+  sessionNaming?: boolean;
   failure?: CodexAppServerFailure;
 }
 
@@ -2418,11 +2424,18 @@ export interface SessionNamingModeAvailability {
   reason?: string;
 }
 
+export interface SessionNamingAccountBoundary {
+  provider: "codex" | "claude";
+  /** Safe billing boundary only. Account identifiers and credential material are never included. */
+  billingSource: "subscription" | "api" | "bedrock" | "vertex" | "gateway" | "provider_account" | "unknown";
+  machineCount: number;
+}
+
 /** Secret-free organization setting. Legacy environment configuration is reported only as
  * endpoint/model metadata; bearer credentials never cross the control-plane API boundary. */
 export interface SessionNamingSettingsView {
   mode: SessionNamingMode;
-  effectiveMode: "prompt_text_only" | "custom_model_endpoint";
+  effectiveMode: SessionNamingMode;
   source: "default" | "environment" | "organization";
   canManage: boolean;
   modes: Record<SessionNamingMode, SessionNamingModeAvailability>;
@@ -2433,6 +2446,8 @@ export interface SessionNamingSettingsView {
     apiKeyConfigured: boolean;
     configurationSource: "environment";
   };
+  /** Organization-wide availability summary. The session still uses only its own Machine/account. */
+  sessionAgentAccounts?: SessionNamingAccountBoundary[];
 }
 
 export interface UpdateSessionNamingSettingsRequest {
@@ -3914,6 +3929,26 @@ export interface DriverTelemetryMessage {
   reason?: DriverTelemetryReason;
 }
 
+export type SessionNamingRunnerErrorCode =
+  | "session_unavailable"
+  | "account_unavailable"
+  | "provider_unsupported"
+  | "rate_limited"
+  | "timed_out"
+  | "provider_failed"
+  | "invalid_result";
+
+/** Bounded runner-hosted title result. Provider output, diagnostics, paths, and identities stay local. */
+export interface GenerateSessionTitleResultMessage {
+  type: "generate_session_title_result";
+  requestId: string;
+  ok: boolean;
+  title?: string;
+  provider?: "codex" | "claude";
+  billingSource?: SessionNamingAccountBoundary["billingSource"];
+  code?: SessionNamingRunnerErrorCode;
+}
+
 export type RunnerToControlPlane =
   | RegisterMessage
   | HeartbeatMessage
@@ -3947,6 +3982,7 @@ export type RunnerToControlPlane =
   | SessionCommandInvocationResultMessage
   | SessionCommandInvocationUpdateMessage
   | DriverTelemetryMessage
+  | GenerateSessionTitleResultMessage
   | GitActionResultMessage
   | RewindResultMessage
   | ForkResultMessage
@@ -4279,6 +4315,21 @@ export interface RediscoverMessage {
 export interface RefreshSubscriptionUsageMessage {
   type: "refresh_subscription_usage";
   requestId: string;
+}
+
+export interface SessionNamingPromptMessage {
+  role: "user" | "assistant";
+  text: string;
+}
+
+/** Metadata-only task for the exact runner session; the runner derives provider and account locally. */
+export interface GenerateSessionTitleMessage {
+  type: "generate_session_title";
+  requestId: string;
+  sessionId: string;
+  messages: SessionNamingPromptMessage[];
+  /** Complete runner-side wall-clock budget, clamped again by the runner. */
+  timeoutMs: number;
 }
 
 export interface LogoutAgentMessage {
@@ -5026,6 +5077,7 @@ export type ControlPlaneToRunner =
   | ForkSessionMessage
   | RediscoverMessage
   | RefreshSubscriptionUsageMessage
+  | GenerateSessionTitleMessage
   | LogoutAgentMessage
   | AcpRegistryApprovalMessage
   | SkillsSyncMessage

@@ -4,6 +4,7 @@ import { run, type ResolvedLaunch } from "./resolve.js";
 /** Oldest Codex build whose generated v2 schema is pinned in this repository. Official docs do
  * not publish a CLI minimum, so older builds remain an explicit exec fallback until verified. */
 export const MIN_VERIFIED_CODEX_APP_SERVER_VERSION = "0.147.0";
+export const MIN_VERIFIED_CODEX_SESSION_NAMING_VERSION = "0.149.1";
 export const CODEX_APP_SERVER_CONTRACT_FINGERPRINT = "codex-app-server-v2-subagents-reasoning-consumed-surface-2026-08-25";
 
 export interface ProbeResult {
@@ -96,6 +97,7 @@ export function interpretCodexAppServerProbe(version: string | undefined, result
     transport: "stdio",
     verification: "help-and-version",
     contractFingerprint: CODEX_APP_SERVER_CONTRACT_FINGERPRINT,
+    sessionNaming: versionAtLeast(version, MIN_VERIFIED_CODEX_SESSION_NAMING_VERSION),
   };
 }
 

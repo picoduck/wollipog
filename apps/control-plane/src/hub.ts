@@ -13,6 +13,7 @@ import type {
   ControlPlaneToUi,
   AdoptSessionResultMessage,
   GitActionResultMessage,
+  GenerateSessionTitleResultMessage,
   ForkResultMessage,
   HostActionResultMessage,
   InterruptTurnResultMessage,
@@ -180,7 +181,8 @@ export type RunnerRequestResult =
   | InterruptTurnResultMessage
   | ResolveSteeringAttemptResultMessage
   | SubscriptionUsageRefreshResultMessage
-  | SteerSessionResultMessage;
+  | SteerSessionResultMessage
+  | GenerateSessionTitleResultMessage;
 
 interface PendingRequest {
   runnerId: string;

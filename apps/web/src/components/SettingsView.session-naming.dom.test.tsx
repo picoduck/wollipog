@@ -175,3 +175,48 @@ test("Session Naming identifies load failure and retries in place", async () => 
     container.remove();
   }
 });
+
+test("Session Naming reports secret-free runner provider and billing availability", async () => {
+  const available: SessionNamingSettingsView = {
+    ...view("session_agent_account"),
+    effectiveMode: "session_agent_account",
+    modes: {
+      ...view("session_agent_account").modes,
+      session_agent_account: { available: true },
+    },
+    sessionAgentAccounts: [
+      { provider: "claude", billingSource: "subscription", machineCount: 1 },
+      { provider: "codex", billingSource: "provider_account", machineCount: 2 },
+    ],
+  };
+  const transport: ApiTransport = {
+    instanceId: "test-accounts",
+    publicOrigin: "http://localhost",
+    close() {},
+    async request() {
+      return new Response(JSON.stringify(available), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  };
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(
+        <ApiProvider client={createApiClient(transport)}>
+          <SessionNamingPanel />
+        </ApiProvider>,
+      );
+    });
+    assert.match(container.textContent ?? "", /Runner Accounts/);
+    assert.match(container.textContent ?? "", /Claude · subscription · 1 Machine/);
+    assert.match(container.textContent ?? "", /Codex · provider account · 2 Machines/);
+    assert.match(container.textContent ?? "", /Each session uses only its own Machine and provider account/);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
