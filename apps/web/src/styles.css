@@ -9593,7 +9593,7 @@ body.shell-dock-dragging * {
   font-size: var(--text-sm);
 }
 .question-text-input {
-  font-family: "Cascadia Code", Consolas, monospace;
+  font-family: var(--font-mono);
 }
 .question-input-label {
   display: block;

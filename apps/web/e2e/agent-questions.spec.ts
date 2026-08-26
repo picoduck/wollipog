@@ -69,6 +69,48 @@ test("desktop Text Entry submits exact structured form answers using only the ke
   });
 });
 
+test("Interactive Form preserves and recovers bounded multi-select choices", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/agent-questions-e2e.html?set=forms");
+
+  const submit = page.getByRole("button", { name: "Submit" });
+  const unit = page.getByRole("checkbox", { name: /Unit Tests/ });
+  const browser = page.getByRole("checkbox", { name: /Browser Tests/ });
+  const smoke = page.getByRole("checkbox", { name: /Smoke Test/ });
+  await page.getByRole("radio", { name: /Staging/ }).click();
+  await page.locator('.question-input[type="password"]').fill("s3cret");
+  await page.locator('.question-input[type="number"]').fill("3");
+
+  await unit.click();
+  await expect(unit).toBeChecked();
+  await expect(submit).toBeDisabled();
+  await browser.click();
+  await expect(browser).toBeChecked();
+  await expect(submit).toBeEnabled();
+
+  await smoke.click();
+  await expect(unit).toBeChecked();
+  await expect(browser).toBeChecked();
+  await expect(smoke).toBeChecked();
+  await expect(submit).toBeDisabled();
+  await expect(page.getByRole("alert")).toHaveText("Select at most 2 options.");
+
+  await unit.click();
+  await expect(unit).not.toBeChecked();
+  await expect(browser).toBeChecked();
+  await expect(smoke).toBeChecked();
+  await expect(submit).toBeEnabled();
+  await submit.click();
+
+  await expect(page.getByRole("status")).toHaveText("Question Answered");
+  expect(await page.evaluate(() => window.agentQuestionCalls[0]?.answers)).toEqual({
+    target: "Staging",
+    checks: ["Browser Tests", "Smoke Test"],
+    token: "s3cret",
+    retries: "3",
+  });
+});
+
 test("mobile Text Entry preserves invalid responses, focuses the first error, and resets replacements", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/agent-questions-e2e.html?style=text");

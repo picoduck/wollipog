@@ -3,7 +3,10 @@ import test from "node:test";
 import type { AgentQuestion } from "@wollipog/protocol";
 import {
   clearQuestionDrafts,
+  isAnswerableAgentQuestion,
+  offeredQuestionChoices,
   questionAnswers,
+  questionDraftAnswers,
   resolveQuestionResponse,
   storedQuestionDrafts,
   storeQuestionDrafts,
@@ -35,6 +38,8 @@ test("multi-select text responses deterministically resolve comma-separated choi
   assert.deepEqual(resolveQuestionResponse(question, "1, browser tests"), { answer: ["Unit Tests", "Browser Tests"] });
   assert.match(resolveQuestionResponse(question, "1").error ?? "", /at least 2/);
   assert.match(resolveQuestionResponse(question, "1, Unit Tests").error ?? "", /more than once/);
+  assert.deepEqual(offeredQuestionChoices(question, "1"), ["Unit Tests"],
+    "incomplete exact choices remain available to Interactive Form toggles");
   assert.equal(toggleQuestionChoice(question, "1, 2", "Unit Tests"), "Browser Tests");
 });
 
@@ -76,11 +81,49 @@ test("answer maps omit blank optional fields and report every invalid response",
 });
 
 test("page-lifetime draft storage is request-correlated and explicitly clearable", () => {
-  storeQuestionDrafts("session", "request-a", { secret: "temporary" });
-  assert.deepEqual(storedQuestionDrafts("session", "request-a"), { secret: "temporary" });
+  storeQuestionDrafts("session", "request-a", { note: { kind: "entry", value: "temporary" } });
+  assert.deepEqual(storedQuestionDrafts("session", "request-a"), { note: { kind: "entry", value: "temporary" } });
   assert.deepEqual(storedQuestionDrafts("session", "request-b"), {});
   clearQuestionDrafts("session", "request-a");
   assert.deepEqual(storedQuestionDrafts("session", "request-a"), {});
+});
+
+test("choice and Other draft intents validate to provider values without becoming interchangeable", () => {
+  const question: AgentQuestion = { ...single, allowOther: true };
+  assert.deepEqual(questionDraftAnswers([question], {
+    language: { kind: "choice", labels: ["Python"] },
+  }).answers, { language: "Python" });
+  assert.deepEqual(questionDraftAnswers([question], {
+    language: { kind: "other", value: "Production west region" },
+  }).answers, { language: "Production west region" });
+});
+
+test("Interactive choices retain exact provider labels without reparsing them as text syntax", () => {
+  const numeric: AgentQuestion = {
+    ...single,
+    options: [{ label: "2" }, { label: "Second Option" }],
+  };
+  assert.deepEqual(resolveQuestionResponse(numeric, "2"), { answer: "Second Option" },
+    "Text Entry keeps displayed-number syntax");
+  assert.deepEqual(questionDraftAnswers([numeric], {
+    language: { kind: "choice", labels: ["2"] },
+  }).answers, { language: "2" }, "Interactive Form keeps the clicked label");
+
+  const comma: AgentQuestion = {
+    ...single,
+    id: "regions",
+    multiSelect: true,
+    options: [{ label: "North, America" }, { label: "Europe" }],
+  };
+  assert.deepEqual(questionDraftAnswers([comma], {
+    regions: { kind: "choice", labels: ["North, America", "Europe"] },
+  }).answers, { regions: ["North, America", "Europe"] });
+});
+
+test("questions with neither choices nor free text fail as unsupported with truthful copy", () => {
+  const question: AgentQuestion = { id: "empty", question: "Impossible", options: [] };
+  assert.equal(isAnswerableAgentQuestion(question), false);
+  assert.deepEqual(resolveQuestionResponse(question, "anything"), { error: "This question format is unsupported." });
 });
 
 test("opaque prototype-chain question ids remain own answer keys", () => {

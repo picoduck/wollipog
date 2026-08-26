@@ -433,3 +433,153 @@ test("text drafts survive unmount and remount for transcript virtualization", as
     container.remove();
   }
 });
+
+test("Interactive Form accumulates bounded multi-select choices and recovers after exceeding the maximum", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const questions: AgentQuestion[] = [{
+    id: "checks",
+    question: "Choose exactly two checks",
+    multiSelect: true,
+    minSelections: 2,
+    maxSelections: 2,
+    options: [{ label: "Unit Tests" }, { label: "Browser Tests" }, { label: "Smoke Test" }],
+  }];
+  const calls: Array<Parameters<ApiClient["answerQuestion"]>[1]> = [];
+  const client = {
+    ...api,
+    answerQuestion: async (_sessionId: string, action: Parameters<ApiClient["answerQuestion"]>[1]) => {
+      calls.push(structuredClone(action));
+      return {} as SessionView;
+    },
+  } as ApiClient;
+
+  try {
+    setQuestionResponseStyle("interactive", domWindow as never);
+    await renderBanner(root, questions, true, client);
+    const choices = [...container.querySelectorAll<HTMLButtonElement>('[role="checkbox"]')];
+    await act(async () => { choices[0]!.click(); });
+    assert.equal(choices[0]!.getAttribute("aria-checked"), "true");
+    assert.equal(submitButton(container).disabled, true);
+
+    await act(async () => { choices[1]!.click(); });
+    assert.deepEqual(choices.slice(0, 2).map((choice) => choice.getAttribute("aria-checked")), ["true", "true"]);
+    assert.equal(submitButton(container).disabled, false);
+
+    await act(async () => { choices[2]!.click(); });
+    assert.ok(choices.every((choice) => choice.getAttribute("aria-checked") === "true"));
+    assert.equal(submitButton(container).disabled, true);
+    assert.match(container.textContent ?? "", /Select at most 2 options/);
+
+    await act(async () => { choices[0]!.click(); });
+    assert.deepEqual(choices.map((choice) => choice.getAttribute("aria-checked")), ["false", "true", "true"]);
+    assert.equal(submitButton(container).disabled, false);
+    await act(async () => {
+      submitButton(container).click();
+      await tick();
+    });
+    assert.deepEqual(calls, [{
+      requestId: "question-1",
+      answers: { checks: ["Browser Tests", "Smoke Test"] },
+      action: "submit",
+    }]);
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
+test("Interactive Other intent survives an exact option prefix while fixed clicks remain exact choices", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const questions: AgentQuestion[] = [{
+    id: "target",
+    question: "Choose a target",
+    options: [{ label: "Production" }, { label: "Staging" }],
+    allowOther: true,
+  }];
+  const calls: Array<Parameters<ApiClient["answerQuestion"]>[1]> = [];
+  const client = {
+    ...api,
+    answerQuestion: async (_sessionId: string, action: Parameters<ApiClient["answerQuestion"]>[1]) => {
+      calls.push(structuredClone(action));
+      return {} as SessionView;
+    },
+  } as ApiClient;
+
+  try {
+    setQuestionResponseStyle("interactive", domWindow as never);
+    await renderBanner(root, questions, true, client);
+    const input = container.querySelector<HTMLInputElement>(".question-input");
+    assert.ok(input);
+    for (const value of ["Prod", "Production", "Production west region"]) {
+      await act(async () => { setInputValue(input, value); });
+      assert.equal(input.value, value);
+      assert.equal(container.querySelector('[role="radio"][aria-checked="true"]'), null);
+    }
+    await act(async () => {
+      submitButton(container).click();
+      await tick();
+    });
+    assert.deepEqual(calls[0], {
+      requestId: "question-1",
+      answers: { target: "Production west region" },
+      action: "submit",
+    });
+
+    const production = container.querySelector<HTMLButtonElement>('[role="radio"]');
+    assert.ok(production);
+    await act(async () => { production.click(); });
+    assert.equal(input.value, "");
+    await act(async () => {
+      submitButton(container).click();
+      await tick();
+    });
+    assert.deepEqual(calls[1], {
+      requestId: "question-1",
+      answers: { target: "Production" },
+      action: "submit",
+    });
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
+test("secret drafts survive mounted style changes but are not recovered after virtualization", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const questions: AgentQuestion[] = [{
+    id: "token",
+    question: "Enter the token",
+    options: [],
+    allowOther: true,
+    secret: true,
+  }];
+
+  try {
+    setQuestionResponseStyle("text", domWindow as never);
+    const firstRoot = createRoot(container);
+    await renderBanner(firstRoot, questions, true, api, "question-virtualized");
+    let input = container.querySelector<HTMLInputElement>(".question-text-input");
+    assert.ok(input);
+    await act(async () => { setInputValue(input!, "page-only-secret"); });
+    await act(async () => { setQuestionResponseStyle("interactive", domWindow as never); });
+    input = container.querySelector<HTMLInputElement>(".question-input");
+    assert.equal(input?.value, "page-only-secret", "mounted style changes preserve the secret response");
+    await act(async () => { setQuestionResponseStyle("text", domWindow as never); });
+    assert.equal(container.querySelector<HTMLInputElement>(".question-text-input")?.value, "page-only-secret");
+    await act(async () => { firstRoot.unmount(); });
+
+    const secondRoot = createRoot(container);
+    await renderBanner(secondRoot, questions, true, api, "question-virtualized");
+    assert.equal(container.querySelector<HTMLInputElement>(".question-text-input")?.value, "");
+    assert.equal(submitButton(container).disabled, true);
+    await act(async () => { secondRoot.unmount(); });
+  } finally {
+    await act(async () => { setQuestionResponseStyle("interactive", domWindow as never); });
+    container.remove();
+  }
+});
