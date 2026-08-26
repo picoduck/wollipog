@@ -20,7 +20,6 @@ import {
   shouldRestoreInboxScroll,
   type InboxApprovalIntent,
 } from "../inbox.js";
-import { scrollBehavior } from "../motion.js";
 import { loadKeySet, saveKeySet, SESSION_PIN_KEY } from "../pins.js";
 import { loadSeen, markSeen, markUnread, saveSeen } from "../sessions-seen.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
@@ -70,7 +69,7 @@ export function inboxSessionMatchesQuery(
 }
 
 export function pageInboxPreview(
-  scroll: Pick<HTMLElement, "clientHeight" | "scrollHeight" | "scrollTop" | "scrollBy"> &
+  scroll: Pick<HTMLElement, "clientHeight" | "scrollHeight" | "scrollTop" | "scrollTo"> &
     Partial<Pick<HTMLElement, "dispatchEvent">> | null | undefined,
   direction: "next" | "previous",
   beginProgrammaticScroll: ((direction: "next" | "previous") => void) | null | undefined,
@@ -82,10 +81,12 @@ export function pageInboxPreview(
   if (!canMove) return;
   dispatchVirtualViewportIntent(scroll);
   beginProgrammaticScroll?.(direction);
-  scroll.scrollBy({
-    top: (direction === "next" ? 1 : -1) * scroll.clientHeight,
-    behavior: scrollBehavior(),
-  });
+  const target = scroll.scrollTop + (direction === "next" ? 1 : -1) * scroll.clientHeight;
+  // Following live output can leave a browser-native smooth scroll in flight after its scheduled
+  // follow frames are canceled. A discrete keyboard page must replace that animation atomically;
+  // starting another smooth scroll can be coalesced with the older one and leave the viewport
+  // untouched in Chromium.
+  scroll.scrollTo({ top: target, behavior: "auto" });
 }
 
 export interface InboxViewProps {
@@ -830,8 +831,6 @@ export function InboxView({
       controls.follow();
       return true;
     },
-    // An explicit behavior overrides CSS scroll-behavior, so the stylesheet's reduced-motion
-    // guard cannot reach these — scrollBehavior() resolves it per call instead.
     pageDown: () => {
       const scroll = viewRef.current?.querySelector<HTMLElement>(".detail-scroll");
       pageInboxPreview(scroll, "next", previewNavigationRef.current?.beginProgrammaticScroll);

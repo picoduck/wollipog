@@ -30,15 +30,15 @@ test("preview paging changes follow state before programmatic scrolling", () => 
       calls.push(`intent:${event.type}`);
       return true;
     },
-    scrollBy: (options: ScrollToOptions) => calls.push(`scroll:${options.top}`),
+    scrollTo: (options: ScrollToOptions) => calls.push(`scroll:${options.top}:${options.behavior}`),
   };
 
   pageInboxPreview(scroll, "next", (direction) => calls.push(`preview:${direction}`));
-  assert.deepEqual(calls, ["intent:wollipog:virtual-viewport-intent", "preview:next", "scroll:480"]);
+  assert.deepEqual(calls, ["intent:wollipog:virtual-viewport-intent", "preview:next", "scroll:980:auto"]);
 
   calls.length = 0;
   pageInboxPreview(scroll, "previous", (direction) => calls.push(`preview:${direction}`));
-  assert.deepEqual(calls, ["intent:wollipog:virtual-viewport-intent", "preview:previous", "scroll:-480"]);
+  assert.deepEqual(calls, ["intent:wollipog:virtual-viewport-intent", "preview:previous", "scroll:20:auto"]);
 });
 
 test("preview paging leaves follow state alone when the requested edge cannot move", () => {
@@ -47,7 +47,7 @@ test("preview paging leaves follow state alone when the requested edge cannot mo
     clientHeight: 480,
     scrollHeight: 1_000,
     scrollTop: 520,
-    scrollBy: () => calls.push("scroll"),
+    scrollTo: () => calls.push("scroll"),
   };
 
   pageInboxPreview(scroll, "next", () => calls.push("preview"));
