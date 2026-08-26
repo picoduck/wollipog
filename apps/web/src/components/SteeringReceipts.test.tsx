@@ -76,7 +76,6 @@ test("receipt derivation exposes every durable label and retires only canonical 
     ["rejected", "Rejected"],
     ["uncertain", "Delivery Uncertain"],
     ["queued-again", "Queued Again"],
-    ["dismissed", "Dismissed"],
   ]);
 });
 
@@ -219,6 +218,72 @@ test("uncertain receipt actions call the matching callback and local pending sta
 
   await act(async () => root.unmount());
   container.remove();
+});
+
+test("one rejected receipt can be durably dismissed", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const dismissed: string[] = [];
+
+  await act(async () => root.render(<SteeringReceipts
+    attempts={[attempt("rejected-one", "rejected", { reason: "no_active_provider_turn" })]}
+    timelineItems={[]}
+    onQueueAgain={() => {}}
+    onDismiss={(submissionId) => dismissed.push(submissionId)}
+  />));
+  const button = container.querySelector("button") as HTMLButtonElement;
+  assert.equal(button.textContent?.trim(), "Dismiss");
+  await act(async () => button.click());
+  assert.deepEqual(dismissed, ["rejected-one"]);
+
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+test("multiple rejected receipts collapse and clear together without touching actionable receipts", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const dismissed: string[] = [];
+
+  await act(async () => root.render(<SteeringReceipts
+    attempts={[
+      attempt("rejected-a", "rejected"),
+      attempt("rejected-b", "rejected"),
+      attempt("rejected-c", "rejected"),
+      attempt("pending-actionable", "pending"),
+      attempt("uncertain-actionable", "uncertain"),
+    ]}
+    timelineItems={[]}
+    pendingActions={new Map([["rejected-b", "dismiss"]])}
+    onQueueAgain={() => {}}
+    onDismiss={(submissionId) => dismissed.push(submissionId)}
+  />));
+
+  const group = container.querySelector(".steering-terminal-receipts") as HTMLDetailsElement;
+  assert.ok(group);
+  assert.equal(group.open, false, "the terminal group has a bounded collapsed footprint by default");
+  assert.match(group.querySelector("summary")?.textContent ?? "", /3 Rejected Receipts/);
+  assert.ok(container.querySelector('[data-testid="steering-attempt-pending-actionable"]'));
+  assert.ok(container.querySelector('[data-testid="steering-attempt-uncertain-actionable"]'));
+  const clearAll = [...group.querySelectorAll("button")]
+    .find((button) => button.textContent?.trim() === "Clear All") as HTMLButtonElement;
+  await act(async () => clearAll.click());
+  assert.deepEqual(dismissed, ["rejected-a", "rejected-c"]);
+
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+test("applied dismissals stay absent after authoritative session state refreshes", () => {
+  const rejected = attempt("dismissed-rejection", "rejected", {
+    resolution: { action: "dismiss", state: "applied" },
+  });
+  assert.deepEqual(deriveSteeringReceipts([rejected], [], "turn-1"), []);
+  assert.deepEqual(deriveSteeringReceipts([{ ...rejected }], [], "turn-1"), []);
 });
 
 test("a bounded window is not evidence that an accepted steer never landed", () => {

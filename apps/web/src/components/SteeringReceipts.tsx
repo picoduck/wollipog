@@ -72,7 +72,8 @@ export function deriveSteeringReceipts(
   // An accepted steer retires into the canonical transcript. Against a bounded window its absence
   // means only that its turn is unloaded, so it must not resurface as an unsettled receipt.
   const eligible = attempts.filter((attempt) =>
-    attempt.state !== "accepted" || (!historyPartial && !canonicalAccepted.has(attempt.submissionId)),
+    !(attempt.resolution?.state === "applied" && attempt.resolution.action === "dismiss") &&
+    (attempt.state !== "accepted" || (!historyPartial && !canonicalAccepted.has(attempt.submissionId))),
   );
   const recentPreviousTurn = new Set(
     eligible
@@ -106,6 +107,82 @@ function humanReason(reason: SteeringAttemptView["reason"]): string | undefined 
   return `${normalized.charAt(0).toUpperCase()}${normalized.slice(1)}.`;
 }
 
+interface SteeringReceiptCardProps {
+  receipt: SteeringReceiptPresentation;
+  pendingActions?: ReadonlyMap<string, SteeringResolutionAction>;
+  onQueueAgain: (submissionId: string) => void;
+  onDismiss: (submissionId: string) => void;
+}
+
+function SteeringReceiptCard({
+  receipt: { attempt, status, label, detail },
+  pendingActions,
+  onQueueAgain,
+  onDismiss,
+}: SteeringReceiptCardProps) {
+  const pendingAction = pendingActions?.get(attempt.submissionId);
+  const actionPending = attempt.resolution?.state === "pending" || pendingAction !== undefined;
+  const recoverable = attempt.state === "uncertain" && attempt.resolution?.state !== "applied";
+  const dismissibleRejection = attempt.state === "rejected";
+  const durableDetail = detail ?? (
+    attempt.state === "rejected" || attempt.state === "converted_to_queue" || attempt.state === "uncertain"
+      ? humanReason(attempt.reason)
+      : undefined
+  );
+  const localPendingDetail = pendingAction
+    ? `${pendingAction === "queue_again" ? "Queue Again" : "Dismiss"} is pending.`
+    : undefined;
+  return (
+    <article
+      className="steering-receipt"
+      data-submission-id={attempt.submissionId}
+      data-status={status}
+      data-testid={`steering-attempt-${attempt.submissionId}`}
+    >
+      <div className="steering-receipt-head">
+        <span className="steering-receipt-status" data-status={status}>{label}</span>
+        <span className="steering-receipt-source">
+          {attempt.source === "queued" ? "Queued Prompt" : "Direct Steering"}
+        </span>
+      </div>
+      {(attempt.text || attempt.hasImages) && (
+        <div className="steering-receipt-content">
+          {attempt.text && <span className="steering-receipt-text">{attempt.text}</span>}
+          {attempt.hasImages && <span className="steering-receipt-image">Image Attached</span>}
+        </div>
+      )}
+      {(durableDetail || (localPendingDetail && localPendingDetail !== durableDetail)) && (
+        <div className="steering-receipt-details">
+          {durableDetail && <span>{durableDetail}</span>}
+          {localPendingDetail && localPendingDetail !== durableDetail && <span>{localPendingDetail}</span>}
+        </div>
+      )}
+      {(recoverable || dismissibleRejection) && (
+        <div className="steering-receipt-actions" aria-busy={actionPending || undefined}>
+          {recoverable && (
+            <button
+              className="btn ghost sm steering-receipt-action"
+              type="button"
+              disabled={actionPending}
+              onClick={() => onQueueAgain(attempt.submissionId)}
+            >
+              Queue Again
+            </button>
+          )}
+          <button
+            className="btn ghost sm steering-receipt-action"
+            type="button"
+            disabled={actionPending}
+            onClick={() => onDismiss(attempt.submissionId)}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+    </article>
+  );
+}
+
 export function SteeringReceipts({
   attempts,
   timelineItems,
@@ -117,71 +194,58 @@ export function SteeringReceipts({
 }: SteeringReceiptsProps) {
   const receipts = deriveSteeringReceipts(attempts, timelineItems, activeTurnId, historyPartial);
   if (!receipts.length) return null;
+  const rejected = receipts.filter(({ attempt }) => attempt.state === "rejected");
+  const ungrouped = rejected.length > 1
+    ? receipts.filter(({ attempt }) => attempt.state !== "rejected")
+    : receipts;
+  const clearableRejected = rejected.filter(({ attempt }) =>
+    attempt.resolution?.state !== "pending" && !pendingActions?.has(attempt.submissionId)
+  );
 
   return (
     <section className="steering-receipts" aria-label="Steering Receipts">
-      {receipts.map(({ attempt, status, label, detail }) => {
-        const pendingAction = pendingActions?.get(attempt.submissionId);
-        const actionPending = attempt.resolution?.state === "pending" ||
-          pendingAction !== undefined;
-        const recoverable = attempt.state === "uncertain" && attempt.resolution?.state !== "applied";
-        const durableDetail = detail ?? (
-          attempt.state === "rejected" || attempt.state === "converted_to_queue" || attempt.state === "uncertain"
-            ? humanReason(attempt.reason)
-            : undefined
-        );
-        const localPendingDetail = pendingAction
-          ? `${pendingAction === "queue_again" ? "Queue Again" : "Dismiss"} is pending.`
-          : undefined;
-        return (
-          <article
-            className="steering-receipt"
-            data-submission-id={attempt.submissionId}
-            data-status={status}
-            data-testid={`steering-attempt-${attempt.submissionId}`}
-            key={attempt.submissionId}
-          >
-            <div className="steering-receipt-head">
-              <span className="steering-receipt-status" data-status={status}>{label}</span>
-              <span className="steering-receipt-source">
-                {attempt.source === "queued" ? "Queued Prompt" : "Direct Steering"}
-              </span>
-            </div>
-            {(attempt.text || attempt.hasImages) && (
-              <div className="steering-receipt-content">
-                {attempt.text && <span className="steering-receipt-text">{attempt.text}</span>}
-                {attempt.hasImages && <span className="steering-receipt-image">Image Attached</span>}
-              </div>
-            )}
-            {(durableDetail || (localPendingDetail && localPendingDetail !== durableDetail)) && (
-              <div className="steering-receipt-details">
-                {durableDetail && <span>{durableDetail}</span>}
-                {localPendingDetail && localPendingDetail !== durableDetail && <span>{localPendingDetail}</span>}
-              </div>
-            )}
-            {recoverable && (
-              <div className="steering-receipt-actions" aria-busy={actionPending || undefined}>
-                <button
-                  className="btn ghost sm steering-receipt-action"
-                  type="button"
-                  disabled={actionPending}
-                  onClick={() => onQueueAgain(attempt.submissionId)}
-                >
-                  Queue Again
-                </button>
-                <button
-                  className="btn ghost sm steering-receipt-action"
-                  type="button"
-                  disabled={actionPending}
-                  onClick={() => onDismiss(attempt.submissionId)}
-                >
-                  Dismiss
-                </button>
-              </div>
-            )}
-          </article>
-        );
-      })}
+      {ungrouped.map((receipt) => (
+        <SteeringReceiptCard
+          key={receipt.attempt.submissionId}
+          receipt={receipt}
+          pendingActions={pendingActions}
+          onQueueAgain={onQueueAgain}
+          onDismiss={onDismiss}
+        />
+      ))}
+      {rejected.length > 1 && (
+        <details className="steering-terminal-receipts">
+          <summary>
+            <span className="steering-terminal-summary">
+              <span className="steering-receipt-status" data-status="rejected">Rejected</span>
+              <span>{rejected.length} Rejected Receipts</span>
+            </span>
+            <button
+              className="btn ghost sm steering-receipt-action"
+              type="button"
+              disabled={clearableRejected.length === 0}
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                for (const { attempt } of clearableRejected) onDismiss(attempt.submissionId);
+              }}
+            >
+              Clear All
+            </button>
+          </summary>
+          <div className="steering-terminal-list">
+            {rejected.map((receipt) => (
+              <SteeringReceiptCard
+                key={receipt.attempt.submissionId}
+                receipt={receipt}
+                pendingActions={pendingActions}
+                onQueueAgain={onQueueAgain}
+                onDismiss={onDismiss}
+              />
+            ))}
+          </div>
+        </details>
+      )}
     </section>
   );
 }

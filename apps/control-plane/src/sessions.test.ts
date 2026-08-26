@@ -2244,6 +2244,26 @@ test("uncertain steering resolution is correlated, idempotent, conflict-safe, an
   assert.equal((await svc.resolveSteeringAttempt(id, "submission-resolve", "dismiss")).status, 409);
 });
 
+test("rejected steering receipt dismissal is durable and does not depend on runner state", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  db.createSteeringAttempt({
+    requestId: "steer-dismiss-rejected", sessionId: id, submissionId: "submission-dismiss-rejected",
+    turnId: "turn-rejected", source: "direct", requestSha256: "9".repeat(64), text: "reject me", now: 1,
+  });
+  db.markSteeringAttemptNotSent("steer-dismiss-rejected", 2);
+  hub.online = false;
+
+  const dismissed = await svc.resolveSteeringAttempt(id, "submission-dismiss-rejected", "dismiss");
+  assert.equal(dismissed.ok, true, dismissed.error);
+  assert.deepEqual(dismissed.data?.resolution, { action: "dismiss", state: "applied" });
+  assert.equal(hub.sentOfType("resolve_steering_attempt").length, 0);
+  assert.deepEqual(db.getSession(id)?.steeringAttempts?.[0]?.resolution, {
+    action: "dismiss", state: "applied",
+  });
+  assert.equal((await svc.resolveSteeringAttempt(id, "submission-dismiss-rejected", "dismiss")).ok, true);
+});
+
 test("a lost steering-resolution reply preserves one action and safely replays its request id", async () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });

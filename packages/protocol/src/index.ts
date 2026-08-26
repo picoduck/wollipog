@@ -4147,7 +4147,7 @@ export interface SteerSessionMessage {
   promotePromptId?: string;
 }
 
-/** Explicit user resolution for a steering attempt whose provider delivery remains uncertain. */
+/** Explicit user resolution for an uncertain delivery, or durable acknowledgement of rejection. */
 export interface ResolveSteeringAttemptMessage {
   type: "resolve_steering_attempt";
   requestId: string;
