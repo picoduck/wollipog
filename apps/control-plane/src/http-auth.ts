@@ -43,6 +43,21 @@ export const UNAUTHORIZED = "unauthorized — open the startup pairing URL or pa
 export const CROSS_ORIGIN_BLOCKED = "cross-origin request blocked";
 export const FORBIDDEN = "forbidden";
 
+/**
+ * The methods the CORS preflight advertises, stated here rather than inherited from
+ * `@fastify/cors`. Its v10 default is exactly this list, but v11 narrows the default to the
+ * CORS-safelisted methods (GET, HEAD, POST). Inheriting that default would silently stop browsers
+ * from issuing the PUT/PATCH/DELETE requests this API serves — cross-origin in development, where
+ * the app is on :5173 and the control plane on :4317 — and nothing in the build, typecheck, or
+ * unit suite exercises a real preflight, so there would be no failure to signal it. Writing the
+ * policy down makes that upgrade a no-op.
+ *
+ * This is not a widening: it is the set v10 already permits. CORS is also not what protects these
+ * routes — see the Origin gate in (2) above — so inheriting the narrower default would buy no
+ * security, only breakage.
+ */
+export const CORS_METHODS = ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE"] as const;
+
 /** True for the API surface, given a matched route pattern. */
 export function isApiRoute(routePath: string): boolean {
   return routePath === "/api" || routePath.startsWith("/api/");

@@ -172,7 +172,7 @@ import {
   SessionsService,
 } from "./sessions.js";
 import { ShellRegistry } from "./shell-registry.js";
-import { registerAuthGate } from "./http-auth.js";
+import { CORS_METHODS, registerAuthGate } from "./http-auth.js";
 import { pushDecision } from "./push-decision.js";
 import { validateSubscription, WebPushSender } from "./web-push.js";
 import {
@@ -883,7 +883,7 @@ const orchestrator = new BoxOrchestrator({
 // Registered without await (Fastify loads plugins in order on ready) so this module
 // has no top-level await — required to bundle the control plane into a CJS single
 // executable (the Tauri sidecar) without an ESM wrapper.
-app.register(cors, { origin: isLocalOrigin });
+app.register(cors, { origin: isLocalOrigin, methods: [...CORS_METHODS] });
 // @fastify/websocket v11 upgrades a route via an onRoute hook that must already be
 // registered when the route is added. A bare top-level `app.register(websocket)` is
 // deferred (avvio), so it isn't loaded when these synchronously-added routes register —
