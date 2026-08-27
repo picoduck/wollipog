@@ -133,8 +133,11 @@ test("an old runner explains why Codex App Server discovery requires an update",
 
     const appServerRadio = container.querySelector('input[value="codex-app"]') as HTMLInputElement;
     assert.equal(appServerRadio.disabled, true);
-    assert.match(container.textContent ?? "", /Runner Update Required/);
-    assert.match(container.textContent ?? "", /Runner protocol is v62.*requires protocol v63.*Update and restart the runner/);
+    const copy = container.textContent ?? "";
+    assert.match(copy, /Runner Update Required/);
+    assert.match(copy, /Codex App Server session discovery/);
+    assert.doesNotMatch(copy, /Codex(?: —)? Interactive session discovery/);
+    assert.match(copy, /Runner protocol is v62.*requires protocol v63.*Update and restart the runner/);
     assert.equal((container.querySelector('input[value="codex-exec"]') as HTMLInputElement).disabled, false);
   } finally {
     await act(async () => { root.unmount(); });

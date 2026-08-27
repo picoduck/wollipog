@@ -463,8 +463,11 @@ test("listExternalSessions requires protocol v63 for Codex App Server discovery"
 
   assert.equal(res.ok, false);
   assert.equal(res.status, 409);
-  assert.match(res.error ?? "", /protocol is v62.*requires protocol v63.*update and restart/i);
-  assert.equal(sent, false, "an old runner must not return a misleading empty Interactive result");
+  const error = res.error ?? "";
+  assert.match(error, /Codex App Server session discovery/);
+  assert.doesNotMatch(error, /Codex(?: —)? Interactive session discovery/);
+  assert.match(error, /protocol is v62.*requires protocol v63.*update and restart/i);
+  assert.equal(sent, false, "an old runner must not return a misleading empty App Server result");
 });
 
 test("listExternalSessions fails 409 when the runner is offline", async () => {
