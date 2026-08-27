@@ -90,7 +90,7 @@ import {
 } from "./drivers/claude-code.js";
 import { resolveAcpSessionContext } from "./acp-session-context.js";
 import { SessionStore, isAdoptedSession, type SessionMeta } from "./session-store.js";
-import { waitForPendingKills } from "./spawn.js";
+import { terminateDescendantBoundaries, waitForPendingKills } from "./spawn.js";
 import {
   findExternalSession,
   listExternalSessions,
@@ -2033,6 +2033,9 @@ function shutdown(exitCode = 0): void {
     sessionsCleanlyShutDown = sessions.shutdownAll();
   });
   bestEffort("dispose shells", () => shells.dispose());
+  // Providers that exited normally may have intentional background descendants retained under
+  // their session boundary. Runner shutdown is the final owner and must drain every such scope.
+  terminateDescendantBoundaries();
   log("shutting down");
   // process.exit() cancels pending timers/exec callbacks — exiting immediately would drop
   // the SIGKILL escalation and the WSL in-distro reap, letting TERM-ignoring agents survive

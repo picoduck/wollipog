@@ -6,10 +6,10 @@ import os from "node:os";
 import path from "node:path";
 import net from "node:net";
 import { test } from "node:test";
-import { buildBwrapArgs, buildCloudArgs, buildContainerArgs, buildWslArgs, killTree, spawnAgent, trackPendingKill, waitForPendingKills, winQuoteArg, type AgentProcess } from "./spawn.js";
+import { buildBwrapArgs, buildCloudArgs, buildContainerArgs, buildWslArgs, killTree, spawnAgent, terminateDescendantBoundaries, trackPendingKill, waitForPendingKills, winQuoteArg, type AgentProcess } from "./spawn.js";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
 import { WINDOWS_JOB_ENCODED_COMMAND, WINDOWS_JOB_LAUNCHER } from "./windows-job.js";
-import { extendOwnedProcessTree, parsePosixProcessTable } from "./posix-process-tree.js";
+import { extendOwnedProcessTree, ownsPosixRootProcessGroup, parsePosixProcessTable } from "./posix-process-tree.js";
 
 const windowsJobIsolation = {
   backend: "windows-job" as const,
@@ -120,6 +120,7 @@ test("container launches exclude explicit and inherited product-prefixed values 
         hostAgentArgs: [], agentCommand: "agent", agentArgs: [],
       },
     });
+    assert.equal(child.posixBoundary, undefined, "the native runtime client keeps its remote lifecycle boundary");
     child.stdin.end();
     let out = "";
     child.stdout.setEncoding("utf8");
@@ -585,8 +586,61 @@ test("POSIX ownership snapshots exclude unrelated and PID-reused processes", () 
     " 201 100 S Thu Aug 27 00:01:01 2026",
   ].join("\n"));
   assert.equal(extendOwnedProcessTree(owned, reused), 0, "a reused root PID cannot capture a foreign child");
+  assert.equal(ownsPosixRootProcessGroup(root.pid, owned, reused), false,
+    "a reused root PID cannot authorize a negative-PID group signal");
   assert.equal(owned.has(200), false);
   assert.equal(owned.has(201), false);
+});
+
+test("normal provider exit preserves owned background work until session disposal", {
+  skip: process.platform === "win32",
+  timeout: 15_000,
+}, async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "wollipog-retained-provider-"));
+  const ready = path.join(dir, "ready.json");
+  const escapedScript = path.join(dir, "escaped.cjs");
+  const providerScript = path.join(dir, "provider.cjs");
+  let escapedPid: number | undefined;
+  t.after(async () => {
+    if (escapedPid) {
+      try { process.kill(escapedPid, "SIGKILL"); } catch { /* already reaped */ }
+    }
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+  await fs.writeFile(escapedScript, [
+    'const fs = require("node:fs");',
+    `fs.writeFileSync(${JSON.stringify(ready)}, JSON.stringify({ pid: process.pid }));`,
+    "setInterval(() => {}, 1000);",
+  ].join("\n"), "utf8");
+  await fs.writeFile(providerScript, [
+    'const { spawn } = require("node:child_process");',
+    `spawn(process.execPath, [${JSON.stringify(escapedScript)}], { detached: true, stdio: "ignore" }).unref();`,
+    "setTimeout(() => process.exit(0), 750);",
+  ].join("\n"), "utf8");
+
+  const owner = {};
+  const child = spawnAgent({
+    command: process.execPath,
+    args: [providerScript],
+    cwd: dir,
+    windowsShell: false,
+    descendantOwner: owner,
+  });
+  child.stdin.end();
+  for (let attempt = 0; attempt < 100 && !escapedPid; attempt++) {
+    try { escapedPid = (JSON.parse(await fs.readFile(ready, "utf8")) as { pid: number }).pid; }
+    catch { await new Promise((resolve) => setTimeout(resolve, 25)); }
+  }
+  assert.ok(escapedPid, "background process became ready");
+  await new Promise<void>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", () => resolve());
+  });
+  assert.doesNotThrow(() => process.kill(escapedPid!, 0), "normal provider exit preserves background work");
+
+  terminateDescendantBoundaries(owner);
+  assert.equal(await waitForPendingKills(8_000), true);
+  assert.throws(() => process.kill(escapedPid!, 0), /ESRCH/, "session disposal reaps retained work");
 });
 
 test("session disposal reaps a grandchild that creates a new POSIX session and its descendant", {
@@ -688,6 +742,13 @@ test("waitForPendingKills reports a deadline with process trees still pending", 
   assert.equal(await waitForPendingKills(5), false);
   release();
   assert.equal(await waitForPendingKills(1_000), true, "later shutdown tests see a drained registry");
+});
+
+test("waitForPendingKills consumes an incomplete result instead of poisoning later drains", async () => {
+  trackPendingKill(Promise.resolve(false));
+  assert.equal(await waitForPendingKills(1_000), false);
+  trackPendingKill(Promise.resolve());
+  assert.equal(await waitForPendingKills(1_000), true);
 });
 
 test("POSIX kill completion waits for close after SIGKILL delivery", {

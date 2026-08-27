@@ -22,7 +22,7 @@ import {
   type SessionConfig,
 } from "@wollipog/protocol";
 import { JsonRpcPeer } from "../jsonrpc.js";
-import { killTree, spawnAgent, type AgentProcess } from "../spawn.js";
+import { killTree, spawnAgent, terminateDescendantBoundaries, type AgentProcess } from "../spawn.js";
 import type {
   Driver,
   DriverCallbacks,
@@ -273,6 +273,7 @@ export class CodexAppServerDriver implements Driver {
   private initializing = false;
   private readonly spawn: typeof spawnAgent;
   private readonly kill: typeof killTree;
+  private readonly descendantOwner = {};
 
   constructor(
     private readonly opts: DriverOptions,
@@ -343,6 +344,7 @@ export class CodexAppServerDriver implements Driver {
       isolation: this.opts.isolation,
       containerAgentLaunch: true,
       cloudAgentLaunch: true,
+      descendantOwner: this.descendantOwner,
     });
     this.child = child;
     const peer = new JsonRpcPeer(child.stdin, child.stdout, (err) => this.emitProviderStderr(`transport: ${err.message}`));
@@ -657,6 +659,7 @@ export class CodexAppServerDriver implements Driver {
     this.peer?.dispose("disposed");
     if (this.child) this.kill(this.child);
     this.child = null;
+    terminateDescendantBoundaries(this.descendantOwner);
   }
 
   private declinePendingRequests(resolutionReason?: "replaced"): void {

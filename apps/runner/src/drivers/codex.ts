@@ -19,7 +19,7 @@ import { unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentContext, PlanEntry, PromptImage, SessionConfig } from "@wollipog/protocol";
-import { killTree, spawnAgent, type AgentProcess } from "../spawn.js";
+import { killTree, spawnAgent, terminateDescendantBoundaries, type AgentProcess } from "../spawn.js";
 import { BoundedNdjsonBuffer } from "../bounded-ndjson.js";
 import type { Driver, DriverCallbacks, DriverOptions, StopReason } from "./driver.js";
 import { isProviderAuthenticationFailure } from "./provider-auth-failure.js";
@@ -89,6 +89,7 @@ export class CodexDriver implements Driver {
   private cancelled = false;
   private config: SessionConfig;
   private readonly deps: CodexDriverDeps;
+  private readonly descendantOwner = {};
   /** track tool items we've announced so updates map to the same toolCallId */
   private readonly seenItems = new Set<string>();
   /** temp image files staged for the in-flight turn, removed when it ends. */
@@ -189,6 +190,7 @@ export class CodexDriver implements Driver {
           isolation: this.opts.isolation,
           containerAgentLaunch: true,
           cloudAgentLaunch: true,
+          descendantOwner: this.descendantOwner,
         });
       } catch (err) {
         this.cleanupImages();
@@ -286,6 +288,7 @@ export class CodexDriver implements Driver {
     this.disposed = true;
     if (this.child) this.deps.kill(this.child);
     this.child = null;
+    terminateDescendantBoundaries(this.descendantOwner);
     // Synchronous cleanup so files are gone before a shutdown process.exit().
     this.cleanupImages();
   }

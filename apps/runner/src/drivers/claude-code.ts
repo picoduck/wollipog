@@ -24,7 +24,7 @@ import { BoundedNdjsonBuffer } from "../bounded-ndjson.js";
 import { inspectClaudeBackgroundWork, inspectClaudeBackgroundWorkInContext, type ClaudeBackgroundWorkInspection } from "../claude-background-work.js";
 import { effectiveClaudePermissionMode } from "../claude-permission.js";
 import { prepareClaudeHookArgs } from "../hook-settings.js";
-import { killTree, spawnAgent, trackPendingKill, type AgentProcess, type SpawnAgentOptions } from "../spawn.js";
+import { killTree, spawnAgent, terminateDescendantBoundaries, trackPendingKill, type AgentProcess, type SpawnAgentOptions } from "../spawn.js";
 import type {
   Driver,
   DriverBackgroundJob,
@@ -279,6 +279,7 @@ export class ClaudeCodeDriver implements Driver {
   private cancelled = false;
   private config: SessionConfig;
   private readonly deps: ClaudeDriverDeps;
+  private readonly descendantOwner = {};
   private readonly persistentRequested: boolean;
   private readonly persistentIdleMs: number;
   private readonly pendingMaxMs: number;
@@ -634,6 +635,7 @@ export class ClaudeCodeDriver implements Driver {
           isolation: this.opts.isolation,
           containerAgentLaunch: true,
           cloudAgentLaunch: true,
+          descendantOwner: this.descendantOwner,
         });
       } catch (err) {
         this.cb.onEvent({ kind: "error", message: (err as Error).message });
@@ -849,6 +851,7 @@ export class ClaudeCodeDriver implements Driver {
           isolation: this.opts.isolation,
           containerAgentLaunch: true,
           cloudAgentLaunch: true,
+          descendantOwner: this.descendantOwner,
         });
       } catch (err) {
         this.openPersistentCircuit(`persistent claude spawn failed: ${(err as Error).message}`, turn);
@@ -1627,6 +1630,7 @@ export class ClaudeCodeDriver implements Driver {
     this.child = null;
     for (const child of this.auxiliaryChildren) this.deps.kill(child);
     this.auxiliaryChildren.clear();
+    terminateDescendantBoundaries(this.descendantOwner);
   }
 
   private emitStderrOrAuthenticationFailure(text: string): void {

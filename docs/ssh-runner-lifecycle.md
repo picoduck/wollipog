@@ -116,7 +116,8 @@ must retain the runner's descendants inside the service-manager boundary until t
 The runner snapshots provider descendants by PID plus process start identity, terminates even children
 that create a new POSIX process group or session, and reports a non-empty boundary instead of releasing
 provider-HOME ownership. A service manager remains the crash boundary if the runner itself is killed
-before that code can run.
+before that code can run. Native POSIX runners require a full `ps` implementation that supports
+`ps -axo pid=,ppid=,state=,lstart=`; minimal BusyBox-only hosts must install a compatible procps package.
 
 For Linux `systemd` services, use `KillMode=control-group` (the default), keep `SendSIGKILL=yes`, and
 set `TimeoutStopSec=15s` or longer. Do not use `KillMode=process`, `KillMode=mixed`, or `SendSIGKILL=no`:
@@ -129,9 +130,10 @@ runner crashes. Because launchd's fallback is process-group based, operators mus
 diagnostic that says the descendant boundary was not empty before starting a replacement against the same
 provider home.
 
-On Windows, native provider processes are always placed in a non-breakaway, kill-on-close Job Object.
-The Job launcher watches the runner owner as well as the provider, so runner termination closes the Job
-and the kernel terminates every associated descendant, including nested Jobs.
+On Windows, native (non-WSL) provider processes are always placed in a non-breakaway, kill-on-close Job
+Object. The Job launcher watches the runner owner as well as the provider, so runner termination closes
+the Job and the kernel terminates every associated descendant, including nested Jobs. WSL launches use
+their in-distro process-group/PID-namespace boundary instead of a Windows Job.
 
 ## Verification matrix
 

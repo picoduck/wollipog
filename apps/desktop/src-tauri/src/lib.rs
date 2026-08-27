@@ -54,11 +54,13 @@ const OWNERSHIP_NOTIFICATION_REQUEST_MAX_BYTES: usize = 64;
 const OWNERSHIP_NOTIFICATION_RETRY_INTERVAL: Duration = Duration::from_millis(25);
 const OWNERSHIP_NOTIFICATION_IO_TIMEOUT: Duration = Duration::from_millis(500);
 const OWNERSHIP_NOTIFICATION_FOCUS_TIMEOUT: Duration = Duration::from_secs(1);
-// Covers the normal shared 5-second child stop plus the 10-second operation drain and scheduler
+// Covers the normal shared 15-second child stop plus the 10-second operation drain and scheduler
 // margin. A pathological final escalation remains fail-closed: the contender exits after this.
-const OWNERSHIP_NOTIFICATION_TAKEOVER_TIMEOUT: Duration = Duration::from_secs(20);
+const OWNERSHIP_NOTIFICATION_TAKEOVER_TIMEOUT: Duration = Duration::from_secs(30);
 const OWNERSHIP_NOTIFICATION_JOIN_TIMEOUT: Duration = Duration::from_secs(1);
-const OWNED_CHILD_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+// The runner advertises an 11.5-second graceful-stop budget. Leave enough margin for its final
+// descendant-boundary verification before the desktop escalates to SIGKILL.
+const OWNED_CHILD_STOP_TIMEOUT: Duration = Duration::from_secs(15);
 const LOCAL_RUNNER_LEGACY_OWNER_FILE: &str = ".wollipog-runner-owner-v1.json";
 const LOCAL_RUNNER_OWNER_FILE: &str = ".wollipog-runner-owner-v2.json";
 

@@ -17,7 +17,7 @@ import type { AgentContext } from "@wollipog/protocol";
 import { containerLabelArgs } from "./container-identity.js";
 import { sensitiveEnvironmentName } from "./env-security.js";
 import { encodeWindowsJobSpec, WINDOWS_JOB_ENCODED_COMMAND } from "./windows-job.js";
-import { PosixProcessBoundary } from "./posix-process-tree.js";
+import { PosixProcessBoundary, terminatePosixProcessBoundaries } from "./posix-process-tree.js";
 
 const isWindows = process.platform === "win32";
 /** Runner policy switches are daemon input and must never become agent input. */
@@ -97,6 +97,9 @@ export interface SpawnAgentOptions {
   containerAgentLaunch?: boolean;
   /** Cloud equivalent: marks the provider launch whose checked remote command replaces host argv. */
   cloudAgentLaunch?: boolean;
+  /** Stable owner for native POSIX descendants that may intentionally outlive one provider turn.
+   * The boundary is retained after normal provider exit and terminated when that session disposes. */
+  descendantOwner?: object;
 }
 
 export interface BwrapSpawnIsolation {
@@ -449,9 +452,14 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
   }) as AgentProcess;
   child.once("close", () => {
     child.closeObserved = true;
-    if (child.posixBoundary) trackPendingKill(child.posixBoundary.terminate());
+    if (child.posixBoundary) {
+      if (opts.descendantOwner) void child.posixBoundary.releaseIfEmpty();
+      else trackPendingKill(child.posixBoundary.terminate());
+    }
   });
-  if (!isWindows && !wslReap && child.pid) child.posixBoundary = new PosixProcessBoundary(child.pid);
+  if (!isWindows && !wslReap && !remoteBoundary && child.pid) {
+    child.posixBoundary = new PosixProcessBoundary(child.pid, opts.descendantOwner);
+  }
   if (wslReap) child.wslReap = wslReap;
   return child;
 }
@@ -512,7 +520,16 @@ export async function waitForPendingKills(deadlineMs: number): Promise<boolean> 
     ]);
     if (deadline) clearTimeout(deadline);
   }
-  return !incompleteKillObserved;
+  const complete = !incompleteKillObserved;
+  // A drain consumes failures from the work it observed. A historical failure must not make every
+  // later, unrelated session shutdown retain ownership forever.
+  incompleteKillObserved = false;
+  return complete;
+}
+
+/** Register cleanup for descendants retained after a provider's normal per-turn exit. */
+export function terminateDescendantBoundaries(owner?: object): void {
+  for (const work of terminatePosixProcessBoundaries(owner)) trackPendingKill(work);
 }
 
 /** Kill a process and all of its children, cross-platform. */
