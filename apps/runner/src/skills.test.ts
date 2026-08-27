@@ -20,6 +20,7 @@ import type { AgentDefinition, SkillFile, SkillSyncEntry, SkillSyncTarget } from
 import { skillVersionDigest } from "@wollipog/protocol/skills-digest";
 import {
   SKILL_SCAN_LIMITS,
+  linkManifestPath,
   parseSkillFrontmatter,
   reconcileSkills,
   skillsStoreRoot,
@@ -73,7 +74,12 @@ function entry(name: string, targets: SkillSyncTarget[], files = skillFiles(name
 async function reconcile(
   roots: { home: string; dataDir: string },
   desired: SkillSyncEntry[],
-  overrides: { allowRemovals?: boolean; agents?: AgentDefinition[]; platform?: NodeJS.Platform } = {},
+  overrides: {
+    allowRemovals?: boolean;
+    agents?: AgentDefinition[];
+    platform?: NodeJS.Platform;
+    log?: (message: string) => void;
+  } = {},
 ) {
   return reconcileSkills({
     dataDir: roots.dataDir,
@@ -82,6 +88,7 @@ async function reconcile(
     desired,
     allowRemovals: overrides.allowRemovals ?? true,
     ...(overrides.platform ? { platform: overrides.platform } : {}),
+    ...(overrides.log ? { log: overrides.log } : {}),
   });
 }
 
@@ -698,6 +705,211 @@ test("an orphaned harness link behind a removed canonical link is still swept as
     assert.equal(
       readdirSync(join(roots.home, ".claude", "skills")).some((name) => name === "alpha"),
       false,
+    );
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("a user-created symlink to the canonical location survives the sweep and is reported unmanaged", async () => {
+  const roots = makeRoots();
+  try {
+    // A hand-rolled skill lives at the canonical location as a real directory, and the user
+    // hand-linked a harness dir to it — byte-identical in shape to a managed harness link.
+    const canonicalPath = join(roots.home, ".agents", "skills", "mine");
+    mkdirSync(canonicalPath, { recursive: true });
+    writeFileSync(join(canonicalPath, "SKILL.md"), "---\nname: mine\ndescription: Hand-rolled\n---\nBody");
+    const userLink = join(roots.home, ".claude", "skills", "mine");
+    mkdirSync(dirname(userLink), { recursive: true });
+    symlinkSync(canonicalPath, userLink);
+
+    const result = await reconcile(roots, [], { allowRemovals: true });
+
+    // The link the runner never created is left in place and stays functional.
+    assert.equal(lstatSync(userLink).isSymbolicLink(), true);
+    assert.equal(linkTarget(userLink), canonicalPath);
+    assert.equal(realpathSync(userLink), realpathSync(canonicalPath));
+    // Nothing was removed, and the hand-linked skill is visible in the reported state.
+    assert.deepEqual(result.removedLinks, []);
+    assert.ok(result.unmanaged.some((s) => s.agentId === claudeAgent.id && s.name === "mine"));
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("a user-created dangling canonical-shaped link is never swept", async () => {
+  const roots = makeRoots();
+  try {
+    // The canonical target does not exist: the link is dangling, exactly the shape the sweep
+    // uses the canonical-path rule for. Without a manifest record it still is not ours.
+    const userLink = join(roots.home, ".codex", "skills", "mine");
+    mkdirSync(dirname(userLink), { recursive: true });
+    symlinkSync(join(roots.home, ".agents", "skills", "mine"), userLink);
+
+    const result = await reconcile(roots, [], { allowRemovals: true });
+    assert.equal(lstatSync(userLink).isSymbolicLink(), true);
+    assert.deepEqual(result.removedLinks, []);
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("removals of runner-created links are logged and returned in the reconcile result", async () => {
+  const roots = makeRoots();
+  try {
+    const alpha = entry("alpha", [
+      { agentId: claudeAgent.id, invocation: "agent" },
+      { agentId: codexAgent.id, invocation: "agent" },
+    ]);
+    await reconcile(roots, [alpha]);
+    // The manifest records every link the deployment created.
+    const manifest = JSON.parse(readFileSync(linkManifestPath(roots.dataDir), "utf8")) as {
+      links: string[];
+    };
+    assert.deepEqual(
+      new Set(manifest.links),
+      new Set([
+        join(roots.home, ".agents", "skills", "alpha"),
+        join(roots.home, ".claude", "skills", "alpha"),
+        join(roots.home, ".codex", "skills", "alpha"),
+      ]),
+    );
+
+    const logged: string[] = [];
+    const result = await reconcile(roots, [], { allowRemovals: true, log: (m) => logged.push(m) });
+    assert.deepEqual(
+      new Set(result.removedLinks),
+      new Set(["~/.claude/skills/alpha", "~/.codex/skills/alpha", "~/.agents/skills/alpha"]),
+    );
+    for (const shown of result.removedLinks) {
+      assert.ok(
+        logged.some((line) => line.includes("skill link removed") && line.includes(shown)),
+        `expected a removal log line for ${shown}`,
+      );
+    }
+    // The swept links leave the manifest too.
+    const after = JSON.parse(readFileSync(linkManifestPath(roots.dataDir), "utf8")) as {
+      links: string[];
+    };
+    assert.deepEqual(after.links, []);
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("a conflicted canonical path leaves a user-created harness link in place and reports it", async () => {
+  const roots = makeRoots();
+  try {
+    // Foreign real directory at the canonical path, plus a user-made harness link routing
+    // through it. The runner created neither.
+    const canonicalPath = join(roots.home, ".agents", "skills", "alpha");
+    mkdirSync(canonicalPath, { recursive: true });
+    writeFileSync(join(canonicalPath, "marker.txt"), "foreign content");
+    const userLink = join(roots.home, ".claude", "skills", "alpha");
+    mkdirSync(dirname(userLink), { recursive: true });
+    symlinkSync(canonicalPath, userLink);
+
+    const result = await reconcile(roots, [
+      entry("alpha", [{ agentId: claudeAgent.id, invocation: "agent" }]),
+    ]);
+    const state = result.deployed[0]!;
+    assert.match(state.error ?? "", /canonical link:.*unmanaged file or directory/);
+    const link = state.links.find((candidate) => candidate.agentId === claudeAgent.id)!;
+    assert.equal(link.status, "conflict");
+    assert.match(link.detail ?? "", /not created by this runner and was left in place/);
+    // Both user artifacts survive untouched.
+    assert.equal(lstatSync(userLink).isSymbolicLink(), true);
+    assert.equal(readFileSync(join(canonicalPath, "marker.txt"), "utf8"), "foreign content");
+    assert.deepEqual(result.removedLinks, []);
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("a corrupt link manifest fails safe: canonical-routed links are left, never swept", async () => {
+  const roots = makeRoots();
+  try {
+    await reconcile(roots, [entry("alpha", [{ agentId: claudeAgent.id, invocation: "agent" }])]);
+    writeFileSync(linkManifestPath(roots.dataDir), "not json at all");
+
+    const logged: string[] = [];
+    const result = await reconcile(roots, [], { allowRemovals: true, log: (m) => logged.push(m) });
+    assert.ok(logged.some((line) => line.includes("skill link manifest unreadable")));
+    // The canonical link targets the store, so it is provably ours and still swept; the harness
+    // link's only ownership evidence was the manifest, so it is left in place (fail-safe).
+    assert.equal(existsSync(join(roots.home, ".agents", "skills", "alpha")), false);
+    assert.equal(lstatSync(join(roots.home, ".claude", "skills", "alpha")).isSymbolicLink(), true);
+    assert.deepEqual(result.removedLinks, ["~/.agents/skills/alpha"]);
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("a partially malformed manifest is rejected whole, not partially trusted", async () => {
+  const roots = makeRoots();
+  try {
+    // A user hand-link plus a manifest the runner never wrote: one valid-looking absolute path
+    // next to an invalid entry. Partially trusting it would authorize removing the user's link.
+    const userLink = join(roots.home, ".claude", "skills", "mine");
+    mkdirSync(dirname(userLink), { recursive: true });
+    symlinkSync(join(roots.home, ".agents", "skills", "mine"), userLink);
+    mkdirSync(join(roots.dataDir, "skills"), { recursive: true });
+    writeFileSync(
+      linkManifestPath(roots.dataDir),
+      JSON.stringify({ version: 1, links: [userLink, 42] }),
+    );
+
+    const logged: string[] = [];
+    const result = await reconcile(roots, [], { allowRemovals: true, log: (m) => logged.push(m) });
+    assert.ok(logged.some((line) => line.includes("skill link manifest has an unknown shape")));
+    assert.equal(lstatSync(userLink).isSymbolicLink(), true);
+    assert.deepEqual(result.removedLinks, []);
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("a stale manifest entry never transfers to a user link created at the same path later", async () => {
+  const roots = makeRoots();
+  try {
+    const alpha = entry("alpha", [{ agentId: claudeAgent.id, invocation: "agent" }]);
+    await reconcile(roots, [alpha]);
+    const claudeLink = join(roots.home, ".claude", "skills", "alpha");
+    // Simulate a crash after the links vanished but before the manifest was saved: the recorded
+    // paths hold nothing. A no-change pass must still prune and persist the shrunken record.
+    unlinkSync(claudeLink);
+    unlinkSync(join(roots.home, ".agents", "skills", "alpha"));
+    await reconcile(roots, [], { allowRemovals: true });
+    const persisted = JSON.parse(readFileSync(linkManifestPath(roots.dataDir), "utf8")) as {
+      links: string[];
+    };
+    assert.deepEqual(persisted.links, []);
+
+    // A user link created at the previously recorded path must not inherit the stale authority.
+    symlinkSync(join(roots.home, ".agents", "skills", "alpha"), claudeLink);
+    const result = await reconcile(roots, [], { allowRemovals: true });
+    assert.equal(lstatSync(claudeLink).isSymbolicLink(), true);
+    assert.deepEqual(result.removedLinks, []);
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("store gc logs what it removes", async () => {
+  const roots = makeRoots();
+  try {
+    const v1 = entry("alpha", [{ agentId: claudeAgent.id, invocation: "agent" }]);
+    await reconcile(roots, [v1]);
+    const v2 = entry(
+      "alpha",
+      [{ agentId: claudeAgent.id, invocation: "agent" }],
+      skillFiles("alpha", "Do the new thing.\n"),
+    );
+    const logged: string[] = [];
+    await reconcile(roots, [v2], { log: (m) => logged.push(m) });
+    assert.ok(
+      logged.some((line) => line.includes("skill store gc") && line.includes(v1.versionDigest)),
+      "expected a gc log line for the stale version",
     );
   } finally {
     rmSync(roots.root, { recursive: true, force: true });
