@@ -2467,6 +2467,8 @@ export interface SessionNamingHarnessOption {
   agentId: string;
   name: string;
   driver: Extract<AgentDriverKind, "codex" | "codex-app-server" | "claude-code">;
+  /** Safe execution context used to distinguish otherwise identical native and WSL choices. */
+  context?: AgentContext;
   provider: SessionNamingAccountBoundary["provider"];
   billingSource: SessionNamingAccountBoundary["billingSource"];
   models: SessionNamingHarnessModel[];
@@ -2486,6 +2488,10 @@ export interface SessionNamingHarnessTarget {
   agentId: string;
   harnessName: string;
   driver: SessionNamingHarnessOption["driver"];
+  context?: AgentContext;
+  /** Absent only for an existing target that has not yet confirmed its account boundary. */
+  provider?: SessionNamingAccountBoundary["provider"];
+  billingSource?: SessionNamingAccountBoundary["billingSource"];
   model: string;
   modelName: string;
   effort: string;

@@ -133,6 +133,8 @@ import {
   type SessionEventPayload,
   type SessionSnapshot,
   type SessionStatus,
+  type SessionNamingAccountBoundary,
+  type SessionNamingHarnessOption,
   type SessionReminderView,
   type SessionReminderWakePolicy,
   type SessionReminderWakeReason,
@@ -1682,6 +1684,10 @@ CREATE TABLE IF NOT EXISTS session_naming_harness_targets (
   runner_id       TEXT NOT NULL,
   agent_id        TEXT NOT NULL,
   driver          TEXT NOT NULL CHECK (driver IN ('codex','codex-app-server','claude-code')),
+  context_kind    TEXT CHECK (context_kind IN ('native','wsl')),
+  context_distro  TEXT,
+  provider        TEXT CHECK (provider IN ('codex','claude')),
+  billing_source  TEXT CHECK (billing_source IN ('subscription','api','bedrock','vertex','gateway','provider_account','unknown')),
   model           TEXT NOT NULL,
   effort          TEXT NOT NULL,
   updated_at      INTEGER NOT NULL,
@@ -2998,6 +3004,23 @@ export interface CreateTranscriptShareRecordInput {
   expiresAt: number;
 }
 
+export interface SessionNamingHarnessTargetRecord {
+  runnerId: string;
+  agentId: string;
+  driver: SessionNamingHarnessOption["driver"];
+  context?: AgentContext;
+  provider?: SessionNamingAccountBoundary["provider"];
+  billingSource?: SessionNamingAccountBoundary["billingSource"];
+  model: string;
+  effort: string;
+  updatedAt: number;
+}
+
+type SessionNamingHarnessTargetWrite = Omit<SessionNamingHarnessTargetRecord, "updatedAt">;
+type ConfirmedSessionNamingHarnessTargetWrite = SessionNamingHarnessTargetWrite & Required<
+  Pick<SessionNamingHarnessTargetWrite, "context" | "provider" | "billingSource">
+>;
+
 export class ControlPlaneDb {
   private constructor(
     private readonly db: DatabaseSync,
@@ -3070,6 +3093,18 @@ export class ControlPlaneDb {
         throw error;
       } finally {
         db.exec("PRAGMA foreign_keys = ON;");
+      }
+    }
+    for (const column of [
+      "context_kind TEXT CHECK (context_kind IN ('native','wsl'))",
+      "context_distro TEXT",
+      "provider TEXT CHECK (provider IN ('codex','claude'))",
+      "billing_source TEXT CHECK (billing_source IN ('subscription','api','bedrock','vertex','gateway','provider_account','unknown'))",
+    ]) {
+      try {
+        db.exec(`ALTER TABLE session_naming_harness_targets ADD COLUMN ${column}`);
+      } catch {
+        /* column already present */
       }
     }
     db.prepare("INSERT OR IGNORE INTO background_push_receipt_secret (id, secret) VALUES (1, ?)")
@@ -6378,21 +6413,19 @@ export class ControlPlaneDb {
     ).run(organizationId, mode, now);
   }
 
-  getSessionNamingHarnessTarget(organizationId: string): {
-    runnerId: string;
-    agentId: string;
-    driver: "codex" | "codex-app-server" | "claude-code";
-    model: string;
-    effort: string;
-    updatedAt: number;
-  } | null {
+  getSessionNamingHarnessTarget(organizationId: string): SessionNamingHarnessTargetRecord | null {
     const row = this.stmt(
-      `SELECT runner_id, agent_id, driver, model, effort, updated_at
+      `SELECT runner_id, agent_id, driver, context_kind, context_distro, provider, billing_source,
+              model, effort, updated_at
        FROM session_naming_harness_targets WHERE organization_id=?`,
     ).get(organizationId) as {
       runner_id: string;
       agent_id: string;
-      driver: "codex" | "codex-app-server" | "claude-code";
+      driver: SessionNamingHarnessOption["driver"];
+      context_kind: "native" | "wsl" | null;
+      context_distro: string | null;
+      provider: SessionNamingAccountBoundary["provider"] | null;
+      billing_source: SessionNamingAccountBoundary["billingSource"] | null;
       model: string;
       effort: string;
       updated_at: number;
@@ -6401,6 +6434,13 @@ export class ControlPlaneDb {
       runnerId: row.runner_id,
       agentId: row.agent_id,
       driver: row.driver,
+      ...(row.context_kind === "native"
+        ? { context: { kind: "native" as const } }
+        : row.context_kind === "wsl" && row.context_distro
+          ? { context: { kind: "wsl" as const, distro: row.context_distro } }
+          : {}),
+      ...(row.provider ? { provider: row.provider } : {}),
+      ...(row.billing_source ? { billingSource: row.billing_source } : {}),
       model: row.model,
       effort: row.effort,
       updatedAt: row.updated_at,
@@ -6408,36 +6448,66 @@ export class ControlPlaneDb {
   }
 
   private clearSessionNamingHarnessTargetsForRunner(runnerId: string, now: number): void {
-    this.stmt(
-      `UPDATE session_naming_preferences
-       SET mode='prompt_text_only', updated_at=?
-       WHERE mode='session_agent_account'
-         AND organization_id IN (
-           SELECT organization_id FROM session_naming_harness_targets WHERE runner_id=?
-         )`,
-    ).run(now, runnerId);
-    this.stmt("DELETE FROM session_naming_harness_targets WHERE runner_id=?").run(runnerId);
+    this.atomic(() => {
+      this.stmt(
+        `UPDATE session_naming_preferences
+         SET mode='prompt_text_only', updated_at=?
+         WHERE mode='session_agent_account'
+           AND organization_id IN (
+             SELECT organization_id FROM session_naming_harness_targets WHERE runner_id=?
+           )`,
+      ).run(now, runnerId);
+      this.stmt("DELETE FROM session_naming_harness_targets WHERE runner_id=?").run(runnerId);
+    });
   }
 
   setSessionNamingHarnessTarget(
     organizationId: string,
-    target: {
-      runnerId: string;
-      agentId: string;
-      driver: "codex" | "codex-app-server" | "claude-code";
-      model: string;
-      effort: string;
-    },
+    target: SessionNamingHarnessTargetWrite,
     now: number,
   ): void {
+    if (target.context?.kind === "wsl" && (
+      !target.context.distro || target.context.distro !== target.context.distro.trim() ||
+      target.context.distro.length > 256 || /[\p{Cc}\p{Cf}]/u.test(target.context.distro)
+    )) throw new Error("a valid WSL distribution is required");
     this.stmt(
       `INSERT INTO session_naming_harness_targets
-         (organization_id, runner_id, agent_id, driver, model, effort, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+         (organization_id, runner_id, agent_id, driver, context_kind, context_distro,
+          provider, billing_source, model, effort, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(organization_id) DO UPDATE SET
          runner_id=excluded.runner_id, agent_id=excluded.agent_id, driver=excluded.driver,
+         context_kind=excluded.context_kind, context_distro=excluded.context_distro,
+         provider=excluded.provider, billing_source=excluded.billing_source,
          model=excluded.model, effort=excluded.effort, updated_at=excluded.updated_at`,
-    ).run(organizationId, target.runnerId, target.agentId, target.driver, target.model, target.effort, now);
+    ).run(
+      organizationId,
+      target.runnerId,
+      target.agentId,
+      target.driver,
+      target.context?.kind ?? null,
+      target.context?.kind === "wsl" ? target.context.distro : null,
+      target.provider ?? null,
+      target.billingSource ?? null,
+      target.model,
+      target.effort,
+      now,
+    );
+  }
+
+  configureSessionNamingHarnessTarget(
+    organizationId: string,
+    target: ConfirmedSessionNamingHarnessTargetWrite,
+    now: number,
+  ): number {
+    return this.atomic(() => {
+      const previousTarget = this.getSessionNamingHarnessTarget(organizationId)?.updatedAt ?? 0;
+      const previousPreference = this.getSessionNamingPreference(organizationId)?.updatedAt ?? 0;
+      const revision = Math.max(now, previousTarget + 1, previousPreference + 1);
+      this.setSessionNamingHarnessTarget(organizationId, target, revision);
+      this.setSessionNamingPreference(organizationId, "session_agent_account", revision);
+      return revision;
+    });
   }
 
   getSessionNamingCustomModel(organizationId: string): {

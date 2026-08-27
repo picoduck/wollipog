@@ -299,11 +299,89 @@ test("runner-account mode is capability-gated, reports only billing boundaries, 
   assert.equal(unsupportedClaude.modes.session_agent_account.available, false);
 });
 
+test("harness labels stay concise alone and distinguish native and multiple WSL contexts on collision", () => {
+  const codex = (
+    id: string,
+    context: { kind: "native" } | { kind: "wsl"; distro: string },
+  ): RunnerView["agents"][number] => ({
+    id,
+    name: context.kind === "wsl" ? `Codex (WSL: ${context.distro})` : "Codex",
+    command: "codex",
+    args: [],
+    env: {},
+    driver: "codex-app-server",
+    context,
+    source: "discovered",
+    available: true,
+    authStatus: "authenticated",
+    codexBillingSource: "provider_account",
+    codexAppServer: { status: "supported", appServerAvailable: true, sessionNaming: true },
+    capabilities: {
+      models: [{ id: "luna", displayName: "Luna", efforts: ["low"] }],
+      effortLevels: ["low"],
+      slashCommands: [],
+      supportsImages: false,
+      supportsApprovals: true,
+    },
+  });
+  let agents = [codex("codex-native", { kind: "native" })];
+  const runner = (): RunnerView => ({
+    runnerId: "runner-contexts",
+    displayName: "Context Machine",
+    hostname: "context-host",
+    os: "windows",
+    version: "test",
+    status: "online",
+    connectedAt: 1,
+    lastSeen: 1,
+    protocolVersion: 95,
+    workspaces: [],
+    agents,
+  });
+  const db = {
+    sessionScope: () => ({ organizationId: "org_personal" }),
+    runnerScope: () => ({ organizationId: "org_personal" }),
+    listRunners: () => [runner()],
+    getRunner: () => runner(),
+    getSessionNamingPreference: () => null,
+    getSessionNamingHarnessTarget: () => null,
+    getSessionNamingCustomModel: () => null,
+  } as unknown as ControlPlaneDb;
+  const hub = { requestFromRunner: async () => { throw new Error("not called"); } } as unknown as Pick<Hub, "requestFromRunner">;
+  const settings = new SessionNamingSettings(db, {}, hub);
+
+  assert.deepEqual(settings.view("org_personal", true).harnessMachines?.[0]?.harnesses.map((item) => item.name),
+    ["Codex App Server"], "a native-only choice stays concise");
+  agents = [codex("codex-wsl-Ubuntu", { kind: "wsl", distro: "Ubuntu" })];
+  assert.deepEqual(settings.view("org_personal", true).harnessMachines?.[0]?.harnesses.map((item) => item.name),
+    ["Codex App Server"], "a WSL-only choice stays concise");
+  agents = [
+    codex("codex-native", { kind: "native" }),
+    codex("codex-wsl-Debian", { kind: "wsl", distro: "Debian" }),
+    codex("codex-wsl-Ubuntu", { kind: "wsl", distro: "Ubuntu" }),
+  ];
+  assert.deepEqual(settings.view("org_personal", true).harnessMachines?.[0]?.harnesses.map((item) => item.name), [
+    "Codex App Server (Native)",
+    "Codex App Server (WSL: Debian)",
+    "Codex App Server (WSL: Ubuntu)",
+  ]);
+  agents = [
+    codex("codex-wsl-control", { kind: "wsl", distro: "Ubuntu\ninvalid" }),
+    codex("codex-wsl-whitespace", { kind: "wsl", distro: "   " }),
+    codex("codex-wsl-bidi", { kind: "wsl", distro: "\u202Elatest" }),
+  ];
+  assert.deepEqual(settings.view("org_personal", true).harnessMachines ?? [], [],
+    "an invalid advertised WSL context is not selectable");
+});
+
 test("explicit harness naming persists capability-backed identifiers, executes on that runner, and fails closed on drift", async () => {
   type Target = {
     runnerId: string;
     agentId: string;
     driver: "codex-app-server";
+    context?: { kind: "native" } | { kind: "wsl"; distro: string };
+    provider?: "codex" | "claude";
+    billingSource?: "provider_account" | "api" | "unknown";
     model: string;
     effort: string;
     updatedAt: number;
@@ -311,6 +389,10 @@ test("explicit harness naming persists capability-backed identifiers, executes o
   let target: Target | null = null;
   let preference: { mode: "session_agent_account"; updatedAt: number } | null = null;
   let efforts = ["low", "medium"];
+  let advertisedBillingSource: "provider_account" | "api" | "unknown" = "provider_account";
+  let resultBillingSource: "provider_account" | "api" | "unknown" = "provider_account";
+  let resultProvider: "codex" | "claude" = "codex";
+  let advertisedContext: { kind: "native" } | { kind: "wsl"; distro: string } = { kind: "native" };
   let runnerOrganizationId = "org_personal";
   const runner = (): RunnerView => ({
     runnerId: "runner-naming",
@@ -330,6 +412,27 @@ test("explicit harness naming persists capability-backed identifiers, executes o
       args: [],
       env: {},
       driver: "codex-app-server",
+      context: advertisedContext,
+      source: "discovered",
+      available: true,
+      authStatus: "authenticated",
+      codexBillingSource: advertisedBillingSource,
+      codexAppServer: { status: "supported", appServerAvailable: true, sessionNaming: true },
+      capabilities: {
+        models: [{ id: "luna", displayName: "Luna", efforts }],
+        effortLevels: efforts,
+        slashCommands: [],
+        supportsImages: false,
+        supportsApprovals: true,
+      },
+    }, {
+      id: "codex-app-server-wsl-Ubuntu",
+      name: "Codex (WSL: Ubuntu)",
+      command: "codex",
+      args: [],
+      env: {},
+      driver: "codex-app-server",
+      context: { kind: "wsl", distro: "Ubuntu" },
       source: "discovered",
       available: true,
       authStatus: "authenticated",
@@ -370,12 +473,15 @@ test("explicit harness naming persists capability-backed identifiers, executes o
     getRunner: () => runner(),
     getSession: () => ({ id: "session-other", runnerId: "runner-other", agentId: "claude-code", driver: "claude-code" }),
     getSessionNamingPreference: () => preference,
-    setSessionNamingPreference: (_organizationId: string, mode: "session_agent_account", updatedAt: number) => {
-      preference = { mode, updatedAt };
-    },
     getSessionNamingHarnessTarget: () => target,
-    setSessionNamingHarnessTarget: (_organizationId: string, value: Omit<Target, "updatedAt">, updatedAt: number) => {
+    configureSessionNamingHarnessTarget: (
+      _organizationId: string,
+      value: Omit<Target, "updatedAt">,
+      updatedAt: number,
+    ) => {
       target = { ...value, updatedAt };
+      preference = { mode: "session_agent_account", updatedAt };
+      return updatedAt;
     },
     getSessionNamingCustomModel: () => null,
   } as unknown as ControlPlaneDb;
@@ -388,8 +494,8 @@ test("explicit harness naming persists capability-backed identifiers, executes o
         requestId: "request",
         ok: true,
         title: "Explicit Harness Naming",
-        provider: "codex" as const,
-        billingSource: "provider_account" as const,
+        provider: resultProvider,
+        billingSource: resultBillingSource,
       };
     },
   } as unknown as Pick<Hub, "requestFromRunner">;
@@ -413,18 +519,37 @@ test("explicit harness naming persists capability-backed identifiers, executes o
   });
   assert.equal(saved.statusCode, 200);
   assert.deepEqual(target && {
-    runnerId: target.runnerId, agentId: target.agentId, driver: target.driver, model: target.model, effort: target.effort,
-  }, { runnerId: "runner-naming", agentId: "codex-app-server", driver: "codex-app-server", model: "luna", effort: "low" });
+    runnerId: target.runnerId, agentId: target.agentId, driver: target.driver, context: target.context,
+    provider: target.provider, billingSource: target.billingSource, model: target.model, effort: target.effort,
+  }, {
+    runnerId: "runner-naming", agentId: "codex-app-server", driver: "codex-app-server",
+    context: { kind: "native" }, provider: "codex", billingSource: "provider_account", model: "luna", effort: "low",
+  });
   assert.deepEqual(saved.json().harnessMachines[0].harnesses[0].models, [{ id: "luna", displayName: "Luna", efforts: ["low", "medium"] }]);
   assert.deepEqual({
     provider: saved.json().harnessMachines[0].harnesses[0].provider,
     billingSource: saved.json().harnessMachines[0].harnesses[0].billingSource,
   }, { provider: "codex", billingSource: "provider_account" });
-  assert.equal(saved.json().harnessMachines[0].harnesses[0].name, "Codex App Server");
-  assert.equal(saved.json().harnessTarget.harnessName, "Codex App Server");
+  assert.equal(saved.json().harnessMachines[0].harnesses[0].name, "Codex App Server (Native)");
+  assert.deepEqual(saved.json().harnessMachines[0].harnesses[0].context, { kind: "native" });
+  assert.equal(saved.json().harnessTarget.harnessName, "Codex App Server (Native)");
+  assert.deepEqual(saved.json().harnessTarget.context, { kind: "native" });
+  assert.equal(saved.json().harnessTarget.provider, "codex");
+  assert.equal(saved.json().harnessTarget.billingSource, "provider_account");
   assert.deepEqual(saved.json().harnessMachines[0].harnesses.map((candidate: { name: string }) => candidate.name),
-    ["Codex App Server", "Team API Naming"], "custom harness names remain distinguishable");
+    ["Codex App Server (Native)", "Codex App Server (WSL: Ubuntu)", "Team API Naming"],
+    "native, WSL, and custom harnesses remain distinguishable");
   assert.equal(saved.json().harnessTarget.available, true);
+
+  const confirmedTarget = target;
+  if (target) {
+    const { provider: _provider, billingSource: _billingSource, ...legacyTarget } = target;
+    target = legacyTarget;
+  }
+  const migrated = settings.view("org_personal", true);
+  assert.equal(migrated.effectiveMode, "prompt_text_only");
+  assert.match(migrated.harnessTarget?.reason ?? "", /confirm its provider and billing source/);
+  target = confirmedTarget;
 
   assert.equal(await settings.generator({
     sessionId: "session-other",
@@ -439,6 +564,50 @@ test("explicit harness naming persists capability-backed identifiers, executes o
     });
   }
 
+  resultBillingSource = "api";
+  await assert.rejects(settings.generator({
+    sessionId: "session-other",
+    messages: [{ role: "user", text: "Name this" }],
+    signal: new AbortController().signal,
+  }), /account boundary changed/);
+  resultBillingSource = "provider_account";
+
+  advertisedBillingSource = "api";
+  const billingDrift = settings.view("org_personal", true);
+  assert.equal(billingDrift.effectiveMode, "prompt_text_only");
+  assert.equal(billingDrift.harnessTarget?.available, false);
+  assert.match(billingDrift.harnessTarget?.reason ?? "", /billing source changed from Provider Account to API/);
+  const requestsBeforeDriftedGeneration = sent.length;
+  await assert.rejects(settings.generator({
+    sessionId: "session-other",
+    messages: [{ role: "user", text: "Name this" }],
+    signal: new AbortController().signal,
+  }), /disabled or not configured/);
+  assert.equal(sent.length, requestsBeforeDriftedGeneration, "advertised boundary drift fails before runner invocation");
+  advertisedBillingSource = "unknown";
+  assert.match(settings.view("org_personal", true).harnessTarget?.reason ?? "", /Provider Account to Unknown/);
+  advertisedBillingSource = "provider_account";
+
+  resultProvider = "claude";
+  await assert.rejects(settings.generator({
+    sessionId: "session-other",
+    messages: [{ role: "user", text: "Name this" }],
+    signal: new AbortController().signal,
+  }), /account boundary changed/);
+  resultProvider = "codex";
+
+  if (target) target = { ...target, provider: "claude" };
+  const providerDrift = settings.view("org_personal", true);
+  assert.equal(providerDrift.harnessTarget?.available, false);
+  assert.match(providerDrift.harnessTarget?.reason ?? "", /different provider/);
+  if (target) target = { ...target, provider: "codex" };
+
+  advertisedContext = { kind: "wsl", distro: "Debian" };
+  const contextDrift = settings.view("org_personal", true);
+  assert.equal(contextDrift.harnessTarget?.available, false);
+  assert.match(contextDrift.harnessTarget?.reason ?? "", /execution context changed/);
+  advertisedContext = { kind: "native" };
+
   efforts = ["medium"];
   const drifted = settings.view("org_personal", true);
   assert.equal(drifted.effectiveMode, "prompt_text_only");
@@ -452,7 +621,7 @@ test("explicit harness naming persists capability-backed identifiers, executes o
   assert.equal(reassigned.harnessTarget?.available, false);
   assert.match(reassigned.harnessTarget?.reason ?? "", /no longer available/);
   assert.equal(reassigned.harnessTarget?.machineName, "runner-naming");
-  assert.equal(reassigned.harnessTarget?.harnessName, "codex-app-server");
+  assert.equal(reassigned.harnessTarget?.harnessName, "Codex App Server (Native) · codex-app-server");
   assert.equal(reassigned.harnessTarget?.modelName, "luna");
   assert.equal(JSON.stringify(reassigned).includes("Naming Machine"), false,
     "a Machine reassigned outside the organization cannot leak its current display metadata");
@@ -502,6 +671,109 @@ test("session naming preference migration preserves legacy choices and admits ru
     db.close();
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("legacy explicit targets migrate unconfirmed and can be atomically confirmed", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-session-naming-target-migration-"));
+  const path = join(root, "control-plane.sqlite");
+  let db: ControlPlaneDb | undefined;
+  try {
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`
+      CREATE TABLE session_naming_harness_targets (
+        organization_id TEXT PRIMARY KEY,
+        runner_id TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        driver TEXT NOT NULL,
+        model TEXT NOT NULL,
+        effort TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      INSERT INTO session_naming_harness_targets VALUES
+        ('org_personal', 'runner-one', 'codex-app-server', 'codex-app-server', 'luna', 'low', 7);
+    `);
+    legacy.close();
+
+    db = ControlPlaneDb.open(path);
+    assert.deepEqual(db.getSessionNamingHarnessTarget("org_personal"), {
+      runnerId: "runner-one",
+      agentId: "codex-app-server",
+      driver: "codex-app-server",
+      model: "luna",
+      effort: "low",
+      updatedAt: 7,
+    }, "an upgraded target has no silently inferred context or account boundary");
+
+    const revision = db.configureSessionNamingHarnessTarget("org_personal", {
+      runnerId: "runner-one",
+      agentId: "codex-app-server",
+      driver: "codex-app-server",
+      context: { kind: "wsl", distro: "Ubuntu" },
+      provider: "codex",
+      billingSource: "subscription",
+      model: "luna",
+      effort: "low",
+    }, 8);
+    assert.equal(revision, 8);
+    assert.deepEqual(db.getSessionNamingHarnessTarget("org_personal"), {
+      runnerId: "runner-one",
+      agentId: "codex-app-server",
+      driver: "codex-app-server",
+      context: { kind: "wsl", distro: "Ubuntu" },
+      provider: "codex",
+      billingSource: "subscription",
+      model: "luna",
+      effort: "low",
+      updatedAt: 8,
+    });
+    assert.deepEqual(db.getSessionNamingPreference("org_personal"), {
+      mode: "session_agent_account",
+      updatedAt: 8,
+    });
+  } finally {
+    db?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("explicit target and active mode roll back together when the second write fails", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    db.configureSessionNamingHarnessTarget("org_personal", {
+      runnerId: "runner-one",
+      agentId: "codex-app-server",
+      driver: "codex-app-server",
+      context: { kind: "native" },
+      provider: "codex",
+      billingSource: "provider_account",
+      model: "luna",
+      effort: "low",
+    }, 10);
+    const originalTarget = db.getSessionNamingHarnessTarget("org_personal");
+    const originalPreference = db.getSessionNamingPreference("org_personal");
+    db.raw().exec(`
+      CREATE TRIGGER reject_session_naming_preference_update
+      BEFORE UPDATE ON session_naming_preferences
+      BEGIN
+        SELECT RAISE(ABORT, 'forced preference failure');
+      END;
+    `);
+
+    assert.throws(() => db.configureSessionNamingHarnessTarget("org_personal", {
+      runnerId: "runner-two",
+      agentId: "claude-code",
+      driver: "claude-code",
+      context: { kind: "wsl", distro: "Debian" },
+      provider: "claude",
+      billingSource: "subscription",
+      model: "sonnet",
+      effort: "high",
+    }, 11), /forced preference failure/);
+    assert.deepEqual(db.getSessionNamingHarnessTarget("org_personal"), originalTarget);
+    assert.deepEqual(db.getSessionNamingPreference("org_personal"), originalPreference);
+  } finally {
+    db.close();
   }
 });
 
