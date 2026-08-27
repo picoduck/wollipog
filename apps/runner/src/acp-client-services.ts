@@ -13,7 +13,13 @@ import type {
 import type { AgentContext } from "@wollipog/protocol";
 import { runContextCommand } from "./context-command.js";
 import { sensitiveEnvironmentName } from "./env-security.js";
-import { killTree, spawnAgent, type AgentProcess, type SpawnIsolation } from "./spawn.js";
+import {
+  killTree,
+  spawnAgent,
+  terminateDescendantBoundaries,
+  type AgentProcess,
+  type SpawnIsolation,
+} from "./spawn.js";
 
 export const ACP_FILE_BYTE_LIMIT = 8 * 1024 * 1024;
 export const ACP_TERMINAL_DEFAULT_OUTPUT_LIMIT = 1024 * 1024;
@@ -250,6 +256,7 @@ function wslPathGuardScript(operation: "read" | "write" | "directory"): string {
 
 interface LiveTerminal {
   sessionId: string;
+  descendantOwner: object;
   child: AgentProcess;
   output: string;
   outputBytes: number;
@@ -301,6 +308,7 @@ export class AcpTerminalService {
         throw new Error("ACP terminal arguments cannot contain newlines for Windows command shims");
       }
       const outputLimit = normalizeOutputLimit(params.outputByteLimit);
+      const descendantOwner = {};
       const child = spawnAgent({
         command: launch.command,
         args,
@@ -310,11 +318,12 @@ export class AcpTerminalService {
         scrubInheritedEnv: sensitiveInheritedEnvironment(),
         windowsShell: launch.windowsShell,
         isolation: this.isolation,
+        descendantOwner,
       });
       let settle!: () => void;
       const wait = new Promise<void>((resolve) => { settle = resolve; });
       const live: LiveTerminal = {
-        sessionId, child, output: "", outputBytes: 0, outputCursor: 0,
+        sessionId, descendantOwner, child, output: "", outputBytes: 0, outputCursor: 0,
         outputLimit, truncated: false, exited: false, closed: false,
         exitCode: null, signal: null, wait, settle,
       };
@@ -375,6 +384,7 @@ export class AcpTerminalService {
     const terminal = this.get(sessionId, terminalId);
     this.terminals.delete(terminalId);
     if (!terminal.closed) killTree(terminal.child);
+    else terminateDescendantBoundaries(terminal.descendantOwner);
   }
 
   releaseSession(sessionId: string): void {
@@ -386,7 +396,10 @@ export class AcpTerminalService {
 
   dispose(): void {
     this.disposed = true;
-    for (const terminal of this.terminals.values()) if (!terminal.closed) killTree(terminal.child);
+    for (const terminal of this.terminals.values()) {
+      if (!terminal.closed) killTree(terminal.child);
+      else terminateDescendantBoundaries(terminal.descendantOwner);
+    }
     this.terminals.clear();
     this.pendingBySession.clear();
     this.sessionEpoch.clear();

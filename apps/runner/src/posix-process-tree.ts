@@ -286,12 +286,19 @@ export class PosixProcessBoundary {
    * Once every owned branch is stopped, the boundary cannot fork while signals are delivered. */
   terminate(): Promise<boolean> {
     if (this.terminating) return this.terminating;
-    this.terminating = (async () => {
+    const work = (async () => {
       if (this.releaseCheck) await this.releaseCheck;
       if (this.released) return true;
       return this.terminateOnce();
-    })().finally(() => {
-      boundaries.delete(this);
+    })();
+    this.terminating = work.then((complete) => {
+      if (complete) boundaries.delete(this);
+      else this.terminating = undefined;
+      return complete;
+    }, (error) => {
+      this.terminating = undefined;
+      throw error;
+    }).finally(() => {
       stopMonitorIfIdle();
     });
     return this.terminating;
@@ -351,7 +358,19 @@ export class PosixProcessBoundary {
         console.error(`[runner] could not verify provider descendant cleanup for pid ${this.rootPid}: ${(error as Error).message}`);
         return false;
       }
-      if (!liveOwned(this.owned, table).length) return true;
+      if (!liveOwned(this.owned, table).length) {
+        // A TERM handler can fork an immediately reparented setsid helper after SIGCONT. Parent
+        // links cannot recover it once the handler exits, so success requires one exact-marker scan.
+        try {
+          table = await this.refreshFresh();
+        } catch (error) {
+          console.error(`[runner] could not verify marked provider descendants for pid ${this.rootPid}: ${(error as Error).message}`);
+          return false;
+        }
+        const rediscovered = liveOwned(this.owned, table);
+        if (!rediscovered.length) return true;
+        for (const process of rediscovered) signalIdentity(process, table, "SIGTERM");
+      }
     }
 
     for (const process of liveOwned(this.owned, table)) signalIdentity(process, table, "SIGKILL");
@@ -365,7 +384,17 @@ export class PosixProcessBoundary {
         console.error(`[runner] could not verify forced provider descendant cleanup for pid ${this.rootPid}: ${(error as Error).message}`);
         return false;
       }
-      if (!liveOwned(this.owned, table).length) return true;
+      if (!liveOwned(this.owned, table).length) {
+        try {
+          table = await this.refreshFresh();
+        } catch (error) {
+          console.error(`[runner] could not verify forced marked-provider cleanup for pid ${this.rootPid}: ${(error as Error).message}`);
+          return false;
+        }
+        const rediscovered = liveOwned(this.owned, table);
+        if (!rediscovered.length) return true;
+        for (const process of rediscovered) signalIdentity(process, table, "SIGKILL");
+      }
     }
 
     const survivors = liveOwned(this.owned, table).map((process) => process.pid);

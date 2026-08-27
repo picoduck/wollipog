@@ -694,6 +694,64 @@ test("session disposal reaps a grandchild that creates a new POSIX session and i
   }
 });
 
+test("termination rescans the exact marker for a helper forked by a SIGTERM handler", {
+  skip: process.platform === "win32",
+  timeout: 15_000,
+}, async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "wollipog-term-handler-escape-"));
+  const ready = path.join(dir, "ready.json");
+  const providerReady = path.join(dir, "provider-ready");
+  const helperScript = path.join(dir, "helper.cjs");
+  const providerScript = path.join(dir, "provider.cjs");
+  let helperPid: number | undefined;
+  t.after(async () => {
+    if (helperPid) {
+      try { process.kill(helperPid, "SIGKILL"); } catch { /* already reaped */ }
+    }
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+  await fs.writeFile(helperScript, [
+    'const fs = require("node:fs");',
+    `fs.writeFileSync(${JSON.stringify(ready)}, JSON.stringify({ pid: process.pid }));`,
+    "setInterval(() => {}, 1000);",
+  ].join("\n"), "utf8");
+  await fs.writeFile(providerScript, [
+    'const { spawn } = require("node:child_process");',
+    'const fs = require("node:fs");',
+    "let stopping = false;",
+    'process.on("SIGTERM", () => {',
+    "  if (stopping) return;",
+    "  stopping = true;",
+    `  spawn(process.execPath, [${JSON.stringify(helperScript)}], { detached: true, stdio: "ignore" }).unref();`,
+    "  process.exit(0);",
+    "});",
+    `fs.writeFileSync(${JSON.stringify(providerReady)}, "ready");`,
+    "setInterval(() => {}, 1000);",
+  ].join("\n"), "utf8");
+
+  const child = spawnAgent({
+    command: process.execPath,
+    args: [providerScript],
+    cwd: dir,
+    windowsShell: false,
+    descendantOwner: {},
+  });
+  child.stdin.end();
+  for (let attempt = 0; attempt < 100; attempt++) {
+    try { await fs.access(providerReady); break; }
+    catch { await new Promise((resolve) => setTimeout(resolve, 25)); }
+  }
+  await fs.access(providerReady);
+  killTree(child);
+  for (let attempt = 0; attempt < 100 && !helperPid; attempt++) {
+    try { helperPid = (JSON.parse(await fs.readFile(ready, "utf8")) as { pid: number }).pid; }
+    catch { await new Promise((resolve) => setTimeout(resolve, 25)); }
+  }
+  assert.ok(helperPid, "SIGTERM handler forked its detached helper");
+  assert.equal(await waitForPendingKills(8_000), true);
+  assert.throws(() => process.kill(helperPid!, 0), /ESRCH/, "final marker rescan reaps the helper");
+});
+
 test("buildWslArgs scrubs names in-distro and never places agent env values in argv", () => {
   const args = buildWslArgs("Ubuntu", "/home/me/repo", "/tmp/x.pgid", {
     command: "claude",
