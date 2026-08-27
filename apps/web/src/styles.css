@@ -9925,8 +9925,8 @@ body.shell-dock-dragging * {
     }
   }
 
-  /* 50px of controls below the top safe-area inset (notch / Dynamic Island). Anything that
-     anchors to the topbar's bottom edge must use the same calc (see .right-panel below). */
+  /* Controls sit below the top safe-area inset (notch / Dynamic Island): 50px by default and
+     40px on Session routes. Each right-panel anchor below must mirror its corresponding calc. */
   .topbar {
     height: calc(50px + env(safe-area-inset-top, 0px));
     padding: env(safe-area-inset-top, 0px) calc(10px + env(safe-area-inset-right, 0px)) 0

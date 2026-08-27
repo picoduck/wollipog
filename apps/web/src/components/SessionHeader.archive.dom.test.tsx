@@ -97,6 +97,10 @@ test("Unarchive on an archived Stop Failed session cancels the archive follow-up
 
   assert.match(container.textContent ?? "", /Disconnected/);
   assert.match(container.textContent ?? "", /Changes Present/);
+  const shareIcon = button(container, "Share").querySelector("svg");
+  assert.ok(shareIcon, "the Share action uses the shared icon");
+  assert.equal(shareIcon.getAttribute("width"), "16",
+    "the Share icon keeps its desktop size while phone CSS owns mobile compaction");
   const moreActions = button(container, "More Actions");
   assert.ok(moreActions.classList.contains("session-header-action"), "the trigger carries the fixed-geometry class");
   const moreIcon = moreActions.querySelector("svg");
