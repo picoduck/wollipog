@@ -10115,11 +10115,13 @@ body.shell-dock-dragging * {
   .session-detail > .detail-head {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-rows: minmax(36px, auto) auto;
+    grid-template-rows: minmax(36px, auto);
+    min-height: 44px;
     column-gap: 7px;
-    row-gap: 4px;
+    row-gap: 0;
     padding: 4px var(--space-3);
   }
+  .session-detail > .detail-head:has(> .session-header-note) { row-gap: 4px; }
   .session-detail > .detail-head > .session-header-statuses {
     /* Span the shared status row so flattened change badges can wrap independently, while
        reserving two compact action targets plus the gaps between buttons and columns. */
@@ -10166,6 +10168,9 @@ body.shell-dock-dragging * {
      inactive, so the reader never changes dimensions and no empty band is reserved. */
   .session-detail .transcript-recovery-slot { display: none; }
   .session-detail .transcript-recovery-strip-echo { display: inline-flex; }
+  .session-detail .transcript-status-context:has(> .transcript-recovery-strip-echo.active) > .context-meter {
+    display: none;
+  }
 
   /* The floating pinned summary would cover the whole transcript — make it a normal block
      above the scroll area (it is already the first child of .detail-reader). */

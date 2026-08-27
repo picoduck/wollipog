@@ -158,6 +158,23 @@ test("review-ready and uncommitted badges wrap together at narrow widths", () =>
       .get("grid-column"),
     ["1 / -1"],
   );
+  assert.deepEqual(
+    phoneRule.declarationsForSelector(".session-detail > .detail-head").get("min-height"),
+    ["44px"],
+    "the compact status/action row must override the desktop 52px floor",
+  );
+  assert.deepEqual(
+    phoneRule.declarationsForSelector(".session-detail > .detail-head").get("row-gap"),
+    ["0"],
+    "an absent transient note must not leave an empty second-row gap",
+  );
+  assert.deepEqual(
+    phoneRule.declarationsForSelector(
+      ".session-detail > .detail-head:has(> .session-header-note)",
+    ).get("row-gap"),
+    ["4px"],
+    "a present transient note retains separation from the status/action row",
+  );
 });
 
 /**
@@ -265,6 +282,13 @@ test("short panes keep the status strip, and the pinned summary is bounded by th
   assert.deepEqual(
     phone.declarationsForSelector(".session-detail .transcript-recovery-strip-echo").get("display"),
     ["inline-flex"],
+  );
+  assert.deepEqual(
+    phone.declarationsForSelector(
+      ".session-detail .transcript-status-context:has(> .transcript-recovery-strip-echo.active) > .context-meter",
+    ).get("display"),
+    ["none"],
+    "the meter must yield to active recovery in a full-height phone Session too",
   );
 
   // The pinned summary's containing block is the reader region — which the DOM tests pin as

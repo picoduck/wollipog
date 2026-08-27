@@ -101,6 +101,8 @@ test("Unarchive on an archived Stop Failed session cancels the archive follow-up
   assert.ok(moreActions.classList.contains("session-header-action"), "the trigger carries the fixed-geometry class");
   const moreIcon = moreActions.querySelector("svg");
   assert.ok(moreIcon, "the trigger uses the shared icon instead of a text glyph");
+  assert.equal(moreIcon.getAttribute("width"), "16",
+    "the icon keeps its desktop size while phone CSS owns mobile compaction");
   const dots = [...moreIcon.querySelectorAll("circle")]
     .map((dot) => [dot.getAttribute("cx"), dot.getAttribute("cy")]);
   assert.deepEqual(dots, [["12", "5"], ["12", "12"], ["12", "19"]],

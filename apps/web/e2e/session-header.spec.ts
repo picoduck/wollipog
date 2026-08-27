@@ -438,9 +438,11 @@ test("the two mobile Session bars use compact touch targets and a bounded menu n
   const header = page.locator(".session-detail > .detail-head");
   const actions = header.locator(".detail-actions");
   const backBox = await page.locator(".topbar").getByRole("button", { name: "Back to Inbox" }).boundingBox();
+  const headerBox = await header.boundingBox();
 
   expect(backBox?.width).toBeGreaterThanOrEqual(36);
   expect(backBox?.height).toBeGreaterThanOrEqual(36);
+  expect(headerBox?.height).toBeLessThanOrEqual(45);
 
   const moreActions = actions.getByRole("button", { name: "More Actions" });
   const trailingClearance = await moreActions.evaluate((element) => {
