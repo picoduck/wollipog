@@ -164,6 +164,16 @@ test("review-ready and uncommitted badges wrap together at narrow widths", () =>
     "later status rows must begin below the compact Session actions");
   assert.deepEqual(lifecycle.get("padding-right"), ["86px"],
     "the lifecycle row must reserve two compact actions plus their gaps");
+  for (const selector of [
+    ".session-detail > .detail-head .status-badge",
+    ".session-detail > .detail-head .background-work-badge",
+  ]) {
+    const badge = phoneRule.declarationsForSelector(selector);
+    assert.deepEqual(badge.get("padding-inline"), ["4px"],
+      `${selector} needs enough width headroom for wider system fonts`);
+    assert.deepEqual(badge.get("font-size"), ["var(--text-2xs)"],
+      `${selector} needs enough width headroom for wider system fonts`);
+  }
   assert.deepEqual(
     phoneRule.declarationsForSelector(".session-detail > .detail-head").get("min-height"),
     ["44px"],

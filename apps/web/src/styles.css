@@ -10138,8 +10138,10 @@ body.shell-dock-dragging * {
   .session-detail > .detail-head .status-badge,
   .session-detail > .detail-head .background-work-badge {
     gap: 4px;
-    padding-inline: 5px;
-    font-size: var(--text-xs);
+    /* CI and user devices do not share the same system font. Leave enough width headroom for
+       both change badges and both background badges to keep pairing at 320px. */
+    padding-inline: 4px;
+    font-size: var(--text-2xs);
   }
   .session-header-action { width: 36px; height: 36px; }
   .session-header-action svg { width: 15px; height: 15px; }
