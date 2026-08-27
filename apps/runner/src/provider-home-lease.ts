@@ -264,6 +264,12 @@ export class ProviderHomeLeaseRegistry {
       );
     }
     const requestedHome = request.env.HOME || homedir();
+    this.acquireHome(requestedHome, provider);
+  }
+
+  /** Acquire the whole mutable HOME for a non-launch mutation such as managed skill links. */
+  acquireHome(requestedHome: string, provider = "skills"): void {
+    if (!PROVIDER_KEY.test(provider)) throw new Error("provider home lease key is invalid");
     if (!isAbsolute(requestedHome)) throw new Error("provider HOME must be absolute");
     const home = realpathSync(requestedHome);
     const root = join(home, ".agent-manager", "provider-home-leases-v1");

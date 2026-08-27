@@ -108,11 +108,17 @@ export interface ReconcileSkillsOptions {
   log?: (message: string) => void;
   /** Test seam. */
   platform?: NodeJS.Platform;
+  /** Acquire the runner's shared provider-HOME lease after store materialization and before any
+   * canonical or harness link mutation. The registry intentionally retains the lease until
+   * runner shutdown, matching provider-launch ownership semantics. */
+  acquireProviderHomeLease?: () => void;
 }
 
 export interface ReconcileSkillsResult {
   deployed: DeployedSkillState[];
   unmanaged: UnmanagedSkillInfo[];
+  /** Pass-wide failure that cannot be represented by one desired entry, such as a blocked sweep. */
+  error?: string;
   /** Home-relative shown paths of every link this pass removed. Always logged as well; a pass
    * that removes nothing returns an empty array. */
   removedLinks: string[];
@@ -757,6 +763,82 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
       removedLinks: [],
     };
   }
+  const bindings = harnessBindings(agents);
+  const agentBinding = new Map(bindings.map((binding) => [binding.agentId, binding]));
+
+  // Materialization is runner-data-dir-local and must remain available even while another runner
+  // owns the shared provider HOME. Finish that phase before attempting the provider-home lease;
+  // a contended pass can then report pending link deployment without touching any harness path.
+  const seenPreparedNames = new Set<string>();
+  const prepared = desired.map((entry) => {
+    const invalid = seenPreparedNames.has(entry.name) ? "duplicate skill name" : validateSkillSyncEntry(entry);
+    seenPreparedNames.add(entry.name);
+    const manualNeeded = !invalid && entry.targets.some(
+      (target) =>
+        target.invocation === "manual" && agentBinding.get(target.agentId)?.driver === "claude-code",
+    );
+    let materializationError: string | undefined;
+    if (!invalid) {
+      try {
+        materializeVersion(realStoreRoot, entry.name, entry.versionDigest, entry.files, false);
+        if (manualNeeded) {
+          materializeVersion(realStoreRoot, entry.name, `${entry.versionDigest}-manual`, entry.files, true);
+        }
+      } catch (error) {
+        materializationError = errText(error);
+      }
+    }
+    return { entry, invalid, manualNeeded, materializationError };
+  });
+
+  const leaseNeeded = allowRemovals ||
+    prepared.some(({ invalid, materializationError }) => !invalid && !materializationError);
+  if (leaseNeeded && options.acquireProviderHomeLease) {
+    try {
+      options.acquireProviderHomeLease();
+    } catch (error) {
+      const detail = `Provider-home lease unavailable: ${errText(error)}`;
+      options.log?.(`skill reconcile links blocked: ${detail}`);
+      return {
+        deployed: prepared.map(({ entry, invalid, materializationError }) => {
+          if (invalid) {
+            return { name: String(entry.name), digest: String(entry.versionDigest), links: [], error: invalid };
+          }
+          if (materializationError) {
+            return {
+              name: entry.name,
+              digest: entry.versionDigest,
+              links: entry.targets.map((target) => ({
+                agentId: target.agentId,
+                status: "error" as const,
+                detail: "the skill version could not be materialized",
+              })),
+              error: `could not materialize the skill version: ${materializationError}`,
+            };
+          }
+          return {
+            name: entry.name,
+            digest: entry.versionDigest,
+            links: entry.targets.map((target) => {
+              const binding = agentBinding.get(target.agentId);
+              if (binding) return { agentId: target.agentId, status: "error" as const, detail };
+              const agent = agents.find((candidate) => candidate.id === target.agentId);
+              const unsupported = !agent
+                ? "this agent is not present on the runner"
+                : (agent.context?.kind ?? "native") !== "native"
+                  ? "only native agent contexts are supported"
+                  : "this agent's driver does not support managed skills";
+              return { agentId: target.agentId, status: "unsupported" as const, detail: unsupported };
+            }),
+            error: detail,
+          };
+        }),
+        unmanaged: scanUnmanagedSkills(home, agents),
+        removedLinks: [],
+        error: detail,
+      };
+    }
+  }
   const canonicalDir = canonicalSkillsDir(home);
   const manifestPath = linkManifestPath(dataDir);
   const owned = loadOwnedLinks(manifestPath, options.log);
@@ -786,19 +868,12 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
   const ownLink = (linkPath: string): void => {
     owned.add(linkPath);
   };
-  const bindings = harnessBindings(agents);
-  const agentBinding = new Map(bindings.map((binding) => [binding.agentId, binding]));
-
   const deployed: DeployedSkillState[] = [];
   const storeKeep: StoreKeep = new Map();
   const canonicalKeep = new Set<string>();
   const harnessKeep = new Map<string, Set<string>>();
   for (const relDir of new Set(Object.values(SKILL_DIRS))) harnessKeep.set(relDir, new Set());
-  const seenNames = new Set<string>();
-
-  for (const entry of desired) {
-    const invalid = seenNames.has(entry.name) ? "duplicate skill name" : validateSkillSyncEntry(entry);
-    seenNames.add(entry.name);
+  for (const { entry, invalid, manualNeeded, materializationError } of prepared) {
     if (typeof entry.name === "string" && entry.name) {
       canonicalKeep.add(entry.name);
       if (invalid) {
@@ -817,21 +892,12 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
     // `disable-model-invocation` is Claude Code frontmatter semantics; only claude-code targets
     // can consume the manual variant (codex-family manual targets are reported unsupported
     // below), so only they force its materialization.
-    const manualNeeded = entry.targets.some(
-      (target) =>
-        target.invocation === "manual" && agentBinding.get(target.agentId)?.driver === "claude-code",
-    );
     if (!storeKeep.has(entry.name)) {
       storeKeep.set(entry.name, { digest: entry.versionDigest, manual: manualNeeded });
     }
     const state: DeployedSkillState = { name: entry.name, digest: entry.versionDigest, links: [] };
-    try {
-      materializeVersion(realStoreRoot, entry.name, entry.versionDigest, entry.files, false);
-      if (manualNeeded) {
-        materializeVersion(realStoreRoot, entry.name, `${entry.versionDigest}-manual`, entry.files, true);
-      }
-    } catch (error) {
-      state.error = `could not materialize the skill version: ${errText(error)}`;
+    if (materializationError) {
+      state.error = `could not materialize the skill version: ${materializationError}`;
       state.links = entry.targets.map((target) => ({
         agentId: target.agentId,
         status: "error" as const,
