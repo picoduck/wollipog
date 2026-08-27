@@ -204,7 +204,9 @@ for (const viewport of [
         statuses: rect(element.querySelector(".session-header-statuses")!),
         actions: rect(element.querySelector(".detail-actions")!),
         share: rect(element.querySelector('[aria-label="Share"]')!),
+        shareIcon: rect(element.querySelector('[aria-label="Share"] svg')!),
         moreActions: rect(element.querySelector('[aria-label="More Actions"]')!),
+        moreActionsIcon: rect(element.querySelector('[aria-label="More Actions"] svg')!),
         badges,
         headerHeight: element.getBoundingClientRect().height,
         hasHorizontalOverflow: element.scrollWidth > element.clientWidth,
@@ -247,6 +249,10 @@ for (const viewport of [
     expect(shellMetrics.settings.height).toBe(metrics.share.height);
     expect(metrics.share.width).toBe(metrics.moreActions.width);
     expect(metrics.share.height).toBe(metrics.moreActions.height);
+    expect(metrics.shareIcon.width).toBe(15);
+    expect(metrics.shareIcon.height).toBe(15);
+    expect(metrics.moreActionsIcon.width).toBe(15);
+    expect(metrics.moreActionsIcon.height).toBe(15);
     for (const control of shellMetrics.controls) {
       expect(control.width).toBe(shellMetrics.settings.width);
       expect(control.height).toBe(shellMetrics.settings.height);

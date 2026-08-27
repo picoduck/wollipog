@@ -177,6 +177,36 @@ test("review-ready and uncommitted badges wrap together at narrow widths", () =>
   );
 });
 
+test("mobile Session chrome keeps its coupled offsets and compact action icons", () => {
+  const phoneRule = mediaBlocks(css).find((block) =>
+    block.maxWidths.includes(760) &&
+    block.containsSelector(".topbar") &&
+    block.containsSelector(".right-panel") &&
+    block.containsSelector(".topbar:has(.mobile-session-back)") &&
+    block.containsSelector(".app:has(.mobile-session-back) .right-panel"));
+  assert.ok(phoneRule, "the phone layout must define both default and Session chrome geometry");
+
+  const defaultTopbarHeight = phoneRule.declarationsForSelector(".topbar").get("height");
+  const defaultPanelTop = phoneRule.declarationsForSelector(".right-panel").get("top");
+  assert.deepEqual(defaultTopbarHeight,
+    ["calc(50px + env(safe-area-inset-top, 0px))"]);
+  assert.deepEqual(defaultPanelTop, defaultTopbarHeight,
+    "the default right panel must begin at the default topbar's bottom edge");
+
+  const sessionTopbarHeight = phoneRule
+    .declarationsForSelector(".topbar:has(.mobile-session-back)").get("height");
+  const sessionPanelTop = phoneRule
+    .declarationsForSelector(".app:has(.mobile-session-back) .right-panel").get("top");
+  assert.deepEqual(sessionTopbarHeight,
+    ["calc(40px + env(safe-area-inset-top, 0px))"]);
+  assert.deepEqual(sessionPanelTop, sessionTopbarHeight,
+    "the Session right panel must begin at the compact Session topbar's bottom edge");
+
+  const actionIcon = phoneRule.declarationsForSelector(".session-header-action svg");
+  assert.deepEqual(actionIcon.get("width"), ["15px"]);
+  assert.deepEqual(actionIcon.get("height"), ["15px"]);
+});
+
 /**
  * The reconnect recovery pill (issue #56) sits in a permanently-present NORMAL-FLOW slot between
  * the transcript scroller and the status strip. Its non-overlap guarantee is structural, not
