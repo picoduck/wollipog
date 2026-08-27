@@ -390,7 +390,7 @@ function loadOwnedLinks(path: string, log?: (message: string) => void): Set<stri
  * symlink — there is nothing left there this runner could ever remove. Failure to persist is
  * logged and non-fatal: a lost manifest only makes future sweeps more conservative. */
 function saveOwnedLinks(path: string, owned: ReadonlySet<string>, log?: (message: string) => void): void {
-  const links = [...owned]
+  const live = [...owned]
     .filter((linkPath) => {
       try {
         return lstatSync(linkPath).isSymbolicLink();
@@ -398,8 +398,15 @@ function saveOwnedLinks(path: string, owned: ReadonlySet<string>, log?: (message
         return false;
       }
     })
-    .sort()
-    .slice(0, LINK_MANIFEST_MAX_ENTRIES);
+    .sort();
+  const links = live.slice(0, LINK_MANIFEST_MAX_ENTRIES);
+  if (live.length > links.length) {
+    // A deployment large enough to hit this cap loses removal authority over the tail: those
+    // links will be left in place (and reported unmanaged), never silently removed. Say so.
+    log?.(
+      `skill link manifest is over capacity: ${live.length - links.length} link record(s) dropped; the affected links will not be swept`,
+    );
+  }
   try {
     assertNotSymlink(path, "the skill link manifest");
     const temp = join(dirname(path), `.links.json.tmp-${randomUUID()}`);
