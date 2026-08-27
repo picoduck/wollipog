@@ -151,13 +151,16 @@ target, so the deployed digest is a pure function of the source digest and the t
 Declarative desired state, not imperative install commands. Convergence is idempotent and re-runs
 on every registration, which makes durability trivial (no receipt outbox needed).
 
-- New capability `agentSkills` in `RUNNER_CAPABILITY_MIN_PROTOCOL`; `PROTOCOL_VERSION` bump.
-  Older runners degrade to the standard 409 capability error.
-- **CP→runner `skills_sync`** — the full desired state for that Machine:
-  `[{ name, versionDigest, files (inline, bounded), targets: [{ agentId | driver, context, dir,
-  invocation }] }]`. Content travels inline over the existing WebSocket (40 MiB frame cap) with a
-  per-skill byte budget modeled on the ACP registry's 2 MiB cap. The runner skips any digest
-  already present in its store.
+- Capability `agentSkills` introduces managed deployment at v90; `chunkedAgentSkills` upgrades
+  delivery at v96. Pre-v96 runners retain the bounded single-frame `skills_sync` protocol and its
+  fail-closed 32 MiB aggregate budget.
+- **CP→runner `skills_sync_manifest`** — the content-free authoritative list for the Machine. The
+  runner compares its verified local store and replies with `skills_sync_need` naming only absent
+  `(name, versionDigest)` pairs. The control plane sends each requested version in its own bounded
+  `skills_sync_content` frame, followed by `skills_sync_complete`.
+- The runner keeps multi-frame assembly ephemeral and never reconciles, especially never removes,
+  before the matching completion fence. A new manifest or reconnect discards an incomplete
+  transaction. Cached digests are linked directly without retransferring their contents.
 - **Runner→CP `skills_state`** — an authoritative full-replacement inventory modeled on
   `SubscriptionUsageInventoryMessage`: deployed digests, link health, conflicts, and unmanaged
   skills found by a bounded scan of harness directories (reusing the `claude-commands.ts` limits
