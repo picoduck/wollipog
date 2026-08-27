@@ -1,4 +1,4 @@
-import React, { useId, type ReactNode } from "react";
+import React, { useId, type ReactNode, type Ref } from "react";
 import { ChevronRightIcon } from "../Icons.js";
 import { SegmentedControl, Select, type SelectOption } from "./ChoiceControls.js";
 
@@ -260,11 +260,17 @@ export function NavRow({
   icon,
   disabled,
   onClick,
-}: RowShellProps & { icon?: ReactNode }) {
+  expanded,
+  controls,
+  buttonRef,
+}: RowShellProps & { icon?: ReactNode; expanded?: boolean; controls?: string; buttonRef?: Ref<HTMLButtonElement> }) {
   return (
     <button
+      ref={buttonRef}
       type="button"
       disabled={disabled}
+      aria-expanded={expanded}
+      aria-controls={controls}
       className={rowClass("ui-row-nav", disabled)}
       onClick={onClick}
     >

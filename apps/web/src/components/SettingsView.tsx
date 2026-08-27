@@ -16,6 +16,7 @@ import {
 } from "../question-response-style.js";
 import { SETTINGS_SECTIONS, type SettingsSection, type View } from "../navigation.js";
 import type { ExperimentFlags, ExperimentId } from "../experiments.js";
+import { effortLabel } from "../format.js";
 
 /**
  * Settings as a ROUTE, not a dialog.
@@ -242,11 +243,12 @@ export function PendingSetting({ title, description, reason }: { title: string; 
   );
 }
 
-export function BehaviorPanel() {
+export function BehaviorPanel({ sessionNaming }: { sessionNaming?: ReactNode } = {}) {
   const enterKey = useEnterKeyBehavior();
   const questionResponseStyle = useQuestionResponseStyle();
   return (
-    <SettingsGroup title="Defaults">
+    <>
+      <SettingsGroup title="Defaults">
       {/* Stored per device and only on an explicit choice; the unstored default derives from the
           device class (touch phones get newline, everything else send), so this row shows each
           device's own effective behavior. The pair swaps as a unit — see enter-key.ts. */}
@@ -304,7 +306,9 @@ export function BehaviorPanel() {
         description="What a new session starts with."
         reason="Chosen per session when you create it; a default is not built yet."
       />
-    </SettingsGroup>
+      </SettingsGroup>
+      {sessionNaming}
+    </>
   );
 }
 
@@ -320,8 +324,8 @@ const SESSION_NAMING_OPTIONS: ReadonlyArray<{
   },
   {
     value: "session_agent_account",
-    label: "Use Session Agent Account",
-    description: "Use the authenticated provider account on the session's Machine.",
+    label: "Agent Harness",
+    description: "Use a selected Machine's authenticated Agent Harness, model, and reasoning effort.",
   },
   {
     value: "custom_model_endpoint",
@@ -337,10 +341,17 @@ export function SessionNamingPanel() {
   const activeApi = useRef(api);
   activeApi.current = api;
   const mounted = useRef(true);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const [settings, setSettings] = useState<SessionNamingSettingsView | null>(null);
+  const [expanded, setExpanded] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<{ action: "load" | "update"; message: string } | null>(null);
+  const [error, setError] = useState<{ action: "load" | "save"; message: string } | null>(null);
   const [loadRevision, setLoadRevision] = useState(0);
+  const [draftMode, setDraftMode] = useState<SessionNamingMode>("prompt_text_only");
+  const [runnerId, setRunnerId] = useState("");
+  const [agentKey, setAgentKey] = useState("");
+  const [modelId, setModelId] = useState("");
+  const [effort, setEffort] = useState("");
   const [customBusy, setCustomBusy] = useState(false);
   const [customStatus, setCustomStatus] = useState<string | null>(null);
   const [customRunnerId, setCustomRunnerId] = useState("");
@@ -366,9 +377,7 @@ export function SessionNamingPanel() {
     void api.sessionNamingSettings().then((next) => {
       if (!disposed) {
         setSettings(next);
-        setCustomRunnerId(next.customModel?.runnerId ?? next.customModelTargets?.find((target) => target.available)?.runnerId ?? "");
-        setCustomModel(next.customModel?.configurationSource === "runner" ? next.customModel.model : "");
-        setCustomTimeout(String(next.customModel?.configurationSource === "runner" ? next.customModel.timeoutMs : 5_000));
+        setDraftMode(next.mode);
       }
     }).catch((cause: unknown) => {
       if (!disposed) setError({ action: "load", message: cause instanceof Error ? cause.message : String(cause) });
@@ -376,20 +385,34 @@ export function SessionNamingPanel() {
     return () => { disposed = true; };
   }, [api, loadRevision]);
 
-  const changeMode = (mode: string) => {
-    if (!settings || busy) return;
-    const requestApi = api;
-    setBusy(true);
+  const resetDraft = (next: SessionNamingSettingsView) => {
+    setDraftMode(next.mode);
+    setRunnerId(next.harnessTarget?.runnerId ?? "");
+    setAgentKey(next.harnessTarget?.agentId ?? "");
+    setModelId(next.harnessTarget?.model ?? "");
+    setEffort(next.harnessTarget?.effort ?? "");
+    setCustomRunnerId(next.customModel?.runnerId ?? next.customModelTargets?.find((target) => target.available)?.runnerId ?? "");
+    setCustomModel(next.customModel?.configurationSource === "runner" ? next.customModel.model : "");
+    setCustomTimeout(String(next.customModel?.configurationSource === "runner" ? next.customModel.timeoutMs : 5_000));
+    setCustomEndpoint("");
+    setCustomApiKey("");
+    setCustomStatus(null);
+  };
+
+  const collapseEditor = () => {
+    if (settings) resetDraft(settings);
+    setExpanded(false);
+    requestAnimationFrame(() => triggerRef.current?.focus());
+  };
+  const toggleEditor = () => {
+    if (expanded) {
+      collapseEditor();
+      return;
+    }
+    if (!settings) return;
+    resetDraft(settings);
     setError(null);
-    void requestApi.updateSessionNamingSettings({ mode: mode as SessionNamingMode }).then((next) => {
-      if (mounted.current && activeApi.current === requestApi) setSettings(next);
-    }).catch((cause: unknown) => {
-      if (mounted.current && activeApi.current === requestApi) {
-        setError({ action: "update", message: cause instanceof Error ? cause.message : String(cause) });
-      }
-    }).finally(() => {
-      if (mounted.current && activeApi.current === requestApi) setBusy(false);
-    });
+    setExpanded(true);
   };
 
   const options = SESSION_NAMING_OPTIONS.map((option) => {
@@ -403,11 +426,32 @@ export function SessionNamingPanel() {
         : availability?.reason;
     return {
       ...option,
-      disabled: !settings || !settings.canManage || !availability?.available,
+      disabled: !settings || !settings.canManage || (
+        option.value === "session_agent_account"
+          ? !settings.harnessMachines?.length && !availability?.available
+          : option.value === "custom_model_endpoint"
+            ? !settings.customModelTargets?.length && !availability?.available
+            : !availability?.available
+      ),
       ...(disabledReason ? { disabledReason } : {}),
     };
   });
   const custom = settings?.customModel;
+  const machine = settings?.harnessMachines?.find((candidate) => candidate.runnerId === runnerId);
+  const harness = machine?.harnesses.find((candidate) => candidate.agentId === agentKey);
+  const harnessModel = harness?.models.find((candidate) => candidate.id === modelId);
+  const initialCustomRunnerId = custom?.configurationSource === "runner"
+    ? custom.runnerId ?? ""
+    : settings?.customModelTargets?.find((target) => target.available)?.runnerId ?? "";
+  const initialCustomModel = custom?.configurationSource === "runner" ? custom.model : "";
+  const initialCustomTimeout = String(custom?.configurationSource === "runner" ? custom.timeoutMs : 5_000);
+  const customDraftChanged = customRunnerId !== initialCustomRunnerId || customEndpoint !== "" ||
+    customModel !== initialCustomModel || customTimeout !== initialCustomTimeout || customApiKey !== "";
+  const customTimeoutValue = Number(customTimeout);
+  const customFormComplete = Boolean(customRunnerId && customEndpoint && customModel &&
+    Number.isInteger(customTimeoutValue) && customTimeoutValue >= 250 && customTimeoutValue <= 30_000);
+  const legacyFollowAvailable = draftMode === "session_agent_account" && !settings?.harnessTarget &&
+    !settings?.harnessMachines?.length && settings?.modes.session_agent_account.available === true;
   const requestIsCurrent = (requestApi: typeof api) => mounted.current && activeApi.current === requestApi;
   const applyCustomSettings = (next: SessionNamingSettingsView, message: string) => {
     setSettings(next);
@@ -417,34 +461,51 @@ export function SessionNamingPanel() {
     setCustomApiKey("");
     setCustomStatus(message);
   };
-  const configureCustom = () => {
-    if (customBusy) return;
+  const finishSave = (next: SessionNamingSettingsView) => {
+    setSettings(next);
+    resetDraft(next);
+    setExpanded(false);
+    requestAnimationFrame(() => triggerRef.current?.focus());
+  };
+  const save = () => {
+    if (!settings || !settings.canManage || busy || customBusy || !saveComplete) return;
     const requestApi = api;
-    setCustomBusy(true);
+    setBusy(true);
+    setError(null);
     setCustomStatus(null);
-    void requestApi.configureSessionNamingCustomModel({
-      runnerId: customRunnerId,
-      endpoint: customEndpoint,
-      model: customModel,
-      timeoutMs: Number(customTimeout),
-      ...(customApiKey ? { apiKey: customApiKey } : {}),
-    }).then((next) => {
+    const operation = draftMode === "session_agent_account" && machine && harness && harnessModel && effort
+      ? requestApi.configureSessionNamingHarness({
+          runnerId: machine.runnerId,
+          agentId: harness.agentId,
+          driver: harness.driver,
+          model: harnessModel.id,
+          effort,
+        })
+      : draftMode === "custom_model_endpoint" && customDraftChanged && customFormComplete
+        ? requestApi.configureSessionNamingCustomModel({
+            runnerId: customRunnerId,
+            endpoint: customEndpoint,
+            model: customModel,
+            timeoutMs: Number(customTimeout),
+            ...(customApiKey ? { apiKey: customApiKey } : {}),
+          })
+        : requestApi.updateSessionNamingSettings({ mode: draftMode });
+    void operation.then((next) => {
       if (!requestIsCurrent(requestApi)) return;
-      applyCustomSettings(next, "Custom model configuration saved on the selected Machine.");
-      setCustomEndpoint("");
+      finishSave(next);
     }).catch((cause: unknown) => {
       if (requestIsCurrent(requestApi)) {
-        setCustomStatus(`Could not save the custom model: ${cause instanceof Error ? cause.message : String(cause)}`);
+        setError({ action: "save", message: cause instanceof Error ? cause.message : String(cause) });
       }
     }).finally(() => {
       if (requestIsCurrent(requestApi)) {
         setCustomApiKey("");
-        setCustomBusy(false);
+        setBusy(false);
       }
     });
   };
   const replaceApiKey = () => {
-    if (customBusy || !customApiKey) return;
+    if (busy || customBusy || !customApiKey) return;
     const requestApi = api;
     setCustomBusy(true);
     setCustomStatus(null);
@@ -462,7 +523,7 @@ export function SessionNamingPanel() {
     });
   };
   const deleteApiKey = () => {
-    if (customBusy || !window.confirm("Delete the runner-local API key? Endpoints that require it will stop working.")) return;
+    if (busy || customBusy || !window.confirm("Delete the runner-local API key? Endpoints that require it will stop working.")) return;
     const requestApi = api;
     setCustomBusy(true);
     setCustomStatus(null);
@@ -475,7 +536,7 @@ export function SessionNamingPanel() {
     }).finally(() => { if (requestIsCurrent(requestApi)) setCustomBusy(false); });
   };
   const testCustom = () => {
-    if (customBusy) return;
+    if (busy || customBusy) return;
     const requestApi = api;
     setCustomBusy(true);
     setCustomStatus(null);
@@ -491,29 +552,39 @@ export function SessionNamingPanel() {
       }
     }).finally(() => { if (requestIsCurrent(requestApi)) setCustomBusy(false); });
   };
-  const status = error
+  const billingSourceLabel = (value: string) => value === "api"
+    ? "API"
+    : value.split("_").map((word) => `${word[0]?.toUpperCase() ?? ""}${word.slice(1)}`).join(" ");
+  const summary = !settings
+    ? "Loading…"
+    : settings.mode === "prompt_text_only"
+      ? "Prompt Text Only"
+      : settings.mode === "custom_model_endpoint"
+        ? `Custom Model Endpoint${settings.customModel ? ` · ${settings.customModel.endpointOrigin}` : " · Not Configured"}`
+        : settings.harnessTarget
+          ? `${settings.harnessTarget.harnessName} · ${settings.harnessTarget.modelName} · ${effortLabel(settings.harnessTarget.effort)}`
+          : "Follow Session Agent";
+  const summaryStatus = error
     ? `Could not ${error.action} session naming: ${error.message}`
-    : !settings
-      ? "Loading the organization setting…"
-      : settings.mode !== settings.effectiveMode
-        ? "The selected naming mode is unavailable, so new sessions fall back to prompt text."
-        : settings.source === "environment"
-          ? "Inherited from the legacy control-plane environment. Save another mode to override it for this organization."
-          : settings.source === "organization"
-            ? "Saved for this organization. Changes apply to new naming requests without a restart."
-            : "Using the credential-free default.";
+    : settings?.mode !== settings?.effectiveMode
+      ? `${settings?.mode === "session_agent_account"
+          ? settings.harnessTarget?.reason ?? settings.modes.session_agent_account.reason
+          : settings?.modes[settings.mode].reason ?? "The selected configuration is unavailable."} New sessions fall back to prompt-derived naming.`
+      : summary;
+  const saveComplete = draftMode === "prompt_text_only" ||
+    (draftMode === "session_agent_account" && (legacyFollowAvailable || Boolean(machine && harness && harnessModel && effort))) ||
+    (draftMode === "custom_model_endpoint" && (customDraftChanged ? customFormComplete : Boolean(custom)));
 
   return (
     <SettingsGroup title="Session Naming">
-      <SelectRow
-        title="Naming Mode"
-        description={status}
-        options={options}
-        value={settings?.mode ?? "prompt_text_only"}
-        disabled={busy}
-        onChange={changeMode}
-        menuWidth={460}
-        estimatedOptionHeight={72}
+      <NavRow
+        title="Session Naming"
+        description={summaryStatus}
+        disabled={!settings || busy || customBusy}
+        expanded={expanded}
+        controls={expanded ? "session-naming-editor" : undefined}
+        buttonRef={triggerRef}
+        onClick={toggleEditor}
       />
       {error?.action === "load" && (
         <StaticRow
@@ -528,23 +599,99 @@ export function SessionNamingPanel() {
           }
         />
       )}
-      {custom && (
-        <StaticRow
-          title="Custom Model"
-          description={`${custom.endpointOrigin} · ${custom.model} · ${custom.timeoutMs} ms · ${custom.apiKeyConfigured ? "API key configured" : "No API key"}. ${custom.configurationSource === "runner" ? `Stored on ${custom.machineName ?? "the selected Machine"}.` : "Managed through the control-plane environment."}`}
-        />
-      )}
-      {!!settings?.customModelTargets?.length && (
-        <div className="session-naming-custom-model" aria-busy={customBusy || undefined}>
+      {expanded && settings && (
+        <div id="session-naming-editor" className="session-naming-editor" aria-busy={busy || customBusy || undefined}>
+          <SelectRow
+            title="Naming Mode"
+            options={options}
+            value={draftMode}
+            disabled={busy || customBusy}
+            onChange={(value) => {
+              setDraftMode(value as SessionNamingMode);
+              setRunnerId("");
+              setAgentKey("");
+              setModelId("");
+              setEffort("");
+              setCustomStatus(null);
+            }}
+            menuWidth={460}
+            estimatedOptionHeight={72}
+          />
+          {!settings.canManage && (
+            <p className="ui-row-desc">Organization owner or admin permission is required to change this setting.</p>
+          )}
+          {draftMode === "session_agent_account" && legacyFollowAvailable && (
+            <p className="ui-row-desc">
+              Each session will use its own Machine and authenticated Agent Harness without changing its billing boundary.
+            </p>
+          )}
+          {draftMode === "session_agent_account" && !legacyFollowAvailable && (
+            <SelectRow
+              title="Machine"
+              description="Bounded session text is sent to this Machine and its provider for title generation."
+              options={(settings.harnessMachines ?? []).map((candidate) => ({
+                value: candidate.runnerId,
+                label: candidate.machineName,
+              }))}
+              value={runnerId}
+              disabled={!settings.canManage || busy || customBusy}
+              onChange={(value) => {
+                setRunnerId(value);
+                setAgentKey("");
+                setModelId("");
+                setEffort("");
+              }}
+            />
+          )}
+          {draftMode === "session_agent_account" && machine && (
+            <SelectRow
+              title="Agent Harness"
+              options={machine.harnesses.map((candidate) => ({
+                value: candidate.agentId,
+                label: candidate.name,
+                description: `${candidate.provider === "codex" ? "Codex" : "Claude"} · ${billingSourceLabel(candidate.billingSource)}`,
+              }))}
+              value={agentKey}
+              disabled={!settings.canManage || busy || customBusy}
+              onChange={(value) => {
+                setAgentKey(value);
+                setModelId("");
+                setEffort("");
+              }}
+            />
+          )}
+          {draftMode === "session_agent_account" && harness && (
+            <SelectRow
+              title="Model"
+              options={harness.models.map((candidate) => ({ value: candidate.id, label: candidate.displayName }))}
+              value={modelId}
+              disabled={!settings.canManage || busy || customBusy}
+              onChange={(value) => {
+                setModelId(value);
+                setEffort("");
+              }}
+            />
+          )}
+          {draftMode === "session_agent_account" && harnessModel && (
+            <SelectRow
+              title="Reasoning Effort"
+              options={harnessModel.efforts.map((value) => ({ value, label: effortLabel(value) }))}
+              value={effort}
+              disabled={!settings.canManage || busy || customBusy}
+              onChange={setEffort}
+            />
+          )}
+          {draftMode === "custom_model_endpoint" && (
+            <>
           <div className="session-naming-custom-fields">
             <label className="field">
               <span>Machine</span>
               <Select
                 label="Machine"
                 value={customRunnerId || null}
-                disabled={!settings.canManage || customBusy}
+                disabled={!settings.canManage || busy || customBusy}
                 placeholder="Select a Machine"
-                options={settings.customModelTargets.map((target) => ({
+                options={(settings.customModelTargets ?? []).map((target) => ({
                   value: target.runnerId,
                   label: target.machineName,
                   disabled: !target.available,
@@ -561,7 +708,7 @@ export function SessionNamingPanel() {
                 maxLength={2048}
                 value={customEndpoint}
                 placeholder={custom?.configurationSource === "runner" ? custom.endpointOrigin : "https://models.example/v1/chat/completions"}
-                disabled={!settings.canManage || customBusy}
+                disabled={!settings.canManage || busy || customBusy}
                 onChange={(event) => setCustomEndpoint(event.target.value)}
               />
             </label>
@@ -571,7 +718,7 @@ export function SessionNamingPanel() {
                 aria-label="Model"
                 maxLength={200}
                 value={customModel}
-                disabled={!settings.canManage || customBusy}
+                disabled={!settings.canManage || busy || customBusy}
                 onChange={(event) => setCustomModel(event.target.value)}
               />
             </label>
@@ -583,7 +730,7 @@ export function SessionNamingPanel() {
                 min={250}
                 max={30000}
                 value={customTimeout}
-                disabled={!settings.canManage || customBusy}
+                disabled={!settings.canManage || busy || customBusy}
                 onChange={(event) => setCustomTimeout(event.target.value)}
               />
             </label>
@@ -595,7 +742,7 @@ export function SessionNamingPanel() {
                 autoComplete="off"
                 value={customApiKey}
                 placeholder={custom?.apiKeyConfigured ? "Enter a replacement key" : "Optional for endpoints without authentication"}
-                disabled={!settings.canManage || customBusy}
+                disabled={!settings.canManage || busy || customBusy}
                 onChange={(event) => setCustomApiKey(event.target.value)}
               />
             </label>
@@ -604,19 +751,14 @@ export function SessionNamingPanel() {
             The API key is sent once to the selected Machine and is never returned to this browser or stored by the control plane.
             {" "}When this mode is active, bounded session text is sent through that Machine to the configured provider.
           </p>
+          {custom?.configurationSource === "runner" && customDraftChanged && !customEndpoint && (
+            <p className="ui-row-desc">Re-enter the complete endpoint URL to change this saved configuration.</p>
+          )}
           <div className="session-naming-custom-actions">
             <button
               type="button"
-              className="btn sm"
-              disabled={!settings.canManage || customBusy || !customRunnerId || !customEndpoint || !customModel}
-              onClick={configureCustom}
-            >
-              Save Configuration
-            </button>
-            <button
-              type="button"
               className="btn ghost sm"
-              disabled={!settings.canManage || customBusy || custom?.configurationSource !== "runner" ||
+              disabled={!settings.canManage || busy || customBusy || custom?.configurationSource !== "runner" ||
                 custom.online === false || !customApiKey}
               onClick={replaceApiKey}
             >
@@ -625,7 +767,7 @@ export function SessionNamingPanel() {
             <button
               type="button"
               className="btn ghost sm"
-              disabled={!settings.canManage || customBusy || custom?.configurationSource !== "runner" ||
+              disabled={!settings.canManage || busy || customBusy || custom?.configurationSource !== "runner" ||
                 custom.online === false || !custom.apiKeyConfigured}
               onClick={deleteApiKey}
             >
@@ -634,26 +776,25 @@ export function SessionNamingPanel() {
             <button
               type="button"
               className="btn ghost sm"
-              disabled={!settings.canManage || customBusy || custom?.configurationSource !== "runner" || custom.online === false}
+              disabled={!settings.canManage || busy || customBusy || custom?.configurationSource !== "runner" || custom.online === false}
               onClick={testCustom}
             >
               Test Connection
             </button>
           </div>
           {customStatus && <p role="status" className="ui-row-desc">{customStatus}</p>}
+            </>
+          )}
+          {error?.action === "save" && <p role="alert" className="ui-row-desc">{summaryStatus}</p>}
+          <div className="session-naming-actions">
+            <button type="button" className="btn sm" disabled={!settings.canManage || !saveComplete || busy || customBusy} onClick={save}>
+              Save Configuration
+            </button>
+            <button type="button" className="btn ghost sm" disabled={busy || customBusy} onClick={collapseEditor}>
+              Cancel
+            </button>
+          </div>
         </div>
-      )}
-      {!!settings?.sessionAgentAccounts?.length && (
-        <StaticRow
-          title="Runner Accounts"
-          description={settings.sessionAgentAccounts.map((account) => {
-            const provider = account.provider === "codex" ? "Codex" : "Claude";
-            const billing = account.billingSource === "provider_account"
-              ? "provider account"
-              : account.billingSource.replace(/_/g, " ");
-            return `${provider} · ${billing} · ${account.machineCount} ${account.machineCount === 1 ? "Machine" : "Machines"}`;
-          }).join("; ") + ". Each session uses only its own Machine and provider account."}
-        />
       )}
     </SettingsGroup>
   );

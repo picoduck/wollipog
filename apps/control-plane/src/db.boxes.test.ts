@@ -317,9 +317,19 @@ test("boxIdForRunner correlates a registered runner back to its box", () => {
 test("deleteBox removes the box (and its runner row) and returns the runnerId", () => {
   const db = ControlPlaneDb.open(":memory:");
   db.createBox(box());
+  db.raw().prepare(
+    "INSERT INTO identity_organizations (organization_id, name, created_at, updated_at) VALUES (?, ?, ?, ?)",
+  ).run("org-delete-box", "Delete Box", 1, 1);
+  db.setSessionNamingPreference("org-delete-box", "session_agent_account", 1);
+  db.setSessionNamingHarnessTarget("org-delete-box", {
+    runnerId: "box-runner-1", agentId: "codex-app-server", driver: "codex-app-server", model: "luna", effort: "low",
+  }, 1);
   const res = db.deleteBox("box-1");
   assert.deepEqual(res, { runnerId: "box-runner-1", sessionIds: [], runIds: [], podIds: [] });
   assert.equal(db.getBox("box-1"), null);
+  assert.equal(db.getSessionNamingHarnessTarget("org-delete-box"), null);
+  assert.equal(db.getSessionNamingPreference("org-delete-box")?.mode, "prompt_text_only",
+    "deleting the selected Machine cannot silently restore per-session provider or billing selection");
   assert.equal(db.deleteBox("box-1"), null); // already gone
 });
 
@@ -428,6 +438,13 @@ test("deleteRunner drops a stale runner + its sessions, returns null when alread
     },
     1000,
   );
+  db.raw().prepare(
+    "INSERT INTO identity_organizations (organization_id, name, created_at, updated_at) VALUES (?, ?, ?, ?)",
+  ).run("org-delete-runner", "Delete Runner", 1, 1);
+  db.setSessionNamingPreference("org-delete-runner", "session_agent_account", 1);
+  db.setSessionNamingHarnessTarget("org-delete-runner", {
+    runnerId: "stale-1", agentId: "codex-app-server", driver: "codex-app-server", model: "luna", effort: "low",
+  }, 1);
   db.createSession({
     id: "s1",
     runnerId: "stale-1",
@@ -446,6 +463,9 @@ test("deleteRunner drops a stale runner + its sessions, returns null when alread
   db.createPod({ id: "pod-1", title: "Pod", objective: "", sessionIds: ["s1", "s2"], now: 1002 });
   assert.deepEqual(db.deleteRunner("stale-1"), { sessionIds: ["s1", "s2"], runIds: [], podIds: ["pod-1"] });
   assert.equal(db.getSession("s1"), null); // its sessions go with it
+  assert.equal(db.getSessionNamingHarnessTarget("org-delete-runner"), null);
+  assert.equal(db.getSessionNamingPreference("org-delete-runner")?.mode, "prompt_text_only",
+    "deleting the selected Machine cannot silently restore per-session provider or billing selection");
   assert.deepEqual(db.getPod("pod-1")?.members, []);
   assert.equal(db.reconcilePodAfterMembershipLoss("pod-1", 1003)?.status, "closed");
   assert.equal(db.deleteRunner("stale-1"), null); // already gone

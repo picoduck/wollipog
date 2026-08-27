@@ -1677,6 +1677,17 @@ CREATE TABLE IF NOT EXISTS session_naming_preferences (
   FOREIGN KEY (organization_id) REFERENCES identity_organizations(organization_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS session_naming_harness_targets (
+  organization_id TEXT PRIMARY KEY,
+  runner_id       TEXT NOT NULL,
+  agent_id        TEXT NOT NULL,
+  driver          TEXT NOT NULL CHECK (driver IN ('codex','codex-app-server','claude-code')),
+  model           TEXT NOT NULL,
+  effort          TEXT NOT NULL,
+  updated_at      INTEGER NOT NULL,
+  FOREIGN KEY (organization_id) REFERENCES identity_organizations(organization_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS session_naming_custom_models (
   organization_id    TEXT PRIMARY KEY,
   runner_id          TEXT NOT NULL,
@@ -6367,6 +6378,68 @@ export class ControlPlaneDb {
     ).run(organizationId, mode, now);
   }
 
+  getSessionNamingHarnessTarget(organizationId: string): {
+    runnerId: string;
+    agentId: string;
+    driver: "codex" | "codex-app-server" | "claude-code";
+    model: string;
+    effort: string;
+    updatedAt: number;
+  } | null {
+    const row = this.stmt(
+      `SELECT runner_id, agent_id, driver, model, effort, updated_at
+       FROM session_naming_harness_targets WHERE organization_id=?`,
+    ).get(organizationId) as {
+      runner_id: string;
+      agent_id: string;
+      driver: "codex" | "codex-app-server" | "claude-code";
+      model: string;
+      effort: string;
+      updated_at: number;
+    } | undefined;
+    return row ? {
+      runnerId: row.runner_id,
+      agentId: row.agent_id,
+      driver: row.driver,
+      model: row.model,
+      effort: row.effort,
+      updatedAt: row.updated_at,
+    } : null;
+  }
+
+  private clearSessionNamingHarnessTargetsForRunner(runnerId: string, now: number): void {
+    this.stmt(
+      `UPDATE session_naming_preferences
+       SET mode='prompt_text_only', updated_at=?
+       WHERE mode='session_agent_account'
+         AND organization_id IN (
+           SELECT organization_id FROM session_naming_harness_targets WHERE runner_id=?
+         )`,
+    ).run(now, runnerId);
+    this.stmt("DELETE FROM session_naming_harness_targets WHERE runner_id=?").run(runnerId);
+  }
+
+  setSessionNamingHarnessTarget(
+    organizationId: string,
+    target: {
+      runnerId: string;
+      agentId: string;
+      driver: "codex" | "codex-app-server" | "claude-code";
+      model: string;
+      effort: string;
+    },
+    now: number,
+  ): void {
+    this.stmt(
+      `INSERT INTO session_naming_harness_targets
+         (organization_id, runner_id, agent_id, driver, model, effort, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(organization_id) DO UPDATE SET
+         runner_id=excluded.runner_id, agent_id=excluded.agent_id, driver=excluded.driver,
+         model=excluded.model, effort=excluded.effort, updated_at=excluded.updated_at`,
+    ).run(organizationId, target.runnerId, target.agentId, target.driver, target.model, target.effort, now);
+  }
+
   getSessionNamingCustomModel(organizationId: string): {
     runnerId: string;
     endpoint: string;
@@ -7558,6 +7631,7 @@ export class ControlPlaneDb {
       this.stmt("DELETE FROM workspace_ownership WHERE runner_id=?").run(row.runner_id);
       this.stmt("DELETE FROM runner_ownership WHERE runner_id=?").run(row.runner_id);
       this.stmt("DELETE FROM runner_credentials WHERE runner_id=?").run(row.runner_id);
+      this.clearSessionNamingHarnessTargetsForRunner(row.runner_id, Date.now());
       this.stmt("DELETE FROM runners WHERE runner_id=?").run(row.runner_id); // cascades workspaces, agents
       this.db.exec("COMMIT");
     } catch (err) {
@@ -7607,6 +7681,7 @@ export class ControlPlaneDb {
       this.stmt("DELETE FROM runner_credentials WHERE runner_id=?").run(runnerId);
       this.stmt("DELETE FROM runner_skill_state WHERE runner_id=?").run(runnerId);
       this.stmt("DELETE FROM skill_assignments WHERE scope_kind='runner' AND runner_id=?").run(runnerId);
+      this.clearSessionNamingHarnessTargetsForRunner(runnerId, Date.now());
       this.stmt("DELETE FROM runners WHERE runner_id=?").run(runnerId); // cascades workspaces, agents
       this.db.exec("COMMIT");
     } catch (err) {

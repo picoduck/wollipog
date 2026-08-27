@@ -11217,7 +11217,7 @@ body.shell-dock-dragging * {
 .settings-group { display: flex; flex-direction: column; gap: var(--space-2); }
 .settings-group > h3 { margin: 0; font-size: var(--text-sm); text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-dim); }
 
-.session-naming-custom-model {
+.session-naming-editor {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
@@ -11234,7 +11234,8 @@ body.shell-dock-dragging * {
 .session-naming-custom-fields .field { margin: 0; }
 .session-naming-key-field { grid-column: 1 / -1; }
 .session-naming-custom-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
-.session-naming-custom-model > p { margin: 0; }
+.session-naming-editor > p { margin: 0; }
+.session-naming-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: var(--space-2); }
 @media (max-width: 680px) {
   .session-naming-custom-fields { grid-template-columns: minmax(0, 1fr); }
   .session-naming-key-field { grid-column: auto; }

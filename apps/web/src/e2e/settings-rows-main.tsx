@@ -159,15 +159,18 @@ function Harness() {
                 />
               ),
               keyboard: <KeyboardPanel shortcutLabel="Reference · ?" disabled={disabled} onOpenShortcuts={() => undefined} />,
-              behavior: <BehaviorPanel />,
-              "session-naming": (
-                <SettingsGroup title="Session Naming">
-                  <PendingSetting
-                    title="Naming Mode"
-                    description="Controls automatic session titles."
-                    reason="The visual fixture does not connect to a control plane."
-                  />
-                </SettingsGroup>
+              behavior: (
+                <BehaviorPanel
+                  sessionNaming={(
+                    <SettingsGroup title="Session Naming">
+                      <PendingSetting
+                        title="Session Naming"
+                        description="Controls automatic session titles."
+                        reason="The visual fixture does not connect to a control plane."
+                      />
+                    </SettingsGroup>
+                  )}
+                />
               ),
               network: (
                 <NetworkPanel

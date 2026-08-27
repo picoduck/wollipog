@@ -141,6 +141,41 @@ test("Codex naming uses an ephemeral read-only thread and a no-approval turn", (
   }
 });
 
+test("explicit naming targets pass only an advertised model and effort to the selected harness", async () => {
+  const target = { agentId: "codex", driver: "codex-app-server" as const, model: "luna", effort: "low" };
+  const codex = {
+    ...codexAgent(),
+    capabilities: {
+      models: [{ id: "luna", displayName: "Luna", efforts: ["low", "medium"] }],
+      effortLevels: ["low", "medium"],
+      slashCommands: [],
+      supportsImages: false,
+      supportsApprovals: true,
+    },
+  };
+  const turn = codexSessionNamingTurnParams("thread", "/neutral", "prompt", target);
+  assert.equal(turn.model, "luna");
+  assert.equal(turn.effort, "low");
+  const claudeArgs = claudeSessionNamingArgs([], {
+    agentId: "claude-code", driver: "claude-code", model: "haiku", effort: "low",
+  });
+  assert.deepEqual(claudeArgs.slice(0, 4), ["--model", "haiku", "--effort", "low"]);
+
+  let generated = 0;
+  const executor = new SessionNamingExecutor({
+    prepareDirectory: async () => ({ cwd: "/neutral", cleanup: async () => {} }),
+    generate: async () => { generated++; return "Explicit Target"; },
+  });
+  assert.equal((await executor.execute({ ...request(), target }, codex, {})).ok, true);
+  assert.deepEqual(await executor.execute({ ...request("bad-effort"), target: { ...target, effort: "max" } }, codex, {}), {
+    type: "generate_session_title_result", requestId: "bad-effort", ok: false, code: "provider_unsupported",
+  });
+  assert.deepEqual(await executor.execute({ ...request("bad-model"), target: { ...target, model: "unknown" } }, codex, {}), {
+    type: "generate_session_title_result", requestId: "bad-model", ok: false, code: "provider_unsupported",
+  });
+  assert.equal(generated, 1, "invalid targets never reach provider execution");
+});
+
 test("runner title normalization rejects multiline, oversized, and malformed model output", () => {
   assert.equal(normalizeRunnerSessionTitle("  Semantic Session Names  "), "Semantic Session Names");
   assert.equal(normalizeRunnerSessionTitle('{"title":"Runner Account Naming"}'), "Runner Account Naming");

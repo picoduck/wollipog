@@ -268,7 +268,10 @@
 // 94: runner-local custom session-naming endpoints. Owners/admins provision a write-only API key
 //     to one selected runner, while the control plane persists only secret-free configuration and
 //     readiness. Configuration, deletion, testing, and title generation are capability-gated.
-export const PROTOCOL_VERSION = 94;
+// 95: session naming may target an explicit authenticated runner harness, advertised model, and
+//     reasoning effort instead of inheriting them from the session. Older runner-account settings
+//     keep their v93 follow-session behavior until an owner/admin saves an explicit target.
+export const PROTOCOL_VERSION = 95;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
@@ -393,6 +396,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   agentSkills: 90,
   sessionAgentNaming: 93,
   sessionCustomModelNaming: 94,
+  sessionNamingTargets: 95,
 } as const;
 
 /* ========================================================================== */
@@ -2453,6 +2457,42 @@ export interface SessionNamingCustomModelTarget {
   reason?: string;
 }
 
+export interface SessionNamingHarnessModel {
+  id: string;
+  displayName: string;
+  efforts: string[];
+}
+
+export interface SessionNamingHarnessOption {
+  agentId: string;
+  name: string;
+  driver: Extract<AgentDriverKind, "codex" | "codex-app-server" | "claude-code">;
+  provider: SessionNamingAccountBoundary["provider"];
+  billingSource: SessionNamingAccountBoundary["billingSource"];
+  models: SessionNamingHarnessModel[];
+}
+
+export interface SessionNamingHarnessMachine {
+  runnerId: string;
+  machineName: string;
+  harnesses: SessionNamingHarnessOption[];
+}
+
+/** Persisted explicit target. Every identifier is secret-free; availability is recomputed from
+ * the selected runner's current authenticated capability advertisement on every read. */
+export interface SessionNamingHarnessTarget {
+  runnerId: string;
+  machineName: string;
+  agentId: string;
+  harnessName: string;
+  driver: SessionNamingHarnessOption["driver"];
+  model: string;
+  modelName: string;
+  effort: string;
+  available: boolean;
+  reason?: string;
+}
+
 /** Secret-free organization setting. Legacy environment configuration is reported only as
  * endpoint/model metadata; bearer credentials never cross the control-plane API boundary. */
 export interface SessionNamingSettingsView {
@@ -2475,10 +2515,22 @@ export interface SessionNamingSettingsView {
   customModelTargets?: SessionNamingCustomModelTarget[];
   /** Organization-wide availability summary. The session still uses only its own Machine/account. */
   sessionAgentAccounts?: SessionNamingAccountBoundary[];
+  /** Absent for a migrated v93 preference, which deliberately continues to follow each session. */
+  harnessTarget?: SessionNamingHarnessTarget;
+  /** Current authenticated, naming-compatible choices. Credentials remain runner-local. */
+  harnessMachines?: SessionNamingHarnessMachine[];
 }
 
 export interface UpdateSessionNamingSettingsRequest {
   mode: SessionNamingMode;
+}
+
+export interface ConfigureSessionNamingHarnessRequest {
+  runnerId: string;
+  agentId: string;
+  driver: SessionNamingHarnessOption["driver"];
+  model: string;
+  effort: string;
 }
 
 /** The API key is write-only. It is accepted by the control plane only long enough to relay the
@@ -4399,6 +4451,14 @@ export interface GenerateSessionTitleMessage {
   sessionId: string;
   /** Absent is the v93 session-account behavior. Custom endpoint execution requires protocol v94. */
   mode?: "session_agent_account" | "custom_model_endpoint";
+  /** Protocol v95+: an explicit, secret-free target. Its live auth and capabilities are validated
+   * again by the runner before invocation; omission retains v93 follow-session behavior. */
+  target?: {
+    agentId: string;
+    driver: SessionNamingHarnessOption["driver"];
+    model: string;
+    effort: string;
+  };
   messages: SessionNamingPromptMessage[];
   /** Complete runner-side wall-clock budget, clamped again by the runner. */
   timeoutMs: number;

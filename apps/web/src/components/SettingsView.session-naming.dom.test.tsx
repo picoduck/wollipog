@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import React, { act } from "react";
-import { createRoot } from "react-dom/client";
+import { createRoot, type Root } from "react-dom/client";
 import { Simulate } from "react-dom/test-utils";
 import { Window } from "happy-dom";
 import type { SessionNamingMode, SessionNamingSettingsView } from "@wollipog/protocol";
@@ -10,7 +10,7 @@ import { ApiProvider } from "../api-context.js";
 import type { ApiTransport } from "../api-transport.js";
 import { SessionNamingPanel } from "./SettingsView.js";
 
-const domWindow = new Window({ url: "http://localhost/settings/session-naming" });
+const domWindow = new Window({ url: "http://localhost/settings/behavior" });
 const previous = new Map<string, unknown>();
 const globals = {
   window: domWindow,
@@ -41,33 +41,403 @@ after(() => {
   }
 });
 
-function view(mode: SessionNamingMode): SessionNamingSettingsView {
+function baseView(mode: SessionNamingMode = "prompt_text_only"): SessionNamingSettingsView {
   return {
     mode,
-    effectiveMode: mode === "custom_model_endpoint" ? mode : "prompt_text_only",
+    effectiveMode: mode,
     source: "organization",
     canManage: true,
     modes: {
       prompt_text_only: { available: true },
-      session_agent_account: {
-        available: false,
-        reason: "Runner-hosted agent account naming is not available in this release.",
-      },
-      custom_model_endpoint: { available: true },
+      session_agent_account: { available: true },
+      custom_model_endpoint: { available: false, reason: "Configure a custom endpoint first." },
     },
-    customModel: {
-      endpointOrigin: "https://models.example",
-      model: "small-title-model",
-      timeoutMs: 750,
-      apiKeyConfigured: true,
-      configurationSource: "environment",
-    },
+    harnessMachines: [{
+      runnerId: "runner-build",
+      machineName: "Build Machine",
+      harnesses: [{
+        agentId: "codex-app-server",
+        name: "Codex App Server",
+        driver: "codex-app-server",
+        provider: "codex",
+        billingSource: "api",
+        models: [
+          { id: "luna", displayName: "Luna", efforts: ["low", "medium"] },
+          { id: "sol", displayName: "Sol", efforts: ["xhigh"] },
+        ],
+      }],
+    }],
+    customModelTargets: [{
+      runnerId: "runner-build",
+      machineName: "Build Machine",
+      online: true,
+      available: true,
+      configured: false,
+    }],
   };
 }
 
-test("Session Naming shows every mode, explains unavailable agent accounts, and saves prompt-only", async () => {
-  let mode: SessionNamingMode = "custom_model_endpoint";
+async function renderPanel(transport: ApiTransport): Promise<{ container: HTMLDivElement; root: Root }> {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      <ApiProvider client={createApiClient(transport)}>
+        <SessionNamingPanel />
+      </ApiProvider>,
+    );
+  });
+  return { container, root };
+}
+
+function buttonNamed(container: HTMLElement, name: string): HTMLButtonElement {
+  const button = [...container.querySelectorAll<HTMLButtonElement>("button")].find((candidate) =>
+    (candidate.getAttribute("aria-label") ?? candidate.textContent ?? "").includes(name));
+  assert.ok(button, `expected button named ${name}`);
+  return button;
+}
+
+async function selectOption(
+  container: HTMLElement,
+  label: string,
+  option: string,
+  expectedListText?: RegExp,
+): Promise<void> {
+  const trigger = container.querySelector<HTMLButtonElement>(`[aria-label^="${label}:"]`);
+  assert.ok(trigger, `expected ${label} select`);
+  await act(async () => trigger.click());
+  if (expectedListText) {
+    assert.match(container.querySelector(`[role="listbox"][aria-label="${label}"]`)?.textContent ?? "", expectedListText);
+  }
+  const choice = [...container.querySelectorAll<HTMLButtonElement>('[role="option"]')].find((candidate) =>
+    (candidate.textContent ?? "").includes(option));
+  assert.ok(choice, `expected ${option} option in ${label}`);
+  await act(async () => choice.click());
+  // Select restores focus through a zero-delay timer. Let that close complete before opening the
+  // next progressive picker, or the pending focus move dismisses the newly opened list in tests.
+  await act(async () => new Promise<void>((resolve) => domWindow.setTimeout(resolve, 0)));
+}
+
+test("Session Naming is compact, progressively discloses a capability-backed target, and collapses after save", async () => {
+  const calls: Array<{ path: string; method: string; body?: Record<string, unknown> }> = [];
+  let current = baseView();
+  const transport: ApiTransport = {
+    instanceId: "test",
+    publicOrigin: "http://localhost",
+    close() {},
+    async request(path, init) {
+      const method = init?.method ?? "GET";
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : undefined;
+      calls.push({ path, method, ...(body ? { body } : {}) });
+      if (path === "/api/session-naming/harness" && method === "PUT") {
+        assert.deepEqual(body, {
+          runnerId: "runner-build",
+          agentId: "codex-app-server",
+          driver: "codex-app-server",
+          model: "luna",
+          effort: "low",
+        });
+        current = {
+          ...current,
+          mode: "session_agent_account",
+          effectiveMode: "session_agent_account",
+          harnessTarget: {
+            ...body,
+            machineName: "Build Machine",
+            harnessName: "Codex App Server",
+            modelName: "Luna",
+            available: true,
+          } as NonNullable<SessionNamingSettingsView["harnessTarget"]>,
+        };
+      }
+      return new Response(JSON.stringify(current), { headers: { "content-type": "application/json" } });
+    },
+  };
+  const { container, root } = await renderPanel(transport);
+  try {
+    assert.match(container.textContent ?? "", /Prompt Text Only/);
+    assert.equal(container.querySelector("#session-naming-editor"), null);
+    const row = buttonNamed(container, "Session Naming");
+    assert.equal(row.getAttribute("aria-expanded"), "false");
+    await act(async () => row.click());
+    assert.equal(row.getAttribute("aria-expanded"), "true");
+    assert.ok(container.querySelector('[aria-label^="Naming Mode:"]'));
+    assert.equal(container.querySelector('[aria-label^="Machine:"]'), null);
+
+    await selectOption(container, "Naming Mode", "Agent Harness");
+    assert.ok(container.querySelector('[aria-label^="Machine:"]'));
+    assert.equal(container.querySelector('[aria-label^="Agent Harness:"]'), null);
+    await selectOption(container, "Machine", "Build Machine");
+    await selectOption(container, "Agent Harness", "Codex App Server", /Codex · API/);
+    await selectOption(container, "Model", "Luna");
+    await selectOption(container, "Reasoning Effort", "Low");
+    await act(async () => buttonNamed(container, "Save Configuration").click());
+
+    assert.equal(container.querySelector("#session-naming-editor"), null);
+    assert.match(container.textContent ?? "", /Codex App Server · Luna · Low/);
+    assert.equal(calls.some((call) => call.path === "/api/session-naming/harness" && call.method === "PUT"), true);
+    assert.equal(domWindow.document.activeElement, row);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("Session Naming preserves canonical harness, billing, and effort labels", async () => {
+  const transport: ApiTransport = {
+    instanceId: "test",
+    publicOrigin: "http://localhost",
+    close() {},
+    async request() {
+      return new Response(JSON.stringify(baseView()), { headers: { "content-type": "application/json" } });
+    },
+  };
+  const { container, root } = await renderPanel(transport);
+  try {
+    await act(async () => buttonNamed(container, "Session Naming").click());
+    await selectOption(container, "Naming Mode", "Agent Harness");
+    await selectOption(container, "Machine", "Build Machine");
+    await selectOption(container, "Agent Harness", "Codex App Server", /Codex · API/);
+    await selectOption(container, "Model", "Sol");
+    const effort = container.querySelector<HTMLButtonElement>('[aria-label^="Reasoning Effort:"]');
+    assert.ok(effort);
+    await act(async () => effort.click());
+    assert.match(container.querySelector('[role="listbox"][aria-label="Reasoning Effort"]')?.textContent ?? "", /Extra High/);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("Session Naming row toggles closed, drops its draft, and exposes controls only while expanded", async () => {
+  const transport: ApiTransport = {
+    instanceId: "test",
+    publicOrigin: "http://localhost",
+    close() {},
+    async request() {
+      return new Response(JSON.stringify(baseView()), { headers: { "content-type": "application/json" } });
+    },
+  };
+  const { container, root } = await renderPanel(transport);
+  try {
+    const row = buttonNamed(container, "Session Naming");
+    assert.equal(row.getAttribute("aria-controls"), null);
+    await act(async () => row.click());
+    await selectOption(container, "Naming Mode", "Agent Harness");
+    await selectOption(container, "Machine", "Build Machine");
+    assert.ok(container.querySelector('[aria-label^="Agent Harness:"]'));
+
+    await act(async () => row.click());
+    assert.equal(row.getAttribute("aria-expanded"), "false");
+    assert.equal(row.getAttribute("aria-controls"), null);
+    assert.equal(container.querySelector("#session-naming-editor"), null);
+
+    await act(async () => row.click());
+    assert.equal(row.getAttribute("aria-expanded"), "true");
+    assert.equal(row.getAttribute("aria-controls"), "session-naming-editor");
+    assert.equal(container.querySelector('[aria-label^="Machine:"]'), null, "the unsaved mode and Machine draft were reset");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("legacy Follow Session Agent can be selected again without an explicit v95 target", async () => {
+  const current = baseView();
+  delete current.harnessMachines;
+  current.sessionAgentAccounts = [{ provider: "codex", billingSource: "provider_account", machineCount: 1 }];
   const calls: Array<{ path: string; method: string; body?: string }> = [];
+  const transport: ApiTransport = {
+    instanceId: "test",
+    publicOrigin: "http://localhost",
+    close() {},
+    async request(path, init) {
+      calls.push({ path, method: init?.method ?? "GET", ...(typeof init?.body === "string" ? { body: init.body } : {}) });
+      return new Response(JSON.stringify({
+        ...current,
+        ...((init?.method ?? "GET") === "PUT"
+          ? { mode: "session_agent_account", effectiveMode: "session_agent_account" }
+          : {}),
+      }), { headers: { "content-type": "application/json" } });
+    },
+  };
+  const { container, root } = await renderPanel(transport);
+  try {
+    await act(async () => buttonNamed(container, "Session Naming").click());
+    await selectOption(container, "Naming Mode", "Agent Harness");
+    assert.equal(container.querySelector('[aria-label^="Machine:"]'), null);
+    assert.match(container.textContent ?? "", /Each session will use its own Machine/);
+    const save = buttonNamed(container, "Save Configuration");
+    assert.equal(save.disabled, false);
+    await act(async () => save.click());
+    assert.deepEqual(calls.at(-1), {
+      path: "/api/session-naming",
+      method: "PUT",
+      body: JSON.stringify({ mode: "session_agent_account" }),
+    });
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("viewers can inspect Session Naming but cannot operate target controls or Save", async () => {
+  const current: SessionNamingSettingsView = {
+    ...baseView("session_agent_account"),
+    canManage: false,
+    harnessTarget: {
+      runnerId: "runner-build",
+      machineName: "Build Machine",
+      agentId: "codex-app-server",
+      harnessName: "Codex App Server",
+      driver: "codex-app-server",
+      model: "luna",
+      modelName: "Luna",
+      effort: "low",
+      available: true,
+    },
+  };
+  const transport: ApiTransport = {
+    instanceId: "test",
+    publicOrigin: "http://localhost",
+    close() {},
+    async request() {
+      return new Response(JSON.stringify(current), { headers: { "content-type": "application/json" } });
+    },
+  };
+  const { container, root } = await renderPanel(transport);
+  try {
+    await act(async () => buttonNamed(container, "Session Naming").click());
+    assert.match(container.textContent ?? "", /owner or admin permission is required/);
+    for (const label of ["Machine", "Agent Harness", "Model", "Reasoning Effort"]) {
+      assert.equal(container.querySelector<HTMLButtonElement>(`[aria-label^="${label}:"]`)?.getAttribute("aria-disabled"), "true", label);
+    }
+    assert.equal(buttonNamed(container, "Save Configuration").disabled, true);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("changing an earlier harness choice clears downstream selections and Cancel collapses without saving", async () => {
+  const calls: string[] = [];
+  const cascadeView = baseView();
+  cascadeView.harnessMachines?.push({
+    runnerId: "runner-review",
+    machineName: "Review Machine",
+    harnesses: [{
+      agentId: "codex-review",
+      name: "Codex App Server",
+      driver: "codex-app-server",
+      provider: "codex",
+      billingSource: "provider_account",
+      models: [{ id: "sol", displayName: "Sol", efforts: ["high"] }],
+    }],
+  });
+  const transport: ApiTransport = {
+    instanceId: "test",
+    publicOrigin: "http://localhost",
+    close() {},
+    async request(path, init) {
+      calls.push(`${init?.method ?? "GET"} ${path}`);
+      return new Response(JSON.stringify(cascadeView), { headers: { "content-type": "application/json" } });
+    },
+  };
+  const { container, root } = await renderPanel(transport);
+  try {
+    const row = buttonNamed(container, "Session Naming");
+    await act(async () => row.click());
+    await selectOption(container, "Naming Mode", "Agent Harness");
+    await selectOption(container, "Machine", "Build Machine");
+    await selectOption(container, "Agent Harness", "Codex App Server");
+    await selectOption(container, "Machine", "Review Machine");
+    assert.match(container.querySelector<HTMLButtonElement>('[aria-label^="Agent Harness:"]')?.getAttribute("aria-label") ?? "", /Select/);
+    assert.equal(container.querySelector('[aria-label^="Model:"]'), null);
+    assert.equal(container.querySelector('[aria-label^="Reasoning Effort:"]'), null);
+    await act(async () => buttonNamed(container, "Cancel").click());
+    assert.equal(container.querySelector("#session-naming-editor"), null);
+    assert.deepEqual(calls, ["GET /api/session-naming"]);
+    assert.equal(domWindow.document.activeElement, row);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("Custom Model Endpoint fields stay hidden until selected and API keys remain write-only", async () => {
+  const bodies: string[] = [];
+  let current = baseView();
+  const transport: ApiTransport = {
+    instanceId: "test",
+    publicOrigin: "http://localhost",
+    close() {},
+    async request(path, init) {
+      if (init?.body) bodies.push(String(init.body));
+      if (path === "/api/session-naming/custom-model" && init?.method === "PUT") {
+        current = {
+          ...current,
+          mode: "custom_model_endpoint",
+          effectiveMode: "custom_model_endpoint",
+          customModel: {
+            endpointOrigin: "https://models.example",
+            model: "title-model",
+            timeoutMs: 900,
+            apiKeyConfigured: true,
+            configurationSource: "runner",
+            runnerId: "runner-build",
+            machineName: "Build Machine",
+            online: true,
+          },
+        };
+      }
+      return new Response(JSON.stringify(current), { headers: { "content-type": "application/json" } });
+    },
+  };
+  const { container, root } = await renderPanel(transport);
+  try {
+    assert.equal(container.querySelector('[aria-label="Endpoint"]'), null);
+    await act(async () => buttonNamed(container, "Session Naming").click());
+    assert.equal(container.querySelector('[aria-label="Endpoint"]'), null);
+    await selectOption(container, "Naming Mode", "Custom Model Endpoint");
+    const setInput = async (label: string, value: string) => {
+      const input = container.querySelector<HTMLInputElement>(`[aria-label="${label}"]`);
+      assert.ok(input);
+      await act(async () => { input.value = value; Simulate.change(input); });
+    };
+    await selectOption(container, "Machine", "Build Machine");
+    await setInput("Endpoint", "https://models.example/v1/chat/completions");
+    await setInput("Model", "title-model");
+    await setInput("Timeout", "900");
+    await setInput("API Key", "write-only-secret");
+    await act(async () => buttonNamed(container, "Save Configuration").click());
+    assert.equal(container.querySelector('[aria-label="Endpoint"]'), null);
+    assert.match(container.textContent ?? "", /Custom Model Endpoint · https:\/\/models.example/);
+    assert.equal(JSON.stringify(current).includes("write-only-secret"), false);
+    assert.equal(bodies.some((body) => body.includes("write-only-secret")), true);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("editing a saved custom endpoint requires the complete URL and excludes competing key operations", async () => {
+  const current: SessionNamingSettingsView = {
+    ...baseView("custom_model_endpoint"),
+    customModel: {
+      endpointOrigin: "https://models.example",
+      model: "title-model",
+      timeoutMs: 900,
+      apiKeyConfigured: true,
+      configurationSource: "runner",
+      runnerId: "runner-build",
+      machineName: "Build Machine",
+      online: true,
+    },
+  };
+  const calls: Array<{ path: string; method: string; body?: string }> = [];
+  let resolveSave!: (response: Response) => void;
+  const pendingSave = new Promise<Response>((resolve) => { resolveSave = resolve; });
   const transport: ApiTransport = {
     instanceId: "test",
     publicOrigin: "http://localhost",
@@ -75,345 +445,126 @@ test("Session Naming shows every mode, explains unavailable agent accounts, and 
     async request(path, init) {
       const method = init?.method ?? "GET";
       calls.push({ path, method, ...(typeof init?.body === "string" ? { body: init.body } : {}) });
-      if (method === "PUT") mode = JSON.parse(String(init?.body)).mode as SessionNamingMode;
-      return new Response(JSON.stringify(view(mode)), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
+      if (path === "/api/session-naming/custom-model" && method === "PUT") return pendingSave;
+      return new Response(JSON.stringify(current), { headers: { "content-type": "application/json" } });
     },
   };
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const { container, root } = await renderPanel(transport);
+  const setInput = async (label: string, value: string) => {
+    const input = container.querySelector<HTMLInputElement>(`[aria-label="${label}"]`);
+    assert.ok(input);
+    await act(async () => { input.value = value; Simulate.change(input); });
+  };
   try {
-    await act(async () => {
-      root.render(
-        <React.StrictMode>
-          <ApiProvider client={createApiClient(transport)}>
-            <SessionNamingPanel />
-          </ApiProvider>
-        </React.StrictMode>,
-      );
-    });
-    assert.equal(calls[0]?.path, "/api/session-naming");
-    assert.match(container.textContent ?? "", /API key configured/);
-    assert.match(container.textContent ?? "", /Managed through the control-plane environment/);
+    await act(async () => buttonNamed(container, "Session Naming").click());
+    await setInput("Model", "haiku-title");
+    assert.match(container.textContent ?? "", /Re-enter the complete endpoint URL/);
+    assert.equal(buttonNamed(container, "Save Configuration").disabled, true);
 
-    const trigger = container.querySelector<HTMLButtonElement>('[aria-haspopup="listbox"]');
-    assert.ok(trigger);
-    await act(async () => trigger.click());
-    const options = [...container.querySelectorAll<HTMLButtonElement>('[role="option"]')];
-    assert.deepEqual(options.map((option) => option.querySelector("span")?.textContent), [
-      "Prompt Text OnlyUse the first completed user message. No model or provider credentials are required.",
-      "Use Session Agent AccountUse the authenticated provider account on the session's Machine.Runner-hosted agent account naming is not available in this release.",
-      "Custom Model EndpointSend selected session text to the operator-configured OpenAI-compatible endpoint.",
-    ]);
-    const agent = options[1]!;
-    assert.equal(agent.getAttribute("aria-disabled"), "true");
-    assert.match(agent.textContent ?? "", /not available in this release/);
-
-    await act(async () => options[0]!.click());
-    assert.equal(calls.at(-1)?.method, "PUT");
-    assert.deepEqual(JSON.parse(calls.at(-1)?.body ?? "{}"), { mode: "prompt_text_only" });
-    assert.equal(trigger.getAttribute("aria-label"), "Naming Mode: Prompt Text Only");
-  } finally {
-    await act(async () => root.unmount());
-    container.remove();
-  }
-});
-
-test("Session Naming identifies load failure and retries in place", async () => {
-  let requests = 0;
-  const transport: ApiTransport = {
-    instanceId: "test-retry",
-    publicOrigin: "http://localhost",
-    close() {},
-    async request() {
-      requests += 1;
-      if (requests === 1) {
-        return new Response(JSON.stringify({ error: "could not load session naming settings" }), {
-          status: 500,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      return new Response(JSON.stringify(view("prompt_text_only")), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-    },
-  };
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
-  try {
-    await act(async () => {
-      root.render(
-        <ApiProvider client={createApiClient(transport)}>
-          <SessionNamingPanel />
-        </ApiProvider>,
-      );
-    });
-    assert.match(container.textContent ?? "", /Could not load session naming: could not load session naming settings/);
-    const retry = [...container.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent?.trim() === "Retry");
-    assert.ok(retry);
-
-    const trigger = container.querySelector<HTMLButtonElement>('[aria-haspopup="listbox"]');
-    assert.ok(trigger);
-    await act(async () => trigger.click());
-    const options = [...container.querySelectorAll<HTMLButtonElement>('[role="option"]')];
-    assert.ok(options.length > 0);
-    for (const option of options) {
-      assert.match(option.textContent ?? "", /Session naming settings could not be loaded/);
-    }
-
-    await act(async () => retry.click());
-    assert.equal(requests, 2);
-    assert.match(container.textContent ?? "", /Saved for this organization/);
-    assert.doesNotMatch(container.textContent ?? "", /Load Failed/);
-  } finally {
-    await act(async () => root.unmount());
-    container.remove();
-  }
-});
-
-test("Session Naming reports secret-free runner provider and billing availability", async () => {
-  const available: SessionNamingSettingsView = {
-    ...view("session_agent_account"),
-    effectiveMode: "session_agent_account",
-    modes: {
-      ...view("session_agent_account").modes,
-      session_agent_account: { available: true },
-    },
-    sessionAgentAccounts: [
-      { provider: "claude", billingSource: "subscription", machineCount: 1 },
-      { provider: "codex", billingSource: "provider_account", machineCount: 2 },
-    ],
-  };
-  const transport: ApiTransport = {
-    instanceId: "test-accounts",
-    publicOrigin: "http://localhost",
-    close() {},
-    async request() {
-      return new Response(JSON.stringify(available), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-    },
-  };
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
-  try {
-    await act(async () => {
-      root.render(
-        <ApiProvider client={createApiClient(transport)}>
-          <SessionNamingPanel />
-        </ApiProvider>,
-      );
-    });
-    assert.match(container.textContent ?? "", /Runner Accounts/);
-    assert.match(container.textContent ?? "", /Claude · subscription · 1 Machine/);
-    assert.match(container.textContent ?? "", /Codex · provider account · 2 Machines/);
-    assert.match(container.textContent ?? "", /Each session uses only its own Machine and provider account/);
-  } finally {
-    await act(async () => root.unmount());
-    container.remove();
-  }
-});
-
-test("Session Naming provisions runner configuration and keeps API keys write-only", async () => {
-  const runnerView: SessionNamingSettingsView = {
-    ...view("custom_model_endpoint"),
-    effectiveMode: "custom_model_endpoint",
-    customModel: {
-      endpointOrigin: "https://models.example",
-      model: "title-model",
+    await setInput("Endpoint", "https://models.example/v1/chat/completions");
+    const save = buttonNamed(container, "Save Configuration");
+    assert.equal(save.disabled, false);
+    await act(async () => save.click());
+    assert.equal(calls.at(-1)?.path, "/api/session-naming/custom-model");
+    assert.deepEqual(JSON.parse(calls.at(-1)?.body ?? "{}"), {
+      runnerId: "runner-build",
+      endpoint: "https://models.example/v1/chat/completions",
+      model: "haiku-title",
       timeoutMs: 900,
-      apiKeyConfigured: true,
-      configurationSource: "runner",
-      runnerId: "runner-one",
-      machineName: "Build Machine",
-      online: true,
-    },
-    customModelTargets: [{
-      runnerId: "runner-one",
-      machineName: "Build Machine",
-      online: true,
-      available: true,
-      configured: true,
-    }, {
+    });
+    for (const label of ["Replace API Key", "Delete API Key", "Test Connection"]) {
+      assert.equal(buttonNamed(container, label).disabled, true, label);
+    }
+    assert.equal(container.querySelector<HTMLButtonElement>('[aria-label^="Machine:"]')?.getAttribute("aria-disabled"), "true");
+
+    await act(async () => {
+      resolveSave(new Response(JSON.stringify(current), { headers: { "content-type": "application/json" } }));
+      await pendingSave;
+    });
+    assert.equal(container.querySelector("#session-naming-editor"), null);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("Session Naming shows sanitized drift fallback and retries a load failure in place", async () => {
+  let requests = 0;
+  const drifted: SessionNamingSettingsView = {
+    ...baseView("session_agent_account"),
+    effectiveMode: "prompt_text_only",
+    harnessTarget: {
       runnerId: "runner-old",
       machineName: "Old Machine",
-      online: true,
+      agentId: "codex-app-server",
+      harnessName: "Codex App Server",
+      driver: "codex-app-server",
+      model: "luna",
+      modelName: "Luna",
+      effort: "low",
       available: false,
-      configured: false,
-      reason: "Update this Machine runner to configure a custom naming endpoint.",
-    }],
-  };
-  const calls: Array<{ path: string; method: string; body?: string }> = [];
-  const transport: ApiTransport = {
-    instanceId: "test-custom-runner",
-    publicOrigin: "http://localhost",
-    close() {},
-    async request(path, init) {
-      const method = init?.method ?? "GET";
-      calls.push({ path, method, ...(typeof init?.body === "string" ? { body: init.body } : {}) });
-      if (path.endsWith("/test")) {
-        return new Response(JSON.stringify({ ok: true, status: "available" }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      return new Response(JSON.stringify(runnerView), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
+      reason: "The selected Machine is offline.",
     },
   };
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const transport: ApiTransport = {
+    instanceId: "test",
+    publicOrigin: "http://localhost",
+    close() {},
+    async request() {
+      requests++;
+      if (requests === 1) return new Response(JSON.stringify({ error: "could not load session naming settings" }), {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      });
+      return new Response(JSON.stringify(drifted), { headers: { "content-type": "application/json" } });
+    },
+  };
+  const { container, root } = await renderPanel(transport);
   try {
-    await act(async () => {
-      root.render(
-        <ApiProvider client={createApiClient(transport)}>
-          <SessionNamingPanel />
-        </ApiProvider>,
-      );
-    });
-    assert.match(container.textContent ?? "", /Stored on Build Machine/);
-    for (const label of ["Endpoint", "Model", "Timeout", "API Key"]) {
-      assert.ok(container.querySelector(`[aria-label="${label}"]`), `${label} field is visible`);
-    }
-    assert.ok(container.querySelector('[aria-label^="Machine: "]'), "Machine field is visible");
-    const machine = container.querySelector<HTMLButtonElement>('[aria-label^="Machine: "]');
-    assert.ok(machine);
-    await act(async () => machine.click());
-    assert.match(container.querySelector('[role="listbox"][aria-label="Machine"]')?.textContent ?? "", /Update this Machine runner/);
-    for (const label of ["Save Configuration", "Replace API Key", "Delete API Key", "Test Connection"]) {
-      assert.ok([...container.querySelectorAll("button")].some((button) => button.textContent?.trim() === label));
-    }
-
-    const key = container.querySelector<HTMLInputElement>('[aria-label="API Key"]');
-    assert.ok(key);
-    await act(async () => {
-      key.value = "write-only-browser-sentinel";
-      Simulate.change(key);
-    });
-    const replace = [...container.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent?.trim() === "Replace API Key");
-    assert.ok(replace);
-    assert.equal(replace.disabled, false);
-    await act(async () => replace.click());
-    const replaceCall = calls.find((call) =>
-      call.path === "/api/session-naming/custom-model/api-key" && call.method === "POST");
-    assert.ok(replaceCall);
-    assert.deepEqual(JSON.parse(replaceCall.body ?? "{}"), { apiKey: "write-only-browser-sentinel" });
-    assert.equal(key.value, "");
-    assert.doesNotMatch(container.textContent ?? "", /write-only-browser-sentinel/);
-    assert.equal(domWindow.localStorage.length, 0);
-
-    const testConnection = [...container.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent?.trim() === "Test Connection");
-    assert.ok(testConnection);
-    await act(async () => testConnection.click());
-    assert.ok(calls.some((call) => call.path === "/api/session-naming/custom-model/test" && call.method === "POST"));
-    assert.match(container.textContent ?? "", /Connection succeeded/);
+    assert.match(container.textContent ?? "", /Load Failed/);
+    await act(async () => buttonNamed(container, "Retry").click());
+    assert.match(container.textContent ?? "", /selected Machine is offline/);
+    assert.match(container.textContent ?? "", /fall back to prompt-derived naming/);
+    assert.equal(container.textContent?.includes("token"), false);
   } finally {
     await act(async () => root.unmount());
     container.remove();
-    domWindow.localStorage.clear();
   }
 });
 
-test("Session Naming ignores custom-model responses from a previous control-plane instance", async () => {
-  const first = {
-    ...view("custom_model_endpoint"),
-    effectiveMode: "custom_model_endpoint" as const,
-    customModel: {
-      endpointOrigin: "https://first.example",
-      model: "first-model",
-      timeoutMs: 900,
-      apiKeyConfigured: false,
-      configurationSource: "runner" as const,
-      runnerId: "runner-first",
-      machineName: "First Machine",
-      online: true,
+test("Session Naming attributes drift fallback to the selected mode", async () => {
+  const drifted: SessionNamingSettingsView = {
+    ...baseView("custom_model_endpoint"),
+    effectiveMode: "prompt_text_only",
+    modes: {
+      ...baseView().modes,
+      custom_model_endpoint: { available: false, reason: "The custom endpoint Machine is offline." },
     },
-    customModelTargets: [{
-      runnerId: "runner-first",
-      machineName: "First Machine",
-      online: true,
-      available: true,
-      configured: true,
-    }],
-  } satisfies SessionNamingSettingsView;
-  const second = {
-    ...first,
-    customModel: { ...first.customModel, runnerId: "runner-second", machineName: "Second Machine" },
-    customModelTargets: [{
-      runnerId: "runner-second",
-      machineName: "Second Machine",
-      online: true,
-      available: true,
-      configured: true,
-    }],
-  } satisfies SessionNamingSettingsView;
-  let resolveOldSave!: (response: Response) => void;
-  const oldSave = new Promise<Response>((resolve) => { resolveOldSave = resolve; });
-  const firstTransport: ApiTransport = {
-    instanceId: "first-instance",
-    publicOrigin: "http://first.local",
-    close() {},
-    async request(_path, init) {
-      return (init?.method ?? "GET") === "PUT"
-        ? oldSave
-        : new Response(JSON.stringify(first), { headers: { "content-type": "application/json" } });
+    harnessTarget: {
+      runnerId: "runner-old",
+      machineName: "Old Machine",
+      agentId: "codex-app-server",
+      harnessName: "Codex App Server",
+      driver: "codex-app-server",
+      model: "luna",
+      modelName: "Luna",
+      effort: "low",
+      available: false,
+      reason: "The selected Agent Harness is no longer authenticated.",
     },
   };
-  const secondTransport: ApiTransport = {
-    instanceId: "second-instance",
-    publicOrigin: "http://second.local",
+  const transport: ApiTransport = {
+    instanceId: "test",
+    publicOrigin: "http://localhost",
     close() {},
     async request() {
-      return new Response(JSON.stringify(second), { headers: { "content-type": "application/json" } });
+      return new Response(JSON.stringify(drifted), { headers: { "content-type": "application/json" } });
     },
   };
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const { container, root } = await renderPanel(transport);
   try {
-    await act(async () => {
-      root.render(
-        <ApiProvider client={createApiClient(firstTransport)}>
-          <SessionNamingPanel />
-        </ApiProvider>,
-      );
-    });
-    const endpoint = container.querySelector<HTMLInputElement>('[aria-label="Endpoint"]');
-    assert.ok(endpoint);
-    await act(async () => {
-      endpoint.value = "https://first.example/v1/chat/completions";
-      Simulate.change(endpoint);
-    });
-    const save = [...container.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent?.trim() === "Save Configuration");
-    assert.ok(save);
-    await act(async () => save.click());
-
-    await act(async () => {
-      root.render(
-        <ApiProvider client={createApiClient(secondTransport)}>
-          <SessionNamingPanel />
-        </ApiProvider>,
-      );
-    });
-    assert.match(container.textContent ?? "", /Stored on Second Machine/);
-    resolveOldSave(new Response(JSON.stringify(first), { headers: { "content-type": "application/json" } }));
-    await act(async () => { await oldSave; });
-    assert.match(container.textContent ?? "", /Stored on Second Machine/);
-    assert.doesNotMatch(container.textContent ?? "", /Custom model configuration saved on the selected Machine/);
+    assert.match(container.textContent ?? "", /custom endpoint Machine is offline/);
+    assert.doesNotMatch(container.textContent ?? "", /Agent Harness is no longer authenticated/);
   } finally {
     await act(async () => root.unmount());
     container.remove();

@@ -94,9 +94,13 @@ export function sessionNamingPrompt(messages: GenerateSessionTitleMessage["messa
   return `${TITLE_INSTRUCTIONS}\n\n<conversation>\n${transcript}\n</conversation>`;
 }
 
-export function claudeSessionNamingArgs(baseArgs: readonly string[]): string[] {
+export function claudeSessionNamingArgs(
+  baseArgs: readonly string[],
+  target?: GenerateSessionTitleMessage["target"],
+): string[] {
   return [
     ...baseArgs,
+    ...(target ? ["--model", target.model, "--effort", target.effort] : []),
     "-p",
     "--output-format", "text",
     "--permission-mode", "plan",
@@ -130,6 +134,7 @@ export function codexSessionNamingTurnParams(
   threadId: string,
   cwd: string,
   prompt: string,
+  target?: GenerateSessionTitleMessage["target"],
 ): Record<string, unknown> {
   return {
     threadId,
@@ -144,6 +149,7 @@ export function codexSessionNamingTurnParams(
       required: ["title"],
       additionalProperties: false,
     },
+    ...(target ? { model: target.model, effort: target.effort } : {}),
   };
 }
 
@@ -202,6 +208,19 @@ function validMessages(messages: GenerateSessionTitleMessage["messages"]): boole
     messages.reduce((total, message) => total + message.text.length, 0) <= INPUT_MAX_CHARS;
 }
 
+function validExplicitTarget(
+  target: GenerateSessionTitleMessage["target"],
+  agent: AgentDefinition,
+): boolean {
+  if (!target || target.agentId !== agent.id || target.driver !== (agent.driver ?? "acp")) return false;
+  const capabilities = agent.capabilities;
+  const model = capabilities?.models.find((candidate) =>
+    candidate.id === target.model && candidate.id !== "default" && !candidate.hidden,
+  );
+  const efforts = model?.efforts?.length ? model.efforts : capabilities?.effortLevels ?? [];
+  return Boolean(model && efforts.includes(target.effort));
+}
+
 function claudeEnvironment(env: Record<string, string>): Record<string, string> {
   const result = { ...env };
   if (result.CLAUDE_CODE_OAUTH_TOKEN) delete result.ANTHROPIC_API_KEY;
@@ -215,6 +234,7 @@ function collectClaudeTitle(
   prompt: string,
   timeoutMs: number,
   isolation: SpawnIsolation | undefined,
+  target: GenerateSessionTitleMessage["target"] | undefined,
   spawn: (options: SpawnAgentOptions) => AgentProcess,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -222,7 +242,7 @@ function collectClaudeTitle(
     try {
       child = spawn({
         command: agent.command,
-        args: claudeSessionNamingArgs(agent.args),
+        args: claudeSessionNamingArgs(agent.args, target),
         cwd,
         env: claudeEnvironment(env),
         context: agent.context,
@@ -274,6 +294,7 @@ async function collectCodexTitle(
   prompt: string,
   timeoutMs: number,
   isolation: SpawnIsolation | undefined,
+  target: GenerateSessionTitleMessage["target"] | undefined,
   spawn: (options: SpawnAgentOptions) => AgentProcess,
 ): Promise<string> {
   let child: AgentProcess;
@@ -348,7 +369,7 @@ async function collectCodexTitle(
     );
     const threadId = started?.thread?.id;
     if (typeof threadId !== "string" || !threadId) throw new SessionNamingFailure("provider_failed");
-    await peer.requestWithDeadline("turn/start", codexSessionNamingTurnParams(threadId, cwd, prompt), deadline);
+    await peer.requestWithDeadline("turn/start", codexSessionNamingTurnParams(threadId, cwd, prompt, target), deadline);
     await turn;
     return output;
   } catch (error) {
@@ -422,6 +443,7 @@ export class SessionNamingExecutor {
     });
     if (!validMessages(message.messages)) return fail("invalid_result");
     if (!agent) return fail("session_unavailable");
+    if (message.target && !validExplicitTarget(message.target, agent)) return fail("provider_unsupported");
     const driver = agent.driver ?? "acp";
     if (driver !== "codex" && driver !== "codex-app-server" && driver !== "claude-code") {
       return fail("provider_unsupported");
@@ -449,8 +471,8 @@ export class SessionNamingExecutor {
       const generated = this.generateOverride
         ? await this.generateOverride(account, agent, neutral.cwd, env, prompt, timeoutMs, authorization?.isolation)
         : account.provider === "claude"
-          ? await collectClaudeTitle(agent, neutral.cwd, env, prompt, timeoutMs, authorization?.isolation, this.spawn)
-          : await collectCodexTitle(agent, neutral.cwd, env, prompt, timeoutMs, authorization?.isolation, this.spawn);
+          ? await collectClaudeTitle(agent, neutral.cwd, env, prompt, timeoutMs, authorization?.isolation, message.target, this.spawn)
+          : await collectCodexTitle(agent, neutral.cwd, env, prompt, timeoutMs, authorization?.isolation, message.target, this.spawn);
       const title = normalizeRunnerSessionTitle(generated);
       if (!title) return fail("invalid_result");
       return {

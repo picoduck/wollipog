@@ -1,11 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
 import type {
   AgentDefinition,
+  ConfigureSessionNamingHarnessRequest,
   ConfigureSessionNamingCustomModelRequest,
   GenerateSessionTitleResultMessage,
   SessionNamingAccountBoundary,
   SessionNamingConnectionTestResult,
   SessionNamingCustomModelResultMessage,
+  SessionNamingHarnessMachine,
+  SessionNamingHarnessTarget,
   SessionNamingMode,
   SessionNamingSettingsView,
 } from "@wollipog/protocol";
@@ -128,6 +131,29 @@ function accountForAgent(agent: AgentDefinition | undefined): Omit<SessionNaming
   return null;
 }
 
+function harnessModelsForAgent(agent: AgentDefinition): SessionNamingHarnessMachine["harnesses"][number]["models"] {
+  if (!accountForAgent(agent)) return [];
+  const capabilities = agent.capabilities;
+  if (!capabilities) return [];
+  return capabilities.models.flatMap((model) => {
+    if (model.hidden || model.id === "default") return [];
+    const efforts = model.efforts?.length ? model.efforts : capabilities.effortLevels;
+    return efforts.length ? [{
+      id: model.id,
+      displayName: model.displayName ?? model.id,
+      efforts: [...new Set(efforts)],
+    }] : [];
+  });
+}
+
+function harnessNameForAgent(agent: AgentDefinition): string {
+  const generatedCodexName = /^Codex(?: —)? Interactive$/u.test(agent.name);
+  return (agent.driver ?? "acp") === "codex-app-server" &&
+    (agent.source === "discovered" || generatedCodexName)
+    ? "Codex App Server"
+    : agent.name;
+}
+
 const SESSION_NAMING_FAILURE_CODES = new Set([
   "session_unavailable", "account_unavailable", "provider_unsupported", "rate_limited",
   "timed_out", "provider_failed", "invalid_result",
@@ -207,6 +233,88 @@ export class SessionNamingSettings {
     }).sort((left, right) => left.provider.localeCompare(right.provider) || left.billingSource.localeCompare(right.billingSource));
   }
 
+  private harnessMachines(organizationId: string): SessionNamingHarnessMachine[] {
+    if (!this.hub) return [];
+    return this.db.listRunners().flatMap((runner) => {
+      if (runner.status !== "online" || !runnerSupportsProtocol(runner.protocolVersion, "sessionNamingTargets") ||
+          this.db.runnerScope(runner.runnerId)?.organizationId !== organizationId) return [];
+      const harnesses = runner.agents.flatMap((agent) => {
+        const driver = agent.driver ?? "acp";
+        if (driver !== "codex" && driver !== "codex-app-server" && driver !== "claude-code") return [];
+        const account = accountForAgent(agent);
+        const models = harnessModelsForAgent(agent);
+        return account && models.length ? [{
+          agentId: agent.id,
+          name: harnessNameForAgent(agent),
+          driver,
+          provider: account.provider,
+          billingSource: account.billingSource,
+          models,
+        }] : [];
+      }).sort((left, right) => left.name.localeCompare(right.name));
+      return harnesses.length ? [{
+        runnerId: runner.runnerId,
+        machineName: runner.displayName ?? runner.hostname ?? runner.runnerId,
+        harnesses,
+      }] : [];
+    }).sort((left, right) => left.machineName.localeCompare(right.machineName));
+  }
+
+  private harnessTarget(organizationId: string): {
+    view: SessionNamingHarnessTarget;
+    runner?: NonNullable<ReturnType<ControlPlaneDb["getRunner"]>>;
+    agent?: AgentDefinition;
+    account?: Omit<SessionNamingAccountBoundary, "machineCount">;
+  } | null {
+    const saved = this.db.getSessionNamingHarnessTarget?.(organizationId) ?? null;
+    if (!saved) return null;
+    const runner = this.db.getRunner(saved.runnerId);
+    const runnerInOrganization = runner &&
+      this.db.runnerScope(runner.runnerId)?.organizationId === organizationId
+      ? runner
+      : undefined;
+    const machineName = runnerInOrganization?.displayName ?? runnerInOrganization?.hostname ?? saved.runnerId;
+    const agent = runnerInOrganization?.agents.find((candidate) => candidate.id === saved.agentId &&
+      (candidate.driver ?? "acp") === saved.driver);
+    const model = agent?.capabilities?.models.find((candidate) => candidate.id === saved.model);
+    const efforts = model?.efforts?.length ? model.efforts : agent?.capabilities?.effortLevels ?? [];
+    const account = accountForAgent(agent);
+    const reason = !runnerInOrganization
+      ? "The selected Machine is no longer available."
+      : runnerInOrganization.status !== "online"
+        ? "The selected Machine is offline."
+        : !runnerSupportsProtocol(runnerInOrganization.protocolVersion, "sessionNamingTargets")
+          ? "Update the selected Machine runner to use an explicit naming target."
+          : !agent
+            ? "The selected Agent Harness is no longer advertised."
+            : !account
+              ? "The selected Agent Harness is unavailable or no longer authenticated."
+              : !model || model.hidden || model.id === "default"
+                ? "The selected model is no longer advertised."
+                : !efforts.includes(saved.effort)
+                  ? "The selected reasoning effort is no longer supported by that model."
+                  : !this.hub
+                    ? "Runner requests are unavailable."
+                    : undefined;
+    return {
+      view: {
+        runnerId: saved.runnerId,
+        machineName,
+        agentId: saved.agentId,
+        harnessName: agent ? harnessNameForAgent(agent) : saved.agentId,
+        driver: saved.driver,
+        model: saved.model,
+        modelName: model?.displayName ?? saved.model,
+        effort: saved.effort,
+        available: reason === undefined,
+        ...(reason ? { reason } : {}),
+      },
+      ...(reason === undefined && runnerInOrganization && agent && account
+        ? { runner: runnerInOrganization, agent, account }
+        : {}),
+    };
+  }
+
   private customModelTargets(organizationId: string): NonNullable<SessionNamingSettingsView["customModelTargets"]> {
     const selected = this.db.getSessionNamingCustomModel(organizationId);
     return this.db.listRunners()
@@ -255,8 +363,11 @@ export class SessionNamingSettings {
     if (selected.mode === "custom_model_endpoint" && this.customModelAvailable(organizationId)) {
       return "custom_model_endpoint";
     }
-    if (selected.mode === "session_agent_account" && this.hub && this.accountBoundaries(organizationId).length) {
-      return "session_agent_account";
+    if (selected.mode === "session_agent_account" && this.hub) {
+      const explicit = this.harnessTarget(organizationId);
+      if (explicit ? explicit.view.available : this.accountBoundaries(organizationId).length > 0) {
+        return "session_agent_account";
+      }
     }
     return "prompt_text_only";
   }
@@ -268,9 +379,12 @@ export class SessionNamingSettings {
     const customAvailable = this.customModelAvailable(organizationId);
     const customModelTargets = this.customModelTargets(organizationId);
     const sessionAgentAccounts = this.hub ? this.accountBoundaries(organizationId) : [];
+    const harnessMachines = this.harnessMachines(organizationId);
+    const harnessTarget = this.harnessTarget(organizationId);
     const effectiveMode = selected.mode === "custom_model_endpoint" && customAvailable
       ? "custom_model_endpoint"
-      : selected.mode === "session_agent_account" && sessionAgentAccounts.length
+      : selected.mode === "session_agent_account" && (harnessTarget?.view.available ||
+          (!harnessTarget && sessionAgentAccounts.length))
         ? "session_agent_account"
         : "prompt_text_only";
     return {
@@ -281,9 +395,10 @@ export class SessionNamingSettings {
       modes: {
         prompt_text_only: { available: true },
         session_agent_account: {
-          available: sessionAgentAccounts.length > 0,
-          ...(sessionAgentAccounts.length ? {} : {
-            reason: "No online current runner reports an eligible authenticated Codex or Claude account.",
+          available: harnessMachines.length > 0 || (!harnessTarget && sessionAgentAccounts.length > 0),
+          ...(harnessMachines.length || (!harnessTarget && sessionAgentAccounts.length) ? {} : {
+            reason: harnessTarget?.view.reason ??
+              "No online current runner advertises an authenticated naming-compatible Agent Harness, model, and effort.",
           }),
         },
         custom_model_endpoint: customAvailable
@@ -318,11 +433,16 @@ export class SessionNamingSettings {
       } : {}),
       ...(customModelTargets.length ? { customModelTargets } : {}),
       ...(sessionAgentAccounts.length ? { sessionAgentAccounts } : {}),
+      ...(harnessTarget ? { harnessTarget: harnessTarget.view } : {}),
+      ...(harnessMachines.length ? { harnessMachines } : {}),
     };
   }
 
   setMode(organizationId: string, mode: SessionNamingMode, now = Date.now()): SessionNamingSettingsView {
-    if (mode === "session_agent_account" && (!this.hub || this.accountBoundaries(organizationId).length === 0)) {
+    const explicitTarget = this.harnessTarget(organizationId);
+    if (mode === "session_agent_account" && (!this.hub || (explicitTarget
+      ? !explicitTarget.view.available
+      : this.accountBoundaries(organizationId).length === 0))) {
       throw new SessionNamingModeUnavailableError("no eligible authenticated runner agent account is currently available");
     }
     if (mode === "custom_model_endpoint" && !this.customModelAvailable(organizationId)) {
@@ -333,12 +453,43 @@ export class SessionNamingSettings {
     return this.view(organizationId, true);
   }
 
+  configureHarness(
+    organizationId: string,
+    input: ConfigureSessionNamingHarnessRequest,
+    now = Date.now(),
+  ): SessionNamingSettingsView {
+    if (!input || typeof input.runnerId !== "string" || typeof input.agentId !== "string" ||
+        (input.driver !== "codex" && input.driver !== "codex-app-server" && input.driver !== "claude-code") ||
+        typeof input.model !== "string" || typeof input.effort !== "string" ||
+        !input.runnerId || !input.agentId || !input.model || !input.effort ||
+        [input.runnerId, input.agentId, input.model, input.effort].some((value) => value.length > 256)) {
+      throw new Error("a complete valid Agent Harness target is required");
+    }
+    const machine = this.harnessMachines(organizationId).find((candidate) => candidate.runnerId === input.runnerId);
+    const harness = machine?.harnesses.find((candidate) => candidate.agentId === input.agentId &&
+      candidate.driver === input.driver);
+    const model = harness?.models.find((candidate) => candidate.id === input.model);
+    if (!machine || !harness || !model || !model.efforts.includes(input.effort)) {
+      throw new SessionNamingModeUnavailableError(
+        "the selected Machine, Agent Harness, model, or reasoning effort is no longer available",
+      );
+    }
+    const previous = this.db.getSessionNamingHarnessTarget?.(organizationId) ?? null;
+    const targetUpdatedAt = Math.max(now, (previous?.updatedAt ?? 0) + 1);
+    this.db.setSessionNamingHarnessTarget(organizationId, input, targetUpdatedAt);
+    const priorPreference = this.db.getSessionNamingPreference(organizationId)?.updatedAt ?? 0;
+    this.db.setSessionNamingPreference(organizationId, "session_agent_account", Math.max(now, priorPreference + 1));
+    return this.view(organizationId, true);
+  }
+
   enabledForSession = (sessionId: string): boolean => {
     const organizationId = this.organizationIdForSession(sessionId);
     if (!organizationId) return false;
     const mode = this.effectiveMode(organizationId);
     if (mode === "custom_model_endpoint") return true;
-    return mode === "session_agent_account" && this.sessionAgentTarget(sessionId) !== null;
+    if (mode !== "session_agent_account") return false;
+    const explicit = this.harnessTarget(organizationId);
+    return explicit ? explicit.view.available : this.sessionAgentTarget(sessionId) !== null;
   };
 
   timeoutForSession = (sessionId: string): number => {
@@ -359,6 +510,11 @@ export class SessionNamingSettings {
         : selected;
     }
     if (this.effectiveMode(organizationId) !== "session_agent_account") return selected;
+    const explicit = this.harnessTarget(organizationId);
+    if (explicit) {
+      const target = explicit.view;
+      return `${selected}:${target.runnerId}:${target.agentId}:${target.driver}:${target.model}:${target.effort}:${target.available}`;
+    }
     const target = this.sessionAgentTarget(sessionId);
     return target
       ? `${selected}:${target.runner.runnerId}:${target.runner.protocolVersion}:${target.agent.id}:${target.agent.authStatus}:${target.agent.available}`
@@ -606,13 +762,26 @@ export class SessionNamingSettings {
       }
       return result.title;
     }
-    const target = this.sessionAgentTarget(request.sessionId);
+    const explicitTarget = this.harnessTarget(organizationId);
+    const target = explicitTarget?.view.available && explicitTarget.runner && explicitTarget.agent && explicitTarget.account
+      ? { runner: explicitTarget.runner, agent: explicitTarget.agent, account: explicitTarget.account }
+      : explicitTarget
+        ? null
+        : this.sessionAgentTarget(request.sessionId);
     if (!target || !this.hub) throw new Error("runner session naming is unavailable");
     const requestId = `session_name_${randomUUID()}`;
     const resultPromise = this.hub.requestFromRunner(target.runner.runnerId, requestId, {
       type: "generate_session_title",
       requestId,
       sessionId: request.sessionId,
+      ...(explicitTarget?.view.available ? {
+        target: {
+          agentId: explicitTarget.view.agentId,
+          driver: explicitTarget.view.driver,
+          model: explicitTarget.view.model,
+          effort: explicitTarget.view.effort,
+        },
+      } : {}),
       messages: request.messages.map((message) => ({ role: message.role, text: message.text })),
       timeoutMs: this.timeoutForSession(request.sessionId),
     }, this.timeoutForSession(request.sessionId) + 1_000);
