@@ -103,8 +103,8 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 95", () => {
-  assert.equal(PROTOCOL_VERSION, 95);
+test("PROTOCOL_VERSION is 96", () => {
+  assert.equal(PROTOCOL_VERSION, 96);
 });
 
 test("slash-command argument hints remain additive metadata", () => {

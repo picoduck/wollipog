@@ -12,7 +12,7 @@
  *   to accessible skill_ownership scopes, and a foreign organization's (or another user's
  *   user-scoped) skill answers 404 to read/update/version/delete/assign, mirroring projects.
  * - P1 cross-organization fan-out: an instance-wide assignment on one organization's skill must
- *   never appear in the skills_sync of another organization's runner.
+ *   never appear in the skills sync manifest of another organization's runner.
  * - P1 discovery race: a runner that registers with an empty agent inventory and only reports its
  *   harnesses via a later agents_updated message must still receive a refreshed skills_sync.
  */
@@ -360,7 +360,7 @@ test("skill routes are member-scoped and agents_updated refreshes the skills_syn
   assert.equal(foreignOwnAssign.status, 201, "the foreign admin can assign their own skill");
 
   // The runner registers with an EMPTY agent inventory — discovery has not reported yet, so the
-  // registration-time skills_sync can resolve no harness targets.
+  // registration-time skills sync can resolve no harness targets.
   const { socket: runner, inbox: runnerInbox } = await openSocketWithInbox(`ws://127.0.0.1:${port}/runner`);
   sockets.add(runner);
   runner.send(JSON.stringify({
@@ -378,12 +378,20 @@ test("skill routes are member-scoped and agents_updated refreshes the skills_syn
     sessionSnapshots: [],
   }));
   await runnerInbox.take((message) => message.type === "registered");
-  const registrationSync = await runnerInbox.take((message) => message.type === "skills_sync");
+  const registrationSync = await runnerInbox.take((message) => message.type === "skills_sync_manifest");
   const registrationSkills = registrationSync.skills as Array<{ name: string; targets: unknown[] }>;
   assert.deepEqual(registrationSkills.map((skill) => skill.name), ["member-skill"],
     "the instance-assigned foreign-organization skill never reaches this organization's runner");
   assert.deepEqual(registrationSkills[0]?.targets, [],
     "before discovery reports agents, the desired set has no harness targets");
+  runner.send(JSON.stringify({
+    type: "skills_sync_need",
+    runnerId: RUNNER_ID,
+    syncId: registrationSync.syncId,
+    missing: [],
+  }));
+  await runnerInbox.take((message) =>
+    message.type === "skills_sync_complete" && message.syncId === registrationSync.syncId);
 
   // The parameterized per-machine routes are member-scoped too, and resource scoping still
   // applies: the personal-organization member reaches the runner, the foreign admin gets 404.
@@ -411,7 +419,7 @@ test("skill routes are member-scoped and agents_updated refreshes the skills_syn
     }],
   }));
   const refreshedSync = await runnerInbox.take((message) =>
-    message.type === "skills_sync" &&
+    message.type === "skills_sync_manifest" &&
     Array.isArray(message.skills) &&
     (message.skills as Array<{ targets?: Array<{ agentId?: string }> }>)
       .some((entry) => entry.targets?.some((target) => target.agentId === "claude")));
@@ -422,6 +430,14 @@ test("skill routes are member-scoped and agents_updated refreshes the skills_syn
   assert.equal(refreshedSkills[0]!.name, "member-skill");
   assert.deepEqual(refreshedSkills[0]!.targets, [{ agentId: "claude", invocation: "agent" }],
     "the post-discovery sync resolves harness targets for the newly reported agent");
+  runner.send(JSON.stringify({
+    type: "skills_sync_need",
+    runnerId: RUNNER_ID,
+    syncId: refreshedSync.syncId,
+    missing: [],
+  }));
+  await runnerInbox.take((message) =>
+    message.type === "skills_sync_complete" && message.syncId === refreshedSync.syncId);
 
   assert.equal(child.exitCode, null, `control plane exited during the skills scenario\n${output}`);
 });

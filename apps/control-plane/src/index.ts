@@ -1243,6 +1243,18 @@ app.register(async (instance) => {
         if (msg.requestId) hub.resolveRunnerRequest({ ...msg, requestId: msg.requestId }, runnerId);
         break;
       }
+      case "skills_sync_need": {
+        if (runnerId !== msg.runnerId) {
+          app.log.warn(`runner ${runnerId} sent a mismatched skills content request`);
+          break;
+        }
+        if (!runnerSupportsProtocol(db.getRunner(runnerId)?.protocolVersion, "chunkedAgentSkills")) {
+          app.log.warn(`runner ${runnerId} requested chunked skills without negotiated support`);
+          break;
+        }
+        pushSkillsSync.handleNeed(msg);
+        break;
+      }
       case "steer_session_result":
         svc.onSteerSessionResult(runnerId!, msg);
         break;

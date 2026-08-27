@@ -762,6 +762,64 @@ test("retention GC refuses a stale version tree containing a symlink", async () 
   }
 });
 
+test("a content-free manifest reuses a verified stored digest without retransferring files", async () => {
+  const roots = makeRoots();
+  try {
+    const alpha = entry("alpha", [{ agentId: claudeAgent.id, invocation: "agent" }]);
+    await reconcile(roots, [alpha]);
+    const reused = await reconcileSkills({
+      dataDir: roots.dataDir,
+      home: roots.home,
+      agents,
+      desired: [{
+        name: alpha.name,
+        versionDigest: alpha.versionDigest,
+        targets: [
+          { agentId: claudeAgent.id, invocation: "agent" },
+          { agentId: codexAgent.id, invocation: "agent" },
+        ],
+      }],
+      allowRemovals: true,
+    });
+    assert.deepEqual(
+      new Map(reused.deployed[0]!.links.map((link) => [link.agentId, link.status])),
+      new Map([[claudeAgent.id, "linked"], [codexAgent.id, "linked"]]),
+    );
+    assert.equal(
+      realpathSync(join(roots.home, ".codex", "skills", "alpha")),
+      join(realpathSync(skillsStoreRoot(roots.dataDir)), "alpha", alpha.versionDigest),
+    );
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("an incomplete content-free manifest never removes the prior deployment", async () => {
+  const roots = makeRoots();
+  try {
+    const alpha = entry("alpha", [{ agentId: claudeAgent.id, invocation: "agent" }]);
+    await reconcile(roots, [alpha]);
+    const harnessPath = join(roots.home, ".claude", "skills", "alpha");
+    const before = realpathSync(harnessPath);
+    const incomplete = await reconcileSkills({
+      dataDir: roots.dataDir,
+      home: roots.home,
+      agents,
+      desired: [{
+        name: alpha.name,
+        versionDigest: "f".repeat(64),
+        targets: alpha.targets,
+      }],
+      allowRemovals: true,
+    });
+    assert.match(incomplete.deployed[0]!.error ?? "", /absent from the runner store/);
+    assert.equal(realpathSync(harnessPath), before);
+    assert.deepEqual(incomplete.removedLinks, []);
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
 test("a version bump flips only the canonical link; harness links stay routed through it", async () => {
   const roots = makeRoots();
   try {

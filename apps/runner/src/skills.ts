@@ -102,7 +102,7 @@ export interface ReconcileSkillsOptions {
   dataDir: string;
   home: string;
   agents: AgentDefinition[];
-  desired: SkillSyncEntry[];
+  desired: ReconcileSkillEntry[];
   /** Removal sweeps and store GC run only when an authoritative CP desired list is in hand. */
   allowRemovals?: boolean;
   log?: (message: string) => void;
@@ -119,6 +119,9 @@ export interface ReconcileSkillsOptions {
   /** Deterministic GC clock for tests. */
   now?: number;
 }
+
+/** Chunked v96 manifests omit content for a digest already verified in this runner's store. */
+export type ReconcileSkillEntry = Omit<SkillSyncEntry, "files"> & { files?: SkillFile[] };
 
 export interface ReconcileSkillsResult {
   deployed: DeployedSkillState[];
@@ -270,6 +273,25 @@ function isRealDirectory(path: string): boolean {
   try {
     const entry = lstatSync(path);
     return entry.isDirectory() && !entry.isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+/** A content-free manifest entry may reuse only a real digest directory physically contained in
+ * this runner's store. This intentionally matches materializeVersion's trust model: published
+ * digest directories were validated before their atomic rename and are not re-hashed each pass. */
+export function storedSkillVersionAvailable(
+  dataDir: string,
+  name: string,
+  digest: string,
+  manualVariant = false,
+): boolean {
+  if (!validSkillName(name) || !DIGEST_HEX.test(digest)) return false;
+  try {
+    const storeRoot = realpathSync(skillsStoreRoot(dataDir));
+    const version = join(storeRoot, name, manualVariant ? `${digest}-manual` : digest);
+    return isRealDirectory(version) && containedInStore(realpathSync(version), storeRoot);
   } catch {
     return false;
   }
@@ -914,7 +936,20 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
   // a contended pass can then report pending link deployment without touching any harness path.
   const seenPreparedNames = new Set<string>();
   const prepared = desired.map((entry) => {
-    const invalid = seenPreparedNames.has(entry.name) ? "duplicate skill name" : validateSkillSyncEntry(entry);
+    let invalid: string | null;
+    if (seenPreparedNames.has(entry.name)) {
+      invalid = "duplicate skill name";
+    } else if (entry.files === undefined) {
+      invalid = !validSkillName(entry.name)
+        ? "invalid skill name"
+        : !DIGEST_HEX.test(entry.versionDigest)
+          ? "invalid version digest"
+          : !Array.isArray(entry.targets)
+            ? "invalid skill targets"
+            : null;
+    } else {
+      invalid = validateSkillSyncEntry(entry as SkillSyncEntry);
+    }
     seenPreparedNames.add(entry.name);
     const manualNeeded = !invalid && entry.targets.some(
       (target) =>
@@ -923,9 +958,18 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
     let materializationError: string | undefined;
     if (!invalid) {
       try {
-        materializeVersion(realStoreRoot, entry.name, entry.versionDigest, entry.files, false);
-        if (manualNeeded) {
-          materializeVersion(realStoreRoot, entry.name, `${entry.versionDigest}-manual`, entry.files, true);
+        if (entry.files === undefined) {
+          if (!storedSkillVersionAvailable(dataDir, entry.name, entry.versionDigest)) {
+            throw new Error("the manifest referenced a version absent from the runner store");
+          }
+          if (manualNeeded && !storedSkillVersionAvailable(dataDir, entry.name, entry.versionDigest, true)) {
+            throw new Error("the manifest referenced a manual variant absent from the runner store");
+          }
+        } else {
+          materializeVersion(realStoreRoot, entry.name, entry.versionDigest, entry.files, false);
+          if (manualNeeded) {
+            materializeVersion(realStoreRoot, entry.name, `${entry.versionDigest}-manual`, entry.files, true);
+          }
         }
       } catch (error) {
         materializationError = errText(error);

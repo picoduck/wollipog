@@ -271,7 +271,10 @@
 // 95: session naming may target an explicit authenticated runner harness, advertised model, and
 //     reasoning effort instead of inheriting them from the session. Older runner-account settings
 //     keep their v93 follow-session behavior until an owner/admin saves an explicit target.
-export const PROTOCOL_VERSION = 95;
+// 96: managed skill desired-state delivery splits metadata from digest-addressed content. A
+//     runner requests only missing versions and applies the authoritative manifest only after an
+//     explicit completion frame; pre-v96 peers retain the bounded single-frame v90 protocol.
+export const PROTOCOL_VERSION = 96;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
@@ -394,6 +397,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   stopFailureRecovery: 85,
   stopAttemptCorrelation: 89,
   agentSkills: 90,
+  chunkedAgentSkills: 96,
   sessionAgentNaming: 93,
   sessionCustomModelNaming: 94,
   sessionNamingTargets: 95,
@@ -4117,6 +4121,7 @@ export type RunnerToControlPlane =
   | LogoutAgentResultMessage
   | AcpRegistryApprovalResultMessage
   | SkillsStateMessage
+  | SkillsSyncNeedMessage
   | DurableSessionCommandResultMessage
   | DurableSessionCommandUpdateMessage
   | HostActionResultMessage;
@@ -4537,6 +4542,41 @@ export interface SkillsSyncMessage {
   /** Present when sent via requestFromRunner; fire-and-forget push syncs omit it. */
   requestId?: string;
   skills: SkillSyncEntry[];
+}
+
+/** Content-free authoritative desired state. Receiving this frame starts (and supersedes) an
+ * ephemeral transaction; it never authorizes reconciliation by itself. */
+export interface SkillsSyncManifestMessage {
+  type: "skills_sync_manifest";
+  runnerId: string;
+  syncId: string;
+  requestId?: string;
+  skills: Array<Omit<SkillSyncEntry, "files">>;
+}
+
+/** Runner request for the exact desired digests absent from its verified local store. */
+export interface SkillsSyncNeedMessage {
+  type: "skills_sync_need";
+  runnerId: string;
+  syncId: string;
+  missing: Array<Pick<SkillSyncEntry, "name" | "versionDigest">>;
+}
+
+/** One independently bounded and digest-validated skill version. */
+export interface SkillsSyncContentMessage {
+  type: "skills_sync_content";
+  runnerId: string;
+  syncId: string;
+  name: string;
+  versionDigest: string;
+  files: SkillFile[];
+}
+
+/** Transaction fence. The runner reconciles only when every manifest digest is available. */
+export interface SkillsSyncCompleteMessage {
+  type: "skills_sync_complete";
+  runnerId: string;
+  syncId: string;
 }
 
 /** Authoritative full replacement of one machine's skill deployment state. Sent as the correlated
@@ -5242,6 +5282,9 @@ export type ControlPlaneToRunner =
   | LogoutAgentMessage
   | AcpRegistryApprovalMessage
   | SkillsSyncMessage
+  | SkillsSyncManifestMessage
+  | SkillsSyncContentMessage
+  | SkillsSyncCompleteMessage
   | GitActionRequestMessage
   | SessionHistoryRequestMessage
   | SessionHistoryPageRequestMessage

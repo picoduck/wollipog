@@ -12,6 +12,9 @@ import {
   runnerSupportsProtocol,
   type ResourceScope,
   type SkillInvocationPolicy,
+  type SkillsSyncContentMessage,
+  type SkillsSyncManifestMessage,
+  type SkillsSyncNeedMessage,
   type SkillsSyncMessage,
 } from "@wollipog/protocol";
 import type {
@@ -20,6 +23,7 @@ import type {
   SkillAssignmentView,
 } from "./db.js";
 import type { Hub } from "./hub.js";
+import type { RunnerRequestResult } from "./hub.js";
 import type { HumanPrincipal, AuthPrincipal } from "./identity.js";
 import {
   parseSkillAgentSelector,
@@ -45,13 +49,87 @@ const NOOP_LOG: SkillsLog = { debug: () => {}, warn: () => {}, error: () => {} }
  * version / assignment mutation and after runner registration completes. No-ops (with a debug log)
  * for offline runners and for runners that have not negotiated the agentSkills capability.
  */
+export interface SkillsSyncPusher {
+  (runnerId: string): void;
+  handleNeed(message: SkillsSyncNeedMessage): void;
+  request(runnerId: string, requestId: string): Promise<RunnerRequestResult>;
+}
+
+export class SkillsSyncBudgetError extends Error {
+  override readonly name = "SkillsSyncBudgetError";
+}
+
+export class SkillsSyncInProgressError extends Error {
+  override readonly name = "SkillsSyncInProgressError";
+}
+
+interface PendingSkillsDelivery {
+  runnerId: string;
+  syncId: string;
+  requestId?: string;
+  skills: ReturnType<typeof resolveDesiredSkills>;
+  timer: ReturnType<typeof setTimeout>;
+}
+
 export function makeSkillsSyncPusher(deps: {
   db: ControlPlaneDb;
   hub: SkillsHub;
   log?: SkillsLog;
-}): (runnerId: string) => void {
+  /** Test seam; bounds orphaned content snapshots in production. */
+  deliveryTtlMs?: number;
+}): SkillsSyncPusher {
   const log = deps.log ?? NOOP_LOG;
-  return (runnerId: string) => {
+  const deliveryTtlMs = deps.deliveryTtlMs ?? 30_000;
+  const pending = new Map<string, PendingSkillsDelivery>();
+  const pendingByRunner = new Map<string, string>();
+
+  const forget = (delivery: PendingSkillsDelivery): void => {
+    clearTimeout(delivery.timer);
+    pending.delete(delivery.syncId);
+    if (pendingByRunner.get(delivery.runnerId) === delivery.syncId) pendingByRunner.delete(delivery.runnerId);
+  };
+  const begin = (runnerId: string, requestId?: string): SkillsSyncMessage | SkillsSyncManifestMessage => {
+    const skills = resolveDesiredSkills(deps.db, runnerId);
+    if (!runnerSupportsProtocol(deps.db.getRunner(runnerId)?.protocolVersion, "chunkedAgentSkills")) {
+      return { type: "skills_sync", runnerId, ...(requestId ? { requestId } : {}), skills };
+    }
+    let effectiveRequestId = requestId;
+    const priorId = pendingByRunner.get(runnerId);
+    if (priorId) {
+      const prior = pending.get(priorId);
+      if (prior) {
+        if (requestId && prior.requestId && requestId !== prior.requestId) {
+          throw new SkillsSyncInProgressError("a skills sync is already in progress for this machine");
+        }
+        effectiveRequestId ??= prior.requestId;
+        forget(prior);
+      }
+    }
+    const syncId = `skills_${randomUUID()}`;
+    const delivery = {
+      runnerId,
+      syncId,
+      ...(effectiveRequestId ? { requestId: effectiveRequestId } : {}),
+      skills,
+      timer: undefined as unknown as ReturnType<typeof setTimeout>,
+    };
+    delivery.timer = setTimeout(() => {
+      forget(delivery);
+      log.warn(`expired incomplete skills delivery to ${runnerId}`);
+    }, deliveryTtlMs);
+    delivery.timer.unref?.();
+    pending.set(syncId, delivery);
+    pendingByRunner.set(runnerId, syncId);
+    return {
+      type: "skills_sync_manifest",
+      runnerId,
+      syncId,
+      ...(effectiveRequestId ? { requestId: effectiveRequestId } : {}),
+      skills: skills.map(({ files: _files, ...entry }) => entry),
+    };
+  };
+
+  const push = ((runnerId: string) => {
     if (!deps.hub.isRunnerOnline(runnerId)) {
       log.debug(`skills sync skipped for ${runnerId}: runner is offline`);
       return;
@@ -61,13 +139,9 @@ export function makeSkillsSyncPusher(deps: {
       return;
     }
     try {
-      const message: SkillsSyncMessage = {
-        type: "skills_sync",
-        runnerId,
-        skills: resolveDesiredSkills(deps.db, runnerId),
-      };
-      const bytes = skillsSyncMessageBytes(message);
-      if (bytes > SKILLS_SYNC_MAX_TOTAL_BYTES) {
+      const message = begin(runnerId);
+      if (message.type === "skills_sync" && skillsSyncMessageBytes(message) > SKILLS_SYNC_MAX_TOTAL_BYTES) {
+        const bytes = skillsSyncMessageBytes(message);
         // Fail closed, never partial: a truncated authoritative list would make the runner
         // delete deployed skills, and an oversized frame would close the runner connection.
         log.error(
@@ -76,11 +150,75 @@ export function makeSkillsSyncPusher(deps: {
         );
         return;
       }
-      deps.hub.sendToRunner(runnerId, message);
+      if (!deps.hub.sendToRunner(runnerId, message) && message.type === "skills_sync_manifest") {
+        const delivery = pending.get(message.syncId);
+        if (delivery) forget(delivery);
+      }
     } catch (error) {
       log.warn(`skills sync push to ${runnerId} failed: ${error instanceof Error ? error.message : "unknown error"}`);
     }
+  }) as SkillsSyncPusher;
+
+  push.handleNeed = (message: SkillsSyncNeedMessage): void => {
+    const delivery = pending.get(message.syncId);
+    if (!delivery || delivery.runnerId !== message.runnerId || !Array.isArray(message.missing)) {
+      log.warn(`ignored stale or invalid skills content request from ${message.runnerId}`);
+      return;
+    }
+    const desired = new Map<string, PendingSkillsDelivery["skills"][number]>(
+      delivery.skills.map((entry) => [`${entry.name}\0${entry.versionDigest}`, entry] as const),
+    );
+    const requested = new Set<string>();
+    for (const missing of message.missing) {
+      const key = `${missing?.name}\0${missing?.versionDigest}`;
+      const entry = desired.get(key);
+      if (!entry || requested.has(key)) {
+        log.warn(`rejected invalid skills content request from ${message.runnerId}`);
+        forget(delivery);
+        return;
+      }
+      requested.add(key);
+      const content: SkillsSyncContentMessage = {
+        type: "skills_sync_content",
+        runnerId: message.runnerId,
+        syncId: message.syncId,
+        name: entry.name,
+        versionDigest: entry.versionDigest,
+        files: entry.files,
+      };
+      if (!deps.hub.sendToRunner(message.runnerId, content)) {
+        log.warn(`skills content delivery to ${message.runnerId} was interrupted`);
+        forget(delivery);
+        return;
+      }
+    }
+    deps.hub.sendToRunner(message.runnerId, {
+      type: "skills_sync_complete",
+      runnerId: message.runnerId,
+      syncId: message.syncId,
+    });
+    forget(delivery);
   };
+
+  push.request = async (runnerId: string, requestId: string): Promise<RunnerRequestResult> => {
+    const message = begin(runnerId, requestId);
+    if (message.type === "skills_sync" && skillsSyncMessageBytes(message) > SKILLS_SYNC_MAX_TOTAL_BYTES) {
+      throw new SkillsSyncBudgetError(
+        `this machine's aggregate desired skill payload is ${skillsSyncMessageBytes(message)} bytes, over the ` +
+          `${SKILLS_SYNC_MAX_TOTAL_BYTES}-byte skills sync budget; unassign or shrink skills before syncing`,
+      );
+    }
+    try {
+      return await deps.hub.requestFromRunner(runnerId, requestId, message);
+    } catch (error) {
+      if (message.type === "skills_sync_manifest") {
+        const delivery = pending.get(message.syncId);
+        if (delivery) forget(delivery);
+      }
+      throw error;
+    }
+  };
+  return push;
 }
 
 export interface SkillsRouteDeps {
@@ -88,7 +226,7 @@ export interface SkillsRouteDeps {
   hub: SkillsHub;
   requestHuman(req: FastifyRequest): HumanPrincipal | null;
   requestPrincipal(req: FastifyRequest): AuthPrincipal | null;
-  pushSkillsSync(runnerId: string): void;
+  pushSkillsSync: SkillsSyncPusher;
 }
 
 /** Skill creation ownership defaults exactly like project creation: organization scope for
@@ -415,28 +553,20 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
       });
     }
     const requestId = `skills_${randomUUID().slice(0, 8)}`;
-    const message: SkillsSyncMessage = {
-      type: "skills_sync",
-      runnerId: id,
-      requestId,
-      skills: resolveDesiredSkills(db, id),
-    };
-    const bytes = skillsSyncMessageBytes(message);
-    if (bytes > SKILLS_SYNC_MAX_TOTAL_BYTES) {
-      // Fail closed, never partial (see makeSkillsSyncPusher).
-      return reply.code(409).send({
-        error: `this machine's aggregate desired skill payload is ${bytes} bytes, over the ` +
-          `${SKILLS_SYNC_MAX_TOTAL_BYTES}-byte skills sync budget; unassign or shrink skills before syncing`,
-      });
-    }
     try {
-      const result = await hub.requestFromRunner(id, requestId, message);
+      const result = await pushSkillsSync.request(id, requestId);
       if (result.type !== "skills_state") {
         return reply.code(502).send({ error: "unexpected runner reply" });
       }
       db.setRunnerSkillState(id, result, Date.now());
       return { state: db.getRunnerSkillState(id) };
     } catch (error) {
+      if (error instanceof SkillsSyncInProgressError) {
+        return reply.code(409).send({ error: error.message });
+      }
+      if (error instanceof SkillsSyncBudgetError) {
+        return reply.code(409).send({ error: error.message });
+      }
       return reply.code(504).send({ error: (error as Error).message });
     }
   });
