@@ -243,7 +243,10 @@ for (const viewport of [
       const badges = [...element.querySelectorAll(
         ".session-header-statuses .status-badge, " +
         ".session-header-statuses > .background-work-badge",
-      )].map(rect);
+      )].map((node) => ({
+        ...rect(node),
+        label: node.getAttribute("aria-label") ?? node.textContent?.trim() ?? "unknown status",
+      }));
       return {
         display: getComputedStyle(element).display,
         statuses: rect(element.querySelector(".session-header-statuses")!),
@@ -311,8 +314,7 @@ for (const viewport of [
     // Five simultaneous statuses require multiple badge lines at 320px; they remain inside the
     // second header bar without overlap or horizontal overflow.
     // The Session topbar is 40px tall, the main body adds 12px of leading space, and this header
-    // has an
-    // explicit 132px ceiling below. Keep the combined stack within that same cross-platform
+    // has an explicit 132px ceiling below. Keep the combined stack within that same cross-platform
     // contract; Linux fallback fonts can require one additional badge line.
     expect(subheaderBottom - shellMetrics.top).toBeLessThanOrEqual(184);
     expect(metrics.share.width).toBeGreaterThanOrEqual(36);
@@ -332,7 +334,7 @@ for (const viewport of [
       const badge = metrics.badges[index]!;
       const overlapsActions = badge.x < metrics.actions.right && badge.right > metrics.actions.x &&
         badge.y < metrics.actions.bottom && badge.bottom > metrics.actions.y;
-      expect(overlapsActions).toBe(false);
+      expect(overlapsActions, `${badge.label} overlaps the Session actions`).toBe(false);
       for (let other = index + 1; other < metrics.badges.length; other += 1) {
         const left = badge;
         const right = metrics.badges[other]!;

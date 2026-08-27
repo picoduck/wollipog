@@ -10129,6 +10129,7 @@ body.shell-dock-dragging * {
   .session-detail > .detail-head .session-status-indicators {
     flex: 0 0 100%;
     box-sizing: border-box;
+    min-height: 36px;
     padding-right: 86px;
   }
   .session-detail > .detail-head .change-status-indicators {

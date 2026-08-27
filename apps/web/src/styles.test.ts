@@ -144,7 +144,7 @@ test("review-ready and uncommitted badges wrap together at narrow widths", () =>
   assert.match(group, /display: inline-flex;/);
   assert.match(group, /min-width: 0;/);
   assert.match(group, /flex-wrap: wrap;/,
-    "the shared header and pinned-summary group must not hide either compact status on mobile");
+    "the authoritative header must not hide either compact change status on mobile");
   const phoneRule = mediaBlocks(css).find((block) =>
     block.maxWidths.includes(760) &&
     block.containsSelector(".session-detail > .detail-head .change-status-indicators"));
@@ -158,6 +158,12 @@ test("review-ready and uncommitted badges wrap together at narrow widths", () =>
       .get("grid-column"),
     ["1 / -1"],
   );
+  const lifecycle = phoneRule
+    .declarationsForSelector(".session-detail > .detail-head .session-status-indicators");
+  assert.deepEqual(lifecycle.get("min-height"), ["36px"],
+    "later status rows must begin below the compact Session actions");
+  assert.deepEqual(lifecycle.get("padding-right"), ["86px"],
+    "the lifecycle row must reserve two compact actions plus their gaps");
   assert.deepEqual(
     phoneRule.declarationsForSelector(".session-detail > .detail-head").get("min-height"),
     ["44px"],
