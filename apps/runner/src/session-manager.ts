@@ -716,6 +716,12 @@ export class SessionManager {
     });
   }
 
+  /** Skill links mutate the same native provider HOME as Claude and Codex launches. Acquire the
+   * registry's process-lifetime lease before reconciliation touches those shared directories. */
+  acquireSkillReconciliationProviderHome(home: string): void {
+    this.providerHomeLeases?.acquireHome(home);
+  }
+
   /** Account probes are no-turn provider launches, but the provider may still mutate its effective
    * HOME while initializing. Bind them to the same attested owner lease as sessions and TUIs. */
   async prepareSubscriptionUsageProbe(

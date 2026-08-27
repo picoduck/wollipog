@@ -18,6 +18,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import type { AgentDefinition, SkillFile, SkillSyncEntry, SkillSyncTarget } from "@wollipog/protocol";
 import { skillVersionDigest } from "@wollipog/protocol/skills-digest";
+import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
 import {
   SKILL_SCAN_LIMITS,
   linkManifestPath,
@@ -79,6 +80,7 @@ async function reconcile(
     agents?: AgentDefinition[];
     platform?: NodeJS.Platform;
     log?: (message: string) => void;
+    acquireProviderHomeLease?: () => void;
   } = {},
 ) {
   return reconcileSkills({
@@ -89,6 +91,9 @@ async function reconcile(
     allowRemovals: overrides.allowRemovals ?? true,
     ...(overrides.platform ? { platform: overrides.platform } : {}),
     ...(overrides.log ? { log: overrides.log } : {}),
+    ...(overrides.acquireProviderHomeLease
+      ? { acquireProviderHomeLease: overrides.acquireProviderHomeLease }
+      : {}),
   });
 }
 
@@ -686,6 +691,95 @@ test("a version bump flips only the canonical link; harness links stay routed th
       realpathSync(join(roots.home, ".codex", "skills", "alpha")),
       join(store, "alpha", v2.versionDigest),
     );
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("a foreign provider-home lease stages content but blocks every harness mutation", async () => {
+  const roots = makeRoots();
+  const contenderDataDir = join(roots.root, "contender-data");
+  mkdirSync(contenderDataDir, { recursive: true });
+  const holder = new ProviderHomeLeaseRegistry("a".repeat(64), {
+    pid: 101,
+    hostname: "shared-host",
+  });
+  const contender = new ProviderHomeLeaseRegistry("b".repeat(64), {
+    pid: 202,
+    hostname: "shared-host",
+    isProcessAlive: (pid) => pid === 101,
+  });
+  const leaseRequest = {
+    driver: "claude-code" as const,
+    command: "claude",
+    context: { kind: "native" as const },
+    env: { HOME: roots.home },
+  };
+  try {
+    const v1 = entry("alpha", [{ agentId: claudeAgent.id, invocation: "agent" }]);
+    await reconcile(roots, [v1], {
+      acquireProviderHomeLease: () => holder.acquire(leaseRequest),
+    });
+    const canonicalPath = join(roots.home, ".agents", "skills", "alpha");
+    const harnessPath = join(roots.home, ".claude", "skills", "alpha");
+    const canonicalBefore = readlinkSync(canonicalPath);
+    const harnessBefore = readlinkSync(harnessPath);
+
+    const v2 = entry(
+      "alpha",
+      [{ agentId: claudeAgent.id, invocation: "agent" }],
+      skillFiles("alpha", "A contending version.\n"),
+    );
+    const blocked = await reconcile(
+      { home: roots.home, dataDir: contenderDataDir },
+      [v2],
+      { acquireProviderHomeLease: () => contender.acquire(leaseRequest) },
+    );
+
+    assert.match(blocked.deployed[0]!.error ?? "", /provider-home lease unavailable/i);
+    assert.match(blocked.error ?? "", /provider-home lease unavailable/i);
+    assert.equal(blocked.deployed[0]!.links[0]!.status, "error");
+    assert.match(blocked.deployed[0]!.links[0]!.detail ?? "", /already in use by process 101/);
+    assert.equal(readlinkSync(canonicalPath), canonicalBefore);
+    assert.equal(readlinkSync(harnessPath), harnessBefore);
+    assert.equal(existsSync(linkManifestPath(contenderDataDir)), false);
+    assert.equal(
+      existsSync(join(skillsStoreRoot(contenderDataDir), "alpha", v2.versionDigest)),
+      true,
+      "runner-local materialization completes before the shared-home lease attempt",
+    );
+
+    const blockedRemoval = await reconcile(
+      { home: roots.home, dataDir: contenderDataDir },
+      [],
+      { allowRemovals: true, acquireProviderHomeLease: () => contender.acquire(leaseRequest) },
+    );
+    assert.match(blockedRemoval.error ?? "", /already in use by process 101/);
+    assert.equal(readlinkSync(canonicalPath), canonicalBefore);
+    assert.equal(readlinkSync(harnessPath), harnessBefore);
+
+  } finally {
+    holder.releaseAll();
+    contender.releaseAll();
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("canonical link mutations require the provider-home lease even without a harness binding", async () => {
+  const roots = makeRoots();
+  try {
+    const alpha = entry("alpha", [{ agentId: claudeAgent.id, invocation: "agent" }]);
+    const canonicalPath = join(roots.home, ".agents", "skills", "alpha");
+    const blocked = await reconcile(roots, [alpha], {
+      agents: [],
+      acquireProviderHomeLease: () => {
+        assert.equal(existsSync(canonicalPath), false);
+        throw new Error("foreign owner");
+      },
+    });
+    assert.match(blocked.error ?? "", /foreign owner/);
+    assert.equal(existsSync(canonicalPath), false);
+    assert.equal(existsSync(join(skillsStoreRoot(roots.dataDir), "alpha", alpha.versionDigest)), true);
   } finally {
     rmSync(roots.root, { recursive: true, force: true });
   }

@@ -787,6 +787,8 @@ function queueSkillsReconcile(requestId?: string): void {
         desired: desired ?? [],
         allowRemovals: desired !== null,
         log,
+        acquireProviderHomeLease: () =>
+          sessions.acquireSkillReconciliationProviderHome(homedir()),
       });
       sendUp({
         type: "skills_state",
@@ -794,6 +796,7 @@ function queueSkillsReconcile(requestId?: string): void {
         ...(requestId !== undefined ? { requestId } : {}),
         deployed: result.deployed,
         unmanaged: result.unmanaged,
+        ...(result.error === undefined ? {} : { error: result.error }),
       });
     } catch (error) {
       sendUp({
