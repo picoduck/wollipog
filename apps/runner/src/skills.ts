@@ -13,7 +13,15 @@
  * Safety invariants (deliberate, tested):
  * - Nothing is ever replaced or deleted unless it is a symlink whose target verifiably resolves
  *   inside the store root (lstat + readlink + containment against the realpathed store root) or
- *   whose immediate readlink target is the canonical link path for that skill name.
+ *   whose immediate readlink target is the canonical link path for that skill name AND this
+ *   runner recorded creating it in the link manifest at `<dataDir>/skills/links.json`. A
+ *   user-created symlink that happens to point at the canonical path is indistinguishable from a
+ *   managed link by shape alone, so shape alone never authorizes removal.
+ * - Nothing is ever deleted silently: every link removal and store GC deletion is logged, link
+ *   removals are returned in the reconcile result, and foreign links that were left in place are
+ *   surfaced through the unmanaged-skill scan.
+ * - The link manifest fails safe: unreadable or malformed content degrades to an empty set, which
+ *   can only cause the sweep to remove less, never more.
  * - The store is never traversed through a symlink: the store root, `<store>/<name>`, and the
  *   digest dir are lstat-verified as non-symlinks before any mkdir, rename, or GC beneath them,
  *   and the published dir's realpath must stay inside the realpathed store root. The store root's
@@ -105,6 +113,9 @@ export interface ReconcileSkillsOptions {
 export interface ReconcileSkillsResult {
   deployed: DeployedSkillState[];
   unmanaged: UnmanagedSkillInfo[];
+  /** Home-relative shown paths of every link this pass removed. Always logged as well; a pass
+   * that removes nothing returns an empty array. */
+  removedLinks: string[];
 }
 
 function errText(error: unknown): string {
@@ -318,11 +329,93 @@ function materializeVersion(
   }
 }
 
+/* --------------------------- link ownership manifest ---------------------- */
+
+/** Removal authority for canonical-target harness links comes from this manifest, not from link
+ * shape: it records the absolute path of every link this runner created (or verified as its own
+ * while ensuring a desired deployment). A link absent from the manifest is somebody else's. */
+const LINK_MANIFEST_VERSION = 1;
+const LINK_MANIFEST_MAX_BYTES = 512 * 1024;
+const LINK_MANIFEST_MAX_ENTRIES = 4096;
+
+export function linkManifestPath(dataDir: string): string {
+  return join(dataDir, "skills", "links.json");
+}
+
+/** Load the set of link paths this runner created. Unreadable, oversized, or malformed content
+ * degrades to an empty set with a log line: the fail-safe direction is sweeping less, never
+ * more. The file itself is opened O_NOFOLLOW and never read through a symlink. */
+function loadOwnedLinks(path: string, log?: (message: string) => void): Set<string> {
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      log?.(`skill link manifest unreadable (${errText(error)}); treating it as empty`);
+    }
+    return new Set();
+  }
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.size > LINK_MANIFEST_MAX_BYTES) {
+      log?.("skill link manifest is not a regular file within bounds; treating it as empty");
+      return new Set();
+    }
+    const buffer = Buffer.alloc(Number(stat.size));
+    const bytesRead = readSync(fd, buffer, 0, buffer.length, 0);
+    const parsed = JSON.parse(buffer.subarray(0, bytesRead).toString("utf8")) as unknown;
+    const links = (parsed as { version?: unknown; links?: unknown })?.links;
+    if ((parsed as { version?: unknown })?.version !== LINK_MANIFEST_VERSION || !Array.isArray(links)) {
+      log?.("skill link manifest has an unknown shape; treating it as empty");
+      return new Set();
+    }
+    return new Set(
+      links
+        .filter((entry): entry is string => typeof entry === "string" && entry.startsWith(sep))
+        .slice(0, LINK_MANIFEST_MAX_ENTRIES),
+    );
+  } catch (error) {
+    log?.(`skill link manifest unreadable (${errText(error)}); treating it as empty`);
+    return new Set();
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Persist the manifest atomically (temp + rename), pruning entries whose path no longer holds a
+ * symlink — there is nothing left there this runner could ever remove. Failure to persist is
+ * logged and non-fatal: a lost manifest only makes future sweeps more conservative. */
+function saveOwnedLinks(path: string, owned: ReadonlySet<string>, log?: (message: string) => void): void {
+  const links = [...owned]
+    .filter((linkPath) => {
+      try {
+        return lstatSync(linkPath).isSymbolicLink();
+      } catch {
+        return false;
+      }
+    })
+    .sort()
+    .slice(0, LINK_MANIFEST_MAX_ENTRIES);
+  try {
+    assertNotSymlink(path, "the skill link manifest");
+    const temp = join(dirname(path), `.links.json.tmp-${randomUUID()}`);
+    const fd = openSync(temp, "wx", 0o644);
+    try {
+      writeFileSync(fd, JSON.stringify({ version: LINK_MANIFEST_VERSION, links }, null, 2));
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(temp, path);
+  } catch (error) {
+    log?.(`could not persist the skill link manifest: ${errText(error)}`);
+  }
+}
+
 /* ------------------------------ symlink safety ---------------------------- */
 
 type LinkProbe =
   | { kind: "missing" }
-  | { kind: "ours"; resolvedTarget: string }
+  | { kind: "ours"; resolvedTarget: string; via: "store" | "canonical" }
   | { kind: "foreign-symlink" }
   | { kind: "occupied" };
 
@@ -332,11 +425,15 @@ function containedInStore(path: string, realStoreRoot: string): boolean {
 }
 
 /** Classify what currently sits at a link path. Only "ours" may ever be replaced or removed: a
- * symlink whose target resolves inside the realpathed store root, or — when `canonicalDir` is
- * given (harness link paths) — one whose immediate readlink target is the canonical link path for
- * that skill name. The canonical match is lexical on the readlink value, deliberately not a
+ * symlink whose target resolves inside the realpathed store root (`via: "store"` — only this
+ * runner creates links into its own store), or — when `canonicalDir` is given (harness link
+ * paths) — one whose immediate readlink target is the canonical link path for that skill name
+ * (`via: "canonical"`). The canonical match is lexical on the readlink value, deliberately not a
  * resolution: a harness link left dangling because the canonical link was already removed must
- * still classify as ours so a sweep can remove it instead of stranding it as "foreign". */
+ * still classify as ours so a sweep can remove it instead of stranding it as "foreign". A
+ * canonical-shaped link is exactly what a user hand-linking a harness to ~/.agents/skills also
+ * produces, so `via: "canonical"` alone never authorizes removal — removal additionally requires
+ * the link manifest to record that this runner created it. */
 function probeLink(linkPath: string, realStoreRoot: string, canonicalDir?: string): LinkProbe {
   let entry;
   try {
@@ -352,12 +449,13 @@ function probeLink(linkPath: string, realStoreRoot: string, canonicalDir?: strin
     return { kind: "occupied" };
   }
   const resolvedTarget = resolve(dirname(linkPath), target);
-  if (canonicalDir !== undefined && resolvedTarget === join(canonicalDir, basename(linkPath))) {
-    return { kind: "ours", resolvedTarget };
+  if (containedInStore(resolvedTarget, realStoreRoot)) {
+    return { kind: "ours", resolvedTarget, via: "store" };
   }
-  return containedInStore(resolvedTarget, realStoreRoot)
-    ? { kind: "ours", resolvedTarget }
-    : { kind: "foreign-symlink" };
+  if (canonicalDir !== undefined && resolvedTarget === join(canonicalDir, basename(linkPath))) {
+    return { kind: "ours", resolvedTarget, via: "canonical" };
+  }
+  return { kind: "foreign-symlink" };
 }
 
 type LinkOutcome = { ok: true } | { ok: false; status: "conflict" | "error"; detail: string };
@@ -394,12 +492,24 @@ function ensureManagedSymlink(
   return { ok: true };
 }
 
-/** Remove store-owned symlinks whose name is no longer desired. Foreign symlinks, real files,
- * and real directories are never touched. */
+/** Everything a removal needs to be non-silent and manifest-checked. `shownDir` is the
+ * home-relative spelling of `dir` used in logs and the reconcile result. */
+interface SweepContext {
+  owned: Set<string>;
+  removedLinks: string[];
+  shownDir: string;
+  log?: (message: string) => void;
+}
+
+/** Remove this runner's own symlinks whose name is no longer desired: store-target links (only
+ * this runner links into its store) and canonical-target links the manifest records this runner
+ * creating. Foreign symlinks, real files, real directories, and canonical-shaped links absent
+ * from the manifest are never touched. Every removal is logged and reported. */
 function sweepManagedLinks(
   dir: string,
   keep: ReadonlySet<string>,
   realStoreRoot: string,
+  sweep: SweepContext,
   canonicalDir?: string,
 ): void {
   let entries;
@@ -411,11 +521,22 @@ function sweepManagedLinks(
   for (const name of entries) {
     if (keep.has(name)) continue;
     const linkPath = join(dir, name);
-    if (probeLink(linkPath, realStoreRoot, canonicalDir).kind !== "ours") continue;
+    const probe = probeLink(linkPath, realStoreRoot, canonicalDir);
+    if (probe.kind !== "ours") continue;
+    if (probe.via === "canonical" && !sweep.owned.has(linkPath)) {
+      // Shaped like ours, but this runner has no record of creating it — a hand-made link to the
+      // canonical location. Leave it; the unmanaged scan reports it.
+      continue;
+    }
+    const shownPath = `${sweep.shownDir}/${name}`;
     try {
       unlinkSync(linkPath);
-    } catch {
+      sweep.owned.delete(linkPath);
+      sweep.removedLinks.push(shownPath);
+      sweep.log?.(`skill link removed: ${shownPath} (no longer in the desired skill list)`);
+    } catch (error) {
       /* Removal is best effort; a vanished or contested entry is left for the next pass. */
+      sweep.log?.(`skill link removal failed for ${shownPath}: ${errText(error)}`);
     }
   }
 }
@@ -430,7 +551,7 @@ type StoreKeep = Map<string, { digest: string; manual: boolean } | "all">;
  * unbounded — nothing ever reclaims the store content of a never-again-desired name. Names whose
  * desired entry could not be validated also keep every version: a transient bad payload must not
  * tear down a working deployment. */
-function gcStore(storeRoot: string, keep: StoreKeep): void {
+function gcStore(storeRoot: string, keep: StoreKeep, log?: (message: string) => void): void {
   let entries;
   try {
     entries = readdirSync(storeRoot, { withFileTypes: true });
@@ -459,7 +580,10 @@ function gcStore(storeRoot: string, keep: StoreKeep): void {
       if (version.isSymbolicLink()) continue;
       const wanted =
         version.name === want.digest || (want.manual && version.name === `${want.digest}-manual`);
-      if (!wanted) rmSync(join(path, version.name), { recursive: true, force: true });
+      if (!wanted) {
+        rmSync(join(path, version.name), { recursive: true, force: true });
+        log?.(`skill store gc: removed stale version ${entry.name}/${version.name}`);
+      }
     }
   }
 }
@@ -485,9 +609,15 @@ function readBoundedSkillMd(path: string): string | null {
   }
 }
 
-/** Bounded report-only scan of one harness skill directory: real directories (never symlinks —
- * managed deployments are symlinks) containing a SKILL.md, no recursion beyond that one read. */
-function scanHarnessSkillDir(dir: string): { name: string; description?: string }[] {
+/** Bounded report-only scan of one harness skill directory: real directories containing a
+ * SKILL.md, no recursion beyond that one read. When `isForeignLink` is provided (managed-link
+ * classification is available), symlinked entries the runner does not own are scanned too, so a
+ * user's hand-linked skill stays visible in the reported state instead of vanishing from it;
+ * without a classifier, symlinks are skipped as before. */
+function scanHarnessSkillDir(
+  dir: string,
+  isForeignLink?: (linkPath: string) => boolean,
+): { name: string; description?: string }[] {
   let entries;
   try {
     entries = readdirSync(dir, { withFileTypes: true });
@@ -498,7 +628,11 @@ function scanHarnessSkillDir(dir: string): { name: string; description?: string 
   let examined = 0;
   for (const entry of entries) {
     if (++examined > SKILL_SCAN_LIMITS.maxEntriesPerDirectory) break;
-    if (!entry.isDirectory()) continue;
+    if (entry.isSymbolicLink()) {
+      if (!isForeignLink?.(join(dir, entry.name))) continue;
+    } else if (!entry.isDirectory()) {
+      continue;
+    }
     const content = readBoundedSkillMd(join(dir, entry.name, "SKILL.md"));
     if (content === null) continue;
     const meta = parseSkillFrontmatter(content);
@@ -532,13 +666,17 @@ function harnessBindings(agents: AgentDefinition[]): HarnessBinding[] {
   return bindings;
 }
 
-function scanUnmanagedSkills(home: string, agents: AgentDefinition[]): UnmanagedSkillInfo[] {
+function scanUnmanagedSkills(
+  home: string,
+  agents: AgentDefinition[],
+  isForeignLink?: (linkPath: string) => boolean,
+): UnmanagedSkillInfo[] {
   const perDir = new Map<string, { name: string; description?: string }[]>();
   const results: UnmanagedSkillInfo[] = [];
   for (const binding of harnessBindings(agents)) {
     let found = perDir.get(binding.relDir);
     if (!found) {
-      found = scanHarnessSkillDir(join(home, binding.relDir));
+      found = scanHarnessSkillDir(join(home, binding.relDir), isForeignLink);
       perDir.set(binding.relDir, found);
     }
     for (const skill of found) {
@@ -571,6 +709,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
         })),
       })),
       unmanaged: [],
+      removedLinks: [],
     };
   }
 
@@ -600,10 +739,21 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
         links: [],
         error: `skills store unavailable: ${errText(error)}`,
       })),
+      // No store root means no managed-link classification, so symlinks are skipped here rather
+      // than misreported; nothing is removed on this path either.
       unmanaged: scanUnmanagedSkills(home, agents),
+      removedLinks: [],
     };
   }
   const canonicalDir = canonicalSkillsDir(home);
+  const manifestPath = linkManifestPath(dataDir);
+  const owned = loadOwnedLinks(manifestPath, options.log);
+  const ownedAtLoad = new Set(owned);
+  const removedLinks: string[] = [];
+  /** Record a link this runner created or verified as its own while ensuring a deployment. */
+  const ownLink = (linkPath: string): void => {
+    owned.add(linkPath);
+  };
   const bindings = harnessBindings(agents);
   const agentBinding = new Map(bindings.map((binding) => [binding.agentId, binding]));
 
@@ -673,7 +823,8 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
       realStoreRoot,
       `~/.agents/skills/${entry.name}`,
     );
-    if (!canonical.ok) state.error = `canonical link: ${canonical.detail}`;
+    if (canonical.ok) ownLink(canonicalPath);
+    else state.error = `canonical link: ${canonical.detail}`;
 
     // Group targets by harness link path; a shared harness directory can only carry one variant,
     // and the agent-invocation variant wins when policies disagree.
@@ -729,22 +880,40 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
       } else if (!canonical.ok && canonical.status === "conflict") {
         // The canonical path has been replaced by foreign content. A managed harness link
         // routing through it would serve that foreign content under a managed name, so remove
-        // the harness link — it is verified ours by the canonical-path-equality probe rule —
-        // and report the removal. The foreign canonical path itself is never touched.
+        // the harness link — verified ours by probe shape AND recorded in the link manifest —
+        // and report the removal. A canonical-shaped link this runner has no record of creating
+        // belongs to the user: it is left in place and reported, never removed. The foreign
+        // canonical path itself is never touched either way.
         const linkPath = join(home, relDir, entry.name);
-        if (probeLink(linkPath, realStoreRoot, canonicalDir).kind === "ours") {
+        const shownPath = `~/${relDir}/${entry.name}`;
+        const probe = probeLink(linkPath, realStoreRoot, canonicalDir);
+        const removable = probe.kind === "ours" && (probe.via === "store" || owned.has(linkPath));
+        if (removable) {
           try {
             unlinkSync(linkPath);
-          } catch {
+            owned.delete(linkPath);
+            removedLinks.push(shownPath);
+            options.log?.(
+              `skill link removed: ${shownPath} (the canonical location it routes through is conflicted)`,
+            );
+          } catch (error) {
             /* Removal is best effort; a vanished or contested entry is left for the next pass. */
+            options.log?.(`skill link removal failed for ${shownPath}: ${errText(error)}`);
           }
         }
         harnessKeep.get(relDir)?.delete(entry.name);
-        outcome = {
-          ok: false,
-          status: "error",
-          detail: `The canonical location at ~/.agents/skills/${entry.name} is conflicted, so this harness link was removed.`,
-        };
+        outcome =
+          probe.kind === "ours" && !removable
+            ? {
+                ok: false,
+                status: "conflict",
+                detail: `The canonical location at ~/.agents/skills/${entry.name} is conflicted, and an unmanaged symlink at ${shownPath} routes through it; the link was not created by this runner and was left in place.`,
+              }
+            : {
+                ok: false,
+                status: "error",
+                detail: `The canonical location at ~/.agents/skills/${entry.name} is conflicted, so this harness link was removed.`,
+              };
       } else if (!canonical.ok) {
         // Agent-invocation harness links route through the canonical link; without it there is
         // nothing managed to point at.
@@ -770,6 +939,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
         );
       }
       if (outcome.ok) {
+        ownLink(join(home, relDir, entry.name));
         linkedDirs.add(relDir);
         // A shared harness directory (codex and codex-app-server both read ~/.codex/skills)
         // cannot scope a skill to one of its agents: every other native agent reading this
@@ -821,13 +991,40 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
     // Harness links route through the canonical link, so remove them first: removing the
     // canonical link first would leave dangling harness links if this pass crashed in between.
     for (const [relDir, keep] of harnessKeep) {
-      sweepManagedLinks(join(home, relDir), keep, realStoreRoot, canonicalDir);
+      sweepManagedLinks(
+        join(home, relDir),
+        keep,
+        realStoreRoot,
+        { owned, removedLinks, shownDir: `~/${relDir}`, log: options.log },
+        canonicalDir,
+      );
     }
-    sweepManagedLinks(canonicalDir, canonicalKeep, realStoreRoot);
+    sweepManagedLinks(canonicalDir, canonicalKeep, realStoreRoot, {
+      owned,
+      removedLinks,
+      shownDir: "~/.agents/skills",
+      log: options.log,
+    });
     // Known limitation (MVP): no retention window — a running session keeps deleted version
     // content alive only through its already-open file descriptors.
-    gcStore(realStoreRoot, storeKeep);
+    gcStore(realStoreRoot, storeKeep, options.log);
   }
 
-  return { deployed, unmanaged: scanUnmanagedSkills(home, agents) };
+  // Persist ownership only when it changed (links created, removed, or newly adopted); the save
+  // path also prunes entries whose path no longer holds any symlink.
+  if (owned.size !== ownedAtLoad.size || [...owned].some((link) => !ownedAtLoad.has(link))) {
+    saveOwnedLinks(manifestPath, owned, options.log);
+  }
+
+  return {
+    deployed,
+    unmanaged: scanUnmanagedSkills(home, agents, (linkPath) => {
+      // Foreign is anything the sweep would refuse to touch: a link with a foreign target, or a
+      // canonical-shaped link this runner has no record of creating.
+      const probe = probeLink(linkPath, realStoreRoot, canonicalDir);
+      if (probe.kind !== "ours") return true;
+      return probe.via === "canonical" && !owned.has(linkPath);
+    }),
+    removedLinks,
+  };
 }
