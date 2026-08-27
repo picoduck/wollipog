@@ -381,6 +381,7 @@ test("initialize reconciles persisted task seeds before the first recovery turn"
 test("graceful persistent shutdown is tracked until the child confirms close", async () => {
   const child = fakeProcess();
   const tracked: Promise<void>[] = [];
+  const drainedOwners: object[] = [];
   const driver = new ClaudeCodeDriver(
     { ...baseOpts, config: { permissionMode: "acceptEdits" } },
     noopCb,
@@ -388,6 +389,7 @@ test("graceful persistent shutdown is tracked until the child confirms close", a
       spawn: () => child,
       kill: () => {},
       trackKill: (work: Promise<void>) => { tracked.push(work); },
+      terminateDescendants: (owner: object) => { drainedOwners.push(owner); },
     } as any,
   );
   const turn = driver.prompt("one");
@@ -397,8 +399,11 @@ test("graceful persistent shutdown is tracked until the child confirms close", a
 
   driver.dispose();
   assert.equal(tracked.length, 1);
+  assert.equal(drainedOwners.length, 0, "owner cleanup preserves the provider's EOF grace window");
   child.emit("close", 0);
   await tracked[0];
+  await nextTask();
+  assert.equal(drainedOwners.length, 1, "owner cleanup begins after graceful retirement settles");
 });
 
 test("explicit disposal kills a persistent child without the shutdown grace interval", async () => {

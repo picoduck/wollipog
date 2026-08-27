@@ -448,7 +448,11 @@ fn terminate_managed_children_with<C>(
     let pending = children
         .into_iter()
         .map(|(child, label)| {
-            if request_stop(&child.child) {
+            // The shell plugin may already have reaped this PID. Never send raw SIGTERM after its
+            // confirmed exit, because the OS may have recycled the numeric PID for another process.
+            if child.has_terminated() {
+                (None, child.terminated, label)
+            } else if request_stop(&child.child) {
                 (Some(child.child), child.terminated, label)
             } else {
                 force_stop(child.child);
@@ -4356,6 +4360,22 @@ mod tests {
             waits[1] < waits[0],
             "both confirmations must consume the same timeout budget"
         );
+    }
+
+    #[test]
+    fn managed_child_confirmed_exit_is_never_signaled_by_recycled_pid() {
+        let terminated = Arc::new(AtomicBool::new(true));
+        let results = terminate_managed_children_with(
+            vec![(
+                ManagedChild::new("runner", Arc::clone(&terminated)),
+                "local runner",
+            )],
+            Duration::from_secs(1),
+            |_| panic!("a confirmed-exit PID must not be signaled"),
+            |_| panic!("a confirmed-exit child must not be force-killed"),
+            |state, _| state.load(Ordering::Acquire),
+        );
+        assert_eq!(results, [("local runner", true)]);
     }
 
     #[test]

@@ -35,6 +35,8 @@ test("Windows Job launcher reads the Wollipog spec first, accepts legacy, and cl
   assert.match(WINDOWS_JOB_LAUNCHER, /OpenProcess/);
   assert.match(WINDOWS_JOB_LAUNCHER, /WaitForMultipleObjects/);
   assert.doesNotMatch(WINDOWS_JOB_LAUNCHER, /MamWindowsJob/);
+  assert.ok(WINDOWS_JOB_ENCODED_COMMAND.length < 32_000,
+    "the default native launcher must retain headroom below CreateProcess's 32,767-character limit");
 });
 
 test("Windows Job launcher treats an explicitly empty Wollipog spec as authoritative", {
@@ -571,10 +573,10 @@ test("closing a Windows Job launcher reaps its descendant tree", { skip: process
 
 test("POSIX ownership snapshots exclude unrelated and PID-reused processes", () => {
   const table = parsePosixProcessTable([
-    " 100 1 Ss Thu Aug 27 00:00:00 2026",
-    " 101 100 S Thu Aug 27 00:00:01 2026",
-    " 102 101 S Thu Aug 27 00:00:02 2026",
-    " 200 1 S Thu Aug 27 00:00:03 2026",
+    " 100 1 100 100 Ss Thu Aug 27 00:00:00 2026",
+    " 101 100 100 100 S Thu Aug 27 00:00:01 2026",
+    " 102 101 102 100 S Thu Aug 27 00:00:02 2026",
+    " 200 1 200 200 S Thu Aug 27 00:00:03 2026",
   ].join("\n"));
   const root = table.get(100)!;
   const owned = new Map([[root.pid, root]]);
@@ -582,8 +584,8 @@ test("POSIX ownership snapshots exclude unrelated and PID-reused processes", () 
   assert.deepEqual([...owned.keys()].sort(), [100, 101, 102]);
 
   const reused = parsePosixProcessTable([
-    " 100 1 Ss Thu Aug 27 00:01:00 2026",
-    " 201 100 S Thu Aug 27 00:01:01 2026",
+    " 100 1 100 100 Ss Thu Aug 27 00:01:00 2026",
+    " 201 100 100 100 S Thu Aug 27 00:01:01 2026",
   ].join("\n"));
   assert.equal(extendOwnedProcessTree(owned, reused), 0, "a reused root PID cannot capture a foreign child");
   assert.equal(ownsPosixRootProcessGroup(root.pid, owned, reused), false,
@@ -615,7 +617,7 @@ test("normal provider exit preserves owned background work until session disposa
   await fs.writeFile(providerScript, [
     'const { spawn } = require("node:child_process");',
     `spawn(process.execPath, [${JSON.stringify(escapedScript)}], { detached: true, stdio: "ignore" }).unref();`,
-    "setTimeout(() => process.exit(0), 750);",
+    "process.exit(0);",
   ].join("\n"), "utf8");
 
   const owner = {};
@@ -632,10 +634,12 @@ test("normal provider exit preserves owned background work until session disposa
     catch { await new Promise((resolve) => setTimeout(resolve, 25)); }
   }
   assert.ok(escapedPid, "background process became ready");
-  await new Promise<void>((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", () => resolve());
-  });
+  if (!child.closeObserved) {
+    await new Promise<void>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", () => resolve());
+    });
+  }
   assert.doesNotThrow(() => process.kill(escapedPid!, 0), "normal provider exit preserves background work");
 
   terminateDescendantBoundaries(owner);

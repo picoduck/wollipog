@@ -2035,7 +2035,7 @@ function shutdown(exitCode = 0): void {
   bestEffort("dispose shells", () => shells.dispose());
   // Providers that exited normally may have intentional background descendants retained under
   // their session boundary. Runner shutdown is the final owner and must drain every such scope.
-  terminateDescendantBoundaries();
+  bestEffort("register retained descendant cleanup", () => terminateDescendantBoundaries());
   log("shutting down");
   // process.exit() cancels pending timers/exec callbacks — exiting immediately would drop
   // the SIGKILL escalation and the WSL in-distro reap, letting TERM-ignoring agents survive

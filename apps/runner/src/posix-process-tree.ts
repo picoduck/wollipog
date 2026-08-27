@@ -1,27 +1,33 @@
 import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
 
 /** A PID plus its kernel-reported start stamp. The stamp prevents a late cleanup pass from
  * signalling an unrelated process that reused one of the provider tree's PIDs. */
 export interface PosixProcessIdentity {
   pid: number;
   ppid: number;
+  pgid: number;
+  sid: number;
   startedAt: string;
   state?: string;
 }
 
 export type PosixProcessTable = Map<number, PosixProcessIdentity>;
 
-const PROCESS_TABLE_ARGS = ["-axo", "pid=,ppid=,state=,lstart="];
+const PROCESS_TABLE_ARGS = ["-axo", "pid=,ppid=,pgid=,sid=,state=,lstart="];
 
 export function parsePosixProcessTable(stdout: string): PosixProcessTable {
   const table: PosixProcessTable = new Map();
   for (const line of stdout.split(/\r?\n/u)) {
-    const match = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$/u.exec(line);
+    const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$/u.exec(line);
     if (!match) continue;
     const pid = Number(match[1]);
     const ppid = Number(match[2]);
-    if (!Number.isSafeInteger(pid) || pid <= 1 || !Number.isSafeInteger(ppid) || ppid < 0) continue;
-    table.set(pid, { pid, ppid, state: match[3]!, startedAt: match[4]! });
+    const pgid = Number(match[3]);
+    const sid = Number(match[4]);
+    if (!Number.isSafeInteger(pid) || pid <= 1 || !Number.isSafeInteger(ppid) || ppid < 0 ||
+        !Number.isSafeInteger(pgid) || pgid <= 1 || !Number.isSafeInteger(sid) || sid <= 1) continue;
+    table.set(pid, { pid, ppid, pgid, sid, state: match[5]!, startedAt: match[6]! });
   }
   return table;
 }
@@ -33,6 +39,46 @@ export function listPosixProcesses(): Promise<PosixProcessTable> {
       else resolve(parsePosixProcessTable(String(stdout)));
     });
   });
+}
+
+export const DESCENDANT_MARKER_ENV = "WOLLIPOG_DESCENDANT_BOUNDARY";
+
+async function listMarkedProcessIds(marker: string, table: PosixProcessTable): Promise<Set<number>> {
+  const result = new Set<number>();
+  if (process.platform === "linux") {
+    const needle = Buffer.from(`${DESCENDANT_MARKER_ENV}=${marker}\0`);
+    const pids = [...table.keys()];
+    // Ownership-critical reads are infrequent, but a large host can have thousands of processes.
+    // Bound concurrency so /proc inspection cannot exhaust the runner's file descriptors.
+    for (let offset = 0; offset < pids.length; offset += 32) {
+      await Promise.all(pids.slice(offset, offset + 32).map(async (pid) => {
+        try {
+          const environ = await readFile(`/proc/${pid}/environ`);
+          if (environ.includes(needle)) result.add(pid);
+        } catch {
+          /* exited or belongs to a uid whose environment is unreadable */
+        }
+      }));
+    }
+    return result;
+  }
+
+  // macOS/BSD have no procfs environ file. `ps eww` appends each visible process environment to
+  // command output; inspect it in memory only and never include it in diagnostics.
+  const output = await new Promise<string>((resolve, reject) => {
+    execFile("ps", ["eww", "-axo", "pid=,command="], { maxBuffer: 64 * 1024 * 1024 }, (error, stdout) => {
+      if (error) reject(error);
+      else resolve(String(stdout));
+    });
+  });
+  const needle = `${DESCENDANT_MARKER_ENV}=${marker}`;
+  for (const line of output.split(/\r?\n/u)) {
+    const match = /^\s*(\d+)\s+(.+)$/u.exec(line);
+    if (!match || !match[2]!.split(/\s+/u).includes(needle)) continue;
+    const pid = Number(match[1]);
+    if (table.has(pid)) result.add(pid);
+  }
+  return result;
 }
 
 function sameProcess(expected: PosixProcessIdentity, current: PosixProcessIdentity | undefined): boolean {
@@ -109,6 +155,7 @@ function refreshTable(): Promise<PosixProcessTable> {
 async function refreshAll(): Promise<PosixProcessTable> {
   const table = await refreshTable();
   for (const boundary of boundaries) boundary.extend(table);
+  for (const boundary of [...boundaries]) boundary.releaseFromMonitor(table);
   return table;
 }
 
@@ -130,17 +177,44 @@ export class PosixProcessBoundary {
   private readonly owned = new Map<number, PosixProcessIdentity>();
   private releaseCheck?: Promise<boolean>;
   private released = false;
+  private rootClosed = false;
   private terminating?: Promise<boolean>;
 
-  constructor(readonly rootPid: number, readonly owner?: object) {
+  constructor(readonly rootPid: number, readonly owner?: object, private readonly marker?: string) {
     boundaries.add(this);
     startMonitor();
-    void refreshAll().catch(() => {});
+    // Do not reuse a monitor read that may predate this spawn: the first ownership snapshot must
+    // start after the provider PID exists.
+    void this.refreshFresh().catch(() => {});
+  }
+
+  private async refreshFresh(): Promise<PosixProcessTable> {
+    const table = await listPosixProcesses();
+    if (this.marker) {
+      for (const pid of await listMarkedProcessIds(this.marker, table)) {
+        const process = table.get(pid);
+        if (process) this.owned.set(pid, process);
+      }
+    }
+    this.extend(table);
+    return table;
   }
 
   extend(table: PosixProcessTable): void {
     const root = table.get(this.rootPid);
-    if (root && !this.owned.has(this.rootPid)) this.owned.set(this.rootPid, root);
+    // Marker-backed boundaries anchor the root only through refreshFresh(), which proves the PID
+    // still carries the exact launch token. A monitor tick alone must not adopt a recycled PID.
+    if (root && !this.marker && !this.owned.has(this.rootPid)) this.owned.set(this.rootPid, root);
+    const ownedRoot = this.owned.get(this.rootPid);
+    if (ownedRoot) {
+      // A live PGID/SID cannot be recycled. This recovers same-session survivors after their root
+      // exits even when a parent-link poll was missed.
+      for (const process of table.values()) {
+        if (process.pgid === ownedRoot.pgid || process.sid === ownedRoot.sid) {
+          this.owned.set(process.pid, process);
+        }
+      }
+    }
     extendOwnedProcessTree(this.owned, table);
     // A dead identity cannot acquire new children. Prune it after extending the live tree so
     // long-running sessions do not retain every short-lived tool process forever.
@@ -156,6 +230,7 @@ export class PosixProcessBoundary {
    * disposal. Release an empty boundary, but retain a non-empty one under its session owner. */
   releaseIfEmpty(): Promise<boolean> {
     if (this.terminating) return this.terminating;
+    this.rootClosed = true;
     if (!this.releaseCheck) {
       this.releaseCheck = this.releaseIfEmptyOnce().finally(() => { this.releaseCheck = undefined; });
     }
@@ -164,16 +239,23 @@ export class PosixProcessBoundary {
 
   private async releaseIfEmptyOnce(): Promise<boolean> {
     try {
-      const table = await refreshAll();
+      // A shared monitor read may have started before the close event. Ownership release always
+      // gets a fresh post-close process table.
+      const table = await this.refreshFresh();
       if (liveOwned(this.owned, table).length > 0) return false;
-      this.released = true;
-      boundaries.delete(this);
-      stopMonitorIfIdle();
+      this.releaseFromMonitor(table);
       return true;
     } catch {
       // Enumeration failure is not proof of emptiness. Keep the boundary for disposal/shutdown.
       return false;
     }
+  }
+
+  releaseFromMonitor(table: PosixProcessTable): void {
+    if (!this.rootClosed || this.terminating || this.released || liveOwned(this.owned, table).length > 0) return;
+    this.released = true;
+    boundaries.delete(this);
+    stopMonitorIfIdle();
   }
 
   private signalRootGroup(table: PosixProcessTable, signal: NodeJS.Signals): boolean {
@@ -205,7 +287,8 @@ export class PosixProcessBoundary {
     let table: PosixProcessTable | undefined;
     const frozen = new Map<number, PosixProcessIdentity>();
     try {
-      table = await refreshAll();
+      // Do not make an ownership-critical stop decision from a possibly stale shared monitor read.
+      table = await this.refreshFresh();
       // A negative PID may have been recycled as an unrelated process group after the provider
       // exited. Signal the group only while its leader still matches the captured start stamp.
       this.signalRootGroup(table, "SIGSTOP");

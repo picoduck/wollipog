@@ -118,6 +118,11 @@ test("shell round-trip: echo streams back, exit fires the callback", async () =>
   const { out, exits, cb } = collector();
   const mgr = new ShellManager(cb);
   mgr.open("s1", "sess", tmpdir(), NATIVE);
+  if (process.platform !== "win32") {
+    const child = (mgr as unknown as { shells: Map<string, { child: { posixBoundary?: unknown } }> })
+      .shells.get("s1")!.child;
+    assert.equal(child.posixBoundary, undefined, "ordinary user terminals do not own daemonized descendants");
+  }
   await waitFor(() => mgr.input("s1", `echo wollipog_shell_ok${ENTER}`));
   await waitFor(() => out.some((o) => o.data.includes("wollipog_shell_ok")));
   assert.ok(mgr.input("s1", `exit${ENTER}`), "input accepted while alive");

@@ -17,7 +17,7 @@ import type { AgentContext } from "@wollipog/protocol";
 import { containerLabelArgs } from "./container-identity.js";
 import { sensitiveEnvironmentName } from "./env-security.js";
 import { encodeWindowsJobSpec, WINDOWS_JOB_ENCODED_COMMAND } from "./windows-job.js";
-import { PosixProcessBoundary, terminatePosixProcessBoundaries } from "./posix-process-tree.js";
+import { DESCENDANT_MARKER_ENV, PosixProcessBoundary, terminatePosixProcessBoundaries } from "./posix-process-tree.js";
 
 const isWindows = process.platform === "win32";
 /** Runner policy switches are daemon input and must never become agent input. */
@@ -38,6 +38,7 @@ const RUNNER_ONLY_ENV = [
   "MAM_POLICY_HOOK_ASK_CAPABLE",
   "WOLLIPOG_WINDOWS_JOB_SPEC",
   "MAM_WINDOWS_JOB_SPEC",
+  DESCENDANT_MARKER_ENV,
   "MANAGER_TOKEN_FILE",
 ];
 
@@ -100,6 +101,8 @@ export interface SpawnAgentOptions {
   /** Stable owner for native POSIX descendants that may intentionally outlive one provider turn.
    * The boundary is retained after normal provider exit and terminated when that session disposes. */
   descendantOwner?: object;
+  /** False for user-owned interactive shells whose daemonized children are not provider-owned. */
+  trackDescendants?: boolean;
 }
 
 export interface BwrapSpawnIsolation {
@@ -438,9 +441,17 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
     inherited.WSLENV = [...existing, ...additions].join(":");
   }
 
+  const descendantMarker = !isWindows && !wslReap && !remoteBoundary && opts.trackDescendants !== false
+    ? randomUUID()
+    : undefined;
   const child = spawn(file, args, {
     cwd,
-    env: { ...inherited, ...explicitEnv, ...isolationEnv },
+    env: {
+      ...inherited,
+      ...explicitEnv,
+      ...isolationEnv,
+      ...(descendantMarker ? { [DESCENDANT_MARKER_ENV]: descendantMarker } : {}),
+    },
     // Resolve .cmd/.bat shims on Windows; harmless on POSIX for our commands.
     shell,
     stdio: ["pipe", "pipe", "pipe"],
@@ -457,8 +468,8 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
       else trackPendingKill(child.posixBoundary.terminate());
     }
   });
-  if (!isWindows && !wslReap && !remoteBoundary && child.pid) {
-    child.posixBoundary = new PosixProcessBoundary(child.pid, opts.descendantOwner);
+  if (!isWindows && !wslReap && !remoteBoundary && opts.trackDescendants !== false && child.pid) {
+    child.posixBoundary = new PosixProcessBoundary(child.pid, opts.descendantOwner, descendantMarker);
   }
   if (wslReap) child.wslReap = wslReap;
   return child;
@@ -522,7 +533,8 @@ export async function waitForPendingKills(deadlineMs: number): Promise<boolean> 
   }
   const complete = !incompleteKillObserved;
   // A drain consumes failures from the work it observed. A historical failure must not make every
-  // later, unrelated session shutdown retain ownership forever.
+  // later, unrelated session shutdown retain ownership forever. Runner shutdown has one drain
+  // caller; this module-global consumption is not a concurrent waiter protocol.
   incompleteKillObserved = false;
   return complete;
 }

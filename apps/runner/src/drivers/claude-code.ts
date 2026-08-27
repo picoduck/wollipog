@@ -64,6 +64,7 @@ interface ClaudeDriverDeps {
   setTimer: typeof setTimeout;
   clearTimer: typeof clearTimeout;
   trackKill: typeof trackPendingKill;
+  terminateDescendants: typeof terminateDescendantBoundaries;
   now: () => number;
   readFile: (path: string) => string;
   inspectBackgroundWork: typeof inspectClaudeBackgroundWorkInContext;
@@ -344,6 +345,7 @@ export class ClaudeCodeDriver implements Driver {
       setTimer: deps.setTimer ?? setTimeout,
       clearTimer: deps.clearTimer ?? clearTimeout,
       trackKill: deps.trackKill ?? trackPendingKill,
+      terminateDescendants: deps.terminateDescendants ?? terminateDescendantBoundaries,
       now: deps.now ?? Date.now,
       readFile: deps.readFile ?? ((path) => readFileSync(path, "utf8")),
       inspectBackgroundWork: deps.inspectBackgroundWork ?? inspectClaudeBackgroundWorkInContext,
@@ -1608,6 +1610,7 @@ export class ClaudeCodeDriver implements Driver {
   }
 
   dispose(options?: { forceImmediate?: boolean }): void {
+    const retirements: Promise<void>[] = [];
     if (this.pendingBackgroundTasks.size > 0) this.markOrphaned("shutdown");
     this.disposed = true;
     this.streamingMessageIds.clear();
@@ -1621,16 +1624,25 @@ export class ClaudeCodeDriver implements Driver {
     this.clearIdleTimer();
     this.clearPendingTimer();
     if (options?.forceImmediate && this.retiringPersistentChild) {
-      void this.gracefullyStop(this.retiringPersistentChild, true);
+      retirements.push(this.gracefullyStop(this.retiringPersistentChild, true));
     }
     if (this.child) {
-      if (this.persistentTransport) this.gracefullyStop(this.child, options?.forceImmediate === true);
+      if (this.persistentTransport) {
+        retirements.push(this.gracefullyStop(this.child, options?.forceImmediate === true));
+      }
       else this.deps.kill(this.child);
     }
     this.child = null;
     for (const child of this.auxiliaryChildren) this.deps.kill(child);
     this.auxiliaryChildren.clear();
-    terminateDescendantBoundaries(this.descendantOwner);
+    // The owner drain must not preempt the persistent provider's five-second EOF window. The
+    // pending-kill registry drains in waves, so cleanup registered by this continuation is still
+    // included in runner shutdown.
+    if (retirements.length > 0) {
+      void Promise.allSettled(retirements).then(() => this.deps.terminateDescendants(this.descendantOwner));
+    } else {
+      this.deps.terminateDescendants(this.descendantOwner);
+    }
   }
 
   private emitStderrOrAuthenticationFailure(text: string): void {

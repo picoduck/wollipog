@@ -188,7 +188,6 @@ export class ShellManager {
       ? posixPtyCommandLaunch(cols, rows, meta.launch)
       : shellLaunchFor(context, cols, rows);
     const { command, args, pty, ttyFile } = selected;
-    const descendantOwner = {};
     const child = process.platform === "win32" && context.kind === "native"
       ? openWindowsConpty({
           command: meta?.launch?.command ?? command,
@@ -207,7 +206,9 @@ export class ShellManager {
           context,
           env: meta?.launch?.env,
           scrubInheritedEnv: meta?.launch?.scrubInheritedEnv,
-          descendantOwner,
+          // Ordinary terminal jobs are user-owned and may intentionally daemonize. Agent TUIs are
+          // providers, so only those receive escaped-descendant ownership tracking.
+          trackDescendants: meta?.kind === "agent_tui",
         });
     const live: LiveShell = {
       sessionId,
@@ -332,7 +333,6 @@ export class ShellManager {
     if (!s) return;
     s.forgetAfterExit = true;
     if (s.exited) {
-      this.kill(s);
       this.shells.delete(shellId);
       // A retained exited shell already emitted its process-exit frame. Emit a second idempotent
       // exit as the forget acknowledgement so an offline-close tombstone can clear immediately.
@@ -348,7 +348,6 @@ export class ShellManager {
       if (s.sessionId !== sessionId) continue;
       s.forgetAfterExit = true;
       if (s.exited) {
-        this.kill(s);
         this.shells.delete(shellId);
         this.cb.onExit(shellId, s.sessionId, s.exitCode, s.outputSeq);
       } else this.kill(s);
