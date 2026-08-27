@@ -83,6 +83,11 @@ test("SkillsView lists skills, opens a detail with assignments and deployment, a
     reported: {
       deployed: [{ name: "code-review", digest: "d1", links: [{ agentId: "claude", status: "linked" }] }],
       unmanaged: [{ agentId: "claude", name: "local-notes", description: "Scratch skill" }],
+      removals: [{
+        path: "~/.codex/skills/retired-skill",
+        reason: "No longer in the desired skill list.",
+      }],
+      updatedAt: 1_700_000_000_000,
     },
   };
   const syncedRunnerIds: string[] = [];
@@ -170,6 +175,10 @@ test("SkillsView lists skills, opens a detail with assignments and deployment, a
   assert.match(pageText(), /Unmanaged Skills/);
   assert.match(pageText(), /local-notes/);
   assert.match(pageText(), /arrives later/);
+  assert.match(pageText(), /Recent Link Removals/);
+  assert.match(pageText(), /~\/\.codex\/skills\/retired-skill/);
+  assert.match(pageText(), /No longer in the desired skill list\./);
+  assert.match(pageText(), new RegExp(new Date(1_700_000_000_000).toLocaleString().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 
   const sync = [...container.querySelectorAll<HTMLButtonElement>("button")]
     .find((candidate) => candidate.textContent?.trim() === "Sync Now");

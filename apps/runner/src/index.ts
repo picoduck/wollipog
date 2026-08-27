@@ -131,6 +131,7 @@ import {
 import { discoverRegistryAgents, updateRegistryApproval } from "./discovery/acp-registry.js";
 import {
   reconcileSkills,
+  skillsStateMessage,
   storedSkillVersionAvailable,
   validateSkillSyncEntry,
   type ReconcileSkillEntry,
@@ -809,6 +810,7 @@ function rejectChunkedSkillsSync(error: string): void {
     ...(pending?.requestId ? { requestId: pending.requestId } : {}),
     deployed: [],
     unmanaged: [],
+    removals: [],
     error,
   });
 }
@@ -822,6 +824,7 @@ function beginChunkedSkillsSync(msg: SkillsSyncManifestMessage): void {
       ...(msg.requestId ? { requestId: msg.requestId } : {}),
       deployed: [],
       unmanaged: [],
+      removals: [],
       error: "skills sync manifest targeted a different runner",
     });
     return;
@@ -834,6 +837,7 @@ function beginChunkedSkillsSync(msg: SkillsSyncManifestMessage): void {
       ...(msg.requestId ? { requestId: msg.requestId } : {}),
       deployed: [],
       unmanaged: [],
+      removals: [],
       error: "invalid chunked skills sync manifest",
     });
     return;
@@ -849,6 +853,7 @@ function beginChunkedSkillsSync(msg: SkillsSyncManifestMessage): void {
         ...(msg.requestId ? { requestId: msg.requestId } : {}),
         deployed: [],
         unmanaged: [],
+        removals: [],
         error: "invalid chunked skills sync manifest",
       });
       return;
@@ -935,14 +940,7 @@ function queueSkillsReconcile(requestId?: string): void {
         removedSkillRetentionMs: config.skillRetention.removedSkillDays * 24 * 60 * 60 * 1000,
         previousVersionGraceMs: config.skillRetention.previousVersionMinutes * 60 * 1000,
       });
-      sendUp({
-        type: "skills_state",
-        runnerId: config.runnerId,
-        ...(requestId !== undefined ? { requestId } : {}),
-        deployed: result.deployed,
-        unmanaged: result.unmanaged,
-        ...(result.error === undefined ? {} : { error: result.error }),
-      });
+      sendUp(skillsStateMessage(config.runnerId, result, requestId));
     } catch (error) {
       sendUp({
         type: "skills_state",
@@ -950,6 +948,7 @@ function queueSkillsReconcile(requestId?: string): void {
         ...(requestId !== undefined ? { requestId } : {}),
         deployed: [],
         unmanaged: [],
+        removals: [],
         error: `skill reconcile failed: ${errText(error)}`,
       });
     }
@@ -1645,6 +1644,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           ...(msg.requestId !== undefined ? { requestId: msg.requestId } : {}),
           deployed: [],
           unmanaged: [],
+          removals: [],
           error: "skills sync targeted a different runner",
         });
         break;

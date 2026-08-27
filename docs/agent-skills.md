@@ -162,10 +162,10 @@ on every registration, which makes durability trivial (no receipt outbox needed)
   before the matching completion fence. A new manifest or reconnect discards an incomplete
   transaction. Cached digests are linked directly without retransferring their contents.
 - **Runner→CP `skills_state`** — an authoritative full-replacement inventory modeled on
-  `SubscriptionUsageInventoryMessage`: deployed digests, link health, conflicts, and unmanaged
-  skills found by a bounded scan of harness directories (reusing the `claude-commands.ts` limits
-  table and the deliberately non-YAML frontmatter reader). Sent after each reconcile, on
-  registration, and on the periodic discovery tick.
+  `SubscriptionUsageInventoryMessage`: deployed digests, link health, conflicts, recent managed
+  link removals, and unmanaged skills found by a bounded scan of harness directories (reusing the
+  `claude-commands.ts` limits table and the deliberately non-YAML frontmatter reader). Sent after
+  each reconcile, on registration, and on the periodic discovery tick.
 - Sync triggers: assignment or library change, runner registration, and a manual "Sync Now"
   mirroring Rediscover.
 

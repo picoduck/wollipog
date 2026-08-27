@@ -14,6 +14,7 @@ import {
   describeAssignmentScope,
   groupSkillList,
   invocationLabel,
+  reportedSkillLinkRemovals,
   reportedUnmanagedSkills,
   skillAssignmentsFromPayload,
   skillDeployBadge,
@@ -593,6 +594,7 @@ export function SkillsView() {
                     skillName: detail.name,
                   });
                   const unmanaged = reportedUnmanagedSkills(machine?.reported);
+                  const removals = reportedSkillLinkRemovals(machine?.reported);
                   return (
                     <article className="skills-machine" key={runner.runnerId}>
                       <div className="skills-machine-head">
@@ -626,6 +628,22 @@ export function SkillsView() {
                           <p className="skills-hint">
                             These skills live on the machine but are not managed here. Adopting them into the library arrives later.
                           </p>
+                        </div>
+                      )}
+                      {removals.length > 0 && (
+                        <div className="skills-removals">
+                          <h5>Recent Link Removals</h5>
+                          <p className="skills-hint">
+                            Reported {formatTime(machine?.reported?.removalsUpdatedAt ?? machine?.reported?.updatedAt)}
+                          </p>
+                          <ul>
+                            {removals.map((entry, index) => (
+                              <li key={`${entry.path}:${entry.reason}:${index}`}>
+                                <strong>{entry.path}</strong>
+                                <span className="muted"> — {entry.reason}</span>
+                              </li>
+                            ))}
+                          </ul>
                         </div>
                       )}
                     </article>
