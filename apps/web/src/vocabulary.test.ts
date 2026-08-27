@@ -46,6 +46,16 @@ test("New Session migration copy names the target and its App Server capabilitie
   assert.doesNotMatch(source, /Interactive \(Recommended\)|Use Recommended|Codex App Server is recommended/);
 });
 
+test("the example runner config uses the canonical Codex App Server name", () => {
+  const config = JSON.parse(read("../../../runner.config.example.json")) as {
+    agents?: Array<{ id?: string; name?: string; driver?: string }>;
+  };
+  const appServer = config.agents?.find((agent) => agent.driver === "codex-app-server");
+  assert.ok(appServer, "the example should include a Codex App Server agent");
+  assert.equal(appServer.id, "codex-app");
+  assert.equal(appServer.name, "Codex App Server");
+});
+
 test("no user-facing string calls a Machine a box", () => {
   // "box" is the SSH-bootstrap implementation term. It appears throughout the protocol and the
   // control plane, which is correct; it must not reach a label, tooltip, or sentence a user reads.
