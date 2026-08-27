@@ -146,17 +146,20 @@ export function InboxView({
   // Rows must not move while the user is reading or aiming at the list, and neither breakpoint can
   // key that on live input: touch has no pre-contact hover signal, and a desktop pointer rests
   // still for long stretches while its owner scans the Inbox. So the collapsed Inbox holds its
-  // displayed order for the whole browsing interval on both. Canonical recency ordering is
-  // re-adopted only at boundaries where the user cannot be aiming at a row: leaving the tab or
-  // window (`inboxAway`), expanding a session, and the deliberate structural actions folded into
-  // structuralOrderKey below.
+  // displayed order for the whole browsing interval on both. Mobile retains that lease for the
+  // whole collapsed interval: browsers can emit transient blur/visibility changes while their
+  // chrome or OS surfaces move without ending the user's visual targeting. Treating those as a
+  // safe boundary let live activity reorder an open phone Inbox and made the virtualizer preserve
+  // the old logical anchor by changing scrollTop. Desktop can reliably use leaving the tab/window
+  // (`inboxAway`) as a boundary. Both breakpoints also reconcile when a session expands and after
+  // the deliberate structural actions folded into structuralOrderKey below.
   // Focus and visibility are tracked apart, not folded into one flag: a page can be made visible
   // again while its window stays unfocused, and a shared flag would let that visibility event
   // re-arm the lease and turn the eventual focus into a no-op, stranding a stale order.
   const [windowBlurred, setWindowBlurred] = useState(() => !document.hasFocus());
   const [documentHidden, setDocumentHidden] = useState(() => document.visibilityState === "hidden");
   const inboxAway = windowBlurred || documentHidden;
-  const browsingOrderLease = expandedSessionId === null && !inboxAway;
+  const browsingOrderLease = expandedSessionId === null && (isMobile || !inboxAway);
   const browsingOrderLeaseRef = useRef(browsingOrderLease);
   browsingOrderLeaseRef.current = browsingOrderLease;
   const [seen, setSeen] = useState(() => loadSeen(instanceScope));

@@ -335,6 +335,9 @@ test("InboxView keeps mobile browsing order stable before and through a touch", 
   const pointer = (type: string, pointerId: number, pointerType: string) =>
     grid.dispatchEvent(new domWindow.PointerEvent(type, { bubbles: true, pointerId, pointerType }) as unknown as Event);
   await act(async () => { pointer("pointerover", 1, "mouse"); });
+  // Mobile browser chrome and OS surfaces can transiently blur the document without ending the
+  // collapsed Inbox browsing interval. The lease must survive that unreliable signal.
+  await act(async () => { domWindow.dispatchEvent(new domWindow.Event("blur")); });
   await act(async () => {
     socket.push({
       type: "session_upsert",

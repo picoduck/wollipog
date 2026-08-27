@@ -40,6 +40,21 @@ async function settlePreviewLayout(page: Page, frames = 12) {
   }), frames);
 }
 
+async function inboxViewportAnchor(page: Page) {
+  return page.locator(".inbox-list").evaluate((element) => {
+    const viewport = element.getBoundingClientRect();
+    const row = [...element.querySelectorAll<HTMLElement>("[data-virtual-row]")].find((candidate) => {
+      const rect = candidate.getBoundingClientRect();
+      return rect.bottom > viewport.top && rect.top < viewport.bottom;
+    });
+    return {
+      scrollTop: element.scrollTop,
+      key: row?.dataset.virtualKey ?? null,
+      offset: row ? row.getBoundingClientRect().top - viewport.top : null,
+    };
+  });
+}
+
 async function settledPreviewScrollMetrics(page: Page) {
   const reader = page.getByRole("region", { name: "Session Preview Activity" });
   await expect.poll(async () => {
@@ -80,6 +95,67 @@ test.beforeEach(async ({ page }) => {
   await page.goto("/command-inbox-projects-e2e.html");
   await expect(page.getByRole("tab", { name: /Alpha/ })).toBeVisible();
 });
+
+for (const viewport of [
+  { name: "mobile", width: 390, height: 720 },
+  { name: "desktop", width: 1280, height: 760 },
+] as const) {
+  test(`live Inbox row changes preserve the ${viewport.name} virtual viewport`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/command-inbox-projects-e2e.html?scenario=inbox-live-scroll");
+    const list = page.locator(".inbox-list");
+    await expect(list.locator("[data-virtual-total='36']")).toBeVisible();
+    await expect.poll(() => list.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+
+    const initialTitles = await list.locator(".inbox-row-title").allTextContents();
+    const atTop = await inboxViewportAnchor(page);
+    expect(atTop.scrollTop).toBe(0);
+
+    await page.evaluate(() => {
+      const fixture = window.__WOLLIPOG_PROJECT_INBOX_E2E__;
+      fixture.updateSession("session-overflow-1", {
+        lastEventAt: 1_000,
+        preview: "Approval and concurrent activity changed this live row.",
+        status: "input_required",
+        pendingApproval: { requestId: "approval", title: "Review", options: [], kind: "question" },
+      });
+      fixture.updateSession("session-overflow-0", {
+        lastEventAt: 1_001,
+        preview: "A running activity strip changed without navigation.",
+        status: "running",
+      });
+    });
+    await settlePreviewLayout(page);
+    expect((await inboxViewportAnchor(page)).scrollTop).toBe(0);
+    expect(await list.locator(".inbox-row-title").allTextContents()).toEqual(initialTitles);
+
+    await list.evaluate((element) => {
+      element.scrollTop = Math.round((element.scrollHeight - element.clientHeight) * 0.55);
+      element.dispatchEvent(new Event("scroll"));
+    });
+    await settlePreviewLayout(page);
+    const scrolled = await inboxViewportAnchor(page);
+    expect(scrolled.key).not.toBeNull();
+
+    await page.evaluate(() => {
+      const fixture = window.__WOLLIPOG_PROJECT_INBOX_E2E__;
+      fixture.updateSession("session-overflow-2", {
+        lastEventAt: 1_002,
+        preview: "Unread output and activity updated above the viewport.",
+        status: "running",
+      });
+      fixture.updateSession("session-overflow-3", {
+        lastEventAt: 1_003,
+        preview: "Another concurrent update exerted recency pressure.",
+        status: "idle",
+      });
+    });
+    await settlePreviewLayout(page);
+    const after = await inboxViewportAnchor(page);
+    expect(after.key).toBe(scrolled.key);
+    expect(Math.abs((after.offset ?? 0) - (scrolled.offset ?? 0))).toBeLessThan(2);
+  });
+}
 
 test("real Inbox preview paging keeps ownership while live output streams", async ({ page }) => {
   await page.goto("/command-inbox-projects-e2e.html?scenario=preview-follow");
