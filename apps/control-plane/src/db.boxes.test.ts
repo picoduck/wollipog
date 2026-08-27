@@ -471,6 +471,44 @@ test("deleteRunner drops a stale runner + its sessions, returns null when alread
   assert.equal(db.deleteRunner("stale-1"), null); // already gone
 });
 
+test("deleteRunner rolls back naming fallback when target cleanup fails", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  db.registerRunner({
+    runnerId: "atomic-runner",
+    hostname: "atomic-host",
+    os: "linux",
+    version: "test",
+    workspaces: [],
+    agents: [],
+  }, 1);
+  db.configureSessionNamingHarnessTarget("org_personal", {
+    runnerId: "atomic-runner",
+    agentId: "codex-app-server",
+    driver: "codex-app-server",
+    context: { kind: "native" },
+    provider: "codex",
+    billingSource: "provider_account",
+    model: "luna",
+    effort: "low",
+  }, 2);
+  const target = db.getSessionNamingHarnessTarget("org_personal");
+  const preference = db.getSessionNamingPreference("org_personal");
+  db.raw().exec(`
+    CREATE TRIGGER reject_session_naming_target_delete
+    BEFORE DELETE ON session_naming_harness_targets
+    BEGIN
+      SELECT RAISE(ABORT, 'forced target cleanup failure');
+    END;
+  `);
+
+  assert.throws(() => db.deleteRunner("atomic-runner"), /forced target cleanup failure/);
+  assert.ok(db.getRunner("atomic-runner"), "runner deletion rolls back with naming cleanup");
+  assert.deepEqual(db.getSessionNamingHarnessTarget("org_personal"), target);
+  assert.deepEqual(db.getSessionNamingPreference("org_personal"), preference,
+    "prompt fallback and target deletion are one transaction");
+  db.close();
+});
+
 test("deleteRunner on a box-owned runner would also drop its box row — so the runner DELETE route guards on boxIdForRunner", () => {
   const db = ControlPlaneDb.open(":memory:");
   db.createBox(box());

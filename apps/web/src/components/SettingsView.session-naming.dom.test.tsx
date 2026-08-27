@@ -210,6 +210,59 @@ test("Session Naming preserves canonical harness, billing, and effort labels", a
   }
 });
 
+test("Session Naming distinguishes native and WSL harnesses in options, accessible names, and summaries", async () => {
+  const current = baseView("session_agent_account");
+  current.harnessMachines![0]!.harnesses = [{
+    ...current.harnessMachines![0]!.harnesses[0]!,
+    name: "Codex App Server (Native)",
+    context: { kind: "native" },
+  }, {
+    ...current.harnessMachines![0]!.harnesses[0]!,
+    agentId: "codex-app-server-wsl-Ubuntu",
+    name: "Codex App Server (WSL: Ubuntu)",
+    context: { kind: "wsl", distro: "Ubuntu" },
+  }];
+  current.harnessTarget = {
+    runnerId: "runner-build",
+    machineName: "Build Machine",
+    agentId: "codex-app-server-wsl-Ubuntu",
+    harnessName: "Codex App Server (WSL: Ubuntu)",
+    driver: "codex-app-server",
+    context: { kind: "wsl", distro: "Ubuntu" },
+    provider: "codex",
+    billingSource: "api",
+    model: "luna",
+    modelName: "Luna",
+    effort: "low",
+    available: true,
+  };
+  const transport: ApiTransport = {
+    instanceId: "test",
+    publicOrigin: "http://localhost",
+    close() {},
+    async request() {
+      return new Response(JSON.stringify(current), { headers: { "content-type": "application/json" } });
+    },
+  };
+  const { container, root } = await renderPanel(transport);
+  try {
+    assert.match(container.textContent ?? "", /Codex App Server \(WSL: Ubuntu\) · Luna · Low/);
+    await act(async () => buttonNamed(container, "Session Naming").click());
+    const trigger = container.querySelector<HTMLButtonElement>('[aria-label^="Agent Harness:"]');
+    assert.ok(trigger);
+    assert.match(trigger.getAttribute("aria-label") ?? "", /Codex App Server \(WSL: Ubuntu\)/);
+    await act(async () => trigger.click());
+    const options = [...container.querySelectorAll<HTMLButtonElement>('[role="option"]')];
+    assert.equal(options.every((option) => option.getAttribute("aria-label") === null), true,
+      "option text supplies the accessible name");
+    const names = options.map((option) => option.textContent?.trim());
+    assert.deepEqual(names, ["Codex App Server (Native)Codex · API", "Codex App Server (WSL: Ubuntu)Codex · API"]);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 test("Session Naming row toggles closed, drops its draft, and exposes controls only while expanded", async () => {
   const transport: ApiTransport = {
     instanceId: "test",
@@ -526,6 +579,45 @@ test("Session Naming shows sanitized drift fallback and retries a load failure i
     assert.match(container.textContent ?? "", /selected Machine is offline/);
     assert.match(container.textContent ?? "", /fall back to prompt-derived naming/);
     assert.equal(container.textContent?.includes("token"), false);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("Session Naming explains a pinned billing-boundary change and keeps prompt fallback visible", async () => {
+  const drifted: SessionNamingSettingsView = {
+    ...baseView("session_agent_account"),
+    effectiveMode: "prompt_text_only",
+    harnessTarget: {
+      runnerId: "runner-build",
+      machineName: "Build Machine",
+      agentId: "codex-app-server",
+      harnessName: "Codex App Server",
+      driver: "codex-app-server",
+      context: { kind: "native" },
+      provider: "codex",
+      billingSource: "subscription",
+      model: "luna",
+      modelName: "Luna",
+      effort: "low",
+      available: false,
+      reason: "The selected Agent Harness billing source changed from Subscription to API. Review and save it to confirm the change.",
+    },
+  };
+  const transport: ApiTransport = {
+    instanceId: "test",
+    publicOrigin: "http://localhost",
+    close() {},
+    async request() {
+      return new Response(JSON.stringify(drifted), { headers: { "content-type": "application/json" } });
+    },
+  };
+  const { container, root } = await renderPanel(transport);
+  try {
+    assert.match(container.textContent ?? "", /billing source changed from Subscription to API/);
+    assert.match(container.textContent ?? "", /fall back to prompt-derived naming/);
+    assert.equal(container.textContent?.includes("account@"), false);
   } finally {
     await act(async () => root.unmount());
     container.remove();

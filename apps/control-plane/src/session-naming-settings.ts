@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type {
   AgentDefinition,
+  AgentContext,
   ConfigureSessionNamingHarnessRequest,
   ConfigureSessionNamingCustomModelRequest,
   GenerateSessionTitleResultMessage,
@@ -146,12 +147,80 @@ function harnessModelsForAgent(agent: AgentDefinition): SessionNamingHarnessMach
   });
 }
 
-function harnessNameForAgent(agent: AgentDefinition): string {
+function canonicalHarnessName(agent: AgentDefinition): string {
   const generatedCodexName = /^Codex(?: —)? Interactive$/u.test(agent.name);
   return (agent.driver ?? "acp") === "codex-app-server" &&
     (agent.source === "discovered" || generatedCodexName)
     ? "Codex App Server"
     : agent.name;
+}
+
+function harnessContext(agent: AgentDefinition): AgentContext {
+  return agent.context ?? { kind: "native" };
+}
+
+function validHarnessContext(context: AgentContext): boolean {
+  return context.kind === "native" || (
+    Boolean(context.distro) && context.distro === context.distro.trim() && context.distro.length <= 256 &&
+    !/[\p{Cc}\p{Cf}]/u.test(context.distro)
+  );
+}
+
+function contextLabel(context: AgentContext): string {
+  return context.kind === "wsl" ? `WSL: ${context.distro}` : "Native";
+}
+
+function sameContext(left: AgentContext, right: AgentContext): boolean {
+  return left.kind === right.kind && (left.kind !== "wsl" || (right.kind === "wsl" && left.distro === right.distro));
+}
+
+function namingHarnesses(agents: AgentDefinition[]): SessionNamingHarnessMachine["harnesses"] {
+  const candidates = agents.flatMap((agent) => {
+    const driver = agent.driver ?? "acp";
+    if (driver !== "codex" && driver !== "codex-app-server" && driver !== "claude-code") return [];
+    const context = harnessContext(agent);
+    if (!validHarnessContext(context)) return [];
+    const account = accountForAgent(agent);
+    const models = harnessModelsForAgent(agent);
+    return account && models.length ? [{
+      agentId: agent.id,
+      name: canonicalHarnessName(agent),
+      driver,
+      context,
+      provider: account.provider,
+      billingSource: account.billingSource,
+      models,
+    }] : [];
+  });
+  const nameCounts = new Map<string, number>();
+  for (const candidate of candidates) nameCounts.set(candidate.name, (nameCounts.get(candidate.name) ?? 0) + 1);
+  const contextual = candidates.map((candidate) => nameCounts.get(candidate.name) === 1
+    ? candidate
+    : { ...candidate, name: `${candidate.name} (${contextLabel(candidate.context)})` });
+  const contextualCounts = new Map<string, number>();
+  for (const candidate of contextual) {
+    contextualCounts.set(candidate.name, (contextualCounts.get(candidate.name) ?? 0) + 1);
+  }
+  return contextual.map((candidate) => contextualCounts.get(candidate.name) === 1
+    ? candidate
+    : { ...candidate, name: `${candidate.name} · ${candidate.agentId}` })
+    .sort((left, right) => left.name.localeCompare(right.name) || left.agentId.localeCompare(right.agentId));
+}
+
+function unavailableHarnessName(saved: NonNullable<ReturnType<ControlPlaneDb["getSessionNamingHarnessTarget"]>>): string {
+  if (!saved.context) return saved.agentId;
+  const canonical = saved.driver === "codex-app-server"
+    ? "Codex App Server"
+    : saved.driver === "claude-code"
+      ? "Claude Code"
+      : "Codex (Non-Interactive)";
+  return `${canonical} (${contextLabel(saved.context)}) · ${saved.agentId}`;
+}
+
+function billingSourceLabel(value: SessionNamingAccountBoundary["billingSource"]): string {
+  return value === "api"
+    ? "API"
+    : value.split("_").map((word) => `${word[0]?.toUpperCase() ?? ""}${word.slice(1)}`).join(" ");
 }
 
 const SESSION_NAMING_FAILURE_CODES = new Set([
@@ -238,20 +307,7 @@ export class SessionNamingSettings {
     return this.db.listRunners().flatMap((runner) => {
       if (runner.status !== "online" || !runnerSupportsProtocol(runner.protocolVersion, "sessionNamingTargets") ||
           this.db.runnerScope(runner.runnerId)?.organizationId !== organizationId) return [];
-      const harnesses = runner.agents.flatMap((agent) => {
-        const driver = agent.driver ?? "acp";
-        if (driver !== "codex" && driver !== "codex-app-server" && driver !== "claude-code") return [];
-        const account = accountForAgent(agent);
-        const models = harnessModelsForAgent(agent);
-        return account && models.length ? [{
-          agentId: agent.id,
-          name: harnessNameForAgent(agent),
-          driver,
-          provider: account.provider,
-          billingSource: account.billingSource,
-          models,
-        }] : [];
-      }).sort((left, right) => left.name.localeCompare(right.name));
+      const harnesses = namingHarnesses(runner.agents);
       return harnesses.length ? [{
         runnerId: runner.runnerId,
         machineName: runner.displayName ?? runner.hostname ?? runner.runnerId,
@@ -276,6 +332,10 @@ export class SessionNamingSettings {
     const machineName = runnerInOrganization?.displayName ?? runnerInOrganization?.hostname ?? saved.runnerId;
     const agent = runnerInOrganization?.agents.find((candidate) => candidate.id === saved.agentId &&
       (candidate.driver ?? "acp") === saved.driver);
+    const harness = runnerInOrganization
+      ? namingHarnesses(runnerInOrganization.agents).find((candidate) =>
+          candidate.agentId === saved.agentId && candidate.driver === saved.driver)
+      : undefined;
     const model = agent?.capabilities?.models.find((candidate) => candidate.id === saved.model);
     const efforts = model?.efforts?.length ? model.efforts : agent?.capabilities?.effortLevels ?? [];
     const account = accountForAgent(agent);
@@ -289,20 +349,31 @@ export class SessionNamingSettings {
             ? "The selected Agent Harness is no longer advertised."
             : !account
               ? "The selected Agent Harness is unavailable or no longer authenticated."
-              : !model || model.hidden || model.id === "default"
-                ? "The selected model is no longer advertised."
-                : !efforts.includes(saved.effort)
-                  ? "The selected reasoning effort is no longer supported by that model."
-                  : !this.hub
-                    ? "Runner requests are unavailable."
-                    : undefined;
+              : !saved.provider || !saved.billingSource
+                ? "Review and save the selected Agent Harness to confirm its provider and billing source."
+                : account.provider !== saved.provider
+                  ? "The selected Agent Harness now advertises a different provider. Review and save it to confirm the change."
+                  : account.billingSource !== saved.billingSource
+                    ? `The selected Agent Harness billing source changed from ${billingSourceLabel(saved.billingSource)} to ${billingSourceLabel(account.billingSource)}. Review and save it to confirm the change.`
+                    : saved.context && !sameContext(saved.context, harnessContext(agent))
+                      ? "The selected Agent Harness execution context changed. Review and save it to confirm the change."
+                      : !model || model.hidden || model.id === "default"
+                        ? "The selected model is no longer advertised."
+                        : !efforts.includes(saved.effort)
+                          ? "The selected reasoning effort is no longer supported by that model."
+                          : !this.hub
+                            ? "Runner requests are unavailable."
+                            : undefined;
     return {
       view: {
         runnerId: saved.runnerId,
         machineName,
         agentId: saved.agentId,
-        harnessName: agent ? harnessNameForAgent(agent) : saved.agentId,
+        harnessName: harness?.name ?? unavailableHarnessName(saved),
         driver: saved.driver,
+        ...(saved.context ? { context: saved.context } : {}),
+        ...(saved.provider ? { provider: saved.provider } : {}),
+        ...(saved.billingSource ? { billingSource: saved.billingSource } : {}),
         model: saved.model,
         modelName: model?.displayName ?? saved.model,
         effort: saved.effort,
@@ -474,11 +545,12 @@ export class SessionNamingSettings {
         "the selected Machine, Agent Harness, model, or reasoning effort is no longer available",
       );
     }
-    const previous = this.db.getSessionNamingHarnessTarget?.(organizationId) ?? null;
-    const targetUpdatedAt = Math.max(now, (previous?.updatedAt ?? 0) + 1);
-    this.db.setSessionNamingHarnessTarget(organizationId, input, targetUpdatedAt);
-    const priorPreference = this.db.getSessionNamingPreference(organizationId)?.updatedAt ?? 0;
-    this.db.setSessionNamingPreference(organizationId, "session_agent_account", Math.max(now, priorPreference + 1));
+    this.db.configureSessionNamingHarnessTarget(organizationId, {
+      ...input,
+      context: harness.context ?? { kind: "native" },
+      provider: harness.provider,
+      billingSource: harness.billingSource,
+    }, now);
     return this.view(organizationId, true);
   }
 
@@ -807,6 +879,12 @@ export class SessionNamingSettings {
     });
     if (!result.ok || typeof result.title !== "string") {
       throw new Error(`runner session naming failed (${result.code ?? "provider_failed"})`);
+    }
+    if (explicitTarget?.view.available && (
+      result.provider !== explicitTarget.account?.provider ||
+      result.billingSource !== explicitTarget.account?.billingSource
+    )) {
+      throw new Error("runner session naming account boundary changed");
     }
     return result.title;
   };
