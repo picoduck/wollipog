@@ -114,11 +114,14 @@ A versioned, immutable store plus two symlink hops:
 Properties:
 
 - **Atomic update and rollback.** A new version is materialized fully in the store, then one
-  symlink flips. Rollback repoints the link. The previous N versions are retained briefly so
-  running sessions keep a consistent tree, then garbage-collected.
+  symlink flips. Rollback repoints the link. Superseded versions survive the configured
+  `skillRetention.previousVersionMinutes` grace period so running sessions keep a consistent tree,
+  then are garbage-collected.
 - **Disable is link removal.** Disabling a skill for an agent removes only that harness-dir
-  symlink; content stays staged and re-enable is instant. Per-agent targeting is expressed as
-  which harness directories receive links.
+  symlink; content stays staged for `skillRetention.removedSkillDays`, so common re-enables are
+  instant while never-again-desired content remains bounded. Per-agent targeting is expressed as
+  which harness directories receive links. Retention timestamps are durable runner-local state;
+  malformed state resets windows conservatively instead of authorizing early deletion.
 - **Never clobber user content.** The runner only creates or replaces symlinks that verifiably
   resolve into its own store. A pre-existing real directory at a target path (a hand-managed
   skill) is a conflict surfaced in the UI with an offer to adopt it into the library — never an

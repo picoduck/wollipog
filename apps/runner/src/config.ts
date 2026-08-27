@@ -39,6 +39,13 @@ export interface RunnerAdmissionPolicy {
   agentWeights: Record<string, number>;
 }
 
+export interface RunnerSkillRetention {
+  /** Keep all versions of a skill after it leaves desired state, enabling instant re-enable. */
+  removedSkillDays: number;
+  /** Keep superseded versions briefly so sessions using the prior tree remain consistent. */
+  previousVersionMinutes: number;
+}
+
 export interface RunnerExecutionIsolation {
   /** Strict platform adapter. Job Objects are process-only; Seatbelt/bwrap also gate writes. */
   mode: "provider" | "bwrap" | "seatbelt" | "windows-job";
@@ -101,6 +108,8 @@ export interface RunnerConfig {
   maxConcurrentSessions: number;
   /** Optional provider-aware quotas and capacity weights. Unlisted agents use limit=unbounded, weight=1. */
   admission: RunnerAdmissionPolicy;
+  /** Bounded retention for verified content in the runner-local skill store. */
+  skillRetention: RunnerSkillRetention;
   /** Runner-owned process/filesystem/network boundary. Defaults to provider-owned sandboxing. */
   executionIsolation: RunnerExecutionIsolation;
   /** Reproducible container placements checked before runner registration. */
@@ -299,6 +308,19 @@ export function resolveConfig(file: Partial<RunnerConfig>, overrides: Partial<Ru
   const rawAdmission: Partial<RunnerAdmissionPolicy> = overrides.admission ?? file.admission ?? {};
   const agentLimits = validateAdmissionMap("agentLimits", rawAdmission.agentLimits, 256);
   const agentWeights = validateAdmissionMap("agentWeights", rawAdmission.agentWeights, maxConcurrentSessions);
+  const rawSkillRetention: Partial<RunnerSkillRetention> =
+    overrides.skillRetention ?? file.skillRetention ?? {};
+  const removedSkillDays = rawSkillRetention.removedSkillDays ?? 7;
+  if (!Number.isInteger(removedSkillDays) || removedSkillDays < 0 || removedSkillDays > 3650) {
+    throw new Error("runner config: skillRetention.removedSkillDays must be an integer from 0 to 3650");
+  }
+  const previousVersionMinutes = rawSkillRetention.previousVersionMinutes ?? 60;
+  if (!Number.isInteger(previousVersionMinutes) || previousVersionMinutes < 0 ||
+      previousVersionMinutes > 525_600) {
+    throw new Error(
+      "runner config: skillRetention.previousVersionMinutes must be an integer from 0 to 525600",
+    );
+  }
   const rawIsolation = overrides.executionIsolation ?? file.executionIsolation ?? { mode: "provider", network: "inherit" };
   if (!["provider", "bwrap", "seatbelt", "windows-job"].includes(rawIsolation.mode)) {
     throw new Error("runner config: executionIsolation.mode must be 'provider', 'bwrap', 'seatbelt', or 'windows-job'");
@@ -378,6 +400,7 @@ export function resolveConfig(file: Partial<RunnerConfig>, overrides: Partial<Ru
     dataDir: resolveWorkspacePath(overrides.dataDir ?? file.dataDir ?? resolve(homedir(), ".agent-manager")),
     maxConcurrentSessions,
     admission: { agentLimits, agentWeights },
+    skillRetention: { removedSkillDays, previousVersionMinutes },
     executionIsolation: {
       mode: rawIsolation.mode,
       network: rawIsolation.network,

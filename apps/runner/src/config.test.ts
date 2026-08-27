@@ -232,6 +232,27 @@ test("resolveConfig defaults and validates the box process ceiling", () => {
   );
 });
 
+test("resolveConfig defaults and validates skill-store retention", () => {
+  const defaults = resolveConfig({}, { runnerId: "x", controlPlaneUrl: "ws://x" });
+  assert.deepEqual(defaults.skillRetention, { removedSkillDays: 7, previousVersionMinutes: 60 });
+  const configured = resolveConfig({
+    runnerId: "x",
+    controlPlaneUrl: "ws://x",
+    skillRetention: { removedSkillDays: 30, previousVersionMinutes: 15 },
+  });
+  assert.deepEqual(configured.skillRetention, { removedSkillDays: 30, previousVersionMinutes: 15 });
+  assert.throws(() => resolveConfig({
+    runnerId: "x",
+    controlPlaneUrl: "ws://x",
+    skillRetention: { removedSkillDays: -1, previousVersionMinutes: 15 },
+  }), /removedSkillDays/);
+  assert.throws(() => resolveConfig({
+    runnerId: "x",
+    controlPlaneUrl: "ws://x",
+    skillRetention: { removedSkillDays: 1, previousVersionMinutes: 1.5 },
+  }), /previousVersionMinutes/);
+});
+
 test("resolveConfig keeps an explicit capacity when the default changes", () => {
   const base = { runnerId: "x", controlPlaneUrl: "ws://x" };
   // An operator who pinned the old default must keep it after an upgrade.
