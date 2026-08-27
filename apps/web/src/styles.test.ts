@@ -158,6 +158,23 @@ test("review-ready and uncommitted badges wrap together at narrow widths", () =>
       .get("grid-column"),
     ["1 / -1"],
   );
+  assert.deepEqual(
+    phoneRule.declarationsForSelector(".session-detail > .detail-head").get("min-height"),
+    ["44px"],
+    "the compact status/action row must override the desktop 52px floor",
+  );
+  assert.deepEqual(
+    phoneRule.declarationsForSelector(".session-detail > .detail-head").get("row-gap"),
+    ["0"],
+    "an absent transient note must not leave an empty second-row gap",
+  );
+  assert.deepEqual(
+    phoneRule.declarationsForSelector(
+      ".session-detail > .detail-head:has(> .session-header-note)",
+    ).get("row-gap"),
+    ["4px"],
+    "a present transient note retains separation from the status/action row",
+  );
 });
 
 /**
@@ -250,6 +267,29 @@ test("short panes keep the status strip, and the pinned summary is bounded by th
   // not activity-based, so recovery toggles stay layout-free in previews too.
   assert.match(soleRuleBody(".session-detail.preview .transcript-recovery-slot"), /display:\s*none;/);
   assert.match(soleRuleBody(".session-detail.preview .transcript-recovery-strip-echo"), /display:\s*inline-flex;/);
+
+  // Full-height phone Sessions deliberately stay in this same compact mode. Both declarations are
+  // conditioned on layout, never recovery activity, so active/inactive transitions cannot resize
+  // the reader and normal operation reserves no empty slot outside the strip.
+  const phone = mediaBlocks(css).find((block) =>
+    block.maxWidths.includes(760) &&
+    block.containsSelector(".session-detail .transcript-recovery-slot"));
+  assert.ok(phone, "the phone layout must collapse the dedicated recovery slot");
+  assert.deepEqual(
+    phone.declarationsForSelector(".session-detail .transcript-recovery-slot").get("display"),
+    ["none"],
+  );
+  assert.deepEqual(
+    phone.declarationsForSelector(".session-detail .transcript-recovery-strip-echo").get("display"),
+    ["inline-flex"],
+  );
+  assert.deepEqual(
+    phone.declarationsForSelector(
+      ".session-detail .transcript-status-context:has(> .transcript-recovery-strip-echo.active) > .context-meter",
+    ).get("display"),
+    ["none"],
+    "the meter must yield to active recovery in a full-height phone Session too",
+  );
 
   // The pinned summary's containing block is the reader region — which the DOM tests pin as
   // containing the scroller and neither the slot nor the strip — so no pixel reservation for

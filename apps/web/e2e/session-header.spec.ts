@@ -220,8 +220,9 @@ for (const viewport of [
       const settings = element.querySelector('[aria-label="Settings"]')!.getBoundingClientRect();
       const back = element.querySelector('[aria-label="Back to Inbox"]')!.getBoundingClientRect();
       const title = element.querySelector("h1")!.getBoundingClientRect();
-      const controls = [...element.querySelectorAll(".topbar-mobile-controls > *, .topbar-mobile-controls > button")]
+      const controls = [...element.querySelectorAll(".topbar-mobile-controls button")]
         .map((node) => node.getBoundingClientRect());
+      const style = getComputedStyle(element.querySelector("h1")!);
       return {
         top: topbarBox.top,
         bottom: topbarBox.bottom,
@@ -229,28 +230,38 @@ for (const viewport of [
         settings: { width: settings.width, height: settings.height, right: settings.right },
         back: { width: back.width, height: back.height, right: back.right },
         title: { x: title.x, right: title.right, width: title.width },
+        titleFontSize: Number.parseFloat(style.fontSize),
         controlsLeft: Math.min(...controls.map((box) => box.left)),
         furthestControlRight: Math.max(...controls.map((box) => box.right)),
+        controls: controls.map((box) => ({ width: box.width, height: box.height })),
       };
     });
     const subheaderBottom = await header.evaluate((element) => element.getBoundingClientRect().bottom);
 
     expect(metrics.display).toBe("grid");
-    expect(shellMetrics.back.width).toBeGreaterThanOrEqual(44);
-    expect(shellMetrics.back.height).toBeGreaterThanOrEqual(44);
-    expect(shellMetrics.settings.width).toBeGreaterThanOrEqual(44);
-    expect(shellMetrics.settings.height).toBeGreaterThanOrEqual(44);
+    expect(shellMetrics.bottom - shellMetrics.top).toBeLessThanOrEqual(40.5);
+    expect(shellMetrics.titleFontSize).toBeLessThanOrEqual(14);
+    expect(shellMetrics.back.width).toBeGreaterThanOrEqual(36);
+    expect(shellMetrics.back.height).toBeGreaterThanOrEqual(36);
+    expect(shellMetrics.settings.width).toBe(metrics.share.width);
+    expect(shellMetrics.settings.height).toBe(metrics.share.height);
+    expect(metrics.share.width).toBe(metrics.moreActions.width);
+    expect(metrics.share.height).toBe(metrics.moreActions.height);
+    for (const control of shellMetrics.controls) {
+      expect(control.width).toBe(shellMetrics.settings.width);
+      expect(control.height).toBe(shellMetrics.settings.height);
+    }
     expect(shellMetrics.settings.right).toBeCloseTo(shellMetrics.furthestControlRight, 0);
     expect(shellMetrics.title.x).toBeGreaterThanOrEqual(shellMetrics.back.right);
     expect(shellMetrics.title.right).toBeLessThanOrEqual(shellMetrics.controlsLeft);
     expect(shellMetrics.title.width).toBeGreaterThanOrEqual(72);
     // Four simultaneous statuses require three badge lines at 320px; they remain inside the
     // second header bar without overlap or horizontal overflow.
-    expect(subheaderBottom - shellMetrics.top).toBeLessThan(156);
-    expect(metrics.share.width).toBeGreaterThanOrEqual(44);
-    expect(metrics.share.height).toBeGreaterThanOrEqual(44);
-    expect(metrics.moreActions.width).toBeGreaterThanOrEqual(44);
-    expect(metrics.moreActions.height).toBeGreaterThanOrEqual(44);
+    expect(subheaderBottom - shellMetrics.top).toBeLessThan(140);
+    expect(metrics.share.width).toBeGreaterThanOrEqual(36);
+    expect(metrics.share.height).toBeGreaterThanOrEqual(36);
+    expect(metrics.moreActions.width).toBeGreaterThanOrEqual(36);
+    expect(metrics.moreActions.height).toBeGreaterThanOrEqual(36);
     expect(metrics.statuses.right).toBeLessThanOrEqual(metrics.actions.x - 6);
     expect(metrics.headerHeight).toBeLessThanOrEqual(104);
     expect(metrics.hasHorizontalOverflow).toBe(false);
@@ -421,15 +432,17 @@ test("unbroken 120-character session titles truncate without overlapping bar act
   expect(metrics.clippingRight - metrics.moreActionsRight).toBeGreaterThanOrEqual(11.5);
 });
 
-test("the two mobile Session bars keep 44-pixel targets and a bounded menu near the breakpoint", async ({ page }) => {
+test("the two mobile Session bars use compact touch targets and a bounded menu near the breakpoint", async ({ page }) => {
   await page.setViewportSize({ width: 700, height: 800 });
   await openSession(page, "preview-follow", { sessionShell: "1" });
   const header = page.locator(".session-detail > .detail-head");
   const actions = header.locator(".detail-actions");
   const backBox = await page.locator(".topbar").getByRole("button", { name: "Back to Inbox" }).boundingBox();
+  const headerBox = await header.boundingBox();
 
-  expect(backBox?.width).toBeGreaterThanOrEqual(44);
-  expect(backBox?.height).toBeGreaterThanOrEqual(44);
+  expect(backBox?.width).toBeGreaterThanOrEqual(36);
+  expect(backBox?.height).toBeGreaterThanOrEqual(36);
+  expect(headerBox?.height).toBeLessThanOrEqual(45);
 
   const moreActions = actions.getByRole("button", { name: "More Actions" });
   const trailingClearance = await moreActions.evaluate((element) => {
@@ -450,6 +463,57 @@ test("the two mobile Session bars keep 44-pixel targets and a bounded menu near 
     const box = await item.boundingBox();
     expect(box?.height).toBeGreaterThanOrEqual(44);
   }
+});
+
+test("the mobile Session name uses compact typography to reveal more of a long title", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 800 });
+  await openSession(page, "preview-follow", { sessionShell: "1" });
+  const longTitle = "A deliberately long mobile Session name for compact header coverage";
+  await page.evaluate((title) => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", { title });
+  }, longTitle);
+  const heading = page.locator(".topbar h1");
+  await expect(heading).toHaveText(longTitle);
+
+  const metrics = await heading.evaluate((element) => {
+    const title = element as HTMLElement;
+    const style = getComputedStyle(title);
+    const box = title.getBoundingClientRect();
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d")!;
+    context.font = `600 17px ${style.fontFamily}`;
+    let prominentFit = 0;
+    for (let index = 1; index <= title.textContent!.length; index += 1) {
+      if (context.measureText(title.textContent!.slice(0, index)).width > box.width) break;
+      prominentFit = index;
+    }
+
+    const range = document.createRange();
+    const text = title.firstChild!;
+    let visibleFit = 0;
+    for (let index = 1; index <= text.textContent!.length; index += 1) {
+      range.setStart(text, 0);
+      range.setEnd(text, index);
+      if (range.getBoundingClientRect().right > box.right + 0.5) break;
+      visibleFit = index;
+    }
+    return {
+      fontSize: Number.parseFloat(style.fontSize),
+      fontWeight: Number.parseFloat(style.fontWeight),
+      textOverflow: style.textOverflow,
+      whiteSpace: style.whiteSpace,
+      visibleFit,
+      prominentFit,
+      hasHorizontalOverflow: title.scrollWidth > title.clientWidth,
+    };
+  });
+
+  expect(metrics.fontSize).toBeLessThanOrEqual(14);
+  expect(metrics.fontWeight).toBeLessThanOrEqual(500);
+  expect(metrics.whiteSpace).toBe("nowrap");
+  expect(metrics.textOverflow).toBe("ellipsis");
+  expect(metrics.hasHorizontalOverflow).toBe(true);
+  expect(metrics.visibleFit).toBeGreaterThan(metrics.prominentFit);
 });
 
 test("the Share menu scrolls inside a short landscape-phone viewport", async ({ page }) => {

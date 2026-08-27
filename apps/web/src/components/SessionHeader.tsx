@@ -22,7 +22,7 @@ import { reachableTranscriptShareOrigin, transcriptShareUrl } from "../transcrip
 import { ChangeStatusBadge, SessionStatusIndicators, Modal, CopyButton } from "./common.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { useFeedback } from "./FeedbackProvider.js";
-import { ChevronLeftIcon, MoreHorizontalIcon, ShareIcon } from "./Icons.js";
+import { ChevronLeftIcon, MoreVerticalIcon, ShareIcon } from "./Icons.js";
 import { useIsMobile } from "./useIsMobile.js";
 
 const BACKGROUND_WORK_DOT_LABELS: Record<BackgroundWorkState, string> = {
@@ -358,7 +358,7 @@ export function SessionHeader({
               aria-expanded={menuOpen}
               aria-controls={menu.menuId}
             >
-              <MoreHorizontalIcon size={16} />
+              <MoreVerticalIcon size={16} />
             </button>
             {menuOpen && (
               <>
@@ -418,6 +418,20 @@ export function SessionHeader({
                   >
                     Rename Session…
                   </button>
+                  {onSnooze && (
+                    <button
+                      className="menu-item"
+                      type="button"
+                      role="menuitem"
+                      disabled={busy}
+                      onClick={() => {
+                        closeMenu(false);
+                        onSnooze();
+                      }}
+                    >
+                      Snooze Session…
+                    </button>
+                  )}
                   <button
                     className="menu-item"
                     type="button"
@@ -461,20 +475,6 @@ export function SessionHeader({
                   >
                     {sessionArchiveActionLabel(session, stopBeforeArchiveSupported)}
                   </button>
-                  {onSnooze && (
-                    <button
-                      className="menu-item"
-                      type="button"
-                      role="menuitem"
-                      disabled={busy}
-                      onClick={() => {
-                        closeMenu(false);
-                        onSnooze();
-                      }}
-                    >
-                      Snooze Session…
-                    </button>
-                  )}
                   {(session.adopted || (session.driver === "acp" && !terminal && runnerOnline && logoutSupported && providerLogoutSupported)) && (
                     <div className="menu-label" role="presentation">Maintenance</div>
                   )}

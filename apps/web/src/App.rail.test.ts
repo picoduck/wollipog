@@ -349,8 +349,12 @@ test("the phone topbar cannot push its controls off-screen", () => {
     "and must not grow with the instance name");
   assert.match(css, /\.topbar:has\(\.topbar-mobile-controls\) h1 \{[^}]*text-overflow: ellipsis/,
     "the title must yield before any control does");
-  assert.match(css, /\.topbar-mobile-controls \.settings-trigger,[\s\S]*?\.mobile-session-back \{[^}]*width: 44px;[^}]*height: 44px/,
-    "Settings and the Session Back control must retain full phone touch targets");
+  assert.match(css, /\.topbar:has\(\.mobile-session-back\) \{[^}]*height: calc\(40px/,
+    "the Session route must compact the mobile topbar without changing other routes");
+  assert.match(css, /\.topbar:has\(\.mobile-session-back\) h1 \{[^}]*font-size: var\(--text-base\)/,
+    "the semantic Session heading must use compact label-scale presentation on phones");
+  assert.match(css, /\.topbar:has\(\.mobile-session-back\) \.mobile-session-back,[\s\S]*?\.topbar:has\(\.mobile-session-back\) \.topbar-mobile-controls \.settings-trigger \{[^}]*width: 36px;[^}]*height: 36px/,
+    "Session navigation, pane controls, and Settings must share compact phone geometry");
 });
 
 test("the phone Session topbar owns Back and the live Session title without Open", () => {
