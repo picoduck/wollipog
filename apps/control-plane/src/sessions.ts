@@ -7055,7 +7055,7 @@ export class SessionsService {
       const appServerUnsupported = this.capabilityFailure(
         runnerId,
         "codexAppServerExternalSessions",
-        "Finding sessions with Codex App Server",
+        "Codex App Server session discovery",
       );
       if (appServerUnsupported) return appServerUnsupported;
     }

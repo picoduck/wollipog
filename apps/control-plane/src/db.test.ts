@@ -4672,6 +4672,29 @@ test("archive page SQL bounds candidate materialization before cursor hydration"
   assert.equal(new Set([...first.sessionIds, ...second.sessionIds]).size, 60);
 });
 
+test("archive page SQL uses the canonical Codex App Server facet and filter", () => {
+  const db = withRunner();
+  db.createSession(newSession({
+    id: "codex-app-session",
+    agentId: "acp-agent",
+    driver: "codex-app-server",
+  }));
+  db.setSessionArchived("codex-app-session", true, 2_000);
+
+  const candidates = db.archiveSessionCandidatePageForPrincipal(localOwner(), {});
+  assert.ok(!("error" in candidates));
+  if ("error" in candidates) throw new Error(candidates.error);
+  assert.deepEqual(candidates.facets.agents, ["Codex App Server"]);
+  assert.doesNotMatch(candidates.facets.agents.join("\n"), /Codex(?: —)? Interactive/);
+
+  const filtered = db.archiveSessionCandidatePageForPrincipal(localOwner(), {
+    agent: "Codex App Server",
+  });
+  assert.ok(!("error" in filtered));
+  if ("error" in filtered) throw new Error(filtered.error);
+  assert.deepEqual(filtered.sessions.map((session) => session.id), ["codex-app-session"]);
+});
+
 test("archive page SQL preserves Stop Failed recovery state", () => {
   const db = withRunner();
   db.createSession(newSession({ id: "stop-failed" }));
