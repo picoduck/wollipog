@@ -134,7 +134,7 @@ for (const viewport of [
   { name: "mobile portrait", width: 390, height: 844 },
   { name: "mobile landscape", width: 844, height: 390 },
 ]) {
-  test(`an over-height question set scrolls with fixed response actions in ${viewport.name}`, async ({ page }) => {
+  test(`an over-height question set uses one natural page scroller in ${viewport.name}`, async ({ page }) => {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     await page.goto("/agent-questions-e2e.html?set=long");
 
@@ -142,7 +142,6 @@ for (const viewport of [
     const list = page.locator(".question-list");
     const submit = page.getByRole("button", { name: "Submit" });
     const dismiss = page.getByRole("button", { name: "Dismiss" });
-    await expectInsideViewport(bar, page);
     await expectInsideViewport(submit, page);
     await expectInsideViewport(dismiss, page);
 
@@ -150,17 +149,17 @@ for (const viewport of [
       clientHeight: element.clientHeight,
       scrollHeight: element.scrollHeight,
       scrollTop: element.scrollTop,
+      overflowY: getComputedStyle(element).overflowY,
     }));
-    expect(overflow.scrollHeight).toBeGreaterThan(overflow.clientHeight);
+    expect(overflow.scrollHeight).toBeLessThanOrEqual(overflow.clientHeight + 1);
     expect(overflow.scrollTop).toBe(0);
+    expect(overflow.overflowY).toBe("visible");
+    expect((await geometry(bar)).height).toBeGreaterThan(viewport.height);
 
-    const actionsBefore = await geometry(page.locator(".approval-actions"));
-    await list.evaluate((element) => element.scrollTo({ top: element.scrollHeight }));
-    await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+    await page.getByRole("radio", { name: /Overnight/ }).scrollIntoViewIfNeeded();
+    await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
     await expect(page.getByRole("radio", { name: /Overnight/ })).toBeInViewport();
-    const actionsAfter = await geometry(page.locator(".approval-actions"));
-    expect(actionsAfter.top).toBeCloseTo(actionsBefore.top, 1);
-    expect(actionsAfter.bottom).toBeCloseTo(actionsBefore.bottom, 1);
+    expect(await list.evaluate((element) => element.scrollTop)).toBe(0);
 
     await answerLongSet(page);
     await expect(submit).toBeEnabled();

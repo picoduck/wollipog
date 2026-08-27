@@ -9525,9 +9525,7 @@ body.shell-dock-dragging * {
   flex-wrap: nowrap;
   align-items: stretch;
   min-width: 0;
-  min-height: 0;
-  max-height: min(560px, 60dvh);
-  overflow: hidden;
+  overflow: visible;
 }
 .question-bar .approval-main,
 .question-bar > .form-error {
@@ -9553,16 +9551,16 @@ body.shell-dock-dragging * {
 .question-list {
   display: flex;
   flex-direction: column;
-  flex: 1 1 auto;
+  flex: none;
   gap: 10px;
   min-width: 0;
-  min-height: 0;
   margin-top: 10px;
-  padding-right: 4px;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  -webkit-overflow-scrolling: touch;
+  overflow: visible;
   width: 100%;
+}
+.timeline .question-bar {
+  max-width: none;
+  margin-top: 0;
 }
 .question-block .question-text {
   font-weight: 600;

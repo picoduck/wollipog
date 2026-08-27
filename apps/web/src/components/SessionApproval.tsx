@@ -1,4 +1,4 @@
-import React, { useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
+import React, { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import {
   DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH,
   isPolicyApproval,
@@ -88,12 +88,101 @@ export function SessionApprovalRegion({
   onSessionUpdate?: (session: SessionView) => void;
   showKeyHints?: boolean;
 }) {
+  const approval = session.pendingApproval?.kind === "question" ? null : session.pendingApproval;
+  return (
+    <SessionRequestRegion
+      sessionId={session.id}
+      requestId={approval?.requestId ?? null}
+      runnerOnline={runnerOnline}
+      fallbackFocusRef={fallbackFocusRef}
+      alternateFallbackFocusRef={alternateFallbackFocusRef}
+    >
+      {approval && (
+        <SessionApprovalBanner
+          key={approval.requestId}
+          session={session}
+          runnerOnline={runnerOnline}
+          onSessionUpdate={onSessionUpdate}
+          showKeyHints={showKeyHints}
+        />
+      )}
+    </SessionRequestRegion>
+  );
+}
+
+/** Keep one question representation at its event's timeline position while the request is live. */
+export function SessionTimelineQuestionRegion({
+  session,
+  eventRequestId,
+  eventQuestions,
+  eventResolved,
+  runnerOnline,
+  fallbackFocusRef,
+  alternateFallbackFocusRef,
+  onSessionUpdate,
+  showKeyHints = true,
+  children,
+}: {
+  session: SessionView;
+  eventRequestId: string;
+  eventQuestions: AgentQuestion[];
+  eventResolved: boolean;
+  runnerOnline: boolean;
+  fallbackFocusRef: RefObject<HTMLElement>;
+  alternateFallbackFocusRef?: RefObject<HTMLElement>;
+  onSessionUpdate?: (session: SessionView) => void;
+  showKeyHints?: boolean;
+  children: ReactNode;
+}) {
+  const approval = !eventResolved && session.pendingApproval?.kind === "question" &&
+    session.pendingApproval.requestId === eventRequestId
+    ? session.pendingApproval
+    : null;
+  return (
+    <SessionRequestRegion
+      sessionId={session.id}
+      requestId={approval?.requestId ?? null}
+      runnerOnline={runnerOnline}
+      fallbackFocusRef={fallbackFocusRef}
+      alternateFallbackFocusRef={alternateFallbackFocusRef}
+      clearQuestionDraftOnExit
+    >
+      {approval ? (
+        <SessionQuestionBanner
+          sessionId={session.id}
+          requestId={approval.requestId}
+          questions={approval.questions ?? eventQuestions}
+          runnerOnline={runnerOnline}
+          onSessionUpdate={onSessionUpdate}
+          showKeyHints={showKeyHints}
+        />
+      ) : children}
+    </SessionRequestRegion>
+  );
+}
+
+function SessionRequestRegion({
+  sessionId,
+  requestId,
+  runnerOnline,
+  fallbackFocusRef,
+  alternateFallbackFocusRef,
+  clearQuestionDraftOnExit = false,
+  children,
+}: {
+  sessionId: string;
+  requestId: string | null;
+  runnerOnline: boolean;
+  fallbackFocusRef: RefObject<HTMLElement>;
+  alternateFallbackFocusRef?: RefObject<HTMLElement>;
+  clearQuestionDraftOnExit?: boolean;
+  children: ReactNode;
+}) {
   const regionRef = useRef<HTMLDivElement>(null);
   const focusOwnedRef = useRef(false);
   const previousRequestRef = useRef<string | null>(null);
   const previousRunnerOnlineRef = useRef(runnerOnline);
   const [announcement, setAnnouncement] = useState("");
-  const requestId = session.pendingApproval?.requestId ?? null;
   const requestWasUnchangedBeforeRender = previousRequestRef.current === requestId;
   const focusedElementBeforeRender = typeof document !== "undefined"
     && focusOwnedRef.current
@@ -111,7 +200,9 @@ export function SessionApprovalRegion({
     const hadFocus = focusOwnedRef.current;
     const hadRequest = previousRequestRef.current !== null;
     const focusDestination = approvalFocusDestination(previousRequestRef.current, requestId, hadFocus);
-    if (previousRequestRef.current) clearQuestionDrafts(session.id, previousRequestRef.current);
+    if (clearQuestionDraftOnExit && previousRequestRef.current) {
+      clearQuestionDrafts(sessionId, previousRequestRef.current);
+    }
     previousRequestRef.current = requestId;
     setAnnouncement(requestId ? (hadRequest ? "Agent request updated" : "Agent response required") : "Agent request resolved");
     if (focusDestination === "request") {
@@ -131,7 +222,7 @@ export function SessionApprovalRegion({
       focusFallback();
       focusOwnedRef.current = false;
     }
-  }, [alternateFallbackFocusRef, fallbackFocusRef, requestId]);
+  }, [alternateFallbackFocusRef, clearQuestionDraftOnExit, fallbackFocusRef, requestId, sessionId]);
 
   useIsomorphicLayoutEffect(() => {
     const wentOffline = previousRunnerOnlineRef.current && !runnerOnline;
@@ -154,15 +245,7 @@ export function SessionApprovalRegion({
       }}
     >
       <span className="sr-only" role="status" aria-live="polite">{announcement}</span>
-      {session.pendingApproval && (
-        <SessionApprovalBanner
-          key={session.pendingApproval.requestId}
-          session={session}
-          runnerOnline={runnerOnline}
-          onSessionUpdate={onSessionUpdate}
-          showKeyHints={showKeyHints}
-        />
-      )}
+      {children}
     </div>
   );
 }

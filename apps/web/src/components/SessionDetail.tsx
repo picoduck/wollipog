@@ -1860,6 +1860,14 @@ function SessionDetailLoaded({
   // "Agent is working" state (items 1 + 2): true the instant a send is optimistically pending
   // (before status flips) and for the whole turn while the runner reports running/starting.
   const showOptimistic = pending != null && timelineUserPrompts.length <= sendBaselineRef.current;
+  const timelineQuestionContext = useMemo(() => ({
+    session,
+    runnerOnline,
+    fallbackFocusRef: mode === "expanded" ? inputRef : scrollRef,
+    alternateFallbackFocusRef: mode === "expanded" ? scrollRef : undefined,
+    onSessionUpdate: loadSession,
+    showKeyHints: !isMobile,
+  }), [isMobile, loadSession, mode, runnerOnline, session]);
   const working =
     showOptimistic || (!terminal && (session.status === "running" || session.status === "starting"));
   // The merged Working row must also survive approval/question waits: the projector keeps
@@ -2666,6 +2674,7 @@ function SessionDetailLoaded({
                       forkLatestOnly={session.driver === "claude-code"}
                       revealRequest={timelineRevealRequest}
                       onRevealHandled={handleTimelineReveal}
+                      questionContext={timelineQuestionContext}
                     />
                   )}
                   <PendingPromptBubbles

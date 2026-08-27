@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import * as React from "react";
-import type { SessionEventPayload } from "@wollipog/protocol";
+import type { SessionEventPayload, SessionView } from "@wollipog/protocol";
 import { renderToStaticMarkup } from "react-dom/server";
 import { groupTimeline, SubagentTreeProjector, TimelineBuilder, type TimelineItem } from "../timeline.js";
 import {
@@ -125,6 +125,77 @@ test("canonical accepted steering messages render one compact Steered marker", (
   }));
   assert.equal((html.match(/class="steered-marker"/g) ?? []).length, 1);
   assert.match(html, /<span class="steered-marker">Steered<\/span>/);
+});
+
+test("the pending question replaces its matching timeline card without a duplicate historical row", () => {
+  const questions = [{
+    id: "language",
+    question: "Which language?",
+    options: [{ label: "TypeScript" }, { label: "Python" }],
+  }];
+  const session = {
+    id: "session-1",
+    runnerId: "runner-1",
+    title: "Session",
+    status: "input_required",
+    pendingApproval: {
+      kind: "question",
+      requestId: "ask-1",
+      title: "Agent Questions",
+      options: [],
+      questions,
+    },
+  } as SessionView;
+  const html = renderToStaticMarkup(React.createElement(EventTimeline, {
+    items: [{ kind: "question", id: 4, requestId: "ask-1", questions }],
+    questionContext: {
+      session,
+      runnerOnline: true,
+      fallbackFocusRef: React.createRef<HTMLElement>(),
+    },
+  }));
+
+  assert.equal((html.match(/aria-label="Agent Questions"/g) ?? []).length, 1);
+  assert.equal((html.match(/Which language\?/g) ?? []).length, 1);
+  assert.doesNotMatch(html, /awaiting answer/);
+  assert.match(html, /role="radiogroup"/);
+});
+
+test("a resolved question keeps one compact outcome card at the same timeline row", () => {
+  const questions = [{ id: "language", question: "Which language?", options: [{ label: "TypeScript" }] }];
+  const session = {
+    id: "session-1",
+    runnerId: "runner-1",
+    title: "Session",
+    status: "input_required",
+    pendingApproval: {
+      kind: "question",
+      requestId: "ask-1",
+      title: "Agent Questions",
+      options: [],
+      questions,
+    },
+  } as SessionView;
+  const html = renderToStaticMarkup(React.createElement(EventTimeline, {
+    items: [{
+      kind: "question",
+      id: 4,
+      requestId: "ask-1",
+      questions,
+      answered: false,
+      resolutionReason: "replaced",
+    }],
+    questionContext: {
+      session,
+      runnerOnline: true,
+      fallbackFocusRef: React.createRef<HTMLElement>(),
+    },
+  }));
+
+  assert.doesNotMatch(html, /aria-label="Agent Questions"/);
+  assert.equal((html.match(/Which language\?/g) ?? []).length, 1);
+  assert.match(html, /→ Replaced/);
+  assert.doesNotMatch(html, /role="radiogroup"/);
 });
 
 test("Claude timeline keeps historical rewind while enabling conversation fork only at latest turn", () => {

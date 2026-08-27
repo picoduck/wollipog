@@ -4,7 +4,8 @@ import type { SessionView } from "@wollipog/protocol";
 import { createApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { createBrowserApiTransport } from "../api-transport.js";
-import { SessionApprovalRegion } from "../components/SessionApproval.js";
+import { EventTimeline } from "../components/EventTimeline.js";
+import type { TimelineItem } from "../timeline.js";
 import "../styles.css";
 
 const params = new URLSearchParams(window.location.hash.slice(1));
@@ -22,6 +23,8 @@ function LiveQuestionFixture() {
   const [session, setSession] = useState<SessionView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const fallbackFocusRef = useRef<HTMLTextAreaElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const questionEventRef = useRef<Extract<TimelineItem, { kind: "question" }> | null>(null);
   const queuedPrompts = [
     { id: "queued-1", text: "Keep this long message queued until both structured questions are answered." },
     { id: "queued-2", text: "The complete two-question form must remain visible and reachable above the composer." },
@@ -37,6 +40,20 @@ function LiveQuestionFixture() {
     return () => { active = false; };
   }, [client]);
 
+  const pendingQuestion = session?.pendingApproval?.kind === "question" ? session.pendingApproval : null;
+  if (pendingQuestion) {
+    questionEventRef.current = {
+      kind: "question",
+      id: 1,
+      requestId: pendingQuestion.requestId,
+      questions: pendingQuestion.questions ?? [],
+    };
+  }
+  const questionEvent = questionEventRef.current;
+  const timelineItems: TimelineItem[] = questionEvent
+    ? [{ ...questionEvent, answered: pendingQuestion ? undefined : true }]
+    : [];
+
   return (
     <ApiProvider client={client}>
       <main id="question-frame" className="session-detail">
@@ -47,16 +64,24 @@ function LiveQuestionFixture() {
         ) : (
           <div className="detail-columns">
             <div className="detail-chat">
-              <SessionApprovalRegion
-                session={session}
-                runnerOnline
-                fallbackFocusRef={fallbackFocusRef}
-                onSessionUpdate={setSession}
-                showKeyHints={false}
-              />
               <div className="detail-main">
                 <div className="detail-reader">
-                  <div className="detail-scroll">
+                  <div className="detail-scroll" ref={scrollRef} tabIndex={0}>
+                    {timelineItems.length > 0 && (
+                      <EventTimeline
+                        items={timelineItems}
+                        scrollRef={scrollRef}
+                        historyKey="agent-question-live-e2e"
+                        questionContext={{
+                          session,
+                          runnerOnline: true,
+                          fallbackFocusRef,
+                          alternateFallbackFocusRef: scrollRef,
+                          onSessionUpdate: setSession,
+                          showKeyHints: false,
+                        }}
+                      />
+                    )}
                     {!session.pendingApproval && <p role="status">Question Answered</p>}
                   </div>
                 </div>

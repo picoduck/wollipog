@@ -5,7 +5,7 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { SessionView } from "@wollipog/protocol";
 import { useCommandPaletteFocus } from "./CommandPalette.js";
-import { SessionApprovalRegion } from "./SessionApproval.js";
+import { SessionApprovalRegion, SessionTimelineQuestionRegion } from "./SessionApproval.js";
 import { handleMenuKeyDown, useAccessibleMenu } from "./interactions.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -177,9 +177,20 @@ function approvalSession(requestId: string | null): SessionView {
 
 function ApprovalHarness({ requestId, runnerOnline = true }: { requestId: string | null; runnerOnline?: boolean }) {
   const fallbackRef = useRef<HTMLTextAreaElement>(null);
+  const session = approvalSession(requestId);
+  const questions = session.pendingApproval?.kind === "question" ? session.pendingApproval.questions ?? [] : [];
   return (
     <>
-      <SessionApprovalRegion session={approvalSession(requestId)} runnerOnline={runnerOnline} fallbackFocusRef={fallbackRef} />
+      <SessionTimelineQuestionRegion
+        session={session}
+        eventRequestId={requestId ?? "resolved"}
+        eventQuestions={questions}
+        eventResolved={requestId === null}
+        runnerOnline={runnerOnline}
+        fallbackFocusRef={fallbackRef}
+      >
+        <div>Historical Question</div>
+      </SessionTimelineQuestionRegion>
       <textarea ref={fallbackRef} aria-label="Composer" />
     </>
   );
