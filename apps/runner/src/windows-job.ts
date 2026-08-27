@@ -145,7 +145,10 @@ public static class WollipogWindowsJob {
   static extern uint ResumeThread(IntPtr thread);
 
   [DllImport("kernel32.dll", SetLastError = true)]
-  static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+  static extern uint WaitForMultipleObjects(uint count, IntPtr[] handles, bool waitAll, uint milliseconds);
+
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern IntPtr OpenProcess(uint desiredAccess, bool inheritHandle, uint processId);
 
   [DllImport("kernel32.dll", SetLastError = true)]
   static extern bool GetExitCodeProcess(IntPtr process, out uint exitCode);
@@ -179,12 +182,14 @@ public static class WollipogWindowsJob {
     return output.ToString();
   }
 
-  public static int Run(string command, string[] args, string cwd, string rawCommandLine) {
+  public static int Run(string command, string[] args, string cwd, string rawCommandLine, uint ownerPid) {
     var job = CreateJobObject(IntPtr.Zero, null);
     if (job == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateJobObject failed");
     PROCESS_INFORMATION process = new PROCESS_INFORMATION();
     var created = false;
     var completed = false;
+    var owner = OpenProcess(0x00100000, false, ownerPid); // SYNCHRONIZE
+    if (owner == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error(), "OpenProcess runner owner failed");
     try {
       var limits = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
       limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -243,8 +248,10 @@ public static class WollipogWindowsJob {
         throw new Win32Exception(Marshal.GetLastWin32Error(), "AssignProcessToJobObject failed");
       if (ResumeThread(process.hThread) != 1)
         throw new Win32Exception(Marshal.GetLastWin32Error(), "ResumeThread failed");
-      if (WaitForSingleObject(process.hProcess, INFINITE) != WAIT_OBJECT_0)
-        throw new Win32Exception(Marshal.GetLastWin32Error(), "WaitForSingleObject failed");
+      var wait = WaitForMultipleObjects(2, new [] { process.hProcess, owner }, false, INFINITE);
+      if (wait == WAIT_OBJECT_0 + 1) return 1; // runner owner exited; finally closes the kill-on-close Job
+      if (wait != WAIT_OBJECT_0)
+        throw new Win32Exception(Marshal.GetLastWin32Error(), "WaitForMultipleObjects failed");
       uint exitCode;
       if (!GetExitCodeProcess(process.hProcess, out exitCode))
         throw new Win32Exception(Marshal.GetLastWin32Error(), "GetExitCodeProcess failed");
@@ -256,6 +263,7 @@ public static class WollipogWindowsJob {
         if (process.hThread != IntPtr.Zero) CloseHandle(process.hThread);
         if (process.hProcess != IntPtr.Zero) CloseHandle(process.hProcess);
       }
+      CloseHandle(owner);
       CloseHandle(job);
     }
   }
@@ -264,11 +272,11 @@ public static class WollipogWindowsJob {
 
 $decoded = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Spec)) | ConvertFrom-Json
 $commandArgs = @($decoded.args | ForEach-Object { [string] $_ })
-exit [WollipogWindowsJob]::Run([string] $decoded.command, $commandArgs, [string] $decoded.cwd, [string] $decoded.rawCommandLine)
+exit [WollipogWindowsJob]::Run([string] $decoded.command, $commandArgs, [string] $decoded.cwd, [string] $decoded.rawCommandLine, [uint32] $decoded.ownerPid)
 `;
 
-export function encodeWindowsJobSpec(command: string, args: string[], cwd: string, rawCommandLine?: string): string {
-  return Buffer.from(JSON.stringify({ command, args, cwd, ...(rawCommandLine ? { rawCommandLine } : {}) }), "utf8").toString("base64");
+export function encodeWindowsJobSpec(command: string, args: string[], cwd: string, ownerPid: number, rawCommandLine?: string): string {
+  return Buffer.from(JSON.stringify({ command, args, cwd, ownerPid, ...(rawCommandLine ? { rawCommandLine } : {}) }), "utf8").toString("base64");
 }
 
 export const WINDOWS_JOB_ENCODED_COMMAND = Buffer.from(WINDOWS_JOB_LAUNCHER, "utf16le").toString("base64");

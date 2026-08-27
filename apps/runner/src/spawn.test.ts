@@ -9,6 +9,7 @@ import { test } from "node:test";
 import { buildBwrapArgs, buildCloudArgs, buildContainerArgs, buildWslArgs, killTree, spawnAgent, trackPendingKill, waitForPendingKills, winQuoteArg, type AgentProcess } from "./spawn.js";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
 import { WINDOWS_JOB_ENCODED_COMMAND, WINDOWS_JOB_LAUNCHER } from "./windows-job.js";
+import { extendOwnedProcessTree, parsePosixProcessTable } from "./posix-process-tree.js";
 
 const windowsJobIsolation = {
   backend: "windows-job" as const,
@@ -31,6 +32,8 @@ test("Windows Job launcher reads the Wollipog spec first, accepts legacy, and cl
   assert.match(WINDOWS_JOB_LAUNCHER, /\$env:WOLLIPOG_WINDOWS_JOB_SPEC = \$null/);
   assert.match(WINDOWS_JOB_LAUNCHER, /\$env:MAM_WINDOWS_JOB_SPEC = \$null/);
   assert.match(WINDOWS_JOB_LAUNCHER, /WollipogWindowsJob/);
+  assert.match(WINDOWS_JOB_LAUNCHER, /OpenProcess/);
+  assert.match(WINDOWS_JOB_LAUNCHER, /WaitForMultipleObjects/);
   assert.doesNotMatch(WINDOWS_JOB_LAUNCHER, /MamWindowsJob/);
 });
 
@@ -549,7 +552,6 @@ test("closing a Windows Job launcher reaps its descendant tree", { skip: process
       args: [parentScript],
       cwd: dir,
       windowsShell: false,
-      isolation: windowsJobIsolation,
     });
     child.stdin.end();
     child.stdout.setEncoding("utf8");
@@ -563,6 +565,66 @@ test("closing a Windows Job launcher reaps its descendant tree", { skip: process
     await assert.rejects(() => fs.stat(marker), /ENOENT/);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("POSIX ownership snapshots exclude unrelated and PID-reused processes", () => {
+  const table = parsePosixProcessTable([
+    " 100 1 Ss Thu Aug 27 00:00:00 2026",
+    " 101 100 S Thu Aug 27 00:00:01 2026",
+    " 102 101 S Thu Aug 27 00:00:02 2026",
+    " 200 1 S Thu Aug 27 00:00:03 2026",
+  ].join("\n"));
+  const root = table.get(100)!;
+  const owned = new Map([[root.pid, root]]);
+  assert.equal(extendOwnedProcessTree(owned, table), 2);
+  assert.deepEqual([...owned.keys()].sort(), [100, 101, 102]);
+
+  const reused = parsePosixProcessTable([
+    " 100 1 Ss Thu Aug 27 00:01:00 2026",
+    " 201 100 S Thu Aug 27 00:01:01 2026",
+  ].join("\n"));
+  assert.equal(extendOwnedProcessTree(owned, reused), 0, "a reused root PID cannot capture a foreign child");
+  assert.equal(owned.has(200), false);
+  assert.equal(owned.has(201), false);
+});
+
+test("session disposal reaps a grandchild that creates a new POSIX session and its descendant", {
+  skip: process.platform === "win32",
+  timeout: 15_000,
+}, async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "wollipog-escaped-provider-"));
+  t.after(async () => { await fs.rm(dir, { recursive: true, force: true }); });
+  const ready = path.join(dir, "ready.json");
+  const leafScript = path.join(dir, "leaf.cjs");
+  const escapedScript = path.join(dir, "escaped.cjs");
+  const providerScript = path.join(dir, "provider.cjs");
+  await fs.writeFile(leafScript, "setInterval(() => {}, 1000);\n", "utf8");
+  await fs.writeFile(escapedScript, [
+    'const { spawn } = require("node:child_process");',
+    'const fs = require("node:fs");',
+    `const leaf = spawn(process.execPath, [${JSON.stringify(leafScript)}], { stdio: "ignore" });`,
+    `fs.writeFileSync(${JSON.stringify(ready)}, JSON.stringify({ escaped: process.pid, leaf: leaf.pid }));`,
+    "setInterval(() => {}, 1000);",
+  ].join("\n"), "utf8");
+  await fs.writeFile(providerScript, [
+    'const { spawn } = require("node:child_process");',
+    `spawn(process.execPath, [${JSON.stringify(escapedScript)}], { detached: true, stdio: "ignore" }).unref();`,
+    "setInterval(() => {}, 1000);",
+  ].join("\n"), "utf8");
+
+  const child = spawnAgent({ command: process.execPath, args: [providerScript], cwd: dir, windowsShell: false });
+  child.stdin.end();
+  let pids: { escaped: number; leaf: number } | undefined;
+  for (let attempt = 0; attempt < 100 && !pids; attempt++) {
+    try { pids = JSON.parse(await fs.readFile(ready, "utf8")) as typeof pids; }
+    catch { await new Promise((resolve) => setTimeout(resolve, 25)); }
+  }
+  assert.ok(pids, "escaped provider fixture became ready");
+  killTree(child);
+  assert.equal(await waitForPendingKills(8_000), true);
+  for (const pid of [pids.escaped, pids.leaf]) {
+    assert.throws(() => process.kill(pid, 0), /ESRCH/, `owned pid ${pid} was reaped`);
   }
 });
 

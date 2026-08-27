@@ -438,31 +438,55 @@ impl<C> ManagedChild<C> {
 fn terminate_managed_children_with<C>(
     children: Vec<(ManagedChild<C>, &'static str)>,
     timeout: Duration,
-    mut signal: impl FnMut(C),
+    mut request_stop: impl FnMut(&C) -> bool,
+    mut force_stop: impl FnMut(C),
     mut wait: impl FnMut(&AtomicBool, Duration) -> bool,
 ) -> Vec<(&'static str, bool)> {
     let deadline = Instant::now() + timeout;
     let pending = children
         .into_iter()
         .map(|(child, label)| {
-            signal(child.child);
-            (child.terminated, label)
+            if request_stop(&child.child) {
+                (Some(child.child), child.terminated, label)
+            } else {
+                force_stop(child.child);
+                (None, child.terminated, label)
+            }
         })
         .collect::<Vec<_>>();
 
     pending
         .into_iter()
-        .map(|(terminated, label)| {
+        .map(|(child, terminated, label)| {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            (label, wait(&terminated, remaining))
+            let confirmed = wait(&terminated, remaining);
+            if !confirmed {
+                if let Some(child) = child {
+                    force_stop(child);
+                }
+            }
+            (label, confirmed)
         })
         .collect()
+}
+
+#[cfg(unix)]
+fn request_managed_child_stop(child: &CommandChild) -> bool {
+    // Tauri's CommandChild::kill is SIGKILL on Unix. Give the runner its bounded SIGTERM cleanup
+    // path first so it can empty provider descendant boundaries and release HOME ownership.
+    unsafe { libc::kill(child.pid() as i32, libc::SIGTERM) == 0 }
+}
+
+#[cfg(windows)]
+fn request_managed_child_stop(_child: &CommandChild) -> bool {
+    false
 }
 
 fn terminate_managed_children(children: Vec<(ManagedChild, &'static str)>) {
     for (label, confirmed) in terminate_managed_children_with(
         children,
         OWNED_CHILD_STOP_TIMEOUT,
+        request_managed_child_stop,
         |child| {
             let _ = child.kill();
         },
@@ -4280,7 +4304,9 @@ mod tests {
                     .unwrap()
                     .push(format!("signal {}", child.name));
                 child.terminated.store(true, Ordering::Release);
+                true
             },
+            |_| panic!("confirmed children do not require force"),
             move |terminated, _| {
                 wait_events.lock().unwrap().push("wait".into());
                 terminated.load(Ordering::Acquire)
@@ -4313,6 +4339,7 @@ mod tests {
         let results = terminate_managed_children_with(
             children,
             Duration::from_millis(50),
+            |_| true,
             |_| {},
             move |_, remaining| {
                 task_waits.lock().unwrap().push(remaining);

@@ -16,7 +16,8 @@ import { posix, win32 } from "node:path";
 import type { AgentContext } from "@wollipog/protocol";
 import { containerLabelArgs } from "./container-identity.js";
 import { sensitiveEnvironmentName } from "./env-security.js";
-import { encodeWindowsJobSpec } from "./windows-job.js";
+import { encodeWindowsJobSpec, WINDOWS_JOB_ENCODED_COMMAND } from "./windows-job.js";
+import { PosixProcessBoundary } from "./posix-process-tree.js";
 
 const isWindows = process.platform === "win32";
 /** Runner policy switches are daemon input and must never become agent input. */
@@ -69,6 +70,8 @@ export type AgentProcess = ChildProcessByStdio<Writable, Readable, Readable> & {
   wslReap?: WslReapInfo;
   /** Internal proof that Node already emitted close; close is not replayed to later listeners. */
   closeObserved?: boolean;
+  /** Kernel-identity ownership for descendants that escape the provider's POSIX process group. */
+  posixBoundary?: PosixProcessBoundary;
 };
 
 export interface SpawnAgentOptions {
@@ -288,6 +291,21 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
   let isolationEnv: Record<string, string> = {};
   let explicitEnv = withoutRunnerOnlyEnv(opts.env);
 
+  // A Windows Job is a lifetime boundary, not a filesystem/network sandbox. Apply it by default
+  // to native provider-mode launches so a child cannot outlive either session disposal or a runner
+  // owner crash. Explicit container/cloud/WSL boundaries retain their own lifecycle adapters.
+  if (isWindows && opts.context?.kind !== "wsl" && !opts.isolation) {
+    opts = {
+      ...opts,
+      isolation: {
+        backend: "windows-job",
+        command: win32.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+        args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", WINDOWS_JOB_ENCODED_COMMAND],
+        network: "inherit",
+      },
+    };
+  }
+
   if (opts.isolation) {
     if (opts.isolation.backend === "bwrap") {
       args = buildBwrapArgs({ command: file, args, cwd: opts.cwd }, opts.isolation);
@@ -328,7 +346,7 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
         targetArgs = [];
         rawCommandLine = [commandToken, ...args.map(winQuoteArg)].join(" ");
       }
-      isolationEnv = { WOLLIPOG_WINDOWS_JOB_SPEC: encodeWindowsJobSpec(targetCommand, targetArgs, opts.cwd, rawCommandLine) };
+      isolationEnv = { WOLLIPOG_WINDOWS_JOB_SPEC: encodeWindowsJobSpec(targetCommand, targetArgs, opts.cwd, process.pid, rawCommandLine) };
       file = opts.isolation.command;
       args = opts.isolation.args;
       shell = false;
@@ -431,7 +449,9 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
   }) as AgentProcess;
   child.once("close", () => {
     child.closeObserved = true;
+    if (child.posixBoundary) trackPendingKill(child.posixBoundary.terminate());
   });
+  if (!isWindows && !wslReap && child.pid) child.posixBoundary = new PosixProcessBoundary(child.pid);
   if (wslReap) child.wslReap = wslReap;
   return child;
 }
@@ -458,9 +478,14 @@ export function winQuoteArg(arg: string): string {
  * in-distro group reap on the floor — agents that ignore SIGTERM would survive the runner.
  * Shutdown awaits these (bounded) via waitForPendingKills before exiting. */
 const pendingKills = new Set<Promise<void>>();
+let incompleteKillObserved = false;
 
-export function trackPendingKill(work: Promise<void>): void {
-  const entry: Promise<void> = work.catch(() => {}).then(() => {
+export function trackPendingKill(work: Promise<void | boolean>): void {
+  const entry: Promise<void> = work.then((complete) => {
+    if (complete === false) incompleteKillObserved = true;
+  }, () => {
+    incompleteKillObserved = true;
+  }).then(() => {
     pendingKills.delete(entry);
   });
   pendingKills.add(entry);
@@ -487,11 +512,15 @@ export async function waitForPendingKills(deadlineMs: number): Promise<boolean> 
     ]);
     if (deadline) clearTimeout(deadline);
   }
-  return true;
+  return !incompleteKillObserved;
 }
 
 /** Kill a process and all of its children, cross-platform. */
 export function killTree(child: AgentProcess): void {
+  if (child.posixBoundary) {
+    trackPendingKill(child.posixBoundary.terminate());
+    return;
+  }
   if (child.closeObserved) return;
   if (!child.pid) {
     // Not spawned yet: wait so we tree-kill the REAL agent rather than the shell
@@ -510,14 +539,27 @@ export function killTree(child: AgentProcess): void {
   if (isWindows) {
     // /T = tree, /F = force.
     trackPendingKill(
-      new Promise<void>((resolve) => {
+      new Promise<boolean>((resolve) => {
+        let taskkillComplete = false;
+        let closeObserved = child.closeObserved === true;
+        const finish = () => {
+          if (taskkillComplete && closeObserved) resolve(true);
+        };
+        child.once("close", () => {
+          closeObserved = true;
+          finish();
+        });
         execFile("taskkill", ["/pid", String(child.pid), "/T", "/F"], (err) => {
           const code = (err as { code?: number } | null)?.code;
           // 128 = "process not found" / already exited — benign.
           if (err && code !== 128) {
             console.error(`[runner] taskkill failed for pid ${child.pid}: ${err.message}`);
+            resolve(false);
+            return;
           }
-          resolve();
+          taskkillComplete = true;
+          if (code === 128) closeObserved = true;
+          finish();
         });
       }),
     );

@@ -2047,7 +2047,9 @@ function shutdown(exitCode = 0): void {
       // possibly-still-alive provider cannot share its HOME with a replacement runner.
       try {
         if (sessionsCleanlyShutDown) {
-          sessions.releaseProviderHomeLeasesAfterShutdown(processTreesReaped);
+          if (!sessions.releaseProviderHomeLeasesAfterShutdown(processTreesReaped)) {
+            log("provider descendant cleanup was incomplete — retaining provider-home lease; inspect the preceding survivor diagnostic before restarting this runner");
+          }
         } else {
           log("session cleanup was incomplete — retaining provider-home lease to avoid concurrent HOME use");
         }

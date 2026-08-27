@@ -5344,6 +5344,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hmac",
  "keyring",
+ "libc",
  "memchr",
  "reqwest",
  "same-file",
