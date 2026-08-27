@@ -19,7 +19,7 @@ export function buildRunnerConfigJson(o: RunnerConfigOptions): string {
     workspaces: [{ id: o.workspaceId, name: o.workspaceId, path: o.workspacePath }],
     agents: [
       { id: "claude", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code" },
-      { id: "codex-app", name: "Codex — Interactive", command: "codex", args: [], env: {}, driver: "codex-app-server" },
+      { id: "codex-app", name: "Codex App Server", command: "codex", args: [], env: {}, driver: "codex-app-server" },
     ],
   };
   return JSON.stringify(config, null, 2);

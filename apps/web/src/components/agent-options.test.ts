@@ -64,7 +64,7 @@ test("Codex variants keep app-server and exec distinct per context, with app-ser
     agent({ id: "codex-native", name: "Codex (native)", driver: "codex" }),
   ]);
   assert.deepEqual(out, [
-    "Codex — Interactive (Recommended)",
+    "Codex App Server",
     "Codex — Non-Interactive (codex exec)",
     "Codex — Non-Interactive (codex exec) · WSL: Ubuntu-24.04",
   ]);
@@ -366,7 +366,7 @@ test("multi-agent run defaults exclude advanced exec while keeping it explicitly
 });
 
 test("persisted session labels audit the actual Codex driver", () => {
-  assert.equal(sessionAgentLabel("Codex", "codex-app-server"), "Codex — Interactive");
+  assert.equal(sessionAgentLabel("Codex", "codex-app-server"), "Codex App Server");
   assert.equal(sessionAgentLabel("Codex", "codex"), "Codex — Non-Interactive (codex exec)");
   assert.equal(sessionAgentLabel("Claude Code", "claude-code"), "Claude Code");
   assert.equal(sessionAgentLabel("Conductor (Agent Manager)", "claude-code"), "Conductor (Wollipog)");

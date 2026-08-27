@@ -121,7 +121,7 @@ test("session discovery excludes exact Conductor identities without matching arb
   assert.equal(agentSupportsSessionDiscovery({ ...appServer, id: "custom", name: "My Conductor" }), true);
 });
 
-test("an old runner explains why Codex Interactive discovery requires an update", async () => {
+test("an old runner explains why Codex App Server discovery requires an update", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
   const container = happyContainer as unknown as HTMLDivElement;

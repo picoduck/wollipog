@@ -79,11 +79,11 @@ test("archive search surfaces archive and every canonical lifecycle label indepe
     "archive and primary lifecycle labels must stay identical",
   );
   for (const [status, label] of Object.entries(expected) as [SessionStatus, string][]) {
-    assert.equal(sessionArchiveSearchDetail(session({ status })), `Archived · ${label} · Wollipog · Codex — Interactive`);
+    assert.equal(sessionArchiveSearchDetail(session({ status })), `Archived · ${label} · Wollipog · Codex App Server`);
   }
   assert.equal(
     sessionArchiveSearchDetail(session({ archived: false, status: "queued" })),
-    "Queued · Wollipog · Codex — Interactive",
+    "Queued · Wollipog · Codex App Server",
   );
 });
 
@@ -103,7 +103,7 @@ test("archive filters combine Project, Location, agent, archive, lifecycle, and 
       query: "release",
       project: "Wollipog",
       location: "Local Checkout",
-      agent: "Codex — Interactive",
+      agent: "Codex App Server",
       lifecycle: "input_required",
     },
   });

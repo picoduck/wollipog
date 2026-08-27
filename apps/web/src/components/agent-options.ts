@@ -22,7 +22,7 @@ export function agentFamily(a: AgentDefinition): string {
 /** Distinguishes entries within a family. Empty for single-variant ACP agents. */
 export function agentVariant(a: AgentDefinition): string {
   const wsl = a.context?.kind === "wsl" ? ` · WSL: ${a.context.distro}` : "";
-  if (a.driver === "codex-app-server") return `Interactive (Recommended)${wsl}`;
+  if (a.driver === "codex-app-server") return `App Server${wsl}`;
   if (a.driver === "codex") return `Non-Interactive (codex exec)${wsl}`;
   if (a.context?.kind === "wsl") return `WSL: ${a.context.distro}`;
   if (a.driver === "claude-code") return "Native";
@@ -32,7 +32,7 @@ export function agentVariant(a: AgentDefinition): string {
 export { agentDriverLabel } from "../agent-presentation.js";
 
 function variantRank(v: string): number {
-  if (v.startsWith("Interactive")) return 0;
+  if (v.startsWith("App Server")) return 0;
   if (v === "Native" || v.startsWith("Non-Interactive")) return 1;
   if (v.startsWith("WSL")) return 2;
   return 3;
@@ -110,7 +110,9 @@ export function agentOptions(
     for (const [v, a] of variants) {
       out.push({
         agent: a,
-        label: !v || (!multi && a.driver !== "codex") ? f : `${f} — ${v}`,
+        label: a.driver === "codex-app-server"
+          ? `${f} ${v}`
+          : !v || (!multi && a.driver !== "codex") ? f : `${f} — ${v}`,
         ...(a.available === false ? { disabled: true } : {}),
         ...(a.driver === "codex" ? { advanced: true } : {}),
       });
@@ -268,7 +270,7 @@ export function sessionAgentLabel(
   if (agentId === "conductor" || (agentName != null && isGeneratedConductorName(agentName))) {
     return CONDUCTOR_FAMILY;
   }
-  if (driver === "codex-app-server") return "Codex — Interactive";
+  if (driver === "codex-app-server") return "Codex App Server";
   if (driver === "codex") return "Codex — Non-Interactive (codex exec)";
   return agentName ?? agentId ?? driver ?? "Agent";
 }

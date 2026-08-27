@@ -29,7 +29,7 @@ test("buildRunnerConfigJson produces valid JSON wired to the given control plane
     cfg.agents.map((a: { driver: string }) => a.driver),
     ["claude-code", "codex-app-server"],
   );
-  assert.equal(cfg.agents[1].name, "Codex — Interactive");
+  assert.equal(cfg.agents[1].name, "Codex App Server");
   // pretty-printed for human editing
   assert.ok(json.includes("\n  "));
   assert.equal(RUNNER_TOKEN_FILE, ".agent-manager/runner.token");

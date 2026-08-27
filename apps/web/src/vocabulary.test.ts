@@ -39,6 +39,13 @@ test("host pickers name the Machine, not the Runner that represents it", () => {
   }
 });
 
+test("New Session migration copy names the target and its App Server capabilities", () => {
+  const source = read("./components/NewSessionDialog.tsx");
+  assert.match(source, /Codex App Server supports interactive approvals and resumable conversations\./);
+  assert.match(source, /Use \{suggestedAgentOption\.label\}/);
+  assert.doesNotMatch(source, /Interactive \(Recommended\)|Use Recommended|Codex App Server is recommended/);
+});
+
 test("no user-facing string calls a Machine a box", () => {
   // "box" is the SSH-bootstrap implementation term. It appears throughout the protocol and the
   // control plane, which is correct; it must not reach a label, tooltip, or sentence a user reads.

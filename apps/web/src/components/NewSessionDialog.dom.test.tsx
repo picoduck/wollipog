@@ -13,6 +13,7 @@ import type {
 } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
+import { loadAgentDefaults, saveAgentDefault } from "../agent-defaults.js";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
@@ -227,6 +228,43 @@ test("Project visibility copy stays neutral before selection and fails closed wh
     assert.doesNotMatch(copy(), /transcripts use/);
   } finally {
     await unmountFixture(fixture);
+  }
+});
+
+test("saved-default recovery buttons name the agent they actually select", async () => {
+  domWindow.localStorage.clear();
+  saveAgentDefault({}, runner.runnerId, "codex-app");
+  const recoveryRunner: RunnerView = {
+    ...runner,
+    agents: [
+      { id: "codex-app", name: "Codex", command: "codex", args: [], env: {}, driver: "codex-app-server", available: false },
+      { id: "codex-exec", name: "Codex", command: "codex", args: ["exec"], env: {}, driver: "codex", available: true },
+    ],
+  };
+  const unavailableFixture = await mountFixture(
+    { runners: [recoveryRunner] },
+    { runnerId: runner.runnerId },
+  );
+  try {
+    const action = [...unavailableFixture.container.querySelectorAll("button")].find((button) =>
+      button.textContent?.trim() === "Use Codex — Non-Interactive (codex exec)") as HTMLButtonElement | undefined;
+    assert.ok(action, "the recovery action names Codex Exec rather than App Server");
+    await act(async () => { action.click(); });
+    assert.equal(loadAgentDefaults()[runner.runnerId], "codex-exec");
+  } finally {
+    await unmountFixture(unavailableFixture);
+    domWindow.localStorage.clear();
+  }
+
+  saveAgentDefault({}, runner.runnerId, "missing-agent");
+  const missingFixture = await mountFixture({}, { runnerId: runner.runnerId });
+  try {
+    const action = [...missingFixture.container.querySelectorAll("button")].find((button) =>
+      button.textContent?.trim() === "Use Claude Code") as HTMLButtonElement | undefined;
+    assert.ok(action, "the recovery action names Claude Code when that is the actual fallback");
+  } finally {
+    await unmountFixture(missingFixture);
+    domWindow.localStorage.clear();
   }
 });
 

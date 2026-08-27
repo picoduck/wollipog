@@ -97,14 +97,14 @@ function archiveResponse(rows: SessionView[]): Awaited<ReturnType<ApiClient["arc
     metadata: Object.fromEntries(rows.map((item) => [item.id, {
       project: item.projectName ?? "No Project",
       location: item.workspaceName ?? "No Location",
-      agent: "Codex — Interactive",
+      agent: "Codex App Server",
     }])),
     nextCursor: null,
     hasMore: false,
     facets: {
       projects: [...new Set(rows.map((item) => item.projectName ?? "No Project"))].sort(),
       locations: [...new Set(rows.map((item) => item.workspaceName ?? "No Location"))].sort(),
-      agents: ["Codex — Interactive"],
+      agents: ["Codex App Server"],
     },
   };
 }
@@ -146,7 +146,7 @@ async function mount(sessions: SessionView[], overrides: Partial<ApiClient> = {}
         if (input.lifecycle !== "all" && item.status !== input.lifecycle) return false;
         if (input.project && item.projectName !== input.project) return false;
         if (input.location && item.workspaceName !== input.location) return false;
-        if (input.agent && input.agent !== "Codex — Interactive") return false;
+        if (input.agent && input.agent !== "Codex App Server") return false;
         return !input.q || [item.id, item.title].join("\n").toLocaleLowerCase().includes(input.q.toLocaleLowerCase());
       }).sort((left, right) => right.createdAt - left.createdAt || left.id.localeCompare(right.id));
       const pageSessions = ordered.slice(offset, offset + 50);
@@ -157,14 +157,14 @@ async function mount(sessions: SessionView[], overrides: Partial<ApiClient> = {}
         metadata: Object.fromEntries(pageSessions.map((item) => [item.id, {
           project: item.projectName ?? "No Project",
           location: item.workspaceName ?? "No Location",
-          agent: "Codex — Interactive",
+          agent: "Codex App Server",
         }])),
         nextCursor,
         hasMore: nextCursor !== null,
         facets: {
           projects: [...new Set(sessions.map((item) => item.projectName ?? "No Project"))].sort(),
           locations: [...new Set(sessions.map((item) => item.workspaceName ?? "No Location"))].sort(),
-          agents: ["Codex — Interactive"],
+          agents: ["Codex App Server"],
         },
       };
     },
