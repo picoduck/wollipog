@@ -206,6 +206,9 @@ export class ShellManager {
           context,
           env: meta?.launch?.env,
           scrubInheritedEnv: meta?.launch?.scrubInheritedEnv,
+          // Ordinary terminal jobs are user-owned and may intentionally daemonize. Agent TUIs are
+          // providers, so only those receive escaped-descendant ownership tracking.
+          trackDescendants: meta?.kind === "agent_tui",
         });
     const live: LiveShell = {
       sessionId,

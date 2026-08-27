@@ -16,7 +16,8 @@ import { posix, win32 } from "node:path";
 import type { AgentContext } from "@wollipog/protocol";
 import { containerLabelArgs } from "./container-identity.js";
 import { sensitiveEnvironmentName } from "./env-security.js";
-import { encodeWindowsJobSpec } from "./windows-job.js";
+import { encodeWindowsJobSpec, WINDOWS_JOB_ENCODED_COMMAND } from "./windows-job.js";
+import { DESCENDANT_MARKER_ENV, PosixProcessBoundary, terminatePosixProcessBoundaries } from "./posix-process-tree.js";
 
 const isWindows = process.platform === "win32";
 /** Runner policy switches are daemon input and must never become agent input. */
@@ -37,6 +38,7 @@ const RUNNER_ONLY_ENV = [
   "MAM_POLICY_HOOK_ASK_CAPABLE",
   "WOLLIPOG_WINDOWS_JOB_SPEC",
   "MAM_WINDOWS_JOB_SPEC",
+  DESCENDANT_MARKER_ENV,
   "MANAGER_TOKEN_FILE",
 ];
 
@@ -69,6 +71,8 @@ export type AgentProcess = ChildProcessByStdio<Writable, Readable, Readable> & {
   wslReap?: WslReapInfo;
   /** Internal proof that Node already emitted close; close is not replayed to later listeners. */
   closeObserved?: boolean;
+  /** Kernel-identity ownership for descendants that escape the provider's POSIX process group. */
+  posixBoundary?: PosixProcessBoundary;
 };
 
 export interface SpawnAgentOptions {
@@ -94,6 +98,11 @@ export interface SpawnAgentOptions {
   containerAgentLaunch?: boolean;
   /** Cloud equivalent: marks the provider launch whose checked remote command replaces host argv. */
   cloudAgentLaunch?: boolean;
+  /** Stable owner for native POSIX descendants that may intentionally outlive one provider turn.
+   * The boundary is retained after normal provider exit and terminated when that session disposes. */
+  descendantOwner?: object;
+  /** False for user-owned interactive shells whose daemonized children are not provider-owned. */
+  trackDescendants?: boolean;
 }
 
 export interface BwrapSpawnIsolation {
@@ -288,6 +297,21 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
   let isolationEnv: Record<string, string> = {};
   let explicitEnv = withoutRunnerOnlyEnv(opts.env);
 
+  // A Windows Job is a lifetime boundary, not a filesystem/network sandbox. Apply it by default
+  // to native provider-mode launches so a child cannot outlive either session disposal or a runner
+  // owner crash. Explicit container/cloud/WSL boundaries retain their own lifecycle adapters.
+  if (isWindows && opts.context?.kind !== "wsl" && !opts.isolation) {
+    opts = {
+      ...opts,
+      isolation: {
+        backend: "windows-job",
+        command: win32.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+        args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", WINDOWS_JOB_ENCODED_COMMAND],
+        network: "inherit",
+      },
+    };
+  }
+
   if (opts.isolation) {
     if (opts.isolation.backend === "bwrap") {
       args = buildBwrapArgs({ command: file, args, cwd: opts.cwd }, opts.isolation);
@@ -328,7 +352,7 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
         targetArgs = [];
         rawCommandLine = [commandToken, ...args.map(winQuoteArg)].join(" ");
       }
-      isolationEnv = { WOLLIPOG_WINDOWS_JOB_SPEC: encodeWindowsJobSpec(targetCommand, targetArgs, opts.cwd, rawCommandLine) };
+      isolationEnv = { WOLLIPOG_WINDOWS_JOB_SPEC: encodeWindowsJobSpec(targetCommand, targetArgs, opts.cwd, process.pid, rawCommandLine) };
       file = opts.isolation.command;
       args = opts.isolation.args;
       shell = false;
@@ -417,9 +441,17 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
     inherited.WSLENV = [...existing, ...additions].join(":");
   }
 
+  const descendantMarker = !isWindows && !wslReap && !remoteBoundary && opts.trackDescendants !== false
+    ? randomUUID()
+    : undefined;
   const child = spawn(file, args, {
     cwd,
-    env: { ...inherited, ...explicitEnv, ...isolationEnv },
+    env: {
+      ...inherited,
+      ...explicitEnv,
+      ...isolationEnv,
+      ...(descendantMarker ? { [DESCENDANT_MARKER_ENV]: descendantMarker } : {}),
+    },
     // Resolve .cmd/.bat shims on Windows; harmless on POSIX for our commands.
     shell,
     stdio: ["pipe", "pipe", "pipe"],
@@ -431,7 +463,15 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
   }) as AgentProcess;
   child.once("close", () => {
     child.closeObserved = true;
+    if (child.posixBoundary) {
+      if (opts.descendantOwner) void child.posixBoundary.releaseIfEmpty();
+      else trackPendingKill(child.posixBoundary.terminate());
+    }
   });
+  if (!isWindows && !wslReap && !remoteBoundary && opts.trackDescendants !== false && child.pid) {
+    child.posixBoundary = new PosixProcessBoundary(child.pid, opts.descendantOwner, descendantMarker);
+    child.once("exit", () => child.posixBoundary?.markRootExited());
+  }
   if (wslReap) child.wslReap = wslReap;
   return child;
 }
@@ -457,10 +497,18 @@ export function winQuoteArg(arg: string): string {
  * exits immediately after calling killTree would drop the SIGKILL escalation and the WSL
  * in-distro group reap on the floor — agents that ignore SIGTERM would survive the runner.
  * Shutdown awaits these (bounded) via waitForPendingKills before exiting. */
-const pendingKills = new Set<Promise<void>>();
+/** Maximum TERM + KILL verification time after descendant enumeration succeeds. */
+export const DESCENDANT_BOUNDARY_TERMINATION_BUDGET_MS = 4_500;
 
-export function trackPendingKill(work: Promise<void>): void {
-  const entry: Promise<void> = work.catch(() => {}).then(() => {
+const pendingKills = new Set<Promise<void>>();
+let incompleteKillObserved = false;
+
+export function trackPendingKill(work: Promise<void | boolean>): void {
+  const entry: Promise<void> = work.then((complete) => {
+    if (complete === false) incompleteKillObserved = true;
+  }, () => {
+    incompleteKillObserved = true;
+  }).then(() => {
     pendingKills.delete(entry);
   });
   pendingKills.add(entry);
@@ -487,11 +535,40 @@ export async function waitForPendingKills(deadlineMs: number): Promise<boolean> 
     ]);
     if (deadline) clearTimeout(deadline);
   }
-  return true;
+  const complete = !incompleteKillObserved;
+  // A drain consumes failures from the work it observed. A historical failure must not make every
+  // later, unrelated session shutdown retain ownership forever. Runner shutdown has one drain
+  // caller; this module-global consumption is not a concurrent waiter protocol.
+  incompleteKillObserved = false;
+  return complete;
+}
+
+/** Register cleanup for descendants retained after a provider's normal per-turn exit. */
+export function terminateDescendantBoundaries(owner?: object): void {
+  for (const work of terminatePosixProcessBoundaries(owner)) trackPendingKill(work);
+}
+
+/** Register the global retained-boundary sweep after work already in flight has settled. Provider
+ * drivers use that work for graceful EOF shutdown, so an immediate global sweep would preempt their
+ * grace period with TERM. waitForPendingKills() drains in waves and therefore observes both this
+ * barrier and the boundary terminations it registers. */
+export function terminateDescendantBoundariesAfterPendingKills(): void {
+  const current = [...pendingKills];
+  if (current.length === 0) {
+    terminateDescendantBoundaries();
+    return;
+  }
+  trackPendingKill(Promise.allSettled(current).then(() => {
+    terminateDescendantBoundaries();
+  }));
 }
 
 /** Kill a process and all of its children, cross-platform. */
 export function killTree(child: AgentProcess): void {
+  if (child.posixBoundary) {
+    trackPendingKill(child.posixBoundary.terminate());
+    return;
+  }
   if (child.closeObserved) return;
   if (!child.pid) {
     // Not spawned yet: wait so we tree-kill the REAL agent rather than the shell
@@ -510,14 +587,27 @@ export function killTree(child: AgentProcess): void {
   if (isWindows) {
     // /T = tree, /F = force.
     trackPendingKill(
-      new Promise<void>((resolve) => {
+      new Promise<boolean>((resolve) => {
+        let taskkillComplete = false;
+        let closeObserved = child.closeObserved === true;
+        const finish = () => {
+          if (taskkillComplete && closeObserved) resolve(true);
+        };
+        child.once("close", () => {
+          closeObserved = true;
+          finish();
+        });
         execFile("taskkill", ["/pid", String(child.pid), "/T", "/F"], (err) => {
           const code = (err as { code?: number } | null)?.code;
           // 128 = "process not found" / already exited — benign.
           if (err && code !== 128) {
             console.error(`[runner] taskkill failed for pid ${child.pid}: ${err.message}`);
+            resolve(false);
+            return;
           }
-          resolve();
+          taskkillComplete = true;
+          if (code === 128) closeObserved = true;
+          finish();
         });
       }),
     );

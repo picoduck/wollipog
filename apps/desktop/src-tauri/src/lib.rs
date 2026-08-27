@@ -54,11 +54,13 @@ const OWNERSHIP_NOTIFICATION_REQUEST_MAX_BYTES: usize = 64;
 const OWNERSHIP_NOTIFICATION_RETRY_INTERVAL: Duration = Duration::from_millis(25);
 const OWNERSHIP_NOTIFICATION_IO_TIMEOUT: Duration = Duration::from_millis(500);
 const OWNERSHIP_NOTIFICATION_FOCUS_TIMEOUT: Duration = Duration::from_secs(1);
-// Covers the normal shared 5-second child stop plus the 10-second operation drain and scheduler
+// Covers the normal shared 20-second child stop plus the 10-second operation drain and scheduler
 // margin. A pathological final escalation remains fail-closed: the contender exits after this.
-const OWNERSHIP_NOTIFICATION_TAKEOVER_TIMEOUT: Duration = Duration::from_secs(20);
+const OWNERSHIP_NOTIFICATION_TAKEOVER_TIMEOUT: Duration = Duration::from_secs(35);
 const OWNERSHIP_NOTIFICATION_JOIN_TIMEOUT: Duration = Duration::from_secs(1);
-const OWNED_CHILD_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+// The runner advertises an 11.5-second graceful-stop budget. Leave enough margin for its final
+// descendant-boundary verification before the desktop escalates to SIGKILL.
+const OWNED_CHILD_STOP_TIMEOUT: Duration = Duration::from_secs(20);
 const LOCAL_RUNNER_LEGACY_OWNER_FILE: &str = ".wollipog-runner-owner-v1.json";
 const LOCAL_RUNNER_OWNER_FILE: &str = ".wollipog-runner-owner-v2.json";
 
@@ -438,31 +440,59 @@ impl<C> ManagedChild<C> {
 fn terminate_managed_children_with<C>(
     children: Vec<(ManagedChild<C>, &'static str)>,
     timeout: Duration,
-    mut signal: impl FnMut(C),
+    mut request_stop: impl FnMut(&C) -> bool,
+    mut force_stop: impl FnMut(C),
     mut wait: impl FnMut(&AtomicBool, Duration) -> bool,
 ) -> Vec<(&'static str, bool)> {
     let deadline = Instant::now() + timeout;
     let pending = children
         .into_iter()
         .map(|(child, label)| {
-            signal(child.child);
-            (child.terminated, label)
+            // The shell plugin may already have reaped this PID. Never send raw SIGTERM after its
+            // confirmed exit, because the OS may have recycled the numeric PID for another process.
+            if child.has_terminated() {
+                (None, child.terminated, label)
+            } else if request_stop(&child.child) {
+                (Some(child.child), child.terminated, label)
+            } else {
+                force_stop(child.child);
+                (None, child.terminated, label)
+            }
         })
         .collect::<Vec<_>>();
 
     pending
         .into_iter()
-        .map(|(terminated, label)| {
+        .map(|(child, terminated, label)| {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            (label, wait(&terminated, remaining))
+            let confirmed = wait(&terminated, remaining);
+            if !confirmed {
+                if let Some(child) = child {
+                    force_stop(child);
+                }
+            }
+            (label, confirmed)
         })
         .collect()
+}
+
+#[cfg(unix)]
+fn request_managed_child_stop(child: &CommandChild) -> bool {
+    // Tauri's CommandChild::kill is SIGKILL on Unix. Give the runner its bounded SIGTERM cleanup
+    // path first so it can empty provider descendant boundaries and release HOME ownership.
+    unsafe { libc::kill(child.pid() as i32, libc::SIGTERM) == 0 }
+}
+
+#[cfg(windows)]
+fn request_managed_child_stop(_child: &CommandChild) -> bool {
+    false
 }
 
 fn terminate_managed_children(children: Vec<(ManagedChild, &'static str)>) {
     for (label, confirmed) in terminate_managed_children_with(
         children,
         OWNED_CHILD_STOP_TIMEOUT,
+        request_managed_child_stop,
         |child| {
             let _ = child.kill();
         },
@@ -4280,7 +4310,9 @@ mod tests {
                     .unwrap()
                     .push(format!("signal {}", child.name));
                 child.terminated.store(true, Ordering::Release);
+                true
             },
+            |_| panic!("confirmed children do not require force"),
             move |terminated, _| {
                 wait_events.lock().unwrap().push("wait".into());
                 terminated.load(Ordering::Acquire)
@@ -4313,6 +4345,7 @@ mod tests {
         let results = terminate_managed_children_with(
             children,
             Duration::from_millis(50),
+            |_| true,
             |_| {},
             move |_, remaining| {
                 task_waits.lock().unwrap().push(remaining);
@@ -4327,6 +4360,22 @@ mod tests {
             waits[1] < waits[0],
             "both confirmations must consume the same timeout budget"
         );
+    }
+
+    #[test]
+    fn managed_child_confirmed_exit_is_never_signaled_by_recycled_pid() {
+        let terminated = Arc::new(AtomicBool::new(true));
+        let results = terminate_managed_children_with(
+            vec![(
+                ManagedChild::new("runner", Arc::clone(&terminated)),
+                "local runner",
+            )],
+            Duration::from_secs(1),
+            |_| panic!("a confirmed-exit PID must not be signaled"),
+            |_| panic!("a confirmed-exit child must not be force-killed"),
+            |state, _| state.load(Ordering::Acquire),
+        );
+        assert_eq!(results, [("local runner", true)]);
     }
 
     #[test]

@@ -6,9 +6,10 @@ import os from "node:os";
 import path from "node:path";
 import net from "node:net";
 import { test } from "node:test";
-import { buildBwrapArgs, buildCloudArgs, buildContainerArgs, buildWslArgs, killTree, spawnAgent, trackPendingKill, waitForPendingKills, winQuoteArg, type AgentProcess } from "./spawn.js";
+import { buildBwrapArgs, buildCloudArgs, buildContainerArgs, buildWslArgs, killTree, spawnAgent, terminateDescendantBoundariesAfterPendingKills, trackPendingKill, waitForPendingKills, winQuoteArg, type AgentProcess } from "./spawn.js";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
 import { WINDOWS_JOB_ENCODED_COMMAND, WINDOWS_JOB_LAUNCHER } from "./windows-job.js";
+import { extendOwnedProcessTree, ownsPosixRootProcessGroup, parsePosixProcessTable } from "./posix-process-tree.js";
 
 const windowsJobIsolation = {
   backend: "windows-job" as const,
@@ -31,7 +32,11 @@ test("Windows Job launcher reads the Wollipog spec first, accepts legacy, and cl
   assert.match(WINDOWS_JOB_LAUNCHER, /\$env:WOLLIPOG_WINDOWS_JOB_SPEC = \$null/);
   assert.match(WINDOWS_JOB_LAUNCHER, /\$env:MAM_WINDOWS_JOB_SPEC = \$null/);
   assert.match(WINDOWS_JOB_LAUNCHER, /WollipogWindowsJob/);
+  assert.match(WINDOWS_JOB_LAUNCHER, /OpenProcess/);
+  assert.match(WINDOWS_JOB_LAUNCHER, /WaitForMultipleObjects/);
   assert.doesNotMatch(WINDOWS_JOB_LAUNCHER, /MamWindowsJob/);
+  assert.ok(WINDOWS_JOB_ENCODED_COMMAND.length < 32_000,
+    "the default native launcher must retain headroom below CreateProcess's 32,767-character limit");
 });
 
 test("Windows Job launcher treats an explicitly empty Wollipog spec as authoritative", {
@@ -117,6 +122,7 @@ test("container launches exclude explicit and inherited product-prefixed values 
         hostAgentArgs: [], agentCommand: "agent", agentArgs: [],
       },
     });
+    assert.equal(child.posixBoundary, undefined, "the native runtime client keeps its remote lifecycle boundary");
     child.stdin.end();
     let out = "";
     child.stdout.setEncoding("utf8");
@@ -549,7 +555,6 @@ test("closing a Windows Job launcher reaps its descendant tree", { skip: process
       args: [parentScript],
       cwd: dir,
       windowsShell: false,
-      isolation: windowsJobIsolation,
     });
     child.stdin.end();
     child.stdout.setEncoding("utf8");
@@ -564,6 +569,187 @@ test("closing a Windows Job launcher reaps its descendant tree", { skip: process
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
+});
+
+test("POSIX ownership snapshots exclude unrelated and PID-reused processes", () => {
+  const table = parsePosixProcessTable([
+    " 100 1 Ss Thu Aug 27 00:00:00 2026",
+    " 101 100 S Thu Aug 27 00:00:01 2026",
+    " 102 101 S Thu Aug 27 00:00:02 2026",
+    " 200 1 S Thu Aug 27 00:00:03 2026",
+  ].join("\n"));
+  const root = table.get(100)!;
+  const owned = new Map([[root.pid, root]]);
+  assert.equal(extendOwnedProcessTree(owned, table), 2);
+  assert.deepEqual([...owned.keys()].sort(), [100, 101, 102]);
+
+  const reused = parsePosixProcessTable([
+    " 100 1 Ss Thu Aug 27 00:01:00 2026",
+    " 201 100 S Thu Aug 27 00:01:01 2026",
+  ].join("\n"));
+  assert.equal(extendOwnedProcessTree(owned, reused), 0, "a reused root PID cannot capture a foreign child");
+  assert.equal(ownsPosixRootProcessGroup(root.pid, owned, reused), false,
+    "a reused root PID cannot authorize a negative-PID group signal");
+  assert.equal(owned.has(200), false);
+  assert.equal(owned.has(201), false);
+});
+
+test("normal provider exit preserves owned background work until session disposal", {
+  skip: process.platform === "win32",
+  timeout: 15_000,
+}, async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "wollipog-retained-provider-"));
+  const ready = path.join(dir, "ready.json");
+  const escapedScript = path.join(dir, "escaped.cjs");
+  const providerScript = path.join(dir, "provider.cjs");
+  let escapedPid: number | undefined;
+  t.after(async () => {
+    if (escapedPid) {
+      try { process.kill(escapedPid, "SIGKILL"); } catch { /* already reaped */ }
+    }
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+  await fs.writeFile(escapedScript, [
+    'const fs = require("node:fs");',
+    `fs.writeFileSync(${JSON.stringify(ready)}, JSON.stringify({ pid: process.pid }));`,
+    "setInterval(() => {}, 1000);",
+  ].join("\n"), "utf8");
+  await fs.writeFile(providerScript, [
+    'const { spawn } = require("node:child_process");',
+    `spawn(process.execPath, [${JSON.stringify(escapedScript)}], { detached: true, stdio: "ignore" }).unref();`,
+    "process.exit(0);",
+  ].join("\n"), "utf8");
+
+  const owner = {};
+  const child = spawnAgent({
+    command: process.execPath,
+    args: [providerScript],
+    cwd: dir,
+    windowsShell: false,
+    descendantOwner: owner,
+  });
+  child.stdin.end();
+  for (let attempt = 0; attempt < 100 && !escapedPid; attempt++) {
+    try { escapedPid = (JSON.parse(await fs.readFile(ready, "utf8")) as { pid: number }).pid; }
+    catch { await new Promise((resolve) => setTimeout(resolve, 25)); }
+  }
+  assert.ok(escapedPid, "background process became ready");
+  if (!child.closeObserved) {
+    await new Promise<void>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", () => resolve());
+    });
+  }
+  assert.doesNotThrow(() => process.kill(escapedPid!, 0), "normal provider exit preserves background work");
+
+  let finishGracefulStop!: () => void;
+  trackPendingKill(new Promise<void>((resolve) => { finishGracefulStop = resolve; }));
+  terminateDescendantBoundariesAfterPendingKills();
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.doesNotThrow(
+    () => process.kill(escapedPid!, 0),
+    "global retained cleanup waits for an in-flight graceful provider stop",
+  );
+  finishGracefulStop();
+  assert.equal(await waitForPendingKills(8_000), true);
+  assert.throws(() => process.kill(escapedPid!, 0), /ESRCH/, "session disposal reaps retained work");
+});
+
+test("session disposal reaps a grandchild that creates a new POSIX session and its descendant", {
+  skip: process.platform === "win32",
+  timeout: 15_000,
+}, async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "wollipog-escaped-provider-"));
+  t.after(async () => { await fs.rm(dir, { recursive: true, force: true }); });
+  const ready = path.join(dir, "ready.json");
+  const leafScript = path.join(dir, "leaf.cjs");
+  const escapedScript = path.join(dir, "escaped.cjs");
+  const providerScript = path.join(dir, "provider.cjs");
+  await fs.writeFile(leafScript, "setInterval(() => {}, 1000);\n", "utf8");
+  await fs.writeFile(escapedScript, [
+    'const { spawn } = require("node:child_process");',
+    'const fs = require("node:fs");',
+    `const leaf = spawn(process.execPath, [${JSON.stringify(leafScript)}], { stdio: "ignore" });`,
+    `fs.writeFileSync(${JSON.stringify(ready)}, JSON.stringify({ escaped: process.pid, leaf: leaf.pid }));`,
+    "setInterval(() => {}, 1000);",
+  ].join("\n"), "utf8");
+  await fs.writeFile(providerScript, [
+    'const { spawn } = require("node:child_process");',
+    `spawn(process.execPath, [${JSON.stringify(escapedScript)}], { detached: true, stdio: "ignore" }).unref();`,
+    "setInterval(() => {}, 1000);",
+  ].join("\n"), "utf8");
+
+  const child = spawnAgent({ command: process.execPath, args: [providerScript], cwd: dir, windowsShell: false });
+  child.stdin.end();
+  let pids: { escaped: number; leaf: number } | undefined;
+  for (let attempt = 0; attempt < 100 && !pids; attempt++) {
+    try { pids = JSON.parse(await fs.readFile(ready, "utf8")) as typeof pids; }
+    catch { await new Promise((resolve) => setTimeout(resolve, 25)); }
+  }
+  assert.ok(pids, "escaped provider fixture became ready");
+  killTree(child);
+  assert.equal(await waitForPendingKills(8_000), true);
+  for (const pid of [pids.escaped, pids.leaf]) {
+    assert.throws(() => process.kill(pid, 0), /ESRCH/, `owned pid ${pid} was reaped`);
+  }
+});
+
+test("termination rescans the exact marker for a helper forked by a SIGTERM handler", {
+  skip: process.platform === "win32",
+  timeout: 15_000,
+}, async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "wollipog-term-handler-escape-"));
+  const ready = path.join(dir, "ready.json");
+  const providerReady = path.join(dir, "provider-ready");
+  const helperScript = path.join(dir, "helper.cjs");
+  const providerScript = path.join(dir, "provider.cjs");
+  let helperPid: number | undefined;
+  t.after(async () => {
+    if (helperPid) {
+      try { process.kill(helperPid, "SIGKILL"); } catch { /* already reaped */ }
+    }
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+  await fs.writeFile(helperScript, [
+    'const fs = require("node:fs");',
+    `fs.writeFileSync(${JSON.stringify(ready)}, JSON.stringify({ pid: process.pid }));`,
+    "setInterval(() => {}, 1000);",
+  ].join("\n"), "utf8");
+  await fs.writeFile(providerScript, [
+    'const { spawn } = require("node:child_process");',
+    'const fs = require("node:fs");',
+    "let stopping = false;",
+    'process.on("SIGTERM", () => {',
+    "  if (stopping) return;",
+    "  stopping = true;",
+    `  spawn(process.execPath, [${JSON.stringify(helperScript)}], { detached: true, stdio: "ignore" }).unref();`,
+    "  process.exit(0);",
+    "});",
+    `fs.writeFileSync(${JSON.stringify(providerReady)}, "ready");`,
+    "setInterval(() => {}, 1000);",
+  ].join("\n"), "utf8");
+
+  const child = spawnAgent({
+    command: process.execPath,
+    args: [providerScript],
+    cwd: dir,
+    windowsShell: false,
+    descendantOwner: {},
+  });
+  child.stdin.end();
+  for (let attempt = 0; attempt < 100; attempt++) {
+    try { await fs.access(providerReady); break; }
+    catch { await new Promise((resolve) => setTimeout(resolve, 25)); }
+  }
+  await fs.access(providerReady);
+  killTree(child);
+  for (let attempt = 0; attempt < 100 && !helperPid; attempt++) {
+    try { helperPid = (JSON.parse(await fs.readFile(ready, "utf8")) as { pid: number }).pid; }
+    catch { await new Promise((resolve) => setTimeout(resolve, 25)); }
+  }
+  assert.ok(helperPid, "SIGTERM handler forked its detached helper");
+  assert.equal(await waitForPendingKills(8_000), true);
+  assert.throws(() => process.kill(helperPid!, 0), /ESRCH/, "final marker rescan reaps the helper");
 });
 
 test("buildWslArgs scrubs names in-distro and never places agent env values in argv", () => {
@@ -626,6 +812,13 @@ test("waitForPendingKills reports a deadline with process trees still pending", 
   assert.equal(await waitForPendingKills(5), false);
   release();
   assert.equal(await waitForPendingKills(1_000), true, "later shutdown tests see a drained registry");
+});
+
+test("waitForPendingKills consumes an incomplete result instead of poisoning later drains", async () => {
+  trackPendingKill(Promise.resolve(false));
+  assert.equal(await waitForPendingKills(1_000), false);
+  trackPendingKill(Promise.resolve());
+  assert.equal(await waitForPendingKills(1_000), true);
 });
 
 test("POSIX kill completion waits for close after SIGKILL delivery", {

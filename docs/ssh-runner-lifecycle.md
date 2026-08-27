@@ -109,6 +109,32 @@ mode remains the only dashboard-managed SSH mode. Operators may independently ru
 native runner as a service against a reachable control plane, but that process is externally managed
 and does not become an SSH-managed box automatically.
 
+### Required descendant containment for standalone services
+
+A standalone service must give the runner time to complete its own `SIGTERM`/`SIGINT` shutdown and
+must retain the runner's descendants inside the service-manager boundary until that drain finishes.
+The runner snapshots provider descendants by PID plus process start identity, terminates even children
+that create a new POSIX process group or session, and reports a non-empty boundary instead of releasing
+provider-HOME ownership. A service manager remains the crash boundary if the runner itself is killed
+before that code can run. Native POSIX runners require a full `ps` implementation that supports
+`ps -axo pid=,ppid=,state=,lstart=`; minimal BusyBox-only hosts must install a compatible procps package.
+
+For Linux `systemd` services, use `KillMode=control-group` (the default), keep `SendSIGKILL=yes`, and
+set `TimeoutStopSec=20s` or longer. Do not use `KillMode=process`, `KillMode=mixed`, or `SendSIGKILL=no`:
+those settings can leave a `setsid` descendant outside the runner's graceful path after a crash.
+
+For macOS `launchd` jobs, leave `AbandonProcessGroup` unset or `false` and set `ExitTimeOut` to at least
+20 seconds. The timeout lets the runner verify its identity-tracked descendant boundary before launchd
+forces the main process down; the non-abandoning default also cleans ordinary same-group children if the
+runner crashes. Because launchd's fallback is process-group based, operators must investigate any runner
+diagnostic that says the descendant boundary was not empty before starting a replacement against the same
+provider home.
+
+On Windows, native (non-WSL) provider processes are always placed in a non-breakaway, kill-on-close Job
+Object. The Job launcher watches the runner owner as well as the provider, so runner termination closes
+the Job and the kernel terminates every associated descendant, including nested Jobs. WSL launches use
+their in-distro process-group/PID-namespace boundary instead of a Windows Job.
+
 ## Verification matrix
 
 Repository tests deterministically cover:

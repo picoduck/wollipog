@@ -140,6 +140,54 @@ test("ACP terminal implements output/wait/release with UTF-8 byte truncation and
   }
 });
 
+test("ACP terminal preserves daemonized work until that terminal is released", {
+  skip: process.platform === "win32",
+  timeout: 15_000,
+}, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "wollipog-acp-terminal-descendants-"));
+  const ready = join(root, "ready.json");
+  const daemon = join(root, "daemon.cjs");
+  const command = join(root, "command.cjs");
+  const fs = new AcpFilesystemService(root, NATIVE);
+  const terminals = new AcpTerminalService(fs, NATIVE);
+  let daemonPid: number | undefined;
+  t.after(async () => {
+    terminals.dispose();
+    if (daemonPid) {
+      try { process.kill(daemonPid, "SIGKILL"); } catch { /* already reaped */ }
+    }
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  });
+  await writeFile(daemon, [
+    'const fs = require("node:fs");',
+    `fs.writeFileSync(${JSON.stringify(ready)}, JSON.stringify({ pid: process.pid }));`,
+    "setInterval(() => {}, 1000);",
+  ].join("\n"), "utf8");
+  await writeFile(command, [
+    'const { spawn } = require("node:child_process");',
+    `spawn(process.execPath, [${JSON.stringify(daemon)}], { detached: true, stdio: "ignore" }).unref();`,
+    "process.exit(0);",
+  ].join("\n"), "utf8");
+
+  const { terminalId } = await terminals.create({
+    sessionId: "session-daemon",
+    command: process.execPath,
+    args: [command],
+    cwd: root,
+  });
+  await terminals.wait("session-daemon", terminalId);
+  for (let attempt = 0; attempt < 100 && !daemonPid; attempt++) {
+    try { daemonPid = (JSON.parse(await readFile(ready, "utf8")) as { pid: number }).pid; }
+    catch { await new Promise((resolve) => setTimeout(resolve, 25)); }
+  }
+  assert.ok(daemonPid, "daemonized terminal work became ready");
+  assert.doesNotThrow(() => process.kill(daemonPid!, 0), "natural command exit preserves its daemon");
+
+  terminals.release("session-daemon", terminalId);
+  assert.equal(await waitForPendingKills(8_000), true);
+  assert.throws(() => process.kill(daemonPid!, 0), /ESRCH/, "terminal release reaps its retained daemon");
+});
+
 test("ACP terminal IDs are session-scoped and kill preserves final output until release", async () => {
   const root = await mkdtemp(join(tmpdir(), "wollipog-acp-terminal-kill-"));
   const fs = new AcpFilesystemService(root, NATIVE);

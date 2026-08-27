@@ -90,7 +90,11 @@ import {
 } from "./drivers/claude-code.js";
 import { resolveAcpSessionContext } from "./acp-session-context.js";
 import { SessionStore, isAdoptedSession, type SessionMeta } from "./session-store.js";
-import { waitForPendingKills } from "./spawn.js";
+import {
+  DESCENDANT_BOUNDARY_TERMINATION_BUDGET_MS,
+  terminateDescendantBoundariesAfterPendingKills,
+  waitForPendingKills,
+} from "./spawn.js";
 import {
   findExternalSession,
   listExternalSessions,
@@ -2033,6 +2037,9 @@ function shutdown(exitCode = 0): void {
     sessionsCleanlyShutDown = sessions.shutdownAll();
   });
   bestEffort("dispose shells", () => shells.dispose());
+  // Providers that exited normally may have intentional background descendants retained under
+  // their session boundary. Runner shutdown is the final owner and must drain every such scope.
+  bestEffort("register retained descendant cleanup", () => terminateDescendantBoundariesAfterPendingKills());
   log("shutting down");
   // process.exit() cancels pending timers/exec callbacks — exiting immediately would drop
   // the SIGKILL escalation and the WSL in-distro reap, letting TERM-ignoring agents survive
@@ -2040,14 +2047,18 @@ function shutdown(exitCode = 0): void {
   // sequence is pidfile retries + TERM + 2s + KILL. The deadline covers Claude's 5s clean-exit
   // interval plus the reap's 6s safety cap.
   // No active sessions ⇒ zero pending kills ⇒ instant exit (dev restarts stay snappy).
-  void waitForPendingKills(CLAUDE_GRACEFUL_STOP_BUDGET_MS + 500)
+  void waitForPendingKills(
+    CLAUDE_GRACEFUL_STOP_BUDGET_MS + DESCENDANT_BOUNDARY_TERMINATION_BUDGET_MS + 500,
+  )
     .then((processTreesReaped) => {
       // Never let a throw here skip the exit. Only release the lease when session cleanup completed
       // cleanly AND every tracked process tree was reaped; otherwise retain it (fail closed) so a
       // possibly-still-alive provider cannot share its HOME with a replacement runner.
       try {
         if (sessionsCleanlyShutDown) {
-          sessions.releaseProviderHomeLeasesAfterShutdown(processTreesReaped);
+          if (!sessions.releaseProviderHomeLeasesAfterShutdown(processTreesReaped)) {
+            log("process-tree cleanup was incomplete — retaining provider-home lease; inspect the preceding survivor diagnostic before restarting this runner");
+          }
         } else {
           log("session cleanup was incomplete — retaining provider-home lease to avoid concurrent HOME use");
         }
