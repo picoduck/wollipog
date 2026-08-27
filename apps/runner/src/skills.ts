@@ -67,6 +67,8 @@ import {
   type AgentDriverKind,
   type DeployedSkillState,
   type SkillFile,
+  type SkillLinkRemoval,
+  type SkillsStateMessage,
   type SkillSyncEntry,
   type UnmanagedSkillInfo,
 } from "@wollipog/protocol";
@@ -128,9 +130,26 @@ export interface ReconcileSkillsResult {
   unmanaged: UnmanagedSkillInfo[];
   /** Pass-wide failure that cannot be represented by one desired entry, such as a blocked sweep. */
   error?: string;
-  /** Home-relative shown paths of every link this pass removed. Always logged as well; a pass
-   * that removes nothing returns an empty array. */
-  removedLinks: string[];
+  /** Home-relative shown paths and reasons for every link this pass removed. Always logged as
+   * well; a pass that removes nothing returns an empty array. */
+  removedLinks: SkillLinkRemoval[];
+}
+
+/** Compose the runner's authoritative wire report from one completed reconcile pass. */
+export function skillsStateMessage(
+  runnerId: string,
+  result: ReconcileSkillsResult,
+  requestId?: string,
+): SkillsStateMessage {
+  return {
+    type: "skills_state",
+    runnerId,
+    ...(requestId === undefined ? {} : { requestId }),
+    deployed: result.deployed,
+    unmanaged: result.unmanaged,
+    removals: result.removedLinks,
+    ...(result.error === undefined ? {} : { error: result.error }),
+  };
 }
 
 function errText(error: unknown): string {
@@ -541,7 +560,7 @@ function ensureManagedSymlink(
  * home-relative spelling of `dir` used in logs and the reconcile result. */
 interface SweepContext {
   owned: Set<string>;
-  removedLinks: string[];
+  removedLinks: SkillLinkRemoval[];
   shownDir: string;
   log?: (message: string) => void;
 }
@@ -577,8 +596,9 @@ function sweepManagedLinks(
     try {
       unlinkSync(linkPath);
       sweep.owned.delete(linkPath);
-      sweep.removedLinks.push(shownPath);
-      sweep.log?.(`skill link removed: ${shownPath} (no longer in the desired skill list)`);
+      const reason = "No longer in the desired skill list.";
+      sweep.removedLinks.push({ path: shownPath, reason });
+      sweep.log?.(`skill link removed: ${shownPath} (${reason})`);
     } catch (error) {
       /* Removal is best effort; a vanished or contested entry is left for the next pass. */
       sweep.log?.(`skill link removal failed for ${shownPath}: ${errText(error)}`);
@@ -1044,7 +1064,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
     }
     if (!isSymlink) owned.delete(linkPath);
   }
-  const removedLinks: string[] = [];
+  const removedLinks: SkillLinkRemoval[] = [];
   /** Record a link this runner created — or found already correct while ensuring a desired
    * deployment. The second half is deliberate adoption: a pre-manifest runner link and a
    * hand-made link that exactly matches the desired deployment are indistinguishable, and
@@ -1177,10 +1197,9 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
           try {
             unlinkSync(linkPath);
             owned.delete(linkPath);
-            removedLinks.push(shownPath);
-            options.log?.(
-              `skill link removed: ${shownPath} (the canonical location it routes through is conflicted)`,
-            );
+            const reason = "The canonical location it routes through is conflicted.";
+            removedLinks.push({ path: shownPath, reason });
+            options.log?.(`skill link removed: ${shownPath} (${reason})`);
           } catch (error) {
             /* Removal is best effort; a vanished or contested entry is left for the next pass. */
             options.log?.(`skill link removal failed for ${shownPath}: ${errText(error)}`);

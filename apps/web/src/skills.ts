@@ -12,6 +12,7 @@ import {
   type DeployedSkillState,
   type SkillFile,
   type SkillInvocationPolicy,
+  type SkillLinkRemoval,
   type SkillSyncTarget,
   type UnmanagedSkillInfo,
 } from "@wollipog/protocol";
@@ -74,6 +75,8 @@ export interface RunnerDesiredSkill {
 export interface ReportedSkillsState {
   deployed?: DeployedSkillState[];
   unmanaged?: UnmanagedSkillInfo[];
+  removals?: SkillLinkRemoval[];
+  removalsUpdatedAt?: number;
   error?: string;
   updatedAt?: number;
 }
@@ -256,6 +259,13 @@ export function skillDeployBadge(input: {
 
 export function reportedUnmanagedSkills(reported: ReportedSkillsState | null | undefined): UnmanagedSkillInfo[] {
   return Array.isArray(reported?.unmanaged) ? reported.unmanaged : [];
+}
+
+export function reportedSkillLinkRemovals(reported: ReportedSkillsState | null | undefined): SkillLinkRemoval[] {
+  if (!Array.isArray(reported?.removals)) return [];
+  return reported.removals.filter(
+    (entry) => entry && typeof entry.path === "string" && typeof entry.reason === "string",
+  );
 }
 
 /* --- Folder upload → SkillFile[] --- */

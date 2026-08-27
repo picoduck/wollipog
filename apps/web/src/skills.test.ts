@@ -6,6 +6,7 @@ import {
   describeAssignmentScope,
   groupSkillList,
   invocationLabel,
+  reportedSkillLinkRemovals,
   reportedUnmanagedSkills,
   skillAssignmentsFromPayload,
   skillDeployBadge,
@@ -139,6 +140,18 @@ test("deploy badges rank offline, conflict, error, digest and link gaps, then de
   assert.deepEqual(reportedUnmanagedSkills({ unmanaged: [{ agentId: "claude", name: "local-notes" }] }),
     [{ agentId: "claude", name: "local-notes" }]);
   assert.deepEqual(reportedUnmanagedSkills(null), []);
+  assert.deepEqual(reportedSkillLinkRemovals({ removals: [{
+    path: "~/.claude/skills/retired",
+    reason: "No longer in the desired skill list.",
+  }] }), [{
+    path: "~/.claude/skills/retired",
+    reason: "No longer in the desired skill list.",
+  }]);
+  assert.deepEqual(reportedSkillLinkRemovals(null), []);
+  assert.deepEqual(reportedSkillLinkRemovals({ removals: [
+    { path: {} as never, reason: "bad" },
+    { path: "~/.codex/skills/good", reason: "Good." },
+  ] }), [{ path: "~/.codex/skills/good", reason: "Good." }]);
 });
 
 test("folder uploads strip the picked root, sort by path, and split text from binary", () => {

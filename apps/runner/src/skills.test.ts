@@ -25,6 +25,7 @@ import {
   parseSkillFrontmatter,
   reconcileSkills,
   skillRetentionStatePath,
+  skillsStateMessage,
   skillsStoreRoot,
   withManualInvocationFrontmatter,
 } from "./skills.js";
@@ -503,6 +504,16 @@ test("a conflicted canonical path removes the managed harness links routed throu
     // The managed harness links are gone: nothing serves the foreign content under a managed name.
     assert.equal(existsSync(claudeLink), false);
     assert.equal(existsSync(codexLink), false);
+    assert.deepEqual(result.removedLinks, [
+      {
+        path: "~/.claude/skills/alpha",
+        reason: "The canonical location it routes through is conflicted.",
+      },
+      {
+        path: "~/.codex/skills/alpha",
+        reason: "The canonical location it routes through is conflicted.",
+      },
+    ]);
     // The foreign directory itself is never touched and its content survives byte-identical.
     const foreign = lstatSync(canonicalPath);
     assert.equal(foreign.isDirectory() && !foreign.isSymbolicLink(), true);
@@ -1030,15 +1041,28 @@ test("removals of runner-created links are logged and returned in the reconcile 
     const logged: string[] = [];
     const result = await reconcile(roots, [], { allowRemovals: true, log: (m) => logged.push(m) });
     assert.deepEqual(
-      new Set(result.removedLinks),
+      new Set(result.removedLinks.map((entry) => entry.path)),
       new Set(["~/.claude/skills/alpha", "~/.codex/skills/alpha", "~/.agents/skills/alpha"]),
     );
-    for (const shown of result.removedLinks) {
+    for (const removal of result.removedLinks) {
+      assert.equal(removal.reason, "No longer in the desired skill list.");
       assert.ok(
-        logged.some((line) => line.includes("skill link removed") && line.includes(shown)),
-        `expected a removal log line for ${shown}`,
+        logged.some((line) => line.includes("skill link removed") && line.includes(removal.path)),
+        `expected a removal log line for ${removal.path}`,
       );
     }
+    assert.deepEqual(
+      skillsStateMessage("runner-1", result, "skills_request"),
+      {
+        type: "skills_state",
+        runnerId: "runner-1",
+        requestId: "skills_request",
+        deployed: result.deployed,
+        unmanaged: result.unmanaged,
+        removals: result.removedLinks,
+      },
+      "the outbound skills_state carries this pass's exact removal records",
+    );
     // The swept links leave the manifest too.
     const after = JSON.parse(readFileSync(linkManifestPath(roots.dataDir), "utf8")) as {
       links: string[];
@@ -1091,7 +1115,10 @@ test("a corrupt link manifest fails safe: canonical-routed links are left, never
     // link's only ownership evidence was the manifest, so it is left in place (fail-safe).
     assert.equal(existsSync(join(roots.home, ".agents", "skills", "alpha")), false);
     assert.equal(lstatSync(join(roots.home, ".claude", "skills", "alpha")).isSymbolicLink(), true);
-    assert.deepEqual(result.removedLinks, ["~/.agents/skills/alpha"]);
+    assert.deepEqual(result.removedLinks, [{
+      path: "~/.agents/skills/alpha",
+      reason: "No longer in the desired skill list.",
+    }]);
   } finally {
     rmSync(roots.root, { recursive: true, force: true });
   }

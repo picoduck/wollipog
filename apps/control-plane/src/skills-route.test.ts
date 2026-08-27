@@ -240,6 +240,10 @@ test("POST /api/runners/:id/skills/sync gates offline and capability, persists t
         links: [{ agentId: "claude", status: "linked" }, { agentId: "codex", status: "linked" }],
       }],
       unmanaged: [],
+      removals: [{
+        path: "~/.claude/skills/retired",
+        reason: "No longer in the desired skill list.",
+      }],
     };
     return state;
   });
@@ -253,6 +257,10 @@ test("POST /api/runners/:id/skills/sync gates offline and capability, persists t
   assert.equal(view.json().desired[0].name, "alpha-skill");
   assert.equal(view.json().desired[0].files, undefined, "the listing omits file contents");
   assert.equal(view.json().reported.deployed[0].name, "alpha-skill");
+  assert.deepEqual(view.json().reported.removals, [{
+    path: "~/.claude/skills/retired",
+    reason: "No longer in the desired skill list.",
+  }]);
 
   stubRequest(async () => { throw new RunnerRequestTimeoutError(); });
   const timedOut = await app.inject({ method: "POST", url: "/api/runners/runner-1/skills/sync" });

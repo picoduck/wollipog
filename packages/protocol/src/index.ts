@@ -700,6 +700,14 @@ export interface UnmanagedSkillInfo {
   description?: string;
 }
 
+/** One managed skill link removed during a runner reconciliation pass. */
+export interface SkillLinkRemoval {
+  /** Home-relative display path; never an absolute host path. */
+  path: string;
+  /** Sanitized human-readable explanation of why the runner removed the link. */
+  reason: string;
+}
+
 export const SKILL_MAX_FILES = 64;
 export const SKILL_MAX_TOTAL_BYTES = 2 * 1024 * 1024;
 export const SKILL_MAX_FILE_BYTES = 512 * 1024;
@@ -4588,6 +4596,8 @@ export interface SkillsStateMessage {
   requestId?: string;
   deployed: DeployedSkillState[];
   unmanaged: UnmanagedSkillInfo[];
+  /** Link removals from this exact reconcile pass. Older runners omit this additive field. */
+  removals?: SkillLinkRemoval[];
   error?: string;
 }
 

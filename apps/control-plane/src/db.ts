@@ -60,6 +60,7 @@ import {
   type DeployedSkillState,
   type SkillFile,
   type SkillInvocationPolicy,
+  type SkillLinkRemoval,
   type UnmanagedSkillInfo,
   type AgentContext,
   type AgentDefinition,
@@ -2603,12 +2604,29 @@ export interface SkillAssignmentView {
   updatedAt: number;
 }
 
-/** The runner-reported deployment state for one machine, stored verbatim (authoritative full
- * replacement) plus the receipt time. */
+const RUNNER_SKILL_REMOVAL_LIMIT = 256;
+const RUNNER_SKILL_REMOVAL_TEXT_LIMIT = 2_048;
+
+function normalizeSkillLinkRemovals(value: unknown): SkillLinkRemoval[] {
+  if (!Array.isArray(value)) return [];
+  const normalized: SkillLinkRemoval[] = [];
+  for (const candidate of value.slice(0, RUNNER_SKILL_REMOVAL_LIMIT)) {
+    const entry = candidate as { path?: unknown; reason?: unknown };
+    if (typeof entry?.path !== "string" || !entry.path.startsWith("~/") ||
+        entry.path.length > RUNNER_SKILL_REMOVAL_TEXT_LIMIT || typeof entry.reason !== "string" ||
+        entry.reason.length < 1 || entry.reason.length > RUNNER_SKILL_REMOVAL_TEXT_LIMIT) continue;
+    normalized.push({ path: entry.path, reason: entry.reason });
+  }
+  return normalized;
+}
+
+/** The runner-reported deployment state for one machine plus a bounded latest-removal event. */
 export interface RunnerSkillStateRecord {
   runnerId: string;
   deployed: DeployedSkillState[];
   unmanaged: UnmanagedSkillInfo[];
+  removals: SkillLinkRemoval[];
+  removalsUpdatedAt?: number;
   error?: string;
   updatedAt: number;
 }
@@ -5485,15 +5503,28 @@ export class ControlPlaneDb {
   /** Persist a runner's authoritative skills_state (full replacement for that machine). */
   setRunnerSkillState(
     runnerId: string,
-    state: { deployed: DeployedSkillState[]; unmanaged: UnmanagedSkillInfo[]; error?: string },
+    state: {
+      deployed: DeployedSkillState[];
+      unmanaged: UnmanagedSkillInfo[];
+      removals?: SkillLinkRemoval[];
+      error?: string;
+    },
     now = Date.now(),
   ): void {
+    const previous = this.getRunnerSkillState(runnerId);
+    const incomingRemovals = normalizeSkillLinkRemovals(state.removals);
+    const removals = incomingRemovals.length > 0 ? incomingRemovals : previous?.removals ?? [];
+    const removalsUpdatedAt = incomingRemovals.length > 0
+      ? now
+      : previous?.removalsUpdatedAt;
     this.stmt(
       `INSERT INTO runner_skill_state (runner_id, state, updated_at) VALUES (?, ?, ?)
        ON CONFLICT(runner_id) DO UPDATE SET state=excluded.state, updated_at=excluded.updated_at`,
     ).run(runnerId, JSON.stringify({
       deployed: state.deployed,
       unmanaged: state.unmanaged,
+      ...(removals.length === 0 ? {} : { removals }),
+      ...(removalsUpdatedAt === undefined ? {} : { removalsUpdatedAt }),
       ...(state.error === undefined ? {} : { error: state.error }),
     }), now);
   }
@@ -5502,11 +5533,23 @@ export class ControlPlaneDb {
     const row = this.stmt("SELECT state, updated_at FROM runner_skill_state WHERE runner_id=?")
       .get(runnerId) as { state: string; updated_at: number } | undefined;
     if (!row) return null;
-    const parsed = parseJson<{ deployed?: DeployedSkillState[]; unmanaged?: UnmanagedSkillInfo[]; error?: string }>(row.state);
+    const parsed = parseJson<{
+      deployed?: DeployedSkillState[];
+      unmanaged?: UnmanagedSkillInfo[];
+      removals?: SkillLinkRemoval[];
+      removalsUpdatedAt?: number;
+      error?: string;
+    }>(row.state);
+    const removals = normalizeSkillLinkRemovals(parsed?.removals);
+    const removalsUpdatedAt = removals.length === 0
+      ? undefined
+      : parsed?.removalsUpdatedAt ?? row.updated_at;
     return {
       runnerId,
       deployed: parsed?.deployed ?? [],
       unmanaged: parsed?.unmanaged ?? [],
+      removals,
+      ...(removalsUpdatedAt === undefined ? {} : { removalsUpdatedAt }),
       ...(parsed?.error === undefined ? {} : { error: parsed.error }),
       updatedAt: row.updated_at,
     };

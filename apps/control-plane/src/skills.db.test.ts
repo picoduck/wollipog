@@ -169,15 +169,45 @@ test("runner skill state persists as an authoritative full replacement", () => {
   db.setRunnerSkillState("runner-1", {
     deployed: [{ name: "alpha", digest: "d1", links: [{ agentId: "claude", status: "linked" }] }],
     unmanaged: [{ agentId: "claude", name: "hand-rolled", description: "Local skill" }],
+    removals: [{ path: "~/.codex/skills/retired", reason: "No longer in the desired skill list." }],
   }, 500);
   const first = db.getRunnerSkillState("runner-1")!;
   assert.equal(first.updatedAt, 500);
   assert.equal(first.deployed[0]!.links[0]!.status, "linked");
+  assert.deepEqual(first.removals, [
+    { path: "~/.codex/skills/retired", reason: "No longer in the desired skill list." },
+  ]);
+  assert.equal(first.removalsUpdatedAt, 500);
   assert.equal(first.error, undefined);
 
+  // An empty subsequent reconcile updates deployment truth without erasing the latest removal event.
   db.setRunnerSkillState("runner-1", { deployed: [], unmanaged: [], error: "scan failed" }, 600);
   const second = db.getRunnerSkillState("runner-1")!;
   assert.equal(second.updatedAt, 600);
   assert.deepEqual(second.deployed, []);
+  assert.deepEqual(second.removals, first.removals);
+  assert.equal(second.removalsUpdatedAt, 500);
   assert.equal(second.error, "scan failed");
+
+  // This shape is what control planes persisted before removal reporting existed.
+  db.setRunnerSkillState("runner-legacy", { deployed: [], unmanaged: [] }, 610);
+  const legacy = db.getRunnerSkillState("runner-legacy")!;
+  assert.deepEqual(legacy.removals, []);
+  assert.equal(legacy.removalsUpdatedAt, undefined);
+
+  db.setRunnerSkillState("runner-1", {
+    deployed: [],
+    unmanaged: [],
+    removals: [{ path: "~/.claude/skills/newer", reason: "A newer removal." }],
+  }, 700);
+  const replaced = db.getRunnerSkillState("runner-1")!;
+  assert.deepEqual(replaced.removals, [{ path: "~/.claude/skills/newer", reason: "A newer removal." }]);
+  assert.equal(replaced.removalsUpdatedAt, 700);
+
+  db.setRunnerSkillState("runner-malformed", {
+    deployed: [],
+    unmanaged: [],
+    removals: [{ path: {} as never, reason: 1 as never }],
+  }, 800);
+  assert.deepEqual(db.getRunnerSkillState("runner-malformed")!.removals, []);
 });
