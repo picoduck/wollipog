@@ -60,7 +60,7 @@ const OWNERSHIP_NOTIFICATION_TAKEOVER_TIMEOUT: Duration = Duration::from_secs(30
 const OWNERSHIP_NOTIFICATION_JOIN_TIMEOUT: Duration = Duration::from_secs(1);
 // The runner advertises an 11.5-second graceful-stop budget. Leave enough margin for its final
 // descendant-boundary verification before the desktop escalates to SIGKILL.
-const OWNED_CHILD_STOP_TIMEOUT: Duration = Duration::from_secs(15);
+const OWNED_CHILD_STOP_TIMEOUT: Duration = Duration::from_secs(20);
 const LOCAL_RUNNER_LEGACY_OWNER_FILE: &str = ".wollipog-runner-owner-v1.json";
 const LOCAL_RUNNER_OWNER_FILE: &str = ".wollipog-runner-owner-v2.json";
 

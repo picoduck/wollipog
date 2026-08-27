@@ -120,11 +120,11 @@ before that code can run. Native POSIX runners require a full `ps` implementatio
 `ps -axo pid=,ppid=,state=,lstart=`; minimal BusyBox-only hosts must install a compatible procps package.
 
 For Linux `systemd` services, use `KillMode=control-group` (the default), keep `SendSIGKILL=yes`, and
-set `TimeoutStopSec=15s` or longer. Do not use `KillMode=process`, `KillMode=mixed`, or `SendSIGKILL=no`:
+set `TimeoutStopSec=20s` or longer. Do not use `KillMode=process`, `KillMode=mixed`, or `SendSIGKILL=no`:
 those settings can leave a `setsid` descendant outside the runner's graceful path after a crash.
 
 For macOS `launchd` jobs, leave `AbandonProcessGroup` unset or `false` and set `ExitTimeOut` to at least
-15 seconds. The timeout lets the runner verify its identity-tracked descendant boundary before launchd
+20 seconds. The timeout lets the runner verify its identity-tracked descendant boundary before launchd
 forces the main process down; the non-abandoning default also cleans ordinary same-group children if the
 runner crashes. Because launchd's fallback is process-group based, operators must investigate any runner
 diagnostic that says the descendant boundary was not empty before starting a replacement against the same

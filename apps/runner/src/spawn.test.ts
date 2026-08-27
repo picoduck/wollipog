@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import net from "node:net";
 import { test } from "node:test";
-import { buildBwrapArgs, buildCloudArgs, buildContainerArgs, buildWslArgs, killTree, spawnAgent, terminateDescendantBoundaries, trackPendingKill, waitForPendingKills, winQuoteArg, type AgentProcess } from "./spawn.js";
+import { buildBwrapArgs, buildCloudArgs, buildContainerArgs, buildWslArgs, killTree, spawnAgent, terminateDescendantBoundariesAfterPendingKills, trackPendingKill, waitForPendingKills, winQuoteArg, type AgentProcess } from "./spawn.js";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
 import { WINDOWS_JOB_ENCODED_COMMAND, WINDOWS_JOB_LAUNCHER } from "./windows-job.js";
 import { extendOwnedProcessTree, ownsPosixRootProcessGroup, parsePosixProcessTable } from "./posix-process-tree.js";
@@ -573,10 +573,10 @@ test("closing a Windows Job launcher reaps its descendant tree", { skip: process
 
 test("POSIX ownership snapshots exclude unrelated and PID-reused processes", () => {
   const table = parsePosixProcessTable([
-    " 100 1 100 100 Ss Thu Aug 27 00:00:00 2026",
-    " 101 100 100 100 S Thu Aug 27 00:00:01 2026",
-    " 102 101 102 100 S Thu Aug 27 00:00:02 2026",
-    " 200 1 200 200 S Thu Aug 27 00:00:03 2026",
+    " 100 1 Ss Thu Aug 27 00:00:00 2026",
+    " 101 100 S Thu Aug 27 00:00:01 2026",
+    " 102 101 S Thu Aug 27 00:00:02 2026",
+    " 200 1 S Thu Aug 27 00:00:03 2026",
   ].join("\n"));
   const root = table.get(100)!;
   const owned = new Map([[root.pid, root]]);
@@ -584,8 +584,8 @@ test("POSIX ownership snapshots exclude unrelated and PID-reused processes", () 
   assert.deepEqual([...owned.keys()].sort(), [100, 101, 102]);
 
   const reused = parsePosixProcessTable([
-    " 100 1 100 100 Ss Thu Aug 27 00:01:00 2026",
-    " 201 100 100 100 S Thu Aug 27 00:01:01 2026",
+    " 100 1 Ss Thu Aug 27 00:01:00 2026",
+    " 201 100 S Thu Aug 27 00:01:01 2026",
   ].join("\n"));
   assert.equal(extendOwnedProcessTree(owned, reused), 0, "a reused root PID cannot capture a foreign child");
   assert.equal(ownsPosixRootProcessGroup(root.pid, owned, reused), false,
@@ -642,7 +642,15 @@ test("normal provider exit preserves owned background work until session disposa
   }
   assert.doesNotThrow(() => process.kill(escapedPid!, 0), "normal provider exit preserves background work");
 
-  terminateDescendantBoundaries(owner);
+  let finishGracefulStop!: () => void;
+  trackPendingKill(new Promise<void>((resolve) => { finishGracefulStop = resolve; }));
+  terminateDescendantBoundariesAfterPendingKills();
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.doesNotThrow(
+    () => process.kill(escapedPid!, 0),
+    "global retained cleanup waits for an in-flight graceful provider stop",
+  );
+  finishGracefulStop();
   assert.equal(await waitForPendingKills(8_000), true);
   assert.throws(() => process.kill(escapedPid!, 0), /ESRCH/, "session disposal reaps retained work");
 });

@@ -6,28 +6,23 @@ import { readFile } from "node:fs/promises";
 export interface PosixProcessIdentity {
   pid: number;
   ppid: number;
-  pgid: number;
-  sid: number;
   startedAt: string;
   state?: string;
 }
 
 export type PosixProcessTable = Map<number, PosixProcessIdentity>;
 
-const PROCESS_TABLE_ARGS = ["-axo", "pid=,ppid=,pgid=,sid=,state=,lstart="];
+const PROCESS_TABLE_ARGS = ["-axo", "pid=,ppid=,state=,lstart="];
 
 export function parsePosixProcessTable(stdout: string): PosixProcessTable {
   const table: PosixProcessTable = new Map();
   for (const line of stdout.split(/\r?\n/u)) {
-    const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$/u.exec(line);
+    const match = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.+?)\s*$/u.exec(line);
     if (!match) continue;
     const pid = Number(match[1]);
     const ppid = Number(match[2]);
-    const pgid = Number(match[3]);
-    const sid = Number(match[4]);
-    if (!Number.isSafeInteger(pid) || pid <= 1 || !Number.isSafeInteger(ppid) || ppid < 0 ||
-        !Number.isSafeInteger(pgid) || pgid <= 1 || !Number.isSafeInteger(sid) || sid <= 1) continue;
-    table.set(pid, { pid, ppid, pgid, sid, state: match[5]!, startedAt: match[6]! });
+    if (!Number.isSafeInteger(pid) || pid <= 1 || !Number.isSafeInteger(ppid) || ppid < 0) continue;
+    table.set(pid, { pid, ppid, state: match[3]!, startedAt: match[4]! });
   }
   return table;
 }
@@ -163,7 +158,7 @@ function startMonitor(): void {
   if (refreshTimer) return;
   // One shared process-table read covers every active provider. This catches a provider that exits
   // unexpectedly after launching a detached tool while avoiding one `ps` process per session.
-  refreshTimer = setInterval(() => { void refreshAll().catch(() => {}); }, 250);
+  refreshTimer = setInterval(() => { void refreshAll().catch(() => {}); }, 1_000);
   refreshTimer.unref?.();
 }
 
@@ -178,6 +173,7 @@ export class PosixProcessBoundary {
   private releaseCheck?: Promise<boolean>;
   private released = false;
   private rootClosed = false;
+  private rootExited = false;
   private terminating?: Promise<boolean>;
 
   constructor(readonly rootPid: number, readonly owner?: object, private readonly marker?: string) {
@@ -196,25 +192,21 @@ export class PosixProcessBoundary {
         if (process) this.owned.set(pid, process);
       }
     }
+    // While Node still owns a live child handle, the spawn PID is authoritative even when a
+    // set-id wrapper makes /proc/<pid>/environ unreadable. Once exit is observed, only the exact
+    // inherited marker may add identities.
+    const root = table.get(this.rootPid);
+    if (root && !this.rootExited && !this.owned.has(this.rootPid)) this.owned.set(this.rootPid, root);
     this.extend(table);
     return table;
   }
 
   extend(table: PosixProcessTable): void {
     const root = table.get(this.rootPid);
-    // Marker-backed boundaries anchor the root only through refreshFresh(), which proves the PID
-    // still carries the exact launch token. A monitor tick alone must not adopt a recycled PID.
+    // Marker-backed boundaries anchor the root only through refreshFresh(), which either proves the
+    // exact token or observes that Node still owns the live child handle. A monitor tick alone must
+    // not adopt a recycled PID.
     if (root && !this.marker && !this.owned.has(this.rootPid)) this.owned.set(this.rootPid, root);
-    const ownedRoot = this.owned.get(this.rootPid);
-    if (ownedRoot) {
-      // A live PGID/SID cannot be recycled. This recovers same-session survivors after their root
-      // exits even when a parent-link poll was missed.
-      for (const process of table.values()) {
-        if (process.pgid === ownedRoot.pgid || process.sid === ownedRoot.sid) {
-          this.owned.set(process.pid, process);
-        }
-      }
-    }
     extendOwnedProcessTree(this.owned, table);
     // A dead identity cannot acquire new children. Prune it after extending the live tree so
     // long-running sessions do not retain every short-lived tool process forever.
@@ -224,6 +216,11 @@ export class PosixProcessBoundary {
         this.owned.delete(pid);
       }
     }
+  }
+
+  /** Node's waitpid-backed exit event permanently ends safe numeric-PGID fallback authority. */
+  markRootExited(): void {
+    this.rootExited = true;
   }
 
   /** A normally exited provider may intentionally leave background work alive until session
@@ -243,7 +240,7 @@ export class PosixProcessBoundary {
       // gets a fresh post-close process table.
       const table = await this.refreshFresh();
       if (liveOwned(this.owned, table).length > 0) return false;
-      this.releaseFromMonitor(table);
+      this.release();
       return true;
     } catch {
       // Enumeration failure is not proof of emptiness. Keep the boundary for disposal/shutdown.
@@ -252,7 +249,14 @@ export class PosixProcessBoundary {
   }
 
   releaseFromMonitor(table: PosixProcessTable): void {
-    if (!this.rootClosed || this.terminating || this.released || liveOwned(this.owned, table).length > 0) return;
+    // A post-close marker scan is authoritative. Do not let a concurrent shared refresh retire the
+    // boundary from its older ownership snapshot while that scan is still in flight.
+    if (!this.rootClosed || this.releaseCheck || this.terminating || this.released || liveOwned(this.owned, table).length > 0) return;
+    this.release();
+  }
+
+  private release(): void {
+    if (this.released) return;
     this.released = true;
     boundaries.delete(this);
     stopMonitorIfIdle();
@@ -266,6 +270,16 @@ export class PosixProcessBoundary {
     } catch {
       return false;
     }
+  }
+
+  private async fallbackRootGroupAfterEnumerationFailure(): Promise<void> {
+    // Preserve main's dependency-free TERM/KILL path only while Node has not observed root exit.
+    // After waitpid-backed exit, the numeric PGID may be recycled and is permanently unsafe.
+    if (this.rootExited) return;
+    try { globalThis.process.kill(-this.rootPid, "SIGTERM"); } catch { return; }
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    if (this.rootExited) return;
+    try { globalThis.process.kill(-this.rootPid, "SIGKILL"); } catch { /* already gone */ }
   }
 
   /** Freeze the original group first, then close over escaped process groups by parent identity.
@@ -294,12 +308,19 @@ export class PosixProcessBoundary {
       this.signalRootGroup(table, "SIGSTOP");
       // Freeze newly discovered escaped groups and rescan to close forks that raced the first pass.
       for (let pass = 0; pass < 8; pass++) {
-        const before = this.owned.size;
+        const before = [...this.owned.values()]
+          .map((process) => `${process.pid}:${process.startedAt}`)
+          .sort()
+          .join("\n");
         for (const process of liveOwned(this.owned, table)) {
           if (signalIdentity(process, table, "SIGSTOP")) frozen.set(process.pid, process);
         }
         table = await refreshAll();
-        if (this.owned.size === before) break;
+        const after = [...this.owned.values()]
+          .map((process) => `${process.pid}:${process.startedAt}`)
+          .sort()
+          .join("\n");
+        if (after === before) break;
       }
     } catch (error) {
       console.error(`[runner] could not enumerate provider descendants for pid ${this.rootPid}: ${(error as Error).message}`);
@@ -309,6 +330,7 @@ export class PosixProcessBoundary {
         for (const process of frozen.values()) signalIdentity(process, table, "SIGCONT");
         this.signalRootGroup(table, "SIGCONT");
       }
+      await this.fallbackRootGroupAfterEnumerationFailure();
       return false;
     }
 

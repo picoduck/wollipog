@@ -470,6 +470,7 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
   });
   if (!isWindows && !wslReap && !remoteBoundary && opts.trackDescendants !== false && child.pid) {
     child.posixBoundary = new PosixProcessBoundary(child.pid, opts.descendantOwner, descendantMarker);
+    child.once("exit", () => child.posixBoundary?.markRootExited());
   }
   if (wslReap) child.wslReap = wslReap;
   return child;
@@ -496,6 +497,9 @@ export function winQuoteArg(arg: string): string {
  * exits immediately after calling killTree would drop the SIGKILL escalation and the WSL
  * in-distro group reap on the floor — agents that ignore SIGTERM would survive the runner.
  * Shutdown awaits these (bounded) via waitForPendingKills before exiting. */
+/** Maximum TERM + KILL verification time after descendant enumeration succeeds. */
+export const DESCENDANT_BOUNDARY_TERMINATION_BUDGET_MS = 4_500;
+
 const pendingKills = new Set<Promise<void>>();
 let incompleteKillObserved = false;
 
@@ -542,6 +546,21 @@ export async function waitForPendingKills(deadlineMs: number): Promise<boolean> 
 /** Register cleanup for descendants retained after a provider's normal per-turn exit. */
 export function terminateDescendantBoundaries(owner?: object): void {
   for (const work of terminatePosixProcessBoundaries(owner)) trackPendingKill(work);
+}
+
+/** Register the global retained-boundary sweep after work already in flight has settled. Provider
+ * drivers use that work for graceful EOF shutdown, so an immediate global sweep would preempt their
+ * grace period with TERM. waitForPendingKills() drains in waves and therefore observes both this
+ * barrier and the boundary terminations it registers. */
+export function terminateDescendantBoundariesAfterPendingKills(): void {
+  const current = [...pendingKills];
+  if (current.length === 0) {
+    terminateDescendantBoundaries();
+    return;
+  }
+  trackPendingKill(Promise.allSettled(current).then(() => {
+    terminateDescendantBoundaries();
+  }));
 }
 
 /** Kill a process and all of its children, cross-platform. */
