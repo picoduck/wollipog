@@ -311,7 +311,7 @@ test("Git availability states are explicit and preserve confirmed facts while up
     worktreePath: null,
     status: empty,
     summary: noSummary,
-  }).stateDetail, "Runner Offline");
+  }).stateDetail, "Git Unavailable While Disconnected");
   assert.equal(deriveGitPresentation({
     runnerOnline: true,
     worktreePath: null,

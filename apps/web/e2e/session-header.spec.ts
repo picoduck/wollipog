@@ -31,7 +31,7 @@ test("the unified session bar balances navigation, breadcrumb, status, and actio
   const back = header.locator(".back");
   await expect(back).toHaveAccessibleName("Back to Inbox");
   await expect(back).toHaveAttribute("title", "Back to inbox");
-  await expect(header.locator(".status-badge")).toBeVisible();
+  await expect(header.locator(".status-badge").first()).toBeVisible();
 
   const geometry = await header.evaluate((element) => {
     const rect = (node: Element) => {
@@ -58,6 +58,7 @@ test("the unified session bar balances navigation, breadcrumb, status, and actio
       paddingTop: Number.parseFloat(style.paddingTop),
       paddingBottom: Number.parseFloat(style.paddingBottom),
       paddingRight: Number.parseFloat(style.paddingRight),
+      hasHorizontalOverflow: element.scrollWidth > element.clientWidth,
     };
   });
 
@@ -68,6 +69,7 @@ test("the unified session bar balances navigation, breadcrumb, status, and actio
   expect(geometry.paddingTop).toBeGreaterThanOrEqual(6);
   expect(geometry.paddingTop).toBe(geometry.paddingBottom);
   expect(geometry.paddingRight).toBeGreaterThanOrEqual(12);
+  expect(geometry.hasHorizontalOverflow).toBe(false);
   expect(geometry.headerRight - (geometry.actions.x + geometry.actions.width)).toBeGreaterThanOrEqual(geometry.paddingRight - 1);
   expect(geometry.clippingRight - geometry.moreActionsRight).toBeGreaterThanOrEqual(11.5);
   const center = (box: { y: number; height: number }) => box.y + box.height / 2;
@@ -158,6 +160,49 @@ test("the unified session bar balances navigation, breadcrumb, status, and actio
   await expect(shareMenu.getByRole("menuitem", { name: "Rename Session…" })).toHaveCount(0);
 });
 
+test("desktop Session actions stay contained with five concurrent status indicators", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 800 });
+  await openSession(page, "git-visibility", { reviewReady: "1" });
+  await page.evaluate(() => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
+      status: "idle",
+      backgroundWorkState: "running",
+    });
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitActiveSubagent("session-alpha", "active-desktop-subagent");
+  });
+
+  const header = page.locator(".session-detail > .detail-head");
+  await expect(header.getByText("Awaiting Prompt", { exact: true })).toBeVisible();
+  await expect(header.getByText("Ready for Review", { exact: true })).toBeVisible();
+  await expect(header.getByText("Uncommitted Changes", { exact: true })).toBeVisible();
+  await expect(header.getByRole("status", { name: "Background Work: Waiting on External Job" })).toBeVisible();
+  await expect(header.getByRole("button", { name: "1 Subagent Active" })).toBeVisible();
+
+  for (const width of [900, 761]) {
+    await page.setViewportSize({ width, height: 800 });
+    const geometry = await header.evaluate((element) => {
+      const headerBox = element.getBoundingClientRect();
+      const actions = element.querySelector(".detail-actions")!.getBoundingClientRect();
+      const moreActions = element.querySelector('[aria-label="More Actions"]')!.getBoundingClientRect();
+      const clippingPane = element.closest(".inbox-preview-pane");
+      return {
+        hasHorizontalOverflow: element.scrollWidth > element.clientWidth,
+        headerRight: headerBox.right,
+        actionsRight: actions.right,
+        clippingRight: Math.min(
+          window.innerWidth,
+          clippingPane?.getBoundingClientRect().right ?? window.innerWidth,
+        ),
+        moreActionsRight: moreActions.right,
+        paddingRight: Number.parseFloat(getComputedStyle(element).paddingRight),
+      };
+    });
+    expect(geometry.hasHorizontalOverflow, `${width}px header overflow`).toBe(false);
+    expect(geometry.headerRight - geometry.actionsRight).toBeGreaterThanOrEqual(geometry.paddingRight - 1);
+    expect(geometry.clippingRight - geometry.moreActionsRight).toBeGreaterThanOrEqual(11.5);
+  }
+});
+
 for (const viewport of [
   { name: "320-pixel phone", width: 320 },
   { name: "390-pixel phone", width: 390 },
@@ -169,6 +214,7 @@ for (const viewport of [
       window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
         backgroundWorkState: "running",
       });
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitActiveSubagent("session-alpha", "active-mobile-subagent");
     });
     await capture(page, `narrow-${viewport.width}`);
 
@@ -183,7 +229,8 @@ for (const viewport of [
     await expect(header.getByText("Awaiting Prompt", { exact: true })).toBeVisible();
     await expect(header.getByText("Ready for Review", { exact: true })).toBeVisible();
     await expect(header.getByText("Uncommitted Changes", { exact: true })).toBeVisible();
-    await expect(header.getByRole("img", { name: "Waiting on External Job" })).toBeVisible();
+    await expect(header.getByRole("status", { name: "Background Work: Waiting on External Job" })).toBeVisible();
+    await expect(header.getByRole("button", { name: "1 Subagent Active" })).toBeVisible();
     const metrics = await header.evaluate((element) => {
       const rect = (node: Element) => {
         const value = node.getBoundingClientRect();
@@ -194,20 +241,23 @@ for (const viewport of [
       };
       const clippingPane = element.closest(".inbox-preview-pane");
       const badges = [...element.querySelectorAll(
-        ".session-header-statuses > .status-badge, " +
-        ".session-header-statuses .session-status-indicators > .status-badge, " +
-        ".session-header-statuses .change-status-indicators > .status-badge, " +
-        ".session-header-statuses > .bgwork-indicator",
-      )].map(rect);
+        ".session-header-statuses .status-badge, " +
+        ".session-header-statuses > .background-work-badge",
+      )].map((node) => ({
+        ...rect(node),
+        label: node.getAttribute("aria-label") ?? node.textContent?.trim() ?? "unknown status",
+      }));
       return {
         display: getComputedStyle(element).display,
         statuses: rect(element.querySelector(".session-header-statuses")!),
+        lifecycle: rect(element.querySelector(".session-status-indicators > .status-badge")!),
         actions: rect(element.querySelector(".detail-actions")!),
         share: rect(element.querySelector('[aria-label="Share"]')!),
         shareIcon: rect(element.querySelector('[aria-label="Share"] svg')!),
         moreActions: rect(element.querySelector('[aria-label="More Actions"]')!),
         moreActionsIcon: rect(element.querySelector('[aria-label="More Actions"] svg')!),
         badges,
+        badgeRows: new Set(badges.map((badge) => Math.round(badge.y))).size,
         headerHeight: element.getBoundingClientRect().height,
         hasHorizontalOverflow: element.scrollWidth > element.clientWidth,
         headerRight: element.getBoundingClientRect().right,
@@ -261,24 +311,32 @@ for (const viewport of [
     expect(shellMetrics.title.x).toBeGreaterThanOrEqual(shellMetrics.back.right);
     expect(shellMetrics.title.right).toBeLessThanOrEqual(shellMetrics.controlsLeft);
     expect(shellMetrics.title.width).toBeGreaterThanOrEqual(72);
-    // Four simultaneous statuses require three badge lines at 320px; they remain inside the
+    // Five simultaneous statuses require multiple badge lines at 320px; they remain inside the
     // second header bar without overlap or horizontal overflow.
-    expect(subheaderBottom - shellMetrics.top).toBeLessThan(140);
+    // The Session topbar is 40px tall, the main body adds 12px of leading space, and this header
+    // has an explicit 132px ceiling below. Keep the combined stack within that same cross-platform
+    // contract; Linux fallback fonts can require one additional badge line.
+    expect(subheaderBottom - shellMetrics.top).toBeLessThanOrEqual(184);
     expect(metrics.share.width).toBeGreaterThanOrEqual(36);
     expect(metrics.share.height).toBeGreaterThanOrEqual(36);
     expect(metrics.moreActions.width).toBeGreaterThanOrEqual(36);
     expect(metrics.moreActions.height).toBeGreaterThanOrEqual(36);
-    expect(metrics.statuses.right).toBeLessThanOrEqual(metrics.actions.x - 6);
-    expect(metrics.headerHeight).toBeLessThanOrEqual(104);
+    expect(metrics.lifecycle.right).toBeLessThanOrEqual(metrics.actions.x - 6);
+    expect(metrics.headerHeight).toBeLessThanOrEqual(132);
     expect(metrics.hasHorizontalOverflow).toBe(false);
     expect(metrics.paddingRight).toBeGreaterThanOrEqual(12);
     expect(metrics.clippingRight - metrics.moreActions.right).toBeGreaterThanOrEqual(11.5);
-    expect(metrics.badges.length).toBeGreaterThanOrEqual(4);
+    expect(metrics.badges.length).toBe(5);
+    expect(metrics.badgeRows).toBeLessThanOrEqual(3);
     const center = (box: { y: number; height: number }) => box.y + box.height / 2;
-    expect(Math.abs(center(metrics.actions) - center(metrics.statuses))).toBeLessThanOrEqual(12);
+    expect(Math.abs(center(metrics.actions) - center(metrics.lifecycle))).toBeLessThanOrEqual(12);
     for (let index = 0; index < metrics.badges.length; index += 1) {
+      const badge = metrics.badges[index]!;
+      const overlapsActions = badge.x < metrics.actions.right && badge.right > metrics.actions.x &&
+        badge.y < metrics.actions.bottom && badge.bottom > metrics.actions.y;
+      expect(overlapsActions, `${badge.label} overlaps the Session actions`).toBe(false);
       for (let other = index + 1; other < metrics.badges.length; other += 1) {
-        const left = metrics.badges[index]!;
+        const left = badge;
         const right = metrics.badges[other]!;
         const overlaps = left.x < right.right && left.right > right.x &&
           left.y < right.bottom && left.bottom > right.y;
@@ -338,6 +396,27 @@ for (const viewport of [
     }
   });
 }
+
+test("wrapped background work clears phone actions when no change status is available", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 800 });
+  await openSession(page, "preview-follow", { sessionShell: "1" });
+  await page.evaluate(() => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
+      backgroundWorkState: "running",
+    });
+  });
+
+  const header = page.locator(".session-detail > .detail-head");
+  await expect(header.locator(".change-status-indicators")).toHaveCount(0);
+  await expect(header.getByRole("status", { name: "Background Work: Waiting on External Job" })).toBeVisible();
+  const overlapsActions = await header.evaluate((element) => {
+    const badge = element.querySelector(".background-work-badge")!.getBoundingClientRect();
+    const actions = element.querySelector(".detail-actions")!.getBoundingClientRect();
+    return badge.x < actions.right && badge.right > actions.x &&
+      badge.y < actions.bottom && badge.bottom > actions.y;
+  });
+  expect(overlapsActions).toBe(false);
+});
 
 test("long session titles truncate inside the breadcrumb without hiding actions", async ({ page }) => {
   await page.setViewportSize({ width: 780, height: 800 });

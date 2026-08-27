@@ -160,6 +160,7 @@ import { enterKeystrokeSends, useEnterKeyBehavior } from "../enter-key.js";
 import { KEYBOARD_DISMISS_BLUR_EVENT } from "../mobile-viewport.js";
 import { resizeComposerToContent } from "../composer-autogrow.js";
 import { IncrementalActiveTurnProgress } from "../turn-progress.js";
+import { IncrementalSubagentProjector, selectedSubagentId } from "../subagents.js";
 import { WorkingIndicator } from "./WorkingIndicator.js";
 import {
   projectAssignmentAudienceConfirmation,
@@ -1421,6 +1422,17 @@ function SessionDetailLoaded({
   const openSubagent = useCallback((subagentId: string) => {
     rightPanelRef.current.showSubagent(session.id, session.eventEpoch ?? 0, subagentId);
   }, [session.eventEpoch, session.id]);
+  const headerSubagentProjector = useRef<IncrementalSubagentProjector | null>(null);
+  headerSubagentProjector.current ??= new IncrementalSubagentProjector();
+  const activeSubagents = useMemo(() => headerSubagentProjector.current!.project(items, {
+    sessionStatus: session.status,
+    runnerOnline,
+    availability: runnerOnline && isTimelineSessionActive(session.status) ? "live" : "recorded",
+  }).descriptors.filter((descriptor) =>
+    descriptor.availability === "live" &&
+    ["starting", "running", "waiting"].includes(descriptor.lifecycle)),
+  [items, runnerOnline, session.status]);
+  const preferredActiveSubagentId = selectedSubagentId(activeSubagents);
 
   // Prior user prompts for ↑ history recall (chronological; recall walks from newest backward).
   const timelineUserPrompts = useMemo(
@@ -2435,6 +2447,10 @@ function SessionDetailLoaded({
           )}
           topbarControls={topbarControls}
           changeStatus={changeStatus}
+          activeSubagents={preferredActiveSubagentId ? {
+            count: activeSubagents.length,
+            onOpen: () => openSubagent(preferredActiveSubagentId),
+          } : undefined}
           // The unified bar replaces the app-level top bar on desktop, so it owns the page-title
           // focus-rescue anchor there; the mobile layout keeps the app bar and its own anchor.
           titleId={!isMobile ? "page-title" : undefined}

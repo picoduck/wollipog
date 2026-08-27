@@ -310,7 +310,7 @@ export function deriveGitPresentation(input: {
   let stateDetail: string | null = null;
   if (!input.runnerOnline) {
     state = "offline";
-    stateDetail = "Runner Offline";
+    stateDetail = "Git Unavailable While Disconnected";
   } else if (notRepository) {
     // A disappeared repository invalidates the last confirmed facts. Keep them in the
     // controller for a recoverable retry, but never present them as the current repository.

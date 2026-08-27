@@ -1172,6 +1172,14 @@ pre {
   font-weight: 600;
   white-space: nowrap;
 }
+button.background-work-badge {
+  font-family: inherit;
+  cursor: pointer;
+}
+button.background-work-badge:hover,
+button.background-work-badge:focus-visible {
+  filter: brightness(1.12);
+}
 .background-work-dot {
   width: 6px;
   height: 6px;
@@ -1668,10 +1676,17 @@ textarea {
   position: relative;
   display: inline-flex;
   align-items: center;
-  /* A flex child of the crumbs row: never yield to the (ellipsizing) title. The chip inside
-     still caps itself at the cctx-item max-width. */
-  flex: none;
+  /* Yield before the authoritative status cluster or trailing actions. Font metrics differ
+     across platforms, so a fixed-width Project crumb can otherwise overflow the unified bar
+     even when the Session title has already collapsed. */
+  flex: 0 1 220px;
+  max-width: 220px;
   min-width: 0;
+}
+.crumb-project > .cctx-item {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
 }
 .crumb-project-actions {
   position: absolute;
@@ -1725,33 +1740,10 @@ textarea {
 .session-header-statuses {
   display: flex;
   align-items: center;
-  flex: none;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
   min-width: 0;
   gap: 5px;
-}
-/* Compact background-work presence dot; its full label lives in the tooltip, accessible name,
-   and the pinned summary's Session section. */
-.bgwork-indicator {
-  flex: none;
-  width: 9px;
-  height: 9px;
-  border-radius: var(--radius-pill);
-}
-.bgwork-running {
-  background: var(--blue);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 16%, transparent);
-}
-.bgwork-orphaned {
-  background: var(--red);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--red) 16%, transparent);
-}
-.bgwork-resumed {
-  background: var(--teal);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--teal) 16%, transparent);
-}
-.bgwork-untracked {
-  background: var(--text-dim);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--text-dim) 14%, transparent);
 }
 .session-header-action { width: 32px; height: 32px; padding: 0; }
 .session-header-action:disabled {
@@ -1765,6 +1757,7 @@ textarea {
 .detail-actions {
   display: flex;
   align-items: center;
+  flex: none;
   gap: 7px;
 }
 /* Keep both sibling menu buttons reachable above the active menu's dismissing backdrop. This lets
@@ -10123,16 +10116,32 @@ body.shell-dock-dragging * {
   }
   .session-detail > .detail-head:has(> .session-header-note) { row-gap: 4px; }
   .session-detail > .detail-head > .session-header-statuses {
-    /* Span the shared status row so flattened change badges can wrap independently, while
-       reserving two compact action targets plus the gaps between buttons and columns. */
+    /* The lifecycle group owns the first line and reserves the two compact action targets. Later
+       status dimensions can use the full bar width, keeping concurrent work visible without
+       forcing every badge into its own narrow column. */
     grid-column: 1 / -1;
     grid-row: 1;
-    width: calc(100% - 86px);
+    width: 100%;
     align-self: center;
     flex-wrap: wrap;
+    gap: 4px;
+  }
+  .session-detail > .detail-head .session-status-indicators {
+    flex: 0 0 100%;
+    box-sizing: border-box;
+    min-height: 36px;
+    padding-right: 86px;
   }
   .session-detail > .detail-head .change-status-indicators {
     display: contents;
+  }
+  .session-detail > .detail-head .status-badge,
+  .session-detail > .detail-head .background-work-badge {
+    gap: 4px;
+    /* CI and user devices do not share the same system font. Leave enough width headroom for
+       both change badges and both background badges to keep pairing at 320px. */
+    padding-inline: 4px;
+    font-size: var(--text-2xs);
   }
   .session-header-action { width: 36px; height: 36px; }
   .session-header-action svg { width: 15px; height: 15px; }
@@ -10143,6 +10152,7 @@ body.shell-dock-dragging * {
     grid-column: 2;
     grid-row: 1;
     min-width: 0;
+    align-self: start;
   }
   .session-detail > .detail-head > .session-header-note {
     grid-column: 1 / -1;

@@ -39,12 +39,14 @@ function button(container: HTMLElement, label: string): HTMLButtonElement {
 test("Unarchive on an archived Stop Failed session cancels the archive follow-up", async () => {
   const archived: Array<[string, boolean]> = [];
   const retries: string[] = [];
+  let activeSubagentOpens = 0;
   const session = {
     id: "session-stop-failed",
     runnerId: "runner-1",
     title: "Failed Stop",
     status: "stopped",
     archived: true,
+    backgroundWorkState: "running",
     archiveStatus: "stop_failed",
     archiveOperation: {
       operationId: "stop-operation-1",
@@ -89,6 +91,7 @@ test("Unarchive on an archived Stop Failed session cancels the archive follow-up
             exportReady={false}
             onSnooze={() => undefined}
             changeStatus={{ kind: "changes_present", label: "Changes Present", description: "Git confirms changes." }}
+            activeSubagents={{ count: 1, onOpen: () => { activeSubagentOpens += 1; } }}
           />
         </FeedbackContext.Provider>
       </ApiProvider>,
@@ -101,6 +104,10 @@ test("Unarchive on an archived Stop Failed session cancels the archive follow-up
   assert.ok(shareIcon, "the Share action uses the shared icon");
   assert.equal(shareIcon.getAttribute("width"), "16",
     "the Share icon keeps its desktop size while phone CSS owns mobile compaction");
+  assert.match(container.textContent ?? "", /Background Work: Waiting on External Job/);
+  assert.ok(container.querySelector('[role="status"][aria-label="Background Work: Waiting on External Job"]'));
+  await act(async () => { button(container, "1 Subagent Active").click(); });
+  assert.equal(activeSubagentOpens, 1);
   const moreActions = button(container, "More Actions");
   assert.ok(moreActions.classList.contains("session-header-action"), "the trigger carries the fixed-geometry class");
   const moreIcon = moreActions.querySelector("svg");

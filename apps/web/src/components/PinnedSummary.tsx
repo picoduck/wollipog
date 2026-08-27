@@ -19,9 +19,8 @@ import type { GitStatus, GitSummary } from "./useGitStatus.js";
 import { GitPinnedSection } from "./GitVisibility.js";
 import { AgentIcon } from "./AgentIcon.js";
 import { BranchIcon, ComputerIcon, DialIcon, FolderOutlineIcon, GitHubIcon, GlobeIcon, NotesIcon, PullRequestIcon, TuningIcon } from "./Icons.js";
-import { BackgroundDeliveryBadge, BackgroundNotificationBadge, BackgroundWorkBadge, ChangeStatusBadge, SessionStatusIndicators, Spinner, UntrackedBackgroundWorkBadge } from "./common.js";
+import { BackgroundDeliveryBadge, BackgroundNotificationBadge, Spinner } from "./common.js";
 import { effortLabel, relativeTime, resolvedModelLabel } from "../format.js";
-import { sessionChangeStatus, sessionMayShowChangeStatus } from "../session-status.js";
 import { effectiveModelEffortForDisplay, resolveCaps, resolveEffectiveCaps } from "../caps.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { safeExternalHref } from "../external-href.js";
@@ -71,14 +70,6 @@ export function PinnedSummary({
   // SessionDetail owns both reads so compact and pinned presentations share one
   // session-tagged snapshot while status and summary keep independent refresh cycles.
   const summary = gitSummary.summary;
-  const changeStatus = sessionChangeStatus({
-    status: git.status,
-    summary,
-    settled: git.settled || gitSummary.settled,
-    available: sessionMayShowChangeStatus(session.status) &&
-      (gitPresentation.state === "ready" || gitPresentation.state === "updating"),
-  });
-
   const host = deriveHost(session, runners.get(session.runnerId), boxes.values());
   const richFactsVisible = gitPresentation.state !== "offline" &&
     gitPresentation.state !== "loading" &&
@@ -110,15 +101,14 @@ export function PinnedSummary({
 
   return (
     <aside className="pinned-summary" aria-label="Pinned Summary">
-      {/* Canonical home for the session facts the unified bar no longer carries: full status
-          label + freshness, then the agent identity with its model and effort. */}
+      {/* Keep identity and freshness here. Live status belongs to the Session header so the same
+          facts are not duplicated in two nearby surfaces. */}
       <div className="ps-section">
         <div className="ps-section-head">
           <span>Session</span>
         </div>
         <div className="ps-row is-static">
-          <SessionStatusIndicators session={session} disconnected={!runnerOnline} />
-          <ChangeStatusBadge change={changeStatus} />
+          <span className="ps-sub-title" title={session.title}>{session.title}</span>
           <span className="ps-right ps-detail">Updated {relativeTime(session.updatedAt)}</span>
         </div>
         <div className="ps-row is-static">
@@ -133,16 +123,6 @@ export function PinnedSummary({
             </span>
           )}
         </div>
-        {session.backgroundWorkState && (
-          <div className="ps-row is-static">
-            <BackgroundWorkBadge state={session.backgroundWorkState} />
-          </div>
-        )}
-        {!session.backgroundWorkState && session.backgroundWorkTracking === "untracked" && (
-          <div className="ps-row is-static">
-            <UntrackedBackgroundWorkBadge />
-          </div>
-        )}
         {session.backgroundDeliveries?.find((delivery) => delivery.watchdogState)?.watchdogState && (
           <div className="ps-row is-static">
             <BackgroundDeliveryBadge
