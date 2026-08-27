@@ -1387,15 +1387,29 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         );
         break;
       }
-      const meta = store.readMeta(msg.sessionId);
-      const agent = meta?.agentId
-        ? metadata.agents.find((candidate) =>
+      if (msg.target && !runnerSupportsProtocol(controlPlaneProtocolVersion, "sessionNamingTargets")) {
+        sendUp({
+          type: "generate_session_title_result",
+          requestId: msg.requestId,
+          ok: false,
+          code: "provider_unsupported",
+        });
+        break;
+      }
+      const meta = msg.target ? undefined : store.readMeta(msg.sessionId);
+      const agent = msg.target
+        ? metadata.agents.find((candidate) => candidate.id === msg.target!.agentId &&
+            (candidate.driver ?? "acp") === msg.target!.driver)
+        : meta?.agentId
+          ? metadata.agents.find((candidate) =>
             candidate.id === meta.agentId &&
             (candidate.driver ?? "acp") === meta.driver &&
             JSON.stringify(candidate.context ?? { kind: "native" }) === JSON.stringify(meta.context),
           )
-        : undefined;
-      const env = meta?.agentId ? runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context) : {};
+          : undefined;
+      const env = agent
+        ? runnerLocalAgentEnv(agent.id, agent.driver ?? "acp", agent.context ?? { kind: "native" })
+        : {};
       runCommandTask("generate_session_title", sessionNaming.execute(msg, agent, env).then((result) => sendUp(result)));
       break;
     }

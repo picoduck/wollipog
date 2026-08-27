@@ -1,4 +1,5 @@
 import type {
+  ConfigureSessionNamingHarnessRequest,
   ConfigureSessionNamingCustomModelRequest,
   ReplaceSessionNamingCustomModelApiKeyRequest,
   SessionNamingMode,
@@ -53,6 +54,26 @@ export function registerSessionNamingRoutes(
       }
       request.log.error({ err: error }, "could not update session naming settings");
       return reply.code(500).send({ error: "could not update session naming settings" });
+    }
+  });
+
+  app.put("/api/session-naming/harness", async (request, reply) => {
+    const principal = requestPrincipal(request);
+    if (!principal || principal.kind !== "human" || !canAdministerIdentity(principal.role)) {
+      return reply.code(403).send({ error: "organization owner or admin permission is required" });
+    }
+    const body = request.body as ConfigureSessionNamingHarnessRequest | null;
+    try {
+      return settings.configureHarness(principal.organizationId, body as ConfigureSessionNamingHarnessRequest);
+    } catch (error) {
+      if (error instanceof SessionNamingModeUnavailableError) {
+        return reply.code(409).send({ error: error.message });
+      }
+      if (error instanceof Error && error.message === "a complete valid Agent Harness target is required") {
+        return reply.code(400).send({ error: error.message });
+      }
+      request.log.error({ err: error }, "could not configure session naming Agent Harness");
+      return reply.code(500).send({ error: "could not configure session naming Agent Harness" });
     }
   });
 

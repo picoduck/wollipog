@@ -299,6 +299,166 @@ test("runner-account mode is capability-gated, reports only billing boundaries, 
   assert.equal(unsupportedClaude.modes.session_agent_account.available, false);
 });
 
+test("explicit harness naming persists capability-backed identifiers, executes on that runner, and fails closed on drift", async () => {
+  type Target = {
+    runnerId: string;
+    agentId: string;
+    driver: "codex-app-server";
+    model: string;
+    effort: string;
+    updatedAt: number;
+  };
+  let target: Target | null = null;
+  let preference: { mode: "session_agent_account"; updatedAt: number } | null = null;
+  let efforts = ["low", "medium"];
+  let runnerOrganizationId = "org_personal";
+  const runner = (): RunnerView => ({
+    runnerId: "runner-naming",
+    displayName: "Naming Machine",
+    hostname: "naming-host",
+    os: "linux",
+    version: "test",
+    status: "online",
+    connectedAt: 1,
+    lastSeen: 1,
+    protocolVersion: 95,
+    workspaces: [],
+    agents: [{
+      id: "codex-app-server",
+      name: "Codex",
+      command: "codex",
+      args: [],
+      env: {},
+      driver: "codex-app-server",
+      source: "discovered",
+      available: true,
+      authStatus: "authenticated",
+      codexBillingSource: "provider_account",
+      codexAppServer: { status: "supported", appServerAvailable: true, sessionNaming: true },
+      capabilities: {
+        models: [{ id: "luna", displayName: "Luna", efforts }],
+        effortLevels: efforts,
+        slashCommands: [],
+        supportsImages: false,
+        supportsApprovals: true,
+      },
+    }, {
+      id: "team-api-naming",
+      name: "Team API Naming",
+      command: "codex",
+      args: [],
+      env: {},
+      driver: "codex-app-server",
+      source: "config",
+      available: true,
+      authStatus: "authenticated",
+      codexBillingSource: "api",
+      codexAppServer: { status: "supported", appServerAvailable: true, sessionNaming: true },
+      capabilities: {
+        models: [{ id: "luna", displayName: "Luna", efforts }],
+        effortLevels: efforts,
+        slashCommands: [],
+        supportsImages: false,
+        supportsApprovals: true,
+      },
+    }],
+  });
+  const db = {
+    sessionScope: () => ({ organizationId: "org_personal" }),
+    runnerScope: () => ({ organizationId: runnerOrganizationId }),
+    listRunners: () => [runner()],
+    getRunner: () => runner(),
+    getSession: () => ({ id: "session-other", runnerId: "runner-other", agentId: "claude-code", driver: "claude-code" }),
+    getSessionNamingPreference: () => preference,
+    setSessionNamingPreference: (_organizationId: string, mode: "session_agent_account", updatedAt: number) => {
+      preference = { mode, updatedAt };
+    },
+    getSessionNamingHarnessTarget: () => target,
+    setSessionNamingHarnessTarget: (_organizationId: string, value: Omit<Target, "updatedAt">, updatedAt: number) => {
+      target = { ...value, updatedAt };
+    },
+    getSessionNamingCustomModel: () => null,
+  } as unknown as ControlPlaneDb;
+  const sent: Array<{ runnerId: string; message: ControlPlaneToRunner }> = [];
+  const hub = {
+    requestFromRunner: async (runnerId: string, _requestId: string, message: ControlPlaneToRunner) => {
+      sent.push({ runnerId, message });
+      return {
+        type: "generate_session_title_result" as const,
+        requestId: "request",
+        ok: true,
+        title: "Explicit Harness Naming",
+        provider: "codex" as const,
+        billingSource: "provider_account" as const,
+      };
+    },
+  } as unknown as Pick<Hub, "requestFromRunner">;
+  const settings = new SessionNamingSettings(db, {}, hub);
+  const app = Fastify();
+  registerSessionNamingRoutes(app, settings, (request) =>
+    request.headers.authorization === "Bearer admin" ? human("admin") : human("viewer"));
+
+  const viewer = await app.inject({
+    method: "PUT",
+    url: "/api/session-naming/harness",
+    headers: { authorization: "Bearer viewer" },
+    payload: { runnerId: "runner-naming", agentId: "codex-app-server", driver: "codex-app-server", model: "luna", effort: "low" },
+  });
+  assert.equal(viewer.statusCode, 403);
+  const saved = await app.inject({
+    method: "PUT",
+    url: "/api/session-naming/harness",
+    headers: { authorization: "Bearer admin" },
+    payload: { runnerId: "runner-naming", agentId: "codex-app-server", driver: "codex-app-server", model: "luna", effort: "low" },
+  });
+  assert.equal(saved.statusCode, 200);
+  assert.deepEqual(target && {
+    runnerId: target.runnerId, agentId: target.agentId, driver: target.driver, model: target.model, effort: target.effort,
+  }, { runnerId: "runner-naming", agentId: "codex-app-server", driver: "codex-app-server", model: "luna", effort: "low" });
+  assert.deepEqual(saved.json().harnessMachines[0].harnesses[0].models, [{ id: "luna", displayName: "Luna", efforts: ["low", "medium"] }]);
+  assert.deepEqual({
+    provider: saved.json().harnessMachines[0].harnesses[0].provider,
+    billingSource: saved.json().harnessMachines[0].harnesses[0].billingSource,
+  }, { provider: "codex", billingSource: "provider_account" });
+  assert.equal(saved.json().harnessMachines[0].harnesses[0].name, "Codex App Server");
+  assert.equal(saved.json().harnessTarget.harnessName, "Codex App Server");
+  assert.deepEqual(saved.json().harnessMachines[0].harnesses.map((candidate: { name: string }) => candidate.name),
+    ["Codex App Server", "Team API Naming"], "custom harness names remain distinguishable");
+  assert.equal(saved.json().harnessTarget.available, true);
+
+  assert.equal(await settings.generator({
+    sessionId: "session-other",
+    messages: [{ role: "user", text: "Name this" }],
+    signal: new AbortController().signal,
+  }), "Explicit Harness Naming");
+  assert.equal(sent[0]?.runnerId, "runner-naming");
+  assert.equal(sent[0]?.message.type, "generate_session_title");
+  if (sent[0]?.message.type === "generate_session_title") {
+    assert.deepEqual(sent[0].message.target, {
+      agentId: "codex-app-server", driver: "codex-app-server", model: "luna", effort: "low",
+    });
+  }
+
+  efforts = ["medium"];
+  const drifted = settings.view("org_personal", true);
+  assert.equal(drifted.effectiveMode, "prompt_text_only");
+  assert.equal(drifted.harnessTarget?.available, false);
+  assert.match(drifted.harnessTarget?.reason ?? "", /reasoning effort/);
+  assert.equal(settings.enabledForSession("session-other"), false, "drift never substitutes another effort or provider");
+
+  efforts = ["low", "medium"];
+  runnerOrganizationId = "org_other";
+  const reassigned = settings.view("org_personal", true);
+  assert.equal(reassigned.harnessTarget?.available, false);
+  assert.match(reassigned.harnessTarget?.reason ?? "", /no longer available/);
+  assert.equal(reassigned.harnessTarget?.machineName, "runner-naming");
+  assert.equal(reassigned.harnessTarget?.harnessName, "codex-app-server");
+  assert.equal(reassigned.harnessTarget?.modelName, "luna");
+  assert.equal(JSON.stringify(reassigned).includes("Naming Machine"), false,
+    "a Machine reassigned outside the organization cannot leak its current display metadata");
+  await app.close();
+});
+
 test("session naming preference migration preserves legacy choices and admits runner-account mode", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-session-naming-mode-migration-"));
   const path = join(root, "control-plane.sqlite");
@@ -321,6 +481,23 @@ test("session naming preference migration preserves legacy choices and admits ru
     db.setSessionNamingPreference("org_personal", "session_agent_account", 8);
     assert.deepEqual(db.getSessionNamingPreference("org_personal"), {
       mode: "session_agent_account", updatedAt: 8,
+    });
+    assert.equal(db.getSessionNamingHarnessTarget("org_personal"), null,
+      "an existing runner-account preference keeps follow-session behavior until explicitly configured");
+    db.setSessionNamingHarnessTarget("org_personal", {
+      runnerId: "runner-one",
+      agentId: "codex-app-server",
+      driver: "codex-app-server",
+      model: "luna",
+      effort: "low",
+    }, 9);
+    assert.deepEqual(db.getSessionNamingHarnessTarget("org_personal"), {
+      runnerId: "runner-one",
+      agentId: "codex-app-server",
+      driver: "codex-app-server",
+      model: "luna",
+      effort: "low",
+      updatedAt: 9,
     });
     db.close();
   } finally {

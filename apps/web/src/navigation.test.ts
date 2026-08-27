@@ -14,6 +14,7 @@ import {
   viewPath,
   type View,
   GLOBAL_VIEW_ITEMS,
+  SETTINGS_SECTIONS,
 } from "./navigation.js";
 
 const routes: Array<[View, string]> = [
@@ -79,6 +80,12 @@ test("global destinations use the polished Connections vocabulary everywhere", (
     paletteLabel: "Archived Sessions",
   });
   assert.equal(GLOBAL_VIEW_ITEMS.some((item) => /runner/i.test(`${item.label} ${item.title} ${item.paletteLabel}`)), false);
+});
+
+test("Session Naming is no longer a primary Settings destination and its legacy link reaches Behavior", () => {
+  assert.equal(SETTINGS_SECTIONS.some((section) => section.id === ("session-naming" as never)), false);
+  assert.deepEqual(viewFromPath("/settings/session-naming"), { name: "settings", section: "behavior" });
+  assert.equal(viewPath(viewFromPath("/settings/session-naming")!), "/settings/behavior");
 });
 
 test("route parser rejects unknown, ambiguous, malformed, empty, and oversized resource paths", () => {

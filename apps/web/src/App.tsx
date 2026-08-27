@@ -759,8 +759,7 @@ function Shell() {
                     onOpenShortcuts={openShortcutReference}
                   />
                 ),
-                behavior: <BehaviorPanel />,
-                "session-naming": <SessionNamingPanel />,
+                behavior: <BehaviorPanel sessionNaming={<SessionNamingPanel />} />,
                 network: <NetworkPanel tailnet={tailnet} />,
                 experimental: (
                   <ExperimentalPanel

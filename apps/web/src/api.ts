@@ -68,6 +68,7 @@ import type {
   UpdateReviewFindingRequest,
   BundleReviewFindingsRequest,
   SessionConfig,
+  ConfigureSessionNamingHarnessRequest,
   ConfigureSessionNamingCustomModelRequest,
   ReplaceSessionNamingCustomModelApiKeyRequest,
   SessionNamingConnectionTestResult,
@@ -267,6 +268,12 @@ export function createApiClient(transport: ApiTransport) {
 
   updateSessionNamingSettings: (input: UpdateSessionNamingSettingsRequest) =>
     req<SessionNamingSettingsView>("/api/session-naming", {
+      method: "PUT",
+      body: JSON.stringify(input),
+    }),
+
+  configureSessionNamingHarness: (input: ConfigureSessionNamingHarnessRequest) =>
+    req<SessionNamingSettingsView>("/api/session-naming/harness", {
       method: "PUT",
       body: JSON.stringify(input),
     }),
