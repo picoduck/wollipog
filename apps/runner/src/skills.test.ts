@@ -845,6 +845,56 @@ test("a corrupt link manifest fails safe: canonical-routed links are left, never
   }
 });
 
+test("a partially malformed manifest is rejected whole, not partially trusted", async () => {
+  const roots = makeRoots();
+  try {
+    // A user hand-link plus a manifest the runner never wrote: one valid-looking absolute path
+    // next to an invalid entry. Partially trusting it would authorize removing the user's link.
+    const userLink = join(roots.home, ".claude", "skills", "mine");
+    mkdirSync(dirname(userLink), { recursive: true });
+    symlinkSync(join(roots.home, ".agents", "skills", "mine"), userLink);
+    mkdirSync(join(roots.dataDir, "skills"), { recursive: true });
+    writeFileSync(
+      linkManifestPath(roots.dataDir),
+      JSON.stringify({ version: 1, links: [userLink, 42] }),
+    );
+
+    const logged: string[] = [];
+    const result = await reconcile(roots, [], { allowRemovals: true, log: (m) => logged.push(m) });
+    assert.ok(logged.some((line) => line.includes("skill link manifest has an unknown shape")));
+    assert.equal(lstatSync(userLink).isSymbolicLink(), true);
+    assert.deepEqual(result.removedLinks, []);
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("a stale manifest entry never transfers to a user link created at the same path later", async () => {
+  const roots = makeRoots();
+  try {
+    const alpha = entry("alpha", [{ agentId: claudeAgent.id, invocation: "agent" }]);
+    await reconcile(roots, [alpha]);
+    const claudeLink = join(roots.home, ".claude", "skills", "alpha");
+    // Simulate a crash after the links vanished but before the manifest was saved: the recorded
+    // paths hold nothing. A no-change pass must still prune and persist the shrunken record.
+    unlinkSync(claudeLink);
+    unlinkSync(join(roots.home, ".agents", "skills", "alpha"));
+    await reconcile(roots, [], { allowRemovals: true });
+    const persisted = JSON.parse(readFileSync(linkManifestPath(roots.dataDir), "utf8")) as {
+      links: string[];
+    };
+    assert.deepEqual(persisted.links, []);
+
+    // A user link created at the previously recorded path must not inherit the stale authority.
+    symlinkSync(join(roots.home, ".agents", "skills", "alpha"), claudeLink);
+    const result = await reconcile(roots, [], { allowRemovals: true });
+    assert.equal(lstatSync(claudeLink).isSymbolicLink(), true);
+    assert.deepEqual(result.removedLinks, []);
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
 test("store gc logs what it removes", async () => {
   const roots = makeRoots();
   try {

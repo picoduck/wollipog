@@ -365,15 +365,19 @@ function loadOwnedLinks(path: string, log?: (message: string) => void): Set<stri
     const bytesRead = readSync(fd, buffer, 0, buffer.length, 0);
     const parsed = JSON.parse(buffer.subarray(0, bytesRead).toString("utf8")) as unknown;
     const links = (parsed as { version?: unknown; links?: unknown })?.links;
-    if ((parsed as { version?: unknown })?.version !== LINK_MANIFEST_VERSION || !Array.isArray(links)) {
+    // Any invalid entry rejects the whole manifest: this runner only ever writes bounded arrays
+    // of absolute paths, so a partially-valid file is corrupt or foreign, and partially trusting
+    // it could authorize removals the runner never recorded.
+    if (
+      (parsed as { version?: unknown })?.version !== LINK_MANIFEST_VERSION ||
+      !Array.isArray(links) ||
+      links.length > LINK_MANIFEST_MAX_ENTRIES ||
+      !links.every((entry): entry is string => typeof entry === "string" && entry.startsWith(sep))
+    ) {
       log?.("skill link manifest has an unknown shape; treating it as empty");
       return new Set();
     }
-    return new Set(
-      links
-        .filter((entry): entry is string => typeof entry === "string" && entry.startsWith(sep))
-        .slice(0, LINK_MANIFEST_MAX_ENTRIES),
-    );
+    return new Set(links);
   } catch (error) {
     log?.(`skill link manifest unreadable (${errText(error)}); treating it as empty`);
     return new Set();
@@ -563,6 +567,7 @@ function gcStore(storeRoot: string, keep: StoreKeep, log?: (message: string) => 
     if (entry.name.startsWith(".tmp-")) {
       // A crashed materialization can strand its temp dir; it is never linked, so reclaim it.
       rmSync(path, { recursive: true, force: true });
+      log?.(`skill store gc: reclaimed stranded temp dir ${entry.name}`);
       continue;
     }
     // Never traverse or delete through a symlink planted inside the store.
@@ -749,8 +754,28 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
   const manifestPath = linkManifestPath(dataDir);
   const owned = loadOwnedLinks(manifestPath, options.log);
   const ownedAtLoad = new Set(owned);
+  // Drop recorded paths that no longer hold a symlink before anything consults the set: a stale
+  // entry (crash between unlink and save, or a link the user removed by hand) is a standing
+  // grant of removal authority over a path this runner no longer controls — a user link created
+  // there later must not inherit it. The snapshot above keeps the dirty check able to see the
+  // prune, so the shrunken set is persisted below.
+  for (const linkPath of owned) {
+    let isSymlink = false;
+    try {
+      isSymlink = lstatSync(linkPath).isSymbolicLink();
+    } catch {
+      /* ENOENT and friends: nothing of ours is there. */
+    }
+    if (!isSymlink) owned.delete(linkPath);
+  }
   const removedLinks: string[] = [];
-  /** Record a link this runner created or verified as its own while ensuring a deployment. */
+  /** Record a link this runner created — or found already correct while ensuring a desired
+   * deployment. The second half is deliberate adoption: a pre-manifest runner link and a
+   * hand-made link that exactly matches the desired deployment are indistinguishable, and
+   * refusing to adopt would strand every link created before the manifest existed. Adopting a
+   * user's lookalike link means the runner will manage (and may later remove, logged and
+   * reported) a link it did not create, but only for a name the control plane actively deploys
+   * to this harness. */
   const ownLink = (linkPath: string): void => {
     owned.add(linkPath);
   };
