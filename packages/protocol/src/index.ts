@@ -1220,8 +1220,6 @@ export interface RunnerCredentialSecret {
 export interface OnboardingInfo {
   /** ws URL a runner registers against, using the control plane's bound host. */
   runnerWsUrl: string;
-  /** @deprecated Always null. Create a runner-specific one-time credential after choosing an id. */
-  token: string | null;
   /** The control plane's bound host and port. */
   host: string;
   port: number;

@@ -1831,7 +1831,6 @@ app.get("/api/onboarding", async (): Promise<OnboardingInfo> => {
   const reachableIps = TAILNET_ONLY ? tailnetIpv4(lanIpv4()) : lanIpv4();
   return {
     runnerWsUrl: buildRunnerWsUrl(HOST, PORT),
-    token: null,
     host: HOST,
     port: PORT,
     lanIps: reachableIps,
