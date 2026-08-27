@@ -789,6 +789,8 @@ function queueSkillsReconcile(requestId?: string): void {
         log,
         acquireProviderHomeLease: () =>
           sessions.acquireSkillReconciliationProviderHome(homedir()),
+        removedSkillRetentionMs: config.skillRetention.removedSkillDays * 24 * 60 * 60 * 1000,
+        previousVersionGraceMs: config.skillRetention.previousVersionMinutes * 60 * 1000,
       });
       sendUp({
         type: "skills_state",

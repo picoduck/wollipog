@@ -24,6 +24,7 @@ import {
   linkManifestPath,
   parseSkillFrontmatter,
   reconcileSkills,
+  skillRetentionStatePath,
   skillsStoreRoot,
   withManualInvocationFrontmatter,
 } from "./skills.js";
@@ -81,6 +82,9 @@ async function reconcile(
     platform?: NodeJS.Platform;
     log?: (message: string) => void;
     acquireProviderHomeLease?: () => void;
+    removedSkillRetentionMs?: number;
+    previousVersionGraceMs?: number;
+    now?: number;
   } = {},
 ) {
   return reconcileSkills({
@@ -94,6 +98,13 @@ async function reconcile(
     ...(overrides.acquireProviderHomeLease
       ? { acquireProviderHomeLease: overrides.acquireProviderHomeLease }
       : {}),
+    ...(overrides.removedSkillRetentionMs !== undefined
+      ? { removedSkillRetentionMs: overrides.removedSkillRetentionMs }
+      : {}),
+    ...(overrides.previousVersionGraceMs !== undefined
+      ? { previousVersionGraceMs: overrides.previousVersionGraceMs }
+      : {}),
+    ...(overrides.now !== undefined ? { now: overrides.now } : {}),
   });
 }
 
@@ -295,11 +306,11 @@ test("shrinking desired removes managed links but keeps store content; foreign e
   }
 });
 
-test("an invocation flip retargets the harness link and GCs the stale manual variant", async () => {
+test("an invocation flip retains the prior variant through the grace period, then GCs it", async () => {
   const roots = makeRoots();
   try {
     const manual = entry("alpha", [{ agentId: claudeAgent.id, invocation: "manual" }]);
-    await reconcile(roots, [manual]);
+    await reconcile(roots, [manual], { now: 1_000 });
     const store = realpathSync(skillsStoreRoot(roots.dataDir));
     const digest = manual.versionDigest;
     assert.equal(existsSync(join(store, "alpha", `${digest}-manual`)), true);
@@ -308,15 +319,18 @@ test("an invocation flip retargets the harness link and GCs the stale manual var
       join(store, "alpha", `${digest}-manual`),
     );
 
-    await reconcile(roots, [entry("alpha", [{ agentId: claudeAgent.id, invocation: "agent" }])]);
+    const agent = entry("alpha", [{ agentId: claudeAgent.id, invocation: "agent" }]);
+    await reconcile(roots, [agent], { now: 2_000, previousVersionGraceMs: 60_000 });
     // The agent-invocation link routes through the canonical link, which points at the digest dir.
     assert.equal(
       linkTarget(join(roots.home, ".claude", "skills", "alpha")),
       join(roots.home, ".agents", "skills", "alpha"),
     );
     assert.equal(realpathSync(join(roots.home, ".claude", "skills", "alpha")), join(store, "alpha", digest));
-    assert.equal(existsSync(join(store, "alpha", `${digest}-manual`)), false);
+    assert.equal(existsSync(join(store, "alpha", `${digest}-manual`)), true);
     assert.equal(existsSync(join(store, "alpha", digest)), true);
+    await reconcile(roots, [agent], { now: 62_001, previousVersionGraceMs: 60_000 });
+    assert.equal(existsSync(join(store, "alpha", `${digest}-manual`)), false);
   } finally {
     rmSync(roots.root, { recursive: true, force: true });
   }
@@ -647,6 +661,7 @@ test("disabling a skill removes links but retains the staged store content for r
     await reconcile(roots, [alpha]);
     const store = realpathSync(skillsStoreRoot(roots.dataDir));
     const agentDir = join(store, "alpha", alpha.versionDigest);
+    writeFileSync(join(agentDir, "retained-marker"), "keep");
 
     await reconcile(roots, [], { allowRemovals: true });
     assert.equal(existsSync(join(roots.home, ".claude", "skills", "alpha")), false);
@@ -657,6 +672,91 @@ test("disabling a skill removes links but retains the staged store content for r
     const reEnabled = await reconcile(roots, [alpha]);
     assert.deepEqual(reEnabled.deployed[0]!.links, [{ agentId: claudeAgent.id, status: "linked" }]);
     assert.equal(realpathSync(join(roots.home, ".claude", "skills", "alpha")), agentDir);
+    assert.equal(readFileSync(join(agentDir, "retained-marker"), "utf8"), "keep",
+      "re-enable reused the retained version rather than rematerializing it");
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("an undesired skill is deleted only after its configured retention window", async () => {
+  const roots = makeRoots();
+  try {
+    const alpha = entry("alpha", [{ agentId: claudeAgent.id, invocation: "agent" }]);
+    await reconcile(roots, [alpha], { now: 1_000 });
+    const versionPath = join(realpathSync(skillsStoreRoot(roots.dataDir)), "alpha", alpha.versionDigest);
+
+    await reconcile(roots, [], { now: 2_000, removedSkillRetentionMs: 10_000 });
+    assert.equal(existsSync(versionPath), true);
+    await reconcile(roots, [], { now: 11_999, removedSkillRetentionMs: 10_000 });
+    assert.equal(existsSync(versionPath), true);
+    await reconcile(roots, [], { now: 12_000, removedSkillRetentionMs: 10_000 });
+    assert.equal(existsSync(versionPath), false);
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("a foreign invalid store name cannot reset valid retention windows", async () => {
+  const roots = makeRoots();
+  try {
+    const alpha = entry("alpha", [{ agentId: claudeAgent.id, invocation: "agent" }]);
+    await reconcile(roots, [alpha], { now: 1_000 });
+    const store = realpathSync(skillsStoreRoot(roots.dataDir));
+    const alphaPath = join(store, "alpha", alpha.versionDigest);
+    mkdirSync(join(store, "Not A Skill", "f".repeat(64)), { recursive: true });
+
+    await reconcile(roots, [], { now: 2_000, removedSkillRetentionMs: 1_000 });
+    assert.equal(existsSync(alphaPath), true);
+    await reconcile(roots, [], { now: 3_000, removedSkillRetentionMs: 1_000 });
+    assert.equal(existsSync(alphaPath), false);
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("malformed retention state restarts the grace window instead of deleting early", async () => {
+  const roots = makeRoots();
+  try {
+    const v1 = entry("alpha", [{ agentId: claudeAgent.id, invocation: "agent" }]);
+    await reconcile(roots, [v1], { now: 1_000 });
+    const store = realpathSync(skillsStoreRoot(roots.dataDir));
+    const v1Path = join(store, "alpha", v1.versionDigest);
+    const v2 = entry(
+      "alpha",
+      [{ agentId: claudeAgent.id, invocation: "agent" }],
+      skillFiles("alpha", "new version\n"),
+    );
+    await reconcile(roots, [v2], { now: 2_000, previousVersionGraceMs: 10_000 });
+    writeFileSync(skillRetentionStatePath(roots.dataDir), "not json");
+
+    await reconcile(roots, [v2], { now: 20_000, previousVersionGraceMs: 10_000 });
+    assert.equal(existsSync(v1Path), true);
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("retention GC refuses a stale version tree containing a symlink", async () => {
+  const roots = makeRoots();
+  try {
+    const v1 = entry("alpha", [{ agentId: claudeAgent.id, invocation: "agent" }]);
+    await reconcile(roots, [v1], { now: 1_000 });
+    const store = realpathSync(skillsStoreRoot(roots.dataDir));
+    const v1Path = join(store, "alpha", v1.versionDigest);
+    const outside = join(roots.root, "outside-retention");
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, "precious.txt"), "keep");
+    symlinkSync(outside, join(v1Path, "planted-link"));
+    const v2 = entry(
+      "alpha",
+      [{ agentId: claudeAgent.id, invocation: "agent" }],
+      skillFiles("alpha", "new version\n"),
+    );
+
+    await reconcile(roots, [v2], { now: 2_000, previousVersionGraceMs: 0 });
+    assert.equal(existsSync(v1Path), true, "the unsafe stale tree is retained for inspection");
+    assert.equal(readFileSync(join(outside, "precious.txt"), "utf8"), "keep");
   } finally {
     rmSync(roots.root, { recursive: true, force: true });
   }
@@ -1000,7 +1100,11 @@ test("store gc logs what it removes", async () => {
       skillFiles("alpha", "Do the new thing.\n"),
     );
     const logged: string[] = [];
-    await reconcile(roots, [v2], { log: (m) => logged.push(m) });
+    await reconcile(roots, [v2], {
+      log: (m) => logged.push(m),
+      previousVersionGraceMs: 0,
+      now: 1_000,
+    });
     assert.ok(
       logged.some((line) => line.includes("skill store gc") && line.includes(v1.versionDigest)),
       "expected a gc log line for the stale version",

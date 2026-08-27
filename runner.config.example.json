@@ -6,6 +6,10 @@
     "agentLimits": {},
     "agentWeights": {}
   },
+  "skillRetention": {
+    "removedSkillDays": 7,
+    "previousVersionMinutes": 60
+  },
   "executionIsolation": {
     "mode": "provider",
     "network": "inherit",

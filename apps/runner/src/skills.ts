@@ -112,6 +112,12 @@ export interface ReconcileSkillsOptions {
    * canonical or harness link mutation. The registry intentionally retains the lease until
    * runner shutdown, matching provider-launch ownership semantics. */
   acquireProviderHomeLease?: () => void;
+  /** Runner-local store retention. Production supplies validated config; defaults preserve a
+   * useful re-enable window and a shorter version-switch grace period. */
+  removedSkillRetentionMs?: number;
+  previousVersionGraceMs?: number;
+  /** Deterministic GC clock for tests. */
+  now?: number;
 }
 
 export interface ReconcileSkillsResult {
@@ -562,13 +568,113 @@ function sweepManagedLinks(
 
 type StoreKeep = Map<string, { digest: string; manual: boolean } | "all">;
 
-/** Prune stale store versions of names still present in desired. Names absent from desired keep
- * their store content: disabling a skill is link removal only, and re-enabling it must not
- * require a full re-transfer. Known MVP limitation: retention for removed skills is therefore
- * unbounded — nothing ever reclaims the store content of a never-again-desired name. Names whose
- * desired entry could not be validated also keep every version: a transient bad payload must not
- * tear down a working deployment. */
-function gcStore(storeRoot: string, keep: StoreKeep, log?: (message: string) => void): void {
+export const DEFAULT_REMOVED_SKILL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+export const DEFAULT_PREVIOUS_VERSION_GRACE_MS = 60 * 60 * 1000;
+const RETENTION_STATE_VERSION = 1;
+const RETENTION_STATE_MAX_BYTES = 1024 * 1024;
+const RETENTION_STATE_MAX_ENTRIES = 8192;
+const STORE_VERSION_NAME = /^[0-9a-f]{64}(?:-manual)?$/;
+type RetentionState = Map<string, number>;
+
+export function skillRetentionStatePath(dataDir: string): string {
+  return join(dataDir, "skills", "retention.json");
+}
+
+function retentionKey(name: string, version: string): string {
+  return `${name}\0${version}`;
+}
+
+/** Corrupt state fails in the conservative direction: an empty map starts every observed
+ * retention window now, so no stored content is deleted early. */
+function loadRetentionState(path: string, log?: (message: string) => void): RetentionState {
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      log?.(`skill retention state unreadable (${errText(error)}); starting conservatively`);
+    }
+    return new Map();
+  }
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.size > RETENTION_STATE_MAX_BYTES) throw new Error("unsafe state file");
+    const buffer = Buffer.alloc(Number(stat.size));
+    const bytesRead = readSync(fd, buffer, 0, buffer.length, 0);
+    const parsed = JSON.parse(buffer.subarray(0, bytesRead).toString("utf8")) as {
+      version?: unknown;
+      entries?: unknown;
+    };
+    if (parsed.version !== RETENTION_STATE_VERSION || !Array.isArray(parsed.entries) ||
+        parsed.entries.length > RETENTION_STATE_MAX_ENTRIES) throw new Error("invalid state shape");
+    const state = new Map<string, number>();
+    for (const value of parsed.entries) {
+      const entry = value as { name?: unknown; version?: unknown; since?: unknown };
+      if (typeof entry.name !== "string" || !validSkillName(entry.name) ||
+          typeof entry.version !== "string" || !STORE_VERSION_NAME.test(entry.version) ||
+          !Number.isSafeInteger(entry.since) || (entry.since as number) < 0) {
+        throw new Error("invalid state entry");
+      }
+      state.set(retentionKey(entry.name, entry.version), entry.since as number);
+    }
+    return state;
+  } catch (error) {
+    log?.(`skill retention state unreadable (${errText(error)}); starting conservatively`);
+    return new Map();
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function saveRetentionState(path: string, state: RetentionState, log?: (message: string) => void): void {
+  const entries = [...state]
+    .slice(0, RETENTION_STATE_MAX_ENTRIES)
+    .map(([key, since]) => {
+      const split = key.indexOf("\0");
+      return { name: key.slice(0, split), version: key.slice(split + 1), since };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name) || a.version.localeCompare(b.version));
+  try {
+    assertNotSymlink(path, "the skill retention state");
+    const temp = join(dirname(path), `.retention.json.tmp-${randomUUID()}`);
+    try {
+      writeFileSync(temp, JSON.stringify({ version: RETENTION_STATE_VERSION, entries }, null, 2), {
+        flag: "wx",
+        mode: 0o600,
+      });
+      renameSync(temp, path);
+    } finally {
+      rmSync(temp, { force: true });
+    }
+  } catch (error) {
+    log?.(`could not persist skill retention state: ${errText(error)}`);
+  }
+}
+
+function treeContainsSymlink(path: string): boolean {
+  const pending = [path];
+  let examined = 0;
+  while (pending.length > 0) {
+    if (++examined > 4096) return true;
+    const current = pending.pop()!;
+    const stat = lstatSync(current);
+    if (stat.isSymbolicLink()) return true;
+    if (!stat.isDirectory()) continue;
+    for (const entry of readdirSync(current)) pending.push(join(current, entry));
+  }
+  return false;
+}
+
+/** Apply bounded retention to stale and undesired versions. Names whose desired entry could not
+ * be validated keep every version: a transient bad payload must not tear down working content. */
+function gcStore(
+  storeRoot: string,
+  keep: StoreKeep,
+  state: RetentionState,
+  policy: { removedSkillMs: number; previousVersionMs: number; now: number },
+  log?: (message: string) => void,
+): void {
+  const seenKeys = new Set<string>();
   let entries;
   try {
     entries = readdirSync(storeRoot, { withFileTypes: true });
@@ -577,16 +683,24 @@ function gcStore(storeRoot: string, keep: StoreKeep, log?: (message: string) => 
   }
   for (const entry of entries) {
     const path = join(storeRoot, entry.name);
-    if (entry.name.startsWith(".tmp-")) {
-      // A crashed materialization can strand its temp dir; it is never linked, so reclaim it.
-      rmSync(path, { recursive: true, force: true });
-      log?.(`skill store gc: reclaimed stranded temp dir ${entry.name}`);
-      continue;
-    }
     // Never traverse or delete through a symlink planted inside the store.
     if (entry.isSymbolicLink() || !entry.isDirectory()) continue;
+    if (entry.name.startsWith(".tmp-")) {
+      // A crashed materialization can strand its temp dir; it is never linked, so reclaim it.
+      try {
+        if (!treeContainsSymlink(path)) {
+          rmSync(path, { recursive: true, force: true });
+          log?.(`skill store gc: reclaimed stranded temp dir ${entry.name}`);
+        }
+      } catch {
+        // A raced or unsafe temp tree remains for inspection; never follow it.
+      }
+      continue;
+    }
+    // Foreign or legacy store names cannot be represented by the retention-state schema. Skip
+    // them entirely so one unrecognized directory cannot poison every valid retention window.
+    if (!validSkillName(entry.name)) continue;
     const want = keep.get(entry.name);
-    if (!want || want === "all") continue;
     let versions;
     try {
       versions = readdirSync(path, { withFileTypes: true });
@@ -596,13 +710,42 @@ function gcStore(storeRoot: string, keep: StoreKeep, log?: (message: string) => 
     for (const version of versions) {
       // A symlinked version entry is never ours; skip it rather than delete through it.
       if (version.isSymbolicLink()) continue;
-      const wanted =
-        version.name === want.digest || (want.manual && version.name === `${want.digest}-manual`);
-      if (!wanted) {
-        rmSync(join(path, version.name), { recursive: true, force: true });
-        log?.(`skill store gc: removed stale version ${entry.name}/${version.name}`);
+      if (!STORE_VERSION_NAME.test(version.name)) continue;
+      const key = retentionKey(entry.name, version.name);
+      seenKeys.add(key);
+      if (want === "all") {
+        state.delete(key);
+        continue;
+      }
+      const wanted = want !== undefined &&
+        (version.name === want.digest || (want.manual && version.name === `${want.digest}-manual`));
+      if (wanted) {
+        state.delete(key);
+        continue;
+      }
+      const threshold = want === undefined ? policy.removedSkillMs : policy.previousVersionMs;
+      const since = state.get(key) ?? policy.now;
+      state.set(key, since);
+      if (policy.now - since < threshold) continue;
+      const versionPath = join(path, version.name);
+      try {
+        if (treeContainsSymlink(versionPath)) {
+          log?.(`skill store gc: retained unsafe symlink-bearing version ${entry.name}/${version.name}`);
+          continue;
+        }
+        rmSync(versionPath, { recursive: true, force: true });
+        state.delete(key);
+        log?.(
+          `skill store gc: removed ${want === undefined ? "expired removed skill" : "expired stale version"} ` +
+            `${entry.name}/${version.name}`,
+        );
+      } catch (error) {
+        log?.(`skill store gc failed for ${entry.name}/${version.name}: ${errText(error)}`);
       }
     }
+  }
+  for (const key of state.keys()) {
+    if (!seenKeys.has(key)) state.delete(key);
   }
 }
 
@@ -1103,9 +1246,20 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
       shownDir: "~/.agents/skills",
       log: options.log,
     });
-    // Known limitation (MVP): no retention window — a running session keeps deleted version
-    // content alive only through its already-open file descriptors.
-    gcStore(realStoreRoot, storeKeep, options.log);
+    const retentionPath = skillRetentionStatePath(dataDir);
+    const retention = loadRetentionState(retentionPath, options.log);
+    gcStore(
+      realStoreRoot,
+      storeKeep,
+      retention,
+      {
+        removedSkillMs: options.removedSkillRetentionMs ?? DEFAULT_REMOVED_SKILL_RETENTION_MS,
+        previousVersionMs: options.previousVersionGraceMs ?? DEFAULT_PREVIOUS_VERSION_GRACE_MS,
+        now: options.now ?? Date.now(),
+      },
+      options.log,
+    );
+    saveRetentionState(retentionPath, retention, options.log);
   }
 
   // Persist ownership only when it changed (links created, removed, or newly adopted); the save
