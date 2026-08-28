@@ -156,6 +156,26 @@ function initialModel(): FixtureModel {
       session("session-no-project", "No Project Session", null, "loose-workspace"),
     ],
   };
+  if (SCENARIO === "inbox-live-scroll") {
+    initial.sessions = Array.from({ length: 36 }, (_, index) => {
+      const value = session(
+        `session-overflow-${index}`,
+        `Overflow Session ${String(index + 1).padStart(2, "0")}`,
+        "alpha",
+        "alpha-workspace",
+      );
+      Object.assign(value, {
+        status: index < 4 ? "running" : "idle",
+        activeTurnId: index < 4 ? `turn-overflow-${index}` : null,
+        updatedAt: 100 - index,
+        lastEventAt: 100 - index,
+        preview: index < 4 ? `Running activity ${index + 1}` : `Waiting session ${index + 1}`,
+      });
+      return value;
+    });
+    initial.projects[0]!.unarchivedSessionCount = initial.sessions.length;
+    initial.projects[0]!.totalSessionCount = initial.sessions.length;
+  }
   if (SCENARIO === "imported-location") {
     Object.assign(initial.projects.find((candidate) => candidate.id === "gamma")!, { canManage: true });
     Object.assign(initial.sessions.find((candidate) => candidate.id === "session-no-project")!, {
@@ -1097,7 +1117,7 @@ declare global {
         patch: Partial<Pick<SessionView,
           "projectId" | "projectName" | "projectLocationId" | "audience" | "status" | "queued" | "queueHeld" |
           "pendingApproval" | "activeTurnId" | "adopted" | "importLocationReady" | "agentCapabilities" |
-          "steeringAttempts">>,
+          "steeringAttempts" | "preview" | "lastEventAt">>,
       ): void;
       emitUserMessage(id: string, text: string, turnId: string): void;
       emitAgentMessage(id: string, text: string): void;
