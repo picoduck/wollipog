@@ -1,5 +1,5 @@
 import { createContext, memo, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
-import { normalizeSourcePath, type PlanEntry, type SessionView, type SourceLocation } from "@wollipog/protocol";
+import { normalizeSourcePath, type AgentQuestion, type PlanEntry, type SessionView, type SourceLocation } from "@wollipog/protocol";
 import {
   groupTimeline,
   SubagentTreeProjector,
@@ -43,7 +43,8 @@ export interface TimelineRevealTarget {
 }
 
 export interface TimelineQuestionContext {
-  session: SessionView;
+  sessionId: string;
+  pendingQuestion: { requestId: string; questions: AgentQuestion[] } | null;
   runnerOnline: boolean;
   onSessionUpdate?: (session: SessionView) => void;
   showKeyHints?: boolean;
@@ -59,7 +60,7 @@ export type TimelineRenderRow =
   | { kind: "item"; key: string; item: TimelineItem; inWork: boolean; depth: number };
 
 const timelineRowKey = (row: TimelineRenderRow) => row.key;
-export const estimateTimelineRow = (row: TimelineRenderRow): number => {
+export const estimateTimelineRow = (row: TimelineRenderRow, pendingQuestionRequestId: string | null = null): number => {
   if (row.kind === "work_summary") return 32;
   if (row.kind === "subagent_summary") return 52;
   switch (row.item.kind) {
@@ -68,7 +69,7 @@ export const estimateTimelineRow = (row: TimelineRenderRow): number => {
     case "user_message": return 72;
     case "file_edit": return 120;
     case "question":
-      if (row.item.answered !== undefined) return 52;
+      if (row.item.answered !== undefined || row.item.requestId !== pendingQuestionRequestId) return 52;
       return 112 + row.item.questions.reduce(
         (height, question) => height + 64 + question.options.length * 44 + (question.allowOther ? 44 : 0),
         0,
@@ -217,12 +218,12 @@ function EventTimelineBody({
   const [disclosure, setDisclosure] = useState<Map<string, boolean>>(() => new Map());
   const projection = useMemo(() => projector.current!.project(items, disclosure), [items, disclosure]);
   const { latestCheckpointTurn, rows } = projection;
-  const pendingQuestionRequestId = questionContext?.session.pendingApproval?.kind === "question"
-    ? questionContext.session.pendingApproval.requestId
-    : null;
+  const pendingQuestionRequestId = questionContext?.pendingQuestion?.requestId ?? null;
   const pinnedQuestionRow = pendingQuestionRequestId === null ? undefined : rows.find((row) =>
     row.kind === "item" && row.item.kind === "question" &&
     row.item.requestId === pendingQuestionRequestId && row.item.answered === undefined);
+  const estimateRow = useMemo(() => (row: TimelineRenderRow) =>
+    estimateTimelineRow(row, pendingQuestionRequestId), [pendingQuestionRequestId]);
   const revealTarget = revealRequest == null
     ? null
     : projector.current.resolveRevealTarget(revealRequest.eventId);
@@ -322,7 +323,7 @@ function EventTimelineBody({
       getKey={timelineRowKey}
       renderItem={renderRow}
       scrollRef={scrollRef}
-      estimateSize={estimateTimelineRow}
+      estimateSize={estimateRow}
       overscan={8}
       pinnedKey={pinnedQuestionRow?.key ?? null}
       rowGap={12}
@@ -1702,7 +1703,8 @@ const TimelineRow = memo(function TimelineRow({
       );
       return questionContext ? (
         <SessionTimelineQuestionRegion
-          session={questionContext.session}
+          sessionId={questionContext.sessionId}
+          pendingQuestion={questionContext.pendingQuestion}
           eventRequestId={item.requestId}
           eventQuestions={item.questions}
           eventResolved={item.answered !== undefined}

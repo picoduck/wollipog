@@ -83,7 +83,11 @@ function LiveQuestionFixture() {
                         scrollRef={scrollRef}
                         historyKey="agent-question-live-e2e"
                         questionContext={{
-                          session,
+                          sessionId: session.id,
+                          pendingQuestion: pendingQuestion ? {
+                            requestId: pendingQuestion.requestId,
+                            questions: pendingQuestion.questions ?? [],
+                          } : null,
                           runnerOnline: true,
                           onSessionUpdate: setSession,
                           showKeyHints: false,

@@ -30,6 +30,7 @@ test("the standalone approval slot does not render structured questions", () => 
     session,
     runnerOnline: true,
     fallbackFocusRef: React.createRef<HTMLElement>(),
+    questionInTimeline: true,
   }));
 
   assert.doesNotMatch(html, /aria-label="Agent Questions"/);

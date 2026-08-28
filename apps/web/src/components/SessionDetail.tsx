@@ -1860,14 +1860,22 @@ function SessionDetailLoaded({
   // "Agent is working" state (items 1 + 2): true the instant a send is optimistically pending
   // (before status flips) and for the whole turn while the runner reports running/starting.
   const showOptimistic = pending != null && timelineUserPrompts.length <= sendBaselineRef.current;
+  const pendingQuestion = session.pendingApproval?.kind === "question" ? session.pendingApproval : null;
+  // A request id owns an immutable question schema. Keep the timeline context stable across
+  // heartbeat, usage, and lifecycle snapshots that replace the surrounding SessionView.
+  const timelinePendingQuestion = useMemo(() => pendingQuestion ? {
+    requestId: pendingQuestion.requestId,
+    questions: pendingQuestion.questions ?? [],
+  } : null, [session.id, pendingQuestion?.requestId]);
   const timelineQuestionContext = useMemo(() => ({
-    session,
+    sessionId: session.id,
+    pendingQuestion: timelinePendingQuestion,
     runnerOnline,
     onSessionUpdate: loadSession,
     showKeyHints: !isMobile,
-  }), [isMobile, loadSession, runnerOnline, session]);
-  const questionInTimeline = session.pendingApproval?.kind !== "question" || items.some((item) =>
-    item.kind === "question" && item.requestId === session.pendingApproval?.requestId);
+  }), [isMobile, loadSession, runnerOnline, session.id, timelinePendingQuestion]);
+  const questionInTimeline = useMemo(() => pendingQuestion === null || items.some((item) =>
+    item.kind === "question" && item.requestId === pendingQuestion.requestId), [items, pendingQuestion?.requestId]);
   const working =
     showOptimistic || (!terminal && (session.status === "running" || session.status === "starting"));
   // The merged Working row must also survive approval/question waits: the projector keeps

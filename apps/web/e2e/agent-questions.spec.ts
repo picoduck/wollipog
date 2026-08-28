@@ -173,6 +173,27 @@ for (const viewport of [
   });
 }
 
+test("a long history-loading fallback remains reachable inside the fixed session column", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/agent-questions-e2e.html?set=long&slot=1");
+
+  const bar = page.getByRole("region", { name: "Agent Questions" });
+  const list = page.locator(".question-list");
+  const submit = page.getByRole("button", { name: "Submit" });
+  await expectInsideViewport(bar, page);
+  await expectInsideViewport(submit, page);
+  await expect(list).toHaveCSS("overflow-y", "auto");
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
+
+  await page.getByRole("radio", { name: /Overnight/ }).scrollIntoViewIfNeeded();
+  await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
+
+  await answerLongSet(page);
+  await expect(submit).toBeEnabled();
+  await expectInsideViewport(submit, page);
+});
+
 test("a replacement request cannot submit retained selections", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/agent-questions-e2e.html");

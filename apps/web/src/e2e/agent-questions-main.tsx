@@ -26,6 +26,7 @@ const params = new URLSearchParams(window.location.search);
 setQuestionResponseStyle(params.get("style") === "text" ? "text" : "interactive");
 const initialOnline = params.get("offline") !== "1";
 const shouldFail = params.get("failure") === "1";
+const renderInFallbackSlot = params.get("slot") === "1";
 let shouldHold = params.get("hold") === "1";
 let releasePending: (() => void) | null = null;
 
@@ -172,21 +173,35 @@ function Fixture() {
     },
   }), []) as ApiClient;
 
+  const questionContent = resolved ? (
+    <p role="status">Question Answered</p>
+  ) : (
+    <SessionQuestionBanner
+      sessionId="agent-question-session"
+      requestId={requestId}
+      questions={questions}
+      runnerOnline={runnerOnline}
+      onSessionUpdate={() => setResolved(true)}
+      showKeyHints={false}
+    />
+  );
+
   return (
     <ApiProvider client={client}>
-      <main id="question-frame">
-        {resolved ? (
-          <p role="status">Question Answered</p>
-        ) : (
-          <SessionQuestionBanner
-            sessionId="agent-question-session"
-            requestId={requestId}
-            questions={questions}
-            runnerOnline={runnerOnline}
-            onSessionUpdate={() => setResolved(true)}
-            showKeyHints={false}
-          />
-        )}
+      <main id="question-frame" className={renderInFallbackSlot ? "session-detail" : "timeline"}>
+        {renderInFallbackSlot ? (
+          <div className="detail-columns">
+            <div className="detail-chat">
+              {questionContent}
+              <div className="detail-main">
+                <div className="detail-reader">
+                  <div className="detail-scroll">Activity Unavailable</div>
+                </div>
+                <div className="composer"><div className="composer-box">Composer</div></div>
+              </div>
+            </div>
+          </div>
+        ) : questionContent}
       </main>
     </ApiProvider>
   );

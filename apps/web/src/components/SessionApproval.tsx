@@ -80,7 +80,7 @@ export function SessionApprovalRegion({
   alternateFallbackFocusRef,
   onSessionUpdate,
   showKeyHints = true,
-  questionInTimeline = true,
+  questionInTimeline = false,
 }: {
   session: SessionView;
   runnerOnline: boolean;
@@ -134,7 +134,8 @@ export function SessionApprovalRegion({
 
 /** Keep one question representation at its event's timeline position while the request is live. */
 export function SessionTimelineQuestionRegion({
-  session,
+  sessionId,
+  pendingQuestion,
   eventRequestId,
   eventQuestions,
   eventResolved,
@@ -143,7 +144,8 @@ export function SessionTimelineQuestionRegion({
   showKeyHints = true,
   children,
 }: {
-  session: SessionView;
+  sessionId: string;
+  pendingQuestion: { requestId: string; questions: AgentQuestion[] } | null;
   eventRequestId: string;
   eventQuestions: AgentQuestion[];
   eventResolved: boolean;
@@ -152,17 +154,16 @@ export function SessionTimelineQuestionRegion({
   showKeyHints?: boolean;
   children: ReactNode;
 }) {
-  const approval = !eventResolved && session.pendingApproval?.kind === "question" &&
-    session.pendingApproval.requestId === eventRequestId
-    ? session.pendingApproval
+  const approval = !eventResolved && pendingQuestion?.requestId === eventRequestId
+    ? pendingQuestion
     : null;
   return (
-    <div data-session-request-id={approval?.requestId} data-session-request-session={approval ? session.id : undefined}>
+    <div data-session-request-id={approval?.requestId} data-session-request-session={approval ? sessionId : undefined}>
       {approval ? (
         <SessionQuestionBanner
-          sessionId={session.id}
+          sessionId={sessionId}
           requestId={approval.requestId}
-          questions={approval.questions ?? eventQuestions}
+          questions={approval.questions.length > 0 ? approval.questions : eventQuestions}
           runnerOnline={runnerOnline}
           onSessionUpdate={onSessionUpdate}
           showKeyHints={showKeyHints}
@@ -249,11 +250,13 @@ function SessionRequestCoordinator({
   useIsomorphicLayoutEffect(() => {
     const wentOffline = previousRunnerOnlineRef.current && !runnerOnline;
     previousRunnerOnlineRef.current = runnerOnline;
-    if (!wentOffline || !requestWasUnchangedBeforeRender || !focusedElementBeforeRender) return;
+    if (!wentOffline || !requestWasUnchangedBeforeRender || !ownedFocusBeforeRender ||
+      requestId === null || !focusedElementBeforeRender) return;
     if (!focusedElementBeforeRender.matches(":disabled")
       && focusedElementBeforeRender.getAttribute("aria-disabled") !== "true") return;
     focusFallback();
-  }, [alternateFallbackFocusRef, fallbackFocusRef, focusedElementBeforeRender, requestWasUnchangedBeforeRender, runnerOnline]);
+  }, [alternateFallbackFocusRef, fallbackFocusRef, focusedElementBeforeRender, ownedFocusBeforeRender,
+    requestId, requestWasUnchangedBeforeRender, runnerOnline]);
 
   return <span className="sr-only" role="status" aria-live="polite">{announcement}</span>;
 }

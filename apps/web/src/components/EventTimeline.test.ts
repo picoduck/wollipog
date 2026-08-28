@@ -38,7 +38,8 @@ test("timeline row estimates include timestamp header lines", () => {
   const question = { kind: "question" as const, id: 3, requestId: "ask", questions: [{
     id: "choice", question: "Pick one", options: [{ label: "A" }, { label: "B" }],
   }] };
-  assert.equal(estimateTimelineRow({ kind: "item", key: "question", item: question, inWork: false, depth: 0 }), 264);
+  assert.equal(estimateTimelineRow({ kind: "item", key: "question", item: question, inWork: false, depth: 0 }, "ask"), 264);
+  assert.equal(estimateTimelineRow({ kind: "item", key: "orphan", item: question, inWork: false, depth: 0 }), 52);
   assert.equal(estimateTimelineRow({
     kind: "item", key: "answered-question", item: { ...question, answered: true }, inWork: false, depth: 0,
   }), 52);
@@ -156,7 +157,8 @@ test("the pending question replaces its matching timeline card without a duplica
   const html = renderToStaticMarkup(React.createElement(EventTimeline, {
     items: [{ kind: "question", id: 4, requestId: "ask-1", questions }],
     questionContext: {
-      session,
+      sessionId: session.id,
+      pendingQuestion: { requestId: "ask-1", questions },
       runnerOnline: true,
     },
   }));
@@ -192,7 +194,8 @@ test("a resolved question keeps one compact outcome card at the same timeline ro
       resolutionReason: "replaced",
     }],
     questionContext: {
-      session,
+      sessionId: session.id,
+      pendingQuestion: { requestId: "ask-1", questions },
       runnerOnline: true,
     },
   }));

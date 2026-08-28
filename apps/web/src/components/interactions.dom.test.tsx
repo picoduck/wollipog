@@ -201,7 +201,14 @@ function ApprovalHarness({ requestId, runnerOnline = true }: { requestId: string
         fallbackFocusRef={fallbackRef}
         questionInTimeline={requestId !== null}
       />
-      <EventTimeline items={items} questionContext={{ session, runnerOnline }} />
+      <EventTimeline items={items} questionContext={{
+        sessionId: session.id,
+        pendingQuestion: session.pendingApproval?.kind === "question" ? {
+          requestId: session.pendingApproval.requestId,
+          questions: session.pendingApproval.questions ?? [],
+        } : null,
+        runnerOnline,
+      }} />
       <textarea ref={fallbackRef} aria-label="Composer" />
     </>
   );
@@ -222,7 +229,11 @@ function QuestionPresentationHarness({ inTimeline }: { inTimeline: boolean }) {
       {inTimeline && (
         <EventTimeline
           items={[{ kind: "question", id: 1, requestId: "ask-a", questions }]}
-          questionContext={{ session, runnerOnline: true }}
+          questionContext={{
+            sessionId: session.id,
+            pendingQuestion: { requestId: "ask-a", questions },
+            runnerOnline: true,
+          }}
         />
       )}
       <textarea ref={fallbackRef} aria-label="Composer" />
@@ -369,6 +380,35 @@ test("taking a pending question offline moves owned focus to the composer", asyn
 
   await act(async () => { root.render(<ApprovalHarness requestId="ask-a" runnerOnline={false} />); });
   assert.equal(domWindow.document.activeElement?.getAttribute("aria-label"), "Composer");
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+function UnownedOfflineHarness({ runnerOnline }: { runnerOnline: boolean }) {
+  const fallbackRef = useRef<HTMLTextAreaElement>(null);
+  return (
+    <>
+      <SessionApprovalRegion
+        session={approvalSession(null)}
+        runnerOnline={runnerOnline}
+        fallbackFocusRef={fallbackRef}
+      />
+      <button type="button" disabled={!runnerOnline}>Unrelated Action</button>
+      <textarea ref={fallbackRef} aria-label="Composer" />
+    </>
+  );
+}
+
+test("an offline transition does not move unrelated disabled focus into the composer", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  await act(async () => { root.render(<UnownedOfflineHarness runnerOnline />); });
+  container.querySelector<HTMLButtonElement>("button")!.focus();
+
+  await act(async () => { root.render(<UnownedOfflineHarness runnerOnline={false} />); });
+  assert.notEqual(domWindow.document.activeElement?.getAttribute("aria-label"), "Composer");
   await act(async () => { root.unmount(); });
   container.remove();
 });
