@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { readFileSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -9,7 +9,7 @@ import net from "node:net";
 import { test } from "node:test";
 import { buildBwrapArgs, buildCloudArgs, buildContainerArgs, buildWslArgs, killTree, spawnAgent, terminateDescendantBoundariesAfterPendingKills, trackPendingKill, waitForPendingKills, winQuoteArg, type AgentProcess } from "./spawn.js";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
-import { encodeWindowsJobSpec, materializeWindowsJobLauncher, WINDOWS_JOB_LAUNCHER } from "./windows-job.js";
+import { encodeWindowsJobSpec, materializeWindowsJobLauncher, WINDOWS_JOB_LAUNCHER, windowsJobCacheRoot } from "./windows-job.js";
 import { extendOwnedProcessTree, ownsPosixRootProcessGroup, parsePosixProcessTable } from "./posix-process-tree.js";
 
 const windowsJobLauncherPath = materializeWindowsJobLauncher();
@@ -24,7 +24,7 @@ const windowsJobIsolation = {
   network: "inherit" as const,
 };
 
-test("Windows Job launcher is materialized once, caches its bridge, and clears both specs", () => {
+test("Windows Job launcher is materialized, caches its bridge, and clears both specs", () => {
   assert.equal(materializeWindowsJobLauncher(), windowsJobLauncherPath);
   assert.equal(readFileSync(windowsJobLauncherPath, "utf8"), WINDOWS_JOB_LAUNCHER);
   assert.match(WINDOWS_JOB_LAUNCHER, /if \(Test-Path Env:WOLLIPOG_WINDOWS_JOB_SPEC\) \{ \$Spec = \$env:WOLLIPOG_WINDOWS_JOB_SPEC \}/);
@@ -41,15 +41,42 @@ test("Windows Job launcher is materialized once, caches its bridge, and clears b
   assert.match(WINDOWS_JOB_LAUNCHER, /WaitForMultipleObjects/);
   assert.match(WINDOWS_JOB_LAUNCHER, /Test-Path -LiteralPath \$BridgePath -PathType Leaf/);
   assert.match(WINDOWS_JOB_LAUNCHER, /Add-Type -Path \$BridgePath/);
+  assert.match(WINDOWS_JOB_LAUNCHER, /WollipogWindowsJobBridge-' \+ \(Split-Path \$PSScriptRoot -Leaf\)/);
+  assert.doesNotMatch(WINDOWS_JOB_LAUNCHER, /WollipogWindowsJobBridge-' \+ \[string\] \$decoded\.ownerPid/);
+  assert.match(WINDOWS_JOB_LAUNCHER, /catch \[IO\.IOException\]/);
   assert.match(WINDOWS_JOB_LAUNCHER, /bridge-unavailable/);
   assert.match(WINDOWS_JOB_LAUNCHER, /job-assignment/);
   assert.doesNotMatch(WINDOWS_JOB_LAUNCHER, /MamWindowsJob/);
 });
 
+test("Windows Job launcher uses per-user storage and repairs a missing or corrupt script", () => {
+  assert.equal(
+    windowsJobCacheRoot("win32", { LOCALAPPDATA: "C:\\Users\\runner\\AppData\\Local" }),
+    "C:\\Users\\runner\\AppData\\Local\\Wollipog\\cache\\windows-job",
+  );
+  assert.throws(() => windowsJobCacheRoot("win32", {}), /absolute LOCALAPPDATA/u);
+
+  const cacheRoot = mkdtempSync(path.join(os.tmpdir(), "wollipog-windows-job-test-"));
+  try {
+    const scriptPath = materializeWindowsJobLauncher(cacheRoot);
+    rmSync(scriptPath);
+    assert.equal(materializeWindowsJobLauncher(cacheRoot), scriptPath);
+    assert.equal(readFileSync(scriptPath, "utf8"), WINDOWS_JOB_LAUNCHER);
+
+    writeFileSync(scriptPath, "corrupt", "utf8");
+    assert.equal(materializeWindowsJobLauncher(cacheRoot), scriptPath);
+    assert.equal(readFileSync(scriptPath, "utf8"), WINDOWS_JOB_LAUNCHER);
+  } finally {
+    rmSync(cacheRoot, { recursive: true, force: true });
+  }
+});
+
 test("Windows Job launcher treats an explicitly empty Wollipog spec as authoritative", {
   skip: process.platform !== "win32",
 }, () => {
-  const result = spawnSync("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", windowsJobLauncherPath], {
+  const result = spawnSync("powershell.exe", [
+    "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", windowsJobLauncherPath,
+  ], {
     encoding: "utf8",
     env: {
       ...process.env,
@@ -65,7 +92,9 @@ test("Windows Job launcher classifies malformed specs without echoing them", {
   skip: process.platform !== "win32",
 }, () => {
   const secretShapedInput = "not-base64-private-launch-data";
-  const result = spawnSync("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", windowsJobLauncherPath], {
+  const result = spawnSync("powershell.exe", [
+    "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", windowsJobLauncherPath,
+  ], {
     encoding: "utf8",
     env: { ...process.env, WOLLIPOG_WINDOWS_JOB_SPEC: secretShapedInput },
   });

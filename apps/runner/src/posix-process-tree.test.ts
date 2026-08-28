@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   PosixMarkerScanner,
   PosixProcessBoundary,
+  parsePosixMarkedProcessIds,
   terminatePosixProcessBoundaries,
   type PosixMarkedProcessIds,
   type PosixProcessBoundaryTestRuntime,
@@ -15,6 +16,16 @@ const root: PosixProcessIdentity = { pid: 100, ppid: 1, state: "S", startedAt: "
 function processTable(...processes: PosixProcessIdentity[]): PosixProcessTable {
   return new Map(processes.map((process) => [process.pid, process]));
 }
+
+test("macOS and BSD marker parsing ignores marker-shaped process arguments", () => {
+  const markers = parsePosixMarkedProcessIds(
+    `${root.pid} provider --label WOLLIPOG_DESCENDANT_BOUNDARY=decoy WOLLIPOG_DESCENDANT_BOUNDARY=owner-a`,
+    processTable(root),
+  );
+
+  assert.equal(markers.has("decoy"), false);
+  assert.deepEqual(markers.get("owner-a"), new Set([root.pid]));
+});
 
 test("marker snapshots coalesce only before enumeration starts", async () => {
   let listCalls = 0;

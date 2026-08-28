@@ -58,17 +58,17 @@ export async function listMarkedProcessIds(table: PosixProcessTable): Promise<Po
       await Promise.all(pids.slice(offset, offset + 32).map(async (pid) => {
         try {
           const environ = await readFile(`/proc/${pid}/environ`);
-          let offset = 0;
-          while (offset < environ.length) {
-            const end = environ.indexOf(0, offset);
+          let cursor = 0;
+          while (cursor < environ.length) {
+            const end = environ.indexOf(0, cursor);
             const limit = end === -1 ? environ.length : end;
-            const entry = environ.subarray(offset, limit);
+            const entry = environ.subarray(cursor, limit);
             if (entry.subarray(0, prefix.length).equals(prefix)) {
               addMarkedProcess(result, entry.subarray(prefix.length).toString("utf8"), pid);
               break;
             }
             if (end === -1) break;
-            offset = end + 1;
+            cursor = end + 1;
           }
         } catch {
           /* exited or belongs to a uid whose environment is unreadable */
@@ -86,11 +86,24 @@ export async function listMarkedProcessIds(table: PosixProcessTable): Promise<Po
       else resolve(String(stdout));
     });
   });
+  return parsePosixMarkedProcessIds(output, table);
+}
+
+/** Parse the macOS/BSD `ps eww` form. Command arguments precede the appended environment, so use
+ * the final marker-shaped token and do not treat an earlier argv decoy as ownership evidence. */
+export function parsePosixMarkedProcessIds(
+  output: string,
+  table: PosixProcessTable,
+): PosixMarkedProcessIds {
+  const result: PosixMarkedProcessIds = new Map();
   const prefix = `${DESCENDANT_MARKER_ENV}=`;
   for (const line of output.split(/\r?\n/u)) {
     const match = /^\s*(\d+)\s+(.+)$/u.exec(line);
     if (!match) continue;
-    const markerEntry = match[2]!.split(/\s+/u).find((entry) => entry.startsWith(prefix));
+    let markerEntry: string | undefined;
+    for (const entry of match[2]!.split(/\s+/u)) {
+      if (entry.startsWith(prefix)) markerEntry = entry;
+    }
     if (!markerEntry) continue;
     const pid = Number(match[1]);
     if (table.has(pid)) addMarkedProcess(result, markerEntry.slice(prefix.length), pid);

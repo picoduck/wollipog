@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, win32 } from "node:path";
 
 /**
  * Windows Job Object launcher materialized by the runner on native Windows.
@@ -45,7 +45,7 @@ $CompilePath = $null
 $Mutex = $null
 $MutexHeld = $false
 try {
-  $MutexName = 'Local\WollipogWindowsJobBridge-' + [string] $decoded.ownerPid + '-' + (Split-Path $PSScriptRoot -Leaf)
+  $MutexName = 'Local\WollipogWindowsJobBridge-' + (Split-Path $PSScriptRoot -Leaf)
   $Mutex = [Threading.Mutex]::new($false, $MutexName)
   try { $MutexHeld = $Mutex.WaitOne(30000) }
   catch [Threading.AbandonedMutexException] { $MutexHeld = $true }
@@ -307,10 +307,19 @@ public static class WollipogWindowsJob {
   }
 }
 '@
-    [IO.File]::Move($CompilePath, $BridgePath)
+    try { [IO.File]::Move($CompilePath, $BridgePath) }
+    catch [IO.IOException] {
+      if (-not (Test-Path -LiteralPath $BridgePath -PathType Leaf)) { throw }
+    }
     $CompilePath = $null
   }
-  Add-Type -Path $BridgePath
+  try { Add-Type -Path $BridgePath }
+  catch {
+    # Fail closed for this launch, but remove an incomplete/corrupt cache entry so the next launch
+    # can rebuild it under the version-scoped mutex.
+    Remove-Item -LiteralPath $BridgePath -Force -ErrorAction SilentlyContinue
+    throw
+  }
 } catch {
   Fail-WollipogJob 'bridge-unavailable' 'the native bridge could not be initialized; Windows application-control policy may be blocking it'
 } finally {
@@ -351,19 +360,32 @@ export function encodeWindowsJobSpec(command: string, args: string[], cwd: strin
   return Buffer.from(JSON.stringify({ command, args, cwd, ownerPid, ...(rawCommandLine ? { rawCommandLine } : {}) }), "utf8").toString("base64");
 }
 
-let materializedWindowsJobLauncher: string | undefined;
+/** Resolve the launcher cache inside the native Windows user's private application-data tree. A
+ * non-Windows fallback exists only so platform-independent tests can inspect the materialization. */
+export function windowsJobCacheRoot(
+  platform: NodeJS.Platform = process.platform,
+  environment: NodeJS.ProcessEnv = process.env,
+): string {
+  if (platform !== "win32") return join(tmpdir(), "wollipog-windows-job");
+  const localAppData = environment.LOCALAPPDATA;
+  if (!localAppData || !win32.isAbsolute(localAppData)) {
+    throw new Error("Windows Job isolation requires an absolute LOCALAPPDATA directory");
+  }
+  return win32.join(localAppData, "Wollipog", "cache", "windows-job");
+}
 
-/** Write the audited launcher once under the current user's temporary directory. Its content hash
- * versions both the script and compiled bridge cache, so source changes never load an older DLL. */
-export function materializeWindowsJobLauncher(): string {
-  if (materializedWindowsJobLauncher) return materializedWindowsJobLauncher;
+/** Materialize and verify the audited launcher. Its content hash versions both the script and
+ * compiled bridge cache, while per-call verification repairs cache cleanup or corruption. */
+export function materializeWindowsJobLauncher(cacheRoot = windowsJobCacheRoot()): string {
   const digest = createHash("sha256").update(WINDOWS_JOB_LAUNCHER, "utf8").digest("hex").slice(0, 24);
-  const cacheRoot = join(tmpdir(), "wollipog-windows-job");
   const versionRoot = join(cacheRoot, digest);
   const scriptPath = join(versionRoot, "launcher.ps1");
   mkdirSync(versionRoot, { recursive: true, mode: 0o700 });
   chmodSync(cacheRoot, 0o700);
   chmodSync(versionRoot, 0o700);
+  if (existsSync(scriptPath) && readFileSync(scriptPath, "utf8") !== WINDOWS_JOB_LAUNCHER) {
+    rmSync(scriptPath, { force: true });
+  }
   if (!existsSync(scriptPath)) {
     const temporaryPath = join(versionRoot, `launcher-${process.pid}-${randomUUID()}.tmp`);
     try {
@@ -381,6 +403,5 @@ export function materializeWindowsJobLauncher(): string {
     throw new Error("Windows Job launcher cache does not match the audited runner source");
   }
   chmodSync(scriptPath, 0o600);
-  materializedWindowsJobLauncher = scriptPath;
   return scriptPath;
 }
