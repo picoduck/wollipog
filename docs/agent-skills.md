@@ -188,10 +188,12 @@ on every registration, which makes durability trivial (no receipt outbox needed)
   are instead a latest-event projection: each non-empty report replaces the prior event and gets
   its own `removalsUpdatedAt`; a later empty or omitted field retains that event and timestamp.
   History is absent only until a compatible runner reports its first non-empty event. Legacy
-  persisted blobs read as empty history with no event timestamp, and the per-machine API identifies
-  pre-v96 runners that cannot report removal events. Reports are sent after each reconcile, on
-  registration, and on the periodic discovery tick. Unmanaged skills come from a bounded harness
-  scan using the `claude-commands.ts` limits and deliberately non-YAML frontmatter reader.
+  persisted blobs with no removals read as empty history with no event timestamp; blobs with
+  removals but no `removalsUpdatedAt` use the inventory timestamp as their compatibility fallback.
+  The per-machine API identifies pre-v96 runners that cannot report removal events. Reports are sent
+  after each reconcile, on registration, and on the periodic discovery tick. Unmanaged skills come
+  from a bounded harness scan using the `claude-commands.ts` limits and deliberately non-YAML
+  frontmatter reader.
 - Sync triggers: assignment or library change, runner registration, and a manual "Sync Now"
   mirroring Rediscover.
 

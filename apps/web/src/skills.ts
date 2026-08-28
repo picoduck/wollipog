@@ -88,6 +88,10 @@ export interface RunnerSkillsResponse {
   removalReporting?: "supported" | "unsupported" | "unknown";
 }
 
+export function normalizeRemovalReporting(value: unknown): NonNullable<RunnerSkillsResponse["removalReporting"]> {
+  return value === "supported" || value === "unsupported" ? value : "unknown";
+}
+
 /* Wrapped-or-bare payload aliases for the list routes, so the API client stays honest about the
  * two shapes the concurrent control-plane workstream may settle on. */
 export type SkillListPayload = SkillSummary[] | { skills?: SkillSummary[] };

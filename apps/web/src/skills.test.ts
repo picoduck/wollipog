@@ -6,6 +6,7 @@ import {
   describeAssignmentScope,
   groupSkillList,
   invocationLabel,
+  normalizeRemovalReporting,
   reportedSkillLinkRemovals,
   reportedUnmanagedSkills,
   skillAssignmentsFromPayload,
@@ -48,6 +49,10 @@ test("payload normalizers accept wrapped and bare shapes and drop malformed rows
   assert.deepEqual(skillFromPayload({ skill: skill() }), skill());
   assert.deepEqual(skillFromPayload(skill()), skill());
   assert.equal(skillFromPayload({ error: "nope" }), null);
+  assert.equal(normalizeRemovalReporting("supported"), "supported");
+  assert.equal(normalizeRemovalReporting("unsupported"), "unsupported");
+  assert.equal(normalizeRemovalReporting("future-value"), "unknown");
+  assert.equal(normalizeRemovalReporting(undefined), "unknown");
 
   // The detail route keeps the full version (with files) as a sibling while the skill record
   // carries only a summary version without files — the sibling must win or the view never sees

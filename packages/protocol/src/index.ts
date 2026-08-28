@@ -4604,8 +4604,9 @@ export interface SkillsSyncCompleteMessage {
   syncId: string;
 }
 
-/** Authoritative full replacement of one machine's skill deployment state. Sent as the correlated
- * reply to a solicited sync and unsolicited after push syncs or discovery-time rescans. */
+/** Authoritative full replacement of one machine's deployed and unmanaged skill inventory plus its
+ * current reconcile error. `removals` is the event exception documented below. Sent as the
+ * correlated reply to a solicited sync and unsolicited after push syncs or discovery-time rescans. */
 export interface SkillsStateMessage {
   type: "skills_state";
   runnerId: string;
