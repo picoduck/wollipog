@@ -125,9 +125,10 @@ Properties:
   compact state writer sorts entries and fits the largest prefix accepted by both its 8,192-entry
   and 1 MiB reader limits; omitted entries are logged and restart their grace window. Backward
   wall-clock changes and discontinuous forward jumps preserve accrued age; expiration advances
-  again only with ordinary clock progress. Independently of time grace, each skill retains at most
-  64 safe stale version directories
-  plus its current desired variants; symlink-bearing trees remain untouched for inspection.
+  again only with ordinary clock progress between connected reconciliation passes, so offline time
+  does not age retained content. Independently of time grace, each skill retains at most 64 safe
+  stale version directories plus its current desired variants; symlink-bearing trees remain
+  untouched for inspection.
 - **Never clobber user content.** The runner only creates or replaces symlinks that verifiably
   resolve into its own store. A pre-existing real directory at a target path (a hand-managed
   skill) is a conflict surfaced in the UI with an offer to adopt it into the library — never an
@@ -247,9 +248,10 @@ Git backs the library as an **upstream source**, not as the distribution transpo
   before the reconciler requests the process-lifetime `ProviderHomeLeaseRegistry` lease. Every
   canonical or harness link mutation, including removal, happens only after that lease is held.
   During contention the runner mutates no shared-HOME path: it reports desired managed links as
-  blocked, reports foreign symlink entry names without following or classifying their targets,
-  and still applies retention plus the fixed 64-stale-version bound to its own store. Releasing
-  the lease lets the next authoritative pass converge directly to the latest desired digest.
+  blocked, reports foreign symlink entry names without following their targets, and still applies
+  retention plus the fixed 64-stale-version bound to its own store while protecting every version
+  targeted by a live shared-HOME link. Releasing the lease lets the next authoritative pass
+  converge directly to the latest desired digest.
   Harnesses may cache their skill list at session start, so updates apply to new sessions; the UI
   says so.
 - **Frontmatter is untrusted input.** Keep the "never interpret YAML aliases, tags, objects, or

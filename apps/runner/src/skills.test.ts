@@ -1169,7 +1169,7 @@ test("prolonged lease contention bounds staging, reports symlinks without follow
 
     const stagedVersions = readdirSync(join(skillsStoreRoot(contenderDataDir), "alpha"));
     assert.ok(stagedVersions.length <= MAX_RETAINED_STALE_SKILL_VERSIONS + 1);
-    assert.match(blocked!.error ?? "", /Unmanaged inventory is limited to entry names/);
+    assert.match(blocked!.error ?? "", /Unmanaged symlink inventory is limited to entry names/);
     assert.ok(blocked!.unmanaged.some((skill) =>
       skill.agentId === codexAgent.id && skill.name === "user-link" && skill.description === undefined));
     assert.equal(readFileSync(join(foreignTarget, "SKILL.md"), "utf8").includes("secret target"), true,
@@ -1195,6 +1195,60 @@ test("prolonged lease contention bounds staging, reports symlinks without follow
   } finally {
     holder.releaseAll();
     contender.releaseAll();
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("contended GC preserves the store version targeted by a live managed link", async () => {
+  const roots = makeRoots();
+  const owner = new ProviderHomeLeaseRegistry("e".repeat(64), { pid: 501, hostname: "shared-host" });
+  const blocker = new ProviderHomeLeaseRegistry("f".repeat(64), { pid: 502, hostname: "shared-host" });
+  const retryingOwner = new ProviderHomeLeaseRegistry("e".repeat(64), {
+    pid: 503,
+    hostname: "shared-host",
+    isProcessAlive: (pid) => pid === 502,
+  });
+  const leaseRequest = {
+    driver: "claude-code" as const,
+    command: "claude",
+    context: { kind: "native" as const },
+    env: { HOME: roots.home },
+  };
+  try {
+    const v1 = entry("alpha", [{ agentId: claudeAgent.id, invocation: "agent" }]);
+    await reconcile(roots, [v1], {
+      acquireProviderHomeLease: () => owner.acquire(leaseRequest),
+    });
+    const v1Path = join(realpathSync(skillsStoreRoot(roots.dataDir)), "alpha", v1.versionDigest);
+    const canonicalPath = join(roots.home, ".agents", "skills", "alpha");
+    assert.equal(realpathSync(canonicalPath), v1Path);
+
+    owner.releaseAll();
+    blocker.acquire(leaseRequest);
+    const v2 = entry(
+      "alpha",
+      [{ agentId: claudeAgent.id, invocation: "agent" }],
+      skillFiles("alpha", "new contended version\n"),
+    );
+    const blocked = await reconcile(roots, [v2], {
+      now: 10_000,
+      previousVersionGraceMs: 0,
+      acquireProviderHomeLease: () => retryingOwner.acquire(leaseRequest),
+    });
+
+    assert.match(blocked.error ?? "", /provider-home lease unavailable/i);
+    assert.equal(existsSync(v1Path), true);
+    assert.equal(realpathSync(canonicalPath), v1Path,
+      "runner-local GC must not strand a live shared-HOME deployment");
+    assert.equal(
+      blocked.unmanaged.some((skill) => skill.name === "alpha"),
+      false,
+      "the runner's own managed symlink is not misreported as unmanaged",
+    );
+  } finally {
+    owner.releaseAll();
+    blocker.releaseAll();
+    retryingOwner.releaseAll();
     rmSync(roots.root, { recursive: true, force: true });
   }
 });

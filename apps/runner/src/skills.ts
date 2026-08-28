@@ -652,6 +652,13 @@ function sweepManagedLinks(
 /* -------------------------------- store GC -------------------------------- */
 
 type StoreKeep = Map<string, { digest: string; manual: boolean } | "all">;
+interface StoreGcPolicy {
+  removedSkillMs: number;
+  previousVersionMs: number;
+  now: number;
+  /** Versions still targeted by a live shared-HOME symlink during a contended pass. */
+  protectedVersions?: ReadonlySet<string>;
+}
 
 export const DEFAULT_REMOVED_SKILL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 export const DEFAULT_PREVIOUS_VERSION_GRACE_MS = 60 * 60 * 1000;
@@ -829,7 +836,7 @@ function gcStore(
   storeRoot: string,
   keep: StoreKeep,
   state: RetentionState,
-  policy: { removedSkillMs: number; previousVersionMs: number; now: number },
+  policy: StoreGcPolicy,
   log?: (message: string) => void,
 ): void {
   normalizeRetentionClock(state, policy.now, log);
@@ -867,6 +874,7 @@ function gcStore(
       continue;
     }
     const stale: { name: string; key: string; path: string; since: number }[] = [];
+    let protectedStaleCount = 0;
     for (const version of versions) {
       // A symlinked version entry is never ours; skip it rather than delete through it.
       if (version.isSymbolicLink()) continue;
@@ -880,6 +888,11 @@ function gcStore(
       const wanted = want !== undefined &&
         (version.name === want.digest || (want.manual && version.name === `${want.digest}-manual`));
       if (wanted) {
+        state.entries.delete(key);
+        continue;
+      }
+      if (policy.protectedVersions?.has(key)) {
+        protectedStaleCount += 1;
         state.entries.delete(key);
         continue;
       }
@@ -898,9 +911,8 @@ function gcStore(
         return false;
       }
     }).sort((a, b) => a.since - b.since || a.name.localeCompare(b.name));
-    const forced = new Set(
-      safeStale.slice(0, Math.max(0, safeStale.length - MAX_RETAINED_STALE_SKILL_VERSIONS)),
-    );
+    const unlinkedAllowance = Math.max(0, MAX_RETAINED_STALE_SKILL_VERSIONS - protectedStaleCount);
+    const forced = new Set(safeStale.slice(0, Math.max(0, safeStale.length - unlinkedAllowance)));
     for (const candidate of safeStale) {
       const threshold = want === undefined ? policy.removedSkillMs : policy.previousVersionMs;
       const bounded = forced.has(candidate);
@@ -935,7 +947,7 @@ function gcStoreWithRetention(
   dataDir: string,
   storeRoot: string,
   keep: StoreKeep,
-  policy: { removedSkillMs: number; previousVersionMs: number; now: number },
+  policy: StoreGcPolicy,
   log?: (message: string) => void,
 ): void {
   const retentionPath = skillRetentionStatePath(dataDir);
@@ -1041,6 +1053,40 @@ function scanUnmanagedSkills(
     }
   }
   return results;
+}
+
+/** Read-only protection for versions a current shared-HOME symlink still targets. A contended
+ * runner may prune its local store, but it must not strand a deployment that is still live while
+ * another process owns HOME. Foreign symlinks into the store are conservatively protected too. */
+function linkedStoreVersionKeys(
+  home: string,
+  agents: AgentDefinition[],
+  realStoreRoot: string,
+): Set<string> {
+  const protectedVersions = new Set<string>();
+  const dirs = new Set([
+    canonicalSkillsDir(home),
+    ...harnessBindings(agents).map((binding) => join(home, binding.relDir)),
+  ]);
+  for (const dir of dirs) {
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    let examined = 0;
+    for (const entry of entries) {
+      if (++examined > SKILL_SCAN_LIMITS.maxEntriesPerDirectory) break;
+      if (!entry.isSymbolicLink()) continue;
+      const probe = probeLink(join(dir, entry.name), realStoreRoot, canonicalSkillsDir(home));
+      if (probe.kind !== "ours" || probe.via !== "store") continue;
+      const relative = probe.resolvedTarget.slice(realStoreRoot.length + 1).split(sep);
+      if (relative.length !== 2 || !validSkillName(relative[0]!) || !STORE_VERSION_NAME.test(relative[1]!)) continue;
+      protectedVersions.add(retentionKey(relative[0]!, relative[1]!));
+    }
+  }
+  return protectedVersions;
 }
 
 /* -------------------------------- reconcile ------------------------------- */
@@ -1159,7 +1205,8 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
     } catch (error) {
       const detail = `Provider-home lease unavailable: ${errText(error)}`;
       const scanDetail =
-        "Unmanaged inventory is limited to entry names because symlinks were not followed or classified.";
+        "Unmanaged symlink inventory is limited to entry names because targets were not followed.";
+      const contendedOwned = loadOwnedLinks(linkManifestPath(dataDir), options.log);
       options.log?.(`skill reconcile links blocked: ${detail}`);
       if (allowRemovals) {
         gcStoreWithRetention(
@@ -1170,6 +1217,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
             removedSkillMs: options.removedSkillRetentionMs ?? DEFAULT_REMOVED_SKILL_RETENTION_MS,
             previousVersionMs: options.previousVersionGraceMs ?? DEFAULT_PREVIOUS_VERSION_GRACE_MS,
             now: options.now ?? Date.now(),
+            protectedVersions: linkedStoreVersionKeys(home, agents, realStoreRoot),
           },
           options.log,
         );
@@ -1208,7 +1256,11 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
             error: detail,
           };
         }),
-        unmanaged: scanUnmanagedSkills(home, agents, () => true),
+        unmanaged: scanUnmanagedSkills(home, agents, (linkPath) => {
+          const probe = probeLink(linkPath, realStoreRoot, canonicalSkillsDir(home));
+          if (probe.kind !== "ours") return true;
+          return probe.via === "canonical" && !contendedOwned.has(linkPath);
+        }),
         removedLinks: [],
         error: `${detail} ${scanDetail}`,
       };
