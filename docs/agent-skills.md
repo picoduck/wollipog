@@ -252,9 +252,10 @@ Git backs the library as an **upstream source**, not as the distribution transpo
   name only.
   During contention the runner mutates no shared-HOME path: it reports desired managed links as
   blocked and still applies retention plus the fixed 64-unprotected-stale-version bound to its own
-  store. It probes every local skill's matching canonical and harness names for a live target, plus
-  a bounded set of foreign direct-store aliases, before GC. Releasing the lease lets the next
-  authoritative pass converge directly to the latest desired digest.
+  store. It probes every local skill's matching canonical and supported harness names for a live
+  target regardless of the current discovery result, plus a bounded set of foreign direct-store
+  aliases, before GC. Releasing the lease lets the next authoritative pass converge directly to the
+  latest desired digest.
   Harnesses may cache their skill list at session start, so updates apply to new sessions; the UI
   says so.
 - **Frontmatter is untrusted input.** Keep the "never interpret YAML aliases, tags, objects, or

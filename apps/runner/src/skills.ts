@@ -1060,14 +1060,13 @@ function scanUnmanagedSkills(
  * another process owns HOME. Foreign symlinks into the store are conservatively protected too. */
 function linkedStoreVersionKeys(
   home: string,
-  agents: AgentDefinition[],
   realStoreRoot: string,
 ): Set<string> {
   const protectedVersions = new Set<string>();
   const canonicalDir = canonicalSkillsDir(home);
   const dirs = new Set([
     canonicalDir,
-    ...harnessBindings(agents).map((binding) => join(home, binding.relDir)),
+    ...Object.values(SKILL_DIRS).map((relDir) => join(home, relDir)),
   ]);
   const protectDirectStoreLink = (linkPath: string): void => {
     const probe = probeLink(linkPath, realStoreRoot, canonicalDir);
@@ -1236,7 +1235,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
             removedSkillMs: options.removedSkillRetentionMs ?? DEFAULT_REMOVED_SKILL_RETENTION_MS,
             previousVersionMs: options.previousVersionGraceMs ?? DEFAULT_PREVIOUS_VERSION_GRACE_MS,
             now: options.now ?? Date.now(),
-            protectedVersions: linkedStoreVersionKeys(home, agents, realStoreRoot),
+            protectedVersions: linkedStoreVersionKeys(home, realStoreRoot),
           },
           options.log,
         );

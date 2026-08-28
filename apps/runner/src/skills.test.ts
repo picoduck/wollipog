@@ -1278,10 +1278,8 @@ test("contended GC protects a live canonical target beyond the bounded diagnosti
     for (let index = 0; index < SKILL_SCAN_LIMITS.maxEntriesPerDirectory + 32; index += 1) {
       symlinkSync(foreignTarget, join(canonicalDir, `filler-${index.toString().padStart(3, "0")}`));
     }
-    const before = readdirSync(canonicalDir);
-    const targetName = before.at(-1)!;
+    const targetName = "zz-live-target";
     const targetLink = join(canonicalDir, targetName);
-    unlinkSync(targetLink);
     const oldDigest = "a".repeat(64);
     const oldVersion = join(skillsStoreRoot(roots.dataDir), targetName, oldDigest);
     mkdirSync(oldVersion, { recursive: true });
@@ -1307,6 +1305,49 @@ test("contended GC protects a live canonical target beyond the bounded diagnosti
     assert.equal(existsSync(oldVersion), true,
       "exact managed-name probes protect live targets beyond the diagnostic scan ceiling");
     assert.equal(realpathSync(targetLink), oldVersion);
+  } finally {
+    holder.releaseAll();
+    contender.releaseAll();
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("contended GC protects harness targets while agent discovery is temporarily empty", async () => {
+  const roots = makeRoots();
+  const holder = new ProviderHomeLeaseRegistry("3".repeat(64), { pid: 701, hostname: "shared-host" });
+  const contender = new ProviderHomeLeaseRegistry("4".repeat(64), {
+    pid: 702,
+    hostname: "shared-host",
+    isProcessAlive: (pid) => pid === 701,
+  });
+  const leaseRequest = {
+    driver: "claude-code" as const,
+    command: "claude",
+    context: { kind: "native" as const },
+    env: { HOME: roots.home },
+  };
+  try {
+    holder.acquire(leaseRequest);
+    const oldDigest = "b".repeat(64);
+    const oldManualVersion = join(skillsStoreRoot(roots.dataDir), "alpha", `${oldDigest}-manual`);
+    mkdirSync(oldManualVersion, { recursive: true });
+    writeFileSync(join(oldManualVersion, "SKILL.md"), "---\nname: alpha\n---\n");
+    const harnessLink = join(roots.home, ".claude", "skills", "alpha");
+    mkdirSync(dirname(harnessLink), { recursive: true });
+    symlinkSync(oldManualVersion, harnessLink);
+
+    const replacement = entry("alpha", [{ agentId: claudeAgent.id, invocation: "manual" }]);
+    const blocked = await reconcile(roots, [replacement], {
+      agents: [],
+      now: 10_000,
+      previousVersionGraceMs: 0,
+      acquireProviderHomeLease: () => contender.acquire(leaseRequest),
+    });
+
+    assert.match(blocked.error ?? "", /provider-home lease unavailable/i);
+    assert.equal(existsSync(oldManualVersion), true,
+      "a transient empty discovery set cannot strand an existing harness deployment");
+    assert.equal(realpathSync(harnessLink), oldManualVersion);
   } finally {
     holder.releaseAll();
     contender.releaseAll();
