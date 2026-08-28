@@ -601,6 +601,7 @@ export function SkillsView() {
                   });
                   const unmanaged = reportedUnmanagedSkills(machine?.reported);
                   const removals = reportedSkillLinkRemovals(machine?.reported);
+                  const removalReporting = machine?.removalReporting ?? "unknown";
                   return (
                     <article className="skills-machine" key={runner.runnerId}>
                       <div className="skills-machine-head">
@@ -636,16 +637,18 @@ export function SkillsView() {
                           </p>
                         </div>
                       )}
-                      {machine && machine.removalReporting !== "unknown" && (
+                      {machine && (removals.length > 0 || removalReporting !== "unknown") && (
                         <div className="skills-removals">
                           <h5>Recent Link Removals</h5>
-                          {machine.removalReporting === "unsupported" ? (
+                          {removalReporting === "unsupported" && (
                             <p className="skills-hint">
-                              This runner version cannot report managed link-removal history.
+                              This runner version cannot report new managed link removals.
                             </p>
-                          ) : removals.length === 0 ? (
+                          )}
+                          {removalReporting === "supported" && removals.length === 0 && (
                             <p className="skills-hint">No managed link removals have been reported.</p>
-                          ) : (
+                          )}
+                          {removals.length > 0 && (
                             <>
                               <p className="skills-hint">
                                 Reported {formatTime(machine.reported?.removalsUpdatedAt ?? machine.reported?.updatedAt)}

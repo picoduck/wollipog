@@ -191,9 +191,26 @@ test("SkillsView lists skills, opens a detail with assignments and deployment, a
   const sync = [...container.querySelectorAll<HTMLButtonElement>("button")]
     .find((candidate) => candidate.textContent?.trim() === "Sync Now");
   assert.ok(sync, "each machine offers Sync Now");
+
+  runnerSkills.removalReporting = "unsupported";
   await act(async () => { sync!.click(); });
   await act(settle);
-  assert.deepEqual(syncedRunnerIds, ["runner-1"]);
+  assert.match(pageText(), /cannot report new managed link removals/);
+  assert.match(pageText(), /~\/\.codex\/skills\/retired-skill/,
+    "a rollback runner does not hide the last event it reported before rollback");
+
+  runnerSkills.removalReporting = "supported";
+  runnerSkills.reported = { ...runnerSkills.reported!, removals: [] };
+  await act(async () => { sync!.click(); });
+  await act(settle);
+  assert.match(pageText(), /No managed link removals have been reported/);
+
+  delete (runnerSkills as Partial<RunnerSkillsResponse>).removalReporting;
+  await act(async () => { sync!.click(); });
+  await act(settle);
+  assert.equal(container.querySelector(".skills-removals"), null,
+    "an older control plane that omits capability state never becomes a false empty-history claim");
+  assert.deepEqual(syncedRunnerIds, ["runner-1", "runner-1", "runner-1"]);
 
   // The New Skill dialog opens with a template whose frontmatter is prefilled.
   const newSkill = [...container.querySelectorAll<HTMLButtonElement>("button")]

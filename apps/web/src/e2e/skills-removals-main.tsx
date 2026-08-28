@@ -31,7 +31,7 @@ const runner: RunnerView = {
   workspaces: [],
   connectedAt: 1,
   lastSeen: 1,
-  protocolVersion: 90,
+  protocolVersion: 96,
 };
 
 const snapshot: ControlPlaneToUi = {
