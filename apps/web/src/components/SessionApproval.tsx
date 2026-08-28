@@ -80,6 +80,7 @@ export function SessionApprovalRegion({
   alternateFallbackFocusRef,
   onSessionUpdate,
   showKeyHints = true,
+  questionInTimeline = true,
 }: {
   session: SessionView;
   runnerOnline: boolean;
@@ -87,26 +88,47 @@ export function SessionApprovalRegion({
   alternateFallbackFocusRef?: RefObject<HTMLElement>;
   onSessionUpdate?: (session: SessionView) => void;
   showKeyHints?: boolean;
+  /** Whether the pending question already has an authoritative transcript row. */
+  questionInTimeline?: boolean;
 }) {
-  const approval = session.pendingApproval?.kind === "question" ? null : session.pendingApproval;
+  const approval = session.pendingApproval;
+  const questionFallback = approval?.kind === "question" && !questionInTimeline;
+  const standaloneApproval = approval?.kind === "question" ? null : approval;
   return (
-    <SessionRequestRegion
-      sessionId={session.id}
-      requestId={approval?.requestId ?? null}
-      runnerOnline={runnerOnline}
-      fallbackFocusRef={fallbackFocusRef}
-      alternateFallbackFocusRef={alternateFallbackFocusRef}
-    >
-      {approval && (
-        <SessionApprovalBanner
-          key={approval.requestId}
-          session={session}
-          runnerOnline={runnerOnline}
-          onSessionUpdate={onSessionUpdate}
-          showKeyHints={showKeyHints}
-        />
+    <>
+      <SessionRequestCoordinator
+        sessionId={session.id}
+        requestId={approval?.requestId ?? null}
+        requestIsQuestion={approval?.kind === "question"}
+        runnerOnline={runnerOnline}
+        fallbackFocusRef={fallbackFocusRef}
+        alternateFallbackFocusRef={alternateFallbackFocusRef}
+      />
+      {standaloneApproval && (
+        <div data-session-request-id={standaloneApproval.requestId} data-session-request-session={session.id}>
+          <SessionApprovalBanner
+            key={standaloneApproval.requestId}
+            session={session}
+            runnerOnline={runnerOnline}
+            onSessionUpdate={onSessionUpdate}
+            showKeyHints={showKeyHints}
+          />
+        </div>
       )}
-    </SessionRequestRegion>
+      {questionFallback && (
+        <div data-session-request-id={approval.requestId} data-session-request-session={session.id}>
+          <SessionQuestionBanner
+            key={approval.requestId}
+            sessionId={session.id}
+            requestId={approval.requestId}
+            questions={approval.questions ?? []}
+            runnerOnline={runnerOnline}
+            onSessionUpdate={onSessionUpdate}
+            showKeyHints={showKeyHints}
+          />
+        </div>
+      )}
+    </>
   );
 }
 
@@ -117,8 +139,6 @@ export function SessionTimelineQuestionRegion({
   eventQuestions,
   eventResolved,
   runnerOnline,
-  fallbackFocusRef,
-  alternateFallbackFocusRef,
   onSessionUpdate,
   showKeyHints = true,
   children,
@@ -128,8 +148,6 @@ export function SessionTimelineQuestionRegion({
   eventQuestions: AgentQuestion[];
   eventResolved: boolean;
   runnerOnline: boolean;
-  fallbackFocusRef: RefObject<HTMLElement>;
-  alternateFallbackFocusRef?: RefObject<HTMLElement>;
   onSessionUpdate?: (session: SessionView) => void;
   showKeyHints?: boolean;
   children: ReactNode;
@@ -139,14 +157,7 @@ export function SessionTimelineQuestionRegion({
     ? session.pendingApproval
     : null;
   return (
-    <SessionRequestRegion
-      sessionId={session.id}
-      requestId={approval?.requestId ?? null}
-      runnerOnline={runnerOnline}
-      fallbackFocusRef={fallbackFocusRef}
-      alternateFallbackFocusRef={alternateFallbackFocusRef}
-      clearQuestionDraftOnExit
-    >
+    <div data-session-request-id={approval?.requestId} data-session-request-session={approval ? session.id : undefined}>
       {approval ? (
         <SessionQuestionBanner
           sessionId={session.id}
@@ -157,38 +168,51 @@ export function SessionTimelineQuestionRegion({
           showKeyHints={showKeyHints}
         />
       ) : children}
-    </SessionRequestRegion>
+    </div>
   );
 }
 
-function SessionRequestRegion({
+function requestRegionFor(element: Element | null): HTMLElement | null {
+  return element?.closest<HTMLElement>("[data-session-request-id]") ?? null;
+}
+
+function enabledRequestControl(sessionId: string, requestId: string): HTMLElement | null {
+  const regions = document.querySelectorAll<HTMLElement>("[data-session-request-id]");
+  const region = [...regions].find((candidate) => candidate.dataset.sessionRequestId === requestId &&
+    candidate.dataset.sessionRequestSession === sessionId);
+  return region?.querySelector<HTMLElement>(
+    'button:not(:disabled):not([aria-disabled="true"]), [role="radio"][tabindex="0"]:not(:disabled):not([aria-disabled="true"]), [role="checkbox"]:not(:disabled):not([aria-disabled="true"]), input:not(:disabled)',
+  ) ?? null;
+}
+
+/** Persistent focus and live-announcement owner for approvals in either presentation. */
+function SessionRequestCoordinator({
   sessionId,
   requestId,
+  requestIsQuestion,
   runnerOnline,
   fallbackFocusRef,
   alternateFallbackFocusRef,
-  clearQuestionDraftOnExit = false,
-  children,
 }: {
   sessionId: string;
   requestId: string | null;
+  requestIsQuestion: boolean;
   runnerOnline: boolean;
   fallbackFocusRef: RefObject<HTMLElement>;
   alternateFallbackFocusRef?: RefObject<HTMLElement>;
-  clearQuestionDraftOnExit?: boolean;
-  children: ReactNode;
 }) {
-  const regionRef = useRef<HTMLDivElement>(null);
-  const focusOwnedRef = useRef(false);
   const previousRequestRef = useRef<string | null>(null);
+  const previousRequestWasQuestionRef = useRef(false);
+  const announcedRequestRef = useRef<string | null>(null);
   const previousRunnerOnlineRef = useRef(runnerOnline);
   const [announcement, setAnnouncement] = useState("");
   const requestWasUnchangedBeforeRender = previousRequestRef.current === requestId;
-  const focusedElementBeforeRender = typeof document !== "undefined"
-    && focusOwnedRef.current
-    && document.activeElement instanceof HTMLElement
-    ? document.activeElement
-    : null;
+  const focusedElementBeforeRender = typeof document !== "undefined" && document.activeElement instanceof HTMLElement
+    ? document.activeElement : null;
+  const focusedRequestBeforeRender = requestRegionFor(focusedElementBeforeRender)?.dataset.sessionRequestId ?? null;
+  const focusedRequestSessionBeforeRender = requestRegionFor(focusedElementBeforeRender)?.dataset.sessionRequestSession ?? null;
+  const ownedFocusBeforeRender = previousRequestRef.current !== null &&
+    focusedRequestBeforeRender === previousRequestRef.current && focusedRequestSessionBeforeRender === sessionId;
   const focusFallback = () => {
     const primary = fallbackFocusRef.current;
     const target = primary && !primary.matches(":disabled") ? primary : alternateFallbackFocusRef?.current;
@@ -196,33 +220,31 @@ function SessionRequestRegion({
   };
 
   useIsomorphicLayoutEffect(() => {
-    if (previousRequestRef.current === requestId) return;
-    const hadFocus = focusOwnedRef.current;
-    const hadRequest = previousRequestRef.current !== null;
-    const focusDestination = approvalFocusDestination(previousRequestRef.current, requestId, hadFocus);
-    if (clearQuestionDraftOnExit && previousRequestRef.current) {
+    const requestChanged = previousRequestRef.current !== requestId;
+    if (requestChanged && previousRequestWasQuestionRef.current && previousRequestRef.current) {
       clearQuestionDrafts(sessionId, previousRequestRef.current);
     }
+    const focusDestination = approvalFocusDestination(previousRequestRef.current, requestId, ownedFocusBeforeRender);
     previousRequestRef.current = requestId;
-    setAnnouncement(requestId ? (hadRequest ? "Agent request updated" : "Agent response required") : "Agent request resolved");
-    if (focusDestination === "request") {
-      const target = regionRef.current?.querySelector<HTMLElement>(
-        'button:not(:disabled):not([aria-disabled="true"]), [role="radio"][tabindex="0"]:not(:disabled):not([aria-disabled="true"]), [role="checkbox"]:not([aria-disabled="true"]), input:not(:disabled)',
-      );
-      if (target) {
-        target.focus();
-        focusOwnedRef.current = true;
-      } else {
-        focusFallback();
-        focusOwnedRef.current = false;
-      }
+    previousRequestWasQuestionRef.current = requestIsQuestion;
+    const activeRegion = requestRegionFor(document.activeElement);
+    const representationMoved = !requestChanged && ownedFocusBeforeRender &&
+      (activeRegion?.dataset.sessionRequestId !== requestId || activeRegion?.dataset.sessionRequestSession !== sessionId);
+    if (focusDestination === "request" || representationMoved) {
+      const target = requestId ? enabledRequestControl(sessionId, requestId) : null;
+      if (target) target.focus();
+      else focusFallback();
       return;
     }
-    if (focusDestination === "fallback") {
-      focusFallback();
-      focusOwnedRef.current = false;
-    }
-  }, [alternateFallbackFocusRef, clearQuestionDraftOnExit, fallbackFocusRef, requestId, sessionId]);
+    if (focusDestination === "fallback") focusFallback();
+  }, [alternateFallbackFocusRef, fallbackFocusRef, ownedFocusBeforeRender, requestId, requestIsQuestion, sessionId]);
+
+  useEffect(() => {
+    if (announcedRequestRef.current === requestId) return;
+    const hadRequest = announcedRequestRef.current !== null;
+    announcedRequestRef.current = requestId;
+    setAnnouncement(requestId ? (hadRequest ? "Agent request updated" : "Agent response required") : "Agent request resolved");
+  }, [requestId]);
 
   useIsomorphicLayoutEffect(() => {
     const wentOffline = previousRunnerOnlineRef.current && !runnerOnline;
@@ -231,23 +253,9 @@ function SessionRequestRegion({
     if (!focusedElementBeforeRender.matches(":disabled")
       && focusedElementBeforeRender.getAttribute("aria-disabled") !== "true") return;
     focusFallback();
-    focusOwnedRef.current = false;
   }, [alternateFallbackFocusRef, fallbackFocusRef, focusedElementBeforeRender, requestWasUnchangedBeforeRender, runnerOnline]);
 
-  return (
-    <div
-      ref={regionRef}
-      onFocusCapture={() => { focusOwnedRef.current = true; }}
-      onBlurCapture={(event) => {
-        if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) {
-          focusOwnedRef.current = false;
-        }
-      }}
-    >
-      <span className="sr-only" role="status" aria-live="polite">{announcement}</span>
-      {children}
-    </div>
-  );
+  return <span className="sr-only" role="status" aria-live="polite">{announcement}</span>;
 }
 
 export function SessionApprovalBanner({

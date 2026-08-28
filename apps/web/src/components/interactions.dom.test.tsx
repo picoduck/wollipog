@@ -5,10 +5,12 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { SessionView } from "@wollipog/protocol";
 import { useCommandPaletteFocus } from "./CommandPalette.js";
-import { SessionApprovalRegion, SessionTimelineQuestionRegion } from "./SessionApproval.js";
+import { EventTimeline } from "./EventTimeline.js";
+import { SessionApprovalRegion } from "./SessionApproval.js";
 import { handleMenuKeyDown, useAccessibleMenu } from "./interactions.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
+(globalThis as typeof globalThis & { React: typeof React }).React = React;
 for (const [name, value] of Object.entries({
   window: domWindow,
   document: domWindow.document,
@@ -178,19 +180,51 @@ function approvalSession(requestId: string | null): SessionView {
 function ApprovalHarness({ requestId, runnerOnline = true }: { requestId: string | null; runnerOnline?: boolean }) {
   const fallbackRef = useRef<HTMLTextAreaElement>(null);
   const session = approvalSession(requestId);
+  const question = (id: string) => [{
+    id: "choice",
+    question: `Choose for ${id}`,
+    multiSelect: false,
+    options: [{ label: "A" }, { label: "B" }],
+  }];
+  const items = requestId === "ask-a"
+    ? [{ kind: "question" as const, id: 1, requestId: "ask-a", questions: question("ask-a") }]
+    : [
+        { kind: "question" as const, id: 1, requestId: "ask-a", questions: question("ask-a"), answered: false, resolutionReason: "replaced" as const },
+        { kind: "question" as const, id: 2, requestId: "ask-b", questions: question("ask-b"),
+          ...(requestId === "ask-b" ? {} : { answered: false, resolutionReason: "dismissed" as const }) },
+      ];
+  return (
+    <>
+      <SessionApprovalRegion
+        session={session}
+        runnerOnline={runnerOnline}
+        fallbackFocusRef={fallbackRef}
+        questionInTimeline={requestId !== null}
+      />
+      <EventTimeline items={items} questionContext={{ session, runnerOnline }} />
+      <textarea ref={fallbackRef} aria-label="Composer" />
+    </>
+  );
+}
+
+function QuestionPresentationHarness({ inTimeline }: { inTimeline: boolean }) {
+  const fallbackRef = useRef<HTMLTextAreaElement>(null);
+  const session = approvalSession("ask-a");
   const questions = session.pendingApproval?.kind === "question" ? session.pendingApproval.questions ?? [] : [];
   return (
     <>
-      <SessionTimelineQuestionRegion
+      <SessionApprovalRegion
         session={session}
-        eventRequestId={requestId ?? "resolved"}
-        eventQuestions={questions}
-        eventResolved={requestId === null}
-        runnerOnline={runnerOnline}
+        runnerOnline
         fallbackFocusRef={fallbackRef}
-      >
-        <div>Historical Question</div>
-      </SessionTimelineQuestionRegion>
+        questionInTimeline={inTimeline}
+      />
+      {inTimeline && (
+        <EventTimeline
+          items={[{ kind: "question", id: 1, requestId: "ask-a", questions }]}
+          questionContext={{ session, runnerOnline: true }}
+        />
+      )}
       <textarea ref={fallbackRef} aria-label="Composer" />
     </>
   );
@@ -282,13 +316,31 @@ test("approval replacement and resolution preserve owned keyboard focus", async 
   const container = happyContainer as unknown as HTMLDivElement;
   const root = createRoot(container);
   await act(async () => { root.render(<ApprovalHarness requestId="ask-a" />); });
+  const liveRegion = container.querySelector('[role="status"]');
   container.querySelector<HTMLElement>('[role="radio"]')!.focus();
 
   await act(async () => { root.render(<ApprovalHarness requestId="ask-b" />); });
+  assert.equal(container.querySelector('[role="status"]'), liveRegion, "the live region remains mounted across row replacement");
+  assert.equal(liveRegion?.textContent, "Agent request updated");
   assert.equal(domWindow.document.activeElement?.textContent?.replace(/\s+/g, " ").trim(), "Dismiss D");
 
   await act(async () => { root.render(<ApprovalHarness requestId={null} />); });
   assert.equal(domWindow.document.activeElement?.getAttribute("aria-label"), "Composer");
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("question focus follows the same request from its loading fallback into the timeline", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  await act(async () => { root.render(<QuestionPresentationHarness inTimeline={false} />); });
+  container.querySelector<HTMLElement>('[role="radio"]')!.focus();
+
+  await act(async () => { root.render(<QuestionPresentationHarness inTimeline />); });
+  assert.equal(domWindow.document.activeElement?.closest("[data-session-request-id]")?.getAttribute("data-session-request-id"), "ask-a");
+  assert.equal(container.querySelectorAll('[aria-label="Agent Questions"]').length, 1);
   await act(async () => { root.unmount(); });
   container.remove();
 });

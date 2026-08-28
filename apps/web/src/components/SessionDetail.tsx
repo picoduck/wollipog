@@ -1863,11 +1863,11 @@ function SessionDetailLoaded({
   const timelineQuestionContext = useMemo(() => ({
     session,
     runnerOnline,
-    fallbackFocusRef: mode === "expanded" ? inputRef : scrollRef,
-    alternateFallbackFocusRef: mode === "expanded" ? scrollRef : undefined,
     onSessionUpdate: loadSession,
     showKeyHints: !isMobile,
-  }), [isMobile, loadSession, mode, runnerOnline, session]);
+  }), [isMobile, loadSession, runnerOnline, session]);
+  const questionInTimeline = session.pendingApproval?.kind !== "question" || items.some((item) =>
+    item.kind === "question" && item.requestId === session.pendingApproval?.requestId);
   const working =
     showOptimistic || (!terminal && (session.status === "running" || session.status === "starting"));
   // The merged Working row must also survive approval/question waits: the projector keeps
@@ -2520,6 +2520,7 @@ function SessionDetailLoaded({
             alternateFallbackFocusRef={mode === "expanded" ? scrollRef : undefined}
             onSessionUpdate={loadSession}
             showKeyHints={!isMobile}
+            questionInTimeline={questionInTimeline}
           />
           {mode === "expanded" && (
             <GovernanceAuditTrail

@@ -45,8 +45,6 @@ export interface TimelineRevealTarget {
 export interface TimelineQuestionContext {
   session: SessionView;
   runnerOnline: boolean;
-  fallbackFocusRef: RefObject<HTMLElement>;
-  alternateFallbackFocusRef?: RefObject<HTMLElement>;
   onSessionUpdate?: (session: SessionView) => void;
   showKeyHints?: boolean;
 }
@@ -69,10 +67,12 @@ export const estimateTimelineRow = (row: TimelineRenderRow): number => {
     case "agent_thought": return 72;
     case "user_message": return 72;
     case "file_edit": return 120;
-    case "question": return 112 + row.item.questions.reduce(
-      (height, question) => height + 64 + question.options.length * 44 + (question.allowOther ? 44 : 0),
-      0,
-    );
+    case "question":
+      if (row.item.answered !== undefined) return 52;
+      return 112 + row.item.questions.reduce(
+        (height, question) => height + 64 + question.options.length * 44 + (question.allowOther ? 44 : 0),
+        0,
+      );
     case "command_output":
     case "stderr": return 96;
     case "tool_call": return 72;
@@ -217,6 +217,12 @@ function EventTimelineBody({
   const [disclosure, setDisclosure] = useState<Map<string, boolean>>(() => new Map());
   const projection = useMemo(() => projector.current!.project(items, disclosure), [items, disclosure]);
   const { latestCheckpointTurn, rows } = projection;
+  const pendingQuestionRequestId = questionContext?.session.pendingApproval?.kind === "question"
+    ? questionContext.session.pendingApproval.requestId
+    : null;
+  const pinnedQuestionRow = pendingQuestionRequestId === null ? undefined : rows.find((row) =>
+    row.kind === "item" && row.item.kind === "question" &&
+    row.item.requestId === pendingQuestionRequestId && row.item.answered === undefined);
   const revealTarget = revealRequest == null
     ? null
     : projector.current.resolveRevealTarget(revealRequest.eventId);
@@ -318,6 +324,7 @@ function EventTimelineBody({
       scrollRef={scrollRef}
       estimateSize={estimateTimelineRow}
       overscan={8}
+      pinnedKey={pinnedQuestionRow?.key ?? null}
       rowGap={12}
       className="timeline"
       ariaLabel={ariaLabel}
@@ -1700,8 +1707,6 @@ const TimelineRow = memo(function TimelineRow({
           eventQuestions={item.questions}
           eventResolved={item.answered !== undefined}
           runnerOnline={questionContext.runnerOnline}
-          fallbackFocusRef={questionContext.fallbackFocusRef}
-          alternateFallbackFocusRef={questionContext.alternateFallbackFocusRef}
           onSessionUpdate={questionContext.onSessionUpdate}
           showKeyHints={questionContext.showKeyHints}
         >

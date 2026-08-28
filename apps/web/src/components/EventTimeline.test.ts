@@ -35,6 +35,13 @@ test("timeline row estimates include timestamp header lines", () => {
   assert.equal(estimateTimelineRow({ kind: "item", key: "thought", item: thought, inWork: true, depth: 0 }), 72);
   assert.equal(estimateTimelineRow({ kind: "subagent_summary", key: "agent", tool, depth: 0, open: false }), 52);
   assert.equal(estimateTimelineRow({ kind: "work_summary", key: "work", tools: 1, edits: 0, thoughts: 0, open: false }), 32);
+  const question = { kind: "question" as const, id: 3, requestId: "ask", questions: [{
+    id: "choice", question: "Pick one", options: [{ label: "A" }, { label: "B" }],
+  }] };
+  assert.equal(estimateTimelineRow({ kind: "item", key: "question", item: question, inWork: false, depth: 0 }), 264);
+  assert.equal(estimateTimelineRow({
+    kind: "item", key: "answered-question", item: { ...question, answered: true }, inWork: false, depth: 0,
+  }), 52);
 });
 
 test("semantic reveal resolution opens a collapsed work group without exposing virtual keys", () => {
@@ -151,7 +158,6 @@ test("the pending question replaces its matching timeline card without a duplica
     questionContext: {
       session,
       runnerOnline: true,
-      fallbackFocusRef: React.createRef<HTMLElement>(),
     },
   }));
 
@@ -188,7 +194,6 @@ test("a resolved question keeps one compact outcome card at the same timeline ro
     questionContext: {
       session,
       runnerOnline: true,
-      fallbackFocusRef: React.createRef<HTMLElement>(),
     },
   }));
 

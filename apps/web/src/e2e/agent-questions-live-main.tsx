@@ -5,6 +5,7 @@ import { createApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { createBrowserApiTransport } from "../api-transport.js";
 import { EventTimeline } from "../components/EventTimeline.js";
+import { SessionApprovalRegion } from "../components/SessionApproval.js";
 import type { TimelineItem } from "../timeline.js";
 import "../styles.css";
 
@@ -64,6 +65,15 @@ function LiveQuestionFixture() {
         ) : (
           <div className="detail-columns">
             <div className="detail-chat">
+              <SessionApprovalRegion
+                session={session}
+                runnerOnline
+                fallbackFocusRef={fallbackFocusRef}
+                alternateFallbackFocusRef={scrollRef}
+                onSessionUpdate={setSession}
+                showKeyHints={false}
+                questionInTimeline={timelineItems.length > 0}
+              />
               <div className="detail-main">
                 <div className="detail-reader">
                   <div className="detail-scroll" ref={scrollRef} tabIndex={0}>
@@ -75,8 +85,6 @@ function LiveQuestionFixture() {
                         questionContext={{
                           session,
                           runnerOnline: true,
-                          fallbackFocusRef,
-                          alternateFallbackFocusRef: scrollRef,
                           onSessionUpdate: setSession,
                           showKeyHints: false,
                         }}

@@ -36,6 +36,32 @@ test("the standalone approval slot does not render structured questions", () => 
   assert.doesNotMatch(html, /Which language\?/);
 });
 
+test("the standalone approval slot keeps a pending question reachable until its timeline row loads", () => {
+  const session = {
+    id: "session-1",
+    runnerId: "runner-1",
+    title: "Session",
+    status: "input_required",
+    pendingApproval: {
+      kind: "question",
+      requestId: "ask-1",
+      title: "Agent Questions",
+      options: [],
+      questions: [{ id: "language", question: "Which language?", options: [{ label: "TypeScript" }] }],
+    },
+  } as SessionView;
+  const html = renderToStaticMarkup(React.createElement(SessionApprovalRegion, {
+    session,
+    runnerOnline: true,
+    fallbackFocusRef: React.createRef<HTMLElement>(),
+    questionInTimeline: false,
+  }));
+
+  assert.match(html, /aria-label="Agent Questions"/);
+  assert.match(html, /Which language\?/);
+  assert.equal((html.match(/Agent Questions/g) ?? []).length, 1);
+});
+
 test("question choices expose labelled radio and checkbox semantics with one radio tab stop", () => {
   const html = renderToStaticMarkup(React.createElement(SessionQuestionBanner, {
     sessionId: "s1",
