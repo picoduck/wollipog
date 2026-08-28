@@ -263,10 +263,22 @@ test("POST /api/runners/:id/skills/sync gates offline and capability, persists t
   assert.equal(view.json().desired[0].name, "alpha-skill");
   assert.equal(view.json().desired[0].files, undefined, "the listing omits file contents");
   assert.equal(view.json().reported.deployed[0].name, "alpha-skill");
+  assert.equal(view.json().removalReporting, "unsupported",
+    "a pre-v96 runner is explicitly distinguished from an empty compatible history");
   assert.deepEqual(view.json().reported.removals, [{
     path: "~/.claude/skills/retired",
     reason: "No longer in the desired skill list.",
   }]);
+
+  db.registerRunner(runnerMeta("runner-v96-empty-history"), 30, 96);
+  const compatibleEmpty = await app.inject({
+    method: "GET",
+    url: "/api/runners/runner-v96-empty-history/skills",
+  });
+  assert.equal(compatibleEmpty.statusCode, 200);
+  assert.equal(compatibleEmpty.json().removalReporting, "supported");
+  assert.equal(compatibleEmpty.json().reported, null,
+    "support is visible even before the runner records its first removal event");
 
   stubRequest(async () => { throw new RunnerRequestTimeoutError(); });
   const timedOut = await app.inject({ method: "POST", url: "/api/runners/runner-1/skills/sync" });

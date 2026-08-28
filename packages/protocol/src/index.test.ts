@@ -550,6 +550,8 @@ test("runner command capability gates fail closed for unknown/old protocols", ()
   assert.equal(runnerSupportsProtocol(94, "sessionCustomModelNaming"), true);
   assert.equal(runnerSupportsProtocol(94, "sessionNamingTargets"), false);
   assert.equal(runnerSupportsProtocol(95, "sessionNamingTargets"), true);
+  assert.equal(runnerSupportsProtocol(95, "skillLinkRemovalReporting"), false);
+  assert.equal(runnerSupportsProtocol(96, "skillLinkRemovalReporting"), true);
   assert.equal(runnerSupportsProtocol(Number.NaN, "externalSessions"), false);
   assert.equal(runnerSupportsProtocol(6.5, "externalSessions"), false);
   assert.match(runnerCapabilityRequirement(null, "sessionFiles", "Files"), /unknown.*requires protocol v16/i);

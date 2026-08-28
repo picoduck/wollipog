@@ -44,7 +44,7 @@ const runner: RunnerView = {
   workspaces: [],
   connectedAt: 1,
   lastSeen: 1,
-  protocolVersion: 90,
+  protocolVersion: 96,
 };
 
 class FakeSocket implements UiSocket {
@@ -79,6 +79,7 @@ const settle = async () => {
 test("SkillsView lists skills, opens a detail with assignments and deployment, and syncs a machine", async () => {
   const skillMd = "---\nname: code-review\ndescription: Reviews code\n---\n\nAlways review the diff.\n";
   const runnerSkills: RunnerSkillsResponse = {
+    removalReporting: "supported",
     desired: [{ name: "code-review", versionDigest: "d1", targets: [{ agentId: "claude", invocation: "agent" }] }],
     reported: {
       deployed: [{ name: "code-review", digest: "d1", links: [{ agentId: "claude", status: "linked" }] }],
@@ -87,6 +88,7 @@ test("SkillsView lists skills, opens a detail with assignments and deployment, a
         path: "~/.codex/skills/retired-skill",
         reason: "No longer in the desired skill list.",
       }],
+      removalsUpdatedAt: 1_699_999_000_000,
       updatedAt: 1_700_000_000_000,
     },
   };
@@ -178,14 +180,37 @@ test("SkillsView lists skills, opens a detail with assignments and deployment, a
   assert.match(pageText(), /Recent Link Removals/);
   assert.match(pageText(), /~\/\.codex\/skills\/retired-skill/);
   assert.match(pageText(), /No longer in the desired skill list\./);
-  assert.match(pageText(), new RegExp(new Date(1_700_000_000_000).toLocaleString().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  const removalHistoryText = container.querySelector(".skills-removals")?.textContent ?? "";
+  assert.match(removalHistoryText, new RegExp(new Date(1_699_999_000_000).toLocaleString().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.doesNotMatch(
+    removalHistoryText,
+    new RegExp(new Date(1_700_000_000_000).toLocaleString().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+    "removal history displays its event timestamp rather than the newer inventory timestamp",
+  );
 
   const sync = [...container.querySelectorAll<HTMLButtonElement>("button")]
     .find((candidate) => candidate.textContent?.trim() === "Sync Now");
   assert.ok(sync, "each machine offers Sync Now");
+
+  runnerSkills.removalReporting = "unsupported";
   await act(async () => { sync!.click(); });
   await act(settle);
-  assert.deepEqual(syncedRunnerIds, ["runner-1"]);
+  assert.match(pageText(), /cannot report new managed link removals/);
+  assert.match(pageText(), /~\/\.codex\/skills\/retired-skill/,
+    "a rollback runner does not hide the last event it reported before rollback");
+
+  runnerSkills.removalReporting = "supported";
+  runnerSkills.reported = { ...runnerSkills.reported!, removals: [] };
+  await act(async () => { sync!.click(); });
+  await act(settle);
+  assert.match(pageText(), /No managed link removals have been reported/);
+
+  delete runnerSkills.removalReporting;
+  await act(async () => { sync!.click(); });
+  await act(settle);
+  assert.equal(container.querySelector(".skills-removals"), null,
+    "an older control plane that omits capability state never becomes a false empty-history claim");
+  assert.deepEqual(syncedRunnerIds, ["runner-1", "runner-1", "runner-1"]);
 
   // The New Skill dialog opens with a template whose frontmatter is prefilled.
   const newSkill = [...container.querySelectorAll<HTMLButtonElement>("button")]

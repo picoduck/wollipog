@@ -163,7 +163,7 @@ test("skill assignments CRUD and per-runner scope filtering", () => {
   assert.equal(db.listSkillAssignments(skill.id).length, 1);
 });
 
-test("runner skill state persists as an authoritative full replacement", () => {
+test("runner skill inventory replaces fully while latest non-empty removal history persists", () => {
   const db = ControlPlaneDb.open(":memory:");
   assert.equal(db.getRunnerSkillState("runner-1"), null);
   db.setRunnerSkillState("runner-1", {
