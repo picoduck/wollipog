@@ -329,6 +329,64 @@ export class Hub {
     }
   }
 
+  /** Send one bounded runner frame and wait until the WebSocket implementation has flushed it.
+   * High-volume protocols use this instead of synchronously enqueueing an aggregate catalog. */
+  sendToRunnerAndWait(
+    runnerId: string,
+    msg: ControlPlaneToRunner,
+    maxBufferedBytes: number,
+    timeoutMs = 30_000,
+  ): Promise<boolean> {
+    const socket = this.runnerSockets.get(runnerId);
+    if (!socket) return Promise.resolve(false);
+    const data = JSON.stringify(msg);
+    const bytes = Buffer.byteLength(data, "utf8");
+    if ((socket.bufferedAmount ?? 0) + bytes > maxBufferedBytes) return Promise.resolve(false);
+    // Narrow synchronous test doubles have no delivery callback. Preserve their established
+    // behavior while production runner sockets take the flow-controlled callback path below.
+    if (!socket.asyncDelivery) return Promise.resolve(this.sendToRunner(runnerId, msg));
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (value: boolean): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      };
+      const timer = setTimeout(() => {
+        try {
+          if (socket.terminate) socket.terminate();
+          else socket.close?.(1013, "runner send timed out");
+        } catch { /* timeout still releases the caller's retained frame */ }
+        finish(false);
+      }, Math.max(1, timeoutMs));
+      timer.unref?.();
+      try {
+        socket.send(data, (error) => {
+          if (!error) {
+            finish(this.runnerSockets.get(runnerId) === socket);
+            return;
+          }
+          try {
+            if (socket.close) socket.close(1011, "runner send failed");
+            else socket.terminate?.();
+          } catch {
+            try { socket.terminate?.(); } catch { /* best-effort shared close path */ }
+          }
+          finish(false);
+        });
+      } catch {
+        try {
+          if (socket.close) socket.close(1011, "runner send failed");
+          else socket.terminate?.();
+        } catch {
+          try { socket.terminate?.(); } catch { /* best-effort shared close path */ }
+        }
+        finish(false);
+      }
+    });
+  }
+
   /**
    * Send a request that expects a correlated reply (e.g. a git action) and await
    * it. `msg.requestId` must match the id the runner echoes in its result.

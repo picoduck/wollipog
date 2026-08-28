@@ -216,7 +216,16 @@ function assignmentRank(assignment: SkillAssignmentView): number {
  * assignment created in one organization would fan out to every other organization's runners.
  * Missing ownership rows fail closed on both sides.
  */
-export function resolveDesiredSkills(db: ControlPlaneDb, runnerId: string): SkillSyncEntry[] {
+export interface DesiredSkillSnapshotEntry extends Omit<SkillSyncEntry, "files"> {
+  /** Immutable version row used to load one requested payload lazily after manifest negotiation. */
+  versionId: string;
+}
+
+/** Resolve authoritative targeting without parsing every version's file JSON into memory. */
+export function resolveDesiredSkillSnapshot(
+  db: ControlPlaneDb,
+  runnerId: string,
+): DesiredSkillSnapshotEntry[] {
   const runner = db.getRunner(runnerId);
   if (!runner) return [];
   const runnerScope = db.runnerScope(runnerId);
@@ -228,14 +237,12 @@ export function resolveDesiredSkills(db: ControlPlaneDb, runnerId: string): Skil
     list.push(assignment);
     bySkill.set(assignment.skillId, list);
   }
-  const entries: SkillSyncEntry[] = [];
+  const entries: DesiredSkillSnapshotEntry[] = [];
   for (const [skillId, assignments] of bySkill) {
     const skill = db.getSkill(skillId);
     if (!skill?.latestVersion) continue;
     const skillScope = db.skillScope(skillId);
     if (!skillScope || !db.scopeAudienceContainedWithMembership(skillScope, runnerScope)) continue;
-    const version = db.getSkillVersion(skill.latestVersion.id);
-    if (!version) continue;
     const targets: SkillSyncTarget[] = [];
     for (const agent of eligibleAgents) {
       const winner = assignments
@@ -253,12 +260,26 @@ export function resolveDesiredSkills(db: ControlPlaneDb, runnerId: string): Skil
     if (!desired) continue;
     entries.push({
       name: skill.name,
-      versionDigest: version.digest,
-      files: version.files,
+      versionId: skill.latestVersion.id,
+      versionDigest: skill.latestVersion.digest,
       targets,
     });
   }
   return entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+}
+
+export function resolveDesiredSkills(db: ControlPlaneDb, runnerId: string): SkillSyncEntry[] {
+  const entries: SkillSyncEntry[] = [];
+  for (const snapshot of resolveDesiredSkillSnapshot(db, runnerId)) {
+    const version = db.getSkillVersion(snapshot.versionId);
+    // Versions are immutable, but a concurrent library deletion can remove the row after the
+    // targeting snapshot. Fail closed by omitting that skill from this freshly resolved legacy
+    // payload; v96 delivery retains the snapshot and aborts if a requested row disappears.
+    if (!version || version.digest !== snapshot.versionDigest) continue;
+    const { versionId: _versionId, ...entry } = snapshot;
+    entries.push({ ...entry, files: version.files });
+  }
+  return entries;
 }
 
 /**

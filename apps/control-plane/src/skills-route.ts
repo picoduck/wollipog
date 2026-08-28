@@ -8,6 +8,7 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
+  SKILL_MAX_TOTAL_BYTES,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
   type ResourceScope,
@@ -27,6 +28,7 @@ import type { RunnerRequestResult } from "./hub.js";
 import type { HumanPrincipal, AuthPrincipal } from "./identity.js";
 import {
   parseSkillAgentSelector,
+  resolveDesiredSkillSnapshot,
   resolveDesiredSkills,
   SKILLS_SYNC_MAX_TOTAL_BYTES,
   skillsSyncMessageBytes,
@@ -34,7 +36,8 @@ import {
 } from "./skills.js";
 
 /** The narrow hub surface the skill routes need (mockable in tests). */
-export type SkillsHub = Pick<Hub, "isRunnerOnline" | "sendToRunner" | "requestFromRunner">;
+export type SkillsHub = Pick<Hub, "isRunnerOnline" | "sendToRunner" | "requestFromRunner"> &
+  Partial<Pick<Hub, "sendToRunnerAndWait">>;
 
 export interface SkillsLog {
   debug(message: string): void;
@@ -51,7 +54,7 @@ const NOOP_LOG: SkillsLog = { debug: () => {}, warn: () => {}, error: () => {} }
  */
 export interface SkillsSyncPusher {
   (runnerId: string): void;
-  handleNeed(message: SkillsSyncNeedMessage): void;
+  handleNeed(message: SkillsSyncNeedMessage): Promise<void>;
   request(runnerId: string, requestId: string): Promise<RunnerRequestResult>;
 }
 
@@ -67,9 +70,15 @@ interface PendingSkillsDelivery {
   runnerId: string;
   syncId: string;
   requestId?: string;
-  skills: ReturnType<typeof resolveDesiredSkills>;
+  skills: ReturnType<typeof resolveDesiredSkillSnapshot>;
+  sending: boolean;
   timer: ReturnType<typeof setTimeout>;
 }
+
+/** One independently bounded skill frame plus ordinary runner traffic may be queued at once.
+ * JSON escaping can expand the 2 MiB decoded skill payload, so reserve its strict worst-case
+ * expansion without allowing aggregate catalog size to affect the transport bound. */
+export const SKILLS_SYNC_MAX_BUFFERED_BYTES = SKILL_MAX_TOTAL_BYTES * 6 + 1024 * 1024;
 
 export function makeSkillsSyncPusher(deps: {
   db: ControlPlaneDb;
@@ -82,6 +91,10 @@ export function makeSkillsSyncPusher(deps: {
   const deliveryTtlMs = deps.deliveryTtlMs ?? 30_000;
   const pending = new Map<string, PendingSkillsDelivery>();
   const pendingByRunner = new Map<string, string>();
+  const sendBounded = (runnerId: string, message: Parameters<Hub["sendToRunner"]>[1]): Promise<boolean> =>
+    deps.hub.sendToRunnerAndWait
+      ? deps.hub.sendToRunnerAndWait(runnerId, message, SKILLS_SYNC_MAX_BUFFERED_BYTES, deliveryTtlMs)
+      : Promise.resolve(deps.hub.sendToRunner(runnerId, message));
 
   const forget = (delivery: PendingSkillsDelivery): void => {
     clearTimeout(delivery.timer);
@@ -89,10 +102,11 @@ export function makeSkillsSyncPusher(deps: {
     if (pendingByRunner.get(delivery.runnerId) === delivery.syncId) pendingByRunner.delete(delivery.runnerId);
   };
   const begin = (runnerId: string, requestId?: string): SkillsSyncMessage | SkillsSyncManifestMessage => {
-    const skills = resolveDesiredSkills(deps.db, runnerId);
     if (!runnerSupportsProtocol(deps.db.getRunner(runnerId)?.protocolVersion, "chunkedAgentSkills")) {
+      const skills = resolveDesiredSkills(deps.db, runnerId);
       return { type: "skills_sync", runnerId, ...(requestId ? { requestId } : {}), skills };
     }
+    const skills = resolveDesiredSkillSnapshot(deps.db, runnerId);
     let effectiveRequestId = requestId;
     const priorId = pendingByRunner.get(runnerId);
     if (priorId) {
@@ -111,6 +125,7 @@ export function makeSkillsSyncPusher(deps: {
       syncId,
       ...(effectiveRequestId ? { requestId: effectiveRequestId } : {}),
       skills,
+      sending: false,
       timer: undefined as unknown as ReturnType<typeof setTimeout>,
     };
     delivery.timer = setTimeout(() => {
@@ -125,7 +140,7 @@ export function makeSkillsSyncPusher(deps: {
       runnerId,
       syncId,
       ...(effectiveRequestId ? { requestId: effectiveRequestId } : {}),
-      skills: skills.map(({ files: _files, ...entry }) => entry),
+      skills: skills.map(({ versionId: _versionId, ...entry }) => entry),
     };
   };
 
@@ -159,16 +174,21 @@ export function makeSkillsSyncPusher(deps: {
     }
   }) as SkillsSyncPusher;
 
-  push.handleNeed = (message: SkillsSyncNeedMessage): void => {
+  push.handleNeed = async (message: SkillsSyncNeedMessage): Promise<void> => {
     const delivery = pending.get(message.syncId);
     if (!delivery || delivery.runnerId !== message.runnerId || !Array.isArray(message.missing)) {
       log.warn(`ignored stale or invalid skills content request from ${message.runnerId}`);
+      return;
+    }
+    if (delivery.sending) {
+      log.warn(`ignored duplicate skills content request from ${message.runnerId}`);
       return;
     }
     const desired = new Map<string, PendingSkillsDelivery["skills"][number]>(
       delivery.skills.map((entry) => [`${entry.name}\0${entry.versionDigest}`, entry] as const),
     );
     const requested = new Set<string>();
+    const requestedEntries: PendingSkillsDelivery["skills"] = [];
     for (const missing of message.missing) {
       const key = `${missing?.name}\0${missing?.versionDigest}`;
       const entry = desired.get(key);
@@ -178,26 +198,51 @@ export function makeSkillsSyncPusher(deps: {
         return;
       }
       requested.add(key);
-      const content: SkillsSyncContentMessage = {
-        type: "skills_sync_content",
+      requestedEntries.push(entry);
+    }
+    delivery.sending = true;
+    try {
+      for (const entry of requestedEntries) {
+        if (pending.get(delivery.syncId) !== delivery) return;
+        const version = deps.db.getSkillVersion(entry.versionId);
+        if (!version || version.digest !== entry.versionDigest) {
+          log.warn(`skills content delivery to ${message.runnerId} lost its immutable version snapshot`);
+          forget(delivery);
+          return;
+        }
+        const content: SkillsSyncContentMessage = {
+          type: "skills_sync_content",
+          runnerId: message.runnerId,
+          syncId: message.syncId,
+          name: entry.name,
+          versionDigest: entry.versionDigest,
+          files: version.files,
+        };
+        const sent = await sendBounded(message.runnerId, content);
+        if (pending.get(delivery.syncId) !== delivery) return;
+        if (!sent) {
+          log.warn(`skills content delivery to ${message.runnerId} was interrupted or exceeded its buffer bound`);
+          forget(delivery);
+          return;
+        }
+      }
+      const completed = await sendBounded(message.runnerId, {
+        type: "skills_sync_complete",
         runnerId: message.runnerId,
         syncId: message.syncId,
-        name: entry.name,
-        versionDigest: entry.versionDigest,
-        files: entry.files,
-      };
-      if (!deps.hub.sendToRunner(message.runnerId, content)) {
-        log.warn(`skills content delivery to ${message.runnerId} was interrupted`);
-        forget(delivery);
-        return;
+      });
+      if (pending.get(delivery.syncId) !== delivery) return;
+      if (!completed) {
+        log.warn(`skills completion delivery to ${message.runnerId} was interrupted`);
       }
+      forget(delivery);
+    } catch (error) {
+      if (pending.get(delivery.syncId) === delivery) forget(delivery);
+      log.warn(
+        `skills content delivery to ${message.runnerId} failed: ` +
+          `${error instanceof Error ? error.message : "unknown error"}`,
+      );
     }
-    deps.hub.sendToRunner(message.runnerId, {
-      type: "skills_sync_complete",
-      runnerId: message.runnerId,
-      syncId: message.syncId,
-    });
-    forget(delivery);
   };
 
   push.request = async (runnerId: string, requestId: string): Promise<RunnerRequestResult> => {
@@ -212,7 +257,10 @@ export function makeSkillsSyncPusher(deps: {
       return await deps.hub.requestFromRunner(runnerId, requestId, message);
     } catch (error) {
       if (message.type === "skills_sync_manifest") {
-        const delivery = pending.get(message.syncId);
+        const original = pending.get(message.syncId);
+        const currentId = pendingByRunner.get(runnerId);
+        const current = currentId ? pending.get(currentId) : undefined;
+        const delivery = original ?? (current?.requestId === requestId ? current : undefined);
         if (delivery) forget(delivery);
       }
       throw error;

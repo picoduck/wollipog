@@ -20,6 +20,7 @@ import type { AgentDefinition, SkillFile, SkillSyncEntry, SkillSyncTarget } from
 import { skillVersionDigest } from "@wollipog/protocol/skills-digest";
 import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
 import {
+  cacheSkillSyncEntry,
   SKILL_SCAN_LIMITS,
   linkManifestPath,
   parseSkillFrontmatter,
@@ -178,6 +179,26 @@ test("reconcile materializes verified versions and links every harness through t
     assert.equal(linkTarget(join(roots.home, ".codex", "skills", "alpha")), canonicalPath);
     assert.equal(realpathSync(join(roots.home, ".claude", "skills", "alpha")), agentDir);
     assert.equal(realpathSync(join(roots.home, ".codex", "skills", "alpha")), agentDir);
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("chunked content is validated and cached immediately with the shared manual-variant policy", () => {
+  const roots = makeRoots();
+  try {
+    const alpha = entry("alpha", [{ agentId: claudeAgent.id, invocation: "manual" }]);
+    cacheSkillSyncEntry(roots.dataDir, agents, alpha);
+    const store = realpathSync(skillsStoreRoot(roots.dataDir));
+    assert.equal(existsSync(join(store, "alpha", alpha.versionDigest, "SKILL.md")), true);
+    assert.match(
+      readFileSync(join(store, "alpha", `${alpha.versionDigest}-manual`, "SKILL.md"), "utf8"),
+      /disable-model-invocation: true/,
+    );
+    assert.throws(
+      () => cacheSkillSyncEntry(roots.dataDir, agents, { ...alpha, versionDigest: "f".repeat(64) }),
+      /version digest does not match/,
+    );
   } finally {
     rmSync(roots.root, { recursive: true, force: true });
   }
