@@ -1676,17 +1676,17 @@ textarea {
   position: relative;
   display: inline-flex;
   align-items: center;
-  /* Yield before the authoritative status cluster or trailing actions. Font metrics differ
-     across platforms, so a fixed-width Project crumb can otherwise overflow the unified bar
-     even when the Session title has already collapsed. */
-  flex: 0 1 220px;
+  /* Size short Projects to their content, but keep the crumb shrinkable: authoritative statuses
+     and trailing actions win when font metrics or available width put the unified bar under
+     pressure. */
+  flex: 0 1 auto;
   max-width: 220px;
   min-width: 0;
 }
 .crumb-project > .cctx-item {
-  width: 100%;
   min-width: 0;
   max-width: 100%;
+  text-overflow: ellipsis;
 }
 .crumb-project-actions {
   position: absolute;
