@@ -14,6 +14,7 @@ import {
   describeAssignmentScope,
   groupSkillList,
   invocationLabel,
+  normalizeRemovalReporting,
   reportedSkillLinkRemovals,
   reportedUnmanagedSkills,
   skillAssignmentsFromPayload,
@@ -298,7 +299,11 @@ export function SkillsView() {
   const refreshMachines = useCallback(async () => {
     const loaded = await Promise.all(runners.map(async (runner) => {
       try {
-        return [runner.runnerId, await api.runnerSkills(runner.runnerId)] as const;
+        const response = await api.runnerSkills(runner.runnerId);
+        return [runner.runnerId, {
+          ...response,
+          removalReporting: normalizeRemovalReporting(response.removalReporting),
+        } satisfies RunnerSkillsResponse] as const;
       } catch {
         // A machine that predates the skills routes reads as never reported rather than an error
         // banner over the whole view.

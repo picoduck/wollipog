@@ -93,6 +93,7 @@ test("SkillsView lists skills, opens a detail with assignments and deployment, a
     },
   };
   const syncedRunnerIds: string[] = [];
+  let machineRefresh: Promise<RunnerSkillsResponse> | null = null;
   const client = {
     ...api,
     listSkills: async () => ({ skills: [{
@@ -117,7 +118,7 @@ test("SkillsView lists skills, opens a detail with assignments and deployment, a
       id: "assignment-1", skillId: "skill-1", scopeKind: "instance" as const,
       agentSelector: { kind: "all" as const }, enabled: true, invocation: "agent" as const,
     }] }),
-    runnerSkills: async () => runnerSkills,
+    runnerSkills: async () => machineRefresh ?? runnerSkills,
     syncRunnerSkills: async (runnerId: string) => {
       syncedRunnerIds.push(runnerId);
       return runnerSkills.reported!;
@@ -192,8 +193,25 @@ test("SkillsView lists skills, opens a detail with assignments and deployment, a
     .find((candidate) => candidate.textContent?.trim() === "Sync Now");
   assert.ok(sync, "each machine offers Sync Now");
 
+  let resolveMachineRefresh!: (response: RunnerSkillsResponse) => void;
+  machineRefresh = new Promise((resolve) => { resolveMachineRefresh = resolve; });
   runnerSkills.removalReporting = "unsupported";
-  await act(async () => { sync!.click(); });
+  await act(async () => {
+    sync!.click();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  assert.equal(sync!.textContent?.trim(), "Syncing…");
+  assert.doesNotMatch(pageText(), /cannot report new managed link removals/,
+    "manual sync preserves the last known capability while its inventory refresh is pending");
+  assert.match(pageText(), /~\/\.codex\/skills\/retired-skill/,
+    "the last removal event remains visible during the pending refresh");
+  await act(async () => {
+    resolveMachineRefresh(runnerSkills);
+    await machineRefresh;
+    await Promise.resolve();
+  });
+  machineRefresh = null;
   await act(settle);
   assert.match(pageText(), /cannot report new managed link removals/);
   assert.match(pageText(), /~\/\.codex\/skills\/retired-skill/,
@@ -205,12 +223,18 @@ test("SkillsView lists skills, opens a detail with assignments and deployment, a
   await act(settle);
   assert.match(pageText(), /No managed link removals have been reported/);
 
+  runnerSkills.removalReporting = "future-value" as never;
+  await act(async () => { sync!.click(); });
+  await act(settle);
+  assert.equal(container.querySelector(".skills-removals"), null,
+    "an unknown future capability value degrades to the explicit unknown state");
+
   delete runnerSkills.removalReporting;
   await act(async () => { sync!.click(); });
   await act(settle);
   assert.equal(container.querySelector(".skills-removals"), null,
     "an older control plane that omits capability state never becomes a false empty-history claim");
-  assert.deepEqual(syncedRunnerIds, ["runner-1", "runner-1", "runner-1"]);
+  assert.deepEqual(syncedRunnerIds, ["runner-1", "runner-1", "runner-1", "runner-1"]);
 
   // The New Skill dialog opens with a template whose frontmatter is prefilled.
   const newSkill = [...container.querySelectorAll<HTMLButtonElement>("button")]
