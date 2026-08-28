@@ -874,7 +874,6 @@ function gcStore(
       continue;
     }
     const stale: { name: string; key: string; path: string; since: number }[] = [];
-    let protectedStaleCount = 0;
     for (const version of versions) {
       // A symlinked version entry is never ours; skip it rather than delete through it.
       if (version.isSymbolicLink()) continue;
@@ -892,7 +891,6 @@ function gcStore(
         continue;
       }
       if (policy.protectedVersions?.has(key)) {
-        protectedStaleCount += 1;
         state.entries.delete(key);
         continue;
       }
@@ -911,7 +909,7 @@ function gcStore(
         return false;
       }
     }).sort((a, b) => a.since - b.since || a.name.localeCompare(b.name));
-    const unlinkedAllowance = Math.max(0, MAX_RETAINED_STALE_SKILL_VERSIONS - protectedStaleCount);
+    const unlinkedAllowance = MAX_RETAINED_STALE_SKILL_VERSIONS;
     const forced = new Set(safeStale.slice(0, Math.max(0, safeStale.length - unlinkedAllowance)));
     for (const candidate of safeStale) {
       const threshold = want === undefined ? policy.removedSkillMs : policy.previousVersionMs;

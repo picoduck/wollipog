@@ -1355,6 +1355,55 @@ test("contended GC protects harness targets while agent discovery is temporarily
   }
 });
 
+test("live aliases do not consume the unprotected stale-version allowance", async () => {
+  const roots = makeRoots();
+  const holder = new ProviderHomeLeaseRegistry("5".repeat(64), { pid: 801, hostname: "shared-host" });
+  const contender = new ProviderHomeLeaseRegistry("6".repeat(64), {
+    pid: 802,
+    hostname: "shared-host",
+    isProcessAlive: (pid) => pid === 801,
+  });
+  const leaseRequest = {
+    driver: "claude-code" as const,
+    command: "claude",
+    context: { kind: "native" as const },
+    env: { HOME: roots.home },
+  };
+  try {
+    holder.acquire(leaseRequest);
+    const storeNameDir = join(skillsStoreRoot(roots.dataDir), "alpha");
+    const canonicalDir = join(roots.home, ".agents", "skills");
+    mkdirSync(storeNameDir, { recursive: true });
+    mkdirSync(canonicalDir, { recursive: true });
+    for (let index = 0; index < MAX_RETAINED_STALE_SKILL_VERSIONS; index += 1) {
+      const digest = (index + 1).toString(16).padStart(64, "0");
+      const version = join(storeNameDir, digest);
+      mkdirSync(version);
+      writeFileSync(join(version, "SKILL.md"), "---\nname: alpha\n---\n");
+      symlinkSync(version, join(canonicalDir, `alias-${index.toString().padStart(2, "0")}`));
+    }
+    const freshDigest = "f".repeat(64);
+    const freshVersion = join(storeNameDir, freshDigest);
+    mkdirSync(freshVersion);
+    writeFileSync(join(freshVersion, "SKILL.md"), "---\nname: alpha\n---\n");
+
+    const replacement = entry("alpha", [{ agentId: claudeAgent.id, invocation: "agent" }]);
+    const blocked = await reconcile(roots, [replacement], {
+      now: 10_000,
+      previousVersionGraceMs: Number.MAX_SAFE_INTEGER,
+      acquireProviderHomeLease: () => contender.acquire(leaseRequest),
+    });
+
+    assert.match(blocked.error ?? "", /provider-home lease unavailable/i);
+    assert.equal(existsSync(freshVersion), true,
+      "protected aliases cannot force a fresh unprotected rollback version past its grace window");
+  } finally {
+    holder.releaseAll();
+    contender.releaseAll();
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
 test("canonical link mutations require the provider-home lease even without a harness binding", async () => {
   const roots = makeRoots();
   try {
