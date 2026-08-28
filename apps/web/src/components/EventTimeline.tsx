@@ -1,5 +1,5 @@
 import { createContext, memo, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
-import { normalizeSourcePath, type PlanEntry, type SourceLocation } from "@wollipog/protocol";
+import { normalizeSourcePath, type AgentQuestion, type PlanEntry, type SessionView, type SourceLocation } from "@wollipog/protocol";
 import {
   groupTimeline,
   SubagentTreeProjector,
@@ -23,6 +23,7 @@ import { formatDuration, formatRecordedRelativeTime, formatRecordedTimestamp, ti
 import { PromptImageView } from "./PromptImageView.js";
 import { EventPayloadContent } from "./EventPayloadContent.js";
 import { useTimelineClock } from "../timeline-clock.js";
+import { SessionTimelineQuestionRegion } from "./SessionApproval.js";
 
 type ToolItem = Extract<TimelineItem, { kind: "tool_call" }>;
 const useBrowserLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
@@ -41,6 +42,14 @@ export interface TimelineRevealTarget {
   disclosureKeys: readonly string[];
 }
 
+export interface TimelineQuestionContext {
+  sessionId: string;
+  pendingQuestion: { requestId: string; questions: AgentQuestion[] } | null;
+  runnerOnline: boolean;
+  onSessionUpdate?: (session: SessionView) => void;
+  showKeyHints?: boolean;
+}
+
 export function timelineFileSourceLocation(path: string): SourceLocation | null {
   const normalized = normalizeSourcePath(path);
   return normalized ? { path: normalized } : null;
@@ -51,7 +60,7 @@ export type TimelineRenderRow =
   | { kind: "item"; key: string; item: TimelineItem; inWork: boolean; depth: number };
 
 const timelineRowKey = (row: TimelineRenderRow) => row.key;
-export const estimateTimelineRow = (row: TimelineRenderRow): number => {
+export const estimateTimelineRow = (row: TimelineRenderRow, pendingQuestionRequestId: string | null = null): number => {
   if (row.kind === "work_summary") return 32;
   if (row.kind === "subagent_summary") return 52;
   switch (row.item.kind) {
@@ -59,6 +68,12 @@ export const estimateTimelineRow = (row: TimelineRenderRow): number => {
     case "agent_thought": return 72;
     case "user_message": return 72;
     case "file_edit": return 120;
+    case "question":
+      if (row.item.answered !== undefined || row.item.requestId !== pendingQuestionRequestId) return 52;
+      return 112 + row.item.questions.reduce(
+        (height, question) => height + 64 + question.options.length * 44 + (question.allowOther ? 44 : 0),
+        0,
+      );
     case "command_output":
     case "stderr": return 96;
     case "tool_call": return 72;
@@ -91,6 +106,7 @@ export const EventTimeline = memo(function EventTimeline({
   onOpenSubagent,
   revealRequest,
   onRevealHandled,
+  questionContext,
 }: {
   items: TimelineItem[];
   onRewind?: (turn: number) => void;
@@ -120,6 +136,8 @@ export const EventTimeline = memo(function EventTimeline({
   /** Reveal a semantic event, opening only the structural disclosures that contain its row. */
   revealRequest?: TimelineRevealRequest | null;
   onRevealHandled?: (requestId: number, outcome: VirtualRevealOutcome) => void;
+  /** Authoritative pending request used to replace its matching historical question row in place. */
+  questionContext?: TimelineQuestionContext;
 }) {
   const effectiveHistoryKey = historyKey ?? "timeline";
   const scopedRevealRequest = revealRequest?.historyKey === effectiveHistoryKey ? revealRequest : null;
@@ -145,6 +163,7 @@ export const EventTimeline = memo(function EventTimeline({
       onOpenSubagent={onOpenSubagent}
       revealRequest={scopedRevealRequest}
       onRevealHandled={onRevealHandled}
+      questionContext={questionContext}
     />
   );
 });
@@ -169,6 +188,7 @@ function EventTimelineBody({
   onOpenSubagent,
   revealRequest,
   onRevealHandled,
+  questionContext,
 }: {
   items: TimelineItem[];
   onRewind?: (turn: number) => void;
@@ -189,6 +209,7 @@ function EventTimelineBody({
   onOpenSubagent?: (toolCallId: string) => void;
   revealRequest?: TimelineRevealRequest | null;
   onRevealHandled?: (requestId: number, outcome: VirtualRevealOutcome) => void;
+  questionContext?: TimelineQuestionContext;
 }) {
   const projector = useRef<IncrementalTimelineRows | null>(null);
   if (!projector.current) projector.current = new IncrementalTimelineRows();
@@ -197,6 +218,12 @@ function EventTimelineBody({
   const [disclosure, setDisclosure] = useState<Map<string, boolean>>(() => new Map());
   const projection = useMemo(() => projector.current!.project(items, disclosure), [items, disclosure]);
   const { latestCheckpointTurn, rows } = projection;
+  const pendingQuestionRequestId = questionContext?.pendingQuestion?.requestId ?? null;
+  const pinnedQuestionRow = pendingQuestionRequestId === null ? undefined : rows.find((row) =>
+    row.kind === "item" && row.item.kind === "question" &&
+    row.item.requestId === pendingQuestionRequestId && row.item.answered === undefined);
+  const estimateRow = useMemo(() => (row: TimelineRenderRow) =>
+    estimateTimelineRow(row, pendingQuestionRequestId), [pendingQuestionRequestId]);
   const revealTarget = revealRequest == null
     ? null
     : projector.current.resolveRevealTarget(revealRequest.eventId);
@@ -285,6 +312,7 @@ function EventTimelineBody({
           forkUnavailableReason={forkBlocked
             ? "Claude CLI can fork only its current transcript at the matching latest-turn checkpoint. A later turn attempt advanced the conversation; files-only rewind remains available."
             : undefined}
+          questionContext={item.kind === "question" ? questionContext : undefined}
         />
       </div>
     );
@@ -295,8 +323,9 @@ function EventTimelineBody({
       getKey={timelineRowKey}
       renderItem={renderRow}
       scrollRef={scrollRef}
-      estimateSize={estimateTimelineRow}
+      estimateSize={estimateRow}
       overscan={8}
+      pinnedKey={pinnedQuestionRow?.key ?? null}
       rowGap={12}
       className="timeline"
       ariaLabel={ariaLabel}
@@ -1327,6 +1356,7 @@ const TimelineRow = memo(function TimelineRow({
   highlightEligible = true,
   disclosureOpen = false,
   onDisclosureToggle,
+  questionContext,
 }: {
   item: TimelineItem;
   inWork?: boolean;
@@ -1340,6 +1370,7 @@ const TimelineRow = memo(function TimelineRow({
   highlightEligible?: boolean;
   disclosureOpen?: boolean;
   onDisclosureToggle?: () => void;
+  questionContext?: TimelineQuestionContext;
 }) {
   const timingDescriptionId = useId();
   switch (item.kind) {
@@ -1639,10 +1670,8 @@ const TimelineRow = memo(function TimelineRow({
           )}
         </div>
       );
-    case "question":
-      // Historical record of a structured agent question. The LIVE ask renders as the
-      // interactive QuestionBar in the approval slot; this row is the transcript trace.
-      return (
+    case "question": {
+      const historicalQuestion = (
         <div className="tl-perm tl-question">
           <div className="tl-perm-head">
             <span className="perm-icon">❓</span>
@@ -1672,6 +1701,21 @@ const TimelineRow = memo(function TimelineRow({
           )}
         </div>
       );
+      return questionContext ? (
+        <SessionTimelineQuestionRegion
+          sessionId={questionContext.sessionId}
+          pendingQuestion={questionContext.pendingQuestion}
+          eventRequestId={item.requestId}
+          eventQuestions={item.questions}
+          eventResolved={item.answered !== undefined}
+          runnerOnline={questionContext.runnerOnline}
+          onSessionUpdate={questionContext.onSessionUpdate}
+          showKeyHints={questionContext.showKeyHints}
+        >
+          {historicalQuestion}
+        </SessionTimelineQuestionRegion>
+      ) : historicalQuestion;
+    }
   }
 });
 

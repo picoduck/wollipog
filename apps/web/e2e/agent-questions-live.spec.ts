@@ -114,12 +114,19 @@ async function expectQuestionControlsInsideCard(page: Page): Promise<void> {
   const cardRect = await card.evaluate((element) => element.getBoundingClientRect().toJSON());
   const list = page.locator(".question-list");
   const overflow = await list.evaluate((element) => ({
+    clientHeight: element.clientHeight,
     clientWidth: element.clientWidth,
+    overflowY: getComputedStyle(element).overflowY,
     scrollLeft: element.scrollLeft,
+    scrollHeight: element.scrollHeight,
     scrollWidth: element.scrollWidth,
   }));
   expect(overflow.scrollLeft).toBe(0);
   expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth + 1);
+  expect(overflow.scrollHeight).toBeLessThanOrEqual(overflow.clientHeight + 1);
+  expect(overflow.overflowY).toBe("visible");
+  await expect(card.locator("xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' detail-scroll ')][1]"))
+    .toHaveCount(1);
 
   const rects = await page.locator(
     ".question-list, .question-block, .question-text, .question-option, .question-input",

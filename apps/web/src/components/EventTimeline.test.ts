@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import * as React from "react";
-import type { SessionEventPayload } from "@wollipog/protocol";
+import type { SessionEventPayload, SessionView } from "@wollipog/protocol";
 import { renderToStaticMarkup } from "react-dom/server";
 import { groupTimeline, SubagentTreeProjector, TimelineBuilder, type TimelineItem } from "../timeline.js";
 import {
@@ -35,6 +35,14 @@ test("timeline row estimates include timestamp header lines", () => {
   assert.equal(estimateTimelineRow({ kind: "item", key: "thought", item: thought, inWork: true, depth: 0 }), 72);
   assert.equal(estimateTimelineRow({ kind: "subagent_summary", key: "agent", tool, depth: 0, open: false }), 52);
   assert.equal(estimateTimelineRow({ kind: "work_summary", key: "work", tools: 1, edits: 0, thoughts: 0, open: false }), 32);
+  const question = { kind: "question" as const, id: 3, requestId: "ask", questions: [{
+    id: "choice", question: "Pick one", options: [{ label: "A" }, { label: "B" }],
+  }] };
+  assert.equal(estimateTimelineRow({ kind: "item", key: "question", item: question, inWork: false, depth: 0 }, "ask"), 264);
+  assert.equal(estimateTimelineRow({ kind: "item", key: "orphan", item: question, inWork: false, depth: 0 }), 52);
+  assert.equal(estimateTimelineRow({
+    kind: "item", key: "answered-question", item: { ...question, answered: true }, inWork: false, depth: 0,
+  }), 52);
 });
 
 test("semantic reveal resolution opens a collapsed work group without exposing virtual keys", () => {
@@ -125,6 +133,77 @@ test("canonical accepted steering messages render one compact Steered marker", (
   }));
   assert.equal((html.match(/class="steered-marker"/g) ?? []).length, 1);
   assert.match(html, /<span class="steered-marker">Steered<\/span>/);
+});
+
+test("the pending question replaces its matching timeline card without a duplicate historical row", () => {
+  const questions = [{
+    id: "language",
+    question: "Which language?",
+    options: [{ label: "TypeScript" }, { label: "Python" }],
+  }];
+  const session = {
+    id: "session-1",
+    runnerId: "runner-1",
+    title: "Session",
+    status: "input_required",
+    pendingApproval: {
+      kind: "question",
+      requestId: "ask-1",
+      title: "Agent Questions",
+      options: [],
+      questions,
+    },
+  } as SessionView;
+  const html = renderToStaticMarkup(React.createElement(EventTimeline, {
+    items: [{ kind: "question", id: 4, requestId: "ask-1", questions }],
+    questionContext: {
+      sessionId: session.id,
+      pendingQuestion: { requestId: "ask-1", questions },
+      runnerOnline: true,
+    },
+  }));
+
+  assert.equal((html.match(/aria-label="Agent Questions"/g) ?? []).length, 1);
+  assert.equal((html.match(/Which language\?/g) ?? []).length, 1);
+  assert.doesNotMatch(html, /awaiting answer/);
+  assert.match(html, /role="radiogroup"/);
+});
+
+test("a resolved question keeps one compact outcome card at the same timeline row", () => {
+  const questions = [{ id: "language", question: "Which language?", options: [{ label: "TypeScript" }] }];
+  const session = {
+    id: "session-1",
+    runnerId: "runner-1",
+    title: "Session",
+    status: "input_required",
+    pendingApproval: {
+      kind: "question",
+      requestId: "ask-1",
+      title: "Agent Questions",
+      options: [],
+      questions,
+    },
+  } as SessionView;
+  const html = renderToStaticMarkup(React.createElement(EventTimeline, {
+    items: [{
+      kind: "question",
+      id: 4,
+      requestId: "ask-1",
+      questions,
+      answered: false,
+      resolutionReason: "replaced",
+    }],
+    questionContext: {
+      sessionId: session.id,
+      pendingQuestion: { requestId: "ask-1", questions },
+      runnerOnline: true,
+    },
+  }));
+
+  assert.doesNotMatch(html, /aria-label="Agent Questions"/);
+  assert.equal((html.match(/Which language\?/g) ?? []).length, 1);
+  assert.match(html, /→ Replaced/);
+  assert.doesNotMatch(html, /role="radiogroup"/);
 });
 
 test("Claude timeline keeps historical rewind while enabling conversation fork only at latest turn", () => {

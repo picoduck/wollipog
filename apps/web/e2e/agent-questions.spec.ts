@@ -55,7 +55,12 @@ test("desktop Text Entry submits exact structured form answers using only the ke
   await responses.nth(0).fill("2");
   await responses.nth(0).press("Tab");
   await responses.nth(1).fill("1, Browser Tests");
-  await responses.nth(2).fill("");
+  await responses.nth(2).fill("itHub");
+  await responses.nth(2).press("Home");
+  await responses.nth(2).press("Shift+G");
+  await responses.nth(2).press("End");
+  await responses.nth(2).pressSequentially("!");
+  await expect(responses.nth(2)).toHaveValue("GitHub!");
   await responses.nth(3).fill("s3cret");
   await responses.nth(4).fill("3");
   await responses.nth(4).press("Control+Enter");
@@ -64,6 +69,7 @@ test("desktop Text Entry submits exact structured form answers using only the ke
   expect(await page.evaluate(() => window.agentQuestionCalls[0]?.answers)).toEqual({
     target: "Production",
     checks: ["Unit Tests", "Browser Tests"],
+    note: "GitHub!",
     token: "s3cret",
     retries: "3",
   });
@@ -134,7 +140,7 @@ for (const viewport of [
   { name: "mobile portrait", width: 390, height: 844 },
   { name: "mobile landscape", width: 844, height: 390 },
 ]) {
-  test(`an over-height question set scrolls with fixed response actions in ${viewport.name}`, async ({ page }) => {
+  test(`an over-height question set uses one natural page scroller in ${viewport.name}`, async ({ page }) => {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     await page.goto("/agent-questions-e2e.html?set=long");
 
@@ -142,7 +148,6 @@ for (const viewport of [
     const list = page.locator(".question-list");
     const submit = page.getByRole("button", { name: "Submit" });
     const dismiss = page.getByRole("button", { name: "Dismiss" });
-    await expectInsideViewport(bar, page);
     await expectInsideViewport(submit, page);
     await expectInsideViewport(dismiss, page);
 
@@ -150,17 +155,17 @@ for (const viewport of [
       clientHeight: element.clientHeight,
       scrollHeight: element.scrollHeight,
       scrollTop: element.scrollTop,
+      overflowY: getComputedStyle(element).overflowY,
     }));
-    expect(overflow.scrollHeight).toBeGreaterThan(overflow.clientHeight);
+    expect(overflow.scrollHeight).toBeLessThanOrEqual(overflow.clientHeight + 1);
     expect(overflow.scrollTop).toBe(0);
+    expect(overflow.overflowY).toBe("visible");
+    expect((await geometry(bar)).height).toBeGreaterThan(viewport.height);
 
-    const actionsBefore = await geometry(page.locator(".approval-actions"));
-    await list.evaluate((element) => element.scrollTo({ top: element.scrollHeight }));
-    await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+    await page.getByRole("radio", { name: /Overnight/ }).scrollIntoViewIfNeeded();
+    await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
     await expect(page.getByRole("radio", { name: /Overnight/ })).toBeInViewport();
-    const actionsAfter = await geometry(page.locator(".approval-actions"));
-    expect(actionsAfter.top).toBeCloseTo(actionsBefore.top, 1);
-    expect(actionsAfter.bottom).toBeCloseTo(actionsBefore.bottom, 1);
+    expect(await list.evaluate((element) => element.scrollTop)).toBe(0);
 
     await answerLongSet(page);
     await expect(submit).toBeEnabled();
@@ -173,6 +178,27 @@ for (const viewport of [
     });
   });
 }
+
+test("a long history-loading fallback remains reachable inside the fixed session column", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/agent-questions-e2e.html?set=long&slot=1");
+
+  const bar = page.getByRole("region", { name: "Agent Questions" });
+  const list = page.locator(".question-list");
+  const submit = page.getByRole("button", { name: "Submit" });
+  await expectInsideViewport(bar, page);
+  await expectInsideViewport(submit, page);
+  await expect(list).toHaveCSS("overflow-y", "auto");
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
+
+  await page.getByRole("radio", { name: /Overnight/ }).scrollIntoViewIfNeeded();
+  await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
+
+  await answerLongSet(page);
+  await expect(submit).toBeEnabled();
+  await expectInsideViewport(submit, page);
+});
 
 test("a replacement request cannot submit retained selections", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });

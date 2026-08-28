@@ -9564,6 +9564,20 @@ body.shell-dock-dragging * {
   -webkit-overflow-scrolling: touch;
   width: 100%;
 }
+.timeline .question-bar {
+  max-width: none;
+  min-height: auto;
+  max-height: none;
+  margin-top: 0;
+  overflow: visible;
+}
+.timeline .question-list {
+  flex: none;
+  min-height: auto;
+  padding-right: 0;
+  overflow: visible;
+  overscroll-behavior: auto;
+}
 .question-block .question-text {
   font-weight: 600;
   margin-bottom: 6px;
