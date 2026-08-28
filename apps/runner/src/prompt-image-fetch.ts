@@ -32,11 +32,16 @@ async function boundedBody(response: Response, expectedBytes: number): Promise<B
       }
       chunks.push(Buffer.from(value));
     }
+    if (total !== expectedBytes) throw new Error("prompt image response byte length does not match its reference");
+    return Buffer.concat(chunks, total);
+  } catch (error) {
+    // Refusal must stop the producer too: releasing the lock alone leaves an oversized response
+    // free to continue buffering into the runner after the caller has already rejected it.
+    void reader.cancel().catch(() => {});
+    throw error;
   } finally {
     reader.releaseLock();
   }
-  if (total !== expectedBytes) throw new Error("prompt image response byte length does not match its reference");
-  return Buffer.concat(chunks, total);
 }
 
 /** Fetch and verify one immutable reference. No redirects, ambient cookies, or cached credentials. */

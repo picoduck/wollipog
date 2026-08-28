@@ -432,6 +432,35 @@ test("explicit offline WSL adoption copies one legacy source and preserves it", 
   }]);
 });
 
+test("explicit offline WSL adoption refuses ambiguous sources and an existing owned target", async () => {
+  const owner = "b".repeat(64);
+  const context = { kind: "wsl" as const, distro: "Ubuntu" };
+  const providerWide = "/home/me/.agent-manager/provider-state/claude/projects";
+  const partition = `/home/me/.agent-manager/provider-state/claude/${providerStateKey("same-session")}/projects`;
+  const target = `/home/me/.agent-manager/runner-instances/${owner}/provider-state/claude/${providerStateKey("same-session")}/projects`;
+  let copies = 0;
+  const shared = {
+    resolveWsl: async () => ({ command: "/usr/bin/bwrap", uid: 1000, home: "/home/me" }),
+    copyWsl: async () => { copies++; },
+  };
+
+  await assert.rejects(() => adoptLegacyWslExecutionIsolationState(
+    context, "claude-code", "same-session", owner, {
+      ...shared,
+      existsWsl: async (_context, path) => path === providerWide || path === partition,
+    },
+  ), /both provider-wide and partitioned sources/);
+  assert.equal(copies, 0, "ambiguous legacy bytes are never copied");
+
+  await assert.rejects(() => adoptLegacyWslExecutionIsolationState(
+    context, "claude-code", "same-session", owner, {
+      ...shared,
+      existsWsl: async (_context, path) => path === partition || path === target,
+    },
+  ), /refusing to merge or overwrite/);
+  assert.equal(copies, 0, "an existing owned partition is never merged or overwritten");
+});
+
 test("relative HOME overrides fail closed instead of mounting the wrong state path", async () => {
   await assert.rejects(() => resolveExecutionIsolation(bwrap, { kind: "native" }, {
     platform: "linux", uid: () => 1000,
