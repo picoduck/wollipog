@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { Buffer } from "node:buffer";
 import { request } from "node:http";
+import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import Fastify from "fastify";
 import type { RunnerMetadata } from "@wollipog/protocol";
@@ -11,6 +13,8 @@ import {
   MAX_TRANSCRIPT_SHARE_READS_PER_TOKEN_PER_MINUTE,
   TranscriptShareReadLimiter,
   createAuthorizedTranscriptShare,
+  loadPublicTranscriptShare,
+  lookupPublicTranscriptShareCapability,
   revokeAuthorizedTranscriptShare,
 } from "./transcript-shares.js";
 
@@ -33,6 +37,71 @@ function rawGet(url: string, headers: Record<string, string | string[]>): Promis
     outgoing.end();
   });
 }
+
+function rawDb(db: ControlPlaneDb): DatabaseSync {
+  return (db as unknown as { db: DatabaseSync }).db;
+}
+
+test("corrupt stored public-share projections fail closed in the service and route", async (t) => {
+  const db = ControlPlaneDb.open(":memory:");
+  db.registerRunner(runner, 1, 53);
+  db.createSession({
+    id: "corrupt-route-session", runnerId: runner.runnerId, agentId: null, workspaceId: null,
+    title: "Never public", useWorktree: false, driver: "acp", config: {}, now: 1,
+  });
+  db.appendEvent("corrupt-route-session", { kind: "user_message", text: "public message" }, 2);
+  const identity = db.localIdentityContext();
+  const principal = { kind: "human" as const, actorId: identity.userId, ...identity };
+  const now = 10_000;
+  const created = createAuthorizedTranscriptShare(
+    db,
+    principal,
+    "corrupt-route-session",
+    { expiresInSeconds: 3600 },
+    now,
+  );
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+
+  const authorization = `MAM-Share ${created.value.token}`;
+  const capability = lookupPublicTranscriptShareCapability(db, authorization, now);
+  assert.ok(capability);
+  const app = Fastify();
+  registerAuthGate(app, { authenticate: () => null, isAllowedOrigin });
+  registerPublicTranscriptShareRoute(app, { db, limiter: new TranscriptShareReadLimiter(), now: () => now });
+  await app.ready();
+  t.after(async () => { await app.close(); db.close(); });
+
+  const baseProjection = {
+    schemaVersion: 1,
+    source: "control-plane-cache",
+    completeness: "possibly-partial",
+  };
+  for (const [name, projectionJson] of [
+    ["unparseable JSON", "{"],
+    ["a non-object payload", "null"],
+    ["an unsupported message role", JSON.stringify({
+      ...baseProjection,
+      messages: [{ role: "system", text: "private" }],
+    })],
+    ["an extra per-message field", JSON.stringify({
+      ...baseProjection,
+      messages: [{ role: "user", text: "public", privateMetadata: "private" }],
+    })],
+  ] as const) {
+    rawDb(db).prepare("UPDATE transcript_shares SET projection_json=?, projection_bytes=? WHERE share_id=?")
+      .run(projectionJson, Buffer.byteLength(projectionJson), created.value.share.shareId);
+    assert.equal(loadPublicTranscriptShare(db, capability!, now), null, `${name} must fail closed in the service`);
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/public/transcript-share",
+      remoteAddress: "10.0.0.8",
+      headers: { authorization },
+    });
+    assert.equal(response.statusCode, 404, `${name} must fail closed at the public route`);
+    assert.deepEqual(response.json(), { error: "shared transcript unavailable" });
+  }
+});
 
 test("the real public share route enforces capability lifecycle, headers, origin, and rate bounds", async (t) => {
   const db = ControlPlaneDb.open(":memory:");
