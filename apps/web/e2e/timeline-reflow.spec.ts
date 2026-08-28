@@ -795,10 +795,11 @@ test("continuous panel resizing keeps long wrapped rows disjoint in every painte
   expect(sampled.overlapFrames, JSON.stringify(sampled.overlapExamples)).toBe(0);
   expect(sampled.missingAnchorFrames).toBe(0);
   expect(sampled.anchorSamples).toBe(sampled.frames);
-  // Long Markdown rewrap can move the sampled row by one 22px text line while its new DOM height
-  // and the virtualizer cache converge. The bound rejects cumulative drift, and the settled
-  // assertions below require the exact logical offset to be restored.
-  expect(sampled.maxAnchorDrift, JSON.stringify(sampled.anchorDriftExamples)).toBeLessThan(24);
+  // MeasuredVirtualList is the only scroll-anchor owner. A whole-line transient used to be
+  // tolerated here because Chromium's native anchoring could also change scrollTop while wrapped
+  // rows reflowed. The scroll owner now opts out of native anchoring, so every painted sample must
+  // preserve the same logical offset; the settled assertions below retain exact final coverage.
+  expect(sampled.maxAnchorDrift, JSON.stringify(sampled.anchorDriftExamples)).toBeLessThan(1);
   await expect(page.getByTestId("panel")).toHaveAttribute("data-width", "460");
   await expectNoOverlap(page);
   const after = await stableAnchor(page);
