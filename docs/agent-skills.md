@@ -121,7 +121,13 @@ Properties:
   symlink; content stays staged for `skillRetention.removedSkillDays`, so common re-enables are
   instant while never-again-desired content remains bounded. Per-agent targeting is expressed as
   which harness directories receive links. Retention timestamps are durable runner-local state;
-  malformed state resets windows conservatively instead of authorizing early deletion.
+  malformed state resets windows conservatively instead of authorizing early deletion. The
+  compact state writer sorts entries and fits the largest prefix accepted by both its 8,192-entry
+  and 1 MiB reader limits; omitted entries are logged and restart their grace window. Backward
+  wall-clock changes and discontinuous forward jumps preserve accrued age; expiration advances
+  again only with ordinary clock progress. Independently of time grace, each skill retains at most
+  64 safe stale version directories
+  plus its current desired variants; symlink-bearing trees remain untouched for inspection.
 - **Never clobber user content.** The runner only creates or replaces symlinks that verifiably
   resolve into its own store. A pre-existing real directory at a target path (a hand-managed
   skill) is a conflict surfaced in the UI with an offer to adopt it into the library — never an
@@ -237,12 +243,15 @@ Git backs the library as an **upstream source**, not as the distribution transpo
 - **Container and cloud execution targets cannot see host skills** — they mount only the workspace
   cwd. Gate exactly like `includeClaudeUserCommandsForTarget()` and report "unavailable on this
   target" honestly. Mounting the skills root into containers is a deliberate later decision.
-- **Provider-home concurrency.** Every link mutation is an atomic rename, so concurrent readers
-  always see either the old or the new deployment. The MVP does not take the
-  `ProviderHomeLeaseRegistry` lease during reconciliation (same-data-dir runners are already
-  serialized by the runner data-dir lease); integrating the provider-home lease is planned for
-  the phase that supports multiple runners sharing one home. Harnesses may cache their skill list
-  at session start, so updates apply to new sessions; the UI says so.
+- **Provider-home concurrency.** Content is verified and materialized in the runner-local store
+  before the reconciler requests the process-lifetime `ProviderHomeLeaseRegistry` lease. Every
+  canonical or harness link mutation, including removal, happens only after that lease is held.
+  During contention the runner mutates no shared-HOME path: it reports desired managed links as
+  blocked, reports foreign symlink entry names without following or classifying their targets,
+  and still applies retention plus the fixed 64-stale-version bound to its own store. Releasing
+  the lease lets the next authoritative pass converge directly to the latest desired digest.
+  Harnesses may cache their skill list at session start, so updates apply to new sessions; the UI
+  says so.
 - **Frontmatter is untrusted input.** Keep the "never interpret YAML aliases, tags, objects, or
   executable extensions" stance and the bounded-traversal limits when scanning machines.
 - **Codex skill support is evolving.** The per-harness adapter table isolates directory paths,

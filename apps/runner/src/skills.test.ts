@@ -21,6 +21,7 @@ import { skillVersionDigest } from "@wollipog/protocol/skills-digest";
 import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
 import {
   cacheSkillSyncEntry,
+  MAX_RETAINED_STALE_SKILL_VERSIONS,
   SKILL_SCAN_LIMITS,
   linkManifestPath,
   parseSkillFrontmatter,
@@ -724,6 +725,135 @@ test("an undesired skill is deleted only after its configured retention window",
     assert.equal(existsSync(versionPath), true);
     await reconcile(roots, [], { now: 12_000, removedSkillRetentionMs: 10_000 });
     assert.equal(existsSync(versionPath), false);
+    assert.equal(existsSync(join(realpathSync(skillsStoreRoot(roots.dataDir)), "alpha")), false,
+      "GC reclaims the empty runner-owned skill directory");
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("retention preserves accrued age across a backward wall-clock adjustment", async () => {
+  const roots = makeRoots();
+  try {
+    const v1 = entry("alpha", [{ agentId: claudeAgent.id, invocation: "agent" }]);
+    const v2 = entry(
+      "alpha",
+      [{ agentId: claudeAgent.id, invocation: "agent" }],
+      skillFiles("alpha", "new version\n"),
+    );
+    await reconcile(roots, [v1], { now: 100_000 });
+    await reconcile(roots, [v2], { now: 101_000, previousVersionGraceMs: 10_000 });
+    await reconcile(roots, [v2], { now: 106_000, previousVersionGraceMs: 10_000 });
+
+    const v1Path = join(realpathSync(skillsStoreRoot(roots.dataDir)), "alpha", v1.versionDigest);
+    const logged: string[] = [];
+    await reconcile(roots, [v2], {
+      now: 96_000,
+      previousVersionGraceMs: 10_000,
+      log: (message) => logged.push(message),
+    });
+    assert.equal(existsSync(v1Path), true);
+    assert.ok(logged.some((line) => line.includes("clock moved backward")));
+
+    await reconcile(roots, [v2], { now: 101_000, previousVersionGraceMs: 10_000 });
+    assert.equal(existsSync(v1Path), false,
+      "five seconds after the adjusted clock plus five accrued seconds completes the grace window");
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("retention ignores a large forward clock adjustment and survives restart", async () => {
+  const roots = makeRoots();
+  try {
+    const v1 = entry("alpha", [{ agentId: claudeAgent.id, invocation: "agent" }]);
+    const v2 = entry(
+      "alpha",
+      [{ agentId: claudeAgent.id, invocation: "agent" }],
+      skillFiles("alpha", "new version\n"),
+    );
+    await reconcile(roots, [v1], { now: 1_000 });
+    await reconcile(roots, [v2], { now: 2_000, previousVersionGraceMs: 10 * 60 * 1000 });
+    const v1Path = join(realpathSync(skillsStoreRoot(roots.dataDir)), "alpha", v1.versionDigest);
+    const logged: string[] = [];
+    await reconcile(roots, [v2], {
+      now: 30 * 24 * 60 * 60 * 1000,
+      previousVersionGraceMs: 10 * 60 * 1000,
+      log: (message) => logged.push(message),
+    });
+    assert.equal(existsSync(v1Path), true, "a forward jump cannot expire the version early");
+    assert.ok(logged.some((line) => line.includes("advanced discontinuously")));
+
+    // Fresh reconcile calls reload the persisted clock sample. Two ordinary five-minute observations
+    // complete the remaining window instead of restarting it.
+    const jumped = 30 * 24 * 60 * 60 * 1000;
+    await reconcile(roots, [v2], { now: jumped + 5 * 60 * 1000, previousVersionGraceMs: 10 * 60 * 1000 });
+    await reconcile(roots, [v2], { now: jumped + 10 * 60 * 1000, previousVersionGraceMs: 10 * 60 * 1000 });
+    assert.equal(existsSync(v1Path), false);
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("retention enforces a deterministic fixed bound on safe stale versions", async () => {
+  const roots = makeRoots();
+  try {
+    const store = skillsStoreRoot(roots.dataDir);
+    mkdirSync(join(store, "alpha"), { recursive: true });
+    for (let index = 0; index < MAX_RETAINED_STALE_SKILL_VERSIONS + 7; index += 1) {
+      mkdirSync(join(store, "alpha", index.toString(16).padStart(64, "0")));
+    }
+    const current = entry("alpha", [{ agentId: claudeAgent.id, invocation: "agent" }]);
+    const logged: string[] = [];
+    await reconcile(roots, [current], {
+      now: 1_000,
+      previousVersionGraceMs: Number.MAX_SAFE_INTEGER,
+      log: (message) => logged.push(message),
+    });
+    const versions = readdirSync(join(realpathSync(store), "alpha"));
+    assert.equal(versions.length, MAX_RETAINED_STALE_SKILL_VERSIONS + 1,
+      "the current desired version is additional to the fixed stale-version allowance");
+    assert.ok(logged.some((line) => line.includes("fixed retention cap")));
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("maximum-entry retention metadata is byte-bounded and readable on restart", async () => {
+  const roots = makeRoots();
+  try {
+    const store = skillsStoreRoot(roots.dataDir);
+    const versionCount = MAX_RETAINED_STALE_SKILL_VERSIONS + 1;
+    for (let skillIndex = 0; skillIndex < 128; skillIndex += 1) {
+      const prefix = `skill-${skillIndex.toString().padStart(3, "0")}-`;
+      const name = `${prefix}${"x".repeat(64 - prefix.length)}`;
+      for (let versionIndex = 0; versionIndex < versionCount; versionIndex += 1) {
+        const digest = `${skillIndex.toString(16).padStart(4, "0")}${versionIndex
+          .toString(16).padStart(4, "0")}${"a".repeat(56)}`;
+        mkdirSync(join(store, name, digest), { recursive: true });
+      }
+    }
+    const firstLog: string[] = [];
+    await reconcile(roots, [], {
+      now: 1_000,
+      removedSkillRetentionMs: Number.MAX_SAFE_INTEGER,
+      log: (message) => firstLog.push(message),
+    });
+    const retentionPath = skillRetentionStatePath(roots.dataDir);
+    assert.ok(readFileSync(retentionPath).byteLength <= 1024 * 1024);
+    assert.ok(firstLog.some((line) => line.includes("retention state capacity reached")));
+
+    const restartLog: string[] = [];
+    await reconcile(roots, [], {
+      now: 2_000,
+      removedSkillRetentionMs: Number.MAX_SAFE_INTEGER,
+      log: (message) => restartLog.push(message),
+    });
+    assert.equal(
+      restartLog.some((line) => line.includes("retention state unreadable")),
+      false,
+      "the writer must not emit a file rejected by the loader's own byte and entry limits",
+    );
   } finally {
     rmSync(roots.root, { recursive: true, force: true });
   }
@@ -764,6 +894,33 @@ test("malformed retention state restarts the grace window instead of deleting ea
 
     await reconcile(roots, [v2], { now: 20_000, previousVersionGraceMs: 10_000 });
     assert.equal(existsSync(v1Path), true);
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("legacy schema-1 retention state remains readable", async () => {
+  const roots = makeRoots();
+  try {
+    const v1 = entry("alpha", [{ agentId: claudeAgent.id, invocation: "agent" }]);
+    const v2 = entry(
+      "alpha",
+      [{ agentId: claudeAgent.id, invocation: "agent" }],
+      skillFiles("alpha", "new version\n"),
+    );
+    await reconcile(roots, [v1], { now: 1_000 });
+    await reconcile(roots, [v2], { now: 2_000, previousVersionGraceMs: 10_000 });
+    const retentionPath = skillRetentionStatePath(roots.dataDir);
+    const current = JSON.parse(readFileSync(retentionPath, "utf8")) as { entries: unknown[] };
+    writeFileSync(retentionPath, JSON.stringify({ version: 1, entries: current.entries }));
+
+    const logged: string[] = [];
+    await reconcile(roots, [v2], {
+      now: 3_000,
+      previousVersionGraceMs: 10_000,
+      log: (message) => logged.push(message),
+    });
+    assert.equal(logged.some((line) => line.includes("retention state unreadable")), false);
   } finally {
     rmSync(roots.root, { recursive: true, force: true });
   }
@@ -948,6 +1105,93 @@ test("a foreign provider-home lease stages content but blocks every harness muta
     assert.equal(readlinkSync(canonicalPath), canonicalBefore);
     assert.equal(readlinkSync(harnessPath), harnessBefore);
 
+  } finally {
+    holder.releaseAll();
+    contender.releaseAll();
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("prolonged lease contention bounds staging, reports symlinks without following, and recovers", async () => {
+  const roots = makeRoots();
+  const contenderDataDir = join(roots.root, "contender-data");
+  mkdirSync(contenderDataDir, { recursive: true });
+  const holder = new ProviderHomeLeaseRegistry("c".repeat(64), {
+    pid: 303,
+    hostname: "shared-host",
+  });
+  const contender = new ProviderHomeLeaseRegistry("d".repeat(64), {
+    pid: 404,
+    hostname: "shared-host",
+    isProcessAlive: (pid) => pid === 303,
+  });
+  const leaseRequest = {
+    driver: "claude-code" as const,
+    command: "claude",
+    context: { kind: "native" as const },
+    env: { HOME: roots.home },
+  };
+  try {
+    holder.acquire(leaseRequest);
+    const canonicalPath = join(roots.home, ".agents", "skills", "alpha");
+    assert.equal(existsSync(canonicalPath), false);
+
+    const foreignTarget = join(roots.root, "foreign-skill");
+    mkdirSync(foreignTarget);
+    writeFileSync(
+      join(foreignTarget, "SKILL.md"),
+      "---\nname: should-not-be-read\ndescription: secret target metadata\n---\n",
+    );
+    const foreignLink = join(roots.home, ".codex", "skills", "user-link");
+    mkdirSync(dirname(foreignLink), { recursive: true });
+    symlinkSync(foreignTarget, foreignLink);
+
+    let latest = entry("alpha", [{ agentId: claudeAgent.id, invocation: "agent" }]);
+    let blocked: Awaited<ReturnType<typeof reconcile>> | undefined;
+    for (let index = 0; index < MAX_RETAINED_STALE_SKILL_VERSIONS + 7; index += 1) {
+      latest = entry(
+        "alpha",
+        [{ agentId: claudeAgent.id, invocation: "agent" }],
+        skillFiles("alpha", `contended version ${index}\n`),
+      );
+      blocked = await reconcile(
+        { home: roots.home, dataDir: contenderDataDir },
+        [latest],
+        {
+          now: 10_000 + index,
+          previousVersionGraceMs: Number.MAX_SAFE_INTEGER,
+          acquireProviderHomeLease: () => contender.acquire(leaseRequest),
+        },
+      );
+      assert.equal(existsSync(canonicalPath), false,
+        "the foreign lease fences every shared-HOME mutation");
+    }
+
+    const stagedVersions = readdirSync(join(skillsStoreRoot(contenderDataDir), "alpha"));
+    assert.ok(stagedVersions.length <= MAX_RETAINED_STALE_SKILL_VERSIONS + 1);
+    assert.match(blocked!.error ?? "", /Unmanaged inventory is limited to entry names/);
+    assert.ok(blocked!.unmanaged.some((skill) =>
+      skill.agentId === codexAgent.id && skill.name === "user-link" && skill.description === undefined));
+    assert.equal(readFileSync(join(foreignTarget, "SKILL.md"), "utf8").includes("secret target"), true,
+      "the diagnostic scan leaves the foreign target untouched");
+
+    holder.releaseAll();
+    const recovered = await reconcile(
+      { home: roots.home, dataDir: contenderDataDir },
+      [latest],
+      {
+        now: 20_000,
+        previousVersionGraceMs: Number.MAX_SAFE_INTEGER,
+        acquireProviderHomeLease: () => contender.acquire(leaseRequest),
+      },
+    );
+    assert.equal(recovered.error, undefined);
+    assert.equal(
+      realpathSync(canonicalPath),
+      join(realpathSync(skillsStoreRoot(contenderDataDir)), "alpha", latest.versionDigest),
+    );
+    assert.equal(lstatSync(foreignLink).isSymbolicLink(), true);
+    assert.equal(realpathSync(foreignLink), realpathSync(foreignTarget));
   } finally {
     holder.releaseAll();
     contender.releaseAll();
