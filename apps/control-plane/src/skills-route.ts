@@ -84,7 +84,7 @@ export function makeSkillsSyncPusher(deps: {
   db: ControlPlaneDb;
   hub: SkillsHub;
   log?: SkillsLog;
-  /** Test seam; bounds orphaned content snapshots in production. */
+  /** Test seam; bounds orphaned manifests and each stalled transport flush in production. */
   deliveryTtlMs?: number;
 }): SkillsSyncPusher {
   const log = deps.log ?? NOOP_LOG;
@@ -201,6 +201,10 @@ export function makeSkillsSyncPusher(deps: {
       requestedEntries.push(entry);
     }
     delivery.sending = true;
+    // The orphan timer protects only a manifest that never receives a valid need. Once transfer
+    // starts, every individual socket flush has the same timeout, while a healthy large catalog
+    // may legitimately take longer than one timeout window in aggregate.
+    clearTimeout(delivery.timer);
     try {
       for (const entry of requestedEntries) {
         if (pending.get(delivery.syncId) !== delivery) return;

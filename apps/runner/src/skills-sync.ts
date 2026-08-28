@@ -13,6 +13,7 @@ interface PendingChunkedSkillsSync {
   skills: ManifestEntry[];
   missing: Set<string>;
   received: Set<string>;
+  expiresAt: number;
 }
 
 type ChunkedSyncFailure =
@@ -31,14 +32,22 @@ function contentKey(name: string, versionDigest: string): string {
  * transaction memory is proportional to manifest metadata rather than aggregate skill bytes. */
 export class ChunkedSkillsSyncAssembler {
   private pending: PendingChunkedSkillsSync | null = null;
+  private readonly assemblyTtlMs: number;
+  private readonly now: () => number;
 
   constructor(private readonly options: {
     runnerId: string;
     needsContent(entry: ManifestEntry): boolean;
     cacheContent(entry: SkillSyncEntry): void;
-  }) {}
+    assemblyTtlMs?: number;
+    now?: () => number;
+  }) {
+    this.assemblyTtlMs = options.assemblyTtlMs ?? 60_000;
+    this.now = options.now ?? Date.now;
+  }
 
   get inProgress(): boolean {
+    this.expireStale();
     return this.pending !== null;
   }
 
@@ -72,6 +81,7 @@ export class ChunkedSkillsSyncAssembler {
       skills: message.skills,
       missing,
       received: new Set(),
+      expiresAt: this.now() + this.assemblyTtlMs,
     };
     return {
       kind: "accepted",
@@ -89,6 +99,7 @@ export class ChunkedSkillsSyncAssembler {
   acceptContent(
     message: Extract<ControlPlaneToRunner, { type: "skills_sync_content" }>,
   ): ChunkedSyncStep {
+    this.expireStale();
     const pending = this.pending;
     if (!pending || message.runnerId !== this.options.runnerId || message.syncId !== pending.syncId) {
       return { kind: "ignored" };
@@ -109,12 +120,14 @@ export class ChunkedSkillsSyncAssembler {
       );
     }
     pending.received.add(key);
+    pending.expiresAt = this.now() + this.assemblyTtlMs;
     return { kind: "accepted" };
   }
 
   complete(
     message: Extract<ControlPlaneToRunner, { type: "skills_sync_complete" }>,
   ): ChunkedSyncStep<{ desired: ManifestEntry[]; requestId?: string }> {
+    this.expireStale();
     const pending = this.pending;
     if (!pending || message.runnerId !== this.options.runnerId || message.syncId !== pending.syncId) {
       return { kind: "ignored" };
@@ -141,5 +154,9 @@ export class ChunkedSkillsSyncAssembler {
     const requestId = this.pending?.requestId;
     this.pending = null;
     return this.rejected(error, requestId);
+  }
+
+  private expireStale(): void {
+    if (this.pending && this.pending.expiresAt <= this.now()) this.pending = null;
   }
 }

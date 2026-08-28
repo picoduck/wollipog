@@ -132,3 +132,30 @@ test("verified cached manifests require no content and complete directly", () =>
   assert.equal(assembler.complete({ type: "skills_sync_complete", runnerId: "runner-1", syncId: "sync-1" }).kind,
     "accepted");
 });
+
+test("chunked assembly expires after stalled progress and extends its deadline per accepted frame", () => {
+  let now = 100;
+  const assembler = new ChunkedSkillsSyncAssembler({
+    runnerId: "runner-1",
+    needsContent: () => true,
+    cacheContent: () => {},
+    assemblyTtlMs: 10,
+    now: () => now,
+  });
+  assembler.begin(manifest());
+  now = 109;
+  assert.equal(assembler.acceptContent({
+    type: "skills_sync_content",
+    runnerId: "runner-1",
+    syncId: "sync-1",
+    name: "alpha",
+    versionDigest: digest,
+    files,
+  }).kind, "accepted");
+  now = 118;
+  assert.equal(assembler.inProgress, true, "accepted content extends the assembly deadline");
+  now = 119;
+  assert.equal(assembler.inProgress, false, "stalled assembly no longer suppresses removal indefinitely");
+  assert.equal(assembler.complete({ type: "skills_sync_complete", runnerId: "runner-1", syncId: "sync-1" }).kind,
+    "ignored");
+});

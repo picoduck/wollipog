@@ -577,6 +577,57 @@ test("chunked content is flow-controlled one frame at a time and interruption om
   assert.ok(warnings.some((message) => message.includes("interrupted or exceeded its buffer bound")));
 });
 
+test("an actively flushing large catalog can outlive the orphan-manifest timeout", async () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const pushed: ControlPlaneToRunner[] = [];
+  const waits: Array<{ msg: ControlPlaneToRunner; resolve(value: boolean): void }> = [];
+  const hub: SkillsHub = {
+    isRunnerOnline: () => true,
+    sendToRunner: (_runnerId, msg) => {
+      pushed.push(msg);
+      return true;
+    },
+    sendToRunnerAndWait: async (_runnerId, msg) => await new Promise<boolean>((resolve) => {
+      waits.push({ msg, resolve });
+    }),
+    requestFromRunner: async () => { throw new Error("unused"); },
+  };
+  db.registerRunner(runnerMeta("runner-v96"), 10, 96);
+  for (const name of ["alpha", "beta"]) {
+    const skill = db.createSkill({
+      name,
+      description: null,
+      groupId: null,
+      files: [{ path: "SKILL.md", content: `---\nname: ${name}\n---\n`, encoding: "utf8" }],
+      manifest: '{"files":[]}',
+      digest: name === "alpha" ? "a".repeat(64) : "b".repeat(64),
+    });
+    db.createSkillAssignment({
+      skillId: skill.id,
+      scopeKind: "instance",
+      agentSelector: { kind: "all" },
+    });
+  }
+  const sync = makeSkillsSyncPusher({ db, hub, deliveryTtlMs: 50 });
+  sync("runner-v96");
+  const manifest = pushed[0] as SkillsSyncManifestMessage;
+  const transferring = sync.handleNeed({
+    type: "skills_sync_need",
+    runnerId: "runner-v96",
+    syncId: manifest.syncId,
+    missing: manifest.skills.map(({ name, versionDigest }) => ({ name, versionDigest })),
+  });
+  await delay(30);
+  waits[0]!.resolve(true);
+  await delay(30);
+  assert.equal(waits.length, 2, "aggregate transfer time exceeds the orphan timeout between healthy flushes");
+  waits[1]!.resolve(true);
+  await delay(0);
+  assert.equal(waits[2]!.msg.type, "skills_sync_complete");
+  waits[2]!.resolve(true);
+  await transferring;
+});
+
 test("a push superseding a solicited v96 sync preserves its request correlation", () => {
   const db = ControlPlaneDb.open(":memory:");
   const pushed: ControlPlaneToRunner[] = [];

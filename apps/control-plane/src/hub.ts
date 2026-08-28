@@ -87,8 +87,8 @@ export function isRunnerRequestNotSentError(error: unknown): error is RunnerRequ
 
 export interface Socket {
   send(data: string, onComplete?: (error?: Error) => void): void;
-  /** Bytes already queued by the WebSocket implementation. Test doubles and runner sockets may
-   * omit this; production UI sockets expose the live ws.bufferedAmount value. */
+  /** Bytes already queued by the WebSocket implementation. Test doubles may omit this; production
+   * UI and runner sockets expose the live ws.bufferedAmount value. */
   readonly bufferedAmount?: number;
   /** Production ws sends complete asynchronously. Synchronous test doubles omit this. */
   readonly asyncDelivery?: boolean;
