@@ -111,26 +111,56 @@ test("styles.css is the only production stylesheet", () => {
 
 test("virtualized scroll owners disable browser-native scroll anchoring", () => {
   const values: string[] = [];
-  root.walkRules((rule) => {
-    if (!selectorMembers(rule.selector).includes(".measured-virtual-scroll")) return;
-    rule.walkDecls("overflow-anchor", (decl) => values.push(decl.value));
-  });
+  root.walkDecls("overflow-anchor", (decl) => values.push(decl.value));
   assert.deepEqual(values, ["none"],
-    "MeasuredVirtualList owns anchor correction, so its scroll container must have one native-anchor opt-out");
+    "MeasuredVirtualList owns anchor correction, so native anchoring must be disabled exactly once and never overridden");
 });
 
 test("every production virtual-list host marks its scroll owner", () => {
   const missing: string[] = [];
-  for (const path of sourceFiles(join(WEB, "src/components"))) {
-    if (/\.test\.[cm]?[jt]sx?$/.test(path)) continue;
+  // InboxList composes its local scroll ref with the forwarded grid ref through attachList.
+  // Name the alias explicitly so the element-scoped audit remains honest and goes stale loudly.
+  const hostRefAliases = new Map([["InboxList.tsx:listRef", "attachList"]]);
+  for (const path of sourceFiles(join(WEB, "src"))) {
     const source = readFileSync(path, "utf8");
+    const file = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const externalScrollRefs = new Set<string>();
+    const hostElements = new Map<string, ts.JsxOpeningLikeElement[]>();
+
+    const visit = (node: ts.Node): void => {
+      if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
+        const tagName = node.tagName.getText(file);
+        const attribute = (name: string) => node.attributes.properties.find((property) =>
+          ts.isJsxAttribute(property) && property.name.getText(file) === name);
+        const identifierValue = (name: string) => {
+          const property = attribute(name);
+          if (!property || !ts.isJsxAttribute(property) || !property.initializer ||
+            !ts.isJsxExpression(property.initializer) || !property.initializer.expression ||
+            !ts.isIdentifier(property.initializer.expression)) return null;
+          return property.initializer.expression.text;
+        };
+
+        const ownsMeasuredList = tagName === "MeasuredVirtualList" && basename(path) !== "EventTimeline.tsx";
+        if (ownsMeasuredList || tagName === "EventTimeline") {
+          const ref = identifierValue("scrollRef");
+          if (ref) externalScrollRefs.add(ref);
+        } else if (/^[a-z]/.test(tagName)) {
+          const ref = identifierValue("ref");
+          if (ref) hostElements.set(ref, [...(hostElements.get(ref) ?? []), node]);
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(file);
+
     // EventTimeline owns the list but not its viewport; the second check audits each production
-    // caller that supplies that external ref instead of pretending the wrapper can mark it.
-    const hostsMeasuredList = basename(path) !== "EventTimeline.tsx" &&
-      source.includes("<MeasuredVirtualList") && source.includes("scrollRef=");
-    const hostsVirtualTimeline = /<EventTimeline\b(?:(?!\/>)[\s\S])*?\bscrollRef=/.test(source);
-    if ((hostsMeasuredList || hostsVirtualTimeline) && !source.includes("measured-virtual-scroll")) {
-      missing.push(basename(path));
+    // caller's actual ref-owning element instead of accepting a class elsewhere in the file.
+    for (const ref of externalScrollRefs) {
+      const hostRef = hostRefAliases.get(`${basename(path)}:${ref}`) ?? ref;
+      const hosts = hostElements.get(hostRef) ?? [];
+      if (hosts.length !== 1 || !hosts[0]!.getText(file).includes("measured-virtual-scroll")) {
+        missing.push(`${basename(path)}:${ref}`);
+      }
     }
   }
   assert.deepEqual(missing, [],
