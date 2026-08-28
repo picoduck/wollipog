@@ -1064,10 +1064,33 @@ function linkedStoreVersionKeys(
   realStoreRoot: string,
 ): Set<string> {
   const protectedVersions = new Set<string>();
+  const canonicalDir = canonicalSkillsDir(home);
   const dirs = new Set([
-    canonicalSkillsDir(home),
+    canonicalDir,
     ...harnessBindings(agents).map((binding) => join(home, binding.relDir)),
   ]);
+  const protectDirectStoreLink = (linkPath: string): void => {
+    const probe = probeLink(linkPath, realStoreRoot, canonicalDir);
+    if (probe.kind !== "ours" || probe.via !== "store") return;
+    const relative = probe.resolvedTarget.slice(realStoreRoot.length + 1).split(sep);
+    if (relative.length !== 2 || !validSkillName(relative[0]!) || !STORE_VERSION_NAME.test(relative[1]!)) return;
+    protectedVersions.add(retentionKey(relative[0]!, relative[1]!));
+  };
+
+  // Probe the exact managed name for every local store directory. The diagnostic directory scan
+  // below is deliberately capped, but that cap must never let a large shared HOME hide the live
+  // canonical target for a version this local GC is about to consider.
+  try {
+    for (const entry of readdirSync(realStoreRoot, { withFileTypes: true })) {
+      if (entry.isSymbolicLink() || !entry.isDirectory() || !validSkillName(entry.name)) continue;
+      for (const dir of dirs) protectDirectStoreLink(join(dir, entry.name));
+    }
+  } catch {
+    // gcStore will also fail conservatively if the local store cannot be enumerated.
+  }
+
+  // Retain bounded broad scanning so a foreign alias directly into the local store also protects
+  // its target, without allowing an attacker-controlled HOME directory to make diagnostics unbounded.
   for (const dir of dirs) {
     let entries;
     try {
@@ -1079,11 +1102,7 @@ function linkedStoreVersionKeys(
     for (const entry of entries) {
       if (++examined > SKILL_SCAN_LIMITS.maxEntriesPerDirectory) break;
       if (!entry.isSymbolicLink()) continue;
-      const probe = probeLink(join(dir, entry.name), realStoreRoot, canonicalSkillsDir(home));
-      if (probe.kind !== "ours" || probe.via !== "store") continue;
-      const relative = probe.resolvedTarget.slice(realStoreRoot.length + 1).split(sep);
-      if (relative.length !== 2 || !validSkillName(relative[0]!) || !STORE_VERSION_NAME.test(relative[1]!)) continue;
-      protectedVersions.add(retentionKey(relative[0]!, relative[1]!));
+      protectDirectStoreLink(join(dir, entry.name));
     }
   }
   return protectedVersions;
@@ -1222,6 +1241,14 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
           options.log,
         );
       }
+      let foundForeignSymlink = false;
+      const unmanaged = scanUnmanagedSkills(home, agents, (linkPath) => {
+        const probe = probeLink(linkPath, realStoreRoot, canonicalSkillsDir(home));
+        const foreign = probe.kind !== "ours" ||
+          (probe.via === "canonical" && !contendedOwned.has(linkPath));
+        foundForeignSymlink ||= foreign;
+        return foreign;
+      });
       return {
         deployed: prepared.map(({ entry, invalid, materializationError }) => {
           if (invalid) {
@@ -1256,13 +1283,9 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
             error: detail,
           };
         }),
-        unmanaged: scanUnmanagedSkills(home, agents, (linkPath) => {
-          const probe = probeLink(linkPath, realStoreRoot, canonicalSkillsDir(home));
-          if (probe.kind !== "ours") return true;
-          return probe.via === "canonical" && !contendedOwned.has(linkPath);
-        }),
+        unmanaged,
         removedLinks: [],
-        error: `${detail} ${scanDetail}`,
+        error: `${detail}${foundForeignSymlink ? ` ${scanDetail}` : ""}`,
       };
     }
   }

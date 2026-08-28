@@ -1237,6 +1237,8 @@ test("contended GC preserves the store version targeted by a live managed link",
     });
 
     assert.match(blocked.error ?? "", /provider-home lease unavailable/i);
+    assert.doesNotMatch(blocked.error ?? "", /Unmanaged symlink inventory is limited/,
+      "the name-only diagnostic is omitted when no foreign symlink was found");
     assert.equal(existsSync(v1Path), true);
     assert.equal(realpathSync(canonicalPath), v1Path,
       "runner-local GC must not strand a live shared-HOME deployment");
@@ -1249,6 +1251,65 @@ test("contended GC preserves the store version targeted by a live managed link",
     owner.releaseAll();
     blocker.releaseAll();
     retryingOwner.releaseAll();
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("contended GC protects a live canonical target beyond the bounded diagnostic scan", async () => {
+  const roots = makeRoots();
+  const holder = new ProviderHomeLeaseRegistry("1".repeat(64), { pid: 601, hostname: "shared-host" });
+  const contender = new ProviderHomeLeaseRegistry("2".repeat(64), {
+    pid: 602,
+    hostname: "shared-host",
+    isProcessAlive: (pid) => pid === 601,
+  });
+  const leaseRequest = {
+    driver: "claude-code" as const,
+    command: "claude",
+    context: { kind: "native" as const },
+    env: { HOME: roots.home },
+  };
+  try {
+    holder.acquire(leaseRequest);
+    const canonicalDir = join(roots.home, ".agents", "skills");
+    const foreignTarget = join(roots.root, "foreign-target");
+    mkdirSync(canonicalDir, { recursive: true });
+    mkdirSync(foreignTarget);
+    for (let index = 0; index < SKILL_SCAN_LIMITS.maxEntriesPerDirectory + 32; index += 1) {
+      symlinkSync(foreignTarget, join(canonicalDir, `filler-${index.toString().padStart(3, "0")}`));
+    }
+    const before = readdirSync(canonicalDir);
+    const targetName = before.at(-1)!;
+    const targetLink = join(canonicalDir, targetName);
+    unlinkSync(targetLink);
+    const oldDigest = "a".repeat(64);
+    const oldVersion = join(skillsStoreRoot(roots.dataDir), targetName, oldDigest);
+    mkdirSync(oldVersion, { recursive: true });
+    writeFileSync(join(oldVersion, "SKILL.md"), `---\nname: ${targetName}\n---\n`);
+    symlinkSync(oldVersion, targetLink);
+    assert.ok(
+      readdirSync(canonicalDir).indexOf(targetName) >= SKILL_SCAN_LIMITS.maxEntriesPerDirectory,
+      "the live target is outside the intentionally bounded broad scan",
+    );
+
+    const replacement = entry(
+      targetName,
+      [{ agentId: claudeAgent.id, invocation: "agent" }],
+      skillFiles(targetName, "replacement staged during contention\n"),
+    );
+    const blocked = await reconcile(roots, [replacement], {
+      now: 10_000,
+      previousVersionGraceMs: 0,
+      acquireProviderHomeLease: () => contender.acquire(leaseRequest),
+    });
+
+    assert.match(blocked.error ?? "", /provider-home lease unavailable/i);
+    assert.equal(existsSync(oldVersion), true,
+      "exact managed-name probes protect live targets beyond the diagnostic scan ceiling");
+    assert.equal(realpathSync(targetLink), oldVersion);
+  } finally {
+    holder.releaseAll();
+    contender.releaseAll();
     rmSync(roots.root, { recursive: true, force: true });
   }
 });
