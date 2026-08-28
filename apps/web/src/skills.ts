@@ -84,6 +84,8 @@ export interface ReportedSkillsState {
 export interface RunnerSkillsResponse {
   desired: RunnerDesiredSkill[];
   reported: ReportedSkillsState | null;
+  /** Capability of the runner binary, independent of whether any removal event exists. */
+  removalReporting: "supported" | "unsupported" | "unknown";
 }
 
 /* Wrapped-or-bare payload aliases for the list routes, so the API client stays honest about the

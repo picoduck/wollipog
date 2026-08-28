@@ -273,7 +273,8 @@
 //     keep their v93 follow-session behavior until an owner/admin saves an explicit target.
 // 96: managed skill desired-state delivery splits metadata from digest-addressed content. A
 //     runner requests only missing versions and applies the authoritative manifest only after an
-//     explicit completion frame; pre-v96 peers retain the bounded single-frame v90 protocol.
+//     explicit completion frame; pre-v96 peers retain the bounded single-frame v90 protocol. The
+//     runner also reports bounded managed-link removal events; older runners omit that projection.
 export const PROTOCOL_VERSION = 96;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
@@ -398,6 +399,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   stopAttemptCorrelation: 89,
   agentSkills: 90,
   chunkedAgentSkills: 96,
+  /** v96 runners emit the additive `skills_state.removals` event projection. */
+  skillLinkRemovalReporting: 96,
   sessionAgentNaming: 93,
   sessionCustomModelNaming: 94,
   sessionNamingTargets: 95,
@@ -4610,7 +4613,9 @@ export interface SkillsStateMessage {
   requestId?: string;
   deployed: DeployedSkillState[];
   unmanaged: UnmanagedSkillInfo[];
-  /** Link removals from this exact reconcile pass. Older runners omit this additive field. */
+  /** Link removals from this exact reconcile pass. This is an event, not replacement inventory:
+   * the control plane retains the latest non-empty array across later empty/omitted reports and
+   * timestamps it independently. Older runners omit this additive field. */
   removals?: SkillLinkRemoval[];
   error?: string;
 }

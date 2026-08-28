@@ -586,7 +586,8 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
 
   app.get("/api/runners/:id/skills", async (req, reply) => {
     const id = (req.params as { id: string }).id;
-    if (!db.getRunner(id)) return reply.code(404).send({ error: "runner not found" });
+    const runner = db.getRunner(id);
+    if (!runner) return reply.code(404).send({ error: "runner not found" });
     return {
       // File contents stay out of the listing; the digest + targets are what the UI compares.
       desired: resolveDesiredSkills(db, id).map((entry) => ({
@@ -595,6 +596,10 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
         targets: entry.targets,
       })),
       reported: db.getRunnerSkillState(id),
+      removalReporting: runnerSupportsProtocol(
+        runner.protocolVersion,
+        "skillLinkRemovalReporting",
+      ) ? "supported" : "unsupported",
     };
   });
 

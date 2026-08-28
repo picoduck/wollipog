@@ -15,8 +15,10 @@ test("skill link removals show path, reason, and state timestamp on desktop", as
   await expect(history).toContainText("No longer in the desired skill list.");
   await expect(history).toContainText("~/.claude/skills/conflicted-canonical-skill");
   await expect(history).toContainText("The canonical location it routes through is conflicted.");
-  const reportedAt = await page.evaluate((timestamp) => new Date(timestamp).toLocaleString(), 1_700_000_000_000);
+  const reportedAt = await page.evaluate((timestamp) => new Date(timestamp).toLocaleString(), 1_699_999_000_000);
   await expect(history).toContainText(`Reported ${reportedAt}`);
+  const inventoryAt = await page.evaluate((timestamp) => new Date(timestamp).toLocaleString(), 1_700_000_000_000);
+  await expect(history).not.toContainText(`Reported ${inventoryAt}`);
 });
 
 test("skill link removal history wraps without horizontal overflow on mobile", async ({ page }) => {

@@ -5500,7 +5500,9 @@ export class ControlPlaneDb {
     });
   }
 
-  /** Persist a runner's authoritative skills_state (full replacement for that machine). */
+  /** Persist a runner report. Deployment, unmanaged inventory, and error are full replacement;
+   * removals are a bounded latest-event projection. A non-empty event replaces and timestamps
+   * history, while an empty or omitted field retains the prior event for operator visibility. */
   setRunnerSkillState(
     runnerId: string,
     state: {
@@ -5529,6 +5531,8 @@ export class ControlPlaneDb {
     }), now);
   }
 
+  /** Read both current inventory and the independent latest-removal event. Legacy blobs without
+   * removals read as an empty history with no event timestamp. */
   getRunnerSkillState(runnerId: string): RunnerSkillStateRecord | null {
     const row = this.stmt("SELECT state, updated_at FROM runner_skill_state WHERE runner_id=?")
       .get(runnerId) as { state: string; updated_at: number } | undefined;

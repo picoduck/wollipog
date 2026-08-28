@@ -180,11 +180,16 @@ on every registration, which makes durability trivial (no receipt outbox needed)
   longer than 30 seconds for the aggregate catalog.
 - Manifest cache checks and reconciliation share the same native-harness/manual-variant policy, so
   discovery changes fail closed instead of letting the two phases disagree about required content.
-- **Runner→CP `skills_state`** — an authoritative full-replacement inventory modeled on
-  `SubscriptionUsageInventoryMessage`: deployed digests, link health, conflicts, recent managed
-  link removals, and unmanaged skills found by a bounded scan of harness directories (reusing the
-  `claude-commands.ts` limits table and the deliberately non-YAML frontmatter reader). Sent after
-  each reconcile, on registration, and on the periodic discovery tick.
+- **Runner→CP `skills_state`** — deployed digests, link health, conflicts, unmanaged skills, and
+  the pass's bounded managed-link removals. Deployed state, unmanaged inventory, and the pass error
+  are authoritative full replacements modeled on `SubscriptionUsageInventoryMessage`. Removals
+  are instead a latest-event projection: each non-empty report replaces the prior event and gets
+  its own `removalsUpdatedAt`; a later empty or omitted field retains that event and timestamp.
+  History is absent only until a compatible runner reports its first non-empty event. Legacy
+  persisted blobs read as empty history with no event timestamp, and the per-machine API identifies
+  pre-v96 runners that cannot report removal events. Reports are sent after each reconcile, on
+  registration, and on the periodic discovery tick. Unmanaged skills come from a bounded harness
+  scan using the `claude-commands.ts` limits and deliberately non-YAML frontmatter reader.
 - Sync triggers: assignment or library change, runner registration, and a manual "Sync Now"
   mirroring Rediscover.
 

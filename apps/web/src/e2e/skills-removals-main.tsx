@@ -79,7 +79,9 @@ const navigation: ViewNavigation = {
 };
 
 const reportedAt = 1_700_000_000_000;
+const removalsReportedAt = 1_699_999_000_000;
 const runnerSkills: RunnerSkillsResponse = {
+  removalReporting: "supported",
   desired: [{
     name: "code-review",
     versionDigest: "d1",
@@ -102,6 +104,7 @@ const runnerSkills: RunnerSkillsResponse = {
         reason: "The canonical location it routes through is conflicted.",
       },
     ],
+    removalsUpdatedAt: removalsReportedAt,
     updatedAt: reportedAt,
   },
 };

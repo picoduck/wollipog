@@ -302,7 +302,9 @@ export function SkillsView() {
       } catch {
         // A machine that predates the skills routes reads as never reported rather than an error
         // banner over the whole view.
-        return [runner.runnerId, { desired: [], reported: null } satisfies RunnerSkillsResponse] as const;
+        return [runner.runnerId, {
+          desired: [], reported: null, removalReporting: "unknown",
+        } satisfies RunnerSkillsResponse] as const;
       }
     }));
     setMachineSkills(Object.fromEntries(loaded));
@@ -395,7 +397,11 @@ export function SkillsView() {
       const reported = await api.syncRunnerSkills(runnerId);
       setMachineSkills((current) => ({
         ...current,
-        [runnerId]: { desired: current[runnerId]?.desired ?? [], reported },
+        [runnerId]: {
+          desired: current[runnerId]?.desired ?? [],
+          reported,
+          removalReporting: current[runnerId]?.removalReporting ?? "unknown",
+        },
       }));
       await refreshMachines();
     } catch (cause) {
@@ -630,20 +636,30 @@ export function SkillsView() {
                           </p>
                         </div>
                       )}
-                      {removals.length > 0 && (
+                      {machine && machine.removalReporting !== "unknown" && (
                         <div className="skills-removals">
                           <h5>Recent Link Removals</h5>
-                          <p className="skills-hint">
-                            Reported {formatTime(machine?.reported?.removalsUpdatedAt ?? machine?.reported?.updatedAt)}
-                          </p>
-                          <ul>
-                            {removals.map((entry, index) => (
-                              <li key={`${entry.path}:${entry.reason}:${index}`}>
-                                <strong>{entry.path}</strong>
-                                <span className="muted"> — {entry.reason}</span>
-                              </li>
-                            ))}
-                          </ul>
+                          {machine.removalReporting === "unsupported" ? (
+                            <p className="skills-hint">
+                              This runner version cannot report managed link-removal history.
+                            </p>
+                          ) : removals.length === 0 ? (
+                            <p className="skills-hint">No managed link removals have been reported.</p>
+                          ) : (
+                            <>
+                              <p className="skills-hint">
+                                Reported {formatTime(machine.reported?.removalsUpdatedAt ?? machine.reported?.updatedAt)}
+                              </p>
+                              <ul>
+                                {removals.map((entry, index) => (
+                                  <li key={`${entry.path}:${entry.reason}:${index}`}>
+                                    <strong>{entry.path}</strong>
+                                    <span className="muted"> — {entry.reason}</span>
+                                  </li>
+                                ))}
+                              </ul>
+                            </>
+                          )}
                         </div>
                       )}
                     </article>
