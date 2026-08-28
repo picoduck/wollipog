@@ -130,7 +130,7 @@ function Fixture() {
     <main style={{ display: "flex", width: "100vw", height: "100vh", background: "var(--bg)" }}>
       <section style={{ display: "flex", minWidth: 0, flex: 1, flexDirection: "column" }}>
         <div
-          className="detail-scroll"
+          className="detail-scroll measured-virtual-scroll"
           ref={scrollRef}
           data-testid="reader"
           data-anchor-key={anchor?.key}

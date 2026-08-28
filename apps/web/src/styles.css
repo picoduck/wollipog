@@ -1488,6 +1488,9 @@ textarea {
   width: 100%;
   min-height: 100%;
 }
+/* MeasuredVirtualList owns logical-anchor correction. Native anchoring sees its transformed rows
+   as ordinary flow and must not become a competing scrollTop owner. */
+.measured-virtual-scroll { overflow-anchor: none; }
 
 /* -------------------------------- Cards --------------------------------- */
 .card {

@@ -223,7 +223,7 @@ export function SubagentsPanel({
           <div
             key={`${session.id}:${session.eventEpoch ?? 0}:${selected.id}`}
             ref={outputScrollRef}
-            className="subagent-output"
+            className="subagent-output measured-virtual-scroll"
             tabIndex={0}
           >
             {output.length > 0 ? (

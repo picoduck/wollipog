@@ -593,6 +593,13 @@ async function recordNoticeChanges(page: Page, change: () => Promise<void>) {
   return { before: before!, initial, recorded };
 }
 
+test("timeline reader disables browser-native scroll anchoring", async ({ page }) => {
+  await page.goto("/timeline-reflow-e2e.html");
+  const reader = page.getByTestId("reader");
+  await expect(reader).toBeVisible();
+  await expect.poll(() => reader.evaluate((element) => getComputedStyle(element).overflowAnchor)).toBe("none");
+});
+
 test("timeline rows remeasure when a side panel narrows wrapped messages", async ({ page }) => {
   await page.goto("/timeline-reflow-e2e.html");
   await expect(page.locator("[data-virtual-row]").first()).toBeVisible();

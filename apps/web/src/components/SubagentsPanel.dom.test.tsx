@@ -95,6 +95,8 @@ test("master-detail list is labelled, Title Case, depth-aware, and keeps selecti
       "the focusable scroller and its timeline do not duplicate the same accessible name");
     assert.ok(container.querySelector('[role="list"][aria-label="Subagent Activity"]'));
     const firstOutput = container.querySelector<HTMLElement>(".subagent-output")!;
+    assert.equal(firstOutput.classList.contains("measured-virtual-scroll"), true,
+      "the subagent virtualizer's scroll owner disables browser-native anchoring");
     assert.match(firstOutput.textContent ?? "", /Outer Output/);
     const workDisclosure = firstOutput.querySelector<HTMLButtonElement>(".tl-work > .tl-disclosure");
     if (workDisclosure?.getAttribute("aria-expanded") === "false") {

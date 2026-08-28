@@ -465,6 +465,9 @@ function VirtualList<T>({
   });
   const initialMeasurementVirtualizerRef = useRef(virtualizer);
   initialMeasurementVirtualizerRef.current = virtualizer;
+  // Every external scrollRef host carries `measured-virtual-scroll`, disabling native anchoring.
+  // Logical-key corrections and TanStack's measured-row adjustments must be the only scroll
+  // owners; native anchoring sees transformed rows as ordinary flow and applies a third correction.
   // Our logical-key anchor correction owns structural/width changes while pending. Otherwise,
   // retain TanStack's positional rule: only measurements above the viewport may compensate the
   // scroll offset. Returning true for a late below-viewport resize moves paused readers.
