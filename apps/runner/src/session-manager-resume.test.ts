@@ -3119,6 +3119,97 @@ test("real Claude driver shutdown persists live work and a restarted manager res
   }
 });
 
+test("a cancelled first Claude turn persists its established id and resumes that conversation", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-claude-cancel-resume-"));
+  const store = new SessionStore(root);
+  store.create(stored(root, {
+    driver: "claude-code",
+    agentId: "claude-code",
+    command: "claude",
+    agentSessionId: null,
+    status: "idle",
+    seq: 0,
+  }));
+  const firstChild = fakeClaudeProcess();
+  let firstDriver!: ClaudeCodeDriver;
+  const firstFactory = (_kind: AgentDriverKind, options: DriverOptions, callbacks: DriverCallbacks): Driver => {
+    firstDriver = new ClaudeCodeDriver(options, callbacks, {
+      spawn: () => firstChild,
+      kill: () => {},
+    } as any);
+    return firstDriver;
+  };
+  const first = new SessionManager(() => {}, () => {}, store, "runner-first", undefined, firstFactory);
+  let proposed = "";
+  try {
+    first.prompt("resume-session", "first turn", []);
+    await tick();
+    await tick();
+    proposed = (firstDriver as any).sessionId as string;
+    assert.equal(store.readMeta("resume-session")?.agentSessionId, null);
+
+    firstChild.stdout.write(JSON.stringify({
+      type: "system",
+      subtype: "init",
+      session_id: proposed,
+    }) + "\n");
+    await tick();
+    assert.equal(
+      store.readMeta("resume-session")?.agentSessionId,
+      proposed,
+      "system/init persists the coordinate before the turn settles",
+    );
+    first.cancel("resume-session");
+    firstChild.emit("close", 0);
+    await tick();
+  } finally {
+    first.shutdownAll();
+  }
+
+  const secondChild = fakeClaudeProcess();
+  const launches: DriverOptions[] = [];
+  const secondFactory = (_kind: AgentDriverKind, options: DriverOptions, callbacks: DriverCallbacks): Driver => {
+    launches.push(options);
+    return new ClaudeCodeDriver(options, callbacks, {
+      spawn: () => secondChild,
+      kill: () => {},
+    } as any);
+  };
+  const restarted = new SessionManager(() => {}, () => {}, store, "runner-second", undefined, secondFactory);
+  try {
+    restarted.prompt("resume-session", "continue after cancellation", []);
+    await tick();
+    await tick();
+    assert.equal(launches[0]?.resumeId, store.readMeta("resume-session")?.agentSessionId);
+    assert.equal(launches[0]?.resumeId, proposed);
+  } finally {
+    restarted.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Claude history without a provider conversation id refuses instead of launching fresh", async () => {
+  const h = harness({
+    driver: "claude-code",
+    agentId: "claude-code",
+    command: "claude",
+    agentSessionId: null,
+    seq: 2,
+  });
+  try {
+    h.manager.prompt("resume-session", "must not replace the conversation");
+    await tick();
+    assert.equal(h.launches.length, 0);
+    assert.equal(h.store.readMeta("resume-session")?.status, "stopped");
+    assert.equal(h.sent.some((message) =>
+      message.type === "session_event" && message.payload.kind === "error" &&
+      /cannot be continued without risking a replacement conversation/.test(message.payload.message)), true);
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
 test("resume publishes session-scoped capability changes made by launch provisioning", async () => {
   const capabilities = {
     models: [],

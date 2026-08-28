@@ -103,6 +103,9 @@ export interface DriverCallbacks {
   onBackgroundWork?: (update: DriverBackgroundWorkUpdate) => void;
   /** Exact provider input acknowledgement for the currently active prompt. */
   onPromptAccepted?: () => void;
+  /** The provider proved that its resumable conversation coordinate exists. Drivers must not
+   * emit this for a locally minted id until provider initialization confirms it. */
+  onSessionEstablished?: (providerSessionId: string) => void;
   /** Provider-confirmed account readiness changes; credentials and identity never cross here. */
   onAuthStatus?: (status: "authenticated" | "unauthenticated") => void;
   /** A harness request proved that its provider credentials need user action. Raw provider text
@@ -152,7 +155,7 @@ export interface Driver {
   newSession(cwd: string): Promise<string>;
 
   /** The agent-native resumable id (claude UUID / codex threadId / acp sessionId), or null if not
-   * yet known or not resumable. Captured into the box session store after each turn. */
+   * yet established, known, or resumable. Captured into the box session store once established. */
   agentSessionId(): string | null;
 
   /** Provider-native id of the most recently started turn, when the driver exposes one. */
