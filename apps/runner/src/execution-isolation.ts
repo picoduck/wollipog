@@ -30,6 +30,7 @@ interface IsolationDeps {
   forkSizeNative: (location: ProviderStateLocation, driver: AgentDriverKind, providerSessionId: string) => Promise<number | null>;
   forkSizeWsl: (context: Extract<AgentContext, { kind: "wsl" }>, location: ProviderStateLocation, driver: AgentDriverKind, providerSessionId: string) => Promise<number | null>;
   wait: (ms: number) => Promise<void>;
+  materializeWindowsJobLauncher: () => string;
 }
 
 const defaultDeps: IsolationDeps = {
@@ -98,6 +99,7 @@ const defaultDeps: IsolationDeps = {
     }, () => null);
   },
   wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  materializeWindowsJobLauncher,
 };
 
 interface IsolationStateOptions {
@@ -310,7 +312,7 @@ export async function resolveExecutionIsolation(
       args: [
         ...binary.launch.args,
         "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-        "-File", materializeWindowsJobLauncher(),
+        "-File", runtime.materializeWindowsJobLauncher(),
       ],
       network: "inherit",
     };
