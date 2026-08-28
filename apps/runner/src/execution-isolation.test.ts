@@ -55,6 +55,7 @@ test("native macOS and Windows policies resolve only their audited platform adap
         via: "path",
         launch: { command: "powershell.exe", args: [] },
       } : null,
+      materializeWindowsJobLauncher: () => "C:\\Wollipog\\cache\\windows-job\\version\\launcher.ps1",
     }, { ...state, dataDir: "C:\\Wollipog", cwd: "C:\\repo" },
   );
   assert.equal(windows?.backend, "windows-job");

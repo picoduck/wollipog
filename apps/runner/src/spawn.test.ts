@@ -6,13 +6,17 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import net from "node:net";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { buildBwrapArgs, buildCloudArgs, buildContainerArgs, buildWslArgs, killTree, spawnAgent, terminateDescendantBoundariesAfterPendingKills, trackPendingKill, waitForPendingKills, winQuoteArg, type AgentProcess } from "./spawn.js";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
-import { encodeWindowsJobSpec, materializeWindowsJobLauncher, WINDOWS_JOB_LAUNCHER, windowsJobCacheRoot } from "./windows-job.js";
+import { encodeWindowsJobSpec, materializeWindowsJobLauncher, WINDOWS_JOB_CACHE_HELPERS, WINDOWS_JOB_LAUNCHER, windowsJobCacheRoot } from "./windows-job.js";
 import { extendOwnedProcessTree, ownsPosixRootProcessGroup, parsePosixProcessTable } from "./posix-process-tree.js";
 
-const windowsJobLauncherPath = materializeWindowsJobLauncher();
+const windowsJobTestCacheRoot = mkdtempSync(path.join(os.tmpdir(), "wollipog-windows-job-suite-"));
+const windowsJobLauncherPath = materializeWindowsJobLauncher(windowsJobTestCacheRoot);
+after(() => {
+  rmSync(windowsJobTestCacheRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+});
 
 const windowsJobIsolation = {
   backend: "windows-job" as const,
@@ -25,7 +29,7 @@ const windowsJobIsolation = {
 };
 
 test("Windows Job launcher is materialized, caches its bridge, and clears both specs", () => {
-  assert.equal(materializeWindowsJobLauncher(), windowsJobLauncherPath);
+  assert.equal(materializeWindowsJobLauncher(windowsJobTestCacheRoot), windowsJobLauncherPath);
   assert.equal(readFileSync(windowsJobLauncherPath, "utf8"), WINDOWS_JOB_LAUNCHER);
   assert.match(WINDOWS_JOB_LAUNCHER, /if \(Test-Path Env:WOLLIPOG_WINDOWS_JOB_SPEC\) \{ \$Spec = \$env:WOLLIPOG_WINDOWS_JOB_SPEC \}/);
   assert.match(WINDOWS_JOB_LAUNCHER, /else \{ \$Spec = \$env:MAM_WINDOWS_JOB_SPEC \}/);
@@ -44,6 +48,7 @@ test("Windows Job launcher is materialized, caches its bridge, and clears both s
   assert.match(WINDOWS_JOB_LAUNCHER, /WollipogWindowsJobBridge-' \+ \(Split-Path \$PSScriptRoot -Leaf\)/);
   assert.doesNotMatch(WINDOWS_JOB_LAUNCHER, /WollipogWindowsJobBridge-' \+ \[string\] \$decoded\.ownerPid/);
   assert.match(WINDOWS_JOB_LAUNCHER, /catch \[IO\.IOException\]/);
+  assert.match(WINDOWS_JOB_LAUNCHER, /Complete-WollipogJobBridgeCache \$CompilePath \$BridgePath/);
   assert.match(WINDOWS_JOB_LAUNCHER, /bridge-unavailable/);
   assert.match(WINDOWS_JOB_LAUNCHER, /job-assignment/);
   assert.doesNotMatch(WINDOWS_JOB_LAUNCHER, /MamWindowsJob/);
@@ -55,6 +60,10 @@ test("Windows Job launcher uses per-user storage and repairs a missing or corrup
     "C:\\Users\\runner\\AppData\\Local\\Wollipog\\cache\\windows-job",
   );
   assert.throws(() => windowsJobCacheRoot("win32", {}), /absolute LOCALAPPDATA/u);
+  assert.throws(
+    () => windowsJobCacheRoot("linux", {}),
+    /explicit cache root outside native Windows/u,
+  );
 
   const cacheRoot = mkdtempSync(path.join(os.tmpdir(), "wollipog-windows-job-test-"));
   try {
@@ -69,6 +78,47 @@ test("Windows Job launcher uses per-user storage and repairs a missing or corrup
   } finally {
     rmSync(cacheRoot, { recursive: true, force: true });
   }
+});
+
+test("Windows Job bridge cache removes losing and failed compilation artifacts", {
+  skip: process.platform !== "win32",
+}, () => {
+  const script = String.raw`
+${WINDOWS_JOB_CACHE_HELPERS}
+$ErrorActionPreference = 'Stop'
+$Root = Join-Path ([IO.Path]::GetTempPath()) ('wollipog-bridge-cache-' + [Guid]::NewGuid().ToString('N'))
+try {
+  [IO.Directory]::CreateDirectory($Root) | Out-Null
+  $BridgePath = Join-Path $Root 'WollipogWindowsJob.dll'
+  $CompilePath = Join-Path $Root 'WollipogWindowsJob-loser.dll'
+  $SentinelPath = Join-Path $Root 'unrelated.txt'
+  [IO.File]::WriteAllText($BridgePath, 'winner')
+  [IO.File]::WriteAllText($CompilePath, 'loser')
+  [IO.File]::WriteAllText($SentinelPath, 'keep')
+
+  Complete-WollipogJobBridgeCache $CompilePath $BridgePath
+  if (Test-Path -LiteralPath $CompilePath) { throw 'losing temporary bridge was retained' }
+  if ([IO.File]::ReadAllText($BridgePath) -ne 'winner') { throw 'winning bridge was changed' }
+  if ([IO.File]::ReadAllText($SentinelPath) -ne 'keep') { throw 'unrelated cache file was changed' }
+
+  $FailedCompilePath = Join-Path $Root 'WollipogWindowsJob-failed.dll'
+  $MissingBridgePath = Join-Path (Join-Path $Root 'missing') 'WollipogWindowsJob.dll'
+  [IO.File]::WriteAllText($FailedCompilePath, 'failed')
+  $FailedClosed = $false
+  try { Complete-WollipogJobBridgeCache $FailedCompilePath $MissingBridgePath }
+  catch { $FailedClosed = $true }
+  if (-not $FailedClosed) { throw 'missing bridge destination did not fail closed' }
+  if (Test-Path -LiteralPath $FailedCompilePath) { throw 'failed temporary bridge was retained' }
+  if ([IO.File]::ReadAllText($SentinelPath) -ne 'keep') { throw 'failure cleanup changed an unrelated file' }
+} finally {
+  Remove-Item -LiteralPath $Root -Recurse -Force -ErrorAction SilentlyContinue
+}
+`;
+  const result = spawnSync("powershell.exe", [
+    "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+    "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64"),
+  ], { encoding: "utf8" });
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
 });
 
 test("Windows Job launcher treats an explicitly empty Wollipog spec as authoritative", {

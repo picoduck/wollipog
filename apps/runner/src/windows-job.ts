@@ -1,7 +1,27 @@
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join, win32 } from "node:path";
+
+/** Complete one compiled-bridge cache write and remove only the caller's temporary artifact. Kept
+ * separately executable so Windows tests can force both destination-race branches deterministically. */
+export const WINDOWS_JOB_CACHE_HELPERS = String.raw`
+function Complete-WollipogJobBridgeCache([string] $CompilePath, [string] $BridgePath) {
+  try {
+    try { [IO.File]::Move($CompilePath, $BridgePath) }
+    catch [IO.IOException] {
+      if (-not (Test-Path -LiteralPath $BridgePath -PathType Leaf)) { throw }
+    }
+  } finally {
+    # A real-time scanner can briefly hold a newly compiled DLL. Retry transient cleanup without
+    # turning a valid winning bridge into a failed provider launch; the GUID temp is never loaded.
+    for ($Attempt = 0; $Attempt -lt 5 -and
+        (Test-Path -LiteralPath $CompilePath -PathType Leaf); $Attempt++) {
+      Remove-Item -LiteralPath $CompilePath -Force -ErrorAction SilentlyContinue
+      if (Test-Path -LiteralPath $CompilePath -PathType Leaf) { Start-Sleep -Milliseconds 50 }
+    }
+  }
+}
+`;
 
 /**
  * Windows Job Object launcher materialized by the runner on native Windows.
@@ -15,6 +35,7 @@ import { join, win32 } from "node:path";
  */
 export const WINDOWS_JOB_LAUNCHER = String.raw`
 $ErrorActionPreference = 'Stop'
+${WINDOWS_JOB_CACHE_HELPERS}
 function Fail-WollipogJob([string] $Code, [string] $Message) {
   [Console]::Error.WriteLine("[runner] Windows Job isolation failed ($Code): $Message")
   exit 125
@@ -307,10 +328,7 @@ public static class WollipogWindowsJob {
   }
 }
 '@
-    try { [IO.File]::Move($CompilePath, $BridgePath) }
-    catch [IO.IOException] {
-      if (-not (Test-Path -LiteralPath $BridgePath -PathType Leaf)) { throw }
-    }
+    Complete-WollipogJobBridgeCache $CompilePath $BridgePath
     $CompilePath = $null
   }
   try { Add-Type -Path $BridgePath }
@@ -360,13 +378,15 @@ export function encodeWindowsJobSpec(command: string, args: string[], cwd: strin
   return Buffer.from(JSON.stringify({ command, args, cwd, ownerPid, ...(rawCommandLine ? { rawCommandLine } : {}) }), "utf8").toString("base64");
 }
 
-/** Resolve the launcher cache inside the native Windows user's private application-data tree. A
- * non-Windows fallback exists only so platform-independent tests can inspect the materialization. */
+/** Resolve the launcher cache inside the native Windows user's private application-data tree.
+ * Platform-independent callers must inject a private cache root instead of sharing system temp. */
 export function windowsJobCacheRoot(
   platform: NodeJS.Platform = process.platform,
   environment: NodeJS.ProcessEnv = process.env,
 ): string {
-  if (platform !== "win32") return join(tmpdir(), "wollipog-windows-job");
+  if (platform !== "win32") {
+    throw new Error("Windows Job launcher materialization requires an explicit cache root outside native Windows");
+  }
   const localAppData = environment.LOCALAPPDATA;
   if (!localAppData || !win32.isAbsolute(localAppData)) {
     throw new Error("Windows Job isolation requires an absolute LOCALAPPDATA directory");
