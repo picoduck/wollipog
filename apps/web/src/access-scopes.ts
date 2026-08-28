@@ -1,7 +1,8 @@
-import type {
-  IdentityAdministrationView,
-  ResourceOwner,
-  ResourceScope,
+import {
+  scopeAudienceContained,
+  type IdentityAdministrationView,
+  type ResourceOwner,
+  type ResourceScope,
 } from "@wollipog/protocol";
 
 export interface AccessScopeChoice {
@@ -19,19 +20,6 @@ export function resourceOwnerKey(owner: ResourceOwner): string {
 export function sameResourceScope(left: ResourceScope | undefined, right: ResourceScope | undefined): boolean {
   return Boolean(left && right && left.organizationId === right.organizationId &&
     resourceOwnerKey(left.owner) === resourceOwnerKey(right.owner));
-}
-
-/** Every principal who can see the narrower scope can also see the wider scope. The client mirrors
- * the server only for preflight presentation; every mutation is independently revalidated there. */
-export function scopeAudienceContained(narrower: ResourceScope, wider: ResourceScope): boolean {
-  if (narrower.organizationId !== wider.organizationId) return false;
-  if (wider.owner.kind === "organization") return true;
-  if (narrower.owner.kind !== wider.owner.kind) return false;
-  if (narrower.owner.kind === "user" && wider.owner.kind === "user") {
-    return narrower.owner.userId === wider.owner.userId;
-  }
-  return narrower.owner.kind === "team" && wider.owner.kind === "team" &&
-    narrower.owner.teamId === wider.owner.teamId;
 }
 
 export function scopeAudienceContainedForIdentity(

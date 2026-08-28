@@ -36,6 +36,7 @@ import {
   providerSupportsConversationFork,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
+  scopeAudienceContained,
   type AddBoxRequest,
   type AccessScopeChangePreview,
   type AddPodMemberRequest,
@@ -214,7 +215,6 @@ import {
   revokeAuthorizedTranscriptShare,
 } from "./transcript-shares.js";
 import { registerPublicTranscriptShareRoute } from "./transcript-share-route.js";
-import { scopeAudienceContained } from "./resource-scope.js";
 import {
   MAX_UI_CLIENT_MESSAGE_BYTES,
   normalizeUiClientRawData,
