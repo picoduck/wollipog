@@ -33,3 +33,18 @@ test("skill link removal history wraps without horizontal overflow on mobile", a
   expect(geometry.historyRight).toBeLessThanOrEqual(geometry.viewRight + 0.5);
   expect(geometry.documentWidth).toBe(geometry.viewportWidth);
 });
+
+test("a healthy long-running manual sync remains visibly in progress", async ({ page }) => {
+  await openRemovalHistory(page, 1280);
+
+  const sync = page.locator(".skills-machine").getByRole("button", { name: "Sync Now" });
+  await sync.click();
+  const progress = page.locator(".skills-machine").getByRole("button", { name: "Syncing…" });
+  await expect(progress).toBeVisible();
+  await page.waitForTimeout(350);
+  await expect(progress).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Recent Link Removals" })).toBeVisible();
+  await expect(page.locator(".skills-machine").getByRole("button", { name: "Sync Now" })).toBeVisible({ timeout: 2_000 });
+  await expect(page.getByRole("alert")).toHaveCount(0);
+});

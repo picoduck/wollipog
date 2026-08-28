@@ -11,8 +11,7 @@ import type {
 } from "@wollipog/protocol";
 import Fastify from "fastify";
 import { ControlPlaneDb } from "./db.js";
-import type { RunnerRequestResult } from "./hub.js";
-import { RunnerRequestTimeoutError } from "./hub.js";
+import { Hub, RunnerRequestTimeoutError, type RunnerRequestResult, type Socket } from "./hub.js";
 import { LOCAL_OWNER_USER_ID, PERSONAL_ORGANIZATION_ID, type HumanPrincipal } from "./identity.js";
 import {
   resolveDesiredSkills,
@@ -638,6 +637,81 @@ test("an actively flushing large catalog can outlive the orphan-manifest timeout
   assert.equal(waits[2]!.msg.type, "skills_sync_complete");
   waits[2]!.resolve(true);
   await transferring;
+});
+
+test("a solicited chunked sync refreshes correlation through healthy aggregate progress", async () => {
+  const db = ControlPlaneDb.open(":memory:");
+  db.registerRunner(runnerMeta("runner-v96"), 10, 96);
+  for (const name of ["alpha", "beta"]) {
+    const skill = db.createSkill({
+      name,
+      description: null,
+      groupId: null,
+      files: [{ path: "SKILL.md", content: `---\nname: ${name}\n---\n`, encoding: "utf8" }],
+      manifest: '{"files":[]}',
+      digest: name === "alpha" ? "a".repeat(64) : "b".repeat(64),
+    });
+    db.createSkillAssignment({
+      skillId: skill.id,
+      scopeKind: "instance",
+      agentSelector: { kind: "all" },
+    });
+  }
+
+  const sent: Array<{
+    message: ControlPlaneToRunner;
+    callback?: (error?: Error) => void;
+  }> = [];
+  const socket: Socket = {
+    asyncDelivery: true,
+    bufferedAmount: 0,
+    send(data, callback) {
+      sent.push({ message: JSON.parse(data) as ControlPlaneToRunner, ...(callback ? { callback } : {}) });
+    },
+  };
+  const hub = new Hub(db);
+  hub.attachRunner("runner-v96", socket);
+  const sync = makeSkillsSyncPusher({ db, hub, deliveryTtlMs: 500 });
+
+  const manual = sync.request("runner-v96", "request-progress");
+  const outcome = manual.then(
+    (result) => ({ ok: true as const, result }),
+    (error: unknown) => ({ ok: false as const, error }),
+  );
+  const manifest = sent[0]!.message as SkillsSyncManifestMessage;
+  const delivery = sync.handleNeed({
+    type: "skills_sync_need",
+    runnerId: "runner-v96",
+    syncId: manifest.syncId,
+    missing: manifest.skills.map(({ name, versionDigest }) => ({ name, versionDigest })),
+  });
+  await delay(0);
+  assert.equal(sent.length, 2);
+  assert.equal(sent[1]!.message.type, "skills_sync_content");
+  await delay(300);
+  sent[1]!.callback!();
+  await delay(0);
+  assert.equal(sent.length, 3);
+  assert.equal(sent[2]!.message.type, "skills_sync_content");
+  await delay(300);
+  sent[2]!.callback!();
+  await delay(0);
+  assert.equal(sent.length, 4);
+  assert.equal(sent[3]!.message.type, "skills_sync_complete");
+  sent[3]!.callback!();
+  await delivery;
+
+  const state: SkillsStateMessage & { requestId: string } = {
+    type: "skills_state",
+    runnerId: "runner-v96",
+    requestId: "request-progress",
+    deployed: [],
+    unmanaged: [],
+    removals: [],
+  };
+  assert.equal(hub.resolveRunnerRequest(state, "runner-v96"), true,
+    "aggregate delivery outlives the original deadline without losing correlation");
+  assert.deepEqual(await outcome, { ok: true, result: state });
 });
 
 test("a push superseding a solicited v96 sync preserves its request correlation", () => {

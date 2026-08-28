@@ -177,7 +177,9 @@ on every registration, which makes durability trivial (no receipt outbox needed)
   peer retains the aggregate catalog contents in transaction memory. A slow or interrupted writer
   never sends the completion fence. A manifest that never receives a valid need expires after 30
   seconds, and every stalled frame flush has the same bound; healthy per-frame progress may take
-  longer than 30 seconds for the aggregate catalog.
+  longer than 30 seconds for the aggregate catalog. A solicited manual sync refreshes its correlated
+  reply deadline on each verified need or successful frame flush, so the UI remains in progress for
+  a healthy aggregate transfer while the same inactivity bound still fails a stalled one.
 - Manifest cache checks and reconciliation share the same native-harness/manual-variant policy, so
   discovery changes fail closed instead of letting the two phases disagree about required content.
 - **Runner→CP `skills_state`** — deployed digests, link health, conflicts, unmanaged skills, and

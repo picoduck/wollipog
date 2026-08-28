@@ -37,7 +37,7 @@ import {
 
 /** The narrow hub surface the skill routes need (mockable in tests). */
 export type SkillsHub = Pick<Hub, "isRunnerOnline" | "sendToRunner" | "requestFromRunner"> &
-  Partial<Pick<Hub, "sendToRunnerAndWait">>;
+  Partial<Pick<Hub, "sendToRunnerAndWait" | "refreshRunnerRequestTimeout">>;
 
 export interface SkillsLog {
   debug(message: string): void;
@@ -95,6 +95,10 @@ export function makeSkillsSyncPusher(deps: {
     deps.hub.sendToRunnerAndWait
       ? deps.hub.sendToRunnerAndWait(runnerId, message, SKILLS_SYNC_MAX_BUFFERED_BYTES, deliveryTtlMs)
       : Promise.resolve(deps.hub.sendToRunner(runnerId, message));
+  const refreshCorrelation = (delivery: PendingSkillsDelivery): void => {
+    if (!delivery.requestId) return;
+    deps.hub.refreshRunnerRequestTimeout?.(delivery.runnerId, delivery.requestId, deliveryTtlMs);
+  };
 
   const forget = (delivery: PendingSkillsDelivery): void => {
     clearTimeout(delivery.timer);
@@ -201,6 +205,7 @@ export function makeSkillsSyncPusher(deps: {
       requestedEntries.push(entry);
     }
     delivery.sending = true;
+    refreshCorrelation(delivery);
     // The orphan timer protects only a manifest that never receives a valid need. Once transfer
     // starts, every individual socket flush has the same timeout, while a healthy large catalog
     // may legitimately take longer than one timeout window in aggregate.
@@ -229,6 +234,7 @@ export function makeSkillsSyncPusher(deps: {
           forget(delivery);
           return;
         }
+        refreshCorrelation(delivery);
       }
       const completed = await sendBounded(message.runnerId, {
         type: "skills_sync_complete",
@@ -238,6 +244,8 @@ export function makeSkillsSyncPusher(deps: {
       if (pending.get(delivery.syncId) !== delivery) return;
       if (!completed) {
         log.warn(`skills completion delivery to ${message.runnerId} was interrupted`);
+      } else {
+        refreshCorrelation(delivery);
       }
       forget(delivery);
     } catch (error) {
@@ -258,7 +266,7 @@ export function makeSkillsSyncPusher(deps: {
       );
     }
     try {
-      return await deps.hub.requestFromRunner(runnerId, requestId, message);
+      return await deps.hub.requestFromRunner(runnerId, requestId, message, deliveryTtlMs);
     } catch (error) {
       if (message.type === "skills_sync_manifest") {
         const original = pending.get(message.syncId);
