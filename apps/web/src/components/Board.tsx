@@ -253,7 +253,7 @@ function BoardColumnBody({
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   return (
-    <div className="column-body" ref={scrollRef}>
+    <div className="column-body measured-virtual-scroll" ref={scrollRef}>
       <MeasuredVirtualList
         items={sessions}
         getKey={sessionCardKey}

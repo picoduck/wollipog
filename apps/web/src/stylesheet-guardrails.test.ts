@@ -109,6 +109,34 @@ test("styles.css is the only production stylesheet", () => {
     "a vendor stylesheet is exempted here but no longer imported; drop the exemption");
 });
 
+test("virtualized scroll owners disable browser-native scroll anchoring", () => {
+  const values: string[] = [];
+  root.walkRules((rule) => {
+    if (!selectorMembers(rule.selector).includes(".measured-virtual-scroll")) return;
+    rule.walkDecls("overflow-anchor", (decl) => values.push(decl.value));
+  });
+  assert.deepEqual(values, ["none"],
+    "MeasuredVirtualList owns anchor correction, so its scroll container must have one native-anchor opt-out");
+});
+
+test("every production virtual-list host marks its scroll owner", () => {
+  const missing: string[] = [];
+  for (const path of sourceFiles(join(WEB, "src/components"))) {
+    if (/\.test\.[cm]?[jt]sx?$/.test(path)) continue;
+    const source = readFileSync(path, "utf8");
+    // EventTimeline owns the list but not its viewport; the second check audits each production
+    // caller that supplies that external ref instead of pretending the wrapper can mark it.
+    const hostsMeasuredList = basename(path) !== "EventTimeline.tsx" &&
+      source.includes("<MeasuredVirtualList") && source.includes("scrollRef=");
+    const hostsVirtualTimeline = /<EventTimeline\b(?:(?!\/>)[\s\S])*?\bscrollRef=/.test(source);
+    if ((hostsMeasuredList || hostsVirtualTimeline) && !source.includes("measured-virtual-scroll")) {
+      missing.push(basename(path));
+    }
+  }
+  assert.deepEqual(missing, [],
+    "a production MeasuredVirtualList host must opt its external scroll container out of native anchoring");
+});
+
 test("custom properties are lowercase, which is what the scanners assume", () => {
   // Custom-property names are CASE-SENSITIVE, and the older shared-root scan in styles.test.ts
   // recognises references matching `[a-z0-9-]+` only. `--Local` declared in one scope and read in

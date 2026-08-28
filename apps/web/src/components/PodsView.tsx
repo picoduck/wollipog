@@ -65,7 +65,7 @@ const PodMemberTimeline = memo(function PodMemberTimeline({
   const presentation = transcriptPresentation({ itemCount: items.length, hasOptimistic: false, working: false, history, conn });
   const scrollRef = useRef<HTMLDivElement>(null);
   return (
-    <div className="compare-body" ref={scrollRef} role="region" aria-label={`${title} activity`} aria-busy={presentation.busy} tabIndex={0}>
+    <div className="compare-body measured-virtual-scroll" ref={scrollRef} role="region" aria-label={`${title} activity`} aria-busy={presentation.busy} tabIndex={0}>
       {presentation.notice === "refreshing" && <div className="muted sm" role="status">Checking for missed activity…</div>}
       {presentation.notice === "stale" && <div className="muted sm" role="status">Showing cached activity.</div>}
       {presentation.notice === "error" && <div className="muted sm" role="status">Activity refresh failed.</div>}

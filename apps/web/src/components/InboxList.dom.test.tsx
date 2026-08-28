@@ -170,6 +170,8 @@ test("inbox list keeps live row content and the visible touch target while inter
   await act(async () => { root.render(renderList(session("target", "Target Session"))); });
 
   const grid = container.querySelector<HTMLElement>(".inbox-list")!;
+  assert.equal(grid.classList.contains("measured-virtual-scroll"), true,
+    "the Inbox virtualizer's scroll owner disables browser-native anchoring");
   const pointer = (type: string, pointerId: number, pointerType: string) =>
     grid.dispatchEvent(new domWindow.PointerEvent(type, { bubbles: true, pointerId, pointerType }) as unknown as Event);
   await act(async () => {

@@ -2573,7 +2573,7 @@ function SessionDetailLoaded({
               />
             )}
             <div
-              className="detail-scroll"
+              className="detail-scroll measured-virtual-scroll"
               ref={scrollRef}
               role="region"
               aria-label={mode === "expanded" ? "Session Activity" : "Session Preview Activity"}

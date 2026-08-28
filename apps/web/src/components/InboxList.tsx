@@ -116,7 +116,7 @@ export const InboxList = forwardRef<HTMLDivElement, {
   return (
     <div
       ref={attachList}
-      className="inbox-list"
+      className="inbox-list measured-virtual-scroll"
       role="grid"
       aria-label="Sessions"
       aria-rowcount={entries.length}
