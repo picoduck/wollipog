@@ -101,6 +101,26 @@ End with a single report. Structure it as:
 5. **Issue drafts** — for genuinely new findings, the exact sanitized title, body, and labels,
    following the format and public-content rules in `.github/ISSUE_REPORTING.md`. Use the
    `maintenance` label plus `bug` or `enhancement`. Title each draft `Maintenance: <summary>`.
+6. **Recommended actions** — a ranked decision list, one item per line, each traceable to a
+   finding above or to a concrete friction this run hit. Never speculative improvements: if the
+   run did not experience it or prove it, it does not belong here. Type every item so the reader
+   knows who can execute it on approval:
+   - `publish` — publish draft N. Executable in this session by replying with approval.
+   - `amend-skill` — change this skill or a job file (a broken command, a rule the run had to
+     override, a false-positive class worth naming). NOT executable here: Phase 1 forbids this
+     session from editing the tree, so approval hands it to a separate session.
+   - `adjust-automation` — change this job's schedule, budget, or config. Also not executable
+     here; state the exact proposed values.
+   - `environment` — machine-level changes (a missing tool, a stale service). Not executable
+     here; name the command or change precisely.
+   - `tracker` — comment on or close an existing issue this run's evidence affects, citing the
+     issue number.
+   Deduplicate before listing: an action already covered by an open issue, an open pull request,
+   or a previous run's still-pending recommendation is noted with its reference, not repeated as
+   new. Writing "No recommended actions" is a valid and often correct entry; omitting the
+   section is not. The reader's approve/reject decisions on these items are the acceptance
+   record the Promotion Criteria below are judged against, so a padded list damages exactly the
+   record it is trying to build.
 
 Present each draft using the Approval Preview Formatting rules in `.github/ISSUE_REPORTING.md`.
 Never wrap a body that may contain code fences in a fixed three-backtick fence.
