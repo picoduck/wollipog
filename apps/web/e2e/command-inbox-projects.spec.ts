@@ -157,6 +157,52 @@ for (const viewport of [
   });
 }
 
+test("desktop can apply a pending Inbox order without losing selection or scroll anchor", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 760 });
+  await page.goto("/command-inbox-projects-e2e.html?scenario=inbox-live-scroll");
+  const list = page.locator(".inbox-list");
+  await expect(list.locator("[data-virtual-total='36']")).toBeVisible();
+  await expect.poll(() => list.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+
+  await list.evaluate((element) => {
+    element.scrollTop = Math.round((element.scrollHeight - element.clientHeight) * 0.55);
+    element.dispatchEvent(new Event("scroll"));
+  });
+  await settlePreviewLayout(page);
+  const selectedKey = await list.locator('.inbox-row-shell[aria-selected="true"]').evaluate((row) =>
+    row.closest<HTMLElement>("[data-virtual-row]")?.dataset.virtualKey ?? null);
+  expect(selectedKey).not.toBeNull();
+
+  await page.evaluate(() => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-overflow-35", {
+      lastEventAt: 2_000,
+      preview: "Newest activity is waiting for deliberate order adoption.",
+      status: "running",
+    });
+  });
+  const applyOrder = page.getByRole("button", { name: "Apply New Order" });
+  await expect(applyOrder).toBeVisible();
+  const before = await inboxViewportAnchor(page);
+  expect(before.key).not.toBeNull();
+
+  await applyOrder.click();
+  await settlePreviewLayout(page);
+  await expect(applyOrder).toHaveCount(0);
+  await expect(list).toBeFocused();
+  const after = await inboxViewportAnchor(page);
+  expect(after.key).toBe(before.key);
+  expect(Math.abs((after.offset ?? 0) - (before.offset ?? 0))).toBeLessThan(2);
+  expect(await list.locator('.inbox-row-shell[aria-selected="true"]').evaluate((row) =>
+    row.closest<HTMLElement>("[data-virtual-row]")?.dataset.virtualKey ?? null)).toBe(selectedKey);
+
+  await list.evaluate((element) => {
+    element.scrollTop = 0;
+    element.dispatchEvent(new Event("scroll"));
+  });
+  await settlePreviewLayout(page);
+  await expect(list.locator(".inbox-row-title").first()).toHaveText("Overflow Session 36");
+});
+
 test("real Inbox preview paging keeps ownership while live output streams", async ({ page }) => {
   await page.goto("/command-inbox-projects-e2e.html?scenario=preview-follow");
   const reader = page.getByRole("region", { name: "Session Preview Activity" });

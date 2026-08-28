@@ -460,6 +460,9 @@ export function InboxView({
   }, [heldOrder, liveEntries]);
   const displayedIds = useMemo(() => entries.map((entry) => entry.session.id), [entries]);
   displayedIdsRef.current = displayedIds;
+  const orderUpdateAvailable = !isMobile && heldOrder !== null && (
+    heldOrder.length !== liveIds.length || heldOrder.some((id, index) => id !== liveIds[index])
+  );
   const displayedSelection = repairedSelection && displayedIds.includes(repairedSelection) ? repairedSelection : null;
   const displayedSelectedSession = displayedSelection ? sessions.get(displayedSelection) ?? null : null;
   const expanded = expandedSessionId !== null;
@@ -532,6 +535,13 @@ export function InboxView({
     holdDisplayedOrder();
     scheduleOrderRelease();
   }, [holdDisplayedOrder, scheduleOrderRelease]);
+
+  const applyCanonicalOrder = useCallback(() => {
+    if (settleTimerRef.current !== null) window.clearTimeout(settleTimerRef.current);
+    settleTimerRef.current = null;
+    setHeldOrder([...liveIdsRef.current]);
+    window.requestAnimationFrame(() => listRef.current?.focus({ preventScroll: true }));
+  }, []);
 
   const handlePointerTargetChange = useCallback((pointerId: number, targeting: boolean) => {
     if (targeting) {
@@ -938,6 +948,19 @@ export function InboxView({
             })}
           </div>
           <div className="inbox-toolbar-actions">
+            <span className="sr-only" aria-live="polite" aria-atomic="true">
+              {orderUpdateAvailable ? "A newer Inbox order is available." : ""}
+            </span>
+            {orderUpdateAvailable && (
+              <button
+                type="button"
+                className="btn sm inbox-order-update"
+                title="Apply the latest session order."
+                onClick={applyCanonicalOrder}
+              >
+                Apply New Order
+              </button>
+            )}
             {sessionRemindersSupported && (
               <SegmentedControl<ReminderInboxMode>
                 className="inbox-reminder-view"

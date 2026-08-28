@@ -7966,6 +7966,7 @@ body.shell-dock-dragging * {
   align-items: center;
   gap: 8px;
 }
+.inbox-order-update { white-space: nowrap; }
 .inbox-create-menu {
   position: relative;
   display: flex;
