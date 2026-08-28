@@ -186,7 +186,7 @@ export function appShellSecurityHeaders(html: string): Record<string, string> {
     .map((match) => `'sha256-${createHash("sha256").update(match[1] ?? "").digest("base64")}'`);
   const scriptSrc = ["'self'", ...new Set(hashes)].join(" ");
   return {
-    "Content-Security-Policy": `script-src ${scriptSrc}; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`,
+    "Content-Security-Policy": `script-src ${scriptSrc}; img-src 'self' data: blob: https:; media-src 'self' blob: https:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`,
     "X-Content-Type-Options": "nosniff",
   };
 }

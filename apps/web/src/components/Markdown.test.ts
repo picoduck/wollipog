@@ -8,6 +8,7 @@ import {
   markdownCodeLanguage,
   markdownCodeText,
   markdownCodeWrapsByDefault,
+  transcriptMediaKind,
 } from "./Markdown.js";
 
 (globalThis as typeof globalThis & { React: typeof React }).React = React;
@@ -42,6 +43,42 @@ test("safe Markdown renders immediately without synchronous highlighting or acti
   assert.doesNotMatch(html, /<script|<img/i);
   assert.match(html, /class="md-img-link"/);
   assert.match(html, /href="https:\/\/attacker\.example\/pixel\.png"/);
+});
+
+test("transcript media classification uses HTTPS path extensions and ignores signatures", () => {
+  for (const href of [
+    "https://evidence.example/review.PNG",
+    "https://evidence.example/review.jpg?X-Amz-Signature=secret",
+    "https://evidence.example/review.jpeg#full",
+    "https://evidence.example/review.gif?download=1",
+    "https://evidence.example/review.webp",
+  ]) assert.equal(transcriptMediaKind(href), "image", href);
+  for (const href of [
+    "https://evidence.example/review.mp4?X-Amz-Signature=secret",
+    "https://evidence.example/review.WEBM#clip",
+  ]) assert.equal(transcriptMediaKind(href), "video", href);
+
+  for (const href of [
+    "http://evidence.example/review.png",
+    "https://evidence.example/download?file=review.png",
+    "https://evidence.example/review.png.exe",
+    "/local/review.png",
+    "not a URL",
+  ]) assert.equal(transcriptMediaKind(href), null, href);
+});
+
+test("transcript media opt-in keeps links and adds bounded native image/video elements", () => {
+  const image = "https://evidence.example/review.png?X-Amz-Signature=redacted";
+  const video = "https://evidence.example/review.webm?X-Amz-Signature=redacted";
+  const html = renderToStaticMarkup(React.createElement(Markdown, {
+    inlineMedia: true,
+    children: `${image}\n\n${video}`,
+  }));
+
+  assert.match(html, new RegExp(`href="${image.replaceAll("?", "\\?")}"`));
+  assert.match(html, /<img class="md-media-image"[^>]*src="https:\/\/evidence\.example\/review\.png[^>]*loading="lazy"/);
+  assert.match(html, /<video class="md-media-video"[^>]*src="https:\/\/evidence\.example\/review\.webm[^>]*controls=""[^>]*playsinline=""[^>]*preload="metadata"/);
+  assert.doesNotMatch(html, /autoplay/);
 });
 
 test("inline code stays action-free", () => {

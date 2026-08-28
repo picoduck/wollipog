@@ -4466,7 +4466,7 @@ button.file-head.source-path-link {
 .md img {
   max-width: 100%;
 }
-/* transcript images render as a non-loading link (see Markdown.tsx) */
+/* Transcript media always retains its plain link; a failed fetch removes only the embed. */
 .md-img-link {
   display: inline-flex;
   align-items: center;
@@ -4478,6 +4478,41 @@ button.file-head.source-path-link {
 }
 .md-img-link:hover {
   text-decoration: underline;
+}
+.md-media-embed {
+  display: block;
+  max-width: 100%;
+  margin: 8px 0;
+}
+.md-media-image-link {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+}
+.md-media-image,
+.md-media-video {
+  display: block;
+  max-width: 100%;
+  max-height: min(480px, 60vh);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev-2);
+  object-fit: contain;
+}
+.md-media-image {
+  width: auto;
+  height: auto;
+}
+/* Keep a pending/broken image from reserving an alt-text placeholder. Its successful load grows
+   the virtual row once, through the list's existing pre-paint ResizeObserver measurement path. */
+.md-media-image[data-load-state="pending"] {
+  width: 0;
+  height: 0;
+  border: 0;
+  opacity: 0;
+}
+.md-media-video {
+  width: min(720px, 100%);
 }
 /* inline code */
 .md code {

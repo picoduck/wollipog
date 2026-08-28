@@ -100,6 +100,84 @@ function CodeBlockPre({ children, node: _node, ...props }: ComponentProps<"pre">
   );
 }
 
+export type TranscriptMediaKind = "image" | "video";
+
+const TRANSCRIPT_IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
+const TRANSCRIPT_VIDEO_EXTENSIONS = new Set([".mp4", ".webm"]);
+
+/** Classify only HTTPS media paths; query strings and fragments never influence the file type. */
+export function transcriptMediaKind(href: string | undefined): TranscriptMediaKind | null {
+  if (!href) return null;
+  try {
+    const url = new URL(href);
+    if (url.protocol !== "https:") return null;
+    const pathname = url.pathname.toLowerCase();
+    if ([...TRANSCRIPT_IMAGE_EXTENSIONS].some((extension) => pathname.endsWith(extension))) return "image";
+    if ([...TRANSCRIPT_VIDEO_EXTENSIONS].some((extension) => pathname.endsWith(extension))) return "video";
+  } catch {
+    // Malformed and relative URLs remain ordinary links and never become remote fetches.
+  }
+  return null;
+}
+
+function TranscriptMediaEmbed({ href, kind, label }: {
+  href: string;
+  kind: TranscriptMediaKind;
+  label: string;
+}) {
+  const [loadState, setLoadState] = useState<"pending" | "loaded" | "failed">("pending");
+  if (loadState === "failed") return null;
+
+  return (
+    <span className="md-media-embed">
+      {kind === "image" ? (
+        <a
+          className="md-media-image-link"
+          href={href}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label={`Open ${label} full size`}
+        >
+          <img
+            className="md-media-image"
+            src={href}
+            alt={label}
+            loading="lazy"
+            decoding="async"
+            data-load-state={loadState}
+            onLoad={() => setLoadState("loaded")}
+            onError={() => setLoadState("failed")}
+          />
+        </a>
+      ) : (
+        <video
+          className="md-media-video"
+          src={href}
+          aria-label={label}
+          controls
+          playsInline
+          preload="metadata"
+          onLoadedMetadata={() => setLoadState("loaded")}
+          onError={() => setLoadState("failed")}
+        />
+      )}
+    </span>
+  );
+}
+
+function MarkdownLink({ href, children, inlineMedia }: ComponentProps<"a"> & { inlineMedia: boolean }) {
+  const kind = inlineMedia ? transcriptMediaKind(href) : null;
+  const label = reactNodeText(children).trim() || href || "media";
+  return (
+    <>
+      <a href={href} target="_blank" rel="noopener noreferrer">
+        {children}
+      </a>
+      {kind && href && <TranscriptMediaEmbed href={href} kind={kind} label={label} />}
+    </>
+  );
+}
+
 /**
  * Markdown renderer for agent messages + reasoning. GFM (tables, task lists, strikethrough,
  * autolinks) plus syntax-highlighted code fences via rehype-highlight (adds `hljs-*` classes;
@@ -109,9 +187,9 @@ function CodeBlockPre({ children, node: _node, ...props }: ComponentProps<"pre">
  * `remark-breaks` keeps single newlines as line breaks, so line-oriented agent output (status
  * lines, pasted command output) doesn't collapse into one paragraph the way CommonMark would.
  *
- * Security: transcript content is semi-untrusted. We do NOT auto-load images — `![](url)` is
- * rendered as a plain link instead of an `<img>`, so opening a session can't trigger a fetch to an
- * attacker-controlled URL (which would leak that the session was viewed + the client IP / reachability).
+ * Security: transcript content is semi-untrusted. Callers must explicitly opt into inline media;
+ * even then only HTTPS URLs with known image/video path extensions become `<img>`/`<video>` fetches.
+ * Raw HTML stays disabled and all media retains a plain external link as its failure fallback.
  *
  * Memoized on `children`: agent bubbles re-render on every streaming chunk, and re-parsing a long
  * message each tick is wasteful — the same text string skips the markdown pipeline.
@@ -119,10 +197,13 @@ function CodeBlockPre({ children, node: _node, ...props }: ComponentProps<"pre">
 export const Markdown = memo(function Markdown({
   children,
   highlightEligible = true,
+  inlineMedia = false,
 }: {
   children: string;
   /** Timeline virtualization passes whether this settled row currently intersects the viewport. */
   highlightEligible?: boolean;
+  /** Transcript-only opt-in for HTTPS image and video URL embeds. */
+  inlineMedia?: boolean;
 }) {
   const key = useRef<symbol | null>(null);
   key.current ??= Symbol("markdown-highlight");
@@ -170,17 +251,23 @@ export const Markdown = memo(function Markdown({
         rehypePlugins={rehypePlugins}
         components={{
           pre: CodeBlockPre,
-          a: ({ href, children }) => (
-            <a href={href} target="_blank" rel="noopener noreferrer">
-              {children}
-            </a>
-          ),
-          // Never auto-fetch transcript-provided images — render as a (non-loading) link instead.
-          img: ({ src, alt }) => (
-            <a className="md-img-link" href={typeof src === "string" ? src : undefined} target="_blank" rel="noopener noreferrer">
-              🖼 {alt || (typeof src === "string" ? src : "image")}
-            </a>
-          ),
+          a: ({ href, children }) => <MarkdownLink href={href} inlineMedia={inlineMedia}>{children}</MarkdownLink>,
+          img: ({ src, alt }) => {
+            const href = typeof src === "string" ? src : undefined;
+            const kind = inlineMedia ? transcriptMediaKind(href) : null;
+            const label = alt || href || "image";
+            if (kind === "image" && href) {
+              return (
+                <>
+                  <a className="md-img-link" href={href} target="_blank" rel="noopener noreferrer">🖼 {label}</a>
+                  <TranscriptMediaEmbed href={href} kind="image" label={label} />
+                </>
+              );
+            }
+            return (
+              <a className="md-img-link" href={href} target="_blank" rel="noopener noreferrer">🖼 {label}</a>
+            );
+          },
         }}
       >
         {children}
