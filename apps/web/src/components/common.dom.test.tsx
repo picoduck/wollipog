@@ -99,6 +99,7 @@ test("background-work badges expose every durable state with Title Case visible 
       ["Background Work: Waiting on External Job", "Background Work: Continuation Pending", "Background Work: Orphaned", "Background Work: Resumed"],
     );
     assert.ok(badges.every((badge) => badge.getAttribute("role") === "status"));
+    assert.ok(badges.every((badge) => !badge.hasAttribute("title")));
     assert.deepEqual(
       badges.map((badge) => [...badge.classList].at(-1)),
       ["background-work-running", "background-work-running", "background-work-orphaned", "background-work-resumed"],
@@ -110,19 +111,37 @@ test("background-work badges expose every durable state with Title Case visible 
   }
 });
 
-test("compact background-work badges retain full live-region content", async () => {
+test("compact background-work badges show specific states and expose every full label", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
   const container = happyContainer as unknown as HTMLDivElement;
   const root = createRoot(container);
   try {
     await act(async () => {
-      root.render(<BackgroundWorkBadge state="running" compact />);
+      root.render(<>
+        <BackgroundWorkBadge state="running" compact />
+        <BackgroundWorkBadge state="continuation_pending" compact />
+        <BackgroundWorkBadge state="orphaned" compact />
+        <BackgroundWorkBadge state="resumed" compact />
+      </>);
     });
-    const badge = container.querySelector('[role="status"]');
-    assert.equal(badge?.getAttribute("aria-label"), "Background Work: Waiting on External Job");
-    assert.equal(badge?.querySelector(".sr-only")?.textContent, "Background Work: Waiting on External Job");
-    assert.equal(badge?.querySelector('[aria-hidden="true"]:last-child')?.textContent, "Background Work Active");
+    const badges = [...container.querySelectorAll('[role="status"]')];
+    const fullLabels = [
+      "Background Work: Waiting on External Job",
+      "Background Work: Continuation Pending",
+      "Background Work: Orphaned",
+      "Background Work: Resumed",
+    ];
+    assert.deepEqual(badges.map((badge) => badge.getAttribute("aria-label")), fullLabels);
+    assert.deepEqual(badges.map((badge) => badge.getAttribute("title")), fullLabels);
+    assert.deepEqual(
+      badges.map((badge) => badge.querySelector(".sr-only")?.textContent),
+      fullLabels,
+    );
+    assert.deepEqual(
+      badges.map((badge) => badge.querySelector('[aria-hidden="true"]:last-child')?.textContent),
+      ["Waiting on External Job", "Continuation Pending", "Background Work Orphaned", "Background Work Resumed"],
+    );
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();

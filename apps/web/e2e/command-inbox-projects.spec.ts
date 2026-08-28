@@ -730,7 +730,7 @@ test("Project-first creation distinguishes same names and explains multi-locatio
     .toMatchObject({ projectId: "alpha-copy", projectLocationId: "location-alpha-copy" });
 });
 
-/** The ⋯ trigger reveals on hover of the Project crumb; Move Session lives in its menu. */
+/** The ⋯ trigger reveals on hover beside the Project crumb; Move Session lives in its menu. */
 async function openMoveToProjectDialog(page: Page) {
   await page.locator(".crumb-project").hover();
   await page.getByRole("button", { name: "Project Actions" }).click();
@@ -738,8 +738,8 @@ async function openMoveToProjectDialog(page: Page) {
   return page.getByRole("dialog", { name: "Move to Project" });
 }
 
-test("the Project crumb navigates to the Project's Inbox split; ⋯ overlays on hover", async ({ page }) => {
-  // A longer name keeps a clear click region beside the 34px trailing overlay.
+test("the Project crumb navigates to the Project's Inbox split; ⋯ reveals beside it", async ({ page }) => {
+  // A longer name keeps its click region separate from the 34px trailing actions gutter.
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateProject("alpha", { name: "Alpha Project" }));
   await page.getByRole("tab", { name: /^All\d/ }).click();
   await page.getByRole("row", { name: /Alpha Session/ }).click();
@@ -748,16 +748,23 @@ test("the Project crumb navigates to the Project's Inbox split; ⋯ overlays on 
   await expect(projectChip).toBeVisible();
   await expect(projectChip).not.toHaveAttribute("aria-haspopup", /.+/);
 
-  // The ⋯ trigger overlays the crumb's trailing text like the split-inbox tab menu: it takes
-  // no layout space, and it is faded out and click-through until hover or focus.
+  // The ⋯ trigger occupies the crumb's reserved trailing gutter. It stays faded out and
+  // click-through until hover or focus without covering the Project navigation button.
   const actions = page.getByRole("button", { name: "Project Actions" });
+  const projectCrumb = page.locator(".crumb-project");
   await expect(actions).toHaveCSS("opacity", "0");
   await expect(actions).toHaveCSS("pointer-events", "none");
-  const [chipBox, actionsBox] = await Promise.all([projectChip.boundingBox(), actions.boundingBox()]);
+  const [crumbBox, chipBox, actionsBox] = await Promise.all([
+    projectCrumb.boundingBox(),
+    projectChip.boundingBox(),
+    actions.boundingBox(),
+  ]);
+  expect(crumbBox).not.toBeNull();
   expect(chipBox).not.toBeNull();
   expect(actionsBox).not.toBeNull();
-  expect(actionsBox!.x + actionsBox!.width).toBeLessThanOrEqual(chipBox!.x + chipBox!.width + 1);
-  await page.locator(".crumb-project").hover();
+  expect(actionsBox!.x).toBeGreaterThanOrEqual(chipBox!.x + chipBox!.width - 1);
+  expect(actionsBox!.x + actionsBox!.width).toBeLessThanOrEqual(crumbBox!.x + crumbBox!.width + 1);
+  await projectCrumb.hover();
   await expect(actions).toHaveCSS("opacity", "1");
   await expect(actions).toHaveCSS("pointer-events", "auto");
 

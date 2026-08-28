@@ -255,7 +255,7 @@ const BACKGROUND_WORK_LABELS: Record<BackgroundWorkState, string> = {
 };
 
 const COMPACT_BACKGROUND_WORK_LABELS: Record<BackgroundWorkState, string> = {
-  running: "Background Work Active",
+  running: "Waiting on External Job",
   continuation_pending: "Continuation Pending",
   orphaned: "Background Work Orphaned",
   resumed: "Background Work Resumed",
@@ -275,6 +275,7 @@ export function BackgroundWorkBadge({ state, compact = false }: {
           : "background-work-resumed"}`}
       role="status"
       aria-label={label}
+      title={compact ? label : undefined}
     >
       <span className="background-work-dot" aria-hidden="true" />
       {compact ? (
