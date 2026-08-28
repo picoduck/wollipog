@@ -354,6 +354,8 @@ test("InboxView keeps mobile browsing order stable before and through a touch", 
   assert.match(container.textContent ?? "", /Question arrived/);
   assert.match(container.textContent ?? "", /Awaiting Input/);
   assert.match(container.textContent ?? "", /Answer Required/);
+  assert.equal(container.querySelector(".inbox-order-update"), null,
+    "the desktop manual-order affordance does not crowd the mobile Inbox toolbar");
 
   await act(async () => { socket.push({ type: "session_removed", sessionId: "A" }); });
   assert.deepEqual(rowTitles(container), ["Session B", "Session C"]);
@@ -445,6 +447,23 @@ test("InboxView holds desktop browsing order until the user leaves the window", 
   assert.deepEqual(rowTitles(container), ["Session A", "Session B", "Session C"],
     "desktop stability must not expire while the user is still browsing the Inbox");
   assert.match(container.textContent ?? "", /Still running/);
+  const selectedBeforeApply = [...container.querySelectorAll<HTMLButtonElement>(".inbox-row")]
+    .find((row) => row.textContent?.includes("Session B"));
+  await act(async () => { selectedBeforeApply?.click(); });
+  const applyOrder = [...container.querySelectorAll<HTMLButtonElement>("button")]
+    .find((button) => button.textContent?.trim() === "Apply New Order");
+  assert.ok(applyOrder, "sustained desktop activity exposes a deliberate reorder boundary");
+  assert.match(container.textContent ?? "", /A newer Inbox order is available/);
+  await act(async () => { applyOrder.click(); });
+  assert.deepEqual(rowTitles(container), ["Session B", "Session C", "Session A"]);
+  assert.match(
+    container.querySelector<HTMLElement>('.inbox-row-shell[aria-selected="true"]')?.textContent ?? "",
+    /Session B/,
+    "manual reordering preserves selection by session identity",
+  );
+  assert.equal(container.querySelector(".inbox-order-update"), null, "the indicator clears after adoption");
+  assert.equal(domWindow.document.activeElement, container.querySelector(".inbox-list"),
+    "keyboard activation returns focus to the list without scrolling it");
 
   await act(async () => { socket.push({ type: "session_removed", sessionId: "A" }); });
   assert.deepEqual(rowTitles(container), ["Session B", "Session C"]);
@@ -456,6 +475,8 @@ test("InboxView holds desktop browsing order until the user leaves the window", 
   // Leaving the window is the safe boundary: canonical recency ordering is applied there.
   await act(async () => { domWindow.dispatchEvent(new domWindow.Event("blur")); });
   assert.deepEqual(rowTitles(container), ["Session B", "Session C"]);
+  assert.equal(container.querySelector(".inbox-order-update"), null,
+    "an automatic safe boundary clears the pending-order indicator");
   await act(async () => { socket.push({ type: "session_upsert", session: session("C", 80) }); });
   assert.deepEqual(rowTitles(container), ["Session C", "Session B"]);
 
@@ -517,6 +538,45 @@ test("InboxView holds desktop browsing order until the user leaves the window", 
     container.querySelector<HTMLElement>('.inbox-row-shell[aria-selected="true"]')?.textContent ?? "",
     /Session A/,
   );
+
+  await act(async () => { root.unmount(); });
+  container.remove();
+  mobileViewport = true;
+});
+
+test("InboxView does not offer a reorder when only a removed selected id remains held", async () => {
+  mobileViewport = false;
+  setVisibility("visible");
+  setWindowFocused(true);
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "inbox-removed-selection-order-test",
+    runtimeKey: "inbox-removed-selection-order-test:1",
+    createSocket: () => socket,
+    close() {},
+  };
+
+  await act(async () => {
+    root.render(
+      <StoreProvider connection={connection} navigation={navigation}>
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+      </StoreProvider>,
+    );
+  });
+  await act(async () => { socket.push(snapshot([session("A", 30), session("B", 20)])); });
+  assert.match(
+    container.querySelector<HTMLElement>('.inbox-row-shell[aria-selected="true"]')?.textContent ?? "",
+    /Session A/,
+  );
+
+  await act(async () => { socket.push({ type: "session_removed", sessionId: "A" }); });
+  assert.deepEqual(rowTitles(container), ["Session B"]);
+  assert.equal(container.querySelector(".inbox-order-update"), null,
+    "a stale selected-id placeholder is not a visible order difference");
+  assert.doesNotMatch(container.textContent ?? "", /A newer Inbox order is available/);
 
   await act(async () => { root.unmount(); });
   container.remove();
