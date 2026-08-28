@@ -12,8 +12,12 @@ function Complete-WollipogJobBridgeCache([string] $CompilePath, [string] $Bridge
       if (-not (Test-Path -LiteralPath $BridgePath -PathType Leaf)) { throw }
     }
   } finally {
-    if (Test-Path -LiteralPath $CompilePath -PathType Leaf) {
-      Remove-Item -LiteralPath $CompilePath -Force -ErrorAction Stop
+    # A real-time scanner can briefly hold a newly compiled DLL. Retry transient cleanup without
+    # turning a valid winning bridge into a failed provider launch; the GUID temp is never loaded.
+    for ($Attempt = 0; $Attempt -lt 5 -and
+        (Test-Path -LiteralPath $CompilePath -PathType Leaf); $Attempt++) {
+      Remove-Item -LiteralPath $CompilePath -Force -ErrorAction SilentlyContinue
+      if (Test-Path -LiteralPath $CompilePath -PathType Leaf) { Start-Sleep -Milliseconds 50 }
     }
   }
 }

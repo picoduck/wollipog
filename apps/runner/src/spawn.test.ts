@@ -14,7 +14,9 @@ import { extendOwnedProcessTree, ownsPosixRootProcessGroup, parsePosixProcessTab
 
 const windowsJobTestCacheRoot = mkdtempSync(path.join(os.tmpdir(), "wollipog-windows-job-suite-"));
 const windowsJobLauncherPath = materializeWindowsJobLauncher(windowsJobTestCacheRoot);
-after(() => { rmSync(windowsJobTestCacheRoot, { recursive: true, force: true }); });
+after(() => {
+  rmSync(windowsJobTestCacheRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+});
 
 const windowsJobIsolation = {
   backend: "windows-job" as const,
@@ -46,6 +48,7 @@ test("Windows Job launcher is materialized, caches its bridge, and clears both s
   assert.match(WINDOWS_JOB_LAUNCHER, /WollipogWindowsJobBridge-' \+ \(Split-Path \$PSScriptRoot -Leaf\)/);
   assert.doesNotMatch(WINDOWS_JOB_LAUNCHER, /WollipogWindowsJobBridge-' \+ \[string\] \$decoded\.ownerPid/);
   assert.match(WINDOWS_JOB_LAUNCHER, /catch \[IO\.IOException\]/);
+  assert.match(WINDOWS_JOB_LAUNCHER, /Complete-WollipogJobBridgeCache \$CompilePath \$BridgePath/);
   assert.match(WINDOWS_JOB_LAUNCHER, /bridge-unavailable/);
   assert.match(WINDOWS_JOB_LAUNCHER, /job-assignment/);
   assert.doesNotMatch(WINDOWS_JOB_LAUNCHER, /MamWindowsJob/);
