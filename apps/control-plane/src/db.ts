@@ -20,7 +20,6 @@ import {
   cleanupEventPayloadArtifacts,
   externalizeSessionEventPayload,
 } from "./event-payloads.js";
-import { scopeAudienceContained } from "./resource-scope.js";
 import {
   EVENT_PAYLOAD_CHUNK_BYTES,
   EVENT_PAYLOAD_PREVIEW_BYTES,
@@ -28,6 +27,7 @@ import {
   isPolicyApproval,
   isTerminal,
   runnerSupportsProtocol,
+  scopeAudienceContained,
   validatePromptImageInputs,
   type AutomationAuditEvent,
   type AccessScopeChangePreview,

@@ -6,7 +6,6 @@ import {
   accessScopeLabel,
   canAssignAccessScope,
   canChangeAccessScope,
-  scopeAudienceContained,
   scopeAudienceContainedForIdentity,
 } from "./access-scopes.js";
 
@@ -50,18 +49,16 @@ test("access choices expose only authorized creation scopes and use Title Case l
   assert.equal(accessScopeLabel(scope({ kind: "user", userId: "user-two" }), identity("admin")), "Private to Two");
 });
 
-test("client compatibility preflight is conservative for private, team, cross-user, and organization scopes", () => {
-  const organization = scope({ kind: "organization", organizationId: "org" });
+test("client preflight widens scope containment by active team membership", () => {
   const one = scope({ kind: "user", userId: "user-one" });
   const two = scope({ kind: "user", userId: "user-two" });
   const team = scope({ kind: "team", teamId: "team" });
-  assert.equal(scopeAudienceContained(one, organization), true);
-  assert.equal(scopeAudienceContained(organization, one), false);
-  assert.equal(scopeAudienceContained(one, one), true);
-  assert.equal(scopeAudienceContained(one, two), false);
-  assert.equal(scopeAudienceContained(one, team), false);
   assert.equal(scopeAudienceContainedForIdentity(identity("operator"), one, team), true,
     "the signed-in active team member is a narrower audience than their team");
+  assert.equal(scopeAudienceContainedForIdentity(identity("operator"), two, team), false,
+    "a non-member stays outside the team audience");
+  assert.equal(scopeAudienceContainedForIdentity(identity("operator"), team, one), false,
+    "membership never widens a team scope into a private one");
 });
 
 test("corrective actions only target scopes the current actor may assign", () => {

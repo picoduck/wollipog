@@ -22,6 +22,7 @@ import {
   runnerSupportsProtocol,
   BOARD_COLUMNS,
   archiveRequiresStop,
+  scopeAudienceContained,
   columnForStatus,
   isTerminal,
   isSupportedAgentQuestion,
@@ -60,6 +61,7 @@ import {
   type SessionCommandInvocationUpdateMessage,
   type SessionCommandInvocationView,
   type UiSnapshotMessage,
+  type ResourceScope,
 } from "./index.js";
 
 test("control-plane discovery accepts both service markers while emission uses Wollipog", () => {
@@ -857,4 +859,35 @@ test("validateQuestionAnswers enforces provider multi-select cardinality", () =>
   assert.equal(validateQuestionAnswers(questions, { features: ["A", "B"] }), null);
   assert.match(validateQuestionAnswers(questions, { features: ["A"] })!, /at least 2/);
   assert.match(validateQuestionAnswers(questions, { features: ["A", "B", "C"] })!, /at most 2/);
+});
+
+const scopeOrganization = (id = "org"): ResourceScope => ({
+  organizationId: id,
+  owner: { kind: "organization", organizationId: id },
+});
+const scopeUser = (id: string, organizationId = "org"): ResourceScope => ({
+  organizationId,
+  owner: { kind: "user", userId: id },
+});
+const scopeTeam = (id: string, organizationId = "org"): ResourceScope => ({
+  organizationId,
+  owner: { kind: "team", teamId: id },
+});
+
+test("scope audience containment is conservative and organization-bounded", () => {
+  const cases: Array<[string, ResourceScope, ResourceScope, boolean]> = [
+    ["organization to same organization", scopeOrganization(), scopeOrganization(), true],
+    ["user to organization", scopeUser("one"), scopeOrganization(), true],
+    ["team to organization", scopeTeam("one"), scopeOrganization(), true],
+    ["user to same user", scopeUser("one"), scopeUser("one"), true],
+    ["user to different user", scopeUser("one"), scopeUser("two"), false],
+    ["team to same team", scopeTeam("one"), scopeTeam("one"), true],
+    ["team to different team", scopeTeam("one"), scopeTeam("two"), false],
+    ["user to team", scopeUser("one"), scopeTeam("one"), false],
+    ["team to user", scopeTeam("one"), scopeUser("one"), false],
+    ["different organization", scopeUser("one", "other"), scopeOrganization(), false],
+  ];
+  for (const [name, narrower, wider, expected] of cases) {
+    assert.equal(scopeAudienceContained(narrower, wider), expected, name);
+  }
 });
