@@ -19,7 +19,13 @@ import {
   SKILLS_SYNC_MAX_TOTAL_BYTES,
   skillsSyncMessageBytes,
 } from "./skills.js";
-import { makeSkillsSyncPusher, registerSkillRoutes, type SkillsHub, type SkillsLog } from "./skills-route.js";
+import {
+  makeSkillsSyncPusher,
+  registerSkillRoutes,
+  SkillsSyncInProgressError,
+  type SkillsHub,
+  type SkillsLog,
+} from "./skills-route.js";
 
 const AGENTS: AgentDefinition[] = [
   { id: "claude", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code" },
@@ -443,7 +449,7 @@ test("an over-budget aggregate skills_sync fails closed: push skipped, manual sy
   assert.equal(requested.length, 0, "the oversized frame never reaches the runner");
 });
 
-test("a v96 runner receives an over-budget desired set as manifest plus requested digest frames", () => {
+test("a v96 runner receives an over-budget desired set as manifest plus requested digest frames", async () => {
   const db = ControlPlaneDb.open(":memory:");
   const pushed: Array<{ runnerId: string; msg: ControlPlaneToRunner }> = [];
   const hub: SkillsHub = {
@@ -480,19 +486,19 @@ test("a v96 runner receives an over-budget desired set as manifest plus requeste
   assert.equal(manifest.skills.length, 17);
   assert.equal("files" in manifest.skills[0]!, false, "the authoritative list carries no content bytes");
 
-  // The runner reports only two missing digests; the other fifteen are already in its store and
-  // must not be transferred again.
-  sync.handleNeed({
+  // Exercise the worst case: every digest is absent. Delivery remains one independently bounded
+  // frame at a time even though the aggregate is larger than the retired budget.
+  await sync.handleNeed({
     type: "skills_sync_need",
     runnerId: "runner-v96",
     syncId: manifest.syncId,
-    missing: manifest.skills.slice(0, 2).map(({ name, versionDigest }) => ({ name, versionDigest })),
+    missing: manifest.skills.map(({ name, versionDigest }) => ({ name, versionDigest })),
   });
   const content = pushed.filter((entry) => entry.msg.type === "skills_sync_content");
-  assert.equal(content.length, 2);
+  assert.equal(content.length, 17);
   assert.deepEqual(
     content.map((entry) => (entry.msg as Extract<ControlPlaneToRunner, { type: "skills_sync_content" }>).name),
-    manifest.skills.slice(0, 2).map((entry) => entry.name),
+    manifest.skills.map((entry) => entry.name),
   );
   assert.equal(pushed.at(-1)!.msg.type, "skills_sync_complete");
 
@@ -505,13 +511,121 @@ test("a v96 runner receives an over-budget desired set as manifest plus requeste
     "the same authoritative state exceeds the retired aggregate frame budget");
 
   const sentBeforeStaleNeed = pushed.length;
-  sync.handleNeed({
+  await sync.handleNeed({
     type: "skills_sync_need",
     runnerId: "runner-v96",
     syncId: manifest.syncId,
     missing: [],
   });
   assert.equal(pushed.length, sentBeforeStaleNeed, "a completed transaction cannot be requested again");
+});
+
+test("chunked content is flow-controlled one frame at a time and interruption omits completion", async () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const pushed: ControlPlaneToRunner[] = [];
+  const waits: Array<{ msg: ControlPlaneToRunner; resolve(value: boolean): void }> = [];
+  const warnings: string[] = [];
+  const hub: SkillsHub = {
+    isRunnerOnline: () => true,
+    sendToRunner: (_runnerId, msg) => {
+      pushed.push(msg);
+      return true;
+    },
+    sendToRunnerAndWait: async (_runnerId, msg) => await new Promise<boolean>((resolve) => {
+      waits.push({ msg, resolve });
+    }),
+    requestFromRunner: async () => { throw new Error("unused"); },
+  };
+  db.registerRunner(runnerMeta("runner-v96"), 10, 96);
+  for (const name of ["alpha", "beta"]) {
+    const skill = db.createSkill({
+      name,
+      description: null,
+      groupId: null,
+      files: [{ path: "SKILL.md", content: `---\nname: ${name}\n---\n`, encoding: "utf8" }],
+      manifest: '{"files":[]}',
+      digest: name === "alpha" ? "a".repeat(64) : "b".repeat(64),
+    });
+    db.createSkillAssignment({
+      skillId: skill.id,
+      scopeKind: "instance",
+      agentSelector: { kind: "all" },
+    });
+  }
+  const sync = makeSkillsSyncPusher({
+    db,
+    hub,
+    log: { debug: () => {}, error: () => {}, warn: (message) => warnings.push(message) },
+  });
+  sync("runner-v96");
+  const manifest = pushed[0] as SkillsSyncManifestMessage;
+  const transferring = sync.handleNeed({
+    type: "skills_sync_need",
+    runnerId: "runner-v96",
+    syncId: manifest.syncId,
+    missing: manifest.skills.map(({ name, versionDigest }) => ({ name, versionDigest })),
+  });
+  await delay(0);
+  assert.equal(waits.length, 1, "only one content frame is handed to the transport before flush");
+  assert.equal(waits[0]!.msg.type, "skills_sync_content");
+  waits[0]!.resolve(true);
+  await delay(0);
+  assert.equal(waits.length, 2, "the second frame waits for the first callback");
+  waits[1]!.resolve(false);
+  await transferring;
+  assert.equal(waits.some(({ msg }) => msg.type === "skills_sync_complete"), false);
+  assert.ok(warnings.some((message) => message.includes("interrupted or exceeded its buffer bound")));
+});
+
+test("an actively flushing large catalog can outlive the orphan-manifest timeout", async () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const pushed: ControlPlaneToRunner[] = [];
+  const waits: Array<{ msg: ControlPlaneToRunner; resolve(value: boolean): void }> = [];
+  const hub: SkillsHub = {
+    isRunnerOnline: () => true,
+    sendToRunner: (_runnerId, msg) => {
+      pushed.push(msg);
+      return true;
+    },
+    sendToRunnerAndWait: async (_runnerId, msg) => await new Promise<boolean>((resolve) => {
+      waits.push({ msg, resolve });
+    }),
+    requestFromRunner: async () => { throw new Error("unused"); },
+  };
+  db.registerRunner(runnerMeta("runner-v96"), 10, 96);
+  for (const name of ["alpha", "beta"]) {
+    const skill = db.createSkill({
+      name,
+      description: null,
+      groupId: null,
+      files: [{ path: "SKILL.md", content: `---\nname: ${name}\n---\n`, encoding: "utf8" }],
+      manifest: '{"files":[]}',
+      digest: name === "alpha" ? "a".repeat(64) : "b".repeat(64),
+    });
+    db.createSkillAssignment({
+      skillId: skill.id,
+      scopeKind: "instance",
+      agentSelector: { kind: "all" },
+    });
+  }
+  const sync = makeSkillsSyncPusher({ db, hub, deliveryTtlMs: 50 });
+  sync("runner-v96");
+  const manifest = pushed[0] as SkillsSyncManifestMessage;
+  const transferring = sync.handleNeed({
+    type: "skills_sync_need",
+    runnerId: "runner-v96",
+    syncId: manifest.syncId,
+    missing: manifest.skills.map(({ name, versionDigest }) => ({ name, versionDigest })),
+  });
+  await delay(30);
+  waits[0]!.resolve(true);
+  await delay(30);
+  assert.equal(waits.length, 2, "aggregate transfer time exceeds the orphan timeout between healthy flushes");
+  waits[1]!.resolve(true);
+  await delay(0);
+  assert.equal(waits[2]!.msg.type, "skills_sync_complete");
+  waits[2]!.resolve(true);
+  await transferring;
 });
 
 test("a push superseding a solicited v96 sync preserves its request correlation", () => {
@@ -538,6 +652,111 @@ test("a push superseding a solicited v96 sync preserves its request correlation"
   );
   assert.equal(manifests.length, 2);
   assert.equal(manifests[1]!.requestId, "request-original");
+});
+
+test("manual overlap rejects deterministically and a late timeout clears its idle superseding push", async () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const pushed: ControlPlaneToRunner[] = [];
+  const pending = new Map<string, { reject(error: Error): void }>();
+  const hub: SkillsHub = {
+    isRunnerOnline: () => true,
+    sendToRunner: (_runnerId: string, msg: ControlPlaneToRunner) => {
+      pushed.push(msg);
+      return true;
+    },
+    requestFromRunner: async (_runnerId, requestId, msg) => {
+      pushed.push(msg);
+      return await new Promise<RunnerRequestResult>((_resolve, reject) => pending.set(requestId, { reject }));
+    },
+  };
+  db.registerRunner(runnerMeta("runner-v96"), 10, 96);
+  const sync = makeSkillsSyncPusher({ db, hub });
+
+  const first = sync.request("runner-v96", "request-first");
+  await assert.rejects(
+    () => sync.request("runner-v96", "request-overlap"),
+    (error) => error instanceof SkillsSyncInProgressError,
+  );
+
+  sync("runner-v96");
+  const manifests = pushed.filter(
+    (msg): msg is SkillsSyncManifestMessage => msg.type === "skills_sync_manifest",
+  );
+  assert.equal(manifests.at(-1)!.requestId, "request-first", "the push inherits the live request owner");
+  pending.get("request-first")!.reject(new RunnerRequestTimeoutError());
+  await assert.rejects(() => first, (error) => error instanceof RunnerRequestTimeoutError);
+
+  const retry = sync.request("runner-v96", "request-retry");
+  assert.equal(
+    pushed.filter((msg) => msg.type === "skills_sync_manifest").at(-1)!.requestId,
+    "request-retry",
+    "timeout cleanup removed the superseding delivery, so retry starts immediately",
+  );
+  pending.get("request-retry")!.reject(new RunnerRequestTimeoutError());
+  await assert.rejects(() => retry, (error) => error instanceof RunnerRequestTimeoutError);
+});
+
+test("a late manual timeout does not abort an in-flight superseding push", async () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const pushed: ControlPlaneToRunner[] = [];
+  const requests = new Map<string, { reject(error: Error): void }>();
+  const waits: Array<{ msg: ControlPlaneToRunner; resolve(value: boolean): void }> = [];
+  const hub: SkillsHub = {
+    isRunnerOnline: () => true,
+    sendToRunner: (_runnerId, msg) => {
+      pushed.push(msg);
+      return true;
+    },
+    sendToRunnerAndWait: async (_runnerId, msg) => await new Promise<boolean>((resolve) => {
+      waits.push({ msg, resolve });
+    }),
+    requestFromRunner: async (_runnerId, requestId, msg) => {
+      pushed.push(msg);
+      return await new Promise<RunnerRequestResult>((_resolve, reject) => requests.set(requestId, { reject }));
+    },
+  };
+  db.registerRunner(runnerMeta("runner-v96"), 10, 96);
+  const skill = db.createSkill({
+    name: "alpha",
+    description: null,
+    groupId: null,
+    files: [{ path: "SKILL.md", content: "alpha", encoding: "utf8" }],
+    manifest: '{"files":[]}',
+    digest: "a".repeat(64),
+  });
+  db.createSkillAssignment({
+    skillId: skill.id,
+    scopeKind: "instance",
+    agentSelector: { kind: "all" },
+  });
+  const sync = makeSkillsSyncPusher({ db, hub });
+
+  const manual = sync.request("runner-v96", "request-first");
+  sync("runner-v96");
+  const replacement = pushed.filter(
+    (msg): msg is SkillsSyncManifestMessage => msg.type === "skills_sync_manifest",
+  ).at(-1)!;
+  const delivery = sync.handleNeed({
+    type: "skills_sync_need",
+    runnerId: "runner-v96",
+    syncId: replacement.syncId,
+    missing: replacement.skills.map(({ name, versionDigest }) => ({ name, versionDigest })),
+  });
+  await delay(0);
+  assert.equal(waits.length, 1);
+
+  requests.get("request-first")!.reject(new RunnerRequestTimeoutError());
+  await assert.rejects(() => manual, (error) => error instanceof RunnerRequestTimeoutError);
+  waits[0]!.resolve(true);
+  await delay(0);
+  assert.equal(waits[1]!.msg.type, "skills_sync_complete",
+    "the healthy inherited push reaches its completion fence after the old waiter times out");
+  waits[1]!.resolve(true);
+  await delivery;
+
+  const retry = sync.request("runner-v96", "request-retry");
+  requests.get("request-retry")!.reject(new RunnerRequestTimeoutError());
+  await assert.rejects(() => retry, (error) => error instanceof RunnerRequestTimeoutError);
 });
 
 test("orphaned v96 deliveries expire and reject duplicate digest requests", async () => {
@@ -572,7 +791,7 @@ test("orphaned v96 deliveries expire and reject duplicate digest requests", asyn
   sync("runner-v96");
   const expired = pushed[0] as SkillsSyncManifestMessage;
   await delay(25);
-  sync.handleNeed({
+  await sync.handleNeed({
     type: "skills_sync_need",
     runnerId: "runner-v96",
     syncId: expired.syncId,
@@ -584,13 +803,14 @@ test("orphaned v96 deliveries expire and reject duplicate digest requests", asyn
   sync("runner-v96");
   const duplicate = pushed.at(-1) as SkillsSyncManifestMessage;
   const missing = duplicate.skills.map(({ name, versionDigest }) => ({ name, versionDigest }));
-  sync.handleNeed({
+  await sync.handleNeed({
     type: "skills_sync_need",
     runnerId: "runner-v96",
     syncId: duplicate.syncId,
     missing: [missing[0]!, missing[0]!],
   });
-  assert.equal(pushed.filter((msg) => msg.type === "skills_sync_content").length, 1);
+  assert.equal(pushed.filter((msg) => msg.type === "skills_sync_content").length, 0,
+    "the whole duplicate request is rejected before any content is queued");
   assert.equal(pushed.some((msg) => msg.type === "skills_sync_complete" && msg.syncId === duplicate.syncId), false);
 });
 

@@ -52,6 +52,42 @@ test("requestFromRunner sends the message and resolves on the matching git_resul
   assert.equal(result.ok, true);
 });
 
+test("flow-controlled runner sends wait for flush and reject frames beyond the caller's byte bound", async () => {
+  const sent: string[] = [];
+  let bufferedAmount = 0;
+  let complete: ((error?: Error) => void) | undefined;
+  let terminations = 0;
+  const socket: Socket = {
+    asyncDelivery: true,
+    get bufferedAmount() { return bufferedAmount; },
+    send: (data, onComplete) => {
+      sent.push(data);
+      complete = onComplete;
+    },
+    terminate: () => { terminations += 1; },
+  };
+  const hub = new Hub(fakeDb);
+  hub.attachRunner("r1", socket);
+
+  let settled = false;
+  const pending = hub.sendToRunnerAndWait("r1", gitReq("flow-1"), 4_096).then((value) => {
+    settled = true;
+    return value;
+  });
+  await Promise.resolve();
+  assert.equal(settled, false, "the caller cannot enqueue the next frame before ws flushes this one");
+  complete?.();
+  assert.equal(await pending, true);
+
+  bufferedAmount = 4_096;
+  assert.equal(await hub.sendToRunnerAndWait("r1", gitReq("flow-2"), 4_096), false);
+  assert.equal(sent.length, 1, "an over-bound frame never reaches socket.send");
+
+  bufferedAmount = 0;
+  assert.equal(await hub.sendToRunnerAndWait("r1", gitReq("flow-3"), 4_096, 1), false);
+  assert.equal(terminations, 1, "a socket that never flushes is terminated to release its retained frame");
+});
+
 test("duplicate durable callers join one runner request and share its receipt", async () => {
   const sent: string[] = [];
   const hub = new Hub(fakeDb);

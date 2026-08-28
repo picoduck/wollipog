@@ -160,7 +160,18 @@ on every registration, which makes durability trivial (no receipt outbox needed)
   `skills_sync_content` frame, followed by `skills_sync_complete`.
 - The runner keeps multi-frame assembly ephemeral and never reconciles, especially never removes,
   before the matching completion fence. A new manifest or reconnect discards an incomplete
-  transaction. Cached digests are linked directly without retransferring their contents.
+  transaction. An assembly with no accepted progress for 60 seconds expires conservatively so it
+  cannot suppress later removal forever. Cached digests are linked directly without retransferring
+  their contents.
+- The control plane retains only manifest metadata and immutable version ids while negotiating.
+  Requested versions are loaded and flushed one at a time under a 13 MiB encoded runner-buffer
+  ceiling; the runner validates and publishes each frame to its local store immediately, so neither
+  peer retains the aggregate catalog contents in transaction memory. A slow or interrupted writer
+  never sends the completion fence. A manifest that never receives a valid need expires after 30
+  seconds, and every stalled frame flush has the same bound; healthy per-frame progress may take
+  longer than 30 seconds for the aggregate catalog.
+- Manifest cache checks and reconciliation share the same native-harness/manual-variant policy, so
+  discovery changes fail closed instead of letting the two phases disagree about required content.
 - **Runner→CP `skills_state`** — an authoritative full-replacement inventory modeled on
   `SubscriptionUsageInventoryMessage`: deployed digests, link health, conflicts, recent managed
   link removals, and unmanaged skills found by a bounded scan of harness directories (reusing the

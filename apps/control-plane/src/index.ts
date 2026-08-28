@@ -917,7 +917,9 @@ app.register(async (instance) => {
     socket.terminate();
   }, RUNNER_PRE_AUTH_TIMEOUT_MS);
   const runnerClient = {
-    send: (d: string) => socket.send(d),
+    send: (d: string, onComplete?: (error?: Error) => void) => socket.send(d, onComplete),
+    get bufferedAmount() { return socket.bufferedAmount; },
+    asyncDelivery: true,
     close: (code?: number, reason?: string) => socket.close(code, reason),
     // Force-drop for the liveness sweep: a half-open socket never completes a graceful close.
     terminate: () => socket.terminate(),
@@ -1252,7 +1254,12 @@ app.register(async (instance) => {
           app.log.warn(`runner ${runnerId} requested chunked skills without negotiated support`);
           break;
         }
-        pushSkillsSync.handleNeed(msg);
+        void pushSkillsSync.handleNeed(msg).catch((error) => {
+          app.log.warn(
+            { error: error instanceof Error ? error.message : String(error) },
+            "skills content request failed",
+          );
+        });
         break;
       }
       case "steer_session_result":

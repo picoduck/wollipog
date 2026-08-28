@@ -42,8 +42,6 @@ import {
   type SessionCommandInvocationUpdateMessage,
   type SessionEventPayload,
   type SessionSnapshot,
-  type SkillFile,
-  type SkillSyncEntry,
   type SkillsSyncManifestMessage,
   type StartSessionMessage,
 } from "@wollipog/protocol";
@@ -130,12 +128,14 @@ import {
 } from "./discovery/claude-commands.js";
 import { discoverRegistryAgents, updateRegistryApproval } from "./discovery/acp-registry.js";
 import {
+  cacheSkillSyncEntry,
   reconcileSkills,
+  skillNeedsManualVariant,
   skillsStateMessage,
   storedSkillVersionAvailable,
-  validateSkillSyncEntry,
   type ReconcileSkillEntry,
 } from "./skills.js";
+import { ChunkedSkillsSyncAssembler, type ChunkedSyncStep } from "./skills-sync.js";
 import { VERSION } from "./version.js";
 import { overlayAcpAuthStatus, type AcpAuthRuntime } from "./acp-auth-status.js";
 import {
@@ -778,145 +778,45 @@ function startTrackedSession(
  * arrives on this process; removal sweeps and store GC never run before then, so a fresh runner
  * cannot tear down links deployed by its previous incarnation on a scan-only pass. */
 let lastDesiredSkills: ReconcileSkillEntry[] | null = null;
-interface PendingChunkedSkillsSync {
-  syncId: string;
-  requestId?: string;
-  skills: SkillsSyncManifestMessage["skills"];
-  missing: Set<string>;
-  content: Map<string, SkillFile[]>;
-}
-/** Ephemeral v96 assembly. It is replaced by every new manifest and discarded on reconnect; only
- * an exact completion fence may promote it to lastDesiredSkills and authorize removals. */
-let pendingChunkedSkillsSync: PendingChunkedSkillsSync | null = null;
+const chunkedSkillsSync = new ChunkedSkillsSyncAssembler({
+  runnerId: config.runnerId,
+  needsContent: (entry) =>
+    !storedSkillVersionAvailable(config.dataDir, entry.name, entry.versionDigest) ||
+    (skillNeedsManualVariant(metadata.agents, entry) &&
+      !storedSkillVersionAvailable(config.dataDir, entry.name, entry.versionDigest, true)),
+  cacheContent: (entry) => cacheSkillSyncEntry(config.dataDir, metadata.agents, entry),
+});
 
-function skillContentKey(name: string, versionDigest: string): string {
-  return `${name}\0${versionDigest}`;
-}
-
-function skillManifestNeedsManual(entry: SkillsSyncManifestMessage["skills"][number]): boolean {
-  return entry.targets.some((target) => {
-    if (target.invocation !== "manual") return false;
-    const agent = metadata.agents.find((candidate) => candidate.id === target.agentId);
-    return (agent?.driver ?? "acp") === "claude-code";
-  });
-}
-
-function rejectChunkedSkillsSync(error: string): void {
-  const pending = pendingChunkedSkillsSync;
-  pendingChunkedSkillsSync = null;
+function reportChunkedSkillsSyncRejection(result: Extract<ChunkedSyncStep, { kind: "rejected" }>): void {
   sendUp({
     type: "skills_state",
     runnerId: config.runnerId,
-    ...(pending?.requestId ? { requestId: pending.requestId } : {}),
+    ...(result.requestId ? { requestId: result.requestId } : {}),
     deployed: [],
     unmanaged: [],
     removals: [],
-    error,
+    error: result.error,
   });
 }
 
 function beginChunkedSkillsSync(msg: SkillsSyncManifestMessage): void {
-  pendingChunkedSkillsSync = null;
-  if (msg.runnerId !== config.runnerId) {
-    sendUp({
-      type: "skills_state",
-      runnerId: config.runnerId,
-      ...(msg.requestId ? { requestId: msg.requestId } : {}),
-      deployed: [],
-      unmanaged: [],
-      removals: [],
-      error: "skills sync manifest targeted a different runner",
-    });
-    return;
-  }
-  if (typeof msg.syncId !== "string" || msg.syncId.length < 1 || msg.syncId.length > 128 ||
-      !Array.isArray(msg.skills)) {
-    sendUp({
-      type: "skills_state",
-      runnerId: config.runnerId,
-      ...(msg.requestId ? { requestId: msg.requestId } : {}),
-      deployed: [],
-      unmanaged: [],
-      removals: [],
-      error: "invalid chunked skills sync manifest",
-    });
-    return;
-  }
-  const seen = new Set<string>();
-  const missing = new Set<string>();
-  for (const entry of msg.skills) {
-    if (typeof entry?.name !== "string" || typeof entry?.versionDigest !== "string" ||
-        !Array.isArray(entry.targets) || seen.has(entry.name)) {
-      sendUp({
-        type: "skills_state",
-        runnerId: config.runnerId,
-        ...(msg.requestId ? { requestId: msg.requestId } : {}),
-        deployed: [],
-        unmanaged: [],
-        removals: [],
-        error: "invalid chunked skills sync manifest",
-      });
-      return;
-    }
-    seen.add(entry.name);
-    const cached = storedSkillVersionAvailable(config.dataDir, entry.name, entry.versionDigest) &&
-      (!skillManifestNeedsManual(entry) ||
-        storedSkillVersionAvailable(config.dataDir, entry.name, entry.versionDigest, true));
-    if (!cached) missing.add(skillContentKey(entry.name, entry.versionDigest));
-  }
-  pendingChunkedSkillsSync = {
-    syncId: msg.syncId,
-    ...(msg.requestId ? { requestId: msg.requestId } : {}),
-    skills: msg.skills,
-    missing,
-    content: new Map(),
-  };
-  sendUp({
-    type: "skills_sync_need",
-    runnerId: config.runnerId,
-    syncId: msg.syncId,
-    missing: msg.skills
-      .filter((entry) => missing.has(skillContentKey(entry.name, entry.versionDigest)))
-      .map(({ name, versionDigest }) => ({ name, versionDigest })),
-  });
+  const result = chunkedSkillsSync.begin(msg);
+  if (result.kind === "rejected") reportChunkedSkillsSyncRejection(result);
+  else if (result.kind === "accepted") sendUp(result.need);
 }
 
 function acceptChunkedSkillContent(msg: Extract<ControlPlaneToRunner, { type: "skills_sync_content" }>): void {
-  const pending = pendingChunkedSkillsSync;
-  if (!pending || msg.runnerId !== config.runnerId || msg.syncId !== pending.syncId) return;
-  const key = skillContentKey(msg.name, msg.versionDigest);
-  const manifest = pending.skills.find(
-    (entry) => entry.name === msg.name && entry.versionDigest === msg.versionDigest,
-  );
-  if (!manifest || !pending.missing.has(key)) {
-    rejectChunkedSkillsSync("chunked skills sync delivered unrequested content");
-    return;
-  }
-  const invalid = validateSkillSyncEntry({ ...manifest, files: msg.files });
-  if (invalid) {
-    rejectChunkedSkillsSync(`chunked skills sync rejected ${msg.name}: ${invalid}`);
-    return;
-  }
-  pending.content.set(key, msg.files);
+  const result = chunkedSkillsSync.acceptContent(msg);
+  if (result.kind === "rejected") reportChunkedSkillsSyncRejection(result);
 }
 
 function completeChunkedSkillsSync(msg: Extract<ControlPlaneToRunner, { type: "skills_sync_complete" }>): void {
-  const pending = pendingChunkedSkillsSync;
-  if (!pending || msg.runnerId !== config.runnerId || msg.syncId !== pending.syncId) return;
-  const absent = [...pending.missing].filter((key) => !pending.content.has(key));
-  if (absent.length > 0) {
-    rejectChunkedSkillsSync(
-      `chunked skills sync incomplete: ${absent.length} requested skill version(s) were not delivered`,
-    );
-    return;
+  const result = chunkedSkillsSync.complete(msg);
+  if (result.kind === "rejected") reportChunkedSkillsSyncRejection(result);
+  else if (result.kind === "accepted") {
+    lastDesiredSkills = result.desired;
+    queueSkillsReconcile(result.requestId);
   }
-  lastDesiredSkills = pending.skills.map((entry) => {
-    const files = pending.content.get(skillContentKey(entry.name, entry.versionDigest));
-    return files ? { ...entry, files } : entry;
-  });
-  const requestId = pending.requestId;
-  pendingChunkedSkillsSync = null;
-  queueSkillsReconcile(requestId);
 }
 /** Serializes reconcile passes so concurrent syncs and discovery rescans cannot interleave the
  * link-replacement and removal steps. */
@@ -933,7 +833,10 @@ function queueSkillsReconcile(requestId?: string): void {
         home: homedir(),
         agents: metadata.agents,
         desired: desired ?? [],
-        allowRemovals: desired !== null,
+        // Content frames are published immediately to bound memory. While their completion fence
+        // is pending, suppress removal/GC so an interleaved discovery pass cannot reclaim that
+        // newly cached digest (especially when previousVersionMinutes is configured to zero).
+        allowRemovals: desired !== null && !chunkedSkillsSync.inProgress,
         log,
         acquireProviderHomeLease: () =>
           sessions.acquireSkillReconciliationProviderHome(homedir()),
@@ -1636,7 +1539,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       })();
       break;
     case "skills_sync":
-      pendingChunkedSkillsSync = null;
+      chunkedSkillsSync.reset();
       if (msg.runnerId !== config.runnerId) {
         sendUp({
           type: "skills_state",
@@ -2105,7 +2008,7 @@ function connect(): void {
   log(`connecting to ${config.controlPlaneUrl}`);
   registered = false;
   controlPlaneProtocolVersion = null;
-  pendingChunkedSkillsSync = null;
+  chunkedSkillsSync.reset();
   const socket = new WebSocket(validateControlPlaneUrl(config.controlPlaneUrl, allowInsecureTransport));
   ws = socket;
 

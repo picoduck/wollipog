@@ -125,6 +125,17 @@ export interface ReconcileSkillsOptions {
 /** Chunked v96 manifests omit content for a digest already verified in this runner's store. */
 export type ReconcileSkillEntry = Omit<SkillSyncEntry, "files"> & { files?: SkillFile[] };
 
+/** One policy for both manifest cache negotiation and final reconciliation. */
+export function skillNeedsManualVariant(
+  agents: AgentDefinition[],
+  entry: Pick<ReconcileSkillEntry, "targets">,
+): boolean {
+  const bindings = new Map(harnessBindings(agents).map((binding) => [binding.agentId, binding]));
+  return entry.targets.some(
+    (target) => target.invocation === "manual" && bindings.get(target.agentId)?.driver === "claude-code",
+  );
+}
+
 export interface ReconcileSkillsResult {
   deployed: DeployedSkillState[];
   unmanaged: UnmanagedSkillInfo[];
@@ -297,6 +308,21 @@ function isRealDirectory(path: string): boolean {
   }
 }
 
+function prepareSkillStoreRoot(dataDir: string): string {
+  const storeRoot = skillsStoreRoot(dataDir);
+  mkdirSync(dataDir, { recursive: true, mode: 0o755 });
+  const realDataDir = realpathSync(dataDir);
+  assertNotSymlink(join(dataDir, "skills"), "the skills directory");
+  assertNotSymlink(storeRoot, "the skills store root");
+  mkdirSync(storeRoot, { recursive: true, mode: 0o755 });
+  assertNotSymlink(storeRoot, "the skills store root");
+  const realStoreRoot = realpathSync(storeRoot);
+  if (realStoreRoot !== join(realDataDir, "skills", "store")) {
+    throw new Error("the skills store root does not resolve inside the data directory");
+  }
+  return realStoreRoot;
+}
+
 /** A content-free manifest entry may reuse only a real digest directory physically contained in
  * this runner's store. This intentionally matches materializeVersion's trust model: published
  * digest directories were validated before their atomic rename and are not re-hashed each pass. */
@@ -379,6 +405,22 @@ function materializeVersion(
     }
   } finally {
     rmSync(temp, { recursive: true, force: true });
+  }
+}
+
+/** Validate and publish one independently bounded content frame immediately. Chunked assembly
+ * retains only manifest metadata and receipt keys, never the aggregate file payload. */
+export function cacheSkillSyncEntry(
+  dataDir: string,
+  agents: AgentDefinition[],
+  entry: SkillSyncEntry,
+): void {
+  const invalid = validateSkillSyncEntry(entry);
+  if (invalid) throw new Error(invalid);
+  const realStoreRoot = prepareSkillStoreRoot(dataDir);
+  materializeVersion(realStoreRoot, entry.name, entry.versionDigest, entry.files, false);
+  if (skillNeedsManualVariant(agents, entry)) {
+    materializeVersion(realStoreRoot, entry.name, `${entry.versionDigest}-manual`, entry.files, true);
   }
 }
 
@@ -916,7 +958,6 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
     };
   }
 
-  const storeRoot = skillsStoreRoot(dataDir);
   let realStoreRoot: string;
   try {
     // dataDir itself may legitimately be a symlink, but every segment below it must be a real
@@ -924,16 +965,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
     // recursive mkdir (and every later materialization, link target, and GC pass) land outside
     // the data dir even though the terminal store dir passes its own lstat check. Verify the
     // ancestry before mkdir can follow anything, then re-verify by realpath equality after.
-    mkdirSync(dataDir, { recursive: true, mode: 0o755 });
-    const realDataDir = realpathSync(dataDir);
-    assertNotSymlink(join(dataDir, "skills"), "the skills directory");
-    assertNotSymlink(storeRoot, "the skills store root");
-    mkdirSync(storeRoot, { recursive: true, mode: 0o755 });
-    assertNotSymlink(storeRoot, "the skills store root");
-    realStoreRoot = realpathSync(storeRoot);
-    if (realStoreRoot !== join(realDataDir, "skills", "store")) {
-      throw new Error("the skills store root does not resolve inside the data directory");
-    }
+    realStoreRoot = prepareSkillStoreRoot(dataDir);
   } catch (error) {
     return {
       deployed: desired.map((entry) => ({
@@ -971,10 +1003,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
       invalid = validateSkillSyncEntry(entry as SkillSyncEntry);
     }
     seenPreparedNames.add(entry.name);
-    const manualNeeded = !invalid && entry.targets.some(
-      (target) =>
-        target.invocation === "manual" && agentBinding.get(target.agentId)?.driver === "claude-code",
-    );
+    const manualNeeded = !invalid && skillNeedsManualVariant(agents, entry);
     let materializationError: string | undefined;
     if (!invalid) {
       try {
