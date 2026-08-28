@@ -544,6 +544,45 @@ test("InboxView holds desktop browsing order until the user leaves the window", 
   mobileViewport = true;
 });
 
+test("InboxView does not offer a reorder when only a removed selected id remains held", async () => {
+  mobileViewport = false;
+  setVisibility("visible");
+  setWindowFocused(true);
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "inbox-removed-selection-order-test",
+    runtimeKey: "inbox-removed-selection-order-test:1",
+    createSocket: () => socket,
+    close() {},
+  };
+
+  await act(async () => {
+    root.render(
+      <StoreProvider connection={connection} navigation={navigation}>
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+      </StoreProvider>,
+    );
+  });
+  await act(async () => { socket.push(snapshot([session("A", 30), session("B", 20)])); });
+  assert.match(
+    container.querySelector<HTMLElement>('.inbox-row-shell[aria-selected="true"]')?.textContent ?? "",
+    /Session A/,
+  );
+
+  await act(async () => { socket.push({ type: "session_removed", sessionId: "A" }); });
+  assert.deepEqual(rowTitles(container), ["Session B"]);
+  assert.equal(container.querySelector(".inbox-order-update"), null,
+    "a stale selected-id placeholder is not a visible order difference");
+  assert.doesNotMatch(container.textContent ?? "", /A newer Inbox order is available/);
+
+  await act(async () => { root.unmount(); });
+  container.remove();
+  mobileViewport = true;
+});
+
 test("InboxView does not arm the order hold when it mounts in an unfocused window", async () => {
   mobileViewport = false;
   setVisibility("visible");

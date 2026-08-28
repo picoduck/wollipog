@@ -461,7 +461,7 @@ export function InboxView({
   const displayedIds = useMemo(() => entries.map((entry) => entry.session.id), [entries]);
   displayedIdsRef.current = displayedIds;
   const orderUpdateAvailable = !isMobile && heldOrder !== null && (
-    heldOrder.length !== liveIds.length || heldOrder.some((id, index) => id !== liveIds[index])
+    displayedIds.length !== liveIds.length || displayedIds.some((id, index) => id !== liveIds[index])
   );
   const displayedSelection = repairedSelection && displayedIds.includes(repairedSelection) ? repairedSelection : null;
   const displayedSelectedSession = displayedSelection ? sessions.get(displayedSelection) ?? null : null;
