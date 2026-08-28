@@ -10174,21 +10174,24 @@ body.shell-dock-dragging * {
   }
   .session-detail > .detail-head:has(> .session-header-note) { row-gap: 4px; }
   .session-detail > .detail-head > .session-header-statuses {
-    /* The lifecycle group owns the first line and reserves the two compact action targets. Later
-       status dimensions can use the full bar width, keeping concurrent work visible without
-       forcing every badge into its own narrow column. */
-    grid-column: 1 / -1;
+    /* Statuses stay in the leading grid track so the action track is always complete. The
+       unshrunk badge row clips inside that track; its mask provides a quiet visual handoff to the
+       fixed Share / More Actions surface without adding a horizontal scroller. */
+    grid-column: 1;
     grid-row: 1;
-    width: 100%;
+    min-width: 0;
     align-self: center;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     gap: 4px;
+    overflow: clip;
+    contain: inline-size paint;
+    -webkit-mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 24px), transparent 100%);
+    mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 24px), transparent 100%);
   }
   .session-detail > .detail-head .session-status-indicators {
-    flex: 0 0 100%;
-    box-sizing: border-box;
+    flex: none;
+    flex-wrap: nowrap;
     min-height: 36px;
-    padding-right: 86px;
   }
   .session-detail > .detail-head .change-status-indicators {
     display: contents;
@@ -10196,8 +10199,8 @@ body.shell-dock-dragging * {
   .session-detail > .detail-head .status-badge,
   .session-detail > .detail-head .background-work-badge {
     gap: 4px;
-    /* CI and user devices do not share the same system font. Leave enough width headroom for
-       both change badges and both background badges to keep pairing at 320px. */
+    /* CI and user devices do not share the same system font. Keep the compact labels stable while
+       the status surface, rather than individual badges, owns narrow-width clipping. */
     padding-inline: 4px;
     font-size: var(--text-2xs);
   }

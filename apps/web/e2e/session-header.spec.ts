@@ -294,7 +294,7 @@ for (const viewport of [
   { name: "320-pixel phone", width: 320 },
   { name: "390-pixel phone", width: 390 },
 ]) {
-  test(`the session bar gives simultaneous statuses a second row on a ${viewport.name}`, async ({ page }) => {
+  test(`the session bar clips simultaneous statuses to one line on a ${viewport.name}`, async ({ page }) => {
     await page.setViewportSize({ width: viewport.width, height: 800 });
     await openSession(page, "git-visibility", { reviewReady: "1", sessionShell: "1" });
     await page.evaluate(() => {
@@ -313,11 +313,11 @@ for (const viewport of [
     await expect(topbar.getByRole("button", { name: /^Open/ })).toHaveCount(0);
     await expect(topbar.getByRole("button", { name: "Settings" })).toBeVisible();
     await expect(header.locator(".back, .detail-crumbs, .editor-select")).toHaveCount(0);
-    await expect(header.getByText("Awaiting Prompt", { exact: true })).toBeVisible();
-    await expect(header.getByText("Ready for Review", { exact: true })).toBeVisible();
-    await expect(header.getByText("Uncommitted Changes", { exact: true })).toBeVisible();
-    await expect(header.getByRole("status", { name: "Background Work: Waiting on External Job" })).toBeVisible();
-    await expect(header.getByRole("button", { name: "1 Subagent Active" })).toBeVisible();
+    await expect(header.getByLabel("Activity: Awaiting Prompt")).toHaveCount(1);
+    await expect(header.getByLabel("Changes: Ready for Review")).toHaveCount(1);
+    await expect(header.getByLabel("Changes: Uncommitted Changes")).toHaveCount(1);
+    await expect(header.getByRole("status", { name: "Background Work: Waiting on External Job" })).toHaveCount(1);
+    await expect(header.getByRole("button", { name: "1 Subagent Active" })).toHaveCount(1);
     const metrics = await header.evaluate((element) => {
       const rect = (node: Element) => {
         const value = node.getBoundingClientRect();
@@ -334,19 +334,40 @@ for (const viewport of [
         ...rect(node),
         label: node.getAttribute("aria-label") ?? node.textContent?.trim() ?? "unknown status",
       }));
+      const statuses = element.querySelector(".session-header-statuses") as HTMLElement;
+      const actions = element.querySelector(".detail-actions") as HTMLElement;
+      const share = element.querySelector('[aria-label="Share"]') as HTMLElement;
+      const moreActions = element.querySelector('[aria-label="More Actions"]') as HTMLElement;
+      const statusStyle = getComputedStyle(statuses);
+      const pageScrollWidth = document.documentElement.scrollWidth;
+      statuses.style.display = "none";
+      const pageScrollWidthWithoutStatuses = document.documentElement.scrollWidth;
+      statuses.style.removeProperty("display");
+      const centerTarget = (target: HTMLElement) => {
+        const box = target.getBoundingClientRect();
+        const painted = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+        return painted === target || (painted !== null && target.contains(painted));
+      };
       return {
         display: getComputedStyle(element).display,
-        statuses: rect(element.querySelector(".session-header-statuses")!),
+        statuses: rect(statuses),
         lifecycle: rect(element.querySelector(".session-status-indicators > .status-badge")!),
-        actions: rect(element.querySelector(".detail-actions")!),
-        share: rect(element.querySelector('[aria-label="Share"]')!),
+        actions: rect(actions),
+        share: rect(share),
         shareIcon: rect(element.querySelector('[aria-label="Share"] svg')!),
-        moreActions: rect(element.querySelector('[aria-label="More Actions"]')!),
+        moreActions: rect(moreActions),
         moreActionsIcon: rect(element.querySelector('[aria-label="More Actions"] svg')!),
         badges,
         badgeRows: new Set(badges.map((badge) => Math.round(badge.y))).size,
         headerHeight: element.getBoundingClientRect().height,
         hasHorizontalOverflow: element.scrollWidth > element.clientWidth,
+        statusAddsPageOverflow: pageScrollWidth > pageScrollWidthWithoutStatuses,
+        statusIsClipped: statuses.scrollWidth > statuses.clientWidth,
+        statusOverflowX: statusStyle.overflowX,
+        statusFlexWrap: statusStyle.flexWrap,
+        statusMaskImage: statusStyle.maskImage || statusStyle.webkitMaskImage,
+        shareIsTopmostAtCenter: centerTarget(share),
+        moreActionsIsTopmostAtCenter: centerTarget(moreActions),
         headerRight: element.getBoundingClientRect().right,
         clippingRight: Math.min(
           window.innerWidth, clippingPane?.getBoundingClientRect().right ?? window.innerWidth,
@@ -398,32 +419,33 @@ for (const viewport of [
     expect(shellMetrics.title.x).toBeGreaterThanOrEqual(shellMetrics.back.right);
     expect(shellMetrics.title.right).toBeLessThanOrEqual(shellMetrics.controlsLeft);
     expect(shellMetrics.title.width).toBeGreaterThanOrEqual(72);
-    // Five simultaneous statuses require multiple badge lines at 320px; they remain inside the
-    // second header bar without overlap or horizontal overflow.
-    // The Session topbar is 40px tall, the main body adds 12px of leading space, and this header
-    // has an explicit 132px ceiling below. Keep the combined stack within that same cross-platform
-    // contract; Linux fallback fonts can require one additional badge line.
-    expect(subheaderBottom - shellMetrics.top).toBeLessThanOrEqual(184);
+    // Five simultaneous statuses remain represented but use one clipped visual line. The Session
+    // topbar is 40px tall, the main body adds 12px of leading space, and the second bar is 44px.
+    expect(subheaderBottom - shellMetrics.top).toBeLessThanOrEqual(96.5);
     expect(metrics.share.width).toBeGreaterThanOrEqual(36);
     expect(metrics.share.height).toBeGreaterThanOrEqual(36);
     expect(metrics.moreActions.width).toBeGreaterThanOrEqual(36);
     expect(metrics.moreActions.height).toBeGreaterThanOrEqual(36);
-    expect(metrics.lifecycle.right).toBeLessThanOrEqual(metrics.actions.x - 6);
-    expect(metrics.headerHeight).toBeLessThanOrEqual(132);
+    expect(metrics.statuses.right).toBeLessThanOrEqual(metrics.actions.x - 6);
+    expect(metrics.headerHeight).toBeLessThanOrEqual(45.5);
     expect(metrics.hasHorizontalOverflow).toBe(false);
+    expect(metrics.statusAddsPageOverflow).toBe(false);
+    expect(metrics.statusIsClipped).toBe(true);
+    expect(metrics.statusOverflowX).toBe("clip");
+    expect(metrics.statusFlexWrap).toBe("nowrap");
+    expect(metrics.statusMaskImage).toContain("linear-gradient");
+    expect(metrics.statusMaskImage).toMatch(/rgba\(0, 0, 0, 0\) 100%/);
+    expect(metrics.shareIsTopmostAtCenter).toBe(true);
+    expect(metrics.moreActionsIsTopmostAtCenter).toBe(true);
     expect(metrics.paddingRight).toBeGreaterThanOrEqual(12);
     expect(metrics.clippingRight - metrics.moreActions.right).toBeGreaterThanOrEqual(11.5);
     expect(metrics.badges.length).toBe(5);
-    expect(metrics.badgeRows).toBeLessThanOrEqual(3);
+    expect(metrics.badgeRows).toBe(1);
     const center = (box: { y: number; height: number }) => box.y + box.height / 2;
-    expect(Math.abs(center(metrics.actions) - center(metrics.lifecycle))).toBeLessThanOrEqual(12);
+    expect(Math.abs(center(metrics.actions) - center(metrics.lifecycle))).toBeLessThanOrEqual(1);
     for (let index = 0; index < metrics.badges.length; index += 1) {
-      const badge = metrics.badges[index]!;
-      const overlapsActions = badge.x < metrics.actions.right && badge.right > metrics.actions.x &&
-        badge.y < metrics.actions.bottom && badge.bottom > metrics.actions.y;
-      expect(overlapsActions, `${badge.label} overlaps the Session actions`).toBe(false);
       for (let other = index + 1; other < metrics.badges.length; other += 1) {
-        const left = badge;
+        const left = metrics.badges[index]!;
         const right = metrics.badges[other]!;
         const overlaps = left.x < right.right && left.right > right.x &&
           left.y < right.bottom && left.bottom > right.y;
