@@ -72,6 +72,75 @@ test("runner rejects prompt image MIME, length, and digest mismatches", async ()
   }
 });
 
+test("runner bounds streamed prompt-image bytes and cancels every mismatched body reader", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-prompt-image-stream-bound-"));
+  try {
+    const tokenFile = join(root, "credential");
+    writeFileSync(tokenFile, "opaque-runner-token");
+
+    const streamedResponse = (chunks: Uint8Array[]) => {
+      let index = 0;
+      let cancelled = false;
+      const stream = new ReadableStream<Uint8Array>({
+        pull: (controller) => {
+          if (index < chunks.length) controller.enqueue(chunks[index++]!);
+          else controller.close();
+        },
+      });
+      const getReader = stream.getReader.bind(stream);
+      Object.defineProperty(stream, "getReader", {
+        value: () => {
+          const reader = getReader();
+          const cancel = reader.cancel.bind(reader);
+          Object.defineProperty(reader, "cancel", {
+            value: (reason?: unknown) => {
+              cancelled = true;
+              return cancel(reason);
+            },
+          });
+          return reader;
+        },
+      });
+      const response = new Response(stream, {
+        headers: {
+          "content-type": "image/png",
+          "content-length": String(PNG.length),
+        },
+      });
+      return {
+        fetchImpl: (async () => response) as typeof fetch,
+        get cancelled() { return cancelled; },
+      };
+    };
+
+    const oversized = streamedResponse([PNG, Uint8Array.of(0xff)]);
+    await assert.rejects(
+      fetchPromptImageReference({
+        controlPlaneUrl: "ws://localhost/runner",
+        runnerId: "r",
+        tokenFile,
+        fetchImpl: oversized.fetchImpl,
+      }, "s", reference()),
+      /exceeds its declared byte length/,
+    );
+    assert.equal(oversized.cancelled, true, "the oversized producer is cancelled at the bound");
+
+    const short = streamedResponse([PNG.subarray(0, PNG.length - 1)]);
+    await assert.rejects(
+      fetchPromptImageReference({
+        controlPlaneUrl: "ws://localhost/runner",
+        runnerId: "r",
+        tokenFile,
+        fetchImpl: short.fetchImpl,
+      }, "s", reference()),
+      /byte length does not match/,
+    );
+    assert.equal(short.cancelled, true, "the short producer's reader is cancelled before release");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("runner never sends a prompt-image credential over remote plaintext without opt-in", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-prompt-image-transport-"));
   try {

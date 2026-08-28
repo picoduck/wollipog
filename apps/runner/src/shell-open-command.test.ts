@@ -64,6 +64,41 @@ test("ordinary shells bypass the initial-session fence", async () => {
   assert.equal(state.replies[0]?.ok, true);
 });
 
+test("a cancellation already queued before the start fence prevents Agent TUI spawn", async () => {
+  let cancellationChecks = 0;
+  const state = harness({
+    consumeCancellation: () => ++cancellationChecks === 1,
+    waitForSessionStart: async () => {
+      throw new Error("a pre-fence cancellation must not wait");
+    },
+  });
+  await handleShellOpenCommand(command("agent_tui", true), state.dependencies);
+  assert.equal(state.opens, 0);
+  assert.equal(cancellationChecks, 1);
+  assert.match(state.replies[0]?.error ?? "", /cancelled/);
+});
+
+test("Agent TUI deletion is checked before and immediately after the start fence", async () => {
+  const before = harness({ sessionCanOpen: () => false });
+  await handleShellOpenCommand(command("agent_tui", true), before.dependencies);
+  assert.equal(before.waits, 0, "a deleting session never enters its start fence");
+  assert.equal(before.opens, 0);
+  assert.match(before.replies[0]?.error ?? "", /being deleted/);
+
+  let checks = 0;
+  const after = harness({
+    sessionCanOpen: () => ++checks === 1,
+    resolveTarget: () => {
+      throw new Error("post-fence deletion must be rejected before target resolution");
+    },
+  });
+  await handleShellOpenCommand(command("agent_tui", true), after.dependencies);
+  assert.equal(after.waits, 1);
+  assert.equal(after.opens, 0);
+  assert.equal(checks, 2, "deletion is rechecked as soon as the fence settles");
+  assert.match(after.replies[0]?.error ?? "", /being deleted/);
+});
+
 test("initial Agent TUI waits for materialization and a settled failure prevents spawn", async () => {
   const order: string[] = [];
   const state = harness({
@@ -104,6 +139,29 @@ test("Agent TUI launch-resolution failures return a failed shell result", async 
   assert.match(state.replies[0]?.error ?? "", /provider HOME lease is unavailable/);
 });
 
+test("missing and pending shell targets fail with distinct messages without spawning", async () => {
+  const missing = harness({ resolveTarget: () => null });
+  await handleShellOpenCommand(command("shell"), missing.dependencies);
+  assert.equal(missing.opens, 0);
+  assert.match(missing.replies[0]?.error ?? "", /unknown session/);
+
+  const pending = harness({ resolveTarget: () => "pending" });
+  await handleShellOpenCommand(command("shell"), pending.dependencies);
+  assert.equal(pending.opens, 0);
+  assert.match(pending.replies[0]?.error ?? "", /worktree is still being prepared/);
+});
+
+test("a cancellation at the synchronous Agent TUI spawn boundary prevents open", async () => {
+  let cancellationChecks = 0;
+  const state = harness({
+    consumeCancellation: () => ++cancellationChecks === 3,
+  });
+  await handleShellOpenCommand(command("agent_tui"), state.dependencies);
+  assert.equal(cancellationChecks, 3);
+  assert.equal(state.opens, 0);
+  assert.match(state.replies[0]?.error ?? "", /cancelled/);
+});
+
 test("a close arriving while Agent TUI waits prevents the delayed spawn", async () => {
   let releaseStart!: (started: boolean) => void;
   const start = new Promise<boolean>((resolve) => { releaseStart = resolve; });
@@ -114,6 +172,9 @@ test("a close arriving while Agent TUI waits prevents the delayed spawn", async 
       if (!cancelled) return false;
       cancelled = false;
       return true;
+    },
+    resolveTarget: () => {
+      throw new Error("post-fence cancellation must be rejected before target resolution");
     },
   });
   const opening = handleShellOpenCommand(command("agent_tui", true), state.dependencies);
