@@ -23,12 +23,16 @@ Hard rules:
 1. Do not edit, create, or delete any file in the workspace. Do not commit, branch, stage, stash,
    push, or open a pull request.
 2. Do not run installs, migrations, formatters, code generators, or any command whose purpose is to
-   change the tree. Analysis tooling that writes only to caches, `node_modules/.cache`, or a temp
-   directory is allowed. Put every scratch file under one run-scoped directory,
-   `/tmp/<job-id>-<YYYY-MM-DD>/` — date-keyed rather than random, so a resumed run can re-derive
-   its own path. Concurrent sessions share `/tmp`, and a session that loses its conversation
-   context can otherwise find another session's drafts there and mistake them for its own — which
-   happened, and turned one lost session into a false "already published" claim.
+   change the tree. Analysis tooling that writes only to caches, `node_modules/.cache`, or the
+   scratch directory below is allowed. Put every scratch file under one run-scoped directory,
+   `~/.cache/wollipog-maintenance/<job-id>-<YYYY-MM-DD>/` (create it with `mkdir -p`) — date-keyed
+   rather than random, so a resumed run can re-derive its own path. Two hard-won properties of
+   this location: it survives a reboot, unlike `/tmp`, which this machine wipes at boot — so the
+   raw evidence behind a report stays inspectable until the report is reviewed; and it is
+   namespaced per run, because a session that loses its conversation context can otherwise find
+   another session's files and mistake them for its own — which happened, and turned one lost
+   session into a false "already published" claim. At the start of each run, delete directories
+   under `~/.cache/wollipog-maintenance/` older than 30 days; nothing else cleans this location.
 3. Before finishing, run `git status --porcelain` and `git stash list`. The working tree must be
    exactly as you found it. If anything changed, say so explicitly at the top of your report and
    name the files rather than quietly reverting.
