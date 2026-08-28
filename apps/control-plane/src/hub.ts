@@ -192,7 +192,7 @@ interface PendingRequest {
     resolve: (result: RunnerRequestResult) => void;
     reject: (err: Error) => void;
   }>;
-  timer: ReturnType<typeof setTimeout>;
+  timer: ReturnType<typeof setTimeout> | undefined;
 }
 
 export class Hub {
@@ -404,19 +404,32 @@ export class Hub {
         existing.waiters.push({ resolve, reject });
         return;
       }
-      const timer = setTimeout(() => {
-        const pending = this.pendingRequests.get(requestId);
-        if (!pending) return;
-        this.pendingRequests.delete(requestId);
-        for (const waiter of pending.waiters) waiter.reject(new RunnerRequestTimeoutError());
-      }, timeoutMs);
-      this.pendingRequests.set(requestId, { runnerId, waiters: [{ resolve, reject }], timer });
+      const pending: PendingRequest = { runnerId, waiters: [{ resolve, reject }], timer: undefined };
+      this.pendingRequests.set(requestId, pending);
+      this.armRunnerRequestTimeout(requestId, pending, timeoutMs);
       if (!this.sendToRunner(runnerId, msg)) {
-        clearTimeout(timer);
+        clearTimeout(pending.timer);
         this.pendingRequests.delete(requestId);
         reject(new RunnerRequestNotSentError());
       }
     });
+  }
+
+  /** Extend one exact request's inactivity deadline after verified protocol progress. */
+  refreshRunnerRequestTimeout(runnerId: string, requestId: string, timeoutMs = 30_000): boolean {
+    const pending = this.pendingRequests.get(requestId);
+    if (!pending || pending.runnerId !== runnerId) return false;
+    this.armRunnerRequestTimeout(requestId, pending, timeoutMs);
+    return true;
+  }
+
+  private armRunnerRequestTimeout(requestId: string, pending: PendingRequest, timeoutMs: number): void {
+    clearTimeout(pending.timer);
+    pending.timer = setTimeout(() => {
+      if (this.pendingRequests.get(requestId) !== pending) return;
+      this.pendingRequests.delete(requestId);
+      for (const waiter of pending.waiters) waiter.reject(new RunnerRequestTimeoutError());
+    }, Math.max(1, timeoutMs));
   }
 
   /** Join an already-dispatched durable request without sending it again. Steering duplicates use

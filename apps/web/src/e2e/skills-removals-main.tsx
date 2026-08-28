@@ -139,6 +139,10 @@ const client = {
   }),
   listSkillAssignments: async () => ({ assignments: [] }),
   runnerSkills: async () => runnerSkills,
+  syncRunnerSkills: async () => {
+    await new Promise((resolve) => setTimeout(resolve, 750));
+    return runnerSkills.reported!;
+  },
 } as unknown as ApiClient;
 
 function SkillsWhenReady() {

@@ -134,6 +134,22 @@ test("requestFromRunner exposes a typed timeout without relying on message text"
   );
 });
 
+test("verified progress refreshes only the exact runner request inactivity deadline", async () => {
+  const hub = new Hub(fakeDb);
+  hub.attachRunner("r1", { send() {} });
+  const pending = hub.requestFromRunner("r1", "req-progress", gitReq("req-progress"), 1);
+  assert.equal(hub.refreshRunnerRequestTimeout("r2", "req-progress", 50), false);
+  assert.equal(hub.refreshRunnerRequestTimeout("r1", "missing", 50), false);
+  assert.equal(hub.refreshRunnerRequestTimeout("r1", "req-progress", 50), true);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(hub.resolveRunnerRequest({
+    type: "git_result", requestId: "req-progress", ok: true, data: { refreshed: true },
+  }, "r1"), true);
+  assert.deepEqual(await pending, {
+    type: "git_result", requestId: "req-progress", ok: true, data: { refreshed: true },
+  });
+});
+
 test("cancelRunnerRequest releases one exact in-flight correlation immediately", async () => {
   const hub = new Hub(fakeDb);
   hub.attachRunner("r1", { send() {} });
