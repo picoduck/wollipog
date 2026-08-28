@@ -205,7 +205,7 @@ test("SkillsView lists skills, opens a detail with assignments and deployment, a
   await act(settle);
   assert.match(pageText(), /No managed link removals have been reported/);
 
-  delete (runnerSkills as Partial<RunnerSkillsResponse>).removalReporting;
+  delete runnerSkills.removalReporting;
   await act(async () => { sync!.click(); });
   await act(settle);
   assert.equal(container.querySelector(".skills-removals"), null,
