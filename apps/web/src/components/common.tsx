@@ -275,7 +275,7 @@ export function BackgroundWorkBadge({ state, compact = false }: {
           : "background-work-resumed"}`}
       role="status"
       aria-label={label}
-      title={label}
+      title={compact ? label : undefined}
     >
       <span className="background-work-dot" aria-hidden="true" />
       {compact ? (

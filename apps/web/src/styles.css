@@ -1669,9 +1669,8 @@ textarea {
   top: calc(100% + 8px);
   bottom: auto;
 }
-/* Project crumb cluster: the name is a breadcrumb back to the Project's Inbox split. The ⋯
-   reassignment trigger takes no layout space — it overlays the crumb's trailing text on
-   hover/focus with a gradient fade, exactly like the split-inbox tab menu. */
+/* Project crumb cluster: the name is a breadcrumb back to the Project's Inbox split. Reserve the
+   trailing gutter for the ⋯ trigger so coarse pointers and hover never cover the Project name. */
 .crumb-project {
   position: relative;
   display: inline-flex;
@@ -1681,12 +1680,18 @@ textarea {
      pressure. */
   flex: 0 1 auto;
   max-width: 220px;
-  min-width: 0;
+  min-width: 50px;
+  padding-inline-end: 34px;
 }
 .crumb-project > .cctx-item {
   min-width: 0;
   max-width: 100%;
+}
+.crumb-project-label {
+  min-width: 0;
+  overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .crumb-project-actions {
   position: absolute;

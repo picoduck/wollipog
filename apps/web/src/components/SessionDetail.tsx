@@ -3239,7 +3239,7 @@ function DurableProjectChip({ session, onOpenInbox }: { session: SessionView; on
           onOpenInbox();
         }}
       >
-        {currentName}
+        <span className="crumb-project-label">{currentName}</span>
       </button>
       <button
         ref={menu.triggerRef}

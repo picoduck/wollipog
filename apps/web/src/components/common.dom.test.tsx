@@ -99,6 +99,7 @@ test("background-work badges expose every durable state with Title Case visible 
       ["Background Work: Waiting on External Job", "Background Work: Continuation Pending", "Background Work: Orphaned", "Background Work: Resumed"],
     );
     assert.ok(badges.every((badge) => badge.getAttribute("role") === "status"));
+    assert.ok(badges.every((badge) => !badge.hasAttribute("title")));
     assert.deepEqual(
       badges.map((badge) => [...badge.classList].at(-1)),
       ["background-work-running", "background-work-running", "background-work-orphaned", "background-work-resumed"],

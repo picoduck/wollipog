@@ -53,8 +53,10 @@ test("the unified session bar balances navigation, breadcrumb, status, and actio
     const actions = element.querySelector(".detail-actions")!;
     const project = element.querySelector(".crumb-project")!;
     const projectButton = project.querySelector(".cctx-chip")!;
+    const projectLabel = project.querySelector(".crumb-project-label")!;
+    const projectActions = project.querySelector(".crumb-project-actions")!;
     const projectText = document.createRange();
-    projectText.selectNodeContents(projectButton);
+    projectText.selectNodeContents(projectLabel);
     const moreActions = element.querySelector('[aria-label="More Actions"]')!;
     const headerBox = element.getBoundingClientRect();
     const clippingPane = element.closest(".inbox-preview-pane");
@@ -67,8 +69,9 @@ test("the unified session bar balances navigation, breadcrumb, status, and actio
       actions: rect(actions),
       project: rect(project),
       projectButton: rect(projectButton),
+      projectActions: rect(projectActions),
       projectTextWidth: projectText.getBoundingClientRect().width,
-      projectTextOverflow: getComputedStyle(projectButton).textOverflow,
+      projectTextOverflow: getComputedStyle(projectLabel).textOverflow,
       headerHeight: headerBox.height,
       headerRight: headerBox.right,
       clippingRight: Math.min(window.innerWidth, clippingBox.right),
@@ -89,7 +92,10 @@ test("the unified session bar balances navigation, breadcrumb, status, and actio
   expect(geometry.paddingRight).toBeGreaterThanOrEqual(12);
   expect(geometry.hasHorizontalOverflow).toBe(false);
   expect(geometry.projectButton.width - geometry.projectTextWidth).toBeLessThanOrEqual(1.5);
-  expect(geometry.project.width).toBeCloseTo(geometry.projectButton.width, 0);
+  expect(geometry.project.width - geometry.projectButton.width).toBeCloseTo(34, 0);
+  expect(geometry.projectActions.x).toBeGreaterThanOrEqual(
+    geometry.projectButton.x + geometry.projectButton.width - 1,
+  );
   expect(geometry.projectTextOverflow).toBe("ellipsis");
   expect(geometry.headerRight - (geometry.actions.x + geometry.actions.width)).toBeGreaterThanOrEqual(geometry.paddingRight - 1);
   expect(geometry.clippingRight - geometry.moreActionsRight).toBeGreaterThanOrEqual(11.5);
@@ -181,6 +187,36 @@ test("the unified session bar balances navigation, breadcrumb, status, and actio
   await expect(shareMenu.getByRole("menuitem", { name: "Rename Session…" })).toHaveCount(0);
 });
 
+test("coarse-pointer desktop keeps Project Actions beside short Project text", async ({ browser }) => {
+  const context = await browser.newContext({
+    hasTouch: true,
+    viewport: { width: 900, height: 800 },
+  });
+  const page = await context.newPage();
+  try {
+    await openSession(page);
+    const header = page.locator(".detail-head");
+    const projectButton = header.locator(".crumb-project > .cctx-chip");
+    const projectActions = header.getByRole("button", { name: "Project Actions" });
+    await expect(projectButton).toHaveText("Alpha");
+    await expect(projectActions).toHaveCSS("opacity", "1");
+    const geometry = await header.locator(".crumb-project").evaluate((element) => {
+      const project = element.getBoundingClientRect();
+      const button = element.querySelector(".cctx-chip")!.getBoundingClientRect();
+      const actions = element.querySelector(".crumb-project-actions")!.getBoundingClientRect();
+      return {
+        projectWidth: project.width,
+        buttonRight: button.right,
+        actionsLeft: actions.left,
+      };
+    });
+    expect(geometry.projectWidth).toBeLessThan(100);
+    expect(geometry.actionsLeft).toBeGreaterThanOrEqual(geometry.buttonRight - 1);
+  } finally {
+    await context.close();
+  }
+});
+
 test("desktop Session actions stay contained with five concurrent status indicators", async ({ page }) => {
   await page.setViewportSize({ width: 900, height: 800 });
   await openSession(page, "git-visibility", { reviewReady: "1" });
@@ -214,6 +250,8 @@ test("desktop Session actions stay contained with five concurrent status indicat
       const moreActions = element.querySelector('[aria-label="More Actions"]')!.getBoundingClientRect();
       const project = element.querySelector(".crumb-project")!.getBoundingClientRect();
       const projectButton = element.querySelector(".crumb-project > .cctx-chip") as HTMLElement;
+      const projectLabel = element.querySelector(".crumb-project-label") as HTMLElement;
+      const projectActions = element.querySelector(".crumb-project-actions")!.getBoundingClientRect();
       const separator = element.querySelector(".detail-crumb-sep")!.getBoundingClientRect();
       const clippingPane = element.closest(".inbox-preview-pane");
       return {
@@ -228,9 +266,11 @@ test("desktop Session actions stay contained with five concurrent status indicat
         paddingRight: Number.parseFloat(getComputedStyle(element).paddingRight),
         projectRight: project.right,
         projectWidth: project.width,
-        projectButtonClientWidth: projectButton.clientWidth,
-        projectButtonScrollWidth: projectButton.scrollWidth,
-        projectButtonTextOverflow: getComputedStyle(projectButton).textOverflow,
+        projectButtonRight: projectButton.getBoundingClientRect().right,
+        projectLabelClientWidth: projectLabel.clientWidth,
+        projectLabelScrollWidth: projectLabel.scrollWidth,
+        projectLabelTextOverflow: getComputedStyle(projectLabel).textOverflow,
+        projectActionsLeft: projectActions.left,
         separatorLeft: separator.left,
       };
     });
@@ -239,8 +279,10 @@ test("desktop Session actions stay contained with five concurrent status indicat
     expect(geometry.clippingRight - geometry.moreActionsRight).toBeGreaterThanOrEqual(11.5);
     expect(geometry.projectWidth).toBeLessThanOrEqual(220);
     expect(geometry.projectRight).toBeLessThanOrEqual(geometry.separatorLeft);
-    expect(geometry.projectButtonScrollWidth).toBeGreaterThan(geometry.projectButtonClientWidth);
-    expect(geometry.projectButtonTextOverflow).toBe("ellipsis");
+    expect(geometry.projectLabelClientWidth).toBeGreaterThan(0);
+    expect(geometry.projectLabelScrollWidth).toBeGreaterThan(geometry.projectLabelClientWidth);
+    expect(geometry.projectLabelTextOverflow).toBe("ellipsis");
+    expect(geometry.projectActionsLeft).toBeGreaterThanOrEqual(geometry.projectButtonRight - 1);
   }
   const projectActions = header.getByRole("button", { name: "Project Actions" });
   await projectActions.focus();
