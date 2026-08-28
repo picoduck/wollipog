@@ -1373,6 +1373,9 @@ const TimelineRow = memo(function TimelineRow({
   questionContext?: TimelineQuestionContext;
 }) {
   const timingDescriptionId = useId();
+  const { sessionActive } = useContext(TimelineClockContext);
+  const mediaSettled = !sessionActive ||
+    ((item.kind === "agent_message" || item.kind === "agent_thought") && Number.isFinite(item.completedAt));
   switch (item.kind) {
     case "checkpoint":
       // Thin turn divider; the Rewind affordance shows on hover (session detail only).
@@ -1455,7 +1458,7 @@ const TimelineRow = memo(function TimelineRow({
       // Codex-style: the model response is full-width document flow, not a chat bubble.
       return (
         <div className="tl-agent-msg">
-          <Markdown highlightEligible={highlightEligible} inlineMedia>{item.text}</Markdown>
+          <Markdown highlightEligible={highlightEligible} inlineMedia mediaSettled={mediaSettled}>{item.text}</Markdown>
           {/* Meta trails the text it describes, matching the user-bubble arrangement. */}
           <MessageMeta
             createdAt={item.createdAt}
@@ -1478,7 +1481,7 @@ const TimelineRow = memo(function TimelineRow({
               completedAt={item.completedAt}
               pointWhenEqual
             />
-            <Markdown highlightEligible={highlightEligible} inlineMedia>{item.text}</Markdown>
+            <Markdown highlightEligible={highlightEligible} inlineMedia mediaSettled={mediaSettled}>{item.text}</Markdown>
           </div>
         );
       }
@@ -1508,7 +1511,7 @@ const TimelineRow = memo(function TimelineRow({
             />
           </summary>
           <div className="thought-body">
-            <Markdown highlightEligible={highlightEligible} inlineMedia>{item.text}</Markdown>
+            <Markdown highlightEligible={highlightEligible} inlineMedia mediaSettled={mediaSettled}>{item.text}</Markdown>
           </div>
         </details>
       );

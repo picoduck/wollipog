@@ -15,13 +15,19 @@ for (const [name, value] of Object.entries({
   IS_REACT_ACT_ENVIRONMENT: true,
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
 
-async function renderMarkdown(markdown: string, inlineMedia = false): Promise<{ container: HTMLDivElement; root: Root }> {
+async function renderMarkdown(
+  markdown: string,
+  inlineMedia = false,
+  mediaSettled = true,
+): Promise<{ container: HTMLDivElement; root: Root }> {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
   const container = happyContainer as unknown as HTMLDivElement;
   const root = createRoot(container);
   await act(async () => {
-    root.render(<Markdown highlightEligible={false} inlineMedia={inlineMedia}>{markdown}</Markdown>);
+    root.render(
+      <Markdown highlightEligible={false} inlineMedia={inlineMedia} mediaSettled={mediaSettled}>{markdown}</Markdown>,
+    );
   });
   return { container, root };
 }
@@ -193,8 +199,8 @@ test("failed transcript image and video loads collapse to their plain links", as
   const { container, root } = await renderMarkdown(`${image}\n\n${video}`, true);
   try {
     assert.equal(container.querySelectorAll(".md-media-embed").length, 2);
-    assert.equal(container.querySelectorAll(`a[href^="https://evidence.example/expired"]`).length, 3,
-      "both plain URL links plus the image's full-size link render before failure");
+    assert.equal(container.querySelectorAll(`a[href^="https://evidence.example/expired"]`).length, 2,
+      "only the two visible plain URL links are actionable before the image loads");
 
     await act(async () => {
       container.querySelector("img.md-media-image")!.dispatchEvent(new domWindow.Event("error") as unknown as Event);
@@ -204,6 +210,51 @@ test("failed transcript image and video loads collapse to their plain links", as
     assert.equal(container.querySelectorAll(".md-media-embed").length, 0, "failed embeds reserve no layout space");
     assert.equal(container.querySelectorAll(`a[href^="https://evidence.example/expired"]`).length, 2,
       "each original plain link remains usable");
+  } finally {
+    await cleanup(container, root);
+  }
+});
+
+test("pending transcript images stay out of the accessibility tree and tab order until loaded", async () => {
+  const image = "https://evidence.example/session%20review.png?signature=valid";
+  const { container, root } = await renderMarkdown(image, true);
+  try {
+    const fullSizeLink = container.querySelector("a.md-media-image-link")!;
+    const embeddedImage = container.querySelector("img.md-media-image")!;
+    assert.equal(fullSizeLink.hasAttribute("href"), false);
+    assert.equal(fullSizeLink.getAttribute("aria-hidden"), "true");
+    assert.equal(fullSizeLink.hasAttribute("aria-label"), false);
+    assert.equal(embeddedImage.getAttribute("alt"), "session review.png");
+
+    await act(async () => {
+      embeddedImage.dispatchEvent(new domWindow.Event("load") as unknown as Event);
+    });
+
+    assert.equal(fullSizeLink.getAttribute("href"), image, "loaded image becomes a full-size link");
+    assert.equal(fullSizeLink.hasAttribute("aria-hidden"), false, "loaded link returns to the accessibility tree");
+    assert.equal(fullSizeLink.getAttribute("aria-label"), "Open session review.png Full Size");
+  } finally {
+    await cleanup(container, root);
+  }
+});
+
+test("streaming URL changes mount no media until the final settled URL", async () => {
+  const first = "https://evidence.example/review.png?signature=a";
+  const second = "https://evidence.example/review.png?signature=ab";
+  const final = "https://evidence.example/review.png?signature=valid";
+  const { container, root } = await renderMarkdown(first, true, false);
+  try {
+    assert.equal(container.querySelector(".md-media-embed"), null);
+    await act(async () => {
+      root.render(<Markdown highlightEligible={false} inlineMedia mediaSettled={false}>{second}</Markdown>);
+    });
+    assert.equal(container.querySelector(".md-media-embed"), null);
+
+    await act(async () => {
+      root.render(<Markdown highlightEligible={false} inlineMedia mediaSettled>{final}</Markdown>);
+    });
+    assert.equal(container.querySelectorAll(".md-media-embed").length, 1);
+    assert.equal(container.querySelector("img.md-media-image")?.getAttribute("src"), final);
   } finally {
     await cleanup(container, root);
   }

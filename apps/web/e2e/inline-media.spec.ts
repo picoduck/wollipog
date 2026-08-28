@@ -22,12 +22,26 @@ test("HTTPS transcript media embeds resize virtual rows and failed media leaves 
   const mediaRow = page.locator("[data-virtual-key='item:agent_message:2']");
   await expect(mediaRow).toBeVisible();
   const heightBefore = await mediaRow.evaluate((element) => element.getBoundingClientRect().height);
+  const plainImageLink = mediaRow.locator('a[href^="https://evidence.example/session-review.png"]:not(.md-media-image-link)');
+  const fullSizeLink = mediaRow.locator("a.md-media-image-link");
+  await expect(fullSizeLink).not.toHaveAttribute("href", /.+/);
+  await expect(fullSizeLink).toHaveAttribute("aria-hidden", "true");
+  await expect(fullSizeLink).not.toHaveAttribute("aria-label", /.+/);
+  await plainImageLink.focus();
+  await page.keyboard.press("Tab");
+  await expect(mediaRow.locator('a[href^="https://evidence.example/session-walkthrough.webm"]')).toBeFocused();
 
   releaseImage();
   const image = mediaRow.locator("img.md-media-image");
   await expect(image).toHaveAttribute("data-load-state", "loaded");
+  await expect(image).toHaveAttribute("alt", "session-review.png");
   await expect(image).toHaveAttribute("loading", "lazy");
   await expect(image.locator("xpath=..")).toHaveAttribute("target", "_blank");
+  expect(await fullSizeLink.getAttribute("aria-hidden")).toBeNull();
+  await expect(fullSizeLink).toHaveAttribute("aria-label", "Open session-review.png Full Size");
+  await plainImageLink.focus();
+  await page.keyboard.press("Tab");
+  await expect(fullSizeLink).toBeFocused();
   await expect(mediaRow.locator("video")).toHaveCount(0);
   await expect(mediaRow.getByRole("link", { name: /session-walkthrough\.webm/ })).toBeVisible();
 
@@ -65,6 +79,12 @@ test("inline transcript media stays bounded on desktop and mobile", async ({ pag
     await expect.poll(() => video.evaluate((element) => element.readyState)).toBeGreaterThan(0);
     await expect(video).toHaveAttribute("controls", "");
     await expect(video).not.toHaveAttribute("autoplay", "");
+    await expect(image).toHaveAttribute("alt", "session-review.png");
+    await expect(page.locator("a.md-media-image-link")).toHaveAttribute(
+      "aria-label",
+      "Open session-review.png Full Size",
+    );
+    await expect(video).toHaveAttribute("aria-label", "session-walkthrough.webm");
     const box = await image.boundingBox();
     const videoBox = await video.boundingBox();
     expect(box).not.toBeNull();
@@ -74,4 +94,44 @@ test("inline transcript media stays bounded on desktop and mobile", async ({ pag
     expect(videoBox!.width).toBeLessThanOrEqual(viewport.width - 40);
     expect(videoBox!.height).toBeLessThanOrEqual(viewport.height * 0.6 + 1);
   }
+});
+
+test("streamed signed URLs issue no media request until authoritative completion", async ({ page }) => {
+  const imageBody = await readFile(imagePath);
+  const videoBody = await readFile(videoPath);
+  const imageRequests: string[] = [];
+  const videoRequests: string[] = [];
+  await page.route("https://evidence.example/session-review.png?*", async (route) => {
+    imageRequests.push(route.request().url());
+    await route.fulfill({ status: 200, contentType: "image/png", body: imageBody });
+  });
+  await page.route("https://evidence.example/session-walkthrough.webm?*", async (route) => {
+    videoRequests.push(route.request().url());
+    await route.fulfill({ status: 200, contentType: "video/webm", body: videoBody });
+  });
+
+  await page.goto("/inline-media-e2e.html?streaming=1", { waitUntil: "domcontentloaded" });
+  const mediaRow = page.locator("[data-virtual-key='item:agent_message:2']");
+  const advance = page.getByTestId("advance-media-stream");
+  await expect(mediaRow.locator(".md-media-embed")).toHaveCount(0);
+  expect(imageRequests).toEqual([]);
+  expect(videoRequests).toEqual([]);
+
+  await advance.evaluate((button: HTMLButtonElement) => button.click());
+  await expect(mediaRow.locator('a[href$="X-Amz-Signature=re"]')).toBeAttached();
+  await expect(mediaRow.locator(".md-media-embed")).toHaveCount(0);
+  expect(imageRequests).toEqual([]);
+  expect(videoRequests).toEqual([]);
+
+  await advance.evaluate((button: HTMLButtonElement) => button.click());
+  const image = mediaRow.locator("img.md-media-image");
+  await expect(image).toHaveAttribute("data-load-state", "loaded");
+  await expect.poll(() => mediaRow.locator("video.md-media-video").evaluate((element) => element.readyState))
+    .toBeGreaterThan(0);
+  expect(imageRequests).toEqual([
+    "https://evidence.example/session-review.png?X-Amz-Signature=redacted",
+  ]);
+  expect(videoRequests).toEqual([
+    "https://evidence.example/session-walkthrough.webm?X-Amz-Signature=redacted",
+  ]);
 });

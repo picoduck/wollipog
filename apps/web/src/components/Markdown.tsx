@@ -121,6 +121,29 @@ export function transcriptMediaKind(href: string | undefined): TranscriptMediaKi
   return null;
 }
 
+/** Prefer author text, then a decoded path basename; signed query strings are never announced. */
+export function transcriptMediaLabel(
+  href: string,
+  kind: TranscriptMediaKind,
+  authorLabel?: string,
+): string {
+  const trimmed = authorLabel?.trim();
+  if (trimmed && trimmed !== href) return trimmed;
+  try {
+    const basename = new URL(href).pathname.split("/").filter(Boolean).at(-1);
+    if (basename) {
+      try {
+        return decodeURIComponent(basename);
+      } catch {
+        return basename;
+      }
+    }
+  } catch {
+    // Classification already rejects malformed media URLs; keep this helper defensive for tests.
+  }
+  return kind === "image" ? "Image" : "Video";
+}
+
 function TranscriptMediaEmbed({ href, kind, label }: {
   href: string;
   kind: TranscriptMediaKind;
@@ -134,10 +157,11 @@ function TranscriptMediaEmbed({ href, kind, label }: {
       {kind === "image" ? (
         <a
           className="md-media-image-link"
-          href={href}
-          target="_blank"
-          rel="noopener noreferrer"
-          aria-label={`Open ${label} Full Size`}
+          href={loadState === "loaded" ? href : undefined}
+          target={loadState === "loaded" ? "_blank" : undefined}
+          rel={loadState === "loaded" ? "noopener noreferrer" : undefined}
+          aria-label={loadState === "loaded" ? `Open ${label} Full Size` : undefined}
+          aria-hidden={loadState === "loaded" ? undefined : true}
         >
           <img
             className="md-media-image"
@@ -166,15 +190,21 @@ function TranscriptMediaEmbed({ href, kind, label }: {
   );
 }
 
-function MarkdownLink({ href, children, inlineMedia }: ComponentProps<"a"> & { inlineMedia: boolean }) {
+function MarkdownLink({ href, children, inlineMedia, mediaSettled }: ComponentProps<"a"> & {
+  inlineMedia: boolean;
+  mediaSettled: boolean;
+}) {
   const kind = inlineMedia ? transcriptMediaKind(href) : null;
-  const label = reactNodeText(children).trim() || href || "media";
+  const childText = reactNodeText(children).trim();
+  const label = kind && href ? transcriptMediaLabel(href, kind, childText) : childText || href || "media";
   return (
     <>
       <a href={href} target="_blank" rel="noopener noreferrer">
         {children}
       </a>
-      {kind && href && <TranscriptMediaEmbed key={href} href={href} kind={kind} label={label} />}
+      {kind && href && mediaSettled && (
+        <TranscriptMediaEmbed key={href} href={href} kind={kind} label={label} />
+      )}
     </>
   );
 }
@@ -199,12 +229,15 @@ export const Markdown = memo(function Markdown({
   children,
   highlightEligible = true,
   inlineMedia = false,
+  mediaSettled = true,
 }: {
   children: string;
   /** Timeline virtualization passes whether this settled row currently intersects the viewport. */
   highlightEligible?: boolean;
   /** Transcript-only opt-in for HTTPS image and video URL embeds. */
   inlineMedia?: boolean;
+  /** False while a transcript row is still streaming; remote media mounts only after completion. */
+  mediaSettled?: boolean;
 }) {
   const key = useRef<symbol | null>(null);
   key.current ??= Symbol("markdown-highlight");
@@ -250,12 +283,14 @@ export const Markdown = memo(function Markdown({
   // instead of remounting, collapsing its row, and issuing another remote request.
   const components = useMemo<MarkdownComponents>(() => ({
     pre: CodeBlockPre,
-    a: ({ href, children }) => <MarkdownLink href={href} inlineMedia={inlineMedia}>{children}</MarkdownLink>,
+    a: ({ href, children }) => (
+      <MarkdownLink href={href} inlineMedia={inlineMedia} mediaSettled={mediaSettled}>{children}</MarkdownLink>
+    ),
     img: ({ src, alt }) => {
       const href = typeof src === "string" ? src : undefined;
       const kind = inlineMedia ? transcriptMediaKind(href) : null;
-      const label = alt || href || "image";
-      if (kind === "image" && href) {
+      const label = kind && href ? transcriptMediaLabel(href, kind, alt) : alt || href || "image";
+      if (kind === "image" && href && mediaSettled) {
         return (
           <>
             <a className="md-img-link" href={href} target="_blank" rel="noopener noreferrer">🖼 {label}</a>
@@ -267,7 +302,7 @@ export const Markdown = memo(function Markdown({
         <a className="md-img-link" href={href} target="_blank" rel="noopener noreferrer">🖼 {label}</a>
       );
     },
-  }), [inlineMedia]);
+  }), [inlineMedia, mediaSettled]);
   return (
     <div className="md">
       <ReactMarkdown
