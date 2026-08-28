@@ -94,12 +94,15 @@ export function SessionApprovalRegion({
   const approval = session.pendingApproval;
   const questionFallback = approval?.kind === "question" && !questionInTimeline;
   const standaloneApproval = approval?.kind === "question" ? null : approval;
+  const requestPresentation = questionFallback ? "fallback" : approval?.kind === "question"
+    ? "timeline" : standaloneApproval ? "standalone" : "none";
   return (
     <>
       <SessionRequestCoordinator
         sessionId={session.id}
         requestId={approval?.requestId ?? null}
         requestIsQuestion={approval?.kind === "question"}
+        requestPresentation={requestPresentation}
         runnerOnline={runnerOnline}
         fallbackFocusRef={fallbackFocusRef}
         alternateFallbackFocusRef={alternateFallbackFocusRef}
@@ -191,6 +194,7 @@ function SessionRequestCoordinator({
   sessionId,
   requestId,
   requestIsQuestion,
+  requestPresentation,
   runnerOnline,
   fallbackFocusRef,
   alternateFallbackFocusRef,
@@ -198,6 +202,7 @@ function SessionRequestCoordinator({
   sessionId: string;
   requestId: string | null;
   requestIsQuestion: boolean;
+  requestPresentation: "fallback" | "timeline" | "standalone" | "none";
   runnerOnline: boolean;
   fallbackFocusRef: RefObject<HTMLElement>;
   alternateFallbackFocusRef?: RefObject<HTMLElement>;
@@ -238,7 +243,8 @@ function SessionRequestCoordinator({
       return;
     }
     if (focusDestination === "fallback") focusFallback();
-  }, [alternateFallbackFocusRef, fallbackFocusRef, ownedFocusBeforeRender, requestId, requestIsQuestion, sessionId]);
+  }, [alternateFallbackFocusRef, fallbackFocusRef, ownedFocusBeforeRender, requestId, requestIsQuestion,
+    requestPresentation, sessionId]);
 
   useEffect(() => {
     if (announcedRequestRef.current === requestId) return;

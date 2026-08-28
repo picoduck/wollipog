@@ -5,6 +5,8 @@ import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { SessionQuestionBanner } from "../components/SessionApproval.js";
 import { setQuestionResponseStyle } from "../question-response-style.js";
+import { inTypingContext } from "../shortcuts.js";
+import { isFollowTailResumeKey } from "../useFollowTail.js";
 import "../styles.css";
 
 interface AnswerCall {
@@ -188,7 +190,14 @@ function Fixture() {
 
   return (
     <ApiProvider client={client}>
-      <main id="question-frame" className={renderInFallbackSlot ? "session-detail" : "timeline"}>
+      <main
+        id="question-frame"
+        className={renderInFallbackSlot ? "session-detail" : "timeline"}
+        onKeyDown={(event) => {
+          if (renderInFallbackSlot || event.defaultPrevented || inTypingContext(event.currentTarget.ownerDocument)) return;
+          if (isFollowTailResumeKey(event)) event.preventDefault();
+        }}
+      >
         {renderInFallbackSlot ? (
           <div className="detail-columns">
             <div className="detail-chat">

@@ -118,7 +118,7 @@ import {
 } from "../useFollowTail.js";
 import { useSessionReadingKeys, type SessionReadingKeyActions } from "../useSessionReadingKeys.js";
 import { VIRTUAL_VIEWPORT_INTENT_EVENT } from "../viewport-intent.js";
-import { matchesShortcut, shortcutDisplay, shortcutLayerActive } from "../shortcuts.js";
+import { inTypingContext, matchesShortcut, shortcutDisplay, shortcutLayerActive } from "../shortcuts.js";
 import { useIsMobile, useIsTouchPhone } from "./useIsMobile.js";
 import {
   usePreviewNavigationRegistration,
@@ -2612,6 +2612,7 @@ function SessionDetailLoaded({
               onTouchCancel={(event) => finishNativeTouchEarlierActivityIntent(event.touches.length)}
               onKeyDown={(event) => {
                 if (event.defaultPrevented) return;
+                if (inTypingContext(event.currentTarget.ownerDocument)) return;
                 if (mode !== "expanded" && !isFollowTailResumeKey(event)) return;
                 if (!followTail.onKeyDown(event)) return;
                 event.preventDefault();

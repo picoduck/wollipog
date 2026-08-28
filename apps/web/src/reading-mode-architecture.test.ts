@@ -22,11 +22,13 @@ test("the session surface key follows session identity, never display mode", () 
 
 test("the transcript key bridge yields to handled and modified global shortcuts", () => {
   const handler = detail.match(
-    /onKeyDown=\{\(event\) => \{\s*if \(event\.defaultPrevented\) return;\s*if \(mode !== "expanded" && !isFollowTailResumeKey\(event\)\) return;\s*if \(!followTail\.onKeyDown\(event\)\) return;\s*event\.preventDefault\(\);\s*\}\}/,
+    /onKeyDown=\{\(event\) => \{\s*if \(event\.defaultPrevented\) return;\s*if \(inTypingContext\(event\.currentTarget\.ownerDocument\)\) return;\s*if \(mode !== "expanded" && !isFollowTailResumeKey\(event\)\) return;\s*if \(!followTail\.onKeyDown\(event\)\) return;\s*event\.preventDefault\(\);\s*\}\}/,
   );
   assert.ok(handler, "preview and expanded readers must skip capture-handled keys and consume only their own bare reading keys");
   assert.match(handler[0], /mode !== "expanded" && !isFollowTailResumeKey\(event\)/,
     "preview readers expose resume keys without inheriting expanded-only upward-key pause semantics");
+  assert.match(handler[0], /inTypingContext\(event\.currentTarget\.ownerDocument\)/,
+    "inline transcript inputs must retain bare letters and navigation keys");
   assert.doesNotMatch(handler[0], /stopPropagation/,
     "unrelated modified shortcuts must continue bubbling to their global owners");
 });

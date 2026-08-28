@@ -55,7 +55,12 @@ test("desktop Text Entry submits exact structured form answers using only the ke
   await responses.nth(0).fill("2");
   await responses.nth(0).press("Tab");
   await responses.nth(1).fill("1, Browser Tests");
-  await responses.nth(2).fill("");
+  await responses.nth(2).fill("itHub");
+  await responses.nth(2).press("Home");
+  await responses.nth(2).press("Shift+G");
+  await responses.nth(2).press("End");
+  await responses.nth(2).pressSequentially("!");
+  await expect(responses.nth(2)).toHaveValue("GitHub!");
   await responses.nth(3).fill("s3cret");
   await responses.nth(4).fill("3");
   await responses.nth(4).press("Control+Enter");
@@ -64,6 +69,7 @@ test("desktop Text Entry submits exact structured form answers using only the ke
   expect(await page.evaluate(() => window.agentQuestionCalls[0]?.answers)).toEqual({
     target: "Production",
     checks: ["Unit Tests", "Browser Tests"],
+    note: "GitHub!",
     token: "s3cret",
     retries: "3",
   });

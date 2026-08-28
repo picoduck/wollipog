@@ -348,6 +348,8 @@ test("question focus follows the same request from its loading fallback into the
   const root = createRoot(container);
   await act(async () => { root.render(<QuestionPresentationHarness inTimeline={false} />); });
   container.querySelector<HTMLElement>('[role="radio"]')!.focus();
+  await act(async () => { root.render(<QuestionPresentationHarness inTimeline={false} />); });
+  assert.equal(domWindow.document.activeElement?.closest("[data-session-request-id]")?.getAttribute("data-session-request-id"), "ask-a");
 
   await act(async () => { root.render(<QuestionPresentationHarness inTimeline />); });
   assert.equal(domWindow.document.activeElement?.closest("[data-session-request-id]")?.getAttribute("data-session-request-id"), "ask-a");
