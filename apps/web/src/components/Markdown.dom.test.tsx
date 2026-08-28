@@ -208,3 +208,46 @@ test("failed transcript image and video loads collapse to their plain links", as
     await cleanup(container, root);
   }
 });
+
+test("loaded transcript media survives visibility-only rerenders without remounting", async () => {
+  const image = "https://evidence.example/review.png?signature=valid";
+  const { container, root } = await renderMarkdown(image, true);
+  try {
+    const loadedImage = container.querySelector("img.md-media-image")!;
+    await act(async () => {
+      loadedImage.dispatchEvent(new domWindow.Event("load") as unknown as Event);
+    });
+    assert.equal(loadedImage.getAttribute("data-load-state"), "loaded");
+
+    await act(async () => {
+      root.render(<Markdown highlightEligible inlineMedia>{image}</Markdown>);
+    });
+
+    assert.equal(container.querySelector("img.md-media-image") === loadedImage, true,
+      "a scroll-driven highlightEligible change must preserve the loaded media node and state");
+    assert.equal(loadedImage.getAttribute("data-load-state"), "loaded");
+  } finally {
+    await cleanup(container, root);
+  }
+});
+
+test("a completed signed media URL retries after its streamed unsigned prefix failed", async () => {
+  const unsigned = "https://evidence.example/review.png";
+  const signed = `${unsigned}?signature=valid`;
+  const { container, root } = await renderMarkdown(unsigned, true);
+  try {
+    await act(async () => {
+      container.querySelector("img.md-media-image")!.dispatchEvent(new domWindow.Event("error") as unknown as Event);
+    });
+    assert.equal(container.querySelector("img.md-media-image"), null);
+
+    await act(async () => {
+      root.render(<Markdown highlightEligible={false} inlineMedia>{signed}</Markdown>);
+    });
+
+    assert.equal(container.querySelector("img.md-media-image")?.getAttribute("src"), signed,
+      "the href identity must reset a failed embed when streaming completes the signed URL");
+  } finally {
+    await cleanup(container, root);
+  }
+});

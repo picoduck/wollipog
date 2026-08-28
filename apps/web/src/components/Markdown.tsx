@@ -1,4 +1,4 @@
-import { isValidElement, memo, useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react";
+import { isValidElement, memo, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
@@ -12,6 +12,7 @@ import {
 import { CopyButton } from "./common.js";
 
 type RehypePlugins = NonNullable<ComponentProps<typeof ReactMarkdown>["rehypePlugins"]>;
+type MarkdownComponents = NonNullable<ComponentProps<typeof ReactMarkdown>["components"]>;
 
 const highlightQueue = new CancelableIdleTaskQueue(createBrowserIdleDriver());
 const highlightCoordinator = new StableIdleTaskCoordinator<symbol>(highlightQueue, browserTimerDriver);
@@ -136,7 +137,7 @@ function TranscriptMediaEmbed({ href, kind, label }: {
           href={href}
           target="_blank"
           rel="noopener noreferrer"
-          aria-label={`Open ${label} full size`}
+          aria-label={`Open ${label} Full Size`}
         >
           <img
             className="md-media-image"
@@ -173,7 +174,7 @@ function MarkdownLink({ href, children, inlineMedia }: ComponentProps<"a"> & { i
       <a href={href} target="_blank" rel="noopener noreferrer">
         {children}
       </a>
-      {kind && href && <TranscriptMediaEmbed href={href} kind={kind} label={label} />}
+      {kind && href && <TranscriptMediaEmbed key={href} href={href} kind={kind} label={label} />}
     </>
   );
 }
@@ -244,31 +245,35 @@ export const Markdown = memo(function Markdown({
   }, [children, eligible]);
 
   const rehypePlugins = eligible && highlighted?.text === children ? highlighted.plugins : undefined;
+  // ReactMarkdown uses each renderer function as the React element type. Keep these identities
+  // stable across scroll-driven highlightEligible changes so loaded media is updated in place
+  // instead of remounting, collapsing its row, and issuing another remote request.
+  const components = useMemo<MarkdownComponents>(() => ({
+    pre: CodeBlockPre,
+    a: ({ href, children }) => <MarkdownLink href={href} inlineMedia={inlineMedia}>{children}</MarkdownLink>,
+    img: ({ src, alt }) => {
+      const href = typeof src === "string" ? src : undefined;
+      const kind = inlineMedia ? transcriptMediaKind(href) : null;
+      const label = alt || href || "image";
+      if (kind === "image" && href) {
+        return (
+          <>
+            <a className="md-img-link" href={href} target="_blank" rel="noopener noreferrer">🖼 {label}</a>
+            <TranscriptMediaEmbed key={href} href={href} kind="image" label={label} />
+          </>
+        );
+      }
+      return (
+        <a className="md-img-link" href={href} target="_blank" rel="noopener noreferrer">🖼 {label}</a>
+      );
+    },
+  }), [inlineMedia]);
   return (
     <div className="md">
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkBreaks]}
         rehypePlugins={rehypePlugins}
-        components={{
-          pre: CodeBlockPre,
-          a: ({ href, children }) => <MarkdownLink href={href} inlineMedia={inlineMedia}>{children}</MarkdownLink>,
-          img: ({ src, alt }) => {
-            const href = typeof src === "string" ? src : undefined;
-            const kind = inlineMedia ? transcriptMediaKind(href) : null;
-            const label = alt || href || "image";
-            if (kind === "image" && href) {
-              return (
-                <>
-                  <a className="md-img-link" href={href} target="_blank" rel="noopener noreferrer">🖼 {label}</a>
-                  <TranscriptMediaEmbed href={href} kind="image" label={label} />
-                </>
-              );
-            }
-            return (
-              <a className="md-img-link" href={href} target="_blank" rel="noopener noreferrer">🖼 {label}</a>
-            );
-          },
-        }}
+        components={components}
       >
         {children}
       </ReactMarkdown>
