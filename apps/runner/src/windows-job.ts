@@ -1,21 +1,59 @@
+import { createHash, randomUUID } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, win32 } from "node:path";
+
 /**
  * Windows Job Object launcher materialized by the runner on native Windows.
  *
- * Node does not expose CreateJobObject/AssignProcessToJobObject. This PowerShell host compiles a
- * small in-memory P/Invoke bridge, creates the requested process suspended with the runner pipes,
- * assigns it to a kill-on-close Job Object, resumes it, and mirrors its exit code. Closing or
- * killing the launcher closes the final job handle and terminates the complete child process tree.
- * This is deliberately a process-lifetime/resource boundary, not a filesystem or network sandbox.
+ * Node does not expose CreateJobObject/AssignProcessToJobObject. This PowerShell host loads a
+ * versioned P/Invoke bridge cached beside the materialized script, creates the requested process
+ * suspended with the runner pipes, assigns it to a kill-on-close Job Object, resumes it, and
+ * mirrors its exit code. Closing or killing the launcher closes the final job handle and
+ * terminates the complete child process tree. This is deliberately a process-lifetime/resource
+ * boundary, not a filesystem or network sandbox.
  */
 export const WINDOWS_JOB_LAUNCHER = String.raw`
 $ErrorActionPreference = 'Stop'
+function Fail-WollipogJob([string] $Code, [string] $Message) {
+  [Console]::Error.WriteLine("[runner] Windows Job isolation failed ($Code): $Message")
+  exit 125
+}
+
 if (Test-Path Env:WOLLIPOG_WINDOWS_JOB_SPEC) { $Spec = $env:WOLLIPOG_WINDOWS_JOB_SPEC }
 else { $Spec = $env:MAM_WINDOWS_JOB_SPEC }
 $env:WOLLIPOG_WINDOWS_JOB_SPEC = $null
 $env:MAM_WINDOWS_JOB_SPEC = $null
-if ([string]::IsNullOrWhiteSpace($Spec)) { throw 'missing Wollipog Windows Job launch specification' }
+if ([string]::IsNullOrWhiteSpace($Spec)) {
+  Fail-WollipogJob 'missing-spec' 'missing Wollipog Windows Job launch specification'
+}
 
-Add-Type -TypeDefinition @'
+try {
+  $decoded = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Spec)) | ConvertFrom-Json
+  if ([string]::IsNullOrWhiteSpace([string] $decoded.command) -or
+      [string]::IsNullOrWhiteSpace([string] $decoded.cwd) -or
+      [uint32] $decoded.ownerPid -le 1 -or $null -eq $decoded.args) {
+    throw 'required launch field missing'
+  }
+  $commandArgs = @($decoded.args | ForEach-Object { [string] $_ })
+} catch {
+  Fail-WollipogJob 'invalid-spec' 'the Windows Job launch specification is malformed'
+}
+
+$BridgePath = Join-Path $PSScriptRoot 'WollipogWindowsJob.dll'
+$CompilePath = $null
+$Mutex = $null
+$MutexHeld = $false
+try {
+  $MutexName = 'Local\WollipogWindowsJobBridge-' + (Split-Path $PSScriptRoot -Leaf)
+  $Mutex = [Threading.Mutex]::new($false, $MutexName)
+  try { $MutexHeld = $Mutex.WaitOne(30000) }
+  catch [Threading.AbandonedMutexException] { $MutexHeld = $true }
+  if (-not $MutexHeld) { throw 'bridge cache lock timed out' }
+  if (-not (Test-Path -LiteralPath $BridgePath -PathType Leaf)) {
+    $CompilePath = Join-Path $PSScriptRoot ('WollipogWindowsJob-' + [Guid]::NewGuid().ToString('N') + '.dll')
+
+    Add-Type -OutputAssembly $CompilePath -TypeDefinition @'
 using System;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
@@ -269,14 +307,101 @@ public static class WollipogWindowsJob {
   }
 }
 '@
+    try { [IO.File]::Move($CompilePath, $BridgePath) }
+    catch [IO.IOException] {
+      if (-not (Test-Path -LiteralPath $BridgePath -PathType Leaf)) { throw }
+    }
+    $CompilePath = $null
+  }
+  try { Add-Type -Path $BridgePath }
+  catch {
+    # Fail closed for this launch, but remove an incomplete/corrupt cache entry so the next launch
+    # can rebuild it under the version-scoped mutex.
+    Remove-Item -LiteralPath $BridgePath -Force -ErrorAction SilentlyContinue
+    throw
+  }
+} catch {
+  Fail-WollipogJob 'bridge-unavailable' 'the native bridge could not be initialized; Windows application-control policy may be blocking it'
+} finally {
+  if ($CompilePath -and (Test-Path -LiteralPath $CompilePath)) {
+    Remove-Item -LiteralPath $CompilePath -Force -ErrorAction SilentlyContinue
+  }
+  if ($MutexHeld) { $Mutex.ReleaseMutex() }
+  if ($Mutex) { $Mutex.Dispose() }
+}
 
-$decoded = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Spec)) | ConvertFrom-Json
-$commandArgs = @($decoded.args | ForEach-Object { [string] $_ })
-exit [WollipogWindowsJob]::Run([string] $decoded.command, $commandArgs, [string] $decoded.cwd, [string] $decoded.rawCommandLine, [uint32] $decoded.ownerPid)
+try {
+  $exitCode = [WollipogWindowsJob]::Run(
+    [string] $decoded.command,
+    $commandArgs,
+    [string] $decoded.cwd,
+    [string] $decoded.rawCommandLine,
+    [uint32] $decoded.ownerPid)
+  exit $exitCode
+} catch {
+  $Failure = $_.Exception.ToString()
+  if ($Failure -match 'AssignProcessToJobObject failed') {
+    Fail-WollipogJob 'job-assignment' 'the provider process could not be assigned to its Job Object'
+  }
+  if ($Failure -match 'CreateJobObject failed|SetInformationJobObject failed') {
+    Fail-WollipogJob 'job-initialization' 'the kill-on-close Job Object could not be initialized'
+  }
+  if ($Failure -match 'CreateProcess failed') {
+    Fail-WollipogJob 'provider-create' 'the provider process could not be created inside the Job Object boundary'
+  }
+  if ($Failure -match 'OpenProcess runner owner failed') {
+    Fail-WollipogJob 'runner-owner' 'the launcher could not bind containment to the runner process'
+  }
+  Fail-WollipogJob 'native-boundary' 'the Windows Job containment boundary failed'
+}
 `;
 
 export function encodeWindowsJobSpec(command: string, args: string[], cwd: string, ownerPid: number, rawCommandLine?: string): string {
   return Buffer.from(JSON.stringify({ command, args, cwd, ownerPid, ...(rawCommandLine ? { rawCommandLine } : {}) }), "utf8").toString("base64");
 }
 
-export const WINDOWS_JOB_ENCODED_COMMAND = Buffer.from(WINDOWS_JOB_LAUNCHER, "utf16le").toString("base64");
+/** Resolve the launcher cache inside the native Windows user's private application-data tree. A
+ * non-Windows fallback exists only so platform-independent tests can inspect the materialization. */
+export function windowsJobCacheRoot(
+  platform: NodeJS.Platform = process.platform,
+  environment: NodeJS.ProcessEnv = process.env,
+): string {
+  if (platform !== "win32") return join(tmpdir(), "wollipog-windows-job");
+  const localAppData = environment.LOCALAPPDATA;
+  if (!localAppData || !win32.isAbsolute(localAppData)) {
+    throw new Error("Windows Job isolation requires an absolute LOCALAPPDATA directory");
+  }
+  return win32.join(localAppData, "Wollipog", "cache", "windows-job");
+}
+
+/** Materialize and verify the audited launcher. Its content hash versions both the script and
+ * compiled bridge cache, while per-call verification repairs cache cleanup or corruption. */
+export function materializeWindowsJobLauncher(cacheRoot = windowsJobCacheRoot()): string {
+  const digest = createHash("sha256").update(WINDOWS_JOB_LAUNCHER, "utf8").digest("hex").slice(0, 24);
+  const versionRoot = join(cacheRoot, digest);
+  const scriptPath = join(versionRoot, "launcher.ps1");
+  mkdirSync(versionRoot, { recursive: true, mode: 0o700 });
+  chmodSync(cacheRoot, 0o700);
+  chmodSync(versionRoot, 0o700);
+  if (existsSync(scriptPath) && readFileSync(scriptPath, "utf8") !== WINDOWS_JOB_LAUNCHER) {
+    rmSync(scriptPath, { force: true });
+  }
+  if (!existsSync(scriptPath)) {
+    const temporaryPath = join(versionRoot, `launcher-${process.pid}-${randomUUID()}.tmp`);
+    try {
+      writeFileSync(temporaryPath, WINDOWS_JOB_LAUNCHER, { encoding: "utf8", mode: 0o600, flag: "wx" });
+      try {
+        renameSync(temporaryPath, scriptPath);
+      } catch (error) {
+        if (!existsSync(scriptPath)) throw error;
+      }
+    } finally {
+      rmSync(temporaryPath, { force: true });
+    }
+  }
+  if (readFileSync(scriptPath, "utf8") !== WINDOWS_JOB_LAUNCHER) {
+    throw new Error("Windows Job launcher cache does not match the audited runner source");
+  }
+  chmodSync(scriptPath, 0o600);
+  return scriptPath;
+}

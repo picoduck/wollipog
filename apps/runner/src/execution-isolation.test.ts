@@ -58,7 +58,8 @@ test("native macOS and Windows policies resolve only their audited platform adap
     }, { ...state, dataDir: "C:\\Wollipog", cwd: "C:\\repo" },
   );
   assert.equal(windows?.backend, "windows-job");
-  assert.ok(windows?.args.includes("-EncodedCommand"));
+  assert.ok(windows?.args.includes("-File"));
+  assert.match(windows?.args.at(-1) ?? "", /launcher\.ps1$/u);
 
   await assert.rejects(() => resolveExecutionIsolation(
     { mode: "seatbelt", network: "inherit" }, { kind: "native" }, { platform: "win32" }, state,

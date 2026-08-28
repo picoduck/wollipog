@@ -8,7 +8,7 @@ import type { RunnerExecutionIsolation } from "./config.js";
 import { runContextCommand } from "./context-command.js";
 import { resolveNative, type ResolvedBinary } from "./discovery/resolve.js";
 import type { SpawnIsolation } from "./spawn.js";
-import { WINDOWS_JOB_ENCODED_COMMAND } from "./windows-job.js";
+import { materializeWindowsJobLauncher } from "./windows-job.js";
 
 interface IsolationDeps {
   platform: NodeJS.Platform;
@@ -310,7 +310,7 @@ export async function resolveExecutionIsolation(
       args: [
         ...binary.launch.args,
         "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-        "-EncodedCommand", WINDOWS_JOB_ENCODED_COMMAND,
+        "-File", materializeWindowsJobLauncher(),
       ],
       network: "inherit",
     };
