@@ -52,6 +52,7 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  rmdirSync,
   symlinkSync,
   unlinkSync,
   writeFileSync,
@@ -651,14 +652,27 @@ function sweepManagedLinks(
 /* -------------------------------- store GC -------------------------------- */
 
 type StoreKeep = Map<string, { digest: string; manual: boolean } | "all">;
+interface StoreGcPolicy {
+  removedSkillMs: number;
+  previousVersionMs: number;
+  now: number;
+  /** Versions still targeted by a live shared-HOME symlink during a contended pass. */
+  protectedVersions?: ReadonlySet<string>;
+}
 
 export const DEFAULT_REMOVED_SKILL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 export const DEFAULT_PREVIOUS_VERSION_GRACE_MS = 60 * 60 * 1000;
-const RETENTION_STATE_VERSION = 1;
+export const MAX_RETAINED_STALE_SKILL_VERSIONS = 64;
+const RETENTION_STATE_VERSION = 2;
 const RETENTION_STATE_MAX_BYTES = 1024 * 1024;
 const RETENTION_STATE_MAX_ENTRIES = 8192;
+const RETENTION_MAX_CONTINUOUS_CLOCK_STEP_MS = 15 * 60 * 1000;
 const STORE_VERSION_NAME = /^[0-9a-f]{64}(?:-manual)?$/;
-type RetentionState = Map<string, number>;
+interface RetentionState {
+  entries: Map<string, number>;
+  /** Wall-clock sample used only to normalize discontinuities between reconciliation passes. */
+  observedAt?: number;
+}
 
 export function skillRetentionStatePath(dataDir: string): string {
   return join(dataDir, "skills", "retention.json");
@@ -678,7 +692,7 @@ function loadRetentionState(path: string, log?: (message: string) => void): Rete
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
       log?.(`skill retention state unreadable (${errText(error)}); starting conservatively`);
     }
-    return new Map();
+    return { entries: new Map() };
   }
   try {
     const stat = fstatSync(fd);
@@ -688,9 +702,15 @@ function loadRetentionState(path: string, log?: (message: string) => void): Rete
     const parsed = JSON.parse(buffer.subarray(0, bytesRead).toString("utf8")) as {
       version?: unknown;
       entries?: unknown;
+      observedAt?: unknown;
     };
-    if (parsed.version !== RETENTION_STATE_VERSION || !Array.isArray(parsed.entries) ||
+    if ((parsed.version !== 1 && parsed.version !== RETENTION_STATE_VERSION) ||
+        !Array.isArray(parsed.entries) ||
         parsed.entries.length > RETENTION_STATE_MAX_ENTRIES) throw new Error("invalid state shape");
+    if (parsed.version === RETENTION_STATE_VERSION &&
+        (!Number.isSafeInteger(parsed.observedAt) || (parsed.observedAt as number) < 0)) {
+      throw new Error("invalid state clock");
+    }
     const state = new Map<string, number>();
     for (const value of parsed.entries) {
       const entry = value as { name?: unknown; version?: unknown; since?: unknown };
@@ -701,28 +721,53 @@ function loadRetentionState(path: string, log?: (message: string) => void): Rete
       }
       state.set(retentionKey(entry.name, entry.version), entry.since as number);
     }
-    return state;
+    return {
+      entries: state,
+      ...(parsed.version === RETENTION_STATE_VERSION
+        ? { observedAt: parsed.observedAt as number }
+        : {}),
+    };
   } catch (error) {
     log?.(`skill retention state unreadable (${errText(error)}); starting conservatively`);
-    return new Map();
+    return { entries: new Map() };
   } finally {
     closeSync(fd);
   }
 }
 
 function saveRetentionState(path: string, state: RetentionState, log?: (message: string) => void): void {
-  const entries = [...state]
-    .slice(0, RETENTION_STATE_MAX_ENTRIES)
+  const candidates = [...state.entries]
     .map(([key, since]) => {
       const split = key.indexOf("\0");
       return { name: key.slice(0, split), version: key.slice(split + 1), since };
     })
     .sort((a, b) => a.name.localeCompare(b.name) || a.version.localeCompare(b.version));
+  const limited = candidates.slice(0, RETENTION_STATE_MAX_ENTRIES);
+  const encode = (count: number): string => JSON.stringify({
+    version: RETENTION_STATE_VERSION,
+    observedAt: state.observedAt ?? 0,
+    entries: limited.slice(0, count),
+  });
+  let low = 0;
+  let high = limited.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (Buffer.byteLength(encode(middle)) <= RETENTION_STATE_MAX_BYTES) low = middle;
+    else high = middle - 1;
+  }
+  const entries = limited.slice(0, low);
+  const dropped = candidates.length - entries.length;
+  if (dropped > 0) {
+    log?.(
+      `skill retention state capacity reached: omitted ${dropped} deterministic entr${dropped === 1 ? "y" : "ies"}; ` +
+        "their grace windows will restart on the next pass",
+    );
+  }
   try {
     assertNotSymlink(path, "the skill retention state");
     const temp = join(dirname(path), `.retention.json.tmp-${randomUUID()}`);
     try {
-      writeFileSync(temp, JSON.stringify({ version: RETENTION_STATE_VERSION, entries }, null, 2), {
+      writeFileSync(temp, encode(entries.length), {
         flag: "wx",
         mode: 0o600,
       });
@@ -733,6 +778,42 @@ function saveRetentionState(path: string, state: RetentionState, log?: (message:
   } catch (error) {
     log?.(`could not persist skill retention state: ${errText(error)}`);
   }
+}
+
+/** Preserve already accrued retention age across a backward or discontinuous forward clock jump.
+ * Only an ordinary wall-clock step advances expiration. This is conservative without resetting an
+ * otherwise mature window. Schema-1 state has no observation sample, so future-dated entries
+ * restart once. */
+function normalizeRetentionClock(
+  state: RetentionState,
+  now: number,
+  log?: (message: string) => void,
+): void {
+  const observedAt = state.observedAt;
+  if (observedAt === undefined) {
+    for (const [key, since] of state.entries) {
+      if (since > now) state.entries.set(key, now);
+    }
+    state.observedAt = now;
+    return;
+  }
+  const delta = now - observedAt;
+  let shift = 0;
+  if (delta < 0) {
+    shift = delta;
+    log?.(`skill retention clock moved backward by ${-delta}ms; preserving accrued age`);
+  } else if (delta > RETENTION_MAX_CONTINUOUS_CLOCK_STEP_MS) {
+    shift = delta;
+    log?.(
+      `skill retention clock advanced discontinuously by ${delta}ms; preserving accrued age`,
+    );
+  }
+  if (shift !== 0) {
+    for (const [key, since] of state.entries) {
+      state.entries.set(key, Math.max(0, Math.min(now, since + shift)));
+    }
+  }
+  state.observedAt = now;
 }
 
 function treeContainsSymlink(path: string): boolean {
@@ -755,9 +836,10 @@ function gcStore(
   storeRoot: string,
   keep: StoreKeep,
   state: RetentionState,
-  policy: { removedSkillMs: number; previousVersionMs: number; now: number },
+  policy: StoreGcPolicy,
   log?: (message: string) => void,
 ): void {
+  normalizeRetentionClock(state, policy.now, log);
   const seenKeys = new Set<string>();
   let entries;
   try {
@@ -791,6 +873,7 @@ function gcStore(
     } catch {
       continue;
     }
+    const stale: { name: string; key: string; path: string; since: number }[] = [];
     for (const version of versions) {
       // A symlinked version entry is never ours; skip it rather than delete through it.
       if (version.isSymbolicLink()) continue;
@@ -798,39 +881,77 @@ function gcStore(
       const key = retentionKey(entry.name, version.name);
       seenKeys.add(key);
       if (want === "all") {
-        state.delete(key);
+        state.entries.delete(key);
         continue;
       }
       const wanted = want !== undefined &&
         (version.name === want.digest || (want.manual && version.name === `${want.digest}-manual`));
       if (wanted) {
-        state.delete(key);
+        state.entries.delete(key);
         continue;
       }
-      const threshold = want === undefined ? policy.removedSkillMs : policy.previousVersionMs;
-      const since = state.get(key) ?? policy.now;
-      state.set(key, since);
-      if (policy.now - since < threshold) continue;
-      const versionPath = join(path, version.name);
+      if (policy.protectedVersions?.has(key)) {
+        state.entries.delete(key);
+        continue;
+      }
+      const since = state.entries.get(key) ?? policy.now;
+      state.entries.set(key, since);
+      stale.push({ name: version.name, key, path: join(path, version.name), since });
+    }
+    const safeStale = stale.filter((candidate) => {
       try {
-        if (treeContainsSymlink(versionPath)) {
-          log?.(`skill store gc: retained unsafe symlink-bearing version ${entry.name}/${version.name}`);
-          continue;
+        if (treeContainsSymlink(candidate.path)) {
+          log?.(`skill store gc: retained unsafe symlink-bearing version ${entry.name}/${candidate.name}`);
+          return false;
         }
-        rmSync(versionPath, { recursive: true, force: true });
-        state.delete(key);
+        return true;
+      } catch {
+        return false;
+      }
+    }).sort((a, b) => a.since - b.since || a.name.localeCompare(b.name));
+    const unlinkedAllowance = MAX_RETAINED_STALE_SKILL_VERSIONS;
+    const forced = new Set(safeStale.slice(0, Math.max(0, safeStale.length - unlinkedAllowance)));
+    for (const candidate of safeStale) {
+      const threshold = want === undefined ? policy.removedSkillMs : policy.previousVersionMs;
+      const bounded = forced.has(candidate);
+      if (!bounded && policy.now - candidate.since < threshold) continue;
+      try {
+        rmSync(candidate.path, { recursive: true, force: true });
+        state.entries.delete(candidate.key);
         log?.(
-          `skill store gc: removed ${want === undefined ? "expired removed skill" : "expired stale version"} ` +
-            `${entry.name}/${version.name}`,
+          `skill store gc: removed ${bounded ? "stale version beyond the fixed retention cap" :
+            want === undefined ? "expired removed skill" : "expired stale version"} ` +
+            `${entry.name}/${candidate.name}`,
         );
       } catch (error) {
-        log?.(`skill store gc failed for ${entry.name}/${version.name}: ${errText(error)}`);
+        log?.(`skill store gc failed for ${entry.name}/${candidate.name}: ${errText(error)}`);
       }
     }
+    try {
+      if (readdirSync(path).length === 0) {
+        rmdirSync(path);
+        log?.(`skill store gc: removed empty skill directory ${entry.name}`);
+      }
+    } catch {
+      // A raced or non-empty directory remains for the next pass; never remove recursively here.
+    }
   }
-  for (const key of state.keys()) {
-    if (!seenKeys.has(key)) state.delete(key);
+  for (const key of state.entries.keys()) {
+    if (!seenKeys.has(key)) state.entries.delete(key);
   }
+}
+
+function gcStoreWithRetention(
+  dataDir: string,
+  storeRoot: string,
+  keep: StoreKeep,
+  policy: StoreGcPolicy,
+  log?: (message: string) => void,
+): void {
+  const retentionPath = skillRetentionStatePath(dataDir);
+  const retention = loadRetentionState(retentionPath, log);
+  gcStore(storeRoot, keep, retention, policy, log);
+  saveRetentionState(retentionPath, retention, log);
 }
 
 /* ----------------------------- unmanaged scan ----------------------------- */
@@ -854,11 +975,9 @@ function readBoundedSkillMd(path: string): string | null {
   }
 }
 
-/** Bounded report-only scan of one harness skill directory: real directories containing a
- * SKILL.md, no recursion beyond that one read. When `isForeignLink` is provided (managed-link
- * classification is available), symlinked entries the runner does not own are scanned too, so a
- * user's hand-linked skill stays visible in the reported state instead of vanishing from it;
- * without a classifier, symlinks are skipped as before. */
+/** Bounded report-only scan of one harness skill directory. Real directories contribute bounded
+ * frontmatter. A classified foreign symlink contributes only its entry name: diagnostic scanning
+ * never follows a symlink, including through a parent path. */
 function scanHarnessSkillDir(
   dir: string,
   isForeignLink?: (linkPath: string) => boolean,
@@ -875,6 +994,9 @@ function scanHarnessSkillDir(
     if (++examined > SKILL_SCAN_LIMITS.maxEntriesPerDirectory) break;
     if (entry.isSymbolicLink()) {
       if (!isForeignLink?.(join(dir, entry.name))) continue;
+      const name = validSkillName(entry.name) ? entry.name : boundedValue(entry.name);
+      if (name) found.push({ name });
+      continue;
     } else if (!entry.isDirectory()) {
       continue;
     }
@@ -929,6 +1051,58 @@ function scanUnmanagedSkills(
     }
   }
   return results;
+}
+
+/** Read-only protection for versions a current shared-HOME symlink still targets. A contended
+ * runner may prune its local store, but it must not strand a deployment that is still live while
+ * another process owns HOME. Foreign symlinks into the store are conservatively protected too. */
+function linkedStoreVersionKeys(
+  home: string,
+  realStoreRoot: string,
+): Set<string> {
+  const protectedVersions = new Set<string>();
+  const canonicalDir = canonicalSkillsDir(home);
+  const dirs = new Set([
+    canonicalDir,
+    ...Object.values(SKILL_DIRS).map((relDir) => join(home, relDir)),
+  ]);
+  const protectDirectStoreLink = (linkPath: string): void => {
+    const probe = probeLink(linkPath, realStoreRoot, canonicalDir);
+    if (probe.kind !== "ours" || probe.via !== "store") return;
+    const relative = probe.resolvedTarget.slice(realStoreRoot.length + 1).split(sep);
+    if (relative.length !== 2 || !validSkillName(relative[0]!) || !STORE_VERSION_NAME.test(relative[1]!)) return;
+    protectedVersions.add(retentionKey(relative[0]!, relative[1]!));
+  };
+
+  // Probe the exact managed name for every local store directory. The diagnostic directory scan
+  // below is deliberately capped, but that cap must never let a large shared HOME hide the live
+  // canonical target for a version this local GC is about to consider.
+  try {
+    for (const entry of readdirSync(realStoreRoot, { withFileTypes: true })) {
+      if (entry.isSymbolicLink() || !entry.isDirectory() || !validSkillName(entry.name)) continue;
+      for (const dir of dirs) protectDirectStoreLink(join(dir, entry.name));
+    }
+  } catch {
+    // gcStore will also fail conservatively if the local store cannot be enumerated.
+  }
+
+  // Retain bounded broad scanning so a foreign alias directly into the local store also protects
+  // its target, without allowing an attacker-controlled HOME directory to make diagnostics unbounded.
+  for (const dir of dirs) {
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    let examined = 0;
+    for (const entry of entries) {
+      if (++examined > SKILL_SCAN_LIMITS.maxEntriesPerDirectory) break;
+      if (!entry.isSymbolicLink()) continue;
+      protectDirectStoreLink(join(dir, entry.name));
+    }
+  }
+  return protectedVersions;
 }
 
 /* -------------------------------- reconcile ------------------------------- */
@@ -1027,6 +1201,18 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
     return { entry, invalid, manualNeeded, materializationError };
   });
 
+  // Build the runner-local retention fence before attempting the shared-HOME lease. A contended
+  // authoritative pass may safely prune only this store while leaving every provider path alone.
+  const storeKeep: StoreKeep = new Map();
+  for (const { entry, invalid, manualNeeded, materializationError } of prepared) {
+    if (!validSkillName(entry.name)) continue;
+    if (invalid || materializationError) {
+      storeKeep.set(entry.name, "all");
+    } else if (!storeKeep.has(entry.name)) {
+      storeKeep.set(entry.name, { digest: entry.versionDigest, manual: manualNeeded });
+    }
+  }
+
   const leaseNeeded = allowRemovals ||
     prepared.some(({ invalid, materializationError }) => !invalid && !materializationError);
   if (leaseNeeded && options.acquireProviderHomeLease) {
@@ -1034,7 +1220,32 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
       options.acquireProviderHomeLease();
     } catch (error) {
       const detail = `Provider-home lease unavailable: ${errText(error)}`;
+      const scanDetail =
+        "Unmanaged symlink inventory is limited to entry names because targets were not followed.";
+      const contendedOwned = loadOwnedLinks(linkManifestPath(dataDir), options.log);
       options.log?.(`skill reconcile links blocked: ${detail}`);
+      if (allowRemovals) {
+        gcStoreWithRetention(
+          dataDir,
+          realStoreRoot,
+          storeKeep,
+          {
+            removedSkillMs: options.removedSkillRetentionMs ?? DEFAULT_REMOVED_SKILL_RETENTION_MS,
+            previousVersionMs: options.previousVersionGraceMs ?? DEFAULT_PREVIOUS_VERSION_GRACE_MS,
+            now: options.now ?? Date.now(),
+            protectedVersions: linkedStoreVersionKeys(home, realStoreRoot),
+          },
+          options.log,
+        );
+      }
+      let foundForeignSymlink = false;
+      const unmanaged = scanUnmanagedSkills(home, agents, (linkPath) => {
+        const probe = probeLink(linkPath, realStoreRoot, canonicalSkillsDir(home));
+        const foreign = probe.kind !== "ours" ||
+          (probe.via === "canonical" && !contendedOwned.has(linkPath));
+        foundForeignSymlink ||= foreign;
+        return foreign;
+      });
       return {
         deployed: prepared.map(({ entry, invalid, materializationError }) => {
           if (invalid) {
@@ -1069,9 +1280,9 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
             error: detail,
           };
         }),
-        unmanaged: scanUnmanagedSkills(home, agents),
+        unmanaged,
         removedLinks: [],
-        error: detail,
+        error: `${detail}${foundForeignSymlink ? ` ${scanDetail}` : ""}`,
       };
     }
   }
@@ -1105,7 +1316,6 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
     owned.add(linkPath);
   };
   const deployed: DeployedSkillState[] = [];
-  const storeKeep: StoreKeep = new Map();
   const canonicalKeep = new Set<string>();
   const harnessKeep = new Map<string, Set<string>>();
   for (const relDir of new Set(Object.values(SKILL_DIRS))) harnessKeep.set(relDir, new Set());
@@ -1115,7 +1325,6 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
       if (invalid) {
         // A payload this runner cannot verify must not tear anything down: keep the name's
         // existing links and every stored version until a valid replacement arrives.
-        storeKeep.set(entry.name, "all");
         for (const set of harnessKeep.values()) set.add(entry.name);
       }
     }
@@ -1128,9 +1337,6 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
     // `disable-model-invocation` is Claude Code frontmatter semantics; only claude-code targets
     // can consume the manual variant (codex-family manual targets are reported unsupported
     // below), so only they force its materialization.
-    if (!storeKeep.has(entry.name)) {
-      storeKeep.set(entry.name, { digest: entry.versionDigest, manual: manualNeeded });
-    }
     const state: DeployedSkillState = { name: entry.name, digest: entry.versionDigest, links: [] };
     if (materializationError) {
       state.error = `could not materialize the skill version: ${materializationError}`;
@@ -1140,7 +1346,6 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
         detail: "the skill version could not be materialized",
       }));
       // The new version never landed; keep the name's prior versions and links deployable.
-      storeKeep.set(entry.name, "all");
       for (const set of harnessKeep.values()) set.add(entry.name);
       deployed.push(state);
       continue;
@@ -1338,12 +1543,10 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
       shownDir: "~/.agents/skills",
       log: options.log,
     });
-    const retentionPath = skillRetentionStatePath(dataDir);
-    const retention = loadRetentionState(retentionPath, options.log);
-    gcStore(
+    gcStoreWithRetention(
+      dataDir,
       realStoreRoot,
       storeKeep,
-      retention,
       {
         removedSkillMs: options.removedSkillRetentionMs ?? DEFAULT_REMOVED_SKILL_RETENTION_MS,
         previousVersionMs: options.previousVersionGraceMs ?? DEFAULT_PREVIOUS_VERSION_GRACE_MS,
@@ -1351,7 +1554,6 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
       },
       options.log,
     );
-    saveRetentionState(retentionPath, retention, options.log);
   }
 
   // Persist ownership only when it changed (links created, removed, or newly adopted); the save
