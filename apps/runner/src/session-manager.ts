@@ -2300,6 +2300,12 @@ export class SessionManager {
           live.backgroundPromptAccepted = true;
           this.markBackgroundContinuationAccepted(sessionId, live.currentBackgroundJobIds);
         },
+        onSessionEstablished: (providerSessionId) => {
+          const live = this.active.get(sessionId);
+          if (!live || live.client !== client || live.launchGeneration !== launchGeneration) return;
+          if (client.agentSessionId() !== providerSessionId) return;
+          this.captureAgentSessionId(sessionId, client);
+        },
         onAuthStatus: (status) => {
           if (meta.agentId) this.onAgentAuthUpdate?.(meta.agentId, { status });
         },
@@ -2511,7 +2517,8 @@ export class SessionManager {
       // NOTE: do NOT capture agentSessionId here. Claude mints a session id at newSession() time
       // before any `--session-id` turn has actually established it; persisting it now would make an
       // empty/never-run session look resumable and a later restart would `--resume` a nonexistent
-      // id. We capture only after a turn succeeds (runPrompt).
+      // id. Claude reports establishment through onSessionEstablished when system/init arrives;
+      // runPrompt retains the completed-turn fallback for older or abbreviated provider streams.
     } catch (err) {
       if (!this.launchIsCurrent(sessionId, launchGeneration)) {
         client.dispose();
@@ -4165,6 +4172,15 @@ export class SessionManager {
       }
     }
     const established = meta.agentSessionId != null;
+    if (!established && meta.driver === "claude-code" && meta.seq > 0) {
+      this.emitEvent(sessionId, {
+        kind: "error",
+        message: "this Claude history has no persisted provider conversation id and cannot be continued without risking a replacement conversation",
+      });
+      this.emitStatus(sessionId, "stopped");
+      durable?.failed("Claude history has no resumable provider conversation id", "INVALID_COMMAND");
+      return;
+    }
     if (!established && meta.driver === "codex-app-server" && meta.seq > 0) {
       this.emitEvent(sessionId, {
         kind: "error",

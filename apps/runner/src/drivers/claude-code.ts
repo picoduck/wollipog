@@ -327,6 +327,8 @@ export class ClaudeCodeDriver implements Driver {
   private streamedAgentResponse = false;
   private hookCircuitReported = false;
   private hookCircuitOpenedAt: number | null = null;
+  /** A fresh UUID is only a proposed coordinate until Claude confirms it in system/init. */
+  private sessionEstablished: boolean;
 
   constructor(
     private readonly opts: DriverOptions,
@@ -339,6 +341,7 @@ export class ClaudeCodeDriver implements Driver {
     // otherwise mint a fresh id (→ `--session-id` on turn 1, `--resume` after).
     this.sessionId = opts.resumeId ?? randomUUID();
     this.firstTurn = opts.resumeId == null;
+    this.sessionEstablished = opts.resumeId != null;
     this.deps = {
       spawn: deps.spawn ?? spawnAgent,
       kill: deps.kill ?? killTree,
@@ -369,7 +372,7 @@ export class ClaudeCodeDriver implements Driver {
   }
 
   agentSessionId(): string | null {
-    return this.sessionId;
+    return this.sessionEstablished ? this.sessionId : null;
   }
 
   agentTurnId(): string | null {
@@ -654,10 +657,9 @@ export class ClaudeCodeDriver implements Driver {
         settled = true;
         if (this.activeOneShotTurnId === turnId) this.activeOneShotTurnId = null;
         if (r !== "cancelled") this.preparedBaseArgs();
-        // Only mark the session established (so the next turn uses --resume) once a
-        // turn settles cleanly; a failed/cancelled first attempt must retry with
-        // --session-id, not --resume against a session the CLI never created.
-        if (r !== "refusal" && r !== "cancelled") this.firstTurn = false;
+        // A clean terminal result is fallback establishment evidence for abbreviated streams
+        // that omit system/init. Refused/cancelled turns rely on init alone.
+        if (r !== "refusal" && r !== "cancelled") this.markSessionEstablished();
         if (r !== "refusal" && r !== "cancelled") this.settleUnverifiedBackgroundTasks();
         resolve(r);
       };
@@ -974,11 +976,6 @@ export class ClaudeCodeDriver implements Driver {
       }
       return;
     }
-    if (msg.type === "system" && msg.subtype === "init" && msg.session_id === this.sessionId) {
-      // The session now exists even if the process dies before its terminal result. A safe
-      // recovery must therefore use --resume, never reuse --session-id for the same UUID.
-      this.firstTurn = false;
-    }
     const reason = this.handleEvent(msg);
     if (reason) this.finishPersistentTurn(turn, reason);
   }
@@ -989,7 +986,7 @@ export class ClaudeCodeDriver implements Driver {
     this.activePersistentTurn = null;
     this.pendingApprovals.clear();
     if (reason !== "cancelled") this.preparedBaseArgs();
-    if (reason !== "refusal" && reason !== "cancelled") this.firstTurn = false;
+    if (reason !== "refusal" && reason !== "cancelled") this.markSessionEstablished();
     if (reason !== "refusal" && reason !== "cancelled") this.settleUnverifiedBackgroundTasks();
     turn.resolve(reason);
     if (this.pendingBackgroundTasks.size > 0) {
@@ -1655,6 +1652,13 @@ export class ClaudeCodeDriver implements Driver {
     else this.cb.onStderr("provider authentication is required");
   }
 
+  private markSessionEstablished(): void {
+    this.firstTurn = false;
+    if (this.sessionEstablished) return;
+    this.sessionEstablished = true;
+    this.cb.onSessionEstablished?.(this.sessionId);
+  }
+
   /** Map one claude stream-json event; return a StopReason when the turn ends. */
   private handleEvent(msg: Json): StopReason | null {
     if (this.disposed) return null;
@@ -1672,6 +1676,11 @@ export class ClaudeCodeDriver implements Driver {
         return null;
 
       case "system":
+        if (msg.subtype === "init" && msg.session_id === this.sessionId) {
+          // The session now exists even if this first turn is cancelled before a terminal result.
+          // Persisting the coordinate at this boundary makes every later recovery use --resume.
+          this.markSessionEstablished();
+        }
         if (msg.subtype === "init" && typeof msg.model === "string" && msg.model) {
           this.cb.onModelResolved?.(msg.model);
         }

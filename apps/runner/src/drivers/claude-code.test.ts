@@ -46,6 +46,7 @@ interface Harness {
   events: SessionEventPayload[];
   stderr: string[];
   resolvedModels: string[];
+  establishedSessions: string[];
   authenticationFailures: number;
   subscriptionUsage: unknown[];
   /** Invoke the private mapper and return its StopReason | null. */
@@ -56,12 +57,14 @@ function makeHarness(): Harness {
   const events: SessionEventPayload[] = [];
   const stderr: string[] = [];
   const resolvedModels: string[] = [];
+  const establishedSessions: string[] = [];
   let authenticationFailures = 0;
   const subscriptionUsage: unknown[] = [];
   const cb: DriverCallbacks = {
     onEvent: (payload) => events.push(payload),
     onStderr: (text) => stderr.push(text),
     onModelResolved: (model) => resolvedModels.push(model),
+    onSessionEstablished: (sessionId) => establishedSessions.push(sessionId),
     onAuthenticationFailure: () => { authenticationFailures += 1; },
     onSubscriptionUsage: (update) => subscriptionUsage.push(update),
     onExit: () => {},
@@ -83,6 +86,7 @@ function makeHarness(): Harness {
     events,
     stderr,
     resolvedModels,
+    establishedSessions,
     get authenticationFailures() { return authenticationFailures; },
     subscriptionUsage,
     feed,
@@ -1568,7 +1572,11 @@ test("an acknowledged prompt is never resent after transport termination", async
   );
   const turn = driver.prompt("do not duplicate");
   await nextTask(); // PassThrough acknowledged the write.
-  children[0].stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: driver.agentSessionId() }) + "\n");
+  children[0].stdout.write(JSON.stringify({
+    type: "system",
+    subtype: "init",
+    session_id: (driver as any).sessionId,
+  }) + "\n");
   await nextTask();
   children[0].emit("close", 7);
   assert.equal(await turn, "refusal");
@@ -1953,14 +1961,13 @@ test("runner-side capability gate rejects stale optional flags and image input",
   assert.equal(claudeCapabilityError({ effort: "low", permissionMode: "acceptEdits" }, [], capabilities), null);
 });
 
-test("resumeId seeds the agent session id (resume) instead of minting a new one (Phase 2)", () => {
+test("agent session id is exposed only after Claude establishes a fresh conversation", () => {
   const resumed = new ClaudeCodeDriver({ ...baseOpts, resumeId: "11111111-2222-3333-4444-555555555555" }, noopCb);
   assert.equal(resumed.agentSessionId(), "11111111-2222-3333-4444-555555555555");
 
-  // A fresh session mints its own id (non-null, and distinct from the resumed one).
+  // A fresh session has only a proposed local UUID until system/init confirms it exists.
   const fresh = new ClaudeCodeDriver(baseOpts, noopCb);
-  assert.notEqual(fresh.agentSessionId(), null);
-  assert.notEqual(fresh.agentSessionId(), resumed.agentSessionId());
+  assert.equal(fresh.agentSessionId(), null);
 });
 
 test("Claude fork mints a deterministic target session with a zero-cost local bootstrap", async () => {
@@ -2119,6 +2126,25 @@ test("system/init reports the provider-resolved model without emitting an event"
   assert.equal(h.events.length, 0);
   assert.equal(h.stderr.length, 0);
   assert.deepEqual(h.resolvedModels, ["claude-opus-5[1m]"]);
+});
+
+test("system/init exposes and reports a fresh resumable conversation id exactly once", () => {
+  const h = makeHarness();
+  const proposed = (h.driver as any).sessionId as string;
+  assert.equal(h.driver.agentSessionId(), null);
+
+  h.feed({ type: "system", subtype: "init", session_id: proposed });
+  h.feed({ type: "system", subtype: "init", session_id: proposed });
+
+  assert.equal(h.driver.agentSessionId(), proposed);
+  assert.deepEqual(h.establishedSessions, [proposed]);
+});
+
+test("system/init for another conversation cannot establish the proposed session id", () => {
+  const h = makeHarness();
+  h.feed({ type: "system", subtype: "init", session_id: "different-session" });
+  assert.equal(h.driver.agentSessionId(), null);
+  assert.deepEqual(h.establishedSessions, []);
 });
 
 test("system/api_retry surfaces a stderr note (no onEvent)", () => {
