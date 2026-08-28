@@ -207,6 +207,7 @@ function parsePersistedProjection(raw: string, schemaVersion: number): Operation
   for (const message of projection.messages) {
     if (!message || typeof message !== "object" || Array.isArray(message)) return null;
     const candidate = message as { role?: unknown; text?: unknown };
+    if (Object.keys(candidate).some((key) => key !== "role" && key !== "text")) return null;
     if ((candidate.role !== "user" && candidate.role !== "assistant") || typeof candidate.text !== "string") return null;
     messages.push({ role: candidate.role, text: candidate.text });
   }

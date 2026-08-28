@@ -109,12 +109,25 @@ test("credential routes require owner/admin and hide cross-organization runner e
   const { app, db } = await fixture();
   try {
     await app.inject({ method: "POST", url: "/api/runner-credentials", payload: { runnerId: "runner-secret" } });
+    const credentialsBeforeDeniedMutations = db.listRunnerCredentials(PERSONAL_ORGANIZATION_ID);
     const operator = await app.inject({
       method: "GET",
       url: "/api/runner-credentials",
       headers: { "x-test-role": "operator" },
     });
     assert.equal(operator.statusCode, 403);
+
+    for (const request of [
+      { method: "POST" as const, url: "/api/runner-credentials", payload: { runnerId: "runner-denied" } },
+      { method: "POST" as const, url: "/api/runner-credentials/runner-secret/rotate", payload: {} },
+      { method: "DELETE" as const, url: "/api/runner-credentials/runner-secret" },
+    ]) {
+      const response = await app.inject({ ...request, headers: { "x-test-role": "operator" } });
+      assert.equal(response.statusCode, 403);
+      assert.deepEqual(response.json(), { error: "organization owner or admin permission is required" });
+      assert.deepEqual(db.listRunnerCredentials(PERSONAL_ORGANIZATION_ID), credentialsBeforeDeniedMutations,
+        "denied credential mutations must leave credential rows unchanged");
+    }
 
     for (const request of [
       { method: "POST" as const, url: "/api/runner-credentials", payload: { runnerId: "runner-secret" } },

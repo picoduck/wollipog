@@ -68,6 +68,19 @@ test("trigger bodies are provider-neutral, strict, bounded, and retain only send
     Buffer.from('{"eventId":"x","command":"run","sender":"actor 🚀"}'))?.senderHash ?? "", /^[a-f0-9]{64}$/);
 });
 
+test("trigger body parser rejects malformed JSON-subset syntax and strings", () => {
+  for (const [name, kind, body] of [
+    ["unterminated input", "webhook", '{"eventId":"x"'],
+    ["missing colon", "webhook", '{"eventId" "x"}'],
+    ["trailing comma", "webhook", '{"eventId":"x",}'],
+    ["trailing content", "webhook", '{"eventId":"x"}x'],
+    ["raw control character in a string", "webhook", '{"eventId":"x\n"}'],
+    ["lone surrogate", "chatops", String.raw`{"eventId":"x","command":"run","sender":"\ud800"}`],
+  ] as const) {
+    assert.equal(parseAutomationTriggerBody(kind, Buffer.from(body)), null, name);
+  }
+});
+
 test("the registered raw-body parser enforces the published HTTP size ceiling", async () => {
   assert.equal(AUTOMATION_TRIGGER_MEDIA_TYPE, WOLLIPOG_AUTOMATION_TRIGGER_MEDIA_TYPE,
     "the post-release producer must publish the Wollipog identity");

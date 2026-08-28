@@ -196,6 +196,60 @@ test("hook request parser accepts only bounded content-minimized selector contex
     hookEventName: "Unknown",
     providerSessionId: "provider-1",
   }).ok, false);
+
+  const valid = {
+    hookEventName: "PreToolUse",
+    providerSessionId: "provider-1",
+  };
+  for (const { name, input, error } of [
+    {
+      name: "non-object request",
+      input: null,
+      error: "policy hook request must be an object",
+    },
+    {
+      name: "empty provider session id",
+      input: { ...valid, providerSessionId: "" },
+      error: "providerSessionId must be a bounded non-empty string",
+    },
+    {
+      name: "257-character provider session id",
+      input: { ...valid, providerSessionId: "p".repeat(257) },
+      error: "providerSessionId must be a bounded non-empty string",
+    },
+    {
+      name: "65-character permission mode",
+      input: { ...valid, permissionMode: "p".repeat(65) },
+      error: "permissionMode must be a bounded non-empty string",
+    },
+    {
+      name: "negative recovery sequence",
+      input: { ...valid, transportRecoveredFrom: -1 },
+      error: "transportRecoveredFrom must be a non-negative safe integer",
+    },
+    {
+      name: "non-integer recovery sequence",
+      input: { ...valid, transportRecoveredFrom: 1.5 },
+      error: "transportRecoveredFrom must be a non-negative safe integer",
+    },
+    {
+      name: "non-object context",
+      input: { ...valid, context: [] },
+      error: "policy hook context must be an object",
+    },
+    {
+      name: "4097-character context path",
+      input: { ...valid, context: { path: "p".repeat(4097) } },
+      error: "policy hook context path is invalid",
+    },
+    {
+      name: "NUL-bearing context path",
+      input: { ...valid, context: { path: "/repo/a\0b" } },
+      error: "policy hook context path is invalid",
+    },
+  ] satisfies Array<{ name: string; input: unknown; error: string }>) {
+    assert.deepEqual(parsePolicyHookRequest(input), { ok: false, error }, name);
+  }
 });
 
 test("declarative conductor safety policy outranks mutable auto-allow policies", () => {
