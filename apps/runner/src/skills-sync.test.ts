@@ -25,8 +25,10 @@ test("chunked assembly caches one frame immediately and promotes only after exac
     needsContent: () => true,
     cacheContent: (entry) => cached.push(entry),
   });
+  assert.equal(assembler.inProgress, false);
   const begun = assembler.begin(manifest());
   assert.equal(begun.kind, "accepted");
+  assert.equal(assembler.inProgress, true);
   if (begun.kind !== "accepted") return;
   assert.deepEqual(begun.need.missing, [{ name: "alpha", versionDigest: digest }]);
 
@@ -47,6 +49,7 @@ test("chunked assembly caches one frame immediately and promotes only after exac
   assert.equal(cached.length, 1, "content is published immediately instead of retained in assembly memory");
   const completed = assembler.complete({ type: "skills_sync_complete", runnerId: "runner-1", syncId: "sync-2" });
   assert.equal(completed.kind, "accepted");
+  assert.equal(assembler.inProgress, false);
   if (completed.kind !== "accepted") return;
   assert.equal(completed.requestId, "request-1");
   assert.equal("files" in completed.desired[0]!, false);

@@ -603,7 +603,7 @@ test("a push superseding a solicited v96 sync preserves its request correlation"
   assert.equal(manifests[1]!.requestId, "request-original");
 });
 
-test("manual overlap rejects deterministically and a late timeout clears its superseding push", async () => {
+test("manual overlap rejects deterministically and a late timeout clears its idle superseding push", async () => {
   const db = ControlPlaneDb.open(":memory:");
   const pushed: ControlPlaneToRunner[] = [];
   const pending = new Map<string, { reject(error: Error): void }>();
@@ -642,6 +642,69 @@ test("manual overlap rejects deterministically and a late timeout clears its sup
     "timeout cleanup removed the superseding delivery, so retry starts immediately",
   );
   pending.get("request-retry")!.reject(new RunnerRequestTimeoutError());
+  await assert.rejects(() => retry, (error) => error instanceof RunnerRequestTimeoutError);
+});
+
+test("a late manual timeout does not abort an in-flight superseding push", async () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const pushed: ControlPlaneToRunner[] = [];
+  const requests = new Map<string, { reject(error: Error): void }>();
+  const waits: Array<{ msg: ControlPlaneToRunner; resolve(value: boolean): void }> = [];
+  const hub: SkillsHub = {
+    isRunnerOnline: () => true,
+    sendToRunner: (_runnerId, msg) => {
+      pushed.push(msg);
+      return true;
+    },
+    sendToRunnerAndWait: async (_runnerId, msg) => await new Promise<boolean>((resolve) => {
+      waits.push({ msg, resolve });
+    }),
+    requestFromRunner: async (_runnerId, requestId, msg) => {
+      pushed.push(msg);
+      return await new Promise<RunnerRequestResult>((_resolve, reject) => requests.set(requestId, { reject }));
+    },
+  };
+  db.registerRunner(runnerMeta("runner-v96"), 10, 96);
+  const skill = db.createSkill({
+    name: "alpha",
+    description: null,
+    groupId: null,
+    files: [{ path: "SKILL.md", content: "alpha", encoding: "utf8" }],
+    manifest: '{"files":[]}',
+    digest: "a".repeat(64),
+  });
+  db.createSkillAssignment({
+    skillId: skill.id,
+    scopeKind: "instance",
+    agentSelector: { kind: "all" },
+  });
+  const sync = makeSkillsSyncPusher({ db, hub });
+
+  const manual = sync.request("runner-v96", "request-first");
+  sync("runner-v96");
+  const replacement = pushed.filter(
+    (msg): msg is SkillsSyncManifestMessage => msg.type === "skills_sync_manifest",
+  ).at(-1)!;
+  const delivery = sync.handleNeed({
+    type: "skills_sync_need",
+    runnerId: "runner-v96",
+    syncId: replacement.syncId,
+    missing: replacement.skills.map(({ name, versionDigest }) => ({ name, versionDigest })),
+  });
+  await delay(0);
+  assert.equal(waits.length, 1);
+
+  requests.get("request-first")!.reject(new RunnerRequestTimeoutError());
+  await assert.rejects(() => manual, (error) => error instanceof RunnerRequestTimeoutError);
+  waits[0]!.resolve(true);
+  await delay(0);
+  assert.equal(waits[1]!.msg.type, "skills_sync_complete",
+    "the healthy inherited push reaches its completion fence after the old waiter times out");
+  waits[1]!.resolve(true);
+  await delivery;
+
+  const retry = sync.request("runner-v96", "request-retry");
+  requests.get("request-retry")!.reject(new RunnerRequestTimeoutError());
   await assert.rejects(() => retry, (error) => error instanceof RunnerRequestTimeoutError);
 });
 

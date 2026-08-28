@@ -38,6 +38,10 @@ export class ChunkedSkillsSyncAssembler {
     cacheContent(entry: SkillSyncEntry): void;
   }) {}
 
+  get inProgress(): boolean {
+    return this.pending !== null;
+  }
+
   reset(): void {
     this.pending = null;
   }

@@ -260,7 +260,11 @@ export function makeSkillsSyncPusher(deps: {
         const original = pending.get(message.syncId);
         const currentId = pendingByRunner.get(runnerId);
         const current = currentId ? pending.get(currentId) : undefined;
-        const delivery = original ?? (current?.requestId === requestId ? current : undefined);
+        // A superseding push inherits the manual request id. Once its content transfer is in
+        // flight, the late HTTP timeout no longer owns that healthy delivery; let it finish and
+        // update authoritative state even though the original waiter has gone away.
+        const delivery = original ??
+          (current?.requestId === requestId && !current.sending ? current : undefined);
         if (delivery) forget(delivery);
       }
       throw error;

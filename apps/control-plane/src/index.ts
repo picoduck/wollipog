@@ -1254,7 +1254,12 @@ app.register(async (instance) => {
           app.log.warn(`runner ${runnerId} requested chunked skills without negotiated support`);
           break;
         }
-        void pushSkillsSync.handleNeed(msg);
+        void pushSkillsSync.handleNeed(msg).catch((error) => {
+          app.log.warn(
+            { error: error instanceof Error ? error.message : String(error) },
+            "skills content request failed",
+          );
+        });
         break;
       }
       case "steer_session_result":

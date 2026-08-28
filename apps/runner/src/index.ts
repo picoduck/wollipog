@@ -833,7 +833,10 @@ function queueSkillsReconcile(requestId?: string): void {
         home: homedir(),
         agents: metadata.agents,
         desired: desired ?? [],
-        allowRemovals: desired !== null,
+        // Content frames are published immediately to bound memory. While their completion fence
+        // is pending, suppress removal/GC so an interleaved discovery pass cannot reclaim that
+        // newly cached digest (especially when previousVersionMinutes is configured to zero).
+        allowRemovals: desired !== null && !chunkedSkillsSync.inProgress,
         log,
         acquireProviderHomeLease: () =>
           sessions.acquireSkillReconciliationProviderHome(homedir()),

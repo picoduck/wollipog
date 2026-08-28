@@ -200,6 +200,11 @@ function assignmentRank(assignment: SkillAssignmentView): number {
   return scope + specificity;
 }
 
+export interface DesiredSkillSnapshotEntry extends Omit<SkillSyncEntry, "files"> {
+  /** Immutable version row used to load one requested payload lazily after manifest negotiation. */
+  versionId: string;
+}
+
 /**
  * Resolve the complete desired skill set for one machine — the payload of a skills_sync.
  *
@@ -215,13 +220,9 @@ function assignmentRank(assignment: SkillAssignmentView): number {
  * for project↔runner attachment, db.createProjectWorkspace). Without this an instance-wide
  * assignment created in one organization would fan out to every other organization's runners.
  * Missing ownership rows fail closed on both sides.
+ * The chunked snapshot resolves authoritative targeting without parsing every version's file JSON
+ * into memory. The legacy wrapper below expands the same result into a complete skills_sync.
  */
-export interface DesiredSkillSnapshotEntry extends Omit<SkillSyncEntry, "files"> {
-  /** Immutable version row used to load one requested payload lazily after manifest negotiation. */
-  versionId: string;
-}
-
-/** Resolve authoritative targeting without parsing every version's file JSON into memory. */
 export function resolveDesiredSkillSnapshot(
   db: ControlPlaneDb,
   runnerId: string,
