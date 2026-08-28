@@ -11,12 +11,13 @@
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import type { Readable, Writable } from "node:stream";
 import { posix, win32 } from "node:path";
 import type { AgentContext } from "@wollipog/protocol";
 import { containerLabelArgs } from "./container-identity.js";
 import { sensitiveEnvironmentName } from "./env-security.js";
-import { encodeWindowsJobSpec, WINDOWS_JOB_ENCODED_COMMAND } from "./windows-job.js";
+import { encodeWindowsJobSpec, materializeWindowsJobLauncher } from "./windows-job.js";
 import { DESCENDANT_MARKER_ENV, PosixProcessBoundary, terminatePosixProcessBoundaries } from "./posix-process-tree.js";
 
 const isWindows = process.platform === "win32";
@@ -301,12 +302,22 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
   // to native provider-mode launches so a child cannot outlive either session disposal or a runner
   // owner crash. Explicit container/cloud/WSL boundaries retain their own lifecycle adapters.
   if (isWindows && opts.context?.kind !== "wsl" && !opts.isolation) {
+    const powershell = win32.join(
+      process.env.SystemRoot || "C:\\Windows",
+      "System32", "WindowsPowerShell", "v1.0", "powershell.exe",
+    );
+    if (!existsSync(powershell)) {
+      throw new Error("Windows Job isolation requires Windows PowerShell but powershell.exe was not found");
+    }
     opts = {
       ...opts,
       isolation: {
         backend: "windows-job",
-        command: win32.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
-        args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", WINDOWS_JOB_ENCODED_COMMAND],
+        command: powershell,
+        args: [
+          "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+          "-File", materializeWindowsJobLauncher(),
+        ],
         network: "inherit",
       },
     };

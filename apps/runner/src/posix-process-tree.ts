@@ -38,10 +38,19 @@ export function listPosixProcesses(): Promise<PosixProcessTable> {
 
 export const DESCENDANT_MARKER_ENV = "WOLLIPOG_DESCENDANT_BOUNDARY";
 
-async function listMarkedProcessIds(marker: string, table: PosixProcessTable): Promise<Set<number>> {
-  const result = new Set<number>();
+export type PosixMarkedProcessIds = Map<string, Set<number>>;
+
+function addMarkedProcess(result: PosixMarkedProcessIds, marker: string, pid: number): void {
+  if (!marker) return;
+  const matches = result.get(marker) ?? new Set<number>();
+  matches.add(pid);
+  result.set(marker, matches);
+}
+
+export async function listMarkedProcessIds(table: PosixProcessTable): Promise<PosixMarkedProcessIds> {
+  const result: PosixMarkedProcessIds = new Map();
   if (process.platform === "linux") {
-    const needle = Buffer.from(`${DESCENDANT_MARKER_ENV}=${marker}\0`);
+    const prefix = Buffer.from(`${DESCENDANT_MARKER_ENV}=`);
     const pids = [...table.keys()];
     // Ownership-critical reads are infrequent, but a large host can have thousands of processes.
     // Bound concurrency so /proc inspection cannot exhaust the runner's file descriptors.
@@ -49,7 +58,18 @@ async function listMarkedProcessIds(marker: string, table: PosixProcessTable): P
       await Promise.all(pids.slice(offset, offset + 32).map(async (pid) => {
         try {
           const environ = await readFile(`/proc/${pid}/environ`);
-          if (environ.includes(needle)) result.add(pid);
+          let offset = 0;
+          while (offset < environ.length) {
+            const end = environ.indexOf(0, offset);
+            const limit = end === -1 ? environ.length : end;
+            const entry = environ.subarray(offset, limit);
+            if (entry.subarray(0, prefix.length).equals(prefix)) {
+              addMarkedProcess(result, entry.subarray(prefix.length).toString("utf8"), pid);
+              break;
+            }
+            if (end === -1) break;
+            offset = end + 1;
+          }
         } catch {
           /* exited or belongs to a uid whose environment is unreadable */
         }
@@ -66,15 +86,55 @@ async function listMarkedProcessIds(marker: string, table: PosixProcessTable): P
       else resolve(String(stdout));
     });
   });
-  const needle = `${DESCENDANT_MARKER_ENV}=${marker}`;
+  const prefix = `${DESCENDANT_MARKER_ENV}=`;
   for (const line of output.split(/\r?\n/u)) {
     const match = /^\s*(\d+)\s+(.+)$/u.exec(line);
-    if (!match || !match[2]!.split(/\s+/u).includes(needle)) continue;
+    if (!match) continue;
+    const markerEntry = match[2]!.split(/\s+/u).find((entry) => entry.startsWith(prefix));
+    if (!markerEntry) continue;
     const pid = Number(match[1]);
-    if (table.has(pid)) result.add(pid);
+    if (table.has(pid)) addMarkedProcess(result, markerEntry.slice(prefix.length), pid);
   }
   return result;
 }
+
+export interface PosixMarkedProcessSnapshot {
+  table: PosixProcessTable;
+  markedProcessIds: PosixMarkedProcessIds;
+}
+
+interface PosixMarkerScanBatch {
+  started: boolean;
+  promise: Promise<PosixMarkedProcessSnapshot>;
+}
+
+/** Coalesce calls made before enumeration starts. A caller arriving after the batch starts gets a
+ * new snapshot, preserving post-spawn, post-close, and post-signal freshness barriers. */
+export class PosixMarkerScanner {
+  private pending?: PosixMarkerScanBatch;
+
+  constructor(
+    private readonly listProcesses: () => Promise<PosixProcessTable> = listPosixProcesses,
+    private readonly listMarkers: (table: PosixProcessTable) => Promise<PosixMarkedProcessIds> = listMarkedProcessIds,
+  ) {}
+
+  snapshot(): Promise<PosixMarkedProcessSnapshot> {
+    if (!this.pending || this.pending.started) {
+      const batch = { started: false } as PosixMarkerScanBatch;
+      batch.promise = Promise.resolve().then(async () => {
+        batch.started = true;
+        const table = await this.listProcesses();
+        return { table, markedProcessIds: await this.listMarkers(table) };
+      }).finally(() => {
+        if (this.pending === batch) this.pending = undefined;
+      });
+      this.pending = batch;
+    }
+    return this.pending.promise;
+  }
+}
+
+const markerScanner = new PosixMarkerScanner();
 
 function sameProcess(expected: PosixProcessIdentity, current: PosixProcessIdentity | undefined): boolean {
   return current?.startedAt === expected.startedAt;
@@ -125,10 +185,11 @@ function signalIdentity(
   process: PosixProcessIdentity,
   table: PosixProcessTable,
   signal: NodeJS.Signals,
+  kill: (pid: number, signal: NodeJS.Signals) => void = globalThis.process.kill.bind(globalThis.process),
 ): boolean {
   if (!sameProcess(process, table.get(process.pid))) return false;
   try {
-    globalThis.process.kill(process.pid, signal);
+    kill(process.pid, signal);
     return true;
   } catch {
     /* exited between the identity check and signal */
@@ -168,6 +229,16 @@ function stopMonitorIfIdle(): void {
   refreshTimer = undefined;
 }
 
+/** Internal-only deterministic seam for process-boundary tests. Production construction never
+ * supplies this object, and no runner configuration or provider input can select it. */
+export interface PosixProcessBoundaryTestRuntime {
+  listProcesses(): Promise<PosixProcessTable>;
+  listMarkers?(table: PosixProcessTable): Promise<PosixMarkedProcessIds>;
+  signal?(pid: number, signal: NodeJS.Signals): void;
+  sleep?(milliseconds: number): Promise<void>;
+  now?(): number;
+}
+
 export class PosixProcessBoundary {
   private readonly owned = new Map<number, PosixProcessIdentity>();
   private releaseCheck?: Promise<boolean>;
@@ -176,8 +247,14 @@ export class PosixProcessBoundary {
   private rootExited = false;
   private terminating?: Promise<boolean>;
 
-  constructor(readonly rootPid: number, readonly owner?: object, private readonly marker?: string) {
+  constructor(
+    readonly rootPid: number,
+    readonly owner?: object,
+    private readonly marker?: string,
+    private readonly testRuntime?: PosixProcessBoundaryTestRuntime,
+  ) {
     boundaries.add(this);
+    if (testRuntime) return;
     startMonitor();
     // Do not reuse a monitor read that may predate this spawn: the first ownership snapshot must
     // start after the provider PID exists.
@@ -185,12 +262,23 @@ export class PosixProcessBoundary {
   }
 
   private async refreshFresh(): Promise<PosixProcessTable> {
-    const table = await listPosixProcesses();
+    let table: PosixProcessTable;
+    let markedProcessIds: PosixMarkedProcessIds | undefined;
     if (this.marker) {
-      for (const pid of await listMarkedProcessIds(this.marker, table)) {
+      if (this.testRuntime) {
+        table = await this.testRuntime.listProcesses();
+        markedProcessIds = await this.testRuntime.listMarkers?.(table) ?? new Map();
+      } else {
+        const snapshot = await markerScanner.snapshot();
+        table = snapshot.table;
+        markedProcessIds = snapshot.markedProcessIds;
+      }
+      for (const pid of markedProcessIds.get(this.marker) ?? []) {
         const process = table.get(pid);
         if (process) this.owned.set(pid, process);
       }
+    } else {
+      table = this.testRuntime ? await this.testRuntime.listProcesses() : await listPosixProcesses();
     }
     // While Node still owns a live child handle, the spawn PID is authoritative even when a
     // set-id wrapper makes /proc/<pid>/environ unreadable. Once exit is observed, only the exact
@@ -199,6 +287,25 @@ export class PosixProcessBoundary {
     if (root && !this.rootExited && !this.owned.has(this.rootPid)) this.owned.set(this.rootPid, root);
     this.extend(table);
     return table;
+  }
+
+  private async refreshTracked(): Promise<PosixProcessTable> {
+    if (!this.testRuntime) return refreshAll();
+    const table = await this.testRuntime.listProcesses();
+    this.extend(table);
+    return table;
+  }
+
+  private signal(process: PosixProcessIdentity, table: PosixProcessTable, signal: NodeJS.Signals): boolean {
+    return signalIdentity(process, table, signal, this.testRuntime?.signal);
+  }
+
+  private sleep(milliseconds: number): Promise<void> {
+    return this.testRuntime?.sleep?.(milliseconds) ?? new Promise((resolve) => setTimeout(resolve, milliseconds));
+  }
+
+  private now(): number {
+    return this.testRuntime?.now?.() ?? Date.now();
   }
 
   extend(table: PosixProcessTable): void {
@@ -265,7 +372,7 @@ export class PosixProcessBoundary {
   private signalRootGroup(table: PosixProcessTable, signal: NodeJS.Signals): boolean {
     if (!ownsPosixRootProcessGroup(this.rootPid, this.owned, table)) return false;
     try {
-      globalThis.process.kill(-this.rootPid, signal);
+      (this.testRuntime?.signal ?? globalThis.process.kill.bind(globalThis.process))(-this.rootPid, signal);
       return true;
     } catch {
       return false;
@@ -276,10 +383,11 @@ export class PosixProcessBoundary {
     // Preserve main's dependency-free TERM/KILL path only while Node has not observed root exit.
     // After waitpid-backed exit, the numeric PGID may be recycled and is permanently unsafe.
     if (this.rootExited) return;
-    try { globalThis.process.kill(-this.rootPid, "SIGTERM"); } catch { return; }
-    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    const kill = this.testRuntime?.signal ?? globalThis.process.kill.bind(globalThis.process);
+    try { kill(-this.rootPid, "SIGTERM"); } catch { return; }
+    await this.sleep(2_000);
     if (this.rootExited) return;
-    try { globalThis.process.kill(-this.rootPid, "SIGKILL"); } catch { /* already gone */ }
+    try { kill(-this.rootPid, "SIGKILL"); } catch { /* already gone */ }
   }
 
   /** Freeze the original group first, then close over escaped process groups by parent identity.
@@ -320,9 +428,9 @@ export class PosixProcessBoundary {
           .sort()
           .join("\n");
         for (const process of liveOwned(this.owned, table)) {
-          if (signalIdentity(process, table, "SIGSTOP")) frozen.set(process.pid, process);
+          if (this.signal(process, table, "SIGSTOP")) frozen.set(process.pid, process);
         }
-        table = await refreshAll();
+        table = await this.refreshTracked();
         const after = [...this.owned.values()]
           .map((process) => `${process.pid}:${process.startedAt}`)
           .sort()
@@ -334,7 +442,7 @@ export class PosixProcessBoundary {
       // Anything successfully stopped cannot fork while we unwind. Resume the identities from the
       // last successful table instead of abandoning escaped descendants in state T forever.
       if (table) {
-        for (const process of frozen.values()) signalIdentity(process, table, "SIGCONT");
+        for (const process of frozen.values()) this.signal(process, table, "SIGCONT");
         this.signalRootGroup(table, "SIGCONT");
       }
       await this.fallbackRootGroupAfterEnumerationFailure();
@@ -344,16 +452,16 @@ export class PosixProcessBoundary {
     // The successful try path always assigns table before any later use.
     if (!table) return false;
 
-    for (const process of liveOwned(this.owned, table)) signalIdentity(process, table, "SIGTERM");
+    for (const process of liveOwned(this.owned, table)) this.signal(process, table, "SIGTERM");
     this.signalRootGroup(table, "SIGTERM");
-    for (const process of liveOwned(this.owned, table)) signalIdentity(process, table, "SIGCONT");
+    for (const process of liveOwned(this.owned, table)) this.signal(process, table, "SIGCONT");
     this.signalRootGroup(table, "SIGCONT");
 
-    const gracefulDeadline = Date.now() + 2_000;
-    while (Date.now() < gracefulDeadline) {
-      await new Promise((resolve) => setTimeout(resolve, 40));
+    const gracefulDeadline = this.now() + 2_000;
+    while (this.now() < gracefulDeadline) {
+      await this.sleep(40);
       try {
-        table = await refreshAll();
+        table = await this.refreshTracked();
       } catch (error) {
         console.error(`[runner] could not verify provider descendant cleanup for pid ${this.rootPid}: ${(error as Error).message}`);
         return false;
@@ -369,22 +477,27 @@ export class PosixProcessBoundary {
         }
         const rediscovered = liveOwned(this.owned, table);
         if (!rediscovered.length) return true;
-        for (const process of rediscovered) signalIdentity(process, table, "SIGTERM");
+        for (const process of rediscovered) this.signal(process, table, "SIGTERM");
       }
     }
 
-    for (const process of liveOwned(this.owned, table)) signalIdentity(process, table, "SIGKILL");
+    for (const process of liveOwned(this.owned, table)) this.signal(process, table, "SIGKILL");
     this.signalRootGroup(table, "SIGKILL");
-    const killDeadline = Date.now() + 2_000;
-    while (Date.now() < killDeadline) {
-      await new Promise((resolve) => setTimeout(resolve, 40));
+    const killDeadline = this.now() + 2_000;
+    while (this.now() < killDeadline) {
+      await this.sleep(40);
       try {
-        table = await refreshAll();
+        table = await this.refreshTracked();
       } catch (error) {
         console.error(`[runner] could not verify forced provider descendant cleanup for pid ${this.rootPid}: ${(error as Error).message}`);
         return false;
       }
-      if (!liveOwned(this.owned, table).length) {
+      const live = liveOwned(this.owned, table);
+      // A descendant can appear after the initial forced sweep. Re-signal every current identity
+      // instead of merely waiting for a newly tracked process until the verification deadline.
+      for (const process of live) this.signal(process, table, "SIGKILL");
+      this.signalRootGroup(table, "SIGKILL");
+      if (!live.length) {
         try {
           table = await this.refreshFresh();
         } catch (error) {
@@ -393,7 +506,7 @@ export class PosixProcessBoundary {
         }
         const rediscovered = liveOwned(this.owned, table);
         if (!rediscovered.length) return true;
-        for (const process of rediscovered) signalIdentity(process, table, "SIGKILL");
+        for (const process of rediscovered) this.signal(process, table, "SIGKILL");
       }
     }
 
