@@ -15,13 +15,13 @@ for (const [name, value] of Object.entries({
   IS_REACT_ACT_ENVIRONMENT: true,
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
 
-async function renderMarkdown(markdown: string): Promise<{ container: HTMLDivElement; root: Root }> {
+async function renderMarkdown(markdown: string, inlineMedia = false): Promise<{ container: HTMLDivElement; root: Root }> {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
   const container = happyContainer as unknown as HTMLDivElement;
   const root = createRoot(container);
   await act(async () => {
-    root.render(<Markdown highlightEligible={false}>{markdown}</Markdown>);
+    root.render(<Markdown highlightEligible={false} inlineMedia={inlineMedia}>{markdown}</Markdown>);
   });
   return { container, root };
 }
@@ -182,6 +182,71 @@ test("copying a visually wrapped block yields the original fenced text", async (
     });
 
     assert.deepEqual(copied, [proseLines.join("\n"), proseLines.join("\n")], "wrapping never alters the copied bytes");
+  } finally {
+    await cleanup(container, root);
+  }
+});
+
+test("failed transcript image and video loads collapse to their plain links", async () => {
+  const image = "https://evidence.example/expired.png?signature=expired";
+  const video = "https://evidence.example/expired.webm?signature=expired";
+  const { container, root } = await renderMarkdown(`${image}\n\n${video}`, true);
+  try {
+    assert.equal(container.querySelectorAll(".md-media-embed").length, 2);
+    assert.equal(container.querySelectorAll(`a[href^="https://evidence.example/expired"]`).length, 3,
+      "both plain URL links plus the image's full-size link render before failure");
+
+    await act(async () => {
+      container.querySelector("img.md-media-image")!.dispatchEvent(new domWindow.Event("error") as unknown as Event);
+      container.querySelector("video.md-media-video")!.dispatchEvent(new domWindow.Event("error") as unknown as Event);
+    });
+
+    assert.equal(container.querySelectorAll(".md-media-embed").length, 0, "failed embeds reserve no layout space");
+    assert.equal(container.querySelectorAll(`a[href^="https://evidence.example/expired"]`).length, 2,
+      "each original plain link remains usable");
+  } finally {
+    await cleanup(container, root);
+  }
+});
+
+test("loaded transcript media survives visibility-only rerenders without remounting", async () => {
+  const image = "https://evidence.example/review.png?signature=valid";
+  const { container, root } = await renderMarkdown(image, true);
+  try {
+    const loadedImage = container.querySelector("img.md-media-image")!;
+    await act(async () => {
+      loadedImage.dispatchEvent(new domWindow.Event("load") as unknown as Event);
+    });
+    assert.equal(loadedImage.getAttribute("data-load-state"), "loaded");
+
+    await act(async () => {
+      root.render(<Markdown highlightEligible inlineMedia>{image}</Markdown>);
+    });
+
+    assert.equal(container.querySelector("img.md-media-image") === loadedImage, true,
+      "a scroll-driven highlightEligible change must preserve the loaded media node and state");
+    assert.equal(loadedImage.getAttribute("data-load-state"), "loaded");
+  } finally {
+    await cleanup(container, root);
+  }
+});
+
+test("a completed signed media URL retries after its streamed unsigned prefix failed", async () => {
+  const unsigned = "https://evidence.example/review.png";
+  const signed = `${unsigned}?signature=valid`;
+  const { container, root } = await renderMarkdown(unsigned, true);
+  try {
+    await act(async () => {
+      container.querySelector("img.md-media-image")!.dispatchEvent(new domWindow.Event("error") as unknown as Event);
+    });
+    assert.equal(container.querySelector("img.md-media-image"), null);
+
+    await act(async () => {
+      root.render(<Markdown highlightEligible={false} inlineMedia>{signed}</Markdown>);
+    });
+
+    assert.equal(container.querySelector("img.md-media-image")?.getAttribute("src"), signed,
+      "the href identity must reset a failed embed when streaming completes the signed URL");
   } finally {
     await cleanup(container, root);
   }

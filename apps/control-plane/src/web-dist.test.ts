@@ -251,4 +251,6 @@ test("appShellSecurityHeaders hashes inline script bodies and ignores external s
   assert.ok(csp.includes(`'sha256-${expected}'`), "inline body containing src= remains hash-authorized");
   const empty = createHash("sha256").update("").digest("base64");
   assert.ok(!csp.includes(`'sha256-${empty}'`), "external src script is not treated as an empty inline script");
+  assert.match(csp, /img-src 'self' data: blob: https:/, "HTTPS transcript images remain loadable in production");
+  assert.match(csp, /media-src 'self' blob: https:/, "HTTPS transcript videos remain playable in production");
 });

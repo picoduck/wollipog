@@ -1455,7 +1455,7 @@ const TimelineRow = memo(function TimelineRow({
       // Codex-style: the model response is full-width document flow, not a chat bubble.
       return (
         <div className="tl-agent-msg">
-          <Markdown highlightEligible={highlightEligible}>{item.text}</Markdown>
+          <Markdown highlightEligible={highlightEligible} inlineMedia>{item.text}</Markdown>
           {/* Meta trails the text it describes, matching the user-bubble arrangement. */}
           <MessageMeta
             createdAt={item.createdAt}
@@ -1478,7 +1478,7 @@ const TimelineRow = memo(function TimelineRow({
               completedAt={item.completedAt}
               pointWhenEqual
             />
-            <Markdown highlightEligible={highlightEligible}>{item.text}</Markdown>
+            <Markdown highlightEligible={highlightEligible} inlineMedia>{item.text}</Markdown>
           </div>
         );
       }
@@ -1508,7 +1508,7 @@ const TimelineRow = memo(function TimelineRow({
             />
           </summary>
           <div className="thought-body">
-            <Markdown highlightEligible={highlightEligible}>{item.text}</Markdown>
+            <Markdown highlightEligible={highlightEligible} inlineMedia>{item.text}</Markdown>
           </div>
         </details>
       );

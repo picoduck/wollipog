@@ -54,6 +54,10 @@ test("desktop content security policies allow the Browser panel's supported exte
       /(?:^|;\s*)frame-src 'self' http:\/\/localhost:\* http:\/\/127\.0\.0\.1:\* https:(?:;|$)/,
       `${name} must preserve same-origin frames and permit loopback HTTP and HTTPS without arbitrary HTTP frames`,
     );
+    assert.match(policy ?? "", /(?:^|;\s*)img-src 'self' data: blob: https:(?:;|$)/,
+      `${name} must permit HTTPS transcript images without permitting arbitrary HTTP images`);
+    assert.match(policy ?? "", /(?:^|;\s*)media-src 'self' blob: https:(?:;|$)/,
+      `${name} must permit HTTPS transcript videos without permitting arbitrary HTTP media`);
   }
 });
 
