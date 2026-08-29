@@ -27,26 +27,55 @@ test("macOS and BSD marker parsing ignores marker-shaped process arguments", () 
   assert.deepEqual(markers.get("owner-a"), new Set([root.pid]));
 });
 
-test("marker snapshots coalesce only before enumeration starts", async () => {
+test("marker scan work scales with generations rather than boundary count", async () => {
   let listCalls = 0;
   let markerCalls = 0;
-  const table = processTable(root);
-  const markers: PosixMarkedProcessIds = new Map([["owner-a", new Set([root.pid])]]);
+  const ownerB = { pid: 101, ppid: 1, state: "S", startedAt: "owner-b-start" };
+  const otherRunner = { pid: 102, ppid: 1, state: "S", startedAt: "other-runner-start" };
+  const table = processTable(root, ownerB, otherRunner);
+  const markers: PosixMarkedProcessIds = new Map([
+    ["owner-a", new Set([root.pid])],
+    ["owner-b", new Set([ownerB.pid])],
+    ["other-runner", new Set([otherRunner.pid])],
+  ]);
   const scanner = new PosixMarkerScanner(
     async () => { listCalls++; return table; },
     async () => { markerCalls++; return markers; },
   );
 
-  const first = scanner.snapshot();
-  const concurrent = scanner.snapshot();
-  assert.strictEqual(concurrent, first);
-  assert.deepEqual(await first, { table, markedProcessIds: markers });
-  assert.equal(listCalls, 1);
-  assert.equal(markerCalls, 1);
+  const boundaryMarkers = [...markers.keys()];
+  const firstGeneration = boundaryMarkers.map((marker) => scanner.snapshot().then((snapshot) => (
+    snapshot.markedProcessIds.get(marker)
+  )));
+  assert.deepEqual(await Promise.all(firstGeneration), [
+    new Set([root.pid]),
+    new Set([ownerB.pid]),
+    new Set([otherRunner.pid]),
+  ], "each exact marker remains distinguishable in the shared snapshot");
+  assert.equal(listCalls, 1, "one process-table enumeration serves every boundary in a generation");
+  assert.equal(markerCalls, 1, "one marker scan serves every boundary in a generation");
 
-  await scanner.snapshot();
+  await Promise.all(boundaryMarkers.map(() => scanner.snapshot()));
   assert.equal(listCalls, 2, "a later freshness barrier starts a new enumeration");
-  assert.equal(markerCalls, 2);
+  assert.equal(markerCalls, 2, "scan count follows generations even as boundary count grows");
+});
+
+test("marker snapshots fail closed when a process exits during scanning", {
+  skip: process.platform !== "linux" ? "requires Linux procfs environment reads" : false,
+}, async () => {
+  const exited = {
+    pid: Number.MAX_SAFE_INTEGER,
+    ppid: root.pid,
+    state: "S",
+    startedAt: "exited-start",
+  };
+  const table = processTable(exited);
+  const scanner = new PosixMarkerScanner(async () => table);
+
+  const snapshot = await scanner.snapshot();
+
+  assert.strictEqual(snapshot.table, table);
+  assert.equal(snapshot.markedProcessIds.size, 0, "a vanished process contributes no marker ownership");
 });
 
 test("a marker snapshot requested after enumeration starts does not adopt the older generation", async () => {
@@ -95,6 +124,30 @@ function scriptedRuntime(
     now: () => now,
   };
 }
+
+test("marker-backed boundaries isolate exact session and runner markers", async () => {
+  const owner = {};
+  const ownerB = { pid: 101, ppid: 1, state: "S", startedAt: "owner-b-start" };
+  const otherRunner = { pid: 102, ppid: 1, state: "S", startedAt: "other-runner-start" };
+  const runtime = scriptedRuntime([
+    processTable(root, ownerB, otherRunner),
+    processTable(root),
+    processTable(),
+    processTable(),
+  ]);
+  runtime.listMarkers = async () => new Map([
+    ["owner-a", new Set([root.pid])],
+    ["owner-b", new Set([ownerB.pid])],
+    ["other-runner", new Set([otherRunner.pid])],
+  ]);
+  const boundary = new PosixProcessBoundary(root.pid, owner, "owner-a", runtime);
+
+  assert.equal(await boundary.terminate(), true);
+  assert.ok(runtime.signals.some(([pid]) => pid === root.pid), "the exact owner marker is signaled");
+  assert.equal(runtime.signals.some(([pid]) => pid === ownerB.pid), false, "another session remains isolated");
+  assert.equal(runtime.signals.some(([pid]) => pid === otherRunner.pid), false, "another runner remains isolated");
+  assert.equal(terminatePosixProcessBoundaries(owner).length, 0);
+});
 
 async function assertRetryableFailure(
   firstAttempt: ProcessStep[],
