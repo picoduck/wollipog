@@ -319,6 +319,26 @@ test("history prefix merges preserve work and coalesced text render keys", () =>
   assert.equal(openRows.some((row) => row.kind === "item" && row.item.id === 10), true);
 });
 
+test("a disjoint prepended head block cannot steal the retained boundary key", () => {
+  const previous = groupTimeline([
+    { kind: "agent_thought", id: 66, text: "old boundary work" },
+    { kind: "agent_message", id: 68, text: "old answer" },
+  ]);
+  const recovered = stabilizeWorkGroupKeys(groupTimeline([
+    { kind: "agent_thought", id: 58, text: "new window head" },
+    { kind: "agent_message", id: 60, text: "earlier answer" },
+    { kind: "user_message", id: 65, text: "boundary question" },
+    { kind: "agent_thought", id: 66, text: "old boundary work" },
+    { kind: "agent_message", id: 68, text: "old answer" },
+  ]), previous);
+  const workIds = recovered.flatMap((group) => group.kind === "work" ? [group.id] : []);
+
+  assert.deepEqual(workIds, ["head:agent_thought:58", "head"]);
+  assert.equal(new Set(workIds).size, workIds.length, "every virtual work row keeps a unique key");
+  assert.equal(workIds[1], previous[0]!.kind === "work" ? previous[0]!.id : null,
+    "the old page-boundary block remains the logical anchor");
+});
+
 test("ordinary streaming updates project only the active tail row", () => {
   const builder = new TimelineBuilder();
   let sequence = 0;

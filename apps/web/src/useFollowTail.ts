@@ -150,7 +150,7 @@ export function hasSavedFollowTailAnchor(scope: string, sessionId: string): bool
   return snapshot != null && snapshot.state !== "following" && snapshot.anchor != null;
 }
 
-function isUpwardReadingKey(event: FollowTailKey): boolean {
+export function isFollowTailUpwardReadingKey(event: FollowTailKey): boolean {
   if (event.ctrlKey || event.metaKey || event.altKey) return false;
   return event.key === "k" || event.key === "ArrowUp" || event.key === "PageUp" ||
     event.key === "Home" || (event.key === " " && event.shiftKey);
@@ -413,7 +413,7 @@ export function useFollowTail({
       follow();
       return true;
     }
-    if (isUpwardReadingKey(event)) pause();
+    if (isFollowTailUpwardReadingKey(event)) pause();
     return false;
   }, [follow, pause]);
 

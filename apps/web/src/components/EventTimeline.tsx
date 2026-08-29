@@ -1165,7 +1165,9 @@ function itemSourceEnd(item: TimelineItem): number {
 
 /** A tail-first cache may initially expose a work block at the transcript head and later recover
  * its preceding user row. Reuse the old block id whenever source ranges overlap so disclosure and
- * virtual anchors survive that newly-discovered boundary. */
+ * virtual anchors survive that newly-discovered boundary. A newly prepended, disjoint head block
+ * must yield that natural id to the retained block; duplicate virtual keys would otherwise bind
+ * the reading anchor to the new window head instead of the old page boundary. */
 export function stabilizeWorkGroupKeys(
   groups: TimelineGroup[],
   previous: readonly TimelineGroup[],
@@ -1177,16 +1179,34 @@ export function stabilizeWorkGroupKeys(
       start: group.items[0]?.id ?? 0,
       end: group.items.reduce((end, item) => Math.max(end, itemSourceEnd(item)), 0),
     }));
+  const retainedIds = new Map<number, string>();
+  const reservedIds = new Set<string>();
   let offset = 0;
-  return groups.map((group) => {
-    if (group.kind !== "work" || group.items.length === 0) return group;
+  groups.forEach((group, index) => {
+    if (group.kind !== "work" || group.items.length === 0) return;
     const start = group.items[0]!.id;
     const end = group.items.reduce((value, item) => Math.max(value, itemSourceEnd(item)), start);
     while (offset < candidates.length && candidates[offset]!.end < start) offset += 1;
     const candidate = candidates[offset];
-    if (!candidate || candidate.start > end) return group;
+    if (!candidate || candidate.start > end) return;
     offset += 1;
-    return candidate.group.id === group.id ? group : { ...group, id: candidate.group.id };
+    retainedIds.set(index, candidate.group.id);
+    reservedIds.add(candidate.group.id);
+  });
+
+  const usedIds = new Set<string>();
+  return groups.map((group, index) => {
+    if (group.kind !== "work" || group.items.length === 0) return group;
+    const retainedId = retainedIds.get(index);
+    let id = retainedId ?? group.id;
+    if (retainedId == null && (reservedIds.has(id) || usedIds.has(id))) {
+      const source = timelineBoundaryKey(group.items[0]!);
+      id = `${group.id}:${source}`;
+      let suffix = 2;
+      while (reservedIds.has(id) || usedIds.has(id)) id = `${group.id}:${source}:${suffix++}`;
+    }
+    usedIds.add(id);
+    return id === group.id ? group : { ...group, id };
   });
 }
 
