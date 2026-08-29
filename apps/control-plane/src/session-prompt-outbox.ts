@@ -18,7 +18,7 @@ const MAX_RETRY_MS = 30_000;
 const RECEIPT_STATES = new Set(["accepted", "queued", "started", "completed", "failed", "uncertain"]);
 const RECEIPT_CODES = new Set([
   "COMMAND_ID_CONFLICT", "COMMAND_EXPIRED", "INVALID_COMMAND", "SESSION_NOT_FOUND",
-  "QUEUE_FULL", "COMMAND_CANCELLED", "RECEIPT_STORE_FULL",
+  "QUEUE_FULL", "COMMAND_CANCELLED", "PROVIDER_AUTHENTICATION_REQUIRED", "RECEIPT_STORE_FULL",
 ]);
 
 function retryDelay(attempt: number): number {

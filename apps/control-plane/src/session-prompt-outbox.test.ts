@@ -112,6 +112,40 @@ test("durable prompt receipt database failures are contained", () => {
   }
 });
 
+test("provider-authentication receipts terminalize durable prompts and stop retries", () => {
+  const { db, outbox, sent, changed, warnings } = fixture();
+  try {
+    const staged = outbox.stage(SESSION_ID, RUNNER_ID, prompt(), NOW);
+    assert.equal(outbox.flush(NOW + 1), 1);
+    assert.equal(sent.length, 1);
+
+    const error = "provider authentication is required";
+    assert.equal(outbox.receipt(RUNNER_ID, {
+      type: "durable_session_command_update",
+      commandId: staged.commandId,
+      sessionId: SESSION_ID,
+      state: "failed",
+      revision: 1,
+      error,
+      code: "PROVIDER_AUTHENTICATION_REQUIRED",
+    }, NOW + 2), true);
+
+    const failed = db.getSessionPromptCommand(staged.commandId);
+    assert.equal(failed?.state, "failed");
+    assert.equal(failed?.revision, 1);
+    assert.equal(failed?.error, error);
+    assert.equal(failed?.errorCode, "PROVIDER_AUTHENTICATION_REQUIRED");
+    assert.deepEqual(changed, [SESSION_ID]);
+    assert.deepEqual(warnings, []);
+
+    sent.length = 0;
+    assert.equal(outbox.flush(NOW + 60_000), 0);
+    assert.deepEqual(sent, [], "a terminal authentication failure is never resent");
+  } finally {
+    db.close();
+  }
+});
+
 test("flush fails an unparseable stored durable prompt without sending it", () => {
   const { db, outbox, sent, changed, warnings } = fixture();
   try {
