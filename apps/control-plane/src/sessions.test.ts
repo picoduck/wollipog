@@ -2977,6 +2977,47 @@ test("durable queued prompts accept revision-zero failures and stop retrying aft
   assert.equal(db.getSessionPromptCommand(stranded.commandId), null);
 });
 
+test("runner provider-authentication failures terminalize the control-plane prompt projection", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { prompt: "initial" });
+  hub.sentToRunner.length = 0;
+
+  assert.equal(svc.prompt(id, "prompt requiring provider authentication").ok, true);
+  const sent = hub.sentOfType("durable_session_command")[0]!;
+  const error = "provider authentication is required";
+  assert.equal(svc.onDurablePromptReceipt(RUNNER_ID, {
+    type: "durable_session_command_result",
+    requestId: sent.requestId,
+    commandId: sent.commandId,
+    sessionId: id,
+    state: "failed",
+    revision: 1,
+    duplicate: false,
+    error,
+    code: "PROVIDER_AUTHENTICATION_REQUIRED",
+  }), true);
+
+  const record = db.getSessionPromptCommand(sent.commandId);
+  assert.equal(record?.state, "failed");
+  assert.equal(record?.error, error);
+  assert.equal(record?.errorCode, "PROVIDER_AUTHENTICATION_REQUIRED");
+  assert.deepEqual(db.getSession(id)?.pendingPrompts?.map((pending) => ({
+    commandId: pending.commandId,
+    state: pending.state,
+    error: pending.error,
+    errorCode: pending.errorCode,
+  })), [{
+    commandId: sent.commandId,
+    state: "failed",
+    error,
+    errorCode: "PROVIDER_AUTHENTICATION_REQUIRED",
+  }]);
+
+  hub.sentToRunner.length = 0;
+  assert.equal(svc.retryDuePrompts(Date.now() + 60_000), 0);
+  assert.equal(hub.sentOfType("durable_session_command").length, 0);
+});
+
 test("durable prompt retry attempt identities stay bounded while recent receipts remain valid", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub, { prompt: "initial" });
