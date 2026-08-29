@@ -597,6 +597,13 @@ pre {
 }
 .rail-more-item:hover { background: var(--bg-elev-3); }
 .rail-more-item.active { color: var(--accent); }
+/* Settings is the sheet's trailing row and is not a navigation destination, so it is ruled off
+   from the destinations above rather than reading as one more of them. */
+.rail-more-settings {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
 .rail-spacer { flex: 1; }
 .rail-instance,
 .rail-settings { display: flex; justify-content: center; width: 100%; }
@@ -623,10 +630,10 @@ pre {
   }
 }
 
-/* The phone topbar carries the instance trigger and Settings in one fixed-height
-   non-wrapping row. The instance trigger grew with the instance NAME, so a long name pushed
-   Settings — and on session views the editor, pinned-summary, terminal and side-panel buttons —
-   past the right edge with nothing to scroll them back into view.
+/* The phone topbar carries the instance trigger and the view's own actions in one fixed-height
+   non-wrapping row. The instance trigger grew with the instance NAME, so a long name pushed the
+   trailing controls — on session views the editor, pinned-summary, terminal and side-panel
+   buttons — past the right edge with nothing to scroll them back into view.
 
    The icon-only treatment already existed but was scoped to .rail-instance, which this row does
    not use. The visible label is safe to drop: .instance-selector-trigger carries its own
@@ -644,7 +651,6 @@ pre {
 }
 .topbar-mobile-controls .instance-selector-label,
 .topbar-mobile-controls .instance-selector-chevron { display: none; }
-.topbar-mobile-controls .settings-trigger,
 .mobile-session-back {
   width: 44px;
   min-width: 44px;
@@ -10006,8 +10012,7 @@ body.shell-dock-dragging * {
   }
   .topbar:has(.mobile-session-back) .mobile-session-back,
   .topbar:has(.mobile-session-back) .topbar-mobile-controls .instance-selector-trigger,
-  .topbar:has(.mobile-session-back) .topbar-mobile-controls .icon-btn,
-  .topbar:has(.mobile-session-back) .topbar-mobile-controls .settings-trigger {
+  .topbar:has(.mobile-session-back) .topbar-mobile-controls .icon-btn {
     width: 36px;
     min-width: 36px;
     height: 36px;

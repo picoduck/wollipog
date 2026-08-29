@@ -44,7 +44,8 @@ test("the application shell is rail-first and the legacy sidebar is fully retire
   assert.doesNotMatch(rail, /onNewSession|rail-action|PlusIcon/);
   assert.doesNotMatch(app, /title="New Session"[\s\S]*aria-label="New Session"/);
   assert.match(app, /mobileInstanceControl=\{isMobile \?/);
-  assert.match(app, /mobileSettingsControl=\{isMobile \?/);
+  assert.doesNotMatch(app, /mobileSettingsControl/,
+    "Settings left the phone topbar for the rail's More sheet");
   assert.match(css, /\.app-rail\s*\{\s*width:\s*66px/);
   assert.match(css, /\.rail-brand img\s*\{[^}]*width:\s*39px;[^}]*height:\s*39px/);
   assert.match(css, /\.app-rail \.rail-item > \.app-icon,[\s\S]*?\.rail-settings \.settings-trigger svg\s*\{[^}]*width:\s*26px;[^}]*height:\s*26px/);
@@ -304,8 +305,10 @@ test("an open More sheet suppresses the toast stack", () => {
 
 test("More menu items activate with Space as well as Enter", () => {
   // An <a> activates on Enter natively but never on Space, while role="menuitem" promises both.
-  const menuItem = rail.slice(rail.indexOf('role="menuitem"'));
-  const handler = menuItem.slice(menuItem.indexOf("onKeyDown"), menuItem.indexOf("</a>"));
+  // Every sheet row — destinations and Settings alike — draws these from one helper, so the guard
+  // reads the helper rather than the first row that happens to appear in the markup.
+  const menuItem = rail.slice(rail.indexOf("const sheetItemProps"));
+  const handler = menuItem.slice(menuItem.indexOf("onKeyDown"), menuItem.indexOf("});"));
   assert.ok(handler.length > 0, "menu items must handle keys themselves");
   assert.match(handler, /event\.key !== " "/, "Space must be recognised");
   assert.match(handler, /preventDefault/, "and must not scroll the sheet instead");
@@ -330,10 +333,19 @@ test("Settings survives the breakpoint because it is a route", () => {
   // was the fix available to a dialog.
   //
   // Settings is a route now, so the problem does not exist: the URL does not care which layout is
-  // mounted, and there is no open state to preserve. What still has to hold is that both layouts
-  // render a trigger and that the trigger navigates rather than opening anything.
-  const triggers = [...app.matchAll(/<SettingsTrigger\s/g)];
-  assert.ok(triggers.length >= 2, "each layout must render its own trigger");
+  // mounted, and there is no open state to preserve. Each layout still needs its own entry point —
+  // the desktop gear at the foot of the rail, the phone row inside the More sheet — and neither may
+  // open anything but the route.
+  assert.equal([...app.matchAll(/<SettingsTrigger\s/g)].length, 1,
+    "the shell mounts the gear once, for the desktop rail only");
+  assert.match(app, /settingsControl: <SettingsTrigger /,
+    "and passes it as the rail's desktop control");
+  assert.match(rail, /rail-more-settings[\s\S]*?sheetItemProps\(\{ name: "settings" \}/,
+    "the phone entry point is a routed row in the More sheet");
+  // Gated on the breakpoint, not on overflowItems: hiding every optional destination by experiment
+  // would otherwise unmount the trigger and leave Settings no entry point in the phone chrome.
+  assert.match(rail, /const showMore = isMobile;[\s\S]*?\{showMore && \(/,
+    "the sheet survives an empty overflow list");
   assert.doesNotMatch(app, /SettingsDialog/, "the dialog is replaced by the route, not kept beside it");
   assert.doesNotMatch(app, /settingsOpen/, "there is no open state to hoist once it is a route");
   assert.match(app, /onOpen=\{\(\) => navigate\(\{ name: "settings" \}\)\}/,
@@ -353,8 +365,10 @@ test("the phone topbar cannot push its controls off-screen", () => {
     "the Session route must compact the mobile topbar without changing other routes");
   assert.match(css, /\.topbar:has\(\.mobile-session-back\) h1 \{[^}]*font-size: var\(--text-base\)/,
     "the semantic Session heading must use compact label-scale presentation on phones");
-  assert.match(css, /\.topbar:has\(\.mobile-session-back\) \.mobile-session-back,[\s\S]*?\.topbar:has\(\.mobile-session-back\) \.topbar-mobile-controls \.settings-trigger \{[^}]*width: 36px;[^}]*height: 36px/,
-    "Session navigation, pane controls, and Settings must share compact phone geometry");
+  assert.match(css, /\.topbar:has\(\.mobile-session-back\) \.mobile-session-back,[\s\S]*?\.topbar:has\(\.mobile-session-back\) \.topbar-mobile-controls \.icon-btn \{[^}]*width: 36px;[^}]*height: 36px/,
+    "Session navigation and pane controls must share compact phone geometry");
+  assert.doesNotMatch(css, /\.topbar-mobile-controls \.settings-trigger/,
+    "no phone topbar Settings geometry survives the move into the More sheet");
 });
 
 test("the phone Session topbar owns Back and the live Session title without Open", () => {
@@ -371,7 +385,10 @@ test("Session menu triggers clear popovers without rising to the modal backdrop 
     "sibling triggers should clear the menu backdrop but stay below every modal");
 });
 
-test("Settings is the trailing control in the unified phone topbar cluster", () => {
+test("the phone topbar cluster is the instance switcher and view actions, with Settings gone", () => {
+  // Settings used to be pinned to this cluster's trailing edge (#210, #304). It is a rail
+  // destination now (#458), so the invariant that survives is the ORDER of what remains and the
+  // fact that no Settings control is mounted here at any width.
   const start = app.indexOf('<div className="topbar-actions topbar-mobile-controls">');
   const end = app.indexOf("</div>", start);
   assert.ok(start >= 0 && end > start, "the phone controls must share one ordered cluster");
@@ -380,15 +397,14 @@ test("Settings is the trailing control in the unified phone topbar cluster", () 
   const instanceIndex = mobileCluster.indexOf("mobileInstanceControl");
   const createIndex = mobileCluster.indexOf("topbar-create");
   const sessionActionsIndex = mobileCluster.indexOf("sessionActions");
-  const settingsIndex = mobileCluster.indexOf("mobileSettingsControl");
-  assert.ok(instanceIndex >= 0 && createIndex >= 0 && sessionActionsIndex >= 0 && settingsIndex >= 0,
-    "the phone cluster must include every control category");
-  assert.ok(instanceIndex < settingsIndex,
-    "the instance control must precede Settings");
-  assert.ok(createIndex < settingsIndex,
-    "creation actions must precede Settings");
-  assert.ok(sessionActionsIndex < settingsIndex,
-    "session actions must precede Settings");
+  assert.ok(instanceIndex >= 0 && createIndex >= 0 && sessionActionsIndex >= 0,
+    "the phone cluster must include every remaining control category");
+  assert.ok(instanceIndex < createIndex,
+    "the instance control must lead the cluster");
+  assert.ok(createIndex < sessionActionsIndex,
+    "creation actions must precede the view's own session actions");
+  assert.doesNotMatch(mobileCluster, /SettingsTrigger|mobileSettingsControl/,
+    "the phone topbar mounts no Settings control");
   assert.match(css, /\.topbar-mobile-controls \{[^}]*flex-wrap: nowrap/,
     "the unified control cluster must stay on one line");
 });
