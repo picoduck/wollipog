@@ -49,7 +49,6 @@ declare global {
   interface Window {
     __WOLLIPOG_XTERM_E2E__: {
       appendInteractive(chunk: string): void;
-      appendReadonly(chunk: string): void;
       clearLogs(): void;
       logs(): {
         interactive: TerminalTransportSnapshot;
@@ -75,7 +74,7 @@ function Fixture() {
     text: INITIAL_INTERACTIVE_OUTPUT,
     total: INITIAL_INTERACTIVE_OUTPUT.length,
   });
-  const [readonly, setReadonly] = useState<StreamState>({
+  const [readonly] = useState<StreamState>({
     text: INITIAL_READONLY_OUTPUT,
     total: INITIAL_READONLY_OUTPUT.length,
   });
@@ -92,7 +91,6 @@ function Fixture() {
   useEffect(() => {
     window.__WOLLIPOG_XTERM_E2E__ = {
       appendInteractive: (chunk) => appendStream(setInteractive, chunk),
-      appendReadonly: (chunk) => appendStream(setReadonly, chunk),
       clearLogs() {
         interactiveTransport.clear();
         readonlyTransport.clear();

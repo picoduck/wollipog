@@ -25,10 +25,12 @@ test("renders initial and incremental raw output once, including split ANSI inpu
   await expect.poll(async () => (await terminalRows(terminal).innerText()).match(/Incremental output/g)?.length ?? 0)
     .toBe(1);
 
+  const rowsBeforePartialEscape = await terminalRows(terminal).innerText();
   await page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.appendInteractive("\u001b[31"));
-  await expect(terminalRows(terminal)).not.toContainText("Split red");
+  await expect.poll(() => terminalRows(terminal).innerText()).toBe(rowsBeforePartialEscape);
   await page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.appendInteractive("mSplit red\u001b[0m survives\r\n"));
   await expect(terminalRows(terminal)).toContainText("Split red survives");
+  await expect(terminalRows(terminal)).not.toContainText("mSplit red survives");
   await expect(terminalRows(terminal).locator("span").filter({ hasText: "Split red" })).toHaveClass(/xterm-fg-1/);
 
   await page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.setSearchTerm("survives"));
@@ -46,6 +48,7 @@ test("sends interactive input once and keeps the read-only terminal inert", asyn
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.logs().interactive.input)).toEqual(["q"]);
 
   await readonly.locator(".xterm-helper-textarea").focus();
+  await expect(readonly.locator(".xterm-helper-textarea")).toBeFocused();
   await page.keyboard.type("blocked");
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.logs().readonly.input)).toEqual([]);
 });
