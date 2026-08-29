@@ -464,7 +464,9 @@ for (const viewport of [
     await header.getByRole("button", { name: "More Actions" }).click();
     const menu = page.getByRole("menu", { name: "Session Actions" });
     await expect(menu).toBeVisible();
+    await expect(menu.locator(".menu-label", { hasText: "Status" })).toHaveAttribute("aria-hidden", "true");
     const statusSummary = menu.locator(".session-menu-statuses");
+    await expect(statusSummary.locator(".session-status-indicators")).toHaveCSS("flex-wrap", "wrap");
     await expect(statusSummary.getByText("Awaiting Prompt", { exact: true })).toBeVisible();
     await expect(statusSummary.getByText("Ready for Review", { exact: true })).toBeVisible();
     await expect(statusSummary.getByText("Uncommitted Changes", { exact: true })).toBeVisible();

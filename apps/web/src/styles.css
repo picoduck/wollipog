@@ -10201,16 +10201,16 @@ body.shell-dock-dragging * {
     order: -1;
     flex: none;
   }
-  .session-detail > .detail-head .session-status-indicators {
+  .session-detail > .detail-head > .session-header-statuses .session-status-indicators {
     flex: none;
     flex-wrap: nowrap;
     min-height: 36px;
   }
-  .session-detail > .detail-head .change-status-indicators {
+  .session-detail > .detail-head > .session-header-statuses .change-status-indicators {
     display: contents;
   }
-  .session-detail > .detail-head .status-badge,
-  .session-detail > .detail-head .background-work-badge {
+  .session-detail > .detail-head > .session-header-statuses .status-badge,
+  .session-detail > .detail-head > .session-header-statuses .background-work-badge {
     gap: 4px;
     /* CI and user devices do not share the same system font. Keep the compact labels stable while
        the status surface, rather than individual badges, owns narrow-width clipping. */

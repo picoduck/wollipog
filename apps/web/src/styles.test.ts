@@ -147,10 +147,14 @@ test("mobile Session statuses stay on one clipped line before fixed actions", ()
     "desktop change statuses must retain their existing wrapping behavior");
   const phoneRule = mediaBlocks(css).find((block) =>
     block.maxWidths.includes(760) &&
-    block.containsSelector(".session-detail > .detail-head .change-status-indicators"));
+    block.containsSelector(
+      ".session-detail > .detail-head > .session-header-statuses .change-status-indicators",
+    ));
   assert.ok(phoneRule, "the phone layout must define the compact shared status row");
   assert.deepEqual(
-    phoneRule.declarationsForSelector(".session-detail > .detail-head .change-status-indicators").get("display"),
+    phoneRule.declarationsForSelector(
+      ".session-detail > .detail-head > .session-header-statuses .change-status-indicators",
+    ).get("display"),
     ["contents"],
   );
   const statuses = phoneRule
@@ -175,7 +179,9 @@ test("mobile Session statuses stay on one clipped line before fixed actions", ()
     "focusable status actions must lead the row instead of disappearing into the clipped tail");
   assert.deepEqual(interactiveStatus.get("flex"), ["none"]);
   const lifecycle = phoneRule
-    .declarationsForSelector(".session-detail > .detail-head .session-status-indicators");
+    .declarationsForSelector(
+      ".session-detail > .detail-head > .session-header-statuses .session-status-indicators",
+    );
   assert.deepEqual(lifecycle.get("flex"), ["none"],
     "the complete lifecycle group must remain available to the accessibility tree while clipped");
   assert.deepEqual(lifecycle.get("flex-wrap"), ["nowrap"]);
@@ -184,8 +190,8 @@ test("mobile Session statuses stay on one clipped line before fixed actions", ()
   assert.equal(lifecycle.has("padding-right"), false,
     "the action grid track, not lifecycle padding, must reserve action space");
   for (const selector of [
-    ".session-detail > .detail-head .status-badge",
-    ".session-detail > .detail-head .background-work-badge",
+    ".session-detail > .detail-head > .session-header-statuses .status-badge",
+    ".session-detail > .detail-head > .session-header-statuses .background-work-badge",
   ]) {
     const badge = phoneRule.declarationsForSelector(selector);
     assert.deepEqual(badge.get("padding-inline"), ["4px"],

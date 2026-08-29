@@ -405,7 +405,7 @@ export function SessionHeader({
                   )}
                   {isMobile && (
                     <>
-                      <div className="menu-label" role="presentation">Status</div>
+                      <div className="menu-label" role="presentation" aria-hidden="true">Status</div>
                       <div className="session-menu-statuses" aria-hidden="true">
                         {renderNoninteractiveStatuses()}
                       </div>
