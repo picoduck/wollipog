@@ -93,11 +93,18 @@ test("every app-shell route carries the same-origin marker", async (t) => {
 test("REGRESSION: no spelling of index.html is served raw from disk", async (t) => {
   const { app } = buildServingApp(t);
   await app.ready();
-  for (const url of ["/index.html", "/INDEX.HTML", "//index.html", "/./index.html", "/index.html/", "/index.html?x=1"]) {
+  for (const url of ["/index.html", "/INDEX.HTML", "/./index.html", "/index.html/", "/index.html?x=1"]) {
     const res = await app.inject({ method: "GET", url });
     assert.ok(isShell(res), `${url} must render HTML, got ${res.statusCode}`);
     assert.ok(res.body.includes("window.__WOLLIPOG_SAME_ORIGIN__=1"), `${url} must carry the marker`);
   }
+
+  // Fastify 5.12 rejects an authority-form-looking path before the static wildcard or SPA
+  // fallback can run. Rejection is the safe outcome: the raw, unmarked entry document is not sent.
+  const duplicateSlash = await app.inject({ method: "GET", url: "//index.html" });
+  assert.equal(duplicateSlash.statusCode, 403);
+  assert.ok(!isShell(duplicateSlash));
+  assert.ok(!duplicateSlash.body.includes(INDEX));
 });
 
 // `/ui/` misses the exact `/ui` route; the shell would leave the token in history/referrers.
