@@ -111,6 +111,21 @@ export function SessionHeader({
   const internalSessionUrl = dashboardOrigin
     ? absoluteViewUrl(dashboardOrigin, { name: "session", id: session.id })
     : null;
+  const renderNoninteractiveStatuses = (presentational = false) => (
+    <>
+      <SessionStatusIndicators session={session} disconnected={!runnerOnline} />
+      <ChangeStatusBadge change={changeStatus ?? null} />
+      {session.backgroundWorkState && (
+        <BackgroundWorkBadge state={session.backgroundWorkState} compact announce={!presentational} />
+      )}
+      {!session.backgroundWorkState && session.backgroundWorkTracking === "untracked" && (
+        <UntrackedBackgroundWorkBadge />
+      )}
+    </>
+  );
+  const activeSubagentMenuLabel = activeSubagents
+    ? `View ${activeSubagents.count} Active ${activeSubagents.count === 1 ? "Subagent" : "Subagents"}`
+    : null;
 
   const closeMenu = (restoreFocus = false) => {
     menu.close(restoreFocus);
@@ -234,12 +249,7 @@ export function SessionHeader({
         </>
       )}
       <div className="session-header-statuses">
-        <SessionStatusIndicators session={session} disconnected={!runnerOnline} />
-        <ChangeStatusBadge change={changeStatus ?? null} />
-        {session.backgroundWorkState && <BackgroundWorkBadge state={session.backgroundWorkState} compact />}
-        {!session.backgroundWorkState && session.backgroundWorkTracking === "untracked" && (
-          <UntrackedBackgroundWorkBadge />
-        )}
+        {renderNoninteractiveStatuses()}
         {activeSubagents && (
           <ActiveSubagentsBadge count={activeSubagents.count} onOpen={activeSubagents.onOpen} />
         )}
@@ -391,6 +401,27 @@ export function SessionHeader({
                           }}
                         >
                           Move Session…
+                        </button>
+                      )}
+                    </>
+                  )}
+                  {isMobile && (
+                    <>
+                      <div className="menu-label" role="presentation" aria-hidden="true">Status</div>
+                      <div className="session-menu-statuses" aria-hidden="true">
+                        {renderNoninteractiveStatuses(true)}
+                      </div>
+                      {activeSubagents && (
+                        <button
+                          className="menu-item"
+                          type="button"
+                          role="menuitem"
+                          onClick={() => {
+                            closeMenu(false);
+                            activeSubagents.onOpen();
+                          }}
+                        >
+                          {activeSubagentMenuLabel}
                         </button>
                       )}
                     </>

@@ -139,34 +139,59 @@ test("the permission-mode popover keeps rows compact while long labels can wrap"
   assert.match(soleRuleBody(".cbar-permission-details-trigger"), /width: 28px;/);
 });
 
-test("review-ready and uncommitted badges wrap together at narrow widths", () => {
+test("mobile Session statuses stay on one clipped line before fixed actions", () => {
   const group = soleRuleBody(".change-status-indicators");
   assert.match(group, /display: inline-flex;/);
   assert.match(group, /min-width: 0;/);
   assert.match(group, /flex-wrap: wrap;/,
-    "the authoritative header must not hide either compact change status on mobile");
+    "desktop change statuses must retain their existing wrapping behavior");
   const phoneRule = mediaBlocks(css).find((block) =>
     block.maxWidths.includes(760) &&
-    block.containsSelector(".session-detail > .detail-head .change-status-indicators"));
-  assert.ok(phoneRule, "the phone layout must flatten the change group into the shared status row");
+    block.containsSelector(
+      ".session-detail > .detail-head > .session-header-statuses .change-status-indicators",
+    ));
+  assert.ok(phoneRule, "the phone layout must define the compact shared status row");
   assert.deepEqual(
-    phoneRule.declarationsForSelector(".session-detail > .detail-head .change-status-indicators").get("display"),
+    phoneRule.declarationsForSelector(
+      ".session-detail > .detail-head > .session-header-statuses .change-status-indicators",
+    ).get("display"),
     ["contents"],
   );
-  assert.deepEqual(
-    phoneRule.declarationsForSelector(".session-detail > .detail-head > .session-header-statuses")
-      .get("grid-column"),
-    ["1 / -1"],
+  const statuses = phoneRule
+    .declarationsForSelector(".session-detail > .detail-head > .session-header-statuses");
+  assert.deepEqual(statuses.get("grid-column"), ["1"],
+    "statuses must stop before the dedicated action track");
+  assert.deepEqual(statuses.get("flex-wrap"), ["nowrap"]);
+  assert.deepEqual(statuses.get("overflow"), ["clip"],
+    "clipped statuses must not create a horizontal scroller");
+  assert.deepEqual(statuses.get("contain"), ["paint"],
+    "paint containment keeps long badge geometry out of the page overflow area across engines");
+  assert.match(statuses.get("mask-image")?.[0] ?? "", /linear-gradient\(.+transparent 100%\)/,
+    "the clipped edge must fade before the action surface");
+  assert.match(statuses.get("-webkit-mask-image")?.[0] ?? "", /linear-gradient\(.+transparent 100%\)/,
+    "the fade must work in WebKit-based mobile browsers");
+  assert.deepEqual(statuses.get("mask-repeat"), ["no-repeat"]);
+  assert.deepEqual(statuses.get("-webkit-mask-repeat"), ["no-repeat"]);
+  const interactiveStatus = phoneRule.declarationsForSelector(
+    ".session-detail > .detail-head > .session-header-statuses > button",
   );
+  assert.deepEqual(interactiveStatus.get("order"), ["-1"],
+    "focusable status actions must lead the row instead of disappearing into the clipped tail");
+  assert.deepEqual(interactiveStatus.get("flex"), ["none"]);
   const lifecycle = phoneRule
-    .declarationsForSelector(".session-detail > .detail-head .session-status-indicators");
+    .declarationsForSelector(
+      ".session-detail > .detail-head > .session-header-statuses .session-status-indicators",
+    );
+  assert.deepEqual(lifecycle.get("flex"), ["none"],
+    "the complete lifecycle group must remain available to the accessibility tree while clipped");
+  assert.deepEqual(lifecycle.get("flex-wrap"), ["nowrap"]);
   assert.deepEqual(lifecycle.get("min-height"), ["36px"],
-    "later status rows must begin below the compact Session actions");
-  assert.deepEqual(lifecycle.get("padding-right"), ["86px"],
-    "the lifecycle row must reserve two compact actions plus their gaps");
+    "the single status line must align with the compact Session actions");
+  assert.equal(lifecycle.has("padding-right"), false,
+    "the action grid track, not lifecycle padding, must reserve action space");
   for (const selector of [
-    ".session-detail > .detail-head .status-badge",
-    ".session-detail > .detail-head .background-work-badge",
+    ".session-detail > .detail-head > .session-header-statuses .status-badge",
+    ".session-detail > .detail-head > .session-header-statuses .background-work-badge",
   ]) {
     const badge = phoneRule.declarationsForSelector(selector);
     assert.deepEqual(badge.get("padding-inline"), ["4px"],
@@ -190,6 +215,13 @@ test("review-ready and uncommitted badges wrap together at narrow widths", () =>
     ).get("row-gap"),
     ["4px"],
     "a present transient note retains separation from the status/action row",
+  );
+  assert.deepEqual(
+    phoneRule.declarationsForSelector(
+      ".session-detail > .detail-head > .detail-actions",
+    ).get("align-self"),
+    ["center"],
+    "status and action centers must remain aligned if the single row grows",
   );
 });
 
