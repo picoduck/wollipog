@@ -1,8 +1,8 @@
+import { fireDomEvent } from "./test-dom-events.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { Simulate } from "react-dom/test-utils";
 import { Window } from "happy-dom";
 import type { ControlPlaneToUi, SessionView, UiSnapshotMessage } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
@@ -232,10 +232,10 @@ test("large archives paginate, deep-link, filter, and accept live lifecycle upda
 
   const firstLink = fixture.container.querySelector<HTMLAnchorElement>('tbody a[href^="/sessions/"]');
   assert.ok(firstLink, "session titles are direct links");
-  await act(async () => { Simulate.click(firstLink!, { button: 0 }); });
+  await act(async () => { fireDomEvent.click(firstLink!, { button: 0 }); });
   assert.equal(fixture.navigated.at(-1)?.name, "session");
 
-  await act(async () => { Simulate.click(button(fixture.container, "Next Page")); });
+  await act(async () => { fireDomEvent.click(button(fixture.container, "Next Page")); });
   assert.equal(fixture.container.querySelectorAll("tbody tr").length, 5);
   assert.match(fixture.container.textContent ?? "", /Page 2/);
 
@@ -271,7 +271,7 @@ test("search input debounces to one request and preserves server row order", asy
   await act(async () => {
     for (const value of ["n", "ne", "new", "newe", "newer"]) {
       input.value = value;
-      Simulate.change(input);
+      fireDomEvent.change(input);
     }
   });
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
@@ -303,7 +303,7 @@ test("unarchive uses the existing authorized mutation and removes the row from t
       return { ...archived, archived: value, updatedAt: archived.updatedAt + 1 };
     },
   });
-  await act(async () => { Simulate.click(button(fixture.container, "Unarchive")); await Promise.resolve(); });
+  await act(async () => { fireDomEvent.click(button(fixture.container, "Unarchive")); await Promise.resolve(); });
   assert.deepEqual(calls, [[archived.id, false]]);
   assert.match(fixture.container.textContent ?? "", /No Archived Sessions/);
   await fixture.unmount();
@@ -330,7 +330,7 @@ test("Stopping sessions fall back to the legacy idempotent archive mutation", as
   const retry = button(fixture.container, "Retry Stop");
   assert.equal([...fixture.container.querySelectorAll("button")].some((candidate) => candidate.textContent?.trim() === "Stop"), false,
     "pending recovery replaces the ordinary Stop action even for a terminal lifecycle");
-  await act(async () => { Simulate.click(retry); await Promise.resolve(); });
+  await act(async () => { fireDomEvent.click(retry); await Promise.resolve(); });
 
   assert.deepEqual(calls, [[pending.id, true]], "legacy retry reissues the archive intent");
   assert.equal(fixture.container.querySelector('.toast-region[aria-live="polite"] [role="status"]')?.textContent?.includes("Stop retry requested."), true,
@@ -368,7 +368,7 @@ test("Stop Failed sessions disclose bounded failure detail and expose Retry Stop
   const badge = [...fixture.container.querySelectorAll<HTMLElement>(".archive-badge")]
     .find((candidate) => candidate.textContent?.trim() === "Stop Failed");
   assert.equal(badge?.title, "Automatic retries were exhausted.");
-  await act(async () => { Simulate.click(button(fixture.container, "Retry Stop")); await Promise.resolve(); });
+  await act(async () => { fireDomEvent.click(button(fixture.container, "Retry Stop")); await Promise.resolve(); });
   assert.deepEqual(calls, [failed.id]);
   await fixture.unmount();
 });
@@ -381,15 +381,15 @@ test("a successful deletion cannot be resurrected by the live session overlay", 
   });
 
   await act(async () => {
-    Simulate.click(button(fixture.container, "Open"));
+    fireDomEvent.click(button(fixture.container, "Open"));
     await Promise.resolve();
   });
   await act(async () => {
-    Simulate.click(button(fixture.container, "Delete"));
+    fireDomEvent.click(button(fixture.container, "Delete"));
     await Promise.resolve();
   });
   await act(async () => {
-    Simulate.click(button(fixture.container, "Delete Session"));
+    fireDomEvent.click(button(fixture.container, "Delete Session"));
     await Promise.resolve();
   });
 
@@ -416,7 +416,7 @@ test("paged search failures expose a retryable load error", async () => {
   assert.ok(input);
   await act(async () => {
     input.value = "metadata";
-    Simulate.change(input);
+    fireDomEvent.change(input);
   });
   await act(async () => { await Promise.resolve(); });
   assert.match(
@@ -471,7 +471,7 @@ test("a live title update removes a row that no longer matches the active query"
   const input = fixture.container.querySelector<HTMLInputElement>('input[type="search"]')!;
   await act(async () => {
     input.value = "needle";
-    Simulate.change(input);
+    fireDomEvent.change(input);
   });
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
   assert.match(fixture.container.textContent ?? "", /Needle Session/);
@@ -541,13 +541,13 @@ test("Undo restores an unarchived row in server cursor order", async () => {
     .find((row) => row.textContent?.includes("Newest"));
   assert.ok(newestRow);
   await act(async () => {
-    Simulate.click(button(newestRow, "Unarchive"));
+    fireDomEvent.click(button(newestRow, "Unarchive"));
     await Promise.resolve();
   });
   assert.deepEqual(rowTitles(), ["Middle", "Oldest"]);
 
   await act(async () => {
-    Simulate.click(button(fixture.container, "Undo"));
+    fireDomEvent.click(button(fixture.container, "Undo"));
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
   assert.deepEqual(rowTitles(), ["Newest", "Middle", "Oldest"]);
@@ -562,7 +562,7 @@ test("server search rows remain authoritative when local derived labels differ",
   const input = fixture.container.querySelector<HTMLInputElement>('input[type="search"]')!;
   await act(async () => {
     input.value = "idle";
-    Simulate.change(input);
+    fireDomEvent.change(input);
   });
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
 
@@ -599,7 +599,7 @@ test("bursty live filter misses coalesce into one bounded revalidation", async (
   const input = fixture.container.querySelector<HTMLInputElement>('input[type="search"]')!;
   await act(async () => {
     input.value = "needle";
-    Simulate.change(input);
+    fireDomEvent.change(input);
   });
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
   const callsBeforeUpdate = fixture.archivePageCalls();
@@ -633,17 +633,17 @@ test("Undo revalidates with the filters active when Undo is clicked", async () =
   });
 
   await act(async () => {
-    Simulate.click(button(fixture.container, "Unarchive"));
+    fireDomEvent.click(button(fixture.container, "Unarchive"));
     await Promise.resolve();
   });
   const input = fixture.container.querySelector<HTMLInputElement>('input[type="search"]')!;
   await act(async () => {
     input.value = "current-filter";
-    Simulate.change(input);
+    fireDomEvent.change(input);
   });
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
   await act(async () => {
-    Simulate.click(button(fixture.container, "Undo"));
+    fireDomEvent.click(button(fixture.container, "Undo"));
     await Promise.resolve();
   });
 

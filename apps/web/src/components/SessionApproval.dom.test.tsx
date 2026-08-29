@@ -1,8 +1,8 @@
+import { fireDomEvent } from "./test-dom-events.js";
 import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
-import { Simulate } from "react-dom/test-utils";
 import { Window } from "happy-dom";
 import type { AgentQuestion, SessionView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
@@ -37,7 +37,7 @@ afterEach(() => {
 
 function setInputValue(input: HTMLInputElement, value: string) {
   input.value = value;
-  Simulate.change(input, { target: { value } } as never);
+  fireDomEvent.change(input, { target: { value } } as never);
 }
 
 async function renderBanner(

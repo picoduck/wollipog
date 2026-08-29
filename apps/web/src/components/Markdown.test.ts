@@ -77,7 +77,7 @@ test("transcript media opt-in keeps links and adds bounded native image/video el
 
   assert.match(html, new RegExp(`href="${image.replaceAll("?", "\\?")}"`));
   assert.match(html, /<img class="md-media-image"[^>]*src="https:\/\/evidence\.example\/review\.png[^>]*loading="lazy"/);
-  assert.match(html, /<video class="md-media-video"[^>]*src="https:\/\/evidence\.example\/review\.webm[^>]*controls=""[^>]*playsinline=""[^>]*preload="metadata"/);
+  assert.match(html, /<video class="md-media-video"[^>]*src="https:\/\/evidence\.example\/review\.webm[^>]*controls=""[^>]*playsInline=""[^>]*preload="metadata"/);
   assert.doesNotMatch(html, /autoplay/);
 });
 

@@ -1,8 +1,8 @@
+import { fireDomEvent } from "./test-dom-events.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
-import { Simulate } from "react-dom/test-utils";
 import { Window } from "happy-dom";
 import type { SessionReminderView, SetSessionReminderRequest } from "@wollipog/protocol";
 import { SnoozeDialog } from "./SnoozeDialog.js";
@@ -106,9 +106,9 @@ test("live reminder changes preserve the complete draft and require an explicit 
   const exact = container.querySelector<HTMLInputElement>("#snooze-exact")!;
   await act(async () => {
     expression.value = "today at 3:30 pm";
-    Simulate.change(expression);
+    fireDomEvent.change(expression);
     exact.value = "2099-04-05T06:30";
-    Simulate.change(exact);
+    fireDomEvent.change(exact);
     [...container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
       .find((button) => button.textContent?.includes("Regardless"))!.click();
     exact.focus();

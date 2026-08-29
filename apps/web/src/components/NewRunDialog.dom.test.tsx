@@ -1,10 +1,10 @@
+import { fireDomEvent } from "./test-dom-events.js";
 import { setExperimentFlag } from "../experiments.js";
 import { LOCAL_INSTANCE_SCOPE } from "../instance-storage.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { Simulate } from "react-dom/test-utils";
 import { Window } from "happy-dom";
 import type {
   CreateRunRequest,
@@ -204,7 +204,7 @@ function enterTask(container: HTMLDivElement): void {
   const valueSetter = Object.getOwnPropertyDescriptor(domWindow.HTMLTextAreaElement.prototype, "value")?.set;
   assert.ok(valueSetter);
   valueSetter.call(task, "Implement the Project flow");
-  Simulate.change(task, { target: task });
+  fireDomEvent.change(task, { target: task });
 }
 
 function clickButton(container: HTMLDivElement, text: string): void {
