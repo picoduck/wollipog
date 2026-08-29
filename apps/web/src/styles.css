@@ -6727,17 +6727,35 @@ button.agent-pick {
   background: transparent;
 }
 /* New Session picks one agent from a grouped dropdown; the provider icon adorns the select. */
+.btn.sm.new-session-project-control {
+  /* Segoe UI's visible ink sits high inside its line box. Preserve the compact desktop control's
+     total padding while moving that line box one pixel toward the optical centre. */
+  padding-block: 6px 4px;
+}
 .agent-select {
   display: flex;
   align-items: center;
   gap: 8px;
 }
-.agent-select select {
+.agent-select select.new-session-agent-control {
   flex: 1;
   min-width: 0;
+  min-height: 35px;
+  /* Native selects ignore an authored line-height in Chromium. Keep the native widget and caret,
+     establish its control height instead, and apply the same one-pixel optical correction as the
+     Project actions without risking clipped glyphs. */
+  padding-block: 9px 7px;
 }
 .agent-select .agent-icon {
   flex: none;
+}
+@media (max-width: 760px), (pointer: coarse), (hover: none) {
+  .btn.sm.new-session-project-control,
+  .agent-select select.new-session-agent-control {
+    min-height: 44px;
+  }
+  .btn.sm.new-session-project-control { padding-block: 14px 12px; }
+  .agent-select select.new-session-agent-control { padding-block: 11px 9px; }
 }
 .agent-meta {
   margin-top: 4px;
