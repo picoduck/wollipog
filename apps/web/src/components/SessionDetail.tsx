@@ -1819,9 +1819,9 @@ function SessionDetailLoaded({
     replace(draft.images);
     setHistIdx(-1);
     setError(null);
+    messageActionReturnFocusRef.current = inputRef.current;
     closeMessageAction(false);
-    window.setTimeout(focusComposerAtDraftEnd, 0);
-  }, [canPrompt, closeMessageAction, focusComposerAtDraftEnd, replace, setProgrammaticComposerText]);
+  }, [canPrompt, closeMessageAction, replace, setProgrammaticComposerText]);
 
   const prepareFork = useCallback(async (
     forkTurn: number,
@@ -3113,6 +3113,7 @@ function SessionDetailLoaded({
           existingDraftPresent={Boolean(text || images.length)}
           canPrepareResend={canPrompt}
           busy={busy}
+          returnFocusRef={messageActionReturnFocusRef}
           onClose={() => closeMessageAction(true)}
           onPrepareResend={prepareResend}
           onPrepareFork={(draft) => prepareFork(messageAction.forkTurn!, draft)}
@@ -3127,6 +3128,7 @@ function MessageActionDialog({
   existingDraftPresent,
   canPrepareResend,
   busy,
+  returnFocusRef,
   onClose,
   onPrepareResend,
   onPrepareFork,
@@ -3135,6 +3137,7 @@ function MessageActionDialog({
   existingDraftPresent: boolean;
   canPrepareResend: boolean;
   busy: boolean;
+  returnFocusRef: { current: HTMLElement | null };
   onClose: () => void;
   onPrepareResend: (draft: { text: string; images: PromptImageInput[] }) => void;
   onPrepareFork: (draft: { text: string; images: PromptImageInput[] }) => Promise<void>;
@@ -3173,6 +3176,7 @@ function MessageActionDialog({
     <Modal
       title={action.mode === "resend" ? "Edit as a new turn" : "Edit in a conversation fork"}
       onClose={submitting ? () => {} : onClose}
+      returnFocusRef={returnFocusRef}
       footer={(
         <>
           <button className="btn ghost" type="button" onClick={onClose} disabled={submitting}>Cancel</button>

@@ -1,8 +1,8 @@
+import { fireDomEvent } from "./test-dom-events.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
-import { Simulate } from "react-dom/test-utils";
 import { Window } from "happy-dom";
 import type { IdentityAdministrationView } from "@wollipog/protocol";
 import { api } from "../api.js";
@@ -75,7 +75,7 @@ test("pairing reveals the one-time credential even when the follow-up refresh fa
     const input = container.querySelector("input") as unknown as HTMLInputElement;
     await act(async () => {
       input.value = "Phone";
-      Simulate.change(input);
+      fireDomEvent.change(input);
     });
     const createButton = Array.from(container.querySelectorAll("button"))
       .find((button) => button.textContent === "Create Pairing") as unknown as HTMLButtonElement;
@@ -96,7 +96,7 @@ test("pairing reveals the one-time credential even when the follow-up refresh fa
     const firstQr = qr.innerHTML;
     await act(async () => {
       address.value = `http://192.168.1.197:443/#pair=${token}`;
-      Simulate.change(address);
+      fireDomEvent.change(address);
     });
     assert.equal(address.value, `http://192.168.1.197:443/#pair=${token}`);
     assert.notEqual(qr.innerHTML, firstQr, "changing the reachable address should regenerate the QR code");

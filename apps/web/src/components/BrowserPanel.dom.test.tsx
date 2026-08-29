@@ -1,9 +1,9 @@
+import { fireDomEvent } from "./test-dom-events.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
-import { Simulate } from "react-dom/test-utils";
 import { Window } from "happy-dom";
 import type { SessionView, WorkflowArtifactView } from "@wollipog/protocol";
 import { api } from "../api.js";
@@ -102,10 +102,10 @@ test("web mode renders the allowed preview and an external anchor owned by the d
     const input = container.querySelector("#browser-url") as HTMLInputElement;
     await act(async () => {
       input.value = "http://localhost:3000/dashboard";
-      Simulate.change(input);
+      fireDomEvent.change(input);
     });
     await act(async () => {
-      Simulate.submit(container.querySelector(".browser-address") as HTMLFormElement);
+      fireDomEvent.submit(container.querySelector(".browser-address") as HTMLFormElement);
     });
 
     const frame = container.querySelector(".browser-web-frame") as HTMLIFrameElement;

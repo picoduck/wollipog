@@ -1,8 +1,8 @@
+import { fireDomEvent } from "./test-dom-events.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
-import { Simulate } from "react-dom/test-utils";
 import { Window } from "happy-dom";
 import type { InstanceProfile } from "../desktop-instances.js";
 import {
@@ -212,9 +212,9 @@ test("add dialog submits a canonical token-free origin and clears the pairing cr
     const inputs = mounted.container.querySelectorAll<HTMLInputElement>("input");
     await act(async () => {
       inputs[0]!.value = "Remote A";
-      Simulate.change(inputs[0]!);
+      fireDomEvent.change(inputs[0]!);
       inputs[1]!.value = "https://REMOTE.example.test/#pair=abcdefghijklmnop";
-      Simulate.change(inputs[1]!);
+      fireDomEvent.change(inputs[1]!);
     });
     const submit = Array.from(mounted.container.querySelectorAll<HTMLButtonElement>("button"))
       .find((button) => button.textContent === "Add and Switch")!;
@@ -246,7 +246,7 @@ test("re-pair rejects a link for a different saved address before invoking nativ
     const input = mounted.container.querySelector<HTMLInputElement>('input[type="password"]')!;
     await act(async () => {
       input.value = "https://other.example.test/#pair=abcdefghijklmnop";
-      Simulate.change(input);
+      fireDomEvent.change(input);
     });
     const submit = Array.from(mounted.container.querySelectorAll<HTMLButtonElement>("button"))
       .find((button) => button.textContent === "Re-Pair")!;
@@ -274,12 +274,12 @@ test("changing an instance address requires a matching fresh pairing link", asyn
       .find((input) => input.previousElementSibling?.textContent === "Server Address")!;
     await act(async () => {
       address.value = "https://new.example.test";
-      Simulate.change(address);
+      fireDomEvent.change(address);
     });
     const pairing = Array.from(mounted.container.querySelectorAll<HTMLInputElement>('input[type="password"]'))[0]!;
     await act(async () => {
       pairing.value = "https://new.example.test/#pair=abcdefghijklmnop";
-      Simulate.change(pairing);
+      fireDomEvent.change(pairing);
     });
     const submit = Array.from(mounted.container.querySelectorAll<HTMLButtonElement>("button"))
       .find((button) => button.textContent === "Save Changes")!;

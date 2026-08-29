@@ -61,7 +61,7 @@ export function anchoredMenuPlacement(input: {
 
 export function useAnchoredMenuStyle(
   open: boolean,
-  triggerRef: RefObject<HTMLButtonElement>,
+  triggerRef: RefObject<HTMLButtonElement | null>,
   options: {
     desiredWidth?: number;
     desiredHeight: number;
@@ -254,8 +254,8 @@ export function handleMenuKeyDown(
 
 export interface AccessibleMenuController {
   menuId: string;
-  triggerRef: RefObject<HTMLButtonElement>;
-  menuRef: RefObject<HTMLDivElement>;
+  triggerRef: RefObject<HTMLButtonElement | null>;
+  menuRef: RefObject<HTMLDivElement | null>;
   toggle: () => void;
   close: (restoreFocus?: boolean) => void;
   onTriggerKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
@@ -264,8 +264,8 @@ export interface AccessibleMenuController {
 
 export interface DismissiblePopoverController {
   panelId: string;
-  triggerRef: RefObject<HTMLButtonElement>;
-  panelRef: RefObject<HTMLDivElement>;
+  triggerRef: RefObject<HTMLButtonElement | null>;
+  panelRef: RefObject<HTMLDivElement | null>;
   toggle: () => void;
   close: (restoreFocus?: boolean) => void;
   onTriggerKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => void;

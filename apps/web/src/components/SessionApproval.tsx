@@ -84,8 +84,8 @@ export function SessionApprovalRegion({
 }: {
   session: SessionView;
   runnerOnline: boolean;
-  fallbackFocusRef: RefObject<HTMLElement>;
-  alternateFallbackFocusRef?: RefObject<HTMLElement>;
+  fallbackFocusRef: RefObject<HTMLElement | null>;
+  alternateFallbackFocusRef?: RefObject<HTMLElement | null>;
   onSessionUpdate?: (session: SessionView) => void;
   showKeyHints?: boolean;
   /** Whether the pending question already has an authoritative transcript row. */
@@ -204,8 +204,8 @@ function SessionRequestCoordinator({
   requestIsQuestion: boolean;
   requestPresentation: "fallback" | "timeline" | "standalone" | "none";
   runnerOnline: boolean;
-  fallbackFocusRef: RefObject<HTMLElement>;
-  alternateFallbackFocusRef?: RefObject<HTMLElement>;
+  fallbackFocusRef: RefObject<HTMLElement | null>;
+  alternateFallbackFocusRef?: RefObject<HTMLElement | null>;
 }) {
   const previousRequestRef = useRef<string | null>(null);
   const previousRequestWasQuestionRef = useRef(false);

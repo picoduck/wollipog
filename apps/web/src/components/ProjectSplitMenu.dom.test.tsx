@@ -1,7 +1,7 @@
+import { fireDomEvent } from "./test-dom-events.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import React, { act } from "react";
-import { Simulate } from "react-dom/test-utils";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { RunnerView, SessionView } from "@wollipog/protocol";
@@ -205,7 +205,7 @@ test("project actions preserve presets, pin state, rename, reveal, and compensat
   const renameInput = container.querySelector<HTMLInputElement>('#rename-project-split-name')!;
   await act(async () => {
     renameInput.value = "Renamed Project";
-    Simulate.change(renameInput);
+    fireDomEvent.change(renameInput);
   });
   await act(async () => { button(container, "Save").click(); await tick(); });
   assert.deepEqual(renamed, [["runner-1", "workspace-1", "Renamed Project"]]);
@@ -517,7 +517,7 @@ test("durable zero-session Projects keep Project actions without inferring ident
   const renameInput = container.querySelector<HTMLInputElement>("#rename-project-split-name")!;
   await act(async () => {
     renameInput.value = "Renamed Durable Project";
-    Simulate.change(renameInput);
+    fireDomEvent.change(renameInput);
   });
   await act(async () => { button(container, "Save").click(); await tick(); });
   assert.deepEqual(renamed, [["project-1", "Renamed Durable Project"]]);

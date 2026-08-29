@@ -8,8 +8,8 @@ import { experimentForViewName } from "../experiments.js";
 import { useExperiments } from "../use-experiments.js";
 
 export function useCommandPaletteFocus(
-  inputRef: RefObject<HTMLInputElement>,
-  returnFocusRef: RefObject<HTMLElement>,
+  inputRef: RefObject<HTMLInputElement | null>,
+  returnFocusRef: RefObject<HTMLElement | null>,
 ): void {
   const restoreFocusTimerRef = useRef<number | null>(null);
   useEffect(() => {

@@ -1,8 +1,8 @@
+import { fireDomEvent } from "./test-dom-events.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { Simulate } from "react-dom/test-utils";
 import { Window } from "happy-dom";
 import type {
   AutomationSchedule, AutomationSpec, RunnerView, SessionView, UiSnapshotMessage,
@@ -169,19 +169,19 @@ test("the empty state's New Automation creates, even after an edit was cancelled
   await act(async () => { await Promise.resolve(); });
   const edit = buttonLabelled(container, "Edit");
   assert.ok(edit, "the seeded automation renders with an Edit button");
-  await act(async () => { Simulate.click(edit!); });
+  await act(async () => { fireDomEvent.click(edit!); });
   assert.match(container.querySelector(".automation-editor h3")?.textContent ?? "", /Edit Automation/);
 
   const cancel = buttonLabelled(container, "Cancel");
-  await act(async () => { Simulate.click(cancel!); });
+  await act(async () => { fireDomEvent.click(cancel!); });
 
   // Delete it the way a user would, through the confirmation, so the refresh that empties the list
   // is the app's own rather than one the test staged.
   const remove = buttonLabelled(container, "Delete");
-  await act(async () => { Simulate.click(remove!); });
+  await act(async () => { fireDomEvent.click(remove!); });
   const confirmDelete = buttonLabelled(container, "Delete Automation");
   assert.ok(confirmDelete, "deleting asks for confirmation first");
-  await act(async () => { Simulate.click(confirmDelete!); });
+  await act(async () => { fireDomEvent.click(confirmDelete!); });
   await act(async () => { await Promise.resolve(); });
 
   // This screen exposed its empty state as an `h3` before it moved to `Empty`, and heading
@@ -190,13 +190,13 @@ test("the empty state's New Automation creates, even after an edit was cancelled
 
   const wayOut = [...container.querySelectorAll(".empty-action button")][0];
   assert.ok(wayOut, "the empty state offers a way out");
-  await act(async () => { Simulate.click(wayOut as never); });
+  await act(async () => { fireDomEvent.click(wayOut as never); });
 
   const heading = container.querySelector(".automation-editor h3")?.textContent ?? "";
   assert.match(heading, /New Automation/, `the empty state's action opened "${heading}"`);
 
   const save = buttonLabelled(container, "Save Automation");
-  await act(async () => { Simulate.click(save!); });
+  await act(async () => { fireDomEvent.click(save!); });
   await act(async () => { await Promise.resolve(); });
 
   assert.deepEqual(updated, [], "Save must not update an automation the user did not open");
@@ -219,11 +219,11 @@ test("deleting the automation being edited closes the editor", async () => {
   } as unknown as Partial<ApiClient>, <AutomationsView />);
 
   await act(async () => { await Promise.resolve(); });
-  await act(async () => { Simulate.click(buttonLabelled(container, "Edit")!); });
+  await act(async () => { fireDomEvent.click(buttonLabelled(container, "Edit")!); });
   assert.ok(container.querySelector(".automation-editor"), "the editor is open on the automation");
 
-  await act(async () => { Simulate.click(buttonLabelled(container, "Delete")!); });
-  await act(async () => { Simulate.click(buttonLabelled(container, "Delete Automation")!); });
+  await act(async () => { fireDomEvent.click(buttonLabelled(container, "Delete")!); });
+  await act(async () => { fireDomEvent.click(buttonLabelled(container, "Delete Automation")!); });
   await act(async () => { await Promise.resolve(); });
 
   assert.equal(container.querySelector(".automation-editor"), null,
@@ -245,7 +245,7 @@ test("a board emptied by a filter offers to clear the filter, not to create", as
   const machine = container.querySelector("select") as unknown as HTMLSelectElement;
   await act(async () => {
     machine.value = "runner-1";
-    Simulate.change(machine as never, { target: { value: "runner-1" } as never });
+    fireDomEvent.change(machine as never, { target: { value: "runner-1" } as never });
   });
   assert.equal(container.querySelector(".empty"), null, "the filter that matches is not empty either");
 
@@ -254,7 +254,7 @@ test("a board emptied by a filter offers to clear the filter, not to create", as
   const machine2 = container.querySelector("select") as unknown as HTMLSelectElement;
   await act(async () => {
     machine2.value = "runner-2";
-    Simulate.change(machine2 as never, { target: { value: "runner-2" } as never });
+    fireDomEvent.change(machine2 as never, { target: { value: "runner-2" } as never });
   });
 
   const title = container.querySelector(".empty-title")?.textContent ?? "";
@@ -262,7 +262,7 @@ test("a board emptied by a filter offers to clear the filter, not to create", as
   const action = container.querySelector(".empty-action button") as unknown as HTMLButtonElement;
   assert.equal((action.textContent ?? "").trim(), "Clear Filters");
 
-  await act(async () => { Simulate.click(action as never); });
+  await act(async () => { fireDomEvent.click(action as never); });
   assert.equal(created, 0, "clearing a filter is not creating a session");
   assert.equal(container.querySelector(".empty"), null, "and it has to actually put the sessions back");
   await unmount();
@@ -291,7 +291,7 @@ test("a remote instance with no machines is not offered local setup", async () =
   assert.ok(action, "an owner looking at an empty remote instance is still offered a way to add a machine");
   assert.equal((action!.textContent ?? "").trim(), "Connect via SSH");
 
-  await act(async () => { Simulate.click(action as never); });
+  await act(async () => { fireDomEvent.click(action as never); });
   // The local-onboarding dialog names This Machine; the SSH dialog does not.
   const opened = container.querySelector(".modal, [role='dialog']");
   assert.ok(opened, "the action opens something");
@@ -309,7 +309,7 @@ test("a genuinely empty board still offers to create", async () => {
   assert.equal(container.querySelector(".empty-title")?.textContent, "No Sessions Yet");
   const action = container.querySelector(".empty-action button") as unknown as HTMLButtonElement;
   assert.equal((action.textContent ?? "").trim(), "New Session");
-  await act(async () => { Simulate.click(action as never); });
+  await act(async () => { fireDomEvent.click(action as never); });
   assert.equal(created, 1);
   await unmount();
 });
@@ -340,7 +340,7 @@ test("an older poll cannot close an editor opened from a newer one", async () =>
   await act(async () => { await nextPoll(); });
   const edits = [...container.querySelectorAll("button")].filter((b) => (b.textContent ?? "").trim() === "Edit");
   assert.equal(edits.length, 2, "both automations render before the stale poll lands");
-  await act(async () => { Simulate.click(edits[1]!); });
+  await act(async () => { fireDomEvent.click(edits[1]!); });
   assert.ok(container.querySelector(".automation-editor"), "the newer automation is open for editing");
 
   // Now the stale first poll finishes, carrying the one-item list.
@@ -371,9 +371,9 @@ test("a workflow-definition failure cannot keep a deleted automation on screen",
   } as unknown as Partial<ApiClient>, <AutomationsView />);
 
   await act(async () => { await Promise.resolve(); });
-  await act(async () => { Simulate.click(buttonLabelled(container, "Edit")!); });
-  await act(async () => { Simulate.click(buttonLabelled(container, "Delete")!); });
-  await act(async () => { Simulate.click(buttonLabelled(container, "Delete Automation")!); });
+  await act(async () => { fireDomEvent.click(buttonLabelled(container, "Edit")!); });
+  await act(async () => { fireDomEvent.click(buttonLabelled(container, "Delete")!); });
+  await act(async () => { fireDomEvent.click(buttonLabelled(container, "Delete Automation")!); });
   await act(async () => { await Promise.resolve(); });
 
   assert.equal(container.querySelector(".automation-editor"), null,
@@ -399,10 +399,10 @@ test("deleting the edited automation leaves the others alone", async () => {
 
   await act(async () => { await Promise.resolve(); });
   const edits = [...container.querySelectorAll("button")].filter((b) => (b.textContent ?? "").trim() === "Edit");
-  await act(async () => { Simulate.click(edits[1]!); });
+  await act(async () => { fireDomEvent.click(edits[1]!); });
   const deletes = [...container.querySelectorAll("button")].filter((b) => (b.textContent ?? "").trim() === "Delete");
-  await act(async () => { Simulate.click(deletes[1]!); });
-  await act(async () => { Simulate.click(buttonLabelled(container, "Delete Automation")!); });
+  await act(async () => { fireDomEvent.click(deletes[1]!); });
+  await act(async () => { fireDomEvent.click(buttonLabelled(container, "Delete Automation")!); });
   await act(async () => { await Promise.resolve(); });
 
   assert.equal(container.querySelector(".automation-editor"), null, "the edited automation is gone");
@@ -421,13 +421,13 @@ test("a board emptied by archiving still clears its filter on the way out", asyn
   const machine = container.querySelector("select") as unknown as HTMLSelectElement;
   await act(async () => {
     machine.value = "runner-1";
-    Simulate.change(machine as never, { target: { value: "runner-1" } as never });
+    fireDomEvent.change(machine as never, { target: { value: "runner-1" } as never });
   });
   // The only session is archived: nothing unarchived is left, and the filter is still Machine 1.
   await act(async () => { socket.push(snapshot({ sessions: [{ ...session, archived: true } as SessionView] })); });
 
   assert.equal(container.querySelector(".empty-title")?.textContent, "No Sessions Yet");
-  await act(async () => { Simulate.click(container.querySelector(".empty-action button") as never); });
+  await act(async () => { fireDomEvent.click(container.querySelector(".empty-action button") as never); });
   assert.equal(created, 1, "the action still creates");
   const after = container.querySelector("select") as unknown as HTMLSelectElement;
   assert.equal(after.value, "", "and it must not leave a filter on that would hide what it creates");

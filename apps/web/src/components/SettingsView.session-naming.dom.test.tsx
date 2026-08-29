@@ -1,8 +1,8 @@
+import { fireDomEvent } from "./test-dom-events.js";
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { Simulate } from "react-dom/test-utils";
 import { Window } from "happy-dom";
 import type { SessionNamingMode, SessionNamingSettingsView } from "@wollipog/protocol";
 import { createApiClient } from "../api.js";
@@ -456,7 +456,7 @@ test("Custom Model Endpoint fields stay hidden until selected and API keys remai
     const setInput = async (label: string, value: string) => {
       const input = container.querySelector<HTMLInputElement>(`[aria-label="${label}"]`);
       assert.ok(input);
-      await act(async () => { input.value = value; Simulate.change(input); });
+      await act(async () => { input.value = value; fireDomEvent.change(input); });
     };
     await selectOption(container, "Machine", "Build Machine");
     await setInput("Endpoint", "https://models.example/v1/chat/completions");
@@ -506,7 +506,7 @@ test("editing a saved custom endpoint requires the complete URL and excludes com
   const setInput = async (label: string, value: string) => {
     const input = container.querySelector<HTMLInputElement>(`[aria-label="${label}"]`);
     assert.ok(input);
-    await act(async () => { input.value = value; Simulate.change(input); });
+    await act(async () => { input.value = value; fireDomEvent.change(input); });
   };
   try {
     await act(async () => buttonNamed(container, "Session Naming").click());

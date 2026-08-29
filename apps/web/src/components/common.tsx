@@ -391,7 +391,7 @@ export function Modal({
   );
   const explicitReturnFocusRef = useRef(returnFocusRef);
   explicitReturnFocusRef.current = returnFocusRef;
-  const layerIdRef = useRef<number>();
+  const layerIdRef = useRef<number | undefined>(undefined);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
   if (layerIdRef.current == null) layerIdRef.current = nextModalLayerId++;

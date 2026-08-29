@@ -887,7 +887,7 @@ export function InboxView({
         style={{ height: isMobile ? "100%" : `${ratio * 100}%` }}
         aria-label="Command Inbox"
         aria-hidden={expanded || undefined}
-        {...((expanded ? { inert: "" } : {}) as Record<string, unknown>)}
+        inert={expanded || undefined}
       >
         <div className="inbox-toolbar">
           <div className="inbox-tabs" role="tablist" aria-label="Inbox Groups">

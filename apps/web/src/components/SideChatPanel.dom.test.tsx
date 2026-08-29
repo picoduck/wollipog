@@ -1,8 +1,8 @@
+import { fireDomEvent } from "./test-dom-events.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
-import { Simulate } from "react-dom/test-utils";
 import { Window } from "happy-dom";
 import type { SessionEvent, SessionView, SideChatView } from "@wollipog/protocol";
 import { api } from "../api.js";
@@ -92,7 +92,7 @@ test("side chat starts separately, prompts only the child, and inserts output ex
     const textarea = container.querySelector("textarea") as HTMLTextAreaElement;
     await act(async () => {
       textarea.value = "independent question";
-      Simulate.change(textarea);
+      fireDomEvent.change(textarea);
     });
     const send = Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "Send")!;
     await act(async () => {

@@ -1,8 +1,8 @@
+import { fireDomEvent } from "./test-dom-events.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { Simulate } from "react-dom/test-utils";
 import { Window } from "happy-dom";
 import type { ControlPlaneToUi, RunnerView, SessionEvent, SessionView, SideChatView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
@@ -497,7 +497,7 @@ test("cleanup throwing after accepted steering cannot recover the accepted draft
   try {
     await resolveDraft(draft, "steer once");
     await act(async () => {
-      Simulate.keyDown(fixture.composer, {
+      fireDomEvent.keyDown(fixture.composer, {
         key: "Enter",
         ctrlKey: true,
         metaKey: false,
@@ -552,7 +552,7 @@ test("an accepted submission marker preserves a newer edit made while the prompt
     await act(async () => { sendButton(fixture).click(); });
     await act(async () => {
       fixture.composer.value = "newer local edit";
-      Simulate.change(fixture.composer);
+      fireDomEvent.change(fixture.composer);
     });
     await flushAsyncWork(450);
     await act(async () => { prompt.resolve(undefined as never); });
@@ -641,7 +641,7 @@ test("SessionDetail suppresses deferred hydration after a dirty edit", async () 
     await focusRequestedComposer(fixture);
     await act(async () => {
       fixture.composer.value = "newer local typing";
-      Simulate.change(fixture.composer);
+      fireDomEvent.change(fixture.composer);
     });
     const selectionCount = selections.length;
 
@@ -664,7 +664,7 @@ test("SessionDetail does not restart hydration when a fresh draft-loader identit
     });
     await act(async () => {
       fixture.composer.value = "typing must survive parent renders";
-      Simulate.change(fixture.composer);
+      fireDomEvent.change(fixture.composer);
     });
 
     let replacementLoaderCalls = 0;
@@ -721,13 +721,13 @@ test("SessionDetail suppresses deferred caret restoration during IME composition
     const selections = recordSelections(fixture.composer);
     await focusRequestedComposer(fixture);
     const selectionCount = selections.length;
-    await act(async () => { Simulate.compositionStart(fixture.composer); });
+    await act(async () => { fireDomEvent.compositionStart(fixture.composer); });
 
     await resolveDraft(draft, "saved during composition");
 
     assert.equal(fixture.composer.value, "saved during composition");
     assert.equal(selections.length, selectionCount);
-    await act(async () => { Simulate.compositionEnd(fixture.composer); });
+    await act(async () => { fireDomEvent.compositionEnd(fixture.composer); });
   } finally {
     await unmountFixture(fixture);
   }
@@ -740,7 +740,7 @@ test("SessionDetail invalidates deferred caret restoration after pointer interac
     const selections = recordSelections(fixture.composer);
     await focusRequestedComposer(fixture);
     const selectionCount = selections.length;
-    await act(async () => { Simulate.pointerDown(fixture.composer); });
+    await act(async () => { fireDomEvent.pointerDown(fixture.composer); });
 
     await resolveDraft(draft, "saved after pointer interaction");
 
@@ -768,20 +768,24 @@ test("live turn updates preserve the focused composer, exact draft geometry, and
     assert.ok(fixture.container.querySelector('button[aria-label="Stop Turn"]'));
     await act(async () => {
       fixture.composer.value = "alpha\nbeta\ngamma";
-      Simulate.change(fixture.composer);
+      fireDomEvent.change(fixture.composer);
     });
     fixture.composer.setSelectionRange(2, 11, "backward");
     fixture.composer.scrollTop = 47;
-    await act(async () => { Simulate.select(fixture.composer); });
+    await act(async () => { fireDomEvent.select(fixture.composer); });
+    assert.ok(
+      diagnostics.some((detail) => (detail as { kind?: unknown }).kind === "selection"),
+      "the browser event reaches the composer's React onSelect handler",
+    );
     const original = fixture.composer;
 
     assert.ok(fixture.container.querySelector('button[aria-label="Send"]'),
       "the first character swaps Stop for Send without replacing the composer");
-    await act(async () => { Simulate.compositionStart(fixture.composer); });
+    await act(async () => { fireDomEvent.compositionStart(fixture.composer); });
     await fixture.pushEvent({ kind: "agent_message", text: "streamed update", messageId: "m-1" });
     await fixture.pushEvent({ kind: "tool_call", toolCallId: "tool-1", title: "Background Tool", status: "running" });
     await fixture.pushSession({ updatedAt: 5, status: "idle", activeTurnId: undefined });
-    await act(async () => { Simulate.compositionEnd(fixture.composer); });
+    await act(async () => { fireDomEvent.compositionEnd(fixture.composer); });
 
     assert.equal(fixture.container.querySelector(".composer-input"), original, "live updates must not remount the textarea");
     assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer);
@@ -870,10 +874,10 @@ test("focus recovery distinguishes background loss from explicit transfer and IM
 
     await act(async () => {
       fixture.composer.focus();
-      Simulate.compositionStart(fixture.composer);
+      fireDomEvent.compositionStart(fixture.composer);
       fixture.composer.blur();
       flushFrames();
-      Simulate.compositionEnd(fixture.composer);
+      fireDomEvent.compositionEnd(fixture.composer);
       flushFrames();
     });
     assert.notEqual(fixture.composer.ownerDocument.activeElement, fixture.composer,
@@ -1119,7 +1123,7 @@ test("the Enter pair swaps as a unit and a stored choice beats the device class"
   const seed = async (text: string) => {
     await act(async () => {
       fixture.composer.value = text;
-      Simulate.change(fixture.composer);
+      fireDomEvent.change(fixture.composer);
     });
   };
   const priorMatchMedia = domWindow.matchMedia;
@@ -1219,13 +1223,13 @@ test("an immediate same-session remount restores exact selection direction and t
       draft.resolve(null);
       await draft.promise;
       fixture.composer.value = "multiline remount draft";
-      Simulate.change(fixture.composer);
+      fireDomEvent.change(fixture.composer);
     });
     await act(async () => {
       fixture.composer.focus();
       fixture.composer.setSelectionRange(3, 16, "backward");
       fixture.composer.scrollTop = 61;
-      Simulate.select(fixture.composer);
+      fireDomEvent.select(fixture.composer);
     });
 
     const persisted = deferred<ComposerDraft | null>();
@@ -1260,11 +1264,11 @@ test("a mismatched hydration expires the remount lease before programmatic histo
       draft.resolve(null);
       await draft.promise;
       fixture.composer.value = rememberedText;
-      Simulate.change(fixture.composer);
+      fireDomEvent.change(fixture.composer);
       fixture.composer.focus();
       fixture.composer.setSelectionRange(2, 5, "backward");
       fixture.composer.scrollTop = 37;
-      Simulate.select(fixture.composer);
+      fireDomEvent.select(fixture.composer);
     });
 
     const persisted = deferred<ComposerDraft | null>();
@@ -1348,6 +1352,12 @@ test("SessionDetail prepares Edit & Resend text with accessible focus and an end
   const fixture = await mountFixture(draft, {
     mainEventPayloads: [{ kind: "user_message", text: "original prompt", images: [] }],
   });
+  const focusTransitions: unknown[] = [];
+  const onFocusIn = (event: unknown) => {
+    const target = (event as { target?: unknown }).target;
+    if (target) focusTransitions.push(target);
+  };
+  domWindow.document.addEventListener("focusin", onFocusIn);
   try {
     await focusRequestedComposer(fixture);
     await resolveDraft(draft, "draft to replace");
@@ -1367,7 +1377,7 @@ test("SessionDetail prepares Edit & Resend text with accessible focus and an end
     assert.equal(dialogInput.labels?.[0]?.textContent, "Message");
     await act(async () => {
       dialogInput.value = "edited prompt";
-      Simulate.change(dialogInput);
+      fireDomEvent.change(dialogInput);
     });
     const load = [...fixture.container.querySelectorAll("button")]
       .find((button) => button.textContent === "Load into Composer") as HTMLButtonElement | undefined;
@@ -1375,17 +1385,34 @@ test("SessionDetail prepares Edit & Resend text with accessible focus and an end
     await act(async () => {
       load.focus();
       load.click();
+    });
+    // Exercise the ordering that used to lose: a frame can run before Modal's zero-delay
+    // restoration timer. The explicit return-focus owner must make either ordering converge.
+    await act(async () => { flushFrames(); });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      flushFrames();
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
     assert.equal(fixture.container.querySelector(".message-action-input"), null);
     assert.equal(fixture.composer.value, "edited prompt");
-    assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer);
+    assert.equal(
+      fixture.composer.ownerDocument.activeElement,
+      fixture.composer,
+      "loading the edited message leaves final focus in the composer",
+    );
+    assert.equal(
+      focusTransitions.at(-1) === fixture.composer,
+      true,
+      "loading the edited message leaves focus in the composer",
+    );
     assert.deepEqual(
       [fixture.composer.selectionStart, fixture.composer.selectionEnd],
       [fixture.composer.value.length, fixture.composer.value.length],
     );
   } finally {
+    domWindow.document.removeEventListener("focusin", onFocusIn);
     await unmountFixture(fixture);
   }
 });

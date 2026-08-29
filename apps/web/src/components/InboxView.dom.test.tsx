@@ -1,8 +1,8 @@
+import { fireDomEvent } from "./test-dom-events.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
-import { Simulate } from "react-dom/test-utils";
 import { Window } from "happy-dom";
 import type { ControlPlaneToUi, ProjectView, SessionReminderView, SessionView, UiSnapshotMessage } from "@wollipog/protocol";
 import type { ViewNavigation } from "../navigation.js";
@@ -681,9 +681,9 @@ test("a two-client reminder upsert preserves the open Inbox Snooze draft and foc
   const exact = container.querySelector<HTMLInputElement>("#snooze-exact")!;
   await act(async () => {
     expression.value = "today at 3:30 pm";
-    Simulate.change(expression);
+    fireDomEvent.change(expression);
     exact.value = "2099-04-05T06:30";
-    Simulate.change(exact);
+    fireDomEvent.change(exact);
     [...container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
       .find((button) => button.textContent?.includes("Regardless"))!.click();
     exact.focus();

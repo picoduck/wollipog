@@ -1,8 +1,8 @@
+import { fireDomEvent } from "./test-dom-events.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { Simulate } from "react-dom/test-utils";
 import { Window } from "happy-dom";
 import type {
   ControlPlaneToUi,
@@ -443,7 +443,7 @@ test("a reader away from the tail keeps their place through recovery and its com
   try {
     // The reader scrolls up to re-read earlier activity: wheel-up pauses following.
     await act(async () => {
-      Simulate.wheel(fixture.scroller, { deltaY: -40 });
+      fireDomEvent.wheel(fixture.scroller, { deltaY: -40 });
     });
     await flushAsyncWork();
     assert.equal(followChipState(fixture), "paused");
