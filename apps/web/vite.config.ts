@@ -43,21 +43,20 @@ function excludePwaAssetsFromDesktop(): Plugin {
 // talks to it directly over CORS + websocket; override via VITE_CONTROL_PLANE_*.
 export default defineConfig(({ mode }) => ({
   plugins: [react(), excludePwaAssetsFromDesktop()],
-  build: mode === "same-origin-dev"
-    ? { emptyOutDir: false }
-    : {
-      target: WOLLIPOG_WEBVIEW_TARGETS,
-      cssTarget: WOLLIPOG_WEBVIEW_TARGETS,
-      ...(mode === "production-e2e" ? {
-        outDir: "dist-e2e",
-        rolldownOptions: {
-          input: {
-            timelineReflow: resolve(appRoot, "timeline-reflow-e2e.html"),
-            settingsRows: resolve(appRoot, "settings-rows-e2e.html"),
-          },
+  build: {
+    target: WOLLIPOG_WEBVIEW_TARGETS,
+    cssTarget: WOLLIPOG_WEBVIEW_TARGETS,
+    ...(mode === "same-origin-dev" ? { emptyOutDir: false } : {}),
+    ...(mode === "production-e2e" ? {
+      outDir: "dist-e2e",
+      rolldownOptions: {
+        input: {
+          timelineReflow: resolve(appRoot, "timeline-reflow-e2e.html"),
+          settingsRows: resolve(appRoot, "settings-rows-e2e.html"),
         },
-      } : {}),
-    },
+      },
+    } : {}),
+  },
   server: {
     host: "127.0.0.1",
     port: 5173,

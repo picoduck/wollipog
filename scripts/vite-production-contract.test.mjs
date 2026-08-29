@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import test from "node:test";
 import viteConfig, { WOLLIPOG_WEBVIEW_TARGETS } from "../apps/web/vite.config.ts";
 
@@ -22,10 +21,44 @@ test("Vite production output pins the supported desktop webview floor", () => {
   const config = viteConfig({ command: "build", mode: "production", isSsrBuild: false, isPreview: false });
   assert.deepEqual(config.build?.target, WOLLIPOG_WEBVIEW_TARGETS);
   assert.deepEqual(config.build?.cssTarget, WOLLIPOG_WEBVIEW_TARGETS);
+  assert.equal(config.build?.outDir, undefined);
+
+  const sameOriginConfig = viteConfig({ command: "build", mode: "same-origin-dev", isSsrBuild: false, isPreview: false });
+  assert.deepEqual(sameOriginConfig.build?.target, WOLLIPOG_WEBVIEW_TARGETS);
+  assert.deepEqual(sameOriginConfig.build?.cssTarget, WOLLIPOG_WEBVIEW_TARGETS);
+  assert.equal(sameOriginConfig.build?.emptyOutDir, false);
+
+  const e2eConfig = viteConfig({ command: "build", mode: "production-e2e", isSsrBuild: false, isPreview: false });
+  assert.deepEqual(e2eConfig.build?.target, WOLLIPOG_WEBVIEW_TARGETS);
+  assert.deepEqual(e2eConfig.build?.cssTarget, WOLLIPOG_WEBVIEW_TARGETS);
+  assert.equal(e2eConfig.build?.outDir, "dist-e2e");
+  assert.deepEqual(Object.keys(e2eConfig.build?.rolldownOptions?.input ?? {}).sort(), [
+    "settingsRows",
+    "timelineReflow",
+  ]);
+});
+
+test("Vite production browser coverage cannot silently lose a selected check", () => {
+  const timelineSpec = readFileSync(new URL("../apps/web/e2e/timeline-reflow.spec.ts", import.meta.url), "utf8");
+  const settingsSpec = readFileSync(new URL("../apps/web/e2e/settings-rows.spec.ts", import.meta.url), "utf8");
+  const markers = `${timelineSpec}\n${settingsSpec}`.match(/@production/g) ?? [];
+  const requiredDeclarations = [
+    [timelineSpec, "continuous panel resizing keeps long wrapped rows disjoint in every painted frame @production"],
+    [timelineSpec, "mounting and unmounting a preceding notice preserves the anchor in every painted frame @production"],
+    [timelineSpec, "mounting and unmounting a preceding notice during a list rerender preserves the anchor in every painted frame @production"],
+    [settingsSpec, "every affordance is painted in ${theme} @production"],
+    [settingsSpec, "the reduced topology production can render is covered too @production"],
+  ];
+
+  // Five tagged declarations discover six tests because the painted-affordance case runs in two themes.
+  assert.equal(markers.length, 5);
+  for (const [source, title] of requiredDeclarations) {
+    assert.ok(source.includes(title), `missing required production browser declaration: ${title}`);
+  }
 });
 
 test("Vite native build bindings cover every supported desktop release target", () => {
-  const lockfile = readFileSync(resolve(process.cwd(), "pnpm-lock.yaml"), "utf8");
+  const lockfile = readFileSync(new URL("../pnpm-lock.yaml", import.meta.url), "utf8");
 
   for (const target of SUPPORTED_NATIVE_TARGETS) {
     assert.match(
