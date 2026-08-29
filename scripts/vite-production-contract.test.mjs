@@ -41,6 +41,7 @@ test("Vite production output pins the supported desktop webview floor", () => {
 test("Vite production browser coverage cannot silently lose a selected check", () => {
   const timelineSpec = readFileSync(new URL("../apps/web/e2e/timeline-reflow.spec.ts", import.meta.url), "utf8");
   const settingsSpec = readFileSync(new URL("../apps/web/e2e/settings-rows.spec.ts", import.meta.url), "utf8");
+  const productionConfig = readFileSync(new URL("../playwright.production.config.ts", import.meta.url), "utf8");
   const markers = `${timelineSpec}\n${settingsSpec}`.match(/@production/g) ?? [];
   const requiredDeclarations = [
     [timelineSpec, "continuous panel resizing keeps long wrapped rows disjoint in every painted frame @production"],
@@ -55,6 +56,16 @@ test("Vite production browser coverage cannot silently lose a selected check", (
   for (const [source, title] of requiredDeclarations) {
     assert.ok(source.includes(title), `missing required production browser declaration: ${title}`);
   }
+  assert.match(
+    productionConfig,
+    /testMatch:\s*\["timeline-reflow\.spec\.ts",\s*"settings-rows\.spec\.ts"\]/,
+    "production browser selection must retain both validated fixtures",
+  );
+  assert.match(
+    productionConfig,
+    /grep:\s*\/@production\//,
+    "production browser selection must retain the exact tag filter",
+  );
 });
 
 test("Vite native build bindings cover every supported desktop release target", () => {
