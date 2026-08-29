@@ -311,7 +311,9 @@ for (const viewport of [
     await expect(topbar.getByRole("button", { name: "Back to Inbox" })).toBeVisible();
     await expect(topbar.getByRole("heading", { name: "Alpha Session", exact: true })).toBeVisible();
     await expect(topbar.getByRole("button", { name: /^Open/ })).toHaveCount(0);
-    await expect(topbar.getByRole("button", { name: "Settings" })).toBeVisible();
+    // Settings left the phone topbar for the rail's More sheet (#458). The compact geometry this
+    // test pins is now anchored on the trailing pane control instead of the gear.
+    await expect(topbar.getByRole("button", { name: "Settings" })).toHaveCount(0);
     await expect(header.locator(".back, .detail-crumbs, .editor-select")).toHaveCount(0);
     await expect(header.getByLabel("Activity: Awaiting Prompt")).toHaveCount(1);
     await expect(header.getByLabel("Changes: Ready for Review")).toHaveCount(1);
@@ -382,17 +384,19 @@ for (const viewport of [
     });
     const shellMetrics = await topbar.evaluate((element) => {
       const topbarBox = element.getBoundingClientRect();
-      const settings = element.querySelector('[aria-label="Settings"]')!.getBoundingClientRect();
       const back = element.querySelector('[aria-label="Back to Inbox"]')!.getBoundingClientRect();
       const title = element.querySelector("h1")!.getBoundingClientRect();
       const controls = [...element.querySelectorAll(".topbar-mobile-controls button")]
         .map((node) => node.getBoundingClientRect());
+      const trailingControl = controls.reduce((furthest, box) => box.right > furthest.right ? box : furthest);
       const style = getComputedStyle(element.querySelector("h1")!);
       return {
         top: topbarBox.top,
         bottom: topbarBox.bottom,
         right: topbarBox.right,
-        settings: { width: settings.width, height: settings.height, right: settings.right },
+        trailingControl: {
+          width: trailingControl.width, height: trailingControl.height, right: trailingControl.right,
+        },
         back: { width: back.width, height: back.height, right: back.right },
         title: { x: title.x, right: title.right, width: title.width },
         titleFontSize: Number.parseFloat(style.fontSize),
@@ -408,8 +412,8 @@ for (const viewport of [
     expect(shellMetrics.titleFontSize).toBeLessThanOrEqual(14);
     expect(shellMetrics.back.width).toBeGreaterThanOrEqual(36);
     expect(shellMetrics.back.height).toBeGreaterThanOrEqual(36);
-    expect(shellMetrics.settings.width).toBe(metrics.share.width);
-    expect(shellMetrics.settings.height).toBe(metrics.share.height);
+    expect(shellMetrics.trailingControl.width).toBe(metrics.share.width);
+    expect(shellMetrics.trailingControl.height).toBe(metrics.share.height);
     expect(metrics.share.width).toBe(metrics.moreActions.width);
     expect(metrics.share.height).toBe(metrics.moreActions.height);
     expect(metrics.shareIcon.width).toBe(15);
@@ -417,10 +421,10 @@ for (const viewport of [
     expect(metrics.moreActionsIcon.width).toBe(15);
     expect(metrics.moreActionsIcon.height).toBe(15);
     for (const control of shellMetrics.controls) {
-      expect(control.width).toBe(shellMetrics.settings.width);
-      expect(control.height).toBe(shellMetrics.settings.height);
+      expect(control.width).toBe(shellMetrics.trailingControl.width);
+      expect(control.height).toBe(shellMetrics.trailingControl.height);
     }
-    expect(shellMetrics.settings.right).toBeCloseTo(shellMetrics.furthestControlRight, 0);
+    expect(shellMetrics.trailingControl.right).toBeCloseTo(shellMetrics.furthestControlRight, 0);
     expect(shellMetrics.title.x).toBeGreaterThanOrEqual(shellMetrics.back.right);
     expect(shellMetrics.title.right).toBeLessThanOrEqual(shellMetrics.controlsLeft);
     expect(shellMetrics.title.width).toBeGreaterThanOrEqual(72);

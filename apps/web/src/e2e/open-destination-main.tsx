@@ -152,9 +152,11 @@ function Harness() {
   return (
     <header className="topbar">
       <h1>Destination Fixture</h1>
+      {/* The instance switcher alone: Settings moved into the rail's More sheet (#458), so a
+          fixture that still renders a header gear measures a phone header production no longer
+          builds. */}
       <div className="topbar-actions topbar-mobile-controls">
         <button type="button" className="instance-selector-trigger" aria-label="Instance">I</button>
-        <button type="button" className="settings-trigger" aria-label="Settings">S</button>
       </div>
       <div className="topbar-actions"><SessionActions /></div>
     </header>

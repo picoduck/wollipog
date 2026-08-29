@@ -73,6 +73,11 @@ export function Rail({
   settingsControl?: ReactNode;
 }) {
   const selected = selectedRailView(view);
+  // Settings rides in the sheet on a phone but is deliberately absent from GLOBAL_VIEW_ITEMS: that
+  // array numbers the desktop rail AND its bare-digit shortcuts, so adding an entry would rebind
+  // every later destination and render a second Settings row beside the gear (see navigation.ts).
+  // It is therefore tracked on its own rather than through selectedRailView.
+  const settingsSelected = view.name === "settings";
   const isMobile = useIsMobile();
   const [moreOpen, setMoreOpen] = useState(false);
   const more = useAccessibleMenu(moreOpen, setMoreOpen, "rail-more-menu");
@@ -110,10 +115,25 @@ export function Rail({
     focusInsideRailRef.current = false;
     if (moreOpen) more.close(false);
     if (!hadFocus) return;
+    // Settings has no rail-item on either side of the crossing, so the destination fallback has
+    // nothing active to match and dropped focus on Inbox — a user who rotated a phone into
+    // landscape while standing in Settings landed on a page they had not opened. The desktop gear
+    // is the same page, so it is the correct survivor.
+    //
+    // Tried one selector at a time, NOT as a comma list: querySelector returns the first match in
+    // DOCUMENT order, not the first selector that matches. `.rail-destinations` precedes both
+    // `.rail-settings` and any active item, so a list silently resolved to the first destination
+    // and the preference expressed by the ordering never applied.
+    const survivors = settingsSelected
+      ? [".rail-settings .settings-trigger", ".rail-destinations .rail-item"]
+      : [".rail-destinations .rail-item.active", ".rail-destinations .rail-item"];
     window.requestAnimationFrame(() => {
-      document.querySelector<HTMLElement>(".rail-destinations .rail-item.active, .rail-destinations .rail-item")?.focus();
+      for (const selector of survivors) {
+        const target = document.querySelector<HTMLElement>(selector);
+        if (target) return target.focus();
+      }
     });
-  }, [isMobile, moreOpen, more]);
+  }, [isMobile, moreOpen, more, settingsSelected]);
 
   // Filtered before the mobile split so a hidden experiment is absent from BOTH the primary bar
   // and the More sheet. The Ctrl+N numbers stay anchored to the canonical list below, so hiding
@@ -129,11 +149,6 @@ export function Rail({
   const overflowItems = isMobile
     ? enabledItems.filter((item) => !MOBILE_PRIMARY_VIEWS.includes(item.name))
     : [];
-  // Settings rides in the sheet on a phone but is deliberately absent from GLOBAL_VIEW_ITEMS: that
-  // array numbers the desktop rail AND its bare-digit shortcuts, so adding an entry would rebind
-  // every later destination and render a second Settings row beside the gear (see navigation.ts).
-  // It is therefore tracked on its own rather than through selectedRailView.
-  const settingsSelected = view.name === "settings";
   // A destination hidden behind More still has to read as current, or the bar looks like nothing
   // is selected while the user is standing on Usage — or, now, in Settings.
   const overflowSelected = settingsSelected || overflowItems.some((item) => item.name === selected);

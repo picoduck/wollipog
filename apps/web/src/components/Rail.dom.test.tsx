@@ -348,3 +348,65 @@ test("the phone More trigger reads as current on the Settings route and the row 
   }
 });
 
+
+test("crossing to desktop from the Settings row hands focus to the desktop gear", async () => {
+  // Settings has no rail-item on either side of the crossing, so the destination selector had
+  // nothing active to match and dropped focus on Inbox — rotating a phone into landscape while
+  // standing in Settings landed the user on a page they had not opened.
+  let phone = true;
+  const prior = domWindow.matchMedia;
+  domWindow.matchMedia = ((query: string) => ({
+    matches: phone,
+    media: query,
+    onchange: null,
+    addEventListener() {},
+    removeEventListener() {},
+    addListener() {},
+    removeListener() {},
+    dispatchEvent: () => false,
+  })) as never;
+
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const render = () => act(async () => {
+    root.render(
+      <Rail
+        view={{ name: "settings", section: "network" }}
+        blockedCount={0}
+        stalledCount={0}
+        onlineConnections={0}
+        onNavigate={() => undefined}
+        settingsControl={<button type="button" className="settings-trigger">Settings</button>}
+      />,
+    );
+  });
+
+  try {
+    await render();
+    await act(async () => {
+      (container.querySelector(".rail-more-trigger") as unknown as HTMLButtonElement).click();
+    });
+    const row = container.querySelector(".rail-more-settings") as unknown as HTMLAnchorElement;
+    await act(async () => { row.focus(); });
+    // Identity, never assert.equal: a failed deep-diff of two DOM nodes serialises the whole tree
+    // and takes the runner out with it.
+    assert.ok(domWindow.document.activeElement === (row as never), "the sheet row owns focus first");
+
+    phone = false;
+    await act(async () => { domWindow.dispatchEvent(new domWindow.Event("resize") as never); });
+    await render();
+    // The handoff is deferred to a frame, so let one elapse before reading focus.
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+
+    const gear = container.querySelector(".rail-settings .settings-trigger");
+    assert.ok(gear, "the desktop layout mounts the gear");
+    const focused = domWindow.document.activeElement as unknown as Element | null;
+    assert.ok(focused === (gear as never),
+      `focus must land on the same page, not on the first destination — got ${focused?.className ?? "nothing"}`);
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+    domWindow.matchMedia = prior;
+  }
+});
