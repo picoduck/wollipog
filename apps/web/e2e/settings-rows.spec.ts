@@ -512,7 +512,7 @@ function parseShadows(value: string, box: { width: number; height: number }): { 
 const PIXELS = { threshold: 0.1, animations: "disabled" } as const;
 
 for (const theme of THEMES) {
-  test(`every affordance is painted in ${theme}`, async ({ page }) => {
+  test(`every affordance is painted in ${theme} @production`, async ({ page }) => {
     // Every row in the registry, each on the section that owns it. The nav row's leading icon is in
     // here because nothing else looks at it: `.ui-row-icon { opacity: 0 }` takes it off the
     // production Keyboard Shortcuts row and every other assertion stays green.
@@ -690,7 +690,7 @@ for (const theme of THEMES) {
  * notification rows always present in the fixture, `.ui-row-switch:only-child` under Alerts was a
  * selector that matched a real production surface and nothing here.
  */
-test("the reduced topology production can render is covered too", async ({ page }) => {
+test("the reduced topology production can render is covered too @production", async ({ page }) => {
   await useHarness(page, "dark", { topology: "minimal", section: "notifications" });
   await expect(page.locator(".settings-options .ui-row"), "Desktop Alerts must be the only notification row")
     .toHaveCount(1);

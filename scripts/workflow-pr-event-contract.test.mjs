@@ -214,6 +214,11 @@ test("CI validates production builds and caches the pinned Playwright browser", 
   );
   assert.match(
     ci,
+    /^      - name: Rendered Production Browser Smoke\r?\n        run: pnpm test:e2e:production$/m,
+    "CI must render the built Timeline and Settings fixtures through the production preview server",
+  );
+  assert.match(
+    ci,
     /^      - name: Validate Runner Bundle\r?\n        run: pnpm --filter @wollipog\/runner exec node scripts\/build-binary\.mjs --bundle-only$/m,
     "CI must exercise the runner esbuild bundle",
   );

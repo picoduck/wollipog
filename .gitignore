@@ -3,6 +3,7 @@ node_modules/
 
 # build output
 dist/
+dist-e2e/
 *.tsbuildinfo
 
 # Playwright end-to-end artifacts

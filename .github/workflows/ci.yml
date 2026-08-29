@@ -72,6 +72,9 @@ jobs:
       - name: Validate Web Production Build
         run: pnpm --filter @wollipog/web build
 
+      - name: Rendered Production Browser Smoke
+        run: pnpm test:e2e:production
+
       # esbuild-only pass (build-binary.mjs --bundle-only): proves the runner and its
       # dependencies still bundle into one CJS file. Skips SEA/postject packaging, so no
       # rustc or target triple is needed here.
