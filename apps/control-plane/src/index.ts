@@ -698,11 +698,12 @@ app.addHook("onResponse", async (req, reply) => {
 // the device-auth gate above.
 const webDist = resolveWebDist();
 if (webDist) {
-  // `allowedPath` refuses EVERY spelling of the entry document (`/INDEX.HTML`, `//index.html`,
+  // `allowedPath` refuses every routable spelling of the entry document (`/INDEX.HTML`,
   // `/./index.html`, `/index.html/` …). An explicit `/index.html` route only beats the wildcard
   // for that exact string; the rest would otherwise be served raw off disk — unmarked — and a
   // phone opening one would point its API calls at itself. Refused paths fall through to the
-  // notFound handler, which renders the marked shell.
+  // notFound handler, which renders the marked shell. Fastify rejects an authority-form-looking
+  // `//index.html` before routing, which is also safe because no entry-document bytes are served.
   app.register(fastifyStatic, {
     root: webDist,
     prefix: "/",
