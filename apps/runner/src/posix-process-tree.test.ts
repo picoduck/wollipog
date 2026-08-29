@@ -51,7 +51,7 @@ test("marker scan work scales with generations rather than boundary count", asyn
     new Set([root.pid]),
     new Set([ownerB.pid]),
     new Set([otherRunner.pid]),
-  ], "each boundary observes only its exact session or runner marker");
+  ], "each exact marker remains distinguishable in the shared snapshot");
   assert.equal(listCalls, 1, "one process-table enumeration serves every boundary in a generation");
   assert.equal(markerCalls, 1, "one marker scan serves every boundary in a generation");
 
@@ -61,7 +61,7 @@ test("marker scan work scales with generations rather than boundary count", asyn
 });
 
 test("marker snapshots fail closed when a process exits during scanning", {
-  skip: process.platform === "win32" ? "POSIX-only behavior" : false,
+  skip: process.platform !== "linux" ? "requires Linux procfs environment reads" : false,
 }, async () => {
   const exited = {
     pid: Number.MAX_SAFE_INTEGER,
@@ -124,6 +124,30 @@ function scriptedRuntime(
     now: () => now,
   };
 }
+
+test("marker-backed boundaries isolate exact session and runner markers", async () => {
+  const owner = {};
+  const ownerB = { pid: 101, ppid: 1, state: "S", startedAt: "owner-b-start" };
+  const otherRunner = { pid: 102, ppid: 1, state: "S", startedAt: "other-runner-start" };
+  const runtime = scriptedRuntime([
+    processTable(root, ownerB, otherRunner),
+    processTable(root),
+    processTable(),
+    processTable(),
+  ]);
+  runtime.listMarkers = async () => new Map([
+    ["owner-a", new Set([root.pid])],
+    ["owner-b", new Set([ownerB.pid])],
+    ["other-runner", new Set([otherRunner.pid])],
+  ]);
+  const boundary = new PosixProcessBoundary(root.pid, owner, "owner-a", runtime);
+
+  assert.equal(await boundary.terminate(), true);
+  assert.ok(runtime.signals.some(([pid]) => pid === root.pid), "the exact owner marker is signaled");
+  assert.equal(runtime.signals.some(([pid]) => pid === ownerB.pid), false, "another session remains isolated");
+  assert.equal(runtime.signals.some(([pid]) => pid === otherRunner.pid), false, "another runner remains isolated");
+  assert.equal(terminatePosixProcessBoundaries(owner).length, 0);
+});
 
 async function assertRetryableFailure(
   firstAttempt: ProcessStep[],
