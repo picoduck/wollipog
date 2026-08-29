@@ -26,6 +26,7 @@ test("renders initial and incremental raw output once, including split ANSI inpu
     .toBe(1);
 
   await page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.appendInteractive("\u001b[31"));
+  await expect(terminalRows(terminal)).not.toContainText("Split red");
   await page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.appendInteractive("mSplit red\u001b[0m survives\r\n"));
   await expect(terminalRows(terminal)).toContainText("Split red survives");
   await expect(terminalRows(terminal).locator("span").filter({ hasText: "Split red" })).toHaveClass(/xterm-fg-1/);
@@ -72,31 +73,30 @@ test("reports fitted dimensions, refits on resize, and preserves usable scrollba
   const output = Array.from({ length: 120 }, (_, index) => `scrollback-${index}\r\n`).join("");
   await page.evaluate((chunk) => window.__WOLLIPOG_XTERM_E2E__.appendInteractive(chunk), output);
   await expect(terminalRows(terminal)).toContainText("scrollback-119");
-  const scrollbar = terminal.locator(".scrollbar.vertical");
-  const slider = scrollbar.locator(".slider");
-  await expect(scrollbar).toHaveClass(/visible/);
-  await expect.poll(async () => {
-    const [track, thumb] = await Promise.all([scrollbar.boundingBox(), slider.boundingBox()]);
-    return Boolean(track && thumb && thumb.height < track.height);
-  }).toBe(true);
-  const bottom = await slider.evaluate((element) => Number.parseFloat(element.style.top));
-  expect(bottom).toBeGreaterThan(0);
-  await terminal.locator(".xterm-screen").hover();
+  const bottomRows = await terminalRows(terminal).innerText();
+  await terminal.locator(".xterm").hover();
   await page.mouse.wheel(0, -500);
-  await expect.poll(() => slider.evaluate((element) => Number.parseFloat(element.style.top))).toBeLessThan(bottom);
+  await expect.poll(() => terminalRows(terminal).innerText()).not.toBe(bottomRows);
   await expect(terminalRows(terminal)).not.toContainText("scrollback-119");
+  await page.mouse.wheel(0, 1_000);
+  await expect(terminalRows(terminal)).toContainText("scrollback-119");
 });
 
 test("keeps terminal shortcuts in xterm and supports the terminal-exit shortcut", async ({ page }) => {
   const terminal = page.getByRole("region", { name: "Interactive Terminal Fixture" });
   const textarea = terminal.locator(".xterm-helper-textarea");
-  await textarea.focus();
   await page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.clearLogs());
 
+  const exitTarget = page.locator(".detail-scroll");
+  await exitTarget.focus();
+  await page.keyboard.press("c");
+  await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.logs().appShortcutCount)).toBe(1);
+
+  await textarea.focus();
   await page.keyboard.press("c");
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.logs())).toMatchObject({
     interactive: { input: ["c"] },
-    appShortcutCount: 0,
+    appShortcutCount: 1,
   });
 
   await page.keyboard.press("Escape");

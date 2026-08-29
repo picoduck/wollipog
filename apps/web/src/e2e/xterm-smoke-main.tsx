@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
+import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import { ShellTerminal } from "../components/ShellTerminal.js";
 import { installTerminalExitBoundary } from "../terminal-focus.js";
@@ -62,7 +63,11 @@ declare global {
 }
 
 function appendStream(setStream: React.Dispatch<React.SetStateAction<StreamState>>, chunk: string): void {
-  setStream((current) => ({ text: current.text + chunk, total: current.total + chunk.length }));
+  // Keep each fake transport delivery as one distinct React commit. The production component's
+  // delta effect can then prove that xterm accepts escape sequences split across separate writes.
+  flushSync(() => {
+    setStream((current) => ({ text: current.text + chunk, total: current.total + chunk.length }));
+  });
 }
 
 function Fixture() {
