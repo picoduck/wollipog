@@ -557,7 +557,11 @@ export class AcpClient {
         sessionId: this.sessionId,
         prompt: content,
       })) as PromptResponse;
-      return res.stopReason as StopReason;
+      const stopReason = res.stopReason as StopReason;
+      // ACP publishes response text only as chunks. Mirror the native streaming drivers' durable,
+      // content-free completion fence so transcript consumers can settle the last text item.
+      if (stopReason === "end_turn") this.ev.onEvent({ kind: "agent_response_completed" });
+      return stopReason;
     } finally {
       // User-write barriers exist only to reject stale notifications racing the write/next turn.
       this.modeBarrier = null;

@@ -4,6 +4,7 @@ import {
   groupTimeline,
   SubagentTreeProjector,
   timelineBoundaryKey,
+  timelineItemIsStreaming,
   timelineSnapshotDelta,
   type TimelineGroup,
   type TimelineItem,
@@ -1373,9 +1374,7 @@ const TimelineRow = memo(function TimelineRow({
   questionContext?: TimelineQuestionContext;
 }) {
   const timingDescriptionId = useId();
-  const { sessionActive } = useContext(TimelineClockContext);
-  const mediaSettled = !sessionActive ||
-    ((item.kind === "agent_message" || item.kind === "agent_thought") && Number.isFinite(item.completedAt));
+  const mediaSettled = !timelineItemIsStreaming(item);
   switch (item.kind) {
     case "checkpoint":
       // Thin turn divider; the Rewind affordance shows on hover (session detail only).

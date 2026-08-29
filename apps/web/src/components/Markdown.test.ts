@@ -73,6 +73,8 @@ test("transcript media labels prefer author text and otherwise omit signed query
   assert.equal(transcriptMediaLabel(signed, "image"), "session capture.png");
   assert.equal(transcriptMediaLabel(signed, "image", signed), "session capture.png");
   assert.equal(transcriptMediaLabel(signed, "image", "Reviewed layout"), "Reviewed layout");
+  assert.equal(transcriptMediaLabel("https://evidence.example/%E2%80%AEreview.png", "image"), "review.png");
+  assert.equal(transcriptMediaLabel("https://evidence.example/%00review.webm", "video"), "review.webm");
   assert.equal(transcriptMediaLabel("not a URL", "video"), "Video");
 });
 
@@ -115,6 +117,16 @@ test("author-provided image alt text remains the media name", () => {
   assert.match(html, /<img class="md-media-image"[^>]*alt="Reviewed Layout"/);
   assert.match(html, /class="md-img-link"[^>]*>🖼 Reviewed Layout<\/a>/);
   assert.doesNotMatch(html, /alt="https:\/\//);
+});
+
+test("an intentionally empty Markdown image alt stays decorative", () => {
+  const html = renderToStaticMarkup(React.createElement(Markdown, {
+    inlineMedia: true,
+    children: "![](https://evidence.example/review.png?signature=redacted)",
+  }));
+
+  assert.match(html, /<img class="md-media-image"[^>]*alt=""/);
+  assert.match(html, /class="md-img-link"[^>]*>🖼 review\.png<\/a>/);
 });
 
 test("inline code stays action-free", () => {

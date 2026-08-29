@@ -282,6 +282,27 @@ test("loaded transcript media survives visibility-only rerenders without remount
   }
 });
 
+test("settled transcript media never regresses when an existing session becomes active again", async () => {
+  const image = "https://evidence.example/review.png?signature=valid";
+  const { container, root } = await renderMarkdown(image, true);
+  try {
+    const loadedImage = container.querySelector("img.md-media-image")!;
+    await act(async () => {
+      loadedImage.dispatchEvent(new domWindow.Event("load") as unknown as Event);
+    });
+
+    await act(async () => {
+      root.render(<Markdown highlightEligible={false} inlineMedia mediaSettled={false}>{image}</Markdown>);
+    });
+
+    assert.equal(container.querySelector("img.md-media-image") === loadedImage, true,
+      "a later session-active transition must not unmount or refetch settled media");
+    assert.equal(loadedImage.getAttribute("data-load-state"), "loaded");
+  } finally {
+    await cleanup(container, root);
+  }
+});
+
 test("a completed signed media URL retries after its streamed unsigned prefix failed", async () => {
   const unsigned = "https://evidence.example/review.png";
   const signed = `${unsigned}?signature=valid`;

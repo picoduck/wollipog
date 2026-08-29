@@ -55,9 +55,9 @@ test("HTTPS transcript media embeds resize virtual rows and failed media leaves 
   expect(imageRequests).toBe(1);
   expect(await mediaRow.evaluate((element) => element.getBoundingClientRect().height)).toBeCloseTo(heightAfter, 0);
 
-  const nextRow = page.locator("[data-virtual-key='item:user_message:3']");
+  const nextRow = page.locator("[data-virtual-key='item:user_message:4']");
   await expect(nextRow).toBeVisible();
-  const geometry = await page.locator("[data-virtual-key='item:agent_message:2'], [data-virtual-key='item:user_message:3']")
+  const geometry = await page.locator("[data-virtual-key='item:agent_message:2'], [data-virtual-key='item:user_message:4']")
     .evaluateAll((rows) => rows.map((row) => row.getBoundingClientRect()).map(({ top, bottom }) => ({ top, bottom })));
   expect(geometry[1]!.top).toBeGreaterThanOrEqual(geometry[0]!.bottom - 0.5);
 });

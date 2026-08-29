@@ -11,6 +11,7 @@ import {
 import {
   publishTimelineSnapshotDelta,
   TimelineBuilder,
+  timelineItemIsStreaming,
   timelineSnapshotDelta,
   type TimelineItem,
 } from "./timeline.js";
@@ -210,9 +211,11 @@ test("incremental projection inspects only changed timeline slots and preserves 
 
   builder.push(event({ kind: "agent_message", text: "top level" }));
   const unrelated = projector.project(builder.snapshot(), context);
-  const unchangedOutput = projector.timeline("agent");
-  assert.equal(unrelated.processedItems, 1, "an append never rescans prior transcript items");
-  assert.equal(unchangedOutput, streamedOutput, "unrelated appends preserve the selected output projection");
+  const settledOutput = projector.timeline("agent");
+  assert.equal(unrelated.processedItems, 2,
+    "a boundary revisits only the open streamed row and the appended transcript item");
+  assert.notEqual(settledOutput, streamedOutput, "settlement publishes the selected row's new generation");
+  assert.equal(timelineItemIsStreaming(settledOutput[0]!), false);
   assert.notEqual(initialOutput, streamedOutput, "a selected streamed update replaces only its output generation");
 });
 
@@ -366,7 +369,7 @@ test("context-only invalidation and cross-session reuse rebuild selected output"
   assert.deepEqual(nextOutput.map((item) => "text" in item ? item.text : ""), ["session B"]);
 });
 
-test("filtered snapshot metadata keeps downstream row projection incremental", () => {
+test("filtered snapshot metadata propagates streamed settlement before a child append", () => {
   let sequence = 0;
   const event = (payload: SessionEventPayload): SessionEvent => ({
     id: ++sequence, sessionId: "rows", seq: sequence, ts: sequence, payload,
@@ -401,11 +404,14 @@ test("filtered snapshot metadata keeps downstream row projection incremental", (
   subagents.project(builder.snapshot(), context);
   const third = subagents.timeline("agent");
   assert.equal(timelineSnapshotDelta(third)?.previous, second);
+  assert.deepEqual(timelineSnapshotDelta(third)?.dirtyIndexes, [0, 1],
+    "the filtered delta includes the settled text row and the new child tool");
   assert.equal(timelineSnapshotDelta(third)?.dirtyHasParentItems, false,
     "the intentionally omitted selected root is not reported as a resolvable parent");
   const appended = rows.project(third, disclosure);
-  assert.equal(appended.incremental, true);
-  assert.equal(appended.processedItems, 1);
+  assert.equal(appended.incremental, false,
+    "a simultaneous text settlement and structural append takes the defensive row rebuild path");
+  assert.equal(appended.processedItems, 2);
 });
 
 test("known zero token usage remains distinct from unavailable usage", () => {

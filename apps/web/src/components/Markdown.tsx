@@ -105,6 +105,7 @@ export type TranscriptMediaKind = "image" | "video";
 
 const TRANSCRIPT_IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 const TRANSCRIPT_VIDEO_EXTENSIONS = new Set([".mp4", ".webm"]);
+const UNSAFE_GENERATED_MEDIA_LABEL = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
 
 /** Classify only HTTPS media paths; query strings and fragments never influence the file type. */
 export function transcriptMediaKind(href: string | undefined): TranscriptMediaKind | null {
@@ -133,9 +134,11 @@ export function transcriptMediaLabel(
     const basename = new URL(href).pathname.split("/").filter(Boolean).at(-1);
     if (basename) {
       try {
-        return decodeURIComponent(basename);
+        const decoded = decodeURIComponent(basename).replace(UNSAFE_GENERATED_MEDIA_LABEL, "").trim();
+        if (decoded) return decoded;
       } catch {
-        return basename;
+        const sanitized = basename.replace(UNSAFE_GENERATED_MEDIA_LABEL, "").trim();
+        if (sanitized) return sanitized;
       }
     }
   } catch {
@@ -144,10 +147,11 @@ export function transcriptMediaLabel(
   return kind === "image" ? "Image" : "Video";
 }
 
-function TranscriptMediaEmbed({ href, kind, label }: {
+function TranscriptMediaEmbed({ href, kind, label, imageAlt }: {
   href: string;
   kind: TranscriptMediaKind;
   label: string;
+  imageAlt?: string;
 }) {
   const [loadState, setLoadState] = useState<"pending" | "loaded" | "failed">("pending");
   if (loadState === "failed") return null;
@@ -166,7 +170,7 @@ function TranscriptMediaEmbed({ href, kind, label }: {
           <img
             className="md-media-image"
             src={href}
-            alt={label}
+            alt={imageAlt ?? label}
             loading="lazy"
             decoding="async"
             data-load-state={loadState}
@@ -278,23 +282,42 @@ export const Markdown = memo(function Markdown({
   }, [children, eligible]);
 
   const rehypePlugins = eligible && highlighted?.text === children ? highlighted.plugins : undefined;
+  // Settlement is monotonic for one streamed document: a later session-active transition must not
+  // hide or refetch media that already loaded. An unrelated replacement starts its own lifecycle.
+  const mediaActivation = useRef({ text: children, enabled: mediaSettled });
+  const previousMedia = mediaActivation.current;
+  if (previousMedia.text !== children) {
+    const continues = children.startsWith(previousMedia.text) || previousMedia.text.startsWith(children);
+    mediaActivation.current = {
+      text: children,
+      enabled: mediaSettled || (continues && previousMedia.enabled),
+    };
+  } else if (mediaSettled && !previousMedia.enabled) {
+    mediaActivation.current = { text: children, enabled: true };
+  }
   // ReactMarkdown uses each renderer function as the React element type. Keep these identities
   // stable across scroll-driven highlightEligible changes so loaded media is updated in place
   // instead of remounting, collapsing its row, and issuing another remote request.
   const components = useMemo<MarkdownComponents>(() => ({
     pre: CodeBlockPre,
     a: ({ href, children }) => (
-      <MarkdownLink href={href} inlineMedia={inlineMedia} mediaSettled={mediaSettled}>{children}</MarkdownLink>
+      <MarkdownLink
+        href={href}
+        inlineMedia={inlineMedia}
+        mediaSettled={mediaActivation.current.enabled}
+      >
+        {children}
+      </MarkdownLink>
     ),
     img: ({ src, alt }) => {
       const href = typeof src === "string" ? src : undefined;
       const kind = inlineMedia ? transcriptMediaKind(href) : null;
       const label = kind && href ? transcriptMediaLabel(href, kind, alt) : alt || href || "image";
-      if (kind === "image" && href && mediaSettled) {
+      if (kind === "image" && href && mediaActivation.current.enabled) {
         return (
           <>
             <a className="md-img-link" href={href} target="_blank" rel="noopener noreferrer">🖼 {label}</a>
-            <TranscriptMediaEmbed key={href} href={href} kind="image" label={label} />
+            <TranscriptMediaEmbed key={href} href={href} kind="image" label={label} imageAlt={alt} />
           </>
         );
       }
@@ -302,7 +325,7 @@ export const Markdown = memo(function Markdown({
         <a className="md-img-link" href={href} target="_blank" rel="noopener noreferrer">🖼 {label}</a>
       );
     },
-  }), [inlineMedia, mediaSettled]);
+  }), [inlineMedia]);
   return (
     <div className="md">
       <ReactMarkdown

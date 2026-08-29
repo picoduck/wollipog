@@ -923,7 +923,16 @@ test("mock ACP agent completes initialize/new/prompt/permission/update transcrip
     assert.match(await client.newSession(cwd), /^mock_/);
     assert.equal(await client.prompt("approve the stable transcript"), "end_turn");
     const kinds = events.map((event) => event.kind);
-    for (const expected of ["agent_thought", "plan", "agent_message", "permission_request", "tool_call", "tool_call_update", "file_edit"]) {
+    for (const expected of [
+      "agent_thought",
+      "plan",
+      "agent_message",
+      "permission_request",
+      "tool_call",
+      "tool_call_update",
+      "file_edit",
+      "agent_response_completed",
+    ]) {
       assert.ok(kinds.includes(expected as SessionEventPayload["kind"]), `missing ${expected}`);
     }
     assert.deepEqual(stderr, ["[mock-acp-agent] ready"]);

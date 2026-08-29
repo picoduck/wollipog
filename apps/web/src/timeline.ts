@@ -134,6 +134,14 @@ export type TimelineItem =
   | { kind: "conversation_checkpoint"; id: number; turn: number }
   | { kind: "conversation_forked"; id: number; sourceSessionId: string; turn: number };
 
+type AgentTextItem = Extract<TimelineItem, { kind: "agent_message" | "agent_thought" }>;
+const streamingTimelineItems = new WeakSet<AgentTextItem>();
+
+/** True only for the current object generation of an agent text item that can still gain chunks. */
+export function timelineItemIsStreaming(item: TimelineItem): boolean {
+  return (item.kind === "agent_message" || item.kind === "agent_thought") && streamingTimelineItems.has(item);
+}
+
 export interface TimelineSnapshotDelta {
   previous: TimelineItem[];
   dirtyFrom: number;
@@ -463,6 +471,7 @@ export class TimelineBuilder {
       // same kind and parent context. Updating the Map entry also makes the cap true LRU.
       const key = JSON.stringify([kind, parentToolUseId ?? "", messageId]);
       const openIndex = this.openProviderTexts.get(key);
+      if (this.lastText) this.settleText(this.lastText.index);
       this.lastText = null;
       if (openIndex != null) {
         const idx = openIndex;
@@ -470,20 +479,22 @@ export class TimelineBuilder {
         const activityAt = Number.isFinite(createdAt)
           ? latestTimelineTimestamp(it.lastActivityAt ?? it.createdAt, createdAt!)
           : undefined;
-        this.items[idx] = {
+        const updated: AgentTextItem = {
           ...it,
           sourceEndId: id,
           text: final ? text : it.text + text,
           ...(activityAt != null ? { lastActivityAt: activityAt } : {}),
           ...(final && activityAt != null ? { completedAt: activityAt } : {}),
         };
+        this.items[idx] = updated;
+        if (!final) streamingTimelineItems.add(updated);
         this.markDirty(idx);
         this.openProviderTexts.delete(key);
         if (!final) this.rememberProviderText(key, idx);
         return;
       }
 
-      const index = this.items.push({
+      const item: AgentTextItem = {
         kind,
         id,
         sourceEndId: id,
@@ -497,7 +508,9 @@ export class TimelineBuilder {
               ...(final ? { completedAt: createdAt } : {}),
             }
           : {}),
-      } as TimelineItem) - 1;
+      };
+      if (!final) streamingTimelineItems.add(item);
+      const index = this.items.push(item) - 1;
       this.markDirty(index);
       if (!final) this.rememberProviderText(key, index);
       return;
@@ -505,28 +518,38 @@ export class TimelineBuilder {
 
     // Losing provider identity is an ambiguity boundary: keep legacy chunks contiguous, but never
     // let a later reintroduced id reach backward across untagged output.
-    this.openProviderTexts.clear();
+    this.settleProviderTexts();
     const open = this.lastText;
     const legacyChunk = !textRefs?.length && open != null && open.kind === kind &&
       open.parent === parentToolUseId && !final;
     if (open && legacyChunk) {
       const idx = open.index;
-      const it = this.items[idx] as Extract<TimelineItem, { kind: "agent_message" | "agent_thought" }>;
+      const it = this.items[idx] as Extract<TimelineItem, {
+        kind: "agent_message" | "agent_thought" | "command_output" | "stderr";
+      }>;
       const activityAt = Number.isFinite(createdAt)
-        ? latestTimelineTimestamp(it.lastActivityAt ?? it.createdAt, createdAt!)
+        ? latestTimelineTimestamp(
+            "lastActivityAt" in it ? it.lastActivityAt ?? ("createdAt" in it ? it.createdAt : undefined) : undefined,
+            createdAt!,
+          )
         : undefined;
-      this.items[idx] = {
+      const updated = {
         ...it,
         sourceEndId: id,
         text: final ? text : it.text + text,
         ...(activityAt != null ? { lastActivityAt: activityAt } : {}),
         ...(final && activityAt != null ? { completedAt: activityAt } : {}),
-      };
+      } as TimelineItem;
+      this.items[idx] = updated;
+      if (!final && (updated.kind === "agent_message" || updated.kind === "agent_thought")) {
+        streamingTimelineItems.add(updated);
+      }
       this.markDirty(idx);
       this.lastText = { kind, index: idx, parent: parentToolUseId };
       return;
     }
-    const index = this.items.push({
+    if (open) this.settleText(open.index);
+    const item = {
       kind,
       id,
       sourceEndId: id,
@@ -540,7 +563,11 @@ export class TimelineBuilder {
             ...(final ? { completedAt: createdAt } : {}),
           }
         : {}),
-    } as TimelineItem) - 1;
+    } as TimelineItem;
+    if (!final && (item.kind === "agent_message" || item.kind === "agent_thought")) {
+      streamingTimelineItems.add(item);
+    }
+    const index = this.items.push(item) - 1;
     this.markDirty(index);
     this.lastText = final || textRefs?.length
       ? null
@@ -552,13 +579,30 @@ export class TimelineBuilder {
     while (this.openProviderTexts.size > MAX_OPEN_PROVIDER_TEXT_ITEMS) {
       const oldest = this.openProviderTexts.keys().next().value;
       if (oldest === undefined) break;
+      const oldestIndex = this.openProviderTexts.get(oldest);
       this.openProviderTexts.delete(oldest);
+      if (oldestIndex !== undefined) this.settleText(oldestIndex);
     }
   }
 
-  private breakText(): void {
-    this.lastText = null;
+  private settleText(index: number): void {
+    const item = this.items[index];
+    if (!item || !timelineItemIsStreaming(item)) return;
+    // Cloning without carrying WeakSet membership publishes a settled object generation while
+    // leaving the public transcript shape and persistence format unchanged.
+    this.items[index] = { ...item };
+    this.markDirty(index);
+  }
+
+  private settleProviderTexts(): void {
+    for (const index of new Set(this.openProviderTexts.values())) this.settleText(index);
     this.openProviderTexts.clear();
+  }
+
+  private breakText(): void {
+    if (this.lastText) this.settleText(this.lastText.index);
+    this.lastText = null;
+    this.settleProviderTexts();
   }
 
   push(ev: SessionEvent): void {

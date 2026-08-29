@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import type { TimelineItem } from "../timeline.js";
+import type { SessionEvent, SessionEventPayload } from "@wollipog/protocol";
+import { TimelineBuilder } from "../timeline.js";
 import { EventTimeline } from "../components/EventTimeline.js";
 import "../styles.css";
 
@@ -18,22 +19,30 @@ function Fixture() {
   const [streamStep, setStreamStep] = useState(0);
   const mediaSettled = !streamingScenario || streamStep === streamedImageUrls.length - 1;
   const imageUrl = streamingScenario ? streamedImageUrls[streamStep]! : finalImageUrl;
-  const items = useMemo<TimelineItem[]>(() => [
-    { kind: "user_message", id: 1, text: "Can you show me the responsive result before I approve the merge?" },
-    {
+  const items = useMemo(() => {
+    const builder = new TimelineBuilder();
+    let seq = 0;
+    const push = (payload: SessionEventPayload) => {
+      seq += 1;
+      builder.push({ id: seq, sessionId: "inline-media-e2e", seq, ts: seq * 1_000, payload } as SessionEvent);
+    };
+    push({ kind: "user_message", text: "Can you show me the responsive result before I approve the merge?" });
+    push({
       kind: "agent_message",
-      id: 2,
       text: `The responsive session view is ready for review.\n\n${imageUrl}\n\nInteraction recording:\n${videoUrl}`,
-      ...(mediaSettled ? { completedAt: 1_000 } : {}),
-    },
-    { kind: "user_message", id: 3, text: "The screenshot is clear on mobile. What happens if an evidence link expires?" },
-    {
-      kind: "agent_message",
-      id: 4,
-      text: "Expired media falls back to its original link without leaving a broken placeholder in the transcript.",
-      completedAt: 1_000,
-    },
-  ], [imageUrl, mediaSettled]);
+      messageId: "review-response",
+    });
+    if (mediaSettled) {
+      push({ kind: "agent_response_completed" });
+      push({ kind: "user_message", text: "The screenshot is clear on mobile. What happens if an evidence link expires?" });
+      push({
+        kind: "agent_message",
+        text: "Expired media falls back to its original link without leaving a broken placeholder in the transcript.",
+        final: true,
+      });
+    }
+    return builder.snapshot();
+  }, [imageUrl, mediaSettled]);
   return (
     <main style={{ display: "flex", flexDirection: "column", height: "100vh", background: "var(--bg)" }}>
       {streamingScenario && (
