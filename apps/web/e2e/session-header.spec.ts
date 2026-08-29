@@ -523,7 +523,7 @@ for (const viewport of [
   });
 }
 
-test("wrapped background work clears phone actions when no change status is available", async ({ page }) => {
+test("clipped background work leaves phone actions hittable when no change status is available", async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 800 });
   await openSession(page, "preview-follow", { sessionShell: "1" });
   await page.evaluate(() => {
@@ -535,13 +535,25 @@ test("wrapped background work clears phone actions when no change status is avai
   const header = page.locator(".session-detail > .detail-head");
   await expect(header.locator(".change-status-indicators")).toHaveCount(0);
   await expect(header.getByRole("status", { name: "Background Work: Waiting on External Job" })).toBeVisible();
-  const overlapsActions = await header.evaluate((element) => {
+  const metrics = await header.evaluate((element) => {
     const badge = element.querySelector(".background-work-badge")!.getBoundingClientRect();
+    const statuses = element.querySelector(".session-header-statuses")!.getBoundingClientRect();
     const actions = element.querySelector(".detail-actions")!.getBoundingClientRect();
-    return badge.x < actions.right && badge.right > actions.x &&
-      badge.y < actions.bottom && badge.bottom > actions.y;
+    const isTopmostAtCenter = (target: Element) => {
+      const box = target.getBoundingClientRect();
+      const painted = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+      return painted === target || (painted !== null && target.contains(painted));
+    };
+    return {
+      paintedBadgeRight: Math.min(badge.right, statuses.right),
+      actionsLeft: actions.x,
+      shareIsTopmost: isTopmostAtCenter(element.querySelector('[aria-label="Share"]')!),
+      moreActionsIsTopmost: isTopmostAtCenter(element.querySelector('[aria-label="More Actions"]')!),
+    };
   });
-  expect(overlapsActions).toBe(false);
+  expect(metrics.paintedBadgeRight).toBeLessThan(metrics.actionsLeft);
+  expect(metrics.shareIsTopmost).toBe(true);
+  expect(metrics.moreActionsIsTopmost).toBe(true);
 });
 
 test("long session titles truncate inside the breadcrumb without hiding actions", async ({ page }) => {

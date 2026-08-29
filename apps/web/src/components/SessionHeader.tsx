@@ -111,11 +111,13 @@ export function SessionHeader({
   const internalSessionUrl = dashboardOrigin
     ? absoluteViewUrl(dashboardOrigin, { name: "session", id: session.id })
     : null;
-  const renderNoninteractiveStatuses = () => (
+  const renderNoninteractiveStatuses = (presentational = false) => (
     <>
       <SessionStatusIndicators session={session} disconnected={!runnerOnline} />
       <ChangeStatusBadge change={changeStatus ?? null} />
-      {session.backgroundWorkState && <BackgroundWorkBadge state={session.backgroundWorkState} compact />}
+      {session.backgroundWorkState && (
+        <BackgroundWorkBadge state={session.backgroundWorkState} compact announce={!presentational} />
+      )}
       {!session.backgroundWorkState && session.backgroundWorkTracking === "untracked" && (
         <UntrackedBackgroundWorkBadge />
       )}
@@ -407,7 +409,7 @@ export function SessionHeader({
                     <>
                       <div className="menu-label" role="presentation" aria-hidden="true">Status</div>
                       <div className="session-menu-statuses" aria-hidden="true">
-                        {renderNoninteractiveStatuses()}
+                        {renderNoninteractiveStatuses(true)}
                       </div>
                       {activeSubagents && (
                         <button

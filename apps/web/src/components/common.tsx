@@ -261,9 +261,10 @@ const COMPACT_BACKGROUND_WORK_LABELS: Record<BackgroundWorkState, string> = {
   resumed: "Background Work Resumed",
 };
 
-export function BackgroundWorkBadge({ state, compact = false }: {
+export function BackgroundWorkBadge({ state, compact = false, announce = true }: {
   state: BackgroundWorkState;
   compact?: boolean;
+  announce?: boolean;
 }) {
   const label = `Background Work: ${BACKGROUND_WORK_LABELS[state]}`;
   return (
@@ -273,7 +274,7 @@ export function BackgroundWorkBadge({ state, compact = false }: {
         : state === "orphaned"
           ? "background-work-orphaned"
           : "background-work-resumed"}`}
-      role="status"
+      role={announce ? "status" : undefined}
       aria-label={label}
       title={compact ? label : undefined}
     >

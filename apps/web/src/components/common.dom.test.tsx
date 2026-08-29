@@ -148,6 +148,25 @@ test("compact background-work badges show specific states and expose every full 
   }
 });
 
+test("presentational background-work badges do not create a duplicate live region", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(<BackgroundWorkBadge state="running" compact announce={false} />);
+    });
+    const badge = container.querySelector(".background-work-badge");
+    assert.ok(badge);
+    assert.equal(badge.getAttribute("role"), null);
+    assert.equal(badge.textContent, "Background Work: Waiting on External JobWaiting on External Job");
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
 test("active subagent badges expose their count and open the active work", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
