@@ -1463,7 +1463,6 @@ function FixtureSurface() {
     <Header
       view={view}
       mobileInstanceControl={<button type="button" className="instance-selector-trigger" aria-label="Switch Instance">I</button>}
-      mobileSettingsControl={<button type="button" className="settings-trigger" aria-label="Settings">S</button>}
       onNewRun={() => undefined}
       onNewPod={() => undefined}
       sessionActions={(

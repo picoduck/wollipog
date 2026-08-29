@@ -17,6 +17,7 @@ const priorActEnvironment = (globalThis as unknown as Record<string, unknown>)["
 const priorElementGlobals = {
   HTMLElement: (globalThis as Record<string, unknown>)["HTMLElement"],
   HTMLButtonElement: (globalThis as Record<string, unknown>)["HTMLButtonElement"],
+  KeyboardEvent: (globalThis as Record<string, unknown>)["KeyboardEvent"],
 };
 
 before(() => {
@@ -25,6 +26,7 @@ before(() => {
   Object.defineProperty(globalThis, "navigator", { configurable: true, writable: true, value: domWindow.navigator });
   Object.defineProperty(globalThis, "HTMLElement", { configurable: true, writable: true, value: domWindow.HTMLElement });
   Object.defineProperty(globalThis, "HTMLButtonElement", { configurable: true, writable: true, value: domWindow.HTMLButtonElement });
+  Object.defineProperty(globalThis, "KeyboardEvent", { configurable: true, writable: true, value: domWindow.KeyboardEvent });
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, writable: true, value: true });
 });
 
@@ -34,6 +36,7 @@ after(() => {
   Object.defineProperty(globalThis, "navigator", { configurable: true, writable: true, value: priorNavigator });
   Object.defineProperty(globalThis, "HTMLElement", { configurable: true, writable: true, value: priorElementGlobals.HTMLElement });
   Object.defineProperty(globalThis, "HTMLButtonElement", { configurable: true, writable: true, value: priorElementGlobals.HTMLButtonElement });
+  Object.defineProperty(globalThis, "KeyboardEvent", { configurable: true, writable: true, value: priorElementGlobals.KeyboardEvent });
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, writable: true, value: priorActEnvironment });
 });
 
@@ -109,14 +112,16 @@ function stubPhoneWidth() {
   return () => { domWindow.matchMedia = prior; };
 }
 
-test("the phone rail is destinations-only and hosts no nested layers", async () => {
-  // The phone bar now carries only destinations. Creation lives in the Inbox toolbar, while
-  // Instance and Settings live in the top bar.
+test("the phone rail hosts destinations plus routed Settings and no nested layers", async () => {
+  // The phone bar carries four destinations plus More. Creation lives in the Inbox toolbar and the
+  // instance switcher lives in the top bar.
   //
-  // The bar now carries four destinations plus More, and the sheet holds ONLY destinations. An
-  // earlier revision put Instance and Settings inside the sheet; because those render their own
-  // menu and dialog, their Tab and Escape events bubbled into the outer roving controller, so one
-  // Tab tore down both layers and one Escape peeled two. They live in the topbar instead.
+  // An earlier revision put Instance and Settings inside the sheet; because those rendered their
+  // own menu and dialog, their Tab and Escape events bubbled into the outer roving controller, so
+  // one Tab tore down both layers and one Escape peeled two. That is a constraint on nesting a
+  // LAYER, and only the instance switcher still opens one. Settings is a plain route, so it is a
+  // menuitem row here like any destination — what must stay true is that nothing in the sheet
+  // owns a dialog or menu of its own.
   const restore = stubPhoneWidth();
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
@@ -154,7 +159,9 @@ test("the phone rail is destinations-only and hosts no nested layers", async () 
     await act(async () => { moreTrigger.click(); });
     const sheet = container.querySelector(".rail-more-sheet")!;
     assert.deepEqual([...sheet.querySelectorAll(".rail-more-item")].map((el) => el.textContent),
-      ["Multi-Agent Runs", "Collaboration Pods", "Automations", "Usage & Cost", "Archived Sessions", "Agent Skills"]);
+      ["Multi-Agent Runs", "Collaboration Pods", "Automations", "Usage & Cost", "Archived Sessions", "Agent Skills",
+        "Settings"],
+      "Settings is the trailing row, after every destination");
     assert.equal(sheet.querySelector(".rail-more-control"), null,
       "the sheet must contain no nested dialog or menu content");
     // Every child of a role=menu must be a menu item, or roving navigation silently skips it.
@@ -288,5 +295,118 @@ test("only one element claims the current page while More is open", async () => 
     await act(async () => { root.unmount(); });
     container.remove();
     restore();
+  }
+});
+
+test("the phone More trigger reads as current on the Settings route and the row navigates", async () => {
+  // Settings is not a GLOBAL_VIEW_ITEMS entry, so neither selectedRailView nor the trigger's
+  // "<title> selected" lookup covers it. Untracked, a user standing in Settings saw a bar with
+  // nothing selected, and a screen reader heard a collapsed "More Destinations" naming no page.
+  const restore = stubPhoneWidth();
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const navigated: View[] = [];
+  try {
+    await act(async () => {
+      root.render(
+        <Rail
+          view={{ name: "settings", section: "appearance" }}
+          blockedCount={0}
+          stalledCount={0}
+          onlineConnections={0}
+          onNavigate={(destination) => navigated.push(destination)}
+        />,
+      );
+    });
+
+    const trigger = container.querySelector(".rail-more-trigger")! as unknown as HTMLButtonElement;
+    assert.ok(trigger.classList.contains("active"), "the closed trigger carries the selected state");
+    assert.equal(trigger.getAttribute("aria-current"), "page");
+    assert.equal(trigger.getAttribute("aria-label"), "More Destinations, Settings selected");
+
+    await act(async () => { trigger.click(); });
+    const row = container.querySelector(".rail-more-settings")! as unknown as HTMLAnchorElement;
+    assert.equal(row.getAttribute("role"), "menuitem", "roving navigation must not skip it");
+    assert.equal(row.getAttribute("aria-current"), "page");
+    assert.ok(row.classList.contains("active"));
+    assert.equal(row.getAttribute("href"), "/settings/appearance",
+      "the row is a real link, so it survives middle-click and copy-link");
+    assert.equal(container.querySelectorAll('[aria-current="page"]').length, 1,
+      "the row takes the current-page marker from the trigger while the sheet is open");
+
+    // Space, not click: an <a> never activates on Space natively, and role="menuitem" promises it.
+    await act(async () => {
+      row.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: " ", bubbles: true }) as never);
+    });
+    assert.deepEqual(navigated, [{ name: "settings" }]);
+    assert.equal(container.querySelector(".rail-more-sheet"), null, "activating a row closes the sheet");
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+    restore();
+  }
+});
+
+
+test("crossing to desktop from the Settings row hands focus to the desktop gear", async () => {
+  // Settings has no rail-item on either side of the crossing, so the destination selector had
+  // nothing active to match and dropped focus on Inbox — rotating a phone into landscape while
+  // standing in Settings landed the user on a page they had not opened.
+  let phone = true;
+  const prior = domWindow.matchMedia;
+  domWindow.matchMedia = ((query: string) => ({
+    matches: phone,
+    media: query,
+    onchange: null,
+    addEventListener() {},
+    removeEventListener() {},
+    addListener() {},
+    removeListener() {},
+    dispatchEvent: () => false,
+  })) as never;
+
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const render = () => act(async () => {
+    root.render(
+      <Rail
+        view={{ name: "settings", section: "network" }}
+        blockedCount={0}
+        stalledCount={0}
+        onlineConnections={0}
+        onNavigate={() => undefined}
+        settingsControl={<button type="button" className="settings-trigger">Settings</button>}
+      />,
+    );
+  });
+
+  try {
+    await render();
+    await act(async () => {
+      (container.querySelector(".rail-more-trigger") as unknown as HTMLButtonElement).click();
+    });
+    const row = container.querySelector(".rail-more-settings") as unknown as HTMLAnchorElement;
+    await act(async () => { row.focus(); });
+    // Identity, never assert.equal: a failed deep-diff of two DOM nodes serialises the whole tree
+    // and takes the runner out with it.
+    assert.ok(domWindow.document.activeElement === (row as never), "the sheet row owns focus first");
+
+    phone = false;
+    await act(async () => { domWindow.dispatchEvent(new domWindow.Event("resize") as never); });
+    await render();
+    // The handoff is deferred to a frame, so let one elapse before reading focus.
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+
+    const gear = container.querySelector(".rail-settings .settings-trigger");
+    assert.ok(gear, "the desktop layout mounts the gear");
+    const focused = domWindow.document.activeElement as unknown as Element | null;
+    assert.ok(focused === (gear as never),
+      `focus must land on the same page, not on the first destination — got ${focused?.className ?? "nothing"}`);
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+    domWindow.matchMedia = prior;
   }
 });

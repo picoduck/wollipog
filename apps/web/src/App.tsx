@@ -656,13 +656,12 @@ function Shell() {
           <Header
             view={view}
             mobileInstanceControl={isMobile ? (
-              /* The phone rail has room for five destinations and nothing else, so these live here.
-                 The topbar is fixed and uncontested — unlike the bottom band, which an open shell
-                 dock and the toast stack both occupy. */
+              /* The phone rail's bar has room for five destinations and nothing else, and the
+                 switcher opens its own popup so it cannot nest inside the More sheet either. The
+                 topbar is fixed and uncontested — unlike the bottom band, which an open shell dock
+                 and the toast stack both occupy. Settings has no such constraint: it is a route,
+                 and it lives in the More sheet (see Rail.tsx). */
               <InstanceSelector compact />
-            ) : null}
-            mobileSettingsControl={isMobile ? (
-              <SettingsTrigger active={view.name === "settings"} onOpen={() => navigate({ name: "settings" })} />
             ) : null}
             onNewRun={() => setDialog({ kind: "run" })}
             onNewPod={() => setDialog({ kind: "pod" })}
@@ -849,7 +848,6 @@ function BannerStatusIcon({ kind }: { kind: "lock" | "warning" }) {
 export function Header({
   view,
   mobileInstanceControl,
-  mobileSettingsControl,
   onNewRun,
   onNewPod,
   sessionActions,
@@ -857,9 +855,9 @@ export function Header({
   onSessionBack,
 }: {
   view: View;
-  /** Global controls moved out of the rail on phone widths. */
+  /** The instance switcher, moved out of the rail on phone widths. Settings is not here: it is a
+   * row in the rail's More sheet. */
   mobileInstanceControl?: React.ReactNode;
-  mobileSettingsControl?: React.ReactNode;
   onNewRun: () => void;
   onNewPod: () => void;
   /** Session panel-control cluster rendered here only on phone widths. */
@@ -889,7 +887,7 @@ export function Header({
       ) : (
         <h1 id="page-title" tabIndex={-1}>{title}</h1>
       )}
-      {mobileInstanceControl && mobileSettingsControl && (
+      {mobileInstanceControl && (
         <div className="topbar-actions topbar-mobile-controls">
           {mobileInstanceControl}
           {view.name === "runs" && flags.multiAgent && (
@@ -899,7 +897,6 @@ export function Header({
             <NewPodHeaderButton onClick={onNewPod} />
           )}
           {view.name === "session" && sessionActions}
-          {mobileSettingsControl}
         </div>
       )}
       {!mobileInstanceControl && view.name === "runs" && flags.multiAgent && (

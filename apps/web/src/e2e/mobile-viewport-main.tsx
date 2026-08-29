@@ -1,6 +1,5 @@
 import React, { useEffect } from "react";
 import { createRoot } from "react-dom/client";
-import { PlusIcon } from "../components/Icons.js";
 import { Rail } from "../components/Rail.js";
 import { installMobileViewportFallback } from "../mobile-viewport.js";
 import type { View } from "../navigation.js";
@@ -107,19 +106,14 @@ function Topbar() {
     <header className="topbar">
       <h1>Inbox</h1>
       <div className="topbar-actions topbar-mobile-controls">
-        {/* Both controls, because production renders both, and class-for-class rather than
-            approximately: with `class="icon-btn settings-trigger"` here against production's plain
-            `class="settings-trigger"`, a rule keyed on `.settings-trigger:not(.icon-btn)` erased
-            the production rail and matched nothing. InstanceSelector and SettingsTrigger both need
-            the store and a live control plane; the element shapes a selector sees do not. */}
+        {/* The instance switcher only, because that is what production renders here since Settings
+            moved into the rail's More sheet (#458) — and class-for-class rather than approximately:
+            a fixture that spells a control differently from production is a fixture that answers a
+            different selector. InstanceSelector needs the store and a live control plane; the
+            element shape a selector sees does not. */}
         <div className="plus-menu instance-selector compact">
           <button type="button" className="instance-selector-trigger" aria-label="Instance">
             <span className="instance-selector-label">Local</span>
-          </button>
-        </div>
-        <div className="settings-control">
-          <button type="button" className="settings-trigger" aria-label="Settings" title="Settings">
-            <PlusIcon size={14} />
           </button>
         </div>
       </div>

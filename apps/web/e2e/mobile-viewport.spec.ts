@@ -1,5 +1,5 @@
 import { devices, expect, test, type Locator, type Page } from "@playwright/test";
-import { GLOBAL_VIEW_ITEMS, viewPath, type View } from "../src/navigation.js";
+import { GLOBAL_VIEW_ITEMS, viewPath, viewTitle, type View } from "../src/navigation.js";
 import { MOBILE_PRIMARY_VIEWS } from "../src/components/Rail.js";
 import { KEYBOARD_DISMISS_BLUR_EVENT } from "../src/mobile-viewport.js";
 
@@ -12,6 +12,16 @@ import { KEYBOARD_DISMISS_BLUR_EVENT } from "../src/mobile-viewport.js";
  * covers the computation; what it cannot see is whether the STYLESHEET consumes the result. These
  * assert rendered geometry — where the rail and the sheet actually end up.
  */
+
+/**
+ * The sheet's trailing row (#458), which is a route but deliberately not a GLOBAL_VIEW_ITEMS
+ * destination — that array numbers the desktop rail and its digit shortcuts. Both halves come from
+ * production's own canonical functions so the checks below stay non-circular.
+ */
+const SETTINGS_ROW = {
+  path: viewPath({ name: "settings" } as View),
+  title: viewTitle({ name: "settings" } as View),
+};
 
 const phone = devices["Pixel 7"];
 test.use({
@@ -379,12 +389,20 @@ const THEMES = ["dark", "light"] as const;
  *   measured paint / legible at the device's own 2.625 ratio, both themes, portrait and landscape
  *   icon       1154-1547 / 944-1295      moreTrigger   101-108 / 71-86
  *   sheetIcon   346-451  / 292-381       sheetLabel   2084-3204 / 1363-2556
+ *   sheetSettingsLabel 1503-1769 / 1038-1229
+ *
+ * "Settings" needs its own floor because the sheetLabel range was measured against destination
+ * titles, the shortest of which is "Automations" — a word with half again the ink of "Settings".
+ * A floor loose enough to cover both would sit under 1503 and stop catching a destination label
+ * that had lost a third of itself, which is the mutation these floors exist for. The ratio to the
+ * measured minimum is the same as sheetLabel's.
  */
 const MARKS = {
   icon: { paint: 1000, legible: 450, illegibleCells: 0, minContrast: CONTRAST.icon },
   moreTrigger: { paint: 90, legible: 35, illegibleCells: 0, minContrast: CONTRAST.icon },
   sheetIcon: { paint: 300, legible: 140, illegibleCells: 0, minContrast: CONTRAST.icon },
   sheetLabel: { paint: 1850, legible: 650, illegibleCells: 0, minContrast: CONTRAST.label },
+  sheetSettingsLabel: { paint: 1330, legible: 490, illegibleCells: 0, minContrast: CONTRAST.label },
 } as const satisfies Record<string, Mark>;
 
 interface HarnessOptions {
@@ -513,7 +531,11 @@ test("no two destinations render the same glyph", async ({ page }) => {
 
   const icons = page.locator(".rail-destinations > .rail-item > svg, .rail-more-item > svg");
   const count = await icons.count();
-  expect(count, "every destination must carry an icon").toBe(GLOBAL_VIEW_ITEMS.length);
+  // Every destination plus the sheet's trailing Settings row. The gear is measured with them
+  // rather than excluded: a Settings glyph collapsed into a destination's shape is exactly as
+  // unusable as two destinations sharing one, and this is the only check that would catch it.
+  expect(count, "every destination and the Settings row must carry an icon")
+    .toBe(GLOBAL_VIEW_ITEMS.length + 1);
   // The MASK, not the screenshot. Comparing raw captures compares the backdrop too, so nine
   // identical rectangles over nine `nth-child` background tints five levels apart differed by
   // hundreds of pixels and passed. A mask holds only the positions the glyph itself paints, which
@@ -863,9 +885,12 @@ async function expectEveryDestinationReachable(page: Page, occluded: number) {
     // `<i>Destination</i>` renamed all four rows identically, cleared the label floors, and named
     // itself in the diagnostics. The expected title comes from production's canonical list instead.
     const path = await item.evaluate((element) => new URL((element as HTMLAnchorElement).href).pathname);
-    const expected = GLOBAL_VIEW_ITEMS.find((entry) => viewPath({ name: entry.name } as View) === path);
+    const destination = GLOBAL_VIEW_ITEMS.find((entry) => viewPath({ name: entry.name } as View) === path);
+    // Settings rides in the sheet without being a rail destination, so it is named from its own
+    // canonical route title rather than from the destination list.
+    const expected = destination?.title ?? (path === SETTINGS_ROW.path ? SETTINGS_ROW.title : undefined);
     expect(expected, `no destination is served at ${path}`).toBeDefined();
-    const label = expected!.title;
+    const label = expected!;
     await expect(item, `the row at ${path} must be labelled "${label}"`).toHaveText(label);
     // Scrolling within the sheet is the intended way to reach an overflowing item; what must not
     // happen is an item that cannot be brought into the sheet's visible box at all.
@@ -884,7 +909,8 @@ async function expectEveryDestinationReachable(page: Page, occluded: number) {
     await expectHittable(item, label);
     await expectPainted(page, item.locator("svg"), `${label} icon`, MARKS.sheetIcon);
     await expectPlainText(item.locator("span"), `${label} label`);
-    await expectPainted(page, item.locator("span"), `${label} label`, MARKS.sheetLabel);
+    await expectPainted(page, item.locator("span"), `${label} label`,
+      path === SETTINGS_ROW.path ? MARKS.sheetSettingsLabel : MARKS.sheetLabel);
   }
 }
 

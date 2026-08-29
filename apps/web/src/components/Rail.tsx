@@ -5,6 +5,7 @@ import {
   AutomationsIcon,
   BoardIcon,
   ConnectionsIcon,
+  GearIcon,
   InboxIcon,
   FolderSolidIcon,
   MoreHorizontalIcon,
@@ -68,10 +69,15 @@ export function Rail({
   onlineConnections: number;
   onNavigate: (view: View) => void;
   instanceControl?: ReactNode;
-  /** Omitted on mobile, where the topbar owns these controls (see the note by .rail-spacer). */
+  /** Desktop only. On a phone Settings is a row in the More sheet (see the note by .rail-spacer). */
   settingsControl?: ReactNode;
 }) {
   const selected = selectedRailView(view);
+  // Settings rides in the sheet on a phone but is deliberately absent from GLOBAL_VIEW_ITEMS: that
+  // array numbers the desktop rail AND its bare-digit shortcuts, so adding an entry would rebind
+  // every later destination and render a second Settings row beside the gear (see navigation.ts).
+  // It is therefore tracked on its own rather than through selectedRailView.
+  const settingsSelected = view.name === "settings";
   const isMobile = useIsMobile();
   const [moreOpen, setMoreOpen] = useState(false);
   const more = useAccessibleMenu(moreOpen, setMoreOpen, "rail-more-menu");
@@ -109,10 +115,25 @@ export function Rail({
     focusInsideRailRef.current = false;
     if (moreOpen) more.close(false);
     if (!hadFocus) return;
+    // Settings has no rail-item on either side of the crossing, so the destination fallback has
+    // nothing active to match and dropped focus on Inbox — a user who rotated a phone into
+    // landscape while standing in Settings landed on a page they had not opened. The desktop gear
+    // is the same page, so it is the correct survivor.
+    //
+    // Tried one selector at a time, NOT as a comma list: querySelector returns the first match in
+    // DOCUMENT order, not the first selector that matches. `.rail-destinations` precedes both
+    // `.rail-settings` and any active item, so a list silently resolved to the first destination
+    // and the preference expressed by the ordering never applied.
+    const survivors = settingsSelected
+      ? [".rail-settings .settings-trigger", ".rail-destinations .rail-item"]
+      : [".rail-destinations .rail-item.active", ".rail-destinations .rail-item"];
     window.requestAnimationFrame(() => {
-      document.querySelector<HTMLElement>(".rail-destinations .rail-item.active, .rail-destinations .rail-item")?.focus();
+      for (const selector of survivors) {
+        const target = document.querySelector<HTMLElement>(selector);
+        if (target) return target.focus();
+      }
     });
-  }, [isMobile, moreOpen, more]);
+  }, [isMobile, moreOpen, more, settingsSelected]);
 
   // Filtered before the mobile split so a hidden experiment is absent from BOTH the primary bar
   // and the More sheet. The Ctrl+N numbers stay anchored to the canonical list below, so hiding
@@ -129,8 +150,41 @@ export function Rail({
     ? enabledItems.filter((item) => !MOBILE_PRIMARY_VIEWS.includes(item.name))
     : [];
   // A destination hidden behind More still has to read as current, or the bar looks like nothing
-  // is selected while the user is standing on Usage.
-  const overflowSelected = overflowItems.some((item) => item.name === selected);
+  // is selected while the user is standing on Usage — or, now, in Settings.
+  const overflowSelected = settingsSelected || overflowItems.some((item) => item.name === selected);
+  const overflowSelectedTitle = settingsSelected
+    ? "Settings"
+    : GLOBAL_VIEW_ITEMS.find((item) => item.name === selected)?.title ?? "";
+  // The sheet is rendered for the whole phone breakpoint rather than only when a destination
+  // overflows: Settings always lives there, so hiding every optional destination by experiment
+  // must not strand it.
+  const showMore = isMobile;
+
+  /**
+   * The parts every sheet row shares. Extracted so the Settings row cannot drift from the
+   * destination rows — both close the sheet the same way and both answer Space.
+   */
+  const sheetItemProps = (destination: View, active: boolean) => ({
+    role: "menuitem" as const,
+    href: viewPath(destination),
+    "aria-current": active ? ("page" as const) : undefined,
+    onClick: (event: React.MouseEvent) => {
+      if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      event.preventDefault();
+      // close(true) restores focus to the trigger, which survives the
+      // teardown; close(false) left keyboard position on <body>.
+      more.close(true);
+      onNavigate(destination);
+    },
+    onKeyDown: (event: React.KeyboardEvent) => {
+      // An anchor activates on Enter natively but not on Space, and role="menuitem"
+      // promises both. Unhandled, Space scrolled the sheet instead of navigating.
+      if (event.key !== " " && event.key !== "Spacebar") return;
+      event.preventDefault();
+      more.close(true);
+      onNavigate(destination);
+    },
+  });
 
   return (
     <nav className="app-rail" aria-label="Primary Navigation" data-focus-zone="rail" tabIndex={-1}>
@@ -191,7 +245,7 @@ export function Rail({
             </a>
           );
         })}
-        {overflowItems.length > 0 && (
+        {showMore && (
           <div className="rail-more">
             <button
               ref={more.triggerRef}
@@ -207,7 +261,7 @@ export function Rail({
                  a screen-reader user on Usage hears only a collapsed "More" button. */
               aria-current={overflowSelected && !moreOpen ? "page" : undefined}
               aria-label={overflowSelected && !moreOpen
-                ? `More Destinations, ${GLOBAL_VIEW_ITEMS.find((item) => item.name === selected)?.title ?? ""} selected`
+                ? `More Destinations, ${overflowSelectedTitle} selected`
                 : "More Destinations"}
               title="More Destinations"
             >
@@ -231,32 +285,25 @@ export function Rail({
                     return (
                       <a
                         key={item.name}
-                        role="menuitem"
                         className={`rail-more-item${selected === item.name ? " active" : ""}`}
-                        href={viewPath(destination)}
-                        aria-current={selected === item.name ? "page" : undefined}
-                        onClick={(event) => {
-                          if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-                          event.preventDefault();
-                          // close(true) restores focus to the trigger, which survives the
-                          // teardown; close(false) left keyboard position on <body>.
-                          more.close(true);
-                          onNavigate(destination);
-                        }}
-                        onKeyDown={(event) => {
-                          // An anchor activates on Enter natively but not on Space, and role="menuitem"
-                          // promises both. Unhandled, Space scrolled the sheet instead of navigating.
-                          if (event.key !== " " && event.key !== "Spacebar") return;
-                          event.preventDefault();
-                          more.close(true);
-                          onNavigate(destination);
-                        }}
+                        {...sheetItemProps(destination, selected === item.name)}
                       >
                         <Icon size={20} />
                         <span>{item.title}</span>
                       </a>
                     );
                   })}
+                  {/* Settings closes the sheet, separated from the destinations above it. On a
+                      phone this is the only Settings entry point in the chrome: the header gear
+                      is gone (see the note by .rail-spacer). Safe here now that Settings is a
+                      route — the layer-nesting defect that evicted it belonged to the dialog. */}
+                  <a
+                    className={`rail-more-item rail-more-settings${settingsSelected ? " active" : ""}`}
+                    {...sheetItemProps({ name: "settings" }, settingsSelected)}
+                  >
+                    <GearIcon size={20} />
+                    <span>Settings</span>
+                  </a>
                 </div>
               </>
             )}
@@ -267,14 +314,20 @@ export function Rail({
         </span>
       </div>
       <div className="rail-spacer" />
-      {/* On a phone the instance switcher and Settings move to the TOPBAR (see App.tsx).
-          They are not in the More sheet and not floating buttons, both of which were
-          tried and reviewed out:
-            - Nested inside a role="menu" sheet, InstanceSelector and SettingsDialog bubbled their
-              own Tab/Escape into the outer roving controller, so one Tab tore down both layers and
-              one Escape peeled two — and neither control was reachable by keyboard at all, since
-              only the destination links carried a menuitem role.
-          The topbar is a fixed, uncontested strip that no overlay occupies. */}
+      {/* On a phone the instance switcher moves to the TOPBAR (see App.tsx), and Settings is the
+          trailing item of the More sheet above.
+
+          Both once lived in the sheet and were evicted together: nested inside a role="menu",
+          InstanceSelector and the then-SettingsDialog bubbled their own Tab/Escape into the outer
+          roving controller, so one Tab tore down both layers and one Escape peeled two — and
+          neither was reachable by keyboard at all, since only the destination links carried a
+          menuitem role. That reasoning is about owning a nested layer, and only the instance
+          switcher still does. Settings is a plain route now, so it carries menuitem like any other
+          sheet row and opens no layer to nest. The topbar keeps the switcher because it is a
+          fixed, uncontested strip that no overlay occupies.
+
+          Floating buttons were rejected for both: that band is occupied by the shell dock and the
+          toast stack. */}
       {!isMobile && instanceControl && <div className="rail-instance">{instanceControl}</div>}
       {!isMobile && <div className="rail-settings">{settingsControl}</div>}
     </nav>
