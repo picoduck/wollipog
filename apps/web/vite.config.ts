@@ -5,6 +5,13 @@ import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import { DESKTOP_EXCLUDED_ASSETS, isDesktopBuild, stripManifestLink } from "./src/desktop-bundle.js";
 
+const appRoot = dirname(fileURLToPath(import.meta.url));
+
+// Keep production output compatible with the webviews supported by the desktop application rather
+// than inheriting a moving Vite default. Windows 11 WebView2 and current WebKitGTK are newer than
+// these floors; Safari 16 is the conservative macOS WebKit floor used for packaged builds.
+export const WOLLIPOG_WEBVIEW_TARGETS = ["chrome107", "edge107", "firefox104", "safari16"];
+
 /**
  * §23.6 — the desktop bundle ships neither a service worker nor a web-app manifest.
  *
@@ -36,7 +43,21 @@ function excludePwaAssetsFromDesktop(): Plugin {
 // talks to it directly over CORS + websocket; override via VITE_CONTROL_PLANE_*.
 export default defineConfig(({ mode }) => ({
   plugins: [react(), excludePwaAssetsFromDesktop()],
-  build: mode === "same-origin-dev" ? { emptyOutDir: false } : undefined,
+  build: mode === "same-origin-dev"
+    ? { emptyOutDir: false }
+    : {
+      target: WOLLIPOG_WEBVIEW_TARGETS,
+      cssTarget: WOLLIPOG_WEBVIEW_TARGETS,
+      ...(mode === "production-e2e" ? {
+        outDir: "dist-e2e",
+        rolldownOptions: {
+          input: {
+            timelineReflow: resolve(appRoot, "timeline-reflow-e2e.html"),
+            settingsRows: resolve(appRoot, "settings-rows-e2e.html"),
+          },
+        },
+      } : {}),
+    },
   server: {
     host: "127.0.0.1",
     port: 5173,
