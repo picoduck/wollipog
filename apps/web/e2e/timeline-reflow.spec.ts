@@ -842,8 +842,8 @@ test("deferring a margin-only notice commit exposes a painted anchor jump", asyn
     .toBeGreaterThan(50);
 });
 
-test("mounting and unmounting a preceding notice preserves the anchor in every painted frame", async ({ page }) => {
-  await page.goto("/timeline-reflow-e2e.html?offset=1");
+async function expectNoticeRemountToPreserveAnchor(page: Page, url: string) {
+  await page.goto(url);
   const { before, initial, recorded } = await recordNoticeChanges(page, async () => {
     await page.getByTestId("toggle-notice-mount").click();
     await expect(page.getByTestId("width-sensitive-prefix")).toHaveCount(0);
@@ -860,6 +860,17 @@ test("mounting and unmounting a preceding notice preserves the anchor in every p
   const after = await stableAnchor(page);
   expect(after.key).toBe(before.key);
   expect(Math.abs(after.offset - before.offset)).toBeLessThan(1);
+}
+
+test("mounting and unmounting a preceding notice preserves the anchor in every painted frame", async ({ page }) => {
+  await expectNoticeRemountToPreserveAnchor(page, "/timeline-reflow-e2e.html?offset=1");
+});
+
+test("mounting and unmounting a preceding notice during a list rerender preserves the anchor in every painted frame", async ({ page }) => {
+  await expectNoticeRemountToPreserveAnchor(
+    page,
+    "/timeline-reflow-e2e.html?offset=1&predecessor-rerender=1",
+  );
 });
 
 test("paused upward traversal compensates old-width rows after a wide panel reflow", async ({ page }) => {

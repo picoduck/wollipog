@@ -954,6 +954,28 @@ function VirtualList<T>({
     const findRow = (key: string) => [...root.querySelectorAll<HTMLElement>("[data-virtual-row]")]
       .find((row) => row.dataset.virtualKey === key);
     let pending = pendingAnchorRef.current;
+    const currentScrollMargin = root.getBoundingClientRect().top - viewport.top + scroll.scrollTop;
+    const currentViewportWidth = Math.round(viewport.width);
+    const geometryChangedBeforeObserver =
+      Math.abs(scrollMarginRef.current - currentScrollMargin) >= 0.5 ||
+      (viewportWidthRef.current !== 0 && viewportWidthRef.current !== currentViewportWidth);
+    const widthAnchor = preserveAnchorRef.current ? widthAnchorRef.current : null;
+    const widthAnchorRow = widthAnchor ? findRow(widthAnchor.key) : null;
+    const mountedWidthAnchor = widthAnchor && widthAnchorRow ? widthAnchor : null;
+    // A parent commit can move or resize the list and also re-render this child before the
+    // corresponding MutationObserver/ResizeObserver callback runs. Preserve the last pre-commit
+    // logical anchor now; otherwise the layout effect below adopts already-shifted geometry and
+    // the observer has no trustworthy baseline left to restore before paint.
+    if (!pending && geometryChangedBeforeObserver && preserveAnchorRef.current && lostAnchorRef.current == null) {
+      // During a resize, keep the dedicated drag-wide owner authoritative instead of seeding a
+      // second baseline from geometry that may already reflect an intermediate width. A stale or
+      // disabled width owner must not suppress the normal visible-anchor recovery path.
+      pending = mountedWidthAnchor ?? visibleAnchorRef.current;
+      if (pending) {
+        pendingAnchorRef.current = pending;
+        anchorCorrectionRequiresIntentRef.current = false;
+      }
+    }
     const correctionScrollTop = anchorCorrectionScrollTopRef.current;
     const correctionIntentVersion = anchorCorrectionIntentVersionRef.current;
     const correctionRelinquished = !anchorCorrectionRequiresIntentRef.current ||
@@ -971,14 +993,21 @@ function VirtualList<T>({
       if (clearAnchorFrameRef.current != null) cancelAnimationFrame(clearAnchorFrameRef.current);
       clearAnchorFrameRef.current = null;
     }
-    if (pending) {
-      const row = findRow(pending.key);
-      if (row) {
-        const adjustment = scrollAnchorAdjustment(
-          pending.offset,
-          row.getBoundingClientRect().top - viewport.top,
-        );
-        if (Math.abs(adjustment) >= 0.5) scroll.scrollTop += adjustment;
+    // Row measurements can commit another virtualizer render between the ResizeObserver callback
+    // and the width owner's next rAF. Correct that freshly committed DOM in this layout effect so
+    // no intermediate width can paint with the old row geometry.
+    const pendingRow = pending ? findRow(pending.key) : null;
+    const correctionAnchor = mountedWidthAnchor ?? (pendingRow ? pending : null);
+    const correctionRow = mountedWidthAnchor ? widthAnchorRow : pendingRow;
+    if (correctionAnchor && correctionRow) {
+      const adjustment = scrollAnchorAdjustment(
+        correctionAnchor.offset,
+        correctionRow.getBoundingClientRect().top - viewport.top,
+      );
+      if (Math.abs(adjustment) >= 0.5) scroll.scrollTop += adjustment;
+      // Width ownership is independent of the generic bounded pending window. Update the
+      // generic owner's intent bookkeeping only when it owns this logical correction.
+      if (pending && correctionAnchor.key === pending.key) {
         anchorCorrectionScrollTopRef.current = scroll.scrollTop;
         anchorCorrectionIntentVersionRef.current = viewportIntentVersionRef.current;
         initialAnchorAppliedRef.current = true;

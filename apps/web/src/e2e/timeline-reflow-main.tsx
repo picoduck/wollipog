@@ -23,6 +23,7 @@ function Fixture() {
   const revealFixtureEnabled = useMemo(() => new URLSearchParams(window.location.search).get("reveal") === "1", []);
   const offsetFixtureEnabled = useMemo(() => new URLSearchParams(window.location.search).get("offset") === "1", []);
   const deferredMeasurementFixture = useMemo(() => new URLSearchParams(window.location.search).get("defer") === "1", []);
+  const predecessorRerenderFixture = useMemo(() => new URLSearchParams(window.location.search).get("predecessor-rerender") === "1", []);
   const [panelWidth, setPanelWidth] = useState(0);
   const [composerHeight, setComposerHeight] = useState(0);
   const [noticeMounted, setNoticeMounted] = useState(true);
@@ -38,6 +39,13 @@ function Fixture() {
   const currentHistoryReplacement = historyReplacement[sessionId] ?? 0;
   const currentHistoryLimit = historyLimit[sessionId];
   const historyKey = `${sessionId}:${historyEpoch}`;
+  // Make predecessor changes and a list-owned prop commit together, as they can in Session Detail.
+  // This deterministically exercises the child layout effect before MutationObserver delivery.
+  const timelineAriaLabel = predecessorRerenderFixture
+    ? noticeMounted
+      ? "Session Activity with Notice"
+      : "Session Activity without Notice"
+    : undefined;
   const [anchor, setAnchor] = useState<VirtualScrollAnchor | null>(null);
   const [revealRequest, setRevealRequest] = useState<TimelineRevealRequest | null>(null);
   const [revealOutcome, setRevealOutcome] = useState("none");
@@ -169,6 +177,7 @@ function Fixture() {
           <VirtualMeasurementCommitTestProvider deferred={deferredMeasurementFixture}>
             <EventTimeline
               items={items}
+              ariaLabel={timelineAriaLabel}
               revealRequest={revealRequest}
               onRevealHandled={handleReveal}
               scrollRef={scrollRef}
