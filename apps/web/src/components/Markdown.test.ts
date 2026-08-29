@@ -73,6 +73,8 @@ test("transcript media labels prefer author text and otherwise omit signed query
   assert.equal(transcriptMediaLabel(signed, "image"), "session capture.png");
   assert.equal(transcriptMediaLabel(signed, "image", signed), "session capture.png");
   assert.equal(transcriptMediaLabel(signed, "image", "Reviewed layout"), "Reviewed layout");
+  const unicodeSigned = "https://evidence.example/caf%C3%A9.png?X-Amz-Signature=secret";
+  assert.equal(transcriptMediaLabel(unicodeSigned, "image", "https://evidence.example/café.png?X-Amz-Signature=secret"), "café.png");
   assert.equal(transcriptMediaLabel("https://evidence.example/%E2%80%AEreview.png", "image"), "review.png");
   assert.equal(transcriptMediaLabel("https://evidence.example/%00review.webm", "video"), "review.webm");
   assert.equal(transcriptMediaLabel("not a URL", "video"), "Video");

@@ -438,31 +438,40 @@ export class IncrementalTimelineRows {
     let delta = timelineSnapshotDelta(items);
     const previousLength = this.items.length;
     let settlementPatched = false;
-    // A text boundary commonly settles the retained tail and appends the next structural item in
-    // one snapshot. Patch that one existing object generation first, then let the ordinary append
-    // paths consume only the suffix; otherwise the two dirty indexes force an O(transcript) rebuild.
+    // A text boundary commonly settles the retained tail while the same event appends or updates
+    // one other item. Patch that object generation first, then let the ordinary one-item paths
+    // consume the remaining change; otherwise two dirty indexes force an O(transcript) rebuild.
+    const settledTailIndex = previousLength - 1;
+    const appendedBoundary = items.length === previousLength + 1 &&
+      delta?.dirtyIndexes.length === 2 && delta.dirtyIndexes[0] === settledTailIndex &&
+      delta.dirtyIndexes[1] === previousLength;
+    const updatedBoundary = items.length === previousLength && delta?.dirtyIndexes.length === 2 &&
+      delta.dirtyIndexes[1] === settledTailIndex;
     if (delta?.previous === this.items && disclosure === this.disclosure && previousLength > 0 &&
-        items.length === previousLength + 1 && delta.dirtyFrom === previousLength - 1 &&
-        delta.dirtyIndexes.length === 2 && delta.dirtyIndexes[0] === previousLength - 1 &&
-        delta.dirtyIndexes[1] === previousLength &&
-        timelineItemIsStreaming(this.items[previousLength - 1]!) &&
-        !timelineItemIsStreaming(items[previousLength - 1]!) &&
-        this.patchExistingItem(items, previousLength - 1)) {
-      const appended = items[previousLength]!;
-      const appendedHasParent = "parentToolUseId" in appended && Boolean(appended.parentToolUseId);
+        (appendedBoundary || updatedBoundary) &&
+        timelineItemIsStreaming(this.items[settledTailIndex]!) &&
+        !timelineItemIsStreaming(items[settledTailIndex]!) &&
+        this.patchExistingItem(items, settledTailIndex)) {
+      const remainingIndex = appendedBoundary ? previousLength : delta.dirtyIndexes[0]!;
+      const remaining = items[remainingIndex]!;
+      const remainingHasParent = "parentToolUseId" in remaining && Boolean(remaining.parentToolUseId);
       settlementPatched = true;
       delta = {
         previous: this.items,
-        dirtyFrom: previousLength,
-        dirtyIndexes: [previousLength],
-        dirtyHasParentItems: delta.dirtyHasParentItems && appendedHasParent,
+        dirtyFrom: remainingIndex,
+        dirtyIndexes: [remainingIndex],
+        dirtyHasParentItems: delta.dirtyHasParentItems && remainingHasParent,
       };
     }
     const indexedUpdate = delta?.previous === this.items && disclosure === this.disclosure &&
       items.length === previousLength && delta.dirtyIndexes.length === 1
       ? this.projectExistingItemUpdate(items, delta.dirtyIndexes[0]!, disclosure)
       : null;
-    if (indexedUpdate) return indexedUpdate;
+    if (indexedUpdate) {
+      return settlementPatched
+        ? { ...indexedUpdate, processedItems: indexedUpdate.processedItems + 1 }
+        : indexedUpdate;
+    }
     const parentTail = delta?.previous === this.items && disclosure === this.disclosure
       ? this.projectParentTail(items, delta, disclosure)
       : null;

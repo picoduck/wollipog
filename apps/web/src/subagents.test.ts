@@ -245,6 +245,28 @@ test("text settlement plus a structural append stays bounded on a long main tran
   assert.equal(timelineMediaSettled(builder.snapshot().at(-2)!, true), true);
 });
 
+test("text settlement plus an earlier tool update stays bounded on a long main transcript", () => {
+  let sequence = 0;
+  const builder = new TimelineBuilder();
+  const push = (payload: SessionEventPayload) => builder.push({
+    id: ++sequence, sessionId: "scale-update", seq: sequence, ts: sequence, payload,
+  });
+  push({ kind: "tool_call", toolCallId: "read", title: "Read", toolKind: "read", status: "in_progress" });
+  for (let index = 0; index < 4_998; index += 1) push({ kind: "user_message", text: `question ${index}` });
+  push({ kind: "agent_message", text: "stream", messageId: "message" });
+
+  const disclosure = new Map<string, boolean>();
+  const rows = new IncrementalTimelineRows();
+  const initial = rows.project(builder.snapshot(), disclosure);
+  const untouched = initial.rows[1_000];
+
+  push({ kind: "tool_call", toolCallId: "read", title: "Read Complete", toolKind: "read", status: "completed" });
+  const boundary = rows.project(builder.snapshot(), disclosure);
+  assert.equal(boundary.incremental, true);
+  assert.equal(boundary.processedItems, 2, "settlement and an earlier in-place update remain O(1)");
+  assert.equal(boundary.rows[1_000], untouched, "the combined update never reprojects history");
+});
+
 test("descriptor assembly inspects only agent and output-owner ids", () => {
   const root = {
     kind: "tool_call", id: 1, toolCallId: "agent", title: "Agent", text: "",

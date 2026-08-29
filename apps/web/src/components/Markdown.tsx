@@ -129,7 +129,15 @@ export function transcriptMediaLabel(
   authorLabel?: string,
 ): string {
   const trimmed = authorLabel?.trim();
-  if (trimmed && trimmed !== href) return trimmed;
+  if (trimmed && trimmed !== href) {
+    try {
+      // GFM preserves raw Unicode as link text while normalizing the href. Treat both forms as the
+      // generated autolink URL so signatures never become an accessibility label.
+      if (new URL(trimmed).href !== new URL(href).href) return trimmed;
+    } catch {
+      return trimmed;
+    }
+  }
   try {
     const basename = new URL(href).pathname.split("/").filter(Boolean).at(-1);
     if (basename) {
