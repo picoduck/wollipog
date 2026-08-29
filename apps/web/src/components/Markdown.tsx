@@ -1,4 +1,4 @@
-import { isValidElement, memo, useEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react";
+import { createContext, isValidElement, memo, useContext, useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
@@ -213,6 +213,41 @@ function MarkdownLink({ href, children, inlineMedia, mediaSettled }: ComponentPr
   );
 }
 
+const MarkdownMediaContext = createContext({ inlineMedia: false, mediaSettled: true });
+
+function MarkdownAnchor({ href, children }: ComponentProps<"a">) {
+  const { inlineMedia, mediaSettled } = useContext(MarkdownMediaContext);
+  return (
+    <MarkdownLink href={href} inlineMedia={inlineMedia} mediaSettled={mediaSettled}>
+      {children}
+    </MarkdownLink>
+  );
+}
+
+function MarkdownImage({ src, alt }: ComponentProps<"img">) {
+  const { inlineMedia, mediaSettled } = useContext(MarkdownMediaContext);
+  const href = typeof src === "string" ? src : undefined;
+  const kind = inlineMedia ? transcriptMediaKind(href) : null;
+  const label = kind && href ? transcriptMediaLabel(href, kind, alt) : alt || href || "image";
+  if (kind === "image" && href && mediaSettled) {
+    return (
+      <>
+        <a className="md-img-link" href={href} target="_blank" rel="noopener noreferrer">🖼 {label}</a>
+        <TranscriptMediaEmbed key={href} href={href} kind="image" label={label} imageAlt={alt} />
+      </>
+    );
+  }
+  return (
+    <a className="md-img-link" href={href} target="_blank" rel="noopener noreferrer">🖼 {label}</a>
+  );
+}
+
+const MARKDOWN_COMPONENTS: MarkdownComponents = {
+  pre: CodeBlockPre,
+  a: MarkdownAnchor,
+  img: MarkdownImage,
+};
+
 /**
  * Markdown renderer for agent messages + reasoning. GFM (tables, task lists, strikethrough,
  * autolinks) plus syntax-highlighted code fences via rehype-highlight (adds `hljs-*` classes;
@@ -284,57 +319,34 @@ export const Markdown = memo(function Markdown({
   const rehypePlugins = eligible && highlighted?.text === children ? highlighted.plugins : undefined;
   // Settlement is monotonic for one streamed document: a later session-active transition must not
   // hide or refetch media that already loaded. An unrelated replacement starts its own lifecycle.
-  const mediaActivation = useRef({ text: children, enabled: mediaSettled });
-  const previousMedia = mediaActivation.current;
+  const [mediaActivation, setMediaActivation] = useState({ text: children, enabled: mediaSettled });
+  let activeMedia = mediaActivation;
+  const previousMedia = mediaActivation;
   if (previousMedia.text !== children) {
     const continues = children.startsWith(previousMedia.text) || previousMedia.text.startsWith(children);
-    mediaActivation.current = {
+    activeMedia = {
       text: children,
       enabled: mediaSettled || (continues && previousMedia.enabled),
     };
+    setMediaActivation(activeMedia);
   } else if (mediaSettled && !previousMedia.enabled) {
-    mediaActivation.current = { text: children, enabled: true };
+    activeMedia = { text: children, enabled: true };
+    setMediaActivation(activeMedia);
   }
   // ReactMarkdown uses each renderer function as the React element type. Keep these identities
   // stable across scroll-driven highlightEligible changes so loaded media is updated in place
   // instead of remounting, collapsing its row, and issuing another remote request.
-  const components = useMemo<MarkdownComponents>(() => ({
-    pre: CodeBlockPre,
-    a: ({ href, children }) => (
-      <MarkdownLink
-        href={href}
-        inlineMedia={inlineMedia}
-        mediaSettled={mediaActivation.current.enabled}
-      >
-        {children}
-      </MarkdownLink>
-    ),
-    img: ({ src, alt }) => {
-      const href = typeof src === "string" ? src : undefined;
-      const kind = inlineMedia ? transcriptMediaKind(href) : null;
-      const label = kind && href ? transcriptMediaLabel(href, kind, alt) : alt || href || "image";
-      if (kind === "image" && href && mediaActivation.current.enabled) {
-        return (
-          <>
-            <a className="md-img-link" href={href} target="_blank" rel="noopener noreferrer">🖼 {label}</a>
-            <TranscriptMediaEmbed key={href} href={href} kind="image" label={label} imageAlt={alt} />
-          </>
-        );
-      }
-      return (
-        <a className="md-img-link" href={href} target="_blank" rel="noopener noreferrer">🖼 {label}</a>
-      );
-    },
-  }), [inlineMedia]);
   return (
     <div className="md">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkBreaks]}
-        rehypePlugins={rehypePlugins}
-        components={components}
-      >
-        {children}
-      </ReactMarkdown>
+      <MarkdownMediaContext.Provider value={{ inlineMedia, mediaSettled: activeMedia.enabled }}>
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm, remarkBreaks]}
+          rehypePlugins={rehypePlugins}
+          components={MARKDOWN_COMPONENTS}
+        >
+          {children}
+        </ReactMarkdown>
+      </MarkdownMediaContext.Provider>
     </div>
   );
 });

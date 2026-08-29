@@ -53,6 +53,37 @@ test("ACP chunk messageId survives normalization and omission preserves legacy p
   }
 });
 
+test("ACP emits a completion fence only after a streamed agent response", async () => {
+  const events: SessionEventPayload[] = [];
+  const client = new AcpClient(
+    {
+      command: process.execPath,
+      args: [fileURLToPath(new URL("../../mock-agent/index.mjs", import.meta.url))],
+      cwd: process.cwd(),
+      env: {},
+    },
+    { onEvent: (event) => events.push(event), onStderr: () => undefined, onExit: () => undefined },
+  );
+  try {
+    (client as any).sessionId = "completion-fence-test";
+    (client as any).peer.request = async () => ({ stopReason: "end_turn" });
+    assert.equal(await client.prompt("tool-only command"), "end_turn");
+    assert.deepEqual(events, [], "an empty successful turn has no response to complete");
+
+    (client as any).peer.request = async () => {
+      (client as any).handleUpdate({
+        sessionId: "completion-fence-test",
+        update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Done" } },
+      });
+      return { stopReason: "end_turn" };
+    };
+    assert.equal(await client.prompt("message command"), "end_turn");
+    assert.deepEqual(events.map((event) => event.kind), ["agent_message", "agent_response_completed"]);
+  } finally {
+    client.dispose();
+  }
+});
+
 test("real Claude Agent 0.58.1 initialize fixture conforms with stable/preview separation", async () => {
   const frame = await fixture("claude-agent-acp-0.58.1.initialize.json");
   const got = negotiateAcpInitialize(frame.result);

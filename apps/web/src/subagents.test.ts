@@ -15,7 +15,7 @@ import {
   timelineSnapshotDelta,
   type TimelineItem,
 } from "./timeline.js";
-import { IncrementalTimelineRows } from "./components/EventTimeline.js";
+import { IncrementalTimelineRows, timelineMediaSettled } from "./components/EventTimeline.js";
 import type { SessionEvent, SessionEventPayload } from "@wollipog/protocol";
 
 const context = {
@@ -219,6 +219,32 @@ test("incremental projection inspects only changed timeline slots and preserves 
   assert.notEqual(initialOutput, streamedOutput, "a selected streamed update replaces only its output generation");
 });
 
+test("text settlement plus a structural append stays bounded on a long main transcript", () => {
+  let sequence = 0;
+  const builder = new TimelineBuilder();
+  const push = (payload: SessionEventPayload) => builder.push({
+    id: ++sequence, sessionId: "scale", seq: sequence, ts: sequence, payload,
+  });
+  for (let index = 0; index < 4_999; index += 1) push({ kind: "user_message", text: `question ${index}` });
+  push({ kind: "agent_message", text: "stream", messageId: "message" });
+
+  const disclosure = new Map<string, boolean>();
+  const rows = new IncrementalTimelineRows();
+  const initial = rows.project(builder.snapshot(), disclosure);
+  const untouched = initial.rows[1_000];
+  const streamingTail = builder.snapshot().at(-1)!;
+  assert.equal(timelineMediaSettled(streamingTail, true), false);
+  assert.equal(timelineMediaSettled(streamingTail, false), true,
+    "inactive and historical transcripts settle even when an older runner recorded no fence");
+
+  push({ kind: "tool_call", toolCallId: "read", title: "Read", toolKind: "read", status: "in_progress" });
+  const boundary = rows.project(builder.snapshot(), disclosure);
+  assert.equal(boundary.incremental, true);
+  assert.equal(boundary.processedItems, 2, "settlement and its structural append remain O(1)");
+  assert.equal(boundary.rows[1_000], untouched, "the combined boundary never reprojects history");
+  assert.equal(timelineMediaSettled(builder.snapshot().at(-2)!, true), true);
+});
+
 test("descriptor assembly inspects only agent and output-owner ids", () => {
   const root = {
     kind: "tool_call", id: 1, toolCallId: "agent", title: "Agent", text: "",
@@ -409,8 +435,8 @@ test("filtered snapshot metadata propagates streamed settlement before a child a
   assert.equal(timelineSnapshotDelta(third)?.dirtyHasParentItems, false,
     "the intentionally omitted selected root is not reported as a resolvable parent");
   const appended = rows.project(third, disclosure);
-  assert.equal(appended.incremental, false,
-    "a simultaneous text settlement and structural append takes the defensive row rebuild path");
+  assert.equal(appended.incremental, true,
+    "a simultaneous text settlement and structural append stays on the bounded row path");
   assert.equal(appended.processedItems, 2);
 });
 

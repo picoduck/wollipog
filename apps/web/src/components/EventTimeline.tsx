@@ -359,6 +359,11 @@ function EventTimelineBody({
 
 const TimelineClockContext = createContext({ now: Date.now(), sessionActive: false });
 
+/** Historical/inactive transcripts are settled even when an older runner recorded no fence. */
+export function timelineMediaSettled(item: TimelineItem, sessionActive: boolean): boolean {
+  return !sessionActive || !timelineItemIsStreaming(item);
+}
+
 function TimelineClockProvider({ enabled, sessionActive, children }: {
   enabled: boolean;
   sessionActive: boolean;
@@ -430,8 +435,29 @@ export class IncrementalTimelineRows {
         keyDirtyFrom: this.rows.length,
       };
     }
-    const delta = timelineSnapshotDelta(items);
+    let delta = timelineSnapshotDelta(items);
     const previousLength = this.items.length;
+    let settlementPatched = false;
+    // A text boundary commonly settles the retained tail and appends the next structural item in
+    // one snapshot. Patch that one existing object generation first, then let the ordinary append
+    // paths consume only the suffix; otherwise the two dirty indexes force an O(transcript) rebuild.
+    if (delta?.previous === this.items && disclosure === this.disclosure && previousLength > 0 &&
+        items.length === previousLength + 1 && delta.dirtyFrom === previousLength - 1 &&
+        delta.dirtyIndexes.length === 2 && delta.dirtyIndexes[0] === previousLength - 1 &&
+        delta.dirtyIndexes[1] === previousLength &&
+        timelineItemIsStreaming(this.items[previousLength - 1]!) &&
+        !timelineItemIsStreaming(items[previousLength - 1]!) &&
+        this.patchExistingItem(items, previousLength - 1)) {
+      const appended = items[previousLength]!;
+      const appendedHasParent = "parentToolUseId" in appended && Boolean(appended.parentToolUseId);
+      settlementPatched = true;
+      delta = {
+        previous: this.items,
+        dirtyFrom: previousLength,
+        dirtyIndexes: [previousLength],
+        dirtyHasParentItems: delta.dirtyHasParentItems && appendedHasParent,
+      };
+    }
     const indexedUpdate = delta?.previous === this.items && disclosure === this.disclosure &&
       items.length === previousLength && delta.dirtyIndexes.length === 1
       ? this.projectExistingItemUpdate(items, delta.dirtyIndexes[0]!, disclosure)
@@ -440,13 +466,18 @@ export class IncrementalTimelineRows {
     const parentTail = delta?.previous === this.items && disclosure === this.disclosure
       ? this.projectParentTail(items, delta, disclosure)
       : null;
-    if (parentTail) return parentTail;
+    if (parentTail) {
+      return settlementPatched
+        ? { ...parentTail, processedItems: parentTail.processedItems + 1 }
+        : parentTail;
+    }
     const tailSafe = this.groups.length > 0 && delta?.previous === this.items &&
       !delta.dirtyHasParentItems && disclosure === this.disclosure &&
       delta.dirtyFrom >= Math.max(0, previousLength - 1);
 
     if (tailSafe) {
-      const appended = delta.dirtyFrom >= previousLength;
+      const tailDelta = delta!;
+      const appended = tailDelta.dirtyFrom >= previousLength;
       const previousLastGroup = this.groups.at(-1)!;
       const firstNew = items[previousLength];
       const joinsLastWork = appended && previousLastGroup.kind === "work" && firstNew != null && isWorkItem(firstNew);
@@ -515,13 +546,13 @@ export class IncrementalTimelineRows {
           rows: this.rows,
           latestCheckpointTurn: this.latestCheckpointTurn,
           incremental: true,
-          processedItems: appendedItems.length,
+          processedItems: appendedItems.length + (settlementPatched ? 1 : 0),
           revision: this.revision,
           keyDirtyFrom: oldRowLength,
         };
       }
       if (!appended) {
-        const updated = this.projectTopLevelTailUpdate(items, delta, disclosure);
+        const updated = this.projectTopLevelTailUpdate(items, tailDelta, disclosure);
         if (updated) return updated;
       } else if (!joinsLastWork && !hasToolCollision && canAppendWithoutTopologyChange) {
         const oldRowLength = this.rows.length;
@@ -560,7 +591,7 @@ export class IncrementalTimelineRows {
           rows: this.rows,
           latestCheckpointTurn: this.latestCheckpointTurn,
           incremental: true,
-          processedItems: appendedItems.length,
+          processedItems: appendedItems.length + (settlementPatched ? 1 : 0),
           revision: this.revision,
           keyDirtyFrom: oldRowLength,
         };
@@ -622,51 +653,50 @@ export class IncrementalTimelineRows {
     return { rowKey: this.revealRowKeys.get(eventId) ?? this.itemKey(location.item), disclosureKeys };
   }
 
-  private projectExistingItemUpdate(
+  private patchExistingItem(
     items: TimelineItem[],
     dirtyIndex: number,
-    disclosure: ReadonlyMap<string, boolean>,
-  ): TimelineRowsProjection | null {
+  ): boolean {
     const previous = this.items[dirtyIndex];
     const changed = items[dirtyIndex];
-    if (!previous || !changed || previous.id !== changed.id || previous.kind !== changed.kind) return null;
+    if (!previous || !changed || previous.id !== changed.id || previous.kind !== changed.kind) return false;
     const location = this.itemLocations.get(previous.id);
-    if (!location || !this.sameSourceItem(location.item, previous)) return null;
+    if (!location || !this.sameSourceItem(location.item, previous)) return false;
     if (location.item.kind === "tool_call" && changed.kind === "tool_call" &&
-        location.item.toolCallId !== changed.toolCallId) return null;
+        location.item.toolCallId !== changed.toolCallId) return false;
     const previousParent = "parentToolUseId" in previous ? previous.parentToolUseId ?? null : null;
     const changedParent = "parentToolUseId" in changed ? changed.parentToolUseId ?? null : null;
     const unchangedOrphanParent = previousParent != null && previousParent === changedParent &&
       !this.toolNodes.has(previousParent) && location.parentId == null;
     if (!unchangedOrphanParent &&
-        (previousParent !== changedParent || previousParent !== location.parentId)) return null;
+        (previousParent !== changedParent || previousParent !== location.parentId)) return false;
 
     const projectedChanged = changed.kind === "tool_call" && location.item.kind === "tool_call" && location.item.children?.length
       ? { ...changed, children: location.item.children }
       : changed;
     // Changing whether a tool owns a subagent summary inserts or removes structural rows.
     // Leave that rare transition to the full defensive projector instead of patching payloads.
-    if (rendersSubagentSummary(location.item) !== rendersSubagentSummary(projectedChanged)) return null;
+    if (rendersSubagentSummary(location.item) !== rendersSubagentSummary(projectedChanged)) return false;
     const visibleTools = new Map<string, ToolItem>();
     if (location.parentId) {
       const parent = this.toolNodes.get(location.parentId);
-      if (!parent?.children || !this.ownedTools.has(parent) || parent.children[location.childIndex] !== location.item) return null;
+      if (!parent?.children || !this.ownedTools.has(parent) || parent.children[location.childIndex] !== location.item) return false;
       let toolId: string | null = location.parentId;
       while (toolId) {
         const tool = this.toolNodes.get(toolId);
-        if (!tool) return null;
+        if (!tool) return false;
         visibleTools.set(toolId, tool);
         toolId = this.toolParents.get(toolId) ?? null;
       }
       parent.children[location.childIndex] = projectedChanged;
     } else {
       const group = this.groups[location.groupIndex];
-      if (!group) return null;
+      if (!group) return false;
       if (group.kind === "work") {
-        if (group.items[location.rootItemIndex] !== location.item) return null;
+        if (group.items[location.rootItemIndex] !== location.item) return false;
         group.items[location.rootItemIndex] = projectedChanged;
       } else {
-        if (location.rootItemIndex !== 0 || group.item !== location.item) return null;
+        if (location.rootItemIndex !== 0 || group.item !== location.item) return false;
         group.item = projectedChanged;
       }
     }
@@ -678,6 +708,15 @@ export class IncrementalTimelineRows {
     this.patchVisibleItem(location.item, projectedChanged);
     this.patchToolRows(visibleTools);
     this.itemLocations.set(changed.id, { ...location, item: projectedChanged });
+    return true;
+  }
+
+  private projectExistingItemUpdate(
+    items: TimelineItem[],
+    dirtyIndex: number,
+    disclosure: ReadonlyMap<string, boolean>,
+  ): TimelineRowsProjection | null {
+    if (!this.patchExistingItem(items, dirtyIndex)) return null;
     this.items = items;
     this.disclosure = disclosure;
     this.revision += 1;
@@ -1374,7 +1413,8 @@ const TimelineRow = memo(function TimelineRow({
   questionContext?: TimelineQuestionContext;
 }) {
   const timingDescriptionId = useId();
-  const mediaSettled = !timelineItemIsStreaming(item);
+  const { sessionActive } = useContext(TimelineClockContext);
+  const mediaSettled = timelineMediaSettled(item, sessionActive);
   switch (item.kind) {
     case "checkpoint":
       // Thin turn divider; the Rewind affordance shows on hover (session detail only).
