@@ -160,12 +160,20 @@ test("mobile Session statuses stay on one clipped line before fixed actions", ()
   assert.deepEqual(statuses.get("flex-wrap"), ["nowrap"]);
   assert.deepEqual(statuses.get("overflow"), ["clip"],
     "clipped statuses must not create a horizontal scroller");
-  assert.deepEqual(statuses.get("contain"), ["inline-size paint"],
-    "long badge geometry must not expand the page overflow area");
+  assert.deepEqual(statuses.get("contain"), ["paint"],
+    "paint containment keeps long badge geometry out of the page overflow area across engines");
   assert.match(statuses.get("mask-image")?.[0] ?? "", /linear-gradient\(.+transparent 100%\)/,
     "the clipped edge must fade before the action surface");
   assert.match(statuses.get("-webkit-mask-image")?.[0] ?? "", /linear-gradient\(.+transparent 100%\)/,
     "the fade must work in WebKit-based mobile browsers");
+  assert.deepEqual(statuses.get("mask-repeat"), ["no-repeat"]);
+  assert.deepEqual(statuses.get("-webkit-mask-repeat"), ["no-repeat"]);
+  const interactiveStatus = phoneRule.declarationsForSelector(
+    ".session-detail > .detail-head > .session-header-statuses > button",
+  );
+  assert.deepEqual(interactiveStatus.get("order"), ["-1"],
+    "focusable status actions must lead the row instead of disappearing into the clipped tail");
+  assert.deepEqual(interactiveStatus.get("flex"), ["none"]);
   const lifecycle = phoneRule
     .declarationsForSelector(".session-detail > .detail-head .session-status-indicators");
   assert.deepEqual(lifecycle.get("flex"), ["none"],
@@ -201,6 +209,13 @@ test("mobile Session statuses stay on one clipped line before fixed actions", ()
     ).get("row-gap"),
     ["4px"],
     "a present transient note retains separation from the status/action row",
+  );
+  assert.deepEqual(
+    phoneRule.declarationsForSelector(
+      ".session-detail > .detail-head > .detail-actions",
+    ).get("align-self"),
+    ["center"],
+    "status and action centers must remain aligned if the single row grows",
   );
 });
 

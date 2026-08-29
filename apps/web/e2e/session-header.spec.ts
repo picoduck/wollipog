@@ -317,7 +317,8 @@ for (const viewport of [
     await expect(header.getByLabel("Changes: Ready for Review")).toHaveCount(1);
     await expect(header.getByLabel("Changes: Uncommitted Changes")).toHaveCount(1);
     await expect(header.getByRole("status", { name: "Background Work: Waiting on External Job" })).toHaveCount(1);
-    await expect(header.getByRole("button", { name: "1 Subagent Active" })).toHaveCount(1);
+    const activeSubagent = header.getByRole("button", { name: "1 Subagent Active" });
+    await expect(activeSubagent).toBeVisible();
     const metrics = await header.evaluate((element) => {
       const rect = (node: Element) => {
         const value = node.getBoundingClientRect();
@@ -338,6 +339,7 @@ for (const viewport of [
       const actions = element.querySelector(".detail-actions") as HTMLElement;
       const share = element.querySelector('[aria-label="Share"]') as HTMLElement;
       const moreActions = element.querySelector('[aria-label="More Actions"]') as HTMLElement;
+      const activeSubagent = element.querySelector('[aria-label="1 Subagent Active"]') as HTMLElement;
       const statusStyle = getComputedStyle(statuses);
       const pageScrollWidth = document.documentElement.scrollWidth;
       statuses.style.display = "none";
@@ -357,17 +359,20 @@ for (const viewport of [
         shareIcon: rect(element.querySelector('[aria-label="Share"] svg')!),
         moreActions: rect(moreActions),
         moreActionsIcon: rect(element.querySelector('[aria-label="More Actions"] svg')!),
+        activeSubagent: rect(activeSubagent),
         badges,
         badgeRows: new Set(badges.map((badge) => Math.round(badge.y))).size,
         headerHeight: element.getBoundingClientRect().height,
         hasHorizontalOverflow: element.scrollWidth > element.clientWidth,
         statusAddsPageOverflow: pageScrollWidth > pageScrollWidthWithoutStatuses,
-        statusIsClipped: statuses.scrollWidth > statuses.clientWidth,
+        statusIsClipped: Math.max(...badges.map((badge) => badge.right)) >
+          statuses.getBoundingClientRect().right,
         statusOverflowX: statusStyle.overflowX,
         statusFlexWrap: statusStyle.flexWrap,
         statusMaskImage: statusStyle.maskImage || statusStyle.webkitMaskImage,
         shareIsTopmostAtCenter: centerTarget(share),
         moreActionsIsTopmostAtCenter: centerTarget(moreActions),
+        activeSubagentIsTopmostAtCenter: centerTarget(activeSubagent),
         headerRight: element.getBoundingClientRect().right,
         clippingRight: Math.min(
           window.innerWidth, clippingPane?.getBoundingClientRect().right ?? window.innerWidth,
@@ -437,6 +442,9 @@ for (const viewport of [
     expect(metrics.statusMaskImage).toMatch(/rgba\(0, 0, 0, 0\) 100%/);
     expect(metrics.shareIsTopmostAtCenter).toBe(true);
     expect(metrics.moreActionsIsTopmostAtCenter).toBe(true);
+    expect(metrics.activeSubagentIsTopmostAtCenter).toBe(true);
+    expect(metrics.activeSubagent.x).toBeGreaterThanOrEqual(metrics.statuses.x);
+    expect(metrics.activeSubagent.right).toBeLessThanOrEqual(metrics.statuses.right);
     expect(metrics.paddingRight).toBeGreaterThanOrEqual(12);
     expect(metrics.clippingRight - metrics.moreActions.right).toBeGreaterThanOrEqual(11.5);
     expect(metrics.badges.length).toBe(5);
@@ -456,6 +464,13 @@ for (const viewport of [
     await header.getByRole("button", { name: "More Actions" }).click();
     const menu = page.getByRole("menu", { name: "Session Actions" });
     await expect(menu).toBeVisible();
+    const statusSummary = menu.locator(".session-menu-statuses");
+    await expect(statusSummary.getByText("Awaiting Prompt", { exact: true })).toBeVisible();
+    await expect(statusSummary.getByText("Ready for Review", { exact: true })).toBeVisible();
+    await expect(statusSummary.getByText("Uncommitted Changes", { exact: true })).toBeVisible();
+    await expect(statusSummary.getByText("Waiting on External Job", { exact: true })).toBeVisible();
+    await expect(menu.getByRole("menuitem", { name: "View 1 Active Subagent" })).toBeEnabled();
+    await capture(page, `narrow-${viewport.width}-status-menu`);
     const projectHeader = menu.locator(".session-project-menu-header");
     await expect(projectHeader).toContainText("Project");
     expect(await projectHeader.evaluate((element) => getComputedStyle(element).textTransform)).toBe("none");

@@ -1854,6 +1854,13 @@ textarea {
   font-size: 11px;
   line-height: 1.35;
 }
+.session-menu-statuses {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 4px 10px 6px;
+}
 .menu-separated {
   margin-top: 3px;
   border-top: 1px solid var(--border);
@@ -10184,9 +10191,15 @@ body.shell-dock-dragging * {
     flex-wrap: nowrap;
     gap: 4px;
     overflow: clip;
-    contain: inline-size paint;
+    contain: paint;
     -webkit-mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 24px), transparent 100%);
+    -webkit-mask-repeat: no-repeat;
     mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 24px), transparent 100%);
+    mask-repeat: no-repeat;
+  }
+  .session-detail > .detail-head > .session-header-statuses > button {
+    order: -1;
+    flex: none;
   }
   .session-detail > .detail-head .session-status-indicators {
     flex: none;
@@ -10213,7 +10226,7 @@ body.shell-dock-dragging * {
     grid-column: 2;
     grid-row: 1;
     min-width: 0;
-    align-self: start;
+    align-self: center;
   }
   .session-detail > .detail-head > .session-header-note {
     grid-column: 1 / -1;
