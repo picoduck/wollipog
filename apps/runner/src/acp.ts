@@ -115,6 +115,7 @@ export class AcpClient {
   private establishingSession = false;
   private pendingSessionStateUpdates: SessionNotification[] = [];
   private replaySuppressedStateUpdates: SessionNotification[] = [];
+  private streamedAgentResponse = false;
   private readonly filesystem: AcpFilesystemService;
   private readonly terminals: AcpTerminalService;
   private readonly terminalEventOutput = new Map<string, { cursor: number }>();
@@ -552,16 +553,24 @@ export class AcpClient {
       }
     }
     if (content.length === 0) content.push({ type: "text", text: "" });
+    this.streamedAgentResponse = false;
     try {
       const res = (await this.peer.request("session/prompt", {
         sessionId: this.sessionId,
         prompt: content,
       })) as PromptResponse;
-      return res.stopReason as StopReason;
+      const stopReason = res.stopReason as StopReason;
+      // ACP publishes response text only as chunks. Mirror the native streaming drivers' durable,
+      // content-free completion fence so transcript consumers can settle the last text item.
+      if (stopReason === "end_turn" && this.streamedAgentResponse) {
+        this.ev.onEvent({ kind: "agent_response_completed" });
+      }
+      return stopReason;
     } finally {
       // User-write barriers exist only to reject stale notifications racing the write/next turn.
       this.modeBarrier = null;
       this.configBarriers.clear();
+      this.streamedAgentResponse = false;
     }
   }
 
@@ -658,13 +667,16 @@ export class AcpClient {
     const u = params?.update;
     if (!u) return;
     switch (u.sessionUpdate) {
-      case "agent_message_chunk":
+      case "agent_message_chunk": {
+        const text = blockText(u.content as ContentBlock);
+        if (text) this.streamedAgentResponse = true;
         this.ev.onEvent({
           kind: "agent_message",
-          text: blockText(u.content as ContentBlock),
+          text,
           ...(typeof u.messageId === "string" && u.messageId ? { messageId: u.messageId } : {}),
         });
         break;
+      }
       case "agent_thought_chunk":
         this.ev.onEvent({
           kind: "agent_thought",

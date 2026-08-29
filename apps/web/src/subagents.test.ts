@@ -11,10 +11,11 @@ import {
 import {
   publishTimelineSnapshotDelta,
   TimelineBuilder,
+  timelineItemIsStreaming,
   timelineSnapshotDelta,
   type TimelineItem,
 } from "./timeline.js";
-import { IncrementalTimelineRows } from "./components/EventTimeline.js";
+import { IncrementalTimelineRows, timelineMediaSettled } from "./components/EventTimeline.js";
 import type { SessionEvent, SessionEventPayload } from "@wollipog/protocol";
 
 const context = {
@@ -210,10 +211,60 @@ test("incremental projection inspects only changed timeline slots and preserves 
 
   builder.push(event({ kind: "agent_message", text: "top level" }));
   const unrelated = projector.project(builder.snapshot(), context);
-  const unchangedOutput = projector.timeline("agent");
-  assert.equal(unrelated.processedItems, 1, "an append never rescans prior transcript items");
-  assert.equal(unchangedOutput, streamedOutput, "unrelated appends preserve the selected output projection");
+  const settledOutput = projector.timeline("agent");
+  assert.equal(unrelated.processedItems, 2,
+    "a boundary revisits only the open streamed row and the appended transcript item");
+  assert.notEqual(settledOutput, streamedOutput, "settlement publishes the selected row's new generation");
+  assert.equal(timelineItemIsStreaming(settledOutput[0]!), false);
   assert.notEqual(initialOutput, streamedOutput, "a selected streamed update replaces only its output generation");
+});
+
+test("text settlement plus a structural append stays bounded on a long main transcript", () => {
+  let sequence = 0;
+  const builder = new TimelineBuilder();
+  const push = (payload: SessionEventPayload) => builder.push({
+    id: ++sequence, sessionId: "scale", seq: sequence, ts: sequence, payload,
+  });
+  for (let index = 0; index < 4_999; index += 1) push({ kind: "user_message", text: `question ${index}` });
+  push({ kind: "agent_message", text: "stream", messageId: "message" });
+
+  const disclosure = new Map<string, boolean>();
+  const rows = new IncrementalTimelineRows();
+  const initial = rows.project(builder.snapshot(), disclosure);
+  const untouched = initial.rows[1_000];
+  const streamingTail = builder.snapshot().at(-1)!;
+  assert.equal(timelineMediaSettled(streamingTail, true), false);
+  assert.equal(timelineMediaSettled(streamingTail, false), true,
+    "inactive and historical transcripts settle even when an older runner recorded no fence");
+
+  push({ kind: "tool_call", toolCallId: "read", title: "Read", toolKind: "read", status: "in_progress" });
+  const boundary = rows.project(builder.snapshot(), disclosure);
+  assert.equal(boundary.incremental, true);
+  assert.equal(boundary.processedItems, 2, "settlement and its structural append remain O(1)");
+  assert.equal(boundary.rows[1_000], untouched, "the combined boundary never reprojects history");
+  assert.equal(timelineMediaSettled(builder.snapshot().at(-2)!, true), true);
+});
+
+test("text settlement plus an earlier tool update stays bounded on a long main transcript", () => {
+  let sequence = 0;
+  const builder = new TimelineBuilder();
+  const push = (payload: SessionEventPayload) => builder.push({
+    id: ++sequence, sessionId: "scale-update", seq: sequence, ts: sequence, payload,
+  });
+  push({ kind: "tool_call", toolCallId: "read", title: "Read", toolKind: "read", status: "in_progress" });
+  for (let index = 0; index < 4_998; index += 1) push({ kind: "user_message", text: `question ${index}` });
+  push({ kind: "agent_message", text: "stream", messageId: "message" });
+
+  const disclosure = new Map<string, boolean>();
+  const rows = new IncrementalTimelineRows();
+  const initial = rows.project(builder.snapshot(), disclosure);
+  const untouched = initial.rows[1_000];
+
+  push({ kind: "tool_call", toolCallId: "read", title: "Read Complete", toolKind: "read", status: "completed" });
+  const boundary = rows.project(builder.snapshot(), disclosure);
+  assert.equal(boundary.incremental, true);
+  assert.equal(boundary.processedItems, 2, "settlement and an earlier in-place update remain O(1)");
+  assert.equal(boundary.rows[1_000], untouched, "the combined update never reprojects history");
 });
 
 test("descriptor assembly inspects only agent and output-owner ids", () => {
@@ -366,7 +417,7 @@ test("context-only invalidation and cross-session reuse rebuild selected output"
   assert.deepEqual(nextOutput.map((item) => "text" in item ? item.text : ""), ["session B"]);
 });
 
-test("filtered snapshot metadata keeps downstream row projection incremental", () => {
+test("filtered snapshot metadata propagates streamed settlement before a child append", () => {
   let sequence = 0;
   const event = (payload: SessionEventPayload): SessionEvent => ({
     id: ++sequence, sessionId: "rows", seq: sequence, ts: sequence, payload,
@@ -401,11 +452,14 @@ test("filtered snapshot metadata keeps downstream row projection incremental", (
   subagents.project(builder.snapshot(), context);
   const third = subagents.timeline("agent");
   assert.equal(timelineSnapshotDelta(third)?.previous, second);
+  assert.deepEqual(timelineSnapshotDelta(third)?.dirtyIndexes, [0, 1],
+    "the filtered delta includes the settled text row and the new child tool");
   assert.equal(timelineSnapshotDelta(third)?.dirtyHasParentItems, false,
     "the intentionally omitted selected root is not reported as a resolvable parent");
   const appended = rows.project(third, disclosure);
-  assert.equal(appended.incremental, true);
-  assert.equal(appended.processedItems, 1);
+  assert.equal(appended.incremental, true,
+    "a simultaneous text settlement and structural append stays on the bounded row path");
+  assert.equal(appended.processedItems, 2);
 });
 
 test("known zero token usage remains distinct from unavailable usage", () => {

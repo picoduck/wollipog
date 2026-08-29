@@ -9,6 +9,7 @@ import {
   nestSubagents,
   SubagentTreeProjector,
   TimelineBuilder,
+  timelineItemIsStreaming,
   timelineSnapshotDelta,
   type TimelineItem,
 } from "./timeline.js";
@@ -146,6 +147,19 @@ test("streamed response completion evidence stays hidden and does not duplicate 
   assert.deepEqual(items.map((item) => item.kind), ["agent_message", "agent_message"]);
   assert.equal((items[0] as Extract<TimelineItem, { kind: "agent_message" }>).text, "streamed answer");
   assert.equal((items[1] as Extract<TimelineItem, { kind: "agent_message" }>).text, "later response");
+});
+
+test("streaming metadata settles on the content-free response completion fence", () => {
+  const builder = new TimelineBuilder();
+  builder.push(ev({ kind: "agent_message", text: "https://evidence.example/review.png?signature=a", messageId: "m" }));
+  const streaming = builder.snapshot()[0]!;
+  assert.equal(timelineItemIsStreaming(streaming), true);
+
+  builder.push(ev({ kind: "agent_response_completed" }));
+  const settled = builder.snapshot()[0]!;
+  assert.equal(timelineItemIsStreaming(settled), false);
+  assert.notEqual(settled, streaming, "settlement publishes a new row identity for memoized consumers");
+  assert.deepEqual(settled, streaming, "streaming state never changes the durable transcript shape");
 });
 
 test("managed continuation delivery markers remain durable but hidden from the timeline", () => {

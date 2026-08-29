@@ -9,6 +9,7 @@ import {
   markdownCodeText,
   markdownCodeWrapsByDefault,
   transcriptMediaKind,
+  transcriptMediaLabel,
 } from "./Markdown.js";
 
 (globalThis as typeof globalThis & { React: typeof React }).React = React;
@@ -67,6 +68,18 @@ test("transcript media classification uses HTTPS path extensions and ignores sig
   ]) assert.equal(transcriptMediaKind(href), null, href);
 });
 
+test("transcript media labels prefer author text and otherwise omit signed query strings", () => {
+  const signed = "https://evidence.example/reviews/session%20capture.png?X-Amz-Signature=secret";
+  assert.equal(transcriptMediaLabel(signed, "image"), "session capture.png");
+  assert.equal(transcriptMediaLabel(signed, "image", signed), "session capture.png");
+  assert.equal(transcriptMediaLabel(signed, "image", "Reviewed layout"), "Reviewed layout");
+  const unicodeSigned = "https://evidence.example/caf%C3%A9.png?X-Amz-Signature=secret";
+  assert.equal(transcriptMediaLabel(unicodeSigned, "image", "https://evidence.example/café.png?X-Amz-Signature=secret"), "café.png");
+  assert.equal(transcriptMediaLabel("https://evidence.example/%E2%80%AEreview.png", "image"), "review.png");
+  assert.equal(transcriptMediaLabel("https://evidence.example/%00review.webm", "video"), "review.webm");
+  assert.equal(transcriptMediaLabel("not a URL", "video"), "Video");
+});
+
 test("transcript media opt-in keeps links and adds bounded native image/video elements", () => {
   const image = "https://evidence.example/review.png?X-Amz-Signature=redacted";
   const video = "https://evidence.example/review.webm?X-Amz-Signature=redacted";
@@ -76,9 +89,46 @@ test("transcript media opt-in keeps links and adds bounded native image/video el
   }));
 
   assert.match(html, new RegExp(`href="${image.replaceAll("?", "\\?")}"`));
-  assert.match(html, /<img class="md-media-image"[^>]*src="https:\/\/evidence\.example\/review\.png[^>]*loading="lazy"/);
-  assert.match(html, /<video class="md-media-video"[^>]*src="https:\/\/evidence\.example\/review\.webm[^>]*controls=""[^>]*playsInline=""[^>]*preload="metadata"/);
+  assert.match(html, /<a class="md-media-image-link" aria-hidden="true">/);
+  assert.doesNotMatch(html, /aria-label="Open review\.png Full Size"/);
+  assert.match(html, /<img class="md-media-image"[^>]*src="https:\/\/evidence\.example\/review\.png[^>]*alt="review\.png"[^>]*loading="lazy"/);
+  assert.match(html, /<video class="md-media-video"[^>]*src="https:\/\/evidence\.example\/review\.webm[^>]*aria-label="review\.webm"[^>]*controls=""[^>]*playsInline=""[^>]*preload="metadata"/);
   assert.doesNotMatch(html, /autoplay/);
+});
+
+test("unsettled transcript media keeps its plain link without mounting a remote element", () => {
+  const image = "https://evidence.example/review.png?X-Amz-Signature=partial";
+  const video = "https://evidence.example/review.webm?X-Amz-Signature=partial";
+  const html = renderToStaticMarkup(React.createElement(Markdown, {
+    inlineMedia: true,
+    mediaSettled: false,
+    children: `${image}\n\n${video}`,
+  }));
+
+  assert.match(html, new RegExp(`href="${image.replaceAll("?", "\\?")}"`));
+  assert.match(html, new RegExp(`href="${video.replaceAll("?", "\\?")}"`));
+  assert.doesNotMatch(html, /md-media-embed|<img|<video/);
+});
+
+test("author-provided image alt text remains the media name", () => {
+  const html = renderToStaticMarkup(React.createElement(Markdown, {
+    inlineMedia: true,
+    children: "![Reviewed Layout](https://evidence.example/review.png?signature=redacted)",
+  }));
+
+  assert.match(html, /<img class="md-media-image"[^>]*alt="Reviewed Layout"/);
+  assert.match(html, /class="md-img-link"[^>]*>🖼 Reviewed Layout<\/a>/);
+  assert.doesNotMatch(html, /alt="https:\/\//);
+});
+
+test("an intentionally empty Markdown image alt stays decorative", () => {
+  const html = renderToStaticMarkup(React.createElement(Markdown, {
+    inlineMedia: true,
+    children: "![](https://evidence.example/review.png?signature=redacted)",
+  }));
+
+  assert.match(html, /<img class="md-media-image"[^>]*alt=""/);
+  assert.match(html, /class="md-img-link"[^>]*>🖼 review\.png<\/a>/);
 });
 
 test("inline code stays action-free", () => {
