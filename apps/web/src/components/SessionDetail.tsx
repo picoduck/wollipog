@@ -133,7 +133,7 @@ import {
 } from "../conversation-steering.js";
 import { SteeringReceipts } from "./SteeringReceipts.js";
 import { SessionCommandReceipts } from "./SessionCommandReceipts.js";
-import { ArrowUpIcon, ChevronLeftIcon, FolderSolidIcon, ImageIcon, MicIcon, MoreHorizontalIcon, StopTurnIcon } from "./Icons.js";
+import { ArrowUpIcon, ChevronLeftIcon, FolderSolidIcon, ImageIcon, MicIcon, MoreVerticalIcon, StopTurnIcon } from "./Icons.js";
 import {
   DURABLE_COMMAND_ATTACHMENT_NOTICE,
   buildComposerCommandRegistry,
@@ -3240,9 +3240,8 @@ function ProjectChip({ session, onOpenInbox }: { session: SessionView; onOpenInb
 
 /**
  * The breadcrumb's Project segment: the name navigates back to this Project's split in the
- * Inbox, and a hover/focus-revealed ⋯ trigger opens a small actions menu (Manage Project /
- * Move Session). Reassignment moved out of the name itself so the crumb behaves like a
- * breadcrumb.
+ * Inbox, and a persistent vertical-ellipsis trigger opens a small actions menu (Manage Project /
+ * Move Session). Reassignment moved out of the name itself so the crumb behaves like a breadcrumb.
  */
 function DurableProjectChip({ session, onOpenInbox }: { session: SessionView; onOpenInbox: () => void }) {
   const projects = useStoreSelector((state) => state.projects);
@@ -3278,7 +3277,7 @@ function DurableProjectChip({ session, onOpenInbox }: { session: SessionView; on
         onClick={menu.toggle}
         onKeyDown={menu.onTriggerKeyDown}
       >
-        <MoreHorizontalIcon size={14} />
+        <MoreVerticalIcon size={14} />
       </button>
       {menuOpen && (
         <>

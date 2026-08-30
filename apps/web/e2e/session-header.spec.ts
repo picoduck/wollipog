@@ -70,6 +70,12 @@ test("the unified session bar balances navigation, breadcrumb, status, and actio
       project: rect(project),
       projectButton: rect(projectButton),
       projectActions: rect(projectActions),
+      projectActionDots: [...projectActions.querySelectorAll("circle")].map((dot) => ({
+        x: Number.parseFloat(dot.getAttribute("cx") ?? "NaN"),
+        y: Number.parseFloat(dot.getAttribute("cy") ?? "NaN"),
+      })),
+      projectActionsOpacity: getComputedStyle(projectActions).opacity,
+      projectActionsPointerEvents: getComputedStyle(projectActions).pointerEvents,
       projectTextWidth: projectText.getBoundingClientRect().width,
       projectTextOverflow: getComputedStyle(projectLabel).textOverflow,
       headerHeight: headerBox.height,
@@ -96,6 +102,13 @@ test("the unified session bar balances navigation, breadcrumb, status, and actio
   expect(geometry.projectActions.x).toBeGreaterThanOrEqual(
     geometry.projectButton.x + geometry.projectButton.width - 1,
   );
+  expect(geometry.projectActionDots).toEqual([
+    { x: 12, y: 5 },
+    { x: 12, y: 12 },
+    { x: 12, y: 19 },
+  ]);
+  expect(geometry.projectActionsOpacity).toBe("1");
+  expect(geometry.projectActionsPointerEvents).toBe("auto");
   expect(geometry.projectTextOverflow).toBe("ellipsis");
   expect(geometry.headerRight - (geometry.actions.x + geometry.actions.width)).toBeGreaterThanOrEqual(geometry.paddingRight - 1);
   expect(geometry.clippingRight - geometry.moreActionsRight).toBeGreaterThanOrEqual(11.5);
@@ -129,8 +142,8 @@ test("the unified session bar balances navigation, breadcrumb, status, and actio
   await page.keyboard.press("Shift+Tab");
   await expect(header.getByRole("button", { name: "Share" })).toBeFocused();
   await page.keyboard.press("Shift+Tab");
-  // The ⋯ trigger overlays the crumb (no layout footprint) but stays in the tab order even
-  // while faded out; focusing it reveals it over the crumb's trailing text.
+  // The actions trigger overlays the crumb's reserved gutter (no layout footprint) and remains in
+  // the tab order after the Project navigation button.
   await expect(header.getByRole("button", { name: "Project Actions" })).toBeFocused();
   await page.keyboard.press("Shift+Tab");
   await expect(header.locator(".detail-crumbs .cctx-chip")).toBeFocused();

@@ -1679,7 +1679,7 @@ textarea {
   bottom: auto;
 }
 /* Project crumb cluster: the name is a breadcrumb back to the Project's Inbox split. Reserve the
-   trailing gutter for the ⋯ trigger so coarse pointers and hover never cover the Project name. */
+   trailing gutter for the persistent actions trigger so it never covers the Project name. */
 .crumb-project {
   position: relative;
   display: inline-flex;
@@ -1716,17 +1716,19 @@ textarea {
   background: linear-gradient(90deg, transparent, var(--bg) 42%);
   color: var(--text-faint);
   cursor: pointer;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity var(--dur-fast) var(--ease-out);
+  transition: color var(--dur-fast) var(--ease-out);
 }
-.crumb-project:hover .crumb-project-actions,
-.crumb-project:focus-within .crumb-project-actions {
-  opacity: 1;
-  pointer-events: auto;
+.crumb-project-actions:hover {
+  color: var(--text-dim);
 }
-.crumb-project-actions:hover,
+.crumb-project-actions:active {
+  color: var(--text);
+}
 .crumb-project-actions:focus-visible {
+  color: var(--accent);
+}
+.crumb-project-actions[aria-expanded="true"] {
+  background: linear-gradient(90deg, transparent, var(--bg-elev-2) 42%);
   color: var(--accent);
 }
 /* The crumb sits near the pane's left edge; the shared right-anchored menu would hang
@@ -1734,12 +1736,6 @@ textarea {
 .crumb-project .menu-pop {
   left: 0;
   right: auto;
-}
-@media (hover: none), (pointer: coarse) {
-  .crumb-project-actions {
-    opacity: 1;
-    pointer-events: auto;
-  }
 }
 .session-detail > .detail-head .detail-title {
   margin: 0;
