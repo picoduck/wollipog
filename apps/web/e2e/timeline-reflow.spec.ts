@@ -607,42 +607,47 @@ test("timeline reader disables browser-native scroll anchoring", async ({ page }
 });
 
 for (const width of [320, 390]) {
-  test(`structured transcript rows stay inside a ${width}px phone reader`, async ({ page }) => {
-    await page.setViewportSize({ width, height: 800 });
-    await page.goto("/timeline-reflow-e2e.html?overflow=1");
-    const reader = page.getByTestId("reader");
-    await expect(page.getByText("Automated Review")).toBeVisible();
-    await expectTranscriptWidthContained(page);
-
-    await page.getByRole("button", { name: /Worked/ }).click();
-    await expect(page.locator(".tl-tool")).toBeVisible();
-    await expectTranscriptWidthContained(page);
-    const diff = page.locator(".diff");
-    await expect(diff).toBeVisible();
-    expect(await diff.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
-
-    const maximumScrollTop = await reader.evaluate((element) => element.scrollHeight - element.clientHeight);
-    for (const scrollTop of [maximumScrollTop / 2, maximumScrollTop]) {
-      await reader.evaluate((element, top) => {
-        element.scrollTop = top;
-        element.dispatchEvent(new Event("scroll"));
-      }, scrollTop);
-      await settleLayout(page);
+  for (const questionStyle of ["interactive", "text"] as const) {
+    test(`structured transcript rows stay inside a ${width}px phone reader with ${questionStyle} questions`, async ({ page }) => {
+      await page.addInitScript((style) => {
+        localStorage.setItem("wollipog.question-response-style", style);
+      }, questionStyle);
+      await page.setViewportSize({ width, height: 800 });
+      await page.goto("/timeline-reflow-e2e.html?overflow=1");
+      const reader = page.getByTestId("reader");
+      await expect(page.getByText("Automated Review")).toBeVisible();
       await expectTranscriptWidthContained(page);
-    }
 
-    const codeBlock = page.locator(".md pre");
-    const table = page.locator(".md table");
-    await expect(codeBlock).toBeVisible();
-    await expect(table).toBeVisible();
-    expect(await codeBlock.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
-    expect(await table.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
-    for (const localScroller of [codeBlock, table]) {
-      expect(await localScroller.evaluate((element) => getComputedStyle(element).overflowX)).toBe("auto");
-      expect(await localScroller.evaluate((element) =>
-        element.getBoundingClientRect().width <= element.parentElement!.getBoundingClientRect().width + 0.5)).toBe(true);
-    }
-  });
+      await page.getByRole("button", { name: /Worked/ }).click();
+      await expect(page.locator(".tl-tool")).toBeVisible();
+      await expectTranscriptWidthContained(page);
+      const diff = page.locator(".diff");
+      await expect(diff).toBeVisible();
+      expect(await diff.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
+
+      const maximumScrollTop = await reader.evaluate((element) => element.scrollHeight - element.clientHeight);
+      for (const scrollTop of [maximumScrollTop / 2, maximumScrollTop]) {
+        await reader.evaluate((element, top) => {
+          element.scrollTop = top;
+          element.dispatchEvent(new Event("scroll"));
+        }, scrollTop);
+        await settleLayout(page);
+        await expectTranscriptWidthContained(page);
+      }
+
+      const codeBlock = page.locator(".md pre");
+      const table = page.locator(".md table");
+      await expect(codeBlock).toBeVisible();
+      await expect(table).toBeVisible();
+      expect(await codeBlock.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
+      expect(await table.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
+      for (const localScroller of [codeBlock, table]) {
+        expect(await localScroller.evaluate((element) => getComputedStyle(element).overflowX)).toBe("auto");
+        expect(await localScroller.evaluate((element) =>
+          element.getBoundingClientRect().width <= element.parentElement!.getBoundingClientRect().width + 0.5)).toBe(true);
+      }
+    });
+  }
 }
 
 test("timeline rows remeasure when a side panel narrows wrapped messages", async ({ page }) => {

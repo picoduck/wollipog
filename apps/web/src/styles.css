@@ -3762,7 +3762,7 @@ textarea,
 }
 /* Absolutely positioned screen-reader text otherwise keeps its static inline position. When the
    timestamp lands exactly at the reader edge, the 1px hidden box extends scrollWidth by 1px. */
-.timeline .sr-only { inset-inline-start: 0 !important; }
+.timeline .sr-only { inset-inline-start: 0; }
 .tl-row {
   display: flex;
 }
@@ -9782,6 +9782,7 @@ body.shell-dock-dragging * {
 }
 .question-text-options li {
   padding: 3px 6px;
+  overflow-wrap: anywhere;
 }
 .question-text-options .question-label {
   font-weight: 500;
