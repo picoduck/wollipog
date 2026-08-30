@@ -69,6 +69,7 @@ test("the unified session bar balances navigation, breadcrumb, status, and actio
     const projectLabel = project.querySelector(".crumb-project-label")!;
     const projectActions = project.querySelector(".crumb-project-actions")!;
     const projectActionsIcon = projectActions.querySelector("svg")!;
+    const projectSeparator = element.querySelector(".detail-crumb-sep")!;
     const projectText = document.createRange();
     projectText.selectNodeContents(projectLabel);
     const moreActions = element.querySelector('[aria-label="More Actions"]')!;
@@ -85,6 +86,7 @@ test("the unified session bar balances navigation, breadcrumb, status, and actio
       projectButton: rect(projectButton),
       projectActions: rect(projectActions),
       projectActionsIcon: rect(projectActionsIcon),
+      projectSeparator: rect(projectSeparator),
       projectActionDots: [...projectActions.querySelectorAll("circle")].map((dot) => ({
         x: Number.parseFloat(dot.getAttribute("cx") ?? "NaN"),
         y: Number.parseFloat(dot.getAttribute("cy") ?? "NaN"),
@@ -121,6 +123,7 @@ test("the unified session bar balances navigation, breadcrumb, status, and actio
     geometry.projectActions.x + geometry.projectActions.width
       - geometry.projectActionsIcon.x - geometry.projectActionsIcon.width,
   ).toBeCloseTo(5, 0);
+  expect(geometry.projectSeparator.x - (geometry.project.x + geometry.project.width)).toBeCloseTo(0, 0);
   expect(geometry.projectActions.x).toBeGreaterThanOrEqual(
     geometry.projectButton.x + geometry.projectButton.width - 1,
   );
