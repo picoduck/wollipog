@@ -182,10 +182,24 @@ let fixtureSequence = 0;
 async function mountFixture(
   pages: ReturnType<typeof pageController>,
   turns = 12,
-  { pinnedOpen = false }: { pinnedOpen?: boolean } = {},
+  { pinnedOpen = false, pendingQuestion = false }: { pinnedOpen?: boolean; pendingQuestion?: boolean } = {},
 ): Promise<Fixture> {
   fixtureSequence += 1;
   const currentSession = session(`transcript-recovery-${fixtureSequence}`);
+  if (pendingQuestion) {
+    currentSession.status = "input_required";
+    currentSession.pendingApproval = {
+      kind: "question",
+      requestId: "pending-question",
+      title: "Agent Questions",
+      options: [],
+      questions: [{
+        id: "language",
+        question: "Which language should I use?",
+        options: [{ label: "TypeScript" }, { label: "JavaScript" }],
+      }],
+    };
+  }
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
     instanceId: `transcript-recovery-${fixtureSequence}`,
@@ -225,6 +239,20 @@ async function mountFixture(
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
   const events = cachedTranscriptEvents(currentSession.id, turns);
+  if (pendingQuestion && currentSession.pendingApproval?.kind === "question") {
+    const seq = events.length + 1;
+    events.push({
+      id: seq,
+      sessionId: currentSession.id,
+      seq,
+      ts: seq,
+      payload: {
+        kind: "question_request",
+        requestId: currentSession.pendingApproval.requestId,
+        questions: currentSession.pendingApproval.questions ?? [],
+      },
+    });
+  }
   await act(async () => {
     root.render(
       <ApiProvider client={client}>
@@ -373,6 +401,23 @@ function followChipState(fixture: Fixture): string | null {
   assert.ok(chip, "the follow-state control is mounted");
   return chip.getAttribute("data-follow-tail-state");
 }
+
+test("SessionDetail keeps a pending question live when its hydrated row is outside the virtual range", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages, 40, { pendingQuestion: true });
+  try {
+    assert.equal(fixture.container.querySelectorAll('[aria-label="Agent Questions"]').length, 1);
+    assert.equal(fixture.container.querySelectorAll('[role="radio"]').length, 2);
+    assert.equal(fixture.container.querySelector(".tl-question"), null,
+      "the off-range historical row is not required to keep the live form reachable");
+    const liveQuestion = fixture.container.querySelector('[aria-label="Agent Questions"]');
+    assert.ok(liveQuestion);
+    assert.equal(fixture.scroller.contains(liveQuestion), false,
+      "the live response form stays outside the virtualized transcript scroller");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
 
 test("recovery over a long cached transcript announces at the reader's lower edge while following live output", async () => {
   const pages = pageController();
