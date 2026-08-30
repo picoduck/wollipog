@@ -635,6 +635,7 @@ for (const width of [320, 390]) {
     await expect(codeBlock).toBeVisible();
     await expect(table).toBeVisible();
     expect(await codeBlock.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
+    expect(await table.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
     for (const localScroller of [codeBlock, table]) {
       expect(await localScroller.evaluate((element) => getComputedStyle(element).overflowX)).toBe("auto");
       expect(await localScroller.evaluate((element) =>

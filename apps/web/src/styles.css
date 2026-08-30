@@ -3895,7 +3895,6 @@ textarea,
 .tl-agent-msg {
   min-width: 0;
   max-width: 100%;
-  overflow-wrap: anywhere;
   color: var(--text);
   font-size: 14px;
   line-height: 1.6;
@@ -3903,6 +3902,7 @@ textarea,
 }
 .md,
 .md-code-block { min-width: 0; max-width: 100%; }
+.md { overflow-wrap: anywhere; }
 .md-code-block { position: relative; }
 .md-code-actions {
   /* Positioned boxes paint above the in-flow <pre> without a z-index. */
@@ -4327,6 +4327,9 @@ button.file-head.source-path-link {
 .tl-perm > .perm-context,
 .tl-perm > .question-recap {
   flex: 1 1 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 .perm-pending {
   color: var(--amber);
