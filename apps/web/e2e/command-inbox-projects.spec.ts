@@ -926,15 +926,14 @@ test("Project-first creation distinguishes same names and explains multi-locatio
     .toMatchObject({ projectId: "alpha-copy", projectLocationId: "location-alpha-copy" });
 });
 
-/** The ⋯ trigger reveals on hover beside the Project crumb; Move Session lives in its menu. */
+/** The persistent vertical-ellipsis trigger beside the Project crumb owns the Move Session menu. */
 async function openMoveToProjectDialog(page: Page) {
-  await page.locator(".crumb-project").hover();
   await page.getByRole("button", { name: "Project Actions" }).click();
   await page.getByRole("menuitem", { name: "Move Session…" }).click();
   return page.getByRole("dialog", { name: "Move to Project" });
 }
 
-test("the Project crumb navigates to the Project's Inbox split; ⋯ reveals beside it", async ({ page }) => {
+test("the Project crumb navigates independently beside persistent Project Actions", async ({ page }) => {
   // A longer name keeps its click region separate from the 34px trailing actions gutter.
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateProject("alpha", { name: "Alpha Project" }));
   await page.getByRole("tab", { name: /^All\d/ }).click();
@@ -944,12 +943,21 @@ test("the Project crumb navigates to the Project's Inbox split; ⋯ reveals besi
   await expect(projectChip).toBeVisible();
   await expect(projectChip).not.toHaveAttribute("aria-haspopup", /.+/);
 
-  // The ⋯ trigger occupies the crumb's reserved trailing gutter. It stays faded out and
-  // click-through until hover or focus without covering the Project navigation button.
+  // The vertical-ellipsis trigger stays visible in the crumb's reserved trailing gutter without
+  // covering the Project navigation button.
   const actions = page.getByRole("button", { name: "Project Actions" });
   const projectCrumb = page.locator(".crumb-project");
-  await expect(actions).toHaveCSS("opacity", "0");
-  await expect(actions).toHaveCSS("pointer-events", "none");
+  await expect(actions).toHaveCSS("opacity", "1");
+  await expect(actions).toHaveCSS("pointer-events", "auto");
+  const dotGeometry = await actions.locator("circle").evaluateAll((dots) => dots.map((dot) => ({
+    x: Number.parseFloat(dot.getAttribute("cx") ?? "NaN"),
+    y: Number.parseFloat(dot.getAttribute("cy") ?? "NaN"),
+  })));
+  expect(dotGeometry).toEqual([
+    { x: 12, y: 5 },
+    { x: 12, y: 12 },
+    { x: 12, y: 19 },
+  ]);
   const [crumbBox, chipBox, actionsBox] = await Promise.all([
     projectCrumb.boundingBox(),
     projectChip.boundingBox(),
@@ -960,17 +968,49 @@ test("the Project crumb navigates to the Project's Inbox split; ⋯ reveals besi
   expect(actionsBox).not.toBeNull();
   expect(actionsBox!.x).toBeGreaterThanOrEqual(chipBox!.x + chipBox!.width - 1);
   expect(actionsBox!.x + actionsBox!.width).toBeLessThanOrEqual(crumbBox!.x + crumbBox!.width + 1);
-  await projectCrumb.hover();
-  await expect(actions).toHaveCSS("opacity", "1");
-  await expect(actions).toHaveCSS("pointer-events", "auto");
+
+  const defaultStyle = await actions.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { color: style.color, backgroundImage: style.backgroundImage };
+  });
+  await actions.hover();
+  await expect.poll(() => actions.evaluate((element) => getComputedStyle(element).color))
+    .not.toBe(defaultStyle.color);
+  const hoverColor = await actions.evaluate((element) => getComputedStyle(element).color);
+
+  const actionsCenter = { x: actionsBox!.x + actionsBox!.width / 2, y: actionsBox!.y + actionsBox!.height / 2 };
+  await page.mouse.move(actionsCenter.x, actionsCenter.y);
+  await page.mouse.down();
+  await expect.poll(() => actions.evaluate((element) => getComputedStyle(element).color))
+    .not.toBe(hoverColor);
+  const activeColor = await actions.evaluate((element) => getComputedStyle(element).color);
+  expect(activeColor).not.toBe(defaultStyle.color);
+  await page.mouse.up();
 
   // The trigger opens a small menu rather than a dialog directly.
-  await actions.click();
   const actionsMenu = page.getByRole("menu", { name: "Project Actions" });
   await expect(actionsMenu.getByRole("menuitem", { name: "Manage Project" })).toBeVisible();
   await expect(actionsMenu.getByRole("menuitem", { name: "Move Session…" })).toBeVisible();
+  await expect(actions).toHaveAttribute("aria-expanded", "true");
+  const openStyle = await actions.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { color: style.color, backgroundImage: style.backgroundImage };
+  });
+  expect(openStyle.color).not.toBe(defaultStyle.color);
+  expect(openStyle.backgroundImage).not.toBe(defaultStyle.backgroundImage);
   await page.keyboard.press("Escape");
   await expect(actionsMenu).toBeHidden();
+
+  await projectChip.focus();
+  await page.keyboard.press("Tab");
+  await expect(actions).toBeFocused();
+  const focusStyle = await actions.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { color: style.color, outlineStyle: style.outlineStyle, outlineWidth: Number.parseFloat(style.outlineWidth) };
+  });
+  expect(focusStyle.color).not.toBe(defaultStyle.color);
+  expect(focusStyle.outlineStyle).not.toBe("none");
+  expect(focusStyle.outlineWidth).toBeGreaterThanOrEqual(2);
 
   // Cancelling the Move dialog restores focus to the durable ⋯ trigger, not the removed
   // menu item and not the page heading (regression coverage).
