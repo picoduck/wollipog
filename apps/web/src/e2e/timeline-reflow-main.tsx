@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { flushSync } from "react-dom";
+import type { AgentQuestion } from "@wollipog/protocol";
 import type { TimelineItem } from "../timeline.js";
 import { EventTimeline, type TimelineRevealRequest } from "../components/EventTimeline.js";
 import {
@@ -11,6 +12,116 @@ import { useFollowTail } from "../useFollowTail.js";
 import "../styles.css";
 
 const sentence = "A long transcript message must wrap naturally when the side panel narrows the reader, without colliding with the next message or its timestamp. ";
+const longToken = "transcript_overflow_identifier_".repeat(12);
+const pendingOverflowQuestions: AgentQuestion[] = [{
+  id: "overflow-live-question-1",
+  question: `Choose the live destination for ${longToken}`,
+  options: [{
+    label: `Destination ${longToken}`,
+    description: `A live option description containing ${longToken}`,
+  }],
+}];
+const structuredItems: TimelineItem[] = [
+  {
+    kind: "user_message",
+    id: 201,
+    text: `Please inspect ${longToken}`,
+    images: [{
+      mimeType: "image/png",
+      data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    }],
+    createdAt: Date.now() - 12_000,
+  },
+  {
+    kind: "agent_thought",
+    id: 210,
+    text: `Reasoning about a long digest ${longToken}`,
+    createdAt: Date.now() - 11_500,
+    completedAt: Date.now() - 11_250,
+  },
+  {
+    kind: "tool_call",
+    id: 202,
+    toolCallId: "overflow-tool",
+    title: `Inspect ${longToken}`,
+    toolKind: "read",
+    status: "completed",
+    text: `tool-output:${longToken}`,
+    startedAt: Date.now() - 11_000,
+    completedAt: Date.now() - 10_000,
+  },
+  {
+    kind: "file_edit",
+    id: 203,
+    path: `/workspace/${longToken}/result.ts`,
+    diff: `@@ -1 +1 @@\n-${longToken}\n+${longToken}-updated`,
+  },
+  {
+    kind: "plan",
+    id: 204,
+    entries: [{ content: `Verify ${longToken}`, status: "in_progress" }],
+  },
+  {
+    kind: "review_decision",
+    id: 205,
+    reviewId: "overflow-review",
+    reviewer: { kind: "agent", id: "fixture-reviewer" },
+    outcome: "escalated",
+    riskLevel: "high",
+    rationale: `The review rationale contains ordinary wrapping prose and ${longToken}.`,
+  },
+  {
+    kind: "permission",
+    id: 206,
+    requestId: "overflow-permission",
+    title: `Run ${longToken}`,
+    options: [],
+    resolvedOptionId: "allow_once",
+    context: { input: `command --target ${longToken}` },
+  },
+  {
+    kind: "question",
+    id: 207,
+    requestId: "overflow-question",
+    questions: [{
+      id: "overflow-question-1",
+      question: `Which destination should receive ${longToken}?`,
+      options: [],
+    }, {
+      id: "overflow-question-2",
+      question: `Should the recap preserve ${longToken}?`,
+      options: [],
+    }],
+    answered: true,
+  },
+  {
+    kind: "question",
+    id: 211,
+    requestId: "overflow-live-question",
+    questions: pendingOverflowQuestions,
+  },
+  {
+    kind: "agent_message",
+    id: 208,
+    text: [
+      `Ordinary prose must wrap beside a long identifier: ${longToken}.`,
+      "",
+      `Inline code \`${longToken}\` and [a long link](https://example.test/${longToken}) stay contained.`,
+      "",
+      "| A | B | C | D | E | F | G | H | I | J | K | L | M | N | O | P |",
+      "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+      "| 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 |",
+      "",
+      "```typescript",
+      `const overflowFixtureIdentifier = "${longToken}";`,
+      "```",
+    ].join("\n"),
+    createdAt: Date.now() - 4_000,
+    lastActivityAt: Date.now() - 3_000,
+    completedAt: Date.now() - 2_000,
+  },
+  { kind: "turn_interrupted", id: 209, createdAt: Date.now() - 1_000 },
+];
 type TranscriptItem = Extract<TimelineItem, { kind: "agent_message" | "user_message" }>;
 const baseItems: TranscriptItem[] = Array.from({ length: 30 }, (_, index) => index % 2 === 0
   ? { kind: "agent_message" as const, id: index + 1, text: `${index + 1}. ${sentence.repeat(30)}`, createdAt: Date.now() - index * 1_000 }
@@ -24,6 +135,7 @@ function Fixture() {
   const offsetFixtureEnabled = useMemo(() => new URLSearchParams(window.location.search).get("offset") === "1", []);
   const deferredMeasurementFixture = useMemo(() => new URLSearchParams(window.location.search).get("defer") === "1", []);
   const predecessorRerenderFixture = useMemo(() => new URLSearchParams(window.location.search).get("predecessor-rerender") === "1", []);
+  const overflowFixtureEnabled = useMemo(() => new URLSearchParams(window.location.search).get("overflow") === "1", []);
   const [panelWidth, setPanelWidth] = useState(0);
   const [composerHeight, setComposerHeight] = useState(0);
   const [noticeMounted, setNoticeMounted] = useState(true);
@@ -53,6 +165,7 @@ function Fixture() {
   const anchorRef = useRef<VirtualScrollAnchor | null>(null);
   const getFixtureInitialAnchor = useCallback(() => anchorRef.current, []);
   const items = useMemo(() => {
+    if (overflowFixtureEnabled) return structuredItems;
     const prefix = Array.from({ length: currentHistoryPrepend }, (_, index): TimelineItem => ({
       kind: "agent_message",
       id: -(index + 1),
@@ -85,7 +198,7 @@ function Fixture() {
     ] : [];
     const complete = [...prefix, ...current, ...revealItems];
     return currentHistoryLimit == null ? complete : complete.slice(0, currentHistoryLimit);
-  }, [currentHistoryLimit, currentHistoryPrepend, currentHistoryReplacement, headStreamTicks, revealFixtureEnabled, sessionId, tailStreamTicks]);
+  }, [currentHistoryLimit, currentHistoryPrepend, currentHistoryReplacement, headStreamTicks, overflowFixtureEnabled, revealFixtureEnabled, sessionId, tailStreamTicks]);
   const followTail = useFollowTail({
     scrollRef: followTailEnabled ? scrollRef : disabledFollowScrollRef,
     contentRevision: `${sessionId}:${currentHistoryPrepend}:${currentHistoryReplacement}:${currentHistoryLimit ?? "all"}:${headStreamTicks}:${tailStreamTicks}`,
@@ -186,6 +299,15 @@ function Fixture() {
               preserveAnchor={!followTailEnabled || !followTail.isFollowing}
               onVisibleAnchorChange={captureAnchor}
               onAnchorLost={followTailEnabled ? handleAnchorLost : undefined}
+              questionContext={overflowFixtureEnabled ? {
+                sessionId: "overflow-fixture",
+                pendingQuestion: {
+                  requestId: "overflow-live-question",
+                  questions: pendingOverflowQuestions,
+                },
+                runnerOnline: true,
+                showKeyHints: false,
+              } : undefined}
             />
           </VirtualMeasurementCommitTestProvider>
         </div>
@@ -199,7 +321,7 @@ function Fixture() {
           />
         )}
       </section>
-      <nav style={{ position: "fixed", zIndex: 2, top: 4, right: 4 }}>
+      <nav hidden={overflowFixtureEnabled} style={{ position: "fixed", zIndex: 2, top: 4, right: 4 }}>
         <button type="button" data-testid="close-panel" onClick={() => setPanelWidth(0)}>Close Panel</button>
         <button type="button" data-testid="medium-panel" onClick={() => setPanelWidth(460)}>Medium Panel</button>
         <button type="button" data-testid="wide-panel" onClick={() => setPanelWidth(540)}>Wide Panel</button>
