@@ -21,6 +21,7 @@ async function expectNoOverlap(page: Page) {
 async function expectTranscriptWidthContained(page: Page) {
   const reader = page.getByTestId("reader");
   await expect.poll(() => reader.evaluate((element) => element.scrollWidth - element.clientWidth)).toBe(0);
+  await expect.poll(() => reader.evaluate((element) => getComputedStyle(element).overflowX)).toBe("hidden");
 }
 
 async function visibleAnchor(page: Page) {

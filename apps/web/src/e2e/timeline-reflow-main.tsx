@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { flushSync } from "react-dom";
+import type { AgentQuestion } from "@wollipog/protocol";
 import type { TimelineItem } from "../timeline.js";
 import { EventTimeline, type TimelineRevealRequest } from "../components/EventTimeline.js";
 import {
@@ -12,6 +13,14 @@ import "../styles.css";
 
 const sentence = "A long transcript message must wrap naturally when the side panel narrows the reader, without colliding with the next message or its timestamp. ";
 const longToken = "transcript_overflow_identifier_".repeat(12);
+const pendingOverflowQuestions: AgentQuestion[] = [{
+  id: "overflow-live-question-1",
+  question: `Choose the live destination for ${longToken}`,
+  options: [{
+    label: `Destination ${longToken}`,
+    description: `A live option description containing ${longToken}`,
+  }],
+}];
 const structuredItems: TimelineItem[] = [
   {
     kind: "user_message",
@@ -84,6 +93,12 @@ const structuredItems: TimelineItem[] = [
       options: [],
     }],
     answered: true,
+  },
+  {
+    kind: "question",
+    id: 211,
+    requestId: "overflow-live-question",
+    questions: pendingOverflowQuestions,
   },
   {
     kind: "agent_message",
@@ -284,6 +299,15 @@ function Fixture() {
               preserveAnchor={!followTailEnabled || !followTail.isFollowing}
               onVisibleAnchorChange={captureAnchor}
               onAnchorLost={followTailEnabled ? handleAnchorLost : undefined}
+              questionContext={overflowFixtureEnabled ? {
+                sessionId: "overflow-fixture",
+                pendingQuestion: {
+                  requestId: "overflow-live-question",
+                  questions: pendingOverflowQuestions,
+                },
+                runnerOnline: true,
+                showKeyHints: false,
+              } : undefined}
             />
           </VirtualMeasurementCommitTestProvider>
         </div>

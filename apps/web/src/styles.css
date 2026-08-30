@@ -9719,6 +9719,7 @@ body.shell-dock-dragging * {
 .question-block .question-text {
   font-weight: 600;
   margin-bottom: 6px;
+  overflow-wrap: anywhere;
 }
 .question-chip {
   display: inline-block;
@@ -9737,6 +9738,8 @@ body.shell-dock-dragging * {
 }
 .question-option {
   display: flex;
+  min-width: 0;
+  max-width: 100%;
   gap: 8px;
   align-items: flex-start;
   text-align: left;
@@ -9746,6 +9749,10 @@ body.shell-dock-dragging * {
   background: var(--bg-elev);
   color: var(--text);
   cursor: pointer;
+}
+.question-option > span:last-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .question-option:not(:disabled):not([aria-disabled="true"]):hover {
   border-color: var(--border-strong);
