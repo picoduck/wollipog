@@ -1898,6 +1898,7 @@ textarea {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   /* Center the transcript at reading width (Codex-style): symmetric padding absorbs any
      pane width beyond --chat-max, while the scrollbar stays at the pane edge. */
   padding: 16px max(2px, calc((100% - var(--chat-max)) / 2));
@@ -3728,17 +3729,21 @@ textarea,
 .bubble-images {
   display: flex;
   flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
   gap: 6px;
   margin-bottom: 6px;
 }
 .bubble-images img {
-  max-width: 220px;
+  max-width: min(220px, 100%);
   max-height: 220px;
   border-radius: 8px;
   display: block;
 }
 .bubble-text {
+  min-width: 0;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* ------------------------------- Timeline ------------------------------- */
@@ -3746,15 +3751,25 @@ textarea,
   display: flex;
   flex-direction: column;
   gap: 12px;
+  width: 100%;
+  min-width: 0;
   max-width: 860px;
 }
+.timeline [data-virtual-row],
+.timeline [role="listitem"] {
+  min-width: 0;
+  max-width: 100%;
+}
+/* Absolutely positioned screen-reader text otherwise keeps its static inline position. When the
+   timestamp lands exactly at the reader edge, the 1px hidden box extends scrollWidth by 1px. */
+.timeline .sr-only { inset-inline-start: 0 !important; }
 .tl-row {
   display: flex;
 }
 .tl-row.user {
   justify-content: flex-end;
 }
-.tl-message-stack { display: grid; gap: 4px; max-width: 80%; }
+.tl-message-stack { display: grid; gap: 4px; min-width: 0; max-width: 80%; }
 .tl-message-stack .bubble { max-width: 100%; }
 /* Message meta reads as a quiet right-aligned footnote rather than a labeled data row — it must
    not compete with transcript content between turns. */
@@ -3788,7 +3803,7 @@ textarea,
 .tl-timestamp-compact .tl-timestamp-value { min-inline-size: 0; }
 .tl-timestamp-compact .tl-timestamp-label {
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
-  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+  inset-inline-start: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
 }
 .tl-timestamp-arrow { color: var(--text-faint); }
 /* Copy / Edit & Resend / Edit in Fork are quiet icon-only targets; each
@@ -3827,6 +3842,7 @@ textarea,
   line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-word;
+  min-width: 0;
   max-width: 80%;
 }
 .user-bubble {
@@ -3877,11 +3893,16 @@ textarea,
 }
 /* Agent (model) response: full-width document flow, not a chat bubble — Codex-style. */
 .tl-agent-msg {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
   color: var(--text);
   font-size: 14px;
   line-height: 1.6;
   padding: 0 2px;
 }
+.md,
+.md-code-block { min-width: 0; max-width: 100%; }
 .md-code-block { position: relative; }
 .md-code-actions {
   /* Positioned boxes paint above the in-flow <pre> without a z-index. */
@@ -4039,6 +4060,8 @@ textarea,
   padding-left: 10px;
 }
 .tl-tool {
+  min-width: 0;
+  max-width: 100%;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--bg-elev);
@@ -4078,6 +4101,8 @@ textarea,
 }
 .tool-title {
   flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
   font-size: 13px;
   font-weight: 500;
 }
@@ -4105,6 +4130,8 @@ textarea,
   background: color-mix(in srgb, var(--red) 12%, transparent);
 }
 .tool-body {
+  width: 100%;
+  max-width: 100%;
   margin: 0;
   padding: 9px 12px;
   border-top: 1px solid var(--border);
@@ -4115,6 +4142,8 @@ textarea,
   overflow: auto;
 }
 .tl-plan {
+  min-width: 0;
+  max-width: 100%;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--bg-elev);
@@ -4140,6 +4169,8 @@ textarea,
   align-items: baseline;
   gap: 9px;
   font-size: 13px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .plan-check {
   color: var(--text-faint);
@@ -4154,6 +4185,8 @@ textarea,
   color: var(--blue);
 }
 .tl-file {
+  min-width: 0;
+  max-width: 100%;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   overflow: hidden;
@@ -4164,12 +4197,15 @@ textarea,
   background: var(--bg-elev);
   color: var(--teal);
   font-family: "Cascadia Code", monospace;
+  overflow-wrap: anywhere;
 }
 button.file-head.source-path-link {
   display: block;
   width: 100%;
 }
 .diff {
+  width: 100%;
+  max-width: 100%;
   margin: 0;
   font-size: 12px;
   line-height: 1.45;
@@ -4201,6 +4237,8 @@ button.file-head.source-path-link {
 }
 .tl-output pre,
 .tl-stderr pre {
+  width: 100%;
+  max-width: 100%;
   margin: 0;
   padding: 9px 12px;
   border-radius: var(--radius-sm);
@@ -4252,6 +4290,9 @@ button.file-head.source-path-link {
   text-transform: uppercase;
 }
 .tl-error {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
   background: color-mix(in srgb, var(--red) 10%, transparent);
   border: 1px solid color-mix(in srgb, var(--red) 30%, transparent);
   color: var(--danger-text);
@@ -4271,13 +4312,21 @@ button.file-head.source-path-link {
 .tl-perm {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 9px;
+  min-width: 0;
+  max-width: 100%;
   font-size: 12.5px;
   color: var(--text-dim);
   padding: 7px 11px;
   background: var(--bg-elev);
   border: 1px dashed var(--border-strong);
   border-radius: var(--radius-sm);
+}
+.tl-perm > .bubble-text,
+.tl-perm > .perm-context,
+.tl-perm > .question-recap {
+  flex: 1 1 100%;
 }
 .perm-pending {
   color: var(--amber);
@@ -4553,6 +4602,8 @@ button.file-head.source-path-link {
 }
 /* fenced code blocks */
 .md pre {
+  width: 100%;
+  max-width: 100%;
   margin: 8px 0;
   padding: 11px 13px;
   background: var(--code-bg);
@@ -4578,6 +4629,8 @@ button.file-head.source-path-link {
 }
 /* GFM tables */
 .md table {
+  width: 100%;
+  max-width: 100%;
   border-collapse: collapse;
   margin: 8px 0;
   font-size: 0.95em;
@@ -9758,8 +9811,14 @@ body.shell-dock-dragging * {
 .tl-perm-head {
   display: flex;
   align-items: center;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
   gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
+.tl-perm-head > * { min-width: 0; max-width: 100%; }
 /* Glyph wrappers that had no rules, so the characters inherited the surrounding size and sat off
    the baseline. A fixed box keeps them aligned with the text beside them. */
 /* min-width, not width: .perm-icon is not always a glyph — EventTimeline renders the word
@@ -9786,6 +9845,8 @@ body.shell-dock-dragging * {
   font-size: 12px;
 }
 .perm-context pre {
+  width: 100%;
+  max-width: 100%;
   margin: 4px 0 0;
   padding: 6px 8px;
   max-height: 160px;
