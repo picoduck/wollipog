@@ -1432,6 +1432,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             requestId: msg.requestId,
             ok: false,
             code: "provider_unsupported",
+            phase: "preflight",
           });
           break;
         }
@@ -1447,6 +1448,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           requestId: msg.requestId,
           ok: false,
           code: "provider_unsupported",
+          phase: "preflight",
         });
         break;
       }

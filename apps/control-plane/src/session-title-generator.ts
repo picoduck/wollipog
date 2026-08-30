@@ -1,4 +1,8 @@
-import type { SessionEvent } from "@wollipog/protocol";
+import type {
+  SessionEvent,
+  SessionNamingRunnerErrorCode,
+  SessionNamingRunnerFailurePhase,
+} from "@wollipog/protocol";
 
 export const SESSION_TITLE_MAX_LENGTH = 120;
 export const TITLE_CONTEXT_MAX_MESSAGES = 9;
@@ -18,6 +22,18 @@ export interface SessionTitleRequest {
 }
 
 export type SessionTitleGenerator = (request: SessionTitleRequest) => Promise<string>;
+
+/** Sanitized runner failure. Provider messages and local operational details never cross this seam. */
+export class SessionTitleGenerationError extends Error {
+  override readonly name = "SessionTitleGenerationError";
+
+  constructor(
+    readonly code: SessionNamingRunnerErrorCode,
+    readonly phase: SessionNamingRunnerFailurePhase,
+  ) {
+    super(`${code} during ${phase}`);
+  }
+}
 
 /** Accept plain text or a small JSON envelope, then apply the same durable title rules as manual
  * renames. Model chatter, markdown headings, and malformed/multiline output fail closed. */

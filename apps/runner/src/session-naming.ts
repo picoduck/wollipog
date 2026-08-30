@@ -8,6 +8,7 @@ import type {
   GenerateSessionTitleResultMessage,
   SessionNamingAccountBoundary,
   SessionNamingRunnerErrorCode,
+  SessionNamingRunnerFailurePhase,
 } from "@wollipog/protocol";
 import { JsonRpcPeer } from "./jsonrpc.js";
 import { run } from "./discovery/resolve.js";
@@ -123,10 +124,6 @@ export function codexSessionNamingThreadParams(cwd: string): Record<string, unkn
     approvalPolicy: "never",
     sandbox: "read-only",
     developerInstructions: TITLE_INSTRUCTIONS,
-    config: { mcp_servers: {} },
-    dynamicTools: [],
-    environments: [],
-    selectedCapabilityRoots: [],
   };
 }
 
@@ -142,7 +139,6 @@ export function codexSessionNamingTurnParams(
     input: [{ type: "text", text: prompt }],
     approvalPolicy: "never",
     sandboxPolicy: { type: "readOnly", networkAccess: false },
-    environments: [],
     outputSchema: {
       type: "object",
       properties: { title: { type: "string", minLength: 1, maxLength: TITLE_MAX_LENGTH, pattern: "^[^\\r\\n]+$" } },
@@ -175,7 +171,7 @@ async function prepareNeutralDirectory(agent: AgentDefinition): Promise<NeutralD
       timeoutMs: 5_000,
       maxBuffer: 4 * 1024,
     });
-    if (made.code !== 0) throw new SessionNamingFailure("provider_failed");
+    if (made.code !== 0) throw new SessionNamingFailure("provider_failed", "isolation");
     return {
       cwd,
       cleanup: async () => {
@@ -192,7 +188,10 @@ async function prepareNeutralDirectory(agent: AgentDefinition): Promise<NeutralD
 
 class SessionNamingFailure extends Error {
   override readonly name = "SessionNamingFailure";
-  constructor(readonly code: SessionNamingRunnerErrorCode) {
+  constructor(
+    readonly code: SessionNamingRunnerErrorCode,
+    readonly phase: SessionNamingRunnerFailurePhase,
+  ) {
     super(code);
   }
 }
@@ -250,7 +249,7 @@ function collectClaudeTitle(
         isolation,
       });
     } catch {
-      reject(new SessionNamingFailure("provider_failed"));
+      reject(new SessionNamingFailure("provider_failed", "initialization"));
       return;
     }
     let output = "";
@@ -263,7 +262,7 @@ function collectClaudeTitle(
     };
     const timer = setTimeout(() => finish(() => {
       killTree(child);
-      reject(new SessionNamingFailure("timed_out"));
+      reject(new SessionNamingFailure("timed_out", "generation"));
     }), timeoutMs);
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
@@ -272,17 +271,17 @@ function collectClaudeTitle(
       if (Buffer.byteLength(output, "utf8") > OUTPUT_MAX_BYTES) {
         finish(() => {
           killTree(child);
-          reject(new SessionNamingFailure("invalid_result"));
+          reject(new SessionNamingFailure("invalid_result", "output_validation"));
         });
       }
     });
     child.stderr.resume();
-    child.once("error", () => finish(() => reject(new SessionNamingFailure("provider_failed"))));
+    child.once("error", () => finish(() => reject(new SessionNamingFailure("provider_failed", "generation"))));
     child.once("close", (code) => finish(() => {
       if (code === 0) resolve(output);
-      else reject(new SessionNamingFailure("provider_failed"));
+      else reject(new SessionNamingFailure("provider_failed", "generation"));
     }));
-    child.stdin.once("error", () => finish(() => reject(new SessionNamingFailure("provider_failed"))));
+    child.stdin.once("error", () => finish(() => reject(new SessionNamingFailure("provider_failed", "initialization"))));
     child.stdin.end(prompt);
   });
 }
@@ -309,7 +308,7 @@ async function collectCodexTitle(
       isolation,
     });
   } catch {
-    throw new SessionNamingFailure("provider_failed");
+    throw new SessionNamingFailure("provider_failed", "initialization");
   }
   child.stderr.resume();
   let output = "";
@@ -320,11 +319,16 @@ async function collectCodexTitle(
   // The wall-clock timer can fire while an earlier initialize/thread request is still awaited.
   // Mark this branch handled immediately; the original promise remains awaitable if turn/start wins.
   void turn.catch(() => {});
-  const peer = new JsonRpcPeer(child.stdin, child.stdout, () => rejectTurn(new SessionNamingFailure("provider_failed")), OUTPUT_MAX_BYTES);
+  let phase: SessionNamingRunnerFailurePhase = "initialization";
+  const peer = new JsonRpcPeer(child.stdin, child.stdout, () => {
+    rejectTurn(new SessionNamingFailure("provider_failed", phase));
+  }, OUTPUT_MAX_BYTES);
   const append = (value: unknown) => {
     if (typeof value !== "string") return;
     output += value;
-    if (Buffer.byteLength(output, "utf8") > OUTPUT_MAX_BYTES) rejectTurn(new SessionNamingFailure("invalid_result"));
+    if (Buffer.byteLength(output, "utf8") > OUTPUT_MAX_BYTES) {
+      rejectTurn(new SessionNamingFailure("invalid_result", "output_validation"));
+    }
   };
   peer.onNotification("item/agentMessage/delta", (params: unknown) => {
     const delta = (params as { delta?: unknown } | null)?.delta;
@@ -340,42 +344,45 @@ async function collectCodexTitle(
   peer.onNotification("item/started", (params: unknown) => {
     const type = (params as { item?: { type?: unknown } } | null)?.item?.type;
     if (type !== "userMessage" && type !== "agentMessage" && type !== "reasoning") {
-      rejectTurn(new SessionNamingFailure("provider_failed"));
+      rejectTurn(new SessionNamingFailure("provider_failed", "generation"));
     }
   });
   peer.onNotification("turn/completed", (params: unknown) => {
     const status = (params as { turn?: { status?: unknown } } | null)?.turn?.status;
     if (status === "completed") settleTurn();
-    else rejectTurn(new SessionNamingFailure("provider_failed"));
+    else rejectTurn(new SessionNamingFailure("provider_failed", "generation"));
   });
-  peer.onNotification("turn/failed", () => rejectTurn(new SessionNamingFailure("provider_failed")));
+  peer.onNotification("turn/failed", () => rejectTurn(new SessionNamingFailure("provider_failed", "generation")));
   for (const method of ["item/commandExecution/requestApproval", "item/fileChange/requestApproval"]) {
     peer.onRequest(method, () => ({ decision: "decline" }));
   }
   peer.onRequest("item/permissions/requestApproval", () => ({ permissions: {}, scope: "turn" }));
   peer.onRequest("item/tool/requestUserInput", () => ({ answers: {} }));
   peer.onRequest("mcpServer/elicitation/request", () => ({ action: "cancel" }));
-  child.once("error", () => rejectTurn(new SessionNamingFailure("provider_failed")));
-  child.once("close", () => rejectTurn(new SessionNamingFailure("provider_failed")));
-  const timer = setTimeout(() => rejectTurn(new SessionNamingFailure("timed_out")), timeoutMs);
+  child.once("error", () => rejectTurn(new SessionNamingFailure("provider_failed", phase)));
+  child.once("close", () => rejectTurn(new SessionNamingFailure("provider_failed", phase)));
+  const timer = setTimeout(() => rejectTurn(new SessionNamingFailure("timed_out", phase)), timeoutMs);
   try {
     const deadline = Date.now() + timeoutMs;
     await peer.requestWithDeadline("initialize", { clientInfo: { name: "wollipog-session-naming", version: "1" } }, deadline);
     peer.notify("initialized", {});
+    phase = "thread_start";
     const started = await peer.requestWithDeadline<{ thread?: { id?: unknown } }>(
       "thread/start",
       codexSessionNamingThreadParams(cwd),
       deadline,
     );
     const threadId = started?.thread?.id;
-    if (typeof threadId !== "string" || !threadId) throw new SessionNamingFailure("provider_failed");
+    if (typeof threadId !== "string" || !threadId) throw new SessionNamingFailure("provider_failed", "thread_start");
+    phase = "turn_start";
     await peer.requestWithDeadline("turn/start", codexSessionNamingTurnParams(threadId, cwd, prompt, target), deadline);
+    phase = "generation";
     await turn;
     return output;
   } catch (error) {
     if (error instanceof SessionNamingFailure) throw error;
     const rpc = error as { requestTimeout?: boolean } | null;
-    throw new SessionNamingFailure(rpc?.requestTimeout ? "timed_out" : "provider_failed");
+    throw new SessionNamingFailure(rpc?.requestTimeout ? "timed_out" : "provider_failed", phase);
   } finally {
     clearTimeout(timer);
     peer.dispose("session naming complete");
@@ -435,11 +442,15 @@ export class SessionNamingExecutor {
     agent: AgentDefinition | undefined,
     env: Record<string, string>,
   ): Promise<GenerateSessionTitleResultMessage> {
-    const fail = (code: SessionNamingRunnerErrorCode): GenerateSessionTitleResultMessage => ({
+    const fail = (
+      code: SessionNamingRunnerErrorCode,
+      phase: SessionNamingRunnerFailurePhase = "preflight",
+    ): GenerateSessionTitleResultMessage => ({
       type: "generate_session_title_result",
       requestId: message.requestId,
       ok: false,
       code,
+      phase,
     });
     if (!validMessages(message.messages)) return fail("invalid_result");
     if (!agent) return fail("session_unavailable");
@@ -460,6 +471,7 @@ export class SessionNamingExecutor {
     this.recent.push(now);
     let neutral: NeutralDirectory | undefined;
     let authorization: Awaited<ReturnType<NonNullable<SessionNamingExecutorOptions["authorize"]>>> | undefined;
+    let failurePhase: SessionNamingRunnerFailurePhase = "isolation";
     try {
       const totalTimeoutMs = validatedTimeout(message.timeoutMs);
       const deadlineAt = Date.now() + totalTimeoutMs;
@@ -467,14 +479,15 @@ export class SessionNamingExecutor {
       authorization = await this.authorize?.(agent, env, neutral.cwd);
       const prompt = sessionNamingPrompt(message.messages);
       const timeoutMs = Math.max(0, deadlineAt - Date.now());
-      if (timeoutMs < MIN_TIMEOUT_MS) throw new SessionNamingFailure("timed_out");
+      if (timeoutMs < MIN_TIMEOUT_MS) throw new SessionNamingFailure("timed_out", "isolation");
+      failurePhase = "generation";
       const generated = this.generateOverride
         ? await this.generateOverride(account, agent, neutral.cwd, env, prompt, timeoutMs, authorization?.isolation)
         : account.provider === "claude"
           ? await collectClaudeTitle(agent, neutral.cwd, env, prompt, timeoutMs, authorization?.isolation, message.target, this.spawn)
           : await collectCodexTitle(agent, neutral.cwd, env, prompt, timeoutMs, authorization?.isolation, message.target, this.spawn);
       const title = normalizeRunnerSessionTitle(generated);
-      if (!title) return fail("invalid_result");
+      if (!title) return fail("invalid_result", "output_validation");
       return {
         type: "generate_session_title_result",
         requestId: message.requestId,
@@ -484,7 +497,9 @@ export class SessionNamingExecutor {
         billingSource: account.billingSource,
       };
     } catch (error) {
-      return fail(error instanceof SessionNamingFailure ? error.code : "provider_failed");
+      return error instanceof SessionNamingFailure
+        ? fail(error.code, error.phase)
+        : fail("provider_failed", failurePhase);
     } finally {
       this.active--;
       await authorization?.cleanup().catch(() => {});

@@ -527,12 +527,14 @@ function SessionDetailLoaded({
     "queue_again" | "dismiss"
   >>(() => new Map());
   const [stoppingTurn, setStoppingTurn] = useState(false);
+  const [retitlePending, setRetitlePending] = useState(false);
   const [pendingPromptAction, setPendingPromptAction] = useState<string>();
   const sendRequestBusy = busy || activeComposerMutation?.kind === "send";
   const steeringRequestBusy = steeringBusy || activeComposerMutation?.kind === "steer" ||
     activeComposerMutation?.kind === "promote";
   const stopRequestPending = stoppingTurn || activeComposerMutation?.kind === "stop";
-  const composerRequestBusy = activeComposerMutation !== undefined || busy || steeringBusy || stoppingTurn;
+  const composerRequestBusy = activeComposerMutation !== undefined || busy || steeringBusy || stoppingTurn ||
+    retitlePending;
   const stopTurnPendingRef = useRef(false);
   const stopTurnMutationRef = useRef<ComposerMutationEntry | null>(null);
   const stopTurnAttemptRef = useRef(0);
@@ -896,6 +898,7 @@ function SessionDetailLoaded({
 
   useEffect(() => {
     const generation = ++viewGenerationRef.current;
+    setRetitlePending(false);
     return () => {
       if (viewGenerationRef.current === generation) viewGenerationRef.current += 1;
     };
@@ -2101,7 +2104,7 @@ function SessionDetailLoaded({
   };
 
   const send = async () => {
-    if (composerMutationRegistry.has(mutationKey) || stopTurnPendingRef.current) return;
+    if (composerMutationRegistry.has(mutationKey) || stopTurnPendingRef.current || retitlePending) return;
     const outgoing = text.trim();
     let invocation = resolveComposerCommandInvocation(outgoing, composerCommands);
     if (invocation.kind === "command" && invocation.command.source === "app") {
@@ -2130,11 +2133,19 @@ function SessionDetailLoaded({
           return;
         }
         if (invocation.command.name === "rename-session") {
+          const generation = viewGenerationRef.current;
+          setError(null);
+          setRetitlePending(true);
           try {
             await api.retitleSession(sessionId);
-            clearAppCommandText();
+            if (viewGenerationRef.current === generation &&
+                draftState.current.text === text && draftState.current.images === images) {
+              clearAppCommandText();
+            }
           } catch (cause) {
-            setError((cause as Error).message);
+            if (viewGenerationRef.current === generation) setError((cause as Error).message);
+          } finally {
+            if (viewGenerationRef.current === generation) setRetitlePending(false);
           }
           return;
         }
@@ -3064,7 +3075,7 @@ function SessionDetailLoaded({
                 role="combobox"
                 aria-autocomplete="list"
                 aria-expanded={paletteOpen}
-                aria-busy={steeringRequestBusy || undefined}
+                aria-busy={steeringRequestBusy || retitlePending || undefined}
                 aria-controls={paletteOpen ? slashListboxId : undefined}
                 aria-activedescendant={paletteOpen && selectedSlashCommandId
                   ? slashCommandOptionId(slashListboxId, selectedSlashCommandId)

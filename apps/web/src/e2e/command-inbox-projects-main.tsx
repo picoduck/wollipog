@@ -312,6 +312,9 @@ const sessionCommandRequests: SessionCommandFixtureRequest[] = [];
 let failNextSessionCommandResponse = false;
 let deferNextSessionCommandResponse = false;
 let pendingSessionCommandSettlement: (() => void) | null = null;
+let deferNextRetitleRequest = false;
+let pendingRetitleSettlement: ((result: { title?: string; error?: string }) => void) | null = null;
+const retitleRequests: string[] = [];
 let nextSteeringResult: SteeringFixtureResult = {
   state: "accepted",
   reason: "accepted",
@@ -619,6 +622,23 @@ const client = {
     const value = model.sessions.find((candidate) => candidate.id === id);
     if (!value) throw new Error("session not found");
     return { session: structuredClone(value) };
+  },
+  retitleSession: async (id: string) => {
+    const value = model.sessions.find((candidate) => candidate.id === id);
+    if (!value) throw new Error("session not found");
+    retitleRequests.push(id);
+    const result = deferNextRetitleRequest
+      ? await new Promise<{ title?: string; error?: string }>((resolve) => {
+          deferNextRetitleRequest = false;
+          pendingRetitleSettlement = resolve;
+        })
+      : { title: "Retitled Session" };
+    pendingRetitleSettlement = null;
+    if (result.error) throw new Error(result.error);
+    const title = result.title ?? "Retitled Session";
+    Object.assign(value, { title, titleSource: "user", updatedAt: value.updatedAt + 1 });
+    pushSession(value);
+    return { title };
   },
   setConfig: async (id: string, config: SessionConfig) => {
     const value = model.sessions.find((candidate) => candidate.id === id);
@@ -1131,6 +1151,9 @@ declare global {
       settleDeferredSteeringResult(result: SteeringFixtureResult): void;
       promptRequests(): PromptFixtureRequest[];
       sessionCommandRequests(): SessionCommandFixtureRequest[];
+      retitleRequests(): string[];
+      deferNextRetitle(): void;
+      settleDeferredRetitle(result: { title?: string; error?: string }): void;
       composerDraft(id: string): Promise<ComposerDraft | null>;
       failNextSessionCommandResponse(): void;
       deferNextSessionCommandResponse(): void;
@@ -1185,6 +1208,14 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
     Object.assign(value, patch, { updatedAt: value.updatedAt + 1 });
     saveModel();
     socket?.push({ type: "project_upsert", project: structuredClone(value) });
+  },
+  retitleRequests: () => structuredClone(retitleRequests),
+  deferNextRetitle() {
+    deferNextRetitleRequest = true;
+  },
+  settleDeferredRetitle(result) {
+    if (!pendingRetitleSettlement) throw new Error("no deferred retitle request");
+    pendingRetitleSettlement(result);
   },
   updateSession(id, patch) {
     const value = model.sessions.find((candidate) => candidate.id === id);

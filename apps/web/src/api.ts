@@ -598,7 +598,7 @@ export function createApiClient(transport: ApiTransport) {
     }),
 
   retitleSession: (id: string) =>
-    req<{ accepted: true }>(`/api/sessions/${id}/retitle`, { method: "POST" }),
+    req<{ title: string }>(`/api/sessions/${id}/retitle`, { method: "POST" }),
 
   stop: (id: string) => req<SessionView>(`/api/sessions/${id}/stop`, { method: "POST" }),
 

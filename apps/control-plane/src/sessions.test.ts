@@ -33,7 +33,7 @@ import { automationCommandDigest, canonicalAutomationCommandJson } from "./autom
 import { Hub, RunnerRequestNotSentError, type RunnerRequestResult } from "./hub.js";
 import { agentDelegationAuthorizationError, type AgentPrincipal } from "./identity.js";
 import { pushDecision } from "./push-decision.js";
-import type { SessionTitleGenerator } from "./session-title-generator.js";
+import { SessionTitleGenerationError, type SessionTitleGenerator } from "./session-title-generator.js";
 import {
   SessionsService,
   EXTERNAL_SESSION_ADOPTION_TIMEOUT_MS,
@@ -3698,6 +3698,44 @@ test("a prompt-created fallback also schedules semantic naming on its first dura
   assert.equal(db.getSession(id)?.title, "Semantic Prompt Title");
 });
 
+test("initial naming failure preserves the immediate prompt fallback", async () => {
+  const generator: SessionTitleGenerator = async () => {
+    throw new SessionTitleGenerationError("provider_failed", "thread_start");
+  };
+  const { db, hub, svc } = makeHarness(generator);
+  const id = seedSession(svc, hub);
+
+  svc.onSessionEvent(id, { kind: "user_message", text: "Keep this prompt fallback", final: true });
+  assert.equal(db.getSession(id)?.title, "Keep this prompt fallback");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(db.getSession(id)?.title, "Keep this prompt fallback");
+  assert.equal(db.getSession(id)?.titleSource, "generated");
+});
+
+test("explicit retitle waits for success and reports sanitized asynchronous failure", async () => {
+  let outcome: "success" | "failure" = "failure";
+  const generator: SessionTitleGenerator = async () => {
+    if (outcome === "failure") throw new SessionTitleGenerationError("provider_failed", "thread_start");
+    return "Correlated Semantic Title";
+  };
+  const { db, hub, svc } = makeHarness(generator);
+  const id = seedSession(svc, hub);
+  assert.ok(svc.setTitle(id, "Current User Title").ok);
+  svc.onSessionEvent(id, { kind: "user_message", text: "Completed naming context", final: true });
+
+  const failed = await svc.retitleSession(id);
+  assert.equal(failed.ok, false);
+  assert.equal(failed.status, 502);
+  assert.match(failed.error ?? "", /failed during thread start/i);
+  assert.equal(db.getSession(id)?.title, "Current User Title");
+
+  outcome = "success";
+  const succeeded = await svc.retitleSession(id);
+  assert.deepEqual(succeeded, { ok: true, status: 200, data: { title: "Correlated Semantic Title" } });
+  assert.equal(db.getSession(id)?.title, "Correlated Semantic Title");
+  assert.equal(db.getSession(id)?.titleSource, "user");
+});
+
 test("runtime naming mode changes apply to subsequent first messages without a restart", async () => {
   let enabled = false;
   const requested: string[] = [];
@@ -3756,13 +3794,13 @@ test("runtime naming availability is resolved only for an eligible completed fir
   assert.equal(checks, firstMessageChecks, "manually titled sessions must not query runtime naming settings");
 });
 
-test("retitle reports an unknown session before resolving its runtime naming setting", () => {
+test("retitle reports an unknown session before resolving its runtime naming setting", async () => {
   let checks = 0;
   const { svc } = makeHarness(async () => "Unused", 1_000, () => {
     checks += 1;
     return true;
   });
-  const result = svc.retitleSession("missing-session");
+  const result = await svc.retitleSession("missing-session");
   assert.equal(result.ok, false);
   if (!result.ok) {
     assert.equal(result.status, 404);
@@ -3794,7 +3832,7 @@ test("a manual rename fences late initial and explicit semantic title results", 
   const { db, hub, svc } = makeHarness(generator);
   const id = seedSession(svc, hub);
   svc.onSessionEvent(id, { kind: "user_message", text: "Initial task", final: true });
-  assert.ok(svc.retitleSession(id).ok);
+  const explicit = svc.retitleSession(id);
   assert.equal(pending.length, 2);
   assert.equal(signals[0]?.aborted, true, "a newer request cancels the superseded model call");
 
@@ -3802,6 +3840,9 @@ test("a manual rename fences late initial and explicit semantic title results", 
   pending[1]!("Explicit Semantic Name");
   pending[0]!("Initial Semantic Name");
   await new Promise((resolve) => setImmediate(resolve));
+  const explicitResult = await explicit;
+  assert.equal(explicitResult.ok, false);
+  assert.equal(explicitResult.status, 409);
   assert.equal(db.getSession(id)?.title, "Manual Name");
   assert.equal(db.getSession(id)?.titleSource, "user");
 });

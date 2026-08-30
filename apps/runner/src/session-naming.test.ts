@@ -115,15 +115,15 @@ test("Codex naming uses an ephemeral read-only thread and a no-approval turn", (
   assert.equal(thread.ephemeral, true);
   assert.equal(thread.approvalPolicy, "never");
   assert.equal(thread.sandbox, "read-only");
-  assert.deepEqual(thread.dynamicTools, []);
-  assert.deepEqual(thread.environments, []);
-  assert.deepEqual(thread.selectedCapabilityRoots, []);
-  assert.deepEqual(thread.config, { mcp_servers: {} });
+  assert.equal(thread.dynamicTools, undefined, "experimental fields stay out of the unnegotiated request");
+  assert.equal(thread.environments, undefined, "experimental fields stay out of the unnegotiated request");
+  assert.equal(thread.selectedCapabilityRoots, undefined, "experimental fields stay out of the unnegotiated request");
+  assert.equal(thread.config, undefined);
 
   const turn = codexSessionNamingTurnParams("thread-one", "/neutral", "bounded prompt");
   assert.equal(turn.approvalPolicy, "never");
   assert.deepEqual(turn.sandboxPolicy, { type: "readOnly", networkAccess: false });
-  assert.deepEqual(turn.environments, []);
+  assert.equal(turn.environments, undefined, "experimental fields stay out of the unnegotiated request");
   assert.deepEqual(turn.input, [{ type: "text", text: "bounded prompt" }]);
   assert.deepEqual(turn.outputSchema, {
     type: "object",
@@ -168,10 +168,10 @@ test("explicit naming targets pass only an advertised model and effort to the se
   });
   assert.equal((await executor.execute({ ...request(), target }, codex, {})).ok, true);
   assert.deepEqual(await executor.execute({ ...request("bad-effort"), target: { ...target, effort: "max" } }, codex, {}), {
-    type: "generate_session_title_result", requestId: "bad-effort", ok: false, code: "provider_unsupported",
+    type: "generate_session_title_result", requestId: "bad-effort", ok: false, code: "provider_unsupported", phase: "preflight",
   });
   assert.deepEqual(await executor.execute({ ...request("bad-model"), target: { ...target, model: "unknown" } }, codex, {}), {
-    type: "generate_session_title_result", requestId: "bad-model", ok: false, code: "provider_unsupported",
+    type: "generate_session_title_result", requestId: "bad-model", ok: false, code: "provider_unsupported", phase: "preflight",
   });
   assert.equal(generated, 1, "invalid targets never reach provider execution");
 });
@@ -236,19 +236,19 @@ test("executor fails closed under concurrency/rate pressure and sanitizes provid
   const first = executor.execute(request("first"), codexAgent(), {});
   const concurrent = await executor.execute(request("concurrent"), codexAgent(), {});
   assert.deepEqual(concurrent, {
-    type: "generate_session_title_result", requestId: "concurrent", ok: false, code: "rate_limited",
+    type: "generate_session_title_result", requestId: "concurrent", ok: false, code: "rate_limited", phase: "preflight",
   });
   release();
   const failed = await first;
   assert.deepEqual(failed, {
-    type: "generate_session_title_result", requestId: "first", ok: false, code: "provider_failed",
+    type: "generate_session_title_result", requestId: "first", ok: false, code: "provider_failed", phase: "generation",
   });
   assert.equal(JSON.stringify(failed).includes("provider-secret"), false);
   assert.equal(calls, 1);
 
   const rateLimited = await executor.execute(request("rate"), codexAgent(), {});
   assert.deepEqual(rateLimited, {
-    type: "generate_session_title_result", requestId: "rate", ok: false, code: "rate_limited",
+    type: "generate_session_title_result", requestId: "rate", ok: false, code: "rate_limited", phase: "preflight",
   });
 });
 

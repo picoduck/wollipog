@@ -11,6 +11,7 @@ import type { ControlPlaneToRunner, RunnerView } from "@wollipog/protocol";
 import type { Hub } from "./hub.js";
 import { ControlPlaneDb } from "./db.js";
 import { registerSessionNamingRoutes } from "./session-naming-route.js";
+import { SessionTitleGenerationError } from "./session-title-generator.js";
 import {
   sanitizeSessionNamingRunnerResult,
   sanitizeSessionNamingCustomModelResult,
@@ -569,7 +570,8 @@ test("explicit harness naming persists capability-backed identifiers, executes o
     sessionId: "session-other",
     messages: [{ role: "user", text: "Name this" }],
     signal: new AbortController().signal,
-  }), /account boundary changed/);
+  }), (error: unknown) => error instanceof SessionTitleGenerationError &&
+    error.code === "account_unavailable" && error.phase === "preflight");
   resultBillingSource = "provider_account";
 
   advertisedBillingSource = "api";
@@ -593,7 +595,8 @@ test("explicit harness naming persists capability-backed identifiers, executes o
     sessionId: "session-other",
     messages: [{ role: "user", text: "Name this" }],
     signal: new AbortController().signal,
-  }), /account boundary changed/);
+  }), (error: unknown) => error instanceof SessionTitleGenerationError &&
+    error.code === "account_unavailable" && error.phase === "preflight");
   resultProvider = "codex";
 
   if (target) target = { ...target, provider: "claude" };
@@ -800,18 +803,27 @@ test("runner naming result validation strips extra fields and rejects secret-bea
     requestId: "request-two",
     ok: false,
     code: "timed_out",
+    phase: "turn_start",
     title: "should be removed",
   }), {
     type: "generate_session_title_result",
     requestId: "request-two",
     ok: false,
     code: "timed_out",
+    phase: "turn_start",
   });
   assert.equal(sanitizeSessionNamingRunnerResult({
     type: "generate_session_title_result",
     requestId: "request-three",
     ok: false,
     code: "token=provider-secret",
+  } as never), null);
+  assert.equal(sanitizeSessionNamingRunnerResult({
+    type: "generate_session_title_result",
+    requestId: "request-invalid-phase",
+    ok: false,
+    code: "provider_failed",
+    phase: "path=/private/repo",
   } as never), null);
   assert.equal(sanitizeSessionNamingRunnerResult({
     type: "generate_session_title_result",
