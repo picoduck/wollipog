@@ -149,12 +149,23 @@ function pageController() {
     resolve: (value: SessionEventsResponse) => void;
     reject: (reason: Error) => void;
   }> = [];
-  const tailCalls: Array<{ id: string; before: number | undefined; eventEpoch: number }> = [];
+  const tailCalls: Array<{
+    id: string;
+    before: number | undefined;
+    eventEpoch: number;
+    alignToTurn: boolean | undefined;
+  }> = [];
   return {
     tailCalls,
     fetchPage: () => new Promise<SessionEventsResponse>((resolve) => { forward.push(resolve); }),
-    fetchTailPage: (id: string, before: number | undefined, eventEpoch: number) => {
-      tailCalls.push({ id, before, eventEpoch });
+    fetchTailPage: (
+      id: string,
+      before: number | undefined,
+      eventEpoch: number,
+      _limit: number,
+      alignToTurn?: boolean,
+    ) => {
+      tailCalls.push({ id, before, eventEpoch, alignToTurn });
       return new Promise<SessionEventsResponse>((resolve, reject) => { tail.push({ resolve, reject }); });
     },
     releaseTail(value: SessionEventsResponse) {
@@ -175,6 +186,7 @@ interface Fixture {
   root: Root;
   scroller: HTMLElement;
   events: SessionEvent[];
+  renderMode: (mode: "preview" | "expanded") => Promise<void>;
 }
 
 let fixtureSequence = 0;
@@ -182,7 +194,15 @@ let fixtureSequence = 0;
 async function mountFixture(
   pages: ReturnType<typeof pageController>,
   turns = 12,
-  { pinnedOpen = false, pendingQuestion = false }: { pinnedOpen?: boolean; pendingQuestion?: boolean } = {},
+  {
+    pinnedOpen = false,
+    pendingQuestion = false,
+    mode = "expanded",
+  }: {
+    pinnedOpen?: boolean;
+    pendingQuestion?: boolean;
+    mode?: "preview" | "expanded";
+  } = {},
 ): Promise<Fixture> {
   fixtureSequence += 1;
   const currentSession = session(`transcript-recovery-${fixtureSequence}`);
@@ -253,13 +273,14 @@ async function mountFixture(
       },
     });
   }
-  await act(async () => {
-    root.render(
+  const renderMode = async (nextMode: "preview" | "expanded") => {
+    await act(async () => root.render(
       <ApiProvider client={client}>
         <StoreProvider connection={connection} navigation={navigation}>
           <EventSeeder sessionId={currentSession.id} events={events} />
           <SessionDetail
             sessionId={currentSession.id}
+            mode={nextMode}
             rightPanel={rightPanel}
             onOpenTerminal={() => {}}
             pinnedOpen={pinnedOpen}
@@ -267,8 +288,9 @@ async function mountFixture(
           />
         </StoreProvider>
       </ApiProvider>,
-    );
-  });
+    ));
+  };
+  await renderMode(mode);
   await act(async () => {
     socket.push({
       type: "snapshot",
@@ -289,7 +311,7 @@ async function mountFixture(
   await flushAsyncWork();
   const scroller = container.querySelector(".detail-scroll") as HTMLElement | null;
   assert.ok(scroller, "the transcript reader is mounted");
-  return { container, root, scroller, events };
+  return { container, root, scroller, events, renderMode };
 }
 
 async function unmountFixture(fixture: Fixture) {
@@ -628,6 +650,8 @@ test("an underfilled partial opening automatically reaches a complete scrollable
 
     assert.equal(pages.tailCalls.length, 2,
       "opening recovery prepends without waiting for reader navigation");
+    assert.deepEqual(pages.tailCalls.map((call) => call.alignToTurn), [true, true],
+      "both the initial window and automatic opening fill request a semantic turn boundary");
     assert.equal(fixture.container.querySelector(".transcript-earlier-activity"), null,
       "the manual fallback stays out of the underfilled opening while recovery is active");
 
@@ -649,6 +673,39 @@ test("an underfilled partial opening automatically reaches a complete scrollable
     const fallback = fixture.container.querySelector(".transcript-earlier-activity") as HTMLElement;
     assert.ok(fallback, "older history remains reachable after bounded opening recovery");
     assert.equal(fallback.textContent, "Load Earlier Activity");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a desktop preview defers opening fill until the same reader expands", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages, 12, { mode: "preview" });
+  try {
+    setScrollerMetrics(fixture.scroller, { clientHeight: 500, scrollHeight: 300, scrollTop: 0 });
+    const openingWindow = fixture.events.slice(-7);
+    await act(async () => {
+      pages.releaseTail({
+        events: openingWindow,
+        eventEpoch: 0,
+        nextBefore: openingWindow[0]!.seq,
+        hasMoreOlder: true,
+        turnAligned: false,
+        cacheComplete: true,
+      });
+    });
+    await flushAsyncWork(10);
+    assert.equal(pages.tailCalls.length, 1, "a preview does not fetch opening-fill pages");
+    assert.ok(fixture.container.querySelector(".transcript-earlier-activity"),
+      "the preview retains its compact manual control");
+
+    await fixture.renderMode("expanded");
+    await flushAsyncWork(10);
+    assert.equal(pages.tailCalls.length, 2,
+      "expanding the same mounted reader starts its deferred opening fill");
+    assert.equal(pages.tailCalls[1]!.alignToTurn, true);
+    assert.equal(fixture.container.querySelector(".transcript-earlier-activity"), null,
+      "the underfilled manual control stays hidden while expanded opening fill runs");
   } finally {
     await unmountFixture(fixture);
   }
@@ -734,6 +791,8 @@ test("scrolling near the partial window head loads one earlier page and requires
     await scrollReader(fixture.scroller, 120);
     assert.equal(pages.tailCalls.length, 2, "the near-head scroll requests an earlier page");
     assert.equal(pages.tailCalls[1]!.before, openingWindow[0]!.seq);
+    assert.equal(pages.tailCalls[1]!.alignToTurn, false,
+      "reader-driven pagination keeps its ordinary count-bounded cursor");
     await scrollReader(fixture.scroller, 0);
     assert.equal(pages.tailCalls.length, 2, "the same window base is deduplicated while in flight");
 

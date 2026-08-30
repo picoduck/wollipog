@@ -1700,8 +1700,14 @@ function SessionDetailLoaded({
       publishSettled(false);
     }
     if (state.settled) return;
-    if (mode !== "expanded" || followTail.state !== "following" ||
-        automaticEarlierLoadRef.current.readerStarted) {
+    if (mode !== "expanded") {
+      // Desktop Inbox mounts a preview first and expands that same component instance. Keep the
+      // preview's manual control visible without permanently consuming the expanded-only fill.
+      publishSettled(true);
+      return;
+    }
+    publishSettled(false);
+    if (followTail.state !== "following" || automaticEarlierLoadRef.current.readerStarted) {
       settle();
       return;
     }
@@ -1760,8 +1766,9 @@ function SessionDetailLoaded({
     timelineHistoryKey,
   ]);
 
-  const openingHistoryFillSettled = openingHistoryFill.historyKey === timelineHistoryKey &&
-    openingHistoryFill.settled;
+  const openingHistoryFillSettled = mode !== "expanded" || (
+    openingHistoryFill.historyKey === timelineHistoryKey && openingHistoryFill.settled
+  );
 
   useEffect(() => {
     timelineRevealRequestRef.current = null;
