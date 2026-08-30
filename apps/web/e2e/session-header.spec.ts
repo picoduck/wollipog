@@ -3,8 +3,19 @@ import { join } from "node:path";
 
 async function openSession(page: Page, scenario = "preview-follow", params: Record<string, string> = {}) {
   const query = new URLSearchParams({ scenario, ...params });
-  await page.goto(`/command-inbox-projects-e2e.html?${query.toString()}`);
   const evidenceTheme = process.env.SESSION_HEADER_SCREENSHOT_THEME;
+  if (evidenceTheme === "dark" || evidenceTheme === "light") {
+    // The fixture does not load index.html's pre-paint appearance bootstrap. Apply evidence themes
+    // before its CSS can paint so button colour transitions cannot produce a false mixed-theme
+    // screenshot while the rest of the document has already switched palettes.
+    await page.addInitScript((theme) => {
+      localStorage.clear();
+      localStorage.setItem("wollipog.theme", theme);
+      document.documentElement.dataset.theme = theme;
+      document.documentElement.style.colorScheme = theme;
+    }, evidenceTheme);
+  }
+  await page.goto(`/command-inbox-projects-e2e.html?${query.toString()}`);
   await page.evaluate((theme) => {
     localStorage.clear();
     if (theme === "dark" || theme === "light") localStorage.setItem("wollipog.theme", theme);
@@ -29,6 +40,8 @@ async function capture(page: Page, viewport: string) {
   const directory = process.env.SESSION_HEADER_SCREENSHOT_DIR;
   const phase = process.env.SESSION_HEADER_SCREENSHOT_PHASE;
   if (!directory || !phase) return;
+  // Evidence represents the settled UI, not the 130ms global control transition after mounting.
+  await page.waitForTimeout(200);
   await page.screenshot({ path: join(directory, `${phase}-${viewport}.png`), fullPage: true });
 }
 
@@ -55,6 +68,7 @@ test("the unified session bar balances navigation, breadcrumb, status, and actio
     const projectButton = project.querySelector(".cctx-chip")!;
     const projectLabel = project.querySelector(".crumb-project-label")!;
     const projectActions = project.querySelector(".crumb-project-actions")!;
+    const projectActionsIcon = projectActions.querySelector("svg")!;
     const projectText = document.createRange();
     projectText.selectNodeContents(projectLabel);
     const moreActions = element.querySelector('[aria-label="More Actions"]')!;
@@ -70,6 +84,7 @@ test("the unified session bar balances navigation, breadcrumb, status, and actio
       project: rect(project),
       projectButton: rect(projectButton),
       projectActions: rect(projectActions),
+      projectActionsIcon: rect(projectActionsIcon),
       projectActionDots: [...projectActions.querySelectorAll("circle")].map((dot) => ({
         x: Number.parseFloat(dot.getAttribute("cx") ?? "NaN"),
         y: Number.parseFloat(dot.getAttribute("cy") ?? "NaN"),
@@ -98,7 +113,14 @@ test("the unified session bar balances navigation, breadcrumb, status, and actio
   expect(geometry.paddingRight).toBeGreaterThanOrEqual(12);
   expect(geometry.hasHorizontalOverflow).toBe(false);
   expect(geometry.projectButton.width - geometry.projectTextWidth).toBeLessThanOrEqual(1.5);
-  expect(geometry.project.width - geometry.projectButton.width).toBeCloseTo(34, 0);
+  expect(geometry.project.width - geometry.projectButton.width).toBeCloseTo(24, 0);
+  expect(geometry.projectActions.width).toBe(24);
+  expect(geometry.projectActions.height).toBe(24);
+  expect(geometry.projectActionsIcon.x - geometry.projectActions.x).toBeCloseTo(5, 0);
+  expect(
+    geometry.projectActions.x + geometry.projectActions.width
+      - geometry.projectActionsIcon.x - geometry.projectActionsIcon.width,
+  ).toBeCloseTo(5, 0);
   expect(geometry.projectActions.x).toBeGreaterThanOrEqual(
     geometry.projectButton.x + geometry.projectButton.width - 1,
   );

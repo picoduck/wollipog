@@ -934,7 +934,7 @@ async function openMoveToProjectDialog(page: Page) {
 }
 
 test("the Project crumb navigates independently beside persistent Project Actions", async ({ page }) => {
-  // A longer name keeps its click region separate from the 34px trailing actions gutter.
+  // A longer name keeps its click region separate from the compact trailing actions gutter.
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateProject("alpha", { name: "Alpha Project" }));
   await page.getByRole("tab", { name: /^All\d/ }).click();
   await page.getByRole("row", { name: /Alpha Session/ }).click();
