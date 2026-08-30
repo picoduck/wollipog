@@ -1,4 +1,20 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
+
+async function controlGeometry(control: Locator) {
+  return control.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    return {
+      height: rect.height,
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+      clientWidth: element.clientWidth,
+      scrollWidth: element.scrollWidth,
+      paddingTop: Number.parseFloat(style.paddingTop),
+      paddingBottom: Number.parseFloat(style.paddingBottom),
+    };
+  });
+}
 
 async function openProjectManager(page: Page, projectName = "Alpha") {
   await page.getByRole("tab", { name: new RegExp(projectName) }).hover();
@@ -663,6 +679,64 @@ test("C defaults New Session to the active single-Project Inbox tab", async ({ p
   await expect(dialog.getByLabel("Project", { exact: true })).toHaveValue("alpha");
   await expect(dialog.getByRole("radiogroup", { name: "Project Location" })
     .getByRole("radio", { name: /\/repos\/alpha$/ })).toHaveAttribute("aria-checked", "true");
+});
+
+test("New Session control labels retain centred, unclipped browser geometry", async ({ page }) => {
+  for (const theme of ["dark", "light"] as const) {
+    for (const viewport of [
+      { name: "mobile", width: 390, height: 844, touchMinimum: true },
+      { name: "desktop", width: 1280, height: 900, touchMinimum: false },
+    ] as const) {
+      await page.setViewportSize(viewport);
+      await page.goto("/command-inbox-projects-e2e.html");
+      await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+      await page.getByRole("tab", { name: /Alpha/ }).click();
+      await page.keyboard.press("c");
+
+      const dialog = page.getByRole("dialog", { name: "New Session" });
+      const controls = [
+        dialog.getByRole("button", { name: "Create Project…" }),
+        dialog.getByRole("button", { name: "Add Location…" }),
+        dialog.getByLabel("Agent"),
+      ];
+      const geometry = await Promise.all(controls.map(controlGeometry));
+
+      for (const control of geometry) {
+        expect(control.paddingTop - control.paddingBottom,
+          `${viewport.name} ${theme} controls optically offset their line box`).toBe(2);
+        expect(control.scrollHeight, `${viewport.name} ${theme} control text is not vertically clipped`)
+          .toBeLessThanOrEqual(control.clientHeight);
+        expect(control.scrollWidth, `${viewport.name} ${theme} control text is not horizontally clipped`)
+          .toBeLessThanOrEqual(control.clientWidth);
+      }
+      expect(geometry[0]!.height).toBeCloseTo(geometry[1]!.height, 5);
+      if (viewport.touchMinimum) {
+        for (const control of geometry) expect(control.height).toBeGreaterThanOrEqual(44);
+        expect(Math.max(...geometry.map(({ height }) => height)) - Math.min(...geometry.map(({ height }) => height)))
+          .toBeLessThan(0.5);
+      }
+    }
+  }
+
+  const dialog = page.getByRole("dialog", { name: "New Session" });
+  const controls = [
+    dialog.getByRole("button", { name: "Create Project…" }),
+    dialog.getByRole("button", { name: "Add Location…" }),
+    dialog.getByLabel("Agent"),
+  ];
+  await page.setViewportSize({ width: 390, height: 844 });
+  await dialog.getByLabel("Agent").evaluate((element) => {
+    const selected = (element as HTMLSelectElement).selectedOptions[0];
+    if (selected) selected.textContent = "Áccented Agent With Descenders ģyq — Extended Name";
+  });
+  await page.addStyleTag({
+    content: ".new-session-project-control, .new-session-agent-control { font-size: 24px !important; }",
+  });
+  const enlargedGeometry = await Promise.all(controls.map(controlGeometry));
+  for (const control of enlargedGeometry) {
+    expect(control.height).toBeGreaterThanOrEqual(44);
+    expect(control.scrollHeight, "enlarged control text is not vertically clipped").toBeLessThanOrEqual(control.clientHeight);
+  }
 });
 
 test("multi-Location Projects without a default require an explicit Location", async ({ page }) => {

@@ -527,7 +527,7 @@ export function NewSessionDialog({
                       ? `A Project is a durable home across Locations. ${projectAudienceVisibilitySummary(selectedProject.audience)}. New session transcripts use the Project's visibility.`
                       : "A Project is a durable home for related sessions across Locations. This control plane does not report the Project's visibility."}
                 </span>
-                <button type="button" className="btn ghost sm" onClick={() => setCreatingProject(true)}>Create Project…</button>
+                <button type="button" className="btn ghost sm new-session-project-control" onClick={() => setCreatingProject(true)}>Create Project…</button>
               </div>
             </>
           )}
@@ -579,7 +579,7 @@ export function NewSessionDialog({
               )}
               <button
                 type="button"
-                className="btn ghost sm"
+                className="btn ghost sm new-session-project-control"
                 disabled={selectedProject.canManage === false}
                 title={selectedProject.canManage === false ? "Project management permission is required" : undefined}
                 onClick={() => setAddingLocation(true)}
@@ -733,6 +733,7 @@ export function NewSessionDialog({
             <div className="agent-select">
               <AgentIcon driver={agent?.driver ?? "acp"} agentName={agent?.name} size={15} />
               <select
+                className="new-session-agent-control"
                 id="new-session-agent"
                 value={selectedAgentOption?.advanced ? "" : agentId}
                 onChange={(e) => selectAgent(e.target.value)}
