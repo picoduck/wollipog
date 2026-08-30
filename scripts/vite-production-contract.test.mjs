@@ -35,31 +35,36 @@ test("Vite production output pins the supported desktop webview floor", () => {
   assert.deepEqual(Object.keys(e2eConfig.build?.rolldownOptions?.input ?? {}).sort(), [
     "settingsRows",
     "timelineReflow",
+    "xtermSmoke",
   ]);
 });
 
 test("Vite production browser coverage cannot silently lose a selected check", () => {
   const timelineSpec = readFileSync(new URL("../apps/web/e2e/timeline-reflow.spec.ts", import.meta.url), "utf8");
   const settingsSpec = readFileSync(new URL("../apps/web/e2e/settings-rows.spec.ts", import.meta.url), "utf8");
+  const xtermSpec = readFileSync(new URL("../apps/web/e2e/xterm-smoke.spec.ts", import.meta.url), "utf8");
   const productionConfig = readFileSync(new URL("../playwright.production.config.ts", import.meta.url), "utf8");
-  const markers = `${timelineSpec}\n${settingsSpec}`.match(/@production/g) ?? [];
+  const markers = `${timelineSpec}\n${settingsSpec}\n${xtermSpec}`.match(/@production/g) ?? [];
   const requiredDeclarations = [
     [timelineSpec, "continuous panel resizing keeps long wrapped rows disjoint in every painted frame @production"],
     [timelineSpec, "mounting and unmounting a preceding notice preserves the anchor in every painted frame @production"],
     [timelineSpec, "mounting and unmounting a preceding notice during a list rerender preserves the anchor in every painted frame @production"],
     [settingsSpec, "every affordance is painted in ${theme} @production"],
     [settingsSpec, "the reduced topology production can render is covered too @production"],
+    [xtermSpec, "renders initial and incremental raw output once, including split ANSI input @production"],
+    [xtermSpec, "sends interactive input once and keeps the read-only terminal inert @production"],
+    [xtermSpec, "reports fitted dimensions, refits on resize, and preserves usable scrollback @production"],
   ];
 
-  // Five tagged declarations discover six tests because the painted-affordance case runs in two themes.
-  assert.equal(markers.length, 5);
+  // Eight tagged declarations discover nine tests because the painted-affordance case runs in two themes.
+  assert.equal(markers.length, 8);
   for (const [source, title] of requiredDeclarations) {
     assert.ok(source.includes(title), `missing required production browser declaration: ${title}`);
   }
   assert.match(
     productionConfig,
-    /testMatch:\s*\["timeline-reflow\.spec\.ts",\s*"settings-rows\.spec\.ts"\]/,
-    "production browser selection must retain both validated fixtures",
+    /testMatch:\s*\["timeline-reflow\.spec\.ts",\s*"settings-rows\.spec\.ts",\s*"xterm-smoke\.spec\.ts"\]/,
+    "production browser selection must retain all validated fixtures",
   );
   assert.match(
     productionConfig,

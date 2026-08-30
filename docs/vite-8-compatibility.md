@@ -1,8 +1,12 @@
 # Vite 8 Compatibility Epoch
 
-Validated on 2026-08-29 against `main` commit `b06c1c26ae5b80963699aea2e858acac5778b4bd`,
-which includes the final Timeline anchor fix from issue #326 and the real-browser xterm smoke fixture
-from issue #454.
+Validated on 2026-08-30 against `main` commit `7a9bca7309326497aaa1d546717680e3a35b7e06`,
+which includes the final Timeline anchor fix from issue #326, the real-browser xterm smoke fixture
+from issue #454, the Project breadcrumb visibility fix from issue #468, and the pending-question
+hydration fix from issue #475. It also includes the initial session-history fill fix from issue #478.
+The transcript Timeline follow-ups from issues #471 through #473, the Session Header overflow-status
+work from issue #480, and the durable receipt-code and Project Actions focus fixes from issue #463
+are included as well.
 
 ## Dependency and Platform Contract
 
@@ -19,7 +23,7 @@ from issue #454.
 
 ## Browser Evidence
 
-The complete development-server suite passed 335/335 tests in one worker with zero retries,
+The complete development-server suite passed 344/344 tests in one worker with zero retries,
 including the four real-browser xterm smoke checks merged from issue #454. The comparison below
 then ran the strict continuous-resize test and both predecessor-remount variants ten times each,
 one worker and zero retries:
@@ -37,12 +41,13 @@ without the development client or diagnostic. This is therefore documented as de
 diagnostic noise for deliberate resize churn, not suppressed or converted into a global browser
 error exception.
 
-CI now builds dedicated production Timeline and Settings fixtures, serves the result with
-`vite preview`, and runs six browser checks against the emitted JavaScript and CSS. They cover the
-strict continuous-resize invariant, both predecessor-remount variants, reduced Settings topology,
-and painted Settings affordances in both themes. Tagged titles and the Playwright selector are
-contract-checked so deleting a production marker or dropping a fixture from `testMatch` cannot
-silently shrink the lane. The validation epoch passed 6/6.
+CI now builds dedicated production Timeline, Settings, and real-xterm fixtures, serves the result
+with `vite preview`, and runs nine browser checks against the emitted JavaScript and CSS. They cover
+the strict continuous-resize invariant, both predecessor-remount variants, reduced Settings
+topology, painted Settings affordances in both themes, and xterm output, transport, fit, resize, and
+scrollback behavior. Tagged titles and the Playwright selector are contract-checked so deleting a
+production marker or dropping a fixture from `testMatch` cannot silently shrink the lane. The
+expanded validation passes 9/9 with one worker and zero retries.
 
 The fixtures use Vite's `production-e2e` mode solely to select isolated HTML entry points and the
 `dist-e2e` output directory. No `.env.production` files or `import.meta.env.MODE` consumers are
@@ -68,7 +73,7 @@ references resolve through `vite preview`, and no unintended CSS or chunk loss w
 
 - Frozen install: passed.
 - Typecheck: passed.
-- Unit tests: 4,250 passed, 26 skipped, 0 failed.
+- Unit tests: 4,268 passed, 26 skipped, 0 failed.
 - Standard web build and production-fixture build: passed.
 - Runner and control-plane bundle-only builds: passed.
 - Desktop bundle guards: passed in the full unit suite.
