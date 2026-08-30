@@ -1,8 +1,9 @@
 # Vite 8 Compatibility Epoch
 
-Validated on 2026-08-29 against `main` commit `b06c1c26ae5b80963699aea2e858acac5778b4bd`,
-which includes the final Timeline anchor fix from issue #326 and the real-browser xterm smoke fixture
-from issue #454.
+Validated on 2026-08-30 against `main` commit `b3323006ab7f98d46e6a27940cd9b8c078bda5a2`,
+which includes the final Timeline anchor fix from issue #326, the real-browser xterm smoke fixture
+from issue #454, the Project breadcrumb visibility fix from issue #468, and the pending-question
+hydration fix from issue #475. It also includes the initial session-history fill fix from issue #478.
 
 ## Dependency and Platform Contract
 
@@ -19,7 +20,7 @@ from issue #454.
 
 ## Browser Evidence
 
-The complete development-server suite passed 335/335 tests in one worker with zero retries,
+The complete development-server suite passed 342/342 tests in one worker with zero retries,
 including the four real-browser xterm smoke checks merged from issue #454. The comparison below
 then ran the strict continuous-resize test and both predecessor-remount variants ten times each,
 one worker and zero retries:
@@ -69,7 +70,7 @@ references resolve through `vite preview`, and no unintended CSS or chunk loss w
 
 - Frozen install: passed.
 - Typecheck: passed.
-- Unit tests: 4,250 passed, 26 skipped, 0 failed.
+- Unit tests: 4,258 passed, 26 skipped, 0 failed.
 - Standard web build and production-fixture build: passed.
 - Runner and control-plane bundle-only builds: passed.
 - Desktop bundle guards: passed in the full unit suite.
