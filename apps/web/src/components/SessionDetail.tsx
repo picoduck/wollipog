@@ -179,6 +179,13 @@ const EARLIER_ACTIVITY_TRIGGER_PX = 160;
 const EARLIER_ACTIVITY_REARM_DISTANCE_PX = 32;
 const EARLIER_ACTIVITY_REARM_FRAMES = 8;
 const EARLIER_ACTIVITY_TOUCH_IDLE_MS = 180;
+/** Opening recovery may add at most the same 2,000 raw events that server-side turn alignment
+ * searches. This keeps a pathological single turn bounded while normal underfilled readers need
+ * only one or two pages. */
+const OPENING_HISTORY_MAX_PAGES = 10;
+/** Leave the earlier-history control safely above a tail-following viewport instead of stopping as
+ * soon as the reader gains a one-pixel scroll range. */
+const OPENING_HISTORY_HEADROOM_PX = EARLIER_ACTIVITY_TRIGGER_PX;
 
 type EarlierActivityIntent = "single-scroll" | "touch-traversal";
 
@@ -537,6 +544,10 @@ function SessionDetailLoaded({
   const viewGenerationRef = useRef(0);
   const [historyRetry, setHistoryRetry] = useState(0);
   const [olderRequestSettled, setOlderRequestSettled] = useState(0);
+  const [openingHistoryFill, setOpeningHistoryFill] = useState({
+    historyKey: `${session.id}:${session.eventEpoch ?? 0}`,
+    settled: false,
+  });
   const [optimisticModel, setOptimisticModel] = useState<string | undefined>();
   const [activeSlashCommandId, setActiveSlashCommandId] = useState<string | null>(null);
   const [timelineRevealRequest, setTimelineRevealRequest] = useState<TimelineRevealRequest | null>(null);
@@ -559,6 +570,13 @@ function SessionDetailLoaded({
     touchTraversalStarted: false,
     touchEndTimer: null as number | null,
     readerIntentMovedUp: false,
+  });
+  const openingHistoryFillRef = useRef({
+    historyKey: timelineHistoryKey,
+    requestedBase: null as number | null,
+    pagesRequested: 0,
+    settled: false,
+    measureFrame: null as number | null,
   });
   const [composerSelection, setComposerSelection] = useState({ start: 0, end: 0 });
   const [slashDismissedFor, setSlashDismissedFor] = useState<string | null>(null);
@@ -1127,10 +1145,10 @@ function SessionDetailLoaded({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api, sessionId, loadEvents, conn, recoveryRevision, recoveryAfter, recoveryEventEpoch, recoveryGeneration, historyRetry, beginEventHistoryLoad, failEventHistoryLoad]);
 
-  // Reader-driven only: older turns load when someone scrolls back to the top of the window, never
-  // on open and never in the background, so the transcript cannot shift under a reader who did not
-  // ask for it. `preserveAnchor` keeps their row fixed while the prepend re-measures.
-  const loadOlder = useCallback(() => {
+  // Older pages have one serialized fetch path. Opening recovery may use it briefly to complete an
+  // underfilled first viewport; afterward only explicit controls and reader navigation call it.
+  // `preserveAnchor` keeps an existing reading row fixed while a prepend re-measures.
+  const loadOlder = useCallback((alignToTurn = false) => {
     const base = eventWindowBase(sessionId);
     if (base <= 1 || olderInFlightRef.current) return false;
     const epoch = recoveryEventEpoch;
@@ -1138,9 +1156,18 @@ function SessionDetailLoaded({
     // Every dispatch carries the base this page was requested below. A reopen re-reads the tail,
     // so a page that outlives its window must be dropped rather than prepended under a newer one.
     beginOlderEventsLoad(sessionId, base, epoch);
-    void loadOlderSessionEvents(sessionId, base, epoch, api.getSessionEventTailPage)
+    void loadOlderSessionEvents(sessionId, base, epoch, api.getSessionEventTailPage, alignToTurn)
       .then((page) => {
-        if (page) loadOlderEvents(sessionId, page.events, page.hasOlder, base, page.eventEpoch);
+        if (page) {
+          loadOlderEvents(
+            sessionId,
+            page.events,
+            page.hasOlder,
+            base,
+            page.eventEpoch,
+            page.turnAligned,
+          );
+        }
         else failOlderEventsLoad(sessionId, "Earlier activity is unavailable from this control plane.", base, epoch);
       })
       .catch(() => failOlderEventsLoad(sessionId, "Could not load earlier activity.", base, epoch))
@@ -1643,6 +1670,105 @@ function SessionDetailLoaded({
     sessionId,
     persistenceScope: instanceScope,
   });
+
+  // A 200-event opening window is a transport budget, not a visual one: hundreds of streamed
+  // chunks can collapse into a single short timeline row. While a freshly opened expanded reader
+  // is still following the tail, prepend only enough bounded pages to recover the leading turn and
+  // put the earlier-history control safely above the first viewport. Reader interaction, hidden
+  // geometry, errors, no progress, exhaustion, and the page cap all settle this automatic phase.
+  useLayoutEffect(() => {
+    const state = openingHistoryFillRef.current;
+    const publishSettled = (settled: boolean) => {
+      setOpeningHistoryFill((current) =>
+        current.historyKey === timelineHistoryKey && current.settled === settled
+          ? current
+          : { historyKey: timelineHistoryKey, settled });
+    };
+    const settle = () => {
+      state.settled = true;
+      state.requestedBase = null;
+      publishSettled(true);
+    };
+
+    if (state.historyKey !== timelineHistoryKey) {
+      if (state.measureFrame !== null) window.cancelAnimationFrame(state.measureFrame);
+      state.historyKey = timelineHistoryKey;
+      state.requestedBase = null;
+      state.pagesRequested = 0;
+      state.settled = false;
+      state.measureFrame = null;
+      publishSettled(false);
+    }
+    if (state.settled) return;
+    if (mode !== "expanded") {
+      // Desktop Inbox mounts a preview first and expands that same component instance. Keep the
+      // preview's manual control visible without permanently consuming the expanded-only fill.
+      publishSettled(true);
+      return;
+    }
+    publishSettled(false);
+    if (followTail.state !== "following" || automaticEarlierLoadRef.current.readerStarted) {
+      settle();
+      return;
+    }
+    if (!eventWindow) return;
+    if (!eventWindow.hasOlder || eventWindow.error || eventWindow.baseSeq <= 1) {
+      settle();
+      return;
+    }
+    if (eventWindow.loadingOlder || olderInFlightRef.current) return;
+    if (state.requestedBase !== null) {
+      if (eventWindow.baseSeq >= state.requestedBase) {
+        settle();
+        return;
+      }
+      state.requestedBase = null;
+    }
+
+    state.measureFrame = window.requestAnimationFrame(() => {
+      state.measureFrame = null;
+      if (state.historyKey !== timelineHistoryKey || state.settled) return;
+      const scroll = scrollRef.current;
+      if (!scroll || scroll.clientHeight <= 0 || scroll.scrollHeight <= 0) {
+        settle();
+        return;
+      }
+      const leadingTurnIncomplete = eventWindow.turnAligned === false;
+      const viewportUnderfilled = scroll.scrollHeight <=
+        scroll.clientHeight + OPENING_HISTORY_HEADROOM_PX;
+      if (!leadingTurnIncomplete && !viewportUnderfilled) {
+        settle();
+        return;
+      }
+      if (state.pagesRequested >= OPENING_HISTORY_MAX_PAGES) {
+        settle();
+        return;
+      }
+      const requestedBase = eventWindow.baseSeq;
+      if (!loadOlder(true)) {
+        settle();
+        return;
+      }
+      state.requestedBase = requestedBase;
+      state.pagesRequested += 1;
+    });
+
+    return () => {
+      if (state.measureFrame !== null) window.cancelAnimationFrame(state.measureFrame);
+      state.measureFrame = null;
+    };
+  }, [
+    eventWindow,
+    followTail.state,
+    loadOlder,
+    mode,
+    olderRequestSettled,
+    timelineHistoryKey,
+  ]);
+
+  const openingHistoryFillSettled = mode !== "expanded" || (
+    openingHistoryFill.historyKey === timelineHistoryKey && openingHistoryFill.settled
+  );
 
   useEffect(() => {
     timelineRevealRequestRef.current = null;
@@ -2624,11 +2750,10 @@ function SessionDetailLoaded({
                   onRetry={() => setHistoryRetry((value) => value + 1)}
                 />
               )}
-              {eventWindow?.hasOlder === true && items.length > 0 && (
+              {eventWindow?.hasOlder === true && items.length > 0 && openingHistoryFillSettled && (
                 <EarlierActivityControl
                   loading={eventWindow.loadingOlder}
                   error={eventWindow.error}
-                  leadingResponsePartial={eventWindow.turnAligned === false}
                   onLoad={loadEarlierFromControl}
                 />
               )}
@@ -4069,27 +4194,18 @@ function TranscriptSkeleton() {
 function EarlierActivityControl({
   loading,
   error,
-  leadingResponsePartial,
   onLoad,
 }: {
   loading: boolean;
   error: string | null;
-  leadingResponsePartial: boolean;
   onLoad: () => void;
 }) {
-  const partialDescriptionId = useId();
   return (
     <div className="transcript-earlier-activity">
-      {leadingResponsePartial && (
-        <span id={partialDescriptionId}>
-          A response near the beginning of the loaded activity may be incomplete.
-        </span>
-      )}
       <button
         className="btn ghost sm"
         type="button"
         disabled={loading}
-        aria-describedby={leadingResponsePartial ? partialDescriptionId : undefined}
         onClick={onLoad}
       >
         {loading ? "Loading Earlier Activity…" : "Load Earlier Activity"}

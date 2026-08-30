@@ -664,6 +664,29 @@ test("older pages carry the reader's cursor and stop at the start of the log", a
   );
 });
 
+test("opening-fill pages request and preserve semantic turn alignment", async () => {
+  const alignments: Array<boolean | undefined> = [];
+  const page = await loadOlderSessionEvents(
+    "s1",
+    4_801,
+    3,
+    async (_id, _before, _epoch, _limit, alignToTurn) => {
+      alignments.push(alignToTurn);
+      return {
+        events: [event(4_401), event(4_402)],
+        eventEpoch: 3,
+        nextBefore: 4_401,
+        hasMoreOlder: true,
+        turnAligned: false,
+        cacheComplete: true,
+      };
+    },
+    true,
+  );
+  assert.deepEqual(alignments, [true]);
+  assert.equal(page?.turnAligned, false);
+});
+
 test("the opening window survives a live event that lands before the load starts", () => {
   const cold = { recoveryAfter: 0, historyEverCompleted: false, hasSavedReadingPosition: false };
   assert.equal(shouldReadOpeningWindow(cold), true);

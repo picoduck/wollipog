@@ -49,6 +49,24 @@ async function expectDesktopPrependAnchor(page: Page, navigate: (reader: Locator
   expect(consoleErrors.filter((message) => message.includes("same key"))).toEqual([]);
 }
 
+test("an event-heavy desktop opening fills itself before exposing earlier activity", async ({ page }) => {
+  await page.goto(
+    "/recovery-notice-e2e.html?pagination=resolve&event-heavy=1&height=800&width=1000",
+  );
+
+  const reader = page.locator(".detail-scroll");
+  const control = page.locator(".transcript-earlier-activity");
+  await expect.poll(() => page.locator("body").getAttribute("data-tail-request-count")).toBe("2");
+  await expect.poll(() => reader.evaluate((element) => element.scrollHeight - element.clientHeight))
+    .toBeGreaterThan(160);
+  await expect(control).toHaveCount(1);
+  await expect(control).not.toBeInViewport();
+  await expect(control).toHaveText("Load Earlier Activity");
+  await expect(page.getByText("A response near the beginning of the loaded activity may be incomplete."))
+    .toHaveCount(0);
+  await expect(page.locator(".follow-tail-chip")).toHaveAttribute("data-follow-tail-state", "following");
+});
+
 test("desktop wheel navigation preserves the earlier-page boundary", async ({ page }) => {
   await expectDesktopPrependAnchor(page, async (reader) => {
     await reader.hover();

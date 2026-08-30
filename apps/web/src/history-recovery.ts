@@ -4,9 +4,8 @@ export const SESSION_EVENT_PAGE_LIMIT = 200;
 export const SESSION_HISTORY_RECOVERY_CONCURRENCY = 6;
 export const SESSION_HISTORY_FLEET_TURN_PAGES = 8;
 
-/** Events the opening window reads in its single round trip. Sized to fill a tall transcript
- * viewport well past its first screen, so a reader who opens a session and scrolls a little never
- * waits on a second request. Older turns load only when they actually scroll back to them. */
+/** Events in the first opening-window round trip. Rendered geometry may request bounded aligned
+ * older pages afterward because many streamed events can collapse into one short timeline row. */
 export const SESSION_EVENT_WINDOW_LIMIT = 200;
 
 /** Stable scalar dependency for restarting a recovery when any selected timeline generation
@@ -301,18 +300,31 @@ export async function recoverSessionHistoryWindow(
   return { supported: true, complete: false };
 }
 
-/** Fetch one page of turns older than the loaded window. Reader-driven: never called on open. */
+/** Fetch one page older than the loaded window. Opening fill opts into turn alignment; later
+ * reader-driven pagination keeps exact count-bounded cursors. */
 export async function loadOlderSessionEvents(
   sessionId: string,
   before: number,
   eventEpoch: number,
   fetchTailPage: SessionHistoryWindowOptions["fetchTailPage"],
-): Promise<{ events: SessionEvent[]; hasOlder: boolean; eventEpoch: number } | null> {
-  const page = await fetchTailPage(sessionId, before, eventEpoch, SESSION_EVENT_WINDOW_LIMIT);
+  alignToTurn = false,
+): Promise<{ events: SessionEvent[]; hasOlder: boolean; eventEpoch: number; turnAligned?: boolean } | null> {
+  const page = await fetchTailPage(
+    sessionId,
+    before,
+    eventEpoch,
+    SESSION_EVENT_WINDOW_LIMIT,
+    alignToTurn,
+  );
   if (!supportsBackwardRead(page)) return null;
   const responseEpoch = page.eventEpoch ?? eventEpoch;
   if (responseEpoch !== eventEpoch) return null;
-  return { events: page.events, hasOlder: page.hasMoreOlder === true, eventEpoch: responseEpoch };
+  return {
+    events: page.events,
+    hasOlder: page.hasMoreOlder === true,
+    eventEpoch: responseEpoch,
+    ...(page.turnAligned === undefined ? {} : { turnAligned: page.turnAligned }),
+  };
 }
 
 /** Recover a fleet view without launching one HTTP/page chain per member at once. */

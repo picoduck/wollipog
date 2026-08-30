@@ -912,6 +912,11 @@ test("reader-driven older pages extend the window downward without touching reco
   );
   assert.equal(store.getState().eventWindows.get("s1")?.turnAligned, true,
     "reaching the start of a transcript without a user-message anchor completes the partial head");
+
+  store.loadEvents("s1", [event("s1", 10), event("s1", 11)], 0, 1, true, generation, true, true);
+  store.loadOlderEvents("s1", [event("s1", 8), event("s1", 9)], true, 10, 0, false);
+  assert.equal(store.getState().eventWindows.get("s1")?.turnAligned, false,
+    "an explicitly aligned prepend publishes its own capped-boundary result");
 });
 
 test("a replaced event log drops the window that described the previous sequence space", () => {

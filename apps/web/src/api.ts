@@ -533,7 +533,8 @@ export function createApiClient(transport: ApiTransport) {
       eventEpoch: String(eventEpoch),
     });
     if (before !== undefined) query.set("before", String(before));
-    // Only the opening window aligns: it is the one page whose first row the reader lands on.
+    // Opening-window reads and bounded automatic opening fill align; ordinary reader-driven pages
+    // omit the flag so their count cursors remain exact and disjoint.
     if (alignToTurn) query.set("align", "turn");
     return req<SessionEventsResponse>(`/api/sessions/${encodeURIComponent(id)}/events?${query}`);
   },

@@ -10,8 +10,13 @@ Opening a session reads a bounded window at the **tail** of its cached history �
 newest events, whatever the session's length — rather than walking the log forward from its first
 event. `GET /api/sessions/:id/events?direction=backward` serves that window and its older pages;
 `before` carries the reader's cursor and `hasMoreOlder` reports whether older cached rows remain.
-Older turns load only when the reader asks for them through **Load Earlier Activity**, never in the
-background, so a transcript cannot shift under someone who did not reach for it.
+After that first response, a freshly opened expanded reader may automatically prepend aligned older
+pages while it is still following the tail. It stops as soon as the leading turn is complete and
+the rendered content provides one viewport plus 160 pixels of headroom. It also stops on reader
+interaction, hidden geometry, an error, no cursor progress, history exhaustion, or after ten older
+pages (2,000 ordinary page events). This makes a raw-event budget useful as rendered content without
+draining a transcript. Older turns beyond that opening fill load only when the reader scrolls back
+or uses **Load Earlier Activity**.
 
 The window is anchored to a turn, not to a raw count. `align=turn` extends the newest `limit` rows
 down to the user message that started the turn they land inside, so the reader's first rows are an
@@ -24,15 +29,16 @@ only prevents extending that page. When no anchor is in reach — because a turn
 event cap, the transcript was adopted or resumed without an anchor, or extension would cross the
 payload ceiling — the count boundary stands and the response reports `turnAligned: false`.
 That value describes only the leading edge of the loaded window: it may split an older response
-while newer complete turns remain visible. Older pages stay count-bounded so their cursors remain
-exact and disjoint.
+while newer complete turns remain visible. Automatic opening-fill pages also request turn alignment;
+later reader-driven pages stay count-bounded so their cursors remain exact and disjoint.
 
-Reader-driven pagination preserves `turnAligned: false` after an agent-only older page while more
-history remains. The reader switches it to true and clears the notice once an older page contains any
-user-message boundary or reaches the start of history (`hasMoreOlder: false`). Older pages remain
-count-bounded, so this is the reader's recovery-state rule rather than a claim that the newly loaded
-first row is itself a turn boundary. Older control planes omit `turnAligned`; the reader preserves
-that absence through pagination instead of inventing either a partial warning or alignment proof.
+An explicitly aligned prepend publishes its own `turnAligned` result. Count-bounded reader
+pagination preserves `turnAligned: false` after an agent-only older page while more history remains,
+then switches it to true once a page contains any user-message boundary or reaches the start of
+history (`hasMoreOlder: false`). If the automatic safety cap is exhausted, the reader exposes the
+same compact **Load Earlier Activity** control without a separate prose warning. Older control
+planes omit `turnAligned`; the reader preserves that absence through pagination instead of inventing
+either partial state or alignment proof.
 
 A window defines the slice that is loaded. A cold cache hydrates forward from the runner and
 republishes those rows exactly like live events, so a transcript can fill from the start of the log

@@ -334,6 +334,8 @@ type Action =
       /** The window base this page was requested below. A page that outlived its window would
        * otherwise land under a newer one and leave an unreachable hole between them. */
       requestedBase: number;
+      /** Present when this older page explicitly requested a semantic turn boundary. */
+      turnAligned?: boolean;
     }
   | { type: "subscription_requested"; revision: number; sessionIds: string[] }
   | {
@@ -531,7 +533,7 @@ function applyWindowBase(
   const priorValid = prior?.eventEpoch === action.eventEpoch ? prior : undefined;
   const pageBase = action.events[0]?.seq;
   // An empty window (a session with no cached events yet) still records the epoch, so a later
-  // reader-driven page has a window to attach to.
+  // older page has a window to attach to.
   if (pageBase === undefined) {
     // An empty retry that reached the tail still settles completeness for the epoch; otherwise a
     // session whose first read expired stays partial forever despite an authoritative answer.
@@ -849,8 +851,8 @@ function reducer(state: State, action: Action): State {
       return { ...state, eventWindows };
     }
     case "events_older_loaded": {
-      // Reader-driven prepend. Unlike recovery it carries no completion or cursor meaning: the
-      // window only grows downward, so neither history state nor the forward gap cursor moves.
+      // Older-page prepend. Unlike recovery it carries no completion or cursor meaning: the window
+      // only grows downward, so neither history state nor the forward gap cursor moves.
       if (!relevantSessions(state).has(action.sessionId)) return state;
       if (action.eventEpoch !== sessionEventEpoch(state.sessions.get(action.sessionId))) return state;
       const window = state.eventWindows.get(action.sessionId);
@@ -867,11 +869,11 @@ function reducer(state: State, action: Action): State {
         ...window,
         baseSeq: Math.min(window.baseSeq, action.events[0]?.seq ?? window.baseSeq),
         hasOlder: action.hasOlder,
-        ...(window.turnAligned === undefined ? {} : {
-          turnAligned: window.turnAligned === false &&
+        ...(window.turnAligned === undefined && action.turnAligned === undefined ? {} : {
+          turnAligned: action.turnAligned ?? (window.turnAligned === false &&
             (action.events.some((event) => event.payload.kind === "user_message") || !action.hasOlder)
             ? true
-            : window.turnAligned,
+            : window.turnAligned),
         }),
         loadingOlder: false,
         error: null,
@@ -1474,6 +1476,7 @@ interface StoreValue extends State {
     hasOlder: boolean,
     requestedBase: number,
     eventEpoch?: number,
+    turnAligned?: boolean,
   ) => void;
   beginOlderEventsLoad: (sessionId: string, requestedBase: number, eventEpoch?: number) => void;
   failOlderEventsLoad: (sessionId: string, error: string, requestedBase: number, eventEpoch?: number) => void;
@@ -1607,7 +1610,16 @@ export class Store {
     hasOlder: boolean,
     requestedBase: number,
     eventEpoch = sessionEventEpoch(this.state.sessions.get(sessionId)),
-  ): void => this.dispatch({ type: "events_older_loaded", sessionId, events, hasOlder, requestedBase, eventEpoch });
+    turnAligned?: boolean,
+  ): void => this.dispatch({
+    type: "events_older_loaded",
+    sessionId,
+    events,
+    hasOlder,
+    requestedBase,
+    eventEpoch,
+    ...(turnAligned === undefined ? {} : { turnAligned }),
+  });
   /** Oldest loaded seq for the session's current epoch, or 0 when no window is loaded. */
   eventWindowBase = (sessionId: string): number => {
     const window = this.state.eventWindows.get(sessionId);

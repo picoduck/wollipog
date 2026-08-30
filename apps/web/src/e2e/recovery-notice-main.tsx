@@ -14,6 +14,7 @@ import "../styles.css";
  * By default recovery stays active for the page life; `?settled=1` completes it, while
  * `?pagination=1` resolves a bounded opening window and then holds the automatic earlier-page
  * request in flight for inspection. `?pagination=resolve` serves multiple variable-height pages;
+ * `?event-heavy=1` makes 200 raw opening events collapse into one partial rendered response, and
  * `?live=1` adds a live tail event during the first prepend. */
 const params = new URLSearchParams(window.location.search);
 const mode = params.get("mode") === "preview" ? ("preview" as const) : ("expanded" as const);
@@ -22,6 +23,7 @@ const frameWidth = Number(params.get("width") ?? "900");
 const pinnedOpen = params.get("pinned") === "1";
 const pagination = params.get("pagination") === "1";
 const resolvedPagination = params.get("pagination") === "resolve";
+const eventHeavyOpening = params.get("event-heavy") === "1";
 const liveDuringPagination = params.get("live") === "1";
 const paginationDelay = Number(params.get("pagination-delay") ?? "80");
 const settled = params.get("settled") === "1";
@@ -143,12 +145,13 @@ const client = {
     document.body.dataset.tailRequestCount = String(tailRequestCount);
     if (settled && before === undefined) {
       return Promise.resolve({
-        events: fixtureEvents, eventEpoch, nextBefore: 0, hasMoreOlder: false, cacheComplete: true,
+        events: activeFixtureEvents, eventEpoch, nextBefore: 0, hasMoreOlder: false, cacheComplete: true,
       });
     }
     if (resolvedPagination && before !== undefined) {
-      const pageStart = Math.max(0, before - 1 - 8);
-      const events = fixtureEvents.slice(pageStart, before - 1);
+      const pageSize = eventHeavyOpening ? 200 : 8;
+      const pageStart = Math.max(0, before - 1 - pageSize);
+      const events = activeFixtureEvents.slice(pageStart, before - 1);
       if (liveDuringPagination && tailRequestCount === 2) {
         window.setTimeout(() => fixtureSocket?.onmessage?.({ data: JSON.stringify({
           type: "session_event",
@@ -174,10 +177,11 @@ const client = {
       }), paginationDelay));
     }
     if ((!pagination && !resolvedPagination) || before !== undefined) return new Promise<never>(() => {});
-    const openingWindow = fixtureEvents.slice(resolvedPagination ? -15 : -24);
+    const openingWindow = activeFixtureEvents.slice(-24);
+    const boundedOpeningWindow = eventHeavyOpening ? activeFixtureEvents.slice(-200) : openingWindow;
     return Promise.resolve({
-      events: openingWindow, eventEpoch, nextBefore: openingWindow[0]?.seq ?? 0,
-      hasMoreOlder: true, cacheComplete: true,
+      events: boundedOpeningWindow, eventEpoch, nextBefore: boundedOpeningWindow[0]?.seq ?? 0,
+      hasMoreOlder: true, turnAligned: eventHeavyOpening ? false : true, cacheComplete: true,
     });
   },
 } as unknown as ApiClient;
@@ -215,12 +219,40 @@ const fixtureEvents: SessionEvent[] = payloads.map((payload, index) => ({
   payload,
 }));
 
+const eventHeavyPayloads: SessionEvent["payload"][] = [];
+for (let turn = 0; turn < 110; turn += 1) {
+  eventHeavyPayloads.push(
+    { kind: "user_message", text: `earlier question ${turn + 1}`, images: [] },
+    { kind: "agent_message", text: `earlier complete answer ${turn + 1}`, final: true },
+  );
+}
+eventHeavyPayloads.push({
+  kind: "user_message",
+  text: "Explain the bounded opening-window behavior.",
+  images: [],
+});
+for (let chunk = 0; chunk < 240; chunk += 1) {
+  eventHeavyPayloads.push({
+    kind: "agent_message",
+    text: "x ",
+    final: chunk === 239,
+  });
+}
+const eventHeavyFixtureEvents: SessionEvent[] = eventHeavyPayloads.map((payload, index) => ({
+  id: index + 1,
+  sessionId: SESSION_ID,
+  seq: index + 1,
+  ts: index + 1,
+  payload,
+}));
+const activeFixtureEvents = eventHeavyOpening ? eventHeavyFixtureEvents : fixtureEvents;
+
 function EventSeeder() {
   const ready = useStoreSelector((state) => state.sessions.has(SESSION_ID));
   const { dispatch } = useStoreActions();
   React.useEffect(() => {
     if (!ready) return;
-    for (const event of fixtureEvents) {
+    for (const event of activeFixtureEvents) {
       dispatch({ type: "msg", msg: { type: "session_event", event } });
     }
   }, [dispatch, ready]);

@@ -49,6 +49,24 @@ test("the first mobile touch traversal loads earlier activity", async ({ page })
   await expect(control).toContainText("Loading Earlier Activity…");
 });
 
+test("an event-heavy mobile opening fills itself before exposing earlier activity", async ({ page }) => {
+  await page.goto(
+    "/recovery-notice-e2e.html?pagination=resolve&event-heavy=1&height=720&width=412",
+  );
+
+  const reader = page.locator(".detail-scroll");
+  const control = page.locator(".transcript-earlier-activity");
+  await expect.poll(() => page.locator("body").getAttribute("data-tail-request-count")).toBe("2");
+  await expect.poll(() => reader.evaluate((element) => element.scrollHeight - element.clientHeight))
+    .toBeGreaterThan(160);
+  await expect(control).toHaveCount(1);
+  await expect(control).not.toBeInViewport();
+  await expect(control).toHaveText("Load Earlier Activity");
+  await expect(page.getByText("A response near the beginning of the loaded activity may be incomplete."))
+    .toHaveCount(0);
+  await expect(page.locator(".follow-tail-chip")).toHaveAttribute("data-follow-tail-state", "following");
+});
+
 test("resolved earlier pages preserve the mobile reading boundary", async ({ page }) => {
   const consoleErrors: string[] = [];
   page.on("console", (message) => {
