@@ -80,6 +80,36 @@ test("transcript media labels prefer author text and otherwise omit signed query
   assert.equal(transcriptMediaLabel("not a URL", "video"), "Video");
 });
 
+test("generated transcript media labels remove invisible Unicode without rewriting author text", () => {
+  const unsafeCharacters = [0x200b, 0x200c, 0x200d, 0x2028, 0x2029]
+    .map((codePoint) => String.fromCodePoint(codePoint)).join("");
+  const encodedUnsafe = [...unsafeCharacters].map((character) => encodeURIComponent(character)).join("");
+  const encoded = `https://evidence.example/session${encodedUnsafe}review.png?X-Amz-Signature=secret`;
+  const raw = `https://evidence.example/session${unsafeCharacters}review.png?X-Amz-Signature=secret`;
+  assert.equal(transcriptMediaLabel(encoded, "image"), "sessionreview.png");
+  assert.equal(transcriptMediaLabel(raw, "image"), "sessionreview.png");
+
+  const authorLabel = `Reviewed${unsafeCharacters} Layout`;
+  assert.equal(transcriptMediaLabel(encoded, "image", authorLabel), authorLabel,
+    "generated-label hardening does not rewrite explicit author text");
+  assert.equal(transcriptMediaLabel("https://evidence.example/%E2%80review.png", "image"), "%E2%80review.png",
+    "malformed percent encoding remains a defensive raw basename");
+  assert.equal(transcriptMediaLabel(`https://evidence.example/${encodedUnsafe}`, "video"), "Video",
+    "an empty sanitized basename uses the stable kind fallback");
+
+  const imageMarkup = renderToStaticMarkup(React.createElement(Markdown, {
+    inlineMedia: true,
+    children: `![](${encoded})`,
+  }));
+  assert.match(imageMarkup, /<img class="md-media-image"[^>]*alt=""/,
+    "an intentionally empty image alt remains decorative after generated-label sanitization");
+  assert.match(imageMarkup, /class="md-img-link"[^>]*>🖼 sessionreview\.png<\/a>/);
+
+  const video = `https://evidence.example/session${encodedUnsafe}review.webm?X-Amz-Signature=secret`;
+  const videoMarkup = renderToStaticMarkup(React.createElement(Markdown, { inlineMedia: true, children: video }));
+  assert.match(videoMarkup, /<video class="md-media-video"[^>]*aria-label="sessionreview\.webm"/);
+});
+
 test("transcript media opt-in keeps links and adds bounded native image/video elements", () => {
   const image = "https://evidence.example/review.png?X-Amz-Signature=redacted";
   const video = "https://evidence.example/review.webm?X-Amz-Signature=redacted";

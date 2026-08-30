@@ -267,6 +267,76 @@ test("text settlement plus an earlier tool update stays bounded on a long main t
   assert.equal(boundary.rows[1_000], untouched, "the combined update never reprojects history");
 });
 
+test("multi-text settlement plus a structural append stays bounded on a long main transcript", () => {
+  let sequence = 0;
+  const builder = new TimelineBuilder();
+  const push = (payload: SessionEventPayload) => builder.push({
+    id: ++sequence, sessionId: "multi-scale", seq: sequence, ts: sequence, payload,
+  });
+  for (let index = 0; index < 4_997; index += 1) push({ kind: "user_message", text: `question ${index}` });
+  for (let index = 0; index < 3; index += 1) {
+    push({ kind: "agent_message", text: `stream ${index}`, messageId: `message-${index}` });
+  }
+
+  const disclosure = new Map<string, boolean>();
+  const rows = new IncrementalTimelineRows();
+  const initial = rows.project(builder.snapshot(), disclosure);
+  const untouched = initial.rows[1_000];
+  assert.equal(builder.snapshot().length, 5_000);
+
+  push({ kind: "tool_call", toolCallId: "read", title: "Read", toolKind: "read", status: "in_progress" });
+  const boundary = rows.project(builder.snapshot(), disclosure);
+  assert.equal(boundary.incremental, true);
+  assert.equal(boundary.processedItems, 4, "three settlements and their append remain O(changed items)");
+  assert.equal(boundary.rows[1_000], untouched, "the multi-settlement boundary never reprojects history");
+  assert.deepEqual(builder.snapshot().slice(-4, -1).map(timelineItemIsStreaming), [false, false, false]);
+});
+
+test("a completion fence settles a multi-text batch without rebuilding", () => {
+  let sequence = 0;
+  const builder = new TimelineBuilder();
+  const push = (payload: SessionEventPayload) => builder.push({
+    id: ++sequence, sessionId: "multi-complete", seq: sequence, ts: sequence, payload,
+  });
+  for (let index = 0; index < 3; index += 1) {
+    push({ kind: "agent_message", text: `stream ${index}`, messageId: `message-${index}` });
+  }
+  const disclosure = new Map<string, boolean>();
+  const rows = new IncrementalTimelineRows();
+  rows.project(builder.snapshot(), disclosure);
+
+  push({ kind: "agent_response_completed" });
+  const boundary = rows.project(builder.snapshot(), disclosure);
+  assert.equal(boundary.incremental, true);
+  assert.equal(boundary.processedItems, 3);
+  assert.deepEqual(builder.snapshot().map(timelineItemIsStreaming), [false, false, false]);
+});
+
+test("multi-text settlement plus an earlier update stays bounded on a long main transcript", () => {
+  let sequence = 0;
+  const builder = new TimelineBuilder();
+  const push = (payload: SessionEventPayload) => builder.push({
+    id: ++sequence, sessionId: "multi-update", seq: sequence, ts: sequence, payload,
+  });
+  push({ kind: "tool_call", toolCallId: "read", title: "Read", toolKind: "read", status: "in_progress" });
+  for (let index = 0; index < 4_996; index += 1) push({ kind: "user_message", text: `question ${index}` });
+  for (let index = 0; index < 3; index += 1) {
+    push({ kind: "agent_message", text: `stream ${index}`, messageId: `message-${index}` });
+  }
+
+  const disclosure = new Map<string, boolean>();
+  const rows = new IncrementalTimelineRows();
+  const initial = rows.project(builder.snapshot(), disclosure);
+  const untouched = initial.rows[1_000];
+  assert.equal(builder.snapshot().length, 5_000);
+
+  push({ kind: "tool_call", toolCallId: "read", title: "Read Complete", toolKind: "read", status: "completed" });
+  const boundary = rows.project(builder.snapshot(), disclosure);
+  assert.equal(boundary.incremental, true);
+  assert.equal(boundary.processedItems, 4, "three settlements and one indexed update remain O(changed items)");
+  assert.equal(boundary.rows[1_000], untouched, "the multi-settlement update never reprojects history");
+});
+
 test("descriptor assembly inspects only agent and output-owner ids", () => {
   const root = {
     kind: "tool_call", id: 1, toolCallId: "agent", title: "Agent", text: "",
@@ -460,6 +530,48 @@ test("filtered snapshot metadata propagates streamed settlement before a child a
   assert.equal(appended.incremental, true,
     "a simultaneous text settlement and structural append stays on the bounded row path");
   assert.equal(appended.processedItems, 2);
+});
+
+test("filtered snapshot metadata keeps a multi-text settlement batch incremental", () => {
+  let sequence = 0;
+  const event = (payload: SessionEventPayload): SessionEvent => ({
+    id: ++sequence, sessionId: "multi-rows", seq: sequence, ts: sequence, payload,
+  });
+  const builder = new TimelineBuilder();
+  const subagents = new IncrementalSubagentProjector();
+  const rows = new IncrementalTimelineRows();
+  const disclosure = new Map<string, boolean>();
+  builder.push(event({ kind: "tool_call", toolCallId: "agent", title: "Agent", toolKind: "agent", status: "in_progress" }));
+  builder.push(event({ kind: "agent_message", text: "history", final: true, parentToolUseId: "agent" }));
+  for (let index = 0; index < 3; index += 1) {
+    builder.push(event({
+      kind: "agent_message",
+      text: `stream ${index}`,
+      messageId: `message-${index}`,
+      parentToolUseId: "agent",
+    }));
+  }
+  subagents.project(builder.snapshot(), context);
+  const first = subagents.timeline("agent");
+  const initial = rows.project(first, disclosure);
+  const historicalRow = initial.rows[0];
+
+  builder.push(event({
+    kind: "tool_call",
+    toolCallId: "child-tool",
+    title: "Read",
+    toolKind: "read",
+    status: "in_progress",
+    parentToolUseId: "agent",
+  }));
+  subagents.project(builder.snapshot(), context);
+  const second = subagents.timeline("agent");
+  assert.equal(timelineSnapshotDelta(second)?.previous, first);
+  assert.deepEqual(timelineSnapshotDelta(second)?.dirtyIndexes, [1, 2, 3, 4]);
+  const boundary = rows.project(second, disclosure);
+  assert.equal(boundary.incremental, true);
+  assert.equal(boundary.processedItems, 4);
+  assert.equal(boundary.rows[0], historicalRow, "unchanged selected history retains row identity");
 });
 
 test("known zero token usage remains distinct from unavailable usage", () => {
