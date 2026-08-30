@@ -5,7 +5,8 @@ function terminalRows(terminal: Locator): Locator {
 }
 
 async function waitForHarness(page: Page): Promise<void> {
-  await page.goto("/xterm-smoke-e2e.html");
+  const response = await page.goto("/xterm-smoke-e2e.html");
+  expect(response?.ok(), "xterm production fixture should be served").toBe(true);
   await expect.poll(() => page.evaluate(() => typeof window.__WOLLIPOG_XTERM_E2E__)).toBe("object");
 }
 
