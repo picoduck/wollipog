@@ -214,7 +214,7 @@ function ApprovalHarness({ requestId, runnerOnline = true }: { requestId: string
   );
 }
 
-function QuestionPresentationHarness({ inTimeline }: { inTimeline: boolean }) {
+function QuestionPresentationHarness({ hydrated }: { hydrated: boolean }) {
   const fallbackRef = useRef<HTMLTextAreaElement>(null);
   const session = approvalSession("ask-a");
   const questions = session.pendingApproval?.kind === "question" ? session.pendingApproval.questions ?? [] : [];
@@ -224,14 +224,14 @@ function QuestionPresentationHarness({ inTimeline }: { inTimeline: boolean }) {
         session={session}
         runnerOnline
         fallbackFocusRef={fallbackRef}
-        questionInTimeline={inTimeline}
+        questionInTimeline={false}
       />
-      {inTimeline && (
+      {hydrated && (
         <EventTimeline
           items={[{ kind: "question", id: 1, requestId: "ask-a", questions }]}
           questionContext={{
             sessionId: session.id,
-            pendingQuestion: { requestId: "ask-a", questions },
+            pendingQuestion: null,
             runnerOnline: true,
           }}
         />
@@ -341,19 +341,24 @@ test("approval replacement and resolution preserve owned keyboard focus", async 
   container.remove();
 });
 
-test("question focus follows the same request from its loading fallback into the timeline", async () => {
+test("question focus and draft survive transcript hydration without exposing a second live form", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
   const container = happyContainer as unknown as HTMLDivElement;
   const root = createRoot(container);
-  await act(async () => { root.render(<QuestionPresentationHarness inTimeline={false} />); });
-  container.querySelector<HTMLElement>('[role="radio"]')!.focus();
-  await act(async () => { root.render(<QuestionPresentationHarness inTimeline={false} />); });
+  await act(async () => { root.render(<QuestionPresentationHarness hydrated={false} />); });
+  const response = container.querySelector<HTMLElement>('[role="radio"]')!;
+  await act(async () => { response.click(); });
+  response.focus();
+  await act(async () => { root.render(<QuestionPresentationHarness hydrated={false} />); });
   assert.equal(domWindow.document.activeElement?.closest("[data-session-request-id]")?.getAttribute("data-session-request-id"), "ask-a");
 
-  await act(async () => { root.render(<QuestionPresentationHarness inTimeline />); });
+  await act(async () => { root.render(<QuestionPresentationHarness hydrated />); });
   assert.equal(domWindow.document.activeElement?.closest("[data-session-request-id]")?.getAttribute("data-session-request-id"), "ask-a");
+  assert.equal(container.querySelector<HTMLElement>('[role="radio"]')?.getAttribute("aria-checked"), "true");
   assert.equal(container.querySelectorAll('[aria-label="Agent Questions"]').length, 1);
+  assert.equal(container.querySelectorAll('[role="radio"]').length, 2);
+  assert.match(container.querySelector(".tl-question")?.textContent ?? "", /awaiting answer/);
   await act(async () => { root.unmount(); });
   container.remove();
 });

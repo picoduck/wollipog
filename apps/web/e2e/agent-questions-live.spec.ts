@@ -114,18 +114,15 @@ async function expectQuestionControlsInsideCard(page: Page): Promise<void> {
   const cardRect = await card.evaluate((element) => element.getBoundingClientRect().toJSON());
   const list = page.locator(".question-list");
   const overflow = await list.evaluate((element) => ({
-    clientHeight: element.clientHeight,
     clientWidth: element.clientWidth,
     overflowY: getComputedStyle(element).overflowY,
     scrollLeft: element.scrollLeft,
-    scrollHeight: element.scrollHeight,
     scrollWidth: element.scrollWidth,
   }));
   expect(overflow.scrollLeft).toBe(0);
   expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth + 1);
-  expect(overflow.scrollHeight).toBeLessThanOrEqual(overflow.clientHeight + 1);
-  expect(overflow.overflowY).toBe("visible");
-  await expect(card.locator("xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' detail-scroll ')][1]"))
+  expect(["auto", "visible"]).toContain(overflow.overflowY);
+  await expect(card.locator("xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' detail-chat ')][1]"))
     .toHaveCount(1);
 
   const rects = await page.locator(
@@ -495,6 +492,7 @@ for (const viewport of [
           queued: "1",
         });
         await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
+        await page.reload();
 
         const submit = page.getByRole("button", { name: "Submit" });
         const mergeNow = page.getByRole("radio", { name: /Merge Now \(Recommended\)/ });
@@ -503,10 +501,13 @@ for (const viewport of [
         const keepBranch = page.getByRole("radio", { name: /Keep Branch/ });
         const otherResponses = page.getByLabel("Other Response");
         await expect(page.getByRole("region", { name: "Agent Questions" })).toBeVisible();
+        await expect(page.getByRole("region", { name: "Agent Questions" })).toHaveCount(1);
+        await expect(page.locator(".tl-question")).toContainText("awaiting answer");
         await expect(page.getByLabel("Queued Messages").locator(".queued-item")).toHaveCount(queuedMessages.length);
         await expect(page.getByLabel("Queued Messages").locator(".queued-text")).toHaveText(queuedMessages);
         await expectQuestionControlsInsideCard(page);
-        await expect(page.getByText("Should I squash-merge pull request #342 now?")).toBeVisible();
+        await expect(page.getByRole("region", { name: "Agent Questions" })
+          .getByText("Should I squash-merge pull request #342 now?", { exact: false })).toBeVisible();
         await expect(mergeNow).toBeVisible();
         await expect(leaveOpen).toBeVisible();
         await expect(mergeNow).toBeInViewport();
@@ -523,7 +524,8 @@ for (const viewport of [
         await expect(submit).toBeDisabled();
 
         await deleteBranch.scrollIntoViewIfNeeded();
-        await expect(page.getByText("Should I delete the remote branch after merging?")).toBeVisible();
+        await expect(page.getByRole("region", { name: "Agent Questions" })
+          .getByText("Should I delete the remote branch after merging?", { exact: false })).toBeVisible();
         await expect(deleteBranch).toBeVisible();
         await expect(keepBranch).toBeVisible();
         await expect(deleteBranch).toBeInViewport();
