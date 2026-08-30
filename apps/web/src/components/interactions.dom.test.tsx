@@ -8,6 +8,7 @@ import { useCommandPaletteFocus } from "./CommandPalette.js";
 import { EventTimeline } from "./EventTimeline.js";
 import { SessionApprovalRegion } from "./SessionApproval.js";
 import { handleMenuKeyDown, useAccessibleMenu } from "./interactions.js";
+import { clearQuestionDrafts } from "../question-response.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 (globalThis as typeof globalThis & { React: typeof React }).React = React;
@@ -360,6 +361,7 @@ test("question focus and draft survive transcript hydration without exposing a s
   assert.equal(container.querySelectorAll('[role="radio"]').length, 2);
   assert.match(container.querySelector(".tl-question")?.textContent ?? "", /awaiting answer/);
   await act(async () => { root.unmount(); });
+  clearQuestionDrafts("session-1", "ask-a");
   container.remove();
 });
 
