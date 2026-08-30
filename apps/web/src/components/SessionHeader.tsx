@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import {
   isTerminal,
   runnerCapabilityRequirement,
@@ -27,7 +27,11 @@ import {
   SessionStatusIndicators,
   UntrackedBackgroundWorkBadge,
 } from "./common.js";
-import { useAccessibleMenu } from "./interactions.js";
+import {
+  useAccessibleMenu,
+  useAnchoredMenuStyle,
+  useDismissiblePopover,
+} from "./interactions.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { ChevronLeftIcon, MoreVerticalIcon, ShareIcon } from "./Icons.js";
 import { useIsMobile } from "./useIsMobile.js";
@@ -94,6 +98,8 @@ export function SessionHeader({
   const [busy, setBusy] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [shareMenuOpen, setShareMenuOpen] = useState(false);
+  const [statusPopoverOpen, setStatusPopoverOpen] = useState(false);
+  const [hiddenStatusCount, setHiddenStatusCount] = useState(0);
   const [moveProjectOpen, setMoveProjectOpen] = useState(false);
   const [shareDialogOpen, setShareDialogOpen] = useState(false);
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
@@ -101,9 +107,32 @@ export function SessionHeader({
   const [renameError, setRenameError] = useState<string | null>(null);
   const [renameSubmitting, setRenameSubmitting] = useState(false);
   const renameSubmittingRef = useRef(false);
+  const statusesRef = useRef<HTMLDivElement>(null);
   const [note, setNote] = useState<string | null>(null);
   const menu = useAccessibleMenu(menuOpen, setMenuOpen, "session-actions-menu");
   const shareMenu = useAccessibleMenu(shareMenuOpen, setShareMenuOpen, "session-share-menu");
+  const statusPopover = useDismissiblePopover(
+    statusPopoverOpen,
+    setStatusPopoverOpen,
+    "session-status-popover",
+  );
+  const statusPopoverStyle = useAnchoredMenuStyle(statusPopoverOpen, statusPopover.triggerRef, {
+    desiredWidth: 280,
+    desiredHeight: 220,
+    align: "end",
+  });
+  const statusLayoutKey = JSON.stringify([
+    session.status,
+    session.pendingApproval,
+    session.archiveStatus,
+    session.archiveOperation,
+    session.stopOperation,
+    session.backgroundWorkState,
+    session.backgroundWorkTracking,
+    changeStatus,
+    runnerOnline,
+    activeSubagents?.count,
+  ]);
   const terminal = isTerminal(session.status);
   const reprocessSupported = runnerSupportsProtocol(runnerProtocolVersion, "sessionReprocess");
   const logoutSupported = runnerSupportsProtocol(runnerProtocolVersion, "acpLogout");
@@ -111,22 +140,18 @@ export function SessionHeader({
   const internalSessionUrl = dashboardOrigin
     ? absoluteViewUrl(dashboardOrigin, { name: "session", id: session.id })
     : null;
-  const renderNoninteractiveStatuses = (presentational = false) => (
+  const renderNoninteractiveStatuses = () => (
     <>
       <SessionStatusIndicators session={session} disconnected={!runnerOnline} />
       <ChangeStatusBadge change={changeStatus ?? null} />
       {session.backgroundWorkState && (
-        <BackgroundWorkBadge state={session.backgroundWorkState} compact announce={!presentational} />
+        <BackgroundWorkBadge state={session.backgroundWorkState} compact announce={false} />
       )}
       {!session.backgroundWorkState && session.backgroundWorkTracking === "untracked" && (
         <UntrackedBackgroundWorkBadge />
       )}
     </>
   );
-  const activeSubagentMenuLabel = activeSubagents
-    ? `View ${activeSubagents.count} Active ${activeSubagents.count === 1 ? "Subagent" : "Subagents"}`
-    : null;
-
   const closeMenu = (restoreFocus = false) => {
     menu.close(restoreFocus);
   };
@@ -134,6 +159,89 @@ export function SessionHeader({
   const closeShareMenu = (restoreFocus = false) => {
     shareMenu.close(restoreFocus);
   };
+
+  const closeStatusPopover = (restoreFocus = false) => {
+    statusPopover.close(restoreFocus);
+  };
+
+  useLayoutEffect(() => {
+    const container = statusesRef.current;
+    if (!container) return;
+
+    const statusItems = () => Array.from(container.querySelectorAll<HTMLElement>(
+      ".session-status-indicators > .status-badge, " +
+      ".change-status-indicators > .status-badge, " +
+      ":scope > .background-work-badge",
+    ));
+    const measure = () => {
+      const items = statusItems();
+      for (const item of items) item.hidden = false;
+      if (!isMobile || items.length === 0) {
+        setHiddenStatusCount(0);
+        return;
+      }
+
+      const containerBox = container.getBoundingClientRect();
+      const shareTrigger = shareMenu.triggerRef.current;
+      const overflowTrigger = statusPopover.triggerRef.current;
+      if (!shareTrigger) return;
+      const actions = shareTrigger.closest<HTMLElement>(".detail-actions");
+      const actionsStyle = actions ? getComputedStyle(actions) : null;
+      const gap = Number.parseFloat(actionsStyle?.columnGap || actionsStyle?.gap || "0") || 0;
+      const overflowWidth = overflowTrigger?.getBoundingClientRect().width ??
+        shareTrigger.getBoundingClientRect().width;
+      const occupiedOverflowWidth = overflowTrigger ? overflowWidth + gap : 0;
+      const availableWithoutTrigger = containerBox.width + occupiedOverflowWidth;
+      const availableWithTrigger = Math.max(0, availableWithoutTrigger - overflowWidth - gap);
+      const ordered = items
+        .map((item) => ({ item, box: item.getBoundingClientRect() }))
+        .sort((left, right) => left.box.left - right.box.left);
+      const totalWidth = Math.max(...ordered.map(({ box }) => box.right - containerBox.left));
+      let visibleCount = ordered.length;
+
+      if (totalWidth > availableWithoutTrigger + 0.5) {
+        visibleCount = 0;
+        for (const { box } of ordered) {
+          if (box.right - containerBox.left > availableWithTrigger + 0.5) break;
+          visibleCount += 1;
+        }
+      }
+
+      ordered.forEach(({ item }, index) => {
+        item.hidden = index >= visibleCount;
+      });
+      setHiddenStatusCount(ordered.length - visibleCount);
+    };
+
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    let cancelled = false;
+    let measurementFrame: number | null = null;
+    const scheduleMeasure = () => {
+      if (cancelled || measurementFrame !== null) return;
+      measurementFrame = window.requestAnimationFrame(() => {
+        measurementFrame = null;
+        if (!cancelled) measure();
+      });
+    };
+    const observer = new ResizeObserver(scheduleMeasure);
+    observer.observe(container);
+    const header = container.closest<HTMLElement>(".detail-head");
+    if (header) observer.observe(header);
+    void document.fonts?.ready.then(scheduleMeasure);
+    return () => {
+      cancelled = true;
+      observer.disconnect();
+      if (measurementFrame !== null) window.cancelAnimationFrame(measurementFrame);
+    };
+  }, [isMobile, statusLayoutKey, shareMenu.triggerRef, statusPopover.triggerRef]);
+
+  useEffect(() => {
+    if (hiddenStatusCount === 0 && statusPopoverOpen) {
+      closeStatusPopover(false);
+      shareMenu.triggerRef.current?.focus();
+    }
+  }, [hiddenStatusCount, statusPopoverOpen]);
 
   const run = async (
     fn: () => Promise<unknown>,
@@ -248,24 +356,98 @@ export function SessionHeader({
           </div>
         </>
       )}
-      <div className="session-header-statuses">
+      <div className="session-header-statuses" ref={statusesRef}>
         {renderNoninteractiveStatuses()}
         {activeSubagents && (
           <ActiveSubagentsBadge count={activeSubagents.count} onOpen={activeSubagents.onOpen} />
         )}
       </div>
+      {session.backgroundWorkState && (
+        <span className="sr-only">
+          <BackgroundWorkBadge state={session.backgroundWorkState} compact />
+        </span>
+      )}
       {note && <span className="detail-note session-header-note" role="status" aria-live="polite">{note}</span>}
       <div className="detail-actions">
+        {hiddenStatusCount > 0 && (
+          <div className="overflow-menu">
+            <button
+              ref={statusPopover.triggerRef}
+              className="icon-btn session-header-action session-status-overflow-trigger"
+              type="button"
+              onClick={() => {
+                if (!statusPopoverOpen) {
+                  closeShareMenu(false);
+                  closeMenu(false);
+                }
+                statusPopover.toggle();
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "ArrowDown") {
+                  closeShareMenu(false);
+                  closeMenu(false);
+                }
+                statusPopover.onTriggerKeyDown(event);
+              }}
+              aria-label={`+${hiddenStatusCount}: Show ${hiddenStatusCount} Hidden ${hiddenStatusCount === 1 ? "Status" : "Statuses"}`}
+              title={`Show ${hiddenStatusCount} Hidden ${hiddenStatusCount === 1 ? "Status" : "Statuses"}`}
+              aria-haspopup="dialog"
+              aria-expanded={statusPopoverOpen}
+              aria-controls={statusPopover.panelId}
+            >
+              +{hiddenStatusCount}
+            </button>
+            {statusPopoverOpen && (
+              <>
+                <div className="menu-backdrop" onClick={() => closeStatusPopover(true)} />
+                <div
+                  className="menu-pop"
+                  id={statusPopover.panelId}
+                  ref={statusPopover.panelRef}
+                  role="dialog"
+                  aria-label="Session Statuses"
+                  style={statusPopoverStyle}
+                  onKeyDown={statusPopover.onPanelKeyDown}
+                >
+                  <div className="menu-label" role="presentation">Session Statuses</div>
+                  <div
+                    className="session-status-popover-content"
+                    role="group"
+                    tabIndex={0}
+                    aria-label="All Session Statuses"
+                  >
+                    {renderNoninteractiveStatuses()}
+                    {activeSubagents && (
+                      <ActiveSubagentsBadge
+                        count={activeSubagents.count}
+                        onOpen={() => {
+                          closeStatusPopover(false);
+                          activeSubagents.onOpen();
+                        }}
+                      />
+                    )}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        )}
         <div className="overflow-menu">
           <button
             ref={shareMenu.triggerRef}
             className="icon-btn session-header-action"
             onClick={() => {
-              if (!shareMenuOpen) closeMenu(false);
+              if (!shareMenuOpen) {
+                closeMenu(false);
+                closeStatusPopover(false);
+              }
               shareMenu.toggle();
             }}
             onKeyDown={(event) => {
-              if (event.key === "ArrowDown" || event.key === "ArrowUp") closeMenu(false);
+              if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                closeMenu(false);
+                closeStatusPopover(false);
+              }
               shareMenu.onTriggerKeyDown(event);
             }}
             disabled={busy}
@@ -345,11 +527,17 @@ export function SessionHeader({
               ref={menu.triggerRef}
               className="icon-btn session-header-action"
               onClick={() => {
-                if (!menuOpen) closeShareMenu(false);
+                if (!menuOpen) {
+                  closeShareMenu(false);
+                  closeStatusPopover(false);
+                }
                 menu.toggle();
               }}
               onKeyDown={(event) => {
-                if (event.key === "ArrowDown" || event.key === "ArrowUp") closeShareMenu(false);
+                if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                  closeShareMenu(false);
+                  closeStatusPopover(false);
+                }
                 menu.onTriggerKeyDown(event);
               }}
               disabled={busy}
@@ -401,27 +589,6 @@ export function SessionHeader({
                           }}
                         >
                           Move Session…
-                        </button>
-                      )}
-                    </>
-                  )}
-                  {isMobile && (
-                    <>
-                      <div className="menu-label" role="presentation" aria-hidden="true">Status</div>
-                      <div className="session-menu-statuses" aria-hidden="true">
-                        {renderNoninteractiveStatuses(true)}
-                      </div>
-                      {activeSubagents && (
-                        <button
-                          className="menu-item"
-                          type="button"
-                          role="menuitem"
-                          onClick={() => {
-                            closeMenu(false);
-                            activeSubagents.onOpen();
-                          }}
-                        >
-                          {activeSubagentMenuLabel}
                         </button>
                       )}
                     </>

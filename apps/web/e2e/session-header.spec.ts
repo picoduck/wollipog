@@ -246,7 +246,11 @@ test("desktop Session actions stay contained with five concurrent status indicat
   await expect(header.getByText("Ready for Review", { exact: true })).toBeVisible();
   await expect(header.getByText("Uncommitted Changes", { exact: true })).toBeVisible();
   await expect(header.getByRole("status", { name: "Background Work: Waiting on External Job" })).toBeVisible();
+  await expect(header.locator(
+    '.session-header-statuses > [aria-label="Background Work: Waiting on External Job"]',
+  )).toBeVisible();
   await expect(header.getByRole("button", { name: "1 Subagent Active" })).toBeVisible();
+  await expect(header.locator(".session-status-overflow-trigger")).toHaveCount(0);
   await capture(page, "desktop-concurrent");
   const longProjectName = "Alpha Project with a deliberately long name for breadcrumb truncation";
   await page.evaluate((name) => {
@@ -304,10 +308,10 @@ test("desktop Session actions stay contained with five concurrent status indicat
 });
 
 for (const viewport of [
-  { name: "320-pixel phone", width: 320 },
-  { name: "390-pixel phone", width: 390 },
+  { name: "320-pixel phone", width: 320, hiddenCount: 4 },
+  { name: "390-pixel phone", width: 390, hiddenCount: 3 },
 ]) {
-  test(`the session bar clips simultaneous statuses to one line on a ${viewport.name}`, async ({ page }) => {
+  test(`the session bar discloses overflowed statuses on a ${viewport.name}`, async ({ page }) => {
     await page.setViewportSize({ width: viewport.width, height: 800 });
     await openSession(page, "git-visibility", { reviewReady: "1", sessionShell: "1" });
     await page.evaluate(() => {
@@ -328,12 +332,22 @@ for (const viewport of [
     // test pins is now anchored on the trailing pane control instead of the gear.
     await expect(topbar.getByRole("button", { name: "Settings" })).toHaveCount(0);
     await expect(header.locator(".back, .detail-crumbs, .editor-select")).toHaveCount(0);
-    await expect(header.getByLabel("Activity: Awaiting Prompt")).toHaveCount(1);
-    await expect(header.getByLabel("Changes: Ready for Review")).toHaveCount(1);
-    await expect(header.getByLabel("Changes: Uncommitted Changes")).toHaveCount(1);
-    await expect(header.getByRole("status", { name: "Background Work: Waiting on External Job" })).toHaveCount(1);
+    await expect(header.locator('[aria-label="Activity: Awaiting Prompt"]')).toHaveCount(1);
+    await expect(header.locator('[aria-label="Changes: Ready for Review"]')).toHaveCount(1);
+    await expect(header.locator('[aria-label="Changes: Uncommitted Changes"]')).toHaveCount(1);
+    await expect(header.locator(
+      '.session-header-statuses [aria-label="Background Work: Waiting on External Job"]',
+    )).toHaveCount(1);
+    await expect(header.locator(
+      '.sr-only > [role="status"][aria-label="Background Work: Waiting on External Job"]',
+    )).toHaveCount(1);
     const activeSubagent = header.getByRole("button", { name: "1 Subagent Active" });
     await expect(activeSubagent).toBeVisible();
+    const overflowTrigger = header.getByRole("button", {
+      name: `Show ${viewport.hiddenCount} Hidden Statuses`,
+    });
+    await expect(overflowTrigger).toHaveText(`+${viewport.hiddenCount}`);
+    await expect(overflowTrigger).toBeVisible();
     const metrics = await header.evaluate((element) => {
       const rect = (node: Element) => {
         const value = node.getBoundingClientRect();
@@ -343,16 +357,18 @@ for (const viewport of [
         };
       };
       const clippingPane = element.closest(".inbox-preview-pane");
-      const badges = [...element.querySelectorAll(
+      const allBadges = [...element.querySelectorAll<HTMLElement>(
         ".session-header-statuses .status-badge, " +
         ".session-header-statuses > .background-work-badge",
-      )].map((node) => ({
+      )];
+      const badges = allBadges.filter((node) => !node.hidden).map((node) => ({
         ...rect(node),
         label: node.getAttribute("aria-label") ?? node.textContent?.trim() ?? "unknown status",
       }));
       const statuses = element.querySelector(".session-header-statuses") as HTMLElement;
       const actions = element.querySelector(".detail-actions") as HTMLElement;
       const share = element.querySelector('[aria-label="Share"]') as HTMLElement;
+      const overflow = element.querySelector('.session-status-overflow-trigger') as HTMLElement;
       const moreActions = element.querySelector('[aria-label="More Actions"]') as HTMLElement;
       const activeSubagent = element.querySelector('[aria-label="1 Subagent Active"]') as HTMLElement;
       const statusStyle = getComputedStyle(statuses);
@@ -368,14 +384,16 @@ for (const viewport of [
       return {
         display: getComputedStyle(element).display,
         statuses: rect(statuses),
-        lifecycle: rect(element.querySelector(".session-status-indicators > .status-badge")!),
+        firstVisibleStatus: badges[0],
         actions: rect(actions),
+        overflow: rect(overflow),
         share: rect(share),
         shareIcon: rect(element.querySelector('[aria-label="Share"] svg')!),
         moreActions: rect(moreActions),
         moreActionsIcon: rect(element.querySelector('[aria-label="More Actions"] svg')!),
         activeSubagent: rect(activeSubagent),
         badges,
+        totalBadgeCount: allBadges.length,
         badgeRows: new Set(badges.map((badge) => Math.round(badge.y))).size,
         headerHeight: element.getBoundingClientRect().height,
         hasHorizontalOverflow: element.scrollWidth > element.clientWidth,
@@ -441,7 +459,7 @@ for (const viewport of [
     expect(shellMetrics.title.x).toBeGreaterThanOrEqual(shellMetrics.back.right);
     expect(shellMetrics.title.right).toBeLessThanOrEqual(shellMetrics.controlsLeft);
     expect(shellMetrics.title.width).toBeGreaterThanOrEqual(72);
-    // Five simultaneous statuses remain represented but use one clipped visual line. The Session
+    // Five simultaneous statuses remain represented on one compact disclosure line. The Session
     // topbar is 40px tall, the main body adds 12px of leading space, and the second bar is 44px.
     expect(subheaderBottom - shellMetrics.top).toBeLessThanOrEqual(96.5);
     expect(metrics.share.width).toBeGreaterThanOrEqual(36);
@@ -452,22 +470,24 @@ for (const viewport of [
     expect(metrics.headerHeight).toBeLessThanOrEqual(45.5);
     expect(metrics.hasHorizontalOverflow).toBe(false);
     expect(metrics.statusAddsPageOverflow).toBe(false);
-    expect(metrics.statusIsClipped).toBe(true);
+    expect(metrics.statusIsClipped).toBe(false);
     expect(metrics.statusOverflowX).toBe("clip");
     expect(metrics.statusFlexWrap).toBe("nowrap");
-    expect(metrics.statusMaskImage).toContain("linear-gradient");
-    expect(metrics.statusMaskImage).toMatch(/rgba\(0, 0, 0, 0\) 100%/);
+    expect(metrics.statusMaskImage).toBe("none");
     expect(metrics.shareIsTopmostAtCenter).toBe(true);
     expect(metrics.moreActionsIsTopmostAtCenter).toBe(true);
     expect(metrics.activeSubagentIsTopmostAtCenter).toBe(true);
     expect(metrics.activeSubagent.x).toBeGreaterThanOrEqual(metrics.statuses.x);
     expect(metrics.activeSubagent.right).toBeLessThanOrEqual(metrics.statuses.right);
+    expect(metrics.overflow.right).toBeLessThanOrEqual(metrics.share.x);
+    expect(metrics.share.x - metrics.overflow.right).toBeCloseTo(7, 0);
     expect(metrics.paddingRight).toBeGreaterThanOrEqual(12);
     expect(metrics.clippingRight - metrics.moreActions.right).toBeGreaterThanOrEqual(11.5);
-    expect(metrics.badges.length).toBe(5);
+    expect(metrics.totalBadgeCount).toBe(5);
+    expect(metrics.badges.length).toBe(5 - viewport.hiddenCount);
     expect(metrics.badgeRows).toBe(1);
     const center = (box: { y: number; height: number }) => box.y + box.height / 2;
-    expect(Math.abs(center(metrics.actions) - center(metrics.lifecycle))).toBeLessThanOrEqual(1);
+    expect(Math.abs(center(metrics.actions) - center(metrics.firstVisibleStatus))).toBeLessThanOrEqual(1);
     for (let index = 0; index < metrics.badges.length; index += 1) {
       for (let other = index + 1; other < metrics.badges.length; other += 1) {
         const left = metrics.badges[index]!;
@@ -478,18 +498,50 @@ for (const viewport of [
       }
     }
 
+    await overflowTrigger.click();
+    const statusPopover = page.getByRole("dialog", { name: "Session Statuses" });
+    await expect(statusPopover).toBeVisible();
+    await expect(statusPopover.getByText("Awaiting Prompt", { exact: true })).toBeVisible();
+    await expect(statusPopover.getByText("Ready for Review", { exact: true })).toBeVisible();
+    await expect(statusPopover.getByText("Uncommitted Changes", { exact: true })).toBeVisible();
+    await expect(statusPopover.getByText("Waiting on External Job", { exact: true })).toBeVisible();
+    await expect(statusPopover.getByRole("button", { name: "1 Subagent Active" })).toBeEnabled();
+    await expect(statusPopover.getByLabel("All Session Statuses")).toBeFocused();
+    const popoverGeometry = await statusPopover.evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      return {
+        left: box.left,
+        right: box.right,
+        contentWrap: getComputedStyle(element.querySelector(".session-status-popover-content")!).flexWrap,
+      };
+    });
+    expect(popoverGeometry.left).toBeGreaterThanOrEqual(8);
+    expect(popoverGeometry.right).toBeLessThanOrEqual(viewport.width - 8);
+    expect(popoverGeometry.contentWrap).toBe("wrap");
+    await capture(page, `narrow-${viewport.width}-status-popover`);
+    await page.keyboard.press("Escape");
+    await expect(statusPopover).toHaveCount(0);
+    await expect(overflowTrigger).toBeFocused();
+
+    await overflowTrigger.click();
+    await page.locator(".menu-backdrop").click({ position: { x: 300, y: 700 } });
+    await expect(statusPopover).toHaveCount(0);
+    await expect(overflowTrigger).toBeFocused();
+
+    await overflowTrigger.click();
+    await header.getByRole("button", { name: "Share" }).click();
+    await expect(statusPopover).toHaveCount(0);
+    await expect(page.getByRole("menu", { name: "Session Sharing" })).toBeVisible();
+    await overflowTrigger.click();
+    await expect(page.getByRole("menu", { name: "Session Sharing" })).toHaveCount(0);
+    await expect(statusPopover).toBeVisible();
+
     await header.getByRole("button", { name: "More Actions" }).click();
+    await expect(statusPopover).toHaveCount(0);
     const menu = page.getByRole("menu", { name: "Session Actions" });
     await expect(menu).toBeVisible();
-    await expect(menu.locator(".menu-label", { hasText: "Status" })).toHaveAttribute("aria-hidden", "true");
-    const statusSummary = menu.locator(".session-menu-statuses");
-    await expect(statusSummary.locator(".session-status-indicators")).toHaveCSS("flex-wrap", "wrap");
-    await expect(statusSummary.getByText("Awaiting Prompt", { exact: true })).toBeVisible();
-    await expect(statusSummary.getByText("Ready for Review", { exact: true })).toBeVisible();
-    await expect(statusSummary.getByText("Uncommitted Changes", { exact: true })).toBeVisible();
-    await expect(statusSummary.getByText("Waiting on External Job", { exact: true })).toBeVisible();
-    await expect(menu.getByRole("menuitem", { name: "View 1 Active Subagent" })).toBeEnabled();
-    await capture(page, `narrow-${viewport.width}-status-menu`);
+    await expect(menu.locator(".menu-label", { hasText: "Status" })).toHaveCount(0);
+    await expect(menu.locator(".session-menu-statuses")).toHaveCount(0);
     const projectHeader = menu.locator(".session-project-menu-header");
     await expect(projectHeader).toContainText("Project");
     expect(await projectHeader.evaluate((element) => getComputedStyle(element).textTransform)).toBe("none");
@@ -540,7 +592,54 @@ for (const viewport of [
   });
 }
 
-test("clipped background work leaves phone actions hittable when no change status is available", async ({ page }) => {
+test("status overflow count follows width and live Session status changes", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 800 });
+  await openSession(page, "git-visibility", { reviewReady: "1", sessionShell: "1" });
+  await page.evaluate(() => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
+      backgroundWorkState: "running",
+    });
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitActiveSubagent("session-alpha", "dynamic-status-subagent");
+  });
+
+  const header = page.locator(".session-detail > .detail-head");
+  await expect(header.getByRole("button", { name: "Show 4 Hidden Statuses" })).toHaveText("+4");
+
+  await page.setViewportSize({ width: 390, height: 800 });
+  const landscapeOverflowTrigger = header.getByRole("button", { name: "Show 3 Hidden Statuses" });
+  await expect(landscapeOverflowTrigger).toHaveText("+3");
+  await landscapeOverflowTrigger.click();
+  await expect(page.getByRole("dialog", { name: "Session Statuses" })).toBeVisible();
+
+  await page.setViewportSize({ width: 800, height: 800 });
+  await expect(header.locator('.session-status-overflow-trigger')).toHaveCount(0);
+  await expect(header.locator('.session-header-statuses [hidden]')).toHaveCount(0);
+  await expect(header.getByRole("button", { name: "Share" })).toBeFocused();
+
+  await page.setViewportSize({ width: 320, height: 800 });
+  await expect(header.getByRole("button", { name: "Show 4 Hidden Statuses" })).toHaveText("+4");
+  await page.evaluate(() => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
+      backgroundWorkState: undefined,
+    });
+  });
+  const updatedTrigger = header.getByRole("button", { name: "Show 3 Hidden Statuses" });
+  await expect(updatedTrigger).toHaveText("+3");
+  await updatedTrigger.click();
+  const popover = page.getByRole("dialog", { name: "Session Statuses" });
+  await expect(popover.getByText("Waiting on External Job", { exact: true })).toHaveCount(0);
+  await expect(popover.getByText("Awaiting Prompt", { exact: true })).toBeVisible();
+});
+
+test("a fitting phone status row does not render an overflow control", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 800 });
+  await openSession(page, "preview-follow", { sessionShell: "1" });
+  const header = page.locator(".session-detail > .detail-head");
+  await expect(header.locator('.session-status-overflow-trigger')).toHaveCount(0);
+  await expect(header.locator(".session-header-statuses .status-badge")).toBeVisible();
+});
+
+test("measured background work leaves phone actions hittable when no change status is available", async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 800 });
   await openSession(page, "preview-follow", { sessionShell: "1" });
   await page.evaluate(() => {
