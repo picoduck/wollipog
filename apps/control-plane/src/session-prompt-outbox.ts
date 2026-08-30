@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
+  isDurableSessionCommandErrorCode,
   runnerSupportsProtocol,
   type DurableSessionCommand,
   type DurableSessionCommandMessage,
@@ -16,10 +17,6 @@ type Logger = { warn: (message: string) => void };
 const RECEIPT_HORIZON_MS = 30 * 24 * 60 * 60_000;
 const MAX_RETRY_MS = 30_000;
 const RECEIPT_STATES = new Set(["accepted", "queued", "started", "completed", "failed", "uncertain"]);
-const RECEIPT_CODES = new Set([
-  "COMMAND_ID_CONFLICT", "COMMAND_EXPIRED", "INVALID_COMMAND", "SESSION_NOT_FOUND",
-  "QUEUE_FULL", "COMMAND_CANCELLED", "PROVIDER_AUTHENTICATION_REQUIRED", "RECEIPT_STORE_FULL",
-]);
 
 function retryDelay(attempt: number): number {
   return Math.min(MAX_RETRY_MS, 250 * (2 ** Math.min(7, Math.max(0, attempt - 1))));
@@ -183,7 +180,7 @@ function validReceipt(message: Receipt): boolean {
       typeof message.sessionId !== "string" || !message.sessionId || message.sessionId.length > 256 ||
       !RECEIPT_STATES.has(message.state) || !Number.isSafeInteger(message.revision) || message.revision < 0 ||
       (message.error !== undefined && (typeof message.error !== "string" || message.error.length > 4_096)) ||
-      (message.code !== undefined && !RECEIPT_CODES.has(message.code))) return false;
+      (message.code !== undefined && !isDurableSessionCommandErrorCode(message.code))) return false;
   if (message.type === "durable_session_command_result") {
     return typeof message.requestId === "string" && Boolean(message.requestId) && message.requestId.length <= 256 &&
       typeof message.duplicate === "boolean";

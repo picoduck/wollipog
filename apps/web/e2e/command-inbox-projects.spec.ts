@@ -1000,6 +1000,7 @@ test("the Project crumb navigates independently beside persistent Project Action
   expect(openStyle.backgroundImage).not.toBe(defaultStyle.backgroundImage);
   await page.keyboard.press("Escape");
   await expect(actionsMenu).toBeHidden();
+  await expect(actions).toBeFocused();
 
   await projectChip.focus();
   await page.keyboard.press("Tab");

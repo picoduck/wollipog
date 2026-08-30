@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { DurableSessionCommand, RunnerMetadata } from "@wollipog/protocol";
+import type {
+  DurableSessionCommand,
+  DurableSessionCommandErrorCode,
+  RunnerMetadata,
+} from "@wollipog/protocol";
 import { canonicalAutomationCommandJson } from "./automation-command-outbox.js";
 import { ControlPlaneDb } from "./db.js";
 import type { Hub } from "./hub.js";
@@ -9,6 +13,16 @@ import { SessionPromptOutbox } from "./session-prompt-outbox.js";
 const RUNNER_ID = "runner-prompt-outbox";
 const SESSION_ID = "session-prompt-outbox";
 const NOW = 10_000;
+const DURABLE_RECEIPT_CODES = [
+  "COMMAND_ID_CONFLICT",
+  "COMMAND_EXPIRED",
+  "INVALID_COMMAND",
+  "SESSION_NOT_FOUND",
+  "QUEUE_FULL",
+  "COMMAND_CANCELLED",
+  "PROVIDER_AUTHENTICATION_REQUIRED",
+  "RECEIPT_STORE_FULL",
+] as const satisfies readonly DurableSessionCommandErrorCode[];
 
 const runner: RunnerMetadata = {
   runnerId: RUNNER_ID,
@@ -109,6 +123,28 @@ test("durable prompt receipt database failures are contained", () => {
     assert.equal(db.getSessionPromptCommand(staged.commandId)?.revision, 0);
   } finally {
     db.close();
+  }
+});
+
+test("durable prompt receipts accept every protocol error code", () => {
+  for (const [index, code] of DURABLE_RECEIPT_CODES.entries()) {
+    const { db, outbox, warnings } = fixture();
+    try {
+      const staged = outbox.stage(SESSION_ID, RUNNER_ID, prompt(), NOW);
+      assert.equal(outbox.receipt(RUNNER_ID, {
+        type: "durable_session_command_update",
+        commandId: staged.commandId,
+        sessionId: SESSION_ID,
+        state: "failed",
+        revision: 1,
+        error: `failure-${index}`,
+        code,
+      }, NOW + 1), true, code);
+      assert.equal(db.getSessionPromptCommand(staged.commandId)?.errorCode, code);
+      assert.deepEqual(warnings, []);
+    } finally {
+      db.close();
+    }
   }
 });
 

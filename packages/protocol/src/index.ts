@@ -4330,6 +4330,24 @@ export type DurableSessionCommandErrorCode =
   | "PROVIDER_AUTHENTICATION_REQUIRED"
   | "RECEIPT_STORE_FULL";
 
+const DURABLE_SESSION_COMMAND_ERROR_CODES = {
+  COMMAND_ID_CONFLICT: true,
+  COMMAND_EXPIRED: true,
+  INVALID_COMMAND: true,
+  SESSION_NOT_FOUND: true,
+  QUEUE_FULL: true,
+  COMMAND_CANCELLED: true,
+  PROVIDER_AUTHENTICATION_REQUIRED: true,
+  RECEIPT_STORE_FULL: true,
+} as const satisfies Record<DurableSessionCommandErrorCode, true>;
+
+/** Runtime validation for receipt codes arriving over the wire. The exhaustive record above makes
+ * a protocol-union addition fail typechecking until the runtime classification is updated too. */
+export function isDurableSessionCommandErrorCode(value: unknown): value is DurableSessionCommandErrorCode {
+  return typeof value === "string" &&
+    Object.prototype.hasOwnProperty.call(DURABLE_SESSION_COMMAND_ERROR_CODES, value);
+}
+
 /** Direct response to one delivery attempt. The runner derives duplicate status from its durable
  * journal and never re-applies a matching command merely because the control plane retried. */
 export interface DurableSessionCommandResultMessage {
