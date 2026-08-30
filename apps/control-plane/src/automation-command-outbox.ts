@@ -6,7 +6,7 @@ import type {
   DurableSessionCommandResultMessage,
   DurableSessionCommandUpdateMessage,
 } from "@wollipog/protocol";
-import { runnerSupportsProtocol } from "@wollipog/protocol";
+import { isDurableSessionCommandErrorCode, runnerSupportsProtocol } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import type { Hub } from "./hub.js";
 
@@ -174,10 +174,6 @@ export class AutomationCommandOutbox {
 }
 
 const RECEIPT_STATES = new Set(["accepted", "queued", "started", "completed", "failed", "uncertain"]);
-const RECEIPT_CODES = new Set([
-  "COMMAND_ID_CONFLICT", "COMMAND_EXPIRED", "INVALID_COMMAND", "SESSION_NOT_FOUND",
-  "QUEUE_FULL", "COMMAND_CANCELLED", "PROVIDER_AUTHENTICATION_REQUIRED", "RECEIPT_STORE_FULL",
-]);
 
 function validReceipt(message: Receipt): boolean {
   if (!message || typeof message !== "object" ||
@@ -186,7 +182,7 @@ function validReceipt(message: Receipt): boolean {
       typeof message.sessionId !== "string" || !message.sessionId ||
       !RECEIPT_STATES.has(message.state) || !Number.isInteger(message.revision) || message.revision < 0 ||
       (message.error !== undefined && typeof message.error !== "string") ||
-      (message.code !== undefined && !RECEIPT_CODES.has(message.code))) return false;
+      (message.code !== undefined && !isDurableSessionCommandErrorCode(message.code))) return false;
   if (message.type === "durable_session_command_result") {
     return typeof message.requestId === "string" && Boolean(message.requestId) && typeof message.duplicate === "boolean";
   }

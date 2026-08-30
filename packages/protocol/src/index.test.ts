@@ -5,6 +5,7 @@ import {
   CONTROL_PLANE_CAPABILITIES,
   CONTROL_PLANE_SERVICE,
   isControlPlaneService,
+  isDurableSessionCommandErrorCode,
   LEGACY_CONTROL_PLANE_SERVICE,
   LEGACY_POLICY_HOOK_POLL_CAPABILITY_HEADER,
   POLICY_HOOK_POLL_CAPABILITY_HEADER,
@@ -62,7 +63,28 @@ import {
   type SessionCommandInvocationView,
   type UiSnapshotMessage,
   type ResourceScope,
+  type DurableSessionCommandErrorCode,
 } from "./index.js";
+
+const DURABLE_SESSION_COMMAND_ERROR_CODES = [
+  "COMMAND_ID_CONFLICT",
+  "COMMAND_EXPIRED",
+  "INVALID_COMMAND",
+  "SESSION_NOT_FOUND",
+  "QUEUE_FULL",
+  "COMMAND_CANCELLED",
+  "PROVIDER_AUTHENTICATION_REQUIRED",
+  "RECEIPT_STORE_FULL",
+] as const satisfies readonly DurableSessionCommandErrorCode[];
+
+test("durable session command error-code validation accepts protocol values and fails closed", () => {
+  for (const code of DURABLE_SESSION_COMMAND_ERROR_CODES) {
+    assert.equal(isDurableSessionCommandErrorCode(code), true, code);
+  }
+  assert.equal(isDurableSessionCommandErrorCode("UNKNOWN_CODE"), false);
+  assert.equal(isDurableSessionCommandErrorCode("toString"), false, "prototype properties are not codes");
+  assert.equal(isDurableSessionCommandErrorCode(null), false);
+});
 
 test("control-plane discovery accepts both service markers while emission uses Wollipog", () => {
   assert.equal(CONTROL_PLANE_API_VERSION, 1);
