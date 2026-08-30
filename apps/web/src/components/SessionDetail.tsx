@@ -113,6 +113,7 @@ import {
   followTailSurfaceLabel,
   hasSavedFollowTailAnchor,
   isFollowTailResumeKey,
+  isFollowTailUpwardReadingKey,
   type FollowTailState,
   useFollowTail,
 } from "../useFollowTail.js";
@@ -2614,6 +2615,7 @@ function SessionDetailLoaded({
                 if (event.defaultPrevented) return;
                 if (inTypingContext(event.currentTarget.ownerDocument)) return;
                 if (mode !== "expanded" && !isFollowTailResumeKey(event)) return;
+                if (isFollowTailUpwardReadingKey(event)) markSingleEarlierActivityIntent();
                 if (!followTail.onKeyDown(event)) return;
                 event.preventDefault();
               }}

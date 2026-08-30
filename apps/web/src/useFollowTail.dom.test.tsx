@@ -13,6 +13,7 @@ import {
   isAtFollowTailBottom,
   hasSavedFollowTailAnchor,
   isFollowTailResumeKey,
+  isFollowTailUpwardReadingKey,
   nextFollowTailState,
   useFollowTail,
   type FollowTailApi,
@@ -43,6 +44,9 @@ test("resume-key matching excludes Inbox navigation and modified global shortcut
   assert.equal(isFollowTailResumeKey({ ...base, key: "G", shiftKey: true }), true);
   assert.equal(isFollowTailResumeKey({ ...base, key: "End" }), true);
   assert.equal(isFollowTailResumeKey({ ...base, key: "G", shiftKey: true, ctrlKey: true }), false);
+  assert.equal(isFollowTailUpwardReadingKey({ ...base, key: "Home" }), true);
+  assert.equal(isFollowTailUpwardReadingKey({ ...base, key: "PageUp" }), true);
+  assert.equal(isFollowTailUpwardReadingKey({ ...base, key: "Home", altKey: true }), false);
 });
 
 const domWindow = new Window({ url: "http://localhost/sessions/one" });

@@ -13,13 +13,17 @@ import "../styles.css";
  * `?mode=preview|expanded`, `?height=<px>`, and `?pinned=1` configure the recovery fixture.
  * By default recovery stays active for the page life; `?settled=1` completes it, while
  * `?pagination=1` resolves a bounded opening window and then holds the automatic earlier-page
- * request in flight for inspection. */
+ * request in flight for inspection. `?pagination=resolve` serves multiple variable-height pages;
+ * `?live=1` adds a live tail event during the first prepend. */
 const params = new URLSearchParams(window.location.search);
 const mode = params.get("mode") === "preview" ? ("preview" as const) : ("expanded" as const);
 const frameHeight = Number(params.get("height") ?? "600");
 const frameWidth = Number(params.get("width") ?? "900");
 const pinnedOpen = params.get("pinned") === "1";
 const pagination = params.get("pagination") === "1";
+const resolvedPagination = params.get("pagination") === "resolve";
+const liveDuringPagination = params.get("live") === "1";
+const paginationDelay = Number(params.get("pagination-delay") ?? "80");
 const settled = params.get("settled") === "1";
 
 const SESSION_ID = "recovery-e2e-session";
@@ -96,6 +100,7 @@ const snapshotMessage: ControlPlaneToUi = {
   pods: [],
 };
 
+let fixtureSocket: FixtureSocket | null = null;
 class FixtureSocket implements UiSocket {
   readonly readyState = UI_SOCKET_OPEN;
   onopen: (() => void) | null = null;
@@ -103,6 +108,7 @@ class FixtureSocket implements UiSocket {
   onclose: ((event: { code: number }) => void) | null = null;
   onerror: (() => void) | null = null;
   constructor() {
+    fixtureSocket = this;
     setTimeout(() => {
       this.onopen?.();
       this.onmessage?.({ data: JSON.stringify(snapshotMessage) });
@@ -140,8 +146,35 @@ const client = {
         events: fixtureEvents, eventEpoch, nextBefore: 0, hasMoreOlder: false, cacheComplete: true,
       });
     }
-    if (!pagination || before !== undefined) return new Promise<never>(() => {});
-    const openingWindow = fixtureEvents.slice(-16);
+    if (resolvedPagination && before !== undefined) {
+      const pageStart = Math.max(0, before - 1 - 8);
+      const events = fixtureEvents.slice(pageStart, before - 1);
+      if (liveDuringPagination && tailRequestCount === 2) {
+        window.setTimeout(() => fixtureSocket?.onmessage?.({ data: JSON.stringify({
+          type: "session_event",
+          event: {
+            id: 81,
+            sessionId: SESSION_ID,
+            seq: 81,
+            ts: 81,
+            payload: {
+              kind: "agent_message",
+              text: `live answer ${"arriving while older activity loads ".repeat(5)}`,
+              final: true,
+            },
+          },
+        } satisfies ControlPlaneToUi) }), 30);
+      }
+      return new Promise((resolve) => window.setTimeout(() => resolve({
+        events,
+        eventEpoch,
+        nextBefore: events[0]?.seq ?? 0,
+        hasMoreOlder: pageStart > 0,
+        cacheComplete: true,
+      }), paginationDelay));
+    }
+    if ((!pagination && !resolvedPagination) || before !== undefined) return new Promise<never>(() => {});
+    const openingWindow = fixtureEvents.slice(resolvedPagination ? -15 : -24);
     return Promise.resolve({
       events: openingWindow, eventEpoch, nextBefore: openingWindow[0]?.seq ?? 0,
       hasMoreOlder: true, cacheComplete: true,
@@ -150,9 +183,29 @@ const client = {
 } as unknown as ApiClient;
 
 const payloads: SessionEvent["payload"][] = [];
-for (let turn = 0; turn < 12; turn += 1) {
-  payloads.push({ kind: "user_message", text: `cached question ${turn + 1}`, images: [] });
-  payloads.push({ kind: "agent_message", text: `cached answer ${turn + 1}`, final: true });
+for (let turn = 0; turn < 20; turn += 1) {
+  payloads.push({
+    kind: "user_message",
+    text: `cached question ${turn + 1} ${"with variable wrapping ".repeat((turn % 3) + 1)}`,
+    images: [],
+  });
+  payloads.push({
+    kind: "agent_thought",
+    text: `cached reasoning ${turn + 1} ${"with measured details ".repeat((turn % 2) + 1)}`,
+    final: true,
+  });
+  payloads.push({
+    kind: "tool_call",
+    toolCallId: `cached-tool-${turn + 1}`,
+    title: `Cached Tool ${turn + 1}`,
+    status: "completed",
+    text: `cached output ${"with variable wrapping ".repeat((turn % 3) + 1)}`,
+  });
+  payloads.push({
+    kind: "agent_message",
+    text: `cached answer ${turn + 1} ${"and a differently sized response ".repeat((turn % 4) + 1)}`,
+    final: true,
+  });
 }
 const fixtureEvents: SessionEvent[] = payloads.map((payload, index) => ({
   id: index + 1,
