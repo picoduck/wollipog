@@ -357,7 +357,8 @@ function EventTimelineBody({
   );
 }
 
-const TimelineClockContext = createContext({ now: Date.now(), sessionActive: false });
+const TimelineClockContext = createContext(Date.now());
+const TimelineActivityContext = createContext(false);
 
 /** Historical/inactive transcripts are settled even when an older runner recorded no fence. */
 export function timelineMediaSettled(item: TimelineItem, sessionActive: boolean): boolean {
@@ -370,8 +371,11 @@ function TimelineClockProvider({ enabled, sessionActive, children }: {
   children: ReactNode;
 }) {
   const now = useTimelineClock(enabled);
-  const value = useMemo(() => ({ now, sessionActive }), [now, sessionActive]);
-  return <TimelineClockContext.Provider value={value}>{children}</TimelineClockContext.Provider>;
+  return (
+    <TimelineActivityContext.Provider value={sessionActive}>
+      <TimelineClockContext.Provider value={now}>{children}</TimelineClockContext.Provider>
+    </TimelineActivityContext.Provider>
+  );
 }
 
 export interface TimelineRowsProjection {
@@ -437,47 +441,62 @@ export class IncrementalTimelineRows {
     }
     let delta = timelineSnapshotDelta(items);
     const previousLength = this.items.length;
-    let settlementPatched = false;
-    // A text boundary commonly settles the retained tail while the same event appends or updates
-    // one other item. Patch that object generation first, then let the ordinary one-item paths
-    // consume the remaining change; otherwise two dirty indexes force an O(transcript) rebuild.
-    const settledTailIndex = previousLength - 1;
-    const appendedBoundary = items.length === previousLength + 1 &&
-      delta?.dirtyIndexes.length === 2 && delta.dirtyIndexes[0] === settledTailIndex &&
-      delta.dirtyIndexes[1] === previousLength;
-    const updatedBoundary = items.length === previousLength && delta?.dirtyIndexes.length === 2 &&
-      delta.dirtyIndexes[1] === settledTailIndex;
+    let settlementPatched = 0;
+    // One boundary can settle several independently identified provider texts and append or update
+    // one structural item. Patch every settled object generation first, then let the ordinary
+    // one-item paths consume the optional remainder so work scales with the changed batch instead
+    // of the full transcript.
     if (delta?.previous === this.items && disclosure === this.disclosure && previousLength > 0 &&
-        (appendedBoundary || updatedBoundary) &&
-        timelineItemIsStreaming(this.items[settledTailIndex]!) &&
-        !timelineItemIsStreaming(items[settledTailIndex]!) &&
-        this.patchExistingItem(items, settledTailIndex)) {
-      const remainingIndex = appendedBoundary ? previousLength : delta.dirtyIndexes[0]!;
-      const remaining = items[remainingIndex]!;
-      const remainingHasParent = "parentToolUseId" in remaining && Boolean(remaining.parentToolUseId);
-      settlementPatched = true;
-      delta = {
-        previous: this.items,
-        dirtyFrom: remainingIndex,
-        dirtyIndexes: [remainingIndex],
-        dirtyHasParentItems: delta.dirtyHasParentItems && remainingHasParent,
-      };
+        items.length >= previousLength && items.length <= previousLength + 1) {
+      const settlementIndexes = delta.dirtyIndexes.filter((index) => index < previousLength &&
+        timelineItemIsStreaming(this.items[index]!) && !timelineItemIsStreaming(items[index]!));
+      const settlementIndexSet = new Set(settlementIndexes);
+      const remainingIndexes = delta.dirtyIndexes.filter((index) => !settlementIndexSet.has(index));
+      const validRemainder = items.length === previousLength
+        ? remainingIndexes.length <= 1
+        : remainingIndexes.length === 1 && remainingIndexes[0] === previousLength;
+      if (settlementIndexes.length > 0 && validRemainder &&
+          settlementIndexes.every((index) => this.patchExistingItem(items, index))) {
+        settlementPatched = settlementIndexes.length;
+        const remainingIndex = remainingIndexes[0];
+        if (remainingIndex === undefined) {
+          this.items = items;
+          this.disclosure = disclosure;
+          this.revision += 1;
+          return {
+            rows: this.rows,
+            latestCheckpointTurn: this.latestCheckpointTurn,
+            incremental: true,
+            processedItems: settlementPatched,
+            revision: this.revision,
+            keyDirtyFrom: this.rows.length,
+          };
+        }
+        const remaining = items[remainingIndex]!;
+        delta = {
+          previous: this.items,
+          dirtyFrom: remainingIndex,
+          dirtyIndexes: [remainingIndex],
+          dirtyHasParentItems: delta.dirtyHasParentItems &&
+            "parentToolUseId" in remaining && Boolean(remaining.parentToolUseId),
+        };
+      }
     }
     const indexedUpdate = delta?.previous === this.items && disclosure === this.disclosure &&
       items.length === previousLength && delta.dirtyIndexes.length === 1
       ? this.projectExistingItemUpdate(items, delta.dirtyIndexes[0]!, disclosure)
       : null;
     if (indexedUpdate) {
-      return settlementPatched
-        ? { ...indexedUpdate, processedItems: indexedUpdate.processedItems + 1 }
+      return settlementPatched > 0
+        ? { ...indexedUpdate, processedItems: indexedUpdate.processedItems + settlementPatched }
         : indexedUpdate;
     }
     const parentTail = delta?.previous === this.items && disclosure === this.disclosure
       ? this.projectParentTail(items, delta, disclosure)
       : null;
     if (parentTail) {
-      return settlementPatched
-        ? { ...parentTail, processedItems: parentTail.processedItems + 1 }
+      return settlementPatched > 0
+        ? { ...parentTail, processedItems: parentTail.processedItems + settlementPatched }
         : parentTail;
     }
     const tailSafe = this.groups.length > 0 && delta?.previous === this.items &&
@@ -555,7 +574,7 @@ export class IncrementalTimelineRows {
           rows: this.rows,
           latestCheckpointTurn: this.latestCheckpointTurn,
           incremental: true,
-          processedItems: appendedItems.length + (settlementPatched ? 1 : 0),
+          processedItems: appendedItems.length + settlementPatched,
           revision: this.revision,
           keyDirtyFrom: oldRowLength,
         };
@@ -600,7 +619,7 @@ export class IncrementalTimelineRows {
           rows: this.rows,
           latestCheckpointTurn: this.latestCheckpointTurn,
           incremental: true,
-          processedItems: appendedItems.length + (settlementPatched ? 1 : 0),
+          processedItems: appendedItems.length + settlementPatched,
           revision: this.revision,
           keyDirtyFrom: oldRowLength,
         };
@@ -1442,7 +1461,7 @@ const TimelineRow = memo(function TimelineRow({
   questionContext?: TimelineQuestionContext;
 }) {
   const timingDescriptionId = useId();
-  const { sessionActive } = useContext(TimelineClockContext);
+  const sessionActive = useContext(TimelineActivityContext);
   const mediaSettled = timelineMediaSettled(item, sessionActive);
   switch (item.kind) {
     case "checkpoint":
@@ -1791,7 +1810,8 @@ const TimelineRow = memo(function TimelineRow({
 });
 
 function TimelineTimestamp({ label, timestamp }: { label: "Recorded" | "Started" | "Last Activity"; timestamp?: number }) {
-  const { now, sessionActive } = useContext(TimelineClockContext);
+  const now = useContext(TimelineClockContext);
+  const sessionActive = useContext(TimelineActivityContext);
   const absolute = formatRecordedTimestamp(timestamp);
   const relative = formatRecordedRelativeTime(timestamp, now);
   if (!absolute || !relative) return null;
@@ -1833,7 +1853,8 @@ function ActivityTimestampMeta({
   compact?: boolean;
   className?: string;
 }) {
-  const { now, sessionActive } = useContext(TimelineClockContext);
+  const now = useContext(TimelineClockContext);
+  const sessionActive = useContext(TimelineActivityContext);
   const started = Number.isFinite(startedAt) ? startedAt : undefined;
   const observedActivity = Number.isFinite(lastActivityAt) ? lastActivityAt : undefined;
   const lastActivity = observedActivity ?? started;

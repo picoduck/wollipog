@@ -238,6 +238,24 @@ test("pending transcript images stay out of the accessibility tree and tab order
   }
 });
 
+test("generated media names remove invisible Unicode from image alt and loaded actions", async () => {
+  const image = "https://evidence.example/session%E2%80%8B%E2%80%8C%E2%80%8D%E2%80%A8%E2%80%A9review.png?signature=valid";
+  const { container, root } = await renderMarkdown(image, true);
+  try {
+    const fullSizeLink = container.querySelector("a.md-media-image-link")!;
+    const embeddedImage = container.querySelector("img.md-media-image")!;
+    assert.equal(embeddedImage.getAttribute("alt"), "sessionreview.png");
+
+    await act(async () => {
+      embeddedImage.dispatchEvent(new domWindow.Event("load") as unknown as Event);
+    });
+
+    assert.equal(fullSizeLink.getAttribute("aria-label"), "Open sessionreview.png Full Size");
+  } finally {
+    await cleanup(container, root);
+  }
+});
+
 test("streaming URL changes mount no media until the final settled URL", async () => {
   const first = "https://evidence.example/review.png?signature=a";
   const second = "https://evidence.example/review.png?signature=ab";

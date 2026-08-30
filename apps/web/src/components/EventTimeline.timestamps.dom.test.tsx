@@ -192,6 +192,52 @@ test("quiet active sessions keep the shared clock advancing", async () => {
   }
 });
 
+test("clock ticks update timestamp consumers without rerendering general timeline rows", async () => {
+  let now = startedAt;
+  let tick: (() => void) | undefined;
+  let kindReads = 0;
+  const originalDateNow = Date.now;
+  const originalSetInterval = globalThis.setInterval;
+  Object.defineProperty(Date, "now", { configurable: true, writable: true, value: () => now });
+  Object.defineProperty(globalThis, "setInterval", {
+    configurable: true,
+    writable: true,
+    value: ((callback: () => void) => { tick = callback; return 304; }) as unknown as typeof setInterval,
+  });
+  const countedItem = { id: 40, text: "Stable response", createdAt: startedAt } as unknown as TimelineItem;
+  Object.defineProperty(countedItem, "kind", {
+    configurable: true,
+    enumerable: true,
+    get: () => {
+      kindReads += 1;
+      return "agent_message";
+    },
+  });
+  const countedItems = [countedItem];
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<EventTimeline items={countedItems} sessionActive />));
+    const readsAfterMount = kindReads;
+    assert.ok(readsAfterMount > 0);
+    assert.equal(container.querySelector("time [aria-hidden='true']")?.textContent, "Just Now");
+    assert.ok(tick);
+
+    now += 120_000;
+    await act(async () => tick?.());
+
+    assert.equal(container.querySelector("time [aria-hidden='true']")?.textContent, "2m Ago");
+    assert.equal(kindReads, readsAfterMount,
+      "the changing clock context reaches time consumers without reevaluating the row item");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    Object.defineProperty(Date, "now", { configurable: true, writable: true, value: originalDateNow });
+    Object.defineProperty(globalThis, "setInterval", { configurable: true, writable: true, value: originalSetInterval });
+  }
+});
+
 test("the shared clock starts when enabled, pauses while hidden, republishes on return, and tears down", async () => {
   let now = startedAt;
   let intervalStarts = 0;
