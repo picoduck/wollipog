@@ -53,6 +53,7 @@ export default defineConfig(({ mode }) => ({
         input: {
           timelineReflow: resolve(appRoot, "timeline-reflow-e2e.html"),
           settingsRows: resolve(appRoot, "settings-rows-e2e.html"),
+          xtermSmoke: resolve(appRoot, "xterm-smoke-e2e.html"),
         },
       },
     } : {}),

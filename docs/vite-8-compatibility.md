@@ -37,12 +37,13 @@ without the development client or diagnostic. This is therefore documented as de
 diagnostic noise for deliberate resize churn, not suppressed or converted into a global browser
 error exception.
 
-CI now builds dedicated production Timeline and Settings fixtures, serves the result with
-`vite preview`, and runs six browser checks against the emitted JavaScript and CSS. They cover the
-strict continuous-resize invariant, both predecessor-remount variants, reduced Settings topology,
-and painted Settings affordances in both themes. Tagged titles and the Playwright selector are
-contract-checked so deleting a production marker or dropping a fixture from `testMatch` cannot
-silently shrink the lane. The validation epoch passed 6/6.
+CI now builds dedicated production Timeline, Settings, and real-xterm fixtures, serves the result
+with `vite preview`, and runs nine browser checks against the emitted JavaScript and CSS. They cover
+the strict continuous-resize invariant, both predecessor-remount variants, reduced Settings
+topology, painted Settings affordances in both themes, and xterm output, transport, fit, resize, and
+scrollback behavior. Tagged titles and the Playwright selector are contract-checked so deleting a
+production marker or dropping a fixture from `testMatch` cannot silently shrink the lane. The
+expanded validation passes 9/9 with one worker and zero retries.
 
 The fixtures use Vite's `production-e2e` mode solely to select isolated HTML entry points and the
 `dist-e2e` output directory. No `.env.production` files or `import.meta.env.MODE` consumers are

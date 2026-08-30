@@ -13,7 +13,7 @@ test.beforeEach(async ({ page }) => {
   await waitForHarness(page);
 });
 
-test("renders initial and incremental raw output once, including split ANSI input", async ({ page }) => {
+test("renders initial and incremental raw output once, including split ANSI input @production", async ({ page }) => {
   const terminal = page.getByRole("region", { name: "Interactive Terminal Fixture" });
   await expect(terminal.locator(".xterm")).toBeVisible();
   await expect(terminalRows(terminal)).toContainText("Initial terminal output");
@@ -37,7 +37,7 @@ test("renders initial and incremental raw output once, including split ANSI inpu
   await expect(terminal.locator(".xterm-selection div")).not.toHaveCount(0);
 });
 
-test("sends interactive input once and keeps the read-only terminal inert", async ({ page }) => {
+test("sends interactive input once and keeps the read-only terminal inert @production", async ({ page }) => {
   const interactive = page.getByRole("region", { name: "Interactive Terminal Fixture" });
   const readonly = page.getByRole("region", { name: "Read-Only Terminal Fixture" });
   await expect(interactive.locator(".xterm-helper-textarea")).toBeAttached();
@@ -53,7 +53,7 @@ test("sends interactive input once and keeps the read-only terminal inert", asyn
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.logs().readonly.input)).toEqual([]);
 });
 
-test("reports fitted dimensions, refits on resize, and preserves usable scrollback", async ({ page }) => {
+test("reports fitted dimensions, refits on resize, and preserves usable scrollback @production", async ({ page }) => {
   const terminal = page.getByRole("region", { name: "Interactive Terminal Fixture" });
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.logs().interactive.resizes.at(-1)))
     .toMatchObject({ cols: expect.any(Number), rows: expect.any(Number) });
