@@ -139,7 +139,7 @@ test("the permission-mode popover keeps rows compact while long labels can wrap"
   assert.match(soleRuleBody(".cbar-permission-details-trigger"), /width: 28px;/);
 });
 
-test("mobile Session statuses stay on one clipped line before fixed actions", () => {
+test("mobile Session statuses stay on one measured line before fixed actions", () => {
   const group = soleRuleBody(".change-status-indicators");
   assert.match(group, /display: inline-flex;/);
   assert.match(group, /min-width: 0;/);
@@ -166,12 +166,15 @@ test("mobile Session statuses stay on one clipped line before fixed actions", ()
     "clipped statuses must not create a horizontal scroller");
   assert.deepEqual(statuses.get("contain"), ["paint"],
     "paint containment keeps long badge geometry out of the page overflow area across engines");
-  assert.match(statuses.get("mask-image")?.[0] ?? "", /linear-gradient\(.+transparent 100%\)/,
-    "the clipped edge must fade before the action surface");
-  assert.match(statuses.get("-webkit-mask-image")?.[0] ?? "", /linear-gradient\(.+transparent 100%\)/,
-    "the fade must work in WebKit-based mobile browsers");
-  assert.deepEqual(statuses.get("mask-repeat"), ["no-repeat"]);
-  assert.deepEqual(statuses.get("-webkit-mask-repeat"), ["no-repeat"]);
+  assert.equal(statuses.has("mask-image"), false,
+    "a hidden-count disclosure replaces the ambiguous clipped-edge fade");
+  assert.deepEqual(
+    phoneRule.declarationsForSelector(
+      ".session-detail > .detail-head > .session-header-statuses [hidden]",
+    ).get("display"),
+    ["none"],
+    "overflowed badges must not remain partially painted",
+  );
   const interactiveStatus = phoneRule.declarationsForSelector(
     ".session-detail > .detail-head > .session-header-statuses > button",
   );
@@ -183,7 +186,7 @@ test("mobile Session statuses stay on one clipped line before fixed actions", ()
       ".session-detail > .detail-head > .session-header-statuses .session-status-indicators",
     );
   assert.deepEqual(lifecycle.get("flex"), ["none"],
-    "the complete lifecycle group must remain available to the accessibility tree while clipped");
+    "the lifecycle group must retain stable intrinsic geometry for overflow measurement");
   assert.deepEqual(lifecycle.get("flex-wrap"), ["nowrap"]);
   assert.deepEqual(lifecycle.get("min-height"), ["36px"],
     "the single status line must align with the compact Session actions");

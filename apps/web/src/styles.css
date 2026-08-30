@@ -1756,6 +1756,13 @@ textarea {
   gap: 5px;
 }
 .session-header-action { width: 32px; height: 32px; padding: 0; }
+.session-status-overflow-trigger {
+  border-color: var(--border-strong);
+  color: var(--text);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
 .session-header-action:disabled {
   cursor: not-allowed;
   opacity: 0.5;
@@ -1856,12 +1863,21 @@ textarea {
   font-size: 11px;
   line-height: 1.35;
 }
-.session-menu-statuses {
+.session-status-popover-content {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 5px;
   padding: 4px 10px 6px;
+  border-radius: var(--radius-sm);
+  outline: none;
+}
+.session-status-popover-content:focus-visible {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+.session-status-popover-content .session-status-indicators,
+.session-status-popover-content .change-status-indicators {
+  flex-wrap: wrap;
 }
 .menu-separated {
   margin-top: 3px;
@@ -10201,8 +10217,8 @@ body.shell-dock-dragging * {
   .session-detail > .detail-head:has(> .session-header-note) { row-gap: 4px; }
   .session-detail > .detail-head > .session-header-statuses {
     /* Statuses stay in the leading grid track so the action track is always complete. The
-       unshrunk badge row clips inside that track; its mask provides a quiet visual handoff to the
-       fixed Share / More Actions surface without adding a horizontal scroller. */
+       measured badge row hides only its overflowing suffix and hands the exact hidden count to the
+       fixed disclosure / Share / More Actions surface without adding a horizontal scroller. */
     grid-column: 1;
     grid-row: 1;
     min-width: 0;
@@ -10211,10 +10227,6 @@ body.shell-dock-dragging * {
     gap: 4px;
     overflow: clip;
     contain: paint;
-    -webkit-mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 24px), transparent 100%);
-    -webkit-mask-repeat: no-repeat;
-    mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 24px), transparent 100%);
-    mask-repeat: no-repeat;
   }
   .session-detail > .detail-head > .session-header-statuses > button {
     order: -1;
@@ -10235,6 +10247,13 @@ body.shell-dock-dragging * {
        the status surface, rather than individual badges, owns narrow-width clipping. */
     padding-inline: 4px;
     font-size: var(--text-2xs);
+  }
+  .session-detail > .detail-head > .session-header-statuses [hidden] {
+    display: none;
+  }
+  .session-detail > .detail-head > .session-header-statuses
+    :is(.session-status-indicators, .change-status-indicators):not(:has(> .status-badge:not([hidden]))) {
+    display: none;
   }
   .session-header-action { width: 36px; height: 36px; }
   .session-header-action svg { width: 15px; height: 15px; }
