@@ -1,9 +1,10 @@
 # Vite 8 Compatibility Epoch
 
-Validated on 2026-08-30 against `main` commit `b3323006ab7f98d46e6a27940cd9b8c078bda5a2`,
+Validated on 2026-08-30 against `main` commit `65ffaf1dd8c835ea2c546991984d0de22305e23e`,
 which includes the final Timeline anchor fix from issue #326, the real-browser xterm smoke fixture
 from issue #454, the Project breadcrumb visibility fix from issue #468, and the pending-question
 hydration fix from issue #475. It also includes the initial session-history fill fix from issue #478.
+The transcript Timeline follow-ups from issues #471 through #473 are included as well.
 
 ## Dependency and Platform Contract
 
@@ -70,7 +71,7 @@ references resolve through `vite preview`, and no unintended CSS or chunk loss w
 
 - Frozen install: passed.
 - Typecheck: passed.
-- Unit tests: 4,258 passed, 26 skipped, 0 failed.
+- Unit tests: 4,265 passed, 26 skipped, 0 failed.
 - Standard web build and production-fixture build: passed.
 - Runner and control-plane bundle-only builds: passed.
 - Desktop bundle guards: passed in the full unit suite.
