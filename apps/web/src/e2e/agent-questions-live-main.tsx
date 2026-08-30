@@ -72,7 +72,7 @@ function LiveQuestionFixture() {
                 alternateFallbackFocusRef={scrollRef}
                 onSessionUpdate={setSession}
                 showKeyHints={false}
-                questionInTimeline={timelineItems.length > 0}
+                questionInTimeline={false}
               />
               <div className="detail-main">
                 <div className="detail-reader">
@@ -84,10 +84,7 @@ function LiveQuestionFixture() {
                         historyKey="agent-question-live-e2e"
                         questionContext={{
                           sessionId: session.id,
-                          pendingQuestion: pendingQuestion ? {
-                            requestId: pendingQuestion.requestId,
-                            questions: pendingQuestion.questions ?? [],
-                          } : null,
+                          pendingQuestion: null,
                           runnerOnline: true,
                           onSessionUpdate: setSession,
                           showKeyHints: false,
