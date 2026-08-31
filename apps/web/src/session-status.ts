@@ -6,8 +6,6 @@ export function sessionMayShowChangeStatus(status: SessionStatus): boolean {
   return !CHANGE_UNAVAILABLE_STATUSES.has(status);
 }
 
-export type SessionChangeKind = "no_changes" | "changes_present" | "ready_for_review";
-
 export interface SessionChangeSupplement {
   kind: "uncommitted_changes";
   label: "Uncommitted Changes";
