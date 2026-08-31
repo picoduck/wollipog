@@ -208,6 +208,7 @@ test("custom model naming admits at most two concurrent requests", async () => {
       requestId: "three",
       ok: false,
       code: "rate_limited",
+      phase: "preflight",
     });
     for (const response of responses) {
       response.setHeader("content-type", "application/json");

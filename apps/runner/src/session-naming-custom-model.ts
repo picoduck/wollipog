@@ -326,7 +326,10 @@ export class RunnerSessionNamingCustomModel {
         : error instanceof CustomModelFailure && error.code === "unavailable"
           ? "provider_unsupported" as const
           : "provider_failed" as const;
-      return { type: "generate_session_title_result", requestId: message.requestId, ok: false, code };
+      const phase = code === "provider_unsupported" || code === "rate_limited"
+        ? "preflight" as const
+        : "generation" as const;
+      return { type: "generate_session_title_result", requestId: message.requestId, ok: false, code, phase };
     }
   }
 

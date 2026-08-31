@@ -4071,6 +4071,15 @@ export type SessionNamingRunnerErrorCode =
   | "provider_failed"
   | "invalid_result";
 
+export type SessionNamingRunnerFailurePhase =
+  | "preflight"
+  | "isolation"
+  | "initialization"
+  | "thread_start"
+  | "turn_start"
+  | "generation"
+  | "output_validation";
+
 /** Bounded runner-hosted title result. Provider output, diagnostics, paths, and identities stay local. */
 export interface GenerateSessionTitleResultMessage {
   type: "generate_session_title_result";
@@ -4080,6 +4089,8 @@ export interface GenerateSessionTitleResultMessage {
   provider?: "codex" | "claude" | "custom";
   billingSource?: SessionNamingAccountBoundary["billingSource"];
   code?: SessionNamingRunnerErrorCode;
+  /** Content-free stage at which a failed request stopped. */
+  phase?: SessionNamingRunnerFailurePhase;
 }
 
 export type SessionNamingCustomModelOperation = "configure" | "delete_api_key" | "test";

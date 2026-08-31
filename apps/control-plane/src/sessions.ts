@@ -148,6 +148,7 @@ import {
 import {
   boundedSessionTitleContext,
   normalizeGeneratedSessionTitle,
+  SessionTitleGenerationError,
   type SessionTitleGenerator,
 } from "./session-title-generator.js";
 
@@ -320,6 +321,35 @@ function ok<T>(data: T, status = 200): ServiceResult<T> {
 }
 function fail<T>(error: string, status = 400): ServiceResult<T> {
   return { ok: false, status, error };
+}
+
+function sessionTitleFailureMessage(error: SessionTitleGenerationError): string {
+  if (error.code === "account_unavailable") {
+    return "The session naming account is no longer authenticated. Reconnect it in Settings and try again.";
+  }
+  if (error.code === "provider_unsupported") {
+    return "The selected session naming model or effort is no longer available. Review Session Naming settings and try again.";
+  }
+  if (error.code === "session_unavailable") {
+    return "The selected Agent Harness is unavailable for session naming. Check that it is online and try again.";
+  }
+  if (error.code === "rate_limited") {
+    return "Session naming is temporarily rate limited. Wait a moment and try again.";
+  }
+  if (error.code === "timed_out") {
+    return `Session naming timed out during ${error.phase.replaceAll("_", " ")}. Try again.`;
+  }
+  if (error.code === "invalid_result") {
+    return "Session naming returned an invalid title. Try again.";
+  }
+  return `Session naming failed during ${error.phase.replaceAll("_", " ")}. Verify the selected Agent Harness and try again.`;
+}
+
+function sessionTitleFailureStatus(error: SessionTitleGenerationError): number {
+  if (error.code === "rate_limited") return 429;
+  if (error.code === "timed_out") return 504;
+  if (error.code === "provider_failed" || error.code === "invalid_result") return 502;
+  return 409;
 }
 
 function shortId(prefix: string): string {
@@ -4360,7 +4390,7 @@ export class SessionsService {
   private generateSessionTitle(
     sessionId: string,
     ownership: "generated" | "user",
-  ): ServiceResult<{ accepted: true }> {
+  ): ServiceResult<{ completion: Promise<ServiceResult<{ title: string }>> }> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
     if (!this.titleGenerator || (this.titleGenerationEnabled && !this.titleGenerationEnabled(sessionId))) {
@@ -4381,18 +4411,40 @@ export class SessionsService {
     this.titleGenerationControllers.set(sessionId, controller);
     const configuredTimeout = typeof this.titleGenerationTimeoutMs === "function"
       ? this.titleGenerationTimeoutMs(sessionId) : this.titleGenerationTimeoutMs;
-    const timeout = setTimeout(() => controller.abort(), configuredTimeout);
-    void this.titleGenerator({ sessionId, messages, signal: controller.signal }).then((rawTitle) => {
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, configuredTimeout);
+    const completion = this.titleGenerator({ sessionId, messages, signal: controller.signal }).then((rawTitle) => {
       const title = normalizeGeneratedSessionTitle(rawTitle);
-      if (!title || controller.signal.aborted || this.titleGenerationEpochs.get(sessionId) !== epoch ||
-          (this.titleGenerationEnabled && !this.titleGenerationEnabled(sessionId)) ||
-          (this.titleGenerationRevision && this.titleGenerationRevision(sessionId) !== expectedGenerationRevision)) return;
+      if (!title) throw new SessionTitleGenerationError("invalid_result", "output_validation");
+      if (controller.signal.aborted || this.titleGenerationEpochs.get(sessionId) !== epoch) {
+        if (timedOut) throw new SessionTitleGenerationError("timed_out", "generation");
+        return fail<{ title: string }>("Session naming was superseded by a newer rename.", 409);
+      }
+      if ((this.titleGenerationEnabled && !this.titleGenerationEnabled(sessionId)) ||
+          (this.titleGenerationRevision && this.titleGenerationRevision(sessionId) !== expectedGenerationRevision)) {
+        return fail<{ title: string }>("Session Naming settings changed while the title was being generated. Try again.", 409);
+      }
       const current = this.db.getSession(sessionId);
-      if (!current || current.title !== expectedTitle || (current.titleSource ?? "generated") !== expectedSource) return;
+      if (!current || current.title !== expectedTitle || (current.titleSource ?? "generated") !== expectedSource) {
+        return fail<{ title: string }>("Session naming was superseded by a newer rename.", 409);
+      }
       this.db.setSemanticSessionTitle(sessionId, title, Date.now(), ownership);
       this.hub.sessionChangedById(sessionId);
+      return ok({ title });
     }).catch((error: unknown) => {
-      if (!controller.signal.aborted) this.log.warn("semantic title generation failed: " + (error as Error).message);
+      if (controller.signal.aborted && !timedOut) {
+        return fail<{ title: string }>("Session naming was superseded by a newer rename.", 409);
+      }
+      const failure = timedOut
+        ? new SessionTitleGenerationError("timed_out", "generation")
+        : error instanceof SessionTitleGenerationError
+          ? error
+          : new SessionTitleGenerationError("provider_failed", "preflight");
+      this.log.warn(`semantic title generation failed: code=${failure.code} phase=${failure.phase}`);
+      return fail<{ title: string }>(sessionTitleFailureMessage(failure), sessionTitleFailureStatus(failure));
     }).finally(() => {
       clearTimeout(timeout);
       if (this.titleGenerationControllers.get(sessionId) === controller) {
@@ -4400,12 +4452,14 @@ export class SessionsService {
         this.titleGenerationEpochs.delete(sessionId);
       }
     });
-    return ok({ accepted: true }, 202);
+    return ok({ completion }, 202);
   }
 
   /** Explicit local retitle requests are metadata work and never enter runner lifecycle or queues. */
-  retitleSession(sessionId: string): ServiceResult<{ accepted: true }> {
-    return this.generateSessionTitle(sessionId, "user");
+  async retitleSession(sessionId: string): Promise<ServiceResult<{ title: string }>> {
+    const started = this.generateSessionTitle(sessionId, "user");
+    if (!started.ok) return fail(started.error ?? "Session naming could not start.", started.status);
+    return started.data!.completion;
   }
 
   /** Legacy compatibility adapter for workspace grouping. Durable clients use setProject. This is
@@ -6343,7 +6397,8 @@ export class SessionsService {
     }
     if (shouldGenerateInitialTitle) {
       // Fire-and-forget: the normal turn has already entered the runner independently.
-      this.generateSessionTitle(sessionId, "generated");
+      const started = this.generateSessionTitle(sessionId, "generated");
+      if (started.ok) void started.data!.completion;
     }
 
     // Parented usage is a display-only subagent breakdown. The provider's top-level result is the

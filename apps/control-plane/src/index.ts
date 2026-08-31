@@ -1182,6 +1182,7 @@ app.register(async (instance) => {
           requestId: msg.requestId,
           ok: false,
           code: "invalid_result",
+          phase: "output_validation",
         }, runnerId!);
         break;
       }
@@ -3618,7 +3619,7 @@ app.post("/api/sessions/:id/title", async (req, reply) => {
 
 app.post("/api/sessions/:id/retitle", async (req, reply) => {
   const id = (req.params as { id: string }).id;
-  return respond(reply, svc.retitleSession(id));
+  return respond(reply, await svc.retitleSession(id));
 });
 
 app.post("/api/sessions/:id/workspace", async (req, reply) => {

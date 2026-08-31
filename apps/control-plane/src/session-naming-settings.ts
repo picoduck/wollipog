@@ -11,12 +11,18 @@ import type {
   SessionNamingHarnessMachine,
   SessionNamingHarnessTarget,
   SessionNamingMode,
+  SessionNamingRunnerErrorCode,
   SessionNamingSettingsView,
 } from "@wollipog/protocol";
 import { runnerSupportsProtocol } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
-import type { Hub } from "./hub.js";
 import {
+  isRunnerRequestNotSentError,
+  isRunnerRequestTimeoutError,
+  type Hub,
+} from "./hub.js";
+import {
+  SessionTitleGenerationError,
   sessionTitleGeneratorFromEnv,
   type SessionTitleGenerator,
   type SessionTitleRequest,
@@ -227,9 +233,18 @@ const SESSION_NAMING_FAILURE_CODES = new Set([
   "session_unavailable", "account_unavailable", "provider_unsupported", "rate_limited",
   "timed_out", "provider_failed", "invalid_result",
 ]);
+const SESSION_NAMING_FAILURE_PHASES = new Set([
+  "preflight", "isolation", "initialization", "thread_start", "turn_start", "generation", "output_validation",
+]);
 const SESSION_NAMING_BILLING_SOURCES = new Set([
   "subscription", "api", "bedrock", "vertex", "gateway", "provider_account", "unknown",
 ]);
+
+function runnerNamingTransportFailure(error: unknown): SessionTitleGenerationError {
+  if (isRunnerRequestTimeoutError(error)) return new SessionTitleGenerationError("timed_out", "generation");
+  if (isRunnerRequestNotSentError(error)) return new SessionTitleGenerationError("session_unavailable", "preflight");
+  return new SessionTitleGenerationError("provider_failed", "generation");
+}
 
 /** Validate and canonicalize the only runner fields allowed across the naming boundary. */
 export function sanitizeSessionNamingRunnerResult(
@@ -238,7 +253,15 @@ export function sanitizeSessionNamingRunnerResult(
   if (typeof message.requestId !== "string" || !message.requestId) return null;
   if (message.ok === false) {
     if (typeof message.code !== "string" || !SESSION_NAMING_FAILURE_CODES.has(message.code)) return null;
-    return { type: "generate_session_title_result", requestId: message.requestId, ok: false, code: message.code };
+    if (message.phase !== undefined &&
+        (typeof message.phase !== "string" || !SESSION_NAMING_FAILURE_PHASES.has(message.phase))) return null;
+    return {
+      type: "generate_session_title_result",
+      requestId: message.requestId,
+      ok: false,
+      code: message.code,
+      ...(message.phase ? { phase: message.phase } : {}),
+    };
   }
   if (message.ok !== true || typeof message.title !== "string" || !message.title || message.title.length > 120 ||
       /[\r\n]/.test(message.title) ||
@@ -321,6 +344,7 @@ export class SessionNamingSettings {
     runner?: NonNullable<ReturnType<ControlPlaneDb["getRunner"]>>;
     agent?: AgentDefinition;
     account?: Omit<SessionNamingAccountBoundary, "machineCount">;
+    failureCode?: SessionNamingRunnerErrorCode;
   } | null {
     const saved = this.db.getSessionNamingHarnessTarget?.(organizationId) ?? null;
     if (!saved) return null;
@@ -363,7 +387,17 @@ export class SessionNamingSettings {
                           ? "The selected reasoning effort is no longer supported by that model."
                           : !this.hub
                             ? "Runner requests are unavailable."
-                            : undefined;
+                          : undefined;
+    const failureCode: SessionNamingRunnerErrorCode | undefined = reason === undefined
+      ? undefined
+      : !runnerInOrganization || runnerInOrganization.status !== "online" || !this.hub
+        ? "session_unavailable"
+        : agent && !account
+          ? "account_unavailable"
+          : account && saved.provider && saved.billingSource &&
+              (account.provider !== saved.provider || account.billingSource !== saved.billingSource)
+            ? "account_unavailable"
+            : "provider_unsupported";
     return {
       view: {
         runnerId: saved.runnerId,
@@ -383,6 +417,7 @@ export class SessionNamingSettings {
       ...(reason === undefined && runnerInOrganization && agent && account
         ? { runner: runnerInOrganization, agent, account }
         : {}),
+      ...(failureCode ? { failureCode } : {}),
     };
   }
 
@@ -795,10 +830,15 @@ export class SessionNamingSettings {
       const custom = this.db.getSessionNamingCustomModel(organizationId);
       if (!custom) {
         if (!this.environment.generator) throw new Error("semantic session naming is disabled or not configured");
-        return this.environment.generator(request);
+        try {
+          return await this.environment.generator(request);
+        } catch (error) {
+          if (request.signal.aborted) throw error;
+          throw new SessionTitleGenerationError("provider_failed", "generation");
+        }
       }
       const target = this.runnerCustomModel(organizationId);
-      if (!target || !this.hub) throw new Error("runner custom model naming is unavailable");
+      if (!target || !this.hub) throw new SessionTitleGenerationError("session_unavailable", "preflight");
       const requestId = `session_name_${randomUUID()}`;
       const resultPromise = this.hub.requestFromRunner(target.runner.runnerId, requestId, {
         type: "generate_session_title",
@@ -822,15 +862,18 @@ export class SessionNamingSettings {
         void resultPromise.then((value) => {
           request.signal.removeEventListener("abort", aborted);
           if (value.type !== "generate_session_title_result" || (value.ok && value.provider !== "custom")) {
-            reject(new Error("runner returned an invalid custom model naming result"));
+            reject(new SessionTitleGenerationError("invalid_result", "output_validation"));
           } else resolve(value);
         }, (error) => {
           request.signal.removeEventListener("abort", aborted);
-          reject(error);
+          reject(runnerNamingTransportFailure(error));
         });
       });
       if (!result.ok || typeof result.title !== "string") {
-        throw new Error(`runner custom model naming failed (${result.code ?? "provider_failed"})`);
+        throw new SessionTitleGenerationError(
+          result.code ?? "provider_failed",
+          result.phase ?? "generation",
+        );
       }
       return result.title;
     }
@@ -840,7 +883,12 @@ export class SessionNamingSettings {
       : explicitTarget
         ? null
         : this.sessionAgentTarget(request.sessionId);
-    if (!target || !this.hub) throw new Error("runner session naming is unavailable");
+    if (!target || !this.hub) {
+      if (explicitTarget) {
+        throw new SessionTitleGenerationError(explicitTarget.failureCode ?? "session_unavailable", "preflight");
+      }
+      throw new SessionTitleGenerationError("session_unavailable", "preflight");
+    }
     const requestId = `session_name_${randomUUID()}`;
     const resultPromise = this.hub.requestFromRunner(target.runner.runnerId, requestId, {
       type: "generate_session_title",
@@ -870,21 +918,26 @@ export class SessionNamingSettings {
       request.signal.addEventListener("abort", aborted, { once: true });
       void resultPromise.then((value) => {
         request.signal.removeEventListener("abort", aborted);
-        if (value.type !== "generate_session_title_result") reject(new Error("runner returned an invalid session naming result"));
+        if (value.type !== "generate_session_title_result") {
+          reject(new SessionTitleGenerationError("invalid_result", "output_validation"));
+        }
         else resolve(value);
       }, (error) => {
         request.signal.removeEventListener("abort", aborted);
-        reject(error);
+        reject(runnerNamingTransportFailure(error));
       });
     });
     if (!result.ok || typeof result.title !== "string") {
-      throw new Error(`runner session naming failed (${result.code ?? "provider_failed"})`);
+      throw new SessionTitleGenerationError(
+        result.code ?? "provider_failed",
+        result.phase ?? "generation",
+      );
     }
     if (explicitTarget?.view.available && (
       result.provider !== explicitTarget.account?.provider ||
       result.billingSource !== explicitTarget.account?.billingSource
     )) {
-      throw new Error("runner session naming account boundary changed");
+      throw new SessionTitleGenerationError("account_unavailable", "preflight");
     }
     return result.title;
   };
