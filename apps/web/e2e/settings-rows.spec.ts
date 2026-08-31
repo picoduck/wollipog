@@ -1068,19 +1068,6 @@ test("tabbing through each section reaches every row kind", async ({ page }) => 
     .toEqual(["ui-row-nav", "ui-row-switch"]);
 });
 
-/**
- * The Appearance controls, which the row registry above cannot describe.
- *
- * Theme, Colour Scheme and Density were ten rows carrying one option each; they are three rows
- * carrying a whole control each. The registry's model — the row IS the control, and one child
- * selector is its affordance — does not fit that, so these get the machinery pointed at them
- * directly rather than a special case threaded through every helper above.
- *
- * What has to hold is unchanged in substance. An unselected option is still visible as an option
- * rather than as blank space; selection is still more than a recolour; the control is still
- * reachable by Tab and still shows a focus ring; and the swatches — which are the one thing here
- * that is a COLOUR by definition — still have to be visible against the surface behind them.
- */
 test("Agent Harness defaults are keyboard-operable, cascade by model, and keep one editor open", async ({ page }) => {
   await useHarness(page, "dark", { section: "behavior", defaults: "agent" });
   const defaults = page.getByRole("button", { name: /Default Models, Efforts, and Permissions/ });
@@ -1109,6 +1096,20 @@ test("Agent Harness defaults are keyboard-operable, cascade by model, and keep o
   await expect(codex).toHaveAttribute("aria-expanded", "false");
   await expect(claude).toHaveAttribute("aria-expanded", "true");
 });
+
+/**
+ * The Appearance controls, which the row registry above cannot describe.
+ *
+ * Theme, Colour Scheme and Density were ten rows carrying one option each; they are three rows
+ * carrying a whole control each. The registry's model — the row IS the control, and one child
+ * selector is its affordance — does not fit that, so these get the machinery pointed at them
+ * directly rather than a special case threaded through every helper above.
+ *
+ * What has to hold is unchanged in substance. An unselected option is still visible as an option
+ * rather than as blank space; selection is still more than a recolour; the control is still
+ * reachable by Tab and still shows a focus ring; and the swatches — which are the one thing here
+ * that is a COLOUR by definition — still have to be visible against the surface behind them.
+ */
 
 test.describe("the appearance controls", () => {
   const seg = (page: Page, name: string) => page.getByRole("radiogroup", { name });

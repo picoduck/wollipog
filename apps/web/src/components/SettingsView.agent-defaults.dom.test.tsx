@@ -181,3 +181,79 @@ test("Agent Harness defaults can restore the Wollipog default", async () => {
     fixture.container.remove();
   }
 });
+
+test("Agent Harness defaults discard hidden drifted values while preserving supported choices", async () => {
+  const current = view(true);
+  const codex = current.defaults[0]!;
+  codex.installations[0]!.models = [{ id: "sol", displayName: "Sol", efforts: ["xhigh"] }];
+  codex.compatibleInstallations = 0;
+  const calls: Array<Record<string, unknown>> = [];
+  const fixture = await renderPanel({
+    instanceId: "test",
+    publicOrigin: "http://localhost",
+    close() {},
+    async request(_path, init) {
+      if (init?.method === "PUT" && init.body) calls.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      return new Response(JSON.stringify(current), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+  try {
+    await act(async () => buttonNamed(fixture.container, "Default Models, Efforts, and Permissions").click());
+    await act(async () => buttonNamed(fixture.container, "Codex App Server").click());
+    assert.match(buttonNamed(fixture.container, "Codex App Server Model").getAttribute("aria-label") ?? "", /Choose Model/);
+    await act(async () => buttonNamed(fixture.container, "Save").click());
+    assert.deepEqual(calls.at(-1), {
+      agentId: "codex",
+      driver: "codex-app-server",
+      context: { kind: "native" },
+      config: { permissionMode: "danger-full-access" },
+    });
+  } finally {
+    await act(async () => fixture.root.unmount());
+    fixture.container.remove();
+  }
+});
+
+test("Agent Harness defaults offer only combinations supported by one Machine", async () => {
+  const current = view();
+  const codex = current.defaults[0]!;
+  const installation = codex.installations[0]!;
+  codex.installations = [
+    {
+      ...installation,
+      models: [{ id: "luna", displayName: "Luna", efforts: ["low"] }],
+      effortLevels: ["low"],
+      permissionModes: ["auto-review"],
+    },
+    {
+      ...installation,
+      runnerId: "runner-two",
+      machineName: "Second Machine",
+      models: [{ id: "sol", displayName: "Sol", efforts: ["xhigh"] }],
+      effortLevels: ["xhigh"],
+      permissionModes: ["danger-full-access"],
+    },
+  ];
+  const fixture = await renderPanel({
+    instanceId: "test",
+    publicOrigin: "http://localhost",
+    close() {},
+    async request() {
+      return new Response(JSON.stringify(current), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+  try {
+    await act(async () => buttonNamed(fixture.container, "Default Models, Efforts, and Permissions").click());
+    await act(async () => buttonNamed(fixture.container, "Codex App Server").click());
+    await choose(fixture.container, "Codex App Server Model", "Luna");
+    await choose(fixture.container, "Codex App Server Reasoning Effort", "Low");
+    await act(async () => buttonNamed(fixture.container, "Codex App Server Permission Mode").click());
+    const options = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+      .map((option) => option.textContent ?? "");
+    assert.equal(options.some((label) => label.includes("Approve for Me")), true);
+    assert.equal(options.some((label) => label.includes("Full Access")), false);
+  } finally {
+    await act(async () => fixture.root.unmount());
+    fixture.container.remove();
+  }
+});

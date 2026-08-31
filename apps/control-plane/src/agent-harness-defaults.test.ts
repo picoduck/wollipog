@@ -61,12 +61,15 @@ function localHuman(db: ControlPlaneDb, role: HumanPrincipal["role"] = "viewer")
 
 test("Agent Harness defaults aggregate installations, preserve drift, and remain per user", () => {
   const db = ControlPlaneDb.open(":memory:");
-  db.registerRunner(runner("runner-a", ["sol", "luna"], ["auto-review", "full-access"]), 1, PROTOCOL_VERSION);
+  const firstRunner = runner("runner-a", ["sol", "luna"], ["auto-review", "full-access"]);
+  firstRunner.agents.push({ ...firstRunner.agents[0]!, id: "conductor", name: "Conductor" });
+  db.registerRunner(firstRunner, 1, PROTOCOL_VERSION);
   db.registerRunner(runner("runner-b", ["sol"], ["auto-review"]), 2, PROTOCOL_VERSION);
   const settings = new AgentHarnessDefaultsSettings(db);
   const principal = localHuman(db);
   const initial = settings.view(principal);
   assert.equal(initial.defaults.length, 1);
+  assert.equal(initial.defaults[0]?.agentId, "codex", "the orchestration-only Conductor must not be configurable");
   assert.equal(initial.defaults[0]?.installations.length, 2);
   assert.equal(JSON.stringify(initial).includes("must-not-project"), false);
   assert.equal(JSON.stringify(initial).includes("/secret/path"), false);

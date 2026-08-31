@@ -2695,7 +2695,7 @@ export class SessionsService {
       // partially sent to a harness, while explicit per-session knobs retain field-level priority.
       if (preference && agentCapabilities && installationSupportsDefault({
         models: agentCapabilities.models.filter((model) => model.id !== "default" && !model.hidden),
-        effortLevels: agentCapabilities.effortLevels,
+        effortLevels: agentCapabilities.effortLevels ?? [],
         permissionModes: agentCapabilities.permissionModes ?? [],
       }, preference)) {
         if (requestedConfig.model === undefined && requestedConfig.effort === undefined) {

@@ -355,8 +355,26 @@ function effortsForModel(option: AgentHarnessDefaultOption, modelId: string): st
   return [...efforts].sort();
 }
 
-function permissionModesForHarness(option: AgentHarnessDefaultOption): string[] {
-  return [...new Set(option.installations.flatMap((installation) => installation.permissionModes))].sort();
+function installationsSupportingDraft(
+  option: AgentHarnessDefaultOption,
+  draft: Pick<AgentHarnessDefaultConfig, "model" | "effort">,
+): AgentHarnessDefaultOption["installations"] {
+  return option.installations.filter((installation) => {
+    const model = draft.model
+      ? installation.models.find((candidate) => candidate.id === draft.model)
+      : undefined;
+    if (draft.model && !model) return false;
+    const efforts = model?.efforts?.length ? model.efforts : installation.effortLevels;
+    return !draft.effort || efforts.includes(draft.effort);
+  });
+}
+
+function permissionModesForDraft(
+  option: AgentHarnessDefaultOption,
+  draft: Pick<AgentHarnessDefaultConfig, "model" | "effort">,
+): string[] {
+  return [...new Set(installationsSupportingDraft(option, draft)
+    .flatMap((installation) => installation.permissionModes))].sort();
 }
 
 function permissionModeDisplayLabel(mode: string, driver: AgentDriverKind): string {
@@ -366,6 +384,23 @@ function permissionModeDisplayLabel(mode: string, driver: AgentDriverKind): stri
 
 function harnessEfforts(option: AgentHarnessDefaultOption): string[] {
   return [...new Set(option.installations.flatMap((installation) => installation.effortLevels))].sort();
+}
+
+function repairableDraft(option: AgentHarnessDefaultOption): AgentHarnessDefaultConfig {
+  const next = option.preference ? { ...option.preference } : {};
+  const models = uniqueModels(option);
+  if (next.model && !models.some((model) => model.id === next.model)) {
+    delete next.model;
+    delete next.effort;
+  }
+  const efforts = next.model
+    ? effortsForModel(option, next.model)
+    : models.length === 0 ? harnessEfforts(option) : [];
+  if (next.effort && !efforts.includes(next.effort)) delete next.effort;
+  if (next.permissionMode && !permissionModesForDraft(option, next).includes(next.permissionMode)) {
+    delete next.permissionMode;
+  }
+  return next;
 }
 
 function harnessDefaultSummary(option: AgentHarnessDefaultOption): string {
@@ -419,7 +454,7 @@ export function AgentHarnessDefaultsPanel() {
       : `${customized} Harness Default${customized === 1 ? "" : "s"} Configured`;
   const beginEdit = (option: AgentHarnessDefaultOption) => {
     setEditing(harnessIdentityKey(option));
-    setDraft(option.preference ? { ...option.preference } : {});
+    setDraft(repairableDraft(option));
     setError(null);
   };
   const finish = (next: AgentHarnessDefaultsView) => {
@@ -456,10 +491,10 @@ export function AgentHarnessDefaultsPanel() {
             const efforts = draft.model
               ? effortsForModel(option, draft.model)
               : models.length === 0 ? harnessEfforts(option) : [];
-            const permissionModes = permissionModesForHarness(option);
+            const permissionModes = permissionModesForDraft(option, draft);
             const configurable = models.length > 0 || permissionModes.length > 0 ||
               option.installations.some((installation) => installation.effortLevels.length > 0);
-            const validDraft = Object.keys(draft).length > 0 &&
+            const validDraft = !!(draft.model || draft.effort || draft.permissionMode) &&
               (!draft.model || efforts.length === 0 || !!draft.effort);
             return (
               <div className="agent-defaults-item" key={key}>
@@ -488,11 +523,14 @@ export function AgentHarnessDefaultsPanel() {
                           placeholder="Choose Model…"
                           onChange={(model) => {
                             const nextEfforts = effortsForModel(option, model);
-                            setDraft((current) => ({
-                              ...current,
-                              model,
-                              ...(current.effort && !nextEfforts.includes(current.effort) ? { effort: undefined } : {}),
-                            }));
+                            setDraft((current) => {
+                              const next = { ...current, model };
+                              if (next.effort && !nextEfforts.includes(next.effort)) delete next.effort;
+                              if (next.permissionMode && !permissionModesForDraft(option, next).includes(next.permissionMode)) {
+                                delete next.permissionMode;
+                              }
+                              return next;
+                            });
                           }}
                         />
                       </label>
@@ -505,7 +543,13 @@ export function AgentHarnessDefaultsPanel() {
                           options={efforts.map((effort) => ({ value: effort, label: effortLabel(effort) }))}
                           value={draft.effort ?? null}
                           placeholder="Choose Effort…"
-                          onChange={(effort) => setDraft((current) => ({ ...current, effort }))}
+                          onChange={(effort) => setDraft((current) => {
+                            const next = { ...current, effort };
+                            if (next.permissionMode && !permissionModesForDraft(option, next).includes(next.permissionMode)) {
+                              delete next.permissionMode;
+                            }
+                            return next;
+                          })}
                         />
                       </label>
                     )}
