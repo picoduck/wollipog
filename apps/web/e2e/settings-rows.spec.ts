@@ -1074,6 +1074,10 @@ test("Agent Harness defaults are keyboard-operable, cascade by model, and keep o
   await defaults.focus();
   await page.keyboard.press("Enter");
   await expect(defaults).toHaveAttribute("aria-expanded", "true");
+  const refresh = page.getByRole("button", { name: "Refresh" });
+  await expect(refresh).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect((await refresh.boundingBox())?.height).toBeGreaterThanOrEqual(44);
 
   const harnessRows = page.locator(".agent-defaults-item > .ui-row-nav");
   const codex = harnessRows.filter({ hasText: "Codex App Server" });
@@ -1095,6 +1099,33 @@ test("Agent Harness defaults are keyboard-operable, cascade by model, and keep o
   await claude.click();
   await expect(codex).toHaveAttribute("aria-expanded", "false");
   await expect(claude).toHaveAttribute("aria-expanded", "true");
+
+  const cancel = page.getByRole("button", { name: "Cancel" });
+  await cancel.focus();
+  await page.keyboard.press("Enter");
+  await expect(claude).toBeFocused();
+  await expect(claude).not.toHaveAttribute("aria-controls", /.+/);
+
+  await codex.click();
+  const save = page.getByRole("button", { name: "Save" });
+  await save.focus();
+  await page.keyboard.press("Enter");
+  await expect(codex).toBeFocused();
+  await expect(codex).not.toHaveAttribute("aria-controls", /.+/);
+
+  await codex.click();
+  const reset = page.getByRole("button", { name: "Use Wollipog Default" });
+  await reset.focus();
+  await page.keyboard.press("Enter");
+  await expect(codex).toBeFocused();
+  await expect(codex).not.toHaveAttribute("aria-controls", /.+/);
+
+  await codex.click();
+  await expect(codex).toHaveAttribute("aria-expanded", "true");
+  await page.keyboard.press("Enter");
+  await expect(codex).toBeFocused();
+  await expect(codex).toHaveAttribute("aria-expanded", "false");
+  await expect(codex).not.toHaveAttribute("aria-controls", /.+/);
 });
 
 /**

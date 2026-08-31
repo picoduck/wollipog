@@ -11426,6 +11426,14 @@ body.shell-dock-dragging * {
   border-left: 1px solid var(--border);
 }
 .agent-defaults-item { display: flex; flex-direction: column; min-width: 0; }
+.agent-defaults-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  min-height: 32px;
+  padding: 0 var(--space-2);
+}
 .agent-defaults-editor {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -11455,8 +11463,9 @@ body.shell-dock-dragging * {
   .agent-defaults-list { margin-left: var(--space-2); }
   .agent-defaults-editor { grid-template-columns: minmax(0, 1fr); }
   .agent-defaults-actions { grid-column: auto; }
-  .agent-defaults-action-spacer { display: none; }
-  .agent-defaults-actions .btn { min-height: 44px; }
+  .agent-defaults-actions .agent-defaults-action-spacer { display: none; }
+  .agent-defaults-actions .btn,
+  .agent-defaults-toolbar .btn { min-height: 44px; }
 }
 
 .session-naming-editor {

@@ -761,7 +761,7 @@ function Shell() {
                 ),
                 behavior: (
                   <BehaviorPanel
-                    agentHarnessDefaults={<AgentHarnessDefaultsPanel />}
+                    agentHarnessDefaults={<AgentHarnessDefaultsPanel discoveryRevision={runners} />}
                     sessionNaming={<SessionNamingPanel />}
                   />
                 ),

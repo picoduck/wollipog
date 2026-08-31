@@ -74,6 +74,21 @@ test("Agent Harness defaults aggregate installations, preserve drift, and remain
   assert.equal(JSON.stringify(initial).includes("must-not-project"), false);
   assert.equal(JSON.stringify(initial).includes("/secret/path"), false);
 
+  db.setMachineDisplayName("runner-a", "Primary Development Machine");
+  const renamed = settings.view(principal).defaults[0]?.installations
+    .find((installation) => installation.runnerId === "runner-a");
+  assert.equal(renamed?.machineName, "Primary Development Machine");
+  db.setMachineDisplayName("runner-b", "Primary Development Machine");
+  assert.deepEqual(settings.view(principal).defaults[0]?.installations.map((installation) => installation.runnerId),
+    ["runner-a", "runner-b"], "equal display labels must retain a deterministic runner-id tie-breaker");
+  db.setMachineDisplayName("runner-b", "");
+  db.setMachineDisplayName("runner-a", "");
+  assert.equal(settings.view(principal).defaults[0]?.installations
+    .find((installation) => installation.runnerId === "runner-a")?.machineName, "Laptop");
+  db.raw().prepare("UPDATE runners SET hostname='' WHERE runner_id=?").run("runner-a");
+  assert.equal(settings.view(principal).defaults[0]?.installations
+    .find((installation) => installation.runnerId === "runner-a")?.machineName, "runner-a");
+
   const updated = settings.update(principal, {
     agentId: "codex",
     driver: "codex-app-server",

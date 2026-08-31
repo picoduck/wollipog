@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, type ReactNode } from "react";
+import React, { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   PROTOCOL_VERSION,
   type AgentDriverKind,
@@ -386,8 +386,11 @@ function harnessEfforts(option: AgentHarnessDefaultOption): string[] {
   return [...new Set(option.installations.flatMap((installation) => installation.effortLevels))].sort();
 }
 
-function repairableDraft(option: AgentHarnessDefaultOption): AgentHarnessDefaultConfig {
-  const next = option.preference ? { ...option.preference } : {};
+function repairDraft(
+  option: AgentHarnessDefaultOption,
+  candidate: AgentHarnessDefaultConfig,
+): AgentHarnessDefaultConfig {
+  const next = { ...candidate };
   const models = uniqueModels(option);
   if (next.model && !models.some((model) => model.id === next.model)) {
     delete next.model;
@@ -401,6 +404,10 @@ function repairableDraft(option: AgentHarnessDefaultOption): AgentHarnessDefault
     delete next.permissionMode;
   }
   return next;
+}
+
+function repairableDraft(option: AgentHarnessDefaultOption): AgentHarnessDefaultConfig {
+  return repairDraft(option, option.preference ?? {});
 }
 
 function harnessDefaultSummary(option: AgentHarnessDefaultOption): string {
@@ -425,48 +432,139 @@ function harnessDefaultSummary(option: AgentHarnessDefaultOption): string {
 
 /** Compact per-user defaults editor. The outer row and every harness return to summaries after a
  * decision, leaving the Behavior page inspectable without permanently exposing a large form. */
-export function AgentHarnessDefaultsPanel() {
+export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevision?: object } = {}) {
   const api = useApi();
+  const activeApi = useRef(api);
+  activeApi.current = api;
+  const mounted = useRef(false);
+  const loadGeneration = useRef(0);
+  const previousDiscoveryRevision = useRef(discoveryRevision);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const retryRef = useRef<HTMLButtonElement>(null);
+  const harnessRowRefs = useRef(new Map<string, HTMLButtonElement>());
   const [view, setView] = useState<AgentHarnessDefaultsView | null>(null);
+  const viewRef = useRef(view);
+  viewRef.current = view;
   const [expanded, setExpanded] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
+  const editingRef = useRef(editing);
+  editingRef.current = editing;
   const [draft, setDraft] = useState<AgentHarnessDefaultConfig>({});
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const busyRef = useRef(false);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [mutationError, setMutationError] = useState<string | null>(null);
   const controlsId = "agent-harness-defaults-editor";
 
   useEffect(() => {
-    let disposed = false;
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+
+  const requestIsCurrent = useCallback((requestApi: typeof api, generation?: number) =>
+    mounted.current && activeApi.current === requestApi &&
+      (generation === undefined || loadGeneration.current === generation), []);
+
+  const load = useCallback(async (reset: boolean): Promise<boolean> => {
+    const requestApi = api;
+    const generation = ++loadGeneration.current;
+    setLoading(true);
+    setLoadError(null);
+    if (reset) setView(null);
+    try {
+      const next = await requestApi.agentHarnessDefaults();
+      if (!requestIsCurrent(requestApi, generation)) return false;
+      if (busyRef.current) return false;
+      const editingKey = editingRef.current;
+      setView(next);
+      if (editingKey) {
+        const refreshed = next.defaults.find((option) => harnessIdentityKey(option) === editingKey);
+        if (refreshed) {
+          setDraft((current) => repairDraft(refreshed, current));
+        } else {
+          const editor = document.getElementById(`agent-default-${encodeURIComponent(editingKey)}`);
+          const restoreFocus = !!editor?.contains(document.activeElement) ||
+            harnessRowRefs.current.get(editingKey) === document.activeElement;
+          setEditing(null);
+          setDraft({});
+          if (restoreFocus) requestAnimationFrame(() => triggerRef.current?.focus());
+        }
+      }
+      return true;
+    } catch (caught) {
+      if (!requestIsCurrent(requestApi, generation)) return false;
+      setLoadError(caught instanceof Error ? caught.message : "Could not load Agent Harness defaults.");
+      return false;
+    } finally {
+      if (requestIsCurrent(requestApi, generation)) setLoading(false);
+    }
+  }, [api, requestIsCurrent]);
+
+  useEffect(() => {
     setView(null);
-    setError(null);
-    void api.agentHarnessDefaults().then((next) => {
-      if (!disposed) setView(next);
-    }).catch((caught: unknown) => {
-      if (!disposed) setError(caught instanceof Error ? caught.message : "Could not load Agent Harness defaults.");
-    });
-    return () => { disposed = true; };
-  }, [api]);
+    setExpanded(false);
+    setEditing(null);
+    setDraft({});
+    busyRef.current = false;
+    setBusy(false);
+    setMutationError(null);
+    void load(true);
+    return () => { loadGeneration.current += 1; };
+  }, [api, load]);
+
+  useEffect(() => {
+    if (Object.is(previousDiscoveryRevision.current, discoveryRevision)) return;
+    previousDiscoveryRevision.current = discoveryRevision;
+    if (viewRef.current) void load(false);
+  }, [discoveryRevision, load]);
 
   const customized = view?.defaults.filter((option) => option.preference).length ?? 0;
-  const summary = error
-    ? "Defaults are unavailable in this client or control plane."
-    : !view ? "Loading Agent Harness defaults…"
-      : `${customized} Harness Default${customized === 1 ? "" : "s"} Configured`;
+  const summary = !view
+    ? loadError ? "Agent Harness defaults could not be loaded." : "Loading Agent Harness defaults…"
+    : `${customized} Harness Default${customized === 1 ? "" : "s"} Configured`;
   const beginEdit = (option: AgentHarnessDefaultOption) => {
     setEditing(harnessIdentityKey(option));
     setDraft(repairableDraft(option));
-    setError(null);
+    setMutationError(null);
   };
-  const finish = (next: AgentHarnessDefaultsView) => {
+  const focusHarnessRow = (key: string) => {
+    requestAnimationFrame(() => (harnessRowRefs.current.get(key) ?? triggerRef.current)?.focus());
+  };
+  const restoreFocusIfLost = (target: () => HTMLElement | null | undefined) => {
+    requestAnimationFrame(() => {
+      if (document.activeElement === document.body) target()?.focus();
+    });
+  };
+  const closeEditor = (key: string) => {
+    setEditing(null);
+    setDraft({});
+    setMutationError(null);
+    focusHarnessRow(key);
+  };
+  const invalidateLoads = () => {
+    loadGeneration.current += 1;
+    setLoading(false);
+    setLoadError(null);
+  };
+  const finish = (next: AgentHarnessDefaultsView, key: string) => {
+    const editor = document.getElementById(`agent-default-${encodeURIComponent(key)}`);
+    const restoreFocus = document.activeElement === document.body || !!editor?.contains(document.activeElement);
+    invalidateLoads();
     setView(next);
+    busyRef.current = false;
     setBusy(false);
     setEditing(null);
     setDraft({});
-    setError(null);
+    setMutationError(null);
+    if (restoreFocus) focusHarnessRow(key);
   };
-  const fail = (caught: unknown) => {
+  const fail = (caught: unknown, action: HTMLButtonElement) => {
+    busyRef.current = false;
     setBusy(false);
-    setError(caught instanceof Error ? caught.message : "Could not save the Agent Harness default.");
+    setMutationError(caught instanceof Error ? caught.message : "Could not save the Agent Harness default.");
+    restoreFocusIfLost(() => action);
+    void load(false);
   };
 
   return (
@@ -475,12 +573,51 @@ export function AgentHarnessDefaultsPanel() {
         title="Default Models, Efforts, and Permissions"
         description={summary}
         expanded={expanded}
-        controls={controlsId}
-        disabled={!view}
-        onClick={() => setExpanded((current) => !current)}
+        controls={expanded && view ? controlsId : undefined}
+        disabled={!view || busy}
+        buttonRef={triggerRef}
+        onClick={() => {
+          setExpanded((current) => !current);
+          setEditing(null);
+          setDraft({});
+          setMutationError(null);
+        }}
       />
+      {loadError && !view && (
+        <StaticRow
+          title="Load Failed"
+          description={
+            <>
+              Agent Harness defaults could not be loaded.{" "}
+              <button ref={retryRef} type="button" className="btn ghost sm" disabled={loading} onClick={(event) => {
+                const retry = event.currentTarget;
+                const restoreFocus = document.activeElement === retry;
+                void load(true).then((loaded) => {
+                  if (restoreFocus) restoreFocusIfLost(() => loaded ? triggerRef.current : retryRef.current);
+                });
+              }}>
+                {loading ? "Retrying…" : "Retry"}
+              </button>
+            </>
+          }
+        />
+      )}
       {expanded && view && (
-        <div id={controlsId} className="agent-defaults-list">
+        <div id={controlsId} className="agent-defaults-list" aria-busy={loading || busy || undefined}>
+          <div className="agent-defaults-toolbar">
+            {loadError && <span className="settings-inline-error" role="alert">Could not refresh Agent Harness defaults: {loadError}</span>}
+            {mutationError && !editing && <span className="settings-inline-error" role="alert">{mutationError}</span>}
+            <span className="agent-defaults-action-spacer" />
+            <button type="button" className="btn ghost sm" disabled={loading || busy} onClick={(event) => {
+              const refresh = event.currentTarget;
+              const restoreFocus = document.activeElement === refresh;
+              void load(false).then(() => {
+                if (restoreFocus) restoreFocusIfLost(() => refresh);
+              });
+            }}>
+              {loading ? "Refreshing…" : "Refresh"}
+            </button>
+          </div>
           {view.defaults.length === 0 && (
             <p className="ui-row-desc agent-defaults-empty">No discovered Agent Harnesses are available yet.</p>
           )}
@@ -502,8 +639,21 @@ export function AgentHarnessDefaultsPanel() {
                   title={option.name}
                   description={harnessDefaultSummary(option)}
                   expanded={isEditing}
-                  controls={`agent-default-${encodeURIComponent(key)}`}
-                  onClick={() => isEditing ? setEditing(null) : beginEdit(option)}
+                  disabled={busy}
+                  controls={isEditing ? `agent-default-${encodeURIComponent(key)}` : undefined}
+                  buttonRef={(node) => {
+                    if (node) harnessRowRefs.current.set(key, node);
+                    else harnessRowRefs.current.delete(key);
+                  }}
+                  onClick={() => {
+                    if (isEditing) {
+                      setEditing(null);
+                      setDraft({});
+                      setMutationError(null);
+                    } else {
+                      beginEdit(option);
+                    }
+                  }}
                 />
                 {isEditing && (
                   <div id={`agent-default-${encodeURIComponent(key)}`} className="agent-defaults-editor">
@@ -568,41 +718,55 @@ export function AgentHarnessDefaultsPanel() {
                         />
                       </label>
                     )}
-                    {error && <p className="settings-inline-error" role="alert">{error}</p>}
+                    {mutationError && <p className="settings-inline-error" role="alert">{mutationError}</p>}
                     <div className="agent-defaults-actions">
                       {option.preference && (
                         <button
                           type="button"
                           className="btn sm"
                           disabled={busy}
-                          onClick={() => {
+                          onClick={(event) => {
+                            const action = event.currentTarget;
+                            const requestApi = api;
+                            invalidateLoads();
+                            busyRef.current = true;
                             setBusy(true);
-                            void api.deleteAgentHarnessDefault({
+                            setMutationError(null);
+                            void requestApi.deleteAgentHarnessDefault({
                               agentId: option.agentId,
                               driver: option.driver,
                               context: option.context,
-                            }).then(finish).catch(fail);
+                            }).then((next) => {
+                              if (requestIsCurrent(requestApi)) finish(next, key);
+                            }).catch((caught: unknown) => {
+                              if (requestIsCurrent(requestApi)) fail(caught, action);
+                            });
                           }}
                         >Use Wollipog Default</button>
                       )}
                       <span className="agent-defaults-action-spacer" />
-                      <button type="button" className="btn sm" disabled={busy} onClick={() => {
-                        setEditing(null);
-                        setDraft({});
-                        setError(null);
-                      }}>Cancel</button>
+                      <button type="button" className="btn sm" disabled={busy} onClick={() => closeEditor(key)}>Cancel</button>
                       <button
                         type="button"
                         className="btn primary sm"
                         disabled={busy || !validDraft || option.installations.length === 0}
-                        onClick={() => {
+                        onClick={(event) => {
+                          const action = event.currentTarget;
+                          const requestApi = api;
+                          invalidateLoads();
+                          busyRef.current = true;
                           setBusy(true);
-                          void api.updateAgentHarnessDefault({
+                          setMutationError(null);
+                          void requestApi.updateAgentHarnessDefault({
                             agentId: option.agentId,
                             driver: option.driver,
                             context: option.context,
                             config: draft,
-                          }).then(finish).catch(fail);
+                          }).then((next) => {
+                            if (requestIsCurrent(requestApi)) finish(next, key);
+                          }).catch((caught: unknown) => {
+                            if (requestIsCurrent(requestApi)) fail(caught, action);
+                          });
                         }}
                       >Save</button>
                     </div>
