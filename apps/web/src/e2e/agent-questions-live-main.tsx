@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { SessionView } from "@wollipog/protocol";
 import { createApiClient } from "../api.js";
@@ -23,9 +23,15 @@ function LiveQuestionFixture() {
   })), []);
   const [session, setSession] = useState<SessionView | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [inlineQuestionRequestId, setInlineQuestionRequestId] = useState<string | null>(null);
   const fallbackFocusRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const questionEventRef = useRef<Extract<TimelineItem, { kind: "question" }> | null>(null);
+  const transcriptContext = useMemo<TimelineItem[]>(() => Array.from({ length: 48 }, (_, index) => (
+    index % 2 === 0
+      ? { kind: "user_message", id: index + 1, text: `Earlier question ${index / 2 + 1}` }
+      : { kind: "agent_message", id: index + 1, text: `Earlier answer ${(index + 1) / 2}` }
+  )), []);
   const queuedPrompts = [
     { id: "queued-1", text: "Keep this long message queued until both structured questions are answered." },
     { id: "queued-2", text: "The complete two-question form must remain visible and reachable above the composer." },
@@ -42,18 +48,24 @@ function LiveQuestionFixture() {
   }, [client]);
 
   const pendingQuestion = session?.pendingApproval?.kind === "question" ? session.pendingApproval : null;
+  const handleQuestionAvailabilityChange = useCallback((requestId: string, available: boolean) => {
+    setInlineQuestionRequestId((current) => available
+      ? current === requestId ? current : requestId
+      : current === requestId ? null : current);
+  }, []);
   if (pendingQuestion) {
     questionEventRef.current = {
       kind: "question",
-      id: 1,
+      id: 10_000,
       requestId: pendingQuestion.requestId,
       questions: pendingQuestion.questions ?? [],
     };
   }
   const questionEvent = questionEventRef.current;
   const timelineItems: TimelineItem[] = questionEvent
-    ? [{ ...questionEvent, answered: pendingQuestion ? undefined : true }]
-    : [];
+    ? [...transcriptContext, { ...questionEvent, answered: pendingQuestion ? undefined : true }]
+    : transcriptContext;
+  const questionInTimeline = pendingQuestion != null && inlineQuestionRequestId === pendingQuestion.requestId;
 
   return (
     <ApiProvider client={client}>
@@ -72,11 +84,11 @@ function LiveQuestionFixture() {
                 alternateFallbackFocusRef={scrollRef}
                 onSessionUpdate={setSession}
                 showKeyHints={false}
-                questionInTimeline={false}
+                questionInTimeline={questionInTimeline}
               />
               <div className="detail-main">
                 <div className="detail-reader">
-                  <div className="detail-scroll" ref={scrollRef} tabIndex={0}>
+                  <div className="detail-scroll measured-virtual-scroll" ref={scrollRef} tabIndex={0}>
                     {timelineItems.length > 0 && (
                       <EventTimeline
                         items={timelineItems}
@@ -84,7 +96,12 @@ function LiveQuestionFixture() {
                         historyKey="agent-question-live-e2e"
                         questionContext={{
                           sessionId: session.id,
-                          pendingQuestion: null,
+                          pendingQuestion: pendingQuestion ? {
+                            requestId: pendingQuestion.requestId,
+                            questions: pendingQuestion.questions ?? [],
+                          } : null,
+                          questionInTimeline,
+                          onPendingQuestionAvailabilityChange: handleQuestionAvailabilityChange,
                           runnerOnline: true,
                           onSessionUpdate: setSession,
                           showKeyHints: false,

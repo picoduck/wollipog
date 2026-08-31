@@ -159,6 +159,7 @@ test("the pending question replaces its matching timeline card without a duplica
     questionContext: {
       sessionId: session.id,
       pendingQuestion: { requestId: "ask-1", questions },
+      questionInTimeline: true,
       runnerOnline: true,
     },
   }));
@@ -196,6 +197,7 @@ test("a resolved question keeps one compact outcome card at the same timeline ro
     questionContext: {
       sessionId: session.id,
       pendingQuestion: { requestId: "ask-1", questions },
+      questionInTimeline: true,
       runnerOnline: true,
     },
   }));

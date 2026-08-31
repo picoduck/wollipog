@@ -161,6 +161,8 @@ interface MeasuredVirtualListProps<T> {
    * that pin never fires — while the id the container points at must refer to a mounted element.
    */
   pinnedKey?: string | null;
+  /** Reports when the explicitly pinned row is mounted in a measurement-ready list. */
+  onPinnedAvailabilityChange?: (key: string | null, available: boolean) => void;
   /**
    * Roles for the virtual root and its positioned wrappers.
    *
@@ -266,12 +268,19 @@ function StaticList<T>({
   rowRole = "listitem",
   revealRequest,
   onRevealHandled,
+  pinnedKey = null,
+  onPinnedAvailabilityChange,
 }: MeasuredVirtualListProps<T>) {
   const revealExists = revealRequest != null && items.some((item) => getKey(item) === revealRequest.key);
+  const pinnedExists = pinnedKey != null && items.some((item) => getKey(item) === pinnedKey);
   useEffect(() => {
     if (!revealRequest) return;
     onRevealHandled?.(revealRequest.requestId, revealExists ? "revealed" : "unresolved");
   }, [onRevealHandled, revealExists, revealRequest]);
+  useLayoutEffect(() => {
+    onPinnedAvailabilityChange?.(pinnedKey, pinnedExists);
+    return () => onPinnedAvailabilityChange?.(pinnedKey, false);
+  }, [onPinnedAvailabilityChange, pinnedExists, pinnedKey]);
   return (
     <div className={className} role={rootRole} aria-label={ariaLabel} data-virtual-kind={dataKind}>
       {items.map((item, index) => (
@@ -303,6 +312,7 @@ function VirtualList<T>({
   ariaLabel,
   pinDraggedRow = false,
   pinnedKey = null,
+  onPinnedAvailabilityChange,
   rowGap = 0,
   dataKind,
   rootRole = "list",
@@ -358,6 +368,9 @@ function VirtualList<T>({
   onAnchorLostRef.current = onAnchorLost;
   const onRevealHandledRef = useRef(onRevealHandled);
   onRevealHandledRef.current = onRevealHandled;
+  const onPinnedAvailabilityChangeRef = useRef(onPinnedAvailabilityChange);
+  onPinnedAvailabilityChangeRef.current = onPinnedAvailabilityChange;
+  const reportedPinnedAvailabilityRef = useRef<{ key: string | null; available: boolean } | null>(null);
   const clearAnchorFrameRef = useRef<number | null>(null);
   const widthAnchorFrameRef = useRef<number | null>(null);
   const widthAnchorRef = useRef<VirtualScrollAnchor | null>(null);
@@ -465,6 +478,23 @@ function VirtualList<T>({
   });
   const initialMeasurementVirtualizerRef = useRef(virtualizer);
   initialMeasurementVirtualizerRef.current = virtualizer;
+  const mountedVirtualRows = virtualizer.getVirtualItems();
+  const pinnedRowMounted = pinnedKey != null && mountedVirtualRows.some((row) => row.key === pinnedKey);
+  useLayoutEffect(() => {
+    const available = initialMeasurementsReady && pinnedRowMounted;
+    const previous = reportedPinnedAvailabilityRef.current;
+    if (previous?.key === pinnedKey && previous.available === available) return;
+    if (previous?.key != null && previous.key !== pinnedKey && previous.available) {
+      onPinnedAvailabilityChangeRef.current?.(previous.key, false);
+    }
+    reportedPinnedAvailabilityRef.current = { key: pinnedKey, available };
+    onPinnedAvailabilityChangeRef.current?.(pinnedKey, available);
+  }, [initialMeasurementsReady, itemsVersion, pinnedKey, pinnedRowMounted]);
+  useLayoutEffect(() => () => {
+    const reported = reportedPinnedAvailabilityRef.current;
+    if (reported?.available) onPinnedAvailabilityChangeRef.current?.(reported.key, false);
+    reportedPinnedAvailabilityRef.current = null;
+  }, []);
   // Every external scrollRef host carries `measured-virtual-scroll`, disabling native anchoring.
   // Logical-key corrections and TanStack's measured-row adjustments must be the only scroll
   // owners; native anchoring sees transformed rows as ordinary flow and applies a third correction.
@@ -1252,7 +1282,7 @@ function VirtualList<T>({
         width: "100%",
       }}
     >
-      {virtualizer.getVirtualItems().map((virtualRow) => {
+      {mountedVirtualRows.map((virtualRow) => {
         const item = items[virtualRow.index]!;
         const visible = initialMeasurementsReady && visibleRange != null &&
           virtualRow.index >= visibleRange.startIndex && virtualRow.index <= visibleRange.endIndex;

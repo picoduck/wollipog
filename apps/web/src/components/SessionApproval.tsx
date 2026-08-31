@@ -180,13 +180,18 @@ function requestRegionFor(element: Element | null): HTMLElement | null {
   return element?.closest<HTMLElement>("[data-session-request-id]") ?? null;
 }
 
-function enabledRequestControl(sessionId: string, requestId: string): HTMLElement | null {
+function enabledRequestControl(
+  sessionId: string,
+  requestId: string,
+  preferredControl: string | null = null,
+): HTMLElement | null {
   const regions = document.querySelectorAll<HTMLElement>("[data-session-request-id]");
   const region = [...regions].find((candidate) => candidate.dataset.sessionRequestId === requestId &&
     candidate.dataset.sessionRequestSession === sessionId);
-  return region?.querySelector<HTMLElement>(
+  const controls = [...region?.querySelectorAll<HTMLElement>(
     'button:not(:disabled):not([aria-disabled="true"]), [role="radio"][tabindex="0"]:not(:disabled):not([aria-disabled="true"]), [role="checkbox"]:not(:disabled):not([aria-disabled="true"]), input:not(:disabled)',
-  ) ?? null;
+  ) ?? []];
+  return controls.find((control) => control.dataset.sessionRequestControl === preferredControl) ?? controls[0] ?? null;
 }
 
 /** Persistent focus and live-announcement owner for approvals in either presentation. */
@@ -217,6 +222,7 @@ function SessionRequestCoordinator({
     ? document.activeElement : null;
   const focusedRequestBeforeRender = requestRegionFor(focusedElementBeforeRender)?.dataset.sessionRequestId ?? null;
   const focusedRequestSessionBeforeRender = requestRegionFor(focusedElementBeforeRender)?.dataset.sessionRequestSession ?? null;
+  const focusedControlBeforeRender = focusedElementBeforeRender?.dataset.sessionRequestControl ?? null;
   const ownedFocusBeforeRender = previousRequestRef.current !== null &&
     focusedRequestBeforeRender === previousRequestRef.current && focusedRequestSessionBeforeRender === sessionId;
   const focusFallback = () => {
@@ -237,7 +243,11 @@ function SessionRequestCoordinator({
     const representationMoved = !requestChanged && ownedFocusBeforeRender &&
       (activeRegion?.dataset.sessionRequestId !== requestId || activeRegion?.dataset.sessionRequestSession !== sessionId);
     if (focusDestination === "request" || representationMoved) {
-      const target = requestId ? enabledRequestControl(sessionId, requestId) : null;
+      const target = requestId ? enabledRequestControl(
+        sessionId,
+        requestId,
+        representationMoved ? focusedControlBeforeRender : null,
+      ) : null;
       if (target) target.focus();
       else focusFallback();
       return;
@@ -518,6 +528,7 @@ export function SessionQuestionBanner({
           <button
             className="btn ghost sm"
             type="button"
+            data-session-request-control="dismiss"
             aria-describedby={!runnerOnline ? availabilityId : undefined}
             disabled={busy !== null || !runnerOnline}
             onClick={() => void dismiss()}
@@ -528,6 +539,7 @@ export function SessionQuestionBanner({
             <button
               className="btn sm primary"
               type="button"
+              data-session-request-control="submit"
               aria-describedby={!runnerOnline ? availabilityId : undefined}
               disabled={busy !== null || !runnerOnline || !complete}
               onClick={() => void submit()}
@@ -612,6 +624,7 @@ export function SessionQuestionBanner({
                       <button
                         key={option.label}
                         type="button"
+                        data-session-request-control={`question:${question.id}:option:${optionIndex}`}
                         role={question.multiSelect ? "checkbox" : "radio"}
                         aria-checked={on}
                         aria-disabled={controlsDisabled || undefined}
@@ -644,6 +657,7 @@ export function SessionQuestionBanner({
                   {question.required === false && <span className="muted sm"> (optional)</span>}
                   <input
                     className="input question-input"
+                    data-session-request-control={`question:${question.id}:input`}
                     aria-labelledby={`${questionLabelId} ${responseLabelId}`}
                     aria-describedby={inputDescriptionIds}
                     aria-invalid={showResponseError ? true : undefined}
@@ -691,6 +705,7 @@ export function SessionQuestionBanner({
                     {question.required === false && <span className="muted sm"> (optional)</span>}
                     <input
                       className="input question-input question-text-input"
+                      data-session-request-control={`question:${question.id}:input`}
                       aria-labelledby={`${questionLabelId} ${responseLabelId}`}
                       aria-describedby={textInputDescriptionIds}
                       aria-invalid={showResponseError ? true : undefined}

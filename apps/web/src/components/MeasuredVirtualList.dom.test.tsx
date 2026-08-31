@@ -121,6 +121,31 @@ function AnchorRecoveryFixture({
   );
 }
 
+function PinnedAvailabilityFixture({
+  pinnedKey,
+  onAvailabilityChange,
+}: {
+  pinnedKey: string;
+  onAvailabilityChange: (key: string | null, available: boolean) => void;
+}) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  return (
+    <div ref={scrollRef} data-testid="pinned-reader" style={{ overflow: "auto", height: 600 }}>
+      <MeasuredVirtualList
+        items={["row-a", "row-b"]}
+        getKey={(item) => item}
+        renderItem={(item) => item}
+        scrollRef={scrollRef}
+        estimateSize={() => 72}
+        overscan={2}
+        pinnedKey={pinnedKey}
+        onPinnedAvailabilityChange={onAvailabilityChange}
+        className="pinned-list"
+      />
+    </div>
+  );
+}
+
 test("a nonzero initial list offset does not call flushSync from the passive setup effect", async () => {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
@@ -141,6 +166,39 @@ test("a nonzero initial list offset does not call flushSync from the passive set
   } finally {
     console.error = originalError;
     await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("a mounted pin reports key replacement and unmount cleanup", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const reports: Array<[string | null, boolean]> = [];
+  const onAvailabilityChange = (key: string | null, available: boolean) => reports.push([key, available]);
+  try {
+    await act(async () => {
+      root.render(<PinnedAvailabilityFixture pinnedKey="row-a" onAvailabilityChange={onAvailabilityChange} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.deepEqual(reports.at(-1), ["row-a", true]);
+
+    await act(async () => {
+      root.render(<PinnedAvailabilityFixture pinnedKey="row-b" onAvailabilityChange={onAvailabilityChange} />);
+      await Promise.resolve();
+    });
+    let lastAvailableA = -1;
+    for (let index = 0; index < reports.length; index += 1) {
+      if (reports[index]?.[0] === "row-a" && reports[index]?.[1] === true) lastAvailableA = index;
+    }
+    const replacementReports = reports.slice(lastAvailableA);
+    assert.deepEqual(replacementReports, [["row-a", true], ["row-a", false], ["row-b", true]]);
+
+    await act(async () => root.unmount());
+    assert.deepEqual(reports.at(-1), ["row-b", false]);
+  } finally {
+    if (container.childNodes.length > 0) await act(async () => root.unmount());
     container.remove();
   }
 });

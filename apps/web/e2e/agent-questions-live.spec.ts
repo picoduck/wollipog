@@ -124,6 +124,18 @@ async function expectQuestionControlsInsideCard(page: Page): Promise<void> {
   expect(["auto", "visible"]).toContain(overflow.overflowY);
   await expect(card.locator("xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' detail-chat ')][1]"))
     .toHaveCount(1);
+  await expect(card.locator("xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' detail-scroll ')][1]"))
+    .toHaveCount(1);
+  await expect(page.locator('[data-virtual-kind="timeline"]')).toHaveAttribute("data-virtual-total", "49");
+  const initiallyInViewport = await card.evaluate((element) => {
+    const scroll = element.closest(".detail-scroll");
+    if (!scroll) return true;
+    const cardRect = element.getBoundingClientRect();
+    const scrollRect = scroll.getBoundingClientRect();
+    return cardRect.bottom > scrollRect.top && cardRect.top < scrollRect.bottom;
+  });
+  expect(initiallyInViewport).toBe(false);
+  await card.scrollIntoViewIfNeeded();
 
   const rects = await page.locator(
     ".question-list, .question-block, .question-text, .question-option, .question-input",
@@ -502,7 +514,10 @@ for (const viewport of [
         const otherResponses = page.getByLabel("Other Response");
         await expect(page.getByRole("region", { name: "Agent Questions" })).toBeVisible();
         await expect(page.getByRole("region", { name: "Agent Questions" })).toHaveCount(1);
-        await expect(page.locator(".tl-question")).toContainText("awaiting answer");
+        await expect(page.locator(".tl-question")).toHaveCount(0);
+        await expect(page.getByRole("region", { name: "Agent Questions" })
+          .locator("xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' detail-scroll ')][1]"))
+          .toHaveCount(1);
         await expect(page.getByLabel("Queued Messages").locator(".queued-item")).toHaveCount(queuedMessages.length);
         await expect(page.getByLabel("Queued Messages").locator(".queued-text")).toHaveText(queuedMessages);
         await expectQuestionControlsInsideCard(page);
@@ -528,6 +543,7 @@ for (const viewport of [
           .getByText("Should I delete the remote branch after merging?", { exact: false })).toBeVisible();
         await expect(deleteBranch).toBeVisible();
         await expect(keepBranch).toBeVisible();
+        await keepBranch.scrollIntoViewIfNeeded();
         await expect(deleteBranch).toBeInViewport();
         await expect(keepBranch).toBeInViewport();
         await otherResponses.nth(1).fill("Keep it for a follow-up");
