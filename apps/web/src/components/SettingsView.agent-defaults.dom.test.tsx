@@ -531,9 +531,9 @@ test("Agent Harness mutations outrank overlapping discovery reads without disabl
 test("Agent Harness mutation failures refetch an invalidated discovery revision", async () => {
   let getCalls = 0;
   let resolvePut!: (response: Response) => void;
-  let resolveInvalidatedRefresh!: (response: Response) => void;
   const put = new Promise<Response>((resolve) => { resolvePut = resolve; });
-  const invalidatedRefresh = new Promise<Response>((resolve) => { resolveInvalidatedRefresh = resolve; });
+  const removed = view();
+  removed.defaults = removed.defaults.filter((option) => option.agentId !== "codex");
   const fixture = await renderPanel({
     instanceId: "test",
     publicOrigin: "http://localhost",
@@ -545,8 +545,7 @@ test("Agent Harness mutation failures refetch an invalidated discovery revision"
         status: 200,
         headers: { "content-type": "application/json" },
       });
-      if (getCalls === 2) return invalidatedRefresh;
-      return new Response(JSON.stringify(view()), {
+      return new Response(JSON.stringify(removed), {
         status: 200,
         headers: { "content-type": "application/json" },
       });
@@ -557,6 +556,7 @@ test("Agent Harness mutation failures refetch an invalidated discovery revision"
     await act(async () => buttonNamed(fixture.container, "Codex App Server").click());
     await act(async () => buttonNamed(fixture.container, "Save").click());
     await fixture.render({ revision: 1 });
+    assert.equal(buttonNamed(fixture.container, "Codex App Server").getAttribute("aria-expanded"), "true");
     await act(async () => {
       resolvePut(new Response(JSON.stringify({ error: "save rejected" }), {
         status: 409,
@@ -566,16 +566,8 @@ test("Agent Harness mutation failures refetch an invalidated discovery revision"
     });
     assert.match(fixture.container.textContent ?? "", /0 Harness Defaults Configured/);
     assert.match(fixture.container.querySelector('[role="alert"]')?.textContent ?? "", /save rejected/);
+    assert.equal(fixture.container.textContent?.includes("Codex App Server"), false);
     assert.equal(getCalls, 3);
-
-    await act(async () => {
-      resolveInvalidatedRefresh(new Response(JSON.stringify(view(true)), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }));
-      await invalidatedRefresh;
-    });
-    assert.match(fixture.container.textContent ?? "", /0 Harness Defaults Configured/);
   } finally {
     await act(async () => fixture.root.unmount());
     fixture.container.remove();

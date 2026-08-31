@@ -451,6 +451,7 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
   editingRef.current = editing;
   const [draft, setDraft] = useState<AgentHarnessDefaultConfig>({});
   const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [mutationError, setMutationError] = useState<string | null>(null);
@@ -474,6 +475,7 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
     try {
       const next = await requestApi.agentHarnessDefaults();
       if (!requestIsCurrent(requestApi, generation)) return false;
+      if (busyRef.current) return false;
       const editingKey = editingRef.current;
       setView(next);
       if (editingKey) {
@@ -504,6 +506,7 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
     setExpanded(false);
     setEditing(null);
     setDraft({});
+    busyRef.current = false;
     setBusy(false);
     setMutationError(null);
     void load(true);
@@ -549,6 +552,7 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
     const restoreFocus = document.activeElement === document.body || !!editor?.contains(document.activeElement);
     invalidateLoads();
     setView(next);
+    busyRef.current = false;
     setBusy(false);
     setEditing(null);
     setDraft({});
@@ -556,6 +560,7 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
     if (restoreFocus) focusHarnessRow(key);
   };
   const fail = (caught: unknown, action: HTMLButtonElement) => {
+    busyRef.current = false;
     setBusy(false);
     setMutationError(caught instanceof Error ? caught.message : "Could not save the Agent Harness default.");
     restoreFocusIfLost(() => action);
@@ -601,6 +606,7 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
         <div id={controlsId} className="agent-defaults-list" aria-busy={loading || busy || undefined}>
           <div className="agent-defaults-toolbar">
             {loadError && <span className="settings-inline-error" role="alert">Could not refresh Agent Harness defaults: {loadError}</span>}
+            {mutationError && !editing && <span className="settings-inline-error" role="alert">{mutationError}</span>}
             <span className="agent-defaults-action-spacer" />
             <button type="button" className="btn ghost sm" disabled={loading || busy} onClick={(event) => {
               const refresh = event.currentTarget;
@@ -723,6 +729,7 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
                             const action = event.currentTarget;
                             const requestApi = api;
                             invalidateLoads();
+                            busyRef.current = true;
                             setBusy(true);
                             setMutationError(null);
                             void requestApi.deleteAgentHarnessDefault({
@@ -747,6 +754,7 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
                           const action = event.currentTarget;
                           const requestApi = api;
                           invalidateLoads();
+                          busyRef.current = true;
                           setBusy(true);
                           setMutationError(null);
                           void requestApi.updateAgentHarnessDefault({
