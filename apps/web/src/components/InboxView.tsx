@@ -477,11 +477,14 @@ export function InboxView({
   const displayedSelectedSession = displayedSelection ? sessions.get(displayedSelection) ?? null : null;
   const expanded = expandedSessionId !== null;
   useEffect(() => {
-    if (!expanded) return;
+    // Board mode clears like expansion does: unmounting the list can swallow pointerleave, and a
+    // stranded pointer id would block the lease release while liveIds kept extending the hold —
+    // activity received on the board would then resurface in stale list order.
+    if (!expanded && !boardMode) return;
     activePointerIdsRef.current.clear();
     targetPointerIdsRef.current.clear();
     clearHeldOrder();
-  }, [clearHeldOrder, expanded]);
+  }, [boardMode, clearHeldOrder, expanded]);
   const surfaceSessionId = expandedSessionId ?? selectedSession?.id ?? null;
 
   useLayoutEffect(() => {
