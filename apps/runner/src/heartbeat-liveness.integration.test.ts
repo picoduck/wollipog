@@ -51,6 +51,19 @@ async function stopChild(child: ChildProcess): Promise<void> {
   await new Promise<void>((resolvePromise) => child.once("exit", () => resolvePromise()));
 }
 
+async function waitForSocketClose(
+  socket: import("ws").WebSocket,
+  timeoutMs: number,
+  context: () => string,
+): Promise<void> {
+  if (socket.readyState >= 2) return;
+  await withTimeout(
+    new Promise<void>((resolvePromise) => socket.once("close", () => resolvePromise())),
+    timeoutMs,
+    context,
+  );
+}
+
 interface FakeControlPlane {
   port: number;
   server: Server;
@@ -173,6 +186,13 @@ test(
       output,
       /control plane heartbeat unanswered \(\d+ missed pongs\) — terminating socket to reconnect/,
       `runner did not terminate the half-open socket\n${output}`,
+    );
+    // The runner logs its local terminate before the close frame reaches this peer. Wait for the
+    // server-side close event rather than assuming stdout and WebSocket propagation are ordered.
+    await waitForSocketClose(
+      first,
+      30_000,
+      () => `runner logged terminate but the original socket stayed open\n${output}`,
     );
     // ws marks a terminated socket CLOSED (readyState 3) rather than leaving it OPEN.
     assert.ok(first.readyState >= 2, "the runner's original socket was torn down");
