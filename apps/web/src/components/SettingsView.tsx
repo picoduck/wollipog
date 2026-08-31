@@ -482,7 +482,8 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
           setDraft((current) => repairDraft(refreshed, current));
         } else {
           const editor = document.getElementById(`agent-default-${encodeURIComponent(editingKey)}`);
-          const restoreFocus = !!editor?.contains(document.activeElement);
+          const restoreFocus = !!editor?.contains(document.activeElement) ||
+            harnessRowRefs.current.get(editingKey) === document.activeElement;
           setEditing(null);
           setDraft({});
           if (restoreFocus) requestAnimationFrame(() => triggerRef.current?.focus());
@@ -568,7 +569,7 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
         description={summary}
         expanded={expanded}
         controls={expanded && view ? controlsId : undefined}
-        disabled={!view}
+        disabled={!view || busy}
         buttonRef={triggerRef}
         onClick={() => {
           setExpanded((current) => !current);

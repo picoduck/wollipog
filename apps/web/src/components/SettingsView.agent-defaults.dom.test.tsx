@@ -447,7 +447,7 @@ test("Agent Harness discovery refresh repairs drafts and closes a removed editor
     assert.equal(fixture.container.querySelector('[aria-label^="Codex App Server Reasoning Effort:"]'), null);
     assert.match(buttonNamed(fixture.container, "Codex App Server Permission Mode").getAttribute("aria-label") ?? "", /Full Access/);
 
-    buttonNamed(fixture.container, "Codex App Server Model").focus();
+    buttonNamed(fixture.container, "Codex App Server").focus();
     await fixture.render({ revision: 2 });
     await nextFrame();
     assert.equal(fixture.container.textContent?.includes("Codex App Server"), false);
@@ -498,6 +498,7 @@ test("Agent Harness mutations outrank overlapping discovery reads without disabl
     const save = buttonNamed(fixture.container, "Save");
     save.focus();
     await act(async () => save.click());
+    assert.equal(buttonNamed(fixture.container, "Default Models, Efforts, and Permissions").disabled, true);
     assert.equal(buttonNamed(fixture.container, "Codex App Server").disabled, true);
     assert.equal(buttonNamed(fixture.container, "Claude Code").disabled, true);
     await fixture.render({ revision: 2 });
