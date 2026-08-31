@@ -1074,7 +1074,10 @@ test("Agent Harness defaults are keyboard-operable, cascade by model, and keep o
   await defaults.focus();
   await page.keyboard.press("Enter");
   await expect(defaults).toHaveAttribute("aria-expanded", "true");
-  await expect(page.getByRole("button", { name: "Refresh" })).toBeVisible();
+  const refresh = page.getByRole("button", { name: "Refresh" });
+  await expect(refresh).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect((await refresh.boundingBox())?.height).toBeGreaterThanOrEqual(44);
 
   const harnessRows = page.locator(".agent-defaults-item > .ui-row-nav");
   const codex = harnessRows.filter({ hasText: "Codex App Server" });

@@ -11464,7 +11464,8 @@ body.shell-dock-dragging * {
   .agent-defaults-editor { grid-template-columns: minmax(0, 1fr); }
   .agent-defaults-actions { grid-column: auto; }
   .agent-defaults-actions .agent-defaults-action-spacer { display: none; }
-  .agent-defaults-actions .btn { min-height: 44px; }
+  .agent-defaults-actions .btn,
+  .agent-defaults-toolbar .btn { min-height: 44px; }
 }
 
 .session-naming-editor {

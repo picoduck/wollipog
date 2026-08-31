@@ -440,6 +440,7 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
   const loadGeneration = useRef(0);
   const previousDiscoveryRevision = useRef(discoveryRevision);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const retryRef = useRef<HTMLButtonElement>(null);
   const harnessRowRefs = useRef(new Map<string, HTMLButtonElement>());
   const [view, setView] = useState<AgentHarnessDefaultsView | null>(null);
   const viewRef = useRef(view);
@@ -526,6 +527,11 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
   const focusHarnessRow = (key: string) => {
     requestAnimationFrame(() => (harnessRowRefs.current.get(key) ?? triggerRef.current)?.focus());
   };
+  const restoreFocusIfLost = (target: () => HTMLElement | null | undefined) => {
+    requestAnimationFrame(() => {
+      if (document.activeElement === document.body) target()?.focus();
+    });
+  };
   const closeEditor = (key: string) => {
     setEditing(null);
     setDraft({});
@@ -538,17 +544,21 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
     setLoadError(null);
   };
   const finish = (next: AgentHarnessDefaultsView, key: string) => {
+    const editor = document.getElementById(`agent-default-${encodeURIComponent(key)}`);
+    const restoreFocus = document.activeElement === document.body || !!editor?.contains(document.activeElement);
     invalidateLoads();
     setView(next);
     setBusy(false);
     setEditing(null);
     setDraft({});
     setMutationError(null);
-    focusHarnessRow(key);
+    if (restoreFocus) focusHarnessRow(key);
   };
-  const fail = (caught: unknown) => {
+  const fail = (caught: unknown, action: HTMLButtonElement) => {
     setBusy(false);
     setMutationError(caught instanceof Error ? caught.message : "Could not save the Agent Harness default.");
+    restoreFocusIfLost(() => action);
+    void load(false);
   };
 
   return (
@@ -573,10 +583,11 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
           description={
             <>
               Agent Harness defaults could not be loaded.{" "}
-              <button type="button" className="btn ghost sm" disabled={loading} onClick={(event) => {
-                const restoreFocus = document.activeElement === event.currentTarget;
+              <button ref={retryRef} type="button" className="btn ghost sm" disabled={loading} onClick={(event) => {
+                const retry = event.currentTarget;
+                const restoreFocus = document.activeElement === retry;
                 void load(true).then((loaded) => {
-                  if (loaded && restoreFocus) requestAnimationFrame(() => triggerRef.current?.focus());
+                  if (restoreFocus) restoreFocusIfLost(() => loaded ? triggerRef.current : retryRef.current);
                 });
               }}>
                 {loading ? "Retrying…" : "Retry"}
@@ -590,7 +601,13 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
           <div className="agent-defaults-toolbar">
             {loadError && <span className="settings-inline-error" role="alert">Could not refresh Agent Harness defaults: {loadError}</span>}
             <span className="agent-defaults-action-spacer" />
-            <button type="button" className="btn ghost sm" disabled={loading || busy} onClick={() => void load(false)}>
+            <button type="button" className="btn ghost sm" disabled={loading || busy} onClick={(event) => {
+              const refresh = event.currentTarget;
+              const restoreFocus = document.activeElement === refresh;
+              void load(false).then(() => {
+                if (restoreFocus) restoreFocusIfLost(() => refresh);
+              });
+            }}>
               {loading ? "Refreshing…" : "Refresh"}
             </button>
           </div>
@@ -700,7 +717,8 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
                           type="button"
                           className="btn sm"
                           disabled={busy}
-                          onClick={() => {
+                          onClick={(event) => {
+                            const action = event.currentTarget;
                             const requestApi = api;
                             invalidateLoads();
                             setBusy(true);
@@ -712,7 +730,7 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
                             }).then((next) => {
                               if (requestIsCurrent(requestApi)) finish(next, key);
                             }).catch((caught: unknown) => {
-                              if (requestIsCurrent(requestApi)) fail(caught);
+                              if (requestIsCurrent(requestApi)) fail(caught, action);
                             });
                           }}
                         >Use Wollipog Default</button>
@@ -723,7 +741,8 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
                         type="button"
                         className="btn primary sm"
                         disabled={busy || !validDraft || option.installations.length === 0}
-                        onClick={() => {
+                        onClick={(event) => {
+                          const action = event.currentTarget;
                           const requestApi = api;
                           invalidateLoads();
                           setBusy(true);
@@ -736,7 +755,7 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
                           }).then((next) => {
                             if (requestIsCurrent(requestApi)) finish(next, key);
                           }).catch((caught: unknown) => {
-                            if (requestIsCurrent(requestApi)) fail(caught);
+                            if (requestIsCurrent(requestApi)) fail(caught, action);
                           });
                         }}
                       >Save</button>
