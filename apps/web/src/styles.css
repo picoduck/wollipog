@@ -1690,7 +1690,10 @@ textarea {
   flex: 0 1 auto;
   max-width: 220px;
   min-width: 50px;
-  padding-inline-end: 34px;
+  padding-inline-end: 24px;
+  /* Keep the shared breadcrumb rhythm after the separator, but pull the separator closer to this
+     compact trailing control so its right side does not read as a second actions gutter. */
+  margin-inline-end: -8px;
 }
 .crumb-project > .cctx-item {
   min-width: 0;
@@ -1708,9 +1711,10 @@ textarea {
   right: 0;
   display: inline-flex;
   align-items: center;
-  justify-content: flex-end;
-  width: 34px;
-  padding: 2px 2px 2px 12px;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 5px;
   border: 0;
   transform: translateY(-50%);
   background: linear-gradient(90deg, transparent, var(--bg) 42%);
