@@ -73,7 +73,7 @@ test("no user-facing string calls a Machine a box", () => {
 });
 
 /**
- * CLAUDE.md: labels are Title Case; hint text, tooltips, and prose stay in sentence case.
+ * AGENTS.md: labels are Title Case; hint text, tooltips, and prose stay in sentence case.
  *
  * Asserted as exact expected strings rather than by heuristic. The previous version allowed "at
  * most one capitalised word after discarding acronyms and punctuation", which failed in both
@@ -96,7 +96,7 @@ test("known placeholders read as hint text, not labels", () => {
 });
 
 /**
- * Tooltips are explicitly listed under sentence case in CLAUDE.md. An earlier revision of this PR
+ * Tooltips are explicitly listed under sentence case in AGENTS.md. An earlier revision of this PR
  * Title-Cased them, which was a straight misreading of the rule.
  */
 const EXPECTED_TOOLTIPS: ReadonlyArray<[string, string]> = [
