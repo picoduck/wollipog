@@ -111,7 +111,11 @@ function archiveResponse(rows: SessionView[]): Awaited<ReturnType<ApiClient["arc
 
 let sequence = 0;
 
-async function mount(sessions: SessionView[], overrides: Partial<ApiClient> = {}) {
+async function mount(
+  sessions: SessionView[],
+  overrides: Partial<ApiClient> = {},
+  options: { initialConnection?: "online" | "unauthorized" } = {},
+) {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
@@ -187,7 +191,11 @@ async function mount(sessions: SessionView[], overrides: Partial<ApiClient> = {}
     );
     await Promise.resolve();
   });
-  await act(async () => { socket.push(snapshot()); await Promise.resolve(); });
+  await act(async () => {
+    if (options.initialConnection === "unauthorized") socket.onclose?.({ code: 1008 });
+    else socket.push(snapshot());
+    await Promise.resolve();
+  });
   return {
     container,
     root,
@@ -493,6 +501,32 @@ test("reconnecting during a pending archive load schedules exactly one post-load
   await fixture.unmount();
 });
 
+test("first online connection revalidates a catalog loaded while unauthorized", async () => {
+  const stale = session(42, { id: "initial-unauthorized-stale", title: "Initial Unauthorized Stale" });
+  const fresh = session(43, { id: "initial-unauthorized-fresh", title: "Initial Unauthorized Fresh" });
+  let current = stale;
+  let calls = 0;
+  const fixture = await mount([], {
+    archiveSessionPage: async () => {
+      calls += 1;
+      return archiveResponse([current]);
+    },
+  }, { initialConnection: "unauthorized" });
+  assert.equal(calls, 1);
+  assert.match(fixture.container.textContent ?? "", /Initial Unauthorized Stale/);
+
+  current = fresh;
+  await act(async () => {
+    fixture.socket.push(snapshot());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  assert.equal(calls, 2);
+  assert.match(fixture.container.textContent ?? "", /Initial Unauthorized Fresh/);
+  assert.doesNotMatch(fixture.container.textContent ?? "", /Initial Unauthorized Stale/);
+  await fixture.unmount();
+});
+
 test("a live title update removes a row that no longer matches the active query", async () => {
   const rows = [session(1, { title: "Needle Session" })];
   const fixture = await mount(rows);
@@ -590,6 +624,52 @@ test("an unresolved live Location preserves the server facet match until bounded
 
   assert.equal(calls, callsBeforeUpdate + 1);
   assert.match(fixture.container.textContent ?? "", /Server Location Match/);
+  await fixture.unmount();
+});
+
+test("an unresolved Workspace name preserves the server Location facet until bounded revalidation", async () => {
+  let current = session(44, {
+    id: "resolved-workspace-location",
+    title: "Server Workspace Match",
+    projectLocationId: null,
+    workspaceId: "workspace-resolved-only-on-server",
+    workspaceName: null,
+  });
+  let calls = 0;
+  const serverResponse = () => ({
+    ...archiveResponse([current]),
+    metadata: {
+      [current.id]: { project: "Wollipog", location: "Resolved Workspace", agent: "Codex App Server" },
+    },
+    facets: { projects: ["Wollipog"], locations: ["Resolved Workspace"], agents: ["Codex App Server"] },
+  });
+  const fixture = await mount([], {
+    archiveSessionPage: async () => {
+      calls += 1;
+      return serverResponse();
+    },
+  });
+  const location = fixture.container.querySelector<HTMLButtonElement>('button[aria-label^="Location:"]')!;
+  await act(async () => { location.click(); });
+  const resolvedWorkspace = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+    .find((option) => option.textContent?.trim() === "Resolved Workspace");
+  assert.ok(resolvedWorkspace);
+  await act(async () => {
+    resolvedWorkspace.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  const callsBeforeUpdate = calls;
+
+  current = { ...current, updatedAt: current.updatedAt + 1 };
+  await act(async () => {
+    fixture.socket.push({ type: "session_upsert", session: current });
+    await Promise.resolve();
+  });
+  assert.match(fixture.container.textContent ?? "", /Server Workspace Match/);
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 80)); });
+
+  assert.equal(calls, callsBeforeUpdate + 1);
+  assert.match(fixture.container.textContent ?? "", /Server Workspace Match/);
   await fixture.unmount();
 });
 
@@ -705,6 +785,41 @@ test("a live upsert preserves an unreproducible server search match until bounde
 
   assert.equal(calls, callsBeforeUpdate + 1);
   assert.match(fixture.container.textContent ?? "", /Resolved Metadata Result/);
+  await fixture.unmount();
+});
+
+test("a REST mutation preserves an unreproducible server search match until bounded revalidation", async () => {
+  let current = session(45, { id: "mutation-server-match", title: "Mutation Server Match" });
+  let calls = 0;
+  const fixture = await mount([], {
+    archiveSessionPage: async () => {
+      calls += 1;
+      return archiveResponse([current]);
+    },
+    stop: async () => {
+      current = { ...current, updatedAt: current.updatedAt + 1 };
+      return current;
+    },
+  });
+  const input = fixture.container.querySelector<HTMLInputElement>('input[type="search"]')!;
+  await act(async () => {
+    input.value = "server-only-metadata";
+    fireDomEvent.change(input);
+  });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
+  const callsBeforeMutation = calls;
+
+  await act(async () => { fireDomEvent.click(button(fixture.container, "Stop")); });
+  await act(async () => {
+    fireDomEvent.click(button(fixture.container, "Stop Session"));
+    await Promise.resolve();
+  });
+  assert.match(fixture.container.textContent ?? "", /Mutation Server Match/,
+    "the mutation response does not transiently invalidate the server search match");
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 80)); });
+
+  assert.equal(calls, callsBeforeMutation + 1);
+  assert.match(fixture.container.textContent ?? "", /Mutation Server Match/);
   await fixture.unmount();
 });
 

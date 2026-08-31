@@ -94,8 +94,10 @@ function reconcileLocally(
   // the client unable to reproduce that facet value. Preserve the server row until one bounded
   // refresh unless another locally authoritative scope filter already excludes it.
   const projectLocationId = session.projectLocationId;
-  const unresolvedLocation = filters.location !== null && projectLocationId != null &&
-    !locationNames.has(projectLocationId);
+  const unresolvedLocation = filters.location !== null && (
+    (projectLocationId != null && !locationNames.has(projectLocationId)) ||
+    (projectLocationId == null && session.workspaceId != null && session.workspaceName == null)
+  );
   if (unresolvedLocation && locallyMatches(
     session,
     { ...filters, query: "", location: null },
@@ -283,13 +285,16 @@ export function ArchivedSessionsView() {
     return () => document.removeEventListener("visibilitychange", revalidate);
   }, [refreshCatalog]);
   useEffect(() => {
-    if (conn !== "online") {
+    if (conn === "offline" || conn === "unauthorized") {
+      connectionLostRef.current = true;
+      return;
+    }
+    if (conn === "connecting") {
       if (hasBeenOnlineRef.current) connectionLostRef.current = true;
       return;
     }
     if (!hasBeenOnlineRef.current) {
       hasBeenOnlineRef.current = true;
-      return;
     }
     if (!connectionLostRef.current) return;
     connectionLostRef.current = false;
@@ -324,13 +329,18 @@ export function ArchivedSessionsView() {
     });
   };
   const updateSession = (session: SessionView) => {
+    const reconciliation = reconcileLocally(
+      session,
+      filters,
+      locationNames,
+      new Set(transcriptHits.keys()),
+    );
     setCatalog((current) => {
       const next = mergeArchiveSessionCatalog(current, [session]);
-      if (!locallyMatches(session, filters, locationNames, new Set(transcriptHits.keys()))) {
-        next.delete(session.id);
-      }
+      if (reconciliation === "exclude") next.delete(session.id);
       return next;
     });
+    if (reconciliation === "revalidate") scheduleLiveRevalidation();
     loadSession(session);
   };
 

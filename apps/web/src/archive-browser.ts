@@ -52,6 +52,12 @@ export function canonicalLifecycleLabel(status: SessionStatus): string {
     : "Status Unavailable";
 }
 
+export function serverLifecycleLabel(status: SessionStatus): string {
+  return Object.hasOwn(SERVER_LIFECYCLE_LABELS, status)
+    ? SERVER_LIFECYCLE_LABELS[status]
+    : "Status Unavailable";
+}
+
 export function sessionArchiveSearchDetail(
   session: Pick<SessionView, "archived" | "status" | "projectName" | "workspaceName" | "agentName" | "driver" | "agentId">,
 ): string {
@@ -110,7 +116,7 @@ export function filterArchiveSessions(input: {
       metadata.location,
       metadata.agent,
       canonicalLifecycleLabel(session.status),
-      SERVER_LIFECYCLE_LABELS[session.status],
+      serverLifecycleLabel(session.status),
       session.archived ? "Archived" : "Not Archived",
     ].join("\n").toLocaleLowerCase();
     return localText.includes(query) || Boolean(input.transcriptSessionIds?.has(session.id));

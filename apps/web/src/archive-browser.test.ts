@@ -99,6 +99,10 @@ test("archive search accepts the server lifecycle labels used for live reconcili
     sessions: [session({ status: "input_required" })],
     filters: { ...defaults, query: "input required" },
   }).map((item) => item.id), ["session-1"]);
+  assert.deepEqual(filterArchiveSessions({
+    sessions: [session({ status: "constructor" as SessionStatus })],
+    filters: { ...defaults, query: "native code" },
+  }).map((item) => item.id), [], "prototype properties never enter the local search corpus");
 });
 
 test("literal all facets remain distinct from the nullable no-filter state", () => {
