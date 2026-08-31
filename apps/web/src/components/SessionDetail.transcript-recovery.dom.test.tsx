@@ -686,7 +686,7 @@ test("an underfilled partial opening automatically reaches a complete scrollable
   }
 });
 
-test("a desktop preview defers opening fill until the same reader expands", async () => {
+test("a desktop preview fills its opening window once and expansion preserves it", async () => {
   const pages = pageController();
   const fixture = await mountFixture(pages, 12, { mode: "preview" });
   try {
@@ -703,17 +703,83 @@ test("a desktop preview defers opening fill until the same reader expands", asyn
       });
     });
     await flushAsyncWork(10);
-    assert.equal(pages.tailCalls.length, 1, "a preview does not fetch opening-fill pages");
-    assert.ok(fixture.container.querySelector(".transcript-earlier-activity"),
-      "the preview retains its compact manual control");
+    assert.equal(pages.tailCalls.length, 2,
+      "an underfilled preview prepends history without waiting for expansion");
+    assert.equal(pages.tailCalls[1]!.alignToTurn, true,
+      "preview fill recovers a semantic turn boundary");
+    assert.equal(fixture.container.querySelector(".transcript-earlier-activity"), null,
+      "the underfilled manual control stays hidden while preview fill runs");
+
+    const earlierPage = fixture.events.slice(-15, -7);
+    setScrollerMetrics(fixture.scroller, { clientHeight: 500, scrollHeight: 900, scrollTop: 400 });
+    await act(async () => {
+      pages.releaseTail({
+        events: earlierPage,
+        eventEpoch: 0,
+        nextBefore: earlierPage[0]!.seq,
+        hasMoreOlder: true,
+        cacheComplete: true,
+      });
+    });
+    await flushAsyncWork(10);
+    assert.equal(pages.tailCalls.length, 2, "a filled preview settles after one bounded prepend");
+    const filledScrollTop = fixture.scroller.scrollTop;
+    assert.equal(filledScrollTop, 900, "a following preview remains anchored to the filled tail");
 
     await fixture.renderMode("expanded");
     await flushAsyncWork(10);
     assert.equal(pages.tailCalls.length, 2,
-      "expanding the same mounted reader starts its deferred opening fill");
-    assert.equal(pages.tailCalls[1]!.alignToTurn, true);
-    assert.equal(fixture.container.querySelector(".transcript-earlier-activity"), null,
-      "the underfilled manual control stays hidden while expanded opening fill runs");
+      "expanding a filled preview does not repeat its history request");
+    assert.equal(fixture.scroller.scrollTop, filledScrollTop,
+      "expansion keeps the filled preview's reading position");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("expansion rechecks taller geometry without repeating the preview cursor", async () => {
+  const pages = pageController();
+  const fixture = await mountFixture(pages, 12, { mode: "preview" });
+  try {
+    setScrollerMetrics(fixture.scroller, { clientHeight: 300, scrollHeight: 200, scrollTop: 0 });
+    const openingWindow = fixture.events.slice(-7);
+    await act(async () => {
+      pages.releaseTail({
+        events: openingWindow,
+        eventEpoch: 0,
+        nextBefore: openingWindow[0]!.seq,
+        hasMoreOlder: true,
+        turnAligned: false,
+        cacheComplete: true,
+      });
+    });
+    await flushAsyncWork(10);
+    assert.equal(pages.tailCalls.length, 2);
+
+    const previewPage = fixture.events.slice(-15, -7);
+    setScrollerMetrics(fixture.scroller, { clientHeight: 300, scrollHeight: 600, scrollTop: 300 });
+    await act(async () => {
+      pages.releaseTail({
+        events: previewPage,
+        eventEpoch: 0,
+        nextBefore: previewPage[0]!.seq,
+        hasMoreOlder: true,
+        cacheComplete: true,
+      });
+    });
+    await flushAsyncWork(10);
+    assert.equal(pages.tailCalls.length, 2, "the filled preview settles at its own height");
+    assert.ok(fixture.container.querySelector(".transcript-earlier-activity"));
+
+    setScrollerMetrics(fixture.scroller, { clientHeight: 700, scrollHeight: 600, scrollTop: 600 });
+    await fixture.renderMode("expanded");
+    await flushAsyncWork(10);
+    assert.equal(pages.tailCalls.length, 3,
+      "the taller expanded reader continues from the preview's next cursor");
+    assert.deepEqual(pages.tailCalls.map((call) => call.before), [undefined, openingWindow[0]!.seq,
+      previewPage[0]!.seq], "expansion never repeats an already loaded page");
+    assert.equal(fixture.scroller.scrollTop, 600,
+      "rechecking expanded geometry does not reset the live-tail position");
   } finally {
     await unmountFixture(fixture);
   }
