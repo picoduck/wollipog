@@ -60,6 +60,47 @@ view unmounts cannot hijack later navigation. Transcript history Retry remains s
 performs only an idempotent history GET. Timeline error rows remain informational because they do
 not carry enough delivery correlation to identify a safe prompt retry.
 
+## Stop Redelivery Policy
+
+A Stop is a durable intent, not evidence that runtime capacity was released. Its operation ID stays
+stable across every idempotent delivery. The session remains fenced, and an archive follow-up
+remains uncommitted, until the owning runner reports a terminal lifecycle or authoritative reconnect
+inventory proves that the runtime is absent. Command acceptance and socket writes do not meet that
+bar. This is also the completion rule for accepted-but-slow Stops described by
+[#175](https://github.com/picoduck/wollipog/issues/175): acceptance starts a bounded completion
+window, but only terminal or absence evidence settles the intent.
+
+Redelivery is protocol-dependent because only protocol v89 and later identify an individual
+delivery attempt:
+
+- Protocol v84 and earlier receive a compatibility Stop without a durable operation identity.
+  They remain conservatively **Stopping** and are redelivered only after reconnect inventory or
+  live runtime evidence shows that the session still exists.
+- Protocol v85 through v88 receive the stable operation ID, but no delivery-attempt ID. They do not
+  receive scheduled redelivery and cannot transition to Stop Failed from an uncorrelated result.
+  While pending, reconnect inventory and live runtime evidence may replay the same idempotent
+  operation. This keeps mixed-version recovery available without allowing delayed evidence to
+  settle or fail a newer delivery.
+- Protocol v89 and later receive bounded scheduled attempts with both identities. Scheduled
+  attempts create a new delivery-attempt ID and advance `lastAttemptAt` and `attemptCount` before
+  bytes are written. A reconnect or live reconciliation replay of an already-pending attempt is an
+  idempotent rewrite of that attempt and does not create another correlation boundary.
+- A v89+ timeout or retry-exhausted failure is recoverable. Reconnect or live evidence that the
+  runtime still exists opens a new delivery-attempt ID and advances the attempt metadata before
+  one replay, while keeping Stop Failed visible. Automatic recovery is bounded to that single
+  correlated delivery per failure episode; later evidence does not create a replay loop. A
+  matching acceptance may return the operation to its bounded completion phase; it still does not
+  release capacity. If that accepted Stop later reaches its completion timeout, the timeout starts
+  a new failure episode eligible for one recovery replay; attempt metadata may therefore grow
+  across distinct accepted-but-stalled episodes without any one episode looping.
+- `runner_rejected` is not recoverable automatically. No scheduled, reconnect, status, snapshot,
+  transcript, or other live-reconciliation path may replay it. Only an explicit user Stop/Retry
+  action can open a new attempt, and stale results remain fenced by delivery-attempt identity.
+
+None of these delivery paths clears Stop Failed merely by sending, archives the session, admits a
+replacement runtime, or reports capacity release. A failed Stop can still settle successfully when
+later terminal status or authoritative absence proves the original intent took effect.
+
 ## Semantic Session Names
 
 The prompt-derived title remains the immediate fallback. **Settings → Session Naming** offers

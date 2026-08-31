@@ -7160,6 +7160,7 @@ test("reconnect replays only recoverable failed archive Stops without clearing f
 
     const failed = db.getSession(id)!.archiveOperation!;
     const failedDeliveryAttemptId = db.sessionStopIntent(id)!.deliveryAttemptId;
+    const failedAttemptCount = failed.attemptCount;
     assert.equal(failed.status, "stop_failed", failureCode);
     assert.equal(failed.failure?.code, failureCode);
     hub.sentToRunner.length = 0;
@@ -7170,13 +7171,25 @@ test("reconnect replays only recoverable failed archive Stops without clearing f
     assert.equal(replayed.length, failureCode === "runner_rejected" ? 0 : 1, failureCode);
     if (failureCode !== "runner_rejected") {
       assert.equal(replayed[0]?.operationId, operation.operationId, failureCode);
-      assert.equal(replayed[0]?.deliveryAttemptId, failedDeliveryAttemptId, failureCode);
+      assert.notEqual(replayed[0]?.deliveryAttemptId, failedDeliveryAttemptId, failureCode);
     }
     const afterReconnect = db.getSession(id)!;
     assert.equal(afterReconnect.archiveStatus, "stop_failed", failureCode);
     assert.equal(afterReconnect.archiveOperation?.failure?.code, failureCode);
     assert.equal(afterReconnect.archiveOperation?.capacityReleased, false, failureCode);
     assert.equal(afterReconnect.archived, false, failureCode);
+    assert.equal(afterReconnect.archiveOperation?.attemptCount,
+      failedAttemptCount + (failureCode === "runner_rejected" ? 0 : 1), failureCode);
+    if (failureCode !== "runner_rejected") {
+      assert.equal(db.sessionStopIntent(id)?.deliveryAttemptId, replayed[0]?.deliveryAttemptId, failureCode);
+      assert.equal(svc.onStopSessionResult(RUNNER_ID, {
+        type: "stop_session_result",
+        sessionId: id,
+        operationId: operation.operationId,
+        deliveryAttemptId: failedDeliveryAttemptId,
+        accepted: false,
+      }), false, `the superseded ${failureCode} result is fenced`);
+    }
 
     if (failureCode === "timeout") {
       svc.onSessionStatus(id, "stopped", undefined, undefined, RUNNER_ID);
@@ -7248,6 +7261,110 @@ test("late runner rejection overrides recoverable Stop failures and suppresses r
   }
 });
 
+test("v89 reconciliation keeps every Stop state truthful across reconnect and live evidence", () => {
+  for (const source of ["reconnect", "runtime", "status", "event"] as const) {
+    for (const state of ["pending", "timeout", "retry_exhausted", "runner_rejected"] as const) {
+      const { db, hub, svc } = makeHarness();
+      const id = seedSession(svc, hub);
+      db.updateSessionStatus(id, "running", Date.now());
+      const operation = svc.setArchived(id, true).data!.archiveOperation!;
+
+      if (state === "timeout") {
+        svc.maintainSessionStopIntents(operation.requestedAt + SESSION_STOP_TIMEOUT_MS);
+      } else if (state === "retry_exhausted") {
+        for (let attempt = 1; attempt <= SESSION_STOP_MAX_ATTEMPTS; attempt++) {
+          svc.maintainSessionStopIntents(
+            operation.requestedAt + attempt * SESSION_STOP_RETRY_INTERVAL_MS,
+          );
+        }
+      } else if (state === "runner_rejected") {
+        const current = db.sessionStopIntent(id)!;
+        svc.onStopSessionResult(RUNNER_ID, {
+          type: "stop_session_result",
+          sessionId: id,
+          operationId: operation.operationId,
+          deliveryAttemptId: current.deliveryAttemptId,
+          accepted: false,
+        });
+      }
+
+      const before = db.sessionStopIntent(id)!;
+      hub.sentToRunner.length = 0;
+      if (source === "reconnect") {
+        svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, status: "running" })]);
+      } else if (source === "runtime") {
+        svc.applySessionRuntimeUpdate(RUNNER_ID, snapshot({ id, status: "running" }));
+      } else if (source === "status") {
+        svc.onSessionStatus(id, "running", undefined, undefined, RUNNER_ID);
+      } else {
+        svc.onSessionEvent(id, { kind: "stderr", text: "late runtime evidence" });
+      }
+
+      const after = db.sessionStopIntent(id)!;
+      const replayed = hub.sentOfType("stop_session");
+      const recoverable = state === "timeout" || state === "retry_exhausted";
+      assert.equal(replayed.length, state === "runner_rejected" ? 0 : 1, `${source}:${state}`);
+      assert.equal(after.operation.operationId, before.operation.operationId, `${source}:${state}`);
+      assert.equal(after.operation.status, state === "pending" ? "stop_pending" : "stop_failed",
+        `${source}:${state}`);
+      assert.equal(after.operation.failure?.code, state === "pending" ? undefined : state,
+        `${source}:${state}`);
+      assert.equal(after.operation.attemptCount, before.operation.attemptCount + (recoverable ? 1 : 0),
+        `${source}:${state}`);
+      assert.equal(after.deliveryAttemptId === before.deliveryAttemptId, !recoverable, `${source}:${state}`);
+      assert.equal(after.operation.capacityReleased, false, `${source}:${state}`);
+      assert.equal(db.getSession(id)?.archived, false, `${source}:${state}`);
+      if (replayed[0]) {
+        assert.equal(replayed[0].operationId, before.operation.operationId, `${source}:${state}`);
+        assert.equal(replayed[0].deliveryAttemptId, after.deliveryAttemptId, `${source}:${state}`);
+      }
+      hub.sentToRunner.length = 0;
+      svc.onSessionStatus(id, "running", undefined, undefined, RUNNER_ID);
+      assert.equal(hub.sentOfType("stop_session").length,
+        recoverable || state === "runner_rejected" ? 0 : 1,
+        `automatic recovery is bounded for ${source}:${state}`);
+      assert.equal(db.sessionStopIntent(id)?.operation.attemptCount, after.operation.attemptCount,
+        `${source}:${state}`);
+    }
+  }
+});
+
+test("an offline Stop cannot consume the failed episode's reconnect recovery", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "running", Date.now());
+  const operation = svc.setArchived(id, true).data!.archiveOperation!;
+  svc.maintainSessionStopIntents(operation.requestedAt + SESSION_STOP_TIMEOUT_MS);
+  const failed = db.sessionStopIntent(id)!;
+  assert.equal(failed.operation.failure?.code, "timeout");
+
+  hub.online = false;
+  hub.deliver = false;
+  hub.sentToRunner.length = 0;
+  svc.stop(id);
+
+  const stillFailed = db.sessionStopIntent(id)!;
+  assert.equal(hub.sentOfType("stop_session").length, 0);
+  assert.equal(stillFailed.deliveryAttemptId, failed.deliveryAttemptId);
+  assert.equal(stillFailed.operation.attemptCount, failed.operation.attemptCount);
+  assert.equal(stillFailed.operation.failure?.code, "timeout");
+
+  hub.online = true;
+  hub.deliver = true;
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, status: "running" })]);
+
+  const recovered = db.sessionStopIntent(id)!;
+  const replay = hub.sentOfType("stop_session");
+  assert.equal(replay.length, 1);
+  assert.equal(replay[0]?.operationId, operation.operationId);
+  assert.notEqual(recovered.deliveryAttemptId, failed.deliveryAttemptId);
+  assert.equal(replay[0]?.deliveryAttemptId, recovered.deliveryAttemptId);
+  assert.equal(recovered.operation.attemptCount, failed.operation.attemptCount + 1);
+  assert.equal(recovered.operation.failure?.code, "timeout");
+  assert.equal(recovered.operation.capacityReleased, false);
+  assert.equal(db.getSession(id)?.archived, false);
+});
+
 test("a pre-v89 runner cannot replay a failed archive Stop without attempt correlation", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);
@@ -7287,24 +7404,46 @@ test("offline current runners exhaust bounded automatic Stop recovery without hi
 });
 
 test("pre-v89 runners remain conservatively Stop Pending without attempt correlation", () => {
-  const { db, hub, svc } = makeHarness();
-  db.registerRunner(runnerMeta(), Date.now(), 88);
-  const id = seedSession(svc, hub);
-  db.updateSessionStatus(id, "running", Date.now());
+  for (const protocolVersion of [85, 86, 87, 88]) {
+    for (const source of ["reconnect", "runtime", "status", "event"] as const) {
+      const { db, hub, svc } = makeHarness();
+      db.registerRunner(runnerMeta(), Date.now(), protocolVersion);
+      const id = seedSession(svc, hub);
+      db.updateSessionStatus(id, "running", Date.now());
 
-  const pending = svc.setArchived(id, true).data!;
-  const command = hub.sentOfType("stop_session").at(-1)!;
-  assert.equal(command.operationId, pending.archiveOperation?.operationId);
-  assert.equal(command.deliveryAttemptId, undefined);
-  assert.equal(svc.onStopSessionResult(RUNNER_ID, {
-    type: "stop_session_result", sessionId: id,
-    operationId: command.operationId!, accepted: false,
-  }), false);
-  assert.equal(svc.maintainSessionStopIntents(
-    pending.archiveOperation!.requestedAt + SESSION_STOP_TIMEOUT_MS * 2,
-  ), 0);
-  assert.equal(db.getSession(id)?.archiveStatus, "stop_pending");
-  assert.equal(db.getSession(id)?.archived, false);
+      const pending = svc.setArchived(id, true).data!;
+      const command = hub.sentOfType("stop_session").at(-1)!;
+      const attemptCount = pending.archiveOperation!.attemptCount;
+      assert.equal(command.operationId, pending.archiveOperation?.operationId, `${protocolVersion}:${source}`);
+      assert.equal(command.deliveryAttemptId, undefined, `${protocolVersion}:${source}`);
+      assert.equal(svc.onStopSessionResult(RUNNER_ID, {
+        type: "stop_session_result", sessionId: id,
+        operationId: command.operationId!, accepted: false,
+      }), false, `${protocolVersion}:${source}`);
+      hub.sentToRunner.length = 0;
+      assert.equal(svc.maintainSessionStopIntents(
+        pending.archiveOperation!.requestedAt + SESSION_STOP_TIMEOUT_MS * 2,
+      ), 0, `${protocolVersion}:${source}`);
+      assert.equal(hub.sentOfType("stop_session").length, 0, `${protocolVersion}:${source}`);
+
+      if (source === "reconnect") {
+        svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, status: "running" })]);
+      } else if (source === "runtime") {
+        svc.applySessionRuntimeUpdate(RUNNER_ID, snapshot({ id, status: "running" }));
+      } else if (source === "status") {
+        svc.onSessionStatus(id, "running", undefined, undefined, RUNNER_ID);
+      } else {
+        svc.onSessionEvent(id, { kind: "stderr", text: "late runtime evidence" });
+      }
+      const replay = hub.sentOfType("stop_session");
+      assert.equal(replay.length, 1, `${protocolVersion}:${source}`);
+      assert.equal(replay[0]?.operationId, pending.archiveOperation?.operationId, `${protocolVersion}:${source}`);
+      assert.equal(replay[0]?.deliveryAttemptId, undefined, `${protocolVersion}:${source}`);
+      assert.equal(db.getSession(id)?.archiveStatus, "stop_pending", `${protocolVersion}:${source}`);
+      assert.equal(db.getSession(id)?.archiveOperation?.attemptCount, attemptCount, `${protocolVersion}:${source}`);
+      assert.equal(db.getSession(id)?.archived, false, `${protocolVersion}:${source}`);
+    }
+  }
 });
 
 test("repeated archive fences a legacy archived session that is still consuming capacity", () => {

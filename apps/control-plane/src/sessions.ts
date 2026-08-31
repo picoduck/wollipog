@@ -3796,14 +3796,26 @@ export class SessionsService {
 
 
   private sendStopCommand(runnerId: string, sessionId: string): boolean {
-    const intent = this.db.sessionStopIntent(sessionId);
+    let intent = this.db.sessionStopIntent(sessionId);
     const protocolVersion = this.db.getRunner(runnerId)?.protocolVersion;
     if (intent?.operation.status === "stop_failed") {
       const recoverableFailure = intent.operation.failure?.code === "timeout" ||
         intent.operation.failure?.code === "retry_exhausted";
       if (!recoverableFailure || !runnerSupportsProtocol(protocolVersion, "stopAttemptCorrelation")) return false;
+      // An absent socket is definitive non-delivery and must not consume this failure episode's
+      // one recovery boundary. Once online, persist before the write because a send failure may be
+      // ambiguous: the runner could still observe bytes before the socket tears down.
+      if (!this.hub.isRunnerOnline(runnerId)) return false;
+      // A failed delivery's attempt identifier must never be reused: a delayed result from that
+      // delivery could otherwise settle or reject this recovery replay. Preserve Stop Failed while
+      // committing the new correlation boundary before writing bytes to the runner.
+      intent = this.db.recordSessionStopRecoveryAttempt(
+        sessionId,
+        Math.max(Date.now(), intent.operation.failure!.failedAt + 1),
+      );
+      if (!intent) return false;
     }
-    return this.hub.sendToRunner(runnerId, {
+    const sent = this.hub.sendToRunner(runnerId, {
       type: "stop_session",
       sessionId,
       ...(intent && runnerSupportsProtocol(protocolVersion, "stopFailureRecovery")
@@ -3813,6 +3825,8 @@ export class SessionsService {
         ? { deliveryAttemptId: intent.deliveryAttemptId }
         : {}),
     });
+    if (intent?.operation.status === "stop_failed") this.hub.sessionChangedById(sessionId);
+    return sent;
   }
 
   /** Turn a supported Stop operation into a truthful failure without claiming capacity release. */
@@ -3836,8 +3850,9 @@ export class SessionsService {
     return changed;
   }
 
-  /** Reconcile durable attempts on a bounded schedule. Older runners never enter Stop Failed
-   * because they cannot return attempt-correlated results and must fail conservatively. */
+  /** Reconcile durable attempts on a bounded schedule. Protocol v85-v88 runners are intentionally
+   * reconnect/live-reconciliation-only: without attempt correlation a scheduled retry could let a
+   * delayed result affect a newer delivery. They remain conservatively Stop Pending. */
   maintainSessionStopIntents(now = Date.now()): number {
     let changed = 0;
     for (const intent of this.db.pendingSessionStopIntents()) {

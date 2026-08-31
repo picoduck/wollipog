@@ -1430,7 +1430,13 @@ export interface StopOperationView {
   operationId: string;
   status: ArchiveStatus;
   requestedAt: number;
+  /** Time of the latest distinct delivery-correlation boundary. Rewriting the same pending attempt
+   * during reconnect does not advance it. A v89+ recovery boundary is logically ordered after its
+   * timeout or retry-exhaustion failure, so after wall-clock rollback this value may be normalized
+   * just beyond the failure timestamp rather than record the current wall time. */
   lastAttemptAt: number;
+  /** Number of distinct delivery-correlation boundaries in the current explicit recovery window.
+   * This includes v89+ automatic recovery replays made while a recoverable failure stays visible. */
   attemptCount: number;
   /** When the runner accepted the current delivery attempt. Acceptance starts a bounded
    * completion window but is not evidence that runtime capacity was released. */
