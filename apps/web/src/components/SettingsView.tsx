@@ -406,6 +406,45 @@ function repairDraft(
   return next;
 }
 
+function repairedDraftFields(
+  candidate: AgentHarnessDefaultConfig,
+  repaired: AgentHarnessDefaultConfig,
+): string[] {
+  const fields: string[] = [];
+  if (candidate.model && candidate.model !== repaired.model) fields.push("Model");
+  if (candidate.effort && candidate.effort !== repaired.effort) fields.push("Reasoning Effort");
+  if (candidate.permissionMode && candidate.permissionMode !== repaired.permissionMode) fields.push("Permission Mode");
+  return fields;
+}
+
+function draftRepairNotice(fields: string[]): string | null {
+  if (fields.length === 0) return null;
+  const names = fields.length === 1
+    ? fields[0]
+    : `${fields.slice(0, -1).join(", ")} and ${fields.at(-1)}`;
+  return `Capabilities changed. Removed unavailable draft selections for ${names}.`;
+}
+
+interface AgentHarnessLoadFailure {
+  message: string;
+  endpointMissing: boolean;
+}
+
+function agentHarnessLoadFailure(caught: unknown): AgentHarnessLoadFailure {
+  const endpointMissing = caught instanceof Error &&
+    "status" in caught && (caught as Error & { status?: unknown }).status === 404;
+  if (endpointMissing) {
+    return {
+      endpointMissing: true,
+      message: "This control plane does not support Agent Harness defaults. Update or restart it so it matches this dashboard, then try again.",
+    };
+  }
+  return {
+    endpointMissing: false,
+    message: caught instanceof Error ? caught.message : "Could not load Agent Harness defaults.",
+  };
+}
+
 function repairableDraft(option: AgentHarnessDefaultOption): AgentHarnessDefaultConfig {
   return repairDraft(option, option.preference ?? {});
 }
@@ -450,10 +489,13 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
   const editingRef = useRef(editing);
   editingRef.current = editing;
   const [draft, setDraft] = useState<AgentHarnessDefaultConfig>({});
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const [draftNotice, setDraftNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   const [loading, setLoading] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<AgentHarnessLoadFailure | null>(null);
   const [mutationError, setMutationError] = useState<string | null>(null);
   const controlsId = "agent-harness-defaults-editor";
 
@@ -481,20 +523,24 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
       if (editingKey) {
         const refreshed = next.defaults.find((option) => harnessIdentityKey(option) === editingKey);
         if (refreshed) {
-          setDraft((current) => repairDraft(refreshed, current));
+          const repaired = repairDraft(refreshed, draftRef.current);
+          const notice = draftRepairNotice(repairedDraftFields(draftRef.current, repaired));
+          setDraft(repaired);
+          if (notice) setDraftNotice(notice);
         } else {
           const editor = document.getElementById(`agent-default-${encodeURIComponent(editingKey)}`);
           const restoreFocus = !!editor?.contains(document.activeElement) ||
             harnessRowRefs.current.get(editingKey) === document.activeElement;
           setEditing(null);
           setDraft({});
+          setDraftNotice(null);
           if (restoreFocus) requestAnimationFrame(() => triggerRef.current?.focus());
         }
       }
       return true;
     } catch (caught) {
       if (!requestIsCurrent(requestApi, generation)) return false;
-      setLoadError(caught instanceof Error ? caught.message : "Could not load Agent Harness defaults.");
+      setLoadError(agentHarnessLoadFailure(caught));
       return false;
     } finally {
       if (requestIsCurrent(requestApi, generation)) setLoading(false);
@@ -506,6 +552,7 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
     setExpanded(false);
     setEditing(null);
     setDraft({});
+    setDraftNotice(null);
     busyRef.current = false;
     setBusy(false);
     setMutationError(null);
@@ -521,11 +568,14 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
 
   const customized = view?.defaults.filter((option) => option.preference).length ?? 0;
   const summary = !view
-    ? loadError ? "Agent Harness defaults could not be loaded." : "Loading Agent Harness defaults…"
+    ? loadError
+      ? loadError.endpointMissing ? "Control plane update required." : "Agent Harness defaults could not be loaded."
+      : "Loading Agent Harness defaults…"
     : `${customized} Harness Default${customized === 1 ? "" : "s"} Configured`;
   const beginEdit = (option: AgentHarnessDefaultOption) => {
     setEditing(harnessIdentityKey(option));
     setDraft(repairableDraft(option));
+    setDraftNotice(null);
     setMutationError(null);
   };
   const focusHarnessRow = (key: string) => {
@@ -539,6 +589,7 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
   const closeEditor = (key: string) => {
     setEditing(null);
     setDraft({});
+    setDraftNotice(null);
     setMutationError(null);
     focusHarnessRow(key);
   };
@@ -556,6 +607,7 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
     setBusy(false);
     setEditing(null);
     setDraft({});
+    setDraftNotice(null);
     setMutationError(null);
     if (restoreFocus) focusHarnessRow(key);
   };
@@ -580,15 +632,16 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
           setExpanded((current) => !current);
           setEditing(null);
           setDraft({});
+          setDraftNotice(null);
           setMutationError(null);
         }}
       />
       {loadError && !view && (
         <StaticRow
-          title="Load Failed"
+          title={loadError.endpointMissing ? "Control Plane Update Required" : "Load Failed"}
           description={
             <>
-              Agent Harness defaults could not be loaded.{" "}
+              {loadError.endpointMissing ? loadError.message : "Agent Harness defaults could not be loaded."}{" "}
               <button ref={retryRef} type="button" className="btn ghost sm" disabled={loading} onClick={(event) => {
                 const retry = event.currentTarget;
                 const restoreFocus = document.activeElement === retry;
@@ -605,7 +658,11 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
       {expanded && view && (
         <div id={controlsId} className="agent-defaults-list" aria-busy={loading || busy || undefined}>
           <div className="agent-defaults-toolbar">
-            {loadError && <span className="settings-inline-error" role="alert">Could not refresh Agent Harness defaults: {loadError}</span>}
+            {loadError && (
+              <span className="settings-inline-error" role={mutationError ? undefined : "alert"}>
+                {loadError.endpointMissing ? loadError.message : `Could not refresh Agent Harness defaults: ${loadError.message}`}
+              </span>
+            )}
             {mutationError && !editing && <span className="settings-inline-error" role="alert">{mutationError}</span>}
             <span className="agent-defaults-action-spacer" />
             <button type="button" className="btn ghost sm" disabled={loading || busy} onClick={(event) => {
@@ -649,6 +706,7 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
                     if (isEditing) {
                       setEditing(null);
                       setDraft({});
+                      setDraftNotice(null);
                       setMutationError(null);
                     } else {
                       beginEdit(option);
@@ -662,6 +720,9 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
                     )}
                     {option.installations.length === 0 && (
                       <p className="settings-inline-error" role="status">This saved Agent Harness is no longer discovered. Reset it to use the Wollipog default.</p>
+                    )}
+                    {draftNotice && (
+                      <p className="agent-defaults-draft-notice" role="status">{draftNotice}</p>
                     )}
                     {models.length > 0 && (
                       <label className="agent-defaults-field">

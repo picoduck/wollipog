@@ -112,12 +112,31 @@ const harnessDefaultsView: AgentHarnessDefaultsView = {
   ],
 };
 
+const harnessDefaultsRepairedView = structuredClone(harnessDefaultsView);
+harnessDefaultsRepairedView.defaults[0]!.installations[0]!.models = [
+  { id: "luna", displayName: "Luna", efforts: ["low"] },
+];
+harnessDefaultsRepairedView.defaults[0]!.installations[0]!.effortLevels = ["low"];
+
+let harnessDefaultsGetCalls = 0;
 const harnessDefaultsTransport: ApiTransport = {
   instanceId: "settings-fixture",
   publicOrigin: window.location.origin,
   close() {},
-  async request() {
-    return new Response(JSON.stringify(harnessDefaultsView), {
+  async request(_path, init) {
+    const mode = new URLSearchParams(window.location.search).get("defaults");
+    if (mode === "agent-missing") {
+      return new Response(JSON.stringify({ error: "Not Found" }), {
+        status: 404,
+        statusText: "Not Found",
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (!init?.method || init.method === "GET") harnessDefaultsGetCalls += 1;
+    const body = mode === "agent-repair" && harnessDefaultsGetCalls > 1
+      ? harnessDefaultsRepairedView
+      : harnessDefaultsView;
+    return new Response(JSON.stringify(body), {
       status: 200,
       headers: { "content-type": "application/json" },
     });
@@ -135,7 +154,7 @@ function Harness() {
   const askedFor = params.get("topology") as Topology | null;
   const topology: Topology = askedFor && TOPOLOGIES.includes(askedFor) ? askedFor : "full";
   const requestedSection = params.get("section") as SettingsSection | null;
-  const showAgentDefaults = params.get("defaults") === "agent";
+  const showAgentDefaults = ["agent", "agent-missing", "agent-repair"].includes(params.get("defaults") ?? "");
   const section: SettingsSection = SETTINGS_SECTIONS.some((entry) => entry.id === requestedSection)
     ? requestedSection!
     : "appearance";

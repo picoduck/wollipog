@@ -11334,6 +11334,14 @@ body.shell-dock-dragging * {
 .agent-defaults-action-spacer { flex: 1; }
 .agent-defaults-empty { margin: var(--space-2); }
 .agent-defaults-editor > p { grid-column: 1 / -1; margin: 0; }
+.agent-defaults-draft-notice {
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--blue) 35%, transparent);
+  border-radius: var(--radius-sm);
+  color: var(--blue-on-tint);
+  background: color-mix(in srgb, var(--blue) 10%, transparent);
+  font-size: var(--text-xs);
+}
 .settings-inline-error { color: var(--red); font-size: var(--text-xs); }
 @media (max-width: 760px) {
   .agent-defaults-list { margin-left: var(--space-2); }

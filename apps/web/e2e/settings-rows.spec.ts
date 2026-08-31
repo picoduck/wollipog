@@ -37,7 +37,7 @@ interface HarnessOptions {
   topology?: "full" | "minimal";
   section?: SettingsSection;
   copy?: "default" | "long";
-  defaults?: "pending" | "agent";
+  defaults?: "pending" | "agent" | "agent-missing" | "agent-repair";
 }
 
 
@@ -1126,6 +1126,37 @@ test("Agent Harness defaults are keyboard-operable, cascade by model, and keep o
   await expect(codex).toBeFocused();
   await expect(codex).toHaveAttribute("aria-expanded", "false");
   await expect(codex).not.toHaveAttribute("aria-controls", /.+/);
+});
+
+test("Agent Harness defaults distinguish version skew and politely explain repaired drafts", async ({ page }) => {
+  await useHarness(page, "light", { section: "behavior", defaults: "agent-missing" });
+  await expect(page.getByText("Control Plane Update Required", { exact: true })).toBeVisible();
+  await expect(page.getByText(/does not support Agent Harness defaults/)).toBeVisible();
+  await expect(page.getByText(/Update or restart it so it matches this dashboard/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
+  await expect(page.getByText("Load Failed", { exact: true })).toHaveCount(0);
+
+  await useHarness(page, "dark", { section: "behavior", defaults: "agent-repair" });
+  await page.getByRole("button", { name: /Default Models, Efforts, and Permissions/ }).click();
+  const codex = page.locator(".agent-defaults-item > .ui-row-nav").filter({ hasText: "Codex App Server" });
+  await codex.click();
+  await page.getByRole("button", { name: /^Codex App Server Model:/ }).click();
+  await page.getByRole("option", { name: "Sol" }).click();
+  await page.getByRole("button", { name: /^Codex App Server Reasoning Effort:/ }).click();
+  await page.getByRole("option", { name: "Extra High" }).click();
+  await page.getByRole("button", { name: /^Codex App Server Permission Mode:/ }).click();
+  await page.getByRole("option", { name: "Full Access" }).click();
+
+  const refresh = page.getByRole("button", { name: "Refresh" });
+  await refresh.focus();
+  await refresh.click();
+  const notice = page.locator('.agent-defaults-draft-notice[role="status"]');
+  await expect(notice).toContainText("Model and Reasoning Effort");
+  await expect(notice).not.toContainText("Permission Mode");
+  await expect(page.locator('[role="alert"]').filter({ hasText: "Capabilities changed" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /^Codex App Server Permission Mode:/ }))
+    .toHaveAccessibleName(/Full Access/);
+  await expect(refresh).toBeFocused();
 });
 
 /**
