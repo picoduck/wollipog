@@ -155,13 +155,15 @@ test("resolved earlier pages preserve the mobile reading boundary", async ({ pag
       .toBe(String(requestCount));
     await expect.poll(() => page.locator("[data-virtual-total]").getAttribute("data-virtual-total"))
       .not.toBe(String(before.total));
-    await expect.poll(() => page.locator(`[data-virtual-key='${before.key}']`).evaluate((row, offset) => {
+    const anchoredRow = page.locator(`[data-virtual-key='${before.key}']`);
+    await expect(anchoredRow).toHaveCount(1);
+    await expect.poll(async () => Number(await anchoredRow.getAttribute("data-index")), {
+      message: "prepended anchor did not advance to its new virtual index",
+    }).toBeGreaterThan(before.index);
+    await expect.poll(() => anchoredRow.evaluate((row, offset) => {
       const viewport = row.closest<HTMLElement>(".detail-scroll")!.getBoundingClientRect();
       return Math.abs(row.getBoundingClientRect().top - viewport.top - Number(offset));
     }, before.offset)).toBeLessThan(1);
-    await expect(page.locator(`[data-virtual-key='${before.key}']`)).toHaveCount(1);
-    expect(Number(await page.locator(`[data-virtual-key='${before.key}']`).getAttribute("data-index")))
-      .toBeGreaterThan(before.index);
     const samples = await page.evaluate(async () => {
       await new Promise<void>((resolve) => {
         let frames = 16;

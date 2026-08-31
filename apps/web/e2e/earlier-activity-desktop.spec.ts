@@ -15,6 +15,22 @@ async function renderedAnchor(reader: Locator) {
   });
 }
 
+async function settleReaderScrollTop(reader: Locator, scrollTop: number) {
+  await reader.evaluate((element, nextScrollTop) => new Promise<void>((resolve) => {
+    const finish = () => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+    };
+    element.addEventListener("scroll", finish, { once: true });
+    const previousScrollTop = element.scrollTop;
+    element.scrollTop = nextScrollTop;
+    // Assigning the current value does not enqueue a native event. Preserve the same React scroll
+    // path for Chromium's occasional native Home behavior while still waiting for it to settle.
+    if (element.scrollTop === previousScrollTop) {
+      element.dispatchEvent(new Event("scroll", { bubbles: true }));
+    }
+  }), scrollTop);
+}
+
 async function expectDesktopPrependAnchor(page: Page, navigate: (reader: Locator) => Promise<void>) {
   const consoleErrors: string[] = [];
   page.on("console", (message) => {
@@ -27,14 +43,16 @@ async function expectDesktopPrependAnchor(page: Page, navigate: (reader: Locator
   await expect.poll(() => page.locator("body").getAttribute("data-tail-request-count")).toBe("1");
   await reader.dispatchEvent("wheel", { deltaY: -40 });
   await expect(page.locator(".follow-tail-chip")).toHaveAttribute("data-follow-tail-state", "paused");
-  await reader.evaluate((element) => {
-    element.scrollTop = 500;
-    element.dispatchEvent(new Event("scroll", { bubbles: true }));
-  });
+  // Consume the native event from positioning the reader before the next input arms pagination.
+  // Otherwise Chromium can deliver that stale event after pointerdown and clear the fresh intent.
+  await settleReaderScrollTop(reader, 500);
 
   await navigate(reader);
   await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() =>
     requestAnimationFrame(() => resolve()))));
+  await expect.poll(() => reader.evaluate((element) => element.scrollTop), {
+    message: "reader navigation did not reach the earlier-activity boundary",
+  }).toBeLessThanOrEqual(160);
   const before = await renderedAnchor(reader);
   await expect.poll(() => page.locator("body").getAttribute("data-tail-request-count")).toBe("2");
   await expect.poll(() => page.locator("[data-virtual-total]").getAttribute("data-virtual-total"))
@@ -80,19 +98,13 @@ test("desktop keyboard navigation preserves the earlier-page boundary", async ({
     await reader.dispatchEvent("keydown", { key: "Home" });
     // Chromium does not consistently apply the native Home default to an overflow region in
     // headless mode. Apply that default explicitly after the real React key path arms pagination.
-    await reader.evaluate((element) => {
-      element.scrollTop = 0;
-      element.dispatchEvent(new Event("scroll", { bubbles: true }));
-    });
+    await settleReaderScrollTop(reader, 0);
   });
 });
 
 test("desktop direct scrollbar navigation preserves the earlier-page boundary", async ({ page }) => {
   await expectDesktopPrependAnchor(page, async (reader) => {
     await reader.dispatchEvent("pointerdown", { pointerType: "mouse", button: 0 });
-    await reader.evaluate((element) => {
-      element.scrollTop = 0;
-      element.dispatchEvent(new Event("scroll", { bubbles: true }));
-    });
+    await settleReaderScrollTop(reader, 0);
   });
 });
