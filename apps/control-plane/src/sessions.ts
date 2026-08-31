@@ -4426,8 +4426,6 @@ export class SessionsService {
       controller.abort();
     }, configuredTimeout);
     const completion = this.titleGenerator({ sessionId, messages, signal: controller.signal }).then((rawTitle) => {
-      const title = normalizeGeneratedSessionTitle(rawTitle);
-      if (!title) throw new SessionTitleGenerationError("invalid_result", "output_validation");
       if (controller.signal.aborted || this.titleGenerationEpochs.get(sessionId) !== epoch) {
         if (timedOut) throw new SessionTitleGenerationError("timed_out", "generation");
         return fail<{ title: string }>("Session naming was superseded by a newer rename.", 409);
@@ -4440,6 +4438,8 @@ export class SessionsService {
       if (!current || current.title !== expectedTitle || (current.titleSource ?? "generated") !== expectedSource) {
         return fail<{ title: string }>("Session naming was superseded by a newer rename.", 409);
       }
+      const title = normalizeGeneratedSessionTitle(rawTitle);
+      if (!title) throw new SessionTitleGenerationError("invalid_result", "output_validation");
       this.db.setSemanticSessionTitle(sessionId, title, Date.now(), ownership);
       this.hub.sessionChangedById(sessionId);
       return ok({ title });
