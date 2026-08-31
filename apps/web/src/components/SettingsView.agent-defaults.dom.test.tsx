@@ -414,6 +414,50 @@ test("Agent Harness defaults refresh on discovery and ignore an older overlappin
   }
 });
 
+test("Agent Harness discovery refresh repairs drafts and closes a removed editor with restored focus", async () => {
+  let getCalls = 0;
+  const repaired = view();
+  repaired.defaults[0]!.installations[0]!.models = [{ id: "luna", displayName: "Luna", efforts: ["low"] }];
+  repaired.defaults[0]!.installations[0]!.effortLevels = ["low"];
+  const removed = view();
+  removed.defaults = removed.defaults.filter((option) => option.agentId !== "codex");
+  const fixture = await renderPanel({
+    instanceId: "test",
+    publicOrigin: "http://localhost",
+    close() {},
+    async request() {
+      getCalls += 1;
+      const next = getCalls === 1 ? view() : getCalls === 2 ? repaired : removed;
+      return new Response(JSON.stringify(next), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+  try {
+    const defaultsRow = buttonNamed(fixture.container, "Default Models, Efforts, and Permissions");
+    await act(async () => defaultsRow.click());
+    await act(async () => buttonNamed(fixture.container, "Codex App Server").click());
+    await choose(fixture.container, "Codex App Server Model", "Sol");
+    await choose(fixture.container, "Codex App Server Reasoning Effort", "Extra High");
+    await choose(fixture.container, "Codex App Server Permission Mode", "Full Access");
+
+    await fixture.render({ revision: 1 });
+    assert.match(buttonNamed(fixture.container, "Codex App Server Model").getAttribute("aria-label") ?? "", /Choose Model/);
+    assert.equal(fixture.container.querySelector('[aria-label^="Codex App Server Reasoning Effort:"]'), null);
+    assert.match(buttonNamed(fixture.container, "Codex App Server Permission Mode").getAttribute("aria-label") ?? "", /Full Access/);
+
+    buttonNamed(fixture.container, "Codex App Server Model").focus();
+    await fixture.render({ revision: 2 });
+    await nextFrame();
+    assert.equal(fixture.container.textContent?.includes("Codex App Server"), false);
+    assert.equal(domWindow.document.activeElement, defaultsRow);
+  } finally {
+    await act(async () => fixture.root.unmount());
+    fixture.container.remove();
+  }
+});
+
 test("Agent Harness mutations outrank overlapping discovery reads without disabling local actions", async () => {
   let getCalls = 0;
   let resolvePut!: (response: Response) => void;
@@ -454,6 +498,8 @@ test("Agent Harness mutations outrank overlapping discovery reads without disabl
     const save = buttonNamed(fixture.container, "Save");
     save.focus();
     await act(async () => save.click());
+    assert.equal(buttonNamed(fixture.container, "Codex App Server").disabled, true);
+    assert.equal(buttonNamed(fixture.container, "Claude Code").disabled, true);
     await fixture.render({ revision: 2 });
     unrelated.focus();
     await act(async () => {

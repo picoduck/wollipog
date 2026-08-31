@@ -632,6 +632,7 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
                   title={option.name}
                   description={harnessDefaultSummary(option)}
                   expanded={isEditing}
+                  disabled={busy}
                   controls={isEditing ? `agent-default-${encodeURIComponent(key)}` : undefined}
                   buttonRef={(node) => {
                     if (node) harnessRowRefs.current.set(key, node);
