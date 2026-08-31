@@ -142,7 +142,6 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   ["components/InstanceSelector.tsx", "raw-radiogroup", 1],
   ["components/NewPodDialog.tsx", "raw-radiogroup", 1],
   ["components/PodsView.tsx", "raw-radiogroup", 2],
-  ["components/ReviewQueue.tsx", "raw-radiogroup", 1],
   /* Down from 6 on 2026-08-12: the Move to Project dialog adopted ChoiceCards, retiring the
      durable Project chip's bespoke menuitemradio popover. */
   ["components/SessionDetail.tsx", "raw-radiogroup", 4],

@@ -44,6 +44,8 @@ import {
 import { SnoozeDialog } from "./SnoozeDialog.js";
 import type { NewSessionPreset } from "./NewSessionDialog.js";
 import { SearchIcon } from "./Icons.js";
+import { Board } from "./Board.js";
+import type { SessionsViewMode } from "../sessions-view-mode.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { dispatchVirtualViewportIntent } from "../viewport-intent.js";
 import type { PreviewNavigationControls } from "./usePreviewNavigationRegistration.js";
@@ -90,6 +92,8 @@ export function pageInboxPreview(
 }
 
 export interface InboxViewProps {
+  /** The Sessions destination's presentation: the project-grouped list or the status board. */
+  viewMode?: SessionsViewMode;
   expandedSessionId?: string | null;
   sourceLocation?: SourceLocation;
   /** App-shell control cluster forwarded into the expanded session's unified bar on desktop. */
@@ -106,6 +110,7 @@ export interface InboxViewProps {
 }
 
 export function InboxView({
+  viewMode = "list",
   expandedSessionId = null,
   sourceLocation,
   topbarControls,
@@ -853,7 +858,11 @@ export function InboxView({
       pageInboxPreview(scroll, "previous", previewNavigationRef.current?.beginProgrammaticScroll);
     },
   }), [activeSplit?.key, archive, decide, displayedSelection, expand, moveSelection, selectSplit, sessionRemindersSupported, setUnread, showToast, splits, togglePin]);
-  useInboxKeys(!isMobile && !expanded, keyActions);
+  // Board mode has no row selection, so the list's j/k/a/d… vocabulary would act on an invisible
+  // row; only the shared toolbar (tabs, search, toggle) stays keyboard-reachable there.
+  const boardMode = viewMode === "board" && !expanded;
+  useInboxKeys(!isMobile && !expanded && !boardMode, keyActions);
+  const boardSessions = useMemo(() => liveEntries.map((entry) => entry.session), [liveEntries]);
 
   const ratio = dragRatio ?? inbox.splitRatio;
   const activeProjectId = activeSplit?.project?.kind === "durable" ? activeSplit.project.project.id : undefined;
@@ -881,11 +890,11 @@ export function InboxView({
   };
 
   return (
-    <div className={`inbox-view${expanded ? " expanded" : ""}`} ref={viewRef} data-focus-zone={expanded ? "detail" : "list"}>
+    <div className={`inbox-view${expanded ? " expanded" : ""}${boardMode ? " board-mode" : ""}`} ref={viewRef} data-focus-zone={expanded ? "detail" : "list"}>
       <section
         className="inbox-list-pane"
-        style={{ height: isMobile ? "100%" : `${ratio * 100}%` }}
-        aria-label="Command Inbox"
+        style={{ height: isMobile || boardMode ? "100%" : `${ratio * 100}%` }}
+        aria-label="Sessions"
         aria-hidden={expanded || undefined}
         inert={expanded || undefined}
       >
@@ -948,6 +957,20 @@ export function InboxView({
             })}
           </div>
           <div className="inbox-toolbar-actions">
+            <SegmentedControl<SessionsViewMode>
+              className="sessions-view-toggle"
+              label="Sessions View"
+              value={viewMode}
+              options={[
+                { value: "list", label: "List" },
+                { value: "board", label: "Board" },
+              ]}
+              onChange={(mode) => {
+                if (mode === viewMode) return;
+                // The route IS the mode; the App-level view effect persists it as last-used.
+                navigate(mode === "board" ? { name: "board" } : { name: "inbox" });
+              }}
+            />
             <span className="sr-only" aria-live="polite" aria-atomic="true">
               {orderUpdateAvailable ? "A newer Inbox order is available." : ""}
             </span>
@@ -995,6 +1018,18 @@ export function InboxView({
             </label>
           </div>
         </div>
+        {boardMode ? (
+          <Board
+            sessions={boardSessions}
+            searchActive={normalizedQuery.length > 0 || (activeSplit?.key ?? null) !== null || reminderMode === "snoozed"}
+            onShowAll={() => {
+              exitSearch();
+              selectSplit(null);
+              setReminderMode("ordinary");
+            }}
+            onNewSession={() => onNewSession?.(activeNewSessionPreset)}
+          />
+        ) : (
         <InboxList
           ref={captureListRef}
           entries={entries}
@@ -1052,6 +1087,8 @@ export function InboxView({
           onPointerTargetChange={handlePointerTargetChange}
           onPointerPressChange={handlePointerPressChange}
         />
+        )}
+        {!boardMode && (
         <footer className="inbox-activity-footer" aria-label="Inbox Status and Shortcuts">
           <div className="inbox-activity-summary" aria-label="Inbox Activity Summary">
             <span>{activityCounts.running} Running</span>
@@ -1083,9 +1120,10 @@ export function InboxView({
             } : {})}
           />
         </footer>
+        )}
       </section>
 
-      {(!isMobile || expanded) && (
+      {!boardMode && (!isMobile || expanded) && (
         <>
           <div
             className="inbox-splitter"

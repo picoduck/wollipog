@@ -61,7 +61,6 @@ import type {
   RelayPodResult,
   ReconcilePodRequest,
   RunView,
-  ReviewQueueItem,
   ReviewFindingsResponse,
   RunnerCredentialSecret,
   CreateReviewFindingRequest,
@@ -647,8 +646,6 @@ export function createApiClient(transport: ApiTransport) {
     ),
 
   approvalQueue: () => req<{ items: ApprovalQueueItem[] }>("/api/governance/approval-queue"),
-
-  reviewQueue: () => req<{ items: ReviewQueueItem[] }>("/api/governance/review-queue"),
 
   reviewFindings: (sessionId: string) =>
     req<ReviewFindingsResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/review-findings`),

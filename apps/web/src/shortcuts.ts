@@ -4,13 +4,14 @@ export type ShortcutId =
   | "search"
   | "navigate-inbox"
   | "navigate-projects"
-  | "navigate-board"
   | "navigate-runs"
   | "navigate-pods"
   | "navigate-automations"
   | "navigate-usage"
   | "navigate-connections"
   | "navigate-archived"
+  | "navigate-skills"
+  | "toggle-sessions-view"
   | "open-settings"
   | "focus-inbox-search"
   | "new-session"
@@ -56,7 +57,7 @@ export type ShortcutId =
   | "stop-turn"
   | "exit-terminal";
 
-export type ShortcutScope = "Global" | "Session" | "Inbox" | "Session Reading" | "Run dialog" | "Pod detail";
+export type ShortcutScope = "Global" | "Sessions" | "Session" | "Inbox" | "Session Reading" | "Run dialog" | "Pod detail";
 
 export type ShortcutGroup = "Navigation" | "Inbox" | "Session Reading" | "Session" | "Actions" | "Help";
 
@@ -94,8 +95,8 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
   {
     id: "navigate-inbox",
     group: "Navigation",
-    label: "Inbox",
-    description: "Open the Command Inbox",
+    label: "Sessions",
+    description: "Open Sessions in its last-used list or board mode",
     scope: "Global",
     binding: { key: "1", bare: true },
   },
@@ -108,20 +109,12 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     binding: { key: "2", bare: true },
   },
   {
-    id: "navigate-board",
-    group: "Navigation",
-    label: "Board",
-    description: "Open the Board",
-    scope: "Global",
-    binding: { key: "3", bare: true },
-  },
-  {
     id: "navigate-runs",
     group: "Navigation",
     label: "Multi-Agent",
     description: "Open Multi-Agent Runs",
     scope: "Global",
-    binding: { key: "4", bare: true },
+    binding: { key: "3", bare: true },
   },
   {
     id: "navigate-pods",
@@ -129,7 +122,7 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     label: "Pods",
     description: "Open Collaboration Pods",
     scope: "Global",
-    binding: { key: "5", bare: true },
+    binding: { key: "4", bare: true },
   },
   {
     id: "navigate-automations",
@@ -137,7 +130,7 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     label: "Automations",
     description: "Open Automations",
     scope: "Global",
-    binding: { key: "6", bare: true },
+    binding: { key: "5", bare: true },
   },
   {
     id: "navigate-usage",
@@ -145,7 +138,7 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     label: "Usage",
     description: "Open Usage & Cost",
     scope: "Global",
-    binding: { key: "7", bare: true },
+    binding: { key: "6", bare: true },
   },
   {
     id: "navigate-connections",
@@ -153,7 +146,7 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     label: "Connections",
     description: "Open Connections",
     scope: "Global",
-    binding: { key: "8", bare: true },
+    binding: { key: "7", bare: true },
   },
   {
     id: "navigate-archived",
@@ -161,7 +154,23 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     label: "Archived Sessions",
     description: "Open Archived Sessions",
     scope: "Global",
+    binding: { key: "8", bare: true },
+  },
+  {
+    id: "navigate-skills",
+    group: "Navigation",
+    label: "Agent Skills",
+    description: "Open Agent Skills",
+    scope: "Global",
     binding: { key: "9", bare: true },
+  },
+  {
+    id: "toggle-sessions-view",
+    group: "Navigation",
+    label: "Toggle List / Board",
+    description: "Switch Sessions between its list and board modes",
+    scope: "Sessions",
+    binding: { key: "b", bare: true },
   },
   {
     id: "open-settings",
@@ -177,7 +186,7 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: "focus-inbox-search",
     group: "Navigation",
     label: "Search Sessions",
-    description: "Focus the Command Inbox search",
+    description: "Focus the Sessions search",
     scope: "Global",
     binding: { key: "/", bare: true },
   },

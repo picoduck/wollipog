@@ -182,9 +182,6 @@ function Sample() {
           {/* The other row families the density axis reaches. Review found the first version
               stopped at the settings row and the inbox row, so the setting looked broken on Board,
               Projects and Review rather than opted out. */}
-          <div className="review-queue-list">
-            <div className="review-queue-row"><span className="review-queue-select" /><span className="review-queue-main">A review row</span><span /></div>
-          </div>
           <div className="project-manager-items">
             <button type="button" className="project-manager-item"><span>A project row</span></button>
           </div>

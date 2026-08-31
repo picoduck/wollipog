@@ -3,7 +3,6 @@ import type { View } from "../navigation.js";
 import { GLOBAL_VIEW_ITEMS, viewPath, type GlobalViewName } from "../navigation.js";
 import {
   AutomationsIcon,
-  BoardIcon,
   ConnectionsIcon,
   GearIcon,
   InboxIcon,
@@ -19,19 +18,22 @@ import { useAccessibleMenu } from "./interactions.js";
 import { useIsMobile } from "./useIsMobile.js";
 import { experimentForViewName } from "../experiments.js";
 import { useExperiments } from "../use-experiments.js";
+import { useInstanceScope } from "../instance-scope.js";
+import { sessionsDestination } from "../sessions-view-mode.js";
 
 /**
  * The four destinations that stay on the phone tab bar. Everything else moves behind "More".
  *
  * Eight destinations at 44px plus the instance and Settings controls exceeded a 375px viewport.
- * Five items is the platform convention; creation is owned by the Inbox toolbar.
+ * Five items is the platform convention; creation is owned by the Sessions toolbar. The board
+ * gave its slot to Automations when it became a mode of Sessions (#499): the next
+ * always-enabled destination in canonical order.
  */
-export const MOBILE_PRIMARY_VIEWS: readonly GlobalViewName[] = ["inbox", "projects", "board", "runners"];
+export const MOBILE_PRIMARY_VIEWS: readonly GlobalViewName[] = ["inbox", "projects", "automations", "runners"];
 
 const VIEW_ICONS: Record<GlobalViewName, (props: { size?: number; className?: string }) => ReactNode> = {
   inbox: InboxIcon,
   projects: ProjectsIcon,
-  board: BoardIcon,
   runs: RunsIcon,
   pods: PodsIcon,
   automations: AutomationsIcon,
@@ -48,7 +50,8 @@ const RAIL_SHORTCUT_DIGITS = 9;
 const RAIL_ICON_SIZE = 26;
 
 function selectedRailView(view: View): GlobalViewName | null {
-  if (view.name === "session") return "inbox";
+  // Board mode and an expanded session are both the Sessions destination.
+  if (view.name === "session" || view.name === "board") return "inbox";
   if (view.name === "run") return "runs";
   if (view.name === "pod") return "pods";
   return GLOBAL_VIEW_ITEMS.some((item) => item.name === view.name) ? view.name as GlobalViewName : null;
@@ -73,6 +76,9 @@ export function Rail({
   settingsControl?: ReactNode;
 }) {
   const selected = selectedRailView(view);
+  const instanceScope = useInstanceScope();
+  // Read at activation time, not render time: the persisted mode may have changed since mount.
+  const sessionsViewDestination = () => sessionsDestination(instanceScope);
   // Settings rides in the sheet on a phone but is deliberately absent from GLOBAL_VIEW_ITEMS: that
   // array numbers the desktop rail AND its bare-digit shortcuts, so adding an entry would rebind
   // every later destination and render a second Settings row beside the gear (see navigation.ts).
@@ -194,10 +200,10 @@ export function Rail({
         onClick={(event) => {
           if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
           event.preventDefault();
-          onNavigate({ name: "inbox" });
+          onNavigate(sessionsViewDestination());
         }}
-        title="Wollipog Inbox"
-        aria-label="Wollipog Inbox"
+        title="Wollipog Sessions"
+        aria-label="Wollipog Sessions"
       >
         <img src="/icons/icon-192.png" alt="" aria-hidden="true" />
       </a>
@@ -228,7 +234,9 @@ export function Rail({
               onClick={(event) => {
                 if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
                 event.preventDefault();
-                onNavigate(destination);
+                // Activating Sessions opens its persisted list/board mode; the href stays the
+                // canonical "/" so copied links deep-link the explicit list mode.
+                onNavigate(item.name === "inbox" ? sessionsViewDestination() : destination);
               }}
             >
               <Icon size={RAIL_ICON_SIZE} />
@@ -310,7 +318,7 @@ export function Rail({
           </div>
         )}
         <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-          Inbox: {blockedCount} Blocked, {stalledCount} Stalled
+          Sessions: {blockedCount} Blocked, {stalledCount} Stalled
         </span>
       </div>
       <div className="rail-spacer" />

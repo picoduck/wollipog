@@ -727,3 +727,69 @@ test("a two-client reminder upsert preserves the open Inbox Snooze draft and foc
   container.remove();
   mobileViewport = true;
 });
+
+test("board mode shares the Sessions toolbar scope and toggles back to the list", async () => {
+  mobileViewport = false;
+  setWindowFocused(true);
+  setVisibility("visible");
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "sessions-board-mode",
+    runtimeKey: "sessions-board-mode:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  const pushed: unknown[] = [];
+  const spyNavigation: ViewNavigation = {
+    current: () => ({ name: "board" }),
+    push: (view) => void pushed.push(view),
+    listen: () => () => {},
+  };
+
+  await act(async () => {
+    root.render(
+      <StoreProvider connection={connection} navigation={spyNavigation}>
+        <InboxView viewMode="board" rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+      </StoreProvider>,
+    );
+  });
+  await act(async () => {
+    socket.push(snapshot([
+      session("A", 30),
+      session("B", 20, { column: "queued" }),
+      session("C", 10, { archived: true }),
+    ]));
+  });
+
+  assert.ok(container.querySelector(".board-wrap"), "board mode renders the kanban canvas");
+  assert.equal(container.querySelector(".inbox-list"), null, "and not the list");
+  assert.equal(container.querySelector(".inbox-splitter"), null, "the preview split belongs to list mode");
+  assert.ok(container.querySelector(".inbox-tabs"), "the shared split tabs stay above the board");
+  assert.equal(container.querySelectorAll(".board .card").length, 2,
+    "archived sessions never reach the board columns");
+
+  // The shared search narrows the board columns just as it narrows the list.
+  const search = container.querySelector(".inbox-search input") as unknown as HTMLInputElement;
+  await act(async () => {
+    search.value = "Session A";
+    fireDomEvent.change(search as never, { target: { value: "Session A" } as never });
+  });
+  await act(async () => { await Promise.resolve(); });
+  assert.equal(container.querySelectorAll(".board .card").length, 1,
+    "the toolbar query scopes board mode");
+
+  const toggle = container.querySelector(".sessions-view-toggle");
+  assert.ok(toggle, "the List / Board toggle lives in the shared toolbar");
+  const listOption = [...toggle!.querySelectorAll("button")]
+    .find((option) => option.textContent === "List") as unknown as HTMLButtonElement;
+  await act(async () => { listOption.click(); });
+  assert.deepEqual(pushed.at(-1), { name: "inbox" },
+    "switching modes navigates: the route is the mode");
+
+  await act(async () => { root.unmount(); });
+  container.remove();
+  mobileViewport = true;
+});

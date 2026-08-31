@@ -112,7 +112,6 @@ test("the rhythm is driven by tokens, not by literals", () => {
   // And the families review found the first version bypassed, so the setting is application-wide
   // rather than "works on the two screens I happened to wire".
   for (const [selector, token] of [
-    [".review-queue-row {", "--queue-row-pad-y"],
     [".project-manager-item {", "--project-row-pad-y"],
     [".card {", "--card-pad-y"],
     [".runner-card {", "--runner-card-pad-y"],

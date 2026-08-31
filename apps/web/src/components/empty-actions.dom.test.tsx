@@ -52,6 +52,14 @@ for (const [name, value] of Object.entries({
   ResizeObserver: class { observe() {} unobserve() {} disconnect() {} },
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
 
+/** The Sessions view owns board scoping now (split, query, reminder mode); this harness supplies
+ * what it would: the store's unarchived sessions with no extra narrowing. */
+function BoardHarness({ onNewSession }: { onNewSession: () => void }) {
+  const sessions = useStoreSelector((s) => s.sessions);
+  const scoped = React.useMemo(() => [...sessions.values()].filter((s) => !s.archived), [sessions]);
+  return <Board sessions={scoped} searchActive={false} onShowAll={() => {}} onNewSession={onNewSession} />;
+}
+
 const runner: RunnerView = {
   runnerId: "runner-1",
   hostname: "runner-host",
@@ -238,7 +246,7 @@ test("a board emptied by a filter offers to clear the filter, not to create", as
   // Yet" and offered New Session — which creates on the dialog's default Machine, leaves the filter
   // in place, and returns the user to the same empty board.
   let created = 0;
-  const { container, socket, unmount } = await mount({}, <Board onOpenReview={() => {}} onNewSession={() => { created += 1; }} />);
+  const { container, socket, unmount } = await mount({}, <BoardHarness onNewSession={() => { created += 1; }} />);
   await act(async () => { socket.push(snapshot({ sessions: [session] })); });
 
   assert.equal(container.querySelector(".empty"), null, "one unfiltered session is not an empty board");
@@ -304,7 +312,7 @@ test("a remote instance with no machines is not offered local setup", async () =
 test("a genuinely empty board still offers to create", async () => {
   // The other half of the same branch: narrowing the filtered case must not swallow the real one.
   let created = 0;
-  const { container, socket, unmount } = await mount({}, <Board onOpenReview={() => {}} onNewSession={() => { created += 1; }} />);
+  const { container, socket, unmount } = await mount({}, <BoardHarness onNewSession={() => { created += 1; }} />);
   await act(async () => { socket.push(snapshot({ sessions: [] })); });
 
   assert.equal(container.querySelector(".empty-title")?.textContent, "No Sessions Yet");
@@ -446,7 +454,7 @@ test("a board emptied by archiving still clears its filter on the way out", asyn
   // own default would then be hidden by that filter and the board would come back empty.
   let created = 0;
   const { container, socket, unmount } = await mount(
-    {}, <Board onOpenReview={() => {}} onNewSession={() => { created += 1; }} />);
+    {}, <BoardHarness onNewSession={() => { created += 1; }} />);
   await act(async () => { socket.push(snapshot({ sessions: [session] })); });
   const machine = container.querySelector("select") as unknown as HTMLSelectElement;
   await act(async () => {

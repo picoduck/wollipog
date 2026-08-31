@@ -24,7 +24,6 @@ import { pickTopmost } from "./layers.js";
 import { useIsMobile } from "./components/useIsMobile.js";
 import { parseStoredDockVisible } from "./dock.js";
 import { isInboxBlocked } from "./inbox.js";
-import { Board } from "./components/Board.js";
 import { RunnersView } from "./components/RunnersView.js";
 import { RunsView, RunDetail } from "./components/RunsView.js";
 import { InboxView } from "./components/InboxView.js";
@@ -69,6 +68,8 @@ import { Empty, Modal } from "./components/common.js";
 import { ChevronLeftIcon, DockBottomIcon, KeyboardIcon, LockIcon, PanelRightIcon, PinnedPanelIcon, PlusIcon, WarningTriangleIcon } from "./components/Icons.js";
 import { NavRow, SwitchRow } from "./components/ui/SettingsRows.js";
 import { viewPath, viewTitle } from "./navigation.js";
+import { useInstanceScope } from "./instance-scope.js";
+import { saveSessionsViewMode, sessionsDestination, sessionsViewModeForView } from "./sessions-view-mode.js";
 import { handleSettingsNavigationKey } from "./settings-navigation.js";
 import { ProjectsView } from "./components/ProjectsView.js";
 import { InstanceSelector } from "./components/InstanceSelector.js";
@@ -427,6 +428,15 @@ function Shell() {
   }, []);
   useNewSessionShortcut(!isMobile, openContextualNewSession);
 
+  // Standing in either Sessions mode records it as the destination's last-used mode. The route is
+  // the source of truth, so every entry path — toggle, `b`, digit, palette, deep link — funnels
+  // through here, and an expanded session deliberately records nothing (see sessions-view-mode.ts).
+  const instanceScope = useInstanceScope();
+  const sessionsMode = sessionsViewModeForView(view);
+  useEffect(() => {
+    if (sessionsMode) saveSessionsViewMode(sessionsMode, instanceScope);
+  }, [sessionsMode, instanceScope]);
+
   // ONE Escape handler for the shell ladder (mounted always; the palette and dialogs manage
   // their own). Escape peels exactly ONE layer, topmost first:
   //  - Any open popover claims the press. Popovers don't all have Escape handlers (the ⋯
@@ -477,7 +487,8 @@ function Shell() {
         });
       } else if (owner === "session-reading") {
         e.preventDefault();
-        navigate({ name: "inbox" });
+        // Escaping a session returns to the Sessions mode it was opened from (list or board).
+        navigate(sessionsDestination(instanceScope));
       } else if (owner === "inbox-filter") {
         e.preventDefault();
         window.dispatchEvent(new Event("wollipog:clear-inbox-query"));
@@ -485,20 +496,20 @@ function Shell() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [navigate]);
+  }, [navigate, instanceScope]);
 
   useEffect(() => {
     if (isMobile) return;
     const destinations = [
       ["navigate-inbox", { name: "inbox" }],
       ["navigate-projects", { name: "projects" }],
-      ["navigate-board", { name: "board" }],
       ["navigate-runs", { name: "runs" }],
       ["navigate-pods", { name: "pods" }],
       ["navigate-automations", { name: "automations" }],
       ["navigate-usage", { name: "usage" }],
       ["navigate-connections", { name: "runners" }],
       ["navigate-archived", { name: "archived" }],
+      ["navigate-skills", { name: "skills" }],
     ] as const;
     const onKey = (event: KeyboardEvent) => {
       if (event.defaultPrevented || shortcutLayerActive(document) || xtermOwnsKey(event.target)) return;
@@ -509,12 +520,23 @@ function Shell() {
         const experiment = experimentForViewName(destination.name);
         if (experiment !== null && !experiments.flags[experiment]) return;
         event.preventDefault();
-        navigate(destination);
+        // The Sessions digit opens whichever mode the destination last used.
+        navigate(shortcutId === "navigate-inbox" ? sessionsDestination(instanceScope) : destination);
         return;
+      }
+      if (matchesShortcut(event, "toggle-sessions-view")) {
+        // Only while Sessions is the current view: `b` is unadvertised elsewhere, and a bare
+        // letter firing from, say, Usage would navigate without any visible control naming it.
+        const current = viewRef.current.name;
+        if (current === "inbox" || current === "board") {
+          event.preventDefault();
+          navigate({ name: current === "board" ? "inbox" : "board" });
+          return;
+        }
       }
       if (matchesShortcut(event, "focus-inbox-search")) {
         event.preventDefault();
-        navigate({ name: "inbox" });
+        navigate(sessionsDestination(instanceScope));
         window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
           document.querySelector<HTMLInputElement>(".inbox-search input")?.focus();
         }));
@@ -528,7 +550,7 @@ function Shell() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [isMobile, navigate, experiments.flags]);
+  }, [isMobile, navigate, experiments.flags, instanceScope]);
 
   // Ctrl+K / Cmd+K opens the global search palette (sessions + transcripts + views).
   // Deliberately ALSO from inputs/textareas (the Slack/Linear convention — jumping mid-typing
@@ -668,7 +690,7 @@ function Shell() {
             onNewPod={() => setDialog({ kind: "pod" })}
             sessionActions={isMobile ? sessionPanelControls : null}
             sessionTitle={view.name === "session" ? sessions.get(view.id)?.title ?? "Session" : undefined}
-            onSessionBack={() => navigate({ name: "inbox" })}
+            onSessionBack={() => navigate(sessionsDestination(instanceScope))}
           />
         )}
         {/* Once a 1008 latched authRequired, the pairing card stays mounted through the
@@ -684,21 +706,14 @@ function Shell() {
               : <OfflineBanner />
           )
         )}
-        <div className={`main-body${view.name === "inbox" || view.name === "session" ? " inbox-main-body" : ""}`}>
+        <div className={`main-body${view.name === "inbox" || view.name === "session" || view.name === "board" ? " inbox-main-body" : ""}`}>
           <ErrorBoundary
             label="View"
             resetKey={viewPath(view)}
           >
-          {view.name === "board" && (
-            <Board
-              onNewSession={openContextualNewSession}
-              onOpenReview={(sessionId) => {
-              navigate({ name: "session", id: sessionId });
-              rightPanel.show("review");
-            }} />
-          )}
-          {(view.name === "inbox" || view.name === "session") && (
+          {(view.name === "inbox" || view.name === "session" || view.name === "board") && (
             <InboxView
+              viewMode={view.name === "board" ? "board" : "list"}
               expandedSessionId={view.name === "session" ? view.id : null}
               sourceLocation={view.name === "session" ? view.location : undefined}
               topbarControls={!isMobile ? sessionPanelControls : undefined}
@@ -710,7 +725,7 @@ function Shell() {
               focusComposerSessionId={composerFocusSessionId}
               onComposerFocusConsumed={() => setComposerFocusSessionId(null)}
               onExpand={expandSession}
-              onCollapse={() => navigate({ name: "inbox" })}
+              onCollapse={() => navigate(sessionsDestination(instanceScope))}
               onNewSession={(preset) => setDialog({ kind: "session", preset })}
               onShortcutNewSessionPresetChange={setInboxNewSessionPreset}
             />

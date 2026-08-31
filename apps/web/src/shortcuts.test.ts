@@ -198,13 +198,14 @@ test("PR4 rail, search, create, and focus-zone shortcuts replace the retired sid
   const expected = [
     ["navigate-inbox", "1"],
     ["navigate-projects", "2"],
-    ["navigate-board", "3"],
-    ["navigate-runs", "4"],
-    ["navigate-pods", "5"],
-    ["navigate-automations", "6"],
-    ["navigate-usage", "7"],
-    ["navigate-connections", "8"],
-    ["navigate-archived", "9"],
+    ["navigate-runs", "3"],
+    ["navigate-pods", "4"],
+    ["navigate-automations", "5"],
+    ["navigate-usage", "6"],
+    ["navigate-connections", "7"],
+    ["navigate-archived", "8"],
+    ["navigate-skills", "9"],
+    ["toggle-sessions-view", "b"],
     ["focus-inbox-search", "/"],
     ["new-session", "c"],
     ["focus-next-zone", "F6"],
@@ -219,14 +220,13 @@ test("global rail numbering stays aligned with its navigation shortcuts", () => 
   const shortcutIdByView = {
     inbox: "navigate-inbox",
     projects: "navigate-projects",
-    board: "navigate-board",
     runs: "navigate-runs",
     pods: "navigate-pods",
     automations: "navigate-automations",
     usage: "navigate-usage",
     runners: "navigate-connections",
     archived: "navigate-archived",
-    skills: null,
+    skills: "navigate-skills",
   } as const;
   for (const [index, item] of GLOBAL_VIEW_ITEMS.entries()) {
     const id = shortcutIdByView[item.name];

@@ -7,15 +7,24 @@ import { relativeTime } from "../format.js";
 import { machineOptionLabels, runnerDisplay } from "../runners.js";
 import { SessionStatusIndicators, Empty } from "./common.js";
 import { sessionAgentLabel } from "./agent-options.js";
-import { ReviewQueue } from "./ReviewQueue.js";
 import { MeasuredVirtualList } from "./MeasuredVirtualList.js";
 import { useExperiments } from "../use-experiments.js";
 
 const sessionCardKey = (session: SessionView) => session.id;
 const estimateSessionCard = (session: SessionView) => session.pendingApproval ? 230 : session.preview ? 155 : 120;
 
-export function Board({ onOpenReview, onNewSession }: {
-  onOpenReview: (sessionId: string) => void;
+/**
+ * The Sessions view's board mode: the same scoped session list the list mode renders (project
+ * split, search, and reminder filtering applied by the parent), grouped into status columns.
+ * The Machine and Agent filters below are board-local refinements on top of that shared scope.
+ */
+export function Board({ sessions: scoped, searchActive, onShowAll, onNewSession }: {
+  /** Already scoped by the Sessions toolbar: unarchived, split, query, and reminder mode. */
+  sessions: SessionView[];
+  /** True while the shared search or a non-All split narrows the scope (changes the empty state). */
+  searchActive: boolean;
+  /** Widen the shared scope back to every session: clear the search, the split, and reminder mode. */
+  onShowAll: () => void;
   onNewSession: () => void;
 }) {
   const api = useApi();
@@ -23,8 +32,8 @@ export function Board({ onOpenReview, onNewSession }: {
   // The empty state's hint names Multi-Agent Run; with the experiment off that destination has
   // been removed everywhere else, and a hint pointing at a control that does not exist teaches
   // the reader the app is broken rather than configured.
-  const { multiAgent: multiAgentEnabled, reviewQueue: reviewQueueEnabled } = useExperiments().flags;
-  const sessions = useStoreSelector((s) => s.sessions);
+  const multiAgentEnabled = useExperiments().flags.multiAgent;
+  const allSessions = useStoreSelector((s) => s.sessions);
   const runners = useStoreSelector((s) => s.runners);
   const boxes = useStoreSelector((s) => s.boxes);
   const filters = useStoreSelector((s) => s.filters);
@@ -48,27 +57,15 @@ export function Board({ onOpenReview, onNewSession }: {
     [boxByRunner, runners],
   );
 
-  const unarchived = useMemo(() => [...sessions.values()].filter((s) => !s.archived), [sessions]);
-  const unarchivedCount = unarchived.length;
+  const scopedCount = scoped.length;
   const filtered = Boolean(filters.runnerId || filters.agentId);
   const visible = useMemo(
     () =>
-      unarchived
+      scoped
         .filter((s) => !filters.runnerId || s.runnerId === filters.runnerId)
         .filter((s) => !filters.agentId || s.agentId === filters.agentId),
-    [unarchived, filters],
+    [scoped, filters],
   );
-  const reviewKey = useMemo(() => [
-    ...[...sessions.values()]
-      .filter((session) => !session.archived)
-      .map((session) => JSON.stringify([
-        session.id,
-        session.status,
-        session.worktreePath ?? null,
-        session.pendingApproval?.requestId ?? null,
-      ])),
-    ...[...runners.values()].map((runner) => JSON.stringify([runner.runnerId, runner.status])),
-  ].sort().join("|"), [sessions, runners]);
 
   const byColumn = useMemo(() => {
     const cols = new Map<string, SessionView[]>();
@@ -116,7 +113,7 @@ export function Board({ onOpenReview, onNewSession }: {
       setDragOverCol(null);
       const id = e.dataTransfer.getData("text/wollipog-session");
       if (!id) return;
-      if (sessions.get(id)?.column === colId) return;
+      if (allSessions.get(id)?.column === colId) return;
       void api.setColumn(id, colId).catch(() => {
         /* board re-syncs from the next session_upsert; a failed move just stays put */
       });
@@ -169,20 +166,13 @@ export function Board({ onOpenReview, onNewSession }: {
         </div>
       </div>
 
-      {reviewQueueEnabled && (
-        <ReviewQueue
-          refreshKey={reviewKey}
-          onOpen={(sessionId) => navigate({ name: "session", id: sessionId })}
-          onOpenReview={onOpenReview}
-        />
-      )}
 
       {visible.length === 0 ? (
         // An empty board and a filtered-out board are different problems, and only one of them is
         // solved by starting a session. Offering "New Session" against an active filter created on
         // the dialog's default Machine leaves the filter in place and the board still empty — the
         // action looked like a way out and was not one.
-        filtered && unarchivedCount > 0 ? (
+        filtered && scopedCount > 0 ? (
           <Empty
             icon={<BoardIcon size={28} />}
             title="No Matching Sessions"
@@ -191,7 +181,20 @@ export function Board({ onOpenReview, onNewSession }: {
                 Clear Filters
               </button>
             }
-            hint={<>{unarchivedCount} session{unarchivedCount === 1 ? "" : "s"} {unarchivedCount === 1 ? "is" : "are"} hidden by the current Machine and Agent filters.</>}
+            hint={<>{scopedCount} session{scopedCount === 1 ? "" : "s"} {scopedCount === 1 ? "is" : "are"} hidden by the current Machine and Agent filters.</>}
+          />
+        ) : searchActive ? (
+          // The shared split tabs or search emptied the scope before the board-local filters ran;
+          // "New Session" cannot answer a query mismatch, so the way out is widening the scope.
+          <Empty
+            icon={<BoardIcon size={28} />}
+            title="No Matching Sessions"
+            action={
+              <button type="button" className="btn primary sm" onClick={onShowAll}>
+                Show All Sessions
+              </button>
+            }
+            hint={<>No sessions match the current group or search.</>}
           />
         ) : (
           <Empty

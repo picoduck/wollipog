@@ -6,6 +6,8 @@ import { EXTRA_PALETTE_DESTINATIONS, GLOBAL_VIEW_ITEMS } from "../navigation.js"
 import { sessionArchiveSearchDetail } from "../archive-browser.js";
 import { experimentForViewName } from "../experiments.js";
 import { useExperiments } from "../use-experiments.js";
+import { useInstanceScope } from "../instance-scope.js";
+import { sessionsDestination } from "../sessions-view-mode.js";
 
 export function useCommandPaletteFocus(
   inputRef: RefObject<HTMLInputElement | null>,
@@ -35,6 +37,7 @@ export function useCommandPaletteFocus(
  */
 export function CommandPalette({ onClose }: { onClose: () => void }) {
   const api = useApi();
+  const instanceScope = useInstanceScope();
   const { navigate, loadSession } = useStoreActions();
   const sessions = useStoreSelector((s) => s.sessions);
   const [catalogSessions, setCatalogSessions] = useState(() => new Map(sessions));
@@ -135,7 +138,9 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
       const session = catalogSessions.get(entry.view.id);
       if (session) loadSession(session);
     }
-    navigate(entry.view as View);
+    // "Sessions" is a destination pick, so it opens the persisted list/board mode; the
+    // explicit "Board" extra entry keeps naming a specific mode.
+    navigate(entry.view.name === "inbox" ? sessionsDestination(instanceScope) : entry.view as View);
     onClose();
   };
 

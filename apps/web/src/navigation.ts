@@ -42,18 +42,22 @@ export const SETTINGS_SECTIONS: ReadonlyArray<{ id: SettingsSection; title: stri
 
 export type ConnectionSection = "instances" | "machines" | "people";
 
-export type GlobalViewName = Extract<View["name"], "inbox" | "projects" | "board" | "runs" | "pods" | "automations" | "usage" | "runners" | "archived" | "skills">;
+export type GlobalViewName = Extract<View["name"], "inbox" | "projects" | "runs" | "pods" | "automations" | "usage" | "runners" | "archived" | "skills">;
 
-/** One vocabulary for every global destination, shared by the rail, header, and palette. */
+/** One vocabulary for every global destination, shared by the rail, header, and palette.
+ *
+ * The board is deliberately NOT a destination: it is the board mode of Sessions (the `inbox`
+ * entry), reachable through the in-view toggle, the `b` shortcut, `/board`, and the palette's
+ * extra Board entry below. The `inbox` name is retained internally so saved preferences and
+ * routes survive the visible rename to Sessions. */
 export const GLOBAL_VIEW_ITEMS: ReadonlyArray<{
   name: GlobalViewName;
   label: string;
   title: string;
   paletteLabel: string;
 }> = [
-  { name: "inbox", label: "Inbox", title: "Inbox", paletteLabel: "Inbox" },
+  { name: "inbox", label: "Sessions", title: "Sessions", paletteLabel: "Sessions" },
   { name: "projects", label: "Projects", title: "Projects", paletteLabel: "Projects" },
-  { name: "board", label: "Board", title: "Board", paletteLabel: "Board" },
   { name: "runs", label: "Multi-Agent", title: "Multi-Agent Runs", paletteLabel: "Multi-Agent Runs" },
   { name: "pods", label: "Pods", title: "Collaboration Pods", paletteLabel: "Collaboration Pods" },
   { name: "automations", label: "Automations", title: "Automations", paletteLabel: "Automations" },
@@ -75,9 +79,11 @@ export const GLOBAL_VIEW_ITEMS: ReadonlyArray<{
  */
 export function viewTitle(view: View): string {
   switch (view.name) {
+    // Board mode belongs to the Sessions destination; its page title matches the rail label.
+    case "board":
+      return GLOBAL_VIEW_ITEMS.find((item) => item.name === "inbox")!.title;
     case "inbox":
     case "projects":
-    case "board":
     case "runs":
     case "pods":
     case "automations":
@@ -108,6 +114,9 @@ export function viewTitle(view: View): string {
  * Settings entry beside the gear.
  */
 export const EXTRA_PALETTE_DESTINATIONS: ReadonlyArray<{ label: string; view: View }> = [
+  // The board left the rail when it became a mode of Sessions, but the palette keeps a direct
+  // entry so "board" still matches a searchable destination.
+  { label: "Board", view: { name: "board" } },
   { label: "Settings", view: { name: "settings" } },
   ...SETTINGS_SECTIONS.map((section) => ({
     label: `Settings — ${section.title}`,
