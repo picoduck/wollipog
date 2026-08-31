@@ -37,6 +37,7 @@ interface HarnessOptions {
   topology?: "full" | "minimal";
   section?: SettingsSection;
   copy?: "default" | "long";
+  defaults?: "pending" | "agent";
 }
 
 
@@ -49,10 +50,10 @@ interface HarnessOptions {
 async function useHarness(
   page: Page,
   theme: Theme,
-  { state = "rest", topology = "full", section = "appearance", copy = "default" }: HarnessOptions = {},
+  { state = "rest", topology = "full", section = "appearance", copy = "default", defaults = "pending" }: HarnessOptions = {},
 ) {
   await page.goto(
-    `/settings-rows-e2e.html?theme=${theme}&state=${state}&topology=${topology}&section=${section}&copy=${copy}`,
+    `/settings-rows-e2e.html?theme=${theme}&state=${state}&topology=${topology}&section=${section}&copy=${copy}&defaults=${defaults}`,
   );
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
   // The SECTION's own heading, not a fixed control: asserting a radio here would silently pass on
@@ -1067,6 +1068,35 @@ test("tabbing through each section reaches every row kind", async ({ page }) => 
     .toEqual(["ui-row-nav", "ui-row-switch"]);
 });
 
+test("Agent Harness defaults are keyboard-operable, cascade by model, and keep one editor open", async ({ page }) => {
+  await useHarness(page, "dark", { section: "behavior", defaults: "agent" });
+  const defaults = page.getByRole("button", { name: /Default Models, Efforts, and Permissions/ });
+  await defaults.focus();
+  await page.keyboard.press("Enter");
+  await expect(defaults).toHaveAttribute("aria-expanded", "true");
+
+  const harnessRows = page.locator(".agent-defaults-item > .ui-row-nav");
+  const codex = harnessRows.filter({ hasText: "Codex App Server" });
+  await codex.focus();
+  await page.keyboard.press("Enter");
+  await expect(codex).toHaveAttribute("aria-expanded", "true");
+  const model = page.getByRole("button", { name: /^Codex App Server Model:/ });
+  await model.focus();
+  await page.keyboard.press("Enter");
+  const modelList = page.getByRole("listbox", { name: "Codex App Server Model" });
+  await expect(modelList).toBeFocused();
+  await page.keyboard.press("End");
+  await page.keyboard.press("Enter");
+  await expect(model).toHaveAccessibleName(/Sol/);
+  await expect(page.getByRole("button", { name: /^Codex App Server Reasoning Effort:/ }))
+    .toHaveAccessibleName(/Choose Effort/);
+
+  const claude = harnessRows.filter({ hasText: "Claude Code" });
+  await claude.click();
+  await expect(codex).toHaveAttribute("aria-expanded", "false");
+  await expect(claude).toHaveAttribute("aria-expanded", "true");
+});
+
 /**
  * The Appearance controls, which the row registry above cannot describe.
  *
@@ -1080,6 +1110,7 @@ test("tabbing through each section reaches every row kind", async ({ page }) => 
  * reachable by Tab and still shows a focus ring; and the swatches — which are the one thing here
  * that is a COLOUR by definition — still have to be visible against the surface behind them.
  */
+
 test.describe("the appearance controls", () => {
   const seg = (page: Page, name: string) => page.getByRole("radiogroup", { name });
   const pill = (page: Page, group: string, name: string) =>

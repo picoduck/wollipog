@@ -46,6 +46,8 @@ import {
   type AutomationTriggerKind,
   type AutomationTriggerView,
   type AgentCapabilities,
+  type AgentHarnessDefaultConfig,
+  type AgentHarnessIdentity,
   type BackgroundDeliveryView,
   type BackgroundDeliveryWatchdogState,
   type BackgroundNotificationReceiptState,
@@ -1695,6 +1697,25 @@ CREATE TABLE IF NOT EXISTS session_naming_harness_targets (
   FOREIGN KEY (organization_id) REFERENCES identity_organizations(organization_id) ON DELETE CASCADE
 );
 
+-- Per-user ordinary-session defaults. Harness identity is deliberately runner-independent so the
+-- same preference follows a user across their devices and Machines. Empty context_distro avoids
+-- SQLite's nullable-composite-key duplicate semantics for native harnesses.
+CREATE TABLE IF NOT EXISTS agent_harness_defaults (
+  user_id          TEXT NOT NULL,
+  agent_id         TEXT NOT NULL,
+  driver           TEXT NOT NULL CHECK (driver IN ('acp','codex','codex-app-server','claude-code')),
+  context_kind     TEXT NOT NULL CHECK (context_kind IN ('native','wsl')),
+  context_distro   TEXT NOT NULL DEFAULT '',
+  model            TEXT,
+  effort           TEXT,
+  permission_mode  TEXT,
+  updated_at       INTEGER NOT NULL,
+  PRIMARY KEY (user_id, agent_id, driver, context_kind, context_distro),
+  CHECK (context_kind='wsl' OR context_distro=''),
+  CHECK (model IS NOT NULL OR effort IS NOT NULL OR permission_mode IS NOT NULL),
+  FOREIGN KEY (user_id) REFERENCES identity_users(user_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS session_naming_custom_models (
   organization_id    TEXT PRIMARY KEY,
   runner_id          TEXT NOT NULL,
@@ -3031,6 +3052,11 @@ export interface SessionNamingHarnessTargetRecord {
   billingSource?: SessionNamingAccountBoundary["billingSource"];
   model: string;
   effort: string;
+  updatedAt: number;
+}
+
+export interface AgentHarnessDefaultRecord extends AgentHarnessIdentity {
+  config: AgentHarnessDefaultConfig;
   updatedAt: number;
 }
 
@@ -6458,6 +6484,95 @@ export class ControlPlaneDb {
       `INSERT INTO session_naming_preferences (organization_id, mode, updated_at) VALUES (?, ?, ?)
        ON CONFLICT(organization_id) DO UPDATE SET mode=excluded.mode, updated_at=excluded.updated_at`,
     ).run(organizationId, mode, now);
+  }
+
+  getAgentHarnessDefault(userId: string, identity: AgentHarnessIdentity): AgentHarnessDefaultRecord | null {
+    const contextKind = identity.context.kind;
+    const contextDistro = identity.context.kind === "wsl" ? identity.context.distro : "";
+    const row = this.stmt(
+      `SELECT model, effort, permission_mode, updated_at FROM agent_harness_defaults
+       WHERE user_id=? AND agent_id=? AND driver=? AND context_kind=? AND context_distro=?`,
+    ).get(userId, identity.agentId, identity.driver, contextKind, contextDistro) as {
+      model: string | null;
+      effort: string | null;
+      permission_mode: string | null;
+      updated_at: number;
+    } | undefined;
+    return row ? {
+      ...identity,
+      config: {
+        ...(row.model ? { model: row.model } : {}),
+        ...(row.effort ? { effort: row.effort } : {}),
+        ...(row.permission_mode ? { permissionMode: row.permission_mode } : {}),
+      },
+      updatedAt: row.updated_at,
+    } : null;
+  }
+
+  listAgentHarnessDefaults(userId: string): AgentHarnessDefaultRecord[] {
+    const rows = this.stmt(
+      `SELECT agent_id, driver, context_kind, context_distro, model, effort, permission_mode, updated_at
+       FROM agent_harness_defaults WHERE user_id=?
+       ORDER BY agent_id, driver, context_kind, context_distro`,
+    ).all(userId) as unknown as Array<{
+      agent_id: string;
+      driver: AgentDriverKind;
+      context_kind: "native" | "wsl";
+      context_distro: string;
+      model: string | null;
+      effort: string | null;
+      permission_mode: string | null;
+      updated_at: number;
+    }>;
+    return rows.map((row) => ({
+      agentId: row.agent_id,
+      driver: row.driver,
+      context: row.context_kind === "wsl"
+        ? { kind: "wsl", distro: row.context_distro }
+        : { kind: "native" },
+      config: {
+        ...(row.model ? { model: row.model } : {}),
+        ...(row.effort ? { effort: row.effort } : {}),
+        ...(row.permission_mode ? { permissionMode: row.permission_mode } : {}),
+      },
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  setAgentHarnessDefault(
+    userId: string,
+    identity: AgentHarnessIdentity,
+    config: AgentHarnessDefaultConfig,
+    now = Date.now(),
+  ): void {
+    const contextKind = identity.context.kind;
+    const contextDistro = identity.context.kind === "wsl" ? identity.context.distro : "";
+    this.stmt(
+      `INSERT INTO agent_harness_defaults
+         (user_id, agent_id, driver, context_kind, context_distro, model, effort, permission_mode, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(user_id, agent_id, driver, context_kind, context_distro) DO UPDATE SET
+         model=excluded.model, effort=excluded.effort,
+         permission_mode=excluded.permission_mode, updated_at=excluded.updated_at`,
+    ).run(
+      userId,
+      identity.agentId,
+      identity.driver,
+      contextKind,
+      contextDistro,
+      config.model ?? null,
+      config.effort ?? null,
+      config.permissionMode ?? null,
+      now,
+    );
+  }
+
+  deleteAgentHarnessDefault(userId: string, identity: AgentHarnessIdentity): boolean {
+    const contextDistro = identity.context.kind === "wsl" ? identity.context.distro : "";
+    return Number(this.stmt(
+      `DELETE FROM agent_harness_defaults
+       WHERE user_id=? AND agent_id=? AND driver=? AND context_kind=? AND context_distro=?`,
+    ).run(userId, identity.agentId, identity.driver, identity.context.kind, contextDistro).changes) > 0;
   }
 
   getSessionNamingHarnessTarget(organizationId: string): SessionNamingHarnessTargetRecord | null {

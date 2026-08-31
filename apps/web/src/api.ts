@@ -74,6 +74,9 @@ import type {
   SessionNamingConnectionTestResult,
   SessionNamingSettingsView,
   UpdateSessionNamingSettingsRequest,
+  AgentHarnessDefaultsView,
+  UpdateAgentHarnessDefaultRequest,
+  DeleteAgentHarnessDefaultRequest,
   SessionEventsResponse,
   SessionFileEntry,
   SessionView,
@@ -269,6 +272,20 @@ export function createApiClient(transport: ApiTransport) {
   updateSessionNamingSettings: (input: UpdateSessionNamingSettingsRequest) =>
     req<SessionNamingSettingsView>("/api/session-naming", {
       method: "PUT",
+      body: JSON.stringify(input),
+    }),
+
+  agentHarnessDefaults: () => req<AgentHarnessDefaultsView>("/api/agent-harness-defaults"),
+
+  updateAgentHarnessDefault: (input: UpdateAgentHarnessDefaultRequest) =>
+    req<AgentHarnessDefaultsView>("/api/agent-harness-defaults", {
+      method: "PUT",
+      body: JSON.stringify(input),
+    }),
+
+  deleteAgentHarnessDefault: (input: DeleteAgentHarnessDefaultRequest) =>
+    req<AgentHarnessDefaultsView>("/api/agent-harness-defaults", {
+      method: "DELETE",
       body: JSON.stringify(input),
     }),
 
