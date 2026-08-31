@@ -305,6 +305,7 @@ function Fixture() {
                   requestId: "overflow-live-question",
                   questions: pendingOverflowQuestions,
                 },
+                questionInTimeline: true,
                 runnerOnline: true,
                 showKeyHints: false,
               } : undefined}

@@ -208,6 +208,7 @@ function ApprovalHarness({ requestId, runnerOnline = true }: { requestId: string
           requestId: session.pendingApproval.requestId,
           questions: session.pendingApproval.questions ?? [],
         } : null,
+        questionInTimeline: requestId !== null,
         runnerOnline,
       }} />
       <textarea ref={fallbackRef} aria-label="Composer" />
@@ -365,6 +366,8 @@ test("question focus and draft survive transcript hydration without exposing a s
 
   await act(async () => { root.render(<QuestionPresentationHarness hydrated />); });
   assert.equal(domWindow.document.activeElement?.closest("[data-session-request-id]")?.getAttribute("data-session-request-id"), "ask-a");
+  assert.equal(domWindow.document.activeElement?.getAttribute("role"), "radio",
+    "the same response control, not Dismiss, keeps focus after the presentation moves");
   assert.equal(container.querySelector<HTMLElement>('[role="radio"]')?.getAttribute("aria-checked"), "true");
   assert.equal(container.querySelectorAll('[aria-label="Agent Questions"]').length, 1);
   assert.equal(container.querySelectorAll('[role="radio"]').length, 2);

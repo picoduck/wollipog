@@ -493,6 +493,7 @@ function VirtualList<T>({
   useLayoutEffect(() => () => {
     const reported = reportedPinnedAvailabilityRef.current;
     if (reported?.available) onPinnedAvailabilityChangeRef.current?.(reported.key, false);
+    reportedPinnedAvailabilityRef.current = null;
   }, []);
   // Every external scrollRef host carries `measured-virtual-scroll`, disabling native anchoring.
   // Logical-key corrections and TanStack's measured-row adjustments must be the only scroll

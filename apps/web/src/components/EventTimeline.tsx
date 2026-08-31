@@ -47,7 +47,7 @@ export interface TimelineQuestionContext {
   sessionId: string;
   pendingQuestion: { requestId: string; questions: AgentQuestion[] } | null;
   /** True only after the matching pinned row is mounted and measurement-ready. */
-  questionInTimeline?: boolean;
+  questionInTimeline: boolean;
   onPendingQuestionAvailabilityChange?: (requestId: string, available: boolean) => void;
   runnerOnline: boolean;
   onSessionUpdate?: (session: SessionView) => void;
@@ -339,7 +339,7 @@ function EventTimelineBody({
             ? "Claude CLI can fork only its current transcript at the matching latest-turn checkpoint. A later turn attempt advanced the conversation; files-only rewind remains available."
             : undefined}
           questionContext={item.kind === "question" && row.key === pinnedQuestionRow?.key &&
-            questionContext?.questionInTimeline !== false ? questionContext : undefined}
+            questionContext?.questionInTimeline === true ? questionContext : undefined}
         />
       </div>
     );
