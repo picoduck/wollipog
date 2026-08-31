@@ -14,7 +14,7 @@ import type { View } from "./navigation.js";
  * which is why the value is instance-scoped rather than a plain browser key like the theme.
  */
 
-export type ExperimentId = "multiAgent" | "pods" | "conductor";
+export type ExperimentId = "multiAgent" | "pods" | "conductor" | "reviewQueue";
 
 export interface ExperimentFlags {
   /** Multi-Agent Runs and the workflow surfaces reached through them. */
@@ -25,6 +25,9 @@ export interface ExperimentFlags {
    * amendment): the runner advertises a conductor whenever it can host one, and this
    * device-local flag decides whether any surface offers it. */
   readonly conductor: boolean;
+  /** Cross-session Board review projection. Disabled by default while pending actions move to
+   * their owning sessions. */
+  readonly reviewQueue: boolean;
 }
 
 export const EXPERIMENTS_STORAGE_KEY = "wollipog.experiments";
@@ -39,6 +42,7 @@ export const DEFAULT_EXPERIMENT_FLAGS: ExperimentFlags = {
   multiAgent: true,
   pods: true,
   conductor: false,
+  reviewQueue: false,
 };
 
 /**
@@ -66,7 +70,12 @@ export function parseExperimentFlags(raw: string | null): ExperimentFlags {
   // A legacy payload can never prove a conductor opt-in: stored true was the old default and
   // stored false agrees with the new default, so the legacy branch is simply off.
   const conductor = record.v === EXPERIMENTS_SCHEMA_VERSION ? flag("conductor") : false;
-  return { multiAgent: flag("multiAgent"), pods: flag("pods"), conductor };
+  return {
+    multiAgent: flag("multiAgent"),
+    pods: flag("pods"),
+    conductor,
+    reviewQueue: flag("reviewQueue"),
+  };
 }
 
 /** One vocabulary for the settings rows and the disabled-route notice, so they cannot drift. */
@@ -74,6 +83,7 @@ export const EXPERIMENT_TITLES: Record<ExperimentId, string> = {
   multiAgent: "Multi-Agent Runs",
   pods: "Collaboration Pods",
   conductor: "Conductor-Led Work",
+  reviewQueue: "Board Review Queue",
 };
 
 /**

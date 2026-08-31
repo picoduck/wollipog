@@ -23,7 +23,7 @@ export function Board({ onOpenReview, onNewSession }: {
   // The empty state's hint names Multi-Agent Run; with the experiment off that destination has
   // been removed everywhere else, and a hint pointing at a control that does not exist teaches
   // the reader the app is broken rather than configured.
-  const multiAgentEnabled = useExperiments().flags.multiAgent;
+  const { multiAgent: multiAgentEnabled, reviewQueue: reviewQueueEnabled } = useExperiments().flags;
   const sessions = useStoreSelector((s) => s.sessions);
   const runners = useStoreSelector((s) => s.runners);
   const boxes = useStoreSelector((s) => s.boxes);
@@ -169,11 +169,13 @@ export function Board({ onOpenReview, onNewSession }: {
         </div>
       </div>
 
-      <ReviewQueue
-        refreshKey={reviewKey}
-        onOpen={(sessionId) => navigate({ name: "session", id: sessionId })}
-        onOpenReview={onOpenReview}
-      />
+      {reviewQueueEnabled && (
+        <ReviewQueue
+          refreshKey={reviewKey}
+          onOpen={(sessionId) => navigate({ name: "session", id: sessionId })}
+          onOpenReview={onOpenReview}
+        />
+      )}
 
       {visible.length === 0 ? (
         // An empty board and a filtered-out board are different problems, and only one of them is
