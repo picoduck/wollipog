@@ -7,9 +7,9 @@ export type ArchiveStateFilter = "archived" | "unarchived" | "all";
 
 export interface ArchiveBrowserFilters {
   query: string;
-  project: string;
-  location: string;
-  agent: string;
+  project: string | null;
+  location: string | null;
+  agent: string | null;
   archive: ArchiveStateFilter;
   lifecycle: SessionStatus | "all";
 }
@@ -26,6 +26,19 @@ export const CANONICAL_LIFECYCLE_LABELS: Readonly<Record<SessionStatus, string>>
   running: "Running",
   input_required: "Awaiting Input",
   idle: "Awaiting Prompt",
+  completed: "Completed",
+  failed: "Failed",
+  stopped: "Stopped",
+};
+
+/** Labels used by the archive endpoint's server-side search. Keep these in the client search
+ * corpus so a live upsert cannot invalidate a row solely because the visible UI label differs. */
+export const SERVER_LIFECYCLE_LABELS: Readonly<Record<SessionStatus, string>> = {
+  queued: "Queued",
+  starting: "Starting",
+  running: "Running",
+  input_required: "Input Required",
+  idle: "Idle",
   completed: "Completed",
   failed: "Failed",
   stopped: "Stopped",
@@ -86,9 +99,9 @@ export function filterArchiveSessions(input: {
     if (!matchesArchive(session) ||
         (input.filters.lifecycle !== "all" && session.status !== input.filters.lifecycle)) return false;
     const metadata = archiveSessionMetadata(session, input.locationNames);
-    if (input.filters.project !== "all" && metadata.project !== input.filters.project) return false;
-    if (input.filters.location !== "all" && metadata.location !== input.filters.location) return false;
-    if (input.filters.agent !== "all" && metadata.agent !== input.filters.agent) return false;
+    if (input.filters.project !== null && metadata.project !== input.filters.project) return false;
+    if (input.filters.location !== null && metadata.location !== input.filters.location) return false;
+    if (input.filters.agent !== null && metadata.agent !== input.filters.agent) return false;
     if (!query) return true;
     const localText = [
       session.id,
@@ -97,6 +110,7 @@ export function filterArchiveSessions(input: {
       metadata.location,
       metadata.agent,
       canonicalLifecycleLabel(session.status),
+      SERVER_LIFECYCLE_LABELS[session.status],
       session.archived ? "Archived" : "Not Archived",
     ].join("\n").toLocaleLowerCase();
     return localText.includes(query) || Boolean(input.transcriptSessionIds?.has(session.id));

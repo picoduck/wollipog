@@ -20,13 +20,7 @@ import { InboxIcon, SearchIcon } from "./Icons.js";
 import { Empty, Spinner } from "./common.js";
 import { Select } from "./ui/ChoiceControls.js";
 
-type ArchiveBrowserViewFilters = Omit<ArchiveBrowserFilters, "project" | "location" | "agent"> & {
-  project: string | null;
-  location: string | null;
-  agent: string | null;
-};
-
-const DEFAULT_FILTERS: ArchiveBrowserViewFilters = {
+const DEFAULT_FILTERS: ArchiveBrowserFilters = {
   query: "",
   project: null,
   location: null,
@@ -60,21 +54,44 @@ function plainSnippet(snippet: string | undefined): string | null {
 
 function locallyMatches(
   session: SessionView,
-  filters: ArchiveBrowserViewFilters,
+  filters: ArchiveBrowserFilters,
   locationNames: ReadonlyMap<string, string>,
   transcriptSessionIds: ReadonlySet<string>,
 ): boolean {
   return filterArchiveSessions({
     sessions: [session],
-    filters: {
-      ...filters,
-      project: filters.project ?? "all",
-      location: filters.location ?? "all",
-      agent: filters.agent ?? "all",
-    },
+    filters,
     locationNames,
     transcriptSessionIds,
   }).length === 1;
+}
+
+type LocalReconciliation = "match" | "exclude" | "revalidate";
+
+function liveRevalidationKey(session: SessionView, filters: ArchiveBrowserFilters): string {
+  return JSON.stringify([
+    session.updatedAt,
+    filters.query.trim(),
+    filters.project,
+    filters.location,
+    filters.agent,
+    filters.archive,
+    filters.lifecycle,
+  ]);
+}
+
+/** Search misses are not authoritative: the server also searches resolved metadata and transcript
+ * text that a websocket upsert does not carry. Scope misses are safe to remove immediately. */
+function reconcileLocally(
+  session: SessionView,
+  filters: ArchiveBrowserFilters,
+  locationNames: ReadonlyMap<string, string>,
+  transcriptSessionIds: ReadonlySet<string>,
+): LocalReconciliation {
+  if (locallyMatches(session, filters, locationNames, transcriptSessionIds)) return "match";
+  return locallyMatches(session, { ...filters, query: "" }, locationNames, transcriptSessionIds)
+    ? "revalidate"
+    : "exclude";
 }
 
 export function ArchivedSessionsView() {
@@ -87,7 +104,7 @@ export function ArchivedSessionsView() {
   const conn = useStoreSelector((state) => state.conn);
   const refreshCatalogRef = useRef<() => Promise<void>>(async () => {});
   const liveRevalidationTimerRef = useRef<number | null>(null);
-  const revalidatedLiveVersionsRef = useRef(new Map<string, number>());
+  const revalidatedLiveVersionsRef = useRef(new Map<string, string>());
   const stopFailureRecoverySupported = useStoreSelector((state) => state.stopFailureRecoverySupported);
   const deletedSessionIdsRef = useRef(new Set<string>());
   const liveSessionsRef = useRef(liveSessions);
@@ -95,6 +112,7 @@ export function ArchivedSessionsView() {
   liveSessionsRef.current = liveSessions;
 
   const [catalog, setCatalog] = useState(() => new Map<string, SessionView>());
+  const hasBeenOnlineRef = useRef(false);
   const connectionLostRef = useRef(false);
   const revalidateAfterLoadRef = useRef(false);
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
@@ -129,22 +147,29 @@ export function ArchivedSessionsView() {
         lifecycle: filters.lifecycle,
         q: filters.query.trim() || undefined,
       });
+      if (requestSequence !== requestSequenceRef.current) return;
       const responseSessions = new Map(response.sessions.map((session) => [session.id, session]));
       const next = new Map(responseSessions);
       const transcriptSessionIds = new Set(Object.keys(response.snippets));
       for (const session of liveSessionsRef.current.values()) {
         const responseSession = responseSessions.get(session.id);
         if (responseSession === undefined || session.updatedAt <= responseSession.updatedAt) continue;
-        if (locallyMatches(session, filters, locationNamesRef.current, transcriptSessionIds)) {
+        const reconciliation = reconcileLocally(session, filters, locationNamesRef.current, transcriptSessionIds);
+        if (reconciliation !== "exclude") {
           next.set(session.id, session);
         } else {
           next.delete(session.id);
+        }
+        const revalidationKey = liveRevalidationKey(session, filters);
+        if (reconciliation === "revalidate" &&
+            revalidatedLiveVersionsRef.current.get(session.id) !== revalidationKey) {
+          revalidatedLiveVersionsRef.current.set(session.id, revalidationKey);
+          revalidateAfterLoadRef.current = true;
         }
       }
       for (const sessionId of deletedSessionIdsRef.current) {
         next.delete(sessionId);
       }
-      if (requestSequence !== requestSequenceRef.current) return;
       setCatalog(next);
       setTranscriptHits(new Map(Object.entries(response.snippets)));
       setPageMetadata(response.metadata);
@@ -191,16 +216,18 @@ export function ArchivedSessionsView() {
     const transcriptSessionIds = new Set(transcriptHits.keys());
     let needsRevalidation = false;
     for (const session of pageUpserts) {
-      if (locallyMatches(session, filters, locationNames, transcriptSessionIds)) continue;
-      if (revalidatedLiveVersionsRef.current.get(session.id) === session.updatedAt) continue;
-      revalidatedLiveVersionsRef.current.set(session.id, session.updatedAt);
+      if (reconcileLocally(session, filters, locationNames, transcriptSessionIds) === "match") continue;
+      const revalidationKey = liveRevalidationKey(session, filters);
+      if (revalidatedLiveVersionsRef.current.get(session.id) === revalidationKey) continue;
+      revalidatedLiveVersionsRef.current.set(session.id, revalidationKey);
       needsRevalidation = true;
     }
     setCatalog((current) => {
       const next = new Map(current);
       let changed = false;
       for (const session of pageUpserts) {
-        if (!locallyMatches(session, filters, locationNames, transcriptSessionIds)) {
+        const reconciliation = reconcileLocally(session, filters, locationNames, transcriptSessionIds);
+        if (reconciliation === "exclude") {
           changed = next.delete(session.id) || changed;
         } else if (next.get(session.id) !== session) {
           next.set(session.id, session);
@@ -216,7 +243,7 @@ export function ArchivedSessionsView() {
       setPageMetadata((current) => {
         const next = { ...current };
         for (const session of pageUpserts) {
-          if (locallyMatches(session, filters, locationNames, transcriptSessionIds)) {
+          if (reconcileLocally(session, filters, locationNames, transcriptSessionIds) === "match") {
             next[session.id] = archiveSessionMetadata(session, locationNames);
           }
         }
@@ -243,11 +270,15 @@ export function ArchivedSessionsView() {
     return () => document.removeEventListener("visibilitychange", revalidate);
   }, [refreshCatalog]);
   useEffect(() => {
-    if (conn === "offline" || conn === "unauthorized") {
-      connectionLostRef.current = true;
+    if (conn !== "online") {
+      if (hasBeenOnlineRef.current) connectionLostRef.current = true;
       return;
     }
-    if (conn !== "online" || !connectionLostRef.current) return;
+    if (!hasBeenOnlineRef.current) {
+      hasBeenOnlineRef.current = true;
+      return;
+    }
+    if (!connectionLostRef.current) return;
     connectionLostRef.current = false;
     if (loading) revalidateAfterLoadRef.current = true;
     else {
@@ -265,7 +296,7 @@ export function ArchivedSessionsView() {
   const hasActiveFilters = Boolean(queryInput) || filters.project !== null || filters.location !== null ||
     filters.agent !== null || filters.lifecycle !== "all" || filters.archive !== "archived";
 
-  const changeFilter = <K extends keyof ArchiveBrowserViewFilters>(key: K, value: ArchiveBrowserViewFilters[K]) => {
+  const changeFilter = <K extends keyof ArchiveBrowserFilters>(key: K, value: ArchiveBrowserFilters[K]) => {
     setFilters((current) => ({ ...current, [key]: value }));
     setPage(1);
     setCursors([null]);

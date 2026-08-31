@@ -9,6 +9,7 @@ import {
   filterArchiveSessions,
   mergeArchiveSessionCatalog,
   pageArchiveSessions,
+  SERVER_LIFECYCLE_LABELS,
   sessionArchiveSearchDetail,
   type ArchiveBrowserFilters,
 } from "./archive-browser.js";
@@ -53,9 +54,9 @@ function session(overrides: Partial<SessionView> = {}): SessionView {
 
 const defaults: ArchiveBrowserFilters = {
   query: "",
-  project: "all",
-  location: "all",
-  agent: "all",
+  project: null,
+  location: null,
+  agent: null,
   archive: "archived",
   lifecycle: "all",
 };
@@ -85,6 +86,35 @@ test("archive search surfaces archive and every canonical lifecycle label indepe
     sessionArchiveSearchDetail(session({ archived: false, status: "queued" })),
     "Queued · Wollipog · Codex App Server",
   );
+});
+
+test("archive search accepts the server lifecycle labels used for live reconciliation", () => {
+  assert.equal(SERVER_LIFECYCLE_LABELS.idle, "Idle");
+  assert.equal(SERVER_LIFECYCLE_LABELS.input_required, "Input Required");
+  assert.deepEqual(filterArchiveSessions({
+    sessions: [session({ status: "idle" })],
+    filters: { ...defaults, query: "idle" },
+  }).map((item) => item.id), ["session-1"]);
+  assert.deepEqual(filterArchiveSessions({
+    sessions: [session({ status: "input_required" })],
+    filters: { ...defaults, query: "input required" },
+  }).map((item) => item.id), ["session-1"]);
+});
+
+test("literal all facets remain distinct from the nullable no-filter state", () => {
+  const namedAll = session({
+    id: "named-all",
+    projectName: "all",
+    workspaceName: "all",
+    projectLocationId: null,
+    agentName: "all",
+    driver: "acp",
+  });
+  const other = session({ id: "other", projectName: "Wollipog", workspaceName: "Chicago" });
+  assert.deepEqual(filterArchiveSessions({
+    sessions: [namedAll, other],
+    filters: { ...defaults, project: "all", location: "all", agent: "all" },
+  }).map((item) => item.id), ["named-all"]);
 });
 
 test("archive filters combine Project, Location, agent, archive, lifecycle, and metadata search", () => {
