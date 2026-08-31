@@ -68,15 +68,15 @@ test("rail exposes every destination, nested active states, live badges, and per
   const links = [...container.querySelectorAll<HTMLAnchorElement>(".rail-destinations a")];
   assert.equal(links.length, 9);
   assert.deepEqual(links.map((link) => link.getAttribute("href")), [
-    "/", "/projects", "/runs", "/pods", "/automations", "/usage", "/connections/machines", "/archived", "/skills",
+    "/", "/automations", "/runs", "/pods", "/connections/machines", "/skills", "/projects", "/archived", "/usage",
   ]);
   // With Board folded into Sessions (#499), all nine destinations carry a digit keycap.
   assert.equal(links[8]!.querySelector(".rail-number")?.textContent, "9",
-    "Agent Skills gained the ninth digit when Board left the rail");
+    "the management tail ends at Usage with the ninth digit");
   assert.match(links[0]!.getAttribute("aria-label") ?? "", /^Sessions/);
   assert.match(links[0]!.getAttribute("aria-label") ?? "", /2 Blocked/);
   assert.match(links[0]!.getAttribute("aria-label") ?? "", /1 Stalled/);
-  assert.match(links[6]!.getAttribute("aria-label") ?? "", /3 Online/);
+  assert.match(links[4]!.getAttribute("aria-label") ?? "", /3 Online/);
   assert.equal(links[0]!.getAttribute("aria-current"), "page", "session detail belongs to Sessions");
   assert.equal(links[0]!.querySelector(".rail-badge.blocked")?.getAttribute("aria-hidden"), "true");
   assert.equal(links[0]!.querySelector(".rail-badge.stalled")?.getAttribute("aria-hidden"), "true");
@@ -90,7 +90,7 @@ test("rail exposes every destination, nested active states, live badges, and per
   assert.equal(container.querySelectorAll<HTMLAnchorElement>(".rail-destinations a")[3]!.getAttribute("aria-current"), "page");
 
   await render({ name: "projects" });
-  assert.equal(container.querySelectorAll<HTMLAnchorElement>(".rail-destinations a")[1]!.getAttribute("aria-current"), "page");
+  assert.equal(container.querySelectorAll<HTMLAnchorElement>(".rail-destinations a")[6]!.getAttribute("aria-current"), "page");
 
   // Board mode is the Sessions destination: it marks Sessions current, and activating the item
   // reopens whichever mode was last used.
@@ -172,7 +172,7 @@ test("the phone rail hosts destinations plus routed Settings and no nested layer
     await act(async () => { moreTrigger.click(); });
     const sheet = container.querySelector(".rail-more-sheet")!;
     assert.deepEqual([...sheet.querySelectorAll(".rail-more-item")].map((el) => el.textContent),
-      ["Multi-Agent Runs", "Collaboration Pods", "Usage & Cost", "Archived Sessions", "Agent Skills",
+      ["Multi-Agent Runs", "Collaboration Pods", "Agent Skills", "Archived Sessions", "Usage & Cost",
         "Settings"],
       "Settings is the trailing row, after every destination");
     assert.equal(sheet.querySelector(".rail-more-control"), null,

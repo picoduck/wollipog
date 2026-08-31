@@ -49,7 +49,13 @@ export type GlobalViewName = Extract<View["name"], "inbox" | "projects" | "runs"
  * The board is deliberately NOT a destination: it is the board mode of Sessions (the `inbox`
  * entry), reachable through the in-view toggle, the `b` shortcut, `/board`, and the palette's
  * extra Board entry below. The `inbox` name is retained internally so saved preferences and
- * routes survive the visible rename to Sessions. */
+ * routes survive the visible rename to Sessions.
+ *
+ * Ordered in three clusters — work surfaces (Sessions, Automations, and the gated agent-work
+ * views), infrastructure (Connections, Skills), then management (Projects, Archived, Usage) —
+ * because the rail numbers double as the bare digit shortcuts: position IS the binding, so the
+ * order is a product decision, not alphabetical. Day-to-day project access happens through the
+ * Sessions split tabs, which is why the Projects page sits in the management tail. */
 export const GLOBAL_VIEW_ITEMS: ReadonlyArray<{
   name: GlobalViewName;
   label: string;
@@ -57,16 +63,14 @@ export const GLOBAL_VIEW_ITEMS: ReadonlyArray<{
   paletteLabel: string;
 }> = [
   { name: "inbox", label: "Sessions", title: "Sessions", paletteLabel: "Sessions" },
-  { name: "projects", label: "Projects", title: "Projects", paletteLabel: "Projects" },
+  { name: "automations", label: "Automations", title: "Automations", paletteLabel: "Automations" },
   { name: "runs", label: "Multi-Agent", title: "Multi-Agent Runs", paletteLabel: "Multi-Agent Runs" },
   { name: "pods", label: "Pods", title: "Collaboration Pods", paletteLabel: "Collaboration Pods" },
-  { name: "automations", label: "Automations", title: "Automations", paletteLabel: "Automations" },
-  { name: "usage", label: "Usage", title: "Usage & Cost", paletteLabel: "Usage & Cost" },
   { name: "runners", label: "Connections", title: "Connections", paletteLabel: "Connections" },
-  { name: "archived", label: "Archived", title: "Archived Sessions", paletteLabel: "Archived Sessions" },
-  // Appended rather than slotted beside Automations: the rail numbers double as the bare digit
-  // shortcuts, so inserting mid-list would silently rebind every later destination.
   { name: "skills", label: "Skills", title: "Agent Skills", paletteLabel: "Agent Skills" },
+  { name: "projects", label: "Projects", title: "Projects", paletteLabel: "Projects" },
+  { name: "archived", label: "Archived", title: "Archived Sessions", paletteLabel: "Archived Sessions" },
+  { name: "usage", label: "Usage", title: "Usage & Cost", paletteLabel: "Usage & Cost" },
 ];
 
 /**

@@ -502,14 +502,14 @@ function Shell() {
     if (isMobile) return;
     const destinations = [
       ["navigate-inbox", { name: "inbox" }],
-      ["navigate-projects", { name: "projects" }],
+      ["navigate-automations", { name: "automations" }],
       ["navigate-runs", { name: "runs" }],
       ["navigate-pods", { name: "pods" }],
-      ["navigate-automations", { name: "automations" }],
-      ["navigate-usage", { name: "usage" }],
       ["navigate-connections", { name: "runners" }],
-      ["navigate-archived", { name: "archived" }],
       ["navigate-skills", { name: "skills" }],
+      ["navigate-projects", { name: "projects" }],
+      ["navigate-archived", { name: "archived" }],
+      ["navigate-usage", { name: "usage" }],
     ] as const;
     const onKey = (event: KeyboardEvent) => {
       if (event.defaultPrevented || shortcutLayerActive(document) || xtermOwnsKey(event.target)) return;

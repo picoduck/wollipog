@@ -102,14 +102,14 @@ test("live-follow status owns a reserved transcript strip with a compact centere
 test("the global keyboard layer wires rail navigation, Inbox search, creation, and F6 zones", () => {
   const navigationIds = [
     "navigate-inbox",
-    "navigate-projects",
+    "navigate-automations",
     "navigate-runs",
     "navigate-pods",
-    "navigate-automations",
-    "navigate-usage",
     "navigate-connections",
-    "navigate-archived",
     "navigate-skills",
+    "navigate-projects",
+    "navigate-archived",
+    "navigate-usage",
   ];
   for (const id of [
     ...navigationIds,

@@ -62,7 +62,7 @@ test("global destinations use the polished Connections vocabulary everywhere", (
     title: "Sessions",
     paletteLabel: "Sessions",
   });
-  assert.deepEqual(GLOBAL_VIEW_ITEMS[1], {
+  assert.deepEqual(GLOBAL_VIEW_ITEMS.find((item) => item.name === "projects"), {
     name: "projects",
     label: "Projects",
     title: "Projects",
