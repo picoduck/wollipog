@@ -232,6 +232,10 @@ async function printPairingUrl(
       cwd: REPO_ROOT,
       env: {
         ...process.env,
+        // Keep captured CLI streams deterministic when the parent test runner forces ANSI output.
+        // This also prevents Node's FORCE_COLOR/NO_COLOR conflict warning from becoming CLI stderr.
+        FORCE_COLOR: undefined,
+        NO_COLOR: "1",
         CONTROL_PLANE_PORT: String(port),
         CONTROL_PLANE_DB: database,
       },
