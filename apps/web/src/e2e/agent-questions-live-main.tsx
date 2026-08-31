@@ -88,7 +88,7 @@ function LiveQuestionFixture() {
               />
               <div className="detail-main">
                 <div className="detail-reader">
-                  <div className="detail-scroll" ref={scrollRef} tabIndex={0}>
+                  <div className="detail-scroll measured-virtual-scroll" ref={scrollRef} tabIndex={0}>
                     {timelineItems.length > 0 && (
                       <EventTimeline
                         items={timelineItems}

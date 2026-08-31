@@ -279,6 +279,7 @@ function StaticList<T>({
   }, [onRevealHandled, revealExists, revealRequest]);
   useLayoutEffect(() => {
     onPinnedAvailabilityChange?.(pinnedKey, pinnedExists);
+    return () => onPinnedAvailabilityChange?.(pinnedKey, false);
   }, [onPinnedAvailabilityChange, pinnedExists, pinnedKey]);
   return (
     <div className={className} role={rootRole} aria-label={ariaLabel} data-virtual-kind={dataKind}>

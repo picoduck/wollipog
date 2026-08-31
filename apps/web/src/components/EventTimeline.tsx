@@ -223,9 +223,17 @@ function EventTimelineBody({
   const projection = useMemo(() => projector.current!.project(items, disclosure), [items, disclosure]);
   const { latestCheckpointTurn, rows } = projection;
   const pendingQuestionRequestId = questionContext?.pendingQuestion?.requestId ?? null;
-  const pinnedQuestionRow = pendingQuestionRequestId === null ? undefined : rows.find((row) =>
-    row.kind === "item" && row.item.kind === "question" &&
-    row.item.requestId === pendingQuestionRequestId && row.item.answered === undefined);
+  let pinnedQuestionRow: TimelineRenderRow | undefined;
+  if (pendingQuestionRequestId !== null) {
+    for (let index = rows.length - 1; index >= 0; index -= 1) {
+      const row = rows[index]!;
+      if (row.kind === "item" && row.item.kind === "question" &&
+          row.item.requestId === pendingQuestionRequestId && row.item.answered === undefined) {
+        pinnedQuestionRow = row;
+        break;
+      }
+    }
+  }
   const onPendingQuestionAvailabilityChange = questionContext?.onPendingQuestionAvailabilityChange;
   const reportPinnedQuestionAvailability = useCallback((key: string | null, available: boolean) => {
     if (pendingQuestionRequestId === null) return;
@@ -236,7 +244,9 @@ function EventTimelineBody({
   }, [onPendingQuestionAvailabilityChange, pendingQuestionRequestId, pinnedQuestionRow?.key]);
   useBrowserLayoutEffect(() => {
     if (scrollRef) return;
-    reportPinnedQuestionAvailability(pinnedQuestionRow?.key ?? null, pinnedQuestionRow != null);
+    const pinnedKey = pinnedQuestionRow?.key ?? null;
+    reportPinnedQuestionAvailability(pinnedKey, pinnedQuestionRow != null);
+    return () => reportPinnedQuestionAvailability(pinnedKey, false);
   }, [pinnedQuestionRow?.key, reportPinnedQuestionAvailability, scrollRef]);
   const estimateRow = useMemo(() => (row: TimelineRenderRow) =>
     estimateTimelineRow(row, pendingQuestionRequestId), [pendingQuestionRequestId]);
@@ -328,10 +338,8 @@ function EventTimelineBody({
           forkUnavailableReason={forkBlocked
             ? "Claude CLI can fork only its current transcript at the matching latest-turn checkpoint. A later turn attempt advanced the conversation; files-only rewind remains available."
             : undefined}
-          questionContext={item.kind === "question" && questionContext ? {
-            ...questionContext,
-            pendingQuestion: questionContext.questionInTimeline !== false ? questionContext.pendingQuestion : null,
-          } : undefined}
+          questionContext={item.kind === "question" && row.key === pinnedQuestionRow?.key &&
+            questionContext?.questionInTimeline !== false ? questionContext : undefined}
         />
       </div>
     );
