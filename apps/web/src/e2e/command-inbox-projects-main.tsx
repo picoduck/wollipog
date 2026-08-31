@@ -333,7 +333,8 @@ let deferredSteeringResolutionCount = 0;
 const pendingSteeringResolutionSettlements = new Map<string, () => void>();
 const sessionEvents = new Map<string, SessionEvent[]>();
 const sessionEventPageRequests: Array<{ sessionId: string; after: number; direction?: "backward" }> = [];
-if (SCENARIO === "preview-follow" || SCENARIO === "scroll-restore") {
+if (SCENARIO === "preview-follow" || SCENARIO === "scroll-restore" ||
+    SCENARIO === "preview-opening-fill") {
   const sessionIds = SCENARIO === "scroll-restore"
     ? ["session-alpha", "session-no-project"]
     : ["session-alpha"];
@@ -341,7 +342,49 @@ if (SCENARIO === "preview-follow" || SCENARIO === "scroll-restore") {
     const value = model.sessions.find((candidate) => candidate.id === sessionId);
     if (!value) throw new Error(`${SCENARIO} fixture requires ${sessionId}`);
     const label = sessionId === "session-alpha" ? "Alpha" : "No Project";
-    const events = Array.from({ length: 56 }, (_, index): SessionEvent => {
+    const events = SCENARIO === "preview-opening-fill"
+      ? [
+          ...Array.from({ length: 48 }, (_, index): SessionEvent => {
+            const seq = index + 1;
+            return {
+              id: seq,
+              sessionId: value.id,
+              seq,
+              ts: seq,
+              payload: index % 2 === 0
+                ? { kind: "user_message", text: `${label} earlier question ${seq}.`, turnId: `${sessionId}-turn-${seq}` }
+                : {
+                    kind: "agent_message",
+                    text: `${label} earlier response ${seq}. ${"Older useful context fills the preview reader. ".repeat(12)}`,
+                    final: true,
+                    messageId: `${sessionId}-message-${seq}`,
+                  },
+            };
+          }),
+          {
+            id: 49,
+            sessionId: value.id,
+            seq: 49,
+            ts: 49,
+            payload: { kind: "user_message", text: `${label} event-heavy question.`, turnId: `${sessionId}-heavy-turn` },
+          } as SessionEvent,
+          ...Array.from({ length: 220 }, (_, index): SessionEvent => {
+            const seq = index + 50;
+            return {
+              id: seq,
+              sessionId: value.id,
+              seq,
+              ts: seq,
+              payload: {
+                kind: "agent_message",
+                text: index === 219 ? "Compact final response." : ".",
+                final: index === 219,
+                messageId: `${sessionId}-heavy-message`,
+              },
+            };
+          }),
+        ]
+      : Array.from({ length: 56 }, (_, index): SessionEvent => {
       const seq = index + 1;
       const turnId = `${sessionId}-preview-turn-${Math.floor(index / 2) + 1}`;
       return {
@@ -358,7 +401,7 @@ if (SCENARIO === "preview-follow" || SCENARIO === "scroll-restore") {
               messageId: `${sessionId}-preview-message-${seq}`,
             },
       };
-    });
+        });
     sessionEvents.set(value.id, events);
     Object.assign(value, {
       status: "running",
@@ -884,7 +927,9 @@ const client = {
     // with older turns still only reachable by paging below it.
     const windowed = SCENARIO === "scroll-restore"
       ? available.slice(before === undefined ? -24 : -12)
-      : available;
+      : SCENARIO === "preview-opening-fill"
+        ? available.slice(before === undefined ? -221 : -24)
+        : available;
     if (SCENARIO === "scroll-restore" && before !== undefined) {
       await new Promise((resolve) => window.setTimeout(resolve, HISTORY_PAGE_DELAY_MS));
     }
@@ -893,6 +938,7 @@ const client = {
       eventEpoch: model.sessions.find((candidate) => candidate.id === sessionId)?.eventEpoch ?? 0,
       ...(windowed[0] ? { nextBefore: windowed[0].seq } : {}),
       hasMoreOlder: windowed.length < available.length,
+      ...(SCENARIO === "preview-opening-fill" ? { turnAligned: true } : {}),
       cacheComplete: true,
     };
   },
@@ -1521,7 +1567,8 @@ function FixtureSurface() {
       </>
     );
   }
-  if (view.name === "session" && SCENARIO !== "conversation-steering" && SCENARIO !== "preview-follow") {
+  if (view.name === "session" && SCENARIO !== "conversation-steering" &&
+      SCENARIO !== "preview-follow" && SCENARIO !== "preview-opening-fill") {
     return (
       <>
         {mobileSessionShell}

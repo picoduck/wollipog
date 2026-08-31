@@ -257,6 +257,45 @@ test("real Inbox preview paging keeps ownership while live output streams", asyn
   await expect(follow).toHaveAttribute("data-follow-tail-state", "previewing");
 });
 
+test("an event-heavy Inbox preview fills its opening viewport before expansion", async ({ page }) => {
+  await page.goto("/command-inbox-projects-e2e.html?scenario=preview-opening-fill");
+  const reader = page.getByRole("region", { name: "Session Preview Activity" });
+  await expect(reader.locator("[data-virtual-row]").first()).toBeVisible();
+
+  await expect.poll(() => page.evaluate(() =>
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.sessionEventPageRequests()
+      .filter((request) => request.sessionId === "session-alpha" && request.direction === "backward" &&
+        request.after === 49).length,
+  )).toBe(1);
+  const earlierActivity = reader.getByRole("button", { name: "Load Earlier Activity" });
+  await expect(earlierActivity).toBeAttached();
+  await expect.poll(() => earlierActivity.evaluate((element) => {
+    const viewport = element.closest(".detail-scroll")?.getBoundingClientRect();
+    const bounds = element.getBoundingClientRect();
+    return viewport != null && (bounds.bottom <= viewport.top || bounds.top >= viewport.bottom);
+  })).toBe(true);
+  const previewMetrics = await reader.evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+  }));
+  expect(previewMetrics.scrollHeight).toBeGreaterThan(previewMetrics.clientHeight + 64);
+  const requestsBeforeExpansion = await page.evaluate(() =>
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.sessionEventPageRequests()
+      .filter((request) => request.sessionId === "session-alpha" && request.direction === "backward").length,
+  );
+
+  await page.getByRole("button", { name: "Expand Session" }).click();
+  const expandedReader = page.getByRole("region", { name: "Session Activity" });
+  await expect(expandedReader).toBeVisible();
+  await expect.poll(() => page.evaluate(() =>
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.sessionEventPageRequests()
+      .filter((request) => request.sessionId === "session-alpha" && request.direction === "backward").length,
+  )).toBe(requestsBeforeExpansion);
+  await expect.poll(() => expandedReader.evaluate((element) =>
+    element.scrollHeight - element.clientHeight - element.scrollTop,
+  )).toBeLessThanOrEqual(2);
+});
+
 test("real Inbox preview paging preserves ownership with reduced motion", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto("/command-inbox-projects-e2e.html?scenario=preview-follow");

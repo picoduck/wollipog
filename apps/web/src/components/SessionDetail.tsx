@@ -578,6 +578,8 @@ function SessionDetailLoaded({
     requestedBase: null as number | null,
     pagesRequested: 0,
     settled: false,
+    recheckOnExpansion: false,
+    mode,
     measureFrame: null as number | null,
   });
   const [composerSelection, setComposerSelection] = useState({ start: 0, end: 0 });
@@ -1675,8 +1677,8 @@ function SessionDetailLoaded({
   });
 
   // A 200-event opening window is a transport budget, not a visual one: hundreds of streamed
-  // chunks can collapse into a single short timeline row. While a freshly opened expanded reader
-  // is still following the tail, prepend only enough bounded pages to recover the leading turn and
+  // chunks can collapse into a single short timeline row. While a freshly opened reader is still
+  // following the tail, prepend only enough bounded pages to recover the leading turn and
   // put the earlier-history control safely above the first viewport. Reader interaction, hidden
   // geometry, errors, no progress, exhaustion, and the page cap all settle this automatic phase.
   useLayoutEffect(() => {
@@ -1687,9 +1689,10 @@ function SessionDetailLoaded({
           ? current
           : { historyKey: timelineHistoryKey, settled });
     };
-    const settle = () => {
+    const settle = (recheckOnExpansion = false) => {
       state.settled = true;
       state.requestedBase = null;
+      state.recheckOnExpansion = recheckOnExpansion;
       publishSettled(true);
     };
 
@@ -1699,16 +1702,22 @@ function SessionDetailLoaded({
       state.requestedBase = null;
       state.pagesRequested = 0;
       state.settled = false;
+      state.recheckOnExpansion = false;
+      state.mode = mode;
       state.measureFrame = null;
       publishSettled(false);
     }
-    if (state.settled) return;
-    if (mode !== "expanded") {
-      // Desktop Inbox mounts a preview first and expands that same component instance. Keep the
-      // preview's manual control visible without permanently consuming the expanded-only fill.
-      publishSettled(true);
-      return;
+    if (state.mode !== mode) {
+      const recheck = state.mode === "preview" && mode === "expanded" &&
+        state.recheckOnExpansion;
+      state.mode = mode;
+      state.recheckOnExpansion = false;
+      if (recheck) {
+        state.settled = false;
+        publishSettled(false);
+      }
     }
+    if (state.settled) return;
     publishSettled(false);
     if (followTail.state !== "following" || automaticEarlierLoadRef.current.readerStarted) {
       settle();
@@ -1740,7 +1749,7 @@ function SessionDetailLoaded({
       const viewportUnderfilled = scroll.scrollHeight <=
         scroll.clientHeight + OPENING_HISTORY_HEADROOM_PX;
       if (!leadingTurnIncomplete && !viewportUnderfilled) {
-        settle();
+        settle(mode === "preview");
         return;
       }
       if (state.pagesRequested >= OPENING_HISTORY_MAX_PAGES) {
@@ -1769,7 +1778,7 @@ function SessionDetailLoaded({
     timelineHistoryKey,
   ]);
 
-  const openingHistoryFillSettled = mode !== "expanded" || (
+  const openingHistoryFillSettled = (
     openingHistoryFill.historyKey === timelineHistoryKey && openingHistoryFill.settled
   );
 
