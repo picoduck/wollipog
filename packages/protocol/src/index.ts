@@ -275,7 +275,10 @@
 //     runner requests only missing versions and applies the authoritative manifest only after an
 //     explicit completion frame; pre-v96 peers retain the bounded single-frame v90 protocol. The
 //     runner also reports bounded managed-link removal events; older runners omit that projection.
-export const PROTOCOL_VERSION = 96;
+// 97: session-naming target drift uses precise runner failure codes for missing harnesses and
+//     models. Because protocol v96 shipped on both sides of the unversioned vocabulary addition,
+//     new runners downgrade those codes for every pre-v97 control plane.
+export const PROTOCOL_VERSION = 97;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
@@ -404,6 +407,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   sessionAgentNaming: 93,
   sessionCustomModelNaming: 94,
   sessionNamingTargets: 95,
+  sessionNamingDriftCodes: 97,
 } as const;
 
 /* ========================================================================== */
@@ -4124,6 +4128,28 @@ export type SessionNamingRunnerErrorCode =
   | "timed_out"
   | "provider_failed"
   | "invalid_result";
+
+/** Classify why an advertised agent cannot execute Session Naming without conflating a missing
+ * harness capability with authentication or billing-account drift. */
+export function sessionNamingAgentFailureCode(
+  agent: AgentDefinition | undefined,
+): "harness_unavailable" | "account_unavailable" | null {
+  if (!agent || agent.available === false) return "harness_unavailable";
+  if (agent.authStatus !== "authenticated") return "account_unavailable";
+  const driver = agent.driver ?? "acp";
+  if (driver === "codex" || driver === "codex-app-server") {
+    return agent.codexAppServer?.status === "supported" && agent.codexAppServer.sessionNaming === true
+      ? null
+      : "harness_unavailable";
+  }
+  if (driver === "claude-code") {
+    if (agent.claudeCode?.status !== "ready" || agent.claudeCode.sessionNaming !== true) {
+      return "harness_unavailable";
+    }
+    return agent.claudeCode.auth.status === "authenticated" ? null : "account_unavailable";
+  }
+  return "harness_unavailable";
+}
 
 export type SessionNamingRunnerFailurePhase =
   | "preflight"

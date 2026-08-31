@@ -10,6 +10,7 @@ import type {
   SessionNamingRunnerErrorCode,
   SessionNamingRunnerFailurePhase,
 } from "@wollipog/protocol";
+import { runnerSupportsProtocol, sessionNamingAgentFailureCode } from "@wollipog/protocol";
 import { JsonRpcPeer } from "./jsonrpc.js";
 import { run } from "./discovery/resolve.js";
 import { killTree, spawnAgent, type AgentProcess, type SpawnAgentOptions, type SpawnIsolation } from "./spawn.js";
@@ -442,19 +443,34 @@ export class SessionNamingExecutor {
     message: GenerateSessionTitleMessage,
     agent: AgentDefinition | undefined,
     env: Record<string, string>,
+    controlPlaneProtocolVersion: number | null | undefined = null,
   ): Promise<GenerateSessionTitleResultMessage> {
     const fail = (
       code: SessionNamingRunnerErrorCode,
       phase: SessionNamingRunnerFailurePhase = "preflight",
-    ): GenerateSessionTitleResultMessage => ({
-      type: "generate_session_title_result",
-      requestId: message.requestId,
-      ok: false,
-      code,
-      phase,
-    });
+    ): GenerateSessionTitleResultMessage => {
+      const compatibleCode = message.target &&
+          !runnerSupportsProtocol(controlPlaneProtocolVersion, "sessionNamingDriftCodes")
+        ? code === "harness_unavailable"
+          ? "session_unavailable"
+          : code === "model_unavailable"
+            ? "provider_unsupported"
+            : code
+        : code;
+      return {
+        type: "generate_session_title_result",
+        requestId: message.requestId,
+        ok: false,
+        code: compatibleCode,
+        phase,
+      };
+    };
     if (!validMessages(message.messages)) return fail("invalid_result");
     if (!agent) return fail(message.target ? "harness_unavailable" : "session_unavailable");
+    if (message.target) {
+      const agentFailureCode = sessionNamingAgentFailureCode(agent);
+      if (agentFailureCode) return fail(agentFailureCode);
+    }
     const targetFailureCode = explicitTargetFailureCode(message.target, agent);
     if (targetFailureCode) return fail(targetFailureCode);
     const driver = agent.driver ?? "acp";

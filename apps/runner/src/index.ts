@@ -1466,7 +1466,12 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       const env = agent
         ? runnerLocalAgentEnv(agent.id, agent.driver ?? "acp", agent.context ?? { kind: "native" })
         : {};
-      runCommandTask("generate_session_title", sessionNaming.execute(msg, agent, env).then((result) => sendUp(result)));
+      runCommandTask("generate_session_title", sessionNaming.execute(
+        msg,
+        agent,
+        env,
+        controlPlaneProtocolVersion,
+      ).then((result) => sendUp(result)));
       break;
     }
     case "configure_session_naming_custom_model": {

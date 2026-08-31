@@ -167,14 +167,41 @@ test("explicit naming targets pass only an advertised model and effort to the se
     generate: async () => { generated++; return "Explicit Target"; },
   });
   assert.equal((await executor.execute({ ...request(), target }, codex, {})).ok, true);
-  assert.deepEqual(await executor.execute({ ...request("bad-effort"), target: { ...target, effort: "max" } }, codex, {}), {
+  assert.deepEqual(await executor.execute(
+    { ...request("bad-effort"), target: { ...target, effort: "max" } }, codex, {}, 97,
+  ), {
     type: "generate_session_title_result", requestId: "bad-effort", ok: false, code: "model_unavailable", phase: "preflight",
   });
-  assert.deepEqual(await executor.execute({ ...request("bad-model"), target: { ...target, model: "unknown" } }, codex, {}), {
+  assert.deepEqual(await executor.execute(
+    { ...request("bad-model"), target: { ...target, model: "unknown" } }, codex, {}, 97,
+  ), {
     type: "generate_session_title_result", requestId: "bad-model", ok: false, code: "model_unavailable", phase: "preflight",
   });
-  assert.equal((await executor.execute({ ...request("bad-harness"), target: { ...target, agentId: "missing" } }, codex, {})).code,
+  assert.equal((await executor.execute(
+    { ...request("bad-harness"), target: { ...target, agentId: "missing" } }, codex, {}, 97,
+  )).code,
     "harness_unavailable");
+  assert.equal((await executor.execute(
+    { ...request("unknown-peer"), target: { ...target, agentId: "missing" } }, codex, {},
+  )).code, "session_unavailable", "an unknown control-plane version fails closed to the legacy vocabulary");
+  assert.equal((await executor.execute(
+    { ...request("legacy-bad-model"), target: { ...target, model: "unknown" } }, codex, {}, 96,
+  )).code, "provider_unsupported", "older control planes receive the legacy model-drift code");
+  assert.equal((await executor.execute(
+    { ...request("legacy-bad-harness"), target: { ...target, agentId: "missing" } }, codex, {}, 96,
+  )).code, "session_unavailable", "older control planes receive the legacy harness-drift code");
+  assert.equal((await executor.execute(
+    { ...request("harness-capability"), target }, {
+      ...codex,
+      codexAppServer: { ...codex.codexAppServer!, sessionNaming: false },
+    }, {}, 97,
+  )).code, "harness_unavailable");
+  assert.equal((await executor.execute(
+    { ...request("legacy-harness-capability"), target }, {
+      ...codex,
+      codexAppServer: { ...codex.codexAppServer!, sessionNaming: false },
+    }, {}, 96,
+  )).code, "session_unavailable");
   assert.equal(generated, 1, "invalid targets never reach provider execution");
 });
 
