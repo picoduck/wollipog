@@ -921,6 +921,51 @@ test("plain Stop Failed metadata and idempotent recovery survive control-plane r
   }
 });
 
+test("automatic Stop recovery advances delivery metadata without hiding recoverable failure", () => {
+  for (const code of ["timeout", "retry_exhausted"] as const) {
+    const db = withRunner();
+    db.createSession(newSession({ id: `recover-${code}` }));
+    const intent = db.addSessionStopIntent(`recover-${code}`, "runner-1", 1_100, true);
+    assert.equal(db.failSessionStopIntent(
+      intent.sessionId,
+      intent.operation.operationId,
+      intent.deliveryAttemptId,
+      code,
+      "Automatic Stop delivery failed.",
+      1_200,
+    ), true);
+
+    const recovery = db.recordSessionStopRecoveryAttempt(intent.sessionId, 1_300)!;
+
+    assert.equal(recovery.operation.operationId, intent.operation.operationId, code);
+    assert.notEqual(recovery.deliveryAttemptId, intent.deliveryAttemptId, code);
+    assert.equal(recovery.operation.status, "stop_failed", code);
+    assert.equal(recovery.operation.failure?.code, code, code);
+    assert.equal(recovery.operation.lastAttemptAt, 1_300, code);
+    assert.equal(recovery.operation.attemptCount, 2, code);
+    assert.equal(recovery.operation.capacityReleased, false, code);
+    assert.equal(db.getSession(intent.sessionId)?.archived, false, code);
+    assert.equal(db.recordSessionStopRecoveryAttempt(intent.sessionId, 1_400), undefined, code);
+    assert.equal(db.sessionStopIntent(intent.sessionId)?.operation.attemptCount, 2, code);
+  }
+
+  const rejectedDb = withRunner();
+  rejectedDb.createSession(newSession({ id: "rejected" }));
+  const rejected = rejectedDb.addSessionStopIntent("rejected", "runner-1", 2_100, true);
+  assert.equal(rejectedDb.failSessionStopIntent(
+    rejected.sessionId,
+    rejected.operation.operationId,
+    rejected.deliveryAttemptId,
+    "runner_rejected",
+    "The runner rejected Stop.",
+    2_200,
+  ), true);
+  assert.equal(rejectedDb.recordSessionStopRecoveryAttempt(rejected.sessionId, 2_300), undefined);
+  assert.equal(rejectedDb.sessionStopIntent(rejected.sessionId)?.deliveryAttemptId, rejected.deliveryAttemptId);
+  assert.equal(rejectedDb.sessionStopIntent(rejected.sessionId)?.operation.attemptCount, 1);
+  assert.equal(rejectedDb.sessionStopIntent(rejected.sessionId)?.operation.failure?.code, "runner_rejected");
+});
+
 function localOwner(): HumanPrincipal {
   return {
     kind: "human",

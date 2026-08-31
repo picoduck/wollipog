@@ -11216,6 +11216,20 @@ export class ControlPlaneDb {
     return this.sessionStopIntent(sessionId);
   }
 
+  /** Open a new attempt-correlated delivery boundary for an automatic recovery replay while
+   * retaining the visible failure. Only timeout and retry-exhausted failures are recoverable;
+   * an explicit runner rejection is never eligible for invisible replay. */
+  recordSessionStopRecoveryAttempt(sessionId: string, now: number): SessionStopIntentRecord | undefined {
+    const deliveryAttemptId = "stop_delivery_" + randomUUID();
+    const changed = this.stmt(
+      "UPDATE session_stop_intents " +
+      "SET last_attempt_at=?, attempt_count=attempt_count+1, delivery_attempt_id=?, accepted_at=NULL " +
+      "WHERE session_id=? AND failed_at IS NOT NULL AND last_attempt_at<=failed_at " +
+      "AND failure_code IN ('timeout', 'retry_exhausted')",
+    ).run(now, deliveryAttemptId, sessionId);
+    return Number(changed.changes) === 1 ? this.sessionStopIntent(sessionId) : undefined;
+  }
+
   /** Persist correlated runner acceptance for the current delivery. A late acceptance may repair
    * a local timeout/exhaustion projection, but never overrides an explicit runner rejection. */
   recordSessionStopAcceptance(
