@@ -103,7 +103,8 @@ export function escapeOwner(
   if (active instanceof Element && active.closest(".composer")) return "composer";
   if (viewName === "settings" && inTypingContext(targetDocument)) return "settings-input";
   if (viewName === "session") return "session-reading";
-  if (viewName === "inbox" && inboxFilterActive) return "inbox-filter";
+  // Board mode shares the Sessions search box, so Escape clears its query the same way.
+  if ((viewName === "inbox" || viewName === "board") && inboxFilterActive) return "inbox-filter";
   if (viewName === "settings") return "settings";
   return null;
 }

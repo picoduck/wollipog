@@ -108,7 +108,10 @@ test("Escape ownership follows one ordered rung and preserves the terminal bound
   composerInput.blur();
   assert.equal(escapeOwner(escape(), { document: window.document, viewName: "session" }), "session-reading");
   assert.equal(escapeOwner(escape(), { document: window.document, viewName: "inbox", inboxFilterActive: true }), "inbox-filter");
+  assert.equal(escapeOwner(escape(), { document: window.document, viewName: "board", inboxFilterActive: true }), "inbox-filter",
+    "board mode shares the Sessions search box, so Escape clears its query too");
   assert.equal(escapeOwner(escape(), { document: window.document, viewName: "inbox" }), null);
+  assert.equal(escapeOwner(escape(), { document: window.document, viewName: "board" }), null);
 
   const settingsInput = window.document.createElement("input");
   const settingsButton = window.document.createElement("button");
