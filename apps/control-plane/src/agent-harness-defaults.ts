@@ -100,7 +100,7 @@ export class AgentHarnessDefaultsSettings {
         const key = agentHarnessIdentityKey(identity);
         const installation: AgentHarnessDefaultInstallation = {
           runnerId: runner.runnerId,
-          machineName: runner.hostname,
+          machineName: runner.displayName || runner.hostname || runner.runnerId,
           online: runner.status === "online",
           models: visibleModels(agent.capabilities),
           effortLevels: [...(agent.capabilities?.effortLevels ?? [])],

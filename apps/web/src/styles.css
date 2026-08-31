@@ -11426,6 +11426,13 @@ body.shell-dock-dragging * {
   border-left: 1px solid var(--border);
 }
 .agent-defaults-item { display: flex; flex-direction: column; min-width: 0; }
+.agent-defaults-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 32px;
+  padding: 0 var(--space-2);
+}
 .agent-defaults-editor {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
