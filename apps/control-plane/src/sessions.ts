@@ -3802,6 +3802,10 @@ export class SessionsService {
       const recoverableFailure = intent.operation.failure?.code === "timeout" ||
         intent.operation.failure?.code === "retry_exhausted";
       if (!recoverableFailure || !runnerSupportsProtocol(protocolVersion, "stopAttemptCorrelation")) return false;
+      // An absent socket is definitive non-delivery and must not consume this failure episode's
+      // one recovery boundary. Once online, persist before the write because a send failure may be
+      // ambiguous: the runner could still observe bytes before the socket tears down.
+      if (!this.hub.isRunnerOnline(runnerId)) return false;
       // A failed delivery's attempt identifier must never be reused: a delayed result from that
       // delivery could otherwise settle or reject this recovery replay. Preserve Stop Failed while
       // committing the new correlation boundary before writing bytes to the runner.

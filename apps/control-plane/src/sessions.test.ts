@@ -7329,6 +7329,42 @@ test("v89 reconciliation keeps every Stop state truthful across reconnect and li
   }
 });
 
+test("an offline Stop cannot consume the failed episode's reconnect recovery", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "running", Date.now());
+  const operation = svc.setArchived(id, true).data!.archiveOperation!;
+  svc.maintainSessionStopIntents(operation.requestedAt + SESSION_STOP_TIMEOUT_MS);
+  const failed = db.sessionStopIntent(id)!;
+  assert.equal(failed.operation.failure?.code, "timeout");
+
+  hub.online = false;
+  hub.deliver = false;
+  hub.sentToRunner.length = 0;
+  svc.stop(id);
+
+  const stillFailed = db.sessionStopIntent(id)!;
+  assert.equal(hub.sentOfType("stop_session").length, 0);
+  assert.equal(stillFailed.deliveryAttemptId, failed.deliveryAttemptId);
+  assert.equal(stillFailed.operation.attemptCount, failed.operation.attemptCount);
+  assert.equal(stillFailed.operation.failure?.code, "timeout");
+
+  hub.online = true;
+  hub.deliver = true;
+  svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, status: "running" })]);
+
+  const recovered = db.sessionStopIntent(id)!;
+  const replay = hub.sentOfType("stop_session");
+  assert.equal(replay.length, 1);
+  assert.equal(replay[0]?.operationId, operation.operationId);
+  assert.notEqual(recovered.deliveryAttemptId, failed.deliveryAttemptId);
+  assert.equal(replay[0]?.deliveryAttemptId, recovered.deliveryAttemptId);
+  assert.equal(recovered.operation.attemptCount, failed.operation.attemptCount + 1);
+  assert.equal(recovered.operation.failure?.code, "timeout");
+  assert.equal(recovered.operation.capacityReleased, false);
+  assert.equal(db.getSession(id)?.archived, false);
+});
+
 test("a pre-v89 runner cannot replay a failed archive Stop without attempt correlation", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);

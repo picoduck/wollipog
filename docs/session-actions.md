@@ -90,7 +90,9 @@ delivery attempt:
   one replay, while keeping Stop Failed visible. Automatic recovery is bounded to that single
   correlated delivery per failure episode; later evidence does not create a replay loop. A
   matching acceptance may return the operation to its bounded completion phase; it still does not
-  release capacity.
+  release capacity. If that accepted Stop later reaches its completion timeout, the timeout starts
+  a new failure episode eligible for one recovery replay; attempt metadata may therefore grow
+  across distinct accepted-but-stalled episodes without any one episode looping.
 - `runner_rejected` is not recoverable automatically. No scheduled, reconnect, status, snapshot,
   transcript, or other live-reconciliation path may replay it. Only an explicit user Stop/Retry
   action can open a new attempt, and stale results remain fenced by delivery-attempt identity.
