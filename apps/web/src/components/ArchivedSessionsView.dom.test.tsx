@@ -111,7 +111,11 @@ function archiveResponse(rows: SessionView[]): Awaited<ReturnType<ApiClient["arc
 
 let sequence = 0;
 
-async function mount(sessions: SessionView[], overrides: Partial<ApiClient> = {}) {
+async function mount(
+  sessions: SessionView[],
+  overrides: Partial<ApiClient> = {},
+  options: { initialConnection?: "online" | "unauthorized" } = {},
+) {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
@@ -123,10 +127,15 @@ async function mount(sessions: SessionView[], overrides: Partial<ApiClient> = {}
     listen: () => () => {},
   };
   sequence += 1;
+  let credentialChange: (() => void) | null = null;
   const connection: UiConnectionRuntime = {
     instanceId: `archive-browser-${sequence}`,
     runtimeKey: `archive-browser-${sequence}:1`,
     createSocket: () => socket,
+    onCredentialChange: (listener) => {
+      credentialChange = listener;
+      return () => { credentialChange = null; };
+    },
     close() {},
   };
   let archivePageCalls = 0;
@@ -182,7 +191,11 @@ async function mount(sessions: SessionView[], overrides: Partial<ApiClient> = {}
     );
     await Promise.resolve();
   });
-  await act(async () => { socket.push(snapshot()); await Promise.resolve(); });
+  await act(async () => {
+    if (options.initialConnection === "unauthorized") socket.onclose?.({ code: 1008 });
+    else socket.push(snapshot());
+    await Promise.resolve();
+  });
   return {
     container,
     root,
@@ -190,6 +203,16 @@ async function mount(sessions: SessionView[], overrides: Partial<ApiClient> = {}
     navigated,
     archiveInputs,
     archivePageCalls: () => archivePageCalls,
+    reconnectWithCredential: async () => {
+      await act(async () => {
+        credentialChange?.();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        socket.push(snapshot());
+        await Promise.resolve();
+      });
+    },
     unmount: async () => {
       await act(async () => root.unmount());
       container.remove();
@@ -280,7 +303,8 @@ test("search input debounces to one request and preserves server row order", asy
 });
 
 test("a Project literally named all is encoded distinctly from All Projects", async () => {
-  const fixture = await mount([session(1, { projectName: "all" })]);
+  const rows = [session(1, { projectName: "all" })];
+  const fixture = await mount(rows);
   const project = fixture.container.querySelector<HTMLButtonElement>('button[aria-label^="Project:"]')!;
   await act(async () => { project.click(); });
   const namedAll = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
@@ -291,6 +315,18 @@ test("a Project literally named all is encoded distinctly from All Projects", as
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
   assert.equal(fixture.archiveInputs.at(-1)?.project, "all");
+
+  const callsBeforeUpdate = fixture.archivePageCalls();
+  const updated = session(1, { projectName: "Other Project", updatedAt: 20 });
+  rows[0] = updated;
+  await act(async () => {
+    fixture.socket.push({ type: "session_upsert", session: updated });
+    await Promise.resolve();
+  });
+  assert.match(fixture.container.textContent ?? "", /No Matching Sessions/,
+    "literal all remains an active facet during live reconciliation");
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 80)); });
+  assert.equal(fixture.archivePageCalls(), callsBeforeUpdate + 1);
   await fixture.unmount();
 });
 
@@ -465,6 +501,32 @@ test("reconnecting during a pending archive load schedules exactly one post-load
   await fixture.unmount();
 });
 
+test("first online connection revalidates a catalog loaded while unauthorized", async () => {
+  const stale = session(42, { id: "initial-unauthorized-stale", title: "Initial Unauthorized Stale" });
+  const fresh = session(43, { id: "initial-unauthorized-fresh", title: "Initial Unauthorized Fresh" });
+  let current = stale;
+  let calls = 0;
+  const fixture = await mount([], {
+    archiveSessionPage: async () => {
+      calls += 1;
+      return archiveResponse([current]);
+    },
+  }, { initialConnection: "unauthorized" });
+  assert.equal(calls, 1);
+  assert.match(fixture.container.textContent ?? "", /Initial Unauthorized Stale/);
+
+  current = fresh;
+  await act(async () => {
+    fixture.socket.push(snapshot());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  assert.equal(calls, 2);
+  assert.match(fixture.container.textContent ?? "", /Initial Unauthorized Fresh/);
+  assert.doesNotMatch(fixture.container.textContent ?? "", /Initial Unauthorized Stale/);
+  await fixture.unmount();
+});
+
 test("a live title update removes a row that no longer matches the active query", async () => {
   const rows = [session(1, { title: "Needle Session" })];
   const fixture = await mount(rows);
@@ -518,6 +580,99 @@ test("a live Project update removes a row that no longer matches the active face
   await fixture.unmount();
 });
 
+test("an unresolved live Location preserves the server facet match until bounded revalidation", async () => {
+  let current = session(41, {
+    id: "resolved-location",
+    title: "Server Location Match",
+    projectLocationId: "location-not-yet-in-projects",
+    workspaceName: "Workspace Fallback",
+  });
+  let calls = 0;
+  const serverResponse = () => ({
+    ...archiveResponse([current]),
+    metadata: {
+      [current.id]: { project: "Wollipog", location: "Server Location", agent: "Codex App Server" },
+    },
+    facets: { projects: ["Wollipog"], locations: ["Server Location"], agents: ["Codex App Server"] },
+  });
+  const fixture = await mount([], {
+    archiveSessionPage: async () => {
+      calls += 1;
+      return serverResponse();
+    },
+  });
+  const location = fixture.container.querySelector<HTMLButtonElement>('button[aria-label^="Location:"]')!;
+  await act(async () => { location.click(); });
+  const serverLocation = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+    .find((option) => option.textContent?.trim() === "Server Location");
+  assert.ok(serverLocation);
+  await act(async () => {
+    serverLocation.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  assert.match(fixture.container.textContent ?? "", /Server Location Match/);
+  const callsBeforeUpdate = calls;
+
+  current = { ...current, updatedAt: current.updatedAt + 1 };
+  await act(async () => {
+    fixture.socket.push({ type: "session_upsert", session: current });
+    await Promise.resolve();
+  });
+  assert.match(fixture.container.textContent ?? "", /Server Location Match/,
+    "missing client metadata cannot transiently invalidate the server facet match");
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 80)); });
+
+  assert.equal(calls, callsBeforeUpdate + 1);
+  assert.match(fixture.container.textContent ?? "", /Server Location Match/);
+  await fixture.unmount();
+});
+
+test("an unresolved Workspace name preserves the server Location facet until bounded revalidation", async () => {
+  let current = session(44, {
+    id: "resolved-workspace-location",
+    title: "Server Workspace Match",
+    projectLocationId: null,
+    workspaceId: "workspace-resolved-only-on-server",
+    workspaceName: null,
+  });
+  let calls = 0;
+  const serverResponse = () => ({
+    ...archiveResponse([current]),
+    metadata: {
+      [current.id]: { project: "Wollipog", location: "Resolved Workspace", agent: "Codex App Server" },
+    },
+    facets: { projects: ["Wollipog"], locations: ["Resolved Workspace"], agents: ["Codex App Server"] },
+  });
+  const fixture = await mount([], {
+    archiveSessionPage: async () => {
+      calls += 1;
+      return serverResponse();
+    },
+  });
+  const location = fixture.container.querySelector<HTMLButtonElement>('button[aria-label^="Location:"]')!;
+  await act(async () => { location.click(); });
+  const resolvedWorkspace = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+    .find((option) => option.textContent?.trim() === "Resolved Workspace");
+  assert.ok(resolvedWorkspace);
+  await act(async () => {
+    resolvedWorkspace.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  const callsBeforeUpdate = calls;
+
+  current = { ...current, updatedAt: current.updatedAt + 1 };
+  await act(async () => {
+    fixture.socket.push({ type: "session_upsert", session: current });
+    await Promise.resolve();
+  });
+  assert.match(fixture.container.textContent ?? "", /Server Workspace Match/);
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 80)); });
+
+  assert.equal(calls, callsBeforeUpdate + 1);
+  assert.match(fixture.container.textContent ?? "", /Server Workspace Match/);
+  await fixture.unmount();
+});
+
 test("Undo restores an unarchived row in server cursor order", async () => {
   const rows = [
     session(3, { id: "newest", title: "Newest", createdAt: 30 }),
@@ -568,6 +723,148 @@ test("server search rows remain authoritative when local derived labels differ",
 
   assert.match(fixture.container.textContent ?? "", /Server Match/,
     "the client does not reject a row the server matched using raw lifecycle data");
+  await fixture.unmount();
+});
+
+test("a live idle upsert preserves a server lifecycle-label match without revalidation", async () => {
+  const rows = [session(35, { id: "idle-match", title: "Lifecycle Search Result", status: "idle" })];
+  let calls = 0;
+  const fixture = await mount([], {
+    archiveSessionPage: async (input) => {
+      calls += 1;
+      return archiveResponse(!input.q || input.q.toLocaleLowerCase() === "idle" ? rows : []);
+    },
+  });
+  const input = fixture.container.querySelector<HTMLInputElement>('input[type="search"]')!;
+  await act(async () => {
+    input.value = "idle";
+    fireDomEvent.change(input);
+  });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
+  assert.match(fixture.container.textContent ?? "", /Lifecycle Search Result/);
+  const callsBeforeUpdate = calls;
+
+  rows[0] = { ...rows[0]!, updatedAt: rows[0]!.updatedAt + 1 };
+  await act(async () => {
+    fixture.socket.push({ type: "session_upsert", session: rows[0]! });
+    await Promise.resolve();
+  });
+  assert.match(fixture.container.textContent ?? "", /Lifecycle Search Result/,
+    "the server-returned row never flickers out after the upsert");
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 80)); });
+  assert.equal(calls, callsBeforeUpdate, "search-label parity avoids an unnecessary request");
+  await fixture.unmount();
+});
+
+test("a live upsert preserves an unreproducible server search match until bounded revalidation", async () => {
+  let current = session(40, { id: "resolved-match", title: "Resolved Metadata Result" });
+  let calls = 0;
+  const fixture = await mount([], {
+    archiveSessionPage: async () => {
+      calls += 1;
+      return archiveResponse([current]);
+    },
+  });
+  const input = fixture.container.querySelector<HTMLInputElement>('input[type="search"]')!;
+  await act(async () => {
+    input.value = "server-only-location";
+    fireDomEvent.change(input);
+  });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
+  assert.match(fixture.container.textContent ?? "", /Resolved Metadata Result/);
+  const callsBeforeUpdate = calls;
+
+  current = { ...current, updatedAt: current.updatedAt + 1 };
+  await act(async () => {
+    fixture.socket.push({ type: "session_upsert", session: current });
+    await Promise.resolve();
+  });
+  assert.match(fixture.container.textContent ?? "", /Resolved Metadata Result/,
+    "an uncertain client-side search miss does not transiently hide the server match");
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 80)); });
+
+  assert.equal(calls, callsBeforeUpdate + 1);
+  assert.match(fixture.container.textContent ?? "", /Resolved Metadata Result/);
+  await fixture.unmount();
+});
+
+test("a REST mutation preserves an unreproducible server search match until bounded revalidation", async () => {
+  let current = session(45, { id: "mutation-server-match", title: "Mutation Server Match" });
+  let calls = 0;
+  const fixture = await mount([], {
+    archiveSessionPage: async () => {
+      calls += 1;
+      return archiveResponse([current]);
+    },
+    stop: async () => {
+      current = { ...current, updatedAt: current.updatedAt + 1 };
+      return current;
+    },
+  });
+  const input = fixture.container.querySelector<HTMLInputElement>('input[type="search"]')!;
+  await act(async () => {
+    input.value = "server-only-metadata";
+    fireDomEvent.change(input);
+  });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
+  const callsBeforeMutation = calls;
+
+  await act(async () => { fireDomEvent.click(button(fixture.container, "Stop")); });
+  await act(async () => {
+    fireDomEvent.click(button(fixture.container, "Stop Session"));
+    await Promise.resolve();
+  });
+  assert.match(fixture.container.textContent ?? "", /Mutation Server Match/,
+    "the mutation response does not transiently invalidate the server search match");
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 80)); });
+
+  assert.equal(calls, callsBeforeMutation + 1);
+  assert.match(fixture.container.textContent ?? "", /Mutation Server Match/);
+  await fixture.unmount();
+});
+
+test("credential-only reconnect revalidates the archive exactly once", async () => {
+  const stale = session(36, { id: "credential-stale", title: "Credential Stale" });
+  const fresh = session(37, { id: "credential-fresh", title: "Credential Fresh" });
+  let calls = 0;
+  const fixture = await mount([], {
+    archiveSessionPage: async () => archiveResponse([++calls === 1 ? stale : fresh]),
+  });
+  assert.equal(calls, 1);
+
+  await fixture.reconnectWithCredential();
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+
+  assert.equal(calls, 2);
+  assert.match(fixture.container.textContent ?? "", /Credential Fresh/);
+  assert.doesNotMatch(fixture.container.textContent ?? "", /Credential Stale/);
+  await fixture.unmount();
+});
+
+test("credential reconnect during a pending load schedules one non-overlapping revalidation", async () => {
+  const stale = session(38, { id: "pending-stale", title: "Pending Stale" });
+  const fresh = session(39, { id: "pending-fresh", title: "Pending Fresh" });
+  let calls = 0;
+  let resolveInitial!: (response: Awaited<ReturnType<ApiClient["archiveSessionPage"]>>) => void;
+  const initial = new Promise<Awaited<ReturnType<ApiClient["archiveSessionPage"]>>>((resolve) => {
+    resolveInitial = resolve;
+  });
+  const fixture = await mount([], {
+    archiveSessionPage: async () => ++calls === 1 ? initial : archiveResponse([fresh]),
+  });
+  assert.equal(calls, 1);
+
+  await fixture.reconnectWithCredential();
+  assert.equal(calls, 1, "credential recovery does not overlap the pending request");
+  await act(async () => {
+    resolveInitial(archiveResponse([stale]));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+
+  assert.equal(calls, 2);
+  assert.match(fixture.container.textContent ?? "", /Pending Fresh/);
+  assert.doesNotMatch(fixture.container.textContent ?? "", /Pending Stale/);
   await fixture.unmount();
 });
 
