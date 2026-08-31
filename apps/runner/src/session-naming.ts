@@ -207,17 +207,18 @@ function validMessages(messages: GenerateSessionTitleMessage["messages"]): boole
     messages.reduce((total, message) => total + message.text.length, 0) <= INPUT_MAX_CHARS;
 }
 
-function validExplicitTarget(
+function explicitTargetFailureCode(
   target: GenerateSessionTitleMessage["target"],
   agent: AgentDefinition,
-): boolean {
-  if (!target || target.agentId !== agent.id || target.driver !== (agent.driver ?? "acp")) return false;
+): SessionNamingRunnerErrorCode | null {
+  if (!target) return null;
+  if (target.agentId !== agent.id || target.driver !== (agent.driver ?? "acp")) return "harness_unavailable";
   const capabilities = agent.capabilities;
   const model = capabilities?.models.find((candidate) =>
     candidate.id === target.model && candidate.id !== "default" && !candidate.hidden,
   );
   const efforts = model?.efforts?.length ? model.efforts : capabilities?.effortLevels ?? [];
-  return Boolean(model && efforts.includes(target.effort));
+  return model && efforts.includes(target.effort) ? null : "model_unavailable";
 }
 
 function claudeEnvironment(env: Record<string, string>): Record<string, string> {
@@ -453,14 +454,15 @@ export class SessionNamingExecutor {
       phase,
     });
     if (!validMessages(message.messages)) return fail("invalid_result");
-    if (!agent) return fail("session_unavailable");
-    if (message.target && !validExplicitTarget(message.target, agent)) return fail("provider_unsupported");
+    if (!agent) return fail(message.target ? "harness_unavailable" : "session_unavailable");
+    const targetFailureCode = explicitTargetFailureCode(message.target, agent);
+    if (targetFailureCode) return fail(targetFailureCode);
     const driver = agent.driver ?? "acp";
     if (driver !== "codex" && driver !== "codex-app-server" && driver !== "claude-code") {
-      return fail("provider_unsupported");
+      return fail(message.target ? "harness_unavailable" : "provider_unsupported");
     }
     if ((driver === "codex" || driver === "codex-app-server") && agent.codexAppServer?.status !== "supported") {
-      return fail("provider_unsupported");
+      return fail(message.target ? "harness_unavailable" : "provider_unsupported");
     }
     const account = sessionNamingAccountForAgent(agent);
     if (!account) return fail("account_unavailable");

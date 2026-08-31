@@ -13,6 +13,7 @@ import type {
   RunnerMetadata,
   RunView,
   SessionEvent,
+  SessionNamingRunnerErrorCode,
   SessionReminderView,
   SetSessionReminderRequest,
   SessionSnapshot,
@@ -3734,6 +3735,32 @@ test("explicit retitle waits for success and reports sanitized asynchronous fail
   assert.deepEqual(succeeded, { ok: true, status: 200, data: { title: "Correlated Semantic Title" } });
   assert.equal(db.getSession(id)?.title, "Correlated Semantic Title");
   assert.equal(db.getSession(id)?.titleSource, "user");
+});
+
+test("explicit retitle reports precise sanitized naming target drift", async () => {
+  let code: SessionNamingRunnerErrorCode = "runner_outdated";
+  const generator: SessionTitleGenerator = async () => {
+    throw new SessionTitleGenerationError(code, "preflight");
+  };
+  const { db, hub, svc } = makeHarness(generator);
+  const id = seedSession(svc, hub);
+  assert.ok(svc.setTitle(id, "Current User Title").ok);
+  svc.onSessionEvent(id, { kind: "user_message", text: "Completed naming context", final: true });
+
+  for (const expected of [
+    ["runner_outdated", /Update the selected Machine runner/u],
+    ["harness_unavailable", /Agent Harness or execution context is no longer available/u],
+    ["model_unavailable", /model or effort is no longer available/u],
+    ["account_unavailable", /account, provider, or billing boundary changed/u],
+    ["session_unavailable", /Agent Harness is unavailable/u],
+  ] as const) {
+    [code] = expected;
+    const result = await svc.retitleSession(id);
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 409);
+    assert.match(result.error ?? "", expected[1]);
+    assert.equal(db.getSession(id)?.title, "Current User Title");
+  }
 });
 
 test("runtime naming mode changes apply to subsequent first messages without a restart", async () => {

@@ -230,7 +230,8 @@ function billingSourceLabel(value: SessionNamingAccountBoundary["billingSource"]
 }
 
 const SESSION_NAMING_FAILURE_CODES = new Set([
-  "session_unavailable", "account_unavailable", "provider_unsupported", "rate_limited",
+  "session_unavailable", "account_unavailable", "runner_outdated", "harness_unavailable",
+  "model_unavailable", "provider_unsupported", "rate_limited",
   "timed_out", "provider_failed", "invalid_result",
 ]);
 const SESSION_NAMING_FAILURE_PHASES = new Set([
@@ -392,12 +393,21 @@ export class SessionNamingSettings {
       ? undefined
       : !runnerInOrganization || runnerInOrganization.status !== "online" || !this.hub
         ? "session_unavailable"
-        : agent && !account
-          ? "account_unavailable"
-          : account && saved.provider && saved.billingSource &&
-              (account.provider !== saved.provider || account.billingSource !== saved.billingSource)
-            ? "account_unavailable"
-            : "provider_unsupported";
+        : !runnerSupportsProtocol(runnerInOrganization.protocolVersion, "sessionNamingTargets")
+          ? "runner_outdated"
+          : !agent
+            ? "harness_unavailable"
+            : !account
+              ? "account_unavailable"
+              : !saved.provider || !saved.billingSource
+                ? "harness_unavailable"
+                : account.provider !== saved.provider || account.billingSource !== saved.billingSource
+                  ? "account_unavailable"
+                  : saved.context && !sameContext(saved.context, harnessContext(agent))
+                    ? "harness_unavailable"
+                    : !model || model.hidden || model.id === "default" || !efforts.includes(saved.effort)
+                      ? "model_unavailable"
+                      : "provider_unsupported";
     return {
       view: {
         runnerId: saved.runnerId,
@@ -594,9 +604,10 @@ export class SessionNamingSettings {
     if (!organizationId) return false;
     const mode = this.effectiveMode(organizationId);
     if (mode === "custom_model_endpoint") return true;
-    if (mode !== "session_agent_account") return false;
+    const selected = this.selectedMode(organizationId);
+    if (selected.mode !== "session_agent_account") return false;
     const explicit = this.harnessTarget(organizationId);
-    return explicit ? explicit.view.available : this.sessionAgentTarget(sessionId) !== null;
+    return explicit !== null || (mode === "session_agent_account" && this.sessionAgentTarget(sessionId) !== null);
   };
 
   timeoutForSession = (sessionId: string): number => {

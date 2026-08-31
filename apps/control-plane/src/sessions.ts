@@ -325,10 +325,19 @@ function fail<T>(error: string, status = 400): ServiceResult<T> {
 
 function sessionTitleFailureMessage(error: SessionTitleGenerationError): string {
   if (error.code === "account_unavailable") {
-    return "The session naming account is no longer authenticated. Reconnect it in Settings and try again.";
+    return "The session naming account, provider, or billing boundary changed or is no longer authenticated. Review Session Naming settings and try again.";
+  }
+  if (error.code === "runner_outdated") {
+    return "Update the selected Machine runner before using this Session Naming target.";
+  }
+  if (error.code === "harness_unavailable") {
+    return "The selected Agent Harness or execution context is no longer available. Review Session Naming settings and try again.";
+  }
+  if (error.code === "model_unavailable") {
+    return "The selected session naming model or effort is no longer available. Review Session Naming settings and try again.";
   }
   if (error.code === "provider_unsupported") {
-    return "The selected session naming model or effort is no longer available. Review Session Naming settings and try again.";
+    return "The selected Agent Harness does not support this session naming request. Review Session Naming settings and try again.";
   }
   if (error.code === "session_unavailable") {
     return "The selected Agent Harness is unavailable for session naming. Check that it is online and try again.";
