@@ -546,6 +546,53 @@ test("a live Project update removes a row that no longer matches the active face
   await fixture.unmount();
 });
 
+test("an unresolved live Location preserves the server facet match until bounded revalidation", async () => {
+  let current = session(41, {
+    id: "resolved-location",
+    title: "Server Location Match",
+    projectLocationId: "location-not-yet-in-projects",
+    workspaceName: "Workspace Fallback",
+  });
+  let calls = 0;
+  const serverResponse = () => ({
+    ...archiveResponse([current]),
+    metadata: {
+      [current.id]: { project: "Wollipog", location: "Server Location", agent: "Codex App Server" },
+    },
+    facets: { projects: ["Wollipog"], locations: ["Server Location"], agents: ["Codex App Server"] },
+  });
+  const fixture = await mount([], {
+    archiveSessionPage: async () => {
+      calls += 1;
+      return serverResponse();
+    },
+  });
+  const location = fixture.container.querySelector<HTMLButtonElement>('button[aria-label^="Location:"]')!;
+  await act(async () => { location.click(); });
+  const serverLocation = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+    .find((option) => option.textContent?.trim() === "Server Location");
+  assert.ok(serverLocation);
+  await act(async () => {
+    serverLocation.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  assert.match(fixture.container.textContent ?? "", /Server Location Match/);
+  const callsBeforeUpdate = calls;
+
+  current = { ...current, updatedAt: current.updatedAt + 1 };
+  await act(async () => {
+    fixture.socket.push({ type: "session_upsert", session: current });
+    await Promise.resolve();
+  });
+  assert.match(fixture.container.textContent ?? "", /Server Location Match/,
+    "missing client metadata cannot transiently invalidate the server facet match");
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 80)); });
+
+  assert.equal(calls, callsBeforeUpdate + 1);
+  assert.match(fixture.container.textContent ?? "", /Server Location Match/);
+  await fixture.unmount();
+});
+
 test("Undo restores an unarchived row in server cursor order", async () => {
   const rows = [
     session(3, { id: "newest", title: "Newest", createdAt: 30 }),

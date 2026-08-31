@@ -89,6 +89,19 @@ function reconcileLocally(
   transcriptSessionIds: ReadonlySet<string>,
 ): LocalReconciliation {
   if (locallyMatches(session, filters, locationNames, transcriptSessionIds)) return "match";
+  // The archive endpoint resolves a Project Location through its database join. A session upsert
+  // carries only the Location id, so websocket and Project snapshot ordering can temporarily leave
+  // the client unable to reproduce that facet value. Preserve the server row until one bounded
+  // refresh unless another locally authoritative scope filter already excludes it.
+  const projectLocationId = session.projectLocationId;
+  const unresolvedLocation = filters.location !== null && projectLocationId != null &&
+    !locationNames.has(projectLocationId);
+  if (unresolvedLocation && locallyMatches(
+    session,
+    { ...filters, query: "", location: null },
+    locationNames,
+    transcriptSessionIds,
+  )) return "revalidate";
   return locallyMatches(session, { ...filters, query: "" }, locationNames, transcriptSessionIds)
     ? "revalidate"
     : "exclude";
