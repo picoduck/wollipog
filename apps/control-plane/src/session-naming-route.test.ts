@@ -394,6 +394,8 @@ test("explicit harness naming persists capability-backed identifiers, executes o
   let resultBillingSource: "provider_account" | "api" | "unknown" = "provider_account";
   let resultProvider: "codex" | "claude" = "codex";
   let advertisedContext: { kind: "native" } | { kind: "wsl"; distro: string } = { kind: "native" };
+  let advertisedSessionNaming = true;
+  let advertisedAuthStatus: "authenticated" | "unauthenticated" = "authenticated";
   let runnerOrganizationId = "org_personal";
   let runnerProtocolVersion = 95;
   const runner = (): RunnerView => ({
@@ -417,9 +419,9 @@ test("explicit harness naming persists capability-backed identifiers, executes o
       context: advertisedContext,
       source: "discovered",
       available: true,
-      authStatus: "authenticated",
+      authStatus: advertisedAuthStatus,
       codexBillingSource: advertisedBillingSource,
-      codexAppServer: { status: "supported", appServerAvailable: true, sessionNaming: true },
+      codexAppServer: { status: "supported", appServerAvailable: true, sessionNaming: advertisedSessionNaming },
       capabilities: {
         models: [{ id: "luna", displayName: "Luna", efforts }],
         effortLevels: efforts,
@@ -565,6 +567,28 @@ test("explicit harness naming persists capability-backed identifiers, executes o
       agentId: "codex-app-server", driver: "codex-app-server", model: "luna", effort: "low",
     });
   }
+
+  advertisedSessionNaming = false;
+  const harnessCapabilityDrift = settings.view("org_personal", true);
+  assert.match(harnessCapabilityDrift.harnessTarget?.reason ?? "", /no longer supports session naming/);
+  await assert.rejects(settings.generator({
+    sessionId: "session-other",
+    messages: [{ role: "user", text: "Name this" }],
+    signal: new AbortController().signal,
+  }), (error: unknown) => error instanceof SessionTitleGenerationError &&
+    error.code === "harness_unavailable" && error.phase === "preflight");
+  advertisedSessionNaming = true;
+
+  advertisedAuthStatus = "unauthenticated";
+  const authenticationDrift = settings.view("org_personal", true);
+  assert.match(authenticationDrift.harnessTarget?.reason ?? "", /no longer authenticated/);
+  await assert.rejects(settings.generator({
+    sessionId: "session-other",
+    messages: [{ role: "user", text: "Name this" }],
+    signal: new AbortController().signal,
+  }), (error: unknown) => error instanceof SessionTitleGenerationError &&
+    error.code === "account_unavailable" && error.phase === "preflight");
+  advertisedAuthStatus = "authenticated";
 
   resultBillingSource = "api";
   await assert.rejects(settings.generator({
@@ -852,6 +876,21 @@ test("runner naming result validation strips extra fields and rejects secret-bea
     code: "model_unavailable",
     phase: "preflight",
   });
+  for (const code of ["session_unavailable", "provider_unsupported"] as const) {
+    assert.deepEqual(sanitizeSessionNamingRunnerResult({
+      type: "generate_session_title_result",
+      requestId: `request-legacy-${code}`,
+      ok: false,
+      code,
+      phase: "preflight",
+    }), {
+      type: "generate_session_title_result",
+      requestId: `request-legacy-${code}`,
+      ok: false,
+      code,
+      phase: "preflight",
+    }, "a newer control plane continues accepting older-runner fallback codes");
+  }
   assert.deepEqual(sanitizeSessionNamingRunnerResult({
     type: "generate_session_title_result",
     requestId: "request-two",

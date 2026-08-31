@@ -13,6 +13,7 @@ import {
   providerAuthenticationReceiptCode,
   projectRunnerMessageForProtocol,
   projectSessionEventPayloadForProtocol,
+  sessionNamingAgentFailureCode,
   sessionEventWireProjectionRequiredForProtocol,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   WOLLIPOG_CONTROL_PLANE_SERVICE,
@@ -37,6 +38,7 @@ import {
   mergeSessionCapabilities,
   type SessionStatus,
   type AgentCapabilities,
+  type AgentDefinition,
   type AgentSlashCommand,
   type BoardColumn,
   type ControlPlaneToRunner,
@@ -127,8 +129,66 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 96", () => {
-  assert.equal(PROTOCOL_VERSION, 96);
+test("PROTOCOL_VERSION is 97", () => {
+  assert.equal(PROTOCOL_VERSION, 97);
+});
+
+test("session-naming agent failures distinguish harness capability from account drift", () => {
+  const codex = {
+    id: "codex",
+    name: "Codex",
+    command: "codex",
+    args: [],
+    env: {},
+    driver: "codex-app-server",
+    available: true,
+    authStatus: "authenticated",
+    codexAppServer: { status: "supported", appServerAvailable: true, sessionNaming: true },
+  } satisfies AgentDefinition;
+  const claude = {
+    id: "claude-code",
+    name: "Claude Code",
+    command: "claude",
+    args: [],
+    env: {},
+    driver: "claude-code",
+    available: true,
+    authStatus: "authenticated",
+    claudeCode: {
+      status: "ready",
+      effortLevels: [],
+      permissionModes: [],
+      streamJsonInput: true,
+      streamJsonImages: true,
+      controlProtocol: true,
+      forkSession: true,
+      replayUserMessages: true,
+      sessionNaming: true,
+      auth: { status: "authenticated", billingSource: "subscription" },
+    },
+  } satisfies AgentDefinition;
+
+  assert.equal(sessionNamingAgentFailureCode(codex), null);
+  assert.equal(sessionNamingAgentFailureCode({ ...codex, available: false }), "harness_unavailable");
+  assert.equal(sessionNamingAgentFailureCode({ ...codex, authStatus: "unauthenticated" }), "account_unavailable");
+  assert.equal(sessionNamingAgentFailureCode({
+    ...codex,
+    codexAppServer: { ...codex.codexAppServer, sessionNaming: false },
+  }), "harness_unavailable");
+  assert.equal(sessionNamingAgentFailureCode(claude), null);
+  assert.equal(sessionNamingAgentFailureCode({
+    ...claude,
+    claudeCode: {
+      ...claude.claudeCode,
+      auth: { ...claude.claudeCode.auth, status: "unauthenticated" },
+    },
+  }), "account_unavailable");
+  assert.equal(sessionNamingAgentFailureCode({
+    ...claude,
+    claudeCode: { ...claude.claudeCode, sessionNaming: false },
+  }), "harness_unavailable");
+  assert.equal(sessionNamingAgentFailureCode({ ...codex, driver: "acp" }), "harness_unavailable");
+  assert.equal(sessionNamingAgentFailureCode(undefined), "harness_unavailable");
 });
 
 test("slash-command argument hints remain additive metadata", () => {
@@ -574,6 +634,8 @@ test("runner command capability gates fail closed for unknown/old protocols", ()
   assert.equal(runnerSupportsProtocol(95, "sessionNamingTargets"), true);
   assert.equal(runnerSupportsProtocol(95, "skillLinkRemovalReporting"), false);
   assert.equal(runnerSupportsProtocol(96, "skillLinkRemovalReporting"), true);
+  assert.equal(runnerSupportsProtocol(96, "sessionNamingDriftCodes"), false);
+  assert.equal(runnerSupportsProtocol(97, "sessionNamingDriftCodes"), true);
   assert.equal(runnerSupportsProtocol(Number.NaN, "externalSessions"), false);
   assert.equal(runnerSupportsProtocol(6.5, "externalSessions"), false);
   assert.match(runnerCapabilityRequirement(null, "sessionFiles", "Files"), /unknown.*requires protocol v16/i);

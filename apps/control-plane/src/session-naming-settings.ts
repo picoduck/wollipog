@@ -14,7 +14,7 @@ import type {
   SessionNamingRunnerErrorCode,
   SessionNamingSettingsView,
 } from "@wollipog/protocol";
-import { runnerSupportsProtocol } from "@wollipog/protocol";
+import { runnerSupportsProtocol, sessionNamingAgentFailureCode } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import {
   isRunnerRequestNotSentError,
@@ -364,6 +364,7 @@ export class SessionNamingSettings {
     const model = agent?.capabilities?.models.find((candidate) => candidate.id === saved.model);
     const efforts = model?.efforts?.length ? model.efforts : agent?.capabilities?.effortLevels ?? [];
     const account = accountForAgent(agent);
+    const agentFailureCode = sessionNamingAgentFailureCode(agent);
     const reason = !runnerInOrganization
       ? "The selected Machine is no longer available."
       : runnerInOrganization.status !== "online"
@@ -373,7 +374,9 @@ export class SessionNamingSettings {
           : !agent
             ? "The selected Agent Harness is no longer advertised."
             : !account
-              ? "The selected Agent Harness is unavailable or no longer authenticated."
+              ? agentFailureCode === "harness_unavailable"
+                ? "The selected Agent Harness is unavailable or no longer supports session naming."
+                : "The selected Agent Harness is no longer authenticated."
               : !saved.provider || !saved.billingSource
                 ? "Review and save the selected Agent Harness to confirm its provider and billing source."
                 : account.provider !== saved.provider
@@ -398,7 +401,7 @@ export class SessionNamingSettings {
           : !agent
             ? "harness_unavailable"
             : !account
-              ? "account_unavailable"
+              ? agentFailureCode ?? "account_unavailable"
               : !saved.provider || !saved.billingSource
                 ? "harness_unavailable"
                 : account.provider !== saved.provider || account.billingSource !== saved.billingSource
