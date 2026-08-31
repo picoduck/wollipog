@@ -424,18 +424,26 @@ function followChipState(fixture: Fixture): string | null {
   return chip.getAttribute("data-follow-tail-state");
 }
 
-test("SessionDetail keeps a pending question live when its hydrated row is outside the virtual range", async () => {
+test("SessionDetail keeps the temporary question fallback until a virtual row is genuinely mounted", async () => {
   const pages = pageController();
   const fixture = await mountFixture(pages, 40, { pendingQuestion: true });
   try {
+    const fallbackQuestion = fixture.container.querySelector('[aria-label="Agent Questions"]');
+    assert.ok(fallbackQuestion, "the fallback remains reachable while transcript recovery is pending");
+    assert.equal(fixture.scroller.contains(fallbackQuestion), false);
+
+    await act(async () => {
+      pages.releaseTail({ events: fixture.events, eventEpoch: 0, nextBefore: 0, hasMoreOlder: false, cacheComplete: true });
+    });
+    await flushAsyncWork();
+
     assert.equal(fixture.container.querySelectorAll('[aria-label="Agent Questions"]').length, 1);
     assert.equal(fixture.container.querySelectorAll('[role="radio"]').length, 2);
-    assert.equal(fixture.container.querySelector(".tl-question"), null,
-      "the off-range historical row is not required to keep the live form reachable");
     const liveQuestion = fixture.container.querySelector('[aria-label="Agent Questions"]');
     assert.ok(liveQuestion);
     assert.equal(fixture.scroller.contains(liveQuestion), false,
-      "the live response form stays outside the virtualized transcript scroller");
+      "the fallback stays authoritative because this hydration harness mounts no virtual rows");
+    assert.equal(fixture.container.querySelector("[data-virtual-row]"), null);
   } finally {
     await unmountFixture(fixture);
   }

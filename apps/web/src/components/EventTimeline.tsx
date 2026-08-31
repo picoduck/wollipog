@@ -1,4 +1,4 @@
-import { createContext, memo, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
+import { createContext, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { normalizeSourcePath, type AgentQuestion, type PlanEntry, type SessionView, type SourceLocation } from "@wollipog/protocol";
 import {
   groupTimeline,
@@ -46,6 +46,9 @@ export interface TimelineRevealTarget {
 export interface TimelineQuestionContext {
   sessionId: string;
   pendingQuestion: { requestId: string; questions: AgentQuestion[] } | null;
+  /** True only after the matching pinned row is mounted and measurement-ready. */
+  questionInTimeline?: boolean;
+  onPendingQuestionAvailabilityChange?: (requestId: string, available: boolean) => void;
   runnerOnline: boolean;
   onSessionUpdate?: (session: SessionView) => void;
   showKeyHints?: boolean;
@@ -223,6 +226,18 @@ function EventTimelineBody({
   const pinnedQuestionRow = pendingQuestionRequestId === null ? undefined : rows.find((row) =>
     row.kind === "item" && row.item.kind === "question" &&
     row.item.requestId === pendingQuestionRequestId && row.item.answered === undefined);
+  const onPendingQuestionAvailabilityChange = questionContext?.onPendingQuestionAvailabilityChange;
+  const reportPinnedQuestionAvailability = useCallback((key: string | null, available: boolean) => {
+    if (pendingQuestionRequestId === null) return;
+    onPendingQuestionAvailabilityChange?.(
+      pendingQuestionRequestId,
+      available && key === pinnedQuestionRow?.key,
+    );
+  }, [onPendingQuestionAvailabilityChange, pendingQuestionRequestId, pinnedQuestionRow?.key]);
+  useBrowserLayoutEffect(() => {
+    if (scrollRef) return;
+    reportPinnedQuestionAvailability(pinnedQuestionRow?.key ?? null, pinnedQuestionRow != null);
+  }, [pinnedQuestionRow?.key, reportPinnedQuestionAvailability, scrollRef]);
   const estimateRow = useMemo(() => (row: TimelineRenderRow) =>
     estimateTimelineRow(row, pendingQuestionRequestId), [pendingQuestionRequestId]);
   const revealTarget = revealRequest == null
@@ -313,7 +328,10 @@ function EventTimelineBody({
           forkUnavailableReason={forkBlocked
             ? "Claude CLI can fork only its current transcript at the matching latest-turn checkpoint. A later turn attempt advanced the conversation; files-only rewind remains available."
             : undefined}
-          questionContext={item.kind === "question" ? questionContext : undefined}
+          questionContext={item.kind === "question" && questionContext ? {
+            ...questionContext,
+            pendingQuestion: questionContext.questionInTimeline !== false ? questionContext.pendingQuestion : null,
+          } : undefined}
         />
       </div>
     );
@@ -327,6 +345,7 @@ function EventTimelineBody({
       estimateSize={estimateRow}
       overscan={8}
       pinnedKey={pinnedQuestionRow?.key ?? null}
+      onPinnedAvailabilityChange={reportPinnedQuestionAvailability}
       rowGap={12}
       className="timeline"
       ariaLabel={ariaLabel}

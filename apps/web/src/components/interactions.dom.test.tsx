@@ -219,20 +219,29 @@ function QuestionPresentationHarness({ hydrated }: { hydrated: boolean }) {
   const fallbackRef = useRef<HTMLTextAreaElement>(null);
   const session = approvalSession("ask-a");
   const questions = session.pendingApproval?.kind === "question" ? session.pendingApproval.questions ?? [] : [];
+  const [inlineRequestId, setInlineRequestId] = React.useState<string | null>(null);
+  const questionInTimeline = inlineRequestId === "ask-a";
+  const handlePendingQuestionAvailabilityChange = React.useCallback((requestId: string, available: boolean) => {
+    setInlineRequestId((current) => available
+      ? current === requestId ? current : requestId
+      : current === requestId ? null : current);
+  }, []);
   return (
     <>
       <SessionApprovalRegion
         session={session}
         runnerOnline
         fallbackFocusRef={fallbackRef}
-        questionInTimeline={false}
+        questionInTimeline={questionInTimeline}
       />
       {hydrated && (
         <EventTimeline
           items={[{ kind: "question", id: 1, requestId: "ask-a", questions }]}
           questionContext={{
             sessionId: session.id,
-            pendingQuestion: null,
+            pendingQuestion: { requestId: "ask-a", questions },
+            questionInTimeline,
+            onPendingQuestionAvailabilityChange: handlePendingQuestionAvailabilityChange,
             runnerOnline: true,
           }}
         />
@@ -359,7 +368,8 @@ test("question focus and draft survive transcript hydration without exposing a s
   assert.equal(container.querySelector<HTMLElement>('[role="radio"]')?.getAttribute("aria-checked"), "true");
   assert.equal(container.querySelectorAll('[aria-label="Agent Questions"]').length, 1);
   assert.equal(container.querySelectorAll('[role="radio"]').length, 2);
-  assert.match(container.querySelector(".tl-question")?.textContent ?? "", /awaiting answer/);
+  assert.equal(container.querySelector(".tl-question"), null,
+    "the live inline form replaces the hydrated historical card");
   await act(async () => { root.unmount(); });
   clearQuestionDrafts("session-1", "ask-a");
   container.remove();

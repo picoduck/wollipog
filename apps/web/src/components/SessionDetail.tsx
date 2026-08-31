@@ -1990,15 +1990,32 @@ function SessionDetailLoaded({
   // "Agent is working" state (items 1 + 2): true the instant a send is optimistically pending
   // (before status flips) and for the whole turn while the runner reports running/starting.
   const showOptimistic = pending != null && timelineUserPrompts.length <= sendBaselineRef.current;
+  const pendingQuestion = session.pendingApproval?.kind === "question" ? session.pendingApproval : null;
+  // A request id owns an immutable question schema. Keep the timeline context stable across
+  // heartbeat, usage, and lifecycle snapshots that replace the surrounding SessionView.
+  const timelinePendingQuestion = useMemo(() => pendingQuestion ? {
+    requestId: pendingQuestion.requestId,
+    questions: pendingQuestion.questions ?? [],
+  } : null, [session.id, pendingQuestion?.requestId]);
+  const [inlineQuestionRequestId, setInlineQuestionRequestId] = useState<string | null>(null);
+  const handlePendingQuestionAvailabilityChange = useCallback((requestId: string, available: boolean) => {
+    setInlineQuestionRequestId((current) => available
+      ? current === requestId ? current : requestId
+      : current === requestId ? null : current);
+  }, []);
+  const matchingQuestionLoaded = pendingQuestion !== null && items.some((item) =>
+    item.kind === "question" && item.requestId === pendingQuestion.requestId && item.answered === undefined);
+  const questionInTimeline = matchingQuestionLoaded && inlineQuestionRequestId === pendingQuestion?.requestId;
   const timelineQuestionContext = useMemo(() => ({
     sessionId: session.id,
-    // SessionDetail keeps the live form in its stable request region. Timeline question rows are
-    // historical context only, even while their matching request remains pending.
-    pendingQuestion: null,
+    pendingQuestion: timelinePendingQuestion,
+    questionInTimeline,
+    onPendingQuestionAvailabilityChange: handlePendingQuestionAvailabilityChange,
     runnerOnline,
     onSessionUpdate: loadSession,
     showKeyHints: !isMobile,
-  }), [isMobile, loadSession, runnerOnline, session.id]);
+  }), [handlePendingQuestionAvailabilityChange, isMobile, loadSession, questionInTimeline, runnerOnline,
+    session.id, timelinePendingQuestion]);
   const working =
     showOptimistic || (!terminal && (session.status === "running" || session.status === "starting"));
   // The merged Working row must also survive approval/question waits: the projector keeps
@@ -2659,10 +2676,9 @@ function SessionDetailLoaded({
             alternateFallbackFocusRef={mode === "expanded" ? scrollRef : undefined}
             onSessionUpdate={loadSession}
             showKeyHints={!isMobile}
-            // The transcript is virtualized and may restore anywhere in a bounded history window.
-            // Merely finding the matching event does not mean its row is visible or reachable, so
-            // the stable pre-transcript surface owns the live request for its entire lifetime.
-            questionInTimeline={false}
+            // The fallback owns the request only until the matching pinned row is mounted and the
+            // virtual list can keep it reachable at its canonical transcript position.
+            questionInTimeline={questionInTimeline}
           />
           {mode === "expanded" && (
             <GovernanceAuditTrail
