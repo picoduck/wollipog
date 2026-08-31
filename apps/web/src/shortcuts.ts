@@ -57,9 +57,9 @@ export type ShortcutId =
   | "stop-turn"
   | "exit-terminal";
 
-export type ShortcutScope = "Global" | "Sessions" | "Session" | "Inbox" | "Session Reading" | "Run dialog" | "Pod detail";
+export type ShortcutScope = "Global" | "Sessions" | "Sessions List" | "Session" | "Session Reading" | "Run dialog" | "Pod detail";
 
-export type ShortcutGroup = "Navigation" | "Inbox" | "Session Reading" | "Session" | "Actions" | "Help";
+export type ShortcutGroup = "Navigation" | "Sessions List" | "Session Reading" | "Session" | "Actions" | "Help";
 
 export type ShortcutDefinition = {
   id: ShortcutId;
@@ -264,130 +264,130 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
   },
   {
     id: "inbox-next",
-    group: "Inbox",
+    group: "Sessions List",
     label: "Next Session",
     description: "Select the next session card",
-    scope: "Inbox",
+    scope: "Sessions List",
     binding: { key: "j", bare: true },
   },
   {
     id: "inbox-previous",
-    group: "Inbox",
+    group: "Sessions List",
     label: "Previous Session",
     description: "Select the previous session card",
-    scope: "Inbox",
+    scope: "Sessions List",
     binding: { key: "k", bare: true },
   },
   {
     id: "inbox-expand",
-    group: "Inbox",
+    group: "Sessions List",
     label: "Expand Session",
     description: "Expand the selected session",
-    scope: "Inbox",
+    scope: "Sessions List",
     binding: { key: "Enter", bare: true },
   },
   {
     id: "inbox-next-split",
-    group: "Inbox",
+    group: "Sessions List",
     label: "Next Split",
     description: "Move to the next project split",
-    scope: "Inbox",
+    scope: "Sessions List",
     binding: { key: "Tab", bare: true },
   },
   {
     id: "inbox-previous-split",
-    group: "Inbox",
+    group: "Sessions List",
     label: "Previous Split",
     description: "Move to the previous project split",
-    scope: "Inbox",
+    scope: "Sessions List",
     binding: { key: "Tab", shift: true, bare: true },
   },
   {
     id: "inbox-approve",
-    group: "Inbox",
+    group: "Sessions List",
     label: "Approve Request",
     description: "Approve the selected session request",
-    scope: "Inbox",
+    scope: "Sessions List",
     binding: { key: "a", bare: true },
   },
   {
     id: "inbox-deny",
-    group: "Inbox",
+    group: "Sessions List",
     label: "Deny Request",
     description: "Deny the selected session request",
-    scope: "Inbox",
+    scope: "Sessions List",
     binding: { key: "d", bare: true },
   },
   {
     id: "inbox-archive",
-    group: "Inbox",
+    group: "Sessions List",
     label: "Archive Session",
     description: "Archive the selected session and advance",
-    scope: "Inbox",
+    scope: "Sessions List",
     binding: { key: "e", bare: true },
   },
   {
     id: "inbox-snooze",
-    group: "Inbox",
+    group: "Sessions List",
     label: "Snooze Session",
     description: "Schedule or edit a reminder for the selected session",
-    scope: "Inbox",
+    scope: "Sessions List",
     binding: { key: "h", bare: true },
   },
   {
     id: "inbox-pin",
-    group: "Inbox",
+    group: "Sessions List",
     label: "Pin Session",
     description: "Pin or unpin the selected session",
-    scope: "Inbox",
+    scope: "Sessions List",
     binding: { key: "s", bare: true },
   },
   {
     id: "inbox-unread",
-    group: "Inbox",
+    group: "Sessions List",
     label: "Mark Unread",
     description: "Mark the selected session unread",
-    scope: "Inbox",
+    scope: "Sessions List",
     binding: { key: "u", bare: true },
   },
   {
     id: "inbox-reply",
-    group: "Inbox",
+    group: "Sessions List",
     label: "Reply to Session",
     description: "Expand the selected session and focus the composer",
-    scope: "Inbox",
+    scope: "Sessions List",
     binding: { key: "r", bare: true },
   },
   {
     id: "inbox-page-down",
-    group: "Inbox",
+    group: "Sessions List",
     label: "Page Down",
     description: "Page down through preview history",
-    scope: "Inbox",
+    scope: "Sessions List",
     binding: { key: " ", bare: true },
   },
   {
     id: "inbox-page-up",
-    group: "Inbox",
+    group: "Sessions List",
     label: "Page Up",
     description: "Page up through preview history",
-    scope: "Inbox",
+    scope: "Sessions List",
     binding: { key: " ", shift: true, bare: true },
   },
   {
     id: "inbox-follow-latest",
-    group: "Inbox",
+    group: "Sessions List",
     label: "Follow Live Output",
     description: "Jump to the latest preview event and resume following",
-    scope: "Inbox",
+    scope: "Sessions List",
     binding: { key: "g", shift: true, bare: true },
   },
   {
     id: "inbox-follow-latest-end",
-    group: "Inbox",
+    group: "Sessions List",
     label: "Follow Live Output (End)",
     description: "Jump to the latest preview event and resume following",
-    scope: "Inbox",
+    scope: "Sessions List",
     binding: { key: "End", bare: true },
   },
   {
@@ -528,7 +528,7 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
   },
 ] as const;
 
-export const SHORTCUT_GROUPS = ["Navigation", "Inbox", "Session Reading", "Session", "Actions", "Help"] as const;
+export const SHORTCUT_GROUPS = ["Navigation", "Sessions List", "Session Reading", "Session", "Actions", "Help"] as const;
 
 export function shortcut(id: ShortcutId): ShortcutDefinition {
   const definition = SHORTCUTS.find((candidate) => candidate.id === id);

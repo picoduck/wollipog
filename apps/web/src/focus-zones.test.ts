@@ -40,8 +40,8 @@ test("focus zones resolve contextual Inbox and session-reading scopes", () => {
 
   assert.equal(focusZoneForElement(listButton), "list");
   assert.equal(focusZoneForElement(detailButton), "detail");
-  assert.equal(shortcutScopeForFocus({ viewName: "inbox", activeElement: listButton }), "Inbox");
-  assert.equal(shortcutScopeForFocus({ viewName: "inbox", activeElement: detailButton }), "Inbox");
+  assert.equal(shortcutScopeForFocus({ viewName: "inbox", activeElement: listButton }), "Sessions List");
+  assert.equal(shortcutScopeForFocus({ viewName: "inbox", activeElement: detailButton }), "Sessions List");
   assert.equal(shortcutScopeForFocus({ viewName: "inbox", activeElement: railButton }), "Global");
   assert.equal(shortcutScopeForFocus({ viewName: "session", activeElement: detailButton, sessionReading: true }), "Session Reading");
   assert.equal(shortcutScopeForFocus({ viewName: "session", activeElement: detailButton }), "Session");

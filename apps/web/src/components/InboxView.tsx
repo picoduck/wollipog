@@ -164,7 +164,10 @@ export function InboxView({
   const [windowBlurred, setWindowBlurred] = useState(() => !document.hasFocus());
   const [documentHidden, setDocumentHidden] = useState(() => document.visibilityState === "hidden");
   const inboxAway = windowBlurred || documentHidden;
-  const browsingOrderLease = expandedSessionId === null && (isMobile || !inboxAway);
+  // Board mode renders no list rows, so the browsing-order lease has nothing to protect there —
+  // and a hold captured on the board would present a stale "Apply New Order" back in list mode.
+  const boardMode = viewMode === "board" && expandedSessionId === null;
+  const browsingOrderLease = expandedSessionId === null && !boardMode && (isMobile || !inboxAway);
   const browsingOrderLeaseRef = useRef(browsingOrderLease);
   browsingOrderLeaseRef.current = browsingOrderLease;
   const [seen, setSeen] = useState(() => loadSeen(instanceScope));
@@ -392,7 +395,9 @@ export function InboxView({
   useEffect(() => {
     if (seenTimerRef.current !== null) window.clearTimeout(seenTimerRef.current);
     seenTimerRef.current = null;
-    if (!selectedSession) return;
+    // Board mode renders no selected preview, so dwelling there must not mark the invisible
+    // list selection as read while its activity keeps arriving.
+    if (!selectedSession || boardMode) return;
     const sessionId = selectedSession.id;
     const seenAt = selectedSession.lastEventAt ?? selectedSession.updatedAt;
     seenTimerRef.current = window.setTimeout(() => {
@@ -405,7 +410,7 @@ export function InboxView({
       if (seenTimerRef.current !== null) window.clearTimeout(seenTimerRef.current);
       seenTimerRef.current = null;
     };
-  }, [instanceScope, selectedSession?.id, selectedSession?.lastEventAt, selectedSession?.updatedAt]);
+  }, [boardMode, instanceScope, selectedSession?.id, selectedSession?.lastEventAt, selectedSession?.updatedAt]);
 
   const normalizedQuery = deferredQuery.trim().toLocaleLowerCase();
   const liveEntries = useMemo<InboxListEntry[]>(() => (activeSplit?.sessions ?? [])
@@ -465,7 +470,7 @@ export function InboxView({
   }, [heldOrder, liveEntries]);
   const displayedIds = useMemo(() => entries.map((entry) => entry.session.id), [entries]);
   displayedIdsRef.current = displayedIds;
-  const orderUpdateAvailable = !isMobile && heldOrder !== null && (
+  const orderUpdateAvailable = !isMobile && !boardMode && heldOrder !== null && (
     displayedIds.length !== liveIds.length || displayedIds.some((id, index) => id !== liveIds[index])
   );
   const displayedSelection = repairedSelection && displayedIds.includes(repairedSelection) ? repairedSelection : null;
@@ -860,7 +865,6 @@ export function InboxView({
   }), [activeSplit?.key, archive, decide, displayedSelection, expand, moveSelection, selectSplit, sessionRemindersSupported, setUnread, showToast, splits, togglePin]);
   // Board mode has no row selection, so the list's j/k/a/d… vocabulary would act on an invisible
   // row; only the shared toolbar (tabs, search, toggle) stays keyboard-reachable there.
-  const boardMode = viewMode === "board" && !expanded;
   useInboxKeys(!isMobile && !expanded && !boardMode, keyActions);
   const boardSessions = useMemo(() => liveEntries.map((entry) => entry.session), [liveEntries]);
 

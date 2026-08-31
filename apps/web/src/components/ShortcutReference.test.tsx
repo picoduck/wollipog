@@ -6,7 +6,7 @@ import { ShortcutReference } from "./ShortcutReference.js";
 
 Object.defineProperty(globalThis, "React", { configurable: true, writable: true, value: React });
 
-test("shortcut reference exposes the Inbox group and terminal exit binding", () => {
+test("shortcut reference exposes the Sessions List group and terminal exit binding", () => {
   const html = renderToStaticMarkup(
     <ShortcutReference
       onClose={() => undefined}
@@ -17,7 +17,7 @@ test("shortcut reference exposes the Inbox group and terminal exit binding", () 
       turnInterruptionSupported
     />,
   );
-  assert.match(html, /id="shortcut-inbox"/);
+  assert.match(html, /id="shortcut-sessions-list"/);
   assert.match(html, />Next Session</);
   assert.match(html, />Previous Split</);
   assert.match(html, />Mark Unread</);

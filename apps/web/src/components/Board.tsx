@@ -121,7 +121,7 @@ export function Board({ sessions: scoped, searchActive, onShowAll, onNewSession 
   });
 
   return (
-    <div className="board-wrap">
+    <div className="board-wrap" tabIndex={-1}>
       <div className="board-toolbar">
         <div className="filters">
           <label className="filter">

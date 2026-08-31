@@ -166,8 +166,8 @@ test("PR2 Inbox shortcuts are registered under the Inbox scope", () => {
     "inbox-approve", "inbox-deny", "inbox-archive", "inbox-snooze", "inbox-pin", "inbox-unread",
     "inbox-reply", "inbox-page-down", "inbox-page-up", "inbox-follow-latest", "inbox-follow-latest-end",
   ];
-  assert.deepEqual(SHORTCUTS.filter((item) => item.scope === "Inbox").map((item) => item.id), expected);
-  assert.equal(SHORTCUTS.filter((item) => expected.includes(item.id)).every((item) => item.group === "Inbox"), true);
+  assert.deepEqual(SHORTCUTS.filter((item) => item.scope === "Sessions List").map((item) => item.id), expected);
+  assert.equal(SHORTCUTS.filter((item) => expected.includes(item.id)).every((item) => item.group === "Sessions List"), true);
   assert.equal(shortcut("inbox-page-down").label, "Page Down");
   assert.equal(shortcut("inbox-page-up").label, "Page Up");
   assert.equal(shortcut("inbox-follow-latest").label, "Follow Live Output");

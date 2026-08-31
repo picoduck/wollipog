@@ -159,6 +159,10 @@ test("the phone rail hosts destinations plus routed Settings and no nested layer
     const bar = container.querySelector(".rail-destinations")!;
     assert.equal(bar.querySelectorAll("a.rail-item, button.rail-item").length, 5,
       "four destinations plus More — five is the platform convention");
+    assert.deepEqual(
+      [...bar.querySelectorAll<HTMLAnchorElement>("a.rail-item")].map((item) => item.getAttribute("href")),
+      ["/", "/automations", "/connections/machines", "/projects"],
+      "the bar renders its members in canonical rail order");
 
     // Nothing that owns its own overlay may live in the bar or the sheet.
     assert.equal(container.querySelector(".rail-instance"), null);

@@ -26,10 +26,12 @@ import { sessionsDestination } from "../sessions-view-mode.js";
  *
  * Eight destinations at 44px plus the instance and Settings controls exceeded a 375px viewport.
  * Five items is the platform convention; creation is owned by the Sessions toolbar. The board
- * gave its slot to Automations when it became a mode of Sessions (#499): the next
- * always-enabled destination in canonical order.
+ * gave its slot to Automations when it became a mode of Sessions (#499).
+ *
+ * A membership SET: the bar renders members in GLOBAL_VIEW_ITEMS order, and this list is kept in
+ * that same order so the constant reads like the bar it produces.
  */
-export const MOBILE_PRIMARY_VIEWS: readonly GlobalViewName[] = ["inbox", "projects", "automations", "runners"];
+export const MOBILE_PRIMARY_VIEWS: readonly GlobalViewName[] = ["inbox", "automations", "runners", "projects"];
 
 const VIEW_ICONS: Record<GlobalViewName, (props: { size?: number; className?: string }) => ReactNode> = {
   inbox: InboxIcon,

@@ -765,6 +765,8 @@ test("board mode shares the Sessions toolbar scope and toggles back to the list"
   });
 
   assert.ok(container.querySelector(".board-wrap"), "board mode renders the kanban canvas");
+  assert.equal(container.querySelector(".board-wrap")?.getAttribute("tabindex"), "-1",
+    "the canvas is programmatically focusable so the F6 list zone still has a landing spot");
   assert.equal(container.querySelector(".inbox-list"), null, "and not the list");
   assert.equal(container.querySelector(".inbox-splitter"), null, "the preview split belongs to list mode");
   assert.ok(container.querySelector(".inbox-tabs"), "the shared split tabs stay above the board");

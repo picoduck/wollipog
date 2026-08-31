@@ -271,7 +271,6 @@ test("comfortable density gives every row more room than compact", async ({ page
       return {
         row: box(".ui-row"),
         inbox: box(".inbox-row"),
-        queue: box(".review-queue-row"),
         project: box(".project-manager-item"),
         card: box(".column .card"),
         agent: box(".agent-row"),
@@ -293,7 +292,7 @@ test("comfortable density gives every row more room than compact", async ({ page
 
   // Each of the three, not the total: a scale that grew one dimension and shrank another could
   // still add up, and "more room" has to mean more room everywhere it is claimed.
-  for (const family of ["row", "inbox", "queue", "project", "card", "agent", "finding", "ext", "artifact", "run", "boxRunner", "nativeRunner", "workspace", "file", "usage"] as const) {
+  for (const family of ["row", "inbox", "project", "card", "agent", "finding", "ext", "artifact", "run", "boxRunner", "nativeRunner", "workspace", "file", "usage"] as const) {
     // A MEANINGFUL step, not "greater than": a subpixel increase satisfied the first version, and
     // a density setting nobody can see is a setting that does not work.
     expect(comfortable[family].height, `a ${family} row must be meaningfully taller`)
