@@ -390,6 +390,17 @@ function sendButton(fixture: Fixture): HTMLButtonElement {
   return button;
 }
 
+async function waitForComposerSendToSettle(fixture: Fixture, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (sendButton(fixture).querySelector(".spinner")) {
+    assert.ok(
+      Date.now() < deadline,
+      "the composer send request did not settle within the bounded test deadline",
+    );
+    await flushAsyncWork(10);
+  }
+}
+
 const submittedImage = { mimeType: "image/png", data: "aW1hZ2U=" } as const;
 
 test("an accepted text-and-image submission stays cleared after SessionDetail remount", async () => {
@@ -1117,7 +1128,7 @@ test("the Enter pair swaps as a unit and a stored choice beats the device class"
         cancelable: true,
       }) as never);
     });
-    await flushAsyncWork();
+    await waitForComposerSendToSettle(fixture);
     return !uncanceled;
   };
   const seed = async (text: string) => {
