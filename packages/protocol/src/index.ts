@@ -4065,6 +4065,9 @@ export interface DriverTelemetryMessage {
 export type SessionNamingRunnerErrorCode =
   | "session_unavailable"
   | "account_unavailable"
+  | "runner_outdated"
+  | "harness_unavailable"
+  | "model_unavailable"
   | "provider_unsupported"
   | "rate_limited"
   | "timed_out"

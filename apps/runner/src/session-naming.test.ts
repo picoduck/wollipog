@@ -168,11 +168,13 @@ test("explicit naming targets pass only an advertised model and effort to the se
   });
   assert.equal((await executor.execute({ ...request(), target }, codex, {})).ok, true);
   assert.deepEqual(await executor.execute({ ...request("bad-effort"), target: { ...target, effort: "max" } }, codex, {}), {
-    type: "generate_session_title_result", requestId: "bad-effort", ok: false, code: "provider_unsupported", phase: "preflight",
+    type: "generate_session_title_result", requestId: "bad-effort", ok: false, code: "model_unavailable", phase: "preflight",
   });
   assert.deepEqual(await executor.execute({ ...request("bad-model"), target: { ...target, model: "unknown" } }, codex, {}), {
-    type: "generate_session_title_result", requestId: "bad-model", ok: false, code: "provider_unsupported", phase: "preflight",
+    type: "generate_session_title_result", requestId: "bad-model", ok: false, code: "model_unavailable", phase: "preflight",
   });
+  assert.equal((await executor.execute({ ...request("bad-harness"), target: { ...target, agentId: "missing" } }, codex, {})).code,
+    "harness_unavailable");
   assert.equal(generated, 1, "invalid targets never reach provider execution");
 });
 

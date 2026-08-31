@@ -395,6 +395,7 @@ test("explicit harness naming persists capability-backed identifiers, executes o
   let resultProvider: "codex" | "claude" = "codex";
   let advertisedContext: { kind: "native" } | { kind: "wsl"; distro: string } = { kind: "native" };
   let runnerOrganizationId = "org_personal";
+  let runnerProtocolVersion = 95;
   const runner = (): RunnerView => ({
     runnerId: "runner-naming",
     displayName: "Naming Machine",
@@ -404,7 +405,7 @@ test("explicit harness naming persists capability-backed identifiers, executes o
     status: "online",
     connectedAt: 1,
     lastSeen: 1,
-    protocolVersion: 95,
+    protocolVersion: runnerProtocolVersion,
     workspaces: [],
     agents: [{
       id: "codex-app-server",
@@ -584,7 +585,8 @@ test("explicit harness naming persists capability-backed identifiers, executes o
     sessionId: "session-other",
     messages: [{ role: "user", text: "Name this" }],
     signal: new AbortController().signal,
-  }), /disabled or not configured/);
+  }), (error: unknown) => error instanceof SessionTitleGenerationError &&
+    error.code === "account_unavailable" && error.phase === "preflight");
   assert.equal(sent.length, requestsBeforeDriftedGeneration, "advertised boundary drift fails before runner invocation");
   advertisedBillingSource = "unknown";
   assert.match(settings.view("org_personal", true).harnessTarget?.reason ?? "", /Provider Account to Unknown/);
@@ -609,6 +611,12 @@ test("explicit harness naming persists capability-backed identifiers, executes o
   const contextDrift = settings.view("org_personal", true);
   assert.equal(contextDrift.harnessTarget?.available, false);
   assert.match(contextDrift.harnessTarget?.reason ?? "", /execution context changed/);
+  await assert.rejects(settings.generator({
+    sessionId: "session-other",
+    messages: [{ role: "user", text: "Name this" }],
+    signal: new AbortController().signal,
+  }), (error: unknown) => error instanceof SessionTitleGenerationError &&
+    error.code === "harness_unavailable" && error.phase === "preflight");
   advertisedContext = { kind: "native" };
 
   efforts = ["medium"];
@@ -616,9 +624,39 @@ test("explicit harness naming persists capability-backed identifiers, executes o
   assert.equal(drifted.effectiveMode, "prompt_text_only");
   assert.equal(drifted.harnessTarget?.available, false);
   assert.match(drifted.harnessTarget?.reason ?? "", /reasoning effort/);
-  assert.equal(settings.enabledForSession("session-other"), false, "drift never substitutes another effort or provider");
+  assert.equal(settings.enabledForSession("session-other"), true,
+    "a saved target reaches typed preflight without substituting another effort or provider");
+  await assert.rejects(settings.generator({
+    sessionId: "session-other",
+    messages: [{ role: "user", text: "Name this" }],
+    signal: new AbortController().signal,
+  }), (error: unknown) => error instanceof SessionTitleGenerationError &&
+    error.code === "model_unavailable" && error.phase === "preflight");
 
   efforts = ["low", "medium"];
+  runnerProtocolVersion = 94;
+  const outdated = settings.view("org_personal", true);
+  assert.match(outdated.harnessTarget?.reason ?? "", /Update the selected Machine runner/);
+  await assert.rejects(settings.generator({
+    sessionId: "session-other",
+    messages: [{ role: "user", text: "Name this" }],
+    signal: new AbortController().signal,
+  }), (error: unknown) => error instanceof SessionTitleGenerationError &&
+    error.code === "runner_outdated" && error.phase === "preflight");
+  runnerProtocolVersion = 95;
+
+  const advertisedTarget = target;
+  if (target) target = { ...target, agentId: "missing-harness" };
+  const missingHarness = settings.view("org_personal", true);
+  assert.match(missingHarness.harnessTarget?.reason ?? "", /no longer advertised/);
+  await assert.rejects(settings.generator({
+    sessionId: "session-other",
+    messages: [{ role: "user", text: "Name this" }],
+    signal: new AbortController().signal,
+  }), (error: unknown) => error instanceof SessionTitleGenerationError &&
+    error.code === "harness_unavailable" && error.phase === "preflight");
+  target = advertisedTarget;
+
   runnerOrganizationId = "org_other";
   const reassigned = settings.view("org_personal", true);
   assert.equal(reassigned.harnessTarget?.available, false);
@@ -628,6 +666,9 @@ test("explicit harness naming persists capability-backed identifiers, executes o
   assert.equal(reassigned.harnessTarget?.modelName, "luna");
   assert.equal(JSON.stringify(reassigned).includes("Naming Machine"), false,
     "a Machine reassigned outside the organization cannot leak its current display metadata");
+  target = null;
+  assert.equal(settings.enabledForSession("session-other"), false,
+    "an implicit target cannot bypass the organization-scoped effective-mode check after reassignment");
   await app.close();
 });
 
@@ -797,6 +838,19 @@ test("runner naming result validation strips extra fields and rejects secret-bea
     title: "Safe Title",
     provider: "codex",
     billingSource: "provider_account",
+  });
+  assert.deepEqual(sanitizeSessionNamingRunnerResult({
+    type: "generate_session_title_result",
+    requestId: "request-model-drift",
+    ok: false,
+    code: "model_unavailable",
+    phase: "preflight",
+  }), {
+    type: "generate_session_title_result",
+    requestId: "request-model-drift",
+    ok: false,
+    code: "model_unavailable",
+    phase: "preflight",
   });
   assert.deepEqual(sanitizeSessionNamingRunnerResult({
     type: "generate_session_title_result",
