@@ -32,6 +32,13 @@ the code.
   `mcp.example.com`, or `/home/you/` in sample configuration are correct as written.
 - Release notes and ADRs describe the past. A statement that was true at the time is not stale;
   check the document's purpose before flagging it.
+- Path references in a nested document are doc-relative. Test each candidate relative to the
+  document's own directory before reporting it broken — `scripts/build-sidecar.mjs` named in
+  `apps/desktop/README.md` resolves to `apps/desktop/scripts/build-sidecar.mjs`, and testing it
+  repo-root-relative produced a false broken-path finding in one run.
+- Third-party protocol and platform identifiers are not repository symbols. A doc naming a launchd
+  plist key, a provider wire field, or another product's event type has nothing to verify with
+  `git grep` against this tree; every symbol-check hit in one run was this class.
 
 ## Report
 

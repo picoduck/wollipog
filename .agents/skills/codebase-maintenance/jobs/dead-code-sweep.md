@@ -32,6 +32,17 @@ or no local references and are not dead. Driver capability tables, migration ste
 compatibility shims for older protocol versions are load-bearing even when unreferenced today.
 Anything exported for tests in another package will look local-only to a naive grep.
 
+Two classes the first sweeps re-derived independently, now named so no run derives them again:
+
+- `apps/web/src/e2e/*-main.tsx` files are Vite entry points referenced from sibling
+  `apps/web/<name>-e2e.html` files. They are never unused, and neither is anything whose only
+  importer is one of them. This was 15 of 17 knip "unused files" in one run.
+- knip reports an export as "unused" when nothing IMPORTS it, even when the symbol is used inside
+  its own file — only the `export` keyword is redundant, and deleting the export removes zero
+  reachable lines. This was 149 of 168 export candidates in one run. Separate the two cases with
+  `git grep -c -w "<symbol>" -- "<its own file>"`: a count of 1 (declaration only) is the real
+  dead-code signal; more means the symbol is alive and at most the export modifier is noise.
+
 ## Report
 
 Group findings by package, and within a package by file. For each, state the symbol, its file and
