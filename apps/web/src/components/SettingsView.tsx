@@ -464,7 +464,7 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
     mounted.current && activeApi.current === requestApi &&
       (generation === undefined || loadGeneration.current === generation), []);
 
-  const load = useCallback(async (reset: boolean) => {
+  const load = useCallback(async (reset: boolean): Promise<boolean> => {
     const requestApi = api;
     const generation = ++loadGeneration.current;
     setLoading(true);
@@ -472,7 +472,7 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
     if (reset) setView(null);
     try {
       const next = await requestApi.agentHarnessDefaults();
-      if (!requestIsCurrent(requestApi, generation)) return;
+      if (!requestIsCurrent(requestApi, generation)) return false;
       const editingKey = editingRef.current;
       setView(next);
       if (editingKey) {
@@ -487,9 +487,11 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
           if (restoreFocus) requestAnimationFrame(() => triggerRef.current?.focus());
         }
       }
+      return true;
     } catch (caught) {
-      if (!requestIsCurrent(requestApi, generation)) return;
+      if (!requestIsCurrent(requestApi, generation)) return false;
       setLoadError(caught instanceof Error ? caught.message : "Could not load Agent Harness defaults.");
+      return false;
     } finally {
       if (requestIsCurrent(requestApi, generation)) setLoading(false);
     }
@@ -530,7 +532,13 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
     setMutationError(null);
     focusHarnessRow(key);
   };
+  const invalidateLoads = () => {
+    loadGeneration.current += 1;
+    setLoading(false);
+    setLoadError(null);
+  };
   const finish = (next: AgentHarnessDefaultsView, key: string) => {
+    invalidateLoads();
     setView(next);
     setBusy(false);
     setEditing(null);
@@ -565,7 +573,12 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
           description={
             <>
               Agent Harness defaults could not be loaded.{" "}
-              <button type="button" className="btn ghost sm" disabled={loading} onClick={() => void load(true)}>
+              <button type="button" className="btn ghost sm" disabled={loading} onClick={(event) => {
+                const restoreFocus = document.activeElement === event.currentTarget;
+                void load(true).then((loaded) => {
+                  if (loaded && restoreFocus) requestAnimationFrame(() => triggerRef.current?.focus());
+                });
+              }}>
                 {loading ? "Retrying…" : "Retry"}
               </button>
             </>
@@ -686,9 +699,10 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
                         <button
                           type="button"
                           className="btn sm"
-                          disabled={busy || loading}
+                          disabled={busy}
                           onClick={() => {
                             const requestApi = api;
+                            invalidateLoads();
                             setBusy(true);
                             setMutationError(null);
                             void requestApi.deleteAgentHarnessDefault({
@@ -704,13 +718,14 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
                         >Use Wollipog Default</button>
                       )}
                       <span className="agent-defaults-action-spacer" />
-                      <button type="button" className="btn sm" disabled={busy || loading} onClick={() => closeEditor(key)}>Cancel</button>
+                      <button type="button" className="btn sm" disabled={busy} onClick={() => closeEditor(key)}>Cancel</button>
                       <button
                         type="button"
                         className="btn primary sm"
-                        disabled={busy || loading || !validDraft || option.installations.length === 0}
+                        disabled={busy || !validDraft || option.installations.length === 0}
                         onClick={() => {
                           const requestApi = api;
+                          invalidateLoads();
                           setBusy(true);
                           setMutationError(null);
                           void requestApi.updateAgentHarnessDefault({

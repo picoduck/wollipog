@@ -11430,6 +11430,7 @@ body.shell-dock-dragging * {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  flex-wrap: wrap;
   min-height: 32px;
   padding: 0 var(--space-2);
 }
@@ -11462,7 +11463,7 @@ body.shell-dock-dragging * {
   .agent-defaults-list { margin-left: var(--space-2); }
   .agent-defaults-editor { grid-template-columns: minmax(0, 1fr); }
   .agent-defaults-actions { grid-column: auto; }
-  .agent-defaults-action-spacer { display: none; }
+  .agent-defaults-actions .agent-defaults-action-spacer { display: none; }
   .agent-defaults-actions .btn { min-height: 44px; }
 }
 

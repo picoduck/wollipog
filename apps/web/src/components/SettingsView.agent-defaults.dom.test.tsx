@@ -315,11 +315,16 @@ test("Agent Harness defaults retry failed loads and keep mutation errors scoped 
   try {
     assert.match(fixture.container.textContent ?? "", /Load Failed/);
     assert.equal(buttonNamed(fixture.container, "Default Models, Efforts, and Permissions").disabled, true);
-    await act(async () => buttonNamed(fixture.container, "Retry").click());
-    assert.equal(buttonNamed(fixture.container, "Default Models, Efforts, and Permissions").disabled, false);
+    const retry = buttonNamed(fixture.container, "Retry");
+    retry.focus();
+    await act(async () => retry.click());
+    await nextFrame();
+    const defaultsRow = buttonNamed(fixture.container, "Default Models, Efforts, and Permissions");
+    assert.equal(defaultsRow.disabled, false);
+    assert.equal(domWindow.document.activeElement, defaultsRow);
     assert.match(fixture.container.textContent ?? "", /1 Harness Default Configured/);
 
-    await act(async () => buttonNamed(fixture.container, "Default Models, Efforts, and Permissions").click());
+    await act(async () => defaultsRow.click());
     await act(async () => buttonNamed(fixture.container, "Codex App Server").click());
     await act(async () => buttonNamed(fixture.container, "Save").click());
     assert.match(fixture.container.querySelector('[role="alert"]')?.textContent ?? "", /save rejected/);
@@ -368,6 +373,65 @@ test("Agent Harness defaults refresh on discovery and ignore an older overlappin
     await act(async () => { await older; });
     assert.match(fixture.container.textContent ?? "", /1 Harness Default Configured/);
     assert.equal(calls, 3);
+  } finally {
+    await act(async () => fixture.root.unmount());
+    fixture.container.remove();
+  }
+});
+
+test("Agent Harness mutations outrank overlapping discovery reads without disabling local actions", async () => {
+  let getCalls = 0;
+  let resolvePut!: (response: Response) => void;
+  let resolveFirstRefresh!: (response: Response) => void;
+  let resolveLateRefresh!: (response: Response) => void;
+  const put = new Promise<Response>((resolve) => { resolvePut = resolve; });
+  const firstRefresh = new Promise<Response>((resolve) => { resolveFirstRefresh = resolve; });
+  const lateRefresh = new Promise<Response>((resolve) => { resolveLateRefresh = resolve; });
+  const fixture = await renderPanel({
+    instanceId: "test",
+    publicOrigin: "http://localhost",
+    close() {},
+    async request(_path, init) {
+      if (init?.method === "PUT") return put;
+      getCalls += 1;
+      if (getCalls === 1) return new Response(JSON.stringify(view(true)), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+      return getCalls === 2 ? firstRefresh : lateRefresh;
+    },
+  });
+  try {
+    await act(async () => buttonNamed(fixture.container, "Default Models, Efforts, and Permissions").click());
+    await act(async () => buttonNamed(fixture.container, "Codex App Server").click());
+    await fixture.render({ revision: 1 });
+    assert.equal(buttonNamed(fixture.container, "Cancel").disabled, false);
+    assert.equal(buttonNamed(fixture.container, "Save").disabled, false);
+    resolveFirstRefresh(new Response(JSON.stringify(view(true)), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    await act(async () => { await firstRefresh; });
+
+    await act(async () => buttonNamed(fixture.container, "Save").click());
+    await fixture.render({ revision: 2 });
+    await act(async () => {
+      resolvePut(new Response(JSON.stringify(view(true)), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }));
+      await put;
+    });
+    assert.match(fixture.container.textContent ?? "", /1 Harness Default Configured/);
+
+    await act(async () => {
+      resolveLateRefresh(new Response(JSON.stringify(view()), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }));
+      await lateRefresh;
+    });
+    assert.match(fixture.container.textContent ?? "", /1 Harness Default Configured/);
   } finally {
     await act(async () => fixture.root.unmount());
     fixture.container.remove();
