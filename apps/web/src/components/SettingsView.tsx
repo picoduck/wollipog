@@ -846,6 +846,12 @@ export function ExperimentalPanel({
         checked={flags.conductor}
         onClick={() => onToggle("conductor", !flags.conductor)}
       />
+      <SwitchRow
+        title="Board Review Queue"
+        description="The cross-session review projection on the Board. Off avoids scanning active sessions for Git, pull-request, check, and review state."
+        checked={flags.reviewQueue}
+        onClick={() => onToggle("reviewQueue", !flags.reviewQueue)}
+      />
     </SettingsGroup>
   );
 }

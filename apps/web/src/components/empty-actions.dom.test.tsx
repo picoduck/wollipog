@@ -10,6 +10,7 @@ import type {
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { browserInstanceManager, InstancesContextProvider, type InstanceManager } from "../instances-context.js";
+import { resetExperimentFlagsForTest, setExperimentFlag } from "../experiments.js";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
@@ -312,6 +313,35 @@ test("a genuinely empty board still offers to create", async () => {
   await act(async () => { fireDomEvent.click(action as never); });
   assert.equal(created, 1);
   await unmount();
+});
+
+test("the Board review queue is disabled by default and does not request its projection", async () => {
+  localStorage.clear();
+  resetExperimentFlagsForTest();
+  let reviewQueueRequests = 0;
+  const client = {
+    reviewQueue: async () => {
+      reviewQueueRequests += 1;
+      return { items: [] };
+    },
+  } as unknown as Partial<ApiClient>;
+
+  const disabled = await mount(client, <Board onOpenReview={() => {}} onNewSession={() => {}} />);
+  await act(async () => { disabled.socket.push(snapshot({ sessions: [session] })); });
+  await act(async () => { await Promise.resolve(); });
+  assert.equal(reviewQueueRequests, 0, "loading the Board must not sample reviews while the flag is off");
+  assert.equal(disabled.container.querySelector(".review-queue"), null);
+  await disabled.unmount();
+
+  setExperimentFlag("reviewQueue", true);
+  const enabled = await mount(client, <Board onOpenReview={() => {}} onNewSession={() => {}} />);
+  await act(async () => { enabled.socket.push(snapshot({ sessions: [session] })); });
+  await act(async () => { await Promise.resolve(); });
+  assert.ok(reviewQueueRequests > 0, "turning the named flag on restores the review projection");
+  await enabled.unmount();
+
+  localStorage.clear();
+  resetExperimentFlagsForTest();
 });
 
 test("an older poll cannot close an editor opened from a newer one", async () => {
