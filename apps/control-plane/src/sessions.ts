@@ -129,6 +129,10 @@ import {
 } from "./policy-engine.js";
 import { executionTargetRef, resolveExecutionTarget } from "./execution-targets.js";
 import {
+  agentHarnessIdentityFor,
+  installationSupportsDefault,
+} from "./agent-harness-defaults.js";
+import {
   cleanupEventPayloadArtifacts,
   externalizeSessionEventPayload,
   type ExternalizedSessionEventPayload,
@@ -2530,6 +2534,7 @@ export class SessionsService {
     cleanupUndelivered = false,
     initiallyArchived = false,
     allowProjectWithoutLocation = false,
+    creationContext?: { defaultOwnerUserId?: string },
   ): ServiceResult<SessionView> {
     const snapshotCommand = delivery?.commandSnapshots?.[0];
     if (delivery?.commandSnapshots &&
@@ -2680,6 +2685,27 @@ export class SessionsService {
       this.db.getRunner(req.runnerId)?.agents.find((agent) => agent.id === req.agentId)?.capabilities;
     const requestedConfig = { ...(snapshotSpec?.config ?? req.config ?? {}) };
     if (!snapshotSpec) {
+      const preference = creationContext?.defaultOwnerUserId
+        ? this.db.getAgentHarnessDefault(
+          creationContext.defaultOwnerUserId,
+          agentHarnessIdentityFor({ id: req.agentId, driver: launch.driver, context: launch.context }),
+        )?.config
+        : undefined;
+      // Saved defaults are all-or-nothing under capability drift. A stale combination is never
+      // partially sent to a harness, while explicit per-session knobs retain field-level priority.
+      if (preference && agentCapabilities && installationSupportsDefault({
+        models: agentCapabilities.models.filter((model) => model.id !== "default" && !model.hidden),
+        effortLevels: agentCapabilities.effortLevels,
+        permissionModes: agentCapabilities.permissionModes ?? [],
+      }, preference)) {
+        if (requestedConfig.model === undefined && requestedConfig.effort === undefined) {
+          if (preference.model !== undefined) requestedConfig.model = preference.model;
+          if (preference.effort !== undefined) requestedConfig.effort = preference.effort;
+        }
+        if (requestedConfig.permissionMode === undefined && preference.permissionMode !== undefined) {
+          requestedConfig.permissionMode = preference.permissionMode;
+        }
+      }
       if (req.agentId !== CONDUCTOR_AGENT_ID && requestedConfig.permissionMode === undefined) {
         requestedConfig.permissionMode = defaultPermissionModeForNewSession(launch.driver, agentCapabilities);
       }

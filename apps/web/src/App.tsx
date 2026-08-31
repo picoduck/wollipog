@@ -80,6 +80,7 @@ import {
   AboutPanel,
   AppearancePanel,
   BehaviorPanel,
+  AgentHarnessDefaultsPanel,
   ExperimentalPanel,
   KeyboardPanel,
   NetworkPanel,
@@ -758,7 +759,12 @@ function Shell() {
                     onOpenShortcuts={openShortcutReference}
                   />
                 ),
-                behavior: <BehaviorPanel sessionNaming={<SessionNamingPanel />} />,
+                behavior: (
+                  <BehaviorPanel
+                    agentHarnessDefaults={<AgentHarnessDefaultsPanel />}
+                    sessionNaming={<SessionNamingPanel />}
+                  />
+                ),
                 network: <NetworkPanel tailnet={tailnet} />,
                 experimental: (
                   <ExperimentalPanel

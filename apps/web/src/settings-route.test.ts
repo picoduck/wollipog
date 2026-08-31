@@ -147,8 +147,7 @@ test("the settings sections name the things the plan says stay discoverable", ()
   // §11.3: never hide a setting that could exist. A missing section teaches a user it is not
   // possible; a disabled one with a sentence teaches them where it lives.
   for (const named of [
-    "Default Approval Mode",
-    "Default Agent and Model",
+    "Default Models, Efforts, and Permissions",
     "Control-Plane Origin",
     "Manage Instances",
     "Updates",

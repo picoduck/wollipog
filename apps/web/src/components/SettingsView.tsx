@@ -1,5 +1,14 @@
 import React, { useEffect, useRef, useState, type ReactNode } from "react";
-import { PROTOCOL_VERSION, type SessionNamingMode, type SessionNamingSettingsView } from "@wollipog/protocol";
+import {
+  PROTOCOL_VERSION,
+  type AgentDriverKind,
+  type AgentHarnessDefaultConfig,
+  type AgentHarnessDefaultOption,
+  type AgentHarnessDefaultsView,
+  type AgentModel,
+  type SessionNamingMode,
+  type SessionNamingSettingsView,
+} from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { notifier } from "../notify.js";
 import { tailnetAccessDescription, type TailnetAccessSetting } from "../tailnet-access.js";
@@ -16,7 +25,7 @@ import {
 } from "../question-response-style.js";
 import { SETTINGS_SECTIONS, type SettingsSection, type View } from "../navigation.js";
 import type { ExperimentFlags, ExperimentId } from "../experiments.js";
-import { effortLabel } from "../format.js";
+import { effortLabel, permissionModeLabel, titleCaseLabel } from "../format.js";
 
 /**
  * Settings as a ROUTE, not a dialog.
@@ -243,7 +252,10 @@ export function PendingSetting({ title, description, reason }: { title: string; 
   );
 }
 
-export function BehaviorPanel({ sessionNaming }: { sessionNaming?: ReactNode } = {}) {
+export function BehaviorPanel({
+  agentHarnessDefaults,
+  sessionNaming,
+}: { agentHarnessDefaults?: ReactNode; sessionNaming?: ReactNode } = {}) {
   const enterKey = useEnterKeyBehavior();
   const questionResponseStyle = useQuestionResponseStyle();
   return (
@@ -296,18 +308,267 @@ export function BehaviorPanel({ sessionNaming }: { sessionNaming?: ReactNode } =
         description="Ask before removing a session, project, or connection."
         reason="Not built yet."
       />
-      <PendingSetting
-        title="Default Approval Mode"
-        description="Whether new sessions ask before running tools."
-        reason="Chosen per session when you create it; a default is not built yet."
-      />
-      <PendingSetting
-        title="Default Agent and Model"
-        description="What a new session starts with."
-        reason="Chosen per session when you create it; a default is not built yet."
-      />
+      {agentHarnessDefaults ?? (
+        <PendingSetting
+          title="Default Models, Efforts, and Permissions"
+          description="What each Agent Harness uses for a new session."
+          reason="Chosen per session when you create it; defaults are not available in this client."
+        />
+      )}
       </SettingsGroup>
       {sessionNaming}
+    </>
+  );
+}
+
+function harnessIdentityKey(option: Pick<AgentHarnessDefaultOption, "agentId" | "driver" | "context">): string {
+  return JSON.stringify([
+    option.agentId,
+    option.driver,
+    option.context.kind,
+    option.context.kind === "wsl" ? option.context.distro : "",
+  ]);
+}
+
+function uniqueModels(option: AgentHarnessDefaultOption): AgentModel[] {
+  const models = new Map<string, AgentModel>();
+  for (const installation of option.installations) {
+    for (const model of installation.models) {
+      const current = models.get(model.id);
+      models.set(model.id, current ? {
+        ...current,
+        efforts: [...new Set([...(current.efforts ?? []), ...(model.efforts ?? [])])],
+      } : model);
+    }
+  }
+  return [...models.values()].sort((left, right) =>
+    (left.displayName ?? left.id).localeCompare(right.displayName ?? right.id) || left.id.localeCompare(right.id));
+}
+
+function effortsForModel(option: AgentHarnessDefaultOption, modelId: string): string[] {
+  const efforts = new Set<string>();
+  for (const installation of option.installations) {
+    const model = installation.models.find((candidate) => candidate.id === modelId);
+    if (!model) continue;
+    for (const effort of model.efforts?.length ? model.efforts : installation.effortLevels) efforts.add(effort);
+  }
+  return [...efforts].sort();
+}
+
+function permissionModesForHarness(option: AgentHarnessDefaultOption): string[] {
+  return [...new Set(option.installations.flatMap((installation) => installation.permissionModes))].sort();
+}
+
+function permissionModeDisplayLabel(mode: string, driver: AgentDriverKind): string {
+  const label = permissionModeLabel(mode, driver);
+  return label === mode ? titleCaseLabel(mode.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/[-_]+/g, " ")) : label;
+}
+
+function harnessEfforts(option: AgentHarnessDefaultOption): string[] {
+  return [...new Set(option.installations.flatMap((installation) => installation.effortLevels))].sort();
+}
+
+function harnessDefaultSummary(option: AgentHarnessDefaultOption): string {
+  if (!option.preference) return "Wollipog Default";
+  const models = uniqueModels(option);
+  const parts = [
+    option.preference.model
+      ? models.find((model) => model.id === option.preference!.model)?.displayName ?? option.preference.model
+      : undefined,
+    option.preference.effort ? effortLabel(option.preference.effort) : undefined,
+    option.preference.permissionMode
+      ? permissionModeDisplayLabel(option.preference.permissionMode, option.driver)
+      : undefined,
+  ].filter((part): part is string => !!part);
+  const summary = parts.join(" · ") || "Wollipog Default";
+  if (option.compatibleInstallations === 0) return `${summary} · Unavailable`;
+  if (option.compatibleInstallations < option.installations.length) {
+    return `${summary} · ${option.compatibleInstallations} of ${option.installations.length} Machines`;
+  }
+  return summary;
+}
+
+/** Compact per-user defaults editor. The outer row and every harness return to summaries after a
+ * decision, leaving the Behavior page inspectable without permanently exposing a large form. */
+export function AgentHarnessDefaultsPanel() {
+  const api = useApi();
+  const [view, setView] = useState<AgentHarnessDefaultsView | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [draft, setDraft] = useState<AgentHarnessDefaultConfig>({});
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const controlsId = "agent-harness-defaults-editor";
+
+  useEffect(() => {
+    let disposed = false;
+    setView(null);
+    setError(null);
+    void api.agentHarnessDefaults().then((next) => {
+      if (!disposed) setView(next);
+    }).catch((caught: unknown) => {
+      if (!disposed) setError(caught instanceof Error ? caught.message : "Could not load Agent Harness defaults.");
+    });
+    return () => { disposed = true; };
+  }, [api]);
+
+  const customized = view?.defaults.filter((option) => option.preference).length ?? 0;
+  const summary = error
+    ? "Defaults are unavailable in this client or control plane."
+    : !view ? "Loading Agent Harness defaults…"
+      : `${customized} Harness Default${customized === 1 ? "" : "s"} Configured`;
+  const beginEdit = (option: AgentHarnessDefaultOption) => {
+    setEditing(harnessIdentityKey(option));
+    setDraft(option.preference ? { ...option.preference } : {});
+    setError(null);
+  };
+  const finish = (next: AgentHarnessDefaultsView) => {
+    setView(next);
+    setBusy(false);
+    setEditing(null);
+    setDraft({});
+    setError(null);
+  };
+  const fail = (caught: unknown) => {
+    setBusy(false);
+    setError(caught instanceof Error ? caught.message : "Could not save the Agent Harness default.");
+  };
+
+  return (
+    <>
+      <NavRow
+        title="Default Models, Efforts, and Permissions"
+        description={summary}
+        expanded={expanded}
+        controls={controlsId}
+        disabled={!view}
+        onClick={() => setExpanded((current) => !current)}
+      />
+      {expanded && view && (
+        <div id={controlsId} className="agent-defaults-list">
+          {view.defaults.length === 0 && (
+            <p className="ui-row-desc agent-defaults-empty">No discovered Agent Harnesses are available yet.</p>
+          )}
+          {view.defaults.map((option) => {
+            const key = harnessIdentityKey(option);
+            const isEditing = editing === key;
+            const models = uniqueModels(option);
+            const efforts = draft.model
+              ? effortsForModel(option, draft.model)
+              : models.length === 0 ? harnessEfforts(option) : [];
+            const permissionModes = permissionModesForHarness(option);
+            const configurable = models.length > 0 || permissionModes.length > 0 ||
+              option.installations.some((installation) => installation.effortLevels.length > 0);
+            const validDraft = Object.keys(draft).length > 0 &&
+              (!draft.model || efforts.length === 0 || !!draft.effort);
+            return (
+              <div className="agent-defaults-item" key={key}>
+                <NavRow
+                  title={option.name}
+                  description={harnessDefaultSummary(option)}
+                  expanded={isEditing}
+                  controls={`agent-default-${encodeURIComponent(key)}`}
+                  onClick={() => isEditing ? setEditing(null) : beginEdit(option)}
+                />
+                {isEditing && (
+                  <div id={`agent-default-${encodeURIComponent(key)}`} className="agent-defaults-editor">
+                    {!configurable && (
+                      <p className="ui-row-desc">This Agent Harness advertises no configurable models, efforts, or permission modes.</p>
+                    )}
+                    {option.installations.length === 0 && (
+                      <p className="settings-inline-error" role="status">This saved Agent Harness is no longer discovered. Reset it to use the Wollipog default.</p>
+                    )}
+                    {models.length > 0 && (
+                      <label className="agent-defaults-field">
+                        <span>Model</span>
+                        <Select
+                          label={`${option.name} Model`}
+                          options={models.map((model) => ({ value: model.id, label: model.displayName ?? model.id }))}
+                          value={draft.model ?? null}
+                          placeholder="Choose Model…"
+                          onChange={(model) => {
+                            const nextEfforts = effortsForModel(option, model);
+                            setDraft((current) => ({
+                              ...current,
+                              model,
+                              ...(current.effort && !nextEfforts.includes(current.effort) ? { effort: undefined } : {}),
+                            }));
+                          }}
+                        />
+                      </label>
+                    )}
+                    {(draft.model || models.length === 0) && efforts.length > 0 && (
+                      <label className="agent-defaults-field">
+                        <span>Reasoning Effort</span>
+                        <Select
+                          label={`${option.name} Reasoning Effort`}
+                          options={efforts.map((effort) => ({ value: effort, label: effortLabel(effort) }))}
+                          value={draft.effort ?? null}
+                          placeholder="Choose Effort…"
+                          onChange={(effort) => setDraft((current) => ({ ...current, effort }))}
+                        />
+                      </label>
+                    )}
+                    {permissionModes.length > 0 && (
+                      <label className="agent-defaults-field">
+                        <span>Permission Mode</span>
+                        <Select
+                          label={`${option.name} Permission Mode`}
+                          options={permissionModes.map((mode) => ({
+                            value: mode,
+                            label: permissionModeDisplayLabel(mode, option.driver),
+                          }))}
+                          value={draft.permissionMode ?? null}
+                          placeholder="Choose Permission Mode…"
+                          onChange={(permissionMode) => setDraft((current) => ({ ...current, permissionMode }))}
+                        />
+                      </label>
+                    )}
+                    {error && <p className="settings-inline-error" role="alert">{error}</p>}
+                    <div className="agent-defaults-actions">
+                      {option.preference && (
+                        <button
+                          type="button"
+                          className="btn sm"
+                          disabled={busy}
+                          onClick={() => {
+                            setBusy(true);
+                            void api.deleteAgentHarnessDefault({
+                              agentId: option.agentId,
+                              driver: option.driver,
+                              context: option.context,
+                            }).then(finish).catch(fail);
+                          }}
+                        >Use Wollipog Default</button>
+                      )}
+                      <span className="agent-defaults-action-spacer" />
+                      <button type="button" className="btn sm" disabled={busy} onClick={() => {
+                        setEditing(null);
+                        setDraft({});
+                        setError(null);
+                      }}>Cancel</button>
+                      <button
+                        type="button"
+                        className="btn primary sm"
+                        disabled={busy || !validDraft || option.installations.length === 0}
+                        onClick={() => {
+                          setBusy(true);
+                          void api.updateAgentHarnessDefault({
+                            agentId: option.agentId,
+                            driver: option.driver,
+                            context: option.context,
+                            config: draft,
+                          }).then(finish).catch(fail);
+                        }}
+                      >Save</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </>
   );
 }

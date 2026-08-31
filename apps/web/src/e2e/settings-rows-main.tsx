@@ -2,6 +2,7 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import {
   AboutPanel,
+  AgentHarnessDefaultsPanel,
   AppearancePanel,
   BehaviorPanel,
   ExperimentalPanel,
@@ -12,6 +13,10 @@ import {
   SettingsGroup,
   SettingsView,
 } from "../components/SettingsView.js";
+import type { AgentHarnessDefaultsView } from "@wollipog/protocol";
+import { createApiClient } from "../api.js";
+import { ApiProvider } from "../api-context.js";
+import type { ApiTransport } from "../api-transport.js";
 import { DEFAULT_EXPERIMENT_FLAGS } from "../experiments.js";
 import {
   COLOR_SCHEMES,
@@ -68,6 +73,58 @@ type State = (typeof STATES)[number];
 const TOPOLOGIES = ["full", "minimal"] as const;
 type Topology = (typeof TOPOLOGIES)[number];
 
+const harnessDefaultsView: AgentHarnessDefaultsView = {
+  defaults: [
+    {
+      agentId: "codex",
+      driver: "codex-app-server",
+      context: { kind: "native" },
+      name: "Codex App Server",
+      installations: [{
+        runnerId: "fixture-runner",
+        machineName: "Build Machine",
+        online: true,
+        models: [
+          { id: "luna", displayName: "Luna", efforts: ["low", "high"] },
+          { id: "sol", displayName: "Sol", efforts: ["high", "xhigh"] },
+        ],
+        effortLevels: ["low", "high", "xhigh"],
+        permissionModes: ["auto-review", "danger-full-access"],
+      }],
+      preference: { model: "luna", effort: "low", permissionMode: "auto-review" },
+      compatibleInstallations: 1,
+    },
+    {
+      agentId: "claude-code",
+      driver: "claude-code",
+      context: { kind: "native" },
+      name: "Claude Code",
+      installations: [{
+        runnerId: "fixture-runner",
+        machineName: "Build Machine",
+        online: true,
+        models: [{ id: "opus", displayName: "Opus", efforts: ["high"] }],
+        effortLevels: ["high"],
+        permissionModes: ["auto", "plan"],
+      }],
+      compatibleInstallations: 1,
+    },
+  ],
+};
+
+const harnessDefaultsTransport: ApiTransport = {
+  instanceId: "settings-fixture",
+  publicOrigin: window.location.origin,
+  close() {},
+  async request() {
+    return new Response(JSON.stringify(harnessDefaultsView), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  },
+};
+const harnessDefaultsApi = createApiClient(harnessDefaultsTransport);
+
 function Harness() {
   const params = new URLSearchParams(window.location.search);
   // Selected by query string rather than by a control on the page: a control would sit inside the
@@ -78,6 +135,7 @@ function Harness() {
   const askedFor = params.get("topology") as Topology | null;
   const topology: Topology = askedFor && TOPOLOGIES.includes(askedFor) ? askedFor : "full";
   const requestedSection = params.get("section") as SettingsSection | null;
+  const showAgentDefaults = params.get("defaults") === "agent";
   const section: SettingsSection = SETTINGS_SECTIONS.some((entry) => entry.id === requestedSection)
     ? requestedSection!
     : "appearance";
@@ -161,6 +219,9 @@ function Harness() {
               keyboard: <KeyboardPanel shortcutLabel="Reference · ?" disabled={disabled} onOpenShortcuts={() => undefined} />,
               behavior: (
                 <BehaviorPanel
+                  agentHarnessDefaults={showAgentDefaults ? (
+                    <ApiProvider client={harnessDefaultsApi}><AgentHarnessDefaultsPanel /></ApiProvider>
+                  ) : undefined}
                   sessionNaming={(
                     <SettingsGroup title="Session Naming">
                       <PendingSetting

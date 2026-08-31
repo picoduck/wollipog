@@ -1417,6 +1417,91 @@ test("createSession persists and launches the resolved concrete model and effort
   assert.equal(hub.sentOfType("start_session").at(-1)?.spec.config.effort, "high");
 });
 
+test("ordinary createSession applies one capability-valid per-user Agent Harness default after explicit config", () => {
+  const { db, hub, svc } = makeHarness();
+  const capabilities = {
+    models: [
+      { id: "sol", displayName: "Sol", default: true, efforts: ["high"] },
+      { id: "luna", displayName: "Luna", efforts: ["low", "high"] },
+    ],
+    effortLevels: ["low", "high"], slashCommands: [], supportsImages: true,
+    supportsApprovals: true, permissionModes: ["auto", "plan"],
+  };
+  db.updateRunnerAgents(
+    RUNNER_ID,
+    runnerMeta().agents.map((agent) => agent.id === AGENT_ID ? { ...agent, capabilities } : agent),
+    Date.now(),
+  );
+  const userId = db.localIdentityContext().userId;
+  db.setAgentHarnessDefault(userId, {
+    agentId: AGENT_ID, driver: "claude-code", context: { kind: "native" },
+  }, { model: "luna", effort: "low", permissionMode: "plan" });
+
+  const ordinary = svc.createSession(
+    { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID },
+    undefined, undefined, false, false, false, { defaultOwnerUserId: userId },
+  );
+  assert.ok(ordinary.ok && ordinary.data, ordinary.error);
+  assert.deepEqual(hub.sentOfType("start_session").at(-1)?.spec.config, {
+    model: "luna", effort: "low", permissionMode: "plan",
+  });
+
+  const explicit = svc.createSession(
+    {
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID,
+      config: { model: "sol", effort: "high", permissionMode: "auto" },
+    },
+    undefined, undefined, false, false, false, { defaultOwnerUserId: userId },
+  );
+  assert.ok(explicit.ok && explicit.data, explicit.error);
+  assert.deepEqual(hub.sentOfType("start_session").at(-1)?.spec.config, {
+    model: "sol", effort: "high", permissionMode: "auto",
+  });
+
+  const automationLike = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
+  assert.ok(automationLike.ok && automationLike.data, automationLike.error);
+  assert.deepEqual(hub.sentOfType("start_session").at(-1)?.spec.config, {
+    model: "sol", effort: "high", permissionMode: "auto",
+  }, "internal callers without a user context retain Wollipog capability defaults");
+
+  db.updateRunnerAgents(
+    RUNNER_ID,
+    runnerMeta().agents.map((agent) => agent.id === AGENT_ID ? {
+      ...agent,
+      capabilities: { ...capabilities, models: capabilities.models.filter((model) => model.id !== "luna") },
+    } : agent),
+    Date.now(),
+  );
+  const drifted = svc.createSession(
+    { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID },
+    undefined, undefined, false, false, false, { defaultOwnerUserId: userId },
+  );
+  assert.ok(drifted.ok && drifted.data, drifted.error);
+  assert.deepEqual(hub.sentOfType("start_session").at(-1)?.spec.config, {
+    model: "sol", effort: "high", permissionMode: "auto",
+  }, "an unavailable saved combination is ignored as a whole and never sent");
+  assert.deepEqual(db.getAgentHarnessDefault(userId, {
+    agentId: AGENT_ID, driver: "claude-code", context: { kind: "native" },
+  })?.config, { model: "luna", effort: "low", permissionMode: "plan" },
+  "capability drift must not rewrite the saved preference");
+
+  db.updateRunnerAgents(
+    RUNNER_ID,
+    runnerMeta().agents.map((agent) => agent.id === AGENT_ID ? { ...agent, capabilities: undefined } : agent),
+    Date.now(),
+  );
+  const mixedVersion = svc.createSession(
+    { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID },
+    undefined, undefined, false, false, false, { defaultOwnerUserId: userId },
+  );
+  assert.ok(mixedVersion.ok && mixedVersion.data, mixedVersion.error);
+  const mixedVersionConfig = hub.sentOfType("start_session").at(-1)?.spec.config;
+  assert.equal(mixedVersionConfig?.model, undefined);
+  assert.equal(mixedVersionConfig?.effort, undefined);
+  assert.equal(mixedVersionConfig?.permissionMode, undefined,
+    "a runner without current capability discovery fails closed instead of receiving the preference");
+});
+
 test("createSession online → 201 and sends start_session with the right launch spec", () => {
   const { hub, svc, db } = makeHarness();
 

@@ -2593,6 +2593,51 @@ export interface SessionNamingConnectionTestResult {
   status: "available" | "authentication_failed" | "endpoint_failed" | "timed_out" | "unavailable";
 }
 
+/* -------------------- Per-user Agent Harness defaults ------------------- */
+
+/** Stable identity for one discovered Agent Harness across Machines. Display names are excluded
+ * deliberately: users may rename configured agents without changing which preference applies. */
+export interface AgentHarnessIdentity {
+  agentId: string;
+  driver: AgentDriverKind;
+  context: AgentContext;
+}
+
+export interface AgentHarnessDefaultConfig {
+  model?: string;
+  effort?: string;
+  permissionMode?: string;
+}
+
+/** One current installation used to explain capability skew without exposing launch commands,
+ * environment values, credentials, or other runner-local configuration. */
+export interface AgentHarnessDefaultInstallation {
+  runnerId: string;
+  machineName: string;
+  online: boolean;
+  models: AgentModel[];
+  effortLevels: string[];
+  permissionModes: string[];
+}
+
+export interface AgentHarnessDefaultOption extends AgentHarnessIdentity {
+  name: string;
+  installations: AgentHarnessDefaultInstallation[];
+  preference?: AgentHarnessDefaultConfig;
+  /** Number of current installations that support the complete saved preference. */
+  compatibleInstallations: number;
+}
+
+export interface AgentHarnessDefaultsView {
+  defaults: AgentHarnessDefaultOption[];
+}
+
+export interface UpdateAgentHarnessDefaultRequest extends AgentHarnessIdentity {
+  config: AgentHarnessDefaultConfig;
+}
+
+export interface DeleteAgentHarnessDefaultRequest extends AgentHarnessIdentity {}
+
 /* ---------------- Provider subscription usage (account-level) ---------- */
 
 export type SubscriptionUsageProvider = "codex" | "claude";
