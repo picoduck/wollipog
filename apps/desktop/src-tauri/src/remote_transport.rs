@@ -40,6 +40,10 @@ const MAX_RUNTIME_LEASES: usize = 8;
 const MAX_SOCKET_ATTEMPTS: usize = 16;
 const MAX_IN_FLIGHT_REQUESTS: usize = 64;
 const MAX_RUNTIME_KEY_BYTES: usize = 160;
+const DEFAULT_REMOTE_HTTP_READ_TIMEOUT: Duration = Duration::from_secs(20);
+const SESSION_NAMING_REMOTE_HTTP_READ_TIMEOUT: Duration = Duration::from_secs(35);
+#[cfg(test)]
+const MAX_SESSION_NAMING_REQUEST_DURATION: Duration = Duration::from_secs(31);
 #[cfg(not(test))]
 const WEBSOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 #[cfg(test)]
@@ -51,8 +55,19 @@ struct RuntimeLease {
     profile_origin: CanonicalRemoteOrigin,
     server_instance_id: String,
     client: Client,
+    session_naming_client: Client,
     secret: Arc<SecretString>,
     cancel: watch::Sender<bool>,
+}
+
+impl RuntimeLease {
+    fn client_for_path(&self, path: &str) -> &Client {
+        if is_session_retitle_path(path) {
+            &self.session_naming_client
+        } else {
+            &self.client
+        }
+    }
 }
 
 struct SocketEntry {
@@ -460,7 +475,10 @@ fn contains_secret(bytes: &[u8], secret: &SecretString) -> bool {
     !secret.is_empty() && memchr::memmem::find(bytes, secret).is_some()
 }
 
-fn hardened_client(local_address: Option<IpAddr>) -> Result<Client, String> {
+fn hardened_client(
+    local_address: Option<IpAddr>,
+    read_timeout: Duration,
+) -> Result<Client, String> {
     let mut builder = Client::builder()
         .tls_backend_native()
         .redirect(reqwest::redirect::Policy::none())
@@ -471,7 +489,7 @@ fn hardened_client(local_address: Option<IpAddr>) -> Result<Client, String> {
         .no_deflate()
         .no_zstd()
         .connect_timeout(Duration::from_secs(5))
-        .read_timeout(Duration::from_secs(20))
+        .read_timeout(read_timeout)
         .timeout(Duration::from_secs(60))
         .pool_max_idle_per_host(2)
         .user_agent(concat!("Wollipog/", env!("CARGO_PKG_VERSION")));
@@ -481,6 +499,18 @@ fn hardened_client(local_address: Option<IpAddr>) -> Result<Client, String> {
     builder
         .build()
         .map_err(|_| "The secure remote transport could not be initialized.".to_string())
+}
+
+fn is_session_retitle_path(path: &str) -> bool {
+    let path = path.split_once('?').map_or(path, |(path, _)| path);
+    let Some(session_path) = path.strip_prefix("/api/sessions/") else {
+        return false;
+    };
+    let mut segments = session_path.split('/');
+    matches!(
+        (segments.next(), segments.next(), segments.next()),
+        (Some(session_id), Some("retitle"), None) if !session_id.is_empty()
+    )
 }
 
 fn tailscale_command() -> Vec<String> {
@@ -602,7 +632,9 @@ fn tailscale_route_from_status(
     Ok(IpAddr::V4(local))
 }
 
-async fn client_for_endpoint(endpoint: &CanonicalRemoteOrigin) -> Result<Client, String> {
+async fn local_address_for_endpoint(
+    endpoint: &CanonicalRemoteOrigin,
+) -> Result<Option<IpAddr>, String> {
     let local_address = if endpoint.security == TransportSecurity::TailscaleRouteRequired {
         let target = Url::parse(&endpoint.origin)
             .ok()
@@ -616,7 +648,24 @@ async fn client_for_endpoint(endpoint: &CanonicalRemoteOrigin) -> Result<Client,
     } else {
         None
     };
-    hardened_client(local_address)
+    Ok(local_address)
+}
+
+async fn client_for_endpoint(endpoint: &CanonicalRemoteOrigin) -> Result<Client, String> {
+    hardened_client(
+        local_address_for_endpoint(endpoint).await?,
+        DEFAULT_REMOTE_HTTP_READ_TIMEOUT,
+    )
+}
+
+async fn runtime_clients_for_endpoint(
+    endpoint: &CanonicalRemoteOrigin,
+) -> Result<(Client, Client), String> {
+    let local_address = local_address_for_endpoint(endpoint).await?;
+    Ok((
+        hardened_client(local_address, DEFAULT_REMOTE_HTTP_READ_TIMEOUT)?,
+        hardened_client(local_address, SESSION_NAMING_REMOTE_HTTP_READ_TIMEOUT)?,
+    ))
 }
 
 type NativeWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -817,7 +866,7 @@ pub(crate) async fn remote_transport_open(
             "The address now belongs to a different Wollipog instance.",
         ));
     }
-    let client = client_for_endpoint(&endpoint)
+    let (client, session_naming_client) = runtime_clients_for_endpoint(&endpoint)
         .await
         .map_err(|message| RemoteOpenError::new("offline", message))?;
     let _guard = registry.0.lock().await;
@@ -845,6 +894,7 @@ pub(crate) async fn remote_transport_open(
                 profile_origin: endpoint.clone(),
                 server_instance_id: profile.server_instance_id,
                 client,
+                session_naming_client,
                 secret: Arc::new(secret),
                 cancel,
             },
@@ -932,7 +982,7 @@ pub(crate) async fn remote_http_request(
         transport.reserve_request(&meta.runtime_key, &meta.request_id)?;
     let result = async {
         let request = lease
-            .client
+            .client_for_path(&meta.path)
             .request(method, url)
             .headers(headers)
             .body(body);
@@ -1228,10 +1278,74 @@ mod tests {
             profile_id: profile_id.to_string(),
             profile_origin: canonical_remote_origin(origin).unwrap(),
             server_instance_id: Uuid::new_v4().to_string(),
-            client: hardened_client(None).unwrap(),
+            client: hardened_client(None, DEFAULT_REMOTE_HTTP_READ_TIMEOUT).unwrap(),
+            session_naming_client: hardened_client(None, SESSION_NAMING_REMOTE_HTTP_READ_TIMEOUT)
+                .unwrap(),
             secret: Arc::new(SecretString::from("abcdefghijklmnop".to_string())),
             cancel,
         }
+    }
+
+    #[tokio::test]
+    async fn retitle_requests_receive_the_extended_native_read_budget() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        assert!(SESSION_NAMING_REMOTE_HTTP_READ_TIMEOUT > MAX_SESSION_NAMING_REQUEST_DURATION);
+        assert!(DEFAULT_REMOTE_HTTP_READ_TIMEOUT < SESSION_NAMING_REMOTE_HTTP_READ_TIMEOUT);
+        assert!(is_session_retitle_path("/api/sessions/session-1/retitle"));
+        assert!(is_session_retitle_path(
+            "/api/sessions/session-1/retitle?source=command"
+        ));
+        assert!(!is_session_retitle_path("/api/sessions/session-1"));
+        assert!(!is_session_retitle_path(
+            "/api/sessions/session-1/retitle/extra"
+        ));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                loop {
+                    let count = stream.read(&mut chunk).await.unwrap();
+                    request.extend_from_slice(&chunk[..count]);
+                    if count == 0 || request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(60)).await;
+                let _ = stream
+                    .write_all(http_response("200 OK", "{}", "").as_bytes())
+                    .await;
+            }
+        });
+        let (cancel, _) = watch::channel(false);
+        let lease = RuntimeLease {
+            profile_id: Uuid::new_v4().to_string(),
+            profile_origin: canonical_remote_origin(&origin).unwrap(),
+            server_instance_id: Uuid::new_v4().to_string(),
+            client: hardened_client(None, Duration::from_millis(20)).unwrap(),
+            session_naming_client: hardened_client(None, Duration::from_millis(500)).unwrap(),
+            secret: Arc::new(SecretString::from("abcdefghijklmnop".to_string())),
+            cancel,
+        };
+
+        assert!(lease
+            .client_for_path("/api/sessions")
+            .get(&origin)
+            .send()
+            .await
+            .is_err());
+        let response = lease
+            .client_for_path("/api/sessions/session-1/retitle")
+            .get(&origin)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        server.await.unwrap();
     }
 
     fn http_response(status: &str, body: &str, extra_headers: &str) -> String {
@@ -1455,7 +1569,9 @@ mod tests {
             profile_id: profile_id.clone(),
             profile_origin: canonical_remote_origin(&format!("http://{address}")).unwrap(),
             server_instance_id: instance_id,
-            client: hardened_client(None).unwrap(),
+            client: hardened_client(None, DEFAULT_REMOTE_HTTP_READ_TIMEOUT).unwrap(),
+            session_naming_client: hardened_client(None, SESSION_NAMING_REMOTE_HTTP_READ_TIMEOUT)
+                .unwrap(),
             secret: Arc::new(SecretString::from("abcdefghijklmnop".to_string())),
             cancel,
         };
