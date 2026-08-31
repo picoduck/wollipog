@@ -9,7 +9,7 @@ import {
 } from "@wollipog/protocol";
 import { isHeartbeatBusy } from "./activity.js";
 
-export { MAX_UI_POD_SUBSCRIPTIONS, MAX_UI_SESSION_SUBSCRIPTIONS };
+export { MAX_UI_SESSION_SUBSCRIPTIONS };
 
 type SubscriptionView =
   | { name: "inbox" }
