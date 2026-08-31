@@ -3849,6 +3849,26 @@ test("a runtime naming setting revision fences an older in-flight result", async
   assert.equal(db.getSession(id)?.title, "Original fallback");
 });
 
+test("a runtime naming setting revision takes precedence over invalid generated output", async () => {
+  let revision = "custom:1";
+  let finish: ((title: string) => void) | undefined;
+  const generator: SessionTitleGenerator = () => new Promise((resolve) => { finish = resolve; });
+  const { db, hub, svc } = makeHarness(generator, 1_000, () => true, () => revision);
+  const id = seedSession(svc, hub);
+  assert.ok(svc.setTitle(id, "Existing Title").ok);
+  svc.onSessionEvent(id, { kind: "user_message", text: "Retitle this session", final: true });
+  const retitle = svc.retitleSession(id);
+
+  revision = "custom:2";
+  finish!("   ");
+
+  const result = await retitle;
+  assert.equal(result.ok, false);
+  assert.equal(result.status, 409);
+  assert.equal(result.error, "Session Naming settings changed while the title was being generated. Try again.");
+  assert.equal(db.getSession(id)?.title, "Existing Title");
+});
+
 test("a manual rename fences late initial and explicit semantic title results", async () => {
   const pending: Array<(value: string) => void> = [];
   const signals: AbortSignal[] = [];
