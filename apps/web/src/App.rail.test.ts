@@ -119,6 +119,14 @@ test("the global keyboard layer wires rail navigation, Inbox search, creation, a
   ]) assert.match(app, new RegExp(`matchesShortcut\\(event, "${id}"\\)|"${id}"`), id);
   assert.match(newSessionShortcut, /matchesShortcut\(event, "new-session"\)/);
   assert.match(app, /useNewSessionShortcut\(!isMobile, openContextualNewSession\)/);
+  // The board-mode e2e harness mounts these same hooks (#527), but it cannot see whether the
+  // SHIPPED shell still does — this is that contract. Board maps to board mode, not list.
+  assert.match(app, /useSessionsViewToggleKey\(!isMobile, view, navigate\)/,
+    "the shell must mount the shared b-toggle hook with the desktop gate");
+  assert.match(app, /useSessionsViewModeMemory\(view, instanceScope\)/,
+    "the shell must record the last-used Sessions mode");
+  assert.match(app, /viewMode=\{view\.name === "board" \? "board" : "list"\}/,
+    "the board route must render board mode");
   assert.match(app, /if \(isMobile\) return;/);
   assert.match(app, /xtermOwnsKey\(event\.target\)/);
   assert.match(app, /cycleFocusZone\(document, "next"\)/);
