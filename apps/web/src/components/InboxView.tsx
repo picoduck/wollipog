@@ -653,17 +653,28 @@ export function InboxView({
     anchor: { x: number; y: number },
     restoreTarget?: () => HTMLElement | null,
   ) => {
-    setSessionMenu({ sessionId, anchor, restoreTarget: restoreTarget ?? (() => listRef.current) });
+    // The list fallback chain mirrors the search-exit handoff: the grid, then the empty state
+    // that replaces it when the last row leaves, then the always-present page title — dismissal
+    // must land focus SOMEWHERE durable even when the row that opened the menu took the grid
+    // down with it.
+    const listRestore = () =>
+      listRef.current ??
+      viewRef.current?.querySelector<HTMLElement>(".inbox-zero") ??
+      document.getElementById("page-title");
+    setSessionMenu({ sessionId, anchor, restoreTarget: restoreTarget ?? listRestore });
   }, []);
   const openRowSessionMenu = useCallback(
     (sessionId: string, anchor: { x: number; y: number }) => openSessionMenuAt(sessionId, anchor),
     [openSessionMenuAt],
   );
   useEffect(() => {
-    if (!sessionMenu || sessions.has(sessionMenu.sessionId)) return;
-    // The target vanished under the open menu (archive elsewhere, a pruning snapshot). The menu
-    // owns focus, so dropping it without a handoff would strand focus on <body> even though the
-    // durable grid or board is still right there.
+    if (!sessionMenu) return;
+    // Valid means ON THE SURFACE, not merely in the catalog: another client archiving the
+    // session removes its row or card while the store keeps the archived record, and a menu
+    // over a vanished target must close. The menu owns focus, so dropping it without a handoff
+    // would strand focus on <body> even though a durable surface is right there.
+    const target = sessions.get(sessionMenu.sessionId);
+    if (target && !target.archived) return;
     sessionMenu.restoreTarget()?.focus();
     setSessionMenu(null);
   }, [sessionMenu, sessions]);

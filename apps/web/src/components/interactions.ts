@@ -469,6 +469,9 @@ export function useLongPress(onLongPress: (point: { x: number; y: number }) => v
         if (event.pointerType !== "touch" && event.pointerType !== "pen") return;
         cancel();
         firedHeldRef.current = false;
+        // A NEW press is a new intent: the previous press's release grace must not swallow a
+        // legitimate quick tap that follows a dismissed menu.
+        releasedAtRef.current = 0;
         const { pointerId, clientX, clientY } = event;
         stateRef.current = {
           pointerId,

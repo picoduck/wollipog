@@ -1017,3 +1017,76 @@ test("a long-press over a card's approval button opens the menu without approvin
     mobileViewport = true;
   }
 });
+
+test("a quick tap after a dismissed long-press still selects, and an archived target closes its menu", async () => {
+  // Round-2 review P2s: the release grace must not swallow the NEXT legitimate tap, and a menu
+  // whose session another client archives must close with a focus handoff.
+  mobileViewport = false;
+  setWindowFocused(true);
+  setVisibility("visible");
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "long-press-followup",
+    runtimeKey: "long-press-followup:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  try {
+    await act(async () => {
+      root.render(
+        <StoreProvider connection={connection} navigation={navigation}>
+          <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+        </StoreProvider>,
+      );
+    });
+    await act(async () => { socket.push(snapshot([session("A", 30), session("B", 20)])); });
+
+    const rowButton = [...container.querySelectorAll<HTMLElement>(".inbox-row")]
+      .find((row) => row.textContent?.includes("Session B"))!;
+    await act(async () => {
+      rowButton.dispatchEvent(new domWindow.PointerEvent("pointerdown", {
+        bubbles: true, pointerId: 3, pointerType: "touch", clientX: 40, clientY: 50,
+      } as never) as never);
+    });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 600)); });
+    let menu = domWindow.document.querySelector('[role="menu"]') as unknown as HTMLElement;
+    assert.ok(menu, "the press opened the menu");
+    await act(async () => {
+      rowButton.dispatchEvent(new domWindow.PointerEvent("pointerup", { bubbles: true, pointerId: 3, pointerType: "touch" } as never) as never);
+      menu.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as never);
+    });
+    assert.equal(domWindow.document.querySelector('[role="menu"]'), null);
+
+    // Immediately (inside the old 700ms grace): a fresh short tap must act normally.
+    await act(async () => {
+      rowButton.dispatchEvent(new domWindow.PointerEvent("pointerdown", {
+        bubbles: true, pointerId: 4, pointerType: "touch", clientX: 41, clientY: 51,
+      } as never) as never);
+      rowButton.dispatchEvent(new domWindow.PointerEvent("pointerup", { bubbles: true, pointerId: 4, pointerType: "touch" } as never) as never);
+      rowButton.dispatchEvent(new domWindow.MouseEvent("click", { bubbles: true, cancelable: true }) as never);
+    });
+    assert.equal(selectedRowTitle(container), "Session B",
+      "a new press is a new intent; the previous grace must not swallow it");
+
+    // Reopen, then archive the target from "another client": the menu closes and hands focus off.
+    await act(async () => {
+      rowButton.dispatchEvent(new domWindow.MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 44, clientY: 55 }) as never);
+    });
+    assert.ok(domWindow.document.querySelector('[role="menu"]'));
+    await act(async () => {
+      socket.push({ type: "session_upsert", session: { ...session("B", 20), archived: true } });
+    });
+    assert.equal(domWindow.document.querySelector('[role="menu"]'), null,
+      "an archived target is off the surface, so its menu closes");
+    assert.notEqual(domWindow.document.activeElement, domWindow.document.body,
+      "and dismissal hands focus to a durable surface, not <body>");
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+    domWindow.document.body.innerHTML = "";
+    mobileViewport = true;
+  }
+});
