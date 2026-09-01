@@ -139,6 +139,15 @@ test("the permission-mode popover keeps rows compact while long labels can wrap"
   assert.match(soleRuleBody(".cbar-permission-details-trigger"), /width: 28px;/);
 });
 
+test("message metadata actions keep one compact target width on phones", () => {
+  assert.match(soleRuleBody(".tl-message-icon"), /width: 24px;/);
+  assert.match(soleRuleBody(".tl-message-icon"), /height: 24px;/);
+  const phoneOverrides = mediaBlocks(css).filter((block) =>
+    block.maxWidths.some((width) => width <= 760) && block.containsSelector(".tl-message-icon"));
+  assert.deepEqual(phoneOverrides, [],
+    "Message actions must not change width independently at phone sizes");
+});
+
 test("mobile Session statuses stay on one measured line before fixed actions", () => {
   const group = soleRuleBody(".change-status-indicators");
   assert.match(group, /display: inline-flex;/);

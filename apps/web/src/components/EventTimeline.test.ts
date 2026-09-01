@@ -229,6 +229,8 @@ test("completed assistant metadata owns enabled and disabled fork controls besid
 
   assert.equal((html.match(/Rewind Files to Here/g) ?? []).length, 2);
   assert.equal((html.match(/aria-label="Fork Conversation Here"/g) ?? []).length, 2);
+  assert.equal((html.match(/lucide-git-fork/g) ?? []).length, 2,
+    "plain historical forks use the shared Lucide fork glyph");
   assert.match(html, /aria-label="Copy assistant message"[\s\S]*?aria-label="Fork Conversation Here"/,
     "Fork follows Copy in assistant metadata");
   assert.match(html, /<button[^>]*disabled=""[^>]*title="Claude Code can fork only its latest completed conversation checkpoint\."[^>]*aria-label="Fork Conversation Here"/);
@@ -948,6 +950,8 @@ test("user rows prepare deliberate resend and expose edit-in-fork only for an el
 
   assert.equal((html.match(/aria-label="Edit User Message as a New Turn"/g) ?? []).length, 2);
   assert.equal((html.match(/aria-label="Edit User Message in a New Conversation Fork"/g) ?? []).length, 1);
+  assert.equal((html.match(/lucide-git-fork/g) ?? []).length, 1,
+    "Edit in Fork uses the same fork glyph language as plain Fork");
   assert.match(html, /Edit &amp; Resend/);
   assert.match(html, /Edit in Fork/);
 });

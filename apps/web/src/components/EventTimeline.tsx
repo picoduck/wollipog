@@ -19,7 +19,7 @@ import {
   type VirtualScrollAnchor,
 } from "./MeasuredVirtualList.js";
 import { CopyButton } from "./common.js";
-import { BranchIcon, EditIcon, ThreadForkIcon } from "./Icons.js";
+import { EditIcon, ThreadForkIcon } from "./Icons.js";
 import { formatDuration, formatRecordedRelativeTime, formatRecordedTimestamp, titleCaseLabel } from "../format.js";
 import { PromptImageView } from "./PromptImageView.js";
 import { EventPayloadContent } from "./EventPayloadContent.js";
@@ -1994,7 +1994,7 @@ function MessageMeta({
       {forkAvailability && (
         <button
           type="button"
-          className="tl-message-icon tl-message-fork"
+          className="tl-message-icon"
           disabled={!forkAvailability.available}
           onClick={forkAvailability.available ? onFork : undefined}
           title={forkAvailability.available ? "Fork Conversation Here" : forkAvailability.reason}
@@ -2022,7 +2022,7 @@ function MessageMeta({
           title="Edit in Fork"
           aria-label="Edit User Message in a New Conversation Fork"
         >
-          <BranchIcon size={14} />
+          <ThreadForkIcon size={14} />
         </button>
       )}
     </div>
