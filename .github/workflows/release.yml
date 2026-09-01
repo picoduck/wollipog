@@ -29,6 +29,7 @@ jobs:
   preflight:
     name: Resolve tag & check version
     runs-on: ubuntu-22.04
+    timeout-minutes: 10
     outputs:
       release_tag: ${{ steps.resolve.outputs.release_tag }}
       prerelease: ${{ steps.resolve.outputs.prerelease }}
@@ -83,6 +84,7 @@ jobs:
     name: ${{ matrix.label }}
     needs: preflight
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false # one platform failing must not cancel the others
       matrix:
@@ -229,6 +231,7 @@ jobs:
     name: Verify runner release assets
     needs: [preflight, build]
     runs-on: ubuntu-22.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

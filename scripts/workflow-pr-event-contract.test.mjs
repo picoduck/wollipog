@@ -263,3 +263,32 @@ test("PR workflow expressions satisfy the complete event matrix", () => {
     );
   }
 });
+
+test("every workflow job bounds its own runtime", () => {
+  // Without timeout-minutes a hung job runs to GitHub's 360-minute default. CI normally
+  // finishes in under 20 minutes, so any bound here is a large improvement; the ceiling
+  // below just keeps a future edit from restoring the default in all but name.
+  const MAX_TIMEOUT_MINUTES = 60;
+
+  for (const path of [...WORKFLOWS, RELEASE_WORKFLOW]) {
+    const text = readFileSync(resolve(process.cwd(), path), "utf8");
+    const jobsIndex = text.search(/^jobs:$/m);
+    assert.notEqual(jobsIndex, -1, `${path}: missing jobs block`);
+
+    const jobsBlock = text.slice(jobsIndex);
+    const jobHeadings = [...jobsBlock.matchAll(/^ {2}([A-Za-z0-9_-]+):$/gm)];
+    assert.notEqual(jobHeadings.length, 0, `${path}: expected at least one job`);
+
+    for (const [index, heading] of jobHeadings.entries()) {
+      const end = jobHeadings[index + 1]?.index ?? jobsBlock.length;
+      const body = jobsBlock.slice(heading.index, end);
+      const timeout = body.match(/^ {4}timeout-minutes: (\d+)$/m);
+
+      assert.ok(timeout, `${path}: job "${heading[1]}" must set timeout-minutes`);
+      assert.ok(
+        Number(timeout[1]) <= MAX_TIMEOUT_MINUTES,
+        `${path}: job "${heading[1]}" timeout-minutes ${timeout[1]} exceeds ${MAX_TIMEOUT_MINUTES}`,
+      );
+    }
+  }
+});
