@@ -651,6 +651,20 @@ export function BranchIcon(props: IconProps) {
   );
 }
 
+/** A conversation thread splitting into two continuations, distinct from a Git branch. */
+export function ThreadForkIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M5 4.5h8a2 2 0 0 1 2 2v2" />
+      <path d="M5 9.5h5a2 2 0 0 1 2 2v1" />
+      <path d="M12 12.5v2a2 2 0 0 0 2 2h4" />
+      <path d="m16 13.5 3 3-3 3" />
+      <path d="M15 8.5v2a2 2 0 0 0 2 2h2" />
+      <path d="m17 9.5 3 3-3 3" />
+    </IconBase>
+  );
+}
+
 /** A node with two spokes: the session's model or effort setting. */
 export function DialIcon(props: IconProps) {
   return (

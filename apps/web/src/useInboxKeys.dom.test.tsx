@@ -37,6 +37,7 @@ test("the central Inbox layer handles bare keys but never steals typing or termi
   const action = (name: keyof InboxKeyActions) => () => calls.push(name);
   const actions: InboxKeyActions = {
     next: action("next"), previous: action("previous"), expand: action("expand"),
+    fork: action("fork"),
     nextSplit: action("nextSplit"), previousSplit: action("previousSplit"),
     approve: action("approve"), deny: action("deny"), archive: action("archive"),
     snooze: action("snooze"),
@@ -59,11 +60,12 @@ test("the central Inbox layer handles bare keys but never steals typing or termi
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: " ", shiftKey: true, bubbles: true }));
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "G", shiftKey: true, bubbles: true }));
   domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "End", bubbles: true }));
-  assert.deepEqual(calls, ["next", "nextSplit", "pageUp", "resumeFollow", "resumeFollow"]);
+  domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "f", bubbles: true }));
+  assert.deepEqual(calls, ["next", "nextSplit", "pageUp", "resumeFollow", "resumeFollow", "fork"]);
 
   const composer = container.querySelector<HTMLTextAreaElement>('[aria-label="Composer"]')!;
   composer.focus();
-  for (const key of ["j", "j", "j", "e", " "]) {
+  for (const key of ["j", "j", "j", "e", " ", "f"]) {
     domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key, bubbles: true }));
   }
   const terminal = container.querySelector<HTMLTextAreaElement>('[aria-label="Terminal"]')!;
@@ -74,7 +76,7 @@ test("the central Inbox layer handles bare keys but never steals typing or termi
   for (const key of ["Enter", " ", "Tab", "a", "d"]) {
     domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key, bubbles: true }));
   }
-  assert.deepEqual(calls, ["next", "nextSplit", "pageUp", "resumeFollow", "resumeFollow"],
+  assert.deepEqual(calls, ["next", "nextSplit", "pageUp", "resumeFollow", "resumeFollow", "fork"],
     "typing contexts and native controls own their keys before the Inbox layer");
 
   previewAvailable = false;
@@ -83,7 +85,12 @@ test("the central Inbox layer handles bare keys but never steals typing or termi
   domWindow.dispatchEvent(unownedEnd);
   assert.equal(unownedEnd.defaultPrevented, false,
     "End retains its native list behavior when no preview navigation surface is registered");
-  assert.deepEqual(calls, ["next", "nextSplit", "pageUp", "resumeFollow", "resumeFollow"]);
+  assert.deepEqual(calls, ["next", "nextSplit", "pageUp", "resumeFollow", "resumeFollow", "fork"]);
+
+  domWindow.document.body.focus();
+  domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "f", bubbles: true }));
+  assert.equal(calls.filter((call) => call === "fork").length, 1,
+    "Fork is scoped to the Inbox list and detail zones");
 
   await act(async () => { root.unmount(); });
   container.remove();

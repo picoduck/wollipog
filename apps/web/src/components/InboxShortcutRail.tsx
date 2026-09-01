@@ -1,15 +1,18 @@
 import type { SessionView } from "@wollipog/protocol";
 import { sessionArchiveActionLabel } from "../archive-actions.js";
+import type { ConversationForkAvailability } from "../session-actions.js";
 
 export interface InboxShortcutRailProps {
   session: SessionView | null;
   pinned: boolean;
   busy: boolean;
+  forkAvailability: ConversationForkAvailability;
   stopBeforeArchiveSupported: boolean;
   onApprove: () => void;
   onDeny: () => void;
   onReply: () => void;
   onExpand: () => void;
+  onFork: () => void;
   onTogglePin: () => void;
   onMarkUnread: () => void;
   onArchive: () => void;
@@ -20,17 +23,18 @@ interface ShortcutButtonProps {
   label: string;
   shortcut: string;
   disabled: boolean;
+  disabledReason?: string;
   onClick: () => void;
 }
 
-function ShortcutButton({ label, shortcut, disabled, onClick }: ShortcutButtonProps) {
+function ShortcutButton({ label, shortcut, disabled, disabledReason, onClick }: ShortcutButtonProps) {
   return (
     <button
       type="button"
       disabled={disabled}
       onMouseDown={(event) => event.preventDefault()}
       onClick={onClick}
-      title={`${label} (${shortcut})`}
+      title={disabled && disabledReason ? disabledReason : `${label} (${shortcut})`}
       aria-label={label}
     >
       {label} <kbd aria-hidden="true">{shortcut}</kbd>
@@ -42,11 +46,13 @@ export function InboxShortcutRail({
   session,
   pinned,
   busy,
+  forkAvailability,
   stopBeforeArchiveSupported,
   onApprove,
   onDeny,
   onReply,
   onExpand,
+  onFork,
   onTogglePin,
   onMarkUnread,
   onArchive,
@@ -67,6 +73,13 @@ export function InboxShortcutRail({
       <span className="inbox-shortcut-standard" role="group" aria-label="Session Shortcuts">
         <ShortcutButton label="Reply" shortcut="R" disabled={busy} onClick={onReply} />
         <ShortcutButton label="Expand" shortcut="Enter" disabled={busy} onClick={onExpand} />
+        <ShortcutButton
+          label="Fork"
+          shortcut="F"
+          disabled={busy || !forkAvailability.available}
+          disabledReason={busy ? "Another session action is already in progress." : forkAvailability.available ? undefined : forkAvailability.reason}
+          onClick={onFork}
+        />
         <ShortcutButton label={pinned ? "Unpin" : "Pin"} shortcut="S" disabled={busy} onClick={onTogglePin} />
         <ShortcutButton label="Unread" shortcut="U" disabled={busy} onClick={onMarkUnread} />
         <ShortcutButton label={sessionArchiveActionLabel(session, stopBeforeArchiveSupported)} shortcut="E" disabled={busy} onClick={onArchive} />

@@ -26,6 +26,7 @@ export type ShortcutId =
   | "inbox-next"
   | "inbox-previous"
   | "inbox-expand"
+  | "inbox-fork"
   | "inbox-next-split"
   | "inbox-previous-split"
   | "inbox-approve"
@@ -289,6 +290,14 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     description: "Expand the selected session",
     scope: "Sessions List",
     binding: { key: "Enter", bare: true },
+  },
+  {
+    id: "inbox-fork",
+    group: "Sessions List",
+    label: "Fork Conversation",
+    description: "Fork the selected session at its latest completed checkpoint",
+    scope: "Sessions List",
+    binding: { key: "f", bare: true },
   },
   {
     id: "inbox-next-split",

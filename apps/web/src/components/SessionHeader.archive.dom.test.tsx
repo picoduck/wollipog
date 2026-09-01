@@ -39,6 +39,7 @@ function button(container: HTMLElement, label: string): HTMLButtonElement {
 test("Unarchive on an archived Stop Failed session cancels the archive follow-up", async () => {
   const archived: Array<[string, boolean]> = [];
   const retries: string[] = [];
+  let forks = 0;
   let activeSubagentOpens = 0;
   const session = {
     id: "session-stop-failed",
@@ -90,6 +91,8 @@ test("Unarchive on an archived Stop Failed session cancels the archive follow-up
             stopBeforeArchiveSupported
             exportReady={false}
             onSnooze={() => undefined}
+            forkAvailability={{ available: true, forkTurn: 3 }}
+            onFork={() => { forks += 1; }}
             changeStatus={{ kind: "changes_present", label: "Changes Present", description: "Git confirms changes." }}
             activeSubagents={{ count: 1, onOpen: () => { activeSubagentOpens += 1; } }}
           />
@@ -104,6 +107,11 @@ test("Unarchive on an archived Stop Failed session cancels the archive follow-up
   assert.ok(shareIcon, "the Share action uses the shared icon");
   assert.equal(shareIcon.getAttribute("width"), "16",
     "the Share icon keeps its desktop size while phone CSS owns mobile compaction");
+  const forkAction = button(container, "Fork Conversation");
+  assert.equal(forkAction.title, "Fork Conversation");
+  assert.ok(forkAction.querySelector("svg"), "the current-point action uses the dedicated thread-fork icon");
+  await act(async () => { forkAction.click(); });
+  assert.equal(forks, 1);
   assert.match(container.textContent ?? "", /Background Work: Waiting on External Job/);
   assert.ok(container.querySelector('[role="status"][aria-label="Background Work: Waiting on External Job"]'));
   await act(async () => { button(container, "1 Subagent Active").click(); });

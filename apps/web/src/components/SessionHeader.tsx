@@ -19,6 +19,7 @@ import { requestTranscriptDownload } from "../transcript-download.js";
 import type { SessionChangeStatus } from "../session-status.js";
 import { CONTROL_PLANE_HTTP, DASHBOARD_ORIGIN, hasSameOriginMarker } from "../config.js";
 import { reachableTranscriptShareOrigin, transcriptShareUrl } from "../transcript-share-client.js";
+import type { ConversationForkAvailability } from "../session-actions.js";
 import {
   ActiveSubagentsBadge,
   BackgroundWorkBadge,
@@ -34,7 +35,7 @@ import {
   useDismissiblePopover,
 } from "./interactions.js";
 import { useFeedback } from "./FeedbackProvider.js";
-import { ChevronLeftIcon, MoreVerticalIcon, ShareIcon } from "./Icons.js";
+import { ChevronLeftIcon, MoreVerticalIcon, ShareIcon, ThreadForkIcon } from "./Icons.js";
 import { useIsMobile } from "./useIsMobile.js";
 
 /**
@@ -52,6 +53,8 @@ export function SessionHeader({
   exportReady,
   onArchive,
   onSnooze,
+  forkAvailability,
+  onFork,
   projectCrumb,
   projectName,
   projectLabel = "Project",
@@ -71,6 +74,8 @@ export function SessionHeader({
   exportReady: boolean;
   onArchive?: () => void;
   onSnooze?: () => void;
+  forkAvailability?: ConversationForkAvailability;
+  onFork?: () => void;
   /** The interactive Project chip, rendered as the breadcrumb's first segment. */
   projectCrumb?: ReactNode;
   /** Current Project identity shown in the mobile More Actions menu header. */
@@ -394,6 +399,20 @@ export function SessionHeader({
               </>
             )}
           </div>
+        )}
+        {forkAvailability && (
+          <button
+            type="button"
+            className="icon-btn session-header-action"
+            disabled={busy || !forkAvailability.available}
+            title={busy
+              ? "Another session action is already in progress."
+              : forkAvailability.available ? "Fork Conversation" : forkAvailability.reason}
+            aria-label="Fork Conversation"
+            onClick={forkAvailability.available ? onFork : undefined}
+          >
+            <ThreadForkIcon size={16} />
+          </button>
         )}
         <div className="overflow-menu">
           <button

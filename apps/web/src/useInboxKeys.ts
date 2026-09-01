@@ -6,6 +6,7 @@ export interface InboxKeyActions {
   next: () => void;
   previous: () => void;
   expand: () => void;
+  fork: () => void;
   nextSplit: () => void;
   previousSplit: () => void;
   approve: () => void;
@@ -25,6 +26,7 @@ const BINDINGS: ReadonlyArray<[ShortcutId, keyof InboxKeyActions]> = [
   ["inbox-next", "next"],
   ["inbox-previous", "previous"],
   ["inbox-expand", "expand"],
+  ["inbox-fork", "fork"],
   ["inbox-next-split", "nextSplit"],
   ["inbox-previous-split", "previousSplit"],
   ["inbox-approve", "approve"],
@@ -56,6 +58,7 @@ export function useInboxKeys(enabled: boolean, actions: InboxKeyActions): void {
           !active.matches(".inbox-list")) return;
       for (const [shortcutId, action] of BINDINGS) {
         if (!matchesShortcut(event, shortcutId)) continue;
+        if (action === "fork" && zone !== "list" && zone !== "detail") return;
         if (action === "resumeFollow") {
           if (!actions.resumeFollow()) return;
           event.preventDefault();
