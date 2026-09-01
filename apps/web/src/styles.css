@@ -1591,22 +1591,24 @@ textarea {
   padding: 5px;
   border: 0;
   transform: translateY(-50%);
-  background: linear-gradient(90deg, transparent, var(--bg) 42%);
-  color: var(--text-faint);
+  background: transparent;
+  color: var(--text);
   cursor: pointer;
-  transition: color var(--dur-fast) var(--ease-out);
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
 }
 .crumb-project-actions:hover {
-  color: var(--text-dim);
+  background: var(--bg-elev-2);
 }
 .crumb-project-actions:active {
-  color: var(--text);
+  background: var(--bg-elev-3);
 }
 .crumb-project-actions:focus-visible {
   color: var(--accent);
 }
 .crumb-project-actions[aria-expanded="true"] {
-  background: linear-gradient(90deg, transparent, var(--bg-elev-2) 42%);
+  background: var(--bg-elev-2);
   color: var(--accent);
 }
 /* The crumb sits near the pane's left edge; the shared right-anchored menu would hang

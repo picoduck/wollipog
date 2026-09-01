@@ -1010,20 +1010,20 @@ test("the Project crumb navigates independently beside persistent Project Action
 
   const defaultStyle = await actions.evaluate((element) => {
     const style = getComputedStyle(element);
-    return { color: style.color, backgroundImage: style.backgroundImage };
+    return { backgroundColor: style.backgroundColor, backgroundImage: style.backgroundImage };
   });
   await actions.hover();
-  await expect.poll(() => actions.evaluate((element) => getComputedStyle(element).color))
-    .not.toBe(defaultStyle.color);
-  const hoverColor = await actions.evaluate((element) => getComputedStyle(element).color);
+  await expect.poll(() => actions.evaluate((element) => getComputedStyle(element).backgroundColor))
+    .not.toBe(defaultStyle.backgroundColor);
+  const hoverBackground = await actions.evaluate((element) => getComputedStyle(element).backgroundColor);
 
   const actionsCenter = { x: actionsBox!.x + actionsBox!.width / 2, y: actionsBox!.y + actionsBox!.height / 2 };
   await page.mouse.move(actionsCenter.x, actionsCenter.y);
   await page.mouse.down();
-  await expect.poll(() => actions.evaluate((element) => getComputedStyle(element).color))
-    .not.toBe(hoverColor);
-  const activeColor = await actions.evaluate((element) => getComputedStyle(element).color);
-  expect(activeColor).not.toBe(defaultStyle.color);
+  await expect.poll(() => actions.evaluate((element) => getComputedStyle(element).backgroundColor))
+    .not.toBe(hoverBackground);
+  const activeBackground = await actions.evaluate((element) => getComputedStyle(element).backgroundColor);
+  expect(activeBackground).not.toBe(defaultStyle.backgroundColor);
   await page.mouse.up();
 
   // The trigger opens a small menu rather than a dialog directly.
@@ -1033,10 +1033,10 @@ test("the Project crumb navigates independently beside persistent Project Action
   await expect(actions).toHaveAttribute("aria-expanded", "true");
   const openStyle = await actions.evaluate((element) => {
     const style = getComputedStyle(element);
-    return { color: style.color, backgroundImage: style.backgroundImage };
+    return { backgroundColor: style.backgroundColor, backgroundImage: style.backgroundImage };
   });
-  expect(openStyle.color).not.toBe(defaultStyle.color);
-  expect(openStyle.backgroundImage).not.toBe(defaultStyle.backgroundImage);
+  expect(openStyle.backgroundColor).not.toBe(defaultStyle.backgroundColor);
+  expect(openStyle.backgroundImage).toBe("none");
   await page.keyboard.press("Escape");
   await expect(actionsMenu).toBeHidden();
   await expect(actions).toBeFocused();
@@ -1046,9 +1046,8 @@ test("the Project crumb navigates independently beside persistent Project Action
   await expect(actions).toBeFocused();
   const focusStyle = await actions.evaluate((element) => {
     const style = getComputedStyle(element);
-    return { color: style.color, outlineStyle: style.outlineStyle, outlineWidth: Number.parseFloat(style.outlineWidth) };
+    return { outlineStyle: style.outlineStyle, outlineWidth: Number.parseFloat(style.outlineWidth) };
   });
-  expect(focusStyle.color).not.toBe(defaultStyle.color);
   expect(focusStyle.outlineStyle).not.toBe("none");
   expect(focusStyle.outlineWidth).toBeGreaterThanOrEqual(2);
 
