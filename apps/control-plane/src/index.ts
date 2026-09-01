@@ -3112,7 +3112,6 @@ app.delete("/api/governance/policies/:policyId", async (req, reply) =>
 
 app.get("/api/governance/approval-queue", async () => ({ items: svc.approvalQueue() }));
 
-app.get("/api/governance/review-queue", async () => ({ items: await svc.reviewQueue() }));
 
 app.post("/api/governance/approval-queue/reject", async (req, reply) => {
   const body = req.body as ApprovalQueueRejectRequest;

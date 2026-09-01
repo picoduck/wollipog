@@ -2033,56 +2033,6 @@ export interface ReviewFindingsResponse {
   summary: ReviewFindingSummary;
 }
 
-/** Latest durable reviewer-agent decision shown in the cross-session review queue. */
-export interface ReviewQueueVerdict extends ReviewDecision {
-  seq: number;
-  timestamp: number;
-}
-
-export type ReviewQueueBlockerKind =
-  | "approval_pending"
-  | "checks_failing"
-  | "checks_pending"
-  | "findings_required"
-  | "runner_offline"
-  | "git_unavailable"
-  | "review_denied"
-  | "review_escalated"
-  | "review_incomplete";
-
-/** One explicit requirement preventing the queue item from reaching ready-to-publish state. */
-export interface ReviewQueueBlocker {
-  kind: ReviewQueueBlockerKind;
-  count?: number;
-}
-
-export type ReviewQueueCompletion = "blocked" | "needs_review" | "ready";
-
-/**
- * Cross-session code-review projection. Git state is sampled live from the owning runner while
- * approval and reviewer provenance come from the control plane's durable stores.
- */
-export interface ReviewQueueItem {
-  sessionId: string;
-  sessionTitle: string;
-  runnerId: string;
-  runnerOnline: boolean;
-  workspaceId?: string;
-  workspaceName?: string;
-  agentId?: string;
-  agentName?: string;
-  updatedAt: number;
-  /** Live git/PR/check rollup. Null when unavailable, inapplicable, or outside this bounded scan. */
-  summary: GitSummaryInfo | null;
-  summaryState: "available" | "offline" | "unavailable" | "not_sampled" | "not_applicable";
-  /** True for a dirty/ahead branch or an open pull request. */
-  changesReady: boolean;
-  approval?: ApprovalQueueItem;
-  reviewerVerdict?: ReviewQueueVerdict;
-  findings: ReviewFindingSummary;
-  blockers: ReviewQueueBlocker[];
-  completion: ReviewQueueCompletion;
-}
 
 /* --- Guardrails (CP policy cards plus protocol-v47 runner-side mid-turn enforcement) --- */
 

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import type {
   ControlPlaneToRunner,
@@ -6176,40 +6177,33 @@ test("inline review findings are stale-safe, bundle through the owning session, 
   assert.match(prompt?.text ?? "", /\[REQUIRED\] \[MAJOR\] src\/example\.ts:12/);
   assert.match(prompt?.text ?? "", /\[OPTIONAL\] \[NIT\] src\/example\.ts:18/);
 
-  db.updateSessionStatus(sessionId, "idle", Date.now());
-  hub.requestHandler = (msg) => {
-    assert.equal(msg.type, "git_action");
-    if (msg.type !== "git_action") throw new Error("unexpected request");
-    return {
-      type: "git_result",
-      requestId: msg.requestId,
-      ok: true,
-      data: { summary: {
-        branch: "codex/change", ahead: 0, behind: 0, hasChanges: false,
-        addedLines: 0, deletedLines: 0, remoteUrl: null, pr: null, checks: null,
-      } },
-    };
-  };
-  let queue = await svc.reviewQueue();
-  assert.equal(queue[0]?.sessionId, sessionId);
-  assert.equal(queue[0]?.completion, "blocked");
-  assert.deepEqual(queue[0]?.blockers, [{ kind: "findings_required", count: 1 }]);
-
+  // Completion gating asserted on the findings summary itself: the cross-session review queue
+  // that used to project it was removed with its Board surface (#526).
   const sentFindings = svc.reviewFindings(sessionId).data!.findings;
   const requiredSent = sentFindings.find((finding) => finding.required)!;
   const resolvedRequired = svc.updateReviewFinding(sessionId, requiredSent.findingId, {
     status: "resolved", expectedUpdatedAt: requiredSent.updatedAt,
   }, { kind: "human", id: "reviewer" });
   assert.equal(resolvedRequired.ok, true);
-  queue = await svc.reviewQueue();
-  assert.equal(queue[0]?.completion, "needs_review", "optional unresolved feedback remains visible without blocking publish");
-  assert.deepEqual(queue[0]?.blockers, []);
+  assert.equal(svc.reviewFindings(sessionId).data!.summary.completion, "in_review",
+    "optional unresolved feedback remains visible without blocking publish");
 
   const optionalSent = svc.reviewFindings(sessionId).data!.findings.find((finding) => !finding.required)!;
   assert.equal(svc.updateReviewFinding(sessionId, optionalSent.findingId, {
     status: "dismissed", expectedUpdatedAt: optionalSent.updatedAt,
   }).ok, true);
-  assert.deepEqual(await svc.reviewQueue(), [], "a quiet session leaves the queue once every finding is terminal");
+  assert.equal(svc.reviewFindings(sessionId).data!.summary.completion, "complete",
+    "every finding terminal completes the review");
+});
+
+test("the cross-session review-queue projection stays retired", () => {
+  // #526: the queue's only client left with #501. A pre-#501 dashboard that still polls
+  // /api/governance/review-queue gets Fastify's plain 404, which its Review Queue card rendered
+  // as an inline error without blocking the Board — so removal, not deprecation.
+  const { svc } = makeHarness();
+  assert.equal("reviewQueue" in svc, false, "the service exposes no cross-session review projection");
+  const index = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(index, /governance\/review-queue/, "no route may quietly reintroduce the projection");
 });
 
 test("GitHub review findings can be bundled to the agent but cannot be resolved locally", () => {
@@ -6246,359 +6240,6 @@ test("GitHub review findings can be bundled to the agent but cannot be resolved 
   });
   assert.equal(bundled.ok, true, bundled.error);
   assert.match(hub.sentOfType("prompt_session").at(-1)?.text ?? "", /Remote issue/);
-});
-
-test("review queue combines live changes, approvals, checks, and the latest reviewer verdict", async () => {
-  const { db, hub, svc } = makeHarness();
-  const needsReview = seedSession(svc, hub);
-  const blocked = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
-  const ready = seedSession(svc, hub, { agentId: ACP_AGENT_ID });
-  const quiet = seedSession(svc, hub);
-  const unavailable = seedSession(svc, hub);
-  const permissionAllowed = seedSession(svc, hub);
-  for (const id of [needsReview, blocked, ready, quiet, unavailable, permissionAllowed]) {
-    db.setWorktreePath(id, `/worktrees/${id}`);
-    db.updateSessionStatus(id, "idle", Date.now());
-  }
-
-  db.setPendingApproval(blocked, {
-    requestId: "review-approval",
-    title: "Approve deploy",
-    options: [{ optionId: "deny", name: "Deny", kind: "reject_once" }],
-  });
-  db.updateSessionStatus(blocked, "input_required", Date.now());
-  db.appendEvent(blocked, {
-    kind: "review_decision",
-    reviewId: "review-obsolete",
-    reviewer: { kind: "agent", id: "guardian" },
-    outcome: "allowed",
-  }, 900);
-  db.appendEvent(blocked, {
-    kind: "review_decision",
-    reviewId: "review-blocked",
-    reviewer: { kind: "agent", id: "guardian" },
-    outcome: "denied",
-    riskLevel: "high",
-    rationale: "Unsafe change",
-  }, 1_000);
-  db.appendEvent(ready, {
-    kind: "review_decision",
-    reviewId: "review-ready",
-    reviewer: { kind: "agent", id: "guardian" },
-    outcome: "allowed",
-    riskLevel: "low",
-  }, 2_000);
-  db.appendEvent(permissionAllowed, {
-    kind: "review_decision",
-    reviewId: "review-one-command",
-    requestId: "provider-permission",
-    reviewer: { kind: "agent", id: "guardian" },
-    outcome: "allowed",
-    riskLevel: "low",
-  }, 2_100);
-
-  const summary = (overrides: Partial<GitSummaryInfo> = {}): GitSummaryInfo => ({
-    branch: "codex/change",
-    ahead: 0,
-    behind: 0,
-    hasChanges: false,
-    addedLines: 0,
-    deletedLines: 0,
-    remoteUrl: "https://github.com/example/repo",
-    pr: null,
-    checks: null,
-    ...overrides,
-  });
-  const summaries = new Map([
-    [needsReview, summary({ hasChanges: true, addedLines: 4 })],
-    [blocked, summary({
-      ahead: 1,
-      pr: { number: 12, title: "Blocked", url: "https://github.com/example/repo/pull/12", state: "OPEN" },
-      checks: { failing: 2, pending: 1, passing: 3, failingNames: ["test", "lint"], url: null },
-    })],
-    [ready, summary({
-      pr: { number: 13, title: "Ready", url: "https://github.com/example/repo/pull/13", state: "OPEN" },
-      checks: { failing: 0, pending: 0, passing: 5, failingNames: [], url: null },
-    })],
-    [permissionAllowed, summary({ hasChanges: true })],
-    [quiet, summary()],
-  ]);
-  hub.requestHandler = (msg) => {
-    assert.equal(msg.type, "git_action");
-    if (msg.type !== "git_action") throw new Error("unexpected request");
-    return {
-      type: "git_result",
-      requestId: msg.requestId,
-      ok: true,
-      data: { summary: summaries.get(msg.sessionId)! },
-    };
-  };
-
-  const queue = await svc.reviewQueue();
-  assert.deepEqual(new Set(queue.map((item) => item.sessionId)), new Set([needsReview, blocked, ready, unavailable, permissionAllowed]));
-  assert.equal(queue[0]!.completion, "blocked", "blocked work sorts before needs-review and ready work");
-  assert.deepEqual(queue.find((item) => item.sessionId === needsReview)!.blockers, [
-    { kind: "review_incomplete", count: 1 },
-  ]);
-  assert.equal(queue.find((item) => item.sessionId === needsReview)!.completion, "needs_review");
-  assert.deepEqual(queue.find((item) => item.sessionId === blocked)!.blockers.map((item) => item.kind), [
-    "approval_pending",
-    "checks_failing",
-    "checks_pending",
-    "review_denied",
-  ]);
-  assert.equal(queue.find((item) => item.sessionId === blocked)!.reviewerVerdict?.reviewId, "review-blocked");
-  assert.equal(queue.find((item) => item.sessionId === ready)!.completion, "ready");
-  assert.equal(queue.find((item) => item.sessionId === permissionAllowed)!.completion, "needs_review");
-  assert.deepEqual(queue.find((item) => item.sessionId === unavailable)!.blockers, [
-    { kind: "git_unavailable", count: 1 },
-  ]);
-});
-
-test("review queue requests primary-checkout summaries without a caller-selected path", async () => {
-  const { db, hub, svc } = makeHarness();
-  const sessionId = seedSession(svc, hub, { useWorktree: false });
-  db.updateSessionStatus(sessionId, "idle", Date.now());
-  hub.requestHandler = (message) => {
-    assert.equal(message.type, "git_action");
-    if (message.type !== "git_action") throw new Error("unexpected request");
-    assert.equal(message.sessionId, sessionId);
-    assert.equal(message.action.kind, "summary");
-    assert.equal(message.worktreePath, undefined);
-    return {
-      type: "git_result",
-      requestId: message.requestId,
-      ok: true,
-      data: {
-        summary: {
-          branch: "main",
-          ahead: 0,
-          behind: 0,
-          hasChanges: true,
-          addedLines: 1,
-          deletedLines: 0,
-          remoteUrl: null,
-          pr: null,
-          checks: null,
-        },
-      },
-    };
-  };
-
-  const queue = await svc.reviewQueue();
-  assert.equal(queue[0]?.sessionId, sessionId);
-  assert.equal(queue[0]?.summary?.branch, "main");
-
-  db.registerRunner(runnerMeta(), Date.now(), 75);
-  let requestedFromOldRunner = false;
-  hub.requestHandler = () => {
-    requestedFromOldRunner = true;
-    throw new Error("pre-v76 primary summary must not be requested");
-  };
-  assert.deepEqual(await svc.reviewQueue(), []);
-  assert.equal(requestedFromOldRunner, false);
-});
-
-test("review queue deduplicates primary checkouts and bounds per-runner Git fanout", async () => {
-  const cleanSummary: GitSummaryInfo = {
-    branch: "main", ahead: 0, behind: 0, hasChanges: false,
-    addedLines: 0, deletedLines: 0, remoteUrl: null, pr: null, checks: null,
-  };
-  const primary = makeHarness();
-  for (let index = 0; index < 6; index++) {
-    const id = seedSession(primary.svc, primary.hub, { useWorktree: false, title: `Primary ${index}` });
-    primary.db.updateSessionStatus(id, "idle", Date.now() + index);
-  }
-  let primaryRequests = 0;
-  primary.hub.requestHandler = (message) => {
-    if (message.type !== "git_action") throw new Error("unexpected request");
-    primaryRequests++;
-    return { type: "git_result", requestId: message.requestId, ok: true, data: { summary: cleanSummary } };
-  };
-  const [firstPrimary, concurrentPrimary] = await Promise.all([
-    primary.svc.reviewQueue(),
-    primary.svc.reviewQueue(),
-  ]);
-  assert.deepEqual(firstPrimary, []);
-  assert.deepEqual(concurrentPrimary, []);
-  assert.equal(primaryRequests, 1, "one runner-authoritative primary checkout is sampled once per workspace");
-
-  const linked = makeHarness();
-  for (let index = 0; index < 20; index++) {
-    const id = seedSession(linked.svc, linked.hub, { useWorktree: true, title: `Linked ${index}` });
-    linked.db.setWorktreePath(id, `/worktrees/linked-${index}`);
-    linked.db.updateSessionStatus(id, "idle", Date.now() + index);
-  }
-  let linkedRequests = 0;
-  const linkedSessionIds: string[] = [];
-  linked.hub.requestHandler = (message) => {
-    if (message.type !== "git_action") throw new Error("unexpected request");
-    linkedRequests++;
-    linkedSessionIds.push(message.sessionId);
-    return { type: "git_result", requestId: message.requestId, ok: true, data: { summary: cleanSummary } };
-  };
-  assert.deepEqual(await linked.svc.reviewQueue(), []);
-  assert.equal(linkedRequests, 12, "one refresh cannot fan out beyond the per-runner sample budget");
-  linkedRequests = 0;
-  await linked.svc.reviewQueue();
-  assert.equal(linkedRequests, 12);
-  assert.equal(new Set(linkedSessionIds).size, 20, "the bounded window rotates so every checkout is eventually sampled");
-});
-
-test("review queue deduplicates primary samples by execution path after a session is re-filed", async () => {
-  const { db, hub, svc } = makeHarness();
-  const moved = svc.createSession({
-    runnerId: RUNNER_ID,
-    workspaceId: WORKSPACE_ID,
-    workspacePath: "/repos/adhoc",
-    agentId: AGENT_ID,
-    useWorktree: false,
-  });
-  assert.ok(moved.ok && moved.data);
-  const movedId = moved.data!.id;
-  assert.equal(db.getAdHocWorkspacePath(movedId), "/repos/adhoc");
-  assert.ok(svc.setWorkspace(movedId, WORKSPACE_ID).ok);
-
-  const workspaceId = seedSession(svc, hub, { useWorktree: false });
-  for (const id of [movedId, workspaceId]) db.updateSessionStatus(id, "idle", Date.now());
-
-  const requested: string[] = [];
-  hub.requestHandler = (message) => {
-    if (message.type !== "git_action") throw new Error("unexpected request");
-    requested.push(message.sessionId);
-    return {
-      type: "git_result",
-      requestId: message.requestId,
-      ok: true,
-      data: {
-        summary: {
-          branch: message.sessionId === movedId ? "adhoc-branch" : "workspace-branch",
-          ahead: 0,
-          behind: 0,
-          hasChanges: true,
-          addedLines: 1,
-          deletedLines: 0,
-          remoteUrl: null,
-          pr: null,
-          checks: null,
-        },
-      },
-    };
-  };
-
-  const queue = await svc.reviewQueue();
-  assert.deepEqual(new Set(requested), new Set([movedId, workspaceId]));
-  assert.equal(queue.find((item) => item.sessionId === movedId)?.summary?.branch, "adhoc-branch");
-  assert.equal(queue.find((item) => item.sessionId === workspaceId)?.summary?.branch, "workspace-branch");
-});
-
-test("review queue distinguishes no repository, failed sampling, and budget truncation", async () => {
-  const noRepo = makeHarness();
-  const noRepoId = seedSession(noRepo.svc, noRepo.hub, { useWorktree: false });
-  noRepo.db.updateSessionStatus(noRepoId, "idle", Date.now());
-  noRepo.hub.requestHandler = (message) => {
-    if (message.type !== "git_action") throw new Error("unexpected request");
-    return {
-      type: "git_result", requestId: message.requestId, ok: false,
-      code: "GIT_NO_REPOSITORY", error: "not the authoritative repository root",
-    };
-  };
-  assert.deepEqual(await noRepo.svc.reviewQueue(), [], "a session without a Git surface is not actionable review work");
-  noRepo.hub.online = false;
-  assert.deepEqual(
-    await noRepo.svc.reviewQueue(),
-    [],
-    "an authoritative no-repository result remains non-actionable while its runner is offline",
-  );
-  noRepo.hub.online = true;
-  assert.ok(noRepo.svc.restart(noRepoId).ok);
-  noRepo.db.updateSessionStatus(noRepoId, "idle", Date.now());
-  let restartedRequests = 0;
-  noRepo.hub.requestHandler = (message) => {
-    if (message.type !== "git_action") throw new Error("unexpected request");
-    restartedRequests++;
-    return {
-      type: "git_result",
-      requestId: message.requestId,
-      ok: true,
-      data: { summary: {
-        branch: "main", ahead: 0, behind: 0, hasChanges: false,
-        addedLines: 0, deletedLines: 0, remoteUrl: null, pr: null, checks: null,
-      } },
-    };
-  };
-  assert.deepEqual(await noRepo.svc.reviewQueue(), []);
-  assert.equal(restartedRequests, 1, "restart invalidates the remembered repository classification");
-
-  const noRepoBudget = makeHarness();
-  for (let index = 0; index < 10; index++) {
-    const result = noRepoBudget.svc.createSession({
-      runnerId: RUNNER_ID,
-      workspaceId: WORKSPACE_ID,
-      workspacePath: `/repos/no-repository-${index}`,
-      agentId: AGENT_ID,
-      useWorktree: false,
-    });
-    assert.ok(result.ok && result.data);
-    noRepoBudget.db.updateSessionStatus(result.data!.id, "idle", Date.now() + index);
-  }
-  noRepoBudget.hub.requestHandler = (message) => {
-    if (message.type !== "git_action") throw new Error("unexpected request");
-    return {
-      type: "git_result", requestId: message.requestId, ok: false,
-      code: "GIT_NO_REPOSITORY", error: "not the authoritative repository root",
-    };
-  };
-  assert.deepEqual(await noRepoBudget.svc.reviewQueue(), []);
-  const repoBacked = new Set<string>();
-  for (let index = 0; index < 12; index++) {
-    const id = seedSession(noRepoBudget.svc, noRepoBudget.hub, { useWorktree: true, title: `Repo ${index}` });
-    noRepoBudget.db.setWorktreePath(id, `/worktrees/repo-${index}`);
-    noRepoBudget.db.updateSessionStatus(id, "idle", Date.now() + 100 + index);
-    repoBacked.add(id);
-  }
-  const sampledRepoBacked = new Set<string>();
-  noRepoBudget.hub.requestHandler = (message) => {
-    if (message.type !== "git_action") throw new Error("unexpected request");
-    sampledRepoBacked.add(message.sessionId);
-    return {
-      type: "git_result", requestId: message.requestId, ok: true,
-      data: { summary: {
-        branch: "main", ahead: 0, behind: 0, hasChanges: false,
-        addedLines: 0, deletedLines: 0, remoteUrl: null, pr: null, checks: null,
-      } },
-    };
-  };
-  assert.deepEqual(await noRepoBudget.svc.reviewQueue(), []);
-  assert.deepEqual(sampledRepoBacked, repoBacked, "known non-repositories no longer consume the sample budget");
-
-  const capped = makeHarness();
-  const ids: string[] = [];
-  for (let index = 0; index < 14; index++) {
-    const id = seedSession(capped.svc, capped.hub, { useWorktree: true, title: `Priority ${index}` });
-    capped.db.setWorktreePath(id, `/worktrees/priority-${index}`);
-    capped.db.updateSessionStatus(id, "idle", Date.now() + index);
-    capped.db.setPendingApproval(id, {
-      requestId: `approval-${index}`,
-      title: "Approve review",
-      options: [{ optionId: "deny", name: "Deny", kind: "reject_once" }],
-    });
-    ids.push(id);
-  }
-  capped.hub.requestHandler = (message) => {
-    if (message.type !== "git_action") throw new Error("unexpected request");
-    return {
-      type: "git_result", requestId: message.requestId, ok: true,
-      data: { summary: { branch: "main", ahead: 0, behind: 0, hasChanges: false,
-        addedLines: 0, deletedLines: 0, remoteUrl: null, pr: null, checks: null } },
-    };
-  };
-  const queue = await capped.svc.reviewQueue();
-  const notSampled = queue.filter((item) => item.summaryState === "not_sampled");
-  assert.equal(notSampled.length, 2);
-  assert.ok(notSampled.every((item) => !item.blockers.some((blocker) => blocker.kind === "git_unavailable")));
-  assert.ok(queue.filter((item) => item.summaryState === "available")
-    .every((item) => !item.blockers.some((blocker) => blocker.kind === "git_unavailable")));
 });
 
 test("bulk queue rejection is stale-safe, selects only reject_once, and attributes the device", () => {
