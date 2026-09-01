@@ -116,7 +116,6 @@ import {
   type RunnerCredentialView,
   type RunnerStatus,
   type RunnerView,
-  type ReviewQueueVerdict,
   type ResourceScope,
   type ReviewFinding,
   type ReviewFindingStatus,
@@ -13803,17 +13802,6 @@ export class ControlPlaneDb {
        WHERE share_id=? AND revoked_at IS NULL AND expires_at>? AND projection_json IS NOT NULL`,
     ).get(shareId, now) as { projection_json: string } | undefined;
     return row?.projection_json ?? null;
-  }
-
-  /** Latest reviewer-agent verdict without hydrating or scanning the full transcript. */
-  latestReviewDecision(sessionId: string): ReviewQueueVerdict | undefined {
-    const row = this.stmt(
-      "SELECT seq, ts, payload FROM session_events WHERE session_id=? AND kind='review_decision' ORDER BY seq DESC LIMIT 1",
-    ).get(sessionId) as unknown as { seq: number; ts: number; payload: string } | undefined;
-    if (!row) return undefined;
-    const payload = JSON.parse(row.payload) as Extract<SessionEventPayload, { kind: "review_decision" }>;
-    const { kind: _kind, ...decision } = payload;
-    return { ...decision, seq: row.seq, timestamp: row.ts };
   }
 
   /* -------------------------- Review findings --------------------------- */

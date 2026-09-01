@@ -75,7 +75,6 @@ import {
   type RelayPodResult,
   type ReconcilePodRequest,
   type RunView,
-  type ReviewQueueItem,
   type ReviewFinding,
   type ResourceScope,
   type ReviewFindingsResponse,
@@ -805,12 +804,6 @@ export class SessionsService {
   private readonly rehydrate = new Set<string>();
   /** Bound v54 history/index work to one page chain per runner. */
   private readonly runnerHydrationTails = new Map<string, Promise<void>>();
-  /** Concurrent dashboard refreshes share one bounded runner fanout. */
-  private reviewQueueInFlight: Promise<ReviewQueueItem[]> | null = null;
-  /** Rotate the bounded non-priority sample window so older quiet checkouts cannot starve forever. */
-  private readonly reviewQueueSampleOffsets = new Map<string, number>();
-  /** Remember authoritative no-repository results across refreshes and offline intervals. */
-  private readonly reviewQueueNoRepository = new Set<string>();
   private readonly promptOutbox: SessionPromptOutbox;
   /** Process-local epochs fence late initial/manual results. Durable title/source checks provide
    * the cross-restart fence, so an abandoned request can never overwrite newer state. */
@@ -2056,188 +2049,6 @@ export class SessionsService {
       findings: this.db.listReviewFindings(sessionId),
       summary: this.db.reviewFindingSummary(sessionId),
     });
-  }
-
-  /**
-   * Project the actionable cross-session review queue from three existing sources: durable
-   * approvals, durable reviewer decisions, and a live git/PR/check sample from each owning
-   * runner. Samples are serialized per runner to avoid a burst of `gh` subprocesses while
-   * distinct runners are sampled in parallel.
-   */
-  async reviewQueue(): Promise<ReviewQueueItem[]> {
-    if (this.reviewQueueInFlight) return this.reviewQueueInFlight;
-    const inFlight = this.collectReviewQueue();
-    this.reviewQueueInFlight = inFlight;
-    try {
-      return await inFlight;
-    } finally {
-      if (this.reviewQueueInFlight === inFlight) this.reviewQueueInFlight = null;
-    }
-  }
-
-  private async collectReviewQueue(): Promise<ReviewQueueItem[]> {
-    const maxSamplesPerRunner = 12;
-    const sessions = this.db.listSessions();
-    const approvals = new Map(this.approvalQueue().map((item) => [item.sessionId, item]));
-    const summaries = new Map<string, GitSummaryInfo>();
-    const sampled = new Set<string>();
-    const byRunner = new Map<string, Map<string, SessionView[]>>();
-
-    const liveSessionIds = new Set(sessions.map((session) => session.id));
-    for (const sessionId of this.reviewQueueNoRepository) {
-      if (!liveSessionIds.has(sessionId)) this.reviewQueueNoRepository.delete(sessionId);
-    }
-
-    for (const session of sessions) {
-      if (!this.hub.isRunnerOnline(session.runnerId)) continue;
-      if (this.reviewQueueNoRepository.has(session.id)) continue;
-      if (!session.worktreePath && !runnerSupportsProtocol(
-        this.db.getRunner(session.runnerId)?.protocolVersion,
-        "gitVisibility",
-      )) continue;
-      const runnerGroup = byRunner.get(session.runnerId) ?? new Map<string, SessionView[]>();
-      // Linked worktrees have distinct state. Primary sessions can share a sample only when their
-      // resolved execution directories match; workspaceId is filing state and may have changed
-      // without moving the runner-owned session.
-      const executionPath = this.db.getAdHocWorkspacePath(session.id) ??
-        (session.workspaceId ? this.db.getWorkspacePath(session.runnerId, session.workspaceId) : null);
-      const key = session.worktreePath
-        ? `worktree:${normalizeGitCheckoutPath(session.worktreePath)}`
-        : executionPath
-          ? `primary:${normalizeGitCheckoutPath(executionPath)}`
-          : `primary:session:${session.id}`;
-      const sameCheckout = runnerGroup.get(key) ?? [];
-      sameCheckout.push(session);
-      runnerGroup.set(key, sameCheckout);
-      byRunner.set(session.runnerId, runnerGroup);
-    }
-
-    await Promise.all([...byRunner.entries()].map(async ([runnerId, checkoutGroups]) => {
-      const groups = [...checkoutGroups.values()].map((sameCheckout) => sameCheckout.sort((a, b) => b.updatedAt - a.updatedAt));
-      const priority = (group: SessionView[]): number => {
-        return group.some((session) => {
-          const verdict = this.db.latestReviewDecision(session.id);
-          const findings = this.db.reviewFindingSummary(session.id);
-          return approvals.has(session.id) || (verdict && verdict.outcome !== "allowed") || findings.unresolved > 0;
-        }) ? 1 : 0;
-      };
-      const ranked = groups.map((group) => ({ group, priority: priority(group) }));
-      const urgent = ranked.filter((candidate) => candidate.priority > 0)
-        .sort((a, b) => b.group[0]!.updatedAt - a.group[0]!.updatedAt);
-      const ordinary = ranked.filter((candidate) => candidate.priority === 0)
-        .sort((a, b) => b.group[0]!.updatedAt - a.group[0]!.updatedAt);
-      const selected = urgent.slice(0, maxSamplesPerRunner).map((candidate) => candidate.group);
-      const remaining = maxSamplesPerRunner - selected.length;
-      if (remaining > 0 && ordinary.length > 0) {
-        const offset = (this.reviewQueueSampleOffsets.get(runnerId) ?? 0) % ordinary.length;
-        for (let index = 0; index < Math.min(remaining, ordinary.length); index++) {
-          selected.push(ordinary[(offset + index) % ordinary.length]!.group);
-        }
-        this.reviewQueueSampleOffsets.set(runnerId, (offset + remaining) % ordinary.length);
-      }
-      for (const group of selected) {
-        const session = group[0]!;
-        for (const member of group) sampled.add(member.id);
-        const requestId = randomUUID();
-        try {
-          const result = await this.hub.requestFromRunner(
-            runnerId,
-            requestId,
-            {
-              type: "git_action",
-              requestId,
-              sessionId: session.id,
-              ...(session.worktreePath ? { worktreePath: session.worktreePath } : {}),
-              action: { kind: "summary" },
-              timeoutMs: 30_000,
-            },
-            30_000,
-          );
-          if (result.type === "git_result" && result.ok && result.data?.summary) {
-            for (const member of group) {
-              this.reviewQueueNoRepository.delete(member.id);
-              summaries.set(member.id, result.data.summary);
-            }
-          } else if (result.type === "git_result" && !result.ok && result.code === "GIT_NO_REPOSITORY") {
-            for (const member of group) this.reviewQueueNoRepository.add(member.id);
-          }
-        } catch { /* unavailable is represented by a missing summary below */ }
-      }
-    }));
-
-    const items: ReviewQueueItem[] = [];
-    for (const session of sessions) {
-      const runnerOnline = this.hub.isRunnerOnline(session.runnerId);
-      const approval = approvals.get(session.id);
-      const reviewerVerdict = this.db.latestReviewDecision(session.id);
-      const findings = this.db.reviewFindingSummary(session.id);
-      const summary = summaries.get(session.id) ?? null;
-      const checks = summary?.checks;
-      const gitReadable = !this.reviewQueueNoRepository.has(session.id) && (Boolean(session.worktreePath) || runnerSupportsProtocol(
-        this.db.getRunner(session.runnerId)?.protocolVersion,
-        "gitVisibility",
-      ));
-      // A running/queued/input-required turn may still be editing the tree. Its approval/check
-      // blockers remain useful, but it cannot truthfully enter the "changes ready" lane until
-      // the owning turn settles.
-      const turnSettled = ["idle", "completed", "failed", "stopped"].includes(session.status);
-      const changesReady = turnSettled && Boolean(
-        summary?.hasChanges || (summary?.ahead ?? 0) > 0 || summary?.pr?.state.toUpperCase() === "OPEN",
-      );
-      // A request-bound verdict reviewed one provider permission, not the branch. It remains
-      // visible provenance but cannot satisfy the code-review completion requirement.
-      const codeReviewAllowed = reviewerVerdict?.outcome === "allowed" && !reviewerVerdict.requestId;
-      const actionableVerdict = reviewerVerdict && reviewerVerdict.outcome !== "allowed";
-      const hasCheckWork = Boolean(checks && (checks.failing > 0 || checks.pending > 0));
-      const summaryUnavailable = Boolean(gitReadable && turnSettled && !summary && (!runnerOnline || sampled.has(session.id)));
-      if (!approval && !changesReady && !hasCheckWork && !actionableVerdict && !summaryUnavailable && findings.unresolved === 0) continue;
-
-      const blockers: ReviewQueueItem["blockers"] = [];
-      if (approval) blockers.push({ kind: "approval_pending", count: 1 });
-      if (checks?.failing) blockers.push({ kind: "checks_failing", count: checks.failing });
-      if (checks?.pending) blockers.push({ kind: "checks_pending", count: checks.pending });
-      if (findings.requiredUnresolved > 0) blockers.push({ kind: "findings_required", count: findings.requiredUnresolved });
-      if (summaryUnavailable) blockers.push({ kind: runnerOnline ? "git_unavailable" : "runner_offline", count: 1 });
-      if (reviewerVerdict?.outcome === "denied") blockers.push({ kind: "review_denied", count: 1 });
-      else if (reviewerVerdict?.outcome === "escalated") blockers.push({ kind: "review_escalated", count: 1 });
-      else if ((reviewerVerdict && reviewerVerdict.outcome !== "allowed") || (changesReady && !codeReviewAllowed)) {
-        blockers.push({ kind: "review_incomplete", count: 1 });
-      }
-
-      const onlyReviewIncomplete = blockers.length === 1 && blockers[0]?.kind === "review_incomplete";
-      items.push({
-        sessionId: session.id,
-        sessionTitle: session.title,
-        runnerId: session.runnerId,
-        runnerOnline,
-        ...(session.workspaceId ? { workspaceId: session.workspaceId } : {}),
-        ...(session.workspaceName ? { workspaceName: session.workspaceName } : {}),
-        ...(session.agentId ? { agentId: session.agentId } : {}),
-        ...(session.agentName ? { agentName: session.agentName } : {}),
-        updatedAt: session.updatedAt,
-        summary,
-        summaryState: summary
-          ? "available"
-          : this.reviewQueueNoRepository.has(session.id)
-            ? "not_applicable"
-          : !runnerOnline
-            ? "offline"
-            : sampled.has(session.id)
-              ? "unavailable"
-              : "not_sampled",
-        changesReady,
-        ...(approval ? { approval } : {}),
-        ...(reviewerVerdict ? { reviewerVerdict } : {}),
-        findings,
-        blockers,
-        completion: blockers.length === 0
-          ? (findings.unresolved > 0 ? "needs_review" : "ready")
-          : onlyReviewIncomplete ? "needs_review" : "blocked",
-      });
-    }
-
-    const rank = { blocked: 0, needs_review: 1, ready: 2 } as const;
-    return items.sort((a, b) => rank[a.completion] - rank[b.completion] || b.updatedAt - a.updatedAt || a.sessionId.localeCompare(b.sessionId));
   }
 
   rejectApprovalQueue(
@@ -4109,7 +3920,6 @@ export class SessionsService {
       if (capabilityFailure) return capabilityFailure;
     }
 
-    this.reviewQueueNoRepository.delete(sessionId);
 
     const now = Date.now();
     const restartLaunchId = hasStopIntent ? randomUUID() : undefined;
@@ -4531,7 +4341,6 @@ export class SessionsService {
       if (launchPath) this.db.setSessionWorkspacePath(sessionId, launchPath);
     }
     this.db.setSessionWorkspace(sessionId, workspaceId, Date.now());
-    this.reviewQueueNoRepository.delete(sessionId);
     const updated = this.db.getSession(sessionId)!;
     this.hub.sessionChanged(updated);
     if (session.projectId && session.projectId !== updated.projectId) this.hub.projectChangedById(session.projectId);
@@ -4812,7 +4621,6 @@ export class SessionsService {
       this.hub.sendToRunner(session.runnerId, { type: "delete_session", sessionId: session.id });
     }
     this.db.deleteSession(session.id);
-    this.reviewQueueNoRepository.delete(session.id);
     this.hub.sessionRemoved(session.id);
     for (const pod of pods) {
       const updatedPod = this.db.reconcilePodAfterMembershipLoss(pod.id, Date.now());
