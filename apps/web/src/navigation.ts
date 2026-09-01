@@ -42,27 +42,35 @@ export const SETTINGS_SECTIONS: ReadonlyArray<{ id: SettingsSection; title: stri
 
 export type ConnectionSection = "instances" | "machines" | "people";
 
-export type GlobalViewName = Extract<View["name"], "inbox" | "projects" | "board" | "runs" | "pods" | "automations" | "usage" | "runners" | "archived" | "skills">;
+export type GlobalViewName = Extract<View["name"], "inbox" | "projects" | "runs" | "pods" | "automations" | "usage" | "runners" | "archived" | "skills">;
 
-/** One vocabulary for every global destination, shared by the rail, header, and palette. */
+/** One vocabulary for every global destination, shared by the rail, header, and palette.
+ *
+ * The board is deliberately NOT a destination: it is the board mode of Sessions (the `inbox`
+ * entry), reachable through the in-view toggle, the `b` shortcut, `/board`, and the palette's
+ * extra Board entry below. The `inbox` name is retained internally so saved preferences and
+ * routes survive the visible rename to Sessions.
+ *
+ * Ordered in three clusters — work surfaces (Sessions, Automations, and the gated agent-work
+ * views), infrastructure (Connections, Skills), then management (Projects, Archived, Usage) —
+ * because the rail numbers double as the bare digit shortcuts: position IS the binding, so the
+ * order is a product decision, not alphabetical. Day-to-day project access happens through the
+ * Sessions split tabs, which is why the Projects page sits in the management tail. */
 export const GLOBAL_VIEW_ITEMS: ReadonlyArray<{
   name: GlobalViewName;
   label: string;
   title: string;
   paletteLabel: string;
 }> = [
-  { name: "inbox", label: "Inbox", title: "Inbox", paletteLabel: "Inbox" },
-  { name: "projects", label: "Projects", title: "Projects", paletteLabel: "Projects" },
-  { name: "board", label: "Board", title: "Board", paletteLabel: "Board" },
+  { name: "inbox", label: "Sessions", title: "Sessions", paletteLabel: "Sessions" },
+  { name: "automations", label: "Automations", title: "Automations", paletteLabel: "Automations" },
   { name: "runs", label: "Multi-Agent", title: "Multi-Agent Runs", paletteLabel: "Multi-Agent Runs" },
   { name: "pods", label: "Pods", title: "Collaboration Pods", paletteLabel: "Collaboration Pods" },
-  { name: "automations", label: "Automations", title: "Automations", paletteLabel: "Automations" },
-  { name: "usage", label: "Usage", title: "Usage & Cost", paletteLabel: "Usage & Cost" },
   { name: "runners", label: "Connections", title: "Connections", paletteLabel: "Connections" },
-  { name: "archived", label: "Archived", title: "Archived Sessions", paletteLabel: "Archived Sessions" },
-  // Appended rather than slotted beside Automations: the rail numbers double as the bare digit
-  // shortcuts, so inserting mid-list would silently rebind every later destination.
   { name: "skills", label: "Skills", title: "Agent Skills", paletteLabel: "Agent Skills" },
+  { name: "projects", label: "Projects", title: "Projects", paletteLabel: "Projects" },
+  { name: "archived", label: "Archived", title: "Archived Sessions", paletteLabel: "Archived Sessions" },
+  { name: "usage", label: "Usage", title: "Usage & Cost", paletteLabel: "Usage & Cost" },
 ];
 
 /**
@@ -75,9 +83,11 @@ export const GLOBAL_VIEW_ITEMS: ReadonlyArray<{
  */
 export function viewTitle(view: View): string {
   switch (view.name) {
+    // Board mode belongs to the Sessions destination; its page title matches the rail label.
+    case "board":
+      return GLOBAL_VIEW_ITEMS.find((item) => item.name === "inbox")!.title;
     case "inbox":
     case "projects":
-    case "board":
     case "runs":
     case "pods":
     case "automations":
@@ -108,6 +118,9 @@ export function viewTitle(view: View): string {
  * Settings entry beside the gear.
  */
 export const EXTRA_PALETTE_DESTINATIONS: ReadonlyArray<{ label: string; view: View }> = [
+  // The board left the rail when it became a mode of Sessions, but the palette keeps a direct
+  // entry so "board" still matches a searchable destination.
+  { label: "Board", view: { name: "board" } },
   { label: "Settings", view: { name: "settings" } },
   ...SETTINGS_SECTIONS.map((section) => ({
     label: `Settings — ${section.title}`,

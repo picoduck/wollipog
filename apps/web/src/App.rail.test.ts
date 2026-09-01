@@ -102,14 +102,14 @@ test("live-follow status owns a reserved transcript strip with a compact centere
 test("the global keyboard layer wires rail navigation, Inbox search, creation, and F6 zones", () => {
   const navigationIds = [
     "navigate-inbox",
-    "navigate-projects",
-    "navigate-board",
+    "navigate-automations",
     "navigate-runs",
     "navigate-pods",
-    "navigate-automations",
-    "navigate-usage",
     "navigate-connections",
+    "navigate-skills",
+    "navigate-projects",
     "navigate-archived",
+    "navigate-usage",
   ];
   for (const id of [
     ...navigationIds,
@@ -198,8 +198,8 @@ test("Inbox project tabs stay balanced, hide overflow chrome, and reveal context
 
 test("Inbox unifies Session and Project creation while the shell exposes no duplicate action", () => {
   assert.match(rail, /projects:\s*ProjectsIcon/);
-  assert.match(rail, /if \(view\.name === "session"\) return "inbox"/,
-    "session detail remains owned by Inbox");
+  assert.match(rail, /if \(view\.name === "session" \|\| view\.name === "board"\) return "inbox"/,
+    "session detail and board mode remain owned by Sessions");
   assert.doesNotMatch(rail, /view\.name === "projects"[\s\S]*return "inbox"/,
     "Projects owns its rail active state");
   assert.doesNotMatch(rail, /onNewSession|rail-action|PlusIcon/,
@@ -493,15 +493,17 @@ test("Shortcut Reference restores focus after a breakpoint change", () => {
 test("the Inbox reminder filter joins option borders without a wrapper outline", () => {
   assert.match(inbox, /<SegmentedControl<ReminderInboxMode>[\s\S]*className="inbox-reminder-view"/,
     "the reminder filter must opt into the scoped joined treatment");
-  assert.match(css, /\.ui-seg\.inbox-reminder-view \{[^}]*isolation: isolate;[^}]*gap: 0;[^}]*padding: 0;[^}]*border: 0;[^}]*background: transparent/,
+  assert.match(inbox, /<SegmentedControl<SessionsViewMode>[\s\S]*className="sessions-view-toggle"/,
+    "the Sessions List/Board toggle shares the joined treatment");
+  assert.match(css, /\.ui-seg\.inbox-reminder-view,\s*\.ui-seg\.sessions-view-toggle \{[^}]*isolation: isolate;[^}]*gap: 0;[^}]*padding: 0;[^}]*border: 0;[^}]*background: transparent/,
     "the reminder wrapper must not paint an outer outline or nested gap");
-  assert.match(css, /\.inbox-reminder-view \.ui-seg-option \{[^}]*border-color: var\(--control-outline\)/,
+  assert.match(css, /\.inbox-reminder-view \.ui-seg-option,\s*\.sessions-view-toggle \.ui-seg-option \{[^}]*border-color: var\(--control-outline\)/,
     "each reminder choice must carry its own boundary");
-  assert.match(css, /\.inbox-reminder-view \.ui-seg-option \+ \.ui-seg-option \{ margin-left: -1px; \}/,
+  assert.match(css, /\.inbox-reminder-view \.ui-seg-option \+ \.ui-seg-option,\s*\.sessions-view-toggle \.ui-seg-option \+ \.ui-seg-option \{ margin-left: -1px; \}/,
     "adjacent reminder borders must collapse to one seam");
-  assert.match(css, /\.inbox-reminder-view \.ui-seg-option\.is-selected \{[^}]*z-index: var\(--z-sticky\);[^}]*border-color: var\(--accent\)/,
+  assert.match(css, /\.inbox-reminder-view \.ui-seg-option\.is-selected,\s*\.sessions-view-toggle \.ui-seg-option\.is-selected \{[^}]*z-index: var\(--z-sticky\);[^}]*border-color: var\(--accent\)/,
     "the selected boundary must paint above its neighbor");
-  assert.match(css, /\.inbox-reminder-view \.ui-seg-option:focus-visible \{[^}]*z-index: var\(--z-dock\)/,
+  assert.match(css, /\.inbox-reminder-view \.ui-seg-option:focus-visible,\s*\.sessions-view-toggle \.ui-seg-option:focus-visible \{[^}]*z-index: var\(--z-dock\)/,
     "the keyboard focus ring must paint above every segment");
   assert.match(css, /\.ui-seg \{[^}]*gap: 2px;[^}]*padding: 2px;[^}]*border: 1px solid var\(--control-outline\)/,
     "unrelated shared segmented controls must retain their established appearance");

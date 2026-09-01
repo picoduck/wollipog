@@ -4,6 +4,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import { Rail } from "./Rail.js";
+import { saveSessionsViewMode } from "../sessions-view-mode.js";
 import type { View } from "../navigation.js";
 
 const domWindow = new Window();
@@ -19,6 +20,7 @@ const priorElementGlobals = {
   HTMLButtonElement: (globalThis as Record<string, unknown>)["HTMLButtonElement"],
   KeyboardEvent: (globalThis as Record<string, unknown>)["KeyboardEvent"],
 };
+const priorLocalStorage = (globalThis as Record<string, unknown>)["localStorage"];
 
 before(() => {
   Object.defineProperty(globalThis, "window", { configurable: true, writable: true, value: domWindow });
@@ -28,6 +30,8 @@ before(() => {
   Object.defineProperty(globalThis, "HTMLButtonElement", { configurable: true, writable: true, value: domWindow.HTMLButtonElement });
   Object.defineProperty(globalThis, "KeyboardEvent", { configurable: true, writable: true, value: domWindow.KeyboardEvent });
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, writable: true, value: true });
+  // The Sessions item resolves its persisted list/board mode from instance storage at click time.
+  Object.defineProperty(globalThis, "localStorage", { configurable: true, writable: true, value: domWindow.localStorage });
 });
 
 after(() => {
@@ -38,6 +42,7 @@ after(() => {
   Object.defineProperty(globalThis, "HTMLButtonElement", { configurable: true, writable: true, value: priorElementGlobals.HTMLButtonElement });
   Object.defineProperty(globalThis, "KeyboardEvent", { configurable: true, writable: true, value: priorElementGlobals.KeyboardEvent });
   Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, writable: true, value: priorActEnvironment });
+  Object.defineProperty(globalThis, "localStorage", { configurable: true, writable: true, value: priorLocalStorage });
 });
 
 test("rail exposes every destination, nested active states, live badges, and persistent actions", async () => {
@@ -61,35 +66,43 @@ test("rail exposes every destination, nested active states, live badges, and per
 
   await render({ name: "session", id: "session-1" });
   const links = [...container.querySelectorAll<HTMLAnchorElement>(".rail-destinations a")];
-  assert.equal(links.length, 10);
+  assert.equal(links.length, 9);
   assert.deepEqual(links.map((link) => link.getAttribute("href")), [
-    "/", "/projects", "/board", "/runs", "/pods", "/automations", "/usage", "/connections/machines", "/archived", "/skills",
+    "/", "/automations", "/runs", "/pods", "/connections/machines", "/skills", "/projects", "/archived", "/usage",
   ]);
-  // The tenth destination advertises no keycap: the bare digit shortcuts stop at 9.
-  assert.equal(links[9]!.querySelector(".rail-number"), null);
-  assert.doesNotMatch(links[9]!.getAttribute("aria-label") ?? "", /\(10\)/);
-  assert.ok(links[8]!.querySelector(".rail-number"), "numbered destinations keep their keycaps");
+  // With Board folded into Sessions (#499), all nine destinations carry a digit keycap.
+  assert.equal(links[8]!.querySelector(".rail-number")?.textContent, "9",
+    "the management tail ends at Usage with the ninth digit");
+  assert.match(links[0]!.getAttribute("aria-label") ?? "", /^Sessions/);
   assert.match(links[0]!.getAttribute("aria-label") ?? "", /2 Blocked/);
   assert.match(links[0]!.getAttribute("aria-label") ?? "", /1 Stalled/);
-  assert.match(links[7]!.getAttribute("aria-label") ?? "", /3 Online/);
-  assert.equal(links[0]!.getAttribute("aria-current"), "page", "session detail belongs to Inbox");
+  assert.match(links[4]!.getAttribute("aria-label") ?? "", /3 Online/);
+  assert.equal(links[0]!.getAttribute("aria-current"), "page", "session detail belongs to Sessions");
   assert.equal(links[0]!.querySelector(".rail-badge.blocked")?.getAttribute("aria-hidden"), "true");
   assert.equal(links[0]!.querySelector(".rail-badge.stalled")?.getAttribute("aria-hidden"), "true");
   const summary = container.querySelector<HTMLElement>('[role="status"]')!;
   assert.equal(summary.getAttribute("aria-live"), "polite");
-  assert.match(summary.textContent ?? "", /Inbox: 2 Blocked, 1 Stalled/);
+  assert.match(summary.textContent ?? "", /Sessions: 2 Blocked, 1 Stalled/);
 
   await render({ name: "run", id: "run-1" });
-  assert.equal(container.querySelectorAll<HTMLAnchorElement>(".rail-destinations a")[3]!.getAttribute("aria-current"), "page");
+  assert.equal(container.querySelectorAll<HTMLAnchorElement>(".rail-destinations a")[2]!.getAttribute("aria-current"), "page");
   await render({ name: "pod", id: "pod-1" });
-  assert.equal(container.querySelectorAll<HTMLAnchorElement>(".rail-destinations a")[4]!.getAttribute("aria-current"), "page");
+  assert.equal(container.querySelectorAll<HTMLAnchorElement>(".rail-destinations a")[3]!.getAttribute("aria-current"), "page");
 
   await render({ name: "projects" });
-  assert.equal(container.querySelectorAll<HTMLAnchorElement>(".rail-destinations a")[1]!.getAttribute("aria-current"), "page");
+  assert.equal(container.querySelectorAll<HTMLAnchorElement>(".rail-destinations a")[6]!.getAttribute("aria-current"), "page");
 
-  const board = container.querySelectorAll<HTMLAnchorElement>(".rail-destinations a")[2]!;
-  board.dispatchEvent(new domWindow.MouseEvent("click", { bubbles: true, button: 0 }) as never);
-  assert.deepEqual(navigated.at(-1), { name: "board" });
+  // Board mode is the Sessions destination: it marks Sessions current, and activating the item
+  // reopens whichever mode was last used.
+  await render({ name: "board" });
+  const sessionsItem = container.querySelectorAll<HTMLAnchorElement>(".rail-destinations a")[0]!;
+  assert.equal(sessionsItem.getAttribute("aria-current"), "page", "board mode belongs to Sessions");
+  saveSessionsViewMode("board");
+  sessionsItem.dispatchEvent(new domWindow.MouseEvent("click", { bubbles: true, button: 0 }) as never);
+  assert.deepEqual(navigated.at(-1), { name: "board" }, "activation honors the persisted board mode");
+  saveSessionsViewMode("list");
+  sessionsItem.dispatchEvent(new domWindow.MouseEvent("click", { bubbles: true, button: 0 }) as never);
+  assert.deepEqual(navigated.at(-1), { name: "inbox" }, "and returns to the list when that was last used");
   assert.ok(container.textContent?.includes("Switch Instance"));
   assert.ok(container.textContent?.includes("Settings"));
 
@@ -146,6 +159,10 @@ test("the phone rail hosts destinations plus routed Settings and no nested layer
     const bar = container.querySelector(".rail-destinations")!;
     assert.equal(bar.querySelectorAll("a.rail-item, button.rail-item").length, 5,
       "four destinations plus More — five is the platform convention");
+    assert.deepEqual(
+      [...bar.querySelectorAll<HTMLAnchorElement>("a.rail-item")].map((item) => item.getAttribute("href")),
+      ["/", "/automations", "/connections/machines", "/projects"],
+      "the bar renders its members in canonical rail order");
 
     // Nothing that owns its own overlay may live in the bar or the sheet.
     assert.equal(container.querySelector(".rail-instance"), null);
@@ -159,7 +176,7 @@ test("the phone rail hosts destinations plus routed Settings and no nested layer
     await act(async () => { moreTrigger.click(); });
     const sheet = container.querySelector(".rail-more-sheet")!;
     assert.deepEqual([...sheet.querySelectorAll(".rail-more-item")].map((el) => el.textContent),
-      ["Multi-Agent Runs", "Collaboration Pods", "Automations", "Usage & Cost", "Archived Sessions", "Agent Skills",
+      ["Multi-Agent Runs", "Collaboration Pods", "Agent Skills", "Archived Sessions", "Usage & Cost",
         "Settings"],
       "Settings is the trailing row, after every destination");
     assert.equal(sheet.querySelector(".rail-more-control"), null,

@@ -44,6 +44,8 @@ import {
 import { SnoozeDialog } from "./SnoozeDialog.js";
 import type { NewSessionPreset } from "./NewSessionDialog.js";
 import { SearchIcon } from "./Icons.js";
+import { Board } from "./Board.js";
+import type { SessionsViewMode } from "../sessions-view-mode.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { dispatchVirtualViewportIntent } from "../viewport-intent.js";
 import type { PreviewNavigationControls } from "./usePreviewNavigationRegistration.js";
@@ -90,6 +92,8 @@ export function pageInboxPreview(
 }
 
 export interface InboxViewProps {
+  /** The Sessions destination's presentation: the project-grouped list or the status board. */
+  viewMode?: SessionsViewMode;
   expandedSessionId?: string | null;
   sourceLocation?: SourceLocation;
   /** App-shell control cluster forwarded into the expanded session's unified bar on desktop. */
@@ -106,6 +110,7 @@ export interface InboxViewProps {
 }
 
 export function InboxView({
+  viewMode = "list",
   expandedSessionId = null,
   sourceLocation,
   topbarControls,
@@ -159,7 +164,10 @@ export function InboxView({
   const [windowBlurred, setWindowBlurred] = useState(() => !document.hasFocus());
   const [documentHidden, setDocumentHidden] = useState(() => document.visibilityState === "hidden");
   const inboxAway = windowBlurred || documentHidden;
-  const browsingOrderLease = expandedSessionId === null && (isMobile || !inboxAway);
+  // Board mode renders no list rows, so the browsing-order lease has nothing to protect there —
+  // and a hold captured on the board would present a stale "Apply New Order" back in list mode.
+  const boardMode = viewMode === "board" && expandedSessionId === null;
+  const browsingOrderLease = expandedSessionId === null && !boardMode && (isMobile || !inboxAway);
   const browsingOrderLeaseRef = useRef(browsingOrderLease);
   browsingOrderLeaseRef.current = browsingOrderLease;
   const [seen, setSeen] = useState(() => loadSeen(instanceScope));
@@ -387,7 +395,9 @@ export function InboxView({
   useEffect(() => {
     if (seenTimerRef.current !== null) window.clearTimeout(seenTimerRef.current);
     seenTimerRef.current = null;
-    if (!selectedSession) return;
+    // Board mode renders no selected preview, so dwelling there must not mark the invisible
+    // list selection as read while its activity keeps arriving.
+    if (!selectedSession || boardMode) return;
     const sessionId = selectedSession.id;
     const seenAt = selectedSession.lastEventAt ?? selectedSession.updatedAt;
     seenTimerRef.current = window.setTimeout(() => {
@@ -400,7 +410,7 @@ export function InboxView({
       if (seenTimerRef.current !== null) window.clearTimeout(seenTimerRef.current);
       seenTimerRef.current = null;
     };
-  }, [instanceScope, selectedSession?.id, selectedSession?.lastEventAt, selectedSession?.updatedAt]);
+  }, [boardMode, instanceScope, selectedSession?.id, selectedSession?.lastEventAt, selectedSession?.updatedAt]);
 
   const normalizedQuery = deferredQuery.trim().toLocaleLowerCase();
   const liveEntries = useMemo<InboxListEntry[]>(() => (activeSplit?.sessions ?? [])
@@ -460,18 +470,21 @@ export function InboxView({
   }, [heldOrder, liveEntries]);
   const displayedIds = useMemo(() => entries.map((entry) => entry.session.id), [entries]);
   displayedIdsRef.current = displayedIds;
-  const orderUpdateAvailable = !isMobile && heldOrder !== null && (
+  const orderUpdateAvailable = !isMobile && !boardMode && heldOrder !== null && (
     displayedIds.length !== liveIds.length || displayedIds.some((id, index) => id !== liveIds[index])
   );
   const displayedSelection = repairedSelection && displayedIds.includes(repairedSelection) ? repairedSelection : null;
   const displayedSelectedSession = displayedSelection ? sessions.get(displayedSelection) ?? null : null;
   const expanded = expandedSessionId !== null;
   useEffect(() => {
-    if (!expanded) return;
+    // Board mode clears like expansion does: unmounting the list can swallow pointerleave, and a
+    // stranded pointer id would block the lease release while liveIds kept extending the hold —
+    // activity received on the board would then resurface in stale list order.
+    if (!expanded && !boardMode) return;
     activePointerIdsRef.current.clear();
     targetPointerIdsRef.current.clear();
     clearHeldOrder();
-  }, [clearHeldOrder, expanded]);
+  }, [boardMode, clearHeldOrder, expanded]);
   const surfaceSessionId = expandedSessionId ?? selectedSession?.id ?? null;
 
   useLayoutEffect(() => {
@@ -853,7 +866,10 @@ export function InboxView({
       pageInboxPreview(scroll, "previous", previewNavigationRef.current?.beginProgrammaticScroll);
     },
   }), [activeSplit?.key, archive, decide, displayedSelection, expand, moveSelection, selectSplit, sessionRemindersSupported, setUnread, showToast, splits, togglePin]);
-  useInboxKeys(!isMobile && !expanded, keyActions);
+  // Board mode has no row selection, so the list's j/k/a/d… vocabulary would act on an invisible
+  // row; only the shared toolbar (tabs, search, toggle) stays keyboard-reachable there.
+  useInboxKeys(!isMobile && !expanded && !boardMode, keyActions);
+  const boardSessions = useMemo(() => liveEntries.map((entry) => entry.session), [liveEntries]);
 
   const ratio = dragRatio ?? inbox.splitRatio;
   const activeProjectId = activeSplit?.project?.kind === "durable" ? activeSplit.project.project.id : undefined;
@@ -881,11 +897,11 @@ export function InboxView({
   };
 
   return (
-    <div className={`inbox-view${expanded ? " expanded" : ""}`} ref={viewRef} data-focus-zone={expanded ? "detail" : "list"}>
+    <div className={`inbox-view${expanded ? " expanded" : ""}${boardMode ? " board-mode" : ""}`} ref={viewRef} data-focus-zone={expanded ? "detail" : "list"}>
       <section
         className="inbox-list-pane"
-        style={{ height: isMobile ? "100%" : `${ratio * 100}%` }}
-        aria-label="Command Inbox"
+        style={{ height: isMobile || boardMode ? "100%" : `${ratio * 100}%` }}
+        aria-label="Sessions"
         aria-hidden={expanded || undefined}
         inert={expanded || undefined}
       >
@@ -948,6 +964,20 @@ export function InboxView({
             })}
           </div>
           <div className="inbox-toolbar-actions">
+            <SegmentedControl<SessionsViewMode>
+              className="sessions-view-toggle"
+              label="Sessions View"
+              value={viewMode}
+              options={[
+                { value: "list", label: "List" },
+                { value: "board", label: "Board" },
+              ]}
+              onChange={(mode) => {
+                if (mode === viewMode) return;
+                // The route IS the mode; the App-level view effect persists it as last-used.
+                navigate(mode === "board" ? { name: "board" } : { name: "inbox" });
+              }}
+            />
             <span className="sr-only" aria-live="polite" aria-atomic="true">
               {orderUpdateAvailable ? "A newer Inbox order is available." : ""}
             </span>
@@ -995,6 +1025,18 @@ export function InboxView({
             </label>
           </div>
         </div>
+        {boardMode ? (
+          <Board
+            sessions={boardSessions}
+            searchActive={normalizedQuery.length > 0 || (activeSplit?.key ?? null) !== null || reminderMode === "snoozed"}
+            onShowAll={() => {
+              exitSearch();
+              selectSplit(null);
+              setReminderMode("ordinary");
+            }}
+            onNewSession={() => onNewSession?.(activeNewSessionPreset)}
+          />
+        ) : (
         <InboxList
           ref={captureListRef}
           entries={entries}
@@ -1052,6 +1094,8 @@ export function InboxView({
           onPointerTargetChange={handlePointerTargetChange}
           onPointerPressChange={handlePointerPressChange}
         />
+        )}
+        {!boardMode && (
         <footer className="inbox-activity-footer" aria-label="Inbox Status and Shortcuts">
           <div className="inbox-activity-summary" aria-label="Inbox Activity Summary">
             <span>{activityCounts.running} Running</span>
@@ -1083,9 +1127,10 @@ export function InboxView({
             } : {})}
           />
         </footer>
+        )}
       </section>
 
-      {(!isMobile || expanded) && (
+      {!boardMode && (!isMobile || expanded) && (
         <>
           <div
             className="inbox-splitter"

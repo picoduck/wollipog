@@ -166,8 +166,8 @@ test("PR2 Inbox shortcuts are registered under the Inbox scope", () => {
     "inbox-approve", "inbox-deny", "inbox-archive", "inbox-snooze", "inbox-pin", "inbox-unread",
     "inbox-reply", "inbox-page-down", "inbox-page-up", "inbox-follow-latest", "inbox-follow-latest-end",
   ];
-  assert.deepEqual(SHORTCUTS.filter((item) => item.scope === "Inbox").map((item) => item.id), expected);
-  assert.equal(SHORTCUTS.filter((item) => expected.includes(item.id)).every((item) => item.group === "Inbox"), true);
+  assert.deepEqual(SHORTCUTS.filter((item) => item.scope === "Sessions List").map((item) => item.id), expected);
+  assert.equal(SHORTCUTS.filter((item) => expected.includes(item.id)).every((item) => item.group === "Sessions List"), true);
   assert.equal(shortcut("inbox-page-down").label, "Page Down");
   assert.equal(shortcut("inbox-page-up").label, "Page Up");
   assert.equal(shortcut("inbox-follow-latest").label, "Follow Live Output");
@@ -197,14 +197,15 @@ test("Session Reading shortcuts are registered in their contextual reference gro
 test("PR4 rail, search, create, and focus-zone shortcuts replace the retired sidebar binding", () => {
   const expected = [
     ["navigate-inbox", "1"],
-    ["navigate-projects", "2"],
-    ["navigate-board", "3"],
-    ["navigate-runs", "4"],
-    ["navigate-pods", "5"],
-    ["navigate-automations", "6"],
-    ["navigate-usage", "7"],
-    ["navigate-connections", "8"],
-    ["navigate-archived", "9"],
+    ["navigate-automations", "2"],
+    ["navigate-runs", "3"],
+    ["navigate-pods", "4"],
+    ["navigate-connections", "5"],
+    ["navigate-skills", "6"],
+    ["navigate-projects", "7"],
+    ["navigate-archived", "8"],
+    ["navigate-usage", "9"],
+    ["toggle-sessions-view", "b"],
     ["focus-inbox-search", "/"],
     ["new-session", "c"],
     ["focus-next-zone", "F6"],
@@ -219,14 +220,13 @@ test("global rail numbering stays aligned with its navigation shortcuts", () => 
   const shortcutIdByView = {
     inbox: "navigate-inbox",
     projects: "navigate-projects",
-    board: "navigate-board",
     runs: "navigate-runs",
     pods: "navigate-pods",
     automations: "navigate-automations",
     usage: "navigate-usage",
     runners: "navigate-connections",
     archived: "navigate-archived",
-    skills: null,
+    skills: "navigate-skills",
   } as const;
   for (const [index, item] of GLOBAL_VIEW_ITEMS.entries()) {
     const id = shortcutIdByView[item.name];

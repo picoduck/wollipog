@@ -18,7 +18,8 @@ function focusTargetForZone(targetDocument: Document, zone: FocusZone): HTMLElem
   if (zone === "rail") {
     return root.querySelector<HTMLElement>('[aria-current="page"], button:not(:disabled), [href]') ?? root;
   }
-  if (zone === "list") return root.querySelector<HTMLElement>(".inbox-list, .inbox-zero") ?? root;
+  // Board mode replaces the list with the kanban canvas; F6 still needs a landing spot there.
+  if (zone === "list") return root.querySelector<HTMLElement>(".inbox-list, .inbox-zero, .board-wrap") ?? root;
   if (zone === "detail") return root.querySelector<HTMLElement>(".detail-scroll, .inbox-preview-empty") ?? root;
   if (root.matches('[tabindex]:not([tabindex="-1"])')) return root;
   return root.querySelector<HTMLElement>(
@@ -55,7 +56,7 @@ export function shortcutScopeForFocus({
   sessionReading?: boolean;
 }): ShortcutScope {
   const zone = focusZoneForElement(activeElement);
-  if (viewName === "inbox" && (zone === null || zone === "list" || zone === "detail")) return "Inbox";
+  if (viewName === "inbox" && (zone === null || zone === "list" || zone === "detail")) return "Sessions List";
   if (viewName === "session" && sessionReading && (zone === null || zone === "detail")) return "Session Reading";
   return viewName === "session" ? "Session" : "Global";
 }
@@ -103,7 +104,8 @@ export function escapeOwner(
   if (active instanceof Element && active.closest(".composer")) return "composer";
   if (viewName === "settings" && inTypingContext(targetDocument)) return "settings-input";
   if (viewName === "session") return "session-reading";
-  if (viewName === "inbox" && inboxFilterActive) return "inbox-filter";
+  // Board mode shares the Sessions search box, so Escape clears its query the same way.
+  if ((viewName === "inbox" || viewName === "board") && inboxFilterActive) return "inbox-filter";
   if (viewName === "settings") return "settings";
   return null;
 }

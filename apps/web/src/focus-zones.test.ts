@@ -40,8 +40,8 @@ test("focus zones resolve contextual Inbox and session-reading scopes", () => {
 
   assert.equal(focusZoneForElement(listButton), "list");
   assert.equal(focusZoneForElement(detailButton), "detail");
-  assert.equal(shortcutScopeForFocus({ viewName: "inbox", activeElement: listButton }), "Inbox");
-  assert.equal(shortcutScopeForFocus({ viewName: "inbox", activeElement: detailButton }), "Inbox");
+  assert.equal(shortcutScopeForFocus({ viewName: "inbox", activeElement: listButton }), "Sessions List");
+  assert.equal(shortcutScopeForFocus({ viewName: "inbox", activeElement: detailButton }), "Sessions List");
   assert.equal(shortcutScopeForFocus({ viewName: "inbox", activeElement: railButton }), "Global");
   assert.equal(shortcutScopeForFocus({ viewName: "session", activeElement: detailButton, sessionReading: true }), "Session Reading");
   assert.equal(shortcutScopeForFocus({ viewName: "session", activeElement: detailButton }), "Session");
@@ -108,7 +108,10 @@ test("Escape ownership follows one ordered rung and preserves the terminal bound
   composerInput.blur();
   assert.equal(escapeOwner(escape(), { document: window.document, viewName: "session" }), "session-reading");
   assert.equal(escapeOwner(escape(), { document: window.document, viewName: "inbox", inboxFilterActive: true }), "inbox-filter");
+  assert.equal(escapeOwner(escape(), { document: window.document, viewName: "board", inboxFilterActive: true }), "inbox-filter",
+    "board mode shares the Sessions search box, so Escape clears its query too");
   assert.equal(escapeOwner(escape(), { document: window.document, viewName: "inbox" }), null);
+  assert.equal(escapeOwner(escape(), { document: window.document, viewName: "board" }), null);
 
   const settingsInput = window.document.createElement("input");
   const settingsButton = window.document.createElement("button");

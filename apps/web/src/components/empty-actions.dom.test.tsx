@@ -10,7 +10,6 @@ import type {
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { browserInstanceManager, InstancesContextProvider, type InstanceManager } from "../instances-context.js";
-import { resetExperimentFlagsForTest, setExperimentFlag } from "../experiments.js";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
@@ -51,6 +50,14 @@ for (const [name, value] of Object.entries({
   // honest model of that, and the list falls back to rendering its items.
   ResizeObserver: class { observe() {} unobserve() {} disconnect() {} },
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+
+/** The Sessions view owns board scoping now (split, query, reminder mode); this harness supplies
+ * what it would: the store's unarchived sessions with no extra narrowing. */
+function BoardHarness({ onNewSession }: { onNewSession: () => void }) {
+  const sessions = useStoreSelector((s) => s.sessions);
+  const scoped = React.useMemo(() => [...sessions.values()].filter((s) => !s.archived), [sessions]);
+  return <Board sessions={scoped} searchActive={false} onShowAll={() => {}} onNewSession={onNewSession} />;
+}
 
 const runner: RunnerView = {
   runnerId: "runner-1",
@@ -238,7 +245,7 @@ test("a board emptied by a filter offers to clear the filter, not to create", as
   // Yet" and offered New Session — which creates on the dialog's default Machine, leaves the filter
   // in place, and returns the user to the same empty board.
   let created = 0;
-  const { container, socket, unmount } = await mount({}, <Board onOpenReview={() => {}} onNewSession={() => { created += 1; }} />);
+  const { container, socket, unmount } = await mount({}, <BoardHarness onNewSession={() => { created += 1; }} />);
   await act(async () => { socket.push(snapshot({ sessions: [session] })); });
 
   assert.equal(container.querySelector(".empty"), null, "one unfiltered session is not an empty board");
@@ -304,7 +311,7 @@ test("a remote instance with no machines is not offered local setup", async () =
 test("a genuinely empty board still offers to create", async () => {
   // The other half of the same branch: narrowing the filtered case must not swallow the real one.
   let created = 0;
-  const { container, socket, unmount } = await mount({}, <Board onOpenReview={() => {}} onNewSession={() => { created += 1; }} />);
+  const { container, socket, unmount } = await mount({}, <BoardHarness onNewSession={() => { created += 1; }} />);
   await act(async () => { socket.push(snapshot({ sessions: [] })); });
 
   assert.equal(container.querySelector(".empty-title")?.textContent, "No Sessions Yet");
@@ -313,35 +320,6 @@ test("a genuinely empty board still offers to create", async () => {
   await act(async () => { fireDomEvent.click(action as never); });
   assert.equal(created, 1);
   await unmount();
-});
-
-test("the Board review queue is disabled by default and does not request its projection", async () => {
-  localStorage.clear();
-  resetExperimentFlagsForTest();
-  let reviewQueueRequests = 0;
-  const client = {
-    reviewQueue: async () => {
-      reviewQueueRequests += 1;
-      return { items: [] };
-    },
-  } as unknown as Partial<ApiClient>;
-
-  const disabled = await mount(client, <Board onOpenReview={() => {}} onNewSession={() => {}} />);
-  await act(async () => { disabled.socket.push(snapshot({ sessions: [session] })); });
-  await act(async () => { await Promise.resolve(); });
-  assert.equal(reviewQueueRequests, 0, "loading the Board must not sample reviews while the flag is off");
-  assert.equal(disabled.container.querySelector(".review-queue"), null);
-  await disabled.unmount();
-
-  setExperimentFlag("reviewQueue", true);
-  const enabled = await mount(client, <Board onOpenReview={() => {}} onNewSession={() => {}} />);
-  await act(async () => { enabled.socket.push(snapshot({ sessions: [session] })); });
-  await act(async () => { await Promise.resolve(); });
-  assert.ok(reviewQueueRequests > 0, "turning the named flag on restores the review projection");
-  await enabled.unmount();
-
-  localStorage.clear();
-  resetExperimentFlagsForTest();
 });
 
 test("an older poll cannot close an editor opened from a newer one", async () => {
@@ -446,7 +424,7 @@ test("a board emptied by archiving still clears its filter on the way out", asyn
   // own default would then be hidden by that filter and the board would come back empty.
   let created = 0;
   const { container, socket, unmount } = await mount(
-    {}, <Board onOpenReview={() => {}} onNewSession={() => { created += 1; }} />);
+    {}, <BoardHarness onNewSession={() => { created += 1; }} />);
   await act(async () => { socket.push(snapshot({ sessions: [session] })); });
   const machine = container.querySelector("select") as unknown as HTMLSelectElement;
   await act(async () => {

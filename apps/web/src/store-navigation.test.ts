@@ -3,10 +3,13 @@ import { test } from "node:test";
 import {
   INBOX_SELECTION_KEY,
   INBOX_SPLIT_RATIO_KEY,
+  SESSIONS_FILTERS_KEY,
   Store,
   loadInboxState,
+  loadSessionFilters,
   parseInboxSelection,
   parseInboxSplitRatio,
+  parseSessionFilters,
 } from "./store.js";
 import { encodeResourceId, type View } from "./navigation.js";
 import { uiStreamSubscriptions } from "./ui-subscriptions.js";
@@ -263,4 +266,32 @@ test("a targeted reconnect keeps the routed archived timeline mounted until exac
     },
   });
   assert.equal(store.getState().sessions.has(archived.id), false);
+});
+
+test("board Machine and Agent filters persist per instance and survive a reload", () => {
+  const backing = new Map<string, string>();
+  const storage: KeyValueStorage = {
+    getItem: (key) => backing.get(key) ?? null,
+    setItem: (key, value) => void backing.set(key, value),
+    removeItem: (key) => void backing.delete(key),
+  };
+
+  const store = new Store({ name: "board" }, undefined, "instance-1", storage);
+  assert.deepEqual(store.getState().filters, { runnerId: null, agentId: null });
+  store.setFilters({ runnerId: "runner-1" });
+  store.setFilters({ agentId: "agent-1" });
+
+  const reloaded = new Store({ name: "board" }, undefined, "instance-1", storage);
+  assert.deepEqual(reloaded.getState().filters, { runnerId: "runner-1", agentId: "agent-1" },
+    "a reload must not silently widen the board back to every machine");
+
+  const otherInstance = new Store({ name: "board" }, undefined, "instance-2", storage);
+  assert.deepEqual(otherInstance.getState().filters, { runnerId: null, agentId: null },
+    "instances do not share board filters");
+
+  saveInstanceStorageValue(SESSIONS_FILTERS_KEY, "not json", "instance-1", storage);
+  assert.deepEqual(loadSessionFilters("instance-1", storage), { runnerId: null, agentId: null },
+    "a corrupt stored value falls back to unfiltered");
+  assert.deepEqual(parseSessionFilters(JSON.stringify({ runnerId: 7, agentId: "" })),
+    { runnerId: null, agentId: null }, "non-string and empty ids are rejected shapes");
 });

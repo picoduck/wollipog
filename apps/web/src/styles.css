@@ -255,8 +255,6 @@
   --inbox-row-pad-y: 12px;
   --inbox-row-pad-x: 13px;
   --inbox-sender-column: 196px;
-  --queue-row-pad-y: 13px;
-  --queue-row-pad-x: 14px;
   --project-row-pad-y: 14px;
   --project-row-pad-x: 14px;
   --card-pad-y: 14px;
@@ -344,8 +342,6 @@
      cannot move; comfortable overrides them below. A single shared token would have been tidier and
      wrong — a board card is not a settings row, and forcing one number on both is how a density
      setting starts redesigning screens. */
-  --queue-row-pad-y: 10px;
-  --queue-row-pad-x: 12px;
   --project-row-pad-y: 11px;
   --project-row-pad-x: 12px;
   --card-pad-y: 11px;
@@ -1294,128 +1290,6 @@ button.background-work-badge:focus-visible {
   font-size: 12.5px;
   color: var(--text-faint);
 }
-.review-queue {
-  flex: 0 0 auto;
-  margin-bottom: 14px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-md);
-  background: var(--bg-elev);
-  overflow: hidden;
-}
-.review-queue-head,
-.review-queue-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-.review-queue-head {
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--border);
-}
-.review-queue-list {
-  max-height: min(42vh, 430px);
-  overflow: auto;
-}
-.review-queue-row {
-  display: grid;
-  grid-template-columns: 22px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 10px;
-  padding: var(--queue-row-pad-y) var(--queue-row-pad-x);
-  border-top: 1px solid var(--border);
-}
-.review-queue-row:first-child { border-top: 0; }
-.review-queue-select { display: flex; justify-content: center; }
-.review-queue-main {
-  min-width: 0;
-}
-.review-queue-summary {
-  display: block;
-  width: 100%;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-.review-queue-summary > span { display: block; }
-.review-queue-title {
-  display: flex !important;
-  align-items: center;
-  gap: 8px;
-  font-weight: 600;
-}
-.review-completion {
-  flex: 0 0 auto;
-  padding: 2px 7px;
-  border-radius: 999px;
-  font-size: 10px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: .25px;
-}
-.review-completion-blocked { color: var(--red-on-tint); background: color-mix(in srgb, var(--red) 12%, transparent); }
-.review-completion-needs_review { color: var(--amber-on-tint); background: color-mix(in srgb, var(--amber) 12%, transparent); }
-.review-completion-ready { color: var(--green-on-tint); background: color-mix(in srgb, var(--green) 12%, transparent); }
-.review-queue-session,
-.review-provenance,
-.review-rationale,
-.review-blockers {
-  margin-top: 3px;
-  overflow-wrap: anywhere;
-  font-size: 11px;
-  color: var(--text-faint);
-}
-.review-signals {
-  display: flex !important;
-  flex-wrap: wrap;
-  gap: 5px;
-  margin-top: 6px;
-}
-.review-signals > span {
-  padding: 3px 6px;
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  color: var(--text-dim);
-  background: var(--bg-elev-2);
-  font-size: 11px;
-}
-.review-rationale { color: var(--text-dim); }
-.review-blockers { color: var(--red); }
-.review-exact-input {
-  margin-top: 8px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg-elev-2);
-  color: var(--text-dim);
-  font-size: 11px;
-}
-.review-exact-input summary {
-  padding: 7px 9px;
-  cursor: pointer;
-  font-weight: 600;
-}
-.review-exact-input pre {
-  max-height: min(28vh, 240px);
-  margin: 0;
-  overflow: auto;
-  border-top: 1px solid var(--border);
-  padding: 9px;
-  color: var(--text);
-  font: 11px/1.45 "Cascadia Code", "Consolas", ui-monospace, monospace;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-.review-exact-unavailable { margin-top: 6px; font-size: 11px; }
-.review-queue-row-actions {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 6px;
-}
-.review-queue-empty { padding: 16px 12px; text-align: center; }
 select,
 input,
 textarea {
@@ -8037,6 +7911,15 @@ body.shell-dock-dragging * {
 .inbox-view.expanded > .inbox-list-pane,
 .inbox-view.expanded > .inbox-splitter { display: none; }
 .inbox-view.expanded > .inbox-preview-pane { height: 100%; }
+/* Sessions board mode: the board canvas fills the pane below the shared toolbar, restoring the
+   inset the standalone /board route used to receive from .main-body's padding. */
+.inbox-view.board-mode > .inbox-list-pane > .board-wrap {
+  flex: 1;
+  height: auto;
+  min-height: 0;
+  padding: 14px 14px 14px;
+  overflow: auto;
+}
 .inbox-list-pane {
   position: relative;
   display: flex;
@@ -10260,21 +10143,6 @@ body.shell-dock-dragging * {
     gap: 8px;
   }
 
-  /* Review queue follows the SAME phone contract as the drawer/right-panel geometry. Keeping
-     this at 760px avoids a cramped three-column card on larger phones and phone landscape. */
-  .review-queue-head { align-items: flex-start; flex-direction: column; }
-  .review-queue-actions { width: 100%; flex-wrap: wrap; justify-content: flex-start; }
-  .review-queue-row { grid-template-columns: 22px minmax(0, 1fr); align-items: start; }
-  .review-queue-row-actions {
-    grid-column: 2;
-    width: 100%;
-    flex-direction: row;
-    flex-wrap: wrap;
-  }
-  .review-open { flex: 1 1 145px; min-height: 44px; }
-  .review-queue-title { align-items: flex-start; flex-direction: column; gap: 4px; }
-  .review-signals { flex-direction: column; }
-  .review-exact-input summary { min-height: 44px; display: flex; align-items: center; }
 
   /* The app topbar owns mobile Session identity. This is the only second bar: statuses at the
      leading edge, Share / More Actions trailing, and transient notes on a follow-up line. */
@@ -11200,37 +11068,45 @@ body.shell-dock-dragging * {
   color: var(--accent-on-tint);
 }
 
-/* The compact Inbox reminder filter is visually one joined control. Its option borders carry the
-   boundary; the shared wrapper remains unchanged for Settings and other segmented controls. */
-.ui-seg.inbox-reminder-view {
+/* The compact Inbox reminder filter and the Sessions List/Board toggle are visually one joined
+   control each. Their option borders carry the boundary; the shared wrapper remains unchanged
+   for Settings and other segmented controls. */
+.ui-seg.inbox-reminder-view,
+.ui-seg.sessions-view-toggle {
   isolation: isolate;
   gap: 0;
   padding: 0;
   border: 0;
   background: transparent;
 }
-.inbox-reminder-view .ui-seg-option {
+.inbox-reminder-view .ui-seg-option,
+.sessions-view-toggle .ui-seg-option {
   border-color: var(--control-outline);
 }
-.inbox-reminder-view .ui-seg-option + .ui-seg-option { margin-left: -1px; }
-.inbox-reminder-view .ui-seg-option:first-child {
+.inbox-reminder-view .ui-seg-option + .ui-seg-option,
+.sessions-view-toggle .ui-seg-option + .ui-seg-option { margin-left: -1px; }
+.inbox-reminder-view .ui-seg-option:first-child,
+.sessions-view-toggle .ui-seg-option:first-child {
   border-top-left-radius: var(--radius-xs);
   border-bottom-left-radius: var(--radius-xs);
   border-top-right-radius: 0;
   border-bottom-right-radius: 0;
 }
-.inbox-reminder-view .ui-seg-option:last-child {
+.inbox-reminder-view .ui-seg-option:last-child,
+.sessions-view-toggle .ui-seg-option:last-child {
   border-top-right-radius: var(--radius-xs);
   border-bottom-right-radius: var(--radius-xs);
   border-top-left-radius: 0;
   border-bottom-left-radius: 0;
 }
-.inbox-reminder-view .ui-seg-option.is-selected {
+.inbox-reminder-view .ui-seg-option.is-selected,
+.sessions-view-toggle .ui-seg-option.is-selected {
   position: relative;
   z-index: var(--z-sticky);
   border-color: var(--accent);
 }
-.inbox-reminder-view .ui-seg-option:focus-visible {
+.inbox-reminder-view .ui-seg-option:focus-visible,
+.sessions-view-toggle .ui-seg-option:focus-visible {
   position: relative;
   z-index: var(--z-dock);
   outline: 2px solid var(--accent);

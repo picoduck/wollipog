@@ -82,6 +82,33 @@ export const INBOX_SELECTION_KEY = INBOX_SELECTION_STORAGE_KEY;
 export const INBOX_SPLIT_RATIO_KEY = INBOX_SPLIT_RATIO_STORAGE_KEY;
 export { clampInboxSplitRatio, parseInboxSplitRatio };
 
+/** The board mode's Machine and Agent filters, persisted per instance so a reload does not
+ * silently widen the board back to every machine. */
+export const SESSIONS_FILTERS_KEY = "wollipog.sessions.filters";
+
+export function parseSessionFilters(raw: string | null): Filters {
+  const fallback: Filters = { runnerId: null, agentId: null };
+  if (!raw) return fallback;
+  try {
+    const value = JSON.parse(raw) as { runnerId?: unknown; agentId?: unknown };
+    if (!value || typeof value !== "object" || Array.isArray(value)) return fallback;
+    return {
+      runnerId: typeof value.runnerId === "string" && value.runnerId.length > 0 ? value.runnerId : null,
+      agentId: typeof value.agentId === "string" && value.agentId.length > 0 ? value.agentId : null,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+export function loadSessionFilters(instanceScope = LOCAL_INSTANCE_SCOPE, storage?: KeyValueStorage): Filters {
+  return parseSessionFilters(loadInstanceStorageValue(SESSIONS_FILTERS_KEY, instanceScope, storage));
+}
+
+function saveSessionFilters(filters: Filters, instanceScope: string, storage?: KeyValueStorage): void {
+  saveInstanceStorageValue(SESSIONS_FILTERS_KEY, JSON.stringify(filters), instanceScope, storage);
+}
+
 /** Slightly exceeds the control plane's fixed 10-second admission window. */
 export const BACKGROUND_OBSERVATION_RETRY_MS = 10_500;
 
@@ -1408,7 +1435,11 @@ function reducer(state: State, action: Action): State {
   }
 }
 
-function initialState(view: View = { name: "inbox" }, inbox = loadInboxState()): State {
+function initialState(
+  view: View = { name: "inbox" },
+  inbox = loadInboxState(),
+  filters: Filters = { runnerId: null, agentId: null },
+): State {
   return {
     conn: "connecting",
     authRequired: false,
@@ -1448,7 +1479,7 @@ function initialState(view: View = { name: "inbox" }, inbox = loadInboxState()):
     // A direct/deep-link Settings entry has no trustworthy same-app predecessor.
     settingsReturnView: view.name === "settings" ? { name: "inbox" } : null,
     inbox,
-    filters: { runnerId: null, agentId: null },
+    filters,
   };
 }
 
@@ -1523,7 +1554,11 @@ export class Store {
     private readonly instanceScope = LOCAL_INSTANCE_SCOPE,
     private readonly inboxStorage?: KeyValueStorage,
   ) {
-    this.state = initialState(initialView, loadInboxState(instanceScope, inboxStorage));
+    this.state = initialState(
+      initialView,
+      loadInboxState(instanceScope, inboxStorage),
+      loadSessionFilters(instanceScope, inboxStorage),
+    );
   }
 
   getState = (): State => this.state;
@@ -1539,10 +1574,12 @@ export class Store {
     const next = reducer(this.state, action);
     if (next === this.state) return;
     const inboxChanged = next.inbox !== this.state.inbox;
+    const filtersChanged = next.filters !== this.state.filters;
     this.state = next;
     if (inboxChanged && this.inboxPersistenceEnabled && (!("persist" in action) || action.persist !== false)) {
       saveInboxState(next.inbox, this.instanceScope, this.inboxStorage);
     }
+    if (filtersChanged) saveSessionFilters(next.filters, this.instanceScope, this.inboxStorage);
     for (const l of [...this.listeners]) l();
   };
 

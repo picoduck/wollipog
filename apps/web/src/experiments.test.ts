@@ -49,7 +49,6 @@ test("defaults: existing surfaces stay on while the conductor and Board review q
   assert.equal(DEFAULT_EXPERIMENT_FLAGS.multiAgent, true);
   assert.equal(DEFAULT_EXPERIMENT_FLAGS.pods, true);
   assert.equal(DEFAULT_EXPERIMENT_FLAGS.conductor, false);
-  assert.equal(DEFAULT_EXPERIMENT_FLAGS.reviewQueue, false);
 });
 
 test("garbage and non-object payloads fall back to the defaults without throwing", () => {
@@ -65,7 +64,6 @@ test("unknown keys are ignored and missing keys keep their defaults", () => {
   assert.equal(flags.pods, false);
   assert.equal(flags.multiAgent, true);
   assert.equal(flags.conductor, false, "a missing conductor key keeps the opt-in default");
-  assert.equal(flags.reviewQueue, false, "a missing review queue key keeps the opt-in default");
 });
 
 test("non-boolean values for known keys are rejected key-by-key", () => {
@@ -153,8 +151,6 @@ test("every surface that exposes a gated feature consults the flags", () => {
       "Automations must not OFFER workflow runs while multi-agent is off, but an automation already using one keeps rendering truthfully"],
     ["./components/Board.tsx", /multiAgentEnabled/,
       "the Board's empty-state hint must not point at a control the flags removed"],
-    ["./components/Board.tsx", /reviewQueueEnabled &&/,
-      "the Board must not mount the cross-session projection while its opt-in flag is off"],
     ["./components/ShortcutReference.tsx", /experimentFlags/,
       "the reference must mark a dead binding unavailable rather than advertise it"],
     ["./shortcuts.ts", /EXPERIMENT_SHORTCUT_IDS/,

@@ -54,13 +54,15 @@ test("every dashboard view has a canonical round-tripping path", () => {
 });
 
 test("global destinations use the polished Connections vocabulary everywhere", () => {
+  // The internal name stays "inbox" so saved preferences and the "/" route survive the visible
+  // rename to Sessions (#499).
   assert.deepEqual(GLOBAL_VIEW_ITEMS[0], {
     name: "inbox",
-    label: "Inbox",
-    title: "Inbox",
-    paletteLabel: "Inbox",
+    label: "Sessions",
+    title: "Sessions",
+    paletteLabel: "Sessions",
   });
-  assert.deepEqual(GLOBAL_VIEW_ITEMS[1], {
+  assert.deepEqual(GLOBAL_VIEW_ITEMS.find((item) => item.name === "projects"), {
     name: "projects",
     label: "Projects",
     title: "Projects",
