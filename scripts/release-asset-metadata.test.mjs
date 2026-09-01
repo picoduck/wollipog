@@ -14,6 +14,11 @@ const cli = fileURLToPath(
   new URL("./release-asset-metadata.mjs", import.meta.url),
 );
 
+// The CLI reads stdin with readFileSync(0), so a child that never sees EOF blocks
+// spawnSync forever. --test-timeout cannot interrupt a synchronous call, so the bound
+// has to live on the spawn itself.
+const CHILD_TIMEOUT_MS = 30_000;
+
 test("draft release lookup includes paginated drafts and ignores a published tag collision", () => {
   const pages = [
     [
@@ -86,7 +91,9 @@ test("metadata CLI exposes parse failure as a retryable nonzero command result",
   const result = spawnSync(process.execPath, [cli, "draft-release-id", "v1"], {
     encoding: "utf8",
     input: "transient invalid JSON",
+    timeout: CHILD_TIMEOUT_MS,
   });
+  assert.equal(result.error, undefined, "the CLI must exit rather than block on stdin");
   assert.equal(result.status, 1);
   assert.match(result.stderr, /not valid JSON/u);
   assert.equal(result.stdout, "");
@@ -102,7 +109,9 @@ test("metadata CLI executes through a symlinked repository root", (t) => {
   const result = spawnSync(process.execPath, [linkedCli, "draft-release-id", "v1"], {
     encoding: "utf8",
     input: '[[{"id":42,"tag_name":"v1","draft":true}]]',
+    timeout: CHILD_TIMEOUT_MS,
   });
+  assert.equal(result.error, undefined, "the CLI must exit rather than block on stdin");
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout, "42");
 });
