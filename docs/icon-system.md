@@ -69,7 +69,7 @@ exports.
 | `ShieldIcon` | Lucide | `Shield` | Generic approval status, intentionally filled. |
 | `ArrowUpIcon` | Lucide | `ArrowUp` | Generic upward action. |
 | `ArrowDownIcon` | Lucide | `ArrowDown` | Generic downward action. |
-| `StopTurnIcon` | Lucide | `Square` | Generic stop action, intentionally filled. |
+| `StopTurnIcon` | Lucide | `Square` | Filled and optically scaled to preserve its send-arrow balance. |
 | `TuningIcon` | Lucide | `SlidersHorizontal` | Model or effort tuning. |
 | `GitHubIcon` | Custom Exception | `GitHub Mark` | Official brand mark with a 16-unit solid geometry. |
 | `FolderSolidIcon` | Lucide | `Folder` | Generic folder, intentionally filled at 13px. |
@@ -95,7 +95,7 @@ The manifest declares `lucide-react` and `pnpm-lock.yaml` pins the resolved rele
    labels or accessible control names.
 
 The pre-migration production entry bundle was 1,736,906 bytes (482,380 bytes gzip); after the full
-migration it is 1,739,362 bytes (484,204 bytes gzip), a 2,456-byte raw and 1,824-byte gzip increase.
+migration it is 1,739,419 bytes (484,242 bytes gzip), a 2,513-byte raw and 1,862-byte gzip increase.
 The dedicated icon bundle contract provides the durable regression guard: it bundles every stable
-icon export (20,153 bytes at migration), rejects evidence of the full Lucide catalog, and enforces
+icon export (20,210 bytes at migration), rejects evidence of the full Lucide catalog, and enforces
 an icon-specific size budget independent of unrelated application growth.

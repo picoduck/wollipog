@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { Window } from "happy-dom";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { GitHubIcon, GridIcon, ShieldIcon } from "./Icons.js";
+import { GitHubIcon, GridIcon, ShieldIcon, StopTurnIcon } from "./Icons.js";
 
 function renderedSvg(markup: string): SVGSVGElement {
   const window = new Window();
@@ -53,6 +53,12 @@ test("intentional filled and brand marks keep their distinct rendered contracts"
   assert.equal(shield.getAttribute("fill"), "currentColor");
   assert.equal(shield.getAttribute("stroke"), "none");
   assert.ok(shield.classList.contains("app-icon"));
+
+  const stop = renderedSvg(renderToStaticMarkup(<StopTurnIcon size={14} />));
+  assert.equal(stop.getAttribute("fill"), "currentColor");
+  assert.equal(stop.getAttribute("stroke"), "none");
+  assert.equal(stop.style.transform, "scale(0.67)");
+  assert.equal(stop.style.transformOrigin, "center");
 
   const github = renderedSvg(renderToStaticMarkup(<GitHubIcon size={14} />));
   assert.equal(github.getAttribute("viewBox"), "0 0 16 16");

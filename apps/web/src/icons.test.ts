@@ -29,6 +29,9 @@ function codeOnly(source: string): string {
   return source.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/[^\n]*/g, " ");
 }
 
+const SVG_FACTORY_PATTERN = /\w+\(\s*["'`]svg["'`]/;
+const SVG_TAG_ASSIGNMENT_PATTERN = /=\s*["'`]svg["'`]/;
+
 function sourceSlice(source: string, startAnchor: string, endAnchor: string): string {
   const start = source.indexOf(startAnchor);
   const end = source.indexOf(endAnchor, start + startAnchor.length);
@@ -45,12 +48,23 @@ test("the SVG ownership inventory covers every production SVG-owning file", () =
     .filter((path) => {
       const code = codeOnly(readFileSync(path, "utf8"));
       return /<svg[\s>]/.test(code)
-        || /\w+\(\s*["'${tick}]svg["'${tick}]/.test(code)
-        || /=\s*["'${tick}]svg["'${tick}]/.test(code);
+        || SVG_FACTORY_PATTERN.test(code)
+        || SVG_TAG_ASSIGNMENT_PATTERN.test(code);
     })
     .map(relativeSource)
     .sort();
   assert.deepEqual(actual, SVG_OWNERS);
+});
+
+test("SVG ownership patterns cover single, double, and template-literal delimiters", () => {
+  for (const source of ['createElement("svg")', "createElement('svg')", "createElement(`svg`)"]) {
+    assert.match(source, SVG_FACTORY_PATTERN);
+  }
+  for (const source of ['const Tag = "svg"', "const Tag = 'svg'", "const Tag = `svg`"]) {
+    assert.match(source, SVG_TAG_ASSIGNMENT_PATTERN);
+  }
+  assert.doesNotMatch("createElement('div')", SVG_FACTORY_PATTERN);
+  assert.doesNotMatch("const Tag = 'div'", SVG_TAG_ASSIGNMENT_PATTERN);
 });
 
 test("no production component draws or injects an icon outside an SVG owner", () => {
@@ -61,9 +75,9 @@ test("no production component draws or injects an icon outside an SVG owner", ()
     const code = codeOnly(readFileSync(path, "utf8"));
     for (const [pattern, how] of [
       [/<svg[\s>]/, "<svg>"],
-      [/\w+\(\s*["'${tick}]svg["'${tick}]/, 'a factory call naming "svg"'],
+      [SVG_FACTORY_PATTERN, 'a factory call naming "svg"'],
       [/dangerouslySetInnerHTML/i, "dangerouslySetInnerHTML"],
-      [/=\s*["'${tick}]svg["'${tick}]/, 'a variable holding the "svg" tag name'],
+      [SVG_TAG_ASSIGNMENT_PATTERN, 'a variable holding the "svg" tag name'],
       [/\bIconBase\b/, "the private custom-mark adapter"],
     ] as const) {
       if (pattern.test(code)) offenders.push(`${relative} (${how})`);
@@ -112,7 +126,7 @@ test("every exported icon is inventoried and follows its documented ownership de
   for (const row of rows) {
     const body = sourceSlice(source, `export function ${row.name}(`, "\n}");
     if (row.decision === "Lucide") {
-      assert.match(body, new RegExp(`<LibraryIcon glyph=\\{Lucide${row.mapping}\\}`),
+      assert.match(body, new RegExp(`<LibraryIcon\\s+glyph=\\{Lucide${row.mapping}\\}`),
         `${row.name} must render its documented Lucide ${row.mapping} mapping`);
     } else {
       assert.doesNotMatch(body, /<LibraryIcon/,
