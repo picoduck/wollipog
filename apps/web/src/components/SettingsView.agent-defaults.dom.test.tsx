@@ -315,6 +315,31 @@ test("Agent Harness defaults keep focus on Retry after another failed load", asy
   }
 });
 
+test("Agent Harness defaults explain a missing endpoint while retaining Retry", async () => {
+  const fixture = await renderPanel({
+    instanceId: "test",
+    publicOrigin: "http://localhost",
+    close() {},
+    async request() {
+      return new Response(JSON.stringify({ error: "Not Found" }), {
+        status: 404,
+        statusText: "Not Found",
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+  try {
+    assert.match(fixture.container.textContent ?? "", /Control Plane Update Required/);
+    assert.match(fixture.container.textContent ?? "", /does not support Agent Harness defaults/);
+    assert.match(fixture.container.textContent ?? "", /Update or restart it so it matches this dashboard/);
+    assert.doesNotMatch(fixture.container.textContent ?? "", /Load Failed/);
+    assert.equal(buttonNamed(fixture.container, "Retry").disabled, false);
+  } finally {
+    await act(async () => fixture.root.unmount());
+    fixture.container.remove();
+  }
+});
+
 test("Agent Harness defaults retry failed loads and keep mutation errors scoped to the editor", async () => {
   let calls = 0;
   const fixture = await renderPanel({
@@ -372,6 +397,167 @@ test("Agent Harness defaults retry failed loads and keep mutation errors scoped 
   }
 });
 
+test("Agent Harness defaults expose one live alert when mutation recovery also fails", async () => {
+  let getCalls = 0;
+  const fixture = await renderPanel({
+    instanceId: "test",
+    publicOrigin: "http://localhost",
+    close() {},
+    async request(_path, init) {
+      if (init?.method === "PUT") return new Response(JSON.stringify({ error: "save rejected" }), {
+        status: 409,
+        headers: { "content-type": "application/json" },
+      });
+      getCalls += 1;
+      if (getCalls === 1) return new Response(JSON.stringify(view(true)), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+      return new Response(JSON.stringify({ error: "recovery unavailable" }), {
+        status: 503,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+  try {
+    await act(async () => buttonNamed(fixture.container, "Default Models, Efforts, and Permissions").click());
+    await act(async () => buttonNamed(fixture.container, "Codex App Server").click());
+    const save = buttonNamed(fixture.container, "Save");
+    await act(async () => save.click());
+    await act(async () => new Promise<void>((resolve) => domWindow.setTimeout(resolve, 0)));
+
+    const alerts = fixture.container.querySelectorAll('[role="alert"]');
+    assert.equal(alerts.length, 1);
+    assert.match(alerts[0]?.textContent ?? "", /save rejected/);
+    assert.match(alerts[0]?.textContent ?? "", /Could not refresh Agent Harness defaults: recovery unavailable/);
+    assert.match(fixture.container.textContent ?? "", /Could not refresh Agent Harness defaults: recovery unavailable/);
+    assert.equal(fixture.container.querySelector('.agent-defaults-toolbar .settings-inline-error')?.getAttribute("aria-hidden"), "true");
+    assert.equal(buttonNamed(fixture.container, "Codex App Server").getAttribute("aria-expanded"), "true");
+    assert.equal(buttonNamed(fixture.container, "Save"), save);
+  } finally {
+    await act(async () => fixture.root.unmount());
+    fixture.container.remove();
+  }
+});
+
+test("Agent Harness draft-repair notices clear when Effort or Permission Mode changes", async () => {
+  const scenarios = [
+    {
+      field: "Codex App Server Reasoning Effort",
+      before: ["Sol", "Extra High", "Full Access"],
+      after: "Low",
+      repair(repaired: AgentHarnessDefaultsView) {
+        repaired.defaults[0]!.installations[0]!.models[1]!.efforts = ["low"];
+      },
+    },
+    {
+      field: "Codex App Server Permission Mode",
+      before: ["Luna", "Low", "Full Access"],
+      after: "Approve for Me",
+      repair(repaired: AgentHarnessDefaultsView) {
+        repaired.defaults[0]!.installations[0]!.permissionModes = ["auto-review"];
+      },
+    },
+  ] as const;
+
+  for (const scenario of scenarios) {
+    let getCalls = 0;
+    const repaired = view();
+    scenario.repair(repaired);
+    const fixture = await renderPanel({
+      instanceId: "test",
+      publicOrigin: "http://localhost",
+      close() {},
+      async request() {
+        getCalls += 1;
+        return new Response(JSON.stringify(getCalls === 1 ? view() : repaired), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+    try {
+      await act(async () => buttonNamed(fixture.container, "Default Models, Efforts, and Permissions").click());
+      await act(async () => buttonNamed(fixture.container, "Codex App Server").click());
+      await choose(fixture.container, "Codex App Server Model", scenario.before[0]);
+      await choose(fixture.container, "Codex App Server Reasoning Effort", scenario.before[1]);
+      await choose(fixture.container, "Codex App Server Permission Mode", scenario.before[2]);
+      await act(async () => buttonNamed(fixture.container, "Refresh").click());
+      await nextFrame();
+      const notice = fixture.container.querySelector('.agent-defaults-draft-notice[role="status"]');
+      assert.match(notice?.textContent ?? "", /Capabilities changed/);
+      await choose(fixture.container, scenario.field, scenario.after);
+      assert.equal(notice?.textContent, "");
+      assert.equal(notice?.classList.contains("sr-only"), true);
+    } finally {
+      await act(async () => fixture.root.unmount());
+      fixture.container.remove();
+    }
+  }
+});
+
+test("Agent Harness manual Refresh explains repaired draft fields and clears the notice after Save", async () => {
+  let getCalls = 0;
+  const repaired = view();
+  repaired.defaults[0]!.installations[0]!.models = [{ id: "luna", displayName: "Luna", efforts: ["low"] }];
+  repaired.defaults[0]!.installations[0]!.effortLevels = ["low"];
+  const fixture = await renderPanel({
+    instanceId: "test",
+    publicOrigin: "http://localhost",
+    close() {},
+    async request(_path, init) {
+      if (init?.method === "PUT") return new Response(JSON.stringify(view(true)), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+      getCalls += 1;
+      return new Response(JSON.stringify(getCalls === 1 ? view() : repaired), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+  try {
+    const defaultsRow = buttonNamed(fixture.container, "Default Models, Efforts, and Permissions");
+    await act(async () => defaultsRow.click());
+    const codexRow = buttonNamed(fixture.container, "Codex App Server");
+    await act(async () => codexRow.click());
+    await choose(fixture.container, "Codex App Server Model", "Sol");
+    await choose(fixture.container, "Codex App Server Reasoning Effort", "Extra High");
+    await choose(fixture.container, "Codex App Server Permission Mode", "Full Access");
+    const persistentStatus = fixture.container.querySelector('.agent-defaults-draft-notice[role="status"]');
+    assert.ok(persistentStatus);
+    assert.equal(persistentStatus.textContent, "");
+
+    const refresh = buttonNamed(fixture.container, "Refresh");
+    refresh.focus();
+    await act(async () => refresh.click());
+    await nextFrame();
+
+    const notice = fixture.container.querySelector('.agent-defaults-draft-notice[role="status"]');
+    assert.equal(notice, persistentStatus);
+    assert.match(notice?.textContent ?? "", /Capabilities changed/);
+    assert.match(notice?.textContent ?? "", /Model and Reasoning Effort/);
+    assert.doesNotMatch(notice?.textContent ?? "", /Permission Mode/);
+    assert.match(buttonNamed(fixture.container, "Codex App Server Permission Mode").getAttribute("aria-label") ?? "", /Full Access/);
+    assert.equal(domWindow.document.activeElement, refresh);
+
+    await choose(fixture.container, "Codex App Server Model", "Luna");
+    assert.equal(persistentStatus.textContent, "");
+    await choose(fixture.container, "Codex App Server Reasoning Effort", "Low");
+
+    await act(async () => buttonNamed(fixture.container, "Save").click());
+    await nextFrame();
+    assert.equal(fixture.container.querySelector(".agent-defaults-draft-notice"), null);
+    assert.equal(codexRow.getAttribute("aria-expanded"), "false");
+    await act(async () => codexRow.click());
+    assert.equal(fixture.container.querySelector(".agent-defaults-draft-notice")?.textContent, "");
+  } finally {
+    await act(async () => fixture.root.unmount());
+    fixture.container.remove();
+  }
+});
+
 test("Agent Harness defaults refresh on discovery and ignore an older overlapping response", async () => {
   let calls = 0;
   let resolveOlder!: (response: Response) => void;
@@ -414,7 +600,7 @@ test("Agent Harness defaults refresh on discovery and ignore an older overlappin
   }
 });
 
-test("Agent Harness discovery refresh repairs drafts and closes a removed editor with restored focus", async () => {
+test("Agent Harness discovery refresh reports only changed drafts and closes a removed editor with restored focus", async () => {
   let getCalls = 0;
   const repaired = view();
   repaired.defaults[0]!.installations[0]!.models = [{ id: "luna", displayName: "Luna", efforts: ["low"] }];
@@ -427,7 +613,7 @@ test("Agent Harness discovery refresh repairs drafts and closes a removed editor
     close() {},
     async request() {
       getCalls += 1;
-      const next = getCalls === 1 ? view() : getCalls === 2 ? repaired : removed;
+      const next = getCalls <= 2 ? view() : getCalls === 3 ? repaired : removed;
       return new Response(JSON.stringify(next), {
         status: 200,
         headers: { "content-type": "application/json" },
@@ -443,12 +629,23 @@ test("Agent Harness discovery refresh repairs drafts and closes a removed editor
     await choose(fixture.container, "Codex App Server Permission Mode", "Full Access");
 
     await fixture.render({ revision: 1 });
+    const persistentStatus = fixture.container.querySelector('.agent-defaults-draft-notice[role="status"]');
+    assert.ok(persistentStatus);
+    assert.equal(persistentStatus.textContent, "");
+    const permission = buttonNamed(fixture.container, "Codex App Server Permission Mode");
+    permission.focus();
+    await fixture.render({ revision: 2 });
+    assert.equal(domWindow.document.activeElement, permission);
     assert.match(buttonNamed(fixture.container, "Codex App Server Model").getAttribute("aria-label") ?? "", /Choose Model/);
     assert.equal(fixture.container.querySelector('[aria-label^="Codex App Server Reasoning Effort:"]'), null);
     assert.match(buttonNamed(fixture.container, "Codex App Server Permission Mode").getAttribute("aria-label") ?? "", /Full Access/);
+    const notice = fixture.container.querySelector('.agent-defaults-draft-notice[role="status"]');
+    assert.equal(notice, persistentStatus);
+    assert.match(notice?.textContent ?? "", /Model and Reasoning Effort/);
+    assert.doesNotMatch(notice?.textContent ?? "", /Permission Mode/);
 
     buttonNamed(fixture.container, "Codex App Server").focus();
-    await fixture.render({ revision: 2 });
+    await fixture.render({ revision: 3 });
     await nextFrame();
     assert.equal(fixture.container.textContent?.includes("Codex App Server"), false);
     assert.equal(domWindow.document.activeElement, defaultsRow);
