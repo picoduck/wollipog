@@ -123,7 +123,8 @@ test("Unarchive on an archived Stop Failed session cancels the archive follow-up
   assert.equal(moreIcon.getAttribute("width"), "16",
     "the icon keeps its desktop size while phone CSS owns mobile compaction");
   const dots = [...moreIcon.querySelectorAll("circle")]
-    .map((dot) => [dot.getAttribute("cx"), dot.getAttribute("cy")]);
+    .map((dot) => [dot.getAttribute("cx"), dot.getAttribute("cy")])
+    .sort((a, b) => Number(a[1]) - Number(b[1]));
   assert.deepEqual(dots, [["12", "5"], ["12", "12"], ["12", "19"]],
     "More Actions uses the intended vertical overflow icon");
   assert.equal(moreActions.textContent?.trim(), "", "the trigger has no font-dependent ellipsis text");
