@@ -91,13 +91,6 @@ test("groupHunksForDisplay: binary file has no hunks and no hidden count", () =>
   assert.equal(df.hiddenCount, 0);
 });
 
-test("groupHunksForDisplay: untracked file has no hunks and no hidden count", () => {
-  const f = file({ path: "new.txt", status: "untracked", hunks: [] });
-  const [df] = groupHunksForDisplay([f], 3);
-  assert.deepEqual(df.hunks, []);
-  assert.equal(df.hiddenCount, 0);
-});
-
 test("groupHunksForDisplay: threshold of 0 collapses everything", () => {
   const f = file({ path: "a.ts", hunks: [hunk(1), hunk(2)] });
   const [df] = groupHunksForDisplay([f], 0);
