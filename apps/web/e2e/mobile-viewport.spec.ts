@@ -619,7 +619,9 @@ for (const current of GLOBAL_VIEW_ITEMS.filter((item) => !MOBILE_PRIMARY_DEFAULT
     await page.locator(".rail-more-trigger").click();
     const active = page.locator(".rail-more-item.active");
     await expect(active).toHaveCount(1);
-    await expect(active).toHaveText(current.title);
+    // The label span, not the row: an overflowed counted destination (Connections by default)
+    // renders its count beside the label.
+    await expect(active.locator(".rail-more-label")).toHaveText(current.title);
     await expectEveryDestinationReachable(page, KEYBOARD);
   });
 }
