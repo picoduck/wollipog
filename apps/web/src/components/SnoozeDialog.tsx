@@ -15,11 +15,14 @@ export function SnoozeDialog({
   onClose,
   onSave,
   onRemove,
+  returnFocusRef,
 }: {
   reminder?: SessionReminderView;
   onClose: () => void;
   onSave: (request: SetSessionReminderRequest) => Promise<void>;
   onRemove?: (expectedRevision: number, expectedReminderId: string) => Promise<void>;
+  /** Where focus returns on close when the dialog was opened from a context menu (#154). */
+  returnFocusRef?: { current: HTMLElement | null };
 }) {
   const [loadedReminder, setLoadedReminder] = useState<SessionReminderView | undefined>(() => reminder);
   const initialDraft = draftForReminder(loadedReminder);
@@ -93,6 +96,7 @@ export function SnoozeDialog({
 
   return (
     <Modal
+      {...(returnFocusRef ? { returnFocusRef } : {})}
       className="snooze-dialog"
       title={loadedReminder ? "Edit Reminder" : "Snooze Session"}
       onClose={onClose}

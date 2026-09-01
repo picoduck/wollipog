@@ -9,6 +9,7 @@ import {
   type CSSProperties,
   type Dispatch,
   type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type RefObject,
   type SetStateAction,
@@ -406,21 +407,23 @@ export function pointAnchorRect(x: number, y: number): Pick<DOMRect, "top" | "ri
 
 const LONG_PRESS_MS = 500;
 const LONG_PRESS_SLOP_PX = 10;
-/** How long a completed long-press suppresses the synthetic click the press also produces. */
+/** Grace after RELEASE for the click the press synthesizes; the hold itself can last any time. */
 const LONG_PRESS_CLICK_SUPPRESS_MS = 700;
 
 export interface LongPress {
-  /** Spread onto the pressed element; `handlers.onDragStart` also belongs on draggable targets. */
+  /** Spread onto the pressed element; `handlers.onDragStart` also belongs on draggable targets.
+   * `onClickCapture` runs at capture so a click landing on a NESTED control (a card's approval
+   * button) is stopped before that control's own handler — the press asked for a menu, and the
+   * nested action must not also run. */
   handlers: {
     onPointerDown: (event: ReactPointerEvent<HTMLElement>) => void;
     onPointerMove: (event: ReactPointerEvent<HTMLElement>) => void;
     onPointerUp: (event: ReactPointerEvent<HTMLElement>) => void;
     onPointerCancel: (event: ReactPointerEvent<HTMLElement>) => void;
     onDragStart: () => void;
+    onClickCapture: (event: ReactMouseEvent<HTMLElement>) => void;
   };
-  /** Click guard for the caller's own onClick: a completed long-press must not also act as a
-   * tap, and the release can synthesize a click after the menu is already open. Reports (does
-   * not reset) so a double-fired click inside the window stays suppressed too. */
+  /** Belt to the capture guard's braces, for the caller's own onClick/onDoubleClick. */
   consumeSuppressedClick: () => boolean;
 }
 
@@ -439,7 +442,11 @@ export function useLongPress(onLongPress: (point: { x: number; y: number }) => v
   const callbackRef = useRef(onLongPress);
   callbackRef.current = onLongPress;
   const stateRef = useRef<{ timer: number; pointerId: number; x: number; y: number } | null>(null);
-  const firedAtRef = useRef(0);
+  /** True from the moment the press fires until its release-click grace expires. The hold can
+   * last any time — suppression pivots on RELEASE, not on when the timer fired, or a slow
+   * two-second hold would leak its click straight through a 700ms fire-anchored window. */
+  const firedHeldRef = useRef(false);
+  const releasedAtRef = useRef(0);
 
   return useMemo<LongPress>(() => {
     const cancel = () => {
@@ -447,12 +454,21 @@ export function useLongPress(onLongPress: (point: { x: number; y: number }) => v
       window.clearTimeout(stateRef.current.timer);
       stateRef.current = null;
     };
+    const suppressed = () =>
+      firedHeldRef.current || Date.now() - releasedAtRef.current <= LONG_PRESS_CLICK_SUPPRESS_MS;
+    const release = () => {
+      cancel();
+      if (!firedHeldRef.current) return;
+      firedHeldRef.current = false;
+      releasedAtRef.current = Date.now();
+    };
     return {
-      consumeSuppressedClick: () => Date.now() - firedAtRef.current <= LONG_PRESS_CLICK_SUPPRESS_MS,
+      consumeSuppressedClick: suppressed,
       handlers: {
       onPointerDown: (event) => {
         if (event.pointerType !== "touch" && event.pointerType !== "pen") return;
         cancel();
+        firedHeldRef.current = false;
         const { pointerId, clientX, clientY } = event;
         stateRef.current = {
           pointerId,
@@ -460,7 +476,7 @@ export function useLongPress(onLongPress: (point: { x: number; y: number }) => v
           y: clientY,
           timer: window.setTimeout(() => {
             stateRef.current = null;
-            firedAtRef.current = Date.now();
+            firedHeldRef.current = true;
             callbackRef.current({ x: clientX, y: clientY });
           }, LONG_PRESS_MS),
         };
@@ -470,9 +486,14 @@ export function useLongPress(onLongPress: (point: { x: number; y: number }) => v
         if (pressed === null || event.pointerId !== pressed.pointerId) return;
         if (Math.hypot(event.clientX - pressed.x, event.clientY - pressed.y) > LONG_PRESS_SLOP_PX) cancel();
       },
-      onPointerUp: cancel,
-      onPointerCancel: cancel,
+      onPointerUp: release,
+      onPointerCancel: release,
       onDragStart: cancel,
+      onClickCapture: (event) => {
+        if (!suppressed()) return;
+        event.preventDefault();
+        event.stopPropagation();
+      },
       },
     };
   }, []);

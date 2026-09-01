@@ -28,7 +28,7 @@ export function Board({ sessions: scoped, searchActive, onShowAll, onNewSession,
   onShowAll: () => void;
   onNewSession: () => void;
   /** Right-click, long-press, or keyboard context menu on a card (#154). */
-  onSessionMenu: (sessionId: string, anchor: { x: number; y: number }, restoreFocus: () => void) => void;
+  onSessionMenu: (sessionId: string, anchor: { x: number; y: number }, restoreTarget: () => HTMLElement | null) => void;
 }) {
   const api = useApi();
   const { setFilters, navigate } = useStoreActions();
@@ -260,7 +260,7 @@ function BoardColumnBody({
   runnerOnline: (runnerId: string) => boolean;
   onOpen: (sessionId: string) => void;
   onDragEnd: () => void;
-  onSessionMenu: (sessionId: string, anchor: { x: number; y: number }, restoreFocus: () => void) => void;
+  onSessionMenu: (sessionId: string, anchor: { x: number; y: number }, restoreTarget: () => HTMLElement | null) => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   return (
@@ -304,14 +304,20 @@ function SessionCard({
   runnerOnline: boolean;
   onOpen: () => void;
   onDragEnd: () => void;
-  onSessionMenu: (sessionId: string, anchor: { x: number; y: number }, restoreFocus: () => void) => void;
+  onSessionMenu: (sessionId: string, anchor: { x: number; y: number }, restoreTarget: () => HTMLElement | null) => void;
 }) {
   const api = useApi();
   const [busy, setBusy] = useState(false);
-  const cardRef = useRef<HTMLElement>(null);
-  // The card's open button is its one tabbable element, so it is where dismissal returns focus.
-  const restoreFocus = () => cardRef.current?.querySelector<HTMLElement>(".card-open")?.focus();
-  const openMenu = (anchor: { x: number; y: number }) => onSessionMenu(session.id, anchor, restoreFocus);
+  // Resolved by session id AT RESTORE TIME, not by card instance: a live column move remounts
+  // the virtualized card while its menu is open, and a ref to the old instance would strand
+  // focus on <body>. The board canvas itself is the fallback (it is focusable for the F6 zone).
+  const restoreTarget = () => {
+    for (const card of document.querySelectorAll<HTMLElement>(".board .card")) {
+      if (card.dataset["sessionId"] === session.id) return card.querySelector<HTMLElement>(".card-open");
+    }
+    return document.querySelector<HTMLElement>(".board-wrap");
+  };
+  const openMenu = (anchor: { x: number; y: number }) => onSessionMenu(session.id, anchor, restoreTarget);
   const longPress = useLongPress(openMenu);
 
   const approve = async (e: MouseEvent, optionId: string | null) => {
@@ -327,8 +333,8 @@ function SessionCard({
 
   return (
     <article
-      ref={cardRef}
       className="card"
+      data-session-id={session.id}
       {...longPress.handlers}
       onClick={() => { if (!longPress.consumeSuppressedClick()) onOpen(); }}
       onContextMenu={(e) => {

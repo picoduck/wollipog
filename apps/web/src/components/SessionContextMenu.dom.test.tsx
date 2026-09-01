@@ -30,10 +30,13 @@ interface Log {
 
 async function mount(overrides: { snoozeAvailable?: boolean } = {}): Promise<{ root: Root; log: Log; menu: HTMLElement }> {
   const log: Log = { closed: 0, restored: 0, renamed: [], snoozed: [], archived: [] };
+  const restoreHost = domWindow.document.createElement("button") as unknown as HTMLElement;
+  domWindow.document.body.append(restoreHost as never);
+  restoreHost.addEventListener("focus", () => { log.restored += 1; });
   const state: SessionContextMenuState = {
     sessionId: "s-1",
     anchor: { x: 120, y: 90 },
-    restoreFocus: () => { log.restored += 1; },
+    restoreTarget: () => restoreHost,
   };
   const host = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(host as never);

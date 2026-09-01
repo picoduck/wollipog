@@ -6,8 +6,9 @@ export interface SessionContextMenuState {
   sessionId: string;
   /** Viewport coordinates of the invoking pointer or the focused row's edge. */
   anchor: { x: number; y: number };
-  /** Where keyboard focus returns on plain dismissal — the grid for rows, the card for cards. */
-  restoreFocus: () => void;
+  /** Resolves the return-focus element AT RESTORE TIME — the grid for rows, the card's open
+   * button for cards — so a virtualized remount between open and close cannot strand focus. */
+  restoreTarget: () => HTMLElement | null;
 }
 
 const MENU_WIDTH = 220;
@@ -70,7 +71,7 @@ export function SessionContextMenu({
 
   const close = (restoreFocus: boolean) => {
     onClose();
-    if (restoreFocus) state.restoreFocus();
+    if (restoreFocus) state.restoreTarget()?.focus();
   };
 
   // Dialog-opening actions close WITHOUT restoring focus — the dialog takes it, and its own

@@ -950,3 +950,70 @@ test("a touch long-press opens the row menu and suppresses the tap it rode in on
     mobileViewport = true;
   }
 });
+
+test("a long-press over a card's approval button opens the menu without approving", async () => {
+  // Round-1 review P1: the release's synthetic click lands on the NESTED control, whose own
+  // handler would run before a bubble-phase guard — a held finger must never approve.
+  mobileViewport = false;
+  setWindowFocused(true);
+  setVisibility("visible");
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "long-press-approval",
+    runtimeKey: "long-press-approval:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  const approvals: string[] = [];
+  const client = {
+    ...api,
+    approve: async (id: string) => { approvals.push(id); return session(id, 1); },
+  } as unknown as ApiClient;
+  try {
+    await act(async () => {
+      root.render(
+        <ApiProvider client={client}>
+          <StoreProvider connection={connection} navigation={navigation}>
+            <InboxView viewMode="board" rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+          </StoreProvider>
+        </ApiProvider>,
+      );
+    });
+    await act(async () => {
+      socket.push(snapshot([session("A", 30, {
+        pendingApproval: {
+          requestId: "req-1",
+          kind: "tool",
+          title: "Run npm test",
+          options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+        } as never,
+      })]));
+    });
+    const approveButton = ([...domWindow.document.querySelectorAll(".card-approval button")] as unknown as HTMLElement[])
+      .find((button) => button.textContent === "Allow")!;
+    await act(async () => {
+      approveButton.dispatchEvent(new domWindow.PointerEvent("pointerdown", {
+        bubbles: true, pointerId: 9, pointerType: "touch", clientX: 300, clientY: 200,
+      } as never) as never);
+    });
+    // Held well past both the 500ms fire and the old fire-anchored 700ms window: suppression
+    // must pivot on release, not on when the timer fired (round-1 P2).
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1400)); });
+    assert.ok(domWindow.document.querySelector('[role="menu"]'), "the held press opened the menu");
+    await act(async () => {
+      approveButton.dispatchEvent(new domWindow.PointerEvent("pointerup", { bubbles: true, pointerId: 9, pointerType: "touch" } as never) as never);
+      approveButton.dispatchEvent(new domWindow.MouseEvent("click", { bubbles: true, cancelable: true }) as never);
+    });
+    await act(async () => { await Promise.resolve(); });
+    assert.deepEqual(approvals, [], "the gesture asked for a menu, not an approval");
+    assert.ok(domWindow.document.querySelector('[role="menu"]'), "and the menu is still the surface in charge");
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+    domWindow.document.body.innerHTML = "";
+    mobileViewport = true;
+  }
+});
