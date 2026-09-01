@@ -96,8 +96,12 @@ import {
   acquireSessionFork,
   canStopActiveTurn,
   composerPrimaryAction,
+  conversationForkAvailability,
   editInForkAvailability,
   forkFailureIsAmbiguous,
+  sessionForkInProgress,
+  subscribeSessionForks,
+  type ConversationForkAvailability,
 } from "../session-actions.js";
 import { SessionApprovalRegion } from "./SessionApproval.js";
 import { GovernanceAuditTrail } from "./GovernanceAuditTrail.js";
@@ -295,6 +299,11 @@ function invalidateComposerMutationRecovery(key: string): void {
 
 export type SessionDetailMode = "preview" | "expanded";
 
+export interface PreviewForkControls {
+  availability: ConversationForkAvailability;
+  fork: () => void;
+}
+
 export type SessionDetailProps = {
   sessionId: string;
   mode?: SessionDetailMode;
@@ -319,6 +328,8 @@ export type SessionDetailProps = {
   providerCommandAttachmentPolicy?: ProviderComposerCommand["attachmentPolicy"];
   /** Registers preview-only paging ownership and live-follow actions with the Inbox key layer. */
   onPreviewNavigationReady?: (controls: PreviewNavigationControls | null) => void;
+  /** Registers the selected preview's latest-checkpoint fork action with the Inbox key layer. */
+  onPreviewForkReady?: (controls: PreviewForkControls | null) => void;
   /** Injectable storage boundary for deterministic component tests; production uses durable storage. */
   composerDraftLoader?: (sessionId: string, instanceScope: string) => Promise<ComposerDraft | null>;
   /** Injectable cleanup boundary for deterministic post-acceptance storage-fault tests. */
@@ -441,6 +452,7 @@ function SessionDetailLoaded({
   topbarControls,
   providerCommandAttachmentPolicy = "send",
   onPreviewNavigationReady,
+  onPreviewForkReady,
   composerDraftLoader = loadComposerDraft,
   composerDraftCleanup = deleteComposerDraftIfMatches,
   session,
@@ -460,7 +472,7 @@ function SessionDetailLoaded({
     [mutationKey],
   );
   const activeComposerMutation = useSyncExternalStore(subscribeMutation, readMutation, readMutation);
-  const { confirm } = useFeedback();
+  const { confirm, showToast } = useFeedback();
   // Narrow selector subscriptions: this component must re-render for ITS session's events and
   // row, not for every token-usage upsert of every other session on the board.
   const {
@@ -543,6 +555,12 @@ function SessionDetailLoaded({
   const [messageAction, setMessageAction] = useState<MessageActionState | null>(null);
   const messageActionReturnFocusRef = useRef<HTMLElement | null>(null);
   const forkInFlightRef = useRef(false);
+  const readForkInProgress = useCallback(() => sessionForkInProgress(sessionId), [sessionId]);
+  const forkInProgress = useSyncExternalStore(
+    subscribeSessionForks,
+    readForkInProgress,
+    readForkInProgress,
+  );
   const viewGenerationRef = useRef(0);
   const [historyRetry, setHistoryRetry] = useState(0);
   const [olderRequestSettled, setOlderRequestSettled] = useState(0);
@@ -1871,7 +1889,9 @@ function SessionDetailLoaded({
       })) return;
       const releaseFork = acquireSessionFork(sessionId);
       if (!releaseFork) {
-        setError("A conversation fork is already in progress for this session. Wait for it to appear on the Board.");
+        const message = "A conversation fork is already in progress for this session. Wait for it to appear on the Board.";
+        setError(message);
+        if (mode === "preview") showToast(message, { tone: "error" });
         return;
       }
       const generation = viewGenerationRef.current;
@@ -1885,7 +1905,11 @@ function SessionDetailLoaded({
         } catch (cause) {
           const ambiguous = ambiguousForkError(cause);
           if (ambiguous) releaseOnFinish = false;
-          if (viewGenerationRef.current === generation) setError((ambiguous ?? cause as Error).message);
+          if (viewGenerationRef.current === generation) {
+            const message = (ambiguous ?? cause as Error).message;
+            setError(message);
+            if (mode === "preview") showToast(message, { tone: "error" });
+          }
         } finally {
           if (releaseOnFinish) releaseFork();
           forkInFlightRef.current = false;
@@ -1893,7 +1917,7 @@ function SessionDetailLoaded({
         }
       })();
     },
-    [busy, confirm, navigate, session?.driver, sessionId],
+    [api, busy, confirm, mode, navigate, session?.driver, sessionId, showToast],
   );
 
   const canSend = canPrompt && (text.trim().length > 0 || images.length > 0);
@@ -1902,10 +1926,63 @@ function SessionDetailLoaded({
     hasContent: text.length > 0 || images.length > 0,
     stopping: stopRequestPending,
   });
-  const completedConversationTurns = useMemo(
-    () => new Set(items.flatMap((item) => item.kind === "conversation_checkpoint" ? [item.turn] : [])),
+  const conversationCheckpointTurns = useMemo(
+    () => items.flatMap((item) => item.kind === "conversation_checkpoint" ? [item.turn] : []),
     [items],
   );
+  const completedConversationTurns = useMemo(
+    () => new Set(conversationCheckpointTurns),
+    [conversationCheckpointTurns],
+  );
+  const latestConversationForkTurn = conversationCheckpointTurns.length > 0
+    ? Math.max(...conversationCheckpointTurns)
+    : undefined;
+  const latestKnownTurn = useMemo(() => items.reduce(
+    (latest, item) => item.kind === "checkpoint" || item.kind === "conversation_checkpoint"
+      ? Math.max(latest, item.turn)
+      : latest,
+    0,
+  ) || undefined, [items]);
+  const forkContext = useMemo(() => ({
+    driver: session.driver,
+    providerSupported: supportsConversationFork,
+    hasWorktree: session.worktreePath != null,
+    runnerOnline,
+    runnerProtocolVersion: runner?.protocolVersion,
+    status: session.status,
+    queuedPrompts: session.queued?.length ?? 0,
+    busy,
+    forkInProgress,
+  }), [
+    busy,
+    forkInProgress,
+    runner?.protocolVersion,
+    runnerOnline,
+    session.driver,
+    session.queued?.length,
+    session.status,
+    session.worktreePath,
+    supportsConversationFork,
+  ]);
+  const forkAvailabilityByTurn = useMemo(() => new Map(conversationCheckpointTurns.map((turn) => [
+    turn,
+    conversationForkAvailability(turn, latestKnownTurn, forkContext),
+  ])), [conversationCheckpointTurns, forkContext, latestKnownTurn]);
+  const latestForkAvailability = useMemo(
+    () => conversationForkAvailability(latestConversationForkTurn, latestKnownTurn, forkContext),
+    [forkContext, latestConversationForkTurn, latestKnownTurn],
+  );
+  const previewForkControls = useMemo<PreviewForkControls>(() => ({
+    availability: latestForkAvailability,
+    fork: () => {
+      if (latestForkAvailability.available) void onFork(latestForkAvailability.forkTurn);
+    },
+  }), [latestForkAvailability, onFork]);
+  useLayoutEffect(() => {
+    if (mode !== "preview" || !onPreviewForkReady) return;
+    onPreviewForkReady(previewForkControls);
+    return () => onPreviewForkReady(null);
+  }, [mode, onPreviewForkReady, previewForkControls]);
   const editInForkTargets = useMemo(() => {
     const targets = new Map<number, number>();
     for (const item of items) {
@@ -2607,6 +2684,10 @@ function SessionDetailLoaded({
           onBack={onBack ?? (() => navigate({ name: "inbox" }))}
           onArchive={onArchive}
           onSnooze={onSnooze}
+          forkAvailability={latestForkAvailability}
+          onFork={() => {
+            if (latestForkAvailability.available) void onFork(latestForkAvailability.forkTurn);
+          }}
           projectCrumb={<ProjectChip session={session} onOpenInbox={onBack ?? (() => navigate({ name: "inbox" }))} />}
           projectName={currentProjectName}
           projectLabel={projectsSupported ? "Project" : "Workspace"}
@@ -2825,22 +2906,11 @@ function SessionDetailLoaded({
                           ? onRewind
                           : undefined
                       }
-                      onFork={
-                        mode === "expanded" &&
-                        supportsConversationFork &&
-                        session.worktreePath != null &&
-                        runnerSupportsProtocol(runner?.protocolVersion, "conversationFork") &&
-                        runnerOnline &&
-                        (session.queued?.length ?? 0) === 0 &&
-                        !busy &&
-                        !["queued", "running", "starting", "input_required"].includes(session.status)
-                          ? onFork
-                          : undefined
-                      }
+                      onFork={mode === "expanded" ? onFork : undefined}
                       onEditAndResend={mode === "expanded" && canPrompt ? openResendAction : undefined}
                       onEditInFork={mode === "expanded" ? openForkEditAction : undefined}
                       editInForkTargets={mode === "expanded" ? editInForkTargets : undefined}
-                      forkLatestOnly={session.driver === "claude-code"}
+                      forkAvailabilityByTurn={mode === "expanded" ? forkAvailabilityByTurn : undefined}
                       revealRequest={timelineRevealRequest}
                       onRevealHandled={handleTimelineReveal}
                       questionContext={timelineQuestionContext}

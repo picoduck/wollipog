@@ -19,12 +19,13 @@ import {
   type VirtualScrollAnchor,
 } from "./MeasuredVirtualList.js";
 import { CopyButton } from "./common.js";
-import { BranchIcon, EditIcon } from "./Icons.js";
+import { BranchIcon, EditIcon, ThreadForkIcon } from "./Icons.js";
 import { formatDuration, formatRecordedRelativeTime, formatRecordedTimestamp, titleCaseLabel } from "../format.js";
 import { PromptImageView } from "./PromptImageView.js";
 import { EventPayloadContent } from "./EventPayloadContent.js";
 import { useTimelineClock } from "../timeline-clock.js";
 import { SessionTimelineQuestionRegion } from "./SessionApproval.js";
+import type { ConversationForkAvailability } from "../session-actions.js";
 
 type ToolItem = Extract<TimelineItem, { kind: "tool_call" }>;
 const useBrowserLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
@@ -57,6 +58,25 @@ export interface TimelineQuestionContext {
 export function timelineFileSourceLocation(path: string): SourceLocation | null {
   const normalized = normalizeSourcePath(path);
   return normalized ? { path: normalized } : null;
+}
+
+/** Attach each durable provider checkpoint to the completed top-level assistant response that
+ * established it. A later user turn clears the candidate so a cancelled turn cannot borrow the
+ * previous response's fork point. */
+export function assistantForkTurns(items: readonly TimelineItem[]): ReadonlyMap<number, number> {
+  const turns = new Map<number, number>();
+  let assistantMessageId: number | null = null;
+  for (const item of items) {
+    if (item.kind === "user_message") {
+      assistantMessageId = null;
+    } else if (item.kind === "agent_message" && !item.parentToolUseId) {
+      assistantMessageId = item.id;
+    } else if (item.kind === "conversation_checkpoint") {
+      if (assistantMessageId !== null) turns.set(assistantMessageId, item.turn);
+      assistantMessageId = null;
+    }
+  }
+  return turns;
 }
 export type TimelineRenderRow =
   | { kind: "work_summary"; key: string; tools: number; edits: number; thoughts: number; open: boolean }
@@ -97,7 +117,7 @@ export const EventTimeline = memo(function EventTimeline({
   onEditInFork,
   onOpenSourceLocation,
   editInForkTargets,
-  forkLatestOnly = false,
+  forkAvailabilityByTurn,
   scrollRef,
   historyKey,
   getInitialAnchor,
@@ -121,8 +141,7 @@ export const EventTimeline = memo(function EventTimeline({
   onEditInFork?: (item: Extract<TimelineItem, { kind: "user_message" }>, forkTurn: number) => void;
   onOpenSourceLocation?: (location: SourceLocation) => void;
   editInForkTargets?: ReadonlyMap<number, number>;
-  /** Claude CLI can only fork the current transcript; older provider checkpoints stay visible. */
-  forkLatestOnly?: boolean;
+  forkAvailabilityByTurn?: ReadonlyMap<number, ConversationForkAvailability>;
   scrollRef?: RefObject<HTMLElement | null>;
   /** Session id + history epoch. A change intentionally resets disclosure and measurements. */
   historyKey?: string;
@@ -155,7 +174,7 @@ export const EventTimeline = memo(function EventTimeline({
       onEditInFork={onEditInFork}
       onOpenSourceLocation={onOpenSourceLocation}
       editInForkTargets={editInForkTargets}
-      forkLatestOnly={forkLatestOnly}
+      forkAvailabilityByTurn={forkAvailabilityByTurn}
       scrollRef={scrollRef}
       getInitialAnchor={getInitialAnchor}
       preserveAnchor={preserveAnchor}
@@ -180,7 +199,7 @@ function EventTimelineBody({
   onEditInFork,
   onOpenSourceLocation,
   editInForkTargets,
-  forkLatestOnly,
+  forkAvailabilityByTurn,
   scrollRef,
   getInitialAnchor,
   preserveAnchor,
@@ -201,7 +220,7 @@ function EventTimelineBody({
   onEditInFork?: (item: Extract<TimelineItem, { kind: "user_message" }>, forkTurn: number) => void;
   onOpenSourceLocation?: (location: SourceLocation) => void;
   editInForkTargets?: ReadonlyMap<number, number>;
-  forkLatestOnly: boolean;
+  forkAvailabilityByTurn?: ReadonlyMap<number, ConversationForkAvailability>;
   scrollRef?: RefObject<HTMLElement | null>;
   getInitialAnchor?: () => VirtualScrollAnchor | null;
   preserveAnchor?: boolean;
@@ -221,7 +240,8 @@ function EventTimelineBody({
   const unresolvedRevealRef = useRef<number | null>(null);
   const [disclosure, setDisclosure] = useState<Map<string, boolean>>(() => new Map());
   const projection = useMemo(() => projector.current!.project(items, disclosure), [items, disclosure]);
-  const { latestCheckpointTurn, rows } = projection;
+  const { rows } = projection;
+  const forkTurns = useMemo(() => assistantForkTurns(items), [items]);
   const pendingQuestionRequestId = questionContext?.pendingQuestion?.requestId ?? null;
   let pinnedQuestionRow: TimelineRenderRow | undefined;
   if (pendingQuestionRequestId !== null) {
@@ -317,7 +337,7 @@ function EventTimelineBody({
     const item = row.item;
     const detailsKey = `row-details:${row.key}`;
     const detailsOpen = disclosure.get(detailsKey) ?? false;
-    const forkBlocked = onFork && forkLatestOnly && item.kind === "conversation_checkpoint" && item.turn !== latestCheckpointTurn;
+    const assistantForkTurn = item.kind === "agent_message" ? forkTurns.get(item.id) : undefined;
     return (
       <div
         className={row.depth > 0 ? "tl-nested-row" : row.inWork ? "tl-work-row" : undefined}
@@ -334,10 +354,9 @@ function EventTimelineBody({
           onEditInFork={onEditInFork}
           onOpenSourceLocation={onOpenSourceLocation}
           editInForkTurn={item.kind === "user_message" ? editInForkTargets?.get(item.id) : undefined}
-          onFork={forkBlocked ? undefined : onFork}
-          forkUnavailableReason={forkBlocked
-            ? "Claude CLI can fork only its current transcript at the matching latest-turn checkpoint. A later turn attempt advanced the conversation; files-only rewind remains available."
-            : undefined}
+          onFork={onFork}
+          forkTurn={assistantForkTurn}
+          forkAvailability={assistantForkTurn == null ? undefined : forkAvailabilityByTurn?.get(assistantForkTurn)}
           questionContext={item.kind === "question" && row.key === pinnedQuestionRow?.key &&
             questionContext?.questionInTimeline === true ? questionContext : undefined}
         />
@@ -1467,7 +1486,8 @@ const TimelineRow = memo(function TimelineRow({
   onEditInFork,
   onOpenSourceLocation,
   editInForkTurn,
-  forkUnavailableReason,
+  forkTurn,
+  forkAvailability,
   highlightEligible = true,
   disclosureOpen = false,
   onDisclosureToggle,
@@ -1481,7 +1501,8 @@ const TimelineRow = memo(function TimelineRow({
   onEditInFork?: (item: Extract<TimelineItem, { kind: "user_message" }>, forkTurn: number) => void;
   onOpenSourceLocation?: (location: SourceLocation) => void;
   editInForkTurn?: number;
-  forkUnavailableReason?: string;
+  forkTurn?: number;
+  forkAvailability?: ConversationForkAvailability;
   highlightEligible?: boolean;
   disclosureOpen?: boolean;
   onDisclosureToggle?: () => void;
@@ -1518,16 +1539,6 @@ const TimelineRow = memo(function TimelineRow({
         <div className="tl-checkpoint conversation" title={`Conversation and files after turn ${item.turn}`}>
           <span className="checkpoint-line" />
           <span className="checkpoint-label">after turn {item.turn}</span>
-          {onFork && (
-            <button className="btn ghost sm checkpoint-rewind" onClick={() => onFork(item.turn)}>
-              Fork Conversation Here
-            </button>
-          )}
-          {!onFork && forkUnavailableReason && (
-            <button className="btn ghost sm checkpoint-rewind" disabled title={forkUnavailableReason}>
-              Claude Forks Latest Only
-            </button>
-          )}
           <span className="checkpoint-line" />
         </div>
       );
@@ -1580,6 +1591,8 @@ const TimelineRow = memo(function TimelineRow({
             completedAt={item.completedAt}
             copyText={item.text}
             copyLabel="Copy assistant message"
+            onFork={onFork && forkTurn != null ? () => onFork(forkTurn) : undefined}
+            forkAvailability={forkAvailability}
           />
         </div>
       );
@@ -1940,6 +1953,8 @@ function MessageMeta({
   copyLabel,
   onEditAndResend,
   onEditInFork,
+  onFork,
+  forkAvailability,
 }: {
   createdAt?: number;
   lastActivityAt?: number;
@@ -1950,10 +1965,12 @@ function MessageMeta({
   copyLabel: string;
   onEditAndResend?: () => void;
   onEditInFork?: () => void;
+  onFork?: () => void;
+  forkAvailability?: ConversationForkAvailability;
 }) {
   const duration = durationMs != null ? formatDuration(durationMs) : "";
   const timestamp = Number.isFinite(createdAt);
-  if (!timestamp && !duration && !copyText && !onEditAndResend && !onEditInFork) return null;
+  if (!timestamp && !duration && !copyText && !onEditAndResend && !onEditInFork && !forkAvailability) return null;
   return (
     <div className="tl-message-meta">
       {timestamp && (
@@ -1974,6 +1991,18 @@ function MessageMeta({
         </span>
       )}
       {copyText && <CopyButton text={copyText} iconOnly ariaLabel={copyLabel} className="tl-message-icon" />}
+      {forkAvailability && (
+        <button
+          type="button"
+          className="tl-message-icon tl-message-fork"
+          disabled={!forkAvailability.available}
+          onClick={forkAvailability.available ? onFork : undefined}
+          title={forkAvailability.available ? "Fork Conversation Here" : forkAvailability.reason}
+          aria-label="Fork Conversation Here"
+        >
+          <ThreadForkIcon size={14} />
+        </button>
+      )}
       {onEditAndResend && (
         <button
           type="button"

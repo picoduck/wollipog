@@ -36,10 +36,12 @@ test("the Inbox footer rail keeps standard shortcuts global and approval shortcu
   const invoked: string[] = [];
   const props: Omit<InboxShortcutRailProps, "session" | "pinned" | "busy"> = {
     stopBeforeArchiveSupported: true,
+    forkAvailability: { available: true, forkTurn: 3 },
     onApprove: () => invoked.push("approve"),
     onDeny: () => invoked.push("deny"),
     onReply: () => invoked.push("reply"),
     onExpand: () => invoked.push("expand"),
+    onFork: () => invoked.push("fork"),
     onTogglePin: () => invoked.push("pin"),
     onMarkUnread: () => invoked.push("unread"),
     onArchive: () => invoked.push("archive"),
@@ -52,7 +54,7 @@ test("the Inbox footer rail keeps standard shortcuts global and approval shortcu
   const toolbar = container.querySelector<HTMLElement>('[aria-label="Shortcuts for Selected Session"]')!;
   assert.deepEqual(
     [...toolbar.querySelectorAll("button")].map((button) => button.getAttribute("aria-label")),
-    ["Reply", "Expand", "Pin", "Unread", "Archive and Stop", "Snooze"],
+    ["Reply", "Expand", "Fork", "Pin", "Unread", "Archive and Stop", "Snooze"],
   );
   assert.equal(toolbar.querySelector('[aria-label="Approve"]'), null);
   assert.equal(toolbar.querySelector('[aria-label="Deny"]'), null);
@@ -70,15 +72,29 @@ test("the Inbox footer rail keeps standard shortcuts global and approval shortcu
   });
   assert.deepEqual(
     [...container.querySelectorAll("button")].map((button) => button.getAttribute("aria-label")),
-    ["Approve", "Deny", "Reply", "Expand", "Unpin", "Unread", "Archive and Stop", "Snooze"],
+    ["Approve", "Deny", "Reply", "Expand", "Fork", "Unpin", "Unread", "Archive and Stop", "Snooze"],
   );
   await act(async () => {
     container.querySelector<HTMLButtonElement>('[aria-label="Approve"]')!.click();
     container.querySelector<HTMLButtonElement>('[aria-label="Reply"]')!.click();
+    container.querySelector<HTMLButtonElement>('[aria-label="Fork"]')!.click();
     container.querySelector<HTMLButtonElement>('[aria-label="Archive and Stop"]')!.click();
     container.querySelector<HTMLButtonElement>('[aria-label="Snooze"]')!.click();
   });
-  assert.deepEqual(invoked, ["approve", "reply", "archive", "snooze"]);
+  assert.deepEqual(invoked, ["approve", "reply", "fork", "archive", "snooze"]);
+
+  await act(async () => {
+    root.render(<InboxShortcutRail
+      {...props}
+      forkAvailability={{ available: false, reason: "Reconnect the runner before creating a fork." }}
+      session={session()}
+      pinned={false}
+      busy={false}
+    />);
+  });
+  const disabledFork = container.querySelector<HTMLButtonElement>('[aria-label="Fork"]')!;
+  assert.equal(disabledFork.disabled, true);
+  assert.equal(disabledFork.title, "Reconnect the runner before creating a fork.");
 
   await act(async () => {
     root.render(<InboxShortcutRail {...props} session={session()} pinned={false} busy />);

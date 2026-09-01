@@ -14,6 +14,15 @@ export interface EditInForkContext {
   busy: boolean;
 }
 
+export interface ConversationForkContext extends EditInForkContext {
+  providerSupported: boolean;
+  forkInProgress: boolean;
+}
+
+export type ConversationForkAvailability =
+  | { available: true; forkTurn: number }
+  | { available: false; reason: string };
+
 export type EditInForkAvailability =
   | { available: true; forkTurn: number }
   | { available: false; reason: string };
@@ -51,16 +60,74 @@ export function composerPrimaryAction(input: {
 // A fork can take minutes and outlive one SessionDetail mount. Keep the lock at module scope so
 // navigating away and reopening the source cannot start a second ambiguous operation.
 const activeSessionForks = new Set<string>();
+const sessionForkListeners = new Set<() => void>();
+
+function notifySessionForkListeners(): void {
+  for (const listener of sessionForkListeners) listener();
+}
+
+export function subscribeSessionForks(listener: () => void): () => void {
+  sessionForkListeners.add(listener);
+  return () => sessionForkListeners.delete(listener);
+}
+
+export function sessionForkInProgress(sessionId: string): boolean {
+  return activeSessionForks.has(sessionId);
+}
 
 export function acquireSessionFork(sessionId: string): (() => void) | null {
   if (activeSessionForks.has(sessionId)) return null;
   activeSessionForks.add(sessionId);
+  notifySessionForkListeners();
   let released = false;
   return () => {
     if (released) return;
     released = true;
     activeSessionForks.delete(sessionId);
+    notifySessionForkListeners();
   };
+}
+
+/** Shared fail-closed gate for every plain conversation-fork entry point. */
+export function conversationForkAvailability(
+  forkTurn: number | undefined,
+  latestKnownTurn: number | undefined,
+  context: ConversationForkContext,
+): ConversationForkAvailability {
+  if (!Number.isInteger(forkTurn) || forkTurn! <= 0) {
+    return { available: false, reason: "Complete a conversation turn before creating a fork." };
+  }
+  if (!context.hasWorktree) {
+    return { available: false, reason: "Conversation forks require an isolated worktree session." };
+  }
+  if (!context.runnerOnline) {
+    return { available: false, reason: "Reconnect the runner before creating a fork." };
+  }
+  if (!runnerSupportsProtocol(context.runnerProtocolVersion, "conversationFork")) {
+    return { available: false, reason: "Update and restart the runner to enable conversation forks." };
+  }
+  if (!context.providerSupported) {
+    return { available: false, reason: "This provider does not support conversation forks." };
+  }
+  if (context.forkInProgress) {
+    return { available: false, reason: "A conversation fork is already in progress for this session." };
+  }
+  if (["queued", "running", "starting", "input_required"].includes(context.status)) {
+    return { available: false, reason: "Wait for the current turn or approval before creating a fork." };
+  }
+  if (context.queuedPrompts > 0) {
+    return { available: false, reason: "Cancel or wait for queued messages before creating a fork." };
+  }
+  if (context.busy) {
+    return { available: false, reason: "Another session action is already in progress." };
+  }
+  if (context.driver === "claude-code" && forkTurn !== latestKnownTurn) {
+    return {
+      available: false,
+      reason: "Claude Code can fork only its latest completed conversation checkpoint.",
+    };
+  }
+  return { available: true, forkTurn: forkTurn! };
 }
 
 /** A lost response or server-side 5xx cannot prove whether the non-idempotent fork committed. */

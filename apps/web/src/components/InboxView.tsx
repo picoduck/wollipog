@@ -32,7 +32,7 @@ import { InboxShortcutRail } from "./InboxShortcutRail.js";
 import { CreateProjectDialog } from "./CreateProjectDialog.js";
 import { InboxCreateMenu } from "./InboxCreateMenu.js";
 import { ProjectSplitMenu } from "./ProjectSplitMenu.js";
-import { SessionDetail } from "./SessionDetail.js";
+import { SessionDetail, type PreviewForkControls } from "./SessionDetail.js";
 import type { RightPanelState } from "./RightPanel.js";
 import { useIsMobile } from "./useIsMobile.js";
 import { useInboxKeys, type InboxKeyActions } from "../useInboxKeys.js";
@@ -195,6 +195,7 @@ export function InboxView({
   const busySessionIdsRef = useRef(new Set<string>());
   const viewRef = useRef<HTMLDivElement>(null);
   const previewNavigationRef = useRef<PreviewNavigationControls | null>(null);
+  const [previewForkControls, setPreviewForkControls] = useState<PreviewForkControls | null>(null);
   const registerPreviewNavigation = useCallback((controls: PreviewNavigationControls | null) => {
     previewNavigationRef.current = controls;
   }, []);
@@ -883,6 +884,15 @@ export function InboxView({
     next: () => moveSelection("next"),
     previous: () => moveSelection("previous"),
     expand: () => { if (displayedSelection) expand(displayedSelection); },
+    fork: () => {
+      if (!previewForkControls) {
+        showToast("Fork availability is still loading.", { tone: "error" });
+      } else if (!previewForkControls.availability.available) {
+        showToast(previewForkControls.availability.reason, { tone: "error" });
+      } else {
+        previewForkControls.fork();
+      }
+    },
     nextSplit: () => selectSplit(nextInboxSplitKey(splits.map((split) => split.key), activeSplit?.key ?? null, "next")),
     previousSplit: () => selectSplit(nextInboxSplitKey(splits.map((split) => split.key), activeSplit?.key ?? null, "previous")),
     approve: () => { if (displayedSelection) void decide(displayedSelection, "approve").catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" })); },
@@ -906,7 +916,7 @@ export function InboxView({
       const scroll = viewRef.current?.querySelector<HTMLElement>(".detail-scroll");
       pageInboxPreview(scroll, "previous", previewNavigationRef.current?.beginProgrammaticScroll);
     },
-  }), [activeSplit?.key, archive, decide, displayedSelection, expand, moveSelection, selectSplit, sessionRemindersSupported, setUnread, showToast, splits, togglePin]);
+  }), [activeSplit?.key, archive, decide, displayedSelection, expand, moveSelection, previewForkControls, selectSplit, sessionRemindersSupported, setUnread, showToast, splits, togglePin]);
   // Board mode has no row selection, so the list's j/k/a/d… vocabulary would act on an invisible
   // row; only the shared toolbar (tabs, search, toggle) stays keyboard-reachable there.
   useInboxKeys(!isMobile && !expanded && !boardMode, keyActions);
@@ -1152,6 +1162,10 @@ export function InboxView({
             pinned={displayedSelection ? pinnedSessions.has(displayedSelection) : false}
             stopBeforeArchiveSupported={stopBeforeArchiveSupported}
             busy={displayedSelection ? busySessionIds.has(displayedSelection) : false}
+            forkAvailability={previewForkControls?.availability ?? {
+              available: false,
+              reason: "Fork availability is still loading.",
+            }}
             onApprove={() => {
               if (displayedSelection) void decide(displayedSelection, "approve")
                 .catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" }));
@@ -1162,6 +1176,7 @@ export function InboxView({
             }}
             onReply={() => { if (displayedSelection) expand(displayedSelection, true); }}
             onExpand={() => { if (displayedSelection) expand(displayedSelection); }}
+            onFork={() => previewForkControls?.fork()}
             onTogglePin={() => { if (displayedSelection) togglePin(displayedSelection); }}
             onMarkUnread={() => { if (displayedSelection) setUnread(displayedSelection); }}
             onArchive={() => { if (displayedSelection) void archive(displayedSelection); }}
@@ -1224,6 +1239,7 @@ export function InboxView({
                   onSnooze: () => setSnoozeSessionId(surfaceSessionId),
                 } : {})}
                 onPreviewNavigationReady={expanded ? undefined : registerPreviewNavigation}
+                onPreviewForkReady={expanded ? undefined : setPreviewForkControls}
               />
             ) : (
               <div className="inbox-preview-empty" tabIndex={-1}>

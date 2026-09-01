@@ -7,6 +7,7 @@ import { groupTimeline, SubagentTreeProjector, TimelineBuilder, type TimelineIte
 import {
   automaticSubagentOpen,
   automaticSubagentOpenAfterChange,
+  assistantForkTurns,
   EventTimeline,
   estimateTimelineRow,
   flattenTimelineRows,
@@ -208,41 +209,45 @@ test("a resolved question keeps one compact outcome card at the same timeline ro
   assert.doesNotMatch(html, /role="radiogroup"/);
 });
 
-test("Claude timeline keeps historical rewind while enabling conversation fork only at latest turn", () => {
+test("completed assistant metadata owns enabled and disabled fork controls beside Copy", () => {
   const html = renderToStaticMarkup(React.createElement(EventTimeline, {
     items: [
       { kind: "checkpoint", id: 1, turn: 1 },
-      { kind: "conversation_checkpoint", id: 2, turn: 1 },
-      { kind: "checkpoint", id: 3, turn: 2 },
-      { kind: "conversation_checkpoint", id: 4, turn: 2 },
+      { kind: "agent_message", id: 2, text: "First answer" },
+      { kind: "conversation_checkpoint", id: 3, turn: 1 },
+      { kind: "checkpoint", id: 4, turn: 2 },
+      { kind: "agent_message", id: 5, text: "Second answer" },
+      { kind: "conversation_checkpoint", id: 6, turn: 2 },
     ],
     onRewind: () => {},
     onFork: () => {},
-    forkLatestOnly: true,
+    forkAvailabilityByTurn: new Map([
+      [1, { available: false, reason: "Claude Code can fork only its latest completed conversation checkpoint." }],
+      [2, { available: true, forkTurn: 2 }],
+    ]),
   }));
 
   assert.equal((html.match(/Rewind Files to Here/g) ?? []).length, 2);
-  assert.equal((html.match(/Fork Conversation Here/g) ?? []).length, 1);
-  assert.equal((html.match(/Claude Forks Latest Only/g) ?? []).length, 1);
-  assert.match(html, /Claude CLI can fork only its current transcript at the matching latest-turn checkpoint\./);
-  assert.match(html, /<button[^>]*disabled=""[^>]*>Claude Forks Latest Only<\/button>/);
+  assert.equal((html.match(/aria-label="Fork Conversation Here"/g) ?? []).length, 2);
+  assert.match(html, /aria-label="Copy assistant message"[\s\S]*?aria-label="Fork Conversation Here"/,
+    "Fork follows Copy in assistant metadata");
+  assert.match(html, /<button[^>]*disabled=""[^>]*title="Claude Code can fork only its latest completed conversation checkpoint\."[^>]*aria-label="Fork Conversation Here"/);
+  assert.match(html, /<button[^>]*title="Fork Conversation Here"[^>]*aria-label="Fork Conversation Here"/);
+  assert.doesNotMatch(html, /class="btn ghost sm checkpoint-rewind"[^>]*>[^<]*Fork Conversation Here/,
+    "checkpoint dividers no longer own the heavy text action");
 });
 
-test("Claude timeline disables an older conversation fork after a later cancelled turn", () => {
-  const html = renderToStaticMarkup(React.createElement(EventTimeline, {
-    items: [
-      { kind: "checkpoint", id: 1, turn: 1 },
-      { kind: "conversation_checkpoint", id: 2, turn: 1 },
-      { kind: "checkpoint", id: 3, turn: 2 },
-    ],
-    onRewind: () => {},
-    onFork: () => {},
-    forkLatestOnly: true,
-  }));
-
-  assert.equal((html.match(/Rewind Files to Here/g) ?? []).length, 2);
-  assert.equal((html.match(/Fork Conversation Here/g) ?? []).length, 0);
-  assert.equal((html.match(/Claude Forks Latest Only/g) ?? []).length, 1);
+test("assistant fork-point projection ignores nested answers and cancelled turns", () => {
+  const turns = assistantForkTurns([
+    { kind: "user_message", id: 1, text: "one", turn: 1 },
+    { kind: "agent_message", id: 2, text: "top-level one" },
+    { kind: "agent_message", id: 3, text: "nested", parentToolUseId: "task" },
+    { kind: "conversation_checkpoint", id: 4, turn: 1 },
+    { kind: "user_message", id: 5, text: "cancelled" },
+    { kind: "error", id: 6, message: "cancelled" },
+    { kind: "conversation_checkpoint", id: 7, turn: 2 },
+  ]);
+  assert.deepEqual([...turns], [[2, 1]], "a checkpoint without a response gets no borrowed icon");
 });
 
 test("file-edit source locations canonicalize separators and reject traversal-shaped paths", () => {

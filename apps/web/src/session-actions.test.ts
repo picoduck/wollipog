@@ -4,8 +4,11 @@ import {
   acquireSessionFork,
   canStopActiveTurn,
   composerPrimaryAction,
+  conversationForkAvailability,
   editInForkAvailability,
   forkFailureIsAmbiguous,
+  sessionForkInProgress,
+  subscribeSessionForks,
   type EditInForkContext,
 } from "./session-actions.js";
 
@@ -46,9 +49,46 @@ test("historical edit-and-fork is Codex interactive only and every runtime gate 
   for (const context of blocked) assert.equal(editInForkAvailability(2, turns, context).available, false);
 });
 
+test("plain conversation forks share runtime gates and preserve Claude latest-only behavior", () => {
+  const context = { ...base, providerSupported: true, forkInProgress: false };
+  assert.deepEqual(conversationForkAvailability(2, 3, context), { available: true, forkTurn: 2 });
+  assert.deepEqual(conversationForkAvailability(3, 3, { ...context, driver: "claude-code" }), {
+    available: true,
+    forkTurn: 3,
+  });
+  assert.match(
+    conversationForkAvailability(2, 3, { ...context, driver: "claude-code" }).available
+      ? ""
+      : conversationForkAvailability(2, 3, { ...context, driver: "claude-code" }).reason,
+    /latest completed conversation checkpoint/,
+  );
+
+  const blocked = [
+    { context: { ...context, hasWorktree: false }, reason: /isolated worktree/ },
+    { context: { ...context, runnerOnline: false }, reason: /Reconnect the runner/ },
+    { context: { ...context, runnerProtocolVersion: 27 }, reason: /Update and restart/ },
+    { context: { ...context, providerSupported: false }, reason: /provider does not support/ },
+    { context: { ...context, forkInProgress: true }, reason: /already in progress/ },
+    { context: { ...context, status: "running" as const }, reason: /current turn or approval/ },
+    { context: { ...context, queuedPrompts: 1 }, reason: /queued messages/ },
+    { context: { ...context, busy: true }, reason: /Another session action/ },
+  ];
+  for (const { context: blockedContext, reason } of blocked) {
+    const availability = conversationForkAvailability(2, 2, blockedContext);
+    assert.equal(availability.available, false);
+    if (!availability.available) assert.match(availability.reason, reason);
+  }
+  const noCheckpoint = conversationForkAvailability(undefined, undefined, context);
+  assert.equal(noCheckpoint.available, false);
+  if (!noCheckpoint.available) assert.match(noCheckpoint.reason, /Complete a conversation turn/);
+});
+
 test("a session fork lease survives view remounts and releases exactly once", () => {
+  let notifications = 0;
+  const unsubscribe = subscribeSessionForks(() => { notifications += 1; });
   const release = acquireSessionFork("source-session");
   assert.ok(release);
+  assert.equal(sessionForkInProgress("source-session"), true);
   assert.equal(acquireSessionFork("source-session"), null);
   const otherRelease = acquireSessionFork("other-session");
   assert.ok(otherRelease, "independent sessions are not blocked");
@@ -58,6 +98,9 @@ test("a session fork lease survives view remounts and releases exactly once", ()
   assert.ok(nextRelease);
   nextRelease();
   otherRelease();
+  assert.equal(sessionForkInProgress("source-session"), false);
+  assert.equal(notifications, 6, "acquire and release notify, while rejected and duplicate releases do not");
+  unsubscribe();
 });
 
 test("lost responses and 5xx fork failures are ambiguous and must not be retried", () => {

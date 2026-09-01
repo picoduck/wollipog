@@ -69,6 +69,7 @@ test("bare Inbox bindings match exact shifted and unshifted keys", () => {
   button.focus();
 
   assert.equal(matchesShortcut(key("j"), "inbox-next", window.document), true);
+  assert.equal(matchesShortcut(key("f"), "inbox-fork", window.document), true);
   assert.equal(matchesShortcut(key("j", { ctrlKey: true }), "inbox-next", window.document), false);
   assert.equal(matchesShortcut(key(" "), "inbox-page-down", window.document), true);
   assert.equal(matchesShortcut(key(" ", { shiftKey: true }), "inbox-page-down", window.document), false);
@@ -88,6 +89,7 @@ test("shortcut labels follow the current platform without changing definitions",
   assert.equal(shortcutDisplay("inbox-follow-latest", false), "Shift+G");
   assert.equal(shortcutDisplay("inbox-follow-latest-end", false), "End");
   assert.equal(shortcutDisplay("inbox-expand", false), "Enter");
+  assert.equal(shortcutDisplay("inbox-fork", false), "F");
   assert.equal(shortcutDisplay("exit-terminal", true), "Ctrl+Esc");
   assert.equal(shortcutDisplay("stop-turn", false), "Shift+Esc");
   assert.equal(shortcutDisplay("steer-turn", false), "Ctrl+Enter");
@@ -162,7 +164,7 @@ test("sequence matching completes inside 600ms and cancels on mismatch, timeout,
 
 test("PR2 Inbox shortcuts are registered under the Inbox scope", () => {
   const expected = [
-    "inbox-next", "inbox-previous", "inbox-expand", "inbox-next-split", "inbox-previous-split",
+    "inbox-next", "inbox-previous", "inbox-expand", "inbox-fork", "inbox-next-split", "inbox-previous-split",
     "inbox-approve", "inbox-deny", "inbox-archive", "inbox-snooze", "inbox-pin", "inbox-unread",
     "inbox-reply", "inbox-page-down", "inbox-page-up", "inbox-follow-latest", "inbox-follow-latest-end",
   ];
