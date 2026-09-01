@@ -11335,14 +11335,13 @@ body.shell-dock-dragging * {
 .agent-defaults-empty { margin: var(--space-2); }
 .agent-defaults-editor > p { grid-column: 1 / -1; margin: 0; }
 .agent-defaults-draft-notice {
-  padding: 8px 10px;
+  padding: var(--space-2) var(--space-3);
   border: 1px solid color-mix(in srgb, var(--blue) 35%, transparent);
   border-radius: var(--radius-sm);
   color: var(--blue-on-tint);
   background: color-mix(in srgb, var(--blue) 10%, transparent);
   font-size: var(--text-xs);
 }
-.agent-defaults-draft-notice:empty { padding: 0; border: 0; background: transparent; }
 .settings-inline-error { color: var(--red); font-size: var(--text-xs); }
 @media (max-width: 760px) {
   .agent-defaults-list { margin-left: var(--space-2); }

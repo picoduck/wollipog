@@ -667,7 +667,11 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
         <div id={controlsId} className="agent-defaults-list" aria-busy={loading || busy || undefined}>
           <div className="agent-defaults-toolbar">
             {loadError && (
-              <span className="settings-inline-error" role={mutationError ? undefined : "alert"}>
+              <span
+                className="settings-inline-error"
+                role={mutationError ? undefined : "alert"}
+                aria-hidden={mutationError ? true : undefined}
+              >
                 {refreshFailure}
               </span>
             )}
@@ -734,7 +738,13 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
                     {option.installations.length === 0 && (
                       <p className="settings-inline-error" role="status">This saved Agent Harness is no longer discovered. Reset it to use the Wollipog default.</p>
                     )}
-                    <p className="agent-defaults-draft-notice" role="status" aria-atomic="true">{draftNotice ?? ""}</p>
+                    <p
+                      className={`agent-defaults-draft-notice${draftNotice ? "" : " sr-only"}`}
+                      role="status"
+                      aria-atomic="true"
+                    >
+                      {draftNotice ?? ""}
+                    </p>
                     {models.length > 0 && (
                       <label className="agent-defaults-field">
                         <span>Model</span>

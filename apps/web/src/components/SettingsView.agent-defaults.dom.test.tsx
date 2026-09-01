@@ -431,11 +431,68 @@ test("Agent Harness defaults expose one live alert when mutation recovery also f
     assert.match(alerts[0]?.textContent ?? "", /save rejected/);
     assert.match(alerts[0]?.textContent ?? "", /Could not refresh Agent Harness defaults: recovery unavailable/);
     assert.match(fixture.container.textContent ?? "", /Could not refresh Agent Harness defaults: recovery unavailable/);
+    assert.equal(fixture.container.querySelector('.agent-defaults-toolbar .settings-inline-error')?.getAttribute("aria-hidden"), "true");
     assert.equal(buttonNamed(fixture.container, "Codex App Server").getAttribute("aria-expanded"), "true");
     assert.equal(buttonNamed(fixture.container, "Save"), save);
   } finally {
     await act(async () => fixture.root.unmount());
     fixture.container.remove();
+  }
+});
+
+test("Agent Harness draft-repair notices clear when Effort or Permission Mode changes", async () => {
+  const scenarios = [
+    {
+      field: "Codex App Server Reasoning Effort",
+      before: ["Sol", "Extra High", "Full Access"],
+      after: "Low",
+      repair(repaired: AgentHarnessDefaultsView) {
+        repaired.defaults[0]!.installations[0]!.models[1]!.efforts = ["low"];
+      },
+    },
+    {
+      field: "Codex App Server Permission Mode",
+      before: ["Luna", "Low", "Full Access"],
+      after: "Approve for Me",
+      repair(repaired: AgentHarnessDefaultsView) {
+        repaired.defaults[0]!.installations[0]!.permissionModes = ["auto-review"];
+      },
+    },
+  ] as const;
+
+  for (const scenario of scenarios) {
+    let getCalls = 0;
+    const repaired = view();
+    scenario.repair(repaired);
+    const fixture = await renderPanel({
+      instanceId: "test",
+      publicOrigin: "http://localhost",
+      close() {},
+      async request() {
+        getCalls += 1;
+        return new Response(JSON.stringify(getCalls === 1 ? view() : repaired), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+    try {
+      await act(async () => buttonNamed(fixture.container, "Default Models, Efforts, and Permissions").click());
+      await act(async () => buttonNamed(fixture.container, "Codex App Server").click());
+      await choose(fixture.container, "Codex App Server Model", scenario.before[0]);
+      await choose(fixture.container, "Codex App Server Reasoning Effort", scenario.before[1]);
+      await choose(fixture.container, "Codex App Server Permission Mode", scenario.before[2]);
+      await act(async () => buttonNamed(fixture.container, "Refresh").click());
+      await nextFrame();
+      const notice = fixture.container.querySelector('.agent-defaults-draft-notice[role="status"]');
+      assert.match(notice?.textContent ?? "", /Capabilities changed/);
+      await choose(fixture.container, scenario.field, scenario.after);
+      assert.equal(notice?.textContent, "");
+      assert.equal(notice?.classList.contains("sr-only"), true);
+    } finally {
+      await act(async () => fixture.root.unmount());
+      fixture.container.remove();
+    }
   }
 });
 
