@@ -34,8 +34,21 @@ test would fail to catch, and name the other test that does catch it.
   that seems obvious.
 - Never propose deleting a regression test that names an issue or PR number. That test exists
   because something broke once.
+- A helper with the same name in two packages is not a duplicate. Two tests can share
+  byte-identical assertion lines while each pins its own implementation —
+  `isControlPlaneService` exists independently in `scripts/dev-runner-bootstrap.mjs` and
+  `packages/protocol/src/index.ts`, and a cross-file detector flags their tests. Before calling
+  a cross-file duplicate, `git grep` the symbol and confirm there is one definition (or a bare
+  re-export); two definitions mean two contracts, each entitled to its own test.
 
 ## Report
+
+**Calibration, recorded 2026-09-01:** two consecutive weekly runs over a ~4,300-test suite have
+produced exactly one small duplicate-test finding each and zero findings in the other three
+categories — this job's steady-state yield is roughly one six-to-nine-line finding per run. The
+schedule stays weekly by explicit decision (the cost is negligible on a subscription); read this
+as the expected baseline, not as underperformance, and do not manufacture findings to beat it.
+
 
 For each candidate: the file and test name, which of the four categories it falls into, the specific
 proof it cannot fail or is duplicated, and the test that covers the behavior instead. State the
