@@ -11293,6 +11293,21 @@ body.shell-dock-dragging * {
 .settings-group { display: flex; flex-direction: column; gap: var(--space-2); }
 
 /* Settings -> Appearance -> Navigation: the rail's visibility and order editor (#385). */
+.rail-more-label { flex: 1; min-width: 0; }
+.rail-more-count {
+  margin-left: 0;
+  min-width: 18px;
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  font-size: var(--text-xs);
+  text-align: center;
+}
+.rail-more-count + .rail-more-count { margin-left: 6px; }
+/* The bar badges' solid palette, not a 16% wash: the wash measured 4.42:1 in wollipog dark. */
+.rail-more-count { background: var(--accent); color: var(--bg); }
+.rail-more-count.blocked { background: var(--accent-2); color: var(--bg); }
+.rail-more-count.stalled { background: var(--red); color: var(--bg); }
+
 .rail-order-list {
   margin: 0;
   padding: 0;

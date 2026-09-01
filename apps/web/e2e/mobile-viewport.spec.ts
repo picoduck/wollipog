@@ -907,7 +907,7 @@ async function expectEveryDestinationReachable(page: Page, occluded: number) {
     const expected = destination?.title ?? (path === SETTINGS_ROW.path ? SETTINGS_ROW.title : undefined);
     expect(expected, `no destination is served at ${path}`).toBeDefined();
     const label = expected!;
-    await expect(item, `the row at ${path} must be labelled "${label}"`).toHaveText(label);
+    await expect(item.locator(".rail-more-label"), `the row at ${path} must be labelled "${label}"`).toHaveText(label);
     // Scrolling within the sheet is the intended way to reach an overflowing item; what must not
     // happen is an item that cannot be brought into the sheet's visible box at all.
     await item.scrollIntoViewIfNeeded();
@@ -924,8 +924,8 @@ async function expectEveryDestinationReachable(page: Page, occluded: number) {
     // overflow icon while the labels kept the item's total above its floor.
     await expectHittable(item, label);
     await expectPainted(page, item.locator("svg"), `${label} icon`, MARKS.sheetIcon);
-    await expectPlainText(item.locator("span"), `${label} label`);
-    await expectPainted(page, item.locator("span"), `${label} label`,
+    await expectPlainText(item.locator(".rail-more-label"), `${label} label`);
+    await expectPainted(page, item.locator(".rail-more-label"), `${label} label`,
       SHORT_SHEET_TITLES.has(label) ? MARKS.sheetShortLabel : MARKS.sheetLabel);
   }
 }

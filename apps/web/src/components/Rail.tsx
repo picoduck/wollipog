@@ -154,7 +154,10 @@ export function Rail({
    * The parts every sheet row shares. Extracted so the Settings row cannot drift from the
    * destination rows — both close the sheet the same way and both answer Space.
    */
-  const sheetItemProps = (destination: View, active: boolean) => ({
+  // `resolve` runs at ACTIVATION, not render: an overflowed Sessions row must open the persisted
+  // list/board mode exactly like the bar item and the digit do, and that mode can change while
+  // the sheet is open.
+  const sheetItemProps = (destination: View, active: boolean, resolve: () => View = () => destination) => ({
     role: "menuitem" as const,
     href: viewPath(destination),
     "aria-current": active ? ("page" as const) : undefined,
@@ -164,7 +167,7 @@ export function Rail({
       // close(true) restores focus to the trigger, which survives the
       // teardown; close(false) left keyboard position on <body>.
       more.close(true);
-      onNavigate(destination);
+      onNavigate(resolve());
     },
     onKeyDown: (event: React.KeyboardEvent) => {
       // An anchor activates on Enter natively but not on Space, and role="menuitem"
@@ -172,7 +175,7 @@ export function Rail({
       if (event.key !== " " && event.key !== "Spacebar") return;
       event.preventDefault();
       more.close(true);
-      onNavigate(destination);
+      onNavigate(resolve());
     },
   });
 
@@ -271,14 +274,31 @@ export function Rail({
                   {overflowItems.map((item) => {
                     const Icon = VIEW_ICONS[item.name];
                     const destination = { name: item.name } as View;
+                    // A reordered rail can push a counted destination into the sheet; its status
+                    // must overflow WITH it, or moving Connections fifth silently hides the
+                    // online count and moving Sessions hides its blocked/stalled attention.
+                    const blocked = item.name === "inbox" ? blockedCount : 0;
+                    const stalled = item.name === "inbox" ? stalledCount : 0;
+                    const online = item.name === "runners" ? onlineConnections : 0;
+                    const countLabel = item.name === "inbox"
+                      ? `${blocked > 0 ? `, ${blocked} Blocked` : ""}${stalled > 0 ? `, ${stalled} Stalled` : ""}`
+                      : online > 0 ? `, ${online} Online` : "";
                     return (
                       <a
                         key={item.name}
                         className={`rail-more-item${selected === item.name ? " active" : ""}`}
-                        {...sheetItemProps(destination, selected === item.name)}
+                        aria-label={`${item.title}${countLabel}`}
+                        {...sheetItemProps(
+                          destination,
+                          selected === item.name,
+                          item.name === "inbox" ? sessionsViewDestination : undefined,
+                        )}
                       >
                         <Icon size={20} />
-                        <span>{item.title}</span>
+                        <span className="rail-more-label">{item.title}</span>
+                        {blocked > 0 && <span className="rail-more-count blocked" aria-hidden="true">{blocked}</span>}
+                        {stalled > 0 && <span className="rail-more-count stalled" aria-hidden="true">{stalled}</span>}
+                        {online > 0 && <span className="rail-more-count" aria-hidden="true">{online}</span>}
                       </a>
                     );
                   })}
@@ -291,7 +311,7 @@ export function Rail({
                     {...sheetItemProps({ name: "settings" }, settingsSelected)}
                   >
                     <GearIcon size={20} />
-                    <span>Settings</span>
+                    <span className="rail-more-label">Settings</span>
                   </a>
                 </div>
               </>

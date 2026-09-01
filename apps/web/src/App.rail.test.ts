@@ -313,7 +313,8 @@ test("More menu items activate with Space as well as Enter", () => {
   assert.ok(handler.length > 0, "menu items must handle keys themselves");
   assert.match(handler, /event\.key !== " "/, "Space must be recognised");
   assert.match(handler, /preventDefault/, "and must not scroll the sheet instead");
-  assert.match(handler, /onNavigate\(destination\)/, "and must actually navigate");
+  assert.match(handler, /onNavigate\(resolve\(\)\)/,
+    "and must actually navigate — through resolve(), so an overflowed Sessions row opens its saved mode");
 });
 
 

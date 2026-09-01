@@ -178,10 +178,16 @@ test("the phone rail hosts destinations plus routed Settings and no nested layer
     const sheet = container.querySelector(".rail-more-sheet")!;
     // The bar takes the first four VISIBLE destinations (#385), so with every experiment on the
     // sheet holds the visible order past them, and Settings still trails everything.
-    assert.deepEqual([...sheet.querySelectorAll(".rail-more-item")].map((el) => el.textContent),
+    assert.deepEqual([...sheet.querySelectorAll(".rail-more-item")].map((el) => el.querySelector("span")?.textContent),
       ["Connections", "Agent Skills", "Projects", "Archived Sessions", "Usage & Cost",
         "Settings"],
       "Settings is the trailing row, after every destination");
+    // The default order overflows Connections, so its online count overflows with it (#532
+    // round-1 finding): a moved destination must not shed its status.
+    const connectionsRow = [...sheet.querySelectorAll<HTMLElement>(".rail-more-item")]
+      .find((row) => row.querySelector("span")?.textContent === "Connections")!;
+    assert.equal(connectionsRow.querySelector(".rail-more-count")?.textContent, "1");
+    assert.match(connectionsRow.getAttribute("aria-label") ?? "", /1 Online/);
     assert.equal(sheet.querySelector(".rail-more-control"), null,
       "the sheet must contain no nested dialog or menu content");
     // Every child of a role=menu must be a menu item, or roving navigation silently skips it.
@@ -470,6 +476,54 @@ test("hiding and reordering renumber the surviving destinations", async () => {
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();
+    resetRailPreferencesForTest();
+    domWindow.localStorage.clear();
+  }
+});
+
+test("overflowed destinations keep their status counts and Sessions keeps its saved mode", async () => {
+  // Round-1 review findings on #532: the default order puts Connections fifth on a phone, so its
+  // online count must overflow WITH it — and a Sessions row pushed into the sheet must open the
+  // persisted list/board mode exactly like the bar item and the digit do.
+  resetRailPreferencesForTest();
+  const restore = stubPhoneWidth();
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const navigated: View[] = [];
+  const render = () => act(async () => {
+    root.render(
+      <Rail
+        view={{ name: "projects" }}
+        blockedCount={2}
+        stalledCount={1}
+        onlineConnections={3}
+        onNavigate={(destination) => navigated.push(destination)}
+      />,
+    );
+  });
+  try {
+    for (let step = 0; step < 5; step += 1) moveRailView("inbox", "down");
+    await render();
+    await act(async () => {
+      (container.querySelector(".rail-more-trigger") as unknown as HTMLButtonElement).click();
+    });
+    const sheet = container.querySelector(".rail-more-sheet")!;
+    const sessionsRow = [...sheet.querySelectorAll<HTMLAnchorElement>(".rail-more-item")]
+      .find((row) => row.querySelector("span")?.textContent === "Sessions")!;
+    assert.equal(sessionsRow.querySelector(".rail-more-count.blocked")?.textContent, "2");
+    assert.equal(sessionsRow.querySelector(".rail-more-count.stalled")?.textContent, "1");
+    assert.match(sessionsRow.getAttribute("aria-label") ?? "", /2 Blocked/);
+
+    saveSessionsViewMode("board");
+    sessionsRow.dispatchEvent(new domWindow.MouseEvent("click", { bubbles: true, button: 0 }) as never);
+    assert.deepEqual(navigated.at(-1), { name: "board" },
+      "an overflowed Sessions row honors the persisted board mode");
+  } finally {
+    saveSessionsViewMode("list");
+    await act(async () => { root.unmount(); });
+    container.remove();
+    restore();
     resetRailPreferencesForTest();
     domWindow.localStorage.clear();
   }
