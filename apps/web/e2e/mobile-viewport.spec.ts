@@ -399,6 +399,12 @@ const THEMES = ["dark", "light"] as const;
  */
 const MARKS = {
   icon: { paint: 1000, legible: 450, illegibleCells: 0, minContrast: CONTRAST.icon },
+  /* The Automations bolt joined the primary bar when Board became a mode of Sessions (#499).
+     It is one stroked path where the other primary glyphs are two or three, so it measures 895
+     paint / 716-746 legible against the icon family's 1154-1547 / 944-1295 — a floor calibrated
+     for the beefier marks would reject a bolt that is fully painted. Same ratios to the measured
+     minimum as `icon`, so losing a third of the bolt still trips it. */
+  boltIcon: { paint: 780, legible: 340, illegibleCells: 0, minContrast: CONTRAST.icon },
   moreTrigger: { paint: 90, legible: 35, illegibleCells: 0, minContrast: CONTRAST.icon },
   sheetIcon: { paint: 300, legible: 140, illegibleCells: 0, minContrast: CONTRAST.icon },
   sheetLabel: { paint: 1850, legible: 650, illegibleCells: 0, minContrast: CONTRAST.label },
@@ -796,8 +802,10 @@ async function expectEveryPrimaryDestinationUsable(page: Page) {
     // and measuring the item instead let its border, and on Connections its count badge, stand in
     // for an icon that had been erased. The More trigger is three small dots inside the same 26px
     // box as a full icon, so it clears a lower floor.
+    const isAutomations = !isMoreTrigger &&
+      (await item.evaluate((element) => new URL((element as HTMLAnchorElement).href).pathname)) === "/automations";
     await expectPainted(page, item.locator("svg"), `${label} icon`,
-      isMoreTrigger ? MARKS.moreTrigger : MARKS.icon);
+      isMoreTrigger ? MARKS.moreTrigger : isAutomations ? MARKS.boltIcon : MARKS.icon);
     await expectHittable(item, label);
   }
 }
