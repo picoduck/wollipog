@@ -997,7 +997,7 @@ export function InboxView({
                 label="Reminder View"
                 value={reminderMode}
                 options={[
-                  { value: "ordinary", label: "Inbox" },
+                  { value: "ordinary", label: "Active" },
                   { value: "snoozed", label: `Snoozed (${snoozedCount})` },
                 ]}
                 onChange={setReminderMode}
