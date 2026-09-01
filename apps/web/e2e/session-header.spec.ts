@@ -255,6 +255,65 @@ test("coarse-pointer desktop keeps Project Actions beside short Project text", a
   }
 });
 
+test("Project Actions has settled breadcrumb colors in light and dark themes", async ({ browser }) => {
+  for (const theme of ["light", "dark"] as const) {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    const page = await context.newPage();
+    try {
+      await openSession(page);
+      await page.evaluate((value) => {
+        document.documentElement.dataset.theme = value;
+        document.documentElement.style.colorScheme = value;
+      }, theme);
+
+      const header = page.locator(".detail-head");
+      const project = header.locator(".crumb-project > .cctx-chip");
+      const actions = header.getByRole("button", { name: "Project Actions" });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await expect(actions).toHaveCSS("background-image", "none");
+      await expect(actions).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+      await expect.poll(async () => {
+        const [actionsColor, projectColor] = await Promise.all([
+          actions.evaluate((element) => getComputedStyle(element).color),
+          project.evaluate((element) => getComputedStyle(element).color),
+        ]);
+        return actionsColor === projectColor;
+      }).toBe(true);
+
+      const tokens = await page.locator("html").evaluate(() => {
+        const probe = document.createElement("div");
+        probe.style.display = "none";
+        probe.style.backgroundColor = "var(--bg-elev-2)";
+        probe.style.color = "var(--accent)";
+        document.body.append(probe);
+        const style = getComputedStyle(probe);
+        const hover = style.backgroundColor;
+        const accent = style.color;
+        probe.style.backgroundColor = "var(--bg-elev-3)";
+        const active = getComputedStyle(probe).backgroundColor;
+        probe.remove();
+        return { accent, active, hover };
+      });
+      await actions.hover();
+      await expect(actions).toHaveCSS("background-color", tokens.hover);
+      const box = await actions.boundingBox();
+      expect(box).not.toBeNull();
+      await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+      await page.mouse.down();
+      await expect(actions).toHaveCSS("background-color", tokens.active);
+      await page.mouse.up();
+      await page.keyboard.press("Escape");
+      await expect(actions).toHaveAttribute("aria-expanded", "false");
+      await project.focus();
+      await page.keyboard.press("Tab");
+      await expect(actions).toBeFocused();
+      await expect(actions).toHaveCSS("color", tokens.accent);
+    } finally {
+      await context.close();
+    }
+  }
+});
+
 test("desktop Session actions stay contained with five concurrent status indicators", async ({ page }) => {
   await page.setViewportSize({ width: 900, height: 800 });
   await openSession(page, "git-visibility", { reviewReady: "1" });
