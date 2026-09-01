@@ -1,5 +1,6 @@
 import { sessionAttentionStatus, type SessionReminderView, type SessionView } from "@wollipog/protocol";
 import { memo } from "react";
+import { useLongPress } from "./interactions.js";
 import { isHeartbeatBusy, type SessionActivity } from "../activity.js";
 import { relativeTime, statusMeta } from "../format.js";
 import { reminderBadgeLabel } from "../session-reminders.js";
@@ -29,6 +30,8 @@ export interface InboxRowProps {
   /** Take the id, so the parent can pass ONE stable callback to every row. */
   onSelect: (sessionId: string) => void;
   onExpand: (sessionId: string) => void;
+  /** Right-click, long-press, or keyboard context menu for this row's session (#154). */
+  onSessionMenu: (sessionId: string, anchor: { x: number; y: number }) => void;
 }
 
 function InboxRowInner({
@@ -45,7 +48,9 @@ function InboxRowInner({
   reminder,
   onSelect,
   onExpand,
+  onSessionMenu,
 }: InboxRowProps) {
+  const longPress = useLongPress(({ x, y }) => onSessionMenu(session.id, { x, y }));
   const stopStatus = session.stopOperation?.status ?? session.archiveStatus;
   const stopFailed = stopStatus === "stop_failed";
   const status = stopStatus === "stop_pending"
@@ -65,6 +70,10 @@ function InboxRowInner({
       aria-rowindex={rowIndex}
       aria-selected={selected}
       className={`inbox-row-shell${selected ? " selected" : ""}${unread ? " unread" : ""}${stalled ? " stalled" : ""}`}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        onSessionMenu(session.id, { x: event.clientX, y: event.clientY });
+      }}
     >
       <div role="gridcell" className="inbox-row-primary-cell">
         <button
@@ -72,8 +81,9 @@ function InboxRowInner({
           tabIndex={-1}
           className="inbox-row"
           onMouseDown={(event) => event.preventDefault()}
-          onClick={() => onSelect(session.id)}
-          onDoubleClick={() => onExpand(session.id)}
+          {...longPress.handlers}
+          onClick={() => { if (!longPress.consumeSuppressedClick()) onSelect(session.id); }}
+          onDoubleClick={() => { if (!longPress.consumeSuppressedClick()) onExpand(session.id); }}
           title={`Select ${session.title}`}
         >
           <span className="inbox-row-sender" title={`${agent} · ${projectName}`}>

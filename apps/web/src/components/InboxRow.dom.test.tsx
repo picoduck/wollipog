@@ -41,6 +41,7 @@ test("Inbox rows expose plain Stop Failed instead of Diff Ready", async () => {
     selected={false} unread={false} pinned={false} rowIndex={1}
     stalled={false} activityNow={2}
     onSelect={() => undefined} onExpand={() => undefined}
+      onSessionMenu={() => undefined}
   />));
   assert.match(container.textContent ?? "", /Stop Failed/);
   assert.doesNotMatch(container.textContent ?? "", /Diff Ready/);

@@ -3,11 +3,13 @@ import {
   useEffect,
   useId,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
   type Dispatch,
   type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
   type RefObject,
   type SetStateAction,
 } from "react";
@@ -395,4 +397,83 @@ export function useAccessibleMenu(
   }, [close]);
 
   return { menuId, triggerRef, menuRef, toggle, close, onTriggerKeyDown, onMenuKeyDown };
+}
+
+/** Where a context menu anchors: a pointer position, widened to the rect the placer expects. */
+export function pointAnchorRect(x: number, y: number): Pick<DOMRect, "top" | "right" | "bottom" | "left" | "width"> {
+  return { top: y, bottom: y, left: x, right: x, width: 0 };
+}
+
+const LONG_PRESS_MS = 500;
+const LONG_PRESS_SLOP_PX = 10;
+/** How long a completed long-press suppresses the synthetic click the press also produces. */
+const LONG_PRESS_CLICK_SUPPRESS_MS = 700;
+
+export interface LongPress {
+  /** Spread onto the pressed element; `handlers.onDragStart` also belongs on draggable targets. */
+  handlers: {
+    onPointerDown: (event: ReactPointerEvent<HTMLElement>) => void;
+    onPointerMove: (event: ReactPointerEvent<HTMLElement>) => void;
+    onPointerUp: (event: ReactPointerEvent<HTMLElement>) => void;
+    onPointerCancel: (event: ReactPointerEvent<HTMLElement>) => void;
+    onDragStart: () => void;
+  };
+  /** Click guard for the caller's own onClick: a completed long-press must not also act as a
+   * tap, and the release can synthesize a click after the menu is already open. Reports (does
+   * not reset) so a double-fired click inside the window stays suppressed too. */
+  consumeSuppressedClick: () => boolean;
+}
+
+/**
+ * A touch/pen long-press that opens a context menu without also acting as a tap (#154).
+ *
+ * Mouse presses are deliberately excluded — desktop already has a real `contextmenu` event, and
+ * a mouse resting on a row for half a second is reading, not requesting a menu. Movement past a
+ * small slop cancels the press so ordinary touch scrolling never triggers it, and a completed
+ * press suppresses the click the same gesture synthesizes on release.
+ *
+ * Returns stable handler identities: rows are memoized on their props, so a fresh object per
+ * render would defeat every row memo at once.
+ */
+export function useLongPress(onLongPress: (point: { x: number; y: number }) => void): LongPress {
+  const callbackRef = useRef(onLongPress);
+  callbackRef.current = onLongPress;
+  const stateRef = useRef<{ timer: number; pointerId: number; x: number; y: number } | null>(null);
+  const firedAtRef = useRef(0);
+
+  return useMemo<LongPress>(() => {
+    const cancel = () => {
+      if (stateRef.current === null) return;
+      window.clearTimeout(stateRef.current.timer);
+      stateRef.current = null;
+    };
+    return {
+      consumeSuppressedClick: () => Date.now() - firedAtRef.current <= LONG_PRESS_CLICK_SUPPRESS_MS,
+      handlers: {
+      onPointerDown: (event) => {
+        if (event.pointerType !== "touch" && event.pointerType !== "pen") return;
+        cancel();
+        const { pointerId, clientX, clientY } = event;
+        stateRef.current = {
+          pointerId,
+          x: clientX,
+          y: clientY,
+          timer: window.setTimeout(() => {
+            stateRef.current = null;
+            firedAtRef.current = Date.now();
+            callbackRef.current({ x: clientX, y: clientY });
+          }, LONG_PRESS_MS),
+        };
+      },
+      onPointerMove: (event) => {
+        const pressed = stateRef.current;
+        if (pressed === null || event.pointerId !== pressed.pointerId) return;
+        if (Math.hypot(event.clientX - pressed.x, event.clientY - pressed.y) > LONG_PRESS_SLOP_PX) cancel();
+      },
+      onPointerUp: cancel,
+      onPointerCancel: cancel,
+      onDragStart: cancel,
+      },
+    };
+  }, []);
 }

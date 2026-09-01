@@ -56,7 +56,7 @@ for (const [name, value] of Object.entries({
 function BoardHarness({ onNewSession }: { onNewSession: () => void }) {
   const sessions = useStoreSelector((s) => s.sessions);
   const scoped = React.useMemo(() => [...sessions.values()].filter((s) => !s.archived), [sessions]);
-  return <Board sessions={scoped} searchActive={false} onShowAll={() => {}} onNewSession={onNewSession} />;
+  return <Board sessions={scoped} searchActive={false} onShowAll={() => {}} onNewSession={onNewSession} onSessionMenu={() => {}} />;
 }
 
 const runner: RunnerView = {

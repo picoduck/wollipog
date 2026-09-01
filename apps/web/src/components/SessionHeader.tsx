@@ -7,6 +7,7 @@ import {
   type TranscriptShareView,
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
+import { RenameSessionDialog } from "./RenameSessionDialog.js";
 import { sessionArchiveActionLabel, sessionArchiveRequiresStop } from "../archive-actions.js";
 import { titleCaseLabel } from "../format.js";
 import { removeFromInstanceKeySet, SESSION_PIN_KEY } from "../pins.js";
@@ -103,10 +104,6 @@ export function SessionHeader({
   const [moveProjectOpen, setMoveProjectOpen] = useState(false);
   const [shareDialogOpen, setShareDialogOpen] = useState(false);
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
-  const [renameDraft, setRenameDraft] = useState(session.title);
-  const [renameError, setRenameError] = useState<string | null>(null);
-  const [renameSubmitting, setRenameSubmitting] = useState(false);
-  const renameSubmittingRef = useRef(false);
   const statusesRef = useRef<HTMLDivElement>(null);
   const [note, setNote] = useState<string | null>(null);
   const menu = useAccessibleMenu(menuOpen, setMenuOpen, "session-actions-menu");
@@ -300,40 +297,6 @@ export function SessionHeader({
   // trigger); the menu item that launched them unmounts with the menu and cannot take focus back.
   const closeShareDialog = () => {
     setShareDialogOpen(false);
-  };
-
-  const closeRenameDialog = () => {
-    if (renameSubmittingRef.current) return;
-    setRenameDialogOpen(false);
-    setRenameError(null);
-  };
-
-  const submitRename = async () => {
-    if (renameSubmittingRef.current) return;
-    const normalized = renameDraft.trim().replace(/\s+/g, " ");
-    if (!normalized) {
-      setRenameError("Enter a session name.");
-      return;
-    }
-    if (normalized.length > 120) {
-      setRenameError("Session names must be 120 characters or fewer.");
-      return;
-    }
-    renameSubmittingRef.current = true;
-    setRenameSubmitting(true);
-    setBusy(true);
-    setRenameError(null);
-    try {
-      await api.renameSession(session.id, normalized);
-      setRenameDialogOpen(false);
-      setNote("Session renamed");
-    } catch (cause) {
-      setRenameError((cause as Error).message);
-    } finally {
-      renameSubmittingRef.current = false;
-      setRenameSubmitting(false);
-      setBusy(false);
-    }
   };
 
   return (
@@ -600,8 +563,6 @@ export function SessionHeader({
                     role="menuitem"
                     onClick={() => {
                       closeMenu(false);
-                      setRenameDraft(session.title);
-                      setRenameError(null);
                       setRenameDialogOpen(true);
                     }}
                   >
@@ -809,39 +770,12 @@ export function SessionHeader({
         )}
         {shareDialogOpen && <TranscriptShareDialog sessionId={session.id} onClose={closeShareDialog} returnFocusRef={shareMenu.triggerRef} />}
         {renameDialogOpen && (
-          <Modal
-            title="Rename Session"
-            onClose={closeRenameDialog}
+          <RenameSessionDialog
+            session={session}
+            onClose={() => setRenameDialogOpen(false)}
+            onRenamed={() => setNote("Session renamed")}
             returnFocusRef={menu.triggerRef}
-            footer={(
-              <>
-                <button className="btn ghost" type="button" onClick={closeRenameDialog} disabled={renameSubmitting}>Cancel</button>
-                <button className="btn primary" type="submit" form="rename-session-form" disabled={renameSubmitting}>
-                  {renameSubmitting ? "Saving…" : "Save"}
-                </button>
-              </>
-            )}
-          >
-            <form
-              id="rename-session-form"
-              onSubmit={(event) => {
-                event.preventDefault();
-                void submitRename();
-              }}
-            >
-              <label className="field-label" htmlFor="rename-session-title">Session Name</label>
-              <input
-                id="rename-session-title"
-                className="input"
-                value={renameDraft}
-                onChange={(event) => setRenameDraft(event.target.value)}
-                maxLength={120}
-                autoFocus
-                disabled={renameSubmitting}
-              />
-              {renameError && <div className="form-error" role="alert">{renameError}</div>}
-            </form>
-          </Modal>
+          />
         )}
         {moveProjectOpen && renderMoveProjectDialog?.({
           onClose: () => setMoveProjectOpen(false),

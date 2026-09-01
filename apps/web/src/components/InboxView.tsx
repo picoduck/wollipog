@@ -42,6 +42,8 @@ import {
   type ReminderInboxMode,
 } from "../session-reminders.js";
 import { SnoozeDialog } from "./SnoozeDialog.js";
+import { SessionContextMenu, type SessionContextMenuState } from "./SessionContextMenu.js";
+import { RenameSessionDialog } from "./RenameSessionDialog.js";
 import type { NewSessionPreset } from "./NewSessionDialog.js";
 import { SearchIcon } from "./Icons.js";
 import { Board } from "./Board.js";
@@ -181,6 +183,8 @@ export function InboxView({
   const [creatingProject, setCreatingProject] = useState(false);
   const [reminderMode, setReminderMode] = useState<ReminderInboxMode>("ordinary");
   const [snoozeSessionId, setSnoozeSessionId] = useState<string | null>(null);
+  const [sessionMenu, setSessionMenu] = useState<SessionContextMenuState | null>(null);
+  const [renameSessionId, setRenameSessionId] = useState<string | null>(null);
   const [dragRatio, setDragRatio] = useState<number | null>(null);
   const [heldOrder, setHeldOrder] = useState<string[] | null>(null);
   const [busySessionIds, setBusySessionIds] = useState<Set<string>>(() => new Set());
@@ -638,6 +642,23 @@ export function InboxView({
     });
   }, [activeSplit, displayedIds, displayedSelection, holdOrderAfterNavigation, selectSession]);
 
+  // One context-menu opener for rows and cards (#154). Rows restore focus to the grid, which is
+  // where their keyboard position lives; cards supply their own tabbable target.
+  const openSessionMenuAt = useCallback((
+    sessionId: string,
+    anchor: { x: number; y: number },
+    restoreFocus?: () => void,
+  ) => {
+    setSessionMenu({ sessionId, anchor, restoreFocus: restoreFocus ?? (() => listRef.current?.focus()) });
+  }, []);
+  const openRowSessionMenu = useCallback(
+    (sessionId: string, anchor: { x: number; y: number }) => openSessionMenuAt(sessionId, anchor),
+    [openSessionMenuAt],
+  );
+  useEffect(() => {
+    if (sessionMenu && !sessions.has(sessionMenu.sessionId)) setSessionMenu(null);
+  }, [sessionMenu, sessions]);
+
   const expand = useCallback((sessionId: string, focusComposer = false) => {
     selectSession(sessionId, activeSplit?.key ?? null);
     if (onExpand) onExpand(sessionId, focusComposer);
@@ -1035,6 +1056,7 @@ export function InboxView({
               setReminderMode("ordinary");
             }}
             onNewSession={() => onNewSession?.(activeNewSessionPreset)}
+            onSessionMenu={openSessionMenuAt}
           />
         ) : (
         <InboxList
@@ -1093,6 +1115,7 @@ export function InboxView({
           onScrollPosition={(scrollTop) => inboxScrollPositions.set(instanceScope, scrollTop)}
           onPointerTargetChange={handlePointerTargetChange}
           onPointerPressChange={handlePointerPressChange}
+          onSessionMenu={openRowSessionMenu}
         />
         )}
         {!boardMode && (
@@ -1198,6 +1221,28 @@ export function InboxView({
           onCreated={(project) => {
             setCreatingProject(false);
             showToast(`Created ${project.name}.`);
+          }}
+        />
+      )}
+      {sessionMenu && sessions.has(sessionMenu.sessionId) && (
+        <SessionContextMenu
+          state={sessionMenu}
+          sessionTitle={sessions.get(sessionMenu.sessionId)!.title}
+          snoozeAvailable={sessionRemindersSupported}
+          onClose={() => setSessionMenu(null)}
+          onRename={setRenameSessionId}
+          onSnooze={setSnoozeSessionId}
+          onArchive={(sessionId) => { void archive(sessionId); }}
+        />
+      )}
+      {renameSessionId && sessions.has(renameSessionId) && (
+        <RenameSessionDialog
+          key={renameSessionId}
+          session={sessions.get(renameSessionId)!}
+          onClose={() => setRenameSessionId(null)}
+          onRenamed={(updated) => {
+            loadSession(updated);
+            showToast("Session renamed.");
           }}
         />
       )}
