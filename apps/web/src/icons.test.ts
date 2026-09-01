@@ -58,9 +58,9 @@ test("no component draws its own <svg>", () => {
       [/dangerouslySetInnerHTML/i, "dangerouslySetInnerHTML — markup this cannot read"],
       // A polymorphic tag: `const Tag = "svg"` then `<Tag />` produces one with no literal.
       [/=\s*["'`]svg["'`]/, 'a variable holding the "svg" tag name'],
-      // IconBase is no longer exported, so importing it is the one remaining way to own new
-      // geometry without a literal <svg>.
+      // Imports that bypass the local and library adapters own geometry without a literal <svg>.
       [/IconBase/, "IconBase — every glyph is a named export in Icons.tsx"],
+      [/\bfrom\s+["']lucide-react(?:\/[^"']*)?["']/, "a direct library glyph import outside Icons.tsx"],
     ] as const) {
       if (pattern.test(code)) offenders.push(`${relative} (${how})`);
     }
@@ -109,7 +109,7 @@ test("every icon in Icons.tsx shares an approved icon adapter, or says why not",
  */
 test("IconBase pins the conventions every icon shares", () => {
   const source = readFileSync(join(SRC, "components/Icons.tsx"), "utf8");
-  const base = source.slice(source.indexOf("function IconBase("), source.indexOf("export function GridIcon"));
+  const base = source.slice(source.indexOf("function IconBase("), source.indexOf("type LibraryIconProps"));
   for (const [pattern, why] of [
     [/viewBox="0 0 24 24"/, "one coordinate system, so paths are comparable between icons"],
     [/strokeWidth="1\.8"/, "the single stroke weight; 2 and a spread object were the drift"],
