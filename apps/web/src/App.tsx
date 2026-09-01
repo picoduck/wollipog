@@ -69,13 +69,15 @@ import { ChevronLeftIcon, DockBottomIcon, KeyboardIcon, LockIcon, PanelRightIcon
 import { NavRow, SwitchRow } from "./components/ui/SettingsRows.js";
 import { viewPath, viewTitle } from "./navigation.js";
 import { useInstanceScope } from "./instance-scope.js";
-import { saveSessionsViewMode, sessionsDestination, sessionsViewModeForView } from "./sessions-view-mode.js";
+import { sessionsDestination } from "./sessions-view-mode.js";
+import { useSessionsViewModeMemory } from "./use-sessions-view-mode-memory.js";
 import { handleSettingsNavigationKey } from "./settings-navigation.js";
 import { ProjectsView } from "./components/ProjectsView.js";
 import { InstanceSelector } from "./components/InstanceSelector.js";
 import { Rail } from "./components/Rail.js";
 import { InstancesPanel } from "./components/InstancesPanel.js";
 import { useNewSessionShortcut } from "./useNewSessionShortcut.js";
+import { useSessionsViewToggleKey } from "./useSessionsViewToggleKey.js";
 import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import {
   AboutPanel,
@@ -427,15 +429,11 @@ function Shell() {
     inboxNewSessionPresetRef.current = preset;
   }, []);
   useNewSessionShortcut(!isMobile, openContextualNewSession);
+  // The `b` list/board toggle, shared with the sessions-board e2e harness (see the hook's note).
+  useSessionsViewToggleKey(!isMobile, view, navigate);
 
-  // Standing in either Sessions mode records it as the destination's last-used mode. The route is
-  // the source of truth, so every entry path — toggle, `b`, digit, palette, deep link — funnels
-  // through here, and an expanded session deliberately records nothing (see sessions-view-mode.ts).
   const instanceScope = useInstanceScope();
-  const sessionsMode = sessionsViewModeForView(view);
-  useEffect(() => {
-    if (sessionsMode) saveSessionsViewMode(sessionsMode, instanceScope);
-  }, [sessionsMode, instanceScope]);
+  useSessionsViewModeMemory(view, instanceScope);
 
   // ONE Escape handler for the shell ladder (mounted always; the palette and dialogs manage
   // their own). Escape peels exactly ONE layer, topmost first:
@@ -523,16 +521,6 @@ function Shell() {
         // The Sessions digit opens whichever mode the destination last used.
         navigate(shortcutId === "navigate-inbox" ? sessionsDestination(instanceScope) : destination);
         return;
-      }
-      if (matchesShortcut(event, "toggle-sessions-view")) {
-        // Only while Sessions is the current view: `b` is unadvertised elsewhere, and a bare
-        // letter firing from, say, Usage would navigate without any visible control naming it.
-        const current = viewRef.current.name;
-        if (current === "inbox" || current === "board") {
-          event.preventDefault();
-          navigate({ name: current === "board" ? "inbox" : "board" });
-          return;
-        }
       }
       if (matchesShortcut(event, "focus-inbox-search")) {
         event.preventDefault();
