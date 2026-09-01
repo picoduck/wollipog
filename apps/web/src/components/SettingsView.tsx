@@ -445,6 +445,12 @@ function agentHarnessLoadFailure(caught: unknown): AgentHarnessLoadFailure {
   };
 }
 
+function agentHarnessRefreshFailure(failure: AgentHarnessLoadFailure): string {
+  return failure.endpointMissing
+    ? failure.message
+    : `Could not refresh Agent Harness defaults: ${failure.message}`;
+}
+
 function repairableDraft(option: AgentHarnessDefaultOption): AgentHarnessDefaultConfig {
   return repairDraft(option, option.preference ?? {});
 }
@@ -567,6 +573,8 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
   }, [discoveryRevision, load]);
 
   const customized = view?.defaults.filter((option) => option.preference).length ?? 0;
+  const refreshFailure = loadError ? agentHarnessRefreshFailure(loadError) : null;
+  const mutationRecoveryAnnouncement = mutationError && refreshFailure ? ` ${refreshFailure}` : null;
   const summary = !view
     ? loadError
       ? loadError.endpointMissing ? "Control plane update required." : "Agent Harness defaults could not be loaded."
@@ -660,10 +668,15 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
           <div className="agent-defaults-toolbar">
             {loadError && (
               <span className="settings-inline-error" role={mutationError ? undefined : "alert"}>
-                {loadError.endpointMissing ? loadError.message : `Could not refresh Agent Harness defaults: ${loadError.message}`}
+                {refreshFailure}
               </span>
             )}
-            {mutationError && !editing && <span className="settings-inline-error" role="alert">{mutationError}</span>}
+            {mutationError && !editing && (
+              <span className="settings-inline-error" role="alert">
+                {mutationError}
+                {mutationRecoveryAnnouncement && <span className="sr-only">{mutationRecoveryAnnouncement}</span>}
+              </span>
+            )}
             <span className="agent-defaults-action-spacer" />
             <button type="button" className="btn ghost sm" disabled={loading || busy} onClick={(event) => {
               const refresh = event.currentTarget;
@@ -721,9 +734,7 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
                     {option.installations.length === 0 && (
                       <p className="settings-inline-error" role="status">This saved Agent Harness is no longer discovered. Reset it to use the Wollipog default.</p>
                     )}
-                    {draftNotice && (
-                      <p className="agent-defaults-draft-notice" role="status">{draftNotice}</p>
-                    )}
+                    <p className="agent-defaults-draft-notice" role="status" aria-atomic="true">{draftNotice ?? ""}</p>
                     {models.length > 0 && (
                       <label className="agent-defaults-field">
                         <span>Model</span>
@@ -733,6 +744,7 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
                           value={draft.model ?? null}
                           placeholder="Choose Model…"
                           onChange={(model) => {
+                            setDraftNotice(null);
                             const nextEfforts = effortsForModel(option, model);
                             setDraft((current) => {
                               const next = { ...current, model };
@@ -754,13 +766,16 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
                           options={efforts.map((effort) => ({ value: effort, label: effortLabel(effort) }))}
                           value={draft.effort ?? null}
                           placeholder="Choose Effort…"
-                          onChange={(effort) => setDraft((current) => {
-                            const next = { ...current, effort };
-                            if (next.permissionMode && !permissionModesForDraft(option, next).includes(next.permissionMode)) {
-                              delete next.permissionMode;
-                            }
-                            return next;
-                          })}
+                          onChange={(effort) => {
+                            setDraftNotice(null);
+                            setDraft((current) => {
+                              const next = { ...current, effort };
+                              if (next.permissionMode && !permissionModesForDraft(option, next).includes(next.permissionMode)) {
+                                delete next.permissionMode;
+                              }
+                              return next;
+                            });
+                          }}
                         />
                       </label>
                     )}
@@ -775,11 +790,19 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
                           }))}
                           value={draft.permissionMode ?? null}
                           placeholder="Choose Permission Mode…"
-                          onChange={(permissionMode) => setDraft((current) => ({ ...current, permissionMode }))}
+                          onChange={(permissionMode) => {
+                            setDraftNotice(null);
+                            setDraft((current) => ({ ...current, permissionMode }));
+                          }}
                         />
                       </label>
                     )}
-                    {mutationError && <p className="settings-inline-error" role="alert">{mutationError}</p>}
+                    {mutationError && (
+                      <p className="settings-inline-error" role="alert">
+                        {mutationError}
+                        {mutationRecoveryAnnouncement && <span className="sr-only">{mutationRecoveryAnnouncement}</span>}
+                      </p>
+                    )}
                     <div className="agent-defaults-actions">
                       {option.preference && (
                         <button

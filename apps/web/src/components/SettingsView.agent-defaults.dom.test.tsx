@@ -429,6 +429,7 @@ test("Agent Harness defaults expose one live alert when mutation recovery also f
     const alerts = fixture.container.querySelectorAll('[role="alert"]');
     assert.equal(alerts.length, 1);
     assert.match(alerts[0]?.textContent ?? "", /save rejected/);
+    assert.match(alerts[0]?.textContent ?? "", /Could not refresh Agent Harness defaults: recovery unavailable/);
     assert.match(fixture.container.textContent ?? "", /Could not refresh Agent Harness defaults: recovery unavailable/);
     assert.equal(buttonNamed(fixture.container, "Codex App Server").getAttribute("aria-expanded"), "true");
     assert.equal(buttonNamed(fixture.container, "Save"), save);
@@ -467,6 +468,9 @@ test("Agent Harness manual Refresh explains repaired draft fields and clears the
     await choose(fixture.container, "Codex App Server Model", "Sol");
     await choose(fixture.container, "Codex App Server Reasoning Effort", "Extra High");
     await choose(fixture.container, "Codex App Server Permission Mode", "Full Access");
+    const persistentStatus = fixture.container.querySelector('.agent-defaults-draft-notice[role="status"]');
+    assert.ok(persistentStatus);
+    assert.equal(persistentStatus.textContent, "");
 
     const refresh = buttonNamed(fixture.container, "Refresh");
     refresh.focus();
@@ -474,18 +478,23 @@ test("Agent Harness manual Refresh explains repaired draft fields and clears the
     await nextFrame();
 
     const notice = fixture.container.querySelector('.agent-defaults-draft-notice[role="status"]');
+    assert.equal(notice, persistentStatus);
     assert.match(notice?.textContent ?? "", /Capabilities changed/);
     assert.match(notice?.textContent ?? "", /Model and Reasoning Effort/);
     assert.doesNotMatch(notice?.textContent ?? "", /Permission Mode/);
     assert.match(buttonNamed(fixture.container, "Codex App Server Permission Mode").getAttribute("aria-label") ?? "", /Full Access/);
     assert.equal(domWindow.document.activeElement, refresh);
 
+    await choose(fixture.container, "Codex App Server Model", "Luna");
+    assert.equal(persistentStatus.textContent, "");
+    await choose(fixture.container, "Codex App Server Reasoning Effort", "Low");
+
     await act(async () => buttonNamed(fixture.container, "Save").click());
     await nextFrame();
     assert.equal(fixture.container.querySelector(".agent-defaults-draft-notice"), null);
     assert.equal(codexRow.getAttribute("aria-expanded"), "false");
     await act(async () => codexRow.click());
-    assert.equal(fixture.container.querySelector(".agent-defaults-draft-notice"), null);
+    assert.equal(fixture.container.querySelector(".agent-defaults-draft-notice")?.textContent, "");
   } finally {
     await act(async () => fixture.root.unmount());
     fixture.container.remove();
@@ -563,7 +572,9 @@ test("Agent Harness discovery refresh reports only changed drafts and closes a r
     await choose(fixture.container, "Codex App Server Permission Mode", "Full Access");
 
     await fixture.render({ revision: 1 });
-    assert.equal(fixture.container.querySelector(".agent-defaults-draft-notice"), null);
+    const persistentStatus = fixture.container.querySelector('.agent-defaults-draft-notice[role="status"]');
+    assert.ok(persistentStatus);
+    assert.equal(persistentStatus.textContent, "");
     const permission = buttonNamed(fixture.container, "Codex App Server Permission Mode");
     permission.focus();
     await fixture.render({ revision: 2 });
@@ -572,6 +583,7 @@ test("Agent Harness discovery refresh reports only changed drafts and closes a r
     assert.equal(fixture.container.querySelector('[aria-label^="Codex App Server Reasoning Effort:"]'), null);
     assert.match(buttonNamed(fixture.container, "Codex App Server Permission Mode").getAttribute("aria-label") ?? "", /Full Access/);
     const notice = fixture.container.querySelector('.agent-defaults-draft-notice[role="status"]');
+    assert.equal(notice, persistentStatus);
     assert.match(notice?.textContent ?? "", /Model and Reasoning Effort/);
     assert.doesNotMatch(notice?.textContent ?? "", /Permission Mode/);
 

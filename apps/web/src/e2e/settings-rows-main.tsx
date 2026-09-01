@@ -118,12 +118,11 @@ harnessDefaultsRepairedView.defaults[0]!.installations[0]!.models = [
 ];
 harnessDefaultsRepairedView.defaults[0]!.installations[0]!.effortLevels = ["low"];
 
-let harnessDefaultsGetCalls = 0;
 const harnessDefaultsTransport: ApiTransport = {
   instanceId: "settings-fixture",
   publicOrigin: window.location.origin,
   close() {},
-  async request(_path, init) {
+  async request() {
     const mode = new URLSearchParams(window.location.search).get("defaults");
     if (mode === "agent-missing") {
       return new Response(JSON.stringify({ error: "Not Found" }), {
@@ -132,8 +131,7 @@ const harnessDefaultsTransport: ApiTransport = {
         headers: { "content-type": "application/json" },
       });
     }
-    if (!init?.method || init.method === "GET") harnessDefaultsGetCalls += 1;
-    const body = mode === "agent-repair" && harnessDefaultsGetCalls > 1
+    const body = mode === "agent-repair" && window.location.hash === "#repair"
       ? harnessDefaultsRepairedView
       : harnessDefaultsView;
     return new Response(JSON.stringify(body), {

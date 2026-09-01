@@ -1148,6 +1148,7 @@ test("Agent Harness defaults distinguish version skew and politely explain repai
   await page.getByRole("option", { name: "Full Access" }).click();
 
   const refresh = page.getByRole("button", { name: "Refresh" });
+  await page.evaluate(() => history.replaceState(null, "", `${location.pathname}${location.search}#repair`));
   await refresh.focus();
   await refresh.click();
   const notice = page.locator('.agent-defaults-draft-notice[role="status"]');

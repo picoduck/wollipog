@@ -11342,6 +11342,7 @@ body.shell-dock-dragging * {
   background: color-mix(in srgb, var(--blue) 10%, transparent);
   font-size: var(--text-xs);
 }
+.agent-defaults-draft-notice:empty { padding: 0; border: 0; background: transparent; }
 .settings-inline-error { color: var(--red); font-size: var(--text-xs); }
 @media (max-width: 760px) {
   .agent-defaults-list { margin-left: var(--space-2); }
