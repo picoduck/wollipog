@@ -343,13 +343,14 @@ export function ArrowDownIcon(props: IconProps) {
 
 /** Filled to preserve the non-terminal turn interruption control. */
 export function StopTurnIcon(props: IconProps) {
+  const { style, ...rest } = props;
   return (
     <LibraryIcon
       glyph={LucideSquare}
       fill="currentColor"
       stroke="none"
-      style={{ transform: "scale(0.67)", transformOrigin: "center" }}
-      {...props}
+      {...rest}
+      style={{ transform: "scale(0.67)", transformOrigin: "center", ...style }}
     />
   );
 }

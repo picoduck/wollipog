@@ -60,6 +60,11 @@ test("intentional filled and brand marks keep their distinct rendered contracts"
   assert.equal(stop.style.transform, "scale(0.67)");
   assert.equal(stop.style.transformOrigin, "center");
 
+  const styledStop = renderedSvg(renderToStaticMarkup(<StopTurnIcon style={{ opacity: 0.6 }} />));
+  assert.equal(styledStop.style.transform, "scale(0.67)");
+  assert.equal(styledStop.style.transformOrigin, "center");
+  assert.equal(styledStop.style.opacity, "0.6");
+
   const github = renderedSvg(renderToStaticMarkup(<GitHubIcon size={14} />));
   assert.equal(github.getAttribute("viewBox"), "0 0 16 16");
   assert.equal(github.getAttribute("fill"), "currentColor");

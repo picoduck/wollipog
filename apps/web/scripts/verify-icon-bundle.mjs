@@ -51,9 +51,18 @@ assert.ok(bytes > 10_000,
   `the icon contract emitted only ${bytes.toLocaleString()} bytes; its virtual entry was tree-shaken away`);
 assert.ok(bytes < 125_000,
   `the complete icon entry is ${bytes.toLocaleString()} bytes; investigate a Lucide catalog or bundle regression`);
-for (const unusedCatalogMarker of ["AArrowDown", "Accessibility", "AirVent", "AlarmClock"]) {
-  assert.equal(code.includes(unusedCatalogMarker), false,
-    `the icon bundle contains unused Lucide marker ${unusedCatalogMarker}; named-import tree shaking regressed`);
+assert.ok(code.includes("Grid2X2") || code.includes("grid-2x2"),
+  "the icon bundle must preserve a known used Lucide name before catalog markers are meaningful");
+for (const unusedCatalogMarkers of [
+  ["AArrowDown", "a-arrow-down"],
+  ["Accessibility", "accessibility"],
+  ["AirVent", "air-vent"],
+  ["AlarmClock", "alarm-clock"],
+]) {
+  for (const unusedCatalogMarker of unusedCatalogMarkers) {
+    assert.equal(code.includes(unusedCatalogMarker), false,
+      `the icon bundle contains unused Lucide marker ${unusedCatalogMarker}; named-import tree shaking regressed`);
+  }
 }
 
 console.log(`Icon bundle contract passed: ${exports.length} exports in ${bytes.toLocaleString()} bytes.`);
