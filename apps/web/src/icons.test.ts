@@ -34,8 +34,9 @@ function sourceFiles(dir: string, out: string[] = []): string[] {
 /**
  * The two files allowed to contain an `<svg>` element.
  *
- * `Icons.tsx` owns the shared `IconBase`, plus two marks that deliberately do not use it and say so
- * at the definition. `AgentIcon.tsx` holds vendor brand marks, which are fixed by their owners.
+ * `Icons.tsx` owns the local and library adapters, plus marks that deliberately do not use either
+ * and say so at the definition. `AgentIcon.tsx` holds vendor brand marks, which are fixed by their
+ * owners.
  */
 const SVG_OWNERS = ["components/Icons.tsx", "components/AgentIcon.tsx"];
 
@@ -57,20 +58,20 @@ test("no component draws its own <svg>", () => {
       [/dangerouslySetInnerHTML/i, "dangerouslySetInnerHTML — markup this cannot read"],
       // A polymorphic tag: `const Tag = "svg"` then `<Tag />` produces one with no literal.
       [/=\s*["'`]svg["'`]/, 'a variable holding the "svg" tag name'],
-      // IconBase is no longer exported, so importing it is the one remaining way to own new
-      // geometry without a literal <svg>.
+      // Imports that bypass the local and library adapters own geometry without a literal <svg>.
       [/IconBase/, "IconBase — every glyph is a named export in Icons.tsx"],
+      [/\bfrom\s+["']lucide-react(?:\/[^"']*)?["']/, "a direct library glyph import outside Icons.tsx"],
     ] as const) {
       if (pattern.test(code)) offenders.push(`${relative} (${how})`);
     }
   }
   assert.deepEqual(offenders, [],
-    "an inline <svg> drifts from the shared stroke width and size scale; compose IconBase instead");
+    "an inline <svg> drifts from the shared contract; export it through Icons.tsx instead");
 });
 
-test("every icon in Icons.tsx shares IconBase, or says at its definition why not", () => {
+test("every icon in Icons.tsx shares an approved icon adapter, or says why not", () => {
   const source = readFileSync(join(SRC, "components/Icons.tsx"), "utf8");
-  /** The two marks that own their `<svg>`, each because it is not ours to redraw or restyle. */
+  /** Marks that own their `<svg>`, each because it is not ours to redraw or restyle. */
   const EXEMPT = new Set([
     "IconBase",
     // A brand mark with its own 16-unit geometry and solid fill.
@@ -86,9 +87,9 @@ test("every icon in Icons.tsx shares IconBase, or says at its definition why not
   for (const match of source.matchAll(/export function (\w+)\(([\s\S]*?)\n\}/g)) {
     const [, name, body] = match;
     if (EXEMPT.has(name!)) continue;
-    if (!/<IconBase/.test(body!)) offenders.push(name!);
+    if (!/<(?:IconBase|LibraryIcon)/.test(body!)) offenders.push(name!);
   }
-  assert.deepEqual(offenders, [], "an icon that does not compose IconBase has its own conventions");
+  assert.deepEqual(offenders, [], "an icon outside the approved adapters has its own conventions");
 
   // The exemptions must still be real: each has to carry a `<svg>` of its own, or it is stale.
   for (const name of EXEMPT) {
@@ -108,7 +109,7 @@ test("every icon in Icons.tsx shares IconBase, or says at its definition why not
  */
 test("IconBase pins the conventions every icon shares", () => {
   const source = readFileSync(join(SRC, "components/Icons.tsx"), "utf8");
-  const base = source.slice(source.indexOf("function IconBase("), source.indexOf("export function GridIcon"));
+  const base = source.slice(source.indexOf("function IconBase("), source.indexOf("type LibraryIconProps"));
   for (const [pattern, why] of [
     [/viewBox="0 0 24 24"/, "one coordinate system, so paths are comparable between icons"],
     [/strokeWidth="1\.8"/, "the single stroke weight; 2 and a spread object were the drift"],
@@ -124,6 +125,20 @@ test("IconBase pins the conventions every icon shares", () => {
   // come after `children`, or a caller could replace the drawing.
   assert.ok(base.indexOf("{...props}") > base.indexOf('fill="none"'),
     "spread props after the defaults, so an opt-out is possible and explicit");
+});
+
+test("LibraryIcon preserves the local icon contract around third-party glyphs", () => {
+  const source = readFileSync(join(SRC, "components/Icons.tsx"), "utf8");
+  const base = source.slice(source.indexOf("function LibraryIcon("), source.indexOf("export function GridIcon"));
+  for (const [pattern, why] of [
+    [/size=\{size\}/, "the app's numeric size scale"],
+    [/strokeWidth=\{1\.8\}/, "the app's stroke weight rather than the library default"],
+    [/aria-hidden="true"/, "decorative — the accessible name belongs to the surrounding control"],
+    [/focusable="false"/, "an SVG must not create a phantom tab stop"],
+    [/className=\{`app-icon/, "existing layout and color rules target the shared app-icon class"],
+  ] as const) {
+    assert.match(base, pattern, `LibraryIcon must preserve ${pattern.source}: ${why}`);
+  }
 });
 
 test("nothing uses an ellipsis as a progress indicator", () => {

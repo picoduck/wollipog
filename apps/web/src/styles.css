@@ -3722,13 +3722,6 @@ textarea,
 .tl-message-icon:disabled:hover { background: transparent; }
 .tl-message-icon.copy-status-copied { color: var(--positive-text); }
 .tl-message-icon.copy-status-failed { color: var(--danger-text); }
-@media (max-width: 760px) {
-  /* Keep the row compact while satisfying WCAG 2.5.8's 24px minimum in both dimensions.
-     A vertically overflowing pseudo-target would intercept links in the preceding final line. */
-  .tl-message-fork {
-    width: 44px;
-  }
-}
 .bubble {
   padding: 10px 13px;
   border-radius: 12px;

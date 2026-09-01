@@ -1,9 +1,10 @@
 import React, { type SVGProps } from "react";
+import { GitFork as LucideGitFork, type LucideIcon } from "lucide-react";
 
 export type IconProps = SVGProps<SVGSVGElement> & { size?: number };
 
 /**
- * The single `<svg>` in the app.
+ * The shared base for icons whose geometry Wollipog owns.
  *
  * NOT exported. It was, briefly, so a component could compose a one-off glyph inline — and that is
  * a hole rather than a convenience: a component owning new geometry through IconBase contains no
@@ -28,6 +29,22 @@ function IconBase({ size = 16, children, className, ...props }: IconProps) {
     >
       {children}
     </svg>
+  );
+}
+
+type LibraryIconProps = IconProps & { glyph: LucideIcon };
+
+/** Keep library glyphs on the same size, stroke, class, and accessibility contract as local ones. */
+function LibraryIcon({ glyph: Glyph, size = 16, className, children: _children, ...props }: LibraryIconProps) {
+  return (
+    <Glyph
+      size={size}
+      strokeWidth={1.8}
+      aria-hidden="true"
+      focusable="false"
+      className={`app-icon${className ? ` ${className}` : ""}`}
+      {...props}
+    />
   );
 }
 
@@ -651,18 +668,9 @@ export function BranchIcon(props: IconProps) {
   );
 }
 
-/** A conversation thread splitting into two continuations, distinct from a Git branch. */
+/** The standard Lucide fork glyph, used for branching a conversation into a new session. */
 export function ThreadForkIcon(props: IconProps) {
-  return (
-    <IconBase {...props}>
-      <path d="M5 4.5h8a2 2 0 0 1 2 2v2" />
-      <path d="M5 9.5h5a2 2 0 0 1 2 2v1" />
-      <path d="M12 12.5v2a2 2 0 0 0 2 2h4" />
-      <path d="m16 13.5 3 3-3 3" />
-      <path d="M15 8.5v2a2 2 0 0 0 2 2h2" />
-      <path d="m17 9.5 3 3-3 3" />
-    </IconBase>
-  );
+  return <LibraryIcon glyph={LucideGitFork} {...props} />;
 }
 
 /** A node with two spokes: the session's model or effort setting. */
