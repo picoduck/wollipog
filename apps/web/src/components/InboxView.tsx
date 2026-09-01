@@ -42,6 +42,8 @@ import {
   type ReminderInboxMode,
 } from "../session-reminders.js";
 import { SnoozeDialog } from "./SnoozeDialog.js";
+import { SessionContextMenu, type SessionContextMenuState } from "./SessionContextMenu.js";
+import { RenameSessionDialog } from "./RenameSessionDialog.js";
 import type { NewSessionPreset } from "./NewSessionDialog.js";
 import { SearchIcon } from "./Icons.js";
 import { Board } from "./Board.js";
@@ -181,6 +183,12 @@ export function InboxView({
   const [creatingProject, setCreatingProject] = useState(false);
   const [reminderMode, setReminderMode] = useState<ReminderInboxMode>("ordinary");
   const [snoozeSessionId, setSnoozeSessionId] = useState<string | null>(null);
+  const [sessionMenu, setSessionMenu] = useState<SessionContextMenuState | null>(null);
+  const [renameSession, setRenameSession] = useState<{
+    sessionId: string;
+    returnFocusRef?: { current: HTMLElement | null };
+  } | null>(null);
+  const [snoozeReturnFocusRef, setSnoozeReturnFocusRef] = useState<{ current: HTMLElement | null } | undefined>(undefined);
   const [dragRatio, setDragRatio] = useState<number | null>(null);
   const [heldOrder, setHeldOrder] = useState<string[] | null>(null);
   const [busySessionIds, setBusySessionIds] = useState<Set<string>>(() => new Set());
@@ -638,6 +646,39 @@ export function InboxView({
     });
   }, [activeSplit, displayedIds, displayedSelection, holdOrderAfterNavigation, selectSession]);
 
+  // One context-menu opener for rows and cards (#154). Rows restore focus to the grid, which is
+  // where their keyboard position lives; cards supply their own tabbable target.
+  const openSessionMenuAt = useCallback((
+    sessionId: string,
+    anchor: { x: number; y: number },
+    restoreTarget?: () => HTMLElement | null,
+  ) => {
+    // The list fallback chain mirrors the search-exit handoff: the grid, then the empty state
+    // that replaces it when the last row leaves, then the always-present page title — dismissal
+    // must land focus SOMEWHERE durable even when the row that opened the menu took the grid
+    // down with it.
+    const listRestore = () =>
+      listRef.current ??
+      viewRef.current?.querySelector<HTMLElement>(".inbox-zero") ??
+      document.getElementById("page-title");
+    setSessionMenu({ sessionId, anchor, restoreTarget: restoreTarget ?? listRestore });
+  }, []);
+  const openRowSessionMenu = useCallback(
+    (sessionId: string, anchor: { x: number; y: number }) => openSessionMenuAt(sessionId, anchor),
+    [openSessionMenuAt],
+  );
+  useEffect(() => {
+    if (!sessionMenu) return;
+    // Valid means ON THE SURFACE, not merely in the catalog: another client archiving the
+    // session removes its row or card while the store keeps the archived record, and a menu
+    // over a vanished target must close. The menu owns focus, so dropping it without a handoff
+    // would strand focus on <body> even though a durable surface is right there.
+    const target = sessions.get(sessionMenu.sessionId);
+    if (target && !target.archived) return;
+    sessionMenu.restoreTarget()?.focus();
+    setSessionMenu(null);
+  }, [sessionMenu, sessions]);
+
   const expand = useCallback((sessionId: string, focusComposer = false) => {
     selectSession(sessionId, activeSplit?.key ?? null);
     if (onExpand) onExpand(sessionId, focusComposer);
@@ -1035,6 +1076,7 @@ export function InboxView({
               setReminderMode("ordinary");
             }}
             onNewSession={() => onNewSession?.(activeNewSessionPreset)}
+            onSessionMenu={openSessionMenuAt}
           />
         ) : (
         <InboxList
@@ -1093,6 +1135,7 @@ export function InboxView({
           onScrollPosition={(scrollTop) => inboxScrollPositions.set(instanceScope, scrollTop)}
           onPointerTargetChange={handlePointerTargetChange}
           onPointerPressChange={handlePointerPressChange}
+          onSessionMenu={openRowSessionMenu}
         />
         )}
         {!boardMode && (
@@ -1201,11 +1244,47 @@ export function InboxView({
           }}
         />
       )}
+      {sessionMenu && sessions.has(sessionMenu.sessionId) && (
+        <SessionContextMenu
+          state={sessionMenu}
+          sessionTitle={sessions.get(sessionMenu.sessionId)!.title}
+          snoozeAvailable={sessionRemindersSupported}
+          onClose={() => setSessionMenu(null)}
+          onRename={(sessionId) => {
+            // The dialog snapshots focus AFTER the menu item unmounts, so it needs a durable
+            // return target — the same resolver the menu itself restores through.
+            const restore = sessionMenu.restoreTarget;
+            setRenameSession({ sessionId, returnFocusRef: { get current() { return restore(); } } });
+          }}
+          onSnooze={(sessionId) => {
+            const restore = sessionMenu.restoreTarget;
+            setSnoozeReturnFocusRef({ get current() { return restore(); } });
+            setSnoozeSessionId(sessionId);
+          }}
+          onArchive={(sessionId) => { void archive(sessionId); }}
+        />
+      )}
+      {renameSession && sessions.has(renameSession.sessionId) && (
+        <RenameSessionDialog
+          key={renameSession.sessionId}
+          session={sessions.get(renameSession.sessionId)!}
+          onClose={() => setRenameSession(null)}
+          onRenamed={(updated) => {
+            loadSession(updated);
+            showToast("Session renamed.");
+          }}
+          {...(renameSession.returnFocusRef ? { returnFocusRef: renameSession.returnFocusRef } : {})}
+        />
+      )}
       {snoozeSessionId && sessionRemindersSupported && (
         <SnoozeDialog
           key={snoozeSessionId}
           reminder={reminders.get(snoozeSessionId)}
-          onClose={() => setSnoozeSessionId(null)}
+          {...(snoozeReturnFocusRef ? { returnFocusRef: snoozeReturnFocusRef } : {})}
+          onClose={() => {
+            setSnoozeSessionId(null);
+            setSnoozeReturnFocusRef(undefined);
+          }}
           onSave={(request) => saveReminder(snoozeSessionId, request)}
           onRemove={(expectedRevision, expectedReminderId) =>
             removeReminder(snoozeSessionId, expectedRevision, expectedReminderId)}

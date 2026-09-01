@@ -109,7 +109,8 @@ test("inbox list exposes selection semantics and mouse select/expand paths", asy
         onNewSession={() => undefined}
         onSelect={(id) => selected.push(id)}
         onExpand={(id) => expanded.push(id)}
-        onScrollPosition={() => undefined}
+        onSessionMenu={() => undefined}
+      onScrollPosition={() => undefined}
       />,
     );
   });
@@ -162,6 +163,7 @@ test("inbox list keeps live row content and the visible touch target while inter
       onNewSession={() => undefined}
       onSelect={(sessionId) => selected.push(sessionId)}
       onExpand={() => undefined}
+      onSessionMenu={() => undefined}
       onScrollPosition={() => undefined}
       onPointerTargetChange={(pointerId, targeting, pointerType) => events.push(`target:${pointerId}:${targeting}:${pointerType}`)}
       onPointerPressChange={(pointerId, active, pointerType) => events.push(`press:${pointerId}:${active}:${pointerType}`)}
@@ -221,7 +223,8 @@ test("inbox zero reports running work and keeps a mouse path to New Session", as
         onNewSession={() => { created += 1; }}
         onSelect={() => undefined}
         onExpand={() => undefined}
-        onScrollPosition={() => undefined}
+        onSessionMenu={() => undefined}
+      onScrollPosition={() => undefined}
       />,
     );
   });
@@ -250,6 +253,7 @@ test("inbox zero uses contextual Project copy and lets search-empty copy take pr
     onNewSession: () => undefined,
     onSelect: () => undefined,
     onExpand: () => undefined,
+    onSessionMenu: () => undefined,
     onScrollPosition: () => undefined,
   };
   await act(async () => {
@@ -334,7 +338,8 @@ test("busy rows show activity while stalled approval remains distinct and access
         onNewSession={() => undefined}
         onSelect={() => undefined}
         onExpand={() => undefined}
-        onScrollPosition={() => undefined}
+        onSessionMenu={() => undefined}
+      onScrollPosition={() => undefined}
       />,
     );
   });

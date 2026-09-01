@@ -3,11 +3,14 @@ import {
   useEffect,
   useId,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
   type Dispatch,
   type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
   type RefObject,
   type SetStateAction,
 } from "react";
@@ -395,4 +398,106 @@ export function useAccessibleMenu(
   }, [close]);
 
   return { menuId, triggerRef, menuRef, toggle, close, onTriggerKeyDown, onMenuKeyDown };
+}
+
+/** Where a context menu anchors: a pointer position, widened to the rect the placer expects. */
+export function pointAnchorRect(x: number, y: number): Pick<DOMRect, "top" | "right" | "bottom" | "left" | "width"> {
+  return { top: y, bottom: y, left: x, right: x, width: 0 };
+}
+
+const LONG_PRESS_MS = 500;
+const LONG_PRESS_SLOP_PX = 10;
+/** Grace after RELEASE for the click the press synthesizes; the hold itself can last any time. */
+const LONG_PRESS_CLICK_SUPPRESS_MS = 700;
+
+export interface LongPress {
+  /** Spread onto the pressed element; `handlers.onDragStart` also belongs on draggable targets.
+   * `onClickCapture` runs at capture so a click landing on a NESTED control (a card's approval
+   * button) is stopped before that control's own handler — the press asked for a menu, and the
+   * nested action must not also run. */
+  handlers: {
+    onPointerDown: (event: ReactPointerEvent<HTMLElement>) => void;
+    onPointerMove: (event: ReactPointerEvent<HTMLElement>) => void;
+    onPointerUp: (event: ReactPointerEvent<HTMLElement>) => void;
+    onPointerCancel: (event: ReactPointerEvent<HTMLElement>) => void;
+    onDragStart: () => void;
+    onClickCapture: (event: ReactMouseEvent<HTMLElement>) => void;
+  };
+  /** Belt to the capture guard's braces, for the caller's own onClick/onDoubleClick. */
+  consumeSuppressedClick: () => boolean;
+}
+
+/**
+ * A touch/pen long-press that opens a context menu without also acting as a tap (#154).
+ *
+ * Mouse presses are deliberately excluded — desktop already has a real `contextmenu` event, and
+ * a mouse resting on a row for half a second is reading, not requesting a menu. Movement past a
+ * small slop cancels the press so ordinary touch scrolling never triggers it, and a completed
+ * press suppresses the click the same gesture synthesizes on release.
+ *
+ * Returns stable handler identities: rows are memoized on their props, so a fresh object per
+ * render would defeat every row memo at once.
+ */
+export function useLongPress(onLongPress: (point: { x: number; y: number }) => void): LongPress {
+  const callbackRef = useRef(onLongPress);
+  callbackRef.current = onLongPress;
+  const stateRef = useRef<{ timer: number; pointerId: number; x: number; y: number } | null>(null);
+  /** True from the moment the press fires until its release-click grace expires. The hold can
+   * last any time — suppression pivots on RELEASE, not on when the timer fired, or a slow
+   * two-second hold would leak its click straight through a 700ms fire-anchored window. */
+  const firedHeldRef = useRef(false);
+  const releasedAtRef = useRef(0);
+
+  return useMemo<LongPress>(() => {
+    const cancel = () => {
+      if (stateRef.current === null) return;
+      window.clearTimeout(stateRef.current.timer);
+      stateRef.current = null;
+    };
+    const suppressed = () =>
+      firedHeldRef.current || Date.now() - releasedAtRef.current <= LONG_PRESS_CLICK_SUPPRESS_MS;
+    const release = () => {
+      cancel();
+      if (!firedHeldRef.current) return;
+      firedHeldRef.current = false;
+      releasedAtRef.current = Date.now();
+    };
+    return {
+      consumeSuppressedClick: suppressed,
+      handlers: {
+      onPointerDown: (event) => {
+        if (event.pointerType !== "touch" && event.pointerType !== "pen") return;
+        cancel();
+        firedHeldRef.current = false;
+        // A NEW press is a new intent: the previous press's release grace must not swallow a
+        // legitimate quick tap that follows a dismissed menu.
+        releasedAtRef.current = 0;
+        const { pointerId, clientX, clientY } = event;
+        stateRef.current = {
+          pointerId,
+          x: clientX,
+          y: clientY,
+          timer: window.setTimeout(() => {
+            stateRef.current = null;
+            firedHeldRef.current = true;
+            callbackRef.current({ x: clientX, y: clientY });
+          }, LONG_PRESS_MS),
+        };
+      },
+      onPointerMove: (event) => {
+        const pressed = stateRef.current;
+        if (pressed === null || event.pointerId !== pressed.pointerId) return;
+        if (Math.hypot(event.clientX - pressed.x, event.clientY - pressed.y) > LONG_PRESS_SLOP_PX) cancel();
+      },
+      onPointerUp: release,
+      onPointerCancel: release,
+      onDragStart: cancel,
+      onClickCapture: (event) => {
+        if (!suppressed()) return;
+        event.preventDefault();
+        event.stopPropagation();
+      },
+      },
+    };
+  }, []);
 }

@@ -53,6 +53,8 @@ export const InboxList = forwardRef<HTMLDivElement, {
   onScrollPosition: (scrollTop: number) => void;
   onPointerTargetChange?: (pointerId: number, targeting: boolean, pointerType: string) => void;
   onPointerPressChange?: (pointerId: number, active: boolean, pointerType: string) => void;
+  /** One stable callback shared by every row (#154); the keyboard path anchors at the row's box. */
+  onSessionMenu: (sessionId: string, anchor: { x: number; y: number }) => void;
 }>(function InboxList({
   entries,
   selectedSessionId,
@@ -71,6 +73,7 @@ export const InboxList = forwardRef<HTMLDivElement, {
   onScrollPosition,
   onPointerTargetChange,
   onPointerPressChange,
+  onSessionMenu,
 }, ref) {
   // The scroll container is BOTH the forwarded ref (InboxView restores scrollTop through it) and
   // the virtualizer's viewport.
@@ -128,6 +131,17 @@ export const InboxList = forwardRef<HTMLDivElement, {
       onPointerDown={(event) => onPointerPressChange?.(event.pointerId, true, event.pointerType)}
       onPointerUp={(event) => onPointerPressChange?.(event.pointerId, false, event.pointerType)}
       onPointerCancel={(event) => onPointerPressChange?.(event.pointerId, false, event.pointerType)}
+      onKeyDown={(event) => {
+        // The platform context-menu interaction for the focused grid: the menu opens on the
+        // ACTIVE row, anchored inside its box, and never navigates into the session.
+        if (event.key !== "ContextMenu" && !(event.key === "F10" && event.shiftKey)) return;
+        if (selectedSessionId === null) return;
+        const row = document.getElementById(`inbox-session-${encodeResourceId(selectedSessionId)}`);
+        if (!row) return;
+        event.preventDefault();
+        const box = row.getBoundingClientRect();
+        onSessionMenu(selectedSessionId, { x: box.left + 24, y: box.top + box.height / 2 });
+      }}
     >
       {/* Virtualized, like the Board and the transcript already are. §F7 flagged this as the one
           unvirtualized list, and it is the longest: an inbox with 200 sessions mounted 200 rows,
@@ -164,6 +178,7 @@ export const InboxList = forwardRef<HTMLDivElement, {
             stalled: stalledSessionIds.has(session.id),
             onSelect,
             onExpand,
+            onSessionMenu,
           } satisfies Omit<InboxRowProps, "activity" | "activityNow">;
           return activityBySession && activityNow !== undefined
             ? <InboxRow {...rowProps} activity={activityBySession.get(session.id)} activityNow={activityNow} />

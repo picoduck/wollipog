@@ -6,6 +6,7 @@ import { useStoreActions, useStoreSelector } from "../store.js";
 import { relativeTime } from "../format.js";
 import { machineOptionLabels, runnerDisplay } from "../runners.js";
 import { SessionStatusIndicators, Empty } from "./common.js";
+import { useLongPress } from "./interactions.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { MeasuredVirtualList } from "./MeasuredVirtualList.js";
 import { useExperiments } from "../use-experiments.js";
@@ -18,7 +19,7 @@ const estimateSessionCard = (session: SessionView) => session.pendingApproval ? 
  * split, search, and reminder filtering applied by the parent), grouped into status columns.
  * The Machine and Agent filters below are board-local refinements on top of that shared scope.
  */
-export function Board({ sessions: scoped, searchActive, onShowAll, onNewSession }: {
+export function Board({ sessions: scoped, searchActive, onShowAll, onNewSession, onSessionMenu }: {
   /** Already scoped by the Sessions toolbar: unarchived, split, query, and reminder mode. */
   sessions: SessionView[];
   /** True while the shared search or a non-All split narrows the scope (changes the empty state). */
@@ -26,6 +27,8 @@ export function Board({ sessions: scoped, searchActive, onShowAll, onNewSession 
   /** Widen the shared scope back to every session: clear the search, the split, and reminder mode. */
   onShowAll: () => void;
   onNewSession: () => void;
+  /** Right-click, long-press, or keyboard context menu on a card (#154). */
+  onSessionMenu: (sessionId: string, anchor: { x: number; y: number }, restoreTarget: () => HTMLElement | null) => void;
 }) {
   const api = useApi();
   const { setFilters, navigate } = useStoreActions();
@@ -233,6 +236,7 @@ export function Board({ sessions: scoped, searchActive, onShowAll, onNewSession 
                   runnerOnline={(runnerId) => runners.get(runnerId)?.status === "online"}
                   onOpen={(sessionId) => navigate({ name: "session", id: sessionId })}
                   onDragEnd={clearDragState}
+                  onSessionMenu={onSessionMenu}
                 />
               </div>
             );
@@ -249,12 +253,14 @@ function BoardColumnBody({
   runnerOnline,
   onOpen,
   onDragEnd,
+  onSessionMenu,
 }: {
   sessions: SessionView[];
   machineName: (runnerId: string) => string;
   runnerOnline: (runnerId: string) => boolean;
   onOpen: (sessionId: string) => void;
   onDragEnd: () => void;
+  onSessionMenu: (sessionId: string, anchor: { x: number; y: number }, restoreTarget: () => HTMLElement | null) => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   return (
@@ -270,6 +276,7 @@ function BoardColumnBody({
             runnerOnline={runnerOnline(session.runnerId)}
             onOpen={() => onOpen(session.id)}
             onDragEnd={onDragEnd}
+            onSessionMenu={onSessionMenu}
           />
         )}
         scrollRef={scrollRef}
@@ -290,15 +297,28 @@ function SessionCard({
   runnerOnline,
   onOpen,
   onDragEnd,
+  onSessionMenu,
 }: {
   session: SessionView;
   machineName: string;
   runnerOnline: boolean;
   onOpen: () => void;
   onDragEnd: () => void;
+  onSessionMenu: (sessionId: string, anchor: { x: number; y: number }, restoreTarget: () => HTMLElement | null) => void;
 }) {
   const api = useApi();
   const [busy, setBusy] = useState(false);
+  // Resolved by session id AT RESTORE TIME, not by card instance: a live column move remounts
+  // the virtualized card while its menu is open, and a ref to the old instance would strand
+  // focus on <body>. The board canvas itself is the fallback (it is focusable for the F6 zone).
+  const restoreTarget = () => {
+    for (const card of document.querySelectorAll<HTMLElement>(".board .card")) {
+      if (card.dataset["sessionId"] === session.id) return card.querySelector<HTMLElement>(".card-open");
+    }
+    return document.querySelector<HTMLElement>(".board-wrap");
+  };
+  const openMenu = (anchor: { x: number; y: number }) => onSessionMenu(session.id, anchor, restoreTarget);
+  const longPress = useLongPress(openMenu);
 
   const approve = async (e: MouseEvent, optionId: string | null) => {
     e.stopPropagation();
@@ -314,9 +334,24 @@ function SessionCard({
   return (
     <article
       className="card"
-      onClick={onOpen}
+      data-session-id={session.id}
+      {...longPress.handlers}
+      onClick={() => { if (!longPress.consumeSuppressedClick()) onOpen(); }}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        openMenu({ x: e.clientX, y: e.clientY });
+      }}
+      onKeyDown={(e) => {
+        // The platform context-menu interaction while focus is inside the card.
+        if (e.key !== "ContextMenu" && !(e.key === "F10" && e.shiftKey)) return;
+        e.preventDefault();
+        const box = e.currentTarget.getBoundingClientRect();
+        openMenu({ x: box.left + 24, y: box.top + 24 });
+      }}
       draggable
       onDragStart={(e) => {
+        // A drag that starts IS the gesture: the long-press must stand down.
+        longPress.handlers.onDragStart();
         e.dataTransfer.setData("text/wollipog-session", session.id);
         e.dataTransfer.effectAllowed = "move";
       }}
