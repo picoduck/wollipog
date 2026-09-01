@@ -1090,3 +1090,69 @@ test("a quick tap after a dismissed long-press still selects, and an archived ta
     mobileViewport = true;
   }
 });
+
+test("a cancelled press and a source-landed release click both leave the next backdrop tap live", async () => {
+  // #543 round-1 P2: pointercancel synthesizes no click, and a release click landing on the
+  // pressed element is consumed there — in both cases the FIRST real backdrop dismissal must
+  // close the menu instead of being swallowed by a stale grace.
+  mobileViewport = false;
+  setWindowFocused(true);
+  setVisibility("visible");
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "long-press-consume",
+    runtimeKey: "long-press-consume:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  const backdrop = () => domWindow.document.querySelector(".menu-backdrop") as unknown as HTMLElement | null;
+  const pressRow = async (row: HTMLElement, pointerId: number) => {
+    await act(async () => {
+      row.dispatchEvent(new domWindow.PointerEvent("pointerdown", {
+        bubbles: true, pointerId, pointerType: "touch", clientX: 40, clientY: 50,
+      } as never) as never);
+    });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 600)); });
+    assert.ok(domWindow.document.querySelector('[role="menu"]'), "the press opened the menu");
+  };
+  try {
+    await act(async () => {
+      root.render(
+        <StoreProvider connection={connection} navigation={navigation}>
+          <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+        </StoreProvider>,
+      );
+    });
+    await act(async () => { socket.push(snapshot([session("A", 30), session("B", 20)])); });
+    const rowButton = [...container.querySelectorAll<HTMLElement>(".inbox-row")]
+      .find((row) => row.textContent?.includes("Session B"))!;
+
+    // Case 1: pointercancel — no click will ever arrive, so no grace may linger.
+    await pressRow(rowButton, 11);
+    await act(async () => {
+      rowButton.dispatchEvent(new domWindow.PointerEvent("pointercancel", { bubbles: true, pointerId: 11, pointerType: "touch" } as never) as never);
+    });
+    await act(async () => { backdrop()!.click(); });
+    assert.equal(domWindow.document.querySelector('[role="menu"]'), null,
+      "the first dismissal tap after a cancelled press must close the menu");
+
+    // Case 2: the release click lands on the pressed element and is consumed THERE.
+    await pressRow(rowButton, 12);
+    await act(async () => {
+      rowButton.dispatchEvent(new domWindow.PointerEvent("pointerup", { bubbles: true, pointerId: 12, pointerType: "touch" } as never) as never);
+      rowButton.dispatchEvent(new domWindow.MouseEvent("click", { bubbles: true, cancelable: true }) as never);
+    });
+    assert.ok(domWindow.document.querySelector('[role="menu"]'), "the source-landed click did not act");
+    await act(async () => { backdrop()!.click(); });
+    assert.equal(domWindow.document.querySelector('[role="menu"]'), null,
+      "the singleton was spent on the source click, so the backdrop tap closes");
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+    domWindow.document.body.innerHTML = "";
+    mobileViewport = true;
+  }
+});

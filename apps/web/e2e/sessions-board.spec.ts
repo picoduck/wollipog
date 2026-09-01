@@ -119,9 +119,11 @@ async function centerOf(target: Locator): Promise<{ x: number; y: number }> {
   return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
 }
 
-async function longPressAt(cdp: CDPSession, point: { x: number; y: number }, holdMs = 650) {
+/** Hold until the press's OBSERVABLE effect (the menu) before releasing: the 500ms timer runs
+ * in the renderer, and a fixed cross-process sleep races it under CI load. */
+async function longPressUntilMenu(cdp: CDPSession, page: Page, point: { x: number; y: number }) {
   await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] });
-  await new Promise((resolve) => setTimeout(resolve, holdMs));
+  await page.locator('[role="menu"]').waitFor({ timeout: 5000 });
   await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
 }
 
@@ -135,7 +137,7 @@ test("a held finger on a row opens its menu without selecting or opening it", as
   const cdp = await touchSession(page);
   const selectedBefore = await page.locator('.inbox-row-shell[aria-selected="true"] .inbox-row-title').textContent();
 
-  await longPressAt(cdp, await centerOf(page.locator(".inbox-row-shell", { hasText: "Queued Session" })));
+  await longPressUntilMenu(cdp, page, await centerOf(page.locator(".inbox-row-shell", { hasText: "Queued Session" })));
   await expect(page.locator('[role="menu"]')).toHaveAttribute("aria-label", "Session Actions for Queued Session");
   await expect(page.locator(".inbox-view.expanded")).toHaveCount(0, "a press is not an open");
   expect(harnessPath(page)).toBe("/");
@@ -157,7 +159,7 @@ test("a held finger over a card's approval button opens the menu and never appro
   const allow = page.locator(".card-approval button", { hasText: "Allow" });
   await expect(allow).toBeVisible();
 
-  await longPressAt(cdp, await centerOf(allow));
+  await longPressUntilMenu(cdp, page, await centerOf(allow));
   await expect(page.locator('[role="menu"]')).toHaveAttribute("aria-label", "Session Actions for Approval Session");
   await page.waitForTimeout(300);
   expect(await page.evaluate(() => window.__approveCalls)).toEqual([]);

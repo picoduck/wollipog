@@ -450,11 +450,13 @@ export function longPressClickSuppressed(): boolean {
 }
 
 /**
- * Swallow exactly ONE backdrop click — the one the opening gesture releases — and clear the
- * grace with it, so the very next interaction (a dismissal tap, the Escape ladder's
- * programmatic backdrop click) closes the menu normally instead of being swallowed too.
+ * Swallow exactly ONE click — the one the opening gesture releases — and clear the grace with
+ * it, so the very next interaction (a dismissal tap, the Escape ladder's programmatic backdrop
+ * click) closes the menu normally instead of being swallowed too. Shared by the menu backdrop
+ * AND the press's own capture guard: whichever element the release click lands on consumes it,
+ * and the singleton is spent either way.
  */
-export function consumeLongPressBackdropClick(): boolean {
+export function consumeLongPressClick(): boolean {
   if (!longPressClickSuppressed()) return false;
   longPressState.held = false;
   longPressState.releasedAt = 0;
@@ -485,6 +487,13 @@ export function useLongPress(onLongPress: (point: { x: number; y: number }) => v
       longPressState.held = false;
       longPressState.releasedAt = Date.now();
     };
+    // A CANCELLED pointer synthesizes no click, so stamping a grace would swallow the user's
+    // next real dismissal tap instead of the click that never comes.
+    const abort = () => {
+      cancel();
+      longPressState.held = false;
+      longPressState.releasedAt = 0;
+    };
     return {
       consumeSuppressedClick: suppressed,
       handlers: {
@@ -513,10 +522,13 @@ export function useLongPress(onLongPress: (point: { x: number; y: number }) => v
         if (Math.hypot(event.clientX - pressed.x, event.clientY - pressed.y) > LONG_PRESS_SLOP_PX) cancel();
       },
       onPointerUp: release,
-      onPointerCancel: release,
+      onPointerCancel: abort,
       onDragStart: cancel,
       onClickCapture: (event) => {
-        if (!suppressed()) return;
+        // Consume, not just suppress: if the release click lands on the pressed element rather
+        // than the backdrop, the singleton is spent HERE, or the next backdrop tap would be
+        // swallowed by a grace whose click already happened.
+        if (!consumeLongPressClick()) return;
         event.preventDefault();
         event.stopPropagation();
       },
