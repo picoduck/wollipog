@@ -1,6 +1,7 @@
 import { devices, expect, test, type Locator, type Page } from "@playwright/test";
 import { GLOBAL_VIEW_ITEMS, viewPath, viewTitle, type View } from "../src/navigation.js";
-import { MOBILE_PRIMARY_VIEWS } from "../src/components/Rail.js";
+import { MOBILE_PRIMARY_COUNT, defaultRailPreferences, visibleRailViews } from "../src/rail-preferences.js";
+import { DEFAULT_EXPERIMENT_FLAGS } from "../src/experiments.js";
 import { KEYBOARD_DISMISS_BLUR_EVENT } from "../src/mobile-viewport.js";
 
 /**
@@ -389,14 +390,17 @@ const THEMES = ["dark", "light"] as const;
  *   measured paint / legible at the device's own 2.625 ratio, both themes, portrait and landscape
  *   icon       1154-1547 / 944-1295      moreTrigger   101-108 / 71-86
  *   sheetIcon   346-451  / 292-381       sheetLabel   2084-3204 / 1363-2556
- *   sheetSettingsLabel 1503-1769 / 1038-1229
+ *   sheetShortLabel ("Settings" 1503-1769 / 1038-1229, "Projects" 1413-1588)
  *
- * "Settings" needs its own floor because the sheetLabel range was measured against destination
- * titles, the shortest of which is "Automations" — a word with half again the ink of "Settings".
- * A floor loose enough to cover both would sit under 1503 and stop catching a destination label
- * that had lost a third of itself, which is the mutation these floors exist for. The ratio to the
- * measured minimum is the same as sheetLabel's.
+ * Short titles need their own floor because the sheetLabel range was measured against long
+ * destination titles — words with half again the ink of "Settings". A floor loose enough to
+ * cover both would sit under 1503 and stop catching a destination label that had lost a third of
+ * itself, which is the mutation these floors exist for. The ratio to the measured minimum is the
+ * same as sheetLabel's. "Projects" joined the short band when the phone bar became the first four
+ * of the configured order (#385): measured 1413-1588, so the 1330 floor still catches a third of
+ * it going (1413 × 2/3 = 942).
  */
+const SHORT_SHEET_TITLES = new Set(["Settings", "Projects"]);
 const MARKS = {
   icon: { paint: 1000, legible: 450, illegibleCells: 0, minContrast: CONTRAST.icon },
   /* The Automations bolt joined the primary bar when Board became a mode of Sessions (#499).
@@ -408,7 +412,7 @@ const MARKS = {
   moreTrigger: { paint: 90, legible: 35, illegibleCells: 0, minContrast: CONTRAST.icon },
   sheetIcon: { paint: 300, legible: 140, illegibleCells: 0, minContrast: CONTRAST.icon },
   sheetLabel: { paint: 1850, legible: 650, illegibleCells: 0, minContrast: CONTRAST.label },
-  sheetSettingsLabel: { paint: 1330, legible: 490, illegibleCells: 0, minContrast: CONTRAST.label },
+  sheetShortLabel: { paint: 1330, legible: 490, illegibleCells: 0, minContrast: CONTRAST.label },
 } as const satisfies Record<string, Mark>;
 
 interface HarnessOptions {
@@ -597,7 +601,11 @@ test("no two destinations render the same glyph", async ({ page }) => {
  * matched nothing — while in production, standing on Runs, Pods, Automations or Usage gives a blank
  * active More control and an erased current row inside the sheet.
  */
-for (const current of GLOBAL_VIEW_ITEMS.filter((item) => !MOBILE_PRIMARY_VIEWS.includes(item.name))) {
+// The harness enables every experiment, so the overflow set is the full default visible order
+// past the phone bar's first four (#385: the bar derives from configured order, not a fixed set).
+const MOBILE_PRIMARY_DEFAULTS = visibleRailViews(defaultRailPreferences(), { ...DEFAULT_EXPERIMENT_FLAGS, multiAgent: true, pods: true })
+  .slice(0, MOBILE_PRIMARY_COUNT);
+for (const current of GLOBAL_VIEW_ITEMS.filter((item) => !MOBILE_PRIMARY_DEFAULTS.includes(item.name))) {
   test(`the More control reads as current on ${current.title}`, async ({ page }) => {
     await useHarness(page, { view: current.name });
     await openKeyboard(page);
@@ -611,7 +619,9 @@ for (const current of GLOBAL_VIEW_ITEMS.filter((item) => !MOBILE_PRIMARY_VIEWS.i
     await page.locator(".rail-more-trigger").click();
     const active = page.locator(".rail-more-item.active");
     await expect(active).toHaveCount(1);
-    await expect(active).toHaveText(current.title);
+    // The label span, not the row: an overflowed counted destination (Connections by default)
+    // renders its count beside the label.
+    await expect(active.locator(".rail-more-label")).toHaveText(current.title);
     await expectEveryDestinationReachable(page, KEYBOARD);
   });
 }
@@ -899,7 +909,7 @@ async function expectEveryDestinationReachable(page: Page, occluded: number) {
     const expected = destination?.title ?? (path === SETTINGS_ROW.path ? SETTINGS_ROW.title : undefined);
     expect(expected, `no destination is served at ${path}`).toBeDefined();
     const label = expected!;
-    await expect(item, `the row at ${path} must be labelled "${label}"`).toHaveText(label);
+    await expect(item.locator(".rail-more-label"), `the row at ${path} must be labelled "${label}"`).toHaveText(label);
     // Scrolling within the sheet is the intended way to reach an overflowing item; what must not
     // happen is an item that cannot be brought into the sheet's visible box at all.
     await item.scrollIntoViewIfNeeded();
@@ -916,9 +926,9 @@ async function expectEveryDestinationReachable(page: Page, occluded: number) {
     // overflow icon while the labels kept the item's total above its floor.
     await expectHittable(item, label);
     await expectPainted(page, item.locator("svg"), `${label} icon`, MARKS.sheetIcon);
-    await expectPlainText(item.locator("span"), `${label} label`);
-    await expectPainted(page, item.locator("span"), `${label} label`,
-      path === SETTINGS_ROW.path ? MARKS.sheetSettingsLabel : MARKS.sheetLabel);
+    await expectPlainText(item.locator(".rail-more-label"), `${label} label`);
+    await expectPainted(page, item.locator(".rail-more-label"), `${label} label`,
+      SHORT_SHEET_TITLES.has(label) ? MARKS.sheetShortLabel : MARKS.sheetLabel);
   }
 }
 

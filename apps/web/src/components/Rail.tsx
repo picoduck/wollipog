@@ -16,24 +16,14 @@ import {
 } from "./Icons.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { useIsMobile } from "./useIsMobile.js";
-import { experimentForViewName } from "../experiments.js";
 import { useExperiments } from "../use-experiments.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { sessionsDestination } from "../sessions-view-mode.js";
+import { MOBILE_PRIMARY_COUNT, railDigits, visibleRailViews } from "../rail-preferences.js";
+import { useRailPreferences } from "../use-rail-preferences.js";
 
-/**
- * The four destinations that stay on the phone tab bar. Everything else moves behind "More".
- *
- * Eight destinations at 44px plus the instance and Settings controls exceeded a 375px viewport.
- * Five items is the platform convention; creation is owned by the Sessions toolbar. The board
- * gave its slot to Automations when it became a mode of Sessions (#499).
- *
- * A membership SET: the bar renders members in GLOBAL_VIEW_ITEMS order, and this list is kept in
- * that same order so the constant reads like the bar it produces.
- */
-export const MOBILE_PRIMARY_VIEWS: readonly GlobalViewName[] = ["inbox", "automations", "runners", "projects"];
-
-const VIEW_ICONS: Record<GlobalViewName, (props: { size?: number; className?: string }) => ReactNode> = {
+/** Shared with Settings → Appearance → Navigation, whose rows show the same glyphs (#385). */
+export const VIEW_ICONS: Record<GlobalViewName, (props: { size?: number; className?: string }) => ReactNode> = {
   inbox: InboxIcon,
   projects: ProjectsIcon,
   runs: RunsIcon,
@@ -44,10 +34,6 @@ const VIEW_ICONS: Record<GlobalViewName, (props: { size?: number; className?: st
   archived: FolderSolidIcon,
   skills: SkillsIcon,
 };
-
-/** The bare digit shortcuts stop at 9. A destination past that limit gets no number, because the
- * number IS the advertised binding and a "(10)" keycap names a key that cannot be pressed. */
-const RAIL_SHORTCUT_DIGITS = 9;
 
 const RAIL_ICON_SIZE = 26;
 
@@ -143,20 +129,16 @@ export function Rail({
     });
   }, [isMobile, moreOpen, more, settingsSelected]);
 
-  // Filtered before the mobile split so a hidden experiment is absent from BOTH the primary bar
-  // and the More sheet. The Ctrl+N numbers stay anchored to the canonical list below, so hiding
-  // a destination never renumbers the survivors' advertised shortcuts.
+  // The user's configured order, minus hidden and experiment-disabled destinations, IS the rail
+  // (#385): digits, keycaps, the phone bar's first four, and the More sheet all derive from this
+  // one list, so hiding a destination renumbers the survivors — position is the binding.
   const { flags } = useExperiments();
-  const enabledItems = GLOBAL_VIEW_ITEMS.filter((item) => {
-    const experiment = experimentForViewName(item.name);
-    return experiment === null || flags[experiment];
-  });
-  const visibleItems = isMobile
-    ? enabledItems.filter((item) => MOBILE_PRIMARY_VIEWS.includes(item.name))
-    : enabledItems;
-  const overflowItems = isMobile
-    ? enabledItems.filter((item) => !MOBILE_PRIMARY_VIEWS.includes(item.name))
-    : [];
+  const preferences = useRailPreferences();
+  const visibleNames = visibleRailViews(preferences, flags);
+  const digits = railDigits(visibleNames);
+  const enabledItems = visibleNames.map((name) => GLOBAL_VIEW_ITEMS.find((item) => item.name === name)!);
+  const visibleItems = isMobile ? enabledItems.slice(0, MOBILE_PRIMARY_COUNT) : enabledItems;
+  const overflowItems = isMobile ? enabledItems.slice(MOBILE_PRIMARY_COUNT) : [];
   // A destination hidden behind More still has to read as current, or the bar looks like nothing
   // is selected while the user is standing on Usage — or, now, in Settings.
   const overflowSelected = settingsSelected || overflowItems.some((item) => item.name === selected);
@@ -172,7 +154,10 @@ export function Rail({
    * The parts every sheet row shares. Extracted so the Settings row cannot drift from the
    * destination rows — both close the sheet the same way and both answer Space.
    */
-  const sheetItemProps = (destination: View, active: boolean) => ({
+  // `resolve` runs at ACTIVATION, not render: an overflowed Sessions row must open the persisted
+  // list/board mode exactly like the bar item and the digit do, and that mode can change while
+  // the sheet is open.
+  const sheetItemProps = (destination: View, active: boolean, resolve: () => View = () => destination) => ({
     role: "menuitem" as const,
     href: viewPath(destination),
     "aria-current": active ? ("page" as const) : undefined,
@@ -182,7 +167,7 @@ export function Rail({
       // close(true) restores focus to the trigger, which survives the
       // teardown; close(false) left keyboard position on <body>.
       more.close(true);
-      onNavigate(destination);
+      onNavigate(resolve());
     },
     onKeyDown: (event: React.KeyboardEvent) => {
       // An anchor activates on Enter natively but not on Space, and role="menuitem"
@@ -190,7 +175,7 @@ export function Rail({
       if (event.key !== " " && event.key !== "Spacebar") return;
       event.preventDefault();
       more.close(true);
-      onNavigate(destination);
+      onNavigate(resolve());
     },
   });
 
@@ -211,10 +196,7 @@ export function Rail({
       </a>
       <div className="rail-destinations">
         {visibleItems.map((item) => {
-          // Anchored to the canonical list, not the filtered one: the number IS the Ctrl+N
-          // shortcut, so renumbering it on mobile would advertise a binding that does not exist.
-          const index = GLOBAL_VIEW_ITEMS.findIndex((entry) => entry.name === item.name);
-          const shortcutDigit = index < RAIL_SHORTCUT_DIGITS ? index + 1 : null;
+          const shortcutDigit = digits.get(item.name) ?? null;
           const shortcutSuffix = isMobile || shortcutDigit === null ? "" : ` (${shortcutDigit})`;
           const Icon = VIEW_ICONS[item.name];
           const active = selected === item.name;
@@ -292,14 +274,31 @@ export function Rail({
                   {overflowItems.map((item) => {
                     const Icon = VIEW_ICONS[item.name];
                     const destination = { name: item.name } as View;
+                    // A reordered rail can push a counted destination into the sheet; its status
+                    // must overflow WITH it, or moving Connections fifth silently hides the
+                    // online count and moving Sessions hides its blocked/stalled attention.
+                    const blocked = item.name === "inbox" ? blockedCount : 0;
+                    const stalled = item.name === "inbox" ? stalledCount : 0;
+                    const online = item.name === "runners" ? onlineConnections : 0;
+                    const countLabel = item.name === "inbox"
+                      ? `${blocked > 0 ? `, ${blocked} Blocked` : ""}${stalled > 0 ? `, ${stalled} Stalled` : ""}`
+                      : online > 0 ? `, ${online} Online` : "";
                     return (
                       <a
                         key={item.name}
                         className={`rail-more-item${selected === item.name ? " active" : ""}`}
-                        {...sheetItemProps(destination, selected === item.name)}
+                        aria-label={`${item.title}${countLabel}`}
+                        {...sheetItemProps(
+                          destination,
+                          selected === item.name,
+                          item.name === "inbox" ? sessionsViewDestination : undefined,
+                        )}
                       >
                         <Icon size={20} />
-                        <span>{item.title}</span>
+                        <span className="rail-more-label">{item.title}</span>
+                        {blocked > 0 && <span className="rail-more-count blocked" aria-hidden="true">{blocked}</span>}
+                        {stalled > 0 && <span className="rail-more-count stalled" aria-hidden="true">{stalled}</span>}
+                        {online > 0 && <span className="rail-more-count" aria-hidden="true">{online}</span>}
                       </a>
                     );
                   })}
@@ -312,7 +311,7 @@ export function Rail({
                     {...sheetItemProps({ name: "settings" }, settingsSelected)}
                   >
                     <GearIcon size={20} />
-                    <span>Settings</span>
+                    <span className="rail-more-label">Settings</span>
                   </a>
                 </div>
               </>

@@ -135,12 +135,12 @@ const read = (path: string) =>
 
 test("every surface that exposes a gated feature consults the flags", () => {
   const consumers: ReadonlyArray<[string, RegExp, string]> = [
-    ["./components/Rail.tsx", /experimentForViewName/,
-      "the rail must filter destinations, or a hidden feature keeps its row"],
+    ["./components/Rail.tsx", /visibleRailViews\(preferences, flags\)/,
+      "the rail must filter destinations through the flags, or a hidden feature keeps its row"],
     ["./components/CommandPalette.tsx", /experimentForViewName/,
       "the palette must filter destinations, or search reaches what the rail hides"],
-    ["./App.tsx", /experimentForViewName\(destination\.name\)/,
-      "the numbered shortcuts must consult the flags, or a hidden view stays one keypress away"],
+    ["./App.tsx", /visibleRailViews\(railPreferences, experiments\.flags\)/,
+      "the numbered shortcuts must consult the flags through the visible rail order, or a hidden view stays one keypress away"],
     ["./App.tsx", /disabledExperimentView/,
       "a direct route into a hidden feature must render the notice, not the feature"],
     ["./App.tsx", /flags\.multiAgent[\s\S]{0,200}New Multi-Agent Run/,
