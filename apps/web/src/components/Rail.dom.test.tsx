@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import { Rail } from "./Rail.js";
 import { saveSessionsViewMode } from "../sessions-view-mode.js";
+import { moveRailView, resetRailPreferencesForTest, setRailViewHidden } from "../rail-preferences.js";
 import type { View } from "../navigation.js";
 
 const domWindow = new Window();
@@ -161,8 +162,8 @@ test("the phone rail hosts destinations plus routed Settings and no nested layer
       "four destinations plus More — five is the platform convention");
     assert.deepEqual(
       [...bar.querySelectorAll<HTMLAnchorElement>("a.rail-item")].map((item) => item.getAttribute("href")),
-      ["/", "/automations", "/connections/machines", "/projects"],
-      "the bar renders its members in canonical rail order");
+      ["/", "/automations", "/runs", "/pods"],
+      "the bar takes the first four visible destinations in configured order");
 
     // Nothing that owns its own overlay may live in the bar or the sheet.
     assert.equal(container.querySelector(".rail-instance"), null);
@@ -175,8 +176,10 @@ test("the phone rail hosts destinations plus routed Settings and no nested layer
     const moreTrigger = container.querySelector(".rail-more-trigger")! as unknown as HTMLButtonElement;
     await act(async () => { moreTrigger.click(); });
     const sheet = container.querySelector(".rail-more-sheet")!;
+    // The bar takes the first four VISIBLE destinations (#385), so with every experiment on the
+    // sheet holds the visible order past them, and Settings still trails everything.
     assert.deepEqual([...sheet.querySelectorAll(".rail-more-item")].map((el) => el.textContent),
-      ["Multi-Agent Runs", "Collaboration Pods", "Agent Skills", "Archived Sessions", "Usage & Cost",
+      ["Connections", "Agent Skills", "Projects", "Archived Sessions", "Usage & Cost",
         "Settings"],
       "Settings is the trailing row, after every destination");
     assert.equal(sheet.querySelector(".rail-more-control"), null,
@@ -425,5 +428,49 @@ test("crossing to desktop from the Settings row hands focus to the desktop gear"
     await act(async () => { root.unmount(); });
     container.remove();
     domWindow.matchMedia = prior;
+  }
+});
+
+test("hiding and reordering renumber the surviving destinations", async () => {
+  // Position IS the binding (#385): Automations gone means Multi-Agent holds digit 2 — the digit
+  // never goes dead the way the pre-#385 canonical anchoring left it.
+  resetRailPreferencesForTest();
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const render = () => act(async () => {
+    root.render(
+      <Rail
+        view={{ name: "inbox" }}
+        blockedCount={0}
+        stalledCount={0}
+        onlineConnections={0}
+        onNavigate={() => undefined}
+      />,
+    );
+  });
+  try {
+    await render();
+    setRailViewHidden("automations", true);
+    await render();
+    let links = [...container.querySelectorAll<HTMLAnchorElement>(".rail-destinations a")];
+    assert.equal(links.length, 8, "a hidden destination leaves the rail");
+    assert.equal(links[1]!.getAttribute("href"), "/runs");
+    assert.equal(links[1]!.querySelector(".rail-number")?.textContent, "2",
+      "the survivor inherits the digit; nothing goes dead");
+    assert.match(links[1]!.getAttribute("aria-label") ?? "", /\(2\)/);
+
+    setRailViewHidden("automations", false);
+    moveRailView("usage", "up");
+    await render();
+    links = [...container.querySelectorAll<HTMLAnchorElement>(".rail-destinations a")];
+    assert.equal(links[7]!.getAttribute("href"), "/usage");
+    assert.equal(links[7]!.querySelector(".rail-number")?.textContent, "8");
+    assert.equal(links[8]!.getAttribute("href"), "/archived");
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+    resetRailPreferencesForTest();
+    domWindow.localStorage.clear();
   }
 });

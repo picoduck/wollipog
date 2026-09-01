@@ -1,6 +1,8 @@
 import { Modal } from "./common.js";
-import { SHORTCUT_GROUPS, SHORTCUTS, shortcutDisplay, shortcutUnavailableReason } from "../shortcuts.js";
+import { SHORTCUT_GROUPS, SHORTCUTS, railViewForShortcut, shortcutDisplay, shortcutUnavailableReason } from "../shortcuts.js";
+import { railDigits, visibleRailViews } from "../rail-preferences.js";
 import { useExperiments } from "../use-experiments.js";
+import { useRailPreferences } from "../use-rail-preferences.js";
 
 function shortcutGroupId(group: string): string {
   return `shortcut-${group.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
@@ -24,6 +26,10 @@ export function ShortcutReference({
   // A switched-off experiment's bindings are dead — their handlers live inside the hidden
   // surfaces — so the reference must say so rather than advertise a working key.
   const { flags: experimentFlags } = useExperiments();
+  // Navigation digits derive from the visible rail order (#385); the reference reads the same
+  // derived mapping as the rail keycaps and the key handler, so the three cannot disagree.
+  const railPreferences = useRailPreferences();
+  const derivedDigits = railDigits(visibleRailViews(railPreferences, experimentFlags));
   return (
     <Modal title="Keyboard Shortcuts" onClose={onClose}>
       <p className="shortcut-intro">These bindings are shared by the app and this reference, so the list stays in step with the controls.</p>
@@ -40,7 +46,10 @@ export function ShortcutReference({
                   conversationSteeringSupported,
                   turnInterruptionSupported,
                   experimentFlags,
+                  hiddenRailViews: railPreferences.hidden,
                 });
+                const railView = railViewForShortcut(item.id);
+                const derivedKey = railView === null ? null : derivedDigits.get(railView) ?? null;
                 return (
                   <div className={`shortcut-row${unavailable ? " is-unavailable" : ""}`} key={item.id} aria-disabled={unavailable ? "true" : undefined}>
                     <div>
@@ -50,7 +59,7 @@ export function ShortcutReference({
                         <span className="shortcut-scope">{item.scope}</span>
                       </dd>
                     </div>
-                    <kbd>{shortcutDisplay(item.id)}</kbd>
+                    <kbd>{railView !== null ? derivedKey ?? "—" : shortcutDisplay(item.id)}</kbd>
                   </div>
                 );
               })}

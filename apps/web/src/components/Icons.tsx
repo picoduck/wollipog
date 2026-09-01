@@ -539,6 +539,14 @@ export function ArrowUpIcon(props: IconProps) {
   );
 }
 
+export function ArrowDownIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <path d="M12 4v15M5 12l7 7 7-7" />
+    </IconBase>
+  );
+}
+
 /** Filled square used for non-terminal turn interruption controls. */
 export function StopTurnIcon(props: IconProps) {
   return (

@@ -52,6 +52,7 @@ import {
 import { cycleFocusZone, escapeOwner } from "./focus-zones.js";
 import { installTerminalExitBoundary } from "./terminal-focus.js";
 import {
+  bareDigitPressed,
   isEditableShortcutTarget,
   matchesShortcut,
   shortcutDisplay,
@@ -70,6 +71,8 @@ import { NavRow, SwitchRow } from "./components/ui/SettingsRows.js";
 import { viewPath, viewTitle } from "./navigation.js";
 import { useInstanceScope } from "./instance-scope.js";
 import { sessionsDestination } from "./sessions-view-mode.js";
+import { railViewForDigit, visibleRailViews } from "./rail-preferences.js";
+import { useRailPreferences } from "./use-rail-preferences.js";
 import { useSessionsViewModeMemory } from "./use-sessions-view-mode-memory.js";
 import { handleSettingsNavigationKey } from "./settings-navigation.js";
 import { ProjectsView } from "./components/ProjectsView.js";
@@ -82,6 +85,7 @@ import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import {
   AboutPanel,
   AppearancePanel,
+  NavigationRailPanel,
   BehaviorPanel,
   AgentHarnessDefaultsPanel,
   ExperimentalPanel,
@@ -434,6 +438,10 @@ function Shell() {
 
   const instanceScope = useInstanceScope();
   useSessionsViewModeMemory(view, instanceScope);
+  const railPreferences = useRailPreferences();
+  const visibleRailNames = visibleRailViews(railPreferences, experiments.flags);
+  const visibleRailNamesRef = useRef(visibleRailNames);
+  visibleRailNamesRef.current = visibleRailNames;
 
   // ONE Escape handler for the shell ladder (mounted always; the palette and dialogs manage
   // their own). Escape peels exactly ONE layer, topmost first:
@@ -498,28 +506,19 @@ function Shell() {
 
   useEffect(() => {
     if (isMobile) return;
-    const destinations = [
-      ["navigate-inbox", { name: "inbox" }],
-      ["navigate-automations", { name: "automations" }],
-      ["navigate-runs", { name: "runs" }],
-      ["navigate-pods", { name: "pods" }],
-      ["navigate-connections", { name: "runners" }],
-      ["navigate-skills", { name: "skills" }],
-      ["navigate-projects", { name: "projects" }],
-      ["navigate-archived", { name: "archived" }],
-      ["navigate-usage", { name: "usage" }],
-    ] as const;
     const onKey = (event: KeyboardEvent) => {
       if (event.defaultPrevented || shortcutLayerActive(document) || xtermOwnsKey(event.target)) return;
-      for (const [shortcutId, destination] of destinations) {
-        if (!matchesShortcut(event, shortcutId)) continue;
-        // A number for a switched-off experiment does nothing rather than opening the
-        // explanation page: the rail hides the destination, so the binding is unadvertised.
-        const experiment = experimentForViewName(destination.name);
-        if (experiment !== null && !experiments.flags[experiment]) return;
-        event.preventDefault();
-        // The Sessions digit opens whichever mode the destination last used.
-        navigate(shortcutId === "navigate-inbox" ? sessionsDestination(instanceScope) : destination);
+      const digit = bareDigitPressed(event);
+      if (digit !== null) {
+        // Digits derive solely from the visible rail order (#385): a hidden or experiment-off
+        // destination consumes no slot, and a digit past the visible list does nothing rather
+        // than firing an unadvertised binding.
+        const destination = railViewForDigit(visibleRailNamesRef.current, digit);
+        if (destination !== null) {
+          event.preventDefault();
+          // The Sessions digit opens whichever mode the destination last used.
+          navigate(destination === "inbox" ? sessionsDestination(instanceScope) : { name: destination });
+        }
         return;
       }
       if (matchesShortcut(event, "focus-inbox-search")) {
@@ -538,7 +537,7 @@ function Shell() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [isMobile, navigate, experiments.flags, instanceScope]);
+  }, [isMobile, navigate, instanceScope]);
 
   // Ctrl+K / Cmd+K opens the global search palette (sessions + transcripts + views).
   // Deliberately ALSO from inputs/textareas (the Slack/Linear convention — jumping mid-typing
@@ -738,6 +737,7 @@ function Shell() {
               onOpenShortcuts={openShortcutReference}
               panels={{
                 appearance: (
+                  <>
                   <AppearancePanel
                     options={THEME_OPTIONS}
                     value={theme.preference}
@@ -754,6 +754,10 @@ function Shell() {
                     density={theme.density}
                     onDensityChange={(value: string) => theme.setDensity(value as typeof theme.density)}
                   />
+                  {/* The rail's visibility/order editor (#385) lives with the other chrome
+                      preferences rather than as its own route: it is one compact group. */}
+                  <NavigationRailPanel />
+                  </>
                 ),
                 notifications: <NotificationsPanel notify={notify} push={push} />,
                 keyboard: (

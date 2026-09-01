@@ -100,23 +100,21 @@ test("live-follow status owns a reserved transcript strip with a compact centere
 });
 
 test("the global keyboard layer wires rail navigation, Inbox search, creation, and F6 zones", () => {
-  const navigationIds = [
-    "navigate-inbox",
-    "navigate-automations",
-    "navigate-runs",
-    "navigate-pods",
-    "navigate-connections",
-    "navigate-skills",
-    "navigate-projects",
-    "navigate-archived",
-    "navigate-usage",
-  ];
+  // Bare digits derive from the visible rail order (#385): the handler must read the derived
+  // list, not a static navigate-* table that a reorder or hide would silently contradict.
+  assert.match(app, /const digit = bareDigitPressed\(event\)/,
+    "digit handling shares the bare-key gating with every other binding");
+  assert.match(app, /railViewForDigit\(visibleRailNamesRef\.current, digit\)/,
+    "the digit resolves against the CURRENT visible order");
+  assert.match(app, /const visibleRailNames = visibleRailViews\(railPreferences, experiments\.flags\)/,
+    "visibility folds preferences and experiment flags together");
+  assert.doesNotMatch(app, /matchesShortcut\(event, "navigate-/,
+    "no static digit table may survive beside the derived mapping");
   for (const id of [
-    ...navigationIds,
     "focus-inbox-search",
     "focus-next-zone",
     "focus-previous-zone",
-  ]) assert.match(app, new RegExp(`matchesShortcut\\(event, "${id}"\\)|"${id}"`), id);
+  ]) assert.match(app, new RegExp(`matchesShortcut\\(event, "${id}"\\)`), id);
   assert.match(newSessionShortcut, /matchesShortcut\(event, "new-session"\)/);
   assert.match(app, /useNewSessionShortcut\(!isMobile, openContextualNewSession\)/);
   // The board-mode e2e harness mounts these same hooks (#527), but it cannot see whether the
@@ -130,12 +128,7 @@ test("the global keyboard layer wires rail navigation, Inbox search, creation, a
   assert.match(app, /if \(isMobile\) return;/);
   assert.match(app, /xtermOwnsKey\(event\.target\)/);
   assert.match(app, /cycleFocusZone\(document, "next"\)/);
-  const destinations = app.match(/const destinations = \[([\s\S]*?)\] as const;/)?.[1] ?? "";
-  assert.deepEqual(
-    [...destinations.matchAll(/\["(navigate-[^"]+)"/g)].map((match) => match[1]),
-    navigationIds,
-    "the global keyboard destination order stays aligned with the rail",
-  );
+
 });
 
 test("Inbox focus, unread state, and shortcuts use non-overlapping visual treatments", () => {

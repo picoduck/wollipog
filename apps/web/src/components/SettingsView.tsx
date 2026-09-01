@@ -13,7 +13,22 @@ import { useApi } from "../api-context.js";
 import { notifier } from "../notify.js";
 import { tailnetAccessDescription, type TailnetAccessSetting } from "../tailnet-access.js";
 import { type PushSetting } from "../push.js";
-import { KeyboardIcon } from "./Icons.js";
+import { ArrowDownIcon, ArrowUpIcon, KeyboardIcon } from "./Icons.js";
+import { VIEW_ICONS } from "./Rail.js";
+import {
+  REQUIRED_RAIL_VIEWS,
+  moveRailView,
+  railDigits,
+  railPreferencesAreDefault,
+  resetRailPreferences,
+  setRailViewHidden,
+  visibleRailViews,
+} from "../rail-preferences.js";
+import { useRailPreferences } from "../use-rail-preferences.js";
+import { useInstanceScope } from "../instance-scope.js";
+import { experimentForViewName } from "../experiments.js";
+import { useExperiments } from "../use-experiments.js";
+import { GLOBAL_VIEW_ITEMS } from "../navigation.js";
 import { NavRow, SegmentedRow, SelectRow, StaticRow, SwitchRow } from "./ui/SettingsRows.js";
 import { Select } from "./ui/ChoiceControls.js";
 import { SCHEME_SWATCHES, type ColorScheme, type ResolvedTheme } from "../theme.js";
@@ -207,6 +222,102 @@ export function AppearancePanel({
         disabledReason={disabledReason}
         onChange={onDensityChange}
       />
+    </SettingsGroup>
+  );
+}
+
+/**
+ * Settings → Appearance → Navigation (#385): visibility and order for the rail's destinations.
+ *
+ * The read-only digit chips are the derived bindings — position IS the shortcut, so there is no
+ * digit editor to drift from the rail. Sessions is required (hiding it would leave the rail with
+ * no home destination), and Settings is absent on purpose: it is not a rail destination, and on
+ * a phone it is the only Settings entry point, pinned as the More sheet's trailing row (#458).
+ * Reordering uses Move buttons rather than drag-and-drop: one interaction that works for
+ * pointer, touch, and keyboard alike, with the effect announced by the updated digit chips.
+ */
+export function NavigationRailPanel() {
+  const instanceScope = useInstanceScope();
+  const preferences = useRailPreferences();
+  const { flags } = useExperiments();
+  const digits = railDigits(visibleRailViews(preferences, flags));
+  return (
+    <SettingsGroup title="Navigation">
+      <ul className="rail-order-list" aria-label="Navigation Destinations">
+        {preferences.order.map((name, index) => {
+          const item = GLOBAL_VIEW_ITEMS.find((candidate) => candidate.name === name)!;
+          const Icon = VIEW_ICONS[name];
+          const required = REQUIRED_RAIL_VIEWS.has(name);
+          const hidden = preferences.hidden.has(name);
+          const experiment = experimentForViewName(name);
+          const experimentOff = experiment !== null && !flags[experiment];
+          const digit = digits.get(name);
+          const state = hidden
+            ? "Hidden"
+            : experimentOff
+              ? "Off in Experimental"
+              : digit === undefined
+                ? "No Digit"
+                : null;
+          return (
+            <li className={`rail-order-row${hidden || experimentOff ? " is-inactive" : ""}`} key={name}>
+              <span className="rail-order-icon" aria-hidden="true"><Icon size={18} /></span>
+              <span className="rail-order-title">{item.title}</span>
+              <span className="rail-order-state">
+                {digit !== undefined && <kbd aria-label={`Shortcut ${digit}`}>{digit}</kbd>}
+                {state !== null && <span className="rail-order-note">{state}</span>}
+              </span>
+              <span className="rail-order-controls">
+                <button
+                  type="button"
+                  className="icon-btn"
+                  disabled={index === 0}
+                  aria-label={`Move ${item.title} Up`}
+                  onClick={() => moveRailView(name, "up", instanceScope)}
+                >
+                  <ArrowUpIcon size={14} />
+                </button>
+                <button
+                  type="button"
+                  className="icon-btn"
+                  disabled={index === preferences.order.length - 1}
+                  aria-label={`Move ${item.title} Down`}
+                  onClick={() => moveRailView(name, "down", instanceScope)}
+                >
+                  <ArrowDownIcon size={14} />
+                </button>
+                {required ? (
+                  <span className="rail-order-required" title="Sessions is the rail's home destination and cannot be hidden.">
+                    Required
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    className="btn ghost sm"
+                    onClick={() => setRailViewHidden(name, !hidden, instanceScope)}
+                  >
+                    {hidden ? "Show" : "Hide"}
+                  </button>
+                )}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+      <p className="rail-order-hint">
+        The visible order assigns the digit shortcuts. Hidden destinations stay reachable from search
+        and direct links, and keep their place here for when they return.
+      </p>
+      <div className="rail-order-actions">
+        <button
+          type="button"
+          className="btn ghost sm"
+          disabled={railPreferencesAreDefault(preferences)}
+          onClick={() => resetRailPreferences(instanceScope)}
+        >
+          Reset to Default
+        </button>
+      </div>
     </SettingsGroup>
   );
 }

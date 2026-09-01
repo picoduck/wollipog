@@ -92,6 +92,10 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     scope: "Global",
     binding: { key: "k", primary: true },
   },
+  // The digits below are the DEFAULT configuration's bindings. At runtime the bare digits derive
+  // solely from the visible rail order (#385, rail-preferences.ts): the shell's key handler and
+  // the shortcut reference both read the derived mapping, so a reordered or hidden destination
+  // renumbers everywhere at once and these table entries never disagree with a keycap.
   {
     id: "navigate-inbox",
     group: "Navigation",
@@ -556,6 +560,17 @@ export function inTypingContext(
   return typingElement(targetDocument?.activeElement ?? null);
 }
 
+/** A bare digit press under the same gating as every other bare binding, or null. */
+export function bareDigitPressed(
+  event: KeyboardLike,
+  targetDocument: ActiveElementDocument | undefined = typeof document === "undefined" ? undefined : document,
+): string | null {
+  if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return null;
+  if (!/^[0-9]$/.test(event.key)) return null;
+  if (inTypingContext(targetDocument)) return null;
+  return event.key;
+}
+
 export function matchesShortcut(
   event: KeyboardLike,
   id: ShortcutId,
@@ -637,12 +652,33 @@ export function advanceShortcutSequence(
 /** Shortcuts whose feature can be switched off in Settings → Experimental. Their handlers all
  * live inside the gated surfaces, so the binding is already dead when the flag is off — this
  * mapping exists so the reference says why instead of advertising a working key. */
+/** The navigation shortcut advertising each rail destination, for derived-digit display. */
+export const RAIL_SHORTCUT_IDS = {
+  inbox: "navigate-inbox",
+  automations: "navigate-automations",
+  runs: "navigate-runs",
+  pods: "navigate-pods",
+  runners: "navigate-connections",
+  skills: "navigate-skills",
+  projects: "navigate-projects",
+  archived: "navigate-archived",
+  usage: "navigate-usage",
+} as const satisfies Record<string, ShortcutId>;
+
 const EXPERIMENT_SHORTCUT_IDS: Partial<Record<ShortcutId, ExperimentId>> = {
   "navigate-runs": "multiAgent",
   "submit-run": "multiAgent",
   "navigate-pods": "pods",
   "relay-pod-note": "pods",
 };
+
+/** The rail destination a navigation shortcut advertises, or null for every other binding. */
+export function railViewForShortcut(id: ShortcutId): keyof typeof RAIL_SHORTCUT_IDS | null {
+  for (const [name, shortcutId] of Object.entries(RAIL_SHORTCUT_IDS)) {
+    if (shortcutId === id) return name as keyof typeof RAIL_SHORTCUT_IDS;
+  }
+  return null;
+}
 
 export function shortcutUnavailableReason(
   definition: ShortcutDefinition,
@@ -653,8 +689,14 @@ export function shortcutUnavailableReason(
     conversationSteeringSupported?: boolean;
     turnInterruptionSupported?: boolean;
     experimentFlags?: ExperimentFlags;
+    /** Rail destinations hidden by preference (#385); their digits are unassigned, not dead. */
+    hiddenRailViews?: ReadonlySet<string>;
   },
 ): string | null {
+  const railView = railViewForShortcut(definition.id);
+  if (railView && context.hiddenRailViews?.has(railView)) {
+    return "Hidden in Settings → Appearance";
+  }
   const experiment = EXPERIMENT_SHORTCUT_IDS[definition.id];
   if (experiment && context.experimentFlags && !context.experimentFlags[experiment]) {
     return "Turned off in Settings → Experimental";
