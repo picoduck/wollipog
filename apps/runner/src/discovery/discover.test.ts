@@ -172,6 +172,33 @@ test("merge applies explicit API billing and preserves an explicit config disabl
   assert.equal(disabled.available, false, "explicit config availability wins");
 });
 
+test("merge strips configured Claude steering claims and restores only live discovered support", () => {
+  const claimed = cfg({
+    id: "configured",
+    driver: "claude-code",
+    command: "/usr/bin/claude",
+    capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false,
+      supportsApprovals: false, supportsSteering: true,
+    },
+  });
+  const unmatched = mergeAgents([claimed], [])[0]!;
+  assert.equal(unmatched.capabilities?.supportsSteering, undefined);
+
+  const discovered = cfg({
+    id: "discovered",
+    driver: "claude-code",
+    command: "/usr/bin/claude",
+    source: "discovered",
+    capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: true,
+      supportsApprovals: true, supportsSteering: true,
+    },
+  });
+  const restored = mergeAgents([claimed], [discovered])[0]!;
+  assert.equal(restored.capabilities?.supportsSteering, true);
+});
+
 test("model enrichment excludes hidden capabilities from aggregate knobs while retaining their metadata", () => {
   const base = cfg({
     id: "codex",

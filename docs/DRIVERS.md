@@ -252,6 +252,15 @@ SessionManager queue remains the single prompt serializer. All approval and AskU
 messages use the same user-message envelope. `WOLLIPOG_CLAUDE_PERSISTENT=0` opts out to the
 one-process-per-turn `--resume` path.
 
+Verified Claude Code installations (currently 2.1.241+) that advertise both stream-json input and
+`--replay-user-messages` also expose active-turn steering. The persistent launch adds that replay
+flag, and each steer uses a runner-minted top-level `uuid`. Only Claude's matching
+`type:"user", isReplay:true` frame for the same session, turn, process, and transport generation is
+an acceptance receipt. A pipe write is never acceptance: timeout, process loss, turn completion,
+or lifecycle cancellation before the replay stays **Uncertain** and is never automatically
+replayed. Persistent opt-out and a circuit fallback publish a session-scoped capability revocation
+so the dashboard stops offering Steer while the active transport is one-shot.
+
 The lifetime policy is quiescence-aware and fail-safe:
 
 - Model, effort, permission-mode, cwd, or launch-arg changes reap the idle process and resume the
@@ -428,6 +437,7 @@ that decision remains Phase 2.5.
 | `assistant` (complete) | `message.content[]` text blocks | authoritative `{kind:"agent_message", text}` (dedupe vs deltas) |
 | `assistant` (complete) | `message.content[]` `tool_use`, `parent_tool_use_id`, parented `message.usage` | `{kind:"tool_call", toolCallId:id, title:name, status:"in_progress", text:JSON(input), parentToolUseId?}` plus attributed subagent `token_usage` when supplied |
 | `user` | `message.content[]` `tool_result`, `parent_tool_use_id` | `{kind:"tool_call_update", toolCallId:tool_use_id, status: is_error?"failed":"completed", text:content, parentToolUseId?}` |
+| replayed top-level `user` | `isReplay:true`, `uuid`, `session_id` | settle the exact pending active-turn steering receipt; suppress from provider tool-result projection |
 | `system`/`api_retry` | `error`, `attempt` | non-auth failures → `{kind:"stderr", text:"retry …"}`; provider-auth failures → secret-free driver signal that cancels the retry loop and parks the session on **Authentication Required** |
 | `system`/`compact_boundary` | — | `{kind:"status", status:"running"}` (informational; or ignore) |
 | `result` | `subtype`, `result`, `modelUsage`, `total_cost_usd` | end turn → `StopReason` (`success`→`end_turn`, `error_max_turns`→`max_turn_requests`, else `refusal`); emit `{kind:"token_usage", …}` |

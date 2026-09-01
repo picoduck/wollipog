@@ -84,8 +84,8 @@ function verifiedCodexAppServerCapabilities(
   return caps && compatibility.status === "supported" ? { ...caps, supportsSteering: true } : caps;
 }
 
-function withoutConfiguredCodexSteering(agent: AgentDefinition): AgentDefinition {
-  if (agent.driver !== "codex-app-server" || !agent.capabilities?.supportsSteering) return agent;
+function withoutConfiguredProviderSteering(agent: AgentDefinition): AgentDefinition {
+  if ((agent.driver !== "codex-app-server" && agent.driver !== "claude-code") || !agent.capabilities?.supportsSteering) return agent;
   const { supportsSteering: _unverified, ...capabilities } = agent.capabilities;
   return { ...agent, capabilities };
 }
@@ -487,9 +487,9 @@ function launchKeys(a: AgentDefinition): string[] {
  * Discovered agents that don't match a config entry are appended as new entries.
  */
 export function mergeAgents(configAgents: AgentDefinition[], discovered: AgentDefinition[]): AgentDefinition[] {
-  // Config selects a driver but cannot attest to the live app-server contract. Strip any stale
-  // steering flag first; only a matching discovery result below may restore it.
-  const safeConfigAgents = configAgents.map(withoutConfiguredCodexSteering);
+  // Config selects a driver but cannot attest to a live provider steering contract. Strip any
+  // stale steering flag first; only a matching discovery result below may restore it.
+  const safeConfigAgents = configAgents.map(withoutConfiguredProviderSteering);
   // Index every discovered agent under ALL of its identities (bin key + launch shape), so both
   // a bare config name and a config entry pinning the exact resolved launch find their match.
   const byKey = new Map<string, AgentDefinition>();
@@ -529,6 +529,7 @@ export function mergeAgents(configAgents: AgentDefinition[], discovered: AgentDe
               elicitation: d.capabilities.elicitation,
               supportsImages: d.capabilities.supportsImages,
               supportsApprovals: d.capabilities.supportsApprovals,
+              supportsSteering: d.capabilities.supportsSteering,
               supportsConversationFork: d.capabilities.supportsConversationFork,
               slashCommands: d.capabilities.slashCommands,
             }

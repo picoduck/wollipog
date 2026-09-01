@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyClaudeConfiguredAuth, claudeCapabilitiesFromProbe, parseClaudeAuthStatus, parseClaudeHelp, probeClaudeCode } from "./claude-code.js";
+import { applyClaudeConfiguredAuth, CLAUDE_STEERING_MIN_VERSION, claudeCapabilitiesFromProbe, parseClaudeAuthStatus, parseClaudeHelp, probeClaudeCode } from "./claude-code.js";
 
 const ok = (stdout: string) => ({ code: 0, stdout, stderr: "" });
 
@@ -35,6 +35,7 @@ test("normalized Claude capabilities expose fork and per-mode elicitation only w
   const base = { models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: false };
   const probe = {
     status: "ready" as const,
+    installedVersion: CLAUDE_STEERING_MIN_VERSION,
     effortLevels: [],
     permissionModes: ["acceptEdits", "auto", "plan", "bypassPermissions"],
     streamJsonInput: true,
@@ -42,6 +43,7 @@ test("normalized Claude capabilities expose fork and per-mode elicitation only w
     auth: { status: "authenticated" as const, billingSource: "subscription" as const },
   };
   const capabilities = claudeCapabilitiesFromProbe(base, probe);
+  assert.equal(capabilities.supportsSteering, true);
   assert.equal(capabilities.supportsConversationFork, true);
   assert.deepEqual(capabilities.permissionModes, ["default", "auto", "acceptEdits", "plan", "bypassPermissions"]);
   assert.deepEqual(capabilities.elicitation, {
@@ -52,6 +54,9 @@ test("normalized Claude capabilities expose fork and per-mode elicitation only w
     bypassPermissions: ["none"],
   });
   assert.equal(claudeCapabilitiesFromProbe(base, { ...probe, status: "unsupported", forkSession: true }).supportsConversationFork, false);
+  assert.equal(claudeCapabilitiesFromProbe(base, { ...probe, status: "unsupported" }).supportsSteering, undefined);
+  assert.equal(claudeCapabilitiesFromProbe(base, { ...probe, replayUserMessages: false }).supportsSteering, undefined);
+  assert.equal(claudeCapabilitiesFromProbe(base, { ...probe, installedVersion: "2.1.240" }).supportsSteering, undefined);
 });
 
 test("Claude fixed modes remain explicitly unavailable without the control protocol", () => {

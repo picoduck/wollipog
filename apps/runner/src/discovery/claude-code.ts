@@ -13,6 +13,7 @@ type ProbeExec = (args: string[], timeoutMs?: number) => Promise<ExecResult>;
 const SAFE_LABEL = /^[a-zA-Z0-9._ -]{1,40}$/;
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 const PERMISSION_MODES = ["acceptEdits", "auto", "bypassPermissions", "dontAsk", "plan"];
+export const CLAUDE_STEERING_MIN_VERSION = "2.1.241";
 
 function enabledFlag(value: string | undefined): boolean {
   return value === "1" || value?.toLowerCase() === "true";
@@ -161,6 +162,10 @@ export function claudeCapabilitiesFromProbe(
     permissionModes,
     supportsImages: probe.streamJsonImages,
     supportsApprovals: probe.controlProtocol,
+    ...(probe.status === "ready" && probe.streamJsonInput && probe.replayUserMessages &&
+        probe.installedVersion && versionAtLeast(probe.installedVersion, CLAUDE_STEERING_MIN_VERSION)
+      ? { supportsSteering: true as const }
+      : {}),
     supportsConversationFork: probe.status === "ready" && probe.forkSession,
     ...(permissionModes.length ? { elicitation } : { elicitation: undefined }),
   };

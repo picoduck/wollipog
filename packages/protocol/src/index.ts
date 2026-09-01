@@ -278,7 +278,9 @@
 // 97: session-naming target drift uses precise runner failure codes for missing harnesses and
 //     models. Because protocol v96 shipped on both sides of the unversioned vocabulary addition,
 //     new runners downgrade those codes for every pre-v97 control plane.
-export const PROTOCOL_VERSION = 97;
+// 98: native session capability overlays can revoke or restore steering when a verified
+//     persistent provider transport falls back at runtime. Older peers retain catalog truth.
+export const PROTOCOL_VERSION = 98;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
@@ -387,6 +389,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   turnInterruption: 71,
   turnInterruptionAck: 72,
   conversationSteering: 73,
+  nativeSteeringOverlay: 98,
   sessionCommandInvocations: 75,
   gitVisibility: 76,
   durablePromptQueueIdentity: 78,
@@ -767,15 +770,12 @@ export interface AgentCapabilities {
 /** Native drivers publish only session-scoped truth. Their catalog capabilities remain live runner
  * truth and must not be frozen into a long-lived session snapshot. An explicitly empty command
  * list is authoritative for that session; an absent field continues to inherit the catalog. */
-export type SessionCapabilityOverlay =
-  | {
-      elicitation: NonNullable<AgentCapabilities["elicitation"]>;
-      slashCommands?: AgentSlashCommand[];
-    }
-  | {
-      elicitation?: NonNullable<AgentCapabilities["elicitation"]>;
-      slashCommands: AgentSlashCommand[];
-    };
+export interface SessionCapabilityOverlay {
+  elicitation?: NonNullable<AgentCapabilities["elicitation"]>;
+  slashCommands?: AgentSlashCommand[];
+  /** Runtime transport truth can be narrower than the discovered native agent catalog. */
+  supportsSteering?: boolean;
+}
 
 export type SessionCapabilities = AgentCapabilities | SessionCapabilityOverlay;
 
@@ -792,6 +792,7 @@ export function mergeSessionCapabilities(
     ...catalog,
     ...(Object.hasOwn(session, "elicitation") ? { elicitation: session.elicitation } : {}),
     ...(Object.hasOwn(session, "slashCommands") ? { slashCommands: session.slashCommands } : {}),
+    ...(Object.hasOwn(session, "supportsSteering") ? { supportsSteering: session.supportsSteering } : {}),
   };
 }
 

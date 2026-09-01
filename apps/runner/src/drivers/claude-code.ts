@@ -33,6 +33,8 @@ import type {
   DriverCallbacks,
   DriverCommandInput,
   DriverOptions,
+  DriverSteerInput,
+  DriverSteerResult,
   PreparedDriverCommand,
   StopReason,
 } from "./driver.js";
@@ -91,6 +93,15 @@ interface PersistentTurn {
   writeAcknowledged: boolean;
   launchAttempts: number;
   waitingForRetirement?: boolean;
+}
+
+interface PendingClaudeSteer {
+  submissionId: string;
+  providerMessageId: string;
+  turnId: number;
+  generation: number;
+  resolve: (result: DriverSteerResult) => void;
+  timer: ReturnType<typeof setTimeout>;
 }
 
 export interface ClaudePersistentSettings {
@@ -241,14 +252,14 @@ export function claudePermissionArgs(
  * Build a stream-json user message carrying text plus base64 image blocks (the
  * Anthropic Messages API content shape, which `claude -p` accepts). Exported for tests.
  */
-export function buildClaudeUserMessage(promptText: string, images: PromptImage[]): Json {
+export function buildClaudeUserMessage(promptText: string, images: PromptImage[], uuid?: string): Json {
   const content: Json[] = [];
   if (promptText) content.push({ type: "text", text: promptText });
   for (const img of images) {
     content.push({ type: "image", source: { type: "base64", media_type: img.mimeType, data: img.data } });
   }
   if (content.length === 0) content.push({ type: "text", text: "" });
-  return { type: "user", message: { role: "user", content } };
+  return { type: "user", message: { role: "user", content }, ...(uuid ? { uuid } : {}) };
 }
 
 export function claudeCapabilityError(
@@ -299,6 +310,8 @@ export class ClaudeCodeDriver implements Driver {
   private providerTurnSeq = 0;
   private activePersistentTurn: PersistentTurn | null = null;
   private activeOneShotTurnId: number | null = null;
+  private readonly pendingSteersByMessage = new Map<string, PendingClaudeSteer>();
+  private readonly pendingSteerSubmissions = new Set<string>();
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingCeilingReached = false;
@@ -386,6 +399,9 @@ export class ClaudeCodeDriver implements Driver {
   }
 
   async initialize(): Promise<void> {
+    if (this.opts.capabilities?.supportsSteering === true && !this.persistentRequested) {
+      this.cb.onSteeringAvailability?.(false);
+    }
     // Reconcile restart seeds before the first recovery/user turn instead of pinning already
     // completed work until the pending ceiling. Unreadable or oversized ledgers retain the ids.
     if (this.pendingBackgroundTasks.size === 0) return;
@@ -555,6 +571,65 @@ export class ClaudeCodeDriver implements Driver {
       return this.promptPersistent(text, images, slashCommand);
     }
     return this.promptOneShot(text, images, slashCommand);
+  }
+
+  async steer({ submissionId, text, images = [], deadlineAt }: DriverSteerInput): Promise<DriverSteerResult> {
+    if (!text && images.length === 0) return { outcome: "rejected", reason: "steering input is empty" };
+    if (this.opts.capabilities?.supportsSteering !== true) {
+      return { outcome: "rejected", reason: "Claude steering was not verified for this installation" };
+    }
+    const turn = this.activePersistentTurn;
+    const child = this.child;
+    const generation = this.persistentGeneration;
+    if (!turn || turn.settled || !this.persistentTransport || !child || this.disposed || this.cancelled) {
+      return { outcome: "no_active_turn", reason: "Claude has no active persistent provider turn to steer" };
+    }
+    if (this.pendingSteerSubmissions.has(submissionId)) {
+      return { outcome: "rejected", reason: "steering submission is already active" };
+    }
+    if (!Number.isFinite(deadlineAt) || this.deps.now() >= deadlineAt) {
+      return { outcome: "rejected", reason: "Steering submission deadline expired before provider delivery" };
+    }
+
+    const providerMessageId = randomUUID();
+    return new Promise<DriverSteerResult>((resolve) => {
+      const timer = this.deps.setTimer(() => {
+        const pending = this.pendingSteersByMessage.get(providerMessageId);
+        if (!pending) return;
+        this.settleClaudeSteer(pending, {
+          outcome: "uncertain",
+          reason: "Claude did not acknowledge steering before the submission deadline",
+        });
+      }, Math.min(MAX_TIMER_MS, Math.max(1, deadlineAt - this.deps.now())));
+      timer.unref?.();
+      const pending: PendingClaudeSteer = {
+        submissionId,
+        providerMessageId,
+        turnId: turn.id,
+        generation,
+        resolve,
+        timer,
+      };
+      this.pendingSteersByMessage.set(providerMessageId, pending);
+      this.pendingSteerSubmissions.add(submissionId);
+
+      try {
+        child.stdin.write(JSON.stringify(buildClaudeUserMessage(text, images, providerMessageId)) + "\n", (error?: Error | null) => {
+          if (!error) return;
+          const current = this.pendingSteersByMessage.get(providerMessageId);
+          if (!current) return;
+          this.settleClaudeSteer(current, {
+            outcome: "uncertain",
+            reason: `Claude steering transport failed after a possible write: ${error.message}`,
+          });
+        });
+      } catch (error) {
+        this.settleClaudeSteer(pending, {
+          outcome: "rejected",
+          reason: `Claude steering could not be written: ${(error as Error).message}`,
+        });
+      }
+    });
   }
 
   prepareCommand(input: DriverCommandInput): PreparedDriverCommand {
@@ -833,6 +908,7 @@ export class ClaudeCodeDriver implements Driver {
       else args.push("--resume", this.sessionId);
       if (cfg.model && cfg.model !== "default") args.push("--model", cfg.model);
       if (cfg.effort) args.push("--effort", cfg.effort);
+      if (this.opts.capabilities?.supportsSteering === true) args.push("--replay-user-messages");
       args.push(...perm.args);
 
       let child: AgentProcess;
@@ -966,6 +1042,8 @@ export class ClaudeCodeDriver implements Driver {
       return;
     }
 
+    if (this.acknowledgeClaudeSteer(msg)) return;
+
     const turn = this.activePersistentTurn;
     if (!turn) {
       this.observeBackgroundLifecycle(msg);
@@ -982,6 +1060,10 @@ export class ClaudeCodeDriver implements Driver {
 
   private finishPersistentTurn(turn: PersistentTurn, reason: StopReason): void {
     if (turn.settled || this.activePersistentTurn !== turn) return;
+    this.settleClaudeSteersForTurn(
+      turn.id,
+      "Claude provider turn closed before steering acknowledgement",
+    );
     turn.settled = true;
     this.activePersistentTurn = null;
     this.pendingApprovals.clear();
@@ -994,6 +1076,47 @@ export class ClaudeCodeDriver implements Driver {
       else this.armPendingCeiling();
     } else {
       this.armIdleEviction();
+    }
+  }
+
+  private acknowledgeClaudeSteer(msg: Json): boolean {
+    if (msg?.type !== "user" || msg.isReplay !== true || typeof msg.uuid !== "string" ||
+        msg.session_id !== this.sessionId) return false;
+    const pending = this.pendingSteersByMessage.get(msg.uuid);
+    if (!pending) return false;
+    const turn = this.activePersistentTurn;
+    if (!turn || turn.id !== pending.turnId || this.persistentGeneration !== pending.generation) {
+      this.settleClaudeSteer(pending, {
+        outcome: "uncertain",
+        reason: "Claude acknowledged steering after the active provider turn changed",
+      });
+      return true;
+    }
+    this.settleClaudeSteer(pending, {
+      outcome: "accepted",
+      providerTurnId: this.sessionId,
+    });
+    return true;
+  }
+
+  private settleClaudeSteer(pending: PendingClaudeSteer, result: DriverSteerResult): void {
+    if (this.pendingSteersByMessage.get(pending.providerMessageId) !== pending) return;
+    this.pendingSteersByMessage.delete(pending.providerMessageId);
+    this.pendingSteerSubmissions.delete(pending.submissionId);
+    this.deps.clearTimer(pending.timer);
+    pending.resolve(result);
+  }
+
+  private settleClaudeSteersForTurn(turnId: number, reason: string): void {
+    for (const pending of [...this.pendingSteersByMessage.values()]) {
+      if (pending.turnId !== turnId) continue;
+      this.settleClaudeSteer(pending, { outcome: "uncertain", reason });
+    }
+  }
+
+  private settleAllClaudeSteers(reason: string): void {
+    for (const pending of [...this.pendingSteersByMessage.values()]) {
+      this.settleClaudeSteer(pending, { outcome: "uncertain", reason });
     }
   }
 
@@ -1367,6 +1490,7 @@ export class ClaudeCodeDriver implements Driver {
 
   private openPersistentCircuit(message: string, turn: PersistentTurn): void {
     this.persistentCircuitOpen = true;
+    if (this.opts.capabilities?.supportsSteering === true) this.cb.onSteeringAvailability?.(false);
     this.cb.onEvent({ kind: "error", message });
     this.stopPersistentTransport(false, "process_exit");
     if (!turn.settled && this.activePersistentTurn === turn) {
@@ -1393,6 +1517,7 @@ export class ClaudeCodeDriver implements Driver {
     this.persistentTransport = false;
     this.persistentFingerprint = null;
     this.pendingApprovals.clear();
+    this.settleAllClaudeSteers("Claude steering transport closed before acknowledgement");
     this.persistentGeneration += 1;
     if (cancelActive && this.activePersistentTurn && !this.activePersistentTurn.settled) {
       const turn = this.activePersistentTurn;
@@ -1612,6 +1737,7 @@ export class ClaudeCodeDriver implements Driver {
     this.disposed = true;
     this.streamingMessageIds.clear();
     this.pendingApprovals.clear();
+    this.settleAllClaudeSteers("Claude driver was disposed before steering acknowledgement");
     this.activeOneShotTurnId = null;
     if (this.activePersistentTurn && !this.activePersistentTurn.settled) {
       this.activePersistentTurn.settled = true;

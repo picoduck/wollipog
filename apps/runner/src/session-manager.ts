@@ -2319,6 +2319,15 @@ export class SessionManager {
             this.onSubscriptionUsageUpdate?.(meta.agentId, meta.driver, meta.context, update);
           }
         },
+        onSteeringAvailability: (available) => {
+          const live = this.active.get(sessionId);
+          if (!live || live.client !== client || live.launchGeneration !== launchGeneration) return;
+          const current = this.store.readMeta(sessionId);
+          if (!current?.capabilities || current.capabilities.supportsSteering === available) return;
+          const capabilities = { ...current.capabilities, supportsSteering: available };
+          const updated = this.store.patchMeta(sessionId, { capabilities });
+          if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+        },
         onAcpCapabilities: (capabilities) => {
           meta.acpCapabilities = capabilities;
           this.store.patchMeta(sessionId, { acpCapabilities: capabilities });

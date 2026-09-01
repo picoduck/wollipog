@@ -129,8 +129,8 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 97", () => {
-  assert.equal(PROTOCOL_VERSION, 97);
+test("PROTOCOL_VERSION is 98", () => {
+  assert.equal(PROTOCOL_VERSION, 98);
 });
 
 test("session-naming agent failures distinguish harness capability from account drift", () => {
@@ -446,6 +446,10 @@ test("native session command overlays replace only session-scoped catalog fields
     ...catalog,
     elicitation: { default: ["hook"] },
   }, "an absent command overlay keeps live catalog commands");
+  assert.deepEqual(mergeSessionCapabilities({ ...catalog, supportsSteering: true }, { supportsSteering: false }), {
+    ...catalog,
+    supportsSteering: false,
+  }, "an explicit runtime revocation narrows stale catalog steering support");
 });
 
 test("durable Project transport is additive to legacy snapshots and session creation", () => {
