@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
-import { anchoredMenuPlacement, handleMenuKeyDown, pointAnchorRect } from "./interactions.js";
+import { anchoredMenuPlacement, consumeLongPressBackdropClick, handleMenuKeyDown, pointAnchorRect } from "./interactions.js";
 
 export interface SessionContextMenuState {
   sessionId: string;
@@ -84,7 +84,17 @@ export function SessionContextMenu({
 
   return createPortal(
     <>
-      <div className="menu-backdrop" onClick={() => close(true)} aria-hidden="true" />
+      <div
+        className="menu-backdrop"
+        onClick={() => {
+          // The click a long-press releases lands HERE — the backdrop mounted over the finger.
+          // That click is the opening gesture, not a dismissal; consuming it once keeps the
+          // NEXT backdrop click (a dismissal tap, the Escape ladder) working normally.
+          if (consumeLongPressBackdropClick()) return;
+          close(true);
+        }}
+        aria-hidden="true"
+      />
       <div
         ref={menuRef}
         className="menu-pop"

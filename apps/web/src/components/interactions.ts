@@ -438,15 +438,39 @@ export interface LongPress {
  * Returns stable handler identities: rows are memoized on their props, so a fresh object per
  * render would defeat every row memo at once.
  */
+/** One finger long-presses at a time, so the press lifecycle is a module-level singleton: the
+ * context menu's BACKDROP has to consult it too, because the release's synthetic click lands on
+ * the backdrop that mounted over the press — a per-hook flag could never reach it, and without
+ * the check a long-press would open the menu and the finger lift would immediately dismiss it. */
+const longPressState = { held: false, releasedAt: 0 };
+
+/** True while a fired press is held, and for a short grace after its release. */
+export function longPressClickSuppressed(): boolean {
+  return longPressState.held || Date.now() - longPressState.releasedAt <= LONG_PRESS_CLICK_SUPPRESS_MS;
+}
+
+/**
+ * Swallow exactly ONE backdrop click — the one the opening gesture releases — and clear the
+ * grace with it, so the very next interaction (a dismissal tap, the Escape ladder's
+ * programmatic backdrop click) closes the menu normally instead of being swallowed too.
+ */
+export function consumeLongPressBackdropClick(): boolean {
+  if (!longPressClickSuppressed()) return false;
+  longPressState.held = false;
+  longPressState.releasedAt = 0;
+  return true;
+}
+
+/** Test seam: presses do not leak suppression across tests. */
+export function resetLongPressForTest(): void {
+  longPressState.held = false;
+  longPressState.releasedAt = 0;
+}
+
 export function useLongPress(onLongPress: (point: { x: number; y: number }) => void): LongPress {
   const callbackRef = useRef(onLongPress);
   callbackRef.current = onLongPress;
   const stateRef = useRef<{ timer: number; pointerId: number; x: number; y: number } | null>(null);
-  /** True from the moment the press fires until its release-click grace expires. The hold can
-   * last any time — suppression pivots on RELEASE, not on when the timer fired, or a slow
-   * two-second hold would leak its click straight through a 700ms fire-anchored window. */
-  const firedHeldRef = useRef(false);
-  const releasedAtRef = useRef(0);
 
   return useMemo<LongPress>(() => {
     const cancel = () => {
@@ -454,13 +478,12 @@ export function useLongPress(onLongPress: (point: { x: number; y: number }) => v
       window.clearTimeout(stateRef.current.timer);
       stateRef.current = null;
     };
-    const suppressed = () =>
-      firedHeldRef.current || Date.now() - releasedAtRef.current <= LONG_PRESS_CLICK_SUPPRESS_MS;
+    const suppressed = longPressClickSuppressed;
     const release = () => {
       cancel();
-      if (!firedHeldRef.current) return;
-      firedHeldRef.current = false;
-      releasedAtRef.current = Date.now();
+      if (!longPressState.held) return;
+      longPressState.held = false;
+      longPressState.releasedAt = Date.now();
     };
     return {
       consumeSuppressedClick: suppressed,
@@ -468,10 +491,10 @@ export function useLongPress(onLongPress: (point: { x: number; y: number }) => v
       onPointerDown: (event) => {
         if (event.pointerType !== "touch" && event.pointerType !== "pen") return;
         cancel();
-        firedHeldRef.current = false;
         // A NEW press is a new intent: the previous press's release grace must not swallow a
         // legitimate quick tap that follows a dismissed menu.
-        releasedAtRef.current = 0;
+        longPressState.held = false;
+        longPressState.releasedAt = 0;
         const { pointerId, clientX, clientY } = event;
         stateRef.current = {
           pointerId,
@@ -479,7 +502,7 @@ export function useLongPress(onLongPress: (point: { x: number; y: number }) => v
           y: clientY,
           timer: window.setTimeout(() => {
             stateRef.current = null;
-            firedHeldRef.current = true;
+            longPressState.held = true;
             callbackRef.current({ x: clientX, y: clientY });
           }, LONG_PRESS_MS),
         };
