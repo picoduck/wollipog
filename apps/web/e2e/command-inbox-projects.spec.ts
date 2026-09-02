@@ -988,10 +988,12 @@ test("the Project crumb navigates independently beside persistent Project Action
   const projectCrumb = page.locator(".crumb-project");
   await expect(actions).toHaveCSS("opacity", "1");
   await expect(actions).toHaveCSS("pointer-events", "auto");
-  const dotGeometry = await actions.locator("circle").evaluateAll((dots) => dots.map((dot) => ({
-    x: Number.parseFloat(dot.getAttribute("cx") ?? "NaN"),
-    y: Number.parseFloat(dot.getAttribute("cy") ?? "NaN"),
-  })));
+  const dotGeometry = await actions.locator("circle").evaluateAll((dots) => dots
+    .map((dot) => ({
+      x: Number.parseFloat(dot.getAttribute("cx") ?? "NaN"),
+      y: Number.parseFloat(dot.getAttribute("cy") ?? "NaN"),
+    }))
+    .sort((a, b) => a.y - b.y));
   expect(dotGeometry).toEqual([
     { x: 12, y: 5 },
     { x: 12, y: 12 },
