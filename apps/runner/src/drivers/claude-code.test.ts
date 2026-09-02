@@ -116,6 +116,10 @@ const baseOpts: DriverOptions = {
   context: {} as DriverOptions["context"],
 };
 const noopCb: DriverCallbacks = { onEvent: () => {}, onStderr: () => {}, onExit: () => {} };
+const steeringCapabilities = {
+  models: [], effortLevels: [], slashCommands: [], supportsImages: true,
+  supportsApprovals: true, supportsSteering: true, permissionModes: ["acceptEdits"],
+};
 
 function fakeProcess(stdin: Writable = new PassThrough()) {
   const child = new EventEmitter() as any;
@@ -536,6 +540,306 @@ test("persistent mode reuses one process across correlated turns and keeps featu
   assert.equal(killed.length, 0, "a clean EOF gets a grace interval before the backstop");
   children[0].emit("close", 0);
   assert.equal(killed.length, 0, "a graceful exit cancels the kill-tree backstop");
+});
+
+test("verified persistent Claude steering waits for the exact replay acknowledgement", async () => {
+  const child = fakeProcess();
+  const launches: any[] = [];
+  const writes: string[] = [];
+  child.stdin.setEncoding("utf8");
+  child.stdin.on("data", (chunk: string) => writes.push(chunk));
+  const driver = new ClaudeCodeDriver(
+    {
+      ...baseOpts,
+      capabilities: steeringCapabilities,
+      config: { permissionMode: "acceptEdits" },
+    },
+    noopCb,
+    { spawn: (options: any) => { launches.push(options); return child; }, kill: () => {} } as any,
+  );
+
+  const turn = driver.prompt("work on the original task");
+  await nextTask();
+  assert.ok(launches[0].args.includes("--replay-user-messages"));
+  const steering = driver.steer({
+    submissionId: "browser-submission",
+    text: "change direction",
+    images: [{ mimeType: "image/png", data: "AAAA" }],
+    deadlineAt: Date.now() + 10_000,
+  });
+  await nextTask();
+  const messages = writes.join("").trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(messages.length, 2);
+  assert.equal(messages[0].uuid, undefined, "ordinary prompts do not create steering receipts");
+  assert.match(messages[1].uuid, /^[0-9a-f-]{36}$/i);
+  assert.deepEqual(messages[1].message.content, [
+    { type: "text", text: "change direction" },
+    { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } },
+  ]);
+
+  child.stdout.write(JSON.stringify({
+    type: "user",
+    isReplay: true,
+    uuid: messages[1].uuid,
+    session_id: (driver as any).sessionId,
+    message: messages[1].message,
+  }) + "\n");
+  assert.deepEqual(await steering, {
+    outcome: "accepted",
+    providerTurnId: (driver as any).sessionId,
+  });
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  assert.equal(await turn, "end_turn");
+  driver.dispose();
+  child.emit("close", 0);
+});
+
+test("Claude steering ignores unproven echoes and becomes uncertain at the turn boundary", async () => {
+  const child = fakeProcess();
+  const writes: string[] = [];
+  child.stdin.setEncoding("utf8");
+  child.stdin.on("data", (chunk: string) => writes.push(chunk));
+  const driver = new ClaudeCodeDriver(
+    { ...baseOpts, capabilities: steeringCapabilities, config: { permissionMode: "acceptEdits" } },
+    noopCb,
+    { spawn: () => child, kill: () => {} } as any,
+  );
+  const turn = driver.prompt("original");
+  await nextTask();
+  const steering = driver.steer({
+    submissionId: "submission",
+    text: "steer",
+    deadlineAt: Date.now() + 10_000,
+  });
+  await nextTask();
+  const message = JSON.parse(writes.join("").trim().split("\n").at(-1)!);
+  child.stdout.write(JSON.stringify({
+    type: "user", uuid: message.uuid, session_id: (driver as any).sessionId, message: message.message,
+  }) + "\n");
+  child.stdout.write(JSON.stringify({
+    type: "user", isReplay: true, uuid: message.uuid, session_id: "another-session", message: message.message,
+  }) + "\n");
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  assert.equal(await turn, "end_turn");
+  const result = await steering;
+  assert.equal(result.outcome, "uncertain");
+  assert.match(result.outcome === "uncertain" ? result.reason : "", /turn closed/);
+  driver.dispose();
+  child.emit("close", 0);
+});
+
+test("turn-boundary uncertainty retires a possible unowned Claude input before the next prompt", async () => {
+  const children: any[] = [];
+  const driver = new ClaudeCodeDriver(
+    { ...baseOpts, capabilities: steeringCapabilities, config: { permissionMode: "acceptEdits" } },
+    noopCb,
+    {
+      spawn: () => {
+        const child = fakeProcess();
+        children.push(child);
+        return child;
+      },
+      kill: () => {},
+    } as any,
+  );
+  const turn = driver.prompt("original");
+  await nextTask();
+  const steering = driver.steer({
+    submissionId: "boundary-race", text: "possibly queued as another turn", deadlineAt: Date.now() + 10_000,
+  });
+  await nextTask();
+  children[0].stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  assert.equal(await turn, "end_turn");
+  assert.equal((await steering).outcome, "uncertain");
+  assert.equal(children[0].stdin.writableEnded, true, "the ambiguous transport must retire");
+
+  const next = driver.prompt("next owned prompt");
+  await nextTask();
+  assert.equal(children.length, 1, "the next prompt waits for ambiguous transport retirement");
+  children[0].emit("close", 0);
+  await nextTask();
+  await nextTask();
+  assert.equal(children.length, 2, "the next prompt launches on a fresh transport");
+  children[1].stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  assert.equal(await next, "end_turn");
+  driver.dispose();
+  children[1].emit("close", 0);
+});
+
+test("a timed-out Claude steer remains a retirement fence until replay acknowledgement", async () => {
+  const children: any[] = [];
+  const timers: Array<{ callback: () => void; active: boolean }> = [];
+  const driver = new ClaudeCodeDriver(
+    { ...baseOpts, capabilities: steeringCapabilities, config: { permissionMode: "acceptEdits" } },
+    noopCb,
+    {
+      spawn: () => {
+        const child = fakeProcess();
+        children.push(child);
+        return child;
+      },
+      kill: () => {},
+      now: () => 1_000,
+      setTimer: (callback: () => void) => {
+        const timer = { callback, active: true };
+        timers.push(timer);
+        return { unref() {}, timer } as any;
+      },
+      clearTimer: (handle: { timer?: { active: boolean } }) => { if (handle.timer) handle.timer.active = false; },
+    } as any,
+  );
+  const turn = driver.prompt("original");
+  await nextTask();
+  const steering = driver.steer({ submissionId: "timeout-boundary", text: "steer", deadlineAt: 2_000 });
+  await nextTask();
+  timers[0].callback();
+  assert.equal((await steering).outcome, "uncertain");
+
+  children[0].stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  assert.equal(await turn, "end_turn");
+  assert.equal(children[0].stdin.writableEnded, true, "timeout evidence survives until the turn boundary");
+  const next = driver.prompt("next owned prompt");
+  await nextTask();
+  assert.equal(children.length, 1);
+  children[0].emit("close", 0);
+  await nextTask();
+  await nextTask();
+  assert.equal(children.length, 2);
+  children[1].stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  assert.equal(await next, "end_turn");
+  driver.dispose();
+  children[1].emit("close", 0);
+});
+
+test("multiple Claude steering messages preserve write order and distinct receipts", async () => {
+  const child = fakeProcess();
+  const writes: string[] = [];
+  child.stdin.setEncoding("utf8");
+  child.stdin.on("data", (chunk: string) => writes.push(chunk));
+  const driver = new ClaudeCodeDriver(
+    { ...baseOpts, capabilities: steeringCapabilities, config: { permissionMode: "acceptEdits" } },
+    noopCb,
+    { spawn: () => child, kill: () => {} } as any,
+  );
+  const turn = driver.prompt("original");
+  await nextTask();
+  const first = driver.steer({ submissionId: "first", text: "first steer", deadlineAt: Date.now() + 10_000 });
+  const second = driver.steer({ submissionId: "second", text: "second steer", deadlineAt: Date.now() + 10_000 });
+  await nextTask();
+  const messages = writes.join("").trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(messages.slice(1).map((message) => message.message.content[0].text), ["first steer", "second steer"]);
+  assert.notEqual(messages[1].uuid, messages[2].uuid);
+  for (const message of messages.slice(1)) {
+    child.stdout.write(JSON.stringify({
+      type: "user", isReplay: true, uuid: message.uuid,
+      session_id: (driver as any).sessionId, message: message.message,
+    }) + "\n");
+  }
+  assert.equal((await first).outcome, "accepted");
+  assert.equal((await second).outcome, "accepted");
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  assert.equal(await turn, "end_turn");
+  driver.dispose();
+  child.emit("close", 0);
+});
+
+test("a synchronous Claude steering write failure is definitely rejected", async () => {
+  const stdin = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
+  const child = fakeProcess(stdin);
+  const driver = new ClaudeCodeDriver(
+    { ...baseOpts, capabilities: steeringCapabilities, config: { permissionMode: "acceptEdits" } },
+    noopCb,
+    { spawn: () => child, kill: () => {} } as any,
+  );
+  const turn = driver.prompt("original");
+  await nextTask();
+  const originalWrite = child.stdin.write.bind(child.stdin);
+  child.stdin.write = () => { throw new Error("definite failure"); };
+  const result = await driver.steer({ submissionId: "failed", text: "steer", deadlineAt: Date.now() + 10_000 });
+  assert.equal(result.outcome, "rejected");
+  assert.match(result.outcome === "rejected" ? result.reason : "", /definite failure/);
+  child.stdin.write = originalWrite;
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  await turn;
+  driver.dispose();
+  child.emit("close", 0);
+});
+
+test("Claude steering rejects unverified or inactive transports without writing", async () => {
+  const unverified = new ClaudeCodeDriver(
+    { ...baseOpts, config: { permissionMode: "acceptEdits" } },
+    noopCb,
+  );
+  assert.equal((await unverified.steer({
+    submissionId: "unverified", text: "steer", deadlineAt: Date.now() + 1_000,
+  })).outcome, "rejected");
+
+  const verified = new ClaudeCodeDriver(
+    { ...baseOpts, capabilities: steeringCapabilities, config: { permissionMode: "acceptEdits" } },
+    noopCb,
+  );
+  assert.equal((await verified.steer({
+    submissionId: "inactive", text: "steer", deadlineAt: Date.now() + 1_000,
+  })).outcome, "no_active_turn");
+  assert.equal((await verified.steer({
+    submissionId: "empty", text: "", deadlineAt: Date.now() + 1_000,
+  })).outcome, "rejected");
+});
+
+test("Claude steering timeout and process loss remain uncertain and never accept a late replay", async () => {
+  const child = fakeProcess();
+  const timers: Array<{ callback: () => void; active: boolean }> = [];
+  const writes: string[] = [];
+  child.stdin.setEncoding("utf8");
+  child.stdin.on("data", (chunk: string) => writes.push(chunk));
+  const driver = new ClaudeCodeDriver(
+    { ...baseOpts, capabilities: steeringCapabilities, config: { permissionMode: "acceptEdits" } },
+    noopCb,
+    {
+      spawn: () => child,
+      kill: () => {},
+      now: () => 1_000,
+      setTimer: (callback: () => void) => {
+        const timer = { callback, active: true };
+        timers.push(timer);
+        return { unref() {}, timer } as any;
+      },
+      clearTimer: (handle: { timer?: { active: boolean } }) => { if (handle.timer) handle.timer.active = false; },
+    } as any,
+  );
+  const turn = driver.prompt("original");
+  await nextTask();
+  const timedOut = driver.steer({ submissionId: "timeout", text: "steer", deadlineAt: 2_000 });
+  await nextTask();
+  timers[0].callback();
+  assert.equal((await timedOut).outcome, "uncertain");
+  const message = JSON.parse(writes.join("").trim().split("\n").at(-1)!);
+  child.stdout.write(JSON.stringify({
+    type: "user", isReplay: true, uuid: message.uuid,
+    session_id: (driver as any).sessionId, message: message.message,
+  }) + "\n");
+
+  const lost = driver.steer({ submissionId: "lost", text: "another", deadlineAt: 2_000 });
+  await nextTask();
+  child.emit("close", 7);
+  assert.equal((await lost).outcome, "uncertain");
+  assert.equal(await turn, "refusal");
+  driver.dispose();
+});
+
+test("persistent opt-out revokes verified Claude steering during initialization", async () => {
+  const updates: boolean[] = [];
+  const driver = new ClaudeCodeDriver(
+    {
+      ...baseOpts,
+      env: { [CLAUDE_PERSISTENT_FLAG]: "0" },
+      capabilities: steeringCapabilities,
+      config: { permissionMode: "acceptEdits" },
+    },
+    { ...noopCb, onSteeringAvailability: (available) => updates.push(available) },
+  );
+  await driver.initialize();
+  assert.deepEqual(updates, [false]);
 });
 
 test("persistent cumulative process cost is emitted as a per-turn delta while usage stays per-turn", async () => {
@@ -2880,6 +3184,10 @@ test("buildClaudeUserMessage: image-only (no text) omits the empty text block", 
 
 test("buildClaudeUserMessage: never produces empty content (falls back to an empty text block)", () => {
   assert.deepEqual(buildClaudeUserMessage("", []).message.content, [{ type: "text", text: "" }]);
+});
+
+test("buildClaudeUserMessage: optional UUID is top-level replay correlation metadata", () => {
+  assert.equal(buildClaudeUserMessage("steer", [], "provider-uuid").uuid, "provider-uuid");
 });
 
 test("normalizeQuestions maps AskUserQuestion input, keying ids by question text", () => {

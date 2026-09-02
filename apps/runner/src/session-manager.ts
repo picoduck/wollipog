@@ -32,6 +32,7 @@ import type {
   SessionCommandInvocationErrorCode,
   SessionEventPayload,
   SessionLaunchSpec,
+  SessionSnapshot,
   SessionStatus,
   ResolveSteeringAttemptMessage,
   ResolveSteeringAttemptResultMessage,
@@ -304,6 +305,9 @@ interface ActiveSession {
    * ACP may publish catalog notifications while session/new is still resolving; those remain
    * display-only until this fence opens. */
   providerReady: boolean;
+  /** Process-generation truth that narrows the live catalog without mutating durable discovery
+   * capabilities. Cleared automatically when this ActiveSession is replaced. */
+  steeringAvailable?: boolean;
   /** A prompt turn is in flight (the agent session can only run one at a time). */
   running: boolean;
   /** A cancel arrived before the agent process existed (during the pre-prompt turn snapshot) —
@@ -853,7 +857,10 @@ export class SessionManager {
   sessionSnapshots(exactEventSeq = false) {
     const protocolVersion = this.controlPlaneProtocolVersion();
     return this.store.snapshots(protocolVersion, exactEventSeq).map((snapshot) =>
-      this.sessionCommandAuthority.overlaySnapshot(snapshot, protocolVersion));
+      this.overlayRuntimeSteering(
+        this.sessionCommandAuthority.overlaySnapshot(snapshot, protocolVersion),
+        protocolVersion,
+      ));
   }
 
   /** Pre-negotiation register metadata. History is published only after the peer version is known. */
@@ -864,7 +871,20 @@ export class SessionManager {
 
   private snapshot(meta: SessionMeta) {
     const protocolVersion = this.controlPlaneProtocolVersion();
-    return this.sessionCommandAuthority.overlaySnapshot(metaToSnapshot(meta, protocolVersion), protocolVersion);
+    return this.overlayRuntimeSteering(
+      this.sessionCommandAuthority.overlaySnapshot(metaToSnapshot(meta, protocolVersion), protocolVersion),
+      protocolVersion,
+    );
+  }
+
+  private overlayRuntimeSteering(snapshot: SessionSnapshot, protocolVersion: number | null): SessionSnapshot {
+    if (!runnerSupportsProtocol(protocolVersion, "nativeSteeringOverlay")) return snapshot;
+    const available = this.active.get(snapshot.id)?.steeringAvailable;
+    if (available === undefined) return snapshot;
+    return {
+      ...snapshot,
+      agentCapabilities: { ...(snapshot.agentCapabilities ?? {}), supportsSteering: available },
+    };
   }
 
   /** One negotiated snapshot for correlated result messages assembled by the socket layer. */
@@ -2318,6 +2338,14 @@ export class SessionManager {
           if (meta.agentId) {
             this.onSubscriptionUsageUpdate?.(meta.agentId, meta.driver, meta.context, update);
           }
+        },
+        onSteeringAvailability: (available) => {
+          const live = this.active.get(sessionId);
+          if (!live || live.client !== client || live.launchGeneration !== launchGeneration) return;
+          if (live.steeringAvailable === available) return;
+          live.steeringAvailable = available;
+          const current = this.store.readMeta(sessionId);
+          if (current) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(current) });
         },
         onAcpCapabilities: (capabilities) => {
           meta.acpCapabilities = capabilities;

@@ -129,6 +129,20 @@ test("native session elicitation overlays do not freeze live catalog controls", 
   });
 });
 
+test("native session steering overlays revoke only the active transport capability", () => {
+  const live = { ...caps, supportsSteering: true };
+  const runner = { agents: [{ id: "claude", driver: "claude-code", capabilities: live }] } as RunnerView;
+  const session = { agentId: "claude", driver: "claude-code" } as SessionView;
+
+  assert.equal(resolveCaps(runner, session)?.supportsSteering, true,
+    "an absent runtime overlay must retain catalog truth");
+  assert.equal(resolveCaps(runner, {
+    ...session,
+    agentCapabilities: { supportsSteering: false },
+  })?.supportsSteering, false,
+  "an explicit runtime revocation must hide steering for the active transport");
+});
+
 test("native session slash commands override the catalog without freezing its other controls", () => {
   const live = {
     ...caps,

@@ -2581,14 +2581,13 @@ export function metaToSnapshot(
     controlPlaneProtocolVersion >= NATIVE_SLASH_COMMAND_OVERLAY_PROTOCOL_VERSION
     ? m.sessionSlashCommands
     : undefined;
-  let nativeCapabilities: SessionCapabilityOverlay | undefined;
-  if (nativeElicitation !== undefined && nativeSlashCommands !== undefined) {
-    nativeCapabilities = { elicitation: nativeElicitation, slashCommands: nativeSlashCommands };
-  } else if (nativeElicitation !== undefined) {
-    nativeCapabilities = { elicitation: nativeElicitation };
-  } else if (nativeSlashCommands !== undefined) {
-    nativeCapabilities = { slashCommands: nativeSlashCommands };
-  }
+  const nativeCapabilities: SessionCapabilityOverlay | undefined =
+    nativeElicitation !== undefined || nativeSlashCommands !== undefined
+      ? {
+          ...(nativeElicitation !== undefined ? { elicitation: nativeElicitation } : {}),
+          ...(nativeSlashCommands !== undefined ? { slashCommands: nativeSlashCommands } : {}),
+        }
+      : undefined;
   return {
     id: m.sessionId,
     controlPlaneLaunchId: m.controlPlaneLaunchId,

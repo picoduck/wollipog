@@ -123,6 +123,9 @@ export interface DriverCallbacks {
   onModelResolved?: (model: string) => void;
   /** Provider-owned account usage observed on an already-running process. */
   onSubscriptionUsage?: (update: DriverSubscriptionUsageUpdate) => void;
+  /** Session-scoped steering availability changed after launch (for example, a persistent
+   * transport circuit fell back to a one-shot provider process). */
+  onSteeringAvailability?: (available: boolean) => void;
 }
 
 export interface DriverOptions {
