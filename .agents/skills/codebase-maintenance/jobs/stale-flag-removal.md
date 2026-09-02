@@ -33,6 +33,14 @@ A flag with no current callers may be a deliberate kill switch. A protocol shim 
 runners the repository still supports even if none are connected on this machine. Environment
 variables consumed only by deployment scripts will look unreferenced from application code.
 
+The "floor has moved" half of the protocol-shim category is unprovable by construction: this
+repository states no minimum supported runner protocol version anywhere in `docs/` (per-capability
+floors exist in `docs/runner-updates.md`, but no support window or drop policy). Do not spend the
+protocol budget re-deriving that absent window each week. The one shim finding this job CAN prove
+is a capability-floor entry with no reader at any version — a `RUNNER_CAPABILITY_MIN_PROTOCOL` key
+that nothing passes to `runnerSupportsProtocol` or reads directly — so put the protocol budget
+there. (Two runs confirmed the absent window; the second found exactly such an unread floor.)
+
 ## Report
 
 For each finding: the flag or key, every definition and reader, the evidence it is fully resolved,
