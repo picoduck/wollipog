@@ -220,7 +220,7 @@ const SPECIFIER = String.raw`['"](?:node:)?child_process['"]`;
 // first import swallow everything up to the offending specifier and tokenize to nothing.
 const IMPORT_CLAUSE = String.raw`import\s+([^;]*?)\s*from\s*${SPECIFIER}`;
 // require() and dynamic import() reach the same module without an import clause.
-const LOADED = String.raw`(?:\{([^}]*)\}|(\w+))\s*=\s*(?:await\s+)?(?:require|import)\(\s*${SPECIFIER}\s*\)`;
+const LOADED = String.raw`(?:\{([^}]*)\}|([\w$]+))\s*=\s*(?:await\s+)?(?:require|import)\(\s*${SPECIFIER}\s*\)`;
 // Catch-all for the shapes that bind nothing, e.g. (await import(...)).spawnSync(...).
 const LOADED_ANY = String.raw`(?:require|import)\(\s*${SPECIFIER}\s*\)`;
 // execSync is synchronous too and has no wrapper here, so importing it is rejected outright.
@@ -239,7 +239,9 @@ const importedNames = (clause: string | undefined): string[] =>
 // only the name `default`, which is not itself synchronous, so recognise the binding separately.
 const defaultBinding = (clause: string | undefined): string | undefined => {
   for (const entry of (clause ?? "").split(",")) {
-    const bound = /^\s*default(?:\s*:\s*|\s+as\s+)(\w+)\s*$/.exec(entry);
+    // `$` is a valid identifier character and `\w` does not cover it: `{ default: $cp }` is a
+    // binding a real contributor writes, and matching only `\w` let it through as no binding.
+    const bound = /^\s*default(?:\s*:\s*|\s+as\s+)([\w$]+)\s*$/.exec(entry);
     if (bound) return bound[1];
   }
   return undefined;
@@ -335,6 +337,9 @@ test("the guardrail rejects every way of reaching the synchronous API", () => {
     "dynamic import whole module": `const cp = await import("node:child_process");\n${CALL}`,
     "require default destructure": `const { default: cp } = require("node:child_process");\n${CALL}`,
     "dynamic import default destructure": `const { default: cp } = await import("node:child_process");\n${CALL}`,
+    "dollar-signed default destructure": `const { default: $cp } = await import("node:child_process");\n${CALL}`,
+    "dollar-signed static default alias": `import { default as $cp } from "node:child_process";\n${CALL}`,
+    "dollar-signed whole module": `const $cp = require("node:child_process");\n${CALL}`,
     "unbound require": 'require("node:child_process").spawnSync("true");',
     "unbound dynamic import": '(await import("node:child_process")).spawnSync("true");',
   };
