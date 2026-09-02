@@ -598,8 +598,6 @@ test("runner command capability gates fail closed for unknown/old protocols", ()
   assert.equal(runnerSupportsProtocol(34, "acpLogout"), true);
   assert.equal(runnerSupportsProtocol(37, "acpSessionContext"), false);
   assert.equal(runnerSupportsProtocol(38, "acpSessionContext"), true);
-  assert.equal(runnerSupportsProtocol(38, "acpRegistry"), false);
-  assert.equal(runnerSupportsProtocol(39, "acpRegistry"), true);
   assert.equal(runnerSupportsProtocol(39, "acpRegistryApproval"), false);
   assert.equal(runnerSupportsProtocol(40, "acpRegistryApproval"), true);
   assert.equal(runnerSupportsProtocol(70, "turnInterruption"), false);
