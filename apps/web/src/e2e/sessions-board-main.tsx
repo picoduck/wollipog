@@ -80,6 +80,19 @@ const sessions = [
   session("s-queued", "Queued Session", "queued"),
   session("s-review", "Review Session", "review"),
   session("s-archived", "Archived Session", "review", { archived: true }),
+  // A pending approval renders inline card actions — the nested controls the long-press spec
+  // must prove a held finger cannot trigger (#540).
+  session("s-approval", "Approval Session", "input_required", {
+    pendingApproval: {
+      requestId: "req-approve-1",
+      kind: "tool",
+      title: "Run npm test",
+      options: [
+        { optionId: "allow", name: "Allow", kind: "allow_once" },
+        { optionId: "deny", name: "Deny", kind: "deny" },
+      ],
+    } as never,
+  }),
 ];
 
 function snapshot(): UiSnapshotMessage {
@@ -127,9 +140,11 @@ const connection: UiConnectionRuntime = {
 declare global {
   interface Window {
     __setColumnCalls: Array<{ sessionId: string; column: BoardColumn }>;
+    __approveCalls: string[];
   }
 }
 window.__setColumnCalls = [];
+window.__approveCalls = [];
 
 const client = {
   ...api,
@@ -140,6 +155,14 @@ const client = {
       moved.column = column;
       window.setTimeout(() => socket?.push({ type: "session_upsert", session: structuredClone(moved) }), 0);
     }
+  },
+  approve: async (sessionId: string) => {
+    window.__approveCalls.push(sessionId);
+    const approved = sessions.find((candidate) => candidate.id === sessionId);
+    if (!approved) throw new Error("session not found");
+    approved.pendingApproval = null;
+    window.setTimeout(() => socket?.push({ type: "session_upsert", session: structuredClone(approved) }), 0);
+    return structuredClone(approved);
   },
   session: async (id: string) => {
     const value = sessions.find((candidate) => candidate.id === id);

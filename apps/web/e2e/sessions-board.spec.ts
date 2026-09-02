@@ -27,7 +27,7 @@ test("the toggle switches modes, the URL follows, and archived sessions never re
   await page.locator(".sessions-view-toggle button", { hasText: "Board" }).click();
   await expect(page.locator(".board-wrap")).toBeVisible();
   expect(harnessPath(page)).toBe("/board");
-  await expect(page.locator(".board .card")).toHaveCount(3);
+  await expect(page.locator(".board .card")).toHaveCount(4);
   await expect(page.locator(".board .card", { hasText: "Archived Session" })).toHaveCount(0);
 
   await page.locator(".sessions-view-toggle button", { hasText: "List" }).click();
@@ -96,4 +96,104 @@ test("dragging a card to another column persists the move", async ({ page }) => 
     .toEqual([{ sessionId: "s-running", column: "done" }]);
   await expect(page.locator(".column.col-done .card", { hasText: "Running Session" })).toBeVisible();
   await expect(page.locator(".column.col-running .card")).toHaveCount(0);
+});
+
+/**
+ * The long-press gesture in a REAL browser (#540): CDP touch injection exercises Chromium's own
+ * touch → pointer → synthetic-click pipeline, which is exactly the gap where every one of the
+ * gesture's review findings lived — DOM tests dispatch pointer events, but only the browser
+ * decides what clicks and drags a held finger actually produces.
+ */
+import type { CDPSession, Locator } from "@playwright/test";
+
+async function touchSession(page: Page): Promise<CDPSession> {
+  const cdp = await page.context().newCDPSession(page);
+  // Without touch emulation Chromium swallows injected touch points instead of promoting them
+  // to pointer events — the exact pipeline this spec exists to exercise.
+  await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 1 });
+  return cdp;
+}
+
+async function centerOf(target: Locator): Promise<{ x: number; y: number }> {
+  const box = (await target.boundingBox())!;
+  return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+}
+
+/** Hold until the press's OBSERVABLE effect (the menu) before releasing: the 500ms timer runs
+ * in the renderer, and a fixed cross-process sleep races it under CI load. */
+async function longPressUntilMenu(cdp: CDPSession, page: Page, point: { x: number; y: number }) {
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] });
+  await page.locator('[role="menu"]').waitFor({ timeout: 5000 });
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+}
+
+async function tapAt(cdp: CDPSession, point: { x: number; y: number }) {
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] });
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+}
+
+test("a held finger on a row opens its menu without selecting or opening it", async ({ page }) => {
+  await openHarness(page);
+  const cdp = await touchSession(page);
+  const selectedBefore = await page.locator('.inbox-row-shell[aria-selected="true"] .inbox-row-title').textContent();
+
+  await longPressUntilMenu(cdp, page, await centerOf(page.locator(".inbox-row-shell", { hasText: "Queued Session" })));
+  await expect(page.locator('[role="menu"]')).toHaveAttribute("aria-label", "Session Actions for Queued Session");
+  await expect(page.locator(".inbox-view.expanded")).toHaveCount(0, "a press is not an open");
+  expect(harnessPath(page)).toBe("/");
+  await expect(page.locator('.inbox-row-shell[aria-selected="true"] .inbox-row-title'))
+    .toHaveText(selectedBefore!, "and not a select");
+
+  // Dismissal on touch is a tap on the backdrop — which must NOT be swallowed by the grace
+  // that protected the menu from its own opening click.
+  await tapAt(cdp, { x: 20, y: 500 });
+  await expect(page.locator('[role="menu"]')).toHaveCount(0);
+  await tapAt(cdp, await centerOf(page.locator(".inbox-row-shell", { hasText: "Queued Session" })));
+  await expect(page.locator('.inbox-row-shell[aria-selected="true"] .inbox-row-title'))
+    .toHaveText("Queued Session", "the previous press's grace must not swallow the tap");
+});
+
+test("a held finger over a card's approval button opens the menu and never approves", async ({ page }) => {
+  await openHarness(page, "/board");
+  const cdp = await touchSession(page);
+  const allow = page.locator(".card-approval button", { hasText: "Allow" });
+  await expect(allow).toBeVisible();
+
+  await longPressUntilMenu(cdp, page, await centerOf(allow));
+  await expect(page.locator('[role="menu"]')).toHaveAttribute("aria-label", "Session Actions for Approval Session");
+  await page.waitForTimeout(300);
+  expect(await page.evaluate(() => window.__approveCalls)).toEqual([]);
+  await expect(page.locator(".inbox-view.expanded")).toHaveCount(0, "and does not open the session either");
+  await page.keyboard.press("Escape");
+});
+
+test("touch scrolling through the list never conjures a menu", async ({ page }) => {
+  await openHarness(page);
+  const cdp = await touchSession(page);
+  const start = await centerOf(page.locator(".inbox-row-shell", { hasText: "Review Session" }));
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [start] });
+  for (const dy of [15, 35, 60]) {
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: start.x, y: start.y - dy }] });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+  }
+  await new Promise((resolve) => setTimeout(resolve, 650));
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await expect(page.locator('[role="menu"]')).toHaveCount(0,
+    "movement past the slop is scrolling, not a menu request");
+});
+
+test("a drag begun from a card stands the pending press down", async ({ page }) => {
+  await openHarness(page, "/board");
+  const cdp = await touchSession(page);
+  const card = page.locator(".board .card", { hasText: "Running Session" });
+  const point = await centerOf(card);
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] });
+  // Some platforms promote a held touch on a draggable straight into a drag; the press must
+  // yield the moment the drag begins, whatever initiated it.
+  await card.evaluate((element) => element.dispatchEvent(
+    new DragEvent("dragstart", { bubbles: true, dataTransfer: new DataTransfer() }),
+  ));
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await expect(page.locator('[role="menu"]')).toHaveCount(0, "the drag owns the gesture");
 });
