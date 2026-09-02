@@ -407,9 +407,12 @@ export class ClaudeCodeDriver implements Driver {
   }
 
   async initialize(): Promise<void> {
-    if (this.opts.capabilities?.supportsSteering === true && !this.persistentRequested) {
-      this.cb.onSteeringAvailability?.(false);
-    }
+    // Publish launch-time process truth even when discovery did not verify steering. Without an
+    // explicit false overlay, a later catalog refresh can make this already-running driver appear
+    // steerable even though its immutable launch capabilities still reject every submission.
+    this.cb.onSteeringAvailability?.(
+      this.opts.capabilities?.supportsSteering === true && this.persistentRequested,
+    );
     // Reconcile restart seeds before the first recovery/user turn instead of pinning already
     // completed work until the pending ceiling. Unreadable or oversized ledgers retain the ids.
     if (this.pendingBackgroundTasks.size === 0) return;

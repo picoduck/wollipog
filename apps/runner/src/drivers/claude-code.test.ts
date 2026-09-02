@@ -827,19 +827,24 @@ test("Claude steering timeout and process loss remain uncertain and never accept
   driver.dispose();
 });
 
-test("persistent opt-out revokes verified Claude steering during initialization", async () => {
-  const updates: boolean[] = [];
-  const driver = new ClaudeCodeDriver(
-    {
-      ...baseOpts,
-      env: { [CLAUDE_PERSISTENT_FLAG]: "0" },
-      capabilities: steeringCapabilities,
-      config: { permissionMode: "acceptEdits" },
-    },
-    { ...noopCb, onSteeringAvailability: (available) => updates.push(available) },
-  );
-  await driver.initialize();
-  assert.deepEqual(updates, [false]);
+test("Claude initialization publishes steering availability for its exact launch generation", async () => {
+  for (const [name, options, expected] of [
+    ["unverified persistent launch", { env: { [CLAUDE_PERSISTENT_FLAG]: "1" } }, false],
+    ["verified persistent launch", {
+      env: { [CLAUDE_PERSISTENT_FLAG]: "1" }, capabilities: steeringCapabilities,
+    }, true],
+    ["verified persistent opt-out", {
+      env: { [CLAUDE_PERSISTENT_FLAG]: "0" }, capabilities: steeringCapabilities,
+    }, false],
+  ] as const) {
+    const updates: boolean[] = [];
+    const driver = new ClaudeCodeDriver(
+      { ...baseOpts, ...options, config: { permissionMode: "acceptEdits" } },
+      { ...noopCb, onSteeringAvailability: (available) => updates.push(available) },
+    );
+    await driver.initialize();
+    assert.deepEqual(updates, [expected], name);
+  }
 });
 
 test("persistent cumulative process cost is emitted as a per-turn delta while usage stays per-turn", async () => {
