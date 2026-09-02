@@ -374,7 +374,7 @@ test("rename-session arguments remain literal prompt text", async ({ page }) => 
     .toBe("/rename-session keep this literal");
 });
 
-test("rename-session remains pending until success and preserves actionable failure feedback", async ({ page }) => {
+test("rename-session moves into a retryable status receipt without disturbing the next draft", async ({ page }) => {
   const composer = page.locator(".composer-input");
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.deferNextRetitle());
   await composer.fill("/rename-session");
@@ -383,27 +383,57 @@ test("rename-session remains pending until success and preserves actionable fail
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.retitleRequests())).toEqual([
     "session-alpha",
   ]);
+  const receipt = page.getByRole("region", { name: "Rename Session Status" });
+  const announcement = page.locator('.composer > [role="status"]');
+  await expect(receipt).toContainText("/rename-session");
+  await expect(receipt).toContainText("Renaming Session…");
+  await expect(announcement).toHaveText("Renaming Session.");
+  await expect(announcement).toHaveAttribute("aria-live", "polite");
   await expect(composer).toHaveAttribute("aria-busy", "true");
-  await expect(composer).toHaveValue("/rename-session");
+  await expect(composer).toHaveValue("");
   await expect(page.getByRole("button", { name: "Send" })).toBeDisabled();
+
+  await composer.fill("/rename-session");
+  await page.keyboard.press("Enter");
+  await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.retitleRequests())).toEqual([
+    "session-alpha",
+  ]);
+  await composer.fill("Draft I care about");
 
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleDeferredRetitle({
     error: "Session naming failed during thread start. Verify the selected Agent Harness and try again.",
   }));
-  await expect(page.locator(".composer-error")).toContainText("Session naming failed during thread start");
+  await expect(receipt).toContainText("Rename Failed");
+  await expect(receipt).toContainText("Session naming failed during thread start");
+  await expect(announcement).toContainText("Rename failed. Session naming failed during thread start");
   await expect(composer).not.toHaveAttribute("aria-busy", "true");
-  await expect(composer).toHaveValue("/rename-session");
+  await expect(composer).toHaveValue("Draft I care about");
+
+  await composer.fill("/stop");
+  await page.keyboard.press("Enter");
+  const composerError = page.locator(".composer-error");
+  await expect(composerError).toContainText("There is no active turn to stop.");
+  const [errorBox, receiptBox] = await Promise.all([composerError.boundingBox(), receipt.boundingBox()]);
+  expect(errorBox).not.toBeNull();
+  expect(receiptBox).not.toBeNull();
+  expect(errorBox!.y + errorBox!.height).toBeLessThanOrEqual(receiptBox!.y);
+  await composer.fill("Draft I care about");
 
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.deferNextRetitle());
-  await page.getByRole("button", { name: "Send" }).click();
+  await receipt.getByRole("button", { name: "Retry Rename" }).click();
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.retitleRequests())).toEqual([
     "session-alpha",
     "session-alpha",
   ]);
-  await composer.fill("Draft I care about");
+  await expect(receipt).toContainText("Renaming Session…");
+  await expect(receipt).toBeFocused();
+  await expect(composerError).toContainText("There is no active turn to stop.");
+  await expect(composer).toHaveValue("Draft I care about");
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleDeferredRetitle({
     title: "Retitled Session",
   }));
+  await expect(receipt).toHaveCount(0);
+  await expect(page.getByText("Session renamed.", { exact: true })).toBeVisible();
   await expect(composer).toHaveValue("Draft I care about");
   await expect.poll(() => page.evaluate(async () =>
     (await window.__WOLLIPOG_PROJECT_INBOX_E2E__.composerDraft("session-alpha"))?.text,
@@ -434,6 +464,29 @@ test("rename-session remains pending until success and preserves actionable fail
   await expect(composer).toHaveValue("");
   await expect(page.getByRole("button", { name: "Remove Image" })).toBeVisible();
   await expect(page.getByText("Retitled Again", { exact: true })).toBeVisible();
+});
+
+test("a stale semantic rename reports its fence without replacing a newer title", async ({ page }) => {
+  const composer = page.locator(".composer-input");
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.deferNextRetitle());
+  await composer.fill("/rename-session");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.retitleRequests().length))
+    .toBe(1);
+
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
+    title: "Newer Manual Title",
+    titleSource: "user",
+  }));
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleDeferredRetitle({
+    error: "Session naming was superseded by a newer rename.",
+  }));
+
+  await expect(page.getByText("Newer Manual Title", { exact: true })).toBeVisible();
+  const receipt = page.getByRole("region", { name: "Rename Session Status" });
+  await expect(receipt).toContainText("Rename Failed");
+  await expect(receipt).toContainText("Session naming was superseded by a newer rename.");
+  await expect(composer).toHaveValue("");
 });
 
 test("unknown commands and absolute paths stay plaintext while command triggers require leading context", async ({ page }) => {

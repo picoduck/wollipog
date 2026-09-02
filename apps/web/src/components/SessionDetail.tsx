@@ -539,7 +539,11 @@ function SessionDetailLoaded({
     "queue_again" | "dismiss"
   >>(() => new Map());
   const [stoppingTurn, setStoppingTurn] = useState(false);
-  const [retitlePending, setRetitlePending] = useState(false);
+  const [retitleFeedback, setRetitleFeedback] = useState<
+    { state: "running" } | { state: "failed"; message: string } | null
+  >(null);
+  const retitlePending = retitleFeedback?.state === "running";
+  const retitleInFlightRef = useRef(false);
   const [pendingPromptAction, setPendingPromptAction] = useState<string>();
   const sendRequestBusy = busy || activeComposerMutation?.kind === "send";
   const steeringRequestBusy = steeringBusy || activeComposerMutation?.kind === "steer" ||
@@ -918,7 +922,8 @@ function SessionDetailLoaded({
 
   useEffect(() => {
     const generation = ++viewGenerationRef.current;
-    setRetitlePending(false);
+    retitleInFlightRef.current = false;
+    setRetitleFeedback(null);
     return () => {
       if (viewGenerationRef.current === generation) viewGenerationRef.current += 1;
     };
@@ -2206,8 +2211,27 @@ function SessionDetailLoaded({
     void saveComposerDraft(sessionId, "", images, instanceScope);
   };
 
+  const requestSessionRetitle = async () => {
+    if (retitleInFlightRef.current) return;
+    const generation = viewGenerationRef.current;
+    retitleInFlightRef.current = true;
+    setRetitleFeedback({ state: "running" });
+    try {
+      await api.retitleSession(sessionId);
+      if (viewGenerationRef.current !== generation) return;
+      setRetitleFeedback(null);
+      showToast("Session renamed.", { tone: "success" });
+    } catch (cause) {
+      if (viewGenerationRef.current === generation) {
+        setRetitleFeedback({ state: "failed", message: (cause as Error).message });
+      }
+    } finally {
+      if (viewGenerationRef.current === generation) retitleInFlightRef.current = false;
+    }
+  };
+
   const send = async () => {
-    if (composerMutationRegistry.has(mutationKey) || stopTurnPendingRef.current || retitlePending) return;
+    if (composerMutationRegistry.has(mutationKey) || stopTurnPendingRef.current || retitleInFlightRef.current) return;
     const outgoing = text.trim();
     let invocation = resolveComposerCommandInvocation(outgoing, composerCommands);
     if (invocation.kind === "command" && invocation.command.source === "app") {
@@ -2236,20 +2260,9 @@ function SessionDetailLoaded({
           return;
         }
         if (invocation.command.name === "rename-session") {
-          const generation = viewGenerationRef.current;
           setError(null);
-          setRetitlePending(true);
-          try {
-            await api.retitleSession(sessionId);
-            if (viewGenerationRef.current === generation &&
-                draftState.current.text === text && draftState.current.images === images) {
-              clearAppCommandText();
-            }
-          } catch (cause) {
-            if (viewGenerationRef.current === generation) setError((cause as Error).message);
-          } finally {
-            if (viewGenerationRef.current === generation) setRetitlePending(false);
-          }
+          clearAppCommandText();
+          await requestSessionRetitle();
           return;
         }
         if (invocation.command.name === "plan") {
@@ -3022,7 +3035,45 @@ function SessionDetailLoaded({
               onFocusCapture={() => setActivePane("composer")}
               onPointerDownCapture={() => setActivePane("composer")}
             >
+            <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+              {retitleFeedback?.state === "running"
+                ? "Renaming Session."
+                : retitleFeedback?.state === "failed"
+                  ? `Rename failed. ${retitleFeedback.message}`
+                  : ""}
+            </span>
             {error && <div className="composer-error" role="alert">{error}</div>}
+            {retitleFeedback && (
+              <div
+                className="retitle-receipt"
+                data-status={retitleFeedback.state}
+                role="region"
+                aria-label="Rename Session Status"
+                tabIndex={-1}
+              >
+                <div className="retitle-receipt-head">
+                  <span className="retitle-receipt-command">/rename-session</span>
+                  <span className="retitle-receipt-status">
+                    {retitleFeedback.state === "running" ? "Renaming Session…" : "Rename Failed"}
+                  </span>
+                </div>
+                {retitleFeedback.state === "failed" && (
+                  <div className="retitle-receipt-details">
+                    <span>{retitleFeedback.message}</span>
+                    <button
+                      type="button"
+                      className="btn ghost sm retitle-receipt-retry"
+                      onClick={(event) => {
+                        event.currentTarget.closest<HTMLElement>(".retitle-receipt")?.focus();
+                        void requestSessionRetitle();
+                      }}
+                    >
+                      Retry Rename
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
             {/* Active-turn progress renders in the transcript's Working row, not as a card here —
                 the composer area keeps only composer concerns (receipts, queue, input). */}
             <SessionCommandReceipts
