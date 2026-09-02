@@ -66,5 +66,5 @@ test("editor source affordances require advertised precision", () => {
   assert.equal(editorSupportsSourceLocation(editor, { path: "a.ts" }), true);
   assert.equal(editorSupportsSourceLocation(editor, { path: "a.ts", line: 2 }), true);
   assert.equal(editorSupportsSourceLocation(editor, { path: "a.ts", line: 2, column: 3 }), false);
-  assert.equal(editorSupportsSourceLocation({ id: "windsurf", name: "Windsurf" }, { path: "a.ts" }), false);
+  assert.equal(editorSupportsSourceLocation({ id: "windsurf", name: "Devin Desktop" }, { path: "a.ts" }), false);
 });

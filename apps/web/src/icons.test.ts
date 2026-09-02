@@ -121,9 +121,9 @@ test("every exported icon is inventoried and follows its documented ownership de
   const customExceptions = rows.filter((row) => row.decision === "Custom Exception").map((row) => row.name).sort();
   assert.deepEqual(customExceptions, [
     "CursorEditorIcon",
+    "DevinDesktopIcon",
     "GitHubIcon",
     "VisualStudioCodeIcon",
-    "WindsurfEditorIcon",
     "ZedEditorIcon",
   ]);
 
@@ -143,8 +143,8 @@ test("every exported icon uses an approved adapter or is the documented GitHub b
   const source = readFileSync(ICONS_PATH, "utf8");
   const customAdapter = new Set([
     "CursorEditorIcon",
+    "DevinDesktopIcon",
     "VisualStudioCodeIcon",
-    "WindsurfEditorIcon",
     "ZedEditorIcon",
   ]);
   const offenders: string[] = [];

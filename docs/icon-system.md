@@ -64,7 +64,7 @@ exports.
 | `CodeIcon` | Lucide | `Code` | Generic code destination. |
 | `VisualStudioCodeIcon` | Custom Exception | `Official VS Code Stable Mark (2021-06-21)` | Microsoft's canonical multicolor product mark; Lucide excludes vendor logos. |
 | `CursorEditorIcon` | Custom Exception | `Simple Icons 16.29.0: Cursor` | Canonical monochrome product mark; Lucide excludes vendor logos. |
-| `WindsurfEditorIcon` | Custom Exception | `Windsurf Mark` | Product identity; Lucide excludes vendor logos. |
+| `DevinDesktopIcon` | Custom Exception | `Official Devin Mark` | Cognition's compact product mark; Lucide excludes vendor logos. |
 | `ZedEditorIcon` | Custom Exception | `Simple Icons 16.29.0: Zed Industries` | Canonical monochrome product mark; Lucide excludes vendor logos. |
 | `ShieldIcon` | Lucide | `Shield` | Generic approval status, intentionally filled. |
 | `ArrowUpIcon` | Lucide | `ArrowUp` | Generic upward action. |
@@ -89,6 +89,10 @@ traces to Cursor's [official brand assets](https://cursor.com/brand). The pinned
 [Simple Icons 16.29.0 Zed Industries mark](https://github.com/simple-icons/simple-icons/blob/16.29.0/icons/zedindustries.svg)
 traces to Zed's
 [official repository asset](https://github.com/zed-industries/zed/blob/main/assets/icons/logo_96.svg).
+The Devin Desktop mark is the exact compact SVG geometry used by the
+[official product page](https://devin.ai/desktop) and its
+[first-party SVG favicon](https://devin.ai/favicon.svg). The runtime intentionally keeps the legacy
+`windsurf` editor id and CLI name because Devin Desktop is delivered as an in-place Windsurf update.
 
 ## Dependency and Visual-Review Policy
 

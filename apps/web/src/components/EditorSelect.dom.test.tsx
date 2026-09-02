@@ -38,6 +38,7 @@ const runner: RunnerView = {
   editors: [
     { id: "code", name: "VS Code" },
     { id: "cursor", name: "Cursor" },
+    { id: "windsurf", name: "Windsurf" },
     { id: "constructor", name: "future editor" },
     { id: "idea", name: "IntelliJ IDEA" },
     { id: "webstorm", name: "WebStorm" },
@@ -176,11 +177,13 @@ test("destination menu launches immediately, persists the primary action, and re
     await act(async () => { choose.click(); });
     const choices = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')];
     assert.deepEqual(choices.map((item) => item.textContent?.replace("✓", "").trim()), [
-      "VS Code", "Cursor", "Future Editor", "IntelliJ IDEA", "WebStorm", "File Manager",
+      "VS Code", "Cursor", "Devin Desktop", "Future Editor", "IntelliJ IDEA", "WebStorm", "File Manager",
     ]);
     assert.ok(choices[0]?.querySelector('[data-destination-icon="code"]'), "known editors receive their recognizable icon");
-    assert.ok(choices[2]?.querySelector('[data-destination-icon="generic-editor"]'), "unknown editors remain visible with a fallback icon");
-    assert.ok(choices[5]?.querySelector('[data-destination-icon="file-manager"]'));
+    assert.ok(choices[2]?.querySelector('[data-destination-icon="windsurf"]'),
+      "legacy runner metadata is rebranded without changing the integration id");
+    assert.ok(choices[3]?.querySelector('[data-destination-icon="generic-editor"]'), "unknown editors remain visible with a fallback icon");
+    assert.ok(choices[6]?.querySelector('[data-destination-icon="file-manager"]'));
 
     const cursor = choices.find((item) => item.textContent?.includes("Cursor"));
     assert.ok(cursor);
