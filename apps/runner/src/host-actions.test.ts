@@ -11,6 +11,11 @@ test("editor catalog advertises only verified native/WSL location precision", ()
   assert.deepEqual(KNOWN_EDITORS.find((editor) => editor.id === "cursor")?.locations, { native: "column" });
   assert.deepEqual(KNOWN_EDITORS.find((editor) => editor.id === "zed")?.locations, { native: "column" });
   assert.equal(KNOWN_EDITORS.find((editor) => editor.id === "windsurf")?.locations, undefined);
+  assert.deepEqual(
+    KNOWN_EDITORS.find((editor) => editor.id === "windsurf"),
+    { id: "windsurf", name: "Devin Desktop", bin: "windsurf", remoteWsl: true },
+    "the rebrand must not break the installed Windsurf CLI contract",
+  );
 });
 
 test("editorLaunchSpec: native root is a plain open; unknown editor errors", () => {
@@ -76,6 +81,7 @@ test("editorLaunchSpec: location validation rejects traversal and impossible coo
 test("editorLaunchSpec: editors without WSL remote support get a clear error", () => {
   const r = editorLaunchSpec("zed", "/home/u/repo", { kind: "wsl", distro: "Ubuntu" });
   assert.ok("error" in r && /Zed cannot open a WSL path/.test(r.error));
+  assert.ok("error" in r && /Devin Desktop/.test(r.error));
 });
 
 test("revealSpec: per-platform file managers; WSL paths go through \\\\wsl.localhost", () => {

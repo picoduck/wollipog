@@ -47,7 +47,7 @@ test("advertised editor precision gates file, line, and column requests", () => 
   assert.equal(editorAdvertisesLocation(editor, {
     kind: "open_editor_location", editorId: "code", location: { path: "a.ts", line: 2, column: 3 },
   }), false);
-  assert.equal(editorAdvertisesLocation({ id: "windsurf", name: "Windsurf" }, {
+  assert.equal(editorAdvertisesLocation({ id: "windsurf", name: "Devin Desktop" }, {
     kind: "open_editor_location", editorId: "windsurf", location: { path: "a.ts" },
   }), false);
 });

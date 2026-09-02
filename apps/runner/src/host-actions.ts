@@ -30,7 +30,9 @@ interface KnownEditor extends EditorInfo {
 export const KNOWN_EDITORS: KnownEditor[] = [
   { id: "code", name: "VS Code", bin: "code", remoteWsl: true, locationStyle: "vscode", locations: { native: "column", wsl: "column" } },
   { id: "cursor", name: "Cursor", bin: "cursor", remoteWsl: true, locationStyle: "vscode", locations: { native: "column" } },
-  { id: "windsurf", name: "Windsurf", bin: "windsurf", remoteWsl: true },
+  // Devin Desktop is the presentation name for the existing Windsurf installation and CLI.
+  // Keep the stable id/bin so upgrades retain discovery, launch, and browser preference state.
+  { id: "windsurf", name: "Devin Desktop", bin: "windsurf", remoteWsl: true },
   { id: "zed", name: "Zed", bin: "zed", locationStyle: "path", locations: { native: "column" } },
   { id: "subl", name: "Sublime Text", bin: "subl", locationStyle: "path", locations: { native: "column" } },
   { id: "idea", name: "IntelliJ IDEA", bin: "idea", locationStyle: "idea", locations: { native: "column" } },
@@ -150,7 +152,7 @@ export function editorLaunchSpec(
     return { bin: e.bin, args: e.locationStyle === "vscode" ? ["--goto", positioned] : [positioned] };
   }
   if (context.kind === "wsl") {
-    if (!e.remoteWsl) return { error: `${e.name} cannot open a WSL path — use VS Code, Cursor, or Windsurf` };
+    if (!e.remoteWsl) return { error: `${e.name} cannot open a WSL path — use VS Code, Cursor, or Devin Desktop` };
     return { bin: e.bin, args: ["--remote", `wsl+${context.distro}`, root] };
   }
   return { bin: e.bin, args: [root] };

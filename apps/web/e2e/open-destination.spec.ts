@@ -29,7 +29,9 @@ test("the desktop session header renders a cohesive labeled split button and usa
 
   await choose.click();
   const menu = page.getByRole("menu");
-  await expect(menu.getByRole("menuitemradio")).toHaveCount(5);
+  await expect(menu.getByRole("menuitemradio")).toHaveCount(6);
+  await expect(menu.getByRole("menuitemradio", { name: "Devin Desktop" })
+    .locator('[data-destination-icon="windsurf"]')).toBeVisible();
   await expect(menu.getByRole("menuitemradio", { name: "Zed" })
     .locator('[data-destination-icon="zed"]')).toBeVisible();
   await expect(menu.getByRole("menuitemradio", { name: "Future Editor" })
@@ -41,11 +43,11 @@ test("the desktop session header renders a cohesive labeled split button and usa
   expect(menuBox!.x).toBeGreaterThanOrEqual(8);
   expect(menuBox!.x + menuBox!.width).toBeLessThanOrEqual(992);
 
-  await menu.getByRole("menuitemradio", { name: "Cursor" }).click();
+  await menu.getByRole("menuitemradio", { name: "Devin Desktop" }).click();
   await expect.poll(() => page.evaluate(() => window.hostActions)).toEqual([
-    { kind: "open_editor", editorId: "cursor" },
+    { kind: "open_editor", editorId: "windsurf" },
   ]);
-  await expect(page.getByRole("button", { name: "Open in Cursor" })).toHaveText("Open");
+  await expect(page.getByRole("button", { name: "Open in Devin Desktop" })).toHaveText("Open");
 });
 
 test("the compact mobile presentation stays on one line and inside the viewport", async ({ page }) => {

@@ -8,9 +8,9 @@ import {
   ChevronDownIcon,
   CodeIcon,
   CursorEditorIcon,
+  DevinDesktopIcon,
   FolderIcon,
   VisualStudioCodeIcon,
-  WindsurfEditorIcon,
   ZedEditorIcon,
   type IconProps,
 } from "./Icons.js";
@@ -30,8 +30,12 @@ const EDITOR_ICONS: Record<string, ComponentType<IconProps>> = {
   code: VisualStudioCodeIcon,
   "code-insiders": VisualStudioCodeIcon,
   cursor: CursorEditorIcon,
-  windsurf: WindsurfEditorIcon,
+  windsurf: DevinDesktopIcon,
   zed: ZedEditorIcon,
+};
+const EDITOR_DISPLAY_NAMES: Record<string, string> = {
+  // Older connected runners still advertise the pre-rebrand name for this stable integration id.
+  windsurf: "Devin Desktop",
 };
 
 export function fileManagerLabel(os: OS): "Explorer" | "Finder" | "File Manager" {
@@ -41,12 +45,16 @@ export function fileManagerLabel(os: OS): "Explorer" | "Finder" | "File Manager"
 }
 
 function editorDestination(editor: EditorInfo): OpenDestination {
-  const preservesIntentionalCasing = /[a-z]/.test(editor.name) && /[A-Z]/.test(editor.name.slice(1));
+  const normalizedId = editor.id.toLocaleLowerCase();
+  const advertisedName = Object.hasOwn(EDITOR_DISPLAY_NAMES, normalizedId)
+    ? EDITOR_DISPLAY_NAMES[normalizedId]!
+    : editor.name;
+  const preservesIntentionalCasing = /[a-z]/.test(advertisedName) && /[A-Z]/.test(advertisedName.slice(1));
   return {
     kind: "editor",
     key: `editor:${editor.id}`,
     editorId: editor.id,
-    name: preservesIntentionalCasing ? editor.name : titleCaseLabel(editor.name),
+    name: preservesIntentionalCasing ? advertisedName : titleCaseLabel(advertisedName),
   };
 }
 

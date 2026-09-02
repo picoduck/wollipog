@@ -29,6 +29,7 @@ const runner: RunnerView = {
   editors: [
     { id: "code", name: "VS Code" },
     { id: "cursor", name: "Cursor" },
+    { id: "windsurf", name: "Windsurf" },
     { id: "zed", name: "Zed" },
     { id: "future-editor", name: "future editor" },
   ],
