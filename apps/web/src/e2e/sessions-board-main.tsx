@@ -4,6 +4,7 @@ import {
   type BoardColumn,
   type ControlPlaneToUi,
   type RunnerView,
+  type SessionReminderView,
   type SessionView,
   type UiSnapshotMessage,
 } from "@wollipog/protocol";
@@ -93,7 +94,21 @@ const sessions = [
       ],
     } as never,
   }),
+  session("s-snoozed", "Snoozed Session", "review"),
 ];
+
+const reminders: SessionReminderView[] = [{
+  reminderId: "reminder-s-snoozed",
+  sessionId: "s-snoozed",
+  scheduledFor: Date.now() + 86_400_000,
+  timeZone: "UTC",
+  originalExpression: "tomorrow",
+  wakePolicy: "until_activity",
+  state: "pending",
+  revision: 1,
+  createdAt: 1,
+  updatedAt: 1,
+}];
 
 function snapshot(): UiSnapshotMessage {
   return {
@@ -103,10 +118,12 @@ function snapshot(): UiSnapshotMessage {
       boundedDelivery: false,
       paginatedSessionHistory: false,
       projects: false,
+      sessionReminders: true,
     },
     runners: [structuredClone(runner)],
     boxes: [],
     sessions: structuredClone(sessions),
+    reminders: structuredClone(reminders),
     runs: [],
     pods: [],
   };

@@ -56,6 +56,7 @@ import type {
   ArchiveProjectSessionsResponse,
   PromptImageInput,
   PromptImageReference,
+  QueuedPromptDraft,
   InvokeSessionCommandRequest,
   RelayPodRequest,
   RelayPodResult,
@@ -625,6 +626,20 @@ export function createApiClient(transport: ApiTransport) {
   // back over the live socket (session_upsert), so there's nothing to read here.
   cancelQueuedPrompt: (id: string, promptId: string) =>
     req<void>(`/api/sessions/${id}/cancel-queued`, { method: "POST", body: JSON.stringify({ promptId }) }),
+
+  readQueuedPrompt: (id: string, promptId: string) =>
+    req<{ prompt: QueuedPromptDraft }>(
+      `/api/sessions/${encodeURIComponent(id)}/queued/${encodeURIComponent(promptId)}/edit`,
+    ),
+
+  editQueuedPrompt: (
+    id: string,
+    promptId: string,
+    input: { submissionId: string; expectedRevision: string; text: string; images: PromptImageInput[] },
+  ) => req<{ prompt: QueuedPromptDraft }>(
+    `/api/sessions/${encodeURIComponent(id)}/queued/${encodeURIComponent(promptId)}/edit`,
+    { method: "POST", body: JSON.stringify(input) },
+  ),
 
   resolvePendingPrompt: (id: string, commandId: string, action: "cancel" | "dismiss") =>
     req<SessionView>(

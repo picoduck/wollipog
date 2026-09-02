@@ -257,6 +257,59 @@ test("a picked image can be removed with the keyboard", async ({ page }) => {
   await expect(thumbnails(page)).toHaveCount(0);
 });
 
+test("the Add and Modes icon stays centered independently of font metrics", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await openSession(page);
+  const trigger = page.getByRole("button", { name: "Add and Modes" });
+
+  const expectCentered = async (state: string) => {
+    const geometry = await trigger.evaluate((element) => {
+      const button = element.getBoundingClientRect();
+      const icon = element.querySelector("svg")?.getBoundingClientRect();
+      if (!icon) throw new Error("Add and Modes must render a font-independent SVG icon");
+      return {
+        button: { width: button.width, height: button.height },
+        icon: { width: icon.width, height: icon.height },
+        centerDeltaX: Math.abs((button.left + button.width / 2) - (icon.left + icon.width / 2)),
+        centerDeltaY: Math.abs((button.top + button.height / 2) - (icon.top + icon.height / 2)),
+        text: element.textContent?.trim() ?? "",
+      };
+    });
+    expect(geometry.button, `${state}: preserve the circular trigger geometry`).toEqual({ width: 30, height: 30 });
+    expect(geometry.icon, `${state}: preserve the shared icon geometry`).toEqual({ width: 16, height: 16 });
+    expect(geometry.text, `${state}: do not fall back to a font glyph`).toBe("");
+    expect(geometry.centerDeltaX, `${state}: horizontal center`).toBeLessThanOrEqual(0.5);
+    expect(geometry.centerDeltaY, `${state}: vertical center`).toBeLessThanOrEqual(0.5);
+  };
+
+  for (const viewport of [
+    { name: "desktop", width: 1280 },
+    { name: "phone", width: 390 },
+  ]) {
+    await page.setViewportSize({ width: viewport.width, height: 800 });
+    for (const theme of ["light", "dark"] as const) {
+      await page.evaluate((value) => {
+        document.documentElement.dataset.theme = value;
+        document.documentElement.style.colorScheme = value;
+      }, theme);
+      await expectCentered(`${viewport.name} ${theme} normal`);
+      await trigger.hover();
+      await expectCentered(`${viewport.name} ${theme} hover`);
+      await trigger.focus();
+      await expectCentered(`${viewport.name} ${theme} focus-visible`);
+      await trigger.click();
+      await expect(trigger).toHaveAttribute("aria-expanded", "true");
+      await expectCentered(`${viewport.name} ${theme} open`);
+      await page.keyboard.press("Escape");
+      await expect(trigger).toBeFocused();
+    }
+  }
+
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerStatus("offline"));
+  await expect(trigger).toBeDisabled();
+  await expectCentered("disabled");
+});
+
 test.describe("on a phone", () => {
   test.use({
     viewport: phone.viewport,

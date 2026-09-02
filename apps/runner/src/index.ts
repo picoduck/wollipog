@@ -1294,6 +1294,12 @@ function handleCommand(msg: ControlPlaneToRunner): void {
     case "cancel_queued_prompt":
       sessions.removeQueuedPrompt(msg.sessionId, msg.promptId);
       break;
+    case "read_queued_prompt":
+      sendUp(sessions.readQueuedPrompt(msg));
+      break;
+    case "edit_queued_prompt":
+      sendUp(sessions.editQueuedPrompt(msg));
+      break;
     case "stop_session":
       try {
         sessions.stop(msg.sessionId);

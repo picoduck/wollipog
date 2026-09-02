@@ -1,13 +1,78 @@
-import type { SessionReminderView, SessionView } from "@wollipog/protocol";
+import {
+  sessionAttentionStatus,
+  type BackgroundDeliveryWatchdogState,
+  type SessionAttentionStatus,
+  type SessionReminderView,
+  type SessionView,
+} from "@wollipog/protocol";
 
 export type ReminderInboxMode = "ordinary" | "snoozed";
+
+export type SnoozedAttentionReason =
+  | { kind: "session_attention"; label: string; description: string; attention: SessionAttentionStatus }
+  | { kind: "failed"; label: "Failed"; description: string }
+  | { kind: "orphaned_background_work"; label: "Background Work Orphaned"; description: string }
+  | {
+    kind: "background_delivery_watchdog";
+    label: string;
+    description: string;
+    watchdogState: BackgroundDeliveryWatchdogState;
+  };
+
+const WATCHDOG_ATTENTION_LABELS: Record<BackgroundDeliveryWatchdogState, string> = {
+  terminal_without_continuation: "Continuation Required",
+  accepted_without_result: "Background Result Missing",
+  result_not_projected: "Transcript Update Missing",
+  dashboard_observation_pending: "Dashboard Check Pending",
+};
+
+/** One canonical explanation for every exception that keeps a pending reminder in Active. */
+export function snoozedSessionAttentionReason(session: SessionView): SnoozedAttentionReason | null {
+  // Older or partial snapshots may omit pendingApproval even though current SessionView requires
+  // null. `undefined !== null` used to retain an otherwise-idle snoozed session with no reason.
+  const attention = sessionAttentionStatus({
+    status: session.status,
+    pendingApproval: session.pendingApproval ?? null,
+  });
+  if (attention) {
+    return {
+      kind: "session_attention",
+      label: attention.label,
+      description: attention.description,
+      attention,
+    };
+  }
+  if (session.status === "failed") {
+    return {
+      kind: "failed",
+      label: "Failed",
+      description: "The session failed and requires attention.",
+    };
+  }
+  if (session.backgroundWorkState === "orphaned") {
+    return {
+      kind: "orphaned_background_work",
+      label: "Background Work Orphaned",
+      description: "Managed background work became orphaned and requires attention.",
+    };
+  }
+  const watchdogState = session.backgroundDeliveries?.find((delivery) => delivery.watchdogState)?.watchdogState;
+  if (watchdogState) {
+    const label = WATCHDOG_ATTENTION_LABELS[watchdogState];
+    return {
+      kind: "background_delivery_watchdog",
+      label,
+      description: `${label}. Background delivery requires attention before this session can leave Active.`,
+      watchdogState,
+    };
+  }
+  return null;
+}
 
 /** Safety and authentication work remains discoverable in the ordinary Inbox even while a
  * reminder is pending. Snooze still stays lifecycle-independent and remains visible in its view. */
 export function sessionNeedsAttentionWhileSnoozed(session: SessionView): boolean {
-  return ["input_required", "failed"].includes(session.status) ||
-    session.pendingApproval !== null || session.backgroundWorkState === "orphaned" ||
-    Boolean(session.backgroundDeliveries?.some((delivery) => delivery.watchdogState));
+  return snoozedSessionAttentionReason(session) !== null;
 }
 
 export function sessionVisibleForReminderMode(

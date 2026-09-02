@@ -373,7 +373,7 @@ test("moving a session between Locations in one Project refreshes exact Location
   db.close();
 });
 
-test("runner queue hold state is projected to dashboards and cleared authoritatively", () => {
+test("runner queue updates fan out to every dashboard and clear hold state authoritatively", () => {
   const db = ControlPlaneDb.open(":memory:");
   db.registerRunner({
     runnerId: "runner-queue-hold",
@@ -395,19 +395,38 @@ test("runner queue hold state is projected to dashboards and cleared authoritati
     now: 2,
   });
   const messages: Array<{ type: string; session?: SessionView }> = [];
+  const secondMessages: Array<{ type: string; session?: SessionView }> = [];
   const hub = new Hub(db);
   hub.attachRunner("runner-queue-hold", { send() {} });
   hub.addUiClient({
     send: (data) => messages.push(JSON.parse(data) as { type: string; session?: SessionView }),
   });
+  hub.addUiClient({
+    send: (data) => secondMessages.push(JSON.parse(data) as { type: string; session?: SessionView }),
+  });
   messages.length = 0;
+  secondMessages.length = 0;
 
-  hub.setSessionQueue(session.id, [{ id: "prompt-b", text: "B" }], true, "turn-a");
+  hub.setSessionQueue(session.id, [{
+    id: "prompt-b",
+    text: "B",
+    liveQueueObserved: true,
+    editable: true,
+    editRevision: "qer-1",
+  }], true, "turn-a");
   const held = messages.findLast((message) => message.type === "session_upsert")?.session;
+  const secondHeld = secondMessages.findLast((message) => message.type === "session_upsert")?.session;
   assert.equal(held?.queueHeld, true);
   assert.equal(held?.activeTurnId, "turn-a");
   assert.equal(hub.activeTurnIdForSession(session.id), "turn-a");
-  assert.deepEqual(held?.queued, [{ id: "prompt-b", text: "B" }]);
+  assert.deepEqual(secondHeld, held, "all connected dashboards receive the same editable queue revision");
+  assert.deepEqual(held?.queued, [{
+    id: "prompt-b",
+    text: "B",
+    liveQueueObserved: true,
+    editable: true,
+    editRevision: "qer-1",
+  }]);
 
   hub.setSessionQueue(session.id, [{ id: "prompt-b", text: "B" }], false);
   const released = messages.findLast((message) => message.type === "session_upsert")?.session;

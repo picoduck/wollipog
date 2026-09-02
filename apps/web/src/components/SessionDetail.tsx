@@ -21,6 +21,7 @@ import {
   runnerSupportsProtocol,
   providerSupportsConversationFork,
   type PromptImageInput,
+  type QueuedPromptDraft,
   type QueuedPromptView,
   type SessionConfig,
   type SessionView,
@@ -132,12 +133,13 @@ import {
 import { ShortcutHint } from "./ShortcutHint.js";
 import {
   conversationSteeringAvailability,
+  queuedPromptEditingAvailability,
   queuedPromptSteeringAvailability,
   shouldReloadReservedDraft,
 } from "../conversation-steering.js";
 import { SteeringReceipts } from "./SteeringReceipts.js";
 import { SessionCommandReceipts } from "./SessionCommandReceipts.js";
-import { ArrowUpIcon, ChevronLeftIcon, FolderSolidIcon, ImageIcon, MicIcon, MoreVerticalIcon, StopTurnIcon } from "./Icons.js";
+import { ArrowUpIcon, ChevronLeftIcon, EditIcon, FolderSolidIcon, ImageIcon, MicIcon, MoreVerticalIcon, PlusIcon, StopTurnIcon } from "./Icons.js";
 import {
   DURABLE_COMMAND_ATTACHMENT_NOTICE,
   buildComposerCommandRegistry,
@@ -193,7 +195,7 @@ const OPENING_HISTORY_HEADROOM_PX = EARLIER_ACTIVITY_TRIGGER_PX;
 
 type EarlierActivityIntent = "single-scroll" | "touch-traversal";
 
-type ComposerMutationKind = "send" | "steer" | "promote" | "stop";
+type ComposerMutationKind = "send" | "steer" | "promote" | "edit" | "stop";
 type ComposerMutationEntry = {
   token: symbol;
   kind: ComposerMutationKind;
@@ -204,6 +206,11 @@ const composerMutationRegistry = new Map<string, ComposerMutationEntry>();
 const composerMutationRecoveries = new Map<string, { text: string; images: PromptImageInput[] }>();
 const MAX_COMPOSER_MUTATION_RECOVERIES = 20;
 const composerMutationListeners = new Map<string, Set<() => void>>();
+
+interface QueuedPromptEditState extends QueuedPromptDraft {
+  submissionId?: string;
+  displacedDraft: { text: string; images: PromptImageInput[] };
+}
 
 function composerMutationKey(instanceScope: string, sessionId: string): string {
   return `${instanceScope}\u0000${sessionId}`;
@@ -531,6 +538,14 @@ function SessionDetailLoaded({
   const draftDirty = useRef(false);
   const [busy, setBusy] = useState(false);
   const [steeringBusy, setSteeringBusy] = useState(false);
+  const [queuedEditBusy, setQueuedEditBusy] = useState(false);
+  const [queuedEdit, setQueuedEdit] = useState<QueuedPromptEditState | null>(null);
+  const queuedEditRef = useRef<QueuedPromptEditState | null>(null);
+  queuedEditRef.current = queuedEdit;
+  useEffect(() => {
+    setQueuedEdit(null);
+    setQueuedEditBusy(false);
+  }, [sessionId]);
   const queueSteeringInFlightRef = useRef(new Set<string>());
   const steeringResolutionInFlightRef = useRef(new Set<string>());
   const [queueSteeringPending, setQueueSteeringPending] = useState<ReadonlySet<string>>(() => new Set());
@@ -549,7 +564,7 @@ function SessionDetailLoaded({
   const steeringRequestBusy = steeringBusy || activeComposerMutation?.kind === "steer" ||
     activeComposerMutation?.kind === "promote";
   const stopRequestPending = stoppingTurn || activeComposerMutation?.kind === "stop";
-  const composerRequestBusy = activeComposerMutation !== undefined || busy || steeringBusy || stoppingTurn ||
+  const composerRequestBusy = activeComposerMutation !== undefined || busy || steeringBusy || queuedEditBusy || stoppingTurn ||
     retitlePending;
   const stopTurnPendingRef = useRef(false);
   const stopTurnMutationRef = useRef<ComposerMutationEntry | null>(null);
@@ -1066,6 +1081,7 @@ function SessionDetailLoaded({
   useEffect(() => {
     if (!draftDirty.current) return;
     const timer = window.setTimeout(() => {
+      if (queuedEditRef.current) return;
       const latest = draftState.current;
       const consumed = consumedDraftsRef.current.get(`${instanceScope}\u0000${sessionId}`);
       if (consumed && consumed.draftVersion === composerDraftVersionRef.current &&
@@ -1079,7 +1095,7 @@ function SessionDetailLoaded({
 
   useEffect(
     () => () => {
-      if (!draftDirty.current) return;
+      if (!draftDirty.current || queuedEditRef.current) return;
       const latest = draftState.current;
       const consumed = consumedDraftsRef.current.get(`${instanceScope}\u0000${sessionId}`);
       if (consumed && consumed.draftVersion === composerDraftVersionRef.current &&
@@ -2556,6 +2572,99 @@ function SessionDetailLoaded({
     }
   };
 
+  const beginQueuedPromptEdit = async (prompt: QueuedPromptView) => {
+    if (queuedEdit || composerRequestBusy) return;
+    const availability = queuedPromptEditingAvailability({
+      runnerProtocolVersion: runner?.protocolVersion,
+      runnerOnline,
+      requestBusy: false,
+    }, prompt);
+    if (!availability.available) {
+      setError(availability.reason);
+      return;
+    }
+    const generation = viewGenerationRef.current;
+    const displacedDraft = {
+      text: draftState.current.text,
+      images: draftState.current.images.map((image) => ({ ...image })),
+    };
+    setQueuedEditBusy(true);
+    setError(null);
+    try {
+      const { prompt: exact } = await api.readQueuedPrompt(sessionId, prompt.id);
+      if (viewGenerationRef.current !== generation) return;
+      await saveComposerDraft(sessionId, displacedDraft.text, displacedDraft.images, instanceScope);
+      if (viewGenerationRef.current !== generation) return;
+      const editState = { ...exact, displacedDraft };
+      queuedEditRef.current = editState;
+      setQueuedEdit(editState);
+      setProgrammaticComposerText(exact.text);
+      replace(exact.images);
+      setHistIdx(-1);
+      window.requestAnimationFrame(focusComposerAtDraftEnd);
+    } catch (cause) {
+      if (viewGenerationRef.current === generation) setError((cause as Error).message);
+    } finally {
+      if (viewGenerationRef.current === generation) setQueuedEditBusy(false);
+    }
+  };
+
+  const cancelQueuedPromptEdit = () => {
+    if (!queuedEdit || queuedEditBusy) return;
+    const displaced = queuedEdit.displacedDraft;
+    markDraftDirty();
+    queuedEditRef.current = null;
+    setQueuedEdit(null);
+    draftState.current = displaced;
+    setProgrammaticComposerText(displaced.text);
+    replace(displaced.images);
+    setHistIdx(-1);
+    setError(null);
+    void saveComposerDraft(sessionId, displaced.text, displaced.images, instanceScope);
+    window.requestAnimationFrame(focusComposerAtDraftEnd);
+  };
+
+  const saveQueuedPromptEdit = async () => {
+    if (!queuedEdit || queuedEditBusy || composerMutationRegistry.has(mutationKey)) return;
+    const submittedDraft = {
+      text: text.trim(),
+      images: images.map((image) => ({ ...image })),
+    };
+    if (!submittedDraft.text && submittedDraft.images.length === 0) return;
+    const submissionId = queuedEdit.submissionId ?? browserRandomUUID();
+    if (!queuedEdit.submissionId) setQueuedEdit((current) => current ? { ...current, submissionId } : current);
+    const mutation = reserveComposerMutation(mutationKey, "edit", submittedDraft);
+    if (!mutation) return;
+    const generation = viewGenerationRef.current;
+    setQueuedEditBusy(true);
+    setError(null);
+    try {
+      await api.editQueuedPrompt(sessionId, queuedEdit.promptId, {
+        submissionId,
+        expectedRevision: queuedEdit.editRevision,
+        text: submittedDraft.text,
+        images: submittedDraft.images,
+      });
+      if (viewGenerationRef.current !== generation) return;
+      const displaced = queuedEdit.displacedDraft;
+      markDraftDirty();
+      queuedEditRef.current = null;
+      setQueuedEdit(null);
+      draftState.current = displaced;
+      setProgrammaticComposerText(displaced.text);
+      replace(displaced.images);
+      setHistIdx(-1);
+      await saveComposerDraft(sessionId, displaced.text, displaced.images, instanceScope);
+      window.requestAnimationFrame(focusComposerAtDraftEnd);
+    } catch (cause) {
+      // The edited draft deliberately remains in place after every stale/racing failure.
+      if (viewGenerationRef.current === generation) setError((cause as Error).message);
+    } finally {
+      releaseComposerMutation(mutationKey, mutation.token);
+      if (viewGenerationRef.current === generation) setQueuedEditBusy(false);
+    }
+  };
+
   const resolveSteeringAttempt = async (
     submissionId: string,
     action: "queue_again" | "dismiss",
@@ -2611,6 +2720,18 @@ function SessionDetailLoaded({
       void stopTurn();
       return;
     }
+    // Editing owns submission and never lets Ctrl+Enter reinterpret the draft as active-turn
+    // steering. Up/Down remain the ordinary history behavior outside this explicit state.
+    if (queuedEdit && matchesShortcut(e, "steer-turn")) {
+      e.preventDefault();
+      return;
+    }
+    if (queuedEdit && e.key === "Enter" && !e.metaKey && !e.ctrlKey && !composing) {
+      if (!enterKeystrokeSends(e.shiftKey)) return;
+      e.preventDefault();
+      void saveQueuedPromptEdit();
+      return;
+    }
     // Steering owns exact Ctrl+Enter before slash-palette selection. The composed slash text is
     // steering content; it is not dispatched as an app or provider slash command.
     if (!shortcutLayerActive(document) && matchesShortcut(e, "steer-turn")) {
@@ -2642,7 +2763,7 @@ function SessionDetailLoaded({
     }
     // ↑/↓ recall previous prompts (palette closed, no modifiers). ↑ engages only when the box is
     // empty or already browsing history, so a multi-line draft's caret navigation isn't hijacked.
-    if (!paletteOpen && !e.shiftKey && !e.metaKey && !e.ctrlKey && userPrompts.length) {
+    if (!queuedEdit && !paletteOpen && !e.shiftKey && !e.metaKey && !e.ctrlKey && userPrompts.length) {
       if (e.key === "ArrowUp" && (histIdx !== -1 || text === "")) {
         e.preventDefault();
         const idx = histIdx === -1 ? userPrompts.length - 1 : Math.max(0, histIdx - 1);
@@ -3013,6 +3134,15 @@ function SessionDetailLoaded({
                 )}
               </div>
               <div className="transcript-status-trailing">
+                {mode === "expanded" && isMobile && usage && (
+                  <span
+                    className="transcript-status-usage"
+                    title={`Session usage: ${usage}`}
+                    aria-label={`Usage: ${usage}`}
+                  >
+                    {usage}
+                  </span>
+                )}
                 <div className="transcript-status-actions">
                   {mode === "expanded" && !isMobile && canPrompt && activePane === "reader" && (
                     <ShortcutHint
@@ -3094,6 +3224,11 @@ function SessionDetailLoaded({
               <div className="queued-list" aria-label="Queued Messages">
                 {queuedPromptControls.map((q) => {
                   const availability = queuedPromptSteeringAvailability(steeringAvailabilityInput, q);
+                  const editAvailability = queuedPromptEditingAvailability({
+                    runnerProtocolVersion: runner?.protocolVersion,
+                    runnerOnline,
+                    requestBusy: composerRequestBusy,
+                  }, q);
                   const locallyPromoting = queueSteeringPending.has(q.id);
                   const reserved = q.steeringState === "promoting" || q.steeringState === "uncertain";
                   const durable = q.durableDeliveryState !== undefined;
@@ -3115,7 +3250,12 @@ function SessionDetailLoaded({
                       : "Promote this queued message into the active turn.";
                   const canCancelThis = canCancelQueued && !durable && !reserved && !locallyPromoting;
                   return (
-                    <div className="queued-item" key={q.id} data-testid={`queued-prompt-${q.id}`}>
+                    <div
+                      className={`queued-item${queuedEdit?.promptId === q.id ? " is-editing" : ""}`}
+                      key={q.id}
+                      data-testid={`queued-prompt-${q.id}`}
+                      aria-current={queuedEdit?.promptId === q.id ? "true" : undefined}
+                    >
                       <span
                         className={`queued-badge${session.queueHeld ? " held" : ""}`}
                         title={session.queueHeld
@@ -3144,6 +3284,20 @@ function SessionDetailLoaded({
                         </button>
                         <button
                           type="button"
+                          className="btn ghost sm queued-edit"
+                          disabled={!editAvailability.available || queuedEdit !== null}
+                          title={queuedEdit?.promptId === q.id
+                            ? "This queued message is already being edited."
+                            : editAvailability.available
+                              ? "Edit this queued message."
+                              : editAvailability.reason}
+                          aria-label="Edit Queued Message"
+                          onClick={() => void beginQueuedPromptEdit(q)}
+                        >
+                          <EditIcon size={14} />
+                        </button>
+                        <button
+                          type="button"
                           className="queued-cancel"
                           disabled={!canCancelThis}
                           title={
@@ -3168,6 +3322,19 @@ function SessionDetailLoaded({
                     </div>
                   );
                 })}
+              </div>
+            )}
+            {queuedEdit && (
+              <div className="queued-edit-banner" role="status">
+                <span>Editing Queued Message</span>
+                <button
+                  type="button"
+                  className="btn ghost sm"
+                  disabled={queuedEditBusy}
+                  onClick={cancelQueuedPromptEdit}
+                >
+                  Cancel Edit
+                </button>
               </div>
             )}
             <div
@@ -3300,7 +3467,7 @@ function SessionDetailLoaded({
                 </div>
                 {/* Session-level usage lives with the session-level controls, not in the
                     transcript status strip — the otherwise-empty center of the composer bar. */}
-                {usage && (
+                {usage && !isMobile && (
                   <span className="cbar-usage" title={`Session usage: ${usage}`} aria-label={`Usage: ${usage}`}>
                     {usage}
                   </span>
@@ -3338,14 +3505,18 @@ function SessionDetailLoaded({
                          collapsed the keyboard instead of sending. Retained focus also keeps the
                          keyboard open after sending, which is the chat convention. */
                       onPointerDown={(e) => e.preventDefault()}
-                      onClick={send}
+                      onClick={queuedEdit ? saveQueuedPromptEdit : send}
                       disabled={!canSend || composerRequestBusy}
-                      title={enterKeySetting === "send"
-                        ? "Send (Enter)"
-                        : isTouchPhone ? "Send" : "Send (Shift+Enter)"}
-                      aria-label="Send"
+                      title={queuedEdit
+                        ? enterKeySetting === "send"
+                          ? "Save Queued Message (Enter)"
+                          : isTouchPhone ? "Save Queued Message" : "Save Queued Message (Shift+Enter)"
+                        : enterKeySetting === "send"
+                          ? "Send (Enter)"
+                          : isTouchPhone ? "Send" : "Send (Shift+Enter)"}
+                      aria-label={queuedEdit ? "Save Queued Message" : "Send"}
                     >
-                      {busy ? <Spinner /> : <ArrowUpIcon size={14} />}
+                      {busy || queuedEditBusy ? <Spinner /> : <ArrowUpIcon size={14} />}
                     </button>
                   ) : (
                     <button
@@ -4195,7 +4366,7 @@ function ComposerPlusMenu({
         onClick={popover.toggle}
         onKeyDown={popover.onTriggerKeyDown}
       >
-        +
+        <PlusIcon size={16} />
       </button>
       {open && (
         <>

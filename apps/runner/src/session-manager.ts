@@ -21,12 +21,18 @@ import type {
   AgentSlashCommand,
   AcpRuntimeCapabilities,
   DurableSessionCommandErrorCode,
+  EditQueuedPromptMessage,
+  EditQueuedPromptResultMessage,
   ExternalSessionDescriptor,
   InvokeSessionCommandMessage,
   InterruptTurnResultReason,
   PromptImage,
   PromptImageInput,
   PromptImageReference,
+  QueuedPromptDraft,
+  QueuedPromptEditFailureReason,
+  ReadQueuedPromptMessage,
+  ReadQueuedPromptResultMessage,
   RunnerToControlPlane,
   SessionConfig,
   SessionCommandInvocationErrorCode,
@@ -45,6 +51,7 @@ import {
   PROTOCOL_VERSION,
   providerSupportsConversationFork,
   runnerSupportsProtocol,
+  validatePromptImageInputs,
 } from "@wollipog/protocol";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
@@ -219,6 +226,8 @@ interface QueuedPrompt {
   ordinal?: number;
   text: string;
   images: PromptImageInput[];
+  /** Optimistic-concurrency coordinate for in-place queue editing. */
+  editRevision?: string;
   slashCommand?: string;
   /** The model/effort/permission config this prompt was SENT with — applied when it dequeues,
    * not at enqueue time. Two queued sends with different configs must each run under their own
@@ -240,6 +249,11 @@ interface QueuedPrompt {
   syntheticRecovery?: boolean;
   /** Durable managed jobs whose barrier terminal observation caused this continuation. */
   backgroundJobIds?: string[];
+}
+
+interface QueueEditReceipt {
+  requestHash: string;
+  result: EditQueuedPromptResultMessage;
 }
 
 interface PreparedCommandCheckpoint {
@@ -516,6 +530,9 @@ function configsEqual(left: SessionConfig | undefined, right: SessionConfig | un
 }
 
 export class SessionManager {
+  /** A reconnect/restart can reconstruct the same queue id and content; tokens from the previous
+   * process must still fail closed instead of matching the replacement generation. */
+  private readonly queueEditGeneration = randomUUID();
   private readonly active = new Map<string, ActiveSession>();
   /** Stable ordering spans active queues, promotion reservations, and app-server recovery queues. */
   private readonly nextQueueOrdinalBySession = new Map<string, number>();
@@ -524,6 +541,8 @@ export class SessionManager {
   private readonly steeringLaneRunning = new Set<string>();
   /** Live-process idempotency. The control plane remains the durable lifetime authority. */
   private readonly steeringRegistry = new Map<string, Map<string, SteeringOperation>>();
+  /** Process-local idempotency; durable accepted content is reconciled by the control plane. */
+  private readonly queueEditReceipts = new Map<string, QueueEditReceipt>();
   private steeringAccessOrdinal = 0;
   /** Test seam; production always uses the mandatory whole-submission ten-second deadline. */
   private steeringSubmissionTimeoutMs = STEERING_SUBMISSION_TIMEOUT_MS;
@@ -3979,6 +3998,182 @@ export class SessionManager {
     if (!registry.size) this.steeringRegistry.delete(sessionId);
   }
 
+  private queuedPromptEditEligibility(prompt: QueuedPrompt): { eligible: true } | { eligible: false; message: string } {
+    if (prompt.durable) {
+      return { eligible: false, message: "Messages controlled by durable delivery cannot be edited until delivery resolves." };
+    }
+    if (prompt.sessionCommand) {
+      return { eligible: false, message: "Provider commands cannot be edited after admission." };
+    }
+    if (prompt.syntheticRecovery || prompt.backgroundJobIds?.length) {
+      return { eligible: false, message: "Runner-managed recovery messages cannot be edited." };
+    }
+    if (prompt.slashCommand) {
+      return { eligible: false, message: "Queued slash commands cannot be edited safely." };
+    }
+    return { eligible: true };
+  }
+
+  private queuedPromptDraft(prompt: QueuedPrompt): QueuedPromptDraft {
+    return {
+      promptId: prompt.id,
+      text: prompt.text,
+      images: prompt.images.map((image) => ({ ...image })),
+      editRevision: this.queuedPromptEditRevision(prompt),
+    };
+  }
+
+  private queuedPromptEditRevision(prompt: QueuedPrompt): string {
+    return prompt.editRevision ??= createHash("sha256").update(JSON.stringify({
+      generation: this.queueEditGeneration,
+      id: prompt.id,
+      ordinal: prompt.ordinal,
+      text: prompt.text,
+      images: prompt.images,
+    })).digest("hex");
+  }
+
+  private queueEditFailure(
+    request: ReadQueuedPromptMessage | EditQueuedPromptMessage,
+    reason: QueuedPromptEditFailureReason,
+    error: string,
+  ): ReadQueuedPromptResultMessage | EditQueuedPromptResultMessage {
+    const base = {
+      requestId: request.requestId,
+      sessionId: request.sessionId,
+      promptId: request.promptId,
+      reason,
+      error,
+    };
+    return request.type === "read_queued_prompt"
+      ? { type: "read_queued_prompt_result", ok: false, ...base }
+      : { type: "edit_queued_prompt_result", submissionId: request.submissionId, applied: false, ...base };
+  }
+
+  readQueuedPrompt(request: ReadQueuedPromptMessage): ReadQueuedPromptResultMessage {
+    const entry = this.active.get(request.sessionId);
+    if (!entry) {
+      return this.queueEditFailure(request, "session_not_found", "The live runner session is unavailable.") as ReadQueuedPromptResultMessage;
+    }
+    const prompt = entry.queue.find((candidate) => candidate.id === request.promptId);
+    if (!prompt) {
+      const started = entry.activeTurnId === request.promptId;
+      return this.queueEditFailure(
+        request,
+        started ? "queue_item_started" : "queue_item_absent",
+        started ? "The queued message has already started." : "The queued message is no longer in the queue.",
+      ) as ReadQueuedPromptResultMessage;
+    }
+    const eligibility = this.queuedPromptEditEligibility(prompt);
+    if (!eligibility.eligible) {
+      return this.queueEditFailure(request, "queue_item_immutable", eligibility.message) as ReadQueuedPromptResultMessage;
+    }
+    return {
+      type: "read_queued_prompt_result",
+      requestId: request.requestId,
+      sessionId: request.sessionId,
+      promptId: request.promptId,
+      ok: true,
+      prompt: this.queuedPromptDraft(prompt),
+    };
+  }
+
+  editQueuedPrompt(request: EditQueuedPromptMessage): EditQueuedPromptResultMessage {
+    const receiptKey = `${request.sessionId}\u0000${request.submissionId}`;
+    const requestHash = createHash("sha256").update(JSON.stringify({
+      promptId: request.promptId,
+      expectedRevision: request.expectedRevision,
+      text: request.text,
+      images: request.images,
+    })).digest("hex");
+    const existing = this.queueEditReceipts.get(receiptKey);
+    if (existing) {
+      if (existing.requestHash === requestHash) return existing.result;
+      return this.queueEditFailure(
+        request,
+        "invalid_content",
+        "The edit submission ID was already used for different content.",
+      ) as EditQueuedPromptResultMessage;
+    }
+    const remember = (result: EditQueuedPromptResultMessage): EditQueuedPromptResultMessage => {
+      this.queueEditReceipts.set(receiptKey, { requestHash, result });
+      if (this.queueEditReceipts.size > 500) {
+        const oldest = this.queueEditReceipts.keys().next().value;
+        if (oldest !== undefined) this.queueEditReceipts.delete(oldest);
+      }
+      return result;
+    };
+    const entry = this.active.get(request.sessionId);
+    if (!entry) {
+      return remember(this.queueEditFailure(
+        request,
+        "session_not_found",
+        "The live runner session is unavailable.",
+      ) as EditQueuedPromptResultMessage);
+    }
+    const prompt = entry.queue.find((candidate) => candidate.id === request.promptId);
+    if (!prompt) {
+      const started = entry.activeTurnId === request.promptId;
+      return remember(this.queueEditFailure(
+        request,
+        started ? "queue_item_started" : "queue_item_absent",
+        started ? "The queued message has already started." : "The queued message is no longer in the queue.",
+      ) as EditQueuedPromptResultMessage);
+    }
+    const eligibility = this.queuedPromptEditEligibility(prompt);
+    if (!eligibility.eligible) {
+      return remember(this.queueEditFailure(
+        request,
+        "queue_item_immutable",
+        eligibility.message,
+      ) as EditQueuedPromptResultMessage);
+    }
+    if (!request.expectedRevision || request.expectedRevision !== this.queuedPromptEditRevision(prompt)) {
+      return remember(this.queueEditFailure(
+        request,
+        "queue_item_changed",
+        "The queued message changed after editing began.",
+      ) as EditQueuedPromptResultMessage);
+    }
+    const imageValidation = validatePromptImageInputs(request.images);
+    if ((!request.text.trim() && request.images.length === 0) || !imageValidation.ok) {
+      return remember(this.queueEditFailure(
+        request,
+        "invalid_content",
+        imageValidation.ok ? "A queued message cannot be empty." : (imageValidation.error ?? "Invalid image attachments."),
+      ) as EditQueuedPromptResultMessage);
+    }
+    const otherBytes = entry.queue.reduce((total, candidate) =>
+      candidate === prompt ? total : total + queuedPromptBytes(candidate.text, candidate.images), 0);
+    if (otherBytes + queuedPromptBytes(request.text, request.images) > MAX_QUEUED_BYTES) {
+      return remember(this.queueEditFailure(
+        request,
+        "queue_capacity_exceeded",
+        "The edited queued message exceeds the queue capacity.",
+      ) as EditQueuedPromptResultMessage);
+    }
+    prompt.text = request.text;
+    prompt.images = request.images.map((image) => ({ ...image }));
+    prompt.editRevision = createHash("sha256").update(JSON.stringify({
+      generation: this.queueEditGeneration,
+      id: prompt.id,
+      previous: request.expectedRevision,
+      submissionId: request.submissionId,
+      text: prompt.text,
+      images: prompt.images,
+    })).digest("hex");
+    this.emitQueue(request.sessionId);
+    return remember({
+      type: "edit_queued_prompt_result",
+      requestId: request.requestId,
+      submissionId: request.submissionId,
+      sessionId: request.sessionId,
+      promptId: request.promptId,
+      applied: true,
+      prompt: this.queuedPromptDraft(prompt),
+    });
+  }
+
   /** Report a session's current not-yet-started queue to the control plane (ephemeral relay).
    * Text is a bounded PREVIEW — dashboards only render/cancel queue entries, and relaying a
    * multi-hundred-KB prompt per queue change would amplify through every reconnect flush and
@@ -4015,6 +4210,11 @@ export class SessionManager {
           : entry
             ? this.steeringEligibility(entry, q)
             : { eligible: false as const, message: "Wait for an active provider turn before steering." };
+        const editEligibility = steeringState
+          ? { eligible: false as const, message: "Resolve steering before editing this queued message." }
+          : entry
+            ? this.queuedPromptEditEligibility(q)
+            : { eligible: false as const, message: "Wait for live runner admission before editing." };
         return {
           id: q.id,
           text: q.text.length > 500 ? q.text.slice(0, 500) + "…" : q.text,
@@ -4023,6 +4223,9 @@ export class SessionManager {
           ...(!eligibility.eligible ? { steerDisabledReason: eligibility.message } : {}),
           ...(steeringState ? { steeringState } : {}),
           liveQueueObserved: true,
+          editable: editEligibility.eligible,
+          ...(!editEligibility.eligible ? { editDisabledReason: editEligibility.message } : {}),
+          editRevision: this.queuedPromptEditRevision(q),
         };
       }),
       ...(entry?.holdQueuedPromptsAfterInterrupt ? { held: true } : {}),

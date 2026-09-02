@@ -20,6 +20,40 @@ function harnessPath(page: Page): string | null {
   return new URL(page.url()).searchParams.get("path");
 }
 
+test("the reminder and mode controls use scoped badges and compact mobile icons", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await openHarness(page);
+  await expect(page.getByRole("radio", { name: "List" })).toBeVisible();
+  await expect(page.getByRole("radio", { name: "Active, 4 Sessions" })).toBeVisible();
+  await expect(page.getByRole("radio", { name: "Snoozed, 1 Session" })).toBeVisible();
+  await expect(page.locator(".sessions-toolbar-option-text").first()).toBeVisible();
+  await expect(page.locator(".sessions-toolbar-option-icon").first()).toBeHidden();
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  for (const name of ["List", "Board", "Active, 4 Sessions", "Snoozed, 1 Session"]) {
+    const option = page.getByRole("radio", { name });
+    await expect(option).toBeVisible();
+    expect((await option.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+  }
+  await expect(page.locator(".sessions-toolbar-option-text").first()).toBeHidden();
+  await expect(page.locator(".sessions-toolbar-option-icon").first()).toBeVisible();
+  await expect(page.locator(".sessions-toolbar-count")).toHaveText(["4", "1"]);
+
+  const geometry = await page.locator(".inbox-toolbar-actions").evaluate((actions) => {
+    const search = actions.querySelector(".inbox-search")!.getBoundingClientRect();
+    const options = [...actions.querySelectorAll<HTMLElement>(".ui-seg-option")]
+      .map((option) => option.getBoundingClientRect());
+    return {
+      searchWidth: search.width,
+      oneLine: options.every((option) => Math.abs(option.top - options[0]!.top) < 1),
+      contained: actions.scrollWidth <= actions.clientWidth,
+    };
+  });
+  expect(geometry.searchWidth).toBeGreaterThan(70);
+  expect(geometry.oneLine).toBe(true);
+  expect(geometry.contained).toBe(true);
+});
+
 test("the toggle switches modes, the URL follows, and archived sessions never reach the board", async ({ page }) => {
   await openHarness(page);
   await expect(page.locator(".inbox-list")).toBeVisible();

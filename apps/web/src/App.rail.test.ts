@@ -76,15 +76,19 @@ test("live-follow status owns a reserved transcript strip with a compact centere
     "Reply and transcript discovery hints must share the same component and keycap markup");
   assert.match(detail, /className="detail-main"[\s\S]*data-active-pane=\{activePane\}[\s\S]*onFocusCapture=\{\(\) => setActivePane\("reader"\)\}/);
   assert.match(detail, /className="composer"[\s\S]*onFocusCapture=\{\(\) => setActivePane\("composer"\)\}/);
-  assert.match(detail, /className="composer-bar"[\s\S]*className="cbar-usage"[\s\S]*className="cbar-right"/,
-    "session-level usage sits between the composer's permission and model controls, not in the strip");
-  assert.doesNotMatch(detail, /transcript-usage-copy|follow-live-shortcut/,
-    "the strip hosts neither usage copy nor edge-distributed or spacer-balanced shortcut hints");
+  assert.match(detail, /className="transcript-status-trailing"[\s\S]*mode === "expanded" && isMobile && usage[\s\S]*className="transcript-status-usage"/,
+    "mobile expanded usage occupies the strip's trailing track");
+  assert.match(detail, /className="composer-bar"[\s\S]*usage && !isMobile[\s\S]*className="cbar-usage"[\s\S]*className="cbar-right"/,
+    "desktop usage remains between the composer's permission and model controls");
+  assert.doesNotMatch(detail, /follow-live-shortcut/,
+    "the strip hosts no edge-distributed or spacer-balanced shortcut hints");
   assert.match(css, /\.transcript-status-strip\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*auto\s*minmax\(0,\s*1fr\);[^}]*flex:\s*none;[^}]*min-height:\s*42px;[^}]*padding:\s*6px 14px;[^}]*background:\s*var\(--bg\);/);
   assert.doesNotMatch(css.match(/\.transcript-status-strip\s*\{[^}]*\}/)?.[0] ?? "", /border-top/,
     "the reader status strip remains visually continuous with the transcript");
   assert.match(css, /\.transcript-status-context\s*\{[^}]*grid-column:\s*1;[^}]*justify-self:\s*end;/);
   assert.match(css, /\.transcript-status-trailing\s*\{[^}]*grid-column:\s*3;[^}]*justify-self:\s*stretch;/);
+  assert.match(css, /\.transcript-status-usage\s*\{[^}]*min-width:\s*0;[^}]*overflow:\s*hidden;[^}]*text-overflow:\s*ellipsis;[^}]*white-space:\s*nowrap;/,
+    "mobile usage truncates inside the trailing track rather than overlapping the center");
   assert.match(css, /\.transcript-status-actions\s*\{[^}]*margin-left:\s*auto;/);
   assert.match(css, /\.follow-tail-control\s*\{[^}]*grid-column:\s*2;[^}]*display:\s*inline-flex;[^}]*gap:\s*8px;[^}]*justify-self:\s*center;/,
     "cluster items sit at the standard inter-control gap — no flexible spacers or space-between");

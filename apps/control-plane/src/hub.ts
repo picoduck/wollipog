@@ -14,6 +14,7 @@ import type {
   AdoptSessionResultMessage,
   GitActionResultMessage,
   GenerateSessionTitleResultMessage,
+  EditQueuedPromptResultMessage,
   SessionNamingCustomModelResultMessage,
   ForkResultMessage,
   HostActionResultMessage,
@@ -24,6 +25,7 @@ import type {
   LogoutAgentResultMessage,
   AcpRegistryApprovalResultMessage,
   QueuedPromptView,
+  ReadQueuedPromptResultMessage,
   ReadSessionFileResultMessage,
   ReprocessSessionResultMessage,
   ResolveSteeringAttemptResultMessage,
@@ -181,6 +183,8 @@ export type RunnerRequestResult =
   | HostActionResultMessage
   | InterruptTurnResultMessage
   | ResolveSteeringAttemptResultMessage
+  | ReadQueuedPromptResultMessage
+  | EditQueuedPromptResultMessage
   | SubscriptionUsageRefreshResultMessage
   | SteerSessionResultMessage
   | GenerateSessionTitleResultMessage

@@ -1,3 +1,11 @@
+@font-face {
+  font-family: "Wollipog JetBrainsMono Nerd Font";
+  src: url("./assets/fonts/WollipogJetBrainsMonoNerd-Regular.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
 :root,
 :root[data-theme="dark"] {
   /* The dim tiers, for text that sits on a TINTED row rather than a plain surface.
@@ -140,6 +148,7 @@
      so commit SHAs and review editors silently fell back to the proportional UI face. */
   --font-ui: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
   --font-mono: "Cascadia Code", "Consolas", ui-monospace, SFMono-Regular, monospace;
+  --font-terminal: "Wollipog JetBrainsMono Nerd Font", "Cascadia Code", "Consolas", ui-monospace, SFMono-Regular, monospace;
   --mono: var(--font-mono);
   color-scheme: dark;
 }
@@ -373,6 +382,11 @@
   --space-6: 24px;
   --space-8: 32px;
   --space-10: 40px;
+
+  /* The two mobile Session-header rows share these trailing-column metrics. The inset includes the
+     physical right safe area because the interface currently has a left-to-right layout. */
+  --mobile-session-action-gap: 2px;
+  --mobile-session-trailing-inset: calc(8px + env(safe-area-inset-right, 0px));
 
   /* --- Radius. The scale is fitted to the values already in use rather than imposed over them:
      the existing --radius-sm (8), --radius-md (10), and --radius (12) become the sm/md/lg steps
@@ -2728,6 +2742,11 @@ textarea {
   font-size: 12.5px;
   color: var(--text-dim);
 }
+.queued-item.is-editing {
+  border-color: color-mix(in srgb, var(--accent) 65%, var(--border));
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-elev));
+  box-shadow: inset 3px 0 0 var(--accent);
+}
 .queued-badge {
   flex: none;
   text-transform: uppercase;
@@ -2757,7 +2776,14 @@ textarea {
   gap: 5px;
   flex: none;
 }
-.queued-steer { flex: none; }
+.queued-steer,
+.queued-edit { flex: none; }
+.queued-edit {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 6px;
+}
 .queued-cancel {
   flex: none;
   background: transparent;
@@ -2772,6 +2798,20 @@ textarea {
 .queued-cancel:hover {
   background: var(--bg-elev-2);
   color: var(--text);
+}
+.queued-edit-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 7px 9px;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-elev));
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: 600;
 }
 .steering-receipts {
   display: grid;
@@ -3255,8 +3295,6 @@ textarea,
   border: none;
   background: transparent;
   color: var(--text-dim);
-  font-size: 20px;
-  line-height: 1;
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -7602,7 +7640,7 @@ body.shell-dock-dragging * {
 }
 .shell-prompt {
   color: var(--accent);
-  font-family: "Cascadia Code", "Consolas", ui-monospace, monospace;
+  font-family: var(--font-terminal);
   flex: none;
 }
 .shell-input {
@@ -7612,7 +7650,7 @@ body.shell-dock-dragging * {
   border-radius: var(--radius-sm);
   color: var(--text);
   padding: 7px 10px;
-  font-family: "Cascadia Code", "Consolas", ui-monospace, monospace;
+  font-family: var(--font-terminal);
   font-size: 12.5px;
 }
 .shell-input:focus {
@@ -9465,6 +9503,17 @@ body.shell-dock-dragging * {
   justify-self: stretch;
   min-width: 0;
 }
+.transcript-status-usage {
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .transcript-status-actions {
   display: flex;
   flex: none;
@@ -9473,6 +9522,7 @@ body.shell-dock-dragging * {
   padding-left: 10px;
   min-width: 0;
 }
+.transcript-status-actions:empty { display: none; }
 /* One compact centered cluster — pager hints sit at the standard inter-control gap directly
    beside the follow-state control instead of being pushed toward the strip edges. */
 .follow-tail-control {
@@ -10045,8 +10095,11 @@ body.shell-dock-dragging * {
      24px WCAG target minimum while recovering room for the user-authored Session name. */
   .topbar:has(.mobile-session-back) {
     height: calc(40px + env(safe-area-inset-top, 0px));
-    padding-right: calc(8px + env(safe-area-inset-right, 0px));
+    padding-right: var(--mobile-session-trailing-inset);
     padding-left: calc(8px + env(safe-area-inset-left, 0px));
+  }
+  .topbar:has(.mobile-session-back) .topbar-mobile-controls {
+    gap: var(--mobile-session-action-gap);
   }
   .topbar:has(.mobile-session-back) h1 {
     font-size: var(--text-base);
@@ -10211,6 +10264,7 @@ body.shell-dock-dragging * {
     column-gap: 7px;
     row-gap: 0;
     padding: 4px var(--space-3);
+    padding-right: var(--mobile-session-trailing-inset);
   }
   .session-detail > .detail-head:has(> .session-header-note) { row-gap: 4px; }
   .session-detail > .detail-head > .session-header-statuses {
@@ -10263,6 +10317,7 @@ body.shell-dock-dragging * {
     grid-row: 1;
     min-width: 0;
     align-self: center;
+    gap: var(--mobile-session-action-gap);
   }
   .session-detail > .detail-head > .session-header-note {
     grid-column: 1 / -1;
@@ -11166,6 +11221,32 @@ body.shell-dock-dragging * {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
+.sessions-toolbar-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+.sessions-toolbar-option-icon { display: none; }
+.sessions-toolbar-count {
+  display: inline-flex;
+  min-width: 18px;
+  height: 18px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  padding: 0 5px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-elev-3);
+  color: var(--text-dim);
+  font-size: var(--text-2xs);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.ui-seg-option.is-selected .sessions-toolbar-count {
+  background: color-mix(in srgb, var(--accent) 20%, var(--bg-elev-3));
+  color: var(--accent-on-tint);
+}
 .ui-seg-option.is-disabled { color: var(--text-dim); cursor: not-allowed; }
 .ui-select-option.is-active { background: var(--bg-elev-3); }
 .ui-select-option.is-disabled { cursor: not-allowed; }
@@ -11196,6 +11277,10 @@ body.shell-dock-dragging * {
 .ui-seg.is-block { display: flex; width: 100%; }
 /* The Usage range fills its row on a phone, as the button row it replaced did. */
 @media (max-width: 760px) {
+  .sessions-toolbar-option-text { display: none; }
+  .sessions-toolbar-option-icon { display: inline-flex; }
+  .inbox-reminder-view .ui-seg-option,
+  .sessions-view-toggle .ui-seg-option { padding-inline: 7px; }
   .ui-seg.usage-range { display: flex; width: 100%; }
   .ui-seg.usage-range .ui-seg-option { flex: 1; }
 }

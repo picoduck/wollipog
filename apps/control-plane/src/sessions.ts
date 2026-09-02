@@ -2256,6 +2256,15 @@ export class SessionsService {
     }
   }
 
+  /** Apply the same session ownership, integrity, MIME, and inline-byte checks used by ordinary
+   * prompt submission before a queued edit crosses the trusted runner boundary. */
+  prepareQueuedPromptEditImages(
+    sessionId: string,
+    inputs: PromptImageInput[],
+  ): ServiceResult<PromptImageReference[]> {
+    return this.externalizePromptImages(sessionId, inputs, { kind: "human", id: "local" });
+  }
+
   createPromptImageArtifact(
     sessionId: string,
     mimeType: string,

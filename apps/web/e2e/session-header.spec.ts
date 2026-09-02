@@ -45,6 +45,60 @@ async function capture(page: Page, viewport: string) {
   await page.screenshot({ path: join(directory, `${phase}-${viewport}.png`), fullPage: true });
 }
 
+async function mobileSessionHeaderGeometry(page: Page) {
+  return page.evaluate(() => {
+    const topbar = document.querySelector(".topbar") as HTMLElement;
+    const header = document.querySelector(".session-detail > .detail-head") as HTMLElement;
+    const paneActions = topbar.querySelector(".topbar-mobile-controls") as HTMLElement;
+    const sessionActions = header.querySelector(".detail-actions") as HTMLElement;
+    const rect = (selector: string, root: ParentNode) => {
+      const box = root.querySelector(selector)?.getBoundingClientRect();
+      if (!box) throw new Error(`Missing mobile Session control: ${selector}`);
+      return { left: box.left, right: box.right, center: box.left + box.width / 2 };
+    };
+    const optionalRect = (selector: string, root: ParentNode) => {
+      const box = root.querySelector(selector)?.getBoundingClientRect();
+      return box ? { left: box.left, right: box.right, center: box.left + box.width / 2 } : null;
+    };
+    return {
+      pinned: rect('[aria-label="Toggle Pinned Summary"]', topbar),
+      terminal: rect('[aria-label="Show Terminal"], [aria-label="Hide Terminal"]', topbar),
+      sidePanel: rect('[aria-label="Show Side Panel"], [aria-label="Hide Side Panel"]', topbar),
+      fork: optionalRect('[aria-label="Fork Conversation"]', header),
+      share: rect('[aria-label="Share"]', header),
+      moreActions: rect('[aria-label="More Actions"]', header),
+      paneGap: Number.parseFloat(getComputedStyle(paneActions).gap),
+      sessionGap: Number.parseFloat(getComputedStyle(sessionActions).gap),
+      topbarPaddingRight: Number.parseFloat(getComputedStyle(topbar).paddingRight),
+      headerPaddingRight: Number.parseFloat(getComputedStyle(header).paddingRight),
+      viewportRight: window.innerWidth,
+      titleRight: topbar.querySelector("h1")!.getBoundingClientRect().right,
+      paneActionsLeft: paneActions.getBoundingClientRect().left,
+      statusesRight: header.querySelector(".session-header-statuses")!.getBoundingClientRect().right,
+      sessionActionsLeft: sessionActions.getBoundingClientRect().left,
+      hasPageOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+    };
+  });
+}
+
+function expectMobileSessionColumnsAligned(geometry: Awaited<ReturnType<typeof mobileSessionHeaderGeometry>>) {
+  expect(geometry.fork, "the fixture must expose the optional Fork column").not.toBeNull();
+  expect(Math.abs(geometry.sidePanel.center - geometry.moreActions.center)).toBeLessThanOrEqual(0.5);
+  expect(Math.abs(geometry.terminal.center - geometry.share.center)).toBeLessThanOrEqual(0.5);
+  expect(Math.abs(geometry.pinned.center - geometry.fork!.center)).toBeLessThanOrEqual(0.5);
+  expect(geometry.paneGap).toBe(geometry.sessionGap);
+  expect(geometry.terminal.left - geometry.pinned.right).toBeCloseTo(geometry.paneGap, 1);
+  expect(geometry.sidePanel.left - geometry.terminal.right).toBeCloseTo(geometry.paneGap, 1);
+  expect(geometry.share.left - geometry.fork!.right).toBeCloseTo(geometry.sessionGap, 1);
+  expect(geometry.moreActions.left - geometry.share.right).toBeCloseTo(geometry.sessionGap, 1);
+  expect(geometry.viewportRight - geometry.sidePanel.right).toBeCloseTo(geometry.topbarPaddingRight, 1);
+  expect(geometry.viewportRight - geometry.moreActions.right).toBeCloseTo(geometry.headerPaddingRight, 1);
+  expect(geometry.topbarPaddingRight).toBe(geometry.headerPaddingRight);
+  expect(geometry.titleRight).toBeLessThanOrEqual(geometry.paneActionsLeft);
+  expect(geometry.statusesRight).toBeLessThanOrEqual(geometry.sessionActionsLeft - 6);
+  expect(geometry.hasPageOverflow).toBe(false);
+}
+
 test("the unified session bar balances navigation, breadcrumb, status, and actions on one row", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await openSession(page);
@@ -393,6 +447,36 @@ test("desktop Session actions stay contained with five concurrent status indicat
   await expect(projectActions).toBeVisible();
 });
 
+test("mobile Session pane and action controls share trailing columns", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 800 });
+  await openSession(page, "git-visibility", { reviewReady: "1", sessionShell: "1" });
+  await page.evaluate(() => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
+      backgroundWorkState: "running",
+    });
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitActiveSubagent("session-alpha", "aligned-mobile-subagent");
+  });
+  await expect(page.locator(".session-status-overflow-trigger")).toBeVisible();
+
+  expectMobileSessionColumnsAligned(await mobileSessionHeaderGeometry(page));
+
+  // Chromium desktop emulation reports a zero CSS env() safe area. Override the shared computed
+  // inset at its owner to exercise the same non-zero geometry an iPhone notch supplies.
+  await page.evaluate(() => {
+    document.documentElement.style.setProperty("--mobile-session-trailing-inset", "21px");
+  });
+  expectMobileSessionColumnsAligned(await mobileSessionHeaderGeometry(page));
+
+  const beforeOptionalActionRemoval = await mobileSessionHeaderGeometry(page);
+  await page.getByRole("button", { name: "Fork Conversation" }).evaluate((element) => element.remove());
+  const withoutOptionalAction = await mobileSessionHeaderGeometry(page);
+  expect(withoutOptionalAction.fork).toBeNull();
+  expect(withoutOptionalAction.share.center).toBeCloseTo(beforeOptionalActionRemoval.share.center, 1);
+  expect(withoutOptionalAction.moreActions.center).toBeCloseTo(beforeOptionalActionRemoval.moreActions.center, 1);
+  expect(withoutOptionalAction.terminal.center).toBeCloseTo(withoutOptionalAction.share.center, 1);
+  expect(withoutOptionalAction.sidePanel.center).toBeCloseTo(withoutOptionalAction.moreActions.center, 1);
+});
+
 for (const viewport of [
   { name: "320-pixel phone", width: 320, hiddenCounts: [4] },
   // At this exact threshold Chromium may fit one more badge on a direct load than after a resize.
@@ -577,11 +661,11 @@ for (const viewport of [
     expect(metrics.activeSubagent.x).toBeGreaterThanOrEqual(metrics.statuses.x);
     expect(metrics.activeSubagent.right).toBeLessThanOrEqual(metrics.statuses.right);
     expect(metrics.overflow.right).toBeLessThanOrEqual(metrics.fork.x);
-    expect(metrics.fork.x - metrics.overflow.right).toBeCloseTo(7, 0);
+    expect(metrics.fork.x - metrics.overflow.right).toBeCloseTo(2, 0);
     expect(metrics.fork.right).toBeLessThanOrEqual(metrics.share.x);
-    expect(metrics.share.x - metrics.fork.right).toBeCloseTo(7, 0);
-    expect(metrics.paddingRight).toBeGreaterThanOrEqual(12);
-    expect(metrics.clippingRight - metrics.moreActions.right).toBeGreaterThanOrEqual(11.5);
+    expect(metrics.share.x - metrics.fork.right).toBeCloseTo(2, 0);
+    expect(metrics.paddingRight).toBe(8);
+    expect(metrics.clippingRight - metrics.moreActions.right).toBeGreaterThanOrEqual(7.5);
     expect(metrics.totalBadgeCount).toBe(5);
     expect(metrics.badges.length).toBe(5 - hiddenCount);
     expect(metrics.badgeRows).toBe(1);
@@ -814,6 +898,13 @@ test("long session titles truncate inside the breadcrumb without hiding actions"
 test.describe("at 125% device scaling", () => {
   test.use({ deviceScaleFactor: 1.25 });
 
+  test("mobile Session action columns remain aligned on fractional device pixels", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 800 });
+    await openSession(page, "preview-follow", { sessionShell: "1" });
+    await expect.poll(() => page.evaluate(() => window.devicePixelRatio)).toBe(1.25);
+    expectMobileSessionColumnsAligned(await mobileSessionHeaderGeometry(page));
+  });
+
   test("session header preserves its trailing inset across clipping-pane scrollbar states", async ({ page }) => {
     await page.setViewportSize({ width: 780, height: 800 });
     await openSession(page);
@@ -889,7 +980,7 @@ test("the two mobile Session bars use compact touch targets and a bounded menu n
     return Math.min(window.innerWidth, clippingPane.getBoundingClientRect().right)
       - element.getBoundingClientRect().right;
   });
-  expect(trailingClearance).toBeGreaterThanOrEqual(11.5);
+  expect(trailingClearance).toBeGreaterThanOrEqual(7.5);
   await moreActions.click();
   const menu = page.getByRole("menu", { name: "Session Actions" });
   await expect(menu).toBeVisible();

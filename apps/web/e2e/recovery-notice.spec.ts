@@ -62,6 +62,8 @@ test("a tall pane shows the in-flow pill and the pinned summary can never inters
 
   // In the tall pane the compact echo stays out of the strip.
   await expect(page.locator(".transcript-recovery-strip-echo")).toBeHidden();
+  await expect(page.locator(".cbar-usage")).toBeVisible();
+  await expect(page.locator(".transcript-status-usage")).toHaveCount(0);
 });
 
 test("full-height mobile Sessions keep recovery readable in the persistent strip without an empty band", async ({ page }) => {
@@ -71,6 +73,7 @@ test("full-height mobile Sessions keep recovery readable in the persistent strip
     const slot = page.locator(".transcript-recovery-slot");
     const echo = page.locator(".transcript-recovery-strip-echo");
     const strip = page.locator(".transcript-status-strip");
+    const usage = page.locator(".transcript-status-usage");
     await expect(slot).toBeHidden();
     await expect(slot).toHaveClass(settled ? /transcript-recovery-slot$/ : /active/);
     if (settled) await expect(echo).toBeHidden();
@@ -81,22 +84,47 @@ test("full-height mobile Sessions keep recovery readable in the persistent strip
       expect(await echo.locator("span").last().evaluate((label) => label.clientWidth)).toBeGreaterThan(0);
     }
     await expect(page.locator(".follow-tail-chip")).toContainText("Following Live Output");
+    await expect(usage).toBeVisible();
+    await expect(usage).toHaveAttribute("aria-label", /^Usage: /);
+    await expect(page.locator(".cbar-usage")).toHaveCount(0);
+    const usageDisclosure = await usage.evaluate((element) => ({
+      text: element.textContent,
+      ariaLabel: element.getAttribute("aria-label"),
+      title: element.getAttribute("title"),
+    }));
+    expect(usageDisclosure.ariaLabel).toBe(`Usage: ${usageDisclosure.text}`);
+    expect(usageDisclosure.title).toBe(`Session usage: ${usageDisclosure.text}`);
 
-    return page.locator("#frame").evaluate((frame) => {
+    return page.locator("#frame").evaluate((frame, recoverySettled) => {
       const rect = (selector: string) => {
         const box = frame.querySelector(selector)!.getBoundingClientRect();
-        return { top: box.top, bottom: box.bottom, height: box.height };
+        return {
+          top: box.top, right: box.right, bottom: box.bottom, left: box.left,
+          width: box.width, height: box.height,
+        };
       };
       const slotBox = rect(".transcript-recovery-slot");
       const reader = rect(".detail-reader");
       const stripBox = rect(".transcript-status-strip");
+      const leading = rect(recoverySettled ? ".context-meter" : ".transcript-recovery-strip-echo");
+      const follow = rect(".follow-tail-chip");
+      const usage = rect(".transcript-status-usage");
+      const composerBar = rect(".composer-bar");
+      const composerLeft = rect(".cbar-left");
+      const composerRight = rect(".cbar-right");
       return {
         reader,
         strip: stripBox,
         slot: slotBox,
+        leading,
+        follow,
+        usage,
+        composerBar,
+        composerLeft,
+        composerRight,
         hasHorizontalOverflow: frame.scrollWidth > frame.clientWidth,
       };
-    });
+    }, settled);
   };
 
   for (const width of [320, 390]) {
@@ -107,6 +135,12 @@ test("full-height mobile Sessions keep recovery readable in the persistent strip
       expect(state.strip.top).toBeCloseTo(state.reader.bottom, 0);
       expect(state.strip.height).toBeLessThanOrEqual(37.5);
       expect(state.hasHorizontalOverflow).toBe(false);
+      expect(state.leading.right).toBeLessThanOrEqual(state.follow.left + 0.5);
+      expect(state.follow.right).toBeLessThanOrEqual(state.usage.left + 0.5);
+      expect(state.usage.width).toBeGreaterThan(0);
+      expect(state.usage.right).toBeLessThanOrEqual(state.strip.right + 0.5);
+      expect(Math.abs(state.composerLeft.top - state.composerRight.top)).toBeLessThanOrEqual(1);
+      expect(state.composerBar.height).toBeLessThanOrEqual(46);
     }
     expect(active.reader.height).toBeCloseTo(inactive.reader.height, 0);
     expect(active.strip.top).toBeCloseTo(inactive.strip.top, 0);

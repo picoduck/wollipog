@@ -41,8 +41,8 @@ class InMemoryShellTransport {
 
 const interactiveTransport = new InMemoryShellTransport();
 const readonlyTransport = new InMemoryShellTransport();
-const INITIAL_INTERACTIVE_OUTPUT = "Initial terminal output\r\n";
-const INITIAL_READONLY_OUTPUT = "Read-only terminal\n";
+const INITIAL_INTERACTIVE_OUTPUT = "Initial terminal output\r\nGlyphs:   󰊢 │ ─ é Ж 日本語\r\n";
+const INITIAL_READONLY_OUTPUT = "Read-only terminal\nGlyphs:   󰊢 │ ─ é Ж 日本語\n";
 let appShortcutCount = 0;
 
 declare global {
@@ -132,6 +132,10 @@ function Fixture() {
           onResize={(cols, rows) => readonlyTransport.reportResize(cols, rows)}
         />
       </section>
+      <div className="shell-input-row">
+        <span className="shell-prompt" aria-hidden="true">$</span>
+        <input className="shell-input" aria-label="Adjacent Shell Input Fixture" readOnly />
+      </div>
       <div className="detail-scroll" tabIndex={-1}>Terminal Exit Target</div>
     </main>
   );

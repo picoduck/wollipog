@@ -334,6 +334,8 @@ test("status predicates distinguish active, running, and blocked states", () => 
   assert.equal(isInboxBlocked(session("approval", {
     pendingApproval: { requestId: "request-1", title: "Allow command?", options: [] },
   })), true);
+  assert.equal(isInboxBlocked(session("legacy-idle", { pendingApproval: undefined as never })), false,
+    "an omitted legacy pendingApproval does not invent a blocked state");
 });
 
 test("split lookup falls back to All and selection repair follows split order", () => {

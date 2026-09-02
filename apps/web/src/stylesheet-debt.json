@@ -228,7 +228,6 @@
     "|.plan-icon|font-size|10",
     "|.plan-row,.artifact-row,.tool-row|font-size|12",
     "|.plus-add .plus-check|font-size|14",
-    "|.plus-btn|font-size|20",
     "|.plus-budget input|font-size|12.5",
     "|.plus-budget-hint|font-size|11",
     "|.plus-budget-prefix|font-size|13",

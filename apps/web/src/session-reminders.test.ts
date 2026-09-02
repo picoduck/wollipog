@@ -4,6 +4,7 @@ import type { SessionReminderView, SessionView } from "@wollipog/protocol";
 import {
   reminderBadgeLabel,
   sessionVisibleForReminderMode,
+  snoozedSessionAttentionReason,
   sortSessionsForReminders,
 } from "./session-reminders.js";
 
@@ -33,6 +34,47 @@ test("pending reminders hide ordinary active work but never hide required attent
   assert.equal(sessionVisibleForReminderMode(session("running", "running"), pending, "snoozed"), true);
   assert.equal(sessionVisibleForReminderMode(session("blocked", "input_required"), reminder("blocked"), "ordinary"), true);
   assert.equal(sessionVisibleForReminderMode(session("failed", "failed"), reminder("failed"), "ordinary"), true);
+});
+
+test("only explicit attention reasons retain a snoozed session in Active", () => {
+  const cases: Array<[string, SessionView, string]> = [
+    ["legacy input", session("input", "input_required"), "Input Required"],
+    ["failure", session("failed", "failed"), "Failed"],
+    ["approval", session("approval", "idle", {
+      pendingApproval: { requestId: "approval", title: "Run tests?", options: [] },
+    }), "Approval Required"],
+    ["question", session("question", "idle", {
+      pendingApproval: { requestId: "question", title: "Which database?", options: [], kind: "question" },
+    }), "Answer Required"],
+    ["orphaned background work", session("orphaned", "idle", {
+      backgroundWorkState: "orphaned",
+    }), "Background Work Orphaned"],
+    ["delivery watchdog", session("watchdog", "idle", {
+      backgroundDeliveries: [{
+        deliveryId: "delivery",
+        continuationId: "continuation",
+        watchdogState: "terminal_without_continuation",
+      } as never],
+    }), "Continuation Required"],
+  ];
+
+  for (const [name, candidate, label] of cases) {
+    assert.equal(sessionVisibleForReminderMode(candidate, reminder(candidate.id), "ordinary"), true, name);
+    assert.equal(snoozedSessionAttentionReason(candidate)?.label, label, name);
+  }
+
+  const omittedApproval = session("omitted-approval", "idle", { pendingApproval: undefined as never });
+  assert.equal(snoozedSessionAttentionReason(omittedApproval), null);
+  assert.equal(sessionVisibleForReminderMode(omittedApproval, reminder(omittedApproval.id), "ordinary"), false,
+    "a legacy omitted pendingApproval is absence, not an attention condition");
+});
+
+test("clearing the final attention condition removes a still-snoozed session from Active", () => {
+  const pending = reminder("transition");
+  const retained = session("transition", "idle", { backgroundWorkState: "orphaned" });
+  assert.equal(sessionVisibleForReminderMode(retained, pending, "ordinary"), true);
+  assert.equal(sessionVisibleForReminderMode({ ...retained, backgroundWorkState: "resumed" }, pending, "ordinary"), false);
+  assert.equal(sessionVisibleForReminderMode({ ...retained, backgroundWorkState: undefined }, pending, "ordinary"), false);
 });
 
 test("archived sessions do not appear in either reminder view", () => {

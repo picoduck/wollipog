@@ -280,7 +280,9 @@
 //     new runners downgrade those codes for every pre-v97 control plane.
 // 98: native session capability overlays can revoke or restore steering when a verified
 //     persistent provider transport falls back at runtime. Older peers retain catalog truth.
-export const PROTOCOL_VERSION = 98;
+// 99: queued-prompt editing uses capability-gated correlated reads and idempotent revision-fenced
+//     replacements. The runner remains authoritative for mutability, identity, and FIFO position.
+export const PROTOCOL_VERSION = 99;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
@@ -389,6 +391,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   turnInterruptionAck: 72,
   conversationSteering: 73,
   nativeSteeringOverlay: 98,
+  queuedPromptEditing: 99,
   sessionCommandInvocations: 75,
   gitVisibility: 76,
   durablePromptQueueIdentity: 78,
@@ -2832,7 +2835,28 @@ export interface QueuedPromptView {
   durableDeliveryError?: string;
   /** True only when this entry came from the current runner's live in-memory queue. */
   liveQueueObserved?: boolean;
+  /** Explicit runner authority for replacing this not-yet-started entry in place. */
+  editable?: boolean;
+  editDisabledReason?: string;
+  /** Opaque optimistic-concurrency coordinate. It changes after every accepted edit. */
+  editRevision?: string;
 }
+
+export interface QueuedPromptDraft {
+  promptId: string;
+  text: string;
+  images: PromptImageInput[];
+  editRevision: string;
+}
+
+export type QueuedPromptEditFailureReason =
+  | "session_not_found"
+  | "queue_item_absent"
+  | "queue_item_started"
+  | "queue_item_changed"
+  | "queue_item_immutable"
+  | "invalid_content"
+  | "queue_capacity_exceeded";
 
 export type PendingPromptState =
   | "pending" | "sent" | "accepted" | "queued" | "started" | "failed" | "uncertain";
@@ -4045,6 +4069,29 @@ export interface ResolveSteeringAttemptResultMessage {
   queuedPromptId?: string;
 }
 
+export interface ReadQueuedPromptResultMessage {
+  type: "read_queued_prompt_result";
+  requestId: string;
+  sessionId: string;
+  promptId: string;
+  ok: boolean;
+  prompt?: QueuedPromptDraft;
+  reason?: QueuedPromptEditFailureReason;
+  error?: string;
+}
+
+export interface EditQueuedPromptResultMessage {
+  type: "edit_queued_prompt_result";
+  requestId: string;
+  submissionId: string;
+  sessionId: string;
+  promptId: string;
+  applied: boolean;
+  prompt?: QueuedPromptDraft;
+  reason?: QueuedPromptEditFailureReason;
+  error?: string;
+}
+
 export type DriverTelemetryMetric = "launch" | "resume" | "approval" | "crash" | "fallback";
 export type DriverTelemetryOutcome = "success" | "failure" | "allowed" | "denied" | "cancelled" | "observed";
 export type DriverTelemetryReason =
@@ -4176,6 +4223,8 @@ export type RunnerToControlPlane =
   | InterruptTurnResultMessage
   | SteerSessionResultMessage
   | ResolveSteeringAttemptResultMessage
+  | ReadQueuedPromptResultMessage
+  | EditQueuedPromptResultMessage
   | SessionCommandInvocationResultMessage
   | SessionCommandInvocationUpdateMessage
   | DriverTelemetryMessage
@@ -4438,6 +4487,26 @@ export interface CancelQueuedPromptMessage {
   type: "cancel_queued_prompt";
   sessionId: string;
   promptId: string;
+}
+
+/** Fetch the exact content of one mutable live queue entry. Queue projections remain bounded. */
+export interface ReadQueuedPromptMessage {
+  type: "read_queued_prompt";
+  requestId: string;
+  sessionId: string;
+  promptId: string;
+}
+
+/** Atomically replace one queue entry without changing its identity or FIFO coordinate. */
+export interface EditQueuedPromptMessage {
+  type: "edit_queued_prompt";
+  requestId: string;
+  submissionId: string;
+  sessionId: string;
+  promptId: string;
+  expectedRevision: string;
+  text: string;
+  images: PromptImageInput[];
 }
 
 export interface StopSessionMessage {
@@ -5356,6 +5425,8 @@ export type ControlPlaneToRunner =
   | CancelSessionMessage
   | InterruptTurnMessage
   | CancelQueuedPromptMessage
+  | ReadQueuedPromptMessage
+  | EditQueuedPromptMessage
   | StopSessionMessage
   | RearmGovernanceMessage
   | ResolvePermissionMessage

@@ -10,7 +10,7 @@ import { StoreProvider } from "../store.js";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
-import { InboxView } from "./InboxView.js";
+import { filterInboxSplitsForReminderMode, InboxView } from "./InboxView.js";
 import type { RightPanelState } from "./RightPanel.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -157,9 +157,45 @@ function snapshot(sessions: SessionView[]): UiSnapshotMessage {
   };
 }
 
+function reminder(sessionId: string, revision = 1): SessionReminderView {
+  return {
+    reminderId: `reminder-${sessionId}`,
+    sessionId,
+    scheduledFor: 10_000,
+    timeZone: "UTC",
+    originalExpression: "tomorrow",
+    wakePolicy: "until_activity",
+    state: "pending",
+    revision,
+    createdAt: 1,
+    updatedAt: revision,
+  };
+}
+
 function rowTitles(container: HTMLDivElement): string[] {
   return [...container.querySelectorAll(".inbox-row-title")].map((row) => row.textContent ?? "");
 }
+
+test("reminder-filtered splits reconcile blocked and stalled counts with visible rows", () => {
+  const visible = session("visible", 3, { status: "input_required" });
+  const hidden = session("hidden", 2);
+  const ordinary = session("ordinary", 1);
+  const reminders = new Map([[hidden.id, reminder(hidden.id)]]);
+  const [split] = filterInboxSplitsForReminderMode([{
+    key: null,
+    kind: "all",
+    name: "All",
+    project: null,
+    sessions: [visible, hidden, ordinary],
+    count: 3,
+    blockedCount: 1,
+    stalledCount: 2,
+  }], reminders, "ordinary", new Set([hidden.id, ordinary.id]));
+
+  assert.deepEqual(split?.sessions.map((candidate) => candidate.id), [visible.id, ordinary.id]);
+  assert.equal(split?.blockedCount, 1);
+  assert.equal(split?.stalledCount, 1, "a snoozed stalled row must not remain in visible aggregates");
+});
 
 function selectedRowTitle(container: HTMLDivElement): string | null {
   return container.querySelector<HTMLElement>('.inbox-row-shell[aria-selected="true"] .inbox-row-title')
@@ -300,6 +336,192 @@ test("InboxView preserves the server-authoritative Project count when reminders 
   const projectTab = [...container.querySelectorAll<HTMLElement>(".inbox-tab")]
     .find((tab) => tab.textContent?.includes("Project One"));
   assert.equal(projectTab?.querySelector(".inbox-tab-count")?.textContent, "7");
+  await act(async () => { projectTab!.click(); });
+  assert.equal(container.querySelector('[title="Active"]')?.getAttribute("aria-label"), "Active, 7 Sessions");
+  assert.equal(container.querySelector('[title="Snoozed"]')?.getAttribute("aria-label"), "Snoozed, 0 Sessions");
+
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("Active and Snoozed badges follow the selected Project split and live reminders", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "inbox-reminder-scope-test",
+    runtimeKey: "inbox-reminder-scope-test:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  const project = (id: string, name: string, count: number): ProjectView => ({
+    id,
+    name,
+    hidden: false,
+    locations: [],
+    activeSessionCount: count,
+    unarchivedSessionCount: count,
+    totalSessionCount: count,
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  const alpha = project("alpha", "Alpha", 2);
+  const beta = project("beta", "Beta", 3);
+  const alphaActive = session("alpha-active", 50, { projectId: alpha.id });
+  const alphaSnoozed = session("alpha-snoozed", 40, { projectId: alpha.id });
+  const betaOne = session("beta-one", 30, { projectId: beta.id });
+  const betaTwo = session("beta-two", 20, { projectId: beta.id });
+  const betaSnoozed = session("beta-snoozed", 10, { projectId: beta.id });
+
+  await act(async () => {
+    root.render(
+      <StoreProvider connection={connection} navigation={navigation}>
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+      </StoreProvider>,
+    );
+  });
+  await act(async () => {
+    socket.push({
+      type: "snapshot",
+      capabilities: {
+        sessionSubscriptions: false,
+        boundedDelivery: false,
+        paginatedSessionHistory: false,
+        projects: true,
+        sessionReminders: true,
+      },
+      runners: [],
+      boxes: [],
+      sessions: [alphaActive, alphaSnoozed, betaOne, betaTwo, betaSnoozed],
+      projects: [alpha, beta],
+      reminders: [reminder(alphaSnoozed.id), reminder(betaSnoozed.id)],
+      runs: [],
+      pods: [],
+    });
+  });
+  const countLabel = (title: string) => container.querySelector(`[title="${title}"]`)?.getAttribute("aria-label");
+  assert.equal(countLabel("Active"), "Active, 3 Sessions");
+  assert.equal(countLabel("Snoozed"), "Snoozed, 2 Sessions");
+
+  const alphaTab = [...container.querySelectorAll<HTMLButtonElement>(".inbox-tab")]
+    .find((tab) => tab.textContent?.includes("Alpha"))!;
+  await act(async () => { alphaTab.click(); });
+  assert.equal(countLabel("Active"), "Active, 1 Session");
+  assert.equal(countLabel("Snoozed"), "Snoozed, 1 Session");
+
+  await act(async () => {
+    socket.push({
+      type: "session_reminder_upsert",
+      userId: "user",
+      reminder: reminder(alphaActive.id),
+    });
+  });
+  assert.equal(countLabel("Active"), "Active, 0 Sessions");
+  assert.equal(countLabel("Snoozed"), "Snoozed, 2 Sessions");
+
+  const betaTab = [...container.querySelectorAll<HTMLButtonElement>(".inbox-tab")]
+    .find((tab) => tab.textContent?.includes("Beta"))!;
+  await act(async () => { betaTab.click(); });
+  assert.equal(countLabel("Active"), "Active, 2 Sessions");
+  assert.equal(countLabel("Snoozed"), "Snoozed, 1 Session");
+
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("reminder membership, scoped badges, and visible retention reasons reconcile live in list and board", async () => {
+  mobileViewport = true;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "inbox-reminder-membership-test",
+    runtimeKey: "inbox-reminder-membership-test:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  const omitted = session("omitted", 70, { pendingApproval: undefined as never });
+  const ordinary = session("ordinary", 60);
+  const orphaned = session("orphaned", 50, { backgroundWorkState: "orphaned" });
+  const watchdog = session("watchdog", 40, {
+    backgroundDeliveries: [{
+      deliveryId: "delivery-watchdog",
+      continuationId: "continuation-watchdog",
+      watchdogState: "terminal_without_continuation",
+    } as never],
+  });
+  const failed = session("failed", 30, { status: "failed" });
+  const input = session("input", 20, { status: "input_required" });
+  const unsnoozed = session("unsnoozed", 10);
+  const pending = [omitted, ordinary, orphaned, watchdog, failed, input].map((candidate) => reminder(candidate.id));
+
+  const renderView = (viewMode: "list" | "board") => act(async () => {
+    root.render(
+      <StoreProvider connection={connection} navigation={navigation}>
+        <InboxView
+          viewMode={viewMode}
+          rightPanel={rightPanel}
+          onOpenTerminal={() => undefined}
+          pinnedOpen={false}
+        />
+      </StoreProvider>,
+    );
+  });
+  await renderView("list");
+  await act(async () => {
+    socket.push({
+      type: "snapshot",
+      capabilities: {
+        sessionSubscriptions: false,
+        boundedDelivery: false,
+        paginatedSessionHistory: false,
+        projects: false,
+        sessionReminders: true,
+      },
+      runners: [],
+      boxes: [],
+      sessions: [omitted, ordinary, orphaned, watchdog, failed, input, unsnoozed],
+      reminders: pending,
+      runs: [],
+      pods: [],
+    });
+  });
+
+  assert.deepEqual(rowTitles(container), ["Session orphaned", "Session watchdog", "Session failed", "Session input", "Session unsnoozed"]);
+  assert.equal(container.querySelector('[title="Active"]')?.getAttribute("aria-label"), "Active, 5 Sessions");
+  assert.equal(container.querySelector('[title="Snoozed"]')?.getAttribute("aria-label"), "Snoozed, 6 Sessions");
+  assert.match(container.textContent ?? "", /Background Work Orphaned/);
+  assert.match(container.textContent ?? "", /Continuation Required/);
+  assert.ok(container.querySelector('[aria-label="Attention: Background Work Orphaned"]'));
+  assert.ok(container.querySelector('[aria-label="Attention: Continuation Required"]'));
+
+  await act(async () => { (container.querySelector('[title="Snoozed"]') as HTMLButtonElement).click(); });
+  assert.deepEqual(rowTitles(container), [
+    "Session omitted", "Session ordinary", "Session orphaned", "Session watchdog", "Session failed", "Session input",
+  ]);
+
+  await act(async () => { (container.querySelector('[title="Active"]') as HTMLButtonElement).click(); });
+  await renderView("board");
+  assert.ok([...container.querySelectorAll(".card")].some((card) => card.textContent?.includes("Session orphaned")));
+  assert.ok(container.querySelector('.card [aria-label="Attention: Background Work Orphaned"]'));
+  assert.ok(container.querySelector('.card [aria-label="Reminder: Snoozed"]'));
+
+  await act(async () => {
+    socket.push({ type: "session_upsert", session: { ...orphaned, backgroundWorkState: "resumed", updatedAt: 80 } });
+  });
+  assert.equal([...container.querySelectorAll(".card")].some((card) => card.textContent?.includes("Session orphaned")), false,
+    "clearing the final attention reason removes the still-snoozed card from Active");
+  assert.equal(container.querySelector('[title="Active"]')?.getAttribute("aria-label"), "Active, 4 Sessions");
+
+  await act(async () => {
+    socket.push({ type: "session_reminder_removed", userId: "user", sessionId: ordinary.id });
+  });
+  assert.ok([...container.querySelectorAll(".card")].some((card) => card.textContent?.includes("Session ordinary")),
+    "removing the reminder returns the idle session without navigation");
+  assert.equal(container.querySelector('[title="Active"]')?.getAttribute("aria-label"), "Active, 5 Sessions");
+  assert.equal(container.querySelector('[title="Snoozed"]')?.getAttribute("aria-label"), "Snoozed, 5 Sessions");
 
   await act(async () => { root.unmount(); });
   container.remove();
