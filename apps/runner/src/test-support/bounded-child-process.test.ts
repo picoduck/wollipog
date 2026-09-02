@@ -211,78 +211,103 @@ test("execFileSync still behaves normally for a child that exits", () => {
   assert.throws(() => execFileSync(process.execPath, ["-e", "process.exit(3)"], { stdio: "ignore" }));
 });
 
-test("runner tests take the synchronous spawns from this module, not node:child_process", () => {
-  // Parse the whole import clause rather than pattern-matching each shape separately. Enumerating
-  // shapes kept leaving gaps: `import cp, { spawnSync }` matches neither a braces-first pattern
-  // nor an identifier-then-from one. Capturing everything between `import` and the specifier, then
-  // inspecting it, covers default, named, namespace, and mixed forms in one place.
-  const SPECIFIER = String.raw`['"](?:node:)?child_process['"]`;
-  // [^;] keeps a clause inside its own statement; a lazy any-character class would let one file's
-  // first import swallow everything up to the offending specifier and tokenize to nothing.
-  const IMPORT_CLAUSE = new RegExp(String.raw`import\s+([^;]*?)\s*from\s*${SPECIFIER}`, "g");
-  // require() and dynamic import() reach the same module without an import clause.
-  const LOADED = new RegExp(
-    String.raw`(?:\{([^}]*)\}|(\w+))\s*=\s*(?:await\s+)?(?:require|import)\(\s*${SPECIFIER}\s*\)`,
-    "g",
-  );
-  // Catch-all for the shapes that bind nothing, e.g. (await import(...)).spawnSync(...).
-  const LOADED_ANY = new RegExp(String.raw`(?:require|import)\(\s*${SPECIFIER}\s*\)`, "g");
-  // execSync is synchronous too and has no wrapper here, so importing it is rejected outright.
-  const SYNCHRONOUS = new Set(["execFileSync", "spawnSync", "execSync"]);
+// Parse the whole import clause rather than pattern-matching each shape separately. Enumerating
+// shapes kept leaving gaps: `import cp, { spawnSync }` matches neither a braces-first pattern
+// nor an identifier-then-from one. Capturing everything between `import` and the specifier, then
+// inspecting it, covers default, named, namespace, and mixed forms in one place.
+const SPECIFIER = String.raw`['"](?:node:)?child_process['"]`;
+// [^;] keeps a clause inside its own statement; a lazy any-character class would let one file's
+// first import swallow everything up to the offending specifier and tokenize to nothing.
+const IMPORT_CLAUSE = String.raw`import\s+([^;]*?)\s*from\s*${SPECIFIER}`;
+// require() and dynamic import() reach the same module without an import clause.
+const LOADED = String.raw`(?:\{([^}]*)\}|(\w+))\s*=\s*(?:await\s+)?(?:require|import)\(\s*${SPECIFIER}\s*\)`;
+// Catch-all for the shapes that bind nothing, e.g. (await import(...)).spawnSync(...).
+const LOADED_ANY = String.raw`(?:require|import)\(\s*${SPECIFIER}\s*\)`;
+// execSync is synchronous too and has no wrapper here, so importing it is rejected outright.
+const SYNCHRONOUS = new Set(["execFileSync", "spawnSync", "execSync"]);
 
+// ESM aliases with `as`, CommonJS destructuring with `:` — either way, take the imported name.
+const importedNames = (clause: string | undefined): string[] =>
+  (clause ?? "")
+    .split(",")
+    .map((name) => name.trim().split(/\s+as\s+|:/)[0].trim())
+    // `spawn` and `exec` are asynchronous, so --test-timeout already bounds them.
+    .filter((name) => SYNCHRONOUS.has(name));
+
+// `{ default: cp }` and `{ default as cp }` hand over the whole module rather than one export: a
+// builtin's `default` is its `module.exports`, so `cp.spawnSync` resolves. `importedNames` reads
+// only the name `default`, which is not itself synchronous, so recognise the binding separately.
+const defaultBinding = (clause: string | undefined): string | undefined => {
+  for (const entry of (clause ?? "").split(",")) {
+    const bound = /^\s*default(?:\s*:\s*|\s+as\s+)(\w+)\s*$/.exec(entry);
+    if (bound) return bound[1];
+  }
+  return undefined;
+};
+
+const mentionsSynchronous = (text: string): boolean =>
+  [...SYNCHRONOUS].some((name) => new RegExp(String.raw`\b${name}\b`).test(text));
+
+// Every way a file can reach node:child_process's synchronous API, as human-readable reasons; []
+// for a clean file. At module scope so the fixtures below can drive each branch directly: walking
+// the repository only ever proves that today's tree happens to be clean, which keeps passing even
+// if the detection is deleted.
+function synchronousLoadOffenders(text: string): string[] {
+  const reasons: string[] = [];
+
+  for (const match of text.matchAll(new RegExp(IMPORT_CLAUSE, "g"))) {
+    const clause = match[1] ?? "";
+    const braced = /\{([^}]*)\}/.exec(clause);
+    const names = importedNames(braced?.[1]);
+    if (names.length > 0) reasons.push(`import { ${names.join(", ")} }`);
+
+    // Whatever sits outside the braces is a default or namespace binding, which hands the test
+    // every synchronous function at once. Only flag it when the file actually mentions one:
+    // acp-client-services.test.ts embeds `require("node:child_process").spawn(...)` inside a
+    // string it writes out as a child script, and that async usage is not this rule's business.
+    const binding = clause.replace(/\{[^}]*\}/g, "").replace(/,/g, "").trim();
+    if (binding.length > 0 && mentionsSynchronous(text)) {
+      reasons.push(`default or namespace import (${binding})`);
+    }
+    const aliased = defaultBinding(braced?.[1]);
+    if (aliased !== undefined && mentionsSynchronous(text)) {
+      reasons.push(`default or namespace import (${aliased})`);
+    }
+  }
+
+  let boundLoad = false;
+  for (const match of text.matchAll(new RegExp(LOADED, "g"))) {
+    boundLoad = true;
+    const names = importedNames(match[1]);
+    if (names.length > 0) reasons.push(`require/import { ${names.join(", ")} }`);
+    // A `default` binding is a whole-module load wearing a destructuring pattern.
+    const whole = match[2] ?? defaultBinding(match[1]);
+    if (whole !== undefined && mentionsSynchronous(text)) {
+      reasons.push(`whole-module require/import (${whole})`);
+    }
+  }
+
+  // An unbound require()/import() still exposes everything, e.g. (await import(...)).spawnSync().
+  // Gated on a synchronous reference for the same reason as the bindings above.
+  if (!boundLoad && mentionsSynchronous(text) && new RegExp(LOADED_ANY, "g").test(text)) {
+    reasons.push("unbound require/import of child_process");
+  }
+
+  return reasons;
+}
+
+test("runner tests take the synchronous spawns from this module, not node:child_process", () => {
   // This file must reach the raw API to bound the module under test independently of itself.
   const GUARDRAIL_EXEMPT = new Set(["src/test-support/bounded-child-process.test.ts"]);
-
-  // ESM aliases with `as`, CommonJS destructuring with `:` — either way, take the imported name.
-  const importedNames = (clause: string | undefined): string[] =>
-    (clause ?? "")
-      .split(",")
-      .map((name) => name.trim().split(/\s+as\s+|:/)[0].trim())
-      // `spawn` and `exec` are asynchronous, so --test-timeout already bounds them.
-      .filter((name) => SYNCHRONOUS.has(name));
-
-  const mentionsSynchronous = (text: string): boolean =>
-    [...SYNCHRONOUS].some((name) => new RegExp(String.raw`\b${name}\b`).test(text));
 
   const offenders: string[] = [];
 
   for (const path of testFilesUnder(RUNNER_ROOT)) {
     const relative = repoRelative(path);
     if (GUARDRAIL_EXEMPT.has(relative)) continue;
-    const text = readFileSync(path, "utf8");
-
-    for (const match of text.matchAll(IMPORT_CLAUSE)) {
-      const clause = match[1] ?? "";
-      const braced = /\{([^}]*)\}/.exec(clause);
-      const names = importedNames(braced?.[1]);
-      if (names.length > 0) offenders.push(`${relative}: import { ${names.join(", ")} }`);
-
-      // Whatever sits outside the braces is a default or namespace binding, which hands the test
-      // every synchronous function at once. Only flag it when the file actually mentions one:
-      // acp-client-services.test.ts embeds `require("node:child_process").spawn(...)` inside a
-      // string it writes out as a child script, and that async usage is not this rule's business.
-      const binding = clause.replace(/\{[^}]*\}/g, "").replace(/,/g, "").trim();
-      if (binding.length > 0 && mentionsSynchronous(text)) {
-        offenders.push(`${relative}: default or namespace import (${binding})`);
-      }
+    for (const reason of synchronousLoadOffenders(readFileSync(path, "utf8"))) {
+      offenders.push(`${relative}: ${reason}`);
     }
-
-    let boundLoad = false;
-    for (const match of text.matchAll(LOADED)) {
-      boundLoad = true;
-      const names = importedNames(match[1]);
-      if (names.length > 0) offenders.push(`${relative}: require/import { ${names.join(", ")} }`);
-      if (match[2] && mentionsSynchronous(text)) {
-        offenders.push(`${relative}: whole-module require/import (${match[2]})`);
-      }
-    }
-
-    // An unbound require()/import() still exposes everything, e.g. (await import(...)).spawnSync().
-    // Gated on a synchronous reference for the same reason as the bindings above.
-    if (!boundLoad && mentionsSynchronous(text) && LOADED_ANY.test(text)) {
-      offenders.push(`${relative}: unbound require/import of child_process`);
-    }
-    LOADED_ANY.lastIndex = 0;
   }
 
   assert.deepEqual(
@@ -290,4 +315,45 @@ test("runner tests take the synchronous spawns from this module, not node:child_
     [],
     `import these from test-support/bounded-child-process.js instead:\n${offenders.join("\n")}`,
   );
+});
+
+// The repository walk above passes on a clean tree no matter how much of the detection is deleted,
+// so on its own it pins none of these branches. Each fixture is a load form that must stay caught.
+test("the guardrail rejects every way of reaching the synchronous API", () => {
+  const CALL = 'spawnSync("true");';
+  const rejected: Record<string, string> = {
+    "named import": 'import { spawnSync } from "node:child_process";',
+    "named import without the node: prefix": 'import { execSync } from "child_process";',
+    "aliased named import": 'import { spawnSync as ss } from "node:child_process";',
+    "default import": `import cp from "node:child_process";\n${CALL}`,
+    "namespace import": `import * as cp from "node:child_process";\n${CALL}`,
+    "mixed default and named import": 'import cp, { spawnSync } from "node:child_process";',
+    "static default alias": `import { default as cp } from "node:child_process";\n${CALL}`,
+    "require destructure": 'const { execSync } = require("node:child_process");',
+    "dynamic import destructure": 'const { spawnSync } = await import("node:child_process");',
+    "require whole module": `const cp = require("node:child_process");\n${CALL}`,
+    "dynamic import whole module": `const cp = await import("node:child_process");\n${CALL}`,
+    "require default destructure": `const { default: cp } = require("node:child_process");\n${CALL}`,
+    "dynamic import default destructure": `const { default: cp } = await import("node:child_process");\n${CALL}`,
+    "unbound require": 'require("node:child_process").spawnSync("true");',
+    "unbound dynamic import": '(await import("node:child_process")).spawnSync("true");',
+  };
+
+  for (const [shape, source] of Object.entries(rejected)) {
+    assert.notDeepEqual(synchronousLoadOffenders(source), [], `${shape} slipped past the guardrail`);
+  }
+});
+
+test("the guardrail leaves the wrapper and the asynchronous forms alone", () => {
+  const allowed: Record<string, string> = {
+    "the wrapper itself": 'import { spawnSync } from "./test-support/bounded-child-process.js";',
+    "asynchronous spawn": 'import { spawn } from "node:child_process";',
+    // acp-client-services.test.ts and spawn.test.ts embed exactly this in a child script string.
+    "an async require inside a child-script string": `const script = 'const { spawn } = require("node:child_process");';\n${'spawnSync("true");'}`,
+    "an unrelated builtin": 'import { readFileSync } from "node:fs";',
+  };
+
+  for (const [shape, source] of Object.entries(allowed)) {
+    assert.deepEqual(synchronousLoadOffenders(source), [], `${shape} was wrongly rejected`);
+  }
 });
