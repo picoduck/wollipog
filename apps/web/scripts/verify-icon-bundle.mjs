@@ -7,7 +7,7 @@ import { build } from "vite";
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const iconsPath = resolve(appRoot, "src/components/Icons.tsx");
 const source = await readFile(iconsPath, "utf8");
-const exports = [...source.matchAll(/export function (\w+Icon)\(/g)].map((match) => match[1]);
+const exports = [...source.matchAll(/export function (\w+)\(/g)].map((match) => match[1]);
 assert.ok(exports.length > 0, "the tree-shaking entry must find stable icon exports");
 assert.equal(new Set(exports).size, exports.length, "stable icon export names must be unique");
 

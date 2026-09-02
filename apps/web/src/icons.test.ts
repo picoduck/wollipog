@@ -29,6 +29,10 @@ function codeOnly(source: string): string {
   return source.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/[^\n]*/g, " ");
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 const SVG_FACTORY_PATTERN = /\w+\(\s*["'`]svg["'`]/;
 const SVG_TAG_ASSIGNMENT_PATTERN = /=\s*["'`]svg["'`]/;
 
@@ -126,7 +130,7 @@ test("every exported icon is inventoried and follows its documented ownership de
   for (const row of rows) {
     const body = sourceSlice(source, `export function ${row.name}(`, "\n}");
     if (row.decision === "Lucide") {
-      assert.match(body, new RegExp(`<LibraryIcon\\s+glyph=\\{Lucide${row.mapping}\\}`),
+      assert.match(body, new RegExp(`<LibraryIcon\\s+glyph=\\{Lucide${escapeRegExp(row.mapping)}\\}`),
         `${row.name} must render its documented Lucide ${row.mapping} mapping`);
     } else {
       assert.doesNotMatch(body, /<LibraryIcon/,
