@@ -666,6 +666,51 @@ test("turn-boundary uncertainty retires a possible unowned Claude input before t
   children[1].emit("close", 0);
 });
 
+test("a timed-out Claude steer remains a retirement fence until replay acknowledgement", async () => {
+  const children: any[] = [];
+  const timers: Array<{ callback: () => void; active: boolean }> = [];
+  const driver = new ClaudeCodeDriver(
+    { ...baseOpts, capabilities: steeringCapabilities, config: { permissionMode: "acceptEdits" } },
+    noopCb,
+    {
+      spawn: () => {
+        const child = fakeProcess();
+        children.push(child);
+        return child;
+      },
+      kill: () => {},
+      now: () => 1_000,
+      setTimer: (callback: () => void) => {
+        const timer = { callback, active: true };
+        timers.push(timer);
+        return { unref() {}, timer } as any;
+      },
+      clearTimer: (handle: { timer?: { active: boolean } }) => { if (handle.timer) handle.timer.active = false; },
+    } as any,
+  );
+  const turn = driver.prompt("original");
+  await nextTask();
+  const steering = driver.steer({ submissionId: "timeout-boundary", text: "steer", deadlineAt: 2_000 });
+  await nextTask();
+  timers[0].callback();
+  assert.equal((await steering).outcome, "uncertain");
+
+  children[0].stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  assert.equal(await turn, "end_turn");
+  assert.equal(children[0].stdin.writableEnded, true, "timeout evidence survives until the turn boundary");
+  const next = driver.prompt("next owned prompt");
+  await nextTask();
+  assert.equal(children.length, 1);
+  children[0].emit("close", 0);
+  await nextTask();
+  await nextTask();
+  assert.equal(children.length, 2);
+  children[1].stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  assert.equal(await next, "end_turn");
+  driver.dispose();
+  children[1].emit("close", 0);
+});
+
 test("multiple Claude steering messages preserve write order and distinct receipts", async () => {
   const child = fakeProcess();
   const writes: string[] = [];

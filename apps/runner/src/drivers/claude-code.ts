@@ -104,6 +104,11 @@ interface PendingClaudeSteer {
   timer: ReturnType<typeof setTimeout>;
 }
 
+interface UnacknowledgedClaudeSteer {
+  turnId: number;
+  generation: number;
+}
+
 export interface ClaudePersistentSettings {
   enabled: boolean;
   idleMs: number;
@@ -312,6 +317,9 @@ export class ClaudeCodeDriver implements Driver {
   private activeOneShotTurnId: number | null = null;
   private readonly pendingSteersByMessage = new Map<string, PendingClaudeSteer>();
   private readonly pendingSteerSubmissions = new Set<string>();
+  /** Independent of receipt-promise lifetime: a timeout must not forget that Claude may still
+   * consume this written message as an unowned next turn. */
+  private readonly unacknowledgedSteerMessages = new Map<string, UnacknowledgedClaudeSteer>();
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingCeilingReached = false;
@@ -612,6 +620,7 @@ export class ClaudeCodeDriver implements Driver {
       };
       this.pendingSteersByMessage.set(providerMessageId, pending);
       this.pendingSteerSubmissions.add(submissionId);
+      this.unacknowledgedSteerMessages.set(providerMessageId, { turnId: turn.id, generation });
 
       try {
         child.stdin.write(JSON.stringify(buildClaudeUserMessage(text, images, providerMessageId)) + "\n", (error?: Error | null) => {
@@ -624,6 +633,7 @@ export class ClaudeCodeDriver implements Driver {
           });
         });
       } catch (error) {
+        this.unacknowledgedSteerMessages.delete(providerMessageId);
         this.settleClaudeSteer(pending, {
           outcome: "rejected",
           reason: `Claude steering could not be written: ${(error as Error).message}`,
@@ -1060,8 +1070,8 @@ export class ClaudeCodeDriver implements Driver {
 
   private finishPersistentTurn(turn: PersistentTurn, reason: StopReason): void {
     if (turn.settled || this.activePersistentTurn !== turn) return;
-    const hadUnacknowledgedSteering = [...this.pendingSteersByMessage.values()]
-      .some((pending) => pending.turnId === turn.id);
+    const hadUnacknowledgedSteering = [...this.unacknowledgedSteerMessages.values()]
+      .some((pending) => pending.turnId === turn.id && pending.generation === this.persistentGeneration);
     this.settleClaudeSteersForTurn(
       turn.id,
       "Claude provider turn closed before steering acknowledgement",
@@ -1091,16 +1101,24 @@ export class ClaudeCodeDriver implements Driver {
   private acknowledgeClaudeSteer(msg: Json): boolean {
     if (msg?.type !== "user" || msg.isReplay !== true || typeof msg.uuid !== "string" ||
         msg.session_id !== this.sessionId) return false;
+    const unacknowledged = this.unacknowledgedSteerMessages.get(msg.uuid);
+    if (!unacknowledged) return false;
     const pending = this.pendingSteersByMessage.get(msg.uuid);
-    if (!pending) return false;
     const turn = this.activePersistentTurn;
-    if (!turn || turn.id !== pending.turnId || this.persistentGeneration !== pending.generation) {
-      this.settleClaudeSteer(pending, {
-        outcome: "uncertain",
-        reason: "Claude acknowledged steering after the active provider turn changed",
-      });
+    if (!turn || turn.id !== unacknowledged.turnId || this.persistentGeneration !== unacknowledged.generation) {
+      if (pending) {
+        this.settleClaudeSteer(pending, {
+          outcome: "uncertain",
+          reason: "Claude acknowledged steering after the active provider turn changed",
+        });
+      }
+      void this.stopPersistentTransport(false, "process_exit");
       return true;
     }
+    this.unacknowledgedSteerMessages.delete(msg.uuid);
+    // A replay after Wollipog's deadline proves provider receipt but cannot retroactively replace
+    // the already-published Uncertain result. It does make retaining this transport safe.
+    if (!pending) return true;
     this.settleClaudeSteer(pending, {
       outcome: "accepted",
       providerTurnId: this.sessionId,
@@ -1527,6 +1545,7 @@ export class ClaudeCodeDriver implements Driver {
     this.persistentFingerprint = null;
     this.pendingApprovals.clear();
     this.settleAllClaudeSteers("Claude steering transport closed before acknowledgement");
+    this.unacknowledgedSteerMessages.clear();
     this.persistentGeneration += 1;
     if (cancelActive && this.activePersistentTurn && !this.activePersistentTurn.settled) {
       const turn = this.activePersistentTurn;
@@ -1747,6 +1766,7 @@ export class ClaudeCodeDriver implements Driver {
     this.streamingMessageIds.clear();
     this.pendingApprovals.clear();
     this.settleAllClaudeSteers("Claude driver was disposed before steering acknowledgement");
+    this.unacknowledgedSteerMessages.clear();
     this.activeOneShotTurnId = null;
     if (this.activePersistentTurn && !this.activePersistentTurn.settled) {
       this.activePersistentTurn.settled = true;
