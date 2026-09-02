@@ -383,7 +383,6 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   runtimeDiagnostics: 32,
   acpLogout: 34,
   acpSessionContext: 38,
-  acpRegistry: 39,
   acpRegistryApproval: 40,
   governanceRearm: 47,
   turnInterruption: 71,
