@@ -625,18 +625,6 @@ test("v74 native snapshots publish an explicit session command catalog, includin
   );
 });
 
-test("v98 native snapshots publish runtime steering availability without freezing catalog knobs", () => {
-  assert.deepEqual(
-    metaToSnapshot(meta({ capabilities: { supportsSteering: false } }), 98).agentCapabilities,
-    { supportsSteering: false },
-  );
-  assert.equal(
-    metaToSnapshot(meta({ capabilities: { supportsSteering: false } }), 97).agentCapabilities,
-    undefined,
-    "older control planes must not receive the v98 native steering overlay",
-  );
-});
-
 test("metaToSnapshot publishes raw ACP session overrides instead of the merged effective context", () => {
   const effective = { mcpServers: [{ type: "http" as const, name: "docs", url: "https://new.example/mcp" }] };
   const overrides = { mcpServers: [{ type: "http" as const, name: "docs", url: "https://old.example/mcp", disabled: true }] };

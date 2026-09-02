@@ -258,8 +258,9 @@ flag, and each steer uses a runner-minted top-level `uuid`. Only Claude's matchi
 `type:"user", isReplay:true` frame for the same session, turn, process, and transport generation is
 an acceptance receipt. A pipe write is never acceptance: timeout, process loss, turn completion,
 or lifecycle cancellation before the replay stays **Uncertain** and is never automatically
-replayed. Persistent opt-out and a circuit fallback publish a session-scoped capability revocation
-so the dashboard stops offering Steer while the active transport is one-shot.
+replayed. Persistent opt-out and a circuit fallback publish a process-generation capability
+revocation so the dashboard stops offering Steer while that active transport is one-shot, without
+overwriting the installation's durable discovery capability.
 
 The lifetime policy is quiescence-aware and fail-safe:
 

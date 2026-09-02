@@ -2566,7 +2566,6 @@ export class SessionStore {
 /** Map persisted metadata to the protocol snapshot the control plane hydrates from. */
 const NATIVE_ELICITATION_OVERLAY_PROTOCOL_VERSION = 66;
 const NATIVE_SLASH_COMMAND_OVERLAY_PROTOCOL_VERSION = 74;
-const NATIVE_STEERING_OVERLAY_PROTOCOL_VERSION = RUNNER_CAPABILITY_MIN_PROTOCOL.nativeSteeringOverlay;
 const MANAGED_BACKGROUND_JOBS_PROTOCOL_VERSION = RUNNER_CAPABILITY_MIN_PROTOCOL.managedBackgroundDelivery;
 const BACKGROUND_WORK_TRACKING_PROTOCOL_VERSION = RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundWorkTracking;
 
@@ -2582,16 +2581,11 @@ export function metaToSnapshot(
     controlPlaneProtocolVersion >= NATIVE_SLASH_COMMAND_OVERLAY_PROTOCOL_VERSION
     ? m.sessionSlashCommands
     : undefined;
-  const nativeSteering = controlPlaneProtocolVersion != null &&
-    controlPlaneProtocolVersion >= NATIVE_STEERING_OVERLAY_PROTOCOL_VERSION
-    ? m.capabilities?.supportsSteering
-    : undefined;
   const nativeCapabilities: SessionCapabilityOverlay | undefined =
-    nativeElicitation !== undefined || nativeSlashCommands !== undefined || nativeSteering !== undefined
+    nativeElicitation !== undefined || nativeSlashCommands !== undefined
       ? {
           ...(nativeElicitation !== undefined ? { elicitation: nativeElicitation } : {}),
           ...(nativeSlashCommands !== undefined ? { slashCommands: nativeSlashCommands } : {}),
-          ...(nativeSteering !== undefined ? { supportsSteering: nativeSteering } : {}),
         }
       : undefined;
   return {

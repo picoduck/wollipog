@@ -628,6 +628,44 @@ test("Claude steering ignores unproven echoes and becomes uncertain at the turn 
   child.emit("close", 0);
 });
 
+test("turn-boundary uncertainty retires a possible unowned Claude input before the next prompt", async () => {
+  const children: any[] = [];
+  const driver = new ClaudeCodeDriver(
+    { ...baseOpts, capabilities: steeringCapabilities, config: { permissionMode: "acceptEdits" } },
+    noopCb,
+    {
+      spawn: () => {
+        const child = fakeProcess();
+        children.push(child);
+        return child;
+      },
+      kill: () => {},
+    } as any,
+  );
+  const turn = driver.prompt("original");
+  await nextTask();
+  const steering = driver.steer({
+    submissionId: "boundary-race", text: "possibly queued as another turn", deadlineAt: Date.now() + 10_000,
+  });
+  await nextTask();
+  children[0].stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  assert.equal(await turn, "end_turn");
+  assert.equal((await steering).outcome, "uncertain");
+  assert.equal(children[0].stdin.writableEnded, true, "the ambiguous transport must retire");
+
+  const next = driver.prompt("next owned prompt");
+  await nextTask();
+  assert.equal(children.length, 1, "the next prompt waits for ambiguous transport retirement");
+  children[0].emit("close", 0);
+  await nextTask();
+  await nextTask();
+  assert.equal(children.length, 2, "the next prompt launches on a fresh transport");
+  children[1].stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  assert.equal(await next, "end_turn");
+  driver.dispose();
+  children[1].emit("close", 0);
+});
+
 test("multiple Claude steering messages preserve write order and distinct receipts", async () => {
   const child = fakeProcess();
   const writes: string[] = [];

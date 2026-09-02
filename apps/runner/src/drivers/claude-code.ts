@@ -1060,6 +1060,8 @@ export class ClaudeCodeDriver implements Driver {
 
   private finishPersistentTurn(turn: PersistentTurn, reason: StopReason): void {
     if (turn.settled || this.activePersistentTurn !== turn) return;
+    const hadUnacknowledgedSteering = [...this.pendingSteersByMessage.values()]
+      .some((pending) => pending.turnId === turn.id);
     this.settleClaudeSteersForTurn(
       turn.id,
       "Claude provider turn closed before steering acknowledgement",
@@ -1071,6 +1073,13 @@ export class ClaudeCodeDriver implements Driver {
     if (reason !== "refusal" && reason !== "cancelled") this.markSessionEstablished();
     if (reason !== "refusal" && reason !== "cancelled") this.settleUnverifiedBackgroundTasks();
     turn.resolve(reason);
+    // Claude may have committed this result just before consuming a concurrently written steer as
+    // its next input turn. The absent replay receipt makes that unknowable. Retire this process so
+    // a possible unowned turn can never alias the next Wollipog prompt's events or result.
+    if (hadUnacknowledgedSteering) {
+      void this.stopPersistentTransport(false, "process_exit");
+      return;
+    }
     if (this.pendingBackgroundTasks.size > 0) {
       if (this.pendingCeilingReached) this.evictPendingAtCeiling();
       else this.armPendingCeiling();

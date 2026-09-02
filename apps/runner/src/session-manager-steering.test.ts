@@ -122,6 +122,32 @@ function durable(commandId: string): DurableCommandLifecycle {
   };
 }
 
+test("runtime steering revocation narrows snapshots without overwriting discovery truth", () => {
+  const h = harness();
+  try {
+    h.store.patchMeta("s_steer", {
+      capabilities: {
+        models: [], effortLevels: [], slashCommands: [], supportsImages: true,
+        supportsApprovals: true, supportsSteering: true,
+      },
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const active = (h.manager as any).active.get("s_steer");
+    active.steeringAvailable = false;
+    assert.equal(h.manager.sessionSnapshots()[0]?.agentCapabilities?.supportsSteering, false);
+    assert.equal(h.store.readMeta("s_steer")?.capabilities?.supportsSteering, true);
+
+    delete active.steeringAvailable;
+    assert.equal(
+      h.manager.sessionSnapshots()[0]?.agentCapabilities?.supportsSteering,
+      undefined,
+      "a new process generation inherits current catalog discovery instead of a durable revocation",
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
 test("accepted steering is serialized, deduplicated, and authored once by the runner", async () => {
   const provider = deferred<DriverSteerResult>();
   let calls = 0;
