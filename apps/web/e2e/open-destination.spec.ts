@@ -29,7 +29,9 @@ test("the desktop session header renders a cohesive labeled split button and usa
 
   await choose.click();
   const menu = page.getByRole("menu");
-  await expect(menu.getByRole("menuitemradio")).toHaveCount(4);
+  await expect(menu.getByRole("menuitemradio")).toHaveCount(5);
+  await expect(menu.getByRole("menuitemradio", { name: "Zed" })
+    .locator('[data-destination-icon="zed"]')).toBeVisible();
   await expect(menu.getByRole("menuitemradio", { name: "Future Editor" })
     .locator('[data-destination-icon="generic-editor"]')).toBeVisible();
   await expect(menu.getByRole("menuitemradio", { name: "File Manager" })
