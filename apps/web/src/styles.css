@@ -2665,6 +2665,51 @@ textarea {
   font-size: 12px;
   margin-top: -22px;
 }
+.retitle-receipt {
+  display: grid;
+  gap: 7px;
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  background: var(--bg-elev);
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border));
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+}
+.retitle-receipt[data-status="failed"] {
+  border-color: color-mix(in srgb, var(--danger-text) 42%, var(--border));
+}
+.retitle-receipt:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.retitle-receipt-head,
+.retitle-receipt-details {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.retitle-receipt-head { justify-content: space-between; }
+.retitle-receipt-command {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.retitle-receipt-status {
+  flex: none;
+  color: var(--accent);
+  font-weight: 600;
+}
+.retitle-receipt[data-status="failed"] .retitle-receipt-status { color: var(--danger-text); }
+.retitle-receipt-details { justify-content: space-between; }
+.retitle-receipt-details > span {
+  min-width: 0;
+  line-height: 1.35;
+}
+.retitle-receipt-retry { flex: none; }
 /* Queued prompts waiting behind the running turn (item 10): visible + individually cancelable. */
 .queued-list {
   display: flex;

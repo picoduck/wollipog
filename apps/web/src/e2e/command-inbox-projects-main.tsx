@@ -1184,7 +1184,7 @@ declare global {
         patch: Partial<Pick<SessionView,
           "projectId" | "projectName" | "projectLocationId" | "audience" | "status" | "queued" | "queueHeld" |
           "pendingApproval" | "activeTurnId" | "adopted" | "importLocationReady" | "agentCapabilities" |
-          "steeringAttempts" | "preview" | "lastEventAt">>,
+          "steeringAttempts" | "preview" | "lastEventAt" | "title" | "titleSource">>,
       ): void;
       emitUserMessage(id: string, text: string, turnId: string): void;
       emitAgentMessage(id: string, text: string): void;
