@@ -15,6 +15,7 @@ import {
   type RunnerView,
   type SessionConfig,
   type SessionCommandInvocationView,
+  type SessionCapabilityOverlay,
   type SessionEvent,
   type SessionView,
   type SteerDisposition,
@@ -1457,6 +1458,10 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
   setSupportsSteering(id, supported) {
     const value = model.sessions.find((candidate) => candidate.id === id);
     if (!value) throw new Error(`unknown session: ${id}`);
+    const sessionCapabilities: SessionCapabilityOverlay = { ...value.agentCapabilities };
+    if (supported === undefined) delete sessionCapabilities.supportsSteering;
+    else sessionCapabilities.supportsSteering = supported;
+    value.agentCapabilities = sessionCapabilities;
     runner.agents[0]!.capabilities = {
       models: [],
       effortLevels: [],
