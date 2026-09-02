@@ -122,27 +122,35 @@ function durable(commandId: string): DurableCommandLifecycle {
   };
 }
 
-test("runtime steering revocation narrows snapshots without overwriting discovery truth", () => {
+test("launch-time steering revocation survives catalog refresh until a verified process replaces it", () => {
   const h = harness();
   try {
+    // The active driver was launched before steering support was verified and publishes explicit
+    // process-generation truth during initialize.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const active = (h.manager as any).active.get("s_steer");
+    active.steeringAvailable = false;
+
+    // A later catalog refresh advertises steering for future launches. It must not widen the
+    // already-running process, and the runtime overlay remains non-durable.
     h.store.patchMeta("s_steer", {
       capabilities: {
         models: [], effortLevels: [], slashCommands: [], supportsImages: true,
         supportsApprovals: true, supportsSteering: true,
       },
     });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const active = (h.manager as any).active.get("s_steer");
-    active.steeringAvailable = false;
     assert.equal(h.manager.sessionSnapshots()[0]?.agentCapabilities?.supportsSteering, false);
     assert.equal(h.store.readMeta("s_steer")?.capabilities?.supportsSteering, true);
 
-    delete active.steeringAvailable;
+    // Replacing the driver creates a new process generation. Its verified launch-time callback
+    // explicitly restores steering without persisting process-local truth into discovery.
+    active.steeringAvailable = true;
     assert.equal(
       h.manager.sessionSnapshots()[0]?.agentCapabilities?.supportsSteering,
-      undefined,
-      "a new process generation inherits current catalog discovery instead of a durable revocation",
+      true,
+      "a verified replacement process restores steering",
     );
+    assert.equal(h.store.readMeta("s_steer")?.capabilities?.supportsSteering, true);
   } finally {
     h.cleanup();
   }
