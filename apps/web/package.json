@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "vite",
     "dev:same-origin": "vite build --watch --mode same-origin-dev",
-    "build": "tsc --noEmit && vite build",
+    "build": "tsc --noEmit && vite build && node scripts/verify-icon-bundle.mjs",
     "build:e2e": "vite build --mode production-e2e",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit"

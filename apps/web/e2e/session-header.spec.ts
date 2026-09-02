@@ -87,10 +87,12 @@ test("the unified session bar balances navigation, breadcrumb, status, and actio
       projectActions: rect(projectActions),
       projectActionsIcon: rect(projectActionsIcon),
       projectSeparator: rect(projectSeparator),
-      projectActionDots: [...projectActions.querySelectorAll("circle")].map((dot) => ({
-        x: Number.parseFloat(dot.getAttribute("cx") ?? "NaN"),
-        y: Number.parseFloat(dot.getAttribute("cy") ?? "NaN"),
-      })),
+      projectActionDots: [...projectActions.querySelectorAll("circle")]
+        .map((dot) => ({
+          x: Number.parseFloat(dot.getAttribute("cx") ?? "NaN"),
+          y: Number.parseFloat(dot.getAttribute("cy") ?? "NaN"),
+        }))
+        .sort((a, b) => a.y - b.y),
       projectActionsOpacity: getComputedStyle(projectActions).opacity,
       projectActionsPointerEvents: getComputedStyle(projectActions).pointerEvents,
       projectTextWidth: projectText.getBoundingClientRect().width,
