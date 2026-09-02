@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawnSync } from "./test-support/bounded-child-process.js";
 import { test } from "node:test";
 import { tmpdir } from "node:os";
 import {
