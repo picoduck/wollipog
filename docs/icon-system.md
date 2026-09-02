@@ -62,10 +62,10 @@ exports.
 | `ImageIcon` | Lucide | `Image` | Image attachment. |
 | `ChainIcon` | Lucide | `GitCommitVertical` | Worktree or context-chain relationship. |
 | `CodeIcon` | Lucide | `Code` | Generic code destination. |
-| `VisualStudioCodeIcon` | Custom Exception | `Visual Studio Code Mark` | Product identity; Lucide excludes vendor logos. |
-| `CursorEditorIcon` | Custom Exception | `Cursor Mark` | Product identity; Lucide excludes vendor logos. |
+| `VisualStudioCodeIcon` | Custom Exception | `Official VS Code Stable Mark (2021-06-21)` | Microsoft's canonical multicolor product mark; Lucide excludes vendor logos. |
+| `CursorEditorIcon` | Custom Exception | `Simple Icons 16.29.0: Cursor` | Canonical monochrome product mark; Lucide excludes vendor logos. |
 | `WindsurfEditorIcon` | Custom Exception | `Windsurf Mark` | Product identity; Lucide excludes vendor logos. |
-| `ZedEditorIcon` | Custom Exception | `Zed Mark` | Product identity; Lucide excludes vendor logos. |
+| `ZedEditorIcon` | Custom Exception | `Simple Icons 16.29.0: Zed Industries` | Canonical monochrome product mark; Lucide excludes vendor logos. |
 | `ShieldIcon` | Lucide | `Shield` | Generic approval status, intentionally filled. |
 | `ArrowUpIcon` | Lucide | `ArrowUp` | Generic upward action. |
 | `ArrowDownIcon` | Lucide | `ArrowDown` | Generic downward action. |
@@ -80,6 +80,15 @@ exports.
 | `ThreadForkIcon` | Lucide | `GitFork` | Conversation fork. |
 | `DialIcon` | Lucide | `CircleGauge` | Model or effort setting. |
 | `PullRequestIcon` | Lucide | `GitPullRequest` | Pull request. |
+
+The Visual Studio Code mark comes from Microsoft's
+[official SVG asset bundle](https://code.visualstudio.com/assets/branding/visual-studio-code-icons.zip)
+and follows its [icon and action-button guidelines](https://code.visualstudio.com/brand). The pinned
+[Simple Icons 16.29.0 Cursor mark](https://github.com/simple-icons/simple-icons/blob/16.29.0/icons/cursor.svg)
+traces to Cursor's [official brand assets](https://cursor.com/brand). The pinned
+[Simple Icons 16.29.0 Zed Industries mark](https://github.com/simple-icons/simple-icons/blob/16.29.0/icons/zedindustries.svg)
+traces to Zed's
+[official repository asset](https://github.com/zed-industries/zed/blob/main/assets/icons/logo_96.svg).
 
 ## Dependency and Visual-Review Policy
 
