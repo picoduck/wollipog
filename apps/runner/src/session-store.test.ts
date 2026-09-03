@@ -261,6 +261,27 @@ test("registration keeps history neutral until one negotiated v86 or v87 generat
   }
 });
 
+test("linked worktree metadata is projected only to protocol v101 peers", () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta({
+      worktrees: [{
+        id: "wt-one",
+        path: "/home/me/repo/.agent-worktrees/s_abc",
+        branch: "fix/one",
+        baseRef: "origin/main",
+        baseCommit: "a".repeat(40),
+        source: "created",
+      }],
+    }));
+    const exact = store.snapshots(101, true)[0]!;
+    assert.equal(store.projectSnapshotForProtocol(exact, 100).worktrees, undefined);
+    assert.equal(store.projectSnapshotForProtocol(exact, 101).worktrees?.[0]?.branch, "fix/one");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a failed incremental projection scan commits no duplicate omissions on retry", () => {
   const { store, root } = tmpStore();
   try {

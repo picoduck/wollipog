@@ -2366,6 +2366,24 @@ test("the provider-resolved model round-trips through create and update snapshot
   assert.equal(db.getSession("resolved-model")?.resolvedModel, "claude-opus-5-20260701");
 });
 
+test("session worktree identity round-trips through create and update snapshots", () => {
+  const db = withRunner();
+  const first = {
+    id: "wt-one", path: "/repo/wt-one", branch: "fix/one", baseRef: "origin/main",
+    baseCommit: "a".repeat(40), source: "created" as const,
+  };
+  db.createSessionFromSnapshot(snapshot({
+    id: "session-worktrees", useWorktree: true, worktreePath: first.path, worktrees: [first],
+  }), "runner-1", 2_000);
+  assert.deepEqual(db.getSession("session-worktrees")?.worktrees, [first]);
+
+  const linked = { ...first, pullRequest: { url: "https://github.com/acme/repo/pull/1", state: "open" as const } };
+  db.updateSessionFromSnapshot("session-worktrees", snapshot({
+    id: "session-worktrees", useWorktree: true, worktreePath: first.path, worktrees: [linked],
+  }), 3_000);
+  assert.deepEqual(db.getSession("session-worktrees")?.worktrees, [linked]);
+});
+
 test("the adopted marker round-trips through create/update snapshot into SessionView", () => {
   const db = withRunner();
   db.createSessionFromSnapshot(snapshot({ id: "ad", adopted: true }), "runner-1", 2000);

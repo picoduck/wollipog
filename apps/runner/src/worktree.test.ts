@@ -281,6 +281,8 @@ test("session deletion journals and removes every runner-created branch without 
     const second = await manager.requestWorktree("s_multi", { baseRef: "HEAD", branch: "fix/second" });
     await manager.attachWorktree("s_multi", attachedPath);
     assert.equal(store.readMeta("s_multi")?.worktrees?.length, 3);
+    await manager.selectWorktree("s_multi", first.worktree.path);
+    assert.equal(store.readMeta("s_multi")?.worktreePath, first.worktree.path);
 
     await manager.delete("s_multi");
     assert.equal(existsSync(first.worktree.path), false);
@@ -442,6 +444,46 @@ test("restarting a worktree session reuses isolation instead of failing or orpha
     manager.stop("s_restart");
     await manager.delete("s_restart");
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a requested worktree becomes the provider cwd on the next launch", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-session-requested-cwd-"));
+  const repo = join(root, "repo");
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const launchedCwds: string[] = [];
+    const factory = (_driver: unknown, launch: { cwd: string }) => {
+      launchedCwds.push(launch.cwd);
+      return {
+        pid: 1, initialize: async () => {}, newSession: async () => {},
+        prompt: async () => ({ stopReason: "end_turn" as const }), cancel: () => {}, dispose: () => {},
+        setConfig: () => {}, resolvePermission: () => false, agentSessionId: () => null,
+      };
+    };
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, factory as never, dataDir, 1);
+    const spec = {
+      sessionId: "s_requested_cwd", workspaceId: "repo", workspacePath: repo, agentId: "claude",
+      command: "claude", args: [], env: {}, useWorktree: false, driver: "claude-code" as const,
+      context: { kind: "native" as const },
+    };
+    await manager.start(spec);
+    const requested = await manager.requestWorktree(spec.sessionId, { baseRef: "HEAD", branch: "fix/requested-cwd" });
+    assert.equal(launchedCwds[0], repo, "the already-running process retains its original OS cwd");
+    manager.stop(spec.sessionId);
+    await manager.start(spec);
+    assert.equal(launchedCwds[1], requested.worktree.path, "the next provider launch uses the selected worktree");
+    manager.stop(spec.sessionId);
+    await manager.delete(spec.sessionId);
+  } finally {
+    manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
   }
 });

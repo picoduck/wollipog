@@ -1712,7 +1712,8 @@ export class SessionManager {
     const prior = this.store.readMeta(spec.sessionId);
     const driver = spec.driver ?? "acp";
     const executionTarget = spec.executionTarget ?? prior?.executionTarget;
-    const carrySlashCommandCatalog = !spec.useWorktree && canCarrySlashCommandCatalog(prior ?? undefined, {
+    const shouldUseWorktree = spec.useWorktree || !!prior?.worktrees?.some((item) => item.path === prior.worktreePath);
+    const carrySlashCommandCatalog = !shouldUseWorktree && canCarrySlashCommandCatalog(prior ?? undefined, {
       driver,
       context,
       repoPath,
@@ -1792,7 +1793,7 @@ export class SessionManager {
       indexReset: true,
       // Worktree setup below is async — block Files/shells root resolution until it lands one
       // way or the other, so a shell can't open in the shared base checkout during the window.
-      worktreePending: !!spec.useWorktree,
+      worktreePending: shouldUseWorktree,
     };
     // create() upserts meta.json (refreshing launch params) but preserves any existing event log,
     // so a restart keeps the timeline while re-spawning a fresh agent.
@@ -1817,7 +1818,7 @@ export class SessionManager {
     // the control plane's bounded shell-open RPC.
     let worktree: WorktreeHandle | null = null;
     let worktreeOwnedByLaunch = false;
-    if (spec.useWorktree) {
+    if (shouldUseWorktree) {
       const preparationAcquired = await this.acquireWorktreePreparation(
         spec.sessionId,
         launchGeneration,
