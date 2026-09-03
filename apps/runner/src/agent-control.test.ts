@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -235,12 +236,22 @@ test("startup sweep removes final and interrupted staging files while retaining 
     }, () => {}, host);
     markAgentControlCredentialReady(root, launch.sessionId, hash);
 
-    const interrupted = join(root, ".pending-123-123e4567-e89b-42d3-a456-426614174000");
-    writeFileSync(interrupted, "abandoned credential bytes", { mode: 0o600 });
+    const interruptedLaunch = { ...spec(), sessionId: "s_interrupted" };
+    const blockedDestination = agentControlTokenPath(root, interruptedLaunch.sessionId);
+    mkdirSync(blockedDestination);
+    assert.throws(() => provisionAgentControl(interruptedLaunch, {
+      controlPlaneUrl: "ws://127.0.0.1:4317/runner",
+      controlPlaneProtocolVersion: PROTOCOL_VERSION,
+    }, () => {}, host), "a failed atomic rename leaves the producer's staging file behind");
+    rmSync(blockedDestination, { recursive: true });
+    const interruptedNames = readdirSync(root).filter((name) => name.startsWith(".pending-"));
+    assert.equal(interruptedNames.length, 1);
+    const interrupted = join(root, interruptedNames[0]!);
     const malformed = [
       ".pending-0-123e4567-e89b-42d3-a456-426614174000",
       ".pending-123-not-a-uuid",
       ".pending-123-123e4567-e89b-12d3-a456-426614174000",
+      ".pending-123-123e4567-e89b-42d3-c456-426614174000",
       ".pending-123-123E4567-E89B-42D3-A456-426614174000",
     ];
     for (const name of malformed) writeFileSync(join(root, name), "retain");
