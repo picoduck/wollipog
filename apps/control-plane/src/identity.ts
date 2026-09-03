@@ -91,7 +91,7 @@ export function mutationAuthorizationError(
 }
 
 export function agentDelegationAuthorizationError(routePath: string, principal: AgentPrincipal): string | null {
-  const resourceRoute = routePath === "/api/runners" || routePath === "/api/sessions" ||
+  const resourceRoute = routePath === "/api/compatibility" || routePath === "/api/runners" || routePath === "/api/sessions" ||
     routePath.startsWith("/api/sessions/");
   if (resourceRoute || principal.delegatedScope.owner.kind === "organization") return null;
   return "the conductor session is not delegated organization-wide access to this global resource";

@@ -73,6 +73,7 @@ test("a user- or team-scoped conductor cannot mutate organization-global resourc
     organizationId: "org_1",
     delegatedScope: { organizationId: "org_1", owner: { kind: "user", userId: "usr_1" } },
   };
+  assert.equal(agentDelegationAuthorizationError("/api/compatibility", userAgent), null);
   assert.equal(agentDelegationAuthorizationError("/api/sessions/s_1/prompt", userAgent), null);
   assert.match(agentDelegationAuthorizationError("/api/workflows", userAgent)!, /organization-wide/);
   assert.equal(agentDelegationAuthorizationError("/api/workflows", {

@@ -12,6 +12,7 @@ import {
   CONTROL_PLANE_API_VERSION,
   PROTOCOL_VERSION,
   WOLLIPOG_CONTROL_PLANE_SERVICE,
+  WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
   type ControlPlaneInstanceInfo,
   type RunnerView,
   type SessionView,
@@ -30,6 +31,8 @@ interface SeededControlPlane {
   workspaceName: string;
   sessionTitle: string;
   deviceToken: string;
+  operatorToken: string;
+  agentToken: string;
 }
 
 function seedControlPlane(database: string, seed: SeededControlPlane, includeBox = false): void {
@@ -60,6 +63,15 @@ function seedControlPlane(database: string, seed: SeededControlPlane, includeBox
         path: `/workspaces/${seed.workspaceName}`,
       }],
     }, now);
+    const identity = db.localIdentityContext();
+    const operatorUserId = `operator_${seed.hostname}`;
+    db.createIdentityMember({
+      userId: operatorUserId,
+      displayName: `${seed.hostname} Operator`,
+      organizationId: identity.organizationId,
+      role: "operator",
+      now: now + 1,
+    });
     db.createSession({
       id: SHARED_SESSION_ID,
       runnerId: SHARED_RUNNER_ID,
@@ -70,13 +82,28 @@ function seedControlPlane(database: string, seed: SeededControlPlane, includeBox
       useWorktree: false,
       driver: "acp",
       config: {},
-      now: now + 1,
+      scope: { organizationId: identity.organizationId, owner: { kind: "user", userId: operatorUserId } },
+      now: now + 2,
     });
+    assert.equal(db.setAgentControlCredential(
+      SHARED_SESSION_ID,
+      SHARED_RUNNER_ID,
+      hashToken(seed.agentToken),
+      now + 3,
+    ), true);
     db.createDevice({
       id: `device_${seed.hostname}`,
       name: `${seed.hostname} Test Device`,
       tokenHash: hashToken(seed.deviceToken),
-      now: now + 2,
+      now: now + 4,
+    });
+    db.createDevice({
+      id: `operator_device_${seed.hostname}`,
+      name: `${seed.hostname} Operator Device`,
+      tokenHash: hashToken(seed.operatorToken),
+      userId: operatorUserId,
+      organizationId: identity.organizationId,
+      now: now + 5,
     });
   } finally {
     db.close();
@@ -342,12 +369,16 @@ test("two real control planes isolate identical ids and persist identity and dat
     workspaceName: "First Workspace",
     sessionTitle: "First Control Plane Session",
     deviceToken: "first-device-token",
+    operatorToken: "first-operator-token",
+    agentToken: "first-agent-token",
   };
   const secondSeed: SeededControlPlane = {
     hostname: "second-host",
     workspaceName: "Second Workspace",
     sessionTitle: "Second Control Plane Session",
     deviceToken: "second-device-token",
+    operatorToken: "second-operator-token",
+    agentToken: "second-agent-token",
   };
   const children = new Set<ChildProcess>();
   t.after(async () => {
@@ -402,6 +433,29 @@ test("two real control planes isolate identical ids and persist identity and dat
   });
   assert.equal(compatibility.status, 200);
   assert.equal((await compatibility.json() as { protocolVersion?: unknown }).protocolVersion, PROTOCOL_VERSION);
+  const operatorCompatibility = await fetch(`http://127.0.0.1:${firstPort}/api/compatibility`, {
+    headers: { authorization: `Bearer ${firstSeed.operatorToken}` },
+  });
+  assert.equal(operatorCompatibility.status, 200, "an organization member can read compatibility metadata");
+  const liveDb = ControlPlaneDb.open(firstDb);
+  try {
+    liveDb.updateSessionStatus(SHARED_SESSION_ID, "running", Date.now());
+    assert.equal(liveDb.setAgentControlCredential(
+      SHARED_SESSION_ID,
+      SHARED_RUNNER_ID,
+      hashToken(firstSeed.agentToken),
+      Date.now(),
+    ), true);
+  } finally {
+    liveDb.close();
+  }
+  const scopedAgentCompatibility = await fetch(`http://127.0.0.1:${firstPort}/api/compatibility`, {
+    headers: {
+      authorization: `Bearer ${firstSeed.agentToken}`,
+      [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: SHARED_SESSION_ID,
+    },
+  });
+  assert.equal(scopedAgentCompatibility.status, 200, "a user-scoped session credential can preflight its CLI");
   const unauthenticated = await fetch(`http://127.0.0.1:${firstPort}/api/instance`, {
     headers: { "x-forwarded-for": "203.0.113.42" },
   });
@@ -464,6 +518,8 @@ test("a duplicate start leaves the live control plane's runner, box, session, an
     workspaceName: "Shared Workspace",
     sessionTitle: "Live Shared Session",
     deviceToken: "duplicate-start-device-token",
+    operatorToken: "duplicate-start-operator-token",
+    agentToken: "duplicate-start-agent-token",
   };
   seedControlPlane(database, seed, true);
 
