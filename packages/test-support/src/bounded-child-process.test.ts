@@ -324,9 +324,15 @@ function synchronousLoadOffenders(text: string): string[] {
   // `require("node:child_process").spawn(...)` strings that several tests embed as child scripts.
   // A synchronous member access on the load itself is the only local evidence that it is one.
   const SYNCHRONOUS_MEMBER = [...SYNCHRONOUS].join("|");
+  // Dot access, optional chaining, and computed access all reach the same function. A comment
+  // between the load and the access would still slip through; that needs a parser rather than a
+  // regex, and is contrived enough to be recorded as accepted risk instead.
+  const ACCESSES_SYNCHRONOUS = new RegExp(
+    String.raw`^\s*\)*\s*(?:\??\.\s*(?:${SYNCHRONOUS_MEMBER})\b|\[\s*["'](?:${SYNCHRONOUS_MEMBER})["']\s*\])`,
+  );
   for (const loose of text.matchAll(new RegExp(LOADED_ANY, "g"))) {
     const after = text.slice(loose.index + loose[0].length);
-    if (new RegExp(String.raw`^\s*\)*\s*\.\s*(?:${SYNCHRONOUS_MEMBER})\b`).test(after)) {
+    if (ACCESSES_SYNCHRONOUS.test(after)) {
       reasons.push("unbound require/import of child_process");
       break;
     }
@@ -379,6 +385,8 @@ test("the guardrail rejects every way of reaching the synchronous API", () => {
     "dollar-signed default destructure": `const { default: $cp } = await import("node:child_process");\n${CALL}`,
     "dollar-signed static default alias": `import { default as $cp } from "node:child_process";\n${CALL}`,
     "dollar-signed whole module": `const $cp = require("node:child_process");\n${CALL}`,
+    "unbound require via optional chaining": 'require("node:child_process")?.spawnSync("true");',
+    "unbound require via computed access": 'require("node:child_process")["spawnSync"]("true");',
     "unbound require": 'require("node:child_process").spawnSync("true");',
     "unbound dynamic import": '(await import("node:child_process")).spawnSync("true");',
   };
@@ -391,26 +399,30 @@ test("the guardrail rejects every way of reaching the synchronous API", () => {
 // synchronousLoadOffenders is pinned by the fixtures above, but the walk that feeds it is not:
 // narrowing it back to the runner subtree, or dropping an application, leaves the repository scan
 // green because the tree it scans is clean either way. Pin the breadth itself.
-test("the guardrail scans every area the test runner executes", () => {
-  const scanned = testRoots().flatMap(testFilesUnder).map(repoRelative);
+test("the guardrail scans every test file the repository tracks", () => {
+  const scanned = new Set(testRoots().flatMap(testFilesUnder).map(repoRelative));
 
-  for (const area of [
-    "apps/runner/src/",
-    "apps/web/src/",
-    "apps/control-plane/src/",
-    "packages/test-support/src/",
-    "scripts/",
-  ]) {
-    assert.ok(
-      scanned.some((path) => path.startsWith(area)),
-      `the guardrail no longer scans ${area}, so unbounded spawns there would go unnoticed`,
-    );
-  }
+  // Derive the expectation from the repository rather than from a hand-kept list of areas. A
+  // prefix list silently rots: it passed while omitting apps/runner/scripts and packages/protocol,
+  // so narrowing the walk to drop them would not have failed anything.
+  const tracked = execFileSync("git", ["ls-files", "*.test.ts", "*.test.tsx", "*.test.mjs"], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+  })
+    .split("\n")
+    .filter((path) => path.length > 0);
+
+  assert.ok(tracked.length > 0, "expected git to report tracked test files");
+  assert.deepEqual(
+    tracked.filter((path) => !scanned.has(path)),
+    [],
+    "these tracked test files are outside the guardrail's walk, so unbounded spawns in them would go unnoticed",
+  );
 
   // The walk must stay out of build output: apps/web's bundle test deletes and rebuilds these
   // while the suite runs, and racing them fails this file with an unrelated ENOENT.
   assert.deepEqual(
-    scanned.filter((path) => path.includes("dist-desktop-check") || path.includes("dist-web-check")),
+    [...scanned].filter((p) => p.includes("dist-desktop-check") || p.includes("dist-web-check")),
     [],
   );
 });
