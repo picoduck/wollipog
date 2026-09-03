@@ -1164,17 +1164,6 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           log,
           claudeHookHost,
         );
-        provisionAgentControl(
-          msg.spec,
-          {
-            controlPlaneUrl: config.controlPlaneUrl,
-            controlPlaneProtocolVersion,
-            allowInsecureTransport,
-            registerCredential: registerAgentControlCredential,
-          },
-          log,
-          agentControlHost,
-        );
       } catch (err) {
         sendUp({
           type: "session_status",
@@ -1297,17 +1286,6 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             },
             log,
             claudeHookHost,
-          );
-          provisionAgentControl(
-            msg.command.spec,
-            {
-              controlPlaneUrl: config.controlPlaneUrl,
-              controlPlaneProtocolVersion,
-              allowInsecureTransport,
-              registerCredential: registerAgentControlCredential,
-            },
-            log,
-            agentControlHost,
           );
         } catch (error) {
           lifecycle.failed(`session launch provisioning failed: ${errText(error)}`, "INVALID_COMMAND");
