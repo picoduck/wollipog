@@ -560,6 +560,12 @@ function SessionDetailLoaded({
   >(null);
   const retitlePending = retitleFeedback?.state === "running";
   const retitleInFlightRef = useRef(false);
+  const retitleFocusRestoreRef = useRef<{
+    generation: number;
+    sessionId: string;
+    composer: ReturnType<typeof captureComposerFocus>;
+  } | null>(null);
+  const retitleRetryPointerActivationRef = useRef(false);
   const [pendingPromptAction, setPendingPromptAction] = useState<string>();
   const sendRequestBusy = busy || activeComposerMutation?.kind === "send";
   const steeringRequestBusy = steeringBusy || activeComposerMutation?.kind === "steer" ||
@@ -633,6 +639,7 @@ function SessionDetailLoaded({
   const dragDepth = useRef(0); // enter/leave bubble from children — count depth so the overlay doesn't stick
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const retitleReceiptRef = useRef<HTMLDivElement>(null);
   const rightPanelRef = useRef(rightPanel);
   rightPanelRef.current = rightPanel;
   const composerComposingRef = useRef(false);
@@ -819,6 +826,18 @@ function SessionDetailLoaded({
   }, [sessionId]);
 
   useLayoutEffect(() => {
+    const pending = retitleFocusRestoreRef.current;
+    retitleFocusRestoreRef.current = null;
+    if (retitleFeedback !== null || pending === null) return;
+    if (pending.sessionId !== sessionId || viewGenerationRef.current !== pending.generation) return;
+    const input = inputRef.current;
+    if (!input || input.ownerDocument.activeElement !== input.ownerDocument.body) return;
+    if (restoreComposerFocus(input, pending.composer)) {
+      reportComposerFocus(sessionId, "restore", input, false);
+    }
+  }, [retitleFeedback, sessionId]);
+
+  useLayoutEffect(() => {
     if (mode !== "expanded" || focusComposerRequestedRef.current) return;
     const frame = window.requestAnimationFrame(() => scrollRef.current?.focus());
     return () => window.cancelAnimationFrame(frame);
@@ -939,6 +958,8 @@ function SessionDetailLoaded({
   useEffect(() => {
     const generation = ++viewGenerationRef.current;
     retitleInFlightRef.current = false;
+    retitleFocusRestoreRef.current = null;
+    retitleRetryPointerActivationRef.current = false;
     setRetitleFeedback(null);
     return () => {
       if (viewGenerationRef.current === generation) viewGenerationRef.current += 1;
@@ -2228,7 +2249,9 @@ function SessionDetailLoaded({
     void saveComposerDraft(sessionId, "", images, instanceScope);
   };
 
-  const requestSessionRetitle = async () => {
+  const requestSessionRetitle = async (
+    composerFocus?: ReturnType<typeof captureComposerFocus>,
+  ) => {
     if (retitleInFlightRef.current) return;
     const generation = viewGenerationRef.current;
     retitleInFlightRef.current = true;
@@ -2236,6 +2259,12 @@ function SessionDetailLoaded({
     try {
       await api.retitleSession(sessionId);
       if (viewGenerationRef.current !== generation) return;
+      const receipt = retitleReceiptRef.current;
+      const restoreComposerAfterReceipt = composerFocus !== undefined
+        && receipt?.ownerDocument.activeElement === receipt;
+      retitleFocusRestoreRef.current = restoreComposerAfterReceipt
+        ? { generation, sessionId, composer: composerFocus }
+        : null;
       setRetitleFeedback(null);
       showToast("Session renamed.", { tone: "success" });
     } catch (cause) {
@@ -3183,6 +3212,7 @@ function SessionDetailLoaded({
             {error && <div className="composer-error" role="alert">{error}</div>}
             {retitleFeedback && (
               <div
+                ref={retitleReceiptRef}
                 className="retitle-receipt"
                 data-status={retitleFeedback.state}
                 role="region"
@@ -3201,9 +3231,25 @@ function SessionDetailLoaded({
                     <button
                       type="button"
                       className="btn ghost sm retitle-receipt-retry"
+                      onPointerDown={() => {
+                        retitleRetryPointerActivationRef.current = true;
+                      }}
+                      onPointerCancel={() => {
+                        retitleRetryPointerActivationRef.current = false;
+                      }}
+                      onKeyDown={() => {
+                        retitleRetryPointerActivationRef.current = false;
+                      }}
                       onClick={(event) => {
-                        event.currentTarget.closest<HTMLElement>(".retitle-receipt")?.focus();
-                        void requestSessionRetitle();
+                        const input = inputRef.current;
+                        const keyboardActivation = event.detail === 0
+                          && !retitleRetryPointerActivationRef.current;
+                        retitleRetryPointerActivationRef.current = false;
+                        const composerFocus = keyboardActivation && input
+                          ? captureComposerFocus(input)
+                          : undefined;
+                        retitleReceiptRef.current?.focus();
+                        void requestSessionRetitle(composerFocus);
                       }}
                     >
                       Retry Rename

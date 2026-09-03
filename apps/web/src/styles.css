@@ -2679,10 +2679,10 @@ textarea {
   padding-right: max(0px, calc((100% - var(--chat-max)) / 2));
 }
 .composer-error {
-  position: absolute;
   color: var(--red);
   font-size: 12px;
-  margin-top: -22px;
+  line-height: 1.35;
+  margin-bottom: 8px;
 }
 .retitle-receipt {
   display: grid;
