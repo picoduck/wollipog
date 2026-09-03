@@ -1277,6 +1277,7 @@ app.register(async (instance) => {
       case "shell_open_result":
       case "rewind_result":
       case "fork_result":
+      case "session_worktree_result":
       case "logout_agent_result":
       case "acp_registry_approval_result":
       case "host_action_result":
@@ -3300,6 +3301,69 @@ app.get("/api/telemetry/drivers", async (req, reply) => {
 // Content-free, observation-time usage accounting. Human members see only frozen ownership
 // scopes they may access; conductor credentials are deliberately excluded from this surface.
 registerUsageRoutes(app, db, requestPrincipal, hub);
+
+async function runSessionWorktreeRequest(
+  sessionId: string,
+  request:
+    | { operation: "create"; baseRef?: string; branch: string }
+    | { operation: "attach" | "select"; path: string },
+  reply: FastifyReply,
+) {
+  const session = db.getSession(sessionId);
+  if (!session) return reply.code(404).send({ error: "session not found" });
+  const reconciliationBlock = svc.podReconciliationMutationError(sessionId);
+  if (reconciliationBlock) return reply.code(409).send({ error: reconciliationBlock });
+  if (!hub.isRunnerOnline(session.runnerId)) return reply.code(409).send({ error: "runner is offline" });
+  const requestId = `worktree_${randomUUID().slice(0, 8)}`;
+  try {
+    const res = await hub.requestFromRunner(
+      session.runnerId,
+      requestId,
+      { ...request, type: "session_worktree", requestId, sessionId },
+      150_000,
+    );
+    if (res.type !== "session_worktree_result") return reply.code(502).send({ error: "unexpected runner reply" });
+    if (!res.ok || !res.snapshot) return reply.code(409).send({ error: res.error ?? "worktree operation failed" });
+    db.updateSessionFromSnapshot(sessionId, res.snapshot, Date.now());
+    return { worktree: res.worktree, session: db.getSession(sessionId) };
+  } catch (error) {
+    return reply.code(502).send({ error: (error as Error).message });
+  }
+}
+
+app.post("/api/sessions/:id/worktrees", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const body = req.body as { baseRef?: unknown; branch?: unknown };
+  if (typeof body?.branch !== "string" || !body.branch || body.branch.length > 255) {
+    return reply.code(400).send({ error: "branch must be a non-empty string of at most 255 characters" });
+  }
+  if (body.baseRef !== undefined && (typeof body.baseRef !== "string" || !body.baseRef || body.baseRef.length > 1024)) {
+    return reply.code(400).send({ error: "baseRef must be a non-empty string of at most 1024 characters" });
+  }
+  return runSessionWorktreeRequest(id, {
+    operation: "create",
+    branch: body.branch,
+    ...(typeof body.baseRef === "string" ? { baseRef: body.baseRef } : {}),
+  }, reply);
+});
+
+app.post("/api/sessions/:id/worktrees/attach", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const path = (req.body as { path?: unknown })?.path;
+  if (typeof path !== "string" || !path || path.length > 4096) {
+    return reply.code(400).send({ error: "path must be a non-empty string of at most 4096 characters" });
+  }
+  return runSessionWorktreeRequest(id, { operation: "attach", path }, reply);
+});
+
+app.post("/api/sessions/:id/worktrees/select", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const path = (req.body as { path?: unknown })?.path;
+  if (typeof path !== "string" || !path || path.length > 4096) {
+    return reply.code(400).send({ error: "path must be a non-empty string of at most 4096 characters" });
+  }
+  return runSessionWorktreeRequest(id, { operation: "select", path }, reply);
+});
 
 // Per-turn checkpoint rewind (T3-style, files only — the conversation continues). The runner
 // re-checks authoritatively (turn running, checkpoint exists); guards here fail fast.

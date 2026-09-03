@@ -59,6 +59,7 @@ import type {
   SessionSnapshot,
   SessionStatus,
   SessionTitleSource,
+  SessionWorktreeView,
 } from "@wollipog/protocol";
 
 /** A session's persisted metadata (superset of the protocol SessionSnapshot with runner-only fields). */
@@ -80,6 +81,10 @@ export interface SessionMeta {
   /** The original repo path; worktrees live in the runner data directory, outside this repo. */
   repoPath: string;
   worktreePath: string | null;
+  /** Exact active worktree branch. Absent on metadata created before requested worktrees. */
+  worktreeBranch?: string;
+  /** Every attributed worktree; worktreePath/worktreeBranch select the active member. */
+  worktrees?: SessionWorktreeView[];
   /** Provider-neutral placement captured at launch. Optional for pre-v60 session metadata. */
   executionTarget?: ExecutionTargetRef;
   executionHandoffRequest?: ExecutionHandoffRequest;
@@ -2600,6 +2605,7 @@ export function metaToSnapshot(
     driver: m.driver,
     useWorktree: m.worktreePath != null,
     worktreePath: m.worktreePath,
+    worktrees: m.worktrees,
     executionTarget: m.executionTarget,
     executionHandoff: m.executionHandoff,
     workspacePath: m.repoPath, // the box's launch dir — lets the CP restart ad-hoc/box-owned sessions

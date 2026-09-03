@@ -102,12 +102,15 @@ const defaultDeps: IsolationDeps = {
   materializeWindowsJobLauncher,
 };
 
-interface IsolationStateOptions {
+export interface IsolationStateOptions {
   driver: AgentDriverKind;
   dataDir: string;
   env: Record<string, string>;
   sessionId: string;
   cwd: string;
+  /** Session-private roots that may be populated after launch (for example an agent-requested
+   * worktree). They are materialized before sandbox construction and never shared across sessions. */
+  additionalWritableRoots?: string[];
   /** Stable attested runner/control-plane owner for state outside dataDir (currently WSL). */
   ownerHash?: string;
   /** Canonical shared provider leaf used by Seatbelt when a home component is symlinked. */
@@ -217,7 +220,7 @@ export function buildSeatbeltProfile(
   nativeTmp = tmpdir(),
 ): string {
   const mapping = statePath(state.driver);
-  const paths = new Set([state.cwd, state.dataDir, nativeTmp]);
+  const paths = new Set([state.cwd, state.dataDir, nativeTmp, ...(state.additionalWritableRoots ?? [])]);
   if (mapping) paths.add(state.providerStatePath ?? posix.join(
     absoluteHome(state.env.HOME ?? home, "HOME on macOS"), ...mapping.relative.split("/"),
   ));
@@ -267,6 +270,7 @@ export async function resolveExecutionIsolation(
         target: `${targetHome}/${mapping.relative}`,
       }];
     })() : [];
+    for (const root of state?.additionalWritableRoots ?? []) writableBinds.push({ source: root, target: root });
     if (writableBinds.length) await runtime.mkdirWsl(context, writableBinds.flatMap((bind) => [bind.source, bind.target]));
     return {
       backend: "bwrap", command: resolved.command, args: [], network: policy.network,
@@ -332,6 +336,7 @@ export async function resolveExecutionIsolation(
       target: posix.join(targetHome, ...mapping.relative.split("/")),
     }];
   })() : [];
+  for (const root of state?.additionalWritableRoots ?? []) writableBinds.push({ source: root, target: root });
   if (writableBinds.length) await runtime.mkdirNative(writableBinds.flatMap((bind) => [bind.source, bind.target]));
   return {
     backend: "bwrap",

@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createWorktree, isGitRepo, nativeRepositoryPathIsUnavailable, removeWorktree, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, setStatfsForTests, WorktreeCleanupJournal } from "./worktree.js";
+import { attachRequestedWorktree, createRequestedWorktree, createWorktree, isGitRepo, nativeRepositoryPathIsUnavailable, removeWorktree, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, setStatfsForTests, WorktreeCleanupJournal } from "./worktree.js";
 import { randomUUID } from "node:crypto";
 import { runContextCommand } from "./context-command.js";
 import { SessionStore } from "./session-store.js";
@@ -109,6 +109,78 @@ test("native worktrees live under the external runner data root and clean up", {
   }
 });
 
+test("requested worktree uses the explicit base and branch instead of primary checkout HEAD", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-requested-wt-"));
+  const repo = join(root, "repo");
+  const dataDir = join(root, "data");
+  try {
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    writeFileSync(join(repo, "state.txt"), "base\n");
+    execFileSync("git", ["-C", repo, "add", "state.txt"]);
+    execFileSync("git", ["-C", repo, "commit", "-m", "base"]);
+    const base = execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    execFileSync("git", ["-C", repo, "branch", "refs-for-agent", base]);
+    writeFileSync(join(repo, "state.txt"), "primary drift\n");
+    execFileSync("git", ["-C", repo, "commit", "-am", "primary drift"]);
+    const primaryHead = execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+
+    const handle = await createRequestedWorktree(repo, "s_requested", {
+      baseRef: "refs-for-agent",
+      branch: "fix/issue-42-short-slug",
+    }, { dataDir });
+    assert.equal(handle.baseCommit, base);
+    assert.notEqual(handle.baseCommit, primaryHead);
+    assert.equal(execFileSync("git", ["-C", handle.path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), base);
+    assert.equal(execFileSync("git", ["-C", handle.path, "branch", "--show-current"], { encoding: "utf8" }).trim(), "fix/issue-42-short-slug");
+    const reused = await createRequestedWorktree(repo, "s_requested", {
+      baseRef: "refs-for-agent",
+      branch: "fix/issue-42-short-slug",
+    }, { dataDir });
+    assert.equal(reused.created, false);
+    await removeWorktree(repo, handle, { dataDir });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("existing worktree attach requires both Git registration and an allowed Location", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-attach-wt-"));
+  const repo = join(root, "repo");
+  const dataDir = join(root, "data");
+  const allowed = join(root, "configured-location");
+  const outside = join(root, "outside-location", "worktree");
+  const existing = join(allowed, "worktree");
+  try {
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    execFileSync("git", ["-C", repo, "worktree", "add", "-b", "fix/attach", existing]);
+    execFileSync("git", ["-C", repo, "worktree", "add", "-b", "fix/outside", outside]);
+
+    const attached = await attachRequestedWorktree(repo, "s_attach", existing, {
+      dataDir,
+      allowedProjectPaths: [allowed],
+    });
+    assert.equal(attached.path, existing);
+    assert.equal(attached.branch, "fix/attach");
+    assert.equal(attached.attached, true);
+    await assert.rejects(
+      attachRequestedWorktree(repo, "s_attach", outside, { dataDir, allowedProjectPaths: [allowed] }),
+      /outside the runner's configured Project Locations/,
+    );
+    const unregistered = join(allowed, "not-registered");
+    await assert.rejects(
+      attachRequestedWorktree(repo, "s_attach", unregistered, { dataDir, allowedProjectPaths: [allowed] }),
+      /not registered with the session repository/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("already-removed worktree cleanup succeeds even when creation capacity preflight fails", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-wt-low-disk-cleanup-"));
   const repo = join(root, "repo");
@@ -179,6 +251,47 @@ test("session deletion removes its external worktree and durable store row", { s
     ).trim(), "");
     assert.throws(() => execFileSync("git", ["-C", handle.path, "status"], { stdio: "ignore" }));
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("session deletion journals and removes every runner-created branch without touching attached worktrees", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-session-multi-wt-"));
+  const repo = join(root, "repo");
+  const dataDir = join(root, "data");
+  const attachedPath = join(root, "operator-location", "attached");
+  let manager: SessionManager | undefined;
+  try {
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    execFileSync("git", ["-C", repo, "worktree", "add", "-b", "operator/attached", attachedPath]);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_multi", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "multi",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    (manager as unknown as { configuredProjectPaths: string[] }).configuredProjectPaths = [join(root, "operator-location")];
+    const first = await manager.requestWorktree("s_multi", { baseRef: "HEAD", branch: "fix/first" });
+    const second = await manager.requestWorktree("s_multi", { baseRef: "HEAD", branch: "fix/second" });
+    await manager.attachWorktree("s_multi", attachedPath);
+    assert.equal(store.readMeta("s_multi")?.worktrees?.length, 3);
+
+    await manager.delete("s_multi");
+    assert.equal(existsSync(first.worktree.path), false);
+    assert.equal(existsSync(second.worktree.path), false);
+    assert.equal(existsSync(attachedPath), true, "attached operator worktree remains operator-owned");
+    execFileSync("git", ["-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/operator/attached"]);
+    assert.throws(() => execFileSync("git", ["-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/fix/first"]));
+    assert.throws(() => execFileSync("git", ["-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/fix/second"]));
+    assert.deepEqual(new WorktreeCleanupJournal(dataDir).list(), []);
+  } finally {
+    manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
   }
 });

@@ -3008,6 +3008,9 @@ export interface SessionView {
   runId: string | null;
   useWorktree: boolean;
   worktreePath: string | null;
+  /** All runner-linked worktrees attributed to this session. `worktreePath` identifies the one
+   * currently targeted by Git, Files, shells, checkpoints, and PR summary actions. */
+  worktrees?: SessionWorktreeView[];
   /** Resolved launch placement; absent for sessions created by a pre-v60 control plane. */
   executionTarget?: ExecutionTargetRef;
   /** Protocol-v62 cloud acceptance proof. Absent until the runner's adapter accepts the handoff. */
@@ -3136,6 +3139,8 @@ export interface SessionSnapshot {
   driver: AgentDriverKind;
   useWorktree: boolean;
   worktreePath: string | null;
+  /** Additive requested-worktree inventory. Older runners expose only worktreePath. */
+  worktrees?: SessionWorktreeView[];
   executionTarget?: ExecutionTargetRef;
   executionHandoff?: ExecutionHandoffReceipt;
   /** The runner's launch directory (the box is the source of truth). Carries the ad-hoc browsed path
@@ -3164,6 +3169,21 @@ export interface SessionSnapshot {
   historyEpoch?: number;
   createdAt: number;
   updatedAt: number;
+}
+
+/** Runner-authoritative Git identity for one session-linked worktree. */
+export interface SessionWorktreeView {
+  /** Stable runner-local identity used for lifecycle journals and selection. */
+  id: string;
+  path: string;
+  branch: string;
+  /** Caller-selected creation ref. Attached and legacy worktrees may omit it. */
+  baseRef?: string;
+  /** Commit resolved from baseRef when this worktree was created. */
+  baseCommit?: string;
+  source: "legacy" | "created" | "attached";
+  /** Pull request linkage is additive and may be absent until GitHub state is available. */
+  pullRequest?: { url: string; state: "open" | "merged" | "closed" };
 }
 
 /* ========================================================================== */
@@ -4257,6 +4277,7 @@ export type RunnerToControlPlane =
   | GitActionResultMessage
   | RewindResultMessage
   | ForkResultMessage
+  | SessionWorktreeResultMessage
   | LogoutAgentResultMessage
   | AcpRegistryApprovalResultMessage
   | SkillsStateMessage
@@ -4613,6 +4634,21 @@ export interface ForkResultMessage {
   error?: string;
   snapshot?: SessionSnapshot;
   events?: { seq: number; ts: number; payload: SessionEventPayload }[];
+}
+
+/** Create, attach, or select the worktree targeted by a session's Git/file actions. The runner
+ * revalidates all repository and configured-location boundaries. */
+export type SessionWorktreeRequestMessage =
+  | { type: "session_worktree"; requestId: string; sessionId: string; operation: "create"; baseRef?: string; branch: string }
+  | { type: "session_worktree"; requestId: string; sessionId: string; operation: "attach" | "select"; path: string };
+
+export interface SessionWorktreeResultMessage {
+  type: "session_worktree_result";
+  requestId: string;
+  ok: boolean;
+  error?: string;
+  worktree?: SessionWorktreeView;
+  snapshot?: SessionSnapshot;
 }
 
 /** Control plane asks the runner to re-probe installed agents and push the result. */
@@ -5458,6 +5494,7 @@ export type ControlPlaneToRunner =
   | AnswerQuestionMessage
   | RewindSessionMessage
   | ForkSessionMessage
+  | SessionWorktreeRequestMessage
   | RediscoverMessage
   | RefreshSubscriptionUsageMessage
   | GenerateSessionTitleMessage

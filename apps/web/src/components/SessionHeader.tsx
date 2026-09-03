@@ -96,6 +96,7 @@ export function SessionHeader({
   /** Set when this bar owns the page heading (`page-title` focus-rescue anchor). */
   titleId?: string;
 }) {
+  const activeWorktree = session.worktrees?.find((worktree) => worktree.path === session.worktreePath);
   const api = useApi();
   const instances = useInstances();
   const instanceScope = useInstanceScope();
@@ -326,6 +327,14 @@ export function SessionHeader({
       )}
       <div className="session-header-statuses" ref={statusesRef}>
         {renderNoninteractiveStatuses()}
+        {activeWorktree && (
+          <span
+            className="tag tag-wt session-worktree-identity"
+            title={`Branch: ${activeWorktree.branch}${activeWorktree.baseRef ? ` · Base: ${activeWorktree.baseRef}` : ""}${activeWorktree.pullRequest ? ` · PR: ${activeWorktree.pullRequest.url}` : ""}`}
+          >
+            {activeWorktree.branch}{activeWorktree.pullRequest?.state === "open" ? " · Open PR" : ""}
+          </span>
+        )}
         {activeSubagents && (
           <ActiveSubagentsBadge count={activeSubagents.count} onOpen={activeSubagents.onOpen} />
         )}
