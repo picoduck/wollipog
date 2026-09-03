@@ -265,7 +265,7 @@ test("session deletion removes its external worktree and durable store row", { s
   }
 });
 
-test("session deletion journals and removes every runner-created branch without touching attached worktrees", { skip: !haveGit() }, async () => {
+test("concurrent requests retain every created branch and deletion leaves attached worktrees alone", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-session-multi-wt-"));
   const repo = join(root, "repo");
   const dataDir = join(root, "data");
@@ -287,8 +287,12 @@ test("session deletion journals and removes every runner-created branch without 
     });
     manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
     (manager as unknown as { configuredProjectPaths: string[] }).configuredProjectPaths = [join(root, "operator-location")];
-    const first = await manager.requestWorktree("s_multi", { baseRef: "HEAD", branch: "fix/first" });
-    const second = await manager.requestWorktree("s_multi", { baseRef: "HEAD", branch: "fix/second" });
+    const [first, second] = await Promise.all([
+      manager.requestWorktree("s_multi", { baseRef: "HEAD", branch: "fix/first" }),
+      manager.requestWorktree("s_multi", { baseRef: "HEAD", branch: "fix/second" }),
+    ]);
+    const repeated = await manager.requestWorktree("s_multi", { baseRef: "HEAD", branch: "fix/first" });
+    assert.equal(repeated.worktree.id, first.worktree.id, "an idempotent retry keeps original ownership metadata");
     await manager.attachWorktree("s_multi", attachedPath);
     assert.equal(store.readMeta("s_multi")?.worktrees?.length, 3);
     await manager.selectWorktree("s_multi", first.worktree.path);
@@ -488,7 +492,14 @@ test("a requested worktree becomes the provider cwd on the next launch", { skip:
     const requested = await manager.requestWorktree(spec.sessionId, { baseRef: "HEAD", branch: "fix/requested-cwd" });
     assert.equal(launchedCwds[0], repo, "the already-running process retains its original OS cwd");
     manager.stop(spec.sessionId);
-    await manager.start(spec);
+    execFileSync("git", ["-C", requested.worktree.path, "switch", "-c", "fix/unattributed-drift"]);
+    assert.equal(await manager.start(spec), false, "restart fails closed if the persisted branch identity drifted");
+    assert.equal(store.readMeta(spec.sessionId)?.worktreePath, null,
+      "a failed validation keeps the unverified root fenced from Files and shells");
+    assert.deepEqual(launchedCwds, [repo], "branch drift never reaches the provider process");
+    execFileSync("git", ["-C", requested.worktree.path, "switch", requested.worktree.branch]);
+    await manager.selectWorktree(spec.sessionId, requested.worktree.path);
+    assert.equal(await manager.start(spec), true);
     assert.equal(launchedCwds[1], requested.worktree.path, "the next provider launch uses the selected worktree");
     manager.stop(spec.sessionId);
     await manager.delete(spec.sessionId);

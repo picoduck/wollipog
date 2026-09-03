@@ -228,6 +228,7 @@ import {
   parseUiClientMessage,
 } from "./ui-channel.js";
 import {
+  agentCredentialSessionTargetError,
   agentDelegationAuthorizationError,
   boundedTargetId,
   forkProjectAssignment,
@@ -473,6 +474,7 @@ function authedApiPrincipal(
       principal: {
         kind: "agent",
         actorId: agentControl.id,
+        credentialSessionId: agentControl.id,
         organizationId: delegatedScope.organizationId,
         delegatedScope,
       },
@@ -609,6 +611,10 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
   const params = (req.params ?? {}) as Record<string, unknown>;
   const sessionId = typeof params.id === "string" && routePath.startsWith("/api/sessions/") ? params.id
     : typeof params.sessionId === "string" ? params.sessionId : null;
+  if (sessionId && principal.kind === "agent") {
+    const credentialTargetError = agentCredentialSessionTargetError(principal, sessionId);
+    if (credentialTargetError) return { statusCode: 404, error: "session not found" };
+  }
   if (sessionId && !db.canAccessSession(principal, sessionId)) {
     return { statusCode: 404, error: "session not found" };
   }

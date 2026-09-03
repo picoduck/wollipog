@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  agentCredentialSessionTargetError,
   agentDelegationAuthorizationError,
   boundedTargetId,
   forkProjectAssignment,
@@ -78,6 +79,20 @@ test("a user- or team-scoped conductor cannot mutate organization-global resourc
     ...userAgent,
     delegatedScope: { organizationId: "org_1", owner: { kind: "organization", organizationId: "org_1" } },
   }), null);
+});
+
+test("a purpose-bound agent credential cannot target a sibling session in its delegated scope", () => {
+  const credential: AgentPrincipal = {
+    kind: "agent",
+    actorId: "s_calling",
+    credentialSessionId: "s_calling",
+    organizationId: "org_1",
+    delegatedScope: { organizationId: "org_1", owner: { kind: "user", userId: "usr_1" } },
+  };
+  assert.equal(agentCredentialSessionTargetError(credential, "s_calling"), null);
+  assert.match(agentCredentialSessionTargetError(credential, "s_sibling")!, /only its own session/);
+  assert.equal(agentCredentialSessionTargetError({ ...credential, credentialSessionId: undefined }, "s_sibling"), null,
+    "a conductor retains its separately reviewed delegated scope");
 });
 
 test("a runner cannot turn a normal fork into a privileged conductor session", () => {

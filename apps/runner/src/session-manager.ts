@@ -658,6 +658,8 @@ export class SessionManager {
   private readonly sessionCommandAuthority = new SessionCommandAuthorityRegistry();
   private readonly providerHomeLeases?: ProviderHomeLeaseRegistry;
   private readonly providerAuthOperations = new Set<string>();
+  /** Create/attach/select all merge durable session inventory, so serialize them per session. */
+  private readonly worktreeOperations = new Map<string, Promise<unknown>>();
 
   constructor(
     private send: Send,
@@ -747,12 +749,25 @@ export class SessionManager {
     }];
   }
 
+  private runWorktreeOperation<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
+    const prior = this.worktreeOperations.get(sessionId) ?? Promise.resolve();
+    const current = prior.catch(() => undefined).then(operation);
+    this.worktreeOperations.set(sessionId, current);
+    return current.finally(() => {
+      if (this.worktreeOperations.get(sessionId) === current) this.worktreeOperations.delete(sessionId);
+    });
+  }
+
   private async activateWorktree(meta: SessionMeta, worktree: SessionWorktreeView): Promise<SessionSnapshot> {
-    const worktrees = this.attributedWorktrees(meta).filter((item) => item.path !== worktree.path);
-    worktrees.push(worktree);
     // A request can arrive during the current provider turn. Anchor that turn's remaining diff at
     // the newly selected tree so capture/checkpoint logic never compares two different worktrees.
     const baseTree = await withGitExecutionContext(meta.context, () => captureWorktreeTree(worktree.path));
+    const latest = this.store.readMeta(meta.sessionId);
+    if (!latest || !this.sessionCanOpen(meta.sessionId)) {
+      throw new Error("session disappeared while its requested worktree was activating");
+    }
+    const worktrees = this.attributedWorktrees(latest).filter((item) => item.path !== worktree.path);
+    worktrees.push(worktree);
     const updated = this.store.patchMeta(meta.sessionId, {
       worktreePath: worktree.path,
       worktreeBranch: worktree.branch,
@@ -772,31 +787,52 @@ export class SessionManager {
     sessionId: string,
     request: { baseRef?: string; branch: string },
   ): Promise<{ worktree: SessionWorktreeView; snapshot: SessionSnapshot }> {
-    const meta = this.store.readMeta(sessionId);
-    if (!meta || !this.sessionCanOpen(sessionId)) throw new Error("session is unavailable");
-    if (meta.executionTarget && meta.executionTarget.adapter !== "host") {
-      throw new Error("session worktrees are available only on host execution targets");
-    }
-    const options = {
-      context: meta.context,
-      dataDir: this.dataDir,
-      ownerHash: this.runnerOwnerHash,
-      allowedProjectPaths: this.configuredProjectPaths,
-    };
-    const baseRef = request.baseRef ?? await fetchRemoteDefaultBase(meta.repoPath, options);
-    const created = await createRequestedWorktree(meta.repoPath, sessionId, {
-      baseRef,
-      branch: request.branch,
-    }, options);
-    const worktree: SessionWorktreeView = {
-      id: created.path.split(/[\\/]/u).at(-1)!,
-      path: created.path,
-      branch: created.branch,
-      baseRef: created.baseRef,
-      baseCommit: created.baseCommit,
-      source: "created",
-    };
-    return { worktree, snapshot: await this.activateWorktree(meta, worktree) };
+    return this.runWorktreeOperation(sessionId, async () => {
+      const meta = this.store.readMeta(sessionId);
+      if (!meta || !this.sessionCanOpen(sessionId)) throw new Error("session is unavailable");
+      if (meta.executionTarget && meta.executionTarget.adapter !== "host") {
+        throw new Error("session worktrees are available only on host execution targets");
+      }
+      const options = {
+        context: meta.context,
+        dataDir: this.dataDir,
+        ownerHash: this.runnerOwnerHash,
+        allowedProjectPaths: this.configuredProjectPaths,
+      };
+      const baseRef = request.baseRef ?? await fetchRemoteDefaultBase(meta.repoPath, options);
+      const created = await createRequestedWorktree(meta.repoPath, sessionId, {
+        baseRef,
+        branch: request.branch,
+      }, options);
+      if (!created.created) {
+        const existing = this.attributedWorktrees(meta).find((item) =>
+          item.source === "created" && item.path === created.path && item.branch === created.branch);
+        if (!existing) {
+          throw new Error("requested worktree already exists without ownership by this session");
+        }
+        return { worktree: existing, snapshot: await this.activateWorktree(meta, existing) };
+      }
+      const worktree: SessionWorktreeView = {
+        id: created.path.split(/[\\/]/u).at(-1)!,
+        path: created.path,
+        branch: created.branch,
+        baseRef: created.baseRef,
+        baseCommit: created.baseCommit,
+        source: "created",
+      };
+      try {
+        return { worktree, snapshot: await this.activateWorktree(meta, worktree) };
+      } catch (error) {
+        if (created.created) {
+          try {
+            await removeWorktree(meta.repoPath, created, options);
+          } catch {
+            this.log(`requested worktree cleanup for ${boundedSessionIdForLog(sessionId)} needs operator attention`);
+          }
+        }
+        throw error;
+      }
+    });
   }
 
   /** Attach an operator-located, Git-registered worktree and make it the active Git target. */
@@ -804,49 +840,53 @@ export class SessionManager {
     sessionId: string,
     path: string,
   ): Promise<{ worktree: SessionWorktreeView; snapshot: SessionSnapshot }> {
-    const meta = this.store.readMeta(sessionId);
-    if (!meta || !this.sessionCanOpen(sessionId)) throw new Error("session is unavailable");
-    if (meta.executionTarget && meta.executionTarget.adapter !== "host") {
-      throw new Error("session worktrees are available only on host execution targets");
-    }
-    const attached = await attachRequestedWorktree(meta.repoPath, sessionId, path, {
-      context: meta.context,
-      dataDir: this.dataDir,
-      ownerHash: this.runnerOwnerHash,
-      // A running platform sandbox cannot gain a new external mount. Its pre-bound session
-      // directory remains attachable; provider isolation can use configured external Locations.
-      allowedProjectPaths: this.executionIsolation.mode === "provider"
-        ? this.configuredProjectPaths
-        : [],
+    return this.runWorktreeOperation(sessionId, async () => {
+      const meta = this.store.readMeta(sessionId);
+      if (!meta || !this.sessionCanOpen(sessionId)) throw new Error("session is unavailable");
+      if (meta.executionTarget && meta.executionTarget.adapter !== "host") {
+        throw new Error("session worktrees are available only on host execution targets");
+      }
+      const attached = await attachRequestedWorktree(meta.repoPath, sessionId, path, {
+        context: meta.context,
+        dataDir: this.dataDir,
+        ownerHash: this.runnerOwnerHash,
+        // A running platform sandbox cannot gain a new external mount. Its pre-bound session
+        // directory remains attachable; provider isolation can use configured external Locations.
+        allowedProjectPaths: this.executionIsolation.mode === "provider"
+          ? this.configuredProjectPaths
+          : [],
+      });
+      const worktree: SessionWorktreeView = {
+        id: createHash("sha256").update(attached.path).digest("hex").slice(0, 16),
+        path: attached.path,
+        branch: attached.branch,
+        baseCommit: attached.baseCommit,
+        source: "attached",
+      };
+      return { worktree, snapshot: await this.activateWorktree(meta, worktree) };
     });
-    const worktree: SessionWorktreeView = {
-      id: createHash("sha256").update(attached.path).digest("hex").slice(0, 16),
-      path: attached.path,
-      branch: attached.branch,
-      baseCommit: attached.baseCommit,
-      source: "attached",
-    };
-    return { worktree, snapshot: await this.activateWorktree(meta, worktree) };
   }
 
   /** Select one already-attributed worktree as the target for every session Git action. */
   async selectWorktree(sessionId: string, path: string): Promise<SessionSnapshot> {
-    const meta = this.store.readMeta(sessionId);
-    if (!meta || !this.sessionCanOpen(sessionId)) throw new Error("session is unavailable");
-    const worktree = this.attributedWorktrees(meta).find((item) => item.path === path);
-    if (!worktree) throw new Error("worktree is not linked to this session");
-    const verified = await attachRequestedWorktree(meta.repoPath, sessionId, worktree.path, {
-      context: meta.context,
-      dataDir: this.dataDir,
-      ownerHash: this.runnerOwnerHash,
-      // The path was already attributed by a prior validated create/attach operation; Git
-      // registration and health are still re-proved before changing the active target.
-      allowedProjectPaths: [worktree.path],
+    return this.runWorktreeOperation(sessionId, async () => {
+      const meta = this.store.readMeta(sessionId);
+      if (!meta || !this.sessionCanOpen(sessionId)) throw new Error("session is unavailable");
+      const worktree = this.attributedWorktrees(meta).find((item) => item.path === path);
+      if (!worktree) throw new Error("worktree is not linked to this session");
+      const verified = await attachRequestedWorktree(meta.repoPath, sessionId, worktree.path, {
+        context: meta.context,
+        dataDir: this.dataDir,
+        ownerHash: this.runnerOwnerHash,
+        // The path was already attributed by a prior validated create/attach operation; Git
+        // registration and health are still re-proved before changing the active target.
+        allowedProjectPaths: [worktree.path],
+      });
+      if (verified.branch !== worktree.branch) {
+        throw new Error("worktree branch changed since it was linked to this session");
+      }
+      return this.activateWorktree(meta, worktree);
     });
-    if (verified.branch !== worktree.branch) {
-      throw new Error("worktree branch changed since it was linked to this session");
-    }
-    return this.activateWorktree(meta, worktree);
   }
 
   linkActiveWorktreePullRequest(sessionId: string, url: string): void {
@@ -1856,14 +1896,19 @@ export class SessionManager {
         if (!this.launchIsCurrent(spec.sessionId, launchGeneration)) return false;
         if (gitRepo) {
           const priorActiveWorktree = prior?.worktrees?.find((item) => item.path === prior.worktreePath);
-          worktree = priorActiveWorktree
-            ? await attachRequestedWorktree(repoPath, spec.sessionId, priorActiveWorktree.path, {
-                ...worktreeOptions,
-                // This is a runner-persisted exact coordinate, not new caller input. Registration
-                // with this repository is still re-proved before launch.
-                allowedProjectPaths: [priorActiveWorktree.path],
-              })
-            : await this.createSessionWorktree(repoPath, spec.sessionId, worktreeOptions);
+          if (priorActiveWorktree) {
+            worktree = await attachRequestedWorktree(repoPath, spec.sessionId, priorActiveWorktree.path, {
+              ...worktreeOptions,
+              // This is a runner-persisted exact coordinate, not new caller input. Registration
+              // with this repository is still re-proved before launch.
+              allowedProjectPaths: [priorActiveWorktree.path],
+            });
+            if (worktree.branch !== priorActiveWorktree.branch) {
+              throw new Error("selected worktree branch changed before the provider could launch");
+            }
+          } else {
+            worktree = await this.createSessionWorktree(repoPath, spec.sessionId, worktreeOptions);
+          }
           // createWorktree deliberately returns an already-registered healthy session worktree.
           // Preserve that durable root and its uncommitted diffs if this launch later loses.
           // Legacy/test materializers omit the marker and historically represented a newly
