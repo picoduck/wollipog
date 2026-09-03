@@ -59,7 +59,9 @@ manager. The control plane converts a valid exact-session claim into an `AgentPr
 the session's delegated resource scope, and records authorized mutations in the content-free
 mutation audit under that session id. New API routes remain denied until explicitly added.
 
-The CLI reads `/healthz` before a command and rejects a control plane older than its own protocol.
+The CLI reads the authenticated `/api/compatibility` endpoint before a command and rejects a
+control plane older than the protocol required by that command. The public `/healthz` probe keeps
+only service-readiness metadata and does not expose the protocol version.
 Runners connected to older control planes do not inject the general surface. Conductor discovery,
 launch gating, default permission-mode clamp, and legacy manager credential remain unchanged.
 

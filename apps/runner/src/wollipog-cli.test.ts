@@ -22,7 +22,7 @@ test("CLI emits stable JSON and authenticates list requests as the exact session
     const calls: Array<{ url: string; init: Parameters<McpFetch>[1] }> = [];
     const fetch: McpFetch = async (url, init) => {
       calls.push({ url, init });
-      const body = url.endsWith("/healthz")
+      const body = url.endsWith("/api/compatibility")
         ? { protocolVersion: PROTOCOL_VERSION }
         : { sessions: [{ id: "s_child", status: "running", runnerId: "r1", title: "Child" }] };
       return { ok: true, status: 200, text: async () => JSON.stringify(body) };
@@ -50,6 +50,9 @@ test("CLI emits stable JSON and authenticates list requests as the exact session
       }],
     });
     assert.equal(calls[1]!.url, "http://127.0.0.1:4317/api/sessions");
+    assert.equal(calls[0]!.url, "http://127.0.0.1:4317/api/compatibility");
+    assert.equal(calls[0]!.init?.headers?.authorization, "Bearer session-secret");
+    assert.equal(calls[0]!.init?.headers?.[WOLLIPOG_AGENT_ACTOR_SESSION_HEADER], "s_parent");
     assert.equal(calls[1]!.init?.headers?.authorization, "Bearer session-secret");
     assert.equal(calls[1]!.init?.headers?.[WOLLIPOG_AGENT_ACTOR_SESSION_HEADER], "s_parent");
   } finally {
@@ -61,7 +64,7 @@ test("CLI JSON create and prompt commands reuse the manager routes and reject in
   const requests: Array<{ url: string; method?: string; body?: string; headers?: Record<string, string> }> = [];
   const fetch: McpFetch = async (url, init) => {
     requests.push({ url, method: init?.method, body: init?.body, headers: init?.headers });
-    if (url.endsWith("/healthz")) {
+    if (url.endsWith("/api/compatibility")) {
       return { ok: true, status: 200, text: async () => JSON.stringify({ protocolVersion: PROTOCOL_VERSION }) };
     }
     return { ok: true, status: 200, text: async () => JSON.stringify({ id: "s_new", status: "starting", runnerId: "r1", title: "New" }) };
@@ -104,7 +107,7 @@ test("CLI keeps v100 core commands compatible while gating worktree commands on 
     return {
       ok: true,
       status: 200,
-      text: async () => JSON.stringify(url.endsWith("/healthz")
+      text: async () => JSON.stringify(url.endsWith("/api/compatibility")
         ? { protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControl }
         : { sessions: [] }),
     };
@@ -127,7 +130,11 @@ test("CLI keeps v100 core commands compatible while gating worktree commands on 
     fetch,
   ), 1);
   assert.match(JSON.parse(output).error, /requires v101/);
-  assert.deepEqual(requests, ["http://cp/healthz", "http://cp/api/sessions", "http://cp/healthz"]);
+  assert.deepEqual(requests, [
+    "http://cp/api/compatibility",
+    "http://cp/api/sessions",
+    "http://cp/api/compatibility",
+  ]);
 });
 
 test("CLI gates destructive worktree discard on v102 without disabling v101 selection", async () => {
@@ -137,7 +144,7 @@ test("CLI gates destructive worktree discard on v102 without disabling v101 sele
     return {
       ok: true,
       status: 200,
-      text: async () => JSON.stringify(url.endsWith("/healthz")
+      text: async () => JSON.stringify(url.endsWith("/api/compatibility")
         ? { protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktrees }
         : { session: { id: "s1" } }),
     };
@@ -158,9 +165,9 @@ test("CLI gates destructive worktree discard on v102 without disabling v101 sele
   ), 1);
   assert.match(JSON.parse(output).error, /requires v102/);
   assert.deepEqual(requests, [
-    "http://cp/healthz",
+    "http://cp/api/compatibility",
     "http://cp/api/sessions/s1/worktrees/select",
-    "http://cp/healthz",
+    "http://cp/api/compatibility",
   ]);
 });
 
@@ -178,7 +185,7 @@ test("CLI emits JSON for get, events, prompt, wait, and stop core commands", asy
     const requests: Array<{ url: string; method?: string }> = [];
     const fetch: McpFetch = async (url, init) => {
       requests.push({ url, method: init?.method });
-      if (url.endsWith("/healthz")) {
+      if (url.endsWith("/api/compatibility")) {
         return { ok: true, status: 200, text: async () => JSON.stringify({ protocolVersion: PROTOCOL_VERSION }) };
       }
       const session = { id: "s_child", status: "completed", runnerId: "r1", title: "Child" };
@@ -207,7 +214,7 @@ test("CLI recognizes installed POSIX and Windows alias invocation names", async 
     const requests: string[] = [];
     const fetch: McpFetch = async (url) => {
       requests.push(url);
-      const body = url.endsWith("/healthz")
+      const body = url.endsWith("/api/compatibility")
         ? { protocolVersion: PROTOCOL_VERSION }
         : { sessions: [] };
       return { ok: true, status: 200, text: async () => JSON.stringify(body) };
@@ -220,7 +227,7 @@ test("CLI recognizes installed POSIX and Windows alias invocation names", async 
       fetch,
     ), 0, executable);
     assert.deepEqual(JSON.parse(output), { sessions: [] });
-    assert.deepEqual(requests, ["http://cp/healthz", "http://cp/api/sessions"]);
+    assert.deepEqual(requests, ["http://cp/api/compatibility", "http://cp/api/sessions"]);
   }
 });
 
@@ -231,7 +238,7 @@ test("CLI worktree commands adapt to the shared MCP operations", async () => {
     return {
       ok: true,
       status: 200,
-      text: async () => JSON.stringify(url.endsWith("/healthz")
+      text: async () => JSON.stringify(url.endsWith("/api/compatibility")
         ? { protocolVersion: PROTOCOL_VERSION }
         : { worktree: { id: "wt", path: "/repo/wt", branch: "fix/583", source: "created" }, session: { id: "s1" } }),
     };

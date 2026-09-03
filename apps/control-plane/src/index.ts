@@ -1506,8 +1506,9 @@ app.get("/healthz", async () => ({
   ok: true,
   ts: Date.now(),
   service: CONTROL_PLANE_SERVICE,
-  protocolVersion: PROTOCOL_VERSION,
 }));
+
+app.get("/api/compatibility", async () => ({ protocolVersion: PROTOCOL_VERSION }));
 
 registerManagedDesktopRoutes(app, MANAGED_DESKTOP_IDENTITY, {
   trustedLoopback,

@@ -66,6 +66,7 @@ test("general agent-control claims require an exact active session and purpose-b
 
 test("conductor REST access is method- and route-scoped to its published MCP tools", () => {
   for (const [method, route] of [
+    ["GET", "/api/compatibility"],
     ["GET", "/api/runners"],
     ["GET", "/api/sessions"],
     ["GET", "/api/sessions/:id/events"],
@@ -103,6 +104,7 @@ test("conductor REST access is method- and route-scoped to its published MCP too
 });
 
 test("general CLI/MCP access shares the closed manager route allowlist", () => {
+  assert.equal(isAgentControlApiRouteAllowed("GET", "/api/compatibility"), true);
   assert.equal(isAgentControlApiRouteAllowed("GET", "/api/sessions"), true);
   assert.equal(isAgentControlApiRouteAllowed("POST", "/api/sessions/:id/prompt"), true);
   assert.equal(isAgentControlApiRouteAllowed("POST", "/api/sessions/:id/worktrees"), true);

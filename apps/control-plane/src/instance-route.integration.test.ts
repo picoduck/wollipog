@@ -380,8 +380,9 @@ test("two real control planes isolate identical ids and persist identity and dat
   for (const port of [firstPort, secondPort]) {
     const response = await fetch(`http://127.0.0.1:${port}/healthz`);
     assert.equal(response.status, 200);
-    const health = await response.json() as { service?: unknown };
+    const health = await response.json() as { service?: unknown; protocolVersion?: unknown };
     assert.equal(health.service, WOLLIPOG_CONTROL_PLANE_SERVICE);
+    assert.equal(health.protocolVersion, undefined, "the unauthenticated health probe does not fingerprint protocol support");
   }
   for (const info of [firstInfo, secondInfo]) {
     assert.equal(info.service, WOLLIPOG_CONTROL_PLANE_SERVICE);
@@ -394,6 +395,13 @@ test("two real control planes isolate identical ids and persist identity and dat
 
   const directLoopbackAnonymous = await fetch(`http://127.0.0.1:${firstPort}/api/instance`);
   assert.equal(directLoopbackAnonymous.status, 401, "loopback no longer substitutes for authentication");
+  const anonymousCompatibility = await fetch(`http://127.0.0.1:${firstPort}/api/compatibility`);
+  assert.equal(anonymousCompatibility.status, 401);
+  const compatibility = await fetch(`http://127.0.0.1:${firstPort}/api/compatibility`, {
+    headers: { authorization: `Bearer ${firstSeed.deviceToken}` },
+  });
+  assert.equal(compatibility.status, 200);
+  assert.equal((await compatibility.json() as { protocolVersion?: unknown }).protocolVersion, PROTOCOL_VERSION);
   const unauthenticated = await fetch(`http://127.0.0.1:${firstPort}/api/instance`, {
     headers: { "x-forwarded-for": "203.0.113.42" },
   });
