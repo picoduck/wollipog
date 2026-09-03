@@ -9897,30 +9897,11 @@ body.shell-dock-dragging * {
   height: 1px;
   background: var(--border);
 }
-/* Opacity, not visibility: `visibility: hidden` removes an element from the tab order, so Rewind
-   could not be reached by keyboard at all — and with no hover on touch, it was unreachable there
-   too. Fades in on hover or keyboard focus, and stays put on coarse pointers. */
-/* pointer-events must track the opacity: an opacity-0 button is still hit-testable, so on a
-   touchscreen laptop (fine primary pointer, so `pointer: coarse` is false, but `any-pointer:
-   coarse` is true) the invisible control could be tapped before it was ever discoverable. */
+/* The action remains visible on every pointer type. Its flex slot was already reserved, so keeping
+   it discoverable does not move either divider line or transcript content on hover and focus. */
 .tl-checkpoint .checkpoint-rewind {
-  opacity: 0;
-  pointer-events: none;
   font-size: 11px;
   padding: 1px 8px;
-  transition: opacity var(--dur-fast) var(--ease-out);
-}
-.tl-checkpoint:hover .checkpoint-rewind,
-.tl-checkpoint .checkpoint-rewind:focus-visible {
-  opacity: 1;
-  pointer-events: auto;
-}
-/* any-pointer, not just pointer: a hybrid device has a touchscreen even when the mouse is primary. */
-@media (hover: none), (pointer: coarse), (any-pointer: coarse) {
-  .tl-checkpoint .checkpoint-rewind {
-    opacity: 1;
-    pointer-events: auto;
-  }
 }
 .tl-checkpoint.restored .checkpoint-label {
   color: var(--teal);
