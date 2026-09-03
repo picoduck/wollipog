@@ -15,6 +15,7 @@ import { discardComposerDraft } from "../composer-drafts.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { instancePublicOrigin, useInstances } from "../instances-context.js";
 import { absoluteViewUrl } from "../navigation.js";
+import { safeExternalHref } from "../external-href.js";
 import { requestTranscriptDownload } from "../transcript-download.js";
 import type { SessionChangeStatus } from "../session-status.js";
 import { CONTROL_PLANE_HTTP, DASHBOARD_ORIGIN, hasSameOriginMarker } from "../config.js";
@@ -96,6 +97,11 @@ export function SessionHeader({
   /** Set when this bar owns the page heading (`page-title` focus-rescue anchor). */
   titleId?: string;
 }) {
+  const activeWorktree = session.worktrees?.find((worktree) => worktree.path === session.worktreePath);
+  const activeWorktreeLabel = activeWorktree
+    ? `${activeWorktree.branch}${activeWorktree.baseRef ? ` ← ${activeWorktree.baseRef}` : ""}${activeWorktree.pullRequest ? ` · ${activeWorktree.pullRequest.state === "open" ? "Open" : activeWorktree.pullRequest.state === "merged" ? "Merged" : "Closed"} PR` : ""}`
+    : "";
+  const activeWorktreePullRequestHref = safeExternalHref(activeWorktree?.pullRequest?.url);
   const api = useApi();
   const instances = useInstances();
   const instanceScope = useInstanceScope();
@@ -330,6 +336,26 @@ export function SessionHeader({
           <ActiveSubagentsBadge count={activeSubagents.count} onOpen={activeSubagents.onOpen} />
         )}
       </div>
+      {activeWorktree?.pullRequest && activeWorktreePullRequestHref ? (
+        <a
+          className="tag tag-wt session-worktree-identity"
+          title={`Branch: ${activeWorktree.branch}${activeWorktree.baseRef ? ` · Base: ${activeWorktree.baseRef}` : ""}${activeWorktree.pullRequest ? ` · PR: ${activeWorktree.pullRequest.url}` : ""}`}
+          href={activeWorktreePullRequestHref}
+          target="_blank"
+          rel="noreferrer"
+        >
+          {activeWorktreeLabel}
+        </a>
+      ) : activeWorktree ? (
+        <span
+          className="tag tag-wt session-worktree-identity"
+          title={`Branch: ${activeWorktree.branch}${activeWorktree.baseRef ? ` · Base: ${activeWorktree.baseRef}` : ""}`}
+        >
+          {activeWorktreeLabel}
+        </span>
+      ) : (
+        null
+      )}
       {session.backgroundWorkState && (
         <span className="sr-only">
           <BackgroundWorkBadge state={session.backgroundWorkState} compact />

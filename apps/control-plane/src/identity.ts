@@ -20,6 +20,8 @@ export interface HumanPrincipal {
 export interface AgentPrincipal {
   kind: "agent";
   actorId: string;
+  /** Present only for the general runner-minted credential, which is confined to one session. */
+  credentialSessionId?: string;
   userId?: undefined;
   organizationId: string;
   delegatedScope: ResourceScope;
@@ -93,6 +95,21 @@ export function agentDelegationAuthorizationError(routePath: string, principal: 
     routePath.startsWith("/api/sessions/");
   if (resourceRoute || principal.delegatedScope.owner.kind === "organization") return null;
   return "the conductor session is not delegated organization-wide access to this global resource";
+}
+
+export function agentCredentialSessionTargetError(
+  routePath: string,
+  principal: AgentPrincipal,
+  targetSessionId: string,
+): string | null {
+  const worktreeRoute = routePath === "/api/sessions/:id/worktrees" ||
+    routePath === "/api/sessions/:id/worktrees/attach" ||
+    routePath === "/api/sessions/:id/worktrees/select" ||
+    routePath === "/api/sessions/:id/worktrees/discard";
+  if (!worktreeRoute) return null;
+  return principal.credentialSessionId && principal.credentialSessionId !== targetSessionId
+    ? "the session credential may manage only its own session"
+    : null;
 }
 
 export function forkSnapshotIdentityError(

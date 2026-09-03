@@ -2,15 +2,17 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { dirname, join, resolve, sep } from "node:path";
-import { mkdir, rm, statfs } from "node:fs/promises";
+import { basename, dirname, join, resolve, sep } from "node:path";
+import { mkdir, rm, rmdir, statfs } from "node:fs/promises";
 import {
   closeSync,
   constants,
   fsyncSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -82,11 +84,31 @@ export interface WorktreeHandle {
   created?: boolean;
 }
 
+/** A session-requested worktree keeps its user-selected Git identity instead of deriving either
+ * coordinate from the session id. `baseRef` is the exact caller-selected ref used at creation;
+ * `baseCommit` makes the result stable and auditable even when that ref moves later. */
+export interface SessionWorktreeHandle extends WorktreeHandle {
+  baseRef: string;
+  baseCommit: string;
+  attached: boolean;
+}
+
+export interface RequestedWorktreeOptions extends WorktreeOptions {
+  /** Exact configured Project Location roots. Existing worktrees may only be attached from one of
+   * these roots (or from the runner-owned worktree root). */
+  allowedProjectPaths?: string[];
+}
+
 export interface WorktreeCleanupRecord {
   sessionId: string;
+  /** Stable per-worktree identity. Absent records are the singular legacy session worktree. */
+  worktreeId?: string;
   repoPath: string;
   worktreePath: string;
   context: AgentContext;
+  /** Exact branch recorded when this generation was created or attached. Legacy records derive
+   * `agent/<sessionId>` during cleanup. */
+  branch?: string;
   /** Exact checkpoint namespace owned by this worktree generation. Absent means legacy refs. */
   checkpointOwnerHash?: string;
 }
@@ -102,7 +124,7 @@ export class WorktreeCleanupJournal {
     this.path = join(dataDir, "worktree-cleanup.json");
     try {
       const parsed = JSON.parse(readFileSync(this.path, "utf8")) as WorktreeCleanupRecord[];
-      if (Array.isArray(parsed)) for (const record of parsed) this.records.set(record.sessionId, record);
+      if (Array.isArray(parsed)) for (const record of parsed) this.records.set(this.key(record), record);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
         throw new Error(`could not read worktree cleanup journal ${this.path}: ${(error as Error).message}`);
@@ -113,13 +135,27 @@ export class WorktreeCleanupJournal {
   list(): WorktreeCleanupRecord[] { return [...this.records.values()]; }
 
   add(record: WorktreeCleanupRecord): void {
-    this.records.set(record.sessionId, record);
+    this.records.set(this.key(record), record);
     this.flush();
   }
 
-  remove(sessionId: string): void {
-    if (!this.records.delete(sessionId)) return;
+  remove(sessionId: string, worktreeId?: string): void {
+    let removed = false;
+    if (worktreeId !== undefined) {
+      removed = this.records.delete(`${sessionId}\0${worktreeId}`);
+    } else {
+      for (const [key, record] of this.records) {
+        if (record.sessionId !== sessionId) continue;
+        this.records.delete(key);
+        removed = true;
+      }
+    }
+    if (!removed) return;
     this.flush();
+  }
+
+  private key(record: WorktreeCleanupRecord): string {
+    return `${record.sessionId}\0${record.worktreeId ?? "legacy"}`;
   }
 
   private flush(): void {
@@ -212,9 +248,7 @@ async function sessionPath(
   options: WorktreeOptions,
   capacityPreflight = true,
 ): Promise<string> {
-  if (!/^[a-zA-Z0-9._-]+$/.test(sessionId) || sessionId === "." || sessionId === "..") {
-    throw new Error("session id is not safe for a worktree path/branch");
-  }
+  validateSessionId(sessionId);
   const root = capacityPreflight ? await resolveWorktreeRoot(options) : await worktreeRootPath(options);
   const context = options.context ?? nativeContext;
   const parent = context.kind === "wsl" ? `${root}/${repoKey(repoPath)}` : join(root, repoKey(repoPath));
@@ -223,6 +257,229 @@ async function sessionPath(
     else await mkdir(parent, { recursive: true });
   }
   return context.kind === "wsl" ? `${parent}/${sessionId}` : join(parent, sessionId);
+}
+
+function requestedSlot(value: string): string {
+  return createHash("sha256").update(value).digest("hex").slice(0, 16);
+}
+
+function validateSessionId(sessionId: string): void {
+  if (!/^[a-zA-Z0-9._-]+$/.test(sessionId) || sessionId === "." || sessionId === "..") {
+    throw new Error("session id is not safe for a worktree path/branch");
+  }
+}
+
+/** Stable session-private directory used by platform isolation before a requested worktree exists.
+ * Binding this directory writable is narrower than exposing the runner's shared worktree root. */
+export async function requestedWorktreeBoundary(
+  repoPath: string,
+  sessionId: string,
+  options: WorktreeOptions = {},
+  capacityPreflight = true,
+): Promise<string> {
+  const boundary = await requestedWorktreeBoundaryPath(repoPath, sessionId, options, capacityPreflight);
+  const context = options.context ?? nativeContext;
+  if (context.kind === "wsl") {
+    await runContextCommand(context, "mkdir", ["-p", "--", boundary], { cwd: "/", timeoutMs: 8_000 });
+  } else {
+    await mkdir(boundary, { recursive: true });
+  }
+  return boundary;
+}
+
+async function requestedWorktreeBoundaryPath(
+  repoPath: string,
+  sessionId: string,
+  options: WorktreeOptions,
+  capacityPreflight: boolean,
+): Promise<string> {
+  validateSessionId(sessionId);
+  const context = options.context ?? nativeContext;
+  const root = capacityPreflight ? await resolveWorktreeRoot(options) : await worktreeRootPath(options);
+  const parent = context.kind === "wsl" ? `${root}/${repoKey(repoPath)}` : join(root, repoKey(repoPath));
+  return context.kind === "wsl"
+    ? `${parent}/${sessionId}.requested`
+    : join(parent, `${sessionId}.requested`);
+}
+
+/** Remove only an empty runner-owned session boundary. A retained attached worktree or any
+ * unexpected content makes the non-recursive removal fail closed and leaves the boundary intact. */
+export async function removeRequestedWorktreeBoundary(
+  repoPath: string,
+  sessionId: string,
+  options: WorktreeOptions = {},
+): Promise<boolean> {
+  const context = options.context ?? nativeContext;
+  const boundary = await requestedWorktreeBoundaryPath(repoPath, sessionId, options, false);
+  try {
+    if (context.kind === "wsl") {
+      await runContextCommand(context, "rmdir", ["--", boundary], { cwd: "/", timeoutMs: 8_000 });
+    } else {
+      await rmdir(boundary);
+    }
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    const detail = `${(error as { stderr?: string }).stderr ?? ""}\n${(error as Error).message}`;
+    if (code === "ENOENT" || code === "ENOTEMPTY" || code === "EEXIST" || /not empty|no such file/i.test(detail)) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+function safeGitArgument(value: string, label: string): string {
+  if (!value || value.startsWith("-") || /[\0\r\n]/u.test(value)) {
+    throw new Error(`${label} is not a safe Git argument`);
+  }
+  return value;
+}
+
+async function validateBranch(context: AgentContext, repoPath: string, branch: string): Promise<string> {
+  safeGitArgument(branch, "worktree branch");
+  const validated = (await command(context, repoPath, ["check-ref-format", "--branch", branch])).trim();
+  if (validated !== branch) throw new Error("worktree branch did not round-trip through Git validation");
+  return branch;
+}
+
+/** Create a distinct session-owned worktree from an explicit ref without consulting the primary
+ * checkout's HEAD. The branch is created, never reset: a pre-existing branch fails closed instead
+ * of moving an unrelated ref. */
+export async function createRequestedWorktree(
+  repoPath: string,
+  sessionId: string,
+  request: { baseRef: string; branch: string },
+  options: RequestedWorktreeOptions = {},
+): Promise<SessionWorktreeHandle> {
+  const context = options.context ?? nativeContext;
+  const baseRef = safeGitArgument(request.baseRef, "worktree base ref");
+  const branch = await validateBranch(context, repoPath, request.branch);
+  const baseCommit = (await command(
+    context,
+    repoPath,
+    ["rev-parse", "--verify", "--end-of-options", `${baseRef}^{commit}`],
+  )).trim();
+  if (!/^[a-f0-9]{40,64}$/u.test(baseCommit)) throw new Error("worktree base did not resolve to a commit");
+  const boundary = await requestedWorktreeBoundary(repoPath, sessionId, options);
+  const path = context.kind === "wsl"
+    ? `${boundary}/${requestedSlot(branch)}`
+    : join(boundary, requestedSlot(branch));
+  const listed = await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]);
+  const matching = parseWorktreePorcelain(listed).find((entry) => sameWorktreePath(context, entry.path, path));
+  if (matching) {
+    if (matching.branch === branch) {
+      return { path: matching.path, branch, baseRef, baseCommit, attached: false, created: false };
+    }
+    throw new Error("requested worktree slot is already registered with different Git coordinates");
+  }
+  // Never delete the deterministic leaf while the requested branch exists. Git may have
+  // canonicalized a symlinked path differently from the runner; a branch/registration collision is
+  // therefore ambiguity, not proof that the leaf is an abandoned session directory.
+  if (parseWorktreePorcelain(listed).some((entry) => entry.branch === branch)) {
+    throw new Error("requested worktree branch is already registered at a different path");
+  }
+  const branchRef = `refs/heads/${branch}`;
+  const existingBranch = (await command(
+    context,
+    repoPath,
+    ["for-each-ref", "--format=%(refname)", branchRef],
+  )).trim();
+  if (existingBranch === branchRef) throw new Error("requested worktree branch already exists");
+  await removeExternalDirectory(context, path, options);
+  await command(context, repoPath, ["worktree", "add", "-b", branch, path, baseCommit], 120_000);
+  return { path, branch, baseRef, baseCommit, attached: false, created: true };
+}
+
+/** Resolve and fetch the remote's advertised default branch. No primary-checkout HEAD or current
+ * branch participates in the result. */
+export async function fetchRemoteDefaultBase(
+  repoPath: string,
+  options: WorktreeOptions = {},
+  remote = "origin",
+): Promise<string> {
+  const context = options.context ?? nativeContext;
+  safeGitArgument(remote, "Git remote");
+  const advertised = await command(context, repoPath, ["ls-remote", "--symref", remote, "HEAD"], 120_000);
+  const headRef = advertised.split("\n")
+    .map((line) => /^ref:\s+(refs\/heads\/[^\s]+)\s+HEAD$/u.exec(line)?.[1])
+    .find((value): value is string => !!value);
+  if (!headRef) throw new Error(`remote ${remote} did not advertise a default branch`);
+  const branch = headRef.slice("refs/heads/".length);
+  safeGitArgument(branch, "remote default branch");
+  const trackingRef = `refs/remotes/${remote}/${branch}`;
+  await command(context, repoPath, ["fetch", "--no-tags", remote, `+${headRef}:${trackingRef}`], 120_000);
+  return `${remote}/${branch}`;
+}
+
+interface ListedWorktree {
+  path: string;
+  head: string | null;
+  branch: string | null;
+  /** Git documents the main worktree as the first porcelain record, including for bare repos. */
+  primary: boolean;
+  bare: boolean;
+}
+
+function parseWorktreePorcelain(value: string): ListedWorktree[] {
+  return value.split("\0\0").flatMap((block, index) => {
+    const fields = block.split("\0");
+    const path = fields.find((field) => field.startsWith("worktree "))?.slice(9);
+    const head = fields.find((field) => field.startsWith("HEAD "))?.slice(5) ?? null;
+    const branchRef = fields.find((field) => field.startsWith("branch "))?.slice(7);
+    if (!path) return [];
+    const bare = fields.includes("bare");
+    return [{
+      path,
+      head,
+      branch: branchRef?.startsWith("refs/heads/") ? branchRef.slice(11) : null,
+      primary: index === 0 || bare,
+      bare,
+    }];
+  });
+}
+
+function pathWithin(context: AgentContext, candidate: string, root: string): boolean {
+  if (sameWorktreePath(context, candidate, root)) return true;
+  if (context.kind === "wsl") return candidate.startsWith(root.replace(/\/$/u, "") + "/");
+  const normalizedCandidate = canonicalNativePath(candidate).replace(/\\/gu, "/");
+  const normalizedRoot = canonicalNativePath(root).replace(/\\/gu, "/");
+  const insensitive = process.platform === "win32";
+  return (insensitive ? normalizedCandidate.toLowerCase() : normalizedCandidate)
+    .startsWith((insensitive ? normalizedRoot.toLowerCase() : normalizedRoot) + "/");
+}
+
+/** Attach only a Git-registered linked worktree from the same repository and an operator-configured
+ * location boundary. Merely existing on disk is insufficient. */
+export async function attachRequestedWorktree(
+  repoPath: string,
+  sessionId: string,
+  requestedPath: string,
+  options: RequestedWorktreeOptions = {},
+): Promise<SessionWorktreeHandle> {
+  const context = options.context ?? nativeContext;
+  const path = safeGitArgument(requestedPath, "worktree path");
+  const runnerBoundary = await requestedWorktreeBoundary(repoPath, sessionId, options, false);
+  const allowed = [runnerBoundary, ...(options.allowedProjectPaths ?? [])];
+  if (!allowed.some((root) => pathWithin(context, path, root))) {
+    throw new Error("worktree path is outside the runner's configured Project Locations");
+  }
+  const listed = parseWorktreePorcelain(await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]));
+  const match = listed.find((entry) => sameWorktreePath(context, entry.path, path));
+  if (!match) throw new Error("worktree path is not registered with the session repository");
+  if (match.primary) {
+    throw new Error("the repository's primary workspace cannot be attached as a session worktree");
+  }
+  if (!match.branch || !match.head) throw new Error("a detached worktree cannot be attached to a session");
+  const healthy = (await command(context, match.path, ["rev-parse", "--is-inside-work-tree"])).trim() === "true";
+  if (!healthy) throw new Error("registered worktree is not healthy");
+  return {
+    path: match.path,
+    branch: match.branch,
+    baseRef: match.head,
+    baseCommit: match.head,
+    attached: true,
+    created: false,
+  };
 }
 
 /** True if `repoPath` is inside a git work tree in the requested context. */
@@ -287,7 +544,7 @@ export async function createWorktree(repoPath: string, sessionId: string, option
     .split(/\n\s*\n/)
     .map((block) => block.split("\n").find((line) => line.startsWith("worktree "))?.slice(9).trim())
     .filter((candidate): candidate is string => !!candidate)
-    .some((candidate) => sameContextPath(context, candidate, path));
+    .some((candidate) => sameWorktreePath(context, candidate, path));
   if (registered) {
     try {
       if ((await command(context, path, ["rev-parse", "--is-inside-work-tree"])).trim() === "true") {
@@ -305,13 +562,34 @@ export async function createWorktree(repoPath: string, sessionId: string, option
   return { path, branch, created: true };
 }
 
-function sameContextPath(context: AgentContext, left: string, right: string): boolean {
+export function sameWorktreePath(context: AgentContext, left: string, right: string): boolean {
   if (context.kind === "wsl") return left.replace(/\/$/, "") === right.replace(/\/$/, "");
   const normalize = (value: string) => {
-    const normalized = resolve(value).replace(/\\/g, "/");
+    const normalized = canonicalNativePath(value).replace(/\\/g, "/");
     return process.platform === "win32" ? normalized.toLowerCase() : normalized;
   };
   return normalize(left) === normalize(right);
+}
+
+function canonicalNativePath(value: string): string {
+  const absolute = resolve(value);
+  let cursor = absolute;
+  const suffix: string[] = [];
+  try {
+    while (true) {
+      try {
+        return join(realpathSync.native(cursor), ...suffix.reverse());
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        const parent = dirname(cursor);
+        if ((code !== "ENOENT" && code !== "ENOTDIR") || parent === cursor) return absolute;
+        suffix.push(basename(cursor));
+        cursor = parent;
+      }
+    }
+  } catch {
+    return absolute;
+  }
 }
 
 export async function createWorktreeFromTree(
@@ -339,6 +617,148 @@ export async function createWorktreeFromTree(
 
 export async function worktreeHead(worktreePath: string, options: WorktreeOptions = {}): Promise<string> {
   return (await command(options.context ?? nativeContext, worktreePath, ["rev-parse", "HEAD"])).trim();
+}
+
+export type PullRequestLifecycleState = "open" | "merged" | "closed";
+const isGitHubPullRequestUrl = (value: string): boolean =>
+  /^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+$/u.test(value);
+
+export function parseWorktreePullRequestState(
+  raw: string,
+  expectedUrl: string,
+): PullRequestLifecycleState | null {
+  if (!isGitHubPullRequestUrl(expectedUrl)) return null;
+  try {
+    const parsed = JSON.parse(raw) as { url?: unknown; state?: unknown };
+    if (parsed.url !== expectedUrl || typeof parsed.state !== "string") return null;
+    if (parsed.state === "OPEN") return "open";
+    if (parsed.state === "MERGED") return "merged";
+    if (parsed.state === "CLOSED") return "closed";
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Read one exact linked GitHub pull request. Network/auth/shape failures are deliberately
+ * indistinguishable from unavailable state: absence of proof is never permission to delete. */
+export async function worktreePullRequestState(
+  worktreePath: string,
+  pullRequestUrl: string,
+  options: WorktreeOptions = {},
+): Promise<PullRequestLifecycleState | null> {
+  if (!isGitHubPullRequestUrl(pullRequestUrl)) return null;
+  try {
+    const result = await runContextCommand(
+      options.context ?? nativeContext,
+      "gh",
+      ["pr", "view", pullRequestUrl, "--json", "url,state"],
+      { cwd: worktreePath, timeoutMs: 30_000, maxBuffer: 1024 * 1024 },
+    );
+    return parseWorktreePullRequestState(result.stdout, pullRequestUrl);
+  } catch {
+    return null;
+  }
+}
+
+export type SafeWorktreeDiscardResult =
+  | { removed: true }
+  | {
+      removed: false;
+      reason: "not_runner_owned" | "branch_changed" | "dirty" | "no_upstream" | "unpushed" | "unavailable";
+    };
+
+/** Remove one inactive runner-owned worktree only after proving it has no local-only state.
+ * The worktree removal is intentionally non-force, so a concurrent file write fails closed. The
+ * branch delete is compare-and-delete against the exact inspected OID, so a concurrent commit is
+ * retained even if it lands after the final status check. */
+export async function discardWorktreeIfSafe(
+  repoPath: string,
+  sessionId: string,
+  handle: WorktreeHandle & { source: "legacy" | "created" },
+  options: WorktreeOptions = {},
+): Promise<SafeWorktreeDiscardResult> {
+  const context = options.context ?? nativeContext;
+  const branch = await validateBranch(context, repoPath, handle.branch);
+  const requestedBoundary = await requestedWorktreeBoundaryPath(repoPath, sessionId, options, false);
+  const currentLegacyPath = await sessionPath(repoPath, sessionId, options, false);
+  const legacyPaths = [currentLegacyPath];
+  if (context.kind === "wsl") {
+    legacyPaths.push(await sessionPath(repoPath, sessionId, { ...options, legacyWslRoot: true }, false));
+  }
+  const runnerOwned = handle.source === "created"
+    ? pathWithin(context, handle.path, requestedBoundary) && !sameWorktreePath(context, handle.path, requestedBoundary)
+    : legacyPaths.some((path) => sameWorktreePath(context, handle.path, path));
+  if (!runnerOwned) {
+    return { removed: false, reason: "not_runner_owned" };
+  }
+
+  try {
+    const ref = `refs/heads/${branch}`;
+    const listed = parseWorktreePorcelain(
+      await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]),
+    );
+    const registered = listed.find((entry) => sameWorktreePath(context, entry.path, handle.path));
+    if (registered && registered.branch !== branch) return { removed: false, reason: "branch_changed" };
+    if (!registered) {
+      // A missing registration is not proof that the on-disk directory is disposable. Native can
+      // distinguish a missing leaf below the already-attested root; WSL transport errors cannot
+      // distinguish absence from an unavailable distro, so retain there.
+      if (context.kind === "wsl") return { removed: false, reason: "unavailable" };
+      try {
+        statSync(handle.path);
+        return { removed: false, reason: "unavailable" };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          return { removed: false, reason: "unavailable" };
+        }
+      }
+    }
+
+    let head: string;
+    if (registered) {
+      if (await command(context, handle.path, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])) {
+        return { removed: false, reason: "dirty" };
+      }
+      head = (await command(context, handle.path, ["rev-parse", "--verify", "HEAD"])).trim();
+    } else {
+      try {
+        head = (await command(context, repoPath, ["rev-parse", "--verify", ref])).trim();
+      } catch {
+        return { removed: true };
+      }
+    }
+    if (!/^[a-f0-9]{40,64}$/u.test(head)) return { removed: false, reason: "unavailable" };
+
+    try {
+      await command(context, repoPath, ["rev-parse", "--verify", `${branch}@{upstream}`]);
+    } catch {
+      return { removed: false, reason: "no_upstream" };
+    }
+    const ahead = (await command(
+      context,
+      repoPath,
+      ["rev-list", "--count", `${branch}@{upstream}..${ref}`],
+    )).trim();
+    if (!/^\d+$/u.test(ahead)) return { removed: false, reason: "unavailable" };
+    if (ahead !== "0") return { removed: false, reason: "unpushed" };
+
+    if (registered) {
+      // Close the widest observable race before the non-force removal. Git independently rejects
+      // a dirty tree, and update-ref below rejects a branch that advanced after this comparison.
+      if (await command(context, handle.path, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])) {
+        return { removed: false, reason: "dirty" };
+      }
+      const finalHead = (await command(context, handle.path, ["rev-parse", "--verify", "HEAD"])).trim();
+      if (finalHead !== head) return { removed: false, reason: "unpushed" };
+      await command(context, repoPath, ["worktree", "remove", handle.path], 120_000);
+    }
+    await command(context, repoPath, ["update-ref", "-d", ref, head]);
+    await command(context, repoPath, ["worktree", "prune"]);
+    return { removed: true };
+  } catch {
+    return { removed: false, reason: "unavailable" };
+  }
 }
 
 /** Remove the linked worktree, its branch, and stale administrative records. */
@@ -383,13 +803,48 @@ async function removeExternalDirectory(context: AgentContext, path: string, opti
   if (context.kind === "wsl") {
     const prefix = root.replace(/\/$/, "") + "/";
     if (!path.startsWith(prefix) || path === root) throw new Error("refusing to remove a path outside the WSL worktree root");
+    const marker = await runContextCommand(
+      context,
+      "sh",
+      [
+        "-c",
+        'marker="$1/.git"; if [ -d "$marker" ] || [ -L "$marker" ]; then printf registered; ' +
+          'elif [ -f "$marker" ]; then gitdir=$(sed -n "s/^gitdir: //p" "$marker"); ' +
+          'if [ -z "$gitdir" ]; then printf registered; else case "$gitdir" in /*) ;; *) gitdir="$1/$gitdir" ;; esac; ' +
+          'if [ -e "$gitdir" ] || [ -L "$gitdir" ]; then printf registered; fi; fi; fi',
+        "sh",
+        path,
+      ],
+      { cwd: "/", timeoutMs: 8_000 },
+    );
+    if (marker.stdout === "registered") {
+      throw new Error("refusing to recursively remove a path that may still be a registered worktree");
+    }
     await runContextCommand(context, "rm", ["-rf", "--", path], { cwd: "/", timeoutMs: 120_000 });
     return;
   }
-  const absoluteRoot = resolve(root);
-  const absolutePath = resolve(path);
+  const absoluteRoot = canonicalNativePath(root);
+  const absolutePath = canonicalNativePath(path);
   if (!absolutePath.startsWith(absoluteRoot + sep) || absolutePath === absoluteRoot) {
     throw new Error("refusing to remove a path outside the native worktree root");
+  }
+  const markerPath = join(absolutePath, ".git");
+  try {
+    const marker = lstatSync(markerPath);
+    if (!marker.isFile() || marker.isSymbolicLink()) {
+      throw new Error("refusing to recursively remove a path that may still be a registered worktree");
+    }
+    const match = /^gitdir:\s*(.+)\s*$/mu.exec(readFileSync(markerPath, "utf8"));
+    if (!match) throw new Error("refusing to recursively remove a path with an unrecognized Git marker");
+    const gitDir = resolve(absolutePath, match[1]!);
+    try {
+      lstatSync(gitDir);
+      throw new Error("refusing to recursively remove a path that may still be a registered worktree");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
   await rm(absolutePath, { recursive: true, force: true });
 }

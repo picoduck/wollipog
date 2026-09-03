@@ -7,6 +7,7 @@ import type { DriverOptions } from "./drivers/driver.js";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 import { ProviderStateCleanupJournal } from "./provider-state-reconciliation.js";
+import { requestedWorktreeBoundary, setStatfsForTests } from "./worktree.js";
 
 function meta(): SessionMeta {
   return {
@@ -33,6 +34,7 @@ function cloudTarget() {
 test("session launch passes one resolved isolation boundary to every driver", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-session-isolation-"));
   try {
+    setStatfsForTests(async () => { throw new Error("capacity preflight must not run for ordinary isolation"); });
     const store = new SessionStore(root);
     store.create(meta());
     let captured: DriverOptions | undefined;
@@ -45,10 +47,11 @@ test("session launch passes one resolved isolation boundary to every driver", as
       };
     };
     const isolation = { backend: "bwrap" as const, command: "/usr/bin/bwrap", args: [], network: "deny" as const };
+    const dataDir = join(root, ".runner-data");
     let state: unknown;
     const migrations: string[] = [];
     const manager = new SessionManager(
-      () => {}, () => {}, store, "runner", undefined, factory as never, undefined, 1,
+      () => {}, () => {}, store, "runner", undefined, factory as never, dataDir, 1,
       undefined, undefined, { agentLimits: {}, agentWeights: {} },
       { mode: "bwrap", network: "deny" }, async (_policy, _context, _deps, options) => {
         state = options;
@@ -62,11 +65,19 @@ test("session launch passes one resolved isolation boundary to every driver", as
     assert.equal(await internals.acquireAdmission("s1"), true);
     assert.equal(await internals.launch(store.readMeta("s1")), true);
     assert.deepEqual(captured?.isolation, isolation);
-    assert.deepEqual(state, { driver: "claude-code", dataDir: join(root, ".runner-data"), env: {}, sessionId: "s1", cwd: "/repo" });
+    assert.deepEqual(state, {
+      driver: "claude-code",
+      dataDir,
+      env: {},
+      sessionId: "s1",
+      cwd: "/repo",
+      additionalWritableRoots: [await requestedWorktreeBoundary("/repo", "s1", { dataDir }, false)],
+    });
     assert.deepEqual(migrations, ["s1"]);
     assert.equal(store.readMeta("s1")?.providerStateVersion, 2);
     manager.shutdownAll();
   } finally {
+    setStatfsForTests();
     rmSync(root, { recursive: true, force: true });
   }
 });

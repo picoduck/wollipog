@@ -2,7 +2,11 @@
 
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { PROTOCOL_VERSION, WOLLIPOG_AGENT_ACTOR_SESSION_HEADER } from "@wollipog/protocol";
+import {
+  PROTOCOL_VERSION,
+  RUNNER_CAPABILITY_MIN_PROTOCOL,
+  WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
+} from "@wollipog/protocol";
 import {
   executeManagerTool,
   serveConductorMcp,
@@ -53,7 +57,7 @@ function positional(args: string[]): string[] {
   const valueOptions = new Set([
     "--url", "--token-file", "--runner", "--agent", "--workspace", "--path", "--prompt",
     "--title", "--model", "--permission-mode", "--after", "--limit", "--for", "--timeout",
-    "--interval", "--cost-budget", "--max-tool-calls",
+    "--interval", "--cost-budget", "--max-tool-calls", "--session", "--branch", "--base", "--base-ref",
   ]);
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
@@ -74,7 +78,9 @@ function numeric(value: string | undefined): number | undefined {
 function usage(): string {
   return [
     "Usage: wollipog session <command> [options]",
-    "Commands: list, get, events, create, prompt, wait, stop",
+    "       wollipog worktree <create|attach|select|discard> [options]",
+    "Session Commands: list, get, events, create, prompt, wait, stop",
+    "Worktree Options: --session <id>, --branch <name>, --base <ref>, --path <absolute-path>",
     "Use --json for stable machine-readable output.",
   ].join("\n");
 }
@@ -88,6 +94,35 @@ function invocationArgs(argv: string[]): string[] {
 
 function command(args: string[]): { tool: string; input: Record<string, unknown> } | { error: string } {
   const words = positional(args);
+  if (words[0] === "worktree" || words[0] === "worktrees") {
+    const verb = words[1];
+    const sessionId = option(args, "--session");
+    if (verb === "create") {
+      const branch = option(args, "--branch");
+      if (!branch) return { error: "worktree create requires --branch" };
+      return {
+        tool: "create_worktree",
+        input: {
+          ...(sessionId ? { sessionId } : {}),
+          branch,
+          ...((option(args, "--base") ?? option(args, "--base-ref"))
+            ? { baseRef: option(args, "--base") ?? option(args, "--base-ref") }
+            : {}),
+        },
+      };
+    }
+    if (verb === "attach" || verb === "select" || verb === "discard") {
+      const path = option(args, "--path");
+      if (!path) return { error: `worktree ${verb} requires --path` };
+      return {
+        tool: verb === "attach"
+          ? "attach_worktree"
+          : verb === "select" ? "select_worktree" : "discard_worktree",
+        input: { ...(sessionId ? { sessionId } : {}), path },
+      };
+    }
+    return { error: usage() };
+  }
   if (words[0] !== "session" && words[0] !== "sessions") return { error: usage() };
   const verb = words[1];
   switch (verb) {
@@ -148,13 +183,13 @@ function payload(result: ToolResult): unknown {
   try { return JSON.parse(raw); } catch { return { error: raw }; }
 }
 
-async function compatible(fetchImpl: McpFetch, cpUrl: string): Promise<string | null> {
+async function compatible(fetchImpl: McpFetch, cpUrl: string, requiredProtocol: number): Promise<string | null> {
   try {
     const response = await fetchImpl(`${cpUrl}/healthz`, { method: "GET", signal: AbortSignal.timeout(10_000) });
     if (!response.ok) return `control plane compatibility check failed: HTTP ${response.status}`;
     const body = JSON.parse(await response.text()) as { protocolVersion?: unknown };
-    if (typeof body.protocolVersion !== "number" || body.protocolVersion < PROTOCOL_VERSION) {
-      return `control plane protocol v${String(body.protocolVersion ?? "unknown")} is incompatible; Wollipog CLI requires v${PROTOCOL_VERSION}`;
+    if (typeof body.protocolVersion !== "number" || body.protocolVersion < requiredProtocol) {
+      return `control plane protocol v${String(body.protocolVersion ?? "unknown")} is incompatible; this Wollipog CLI command requires v${requiredProtocol}`;
     }
     return null;
   } catch (error) {
@@ -200,7 +235,13 @@ export async function runWollipogCli(
     (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: readinessError })}\n` : `${readinessError}\n`);
     return 1;
   }
-  const incompatibility = await compatible(fetchImpl, cpUrl);
+  const worktreeTools = new Set(["create_worktree", "attach_worktree", "select_worktree"]);
+  const requiredProtocol = parsed.tool === "discard_worktree"
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeDiscard
+    : worktreeTools.has(parsed.tool)
+      ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktrees
+      : RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControl;
+  const incompatibility = await compatible(fetchImpl, cpUrl, requiredProtocol);
   if (incompatibility) {
     (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: incompatibility })}\n` : `${incompatibility}\n`);
     return 1;

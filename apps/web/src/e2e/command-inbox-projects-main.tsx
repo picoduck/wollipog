@@ -208,6 +208,26 @@ function initialModel(): FixtureModel {
       worktreePath: "/repos/alpha/.agent-worktrees/session-alpha",
     });
   }
+  if (SCENARIO === "worktree-identity" || SCENARIO === "unsafe-worktree-pr") {
+    Object.assign(initial.sessions.find((candidate) => candidate.id === "session-alpha")!, {
+      useWorktree: true,
+      worktreePath: "/repos/alpha/.agent-worktrees/fix-583",
+      worktrees: [{
+        id: "wt-fix-583",
+        path: "/repos/alpha/.agent-worktrees/fix-583",
+        branch: "fix/session-worktree-identity",
+        baseRef: "origin/main",
+        baseCommit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        source: "created",
+        pullRequest: {
+          url: SCENARIO === "unsafe-worktree-pr"
+            ? "javascript:alert('unsafe')"
+            : "https://github.com/picoduck/wollipog/pull/600",
+          state: "open",
+        },
+      }],
+    });
+  }
   if (UNFILED_WORKSPACE) {
     Object.assign(initial.sessions.find((candidate) => candidate.id === "session-alpha")!, {
       projectId: null,

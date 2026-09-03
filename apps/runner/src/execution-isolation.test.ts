@@ -120,6 +120,28 @@ test("bwrap resolves in the exact native or WSL process namespace", async () => 
   assert.deepEqual(wsl, { backend: "bwrap", command: "/usr/bin/bwrap", args: [], network: "deny" });
 });
 
+test("platform isolation makes only the session-requested worktree boundary additionally writable", async () => {
+  const native = await resolveExecutionIsolation(bwrap, { kind: "native" }, {
+    platform: "linux",
+    uid: () => 1000,
+    resolveNative: async () => ({
+      path: "/usr/bin/bwrap", via: "path", launch: { command: "/usr/bin/bwrap", args: [] },
+    }),
+    mkdirNative: async () => {},
+  }, {
+    driver: "acp",
+    dataDir: "/var/lib/wollipog",
+    env: {},
+    sessionId: "s-one",
+    cwd: "/repo",
+    additionalWritableRoots: ["/var/lib/wollipog/worktrees/repo/s-one.requested"],
+  });
+  assert.deepEqual(native?.backend === "bwrap" ? native.writableBinds : undefined, [{
+    source: "/var/lib/wollipog/worktrees/repo/s-one.requested",
+    target: "/var/lib/wollipog/worktrees/repo/s-one.requested",
+  }]);
+});
+
 test("strict bwrap policy fails closed when the target context cannot provide it", async () => {
   await assert.rejects(() => resolveExecutionIsolation(bwrap, { kind: "native" }, {
     platform: "win32", uid: () => undefined, resolveNative: async () => null, resolveWsl: async () => null,

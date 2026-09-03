@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  agentCredentialSessionTargetError,
   agentDelegationAuthorizationError,
   boundedTargetId,
   forkProjectAssignment,
@@ -78,6 +79,31 @@ test("a user- or team-scoped conductor cannot mutate organization-global resourc
     ...userAgent,
     delegatedScope: { organizationId: "org_1", owner: { kind: "organization", organizationId: "org_1" } },
   }), null);
+});
+
+test("a purpose-bound credential confines worktree routes without blocking delegated sibling operations", () => {
+  const credential: AgentPrincipal = {
+    kind: "agent",
+    actorId: "s_calling",
+    credentialSessionId: "s_calling",
+    organizationId: "org_1",
+    delegatedScope: { organizationId: "org_1", owner: { kind: "user", userId: "usr_1" } },
+  };
+  assert.equal(agentCredentialSessionTargetError("/api/sessions/:id/worktrees", credential, "s_calling"), null);
+  assert.match(agentCredentialSessionTargetError("/api/sessions/:id/worktrees", credential, "s_sibling")!, /only its own session/);
+  assert.match(agentCredentialSessionTargetError(
+    "/api/sessions/:id/worktrees/discard",
+    credential,
+    "s_sibling",
+  )!, /only its own session/);
+  assert.equal(agentCredentialSessionTargetError("/api/sessions/:id/prompt", credential, "s_sibling"), null,
+    "the general agent-control credential retains its reviewed delegated sibling-session surface");
+  assert.equal(agentCredentialSessionTargetError(
+    "/api/sessions/:id/worktrees",
+    { ...credential, credentialSessionId: undefined },
+    "s_sibling",
+  ), null,
+    "a conductor retains its separately reviewed delegated scope");
 });
 
 test("a runner cannot turn a normal fork into a privileged conductor session", () => {

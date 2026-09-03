@@ -261,6 +261,27 @@ test("registration keeps history neutral until one negotiated v86 or v87 generat
   }
 });
 
+test("linked worktree metadata is projected only to protocol v101 peers", () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta({
+      worktrees: [{
+        id: "wt-one",
+        path: "/home/me/repo/.agent-worktrees/s_abc",
+        branch: "fix/one",
+        baseRef: "origin/main",
+        baseCommit: "a".repeat(40),
+        source: "created",
+      }],
+    }));
+    const exact = store.snapshots(101, true)[0]!;
+    assert.equal(store.projectSnapshotForProtocol(exact, 100).worktrees, undefined);
+    assert.equal(store.projectSnapshotForProtocol(exact, 101).worktrees?.[0]?.branch, "fix/one");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a failed incremental projection scan commits no duplicate omissions on retry", () => {
   const { store, root } = tmpStore();
   try {
@@ -448,6 +469,25 @@ test("lock: free→acquire, second owner blocked, release frees it", () => {
     store.releaseLock("s_abc", "runner-A");
     assert.equal(store.ownsLock("s_abc", "runner-A"), false);
     assert.equal(store.acquireLock("s_abc", "runner-B"), true); // now free
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("worktree leases retain a live provider across store instances and release owner-safely", () => {
+  const { store: first, root } = tmpStore();
+  try {
+    first.create(meta());
+    const second = new SessionStore(root);
+    assert.equal(first.acquireWorktreeLease("s_abc", "provider:first"), true);
+    assert.equal(second.acquireWorktreeLease("s_abc", "cleanup:second"), false,
+      "a sibling process must treat the live provider PID as authoritative");
+    second.releaseWorktreeLease("s_abc", "cleanup:second");
+    assert.equal(second.acquireWorktreeLease("s_abc", "cleanup:third"), false,
+      "a non-owner release must not unlink the provider lease");
+    first.releaseWorktreeLease("s_abc", "provider:first");
+    assert.equal(second.acquireWorktreeLease("s_abc", "cleanup:second"), true);
+    second.releaseWorktreeLease("s_abc", "cleanup:second");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

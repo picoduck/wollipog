@@ -447,6 +447,7 @@ const CURRENT_CHECKPOINT_REF_ROOT = "refs/wollipog";
 const LEGACY_CHECKPOINT_REF_ROOT = "refs/mam";
 const CHECKPOINT_REF_ROOTS = [CURRENT_CHECKPOINT_REF_ROOT, LEGACY_CHECKPOINT_REF_ROOT] as const;
 const CHECKPOINT_OWNER_HASH = /^[a-f0-9]{64}$/u;
+const CHECKPOINT_WORKTREE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
 
 type CheckpointRefKind = "turn" | "fork";
 
@@ -476,14 +477,25 @@ function checkpointRefName(
   kind: CheckpointRefKind,
   turn: number,
   ownerHash?: string,
+  worktreeId?: string,
 ): string {
-  return `${checkpointSessionRoot(root, sessionId, ownerHash)}/${kind}-${turn}`;
+  if (worktreeId !== undefined && !CHECKPOINT_WORKTREE_ID.test(worktreeId)) {
+    throw new Error("invalid checkpoint worktree id");
+  }
+  const scope = worktreeId ? `/worktrees/${worktreeId}` : "";
+  return `${checkpointSessionRoot(root, sessionId, ownerHash)}${scope}/${kind}-${turn}`;
 }
 
-function checkpointRefNames(sessionId: string, kind: CheckpointRefKind, turn: number, ownerHash?: string) {
+function checkpointRefNames(
+  sessionId: string,
+  kind: CheckpointRefKind,
+  turn: number,
+  ownerHash?: string,
+  worktreeId?: string,
+) {
   return {
-    current: checkpointRefName(CURRENT_CHECKPOINT_REF_ROOT, sessionId, kind, turn, ownerHash),
-    legacy: checkpointRefName(LEGACY_CHECKPOINT_REF_ROOT, sessionId, kind, turn, ownerHash),
+    current: checkpointRefName(CURRENT_CHECKPOINT_REF_ROOT, sessionId, kind, turn, ownerHash, worktreeId),
+    legacy: checkpointRefName(LEGACY_CHECKPOINT_REF_ROOT, sessionId, kind, turn, ownerHash, worktreeId),
   };
 }
 
@@ -524,8 +536,9 @@ async function anchorCheckpointRef(
   turn: number,
   tree: string,
   ownerHash?: string,
+  worktreeId?: string,
 ): Promise<void> {
-  const names = checkpointRefNames(sessionId, kind, turn, ownerHash);
+  const names = checkpointRefNames(sessionId, kind, turn, ownerHash, worktreeId);
   await updateCheckpointRefs(cwd, [
     `update ${names.legacy} ${tree}`,
     `update ${names.current} ${tree}`,
@@ -533,22 +546,42 @@ async function anchorCheckpointRef(
 }
 
 /** Keep a completed-turn tree alive for provider-native conversation forks. */
-export async function anchorForkRef(cwd: string, sessionId: string, turn: number, tree: string, ownerHash?: string): Promise<void> {
-  await anchorCheckpointRef(cwd, sessionId, "fork", turn, tree, ownerHash);
+export async function anchorForkRef(
+  cwd: string,
+  sessionId: string,
+  turn: number,
+  tree: string,
+  ownerHash?: string,
+  worktreeId?: string,
+): Promise<void> {
+  await anchorCheckpointRef(cwd, sessionId, "fork", turn, tree, ownerHash, worktreeId);
 }
 
 /** Anchor a snapshot tree as real refs so `git gc` can never prune it (unlike the dangling
  * lastTurnBaseTree, which is only best-effort). Refs may point at tree objects directly. */
-export async function anchorTurnRef(cwd: string, sessionId: string, turn: number, tree: string, ownerHash?: string): Promise<void> {
-  await anchorCheckpointRef(cwd, sessionId, "turn", turn, tree, ownerHash);
+export async function anchorTurnRef(
+  cwd: string,
+  sessionId: string,
+  turn: number,
+  tree: string,
+  ownerHash?: string,
+  worktreeId?: string,
+): Promise<void> {
+  await anchorCheckpointRef(cwd, sessionId, "turn", turn, tree, ownerHash, worktreeId);
 }
 
 /** Read a session's checkpoint tree for `turn` (null = never anchored / deleted). The current
  * namespace is probed first, but the legacy value is still checked: after a downgrade an old
  * runner can update only refs/mam, so silently preferring a stale current ref would rewind files
  * to the wrong tree. Divergence therefore fails closed for explicit repair. */
-export async function readTurnRef(cwd: string, sessionId: string, turn: number, ownerHash?: string): Promise<string | null> {
-  const names = checkpointRefNames(sessionId, "turn", turn, ownerHash);
+export async function readTurnRef(
+  cwd: string,
+  sessionId: string,
+  turn: number,
+  ownerHash?: string,
+  worktreeId?: string,
+): Promise<string | null> {
+  const names = checkpointRefNames(sessionId, "turn", turn, ownerHash, worktreeId);
   let pair: { current: string | null; legacy: string | null };
   try {
     pair = await readCheckpointRefPair(cwd, names);
@@ -571,8 +604,14 @@ export async function readTurnRef(cwd: string, sessionId: string, turn: number, 
 }
 
 /** Remove one prepared checkpoint ref without disturbing earlier turns or fork points. */
-export async function deleteTurnRef(cwd: string, sessionId: string, turn: number, ownerHash?: string): Promise<void> {
-  const names = checkpointRefNames(sessionId, "turn", turn, ownerHash);
+export async function deleteTurnRef(
+  cwd: string,
+  sessionId: string,
+  turn: number,
+  ownerHash?: string,
+  worktreeId?: string,
+): Promise<void> {
+  const names = checkpointRefNames(sessionId, "turn", turn, ownerHash, worktreeId);
   await updateCheckpointRefs(cwd, [`delete ${names.current}`, `delete ${names.legacy}`]);
 }
 
@@ -592,7 +631,9 @@ async function listCheckpointRefs(
     const oid = line.slice(separator + 1).trim();
     if (!name.startsWith(prefix) || !oid) continue;
     const suffix = name.slice(prefix.length);
-    if (/^(?:turn|fork)-[1-9]\d*$/.test(suffix)) refs.set(suffix, oid);
+    if (/^(?:(?:turn|fork)-[1-9]\d*|worktrees\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/(?:turn|fork)-[1-9]\d*)$/.test(suffix)) {
+      refs.set(suffix, oid);
+    }
   }
   return refs;
 }

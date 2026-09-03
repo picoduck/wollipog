@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import {
   PROTOCOL_VERSION,
+  RUNNER_CAPABILITY_MIN_PROTOCOL,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
 } from "@wollipog/protocol";
 import type { McpFetch } from "./conductor-mcp.js";
@@ -85,7 +86,7 @@ test("CLI JSON create and prompt commands reuse the manager routes and reject in
   const oldFetch: McpFetch = async () => ({
     ok: true,
     status: 200,
-    text: async () => JSON.stringify({ protocolVersion: PROTOCOL_VERSION - 1 }),
+    text: async () => JSON.stringify({ protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControl - 1 }),
   });
   assert.equal(await runWollipogCli(
     ["node", "cli.js", "--wollipog-cli", "session", "list", "--json"],
@@ -94,6 +95,73 @@ test("CLI JSON create and prompt commands reuse the manager routes and reject in
     oldFetch,
   ), 1);
   assert.match(JSON.parse(incompatible).error, /incompatible/);
+});
+
+test("CLI keeps v100 core commands compatible while gating worktree commands on v101", async () => {
+  const requests: string[] = [];
+  const fetch: McpFetch = async (url) => {
+    requests.push(url);
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify(url.endsWith("/healthz")
+        ? { protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControl }
+        : { sessions: [] }),
+    };
+  };
+  const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "paired-device" };
+  let output = "";
+  assert.equal(await runWollipogCli(
+    ["node", "cli.js", "--wollipog-cli", "session", "list", "--json"],
+    env,
+    { stdout: (text) => { output += text; }, stderr: () => {} },
+    fetch,
+  ), 0);
+  assert.deepEqual(JSON.parse(output), { sessions: [] });
+
+  output = "";
+  assert.equal(await runWollipogCli(
+    ["node", "cli.js", "--wollipog-cli", "worktree", "select", "--session", "s1", "--path", "/repo/wt", "--json"],
+    env,
+    { stdout: (text) => { output += text; }, stderr: () => {} },
+    fetch,
+  ), 1);
+  assert.match(JSON.parse(output).error, /requires v101/);
+  assert.deepEqual(requests, ["http://cp/healthz", "http://cp/api/sessions", "http://cp/healthz"]);
+});
+
+test("CLI gates destructive worktree discard on v102 without disabling v101 selection", async () => {
+  const requests: string[] = [];
+  const fetch: McpFetch = async (url) => {
+    requests.push(url);
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify(url.endsWith("/healthz")
+        ? { protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktrees }
+        : { session: { id: "s1" } }),
+    };
+  };
+  const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "paired-device" };
+  assert.equal(await runWollipogCli(
+    ["node", "cli.js", "--wollipog-cli", "worktree", "select", "--session", "s1", "--path", "/repo/wt", "--json"],
+    env,
+    { stdout: () => {}, stderr: () => {} },
+    fetch,
+  ), 0);
+  let output = "";
+  assert.equal(await runWollipogCli(
+    ["node", "cli.js", "--wollipog-cli", "worktree", "discard", "--session", "s1", "--path", "/repo/wt", "--json"],
+    env,
+    { stdout: (text) => { output += text; }, stderr: () => {} },
+    fetch,
+  ), 1);
+  assert.match(JSON.parse(output).error, /requires v102/);
+  assert.deepEqual(requests, [
+    "http://cp/healthz",
+    "http://cp/api/sessions/s1/worktrees/select",
+    "http://cp/healthz",
+  ]);
 });
 
 test("CLI emits JSON for get, events, prompt, wait, and stop core commands", async () => {
@@ -154,4 +222,49 @@ test("CLI recognizes installed POSIX and Windows alias invocation names", async 
     assert.deepEqual(JSON.parse(output), { sessions: [] });
     assert.deepEqual(requests, ["http://cp/healthz", "http://cp/api/sessions"]);
   }
+});
+
+test("CLI worktree commands adapt to the shared MCP operations", async () => {
+  const requests: Array<{ url: string; body?: string }> = [];
+  const fetch: McpFetch = async (url, init) => {
+    requests.push({ url, body: init?.body });
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify(url.endsWith("/healthz")
+        ? { protocolVersion: PROTOCOL_VERSION }
+        : { worktree: { id: "wt", path: "/repo/wt", branch: "fix/583", source: "created" }, session: { id: "s1" } }),
+    };
+  };
+  const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "paired-device" };
+  let output = "";
+  assert.equal(await runWollipogCli(
+    ["node", "cli.js", "--wollipog-cli", "worktree", "create", "--session", "s1", "--branch", "fix/583", "--base", "origin/main", "--json"],
+    env,
+    { stdout: (text) => { output += text; }, stderr: () => {} },
+    fetch,
+  ), 0);
+  assert.equal(JSON.parse(output).worktree.branch, "fix/583");
+  assert.equal(requests[1]!.url, "http://cp/api/sessions/s1/worktrees");
+  assert.deepEqual(JSON.parse(requests[1]!.body!), { branch: "fix/583", baseRef: "origin/main" });
+
+  output = "";
+  assert.equal(await runWollipogCli(
+    ["node", "cli.js", "--wollipog-cli", "worktree", "select", "--session", "s1", "--path", "/repo/wt", "--json"],
+    env,
+    { stdout: (text) => { output += text; }, stderr: () => {} },
+    fetch,
+  ), 0);
+  assert.equal(requests[3]!.url, "http://cp/api/sessions/s1/worktrees/select");
+  assert.deepEqual(JSON.parse(requests[3]!.body!), { path: "/repo/wt" });
+
+  output = "";
+  assert.equal(await runWollipogCli(
+    ["node", "cli.js", "--wollipog-cli", "worktree", "discard", "--session", "s1", "--path", "/repo/old", "--json"],
+    env,
+    { stdout: (text) => { output += text; }, stderr: () => {} },
+    fetch,
+  ), 0);
+  assert.equal(requests[5]!.url, "http://cp/api/sessions/s1/worktrees/discard");
+  assert.deepEqual(JSON.parse(requests[5]!.body!), { path: "/repo/old" });
 });

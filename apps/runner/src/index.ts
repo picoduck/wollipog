@@ -42,6 +42,7 @@ import {
   type SessionCommandInvocationUpdateMessage,
   type SessionEventPayload,
   type SessionSnapshot,
+  type SessionWorktreeView,
   type SkillsSyncManifestMessage,
   type StartSessionMessage,
 } from "@wollipog/protocol";
@@ -548,6 +549,7 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
   (agentId, driver, context, update) => {
     subscriptionUsage.observe(agentId, driver, context, update);
   },
+  config.workspaces.map((workspace) => workspace.path),
 );
 authorizeSubscriptionUsageProbe = (agent, env, sourceId) =>
   sessions.prepareSubscriptionUsageProbe(agent, env, sourceId);
@@ -630,6 +632,12 @@ function projectMessageForCurrentProtocol(msg: RunnerToControlPlane): RunnerToCo
       ...msg,
       ...(msg.snapshot ? { snapshot: projectSnapshotForCurrentProtocol(msg.snapshot) } : {}),
       ...(events ? { events } : {}),
+    }, controlPlaneProtocolVersion);
+  }
+  if (msg.type === "session_worktree_result") {
+    return projectRunnerMessageForProtocol({
+      ...msg,
+      ...(msg.snapshot ? { snapshot: projectSnapshotForCurrentProtocol(msg.snapshot) } : {}),
     }, controlPlaneProtocolVersion);
   }
   if (msg.type === "adopt_session_result" && msg.snapshot) {
@@ -1438,6 +1446,31 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         );
       break;
     }
+    case "session_worktree": {
+      const operation: Promise<{ snapshot: SessionSnapshot; worktree?: SessionWorktreeView }> = msg.operation === "create"
+        ? sessions.requestWorktree(msg.sessionId, { branch: msg.branch, baseRef: msg.baseRef })
+        : msg.operation === "attach"
+          ? sessions.attachWorktree(msg.sessionId, msg.path)
+          : msg.operation === "select"
+            ? sessions.selectWorktree(msg.sessionId, msg.path).then((snapshot) => ({
+              snapshot,
+              worktree: snapshot.worktrees?.find((item) => item.path === snapshot.worktreePath),
+            }))
+            : sessions.discardWorktree(msg.sessionId, msg.path).then((snapshot) => ({ snapshot }));
+      void operation.then((result) => sendUp({
+        type: "session_worktree_result",
+        requestId: msg.requestId,
+        ok: true,
+        snapshot: result.snapshot,
+        ...(result.worktree ? { worktree: result.worktree } : {}),
+      })).catch((error) => sendUp({
+        type: "session_worktree_result",
+        requestId: msg.requestId,
+        ok: false,
+        error: errText(error),
+      }));
+      break;
+    }
     case "rediscover":
       log("rediscover requested");
       void runDiscovery(true);
@@ -2044,6 +2077,9 @@ async function runOneGitAction(msg: GitActionRequestMessage): Promise<void> {
       const resolved = validatePodReconciliationMetadata(execution.cwd, meta, source);
       return { podReconciliation: await runPodReconcile(execution.cwd, resolved.sourceWorktreePath, msg.action) };
     });
+    if (msg.action.kind === "open_pr" && data.pr?.createdWithGh) {
+      await sessions.linkWorktreePullRequest(msg.sessionId, execution.cwd, data.pr.url);
+    }
     sendUp({ type: "git_result", requestId: msg.requestId, ok: true, data });
   } catch (err) {
     const text = errText(err);

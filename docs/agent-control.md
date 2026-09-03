@@ -31,7 +31,22 @@ wollipog session create --runner ID --agent ID (--workspace ID | --path PATH) [-
 wollipog session prompt ID TEXT --json
 wollipog session wait ID [--for STATE,...] [--timeout MS] [--interval MS] --json
 wollipog session stop ID --json
+wollipog worktree create [--session ID] --branch NAME [--base REF] --json
+wollipog worktree attach [--session ID] --path PATH --json
+wollipog worktree select [--session ID] --path PATH --json
+wollipog worktree discard [--session ID] --path PATH --json
 ```
+
+An injected session defaults worktree commands to its own id and cannot override that target.
+Paired-device and conductor callers may supply `--session`. A create without `--base` fetches and
+resolves the remote default branch. Create, attach, and select return the selected absolute path;
+the already-running provider process keeps its original operating-system cwd, so it must use the
+returned path explicitly during that turn. A later resume or restart launches in the selection.
+Discard is intentionally fail-closed: it removes only an inactive runner-owned tree with a clean
+status and no commits ahead of its configured upstream. Attached, active, dirty, upstream-less,
+unpushed, branch-drifted, and Git-unavailable worktrees are retained. The runner applies the same
+checks during startup and periodic reconciliation after a linked GitHub PR is definitively merged
+or closed; an unavailable forge keeps the durable open linkage unchanged.
 
 Claude Code launches also receive an additive `wollipog` stdio MCP configuration. Both adapters
 execute the existing manager tool table, including bounded output projection and `wait_session`, so
@@ -44,7 +59,7 @@ manager. The control plane converts a valid exact-session claim into an `AgentPr
 the session's delegated resource scope, and records authorized mutations in the content-free
 mutation audit under that session id. New API routes remain denied until explicitly added.
 
-The CLI reads `/healthz` before a command and rejects a control plane older than protocol v100.
+The CLI reads `/healthz` before a command and rejects a control plane older than its own protocol.
 Runners connected to older control planes do not inject the general surface. Conductor discovery,
 launch gating, default permission-mode clamp, and legacy manager credential remain unchanged.
 

@@ -142,6 +142,7 @@ import {
   type SessionReminderWakeReason,
   type SessionTitleSource,
   type SessionView,
+  type SessionWorktreeView,
   type QueuedPromptView,
   type SteerDisposition,
   type SteerResultReason,
@@ -425,6 +426,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   run_id         TEXT,
   use_worktree   INTEGER NOT NULL DEFAULT 0,
   worktree_path  TEXT,
+  worktrees      TEXT,
   execution_target TEXT,
   execution_handoff_request TEXT,
   execution_handoff TEXT,
@@ -1912,6 +1914,7 @@ interface SessionRow {
   run_id: string | null;
   use_worktree: number;
   worktree_path: string | null;
+  worktrees: string | null;
   execution_target: string | null;
   execution_handoff_request: string | null;
   execution_handoff: string | null;
@@ -3770,6 +3773,9 @@ export class ControlPlaneDb {
       // runner; workspace_id/workspace_path remain launch-placement metadata.
       "project_id TEXT REFERENCES projects(id) ON DELETE SET NULL",
       "project_location_id TEXT REFERENCES project_locations(id) ON DELETE SET NULL",
+      // Runner-authoritative multi-worktree inventory; worktree_path stays the active legacy
+      // projection for rolling peers and existing queries.
+      "worktrees TEXT",
     ]) {
       try {
         db.exec(`ALTER TABLE sessions ADD COLUMN ${col}`);
@@ -9184,6 +9190,10 @@ export class ControlPlaneDb {
         this.stmt("UPDATE sessions SET execution_target=? WHERE id=?")
           .run(JSON.stringify(snap.executionTarget), snap.id);
       }
+      if (snap.worktrees) {
+        this.stmt("UPDATE sessions SET worktrees=? WHERE id=?")
+          .run(JSON.stringify(snap.worktrees), snap.id);
+      }
       const handoff = validateExecutionHandoffReceipt(snap.executionHandoff, snap.executionTarget);
       if (handoff) {
         this.stmt("UPDATE sessions SET execution_handoff_request=?, execution_handoff=? WHERE id=?")
@@ -9321,7 +9331,7 @@ export class ControlPlaneDb {
         );
       }
       this.stmt(
-        `UPDATE sessions SET status=?, title=?, title_source=?, semantic_title=?, provider_updated_at=?, background_work_state=?, background_work_tracking=COALESCE(?, background_work_tracking), preview=?, pending_approval=?, worktree_path=?, workspace_path=?, use_worktree=?,
+        `UPDATE sessions SET status=?, title=?, title_source=?, semantic_title=?, provider_updated_at=?, background_work_state=?, background_work_tracking=COALESCE(?, background_work_tracking), preview=?, pending_approval=?, worktree_path=?, worktrees=?, workspace_path=?, use_worktree=?,
             model=?, resolved_model=?, effort=?, permission_mode=?, agent_capabilities=?, input_tokens=?, output_tokens=?, context_tokens_used=?, context_window=?, cost_usd=?, adopted=?,
             acp_session_context=COALESCE(?, acp_session_context),
             updated_at=? WHERE id=?`,
@@ -9337,6 +9347,7 @@ export class ControlPlaneDb {
         snap.preview,
         pendingJson,
         snap.worktreePath,
+        snap.worktrees ? JSON.stringify(snap.worktrees) : null,
         snap.workspacePath ?? null,
         snap.useWorktree ? 1 : 0,
         snap.config.model ?? null,
@@ -12903,6 +12914,10 @@ export class ControlPlaneDb {
       runId: row.run_id,
       useWorktree: row.use_worktree === 1,
       worktreePath: row.worktree_path,
+      worktrees: (() => {
+        const parsed = parseJson<SessionWorktreeView[]>(row.worktrees);
+        return Array.isArray(parsed) ? parsed : undefined;
+      })(),
       executionTarget: target ? {
         id: target.id,
         runnerId: target.runnerId,

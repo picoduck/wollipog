@@ -263,8 +263,8 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
     store.appendEvent = ((sessionId, payload, ts) => {
       if (sessionId === "s_post_anchor_fail" && payload.kind === "conversation_checkpoint") {
         postAnchorWorktree = store.readMeta(sessionId)?.worktreePath ?? "";
-        assert.equal(git(repo, ["rev-parse", "refs/mam/s_post_anchor_fail/fork-2"]), tree);
-        assert.equal(git(repo, ["rev-parse", "refs/wollipog/s_post_anchor_fail/fork-2"]), tree);
+        assert.equal(git(repo, ["rev-parse", "refs/mam/s_post_anchor_fail/worktrees/legacy/fork-2"]), tree);
+        assert.equal(git(repo, ["rev-parse", "refs/wollipog/s_post_anchor_fail/worktrees/legacy/fork-2"]), tree);
         throw new Error("post-anchor copy interrupted");
       }
       return appendEvent(sessionId, payload, ts);

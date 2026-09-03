@@ -67,6 +67,7 @@ function InboxRowInner({
   const active = isHeartbeatBusy(session.status);
   const agent = sessionAgentLabel(session.agentName, session.driver, session.agentId);
   const lastActivityAt = Math.max(session.lastEventAt ?? 0, activity?.lastEventAt ?? 0) || null;
+  const activeWorktree = session.worktrees?.find((worktree) => worktree.path === session.worktreePath);
 
   return (
     <div
@@ -97,6 +98,11 @@ function InboxRowInner({
           </span>
           <span className="inbox-row-copy">
             <span className="inbox-row-title">{session.title}</span>
+            {activeWorktree && (
+              <span className="inbox-row-worktree">
+                {` · ${activeWorktree.branch}${activeWorktree.baseRef ? ` ← ${activeWorktree.baseRef}` : ""}${activeWorktree.pullRequest ? ` · ${activeWorktree.pullRequest.state === "open" ? "Open" : activeWorktree.pullRequest.state === "merged" ? "Merged" : "Closed"} PR` : ""}`}
+              </span>
+            )}
             {session.preview && <span className="inbox-row-snippet"> — {session.preview}</span>}
             {active && <ActivityStrip activity={activity} now={activityNow} compact className="inbox-row-activity" />}
           </span>
