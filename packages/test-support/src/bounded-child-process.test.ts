@@ -328,7 +328,7 @@ function synchronousLoadOffenders(text: string): string[] {
   // between the load and the access would still slip through; that needs a parser rather than a
   // regex, and is contrived enough to be recorded as accepted risk instead.
   const ACCESSES_SYNCHRONOUS = new RegExp(
-    String.raw`^\s*\)*\s*(?:\??\.\s*(?:${SYNCHRONOUS_MEMBER})\b|\[\s*["'](?:${SYNCHRONOUS_MEMBER})["']\s*\])`,
+    String.raw`^\s*\)*\s*(?:\??\.\s*(?:${SYNCHRONOUS_MEMBER})\b|(?:\?\.)?\[\s*["'](?:${SYNCHRONOUS_MEMBER})["']\s*\])`,
   );
   for (const loose of text.matchAll(new RegExp(LOADED_ANY, "g"))) {
     const after = text.slice(loose.index + loose[0].length);
@@ -386,6 +386,7 @@ test("the guardrail rejects every way of reaching the synchronous API", () => {
     "dollar-signed static default alias": `import { default as $cp } from "node:child_process";\n${CALL}`,
     "dollar-signed whole module": `const $cp = require("node:child_process");\n${CALL}`,
     "unbound require via optional chaining": 'require("node:child_process")?.spawnSync("true");',
+    "unbound require via optional computed access": 'require("node:child_process")?.["spawnSync"]("true");',
     "unbound require via computed access": 'require("node:child_process")["spawnSync"]("true");',
     "unbound require": 'require("node:child_process").spawnSync("true");',
     "unbound dynamic import": '(await import("node:child_process")).spawnSync("true");',
