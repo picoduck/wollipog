@@ -10,8 +10,29 @@ async function waitForHarness(page: Page): Promise<void> {
   await expect.poll(() => page.evaluate(() => typeof window.__WOLLIPOG_XTERM_E2E__)).toBe("object");
 }
 
-test.beforeEach(async ({ page }) => {
+const SEARCH_DURING_FONT_LOAD_TEST = "applies search entered while the terminal font is still loading @production";
+
+test.beforeEach(async ({ page }, testInfo) => {
+  if (testInfo.title === SEARCH_DURING_FONT_LOAD_TEST) return;
   await waitForHarness(page);
+});
+
+test(SEARCH_DURING_FONT_LOAD_TEST, async ({ page }) => {
+  let releaseFont!: () => void;
+  const fontGate = new Promise<void>((resolve) => { releaseFont = resolve; });
+  await page.route(/WollipogJetBrainsMonoNerd-Regular.*\.woff2$/u, async (route) => {
+    await fontGate;
+    await route.continue();
+  });
+  const response = await page.goto("/xterm-smoke-e2e.html");
+  expect(response?.ok()).toBe(true);
+  await expect.poll(() => page.evaluate(() => typeof window.__WOLLIPOG_XTERM_E2E__)).toBe("object");
+  await page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.setSearchTerm("Initial terminal"));
+  releaseFont();
+
+  const terminal = page.getByRole("region", { name: "Interactive Terminal Fixture" });
+  await expect(terminal.locator(".xterm")).toBeVisible();
+  await expect(terminal.locator(".xterm-selection div")).not.toHaveCount(0);
 });
 
 test("renders initial and incremental raw output once, including split ANSI input @production", async ({ page }) => {

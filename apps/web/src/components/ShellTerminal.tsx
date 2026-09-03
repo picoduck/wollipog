@@ -51,6 +51,8 @@ export function ShellTerminal({
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const searchRef = useRef<SearchAddon | null>(null);
+  const searchTermRef = useRef(searchTerm);
+  searchTermRef.current = searchTerm;
   const consumedRef = useRef(0);
   const textRef = useRef(text);
   textRef.current = text;
@@ -128,7 +130,10 @@ export function ShellTerminal({
       // React may have committed output while the font was loading. Consume the current snapshot
       // once now; the ordinary delta effect takes over after the terminal reference exists.
       if (totalRef.current > 0) {
-        term.write(textRef.current);
+        term.write(textRef.current, () => {
+          const pendingSearch = searchTermRef.current;
+          if (pendingSearch) search.findNext(pendingSearch, { incremental: true });
+        });
         consumedRef.current = totalRef.current;
       }
 

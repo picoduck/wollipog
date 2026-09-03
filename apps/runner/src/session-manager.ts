@@ -4084,7 +4084,13 @@ export class SessionManager {
       promptId: request.promptId,
       expectedRevision: request.expectedRevision,
       text: request.text,
-      images: request.images,
+      // A control-plane retry can externalize identical inline bytes into a fresh artifact ID.
+      // Hash immutable content identity so that storage allocation does not defeat idempotency.
+      images: request.images.map((image) => isPromptImageReference(image) ? {
+        mimeType: image.mimeType,
+        sizeBytes: image.sizeBytes,
+        sha256: image.sha256,
+      } : image),
     })).digest("hex");
     const existing = this.queueEditReceipts.get(receiptKey);
     if (existing) {

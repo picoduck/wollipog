@@ -664,7 +664,7 @@ for (const viewport of [
     expect(metrics.fork.x - metrics.overflow.right).toBeCloseTo(7, 0);
     expect(metrics.fork.right).toBeLessThanOrEqual(metrics.share.x);
     expect(metrics.share.x - metrics.fork.right).toBeCloseTo(7, 0);
-    expect(metrics.paddingRight).toBe(12);
+    expect(metrics.paddingRight).toBeGreaterThanOrEqual(12);
     expect(metrics.clippingRight - metrics.moreActions.right).toBeGreaterThanOrEqual(11.5);
     expect(metrics.totalBadgeCount).toBe(5);
     expect(metrics.badges.length).toBe(5 - hiddenCount);

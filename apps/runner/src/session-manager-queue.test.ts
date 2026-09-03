@@ -246,6 +246,48 @@ test("a failed queued edit receipt is re-evaluated when transient immutability c
   }
 });
 
+test("an applied queued edit replays across equivalent externalized artifact IDs", () => {
+  const { sm, queues, cleanup } = harness();
+  try {
+    sm.prompt("s_q", "ordinary");
+    const queued = queues().at(-1)!.queue[0]!;
+    const read = sm.readQueuedPrompt({
+      type: "read_queued_prompt", requestId: "read-image-retry", sessionId: "s_q", promptId: queued.id,
+    });
+    assert.equal(read.ok, true);
+    const integrity = { mimeType: "image/png", sizeBytes: 4, sha256: "a".repeat(64) };
+    const request: EditQueuedPromptMessage = {
+      type: "edit_queued_prompt",
+      requestId: "edit-image-1",
+      submissionId: "edit-image-submission",
+      sessionId: "s_q",
+      promptId: queued.id,
+      expectedRevision: read.prompt!.editRevision,
+      text: "same bytes, new artifact allocation",
+      images: [{ artifactId: "art_first", ...integrity }],
+    };
+    const applied = sm.editQueuedPrompt(request);
+    assert.equal(applied.applied, true);
+
+    const replay = sm.editQueuedPrompt({
+      ...request,
+      requestId: "edit-image-2",
+      images: [{ artifactId: "art_retry", ...integrity }],
+    });
+    assert.deepEqual(replay, applied, "artifact storage identity must not change the idempotency receipt");
+
+    const conflict = sm.editQueuedPrompt({
+      ...request,
+      requestId: "edit-image-3",
+      images: [{ artifactId: "art_different", ...integrity, sha256: "b".repeat(64) }],
+    });
+    assert.equal(conflict.applied, false);
+    assert.equal(conflict.reason, "invalid_content", "different image bytes must still conflict");
+  } finally {
+    cleanup();
+  }
+});
+
 test("unresolved durable-delivery queue entries stay immutable across retries and reconnect projection", () => {
   const { sm, queues, cleanup } = harness();
   try {
