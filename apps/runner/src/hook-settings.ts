@@ -33,6 +33,7 @@ import {
 } from "./runner-reentry.js";
 import { winQuoteArg } from "./spawn.js";
 import { readCompatibleEnv, type LegacyEnvironmentWarning } from "./env-compat.js";
+import { assertSafeSessionFileId, isSafeSessionFileId } from "./session-file-id.js";
 
 export const CLAUDE_HOOKS_FLAG = "WOLLIPOG_CLAUDE_HOOKS";
 export const LEGACY_CLAUDE_HOOKS_FLAG = "MAM_CLAUDE_HOOKS";
@@ -59,8 +60,6 @@ const CIRCUIT_SUFFIX = ".circuit.json";
 const CIRCUIT_LOCK_SUFFIX = ".circuit.lock";
 const TOKEN_SUFFIX = ".token";
 const READY_SUFFIX = ".ready";
-const SAFE_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/;
-const WINDOWS_RESERVED_BASENAME = /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/i;
 const POLICY_HOOK_CREDENTIAL_PREFIX = "wollipogh_";
 const POLICY_HOOK_CREDENTIAL = /^(?:wollipogh_|mamh_)[A-Za-z0-9_-]{43}$/u;
 export const CLAUDE_HOOK_CIRCUIT_COOLDOWN_MS = 30_000;
@@ -108,15 +107,8 @@ export function claudeHookRunnerConfigDir(dataDir: string, runnerId: string): st
   return join(dataDir, "hooks", runnerKey);
 }
 
-function assertSafeSessionId(sessionId: string): void {
-  if (!SAFE_SESSION_ID.test(sessionId) || sessionId.endsWith(".") ||
-      WINDOWS_RESERVED_BASENAME.test(sessionId)) {
-    throw new Error("Claude hook session id contains unsupported path characters");
-  }
-}
-
 export function claudeHookSettingsPath(configDir: string, sessionId: string): string {
-  assertSafeSessionId(sessionId);
+  assertSafeSessionFileId(sessionId);
   return join(configDir, `${sessionId}${SETTINGS_SUFFIX}`);
 }
 
@@ -301,7 +293,7 @@ function managedSettingsIndices(args: string[], configDir: string): number[] {
     const name = basename(value);
     if (resolve(dirname(value)).toLowerCase() !== expectedDir ||
         !name.endsWith(SETTINGS_SUFFIX) ||
-        !SAFE_SESSION_ID.test(name.slice(0, -SETTINGS_SUFFIX.length))) continue;
+        !isSafeSessionFileId(name.slice(0, -SETTINGS_SUFFIX.length))) continue;
     indices.push(index);
   }
   return indices;
@@ -405,7 +397,7 @@ export function provisionClaudeHooks(
   host: ClaudeHookHost = defaultClaudeHookHost(),
 ): void {
   if (spec.agentId === "conductor" || spec.driver !== "claude-code") return;
-  assertSafeSessionId(spec.sessionId);
+  assertSafeSessionFileId(spec.sessionId);
   const expectedFile = claudeHookSettingsPath(host.configDir, spec.sessionId);
   const existingIndex = spec.args.findIndex(
     (arg, index) => arg === "--settings" &&

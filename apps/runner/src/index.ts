@@ -78,6 +78,7 @@ import {
   markAgentControlCredentialRejected,
   provisionAgentControl,
   removeAgentControlFiles,
+  sweepAgentControlFiles,
 } from "./agent-control.js";
 import {
   GitOpError,
@@ -309,6 +310,7 @@ const claudeHookHost = {
 const agentControlHost = defaultAgentControlHost(config.dataDir);
 sweepConductorMcpConfigs(conductorHost.configDir);
 sweepClaudeHookFiles(claudeHookHost.configDir);
+sweepAgentControlFiles(agentControlHost.configDir);
 
 const runnerHostname = hostname();
 const sessionNamingCustomModel = new RunnerSessionNamingCustomModel(resolve(config.dataDir, "session-naming"));

@@ -7,6 +7,7 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -19,6 +20,7 @@ import {
   runnerReentryCommand,
   type RunnerReentryHost,
 } from "./runner-reentry.js";
+import { assertSafeSessionFileId } from "./session-file-id.js";
 
 const TOKEN_PREFIX = "wollipoga_";
 const TOKEN_PATTERN = /^wollipoga_[A-Za-z0-9_-]{43}$/u;
@@ -32,14 +34,17 @@ export function defaultAgentControlHost(dataDir: string): AgentControlHost {
 }
 
 export function agentControlTokenPath(configDir: string, sessionId: string): string {
+  assertSafeSessionFileId(sessionId);
   return join(configDir, `${sessionId}.token`);
 }
 
 export function agentControlMcpConfigPath(configDir: string, sessionId: string): string {
+  assertSafeSessionFileId(sessionId);
   return join(configDir, `${sessionId}.mcp.json`);
 }
 
 export function agentControlReadyPath(configDir: string, sessionId: string): string {
+  assertSafeSessionFileId(sessionId);
   return join(configDir, `${sessionId}.ready`);
 }
 
@@ -159,6 +164,20 @@ export function removeAgentControlFiles(sessionId: string, configDir: string): v
   ]) {
     try { rmSync(file, { force: true }); } catch { /* Best effort after session deletion. */ }
   }
+}
+
+/** Startup cleanup: active sessions re-provision before launch, while terminal/orphaned secrets
+ * must not survive runner restarts as live-looking credential material. */
+export function sweepAgentControlFiles(configDir: string): number {
+  if (!existsSync(configDir)) return 0;
+  let removed = 0;
+  for (const entry of readdirSync(configDir, { withFileTypes: true })) {
+    if (!entry.isFile() ||
+        ![".token", ".mcp.json", ".ready"].some((suffix) => entry.name.endsWith(suffix))) continue;
+    rmSync(join(configDir, entry.name), { force: true });
+    removed++;
+  }
+  return removed;
 }
 
 /** Publish the exact hash acknowledgement atomically. CLI/MCP callers verify it against their

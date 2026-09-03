@@ -13,6 +13,7 @@ import {
   markAgentControlCredentialRejected,
   provisionAgentControl,
   removeAgentControlFiles,
+  sweepAgentControlFiles,
   type AgentControlHost,
 } from "./agent-control.js";
 
@@ -159,6 +160,44 @@ test("older control planes and non-host targets receive no general control surfa
       controlPlaneProtocolVersion: PROTOCOL_VERSION,
     }, () => {}, host);
     assert.deepEqual(container.env, { PROVIDER_SETTING: "kept" });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("agent-control paths reject traversal and Windows-reserved session ids", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-agent-control-"));
+  try {
+    const host: AgentControlHost = { isSea: true, execPath: "/runner", execArgv: [], configDir: root };
+    for (const sessionId of ["../escape", "CON", "nested/path", "trailing."]) {
+      assert.throws(() => provisionAgentControl({ ...spec(), sessionId }, {
+        controlPlaneUrl: "ws://127.0.0.1:4317/runner",
+        controlPlaneProtocolVersion: PROTOCOL_VERSION,
+      }, () => {}, host), /unsupported path characters/);
+      assert.throws(() => removeAgentControlFiles(sessionId, root), /unsupported path characters/);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("startup sweep removes orphaned token, readiness, and MCP files", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-agent-control-"));
+  try {
+    const host: AgentControlHost = { isSea: true, execPath: "/runner", execArgv: [], configDir: root };
+    const launch = spec("claude-code");
+    let hash = "";
+    provisionAgentControl(launch, {
+      controlPlaneUrl: "ws://127.0.0.1:4317/runner",
+      controlPlaneProtocolVersion: PROTOCOL_VERSION,
+      registerCredential: (_id, value) => { hash = value; },
+    }, () => {}, host);
+    markAgentControlCredentialReady(root, launch.sessionId, hash);
+    assert.equal(sweepAgentControlFiles(root), 3);
+    assert.throws(() => readFileSync(agentControlTokenPath(root, launch.sessionId)));
+    assert.throws(() => readFileSync(agentControlReadyPath(root, launch.sessionId)));
+    assert.throws(() => readFileSync(agentControlMcpConfigPath(root, launch.sessionId)));
+    assert.equal(sweepAgentControlFiles(root), 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

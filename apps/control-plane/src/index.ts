@@ -240,6 +240,7 @@ import {
   mutationAuthorizationError,
   type AuthPrincipal,
   type HumanPrincipal,
+  workflowActorForPrincipal,
 } from "./identity.js";
 
 // Consume inherited launch material before initialization can create any descendants.
@@ -533,14 +534,12 @@ function humanActorId(req: FastifyRequest): string {
   return requestHuman(req)?.userId ?? db.localIdentityContext().userId;
 }
 
-/** Attribute workflow mutations from the authenticated conductor MCP sidecar to its exact
- * session. The claim is accepted only with the runner/control-plane token and a live persisted
- * conductor session; ordinary device calls retain paired-device provenance. */
-function workflowActor(req: { headers: { authorization?: string; [key: string]: unknown }; url: string }) {
-  const conductor = authedConductor(req);
-  if (conductor) return { kind: "agent" as const, id: conductor.id };
-  const device = authedDevice(req);
-  return { kind: "human" as const, id: device?.principal.userId ?? db.localIdentityContext().userId };
+/** Attribute workflow mutations to the exact principal captured by the central auth gate. */
+function workflowActor(req: FastifyRequest) {
+  return workflowActorForPrincipal(
+    requestPrincipals.get(req) ?? requestPrincipal(req),
+    db.localIdentityContext().userId,
+  );
 }
 
 /** Automation definitions are operator-owned. Conductor credentials never gain schedule-write

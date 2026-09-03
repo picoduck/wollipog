@@ -9,6 +9,7 @@ import {
   providerForkCleanupTarget,
   providerForkNeedsCleanup,
   providerForkSnapshotIdError,
+  workflowActorForPrincipal,
   type AgentPrincipal,
   type HumanPrincipal,
 } from "./identity.js";
@@ -50,6 +51,18 @@ test("agent mutations pass only after the separate conductor route allowlist aut
   }), null);
   assert.match(mutationAuthorizationError("POST", "/api/workflows", null)!, /authentication/);
   assert.equal(mutationAuthorizationError("POST", "/hooks/v1/example", null), null);
+});
+
+test("workflow domain actors preserve authenticated agent and human attribution", () => {
+  const agent: AgentPrincipal = {
+    kind: "agent",
+    actorId: "s_agent_control",
+    organizationId: "org_1",
+    delegatedScope: { organizationId: "org_1", owner: { kind: "organization", organizationId: "org_1" } },
+  };
+  assert.deepEqual(workflowActorForPrincipal(agent, "usr_local"), { kind: "agent", id: "s_agent_control" });
+  assert.deepEqual(workflowActorForPrincipal(human("operator"), "usr_local"), { kind: "human", id: "usr_1" });
+  assert.deepEqual(workflowActorForPrincipal(null, "usr_local"), { kind: "human", id: "usr_local" });
 });
 
 test("a user- or team-scoped conductor cannot mutate organization-global resources", () => {

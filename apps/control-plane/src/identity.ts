@@ -29,6 +29,16 @@ export interface AgentPrincipal {
 
 export type AuthPrincipal = HumanPrincipal | AgentPrincipal;
 
+/** Preserve the authenticated principal when domain workflow records require a compact actor. */
+export function workflowActorForPrincipal(
+  principal: AuthPrincipal | null,
+  fallbackUserId: string,
+): { kind: "agent" | "human"; id: string } {
+  return principal?.kind === "agent"
+    ? { kind: "agent", id: principal.actorId }
+    : { kind: "human", id: principal?.userId ?? fallbackUserId };
+}
+
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
 export function isMutationMethod(method: string): boolean {
