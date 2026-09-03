@@ -204,6 +204,40 @@ test("workflow actions use immutable commit pins", () => {
   }
 });
 
+test("desktop Rust verification enforces the lockfile and runs one pinned audit", () => {
+  const desktop = readFileSync(resolve(process.cwd(), WORKFLOWS[1]), "utf8");
+
+  assert.match(
+    desktop,
+    /^      - name: Install Cargo Audit\r?\n        if: startsWith\(matrix\.os, 'ubuntu'\)\r?\n        run: cargo install cargo-audit --version 0\.22\.2 --locked$/m,
+    "desktop CI must install an exact cargo-audit release on only the Linux matrix leg",
+  );
+  assert.match(
+    desktop,
+    /^      - name: Audit Locked Dependencies\r?\n        if: startsWith\(matrix\.os, 'ubuntu'\)\r?\n        run: cargo audit --file apps\/desktop\/src-tauri\/Cargo\.lock$/m,
+    "desktop CI must audit the committed lockfile on only the Linux matrix leg",
+  );
+  assert.equal(
+    desktop.match(/cargo audit --file apps\/desktop\/src-tauri\/Cargo\.lock/g)?.length,
+    1,
+    "desktop CI must not duplicate the audit across matrix legs",
+  );
+  assert.match(
+    desktop,
+    /run: cargo test --locked --manifest-path apps\/desktop\/src-tauri\/Cargo\.toml/,
+    "desktop tests must fail instead of resolving a changed lockfile",
+  );
+  assert.match(
+    desktop,
+    /run: cargo clippy --locked --manifest-path apps\/desktop\/src-tauri\/Cargo\.toml/,
+    "desktop lint must fail instead of resolving a changed lockfile",
+  );
+
+  const rootPackage = JSON.parse(readFileSync(resolve(process.cwd(), "package.json"), "utf8"));
+  assert.match(rootPackage.scripts["check:rust"], /cargo clippy --locked /);
+  assert.match(rootPackage.scripts["check:rust"], /cargo test --locked /);
+});
+
 test("CI validates production builds and caches the pinned Playwright browser", () => {
   const ci = readFileSync(resolve(process.cwd(), WORKFLOWS[0]), "utf8");
 
