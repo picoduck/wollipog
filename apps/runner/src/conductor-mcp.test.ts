@@ -99,6 +99,7 @@ test("tools/list returns the curated session and workflow tools with schemas", a
       "list_sessions",
       "get_session",
       "get_session_events",
+      "wait_session",
       "list_runs",
       "list_governance_policies",
       "get_governance_policy",

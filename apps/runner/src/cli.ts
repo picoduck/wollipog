@@ -17,6 +17,12 @@ if (process.argv.includes("--state-doctor")) {
   void import("./policy-hook.js").then((m) => m.runPolicyHookCli(process.argv, process.env));
 } else if (process.argv.includes("--conductor-mcp")) {
   void import("./conductor-mcp.js").then((m) => m.runConductorMcp(process.argv, process.env));
+} else if (process.argv.includes("--agent-control-mcp")) {
+  void import("./wollipog-cli.js").then((m) => m.runAgentControlMcp(process.env));
+} else if (process.argv.includes("--wollipog-cli") || /(?:^|[\\/])wollipog(?:\.exe)?$/iu.test(process.argv[0] ?? "")) {
+  void import("./wollipog-cli.js").then(async (m) => {
+    process.exitCode = await m.runWollipogCli(process.argv, process.env);
+  });
 } else {
   void import("./index.js");
 }

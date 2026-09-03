@@ -282,7 +282,10 @@
 //     persistent provider transport falls back at runtime. Older peers retain catalog truth.
 // 99: queued-prompt editing uses capability-gated correlated reads and idempotent revision-fenced
 //     replacements. The runner remains authoritative for mutability, identity, and FIFO position.
-export const PROTOCOL_VERSION = 99;
+// 100: every native session receives a runner-minted, exact-session control credential and the
+//      runner's Wollipog CLI entrypoint. The same credential authenticates the provider-neutral
+//      stdio MCP surface; only its hash crosses the runner socket or reaches durable storage.
+export const PROTOCOL_VERSION = 100;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
@@ -311,6 +314,8 @@ export const LEGACY_TRANSCRIPT_SHARE_AUTH_SCHEME = "MAM-Share" as const;
 export const WOLLIPOG_TRANSCRIPT_SHARE_AUTH_SCHEME = "Wollipog-Share" as const;
 export const LEGACY_CONDUCTOR_ACTOR_SESSION_HEADER = "x-mam-actor-session" as const;
 export const WOLLIPOG_CONDUCTOR_ACTOR_SESSION_HEADER = "x-wollipog-actor-session" as const;
+/** Exact session claim paired with a per-session agent-control credential. */
+export const WOLLIPOG_AGENT_ACTOR_SESSION_HEADER = "x-wollipog-agent-session" as const;
 export const LEGACY_POLICY_HOOK_SESSION_HEADER = "x-mam-hook-session" as const;
 export const WOLLIPOG_POLICY_HOOK_SESSION_HEADER = "x-wollipog-hook-session" as const;
 export const LEGACY_AUTOMATION_TRIGGER_MEDIA_TYPE = "application/vnd.mam.automation-trigger+json" as const;
@@ -413,6 +418,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   sessionCustomModelNaming: 94,
   sessionNamingTargets: 95,
   sessionNamingDriftCodes: 97,
+  sessionAgentControl: 100,
 } as const;
 
 /* ========================================================================== */
@@ -3902,6 +3908,23 @@ export interface PolicyHookCredentialRegisteredMessage {
   error?: string;
 }
 
+/** Hash-only binding for one runner-minted, exact-session CLI/MCP credential. The plaintext stays
+ * in a protected runner-local file and is never placed in argv or a durable command snapshot. */
+export interface AgentControlCredentialMessage {
+  type: "agent_control_credential";
+  sessionId: string;
+  tokenHash: string;
+}
+
+/** Secret-free registration acknowledgement used for operational diagnosis and future fencing. */
+export interface AgentControlCredentialRegisteredMessage {
+  type: "agent_control_credential_registered";
+  sessionId: string;
+  tokenHash: string;
+  accepted: boolean;
+  error?: string;
+}
+
 /** A live provider changed session-scoped controls/config. The full runner snapshot is
  * authoritative and lets reconnect hydration reuse the exact same persistence path. */
 export interface SessionRuntimeUpdatedMessage {
@@ -4199,6 +4222,7 @@ export type RunnerToControlPlane =
   | SessionStatusMessage
   | StopSessionResultMessage
   | PolicyHookCredentialMessage
+  | AgentControlCredentialMessage
   | SessionRuntimeUpdatedMessage
   | SessionEventMessage
   | SessionHistoryResultMessage
@@ -5416,6 +5440,7 @@ export type ControlPlaneToRunner =
   | RegisteredMessage
   | RegisterRejectedMessage
   | PolicyHookCredentialRegisteredMessage
+  | AgentControlCredentialRegisteredMessage
   | StartSessionMessage
   | PromptSessionMessage
   | SteerSessionMessage

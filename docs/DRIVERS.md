@@ -873,6 +873,12 @@ user titles and conservatively migrated legacy titles win over later provider up
 seed persisted commands, and runtime state received during load replay is applied only after
 transcript events have been suppressed.
 
+### 4.1 Agent-facing control surface
+
+Protocol v100 provisions native host sessions with the session-scoped Wollipog CLI and, for Claude
+Code, the equivalent general stdio MCP server. See [Agent Control CLI and MCP](./agent-control.md)
+for the credential lifecycle, route/audit boundary, commands, and compatibility contract.
+
 ---
 
 ## 5. Quick reference — config flag mapping across drivers

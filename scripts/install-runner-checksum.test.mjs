@@ -132,6 +132,7 @@ fi
     bytes,
     run,
     live: join(home, ".local", "bin", "wollipog-runner"),
+    cliLive: join(home, ".local", "bin", "wollipog"),
     legacyLive: join(home, ".local", "bin", "agent-manager-runner"),
     warningForTag: (tag = options.releaseTag ?? releaseTag) => join(
       home,
@@ -155,6 +156,7 @@ posixTest("POSIX runner installer verifies the exact canonical checksum before a
     const result = harness.run();
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(readFileSync(harness.live), harness.bytes);
+    assert.deepEqual(readFileSync(harness.cliLive), harness.bytes);
     assert.deepEqual(readFileSync(harness.legacyLive), harness.bytes);
     assert.equal(existsSync(harness.warningForTag()), false);
     assertNoStagingFiles(harness);

@@ -144,14 +144,17 @@ expected_sha256=${publisher_digest#sha256:}
 bindir="$HOME/.local/bin"
 mkdir -p "$bindir"
 bin="$bindir/wollipog-runner"
+cli_bin="$bindir/wollipog"
 legacy_bin="$bindir/agent-manager-runner"
 echo "Downloading $asset_name from $release_tag..."
 partial="${bin}.download.$$"
 legacy_partial="${legacy_bin}.alias.$$"
+cli_partial="${cli_bin}.alias.$$"
 checksum_partial="${bin}.SHA256SUMS.$$"
 cleanup() {
   [ -z "${partial:-}" ] || rm -f "$partial"
   [ -z "${legacy_partial:-}" ] || rm -f "$legacy_partial"
+  [ -z "${cli_partial:-}" ] || rm -f "$cli_partial"
   [ -z "${checksum_partial:-}" ] || rm -f "$checksum_partial"
 }
 trap cleanup EXIT
@@ -220,6 +223,21 @@ if ! refresh_legacy_alias; then
   rm -f "$legacy_partial" || true
 fi
 legacy_partial=""
+
+# The same verified SEA dispatches by invocation name, so the user-facing CLI needs no second
+# download or runtime. Publish it only after the canonical binary has been verified and promoted.
+refresh_cli_alias() {
+  if ! ln -f "$bin" "$cli_partial" 2>/dev/null; then
+    cp "$bin" "$cli_partial" || return 1
+    chmod +x "$cli_partial" || return 1
+  fi
+  mv -f "$cli_partial" "$cli_bin" || return 1
+}
+if ! refresh_cli_alias; then
+  echo "Warning: could not refresh the Wollipog CLI alias at $cli_bin; rerun this installer after stopping any process using it." >&2
+  rm -f "$cli_partial" || true
+fi
+cli_partial=""
 rm -f "$checksum_partial"
 checksum_partial=""
 
@@ -276,6 +294,7 @@ umask "$install_umask"
 
 echo ""
 echo "Runner installed: $bin"
+echo "CLI installed:    $cli_bin"
 echo "Start it:  $bin --config $cfg"
 case ":$PATH:" in
   *":$bindir:"*) ;;

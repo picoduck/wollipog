@@ -71,6 +71,20 @@ export function isAuthenticatedConductorClaim(input: {
     ["starting", "running", "input_required"].includes(input.session.status);
 }
 
+/** Authenticate a runner-minted exact-session credential used by the general CLI/MCP surface. */
+export function isAuthenticatedAgentControlClaim(input: {
+  credentialValid: boolean;
+  claimedSessionId: unknown;
+  session: { id: string; status: string } | null | undefined;
+}): boolean {
+  return input.credentialValid &&
+    typeof input.claimedSessionId === "string" &&
+    input.claimedSessionId.length > 0 &&
+    input.claimedSessionId.length <= 256 &&
+    input.session?.id === input.claimedSessionId &&
+    ["starting", "running", "input_required"].includes(input.session.status);
+}
+
 /** Authenticate one hook sidecar with a credential independently bound to its live Claude session. */
 export function isAuthenticatedPolicyHookClaim(input: {
   credentialValid: boolean;
@@ -128,6 +142,12 @@ const CONDUCTOR_API_ROUTES = new Set([
 
 export function isConductorApiRouteAllowed(method: string, routePath: string): boolean {
   return CONDUCTOR_API_ROUTES.has(`${method.toUpperCase()} ${routePath}`);
+}
+
+/** The general surface deliberately reuses the reviewed manager allowlist. Worktree additions are
+ * made once here when #583 lands, so the CLI and MCP server cannot diverge. */
+export function isAgentControlApiRouteAllowed(method: string, routePath: string): boolean {
+  return isConductorApiRouteAllowed(method, routePath);
 }
 
 /**

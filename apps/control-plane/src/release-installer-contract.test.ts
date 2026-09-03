@@ -54,6 +54,7 @@ test("standalone runner installers download beside the live binary and promote a
     "POSIX fallback produces a value-free warning");
   assert.match(posix, /partial="\$\{bin\}\.download\.\$\$"/);
   assert.match(posix, /bin="\$bindir\/wollipog-runner"/);
+  assert.match(posix, /cli_bin="\$bindir\/wollipog"/);
   assert.match(posix, /legacy_bin="\$bindir\/agent-manager-runner"/);
   assert.match(posix, /trap cleanup EXIT/);
   assert.match(posix, /--output "\$partial"/);
@@ -64,6 +65,8 @@ test("standalone runner installers download beside the live binary and promote a
   assert.match(posix, /mv -f "\$partial" "\$bin"/);
   assert.match(posix, /mv -f "\$legacy_partial" "\$legacy_bin"/,
     "the legacy command alias is replaced atomically");
+  assert.match(posix, /mv -f "\$cli_partial" "\$cli_bin"/,
+    "the user-facing CLI alias is replaced atomically");
   assert.match(posix, /canonical_cfgdir="\$HOME\/\.config\/wollipog"/);
   assert.match(posix, /legacy_cfgdir="\$HOME\/\.config\/agent-manager"/);
   assert.ok(posix.indexOf('if [ -f "$canonical_cfg" ]') < posix.indexOf('elif [ -f "$legacy_cfg" ]'),
@@ -87,6 +90,7 @@ test("standalone runner installers download beside the live binary and promote a
   assert.match(powershell, /'User-Agent' = 'wollipog-install'/);
   assert.match(powershell, /Join-Path \$env:LOCALAPPDATA 'Wollipog'/);
   assert.match(powershell, /Join-Path \$dir 'wollipog-runner\.exe'/);
+  assert.match(powershell, /Join-Path \$dir 'wollipog\.exe'/);
   assert.match(powershell, /Join-Path \$legacyDir 'agent-manager-runner\.exe'/);
   assert.match(powershell, /--output \$partial/);
   assert.match(powershell, /Move-Item -LiteralPath \$partial -Destination \$bin -Force/);

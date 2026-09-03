@@ -101,8 +101,10 @@ import {
   carriesTokenParam,
   extractBearer,
   hashToken,
+  isAuthenticatedAgentControlClaim,
   isAuthenticatedConductorClaim,
   isAuthenticatedPolicyHookClaim,
+  isAgentControlApiRouteAllowed,
   isConductorApiRouteAllowed,
   isPolicyHookApiRouteAllowed,
   isTrustedLoopback,
@@ -119,6 +121,7 @@ import {
   LEGACY_POLICY_HOOK_SESSION_HEADER,
   selectAutomationTriggerHeaders,
   selectCompatibleHeader,
+  WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
   WOLLIPOG_CONDUCTOR_ACTOR_SESSION_HEADER,
   WOLLIPOG_POLICY_HOOK_POLL_CAPABILITY_HEADER,
   WOLLIPOG_POLICY_HOOK_SESSION_HEADER,
@@ -414,6 +417,19 @@ function authedConductor(req: { headers: { authorization?: string; [key: string]
   }) ? session : null;
 }
 
+/** Resolve one live session whose runner-minted control credential is bound to that exact row. */
+function authedAgentControl(req: { headers: { authorization?: string; [key: string]: unknown } }) {
+  const claimed = req.headers[WOLLIPOG_AGENT_ACTOR_SESSION_HEADER];
+  const session = typeof claimed === "string" && claimed.length <= 256 ? db.getSession(claimed) : null;
+  const bearer = extractBearer(req.headers.authorization);
+  return isAuthenticatedAgentControlClaim({
+    credentialValid: Boolean(session && bearer &&
+      db.agentControlCredentialValid(session.id, session.runnerId, hashToken(bearer))),
+    claimedSessionId: claimed,
+    session,
+  }) ? session : null;
+}
+
 /** Resolve one live Claude session whose hook sidecar presented its independently bound token. */
 function authedPolicyHook(req: { headers: { authorization?: string; [key: string]: unknown } }) {
   const selected = selectCompatibleHeader(
@@ -446,6 +462,21 @@ function authedApiPrincipal(
   const local = authedLocalBootstrap(req, allowQueryToken);
   if (local) return local;
   const routePath = req.routeOptions?.url ?? req.url.split("?")[0] ?? "";
+  const agentControl = authedAgentControl(req);
+  if (agentControl && isAgentControlApiRouteAllowed(req.method, routePath)) {
+    const delegatedScope = db.sessionScope(agentControl.id);
+    if (!delegatedScope) return null;
+    return {
+      id: agentControl.id,
+      name: agentControl.agentName ?? "Agent",
+      principal: {
+        kind: "agent",
+        actorId: agentControl.id,
+        organizationId: delegatedScope.organizationId,
+        delegatedScope,
+      },
+    };
+  }
   const policyHook = authedPolicyHook(req);
   if (policyHook && isPolicyHookApiRouteAllowed(req.method, routePath)) {
     const delegatedScope = db.sessionScope(policyHook.id);
@@ -1079,6 +1110,21 @@ app.register(async (instance) => {
           }
         }
         break;
+      case "agent_control_credential":
+        {
+          const accepted = db.setAgentControlCredential(msg.sessionId, runnerId!, msg.tokenHash, Date.now());
+          send(socket, {
+            type: "agent_control_credential_registered",
+            sessionId: msg.sessionId,
+            tokenHash: msg.tokenHash,
+            accepted,
+            ...(!accepted ? { error: "session binding was rejected" } : {}),
+          });
+          if (!accepted) {
+            app.log.warn(`runner ${runnerId} sent invalid agent-control credential binding for ${msg.sessionId}`);
+          }
+        }
+        break;
       case "session_runtime_updated":
         svc.applySessionRuntimeUpdate(runnerId!, msg.snapshot);
         break;
@@ -1450,7 +1496,12 @@ app.register(async (instance) => {
 
 // The `service` marker lets the desktop shell confirm this is OUR control plane (not
 // some unrelated process on the same port) before skipping its managed sidecar.
-app.get("/healthz", async () => ({ ok: true, ts: Date.now(), service: CONTROL_PLANE_SERVICE }));
+app.get("/healthz", async () => ({
+  ok: true,
+  ts: Date.now(),
+  service: CONTROL_PLANE_SERVICE,
+  protocolVersion: PROTOCOL_VERSION,
+}));
 
 registerManagedDesktopRoutes(app, MANAGED_DESKTOP_IDENTITY, {
   trustedLoopback,

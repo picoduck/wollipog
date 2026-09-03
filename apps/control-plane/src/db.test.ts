@@ -1856,6 +1856,22 @@ test("policy hook credentials are hash-only, exact-session, runner-bound, replac
   assert.equal(db.policyHookCredentialValid("hook-session", "runner-1", second), false);
 });
 
+test("agent-control credentials are hash-only, exact-session, runner-bound, replaceable, and cascading", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "agent-session" }));
+  const first = "1".repeat(64);
+  const second = "2".repeat(64);
+  assert.equal(db.setAgentControlCredential("agent-session", "runner-1", first, 1), true);
+  assert.equal(db.agentControlCredentialValid("agent-session", "runner-1", first), true);
+  assert.equal(db.agentControlCredentialValid("agent-session", "runner-other", first), false);
+  assert.equal(db.agentControlCredentialValid("other-session", "runner-1", first), false);
+  assert.equal(db.setAgentControlCredential("agent-session", "runner-1", second, 2), true);
+  assert.equal(db.agentControlCredentialValid("agent-session", "runner-1", first), false);
+  assert.equal(db.agentControlCredentialValid("agent-session", "runner-1", second), true);
+  db.deleteSession("agent-session");
+  assert.equal(db.agentControlCredentialValid("agent-session", "runner-1", second), false);
+});
+
 test("policy hook reconciliation queries use session/status indexes instead of optional-filter scans", () => {
   const db = withRunner();
   const plans = [

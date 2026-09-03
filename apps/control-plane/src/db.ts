@@ -706,6 +706,18 @@ CREATE TABLE IF NOT EXISTS policy_hook_credentials (
 CREATE INDEX IF NOT EXISTS idx_policy_hook_credentials_runner
   ON policy_hook_credentials(runner_id, session_id);
 
+-- General agent control uses an independently revocable token per exact live session. Only the
+-- digest crosses the runner boundary; deletion cascades revocation with the session.
+CREATE TABLE IF NOT EXISTS agent_control_credentials (
+  session_id TEXT PRIMARY KEY,
+  runner_id  TEXT NOT NULL,
+  token_hash TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_agent_control_credentials_runner
+  ON agent_control_credentials(runner_id, session_id);
+
 -- A hook ask must outlive a control-plane restart while the SAME Claude hook process polls.
 -- Tool input is deliberately absent: request_fingerprint binds only the minimized hook envelope.
 CREATE TABLE IF NOT EXISTS policy_hook_approvals (
@@ -11137,6 +11149,30 @@ export class ControlPlaneDb {
     if (!/^[0-9a-f]{64}$/u.test(tokenHash)) return false;
     return Boolean(this.stmt(
       `SELECT 1 FROM policy_hook_credentials
+       WHERE session_id=? AND runner_id=? AND token_hash=?`,
+    ).get(sessionId, runnerId, tokenHash));
+  }
+
+  /** Replace the hash-only credential accepted for one exact session's CLI/MCP surface. */
+  setAgentControlCredential(sessionId: string, runnerId: string, tokenHash: string, now: number): boolean {
+    if (!/^[0-9a-f]{64}$/u.test(tokenHash)) return false;
+    const owned = this.stmt("SELECT 1 FROM sessions WHERE id=? AND runner_id=?").get(sessionId, runnerId);
+    if (!owned) return false;
+    this.stmt(
+      `INSERT INTO agent_control_credentials (session_id, runner_id, token_hash, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(session_id) DO UPDATE SET
+         runner_id=excluded.runner_id,
+         token_hash=excluded.token_hash,
+         updated_at=excluded.updated_at`,
+    ).run(sessionId, runnerId, tokenHash, now);
+    return true;
+  }
+
+  agentControlCredentialValid(sessionId: string, runnerId: string, tokenHash: string): boolean {
+    if (!/^[0-9a-f]{64}$/u.test(tokenHash)) return false;
+    return Boolean(this.stmt(
+      `SELECT 1 FROM agent_control_credentials
        WHERE session_id=? AND runner_id=? AND token_hash=?`,
     ).get(sessionId, runnerId, tokenHash));
   }
