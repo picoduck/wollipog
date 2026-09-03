@@ -1962,6 +1962,12 @@ function useStoreHandle(): Store {
   return ctx;
 }
 
+/** Whether a store is mounted above. Views that also render standalone (tests, harness pages)
+ * gate their store-backed children on this instead of throwing. */
+export function useHasStore(): boolean {
+  return useContext(StoreContext) !== null;
+}
+
 /** Stable action handles (never cause re-renders). */
 export function useStoreActions(): Pick<Store, "dispatch" | "navigate" | "setInboxPersistenceEnabled" | "setInboxSelection" | "setInboxSplit" | "setInboxRatio" | "setFilters" | "loadEvents" | "loadOlderEvents" | "beginOlderEventsLoad" | "failOlderEventsLoad" | "eventWindowBase" | "loadSession" | "beginEventHistoryLoad" | "failEventHistoryLoad" | "loadPodContext" | "eventHighWater" | "recoveryAfter" | "eventEpoch" | "reconcileShellOutputs" | "loadShellHistory" | "removeShellOutput"> {
   return useStoreHandle();

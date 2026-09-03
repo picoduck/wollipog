@@ -8,6 +8,12 @@
 
 :root,
 :root[data-theme="dark"] {
+  /* Usage chart series slots (dataviz categorical palette, validated on this surface). Chart-only:
+     never text, never status. Shared across schemes so a driver reads the same colour everywhere. */
+  --usage-series-1: #d95926;
+  --usage-series-2: #3987e5;
+  --usage-series-3: #199e70;
+  --usage-series-4: #9085e9;
   /* The dim tiers, for text that sits on a TINTED row rather than a plain surface.
      A diff gutter, a slash-menu source, a syntax comment: each declares only a colour and inherits
      its ground from a container that paints a 16% wash of accent, green or red. The plain dim tiers
@@ -154,6 +160,11 @@
 }
 
 :root[data-theme="light"] {
+  /* Usage chart series slots, stepped for the light surface. */
+  --usage-series-1: #eb6834;
+  --usage-series-2: #2a78d6;
+  --usage-series-3: #1baf7a;
+  --usage-series-4: #4a3aa7;
   /* The dim tiers, for text that sits on a TINTED row rather than a plain surface.
      A diff gutter, a slash-menu source, a syntax comment: each declares only a colour and inherits
      its ground from a container that paints a 16% wash of accent, green or red. The plain dim tiers
@@ -298,6 +309,9 @@
    below so nothing breaks; call sites migrate incrementally in later passes.
    ======================================================================== */
 :root {
+  /* The usage chart's per-mark series colour. Components set it by slot (`.usage-series-N`); the
+     root default keeps the property resolvable everywhere and paints an unsplit column neutral. */
+  --usage-series: var(--text-dim);
   /* --- Type. In rem, so the browser's font-size preference actually does something: the app was
      100% px, which meant a user who raised their default size saw no change at all (zoom worked,
      but that is a different accommodation). Comments give the px value at a 16px root. --- */
@@ -10840,10 +10854,6 @@ body.shell-dock-dragging * {
 .subscription-bucket.exhausted dd strong, .subscription-bucket.exhausted .subscription-warning { color: var(--red); }
 .subscription-warning { font-weight: 700; }
 .usage-coverage { margin: 0 0 14px; font-size: 12px; }
-.usage-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 0 0 18px; }
-.usage-summary > div { border: 1px solid var(--border); background: var(--bg-elev); border-radius: 10px; padding: 14px; }
-.usage-summary dt { color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
-.usage-summary dd { margin: 5px 0 0; font-size: 20px; font-weight: 700; }
 .usage-table-wrap:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .usage-table-wrap { overflow: auto; max-height: min(70vh, 640px); border: 1px solid var(--border); border-radius: 10px; background: var(--bg-elev); }
 .usage-table { width: 100%; min-width: 620px; border-collapse: collapse; }
@@ -10875,29 +10885,75 @@ body.shell-dock-dragging * {
   z-index: var(--z-sticky);
   background: var(--bg-elev);
 }
-.usage-table td:nth-child(2) { position: relative; min-width: 120px; }
-/* Inset from the SAME token as the cell padding. These were 14px and calc(100% - 28px), written
-   when the padding was 14px — #224 made that padding a density token, so at Comfortable the bar
-   started 2px inside the text it measures. A literal that silently agreed with another literal is
-   the whole reason the token exists. */
-.usage-cost-bar {
-  position: absolute;
-  height: 2px;
-  left: var(--usage-cell-pad-x);
-  bottom: 5px;
-  max-width: calc(100% - (var(--usage-cell-pad-x) * 2));
-  background: var(--accent);
-  border-radius: 999px;
-  /* OPAQUE. At 0.6 it measured 3.03:1 on the plain surface — already at the edge of WCAG's 3:1 for
-     a non-text graphic — and the zebra and hover tints this PR adds change the ground beneath it,
-     taking Wollipog light to 2.88:1 and Dracula dark hover to 2.91:1. A graphic that carries meaning
-     cannot have its readability depend on which row it happens to land on. */
-}
 .usage-empty { color: var(--text-dim); text-align: center !important; padding: 28px !important; }
 .usage-breakdowns { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-top: 18px; }
 .usage-breakdown { padding: 14px; min-width: 0; }
 .usage-breakdown h3 { margin: 0 0 10px; }
 .usage-breakdown ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+
+/* ---- Usage & Cost: chart, series slots, tiles, breakdown ----
+   Series colours are the validated categorical slots (dataviz palette, adjacent pairs pass CVD
+   ΔE ≥ 8 and normal-vision ΔE ≥ 15 on both surfaces). They are chart-only tokens: never text,
+   never status. Colour follows the driver, never its rank, so a driver keeps its slot whether or
+   not the others have usage in the window. */
+.usage-series-1 { --usage-series: var(--usage-series-1); }
+.usage-series-2 { --usage-series: var(--usage-series-2); }
+.usage-series-3 { --usage-series: var(--usage-series-3); }
+.usage-series-4 { --usage-series: var(--usage-series-4); }
+.usage-series-swatch, .usage-series-key { display: inline-block; vertical-align: middle; margin-right: 7px; background: var(--usage-series); }
+.usage-series-swatch { width: 10px; height: 10px; }
+.usage-series-key { width: 12px; height: 2px; }
+
+.usage-toolbar-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; }
+.usage-notice { display: grid; gap: 4px; margin: 0 0 14px; padding: 10px 14px; border: 1px solid var(--border); border-radius: var(--radius-md); color: var(--text-dim); font-size: var(--text-sm); }
+.usage-notice p { margin: 0; }
+
+.usage-overview { display: grid; grid-template-columns: minmax(0, 18rem) minmax(0, 1fr); gap: 20px; margin: 0 0 20px; }
+.usage-headline { display: grid; gap: 4px; align-content: start; }
+.usage-headline-value { font-size: var(--text-2xl); font-weight: 650; line-height: 1.1; }
+.usage-headline-note { color: var(--text-dim); font-size: var(--text-sm); }
+.usage-driver-list { list-style: none; margin: 14px 0 0; padding: 0; display: grid; gap: 12px; }
+.usage-driver-row { display: grid; gap: 2px; }
+.usage-driver-row > div { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.usage-driver-row strong { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.usage-driver-row small { color: var(--text-dim); font-size: var(--text-xs); }
+.usage-chart-section h3, .usage-breakdown-section h3, .usage-totals-section h3 { margin: 0 0 10px; font-size: var(--text-md); }
+
+.usage-chart { position: relative; display: grid; gap: 8px; min-width: 0; }
+.usage-chart-empty { padding: 40px 0; color: var(--text-dim); text-align: center; }
+.usage-chart-svg { display: block; max-width: 100%; height: 260px; overflow: visible; }
+.usage-chart-grid { stroke: var(--border); stroke-width: 1; }
+.usage-chart-baseline { stroke: var(--border-strong); stroke-width: 1; }
+.usage-chart-tick, .usage-chart-axis { fill: var(--text-dim); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
+.usage-chart-segment { fill: var(--usage-series); transition: fill var(--dur-fast) var(--ease-out); }
+/* The hovered column lifts by mixing toward the surface, not by fading: opacity would dim the
+   bands' contrast below the 3:1 they were validated at. */
+.usage-chart-column.is-hovered .usage-chart-segment { fill: color-mix(in srgb, var(--usage-series) 80%, var(--bg-elev)); }
+.usage-chart-hit { fill: transparent; cursor: crosshair; }
+.usage-chart-hit:focus-visible { outline: none; stroke: var(--accent); stroke-width: 2; }
+.usage-chart-readout { min-height: 22px; display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 18px; font-size: var(--text-sm); }
+.usage-chart-readout dl { display: flex; flex-wrap: wrap; gap: 4px 18px; margin: 0; }
+.usage-chart-readout dl > div { display: flex; gap: 6px; align-items: baseline; }
+.usage-chart-readout dt { color: var(--text-dim); }
+.usage-chart-readout dd { margin: 0; font-weight: 650; font-variant-numeric: tabular-nums; }
+.usage-chart-readout-period { font-weight: 650; }
+.usage-chart-readout-hint, .usage-chart-readout-total dt { color: var(--text-dim); }
+.usage-legend { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px 16px; color: var(--text-dim); font-size: var(--text-sm); }
+
+.usage-totals { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin: 0 0 20px; }
+.usage-totals > div { border: 1px solid var(--border); background: var(--bg-elev); border-radius: var(--radius-md); padding: 12px 14px; min-width: 0; }
+.usage-totals dt { color: var(--text-dim); font-size: var(--text-xs); text-transform: uppercase; letter-spacing: .04em; }
+.usage-totals dd { margin: 5px 0 0; font-size: var(--text-lg); font-weight: 650; }
+
+.usage-breakdown-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.usage-breakdown-heading h3 { margin: 0; }
+.usage-table td.usage-cell-dim { color: var(--text-dim); }
+
+@media (max-width: 860px) {
+  .usage-overview { grid-template-columns: minmax(0, 1fr); }
+  .usage-totals { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .usage-chart-svg { height: 260px; }
+}
 .usage-breakdown li { display: flex; justify-content: space-between; gap: 10px; min-width: 0; font-size: 12px; }
 .usage-breakdown li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .usage-breakdown li strong { color: var(--text-dim); flex: none; }
@@ -10923,7 +10979,6 @@ body.shell-dock-dragging * {
   .usage-view { padding: 14px; }
   .usage-toolbar { flex-direction: column; align-items: stretch; }
   .usage-range .btn { min-height: 44px; flex: 1; }
-  .usage-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .usage-breakdowns { grid-template-columns: minmax(0, 1fr); }
   .usage-retention { grid-template-columns: minmax(0, 1fr); align-items: stretch; }
   .usage-retention .btn { min-height: 44px; }
@@ -11849,6 +11904,10 @@ body.shell-dock-dragging * {
   --accent-2-on-tint: #e0a179;
   --red-on-strong-tint: #efaeae;
   --yellow: #e3b341;
+  --usage-series-1: #d95926;
+  --usage-series-2: #3987e5;
+  --usage-series-3: #199e70;
+  --usage-series-4: #9085e9;
   --diff-add-bg: #152c20;
   --diff-delete-bg: #321e22;
   --modal-backdrop: rgba(7, 9, 12, 0.62);
@@ -11916,6 +11975,10 @@ body.shell-dock-dragging * {
   --accent-2-on-tint: #823d0f;
   --red-on-strong-tint: #73232b;
   --yellow: #7d4e00;
+  --usage-series-1: #eb6834;
+  --usage-series-2: #2a78d6;
+  --usage-series-3: #1baf7a;
+  --usage-series-4: #4a3aa7;
   --diff-add-bg: #dae9df;
   --diff-delete-bg: #f7dfe0;
   --modal-backdrop: rgba(28, 32, 36, 0.32);
@@ -11985,6 +12048,10 @@ body.shell-dock-dragging * {
   --accent-2-on-tint: #caa789;
   --red-on-strong-tint: #d5adb5;
   --yellow: #e5c07b;
+  --usage-series-1: #d95926;
+  --usage-series-2: #3987e5;
+  --usage-series-3: #199e70;
+  --usage-series-4: #9085e9;
   --diff-add-bg: #3a443f;
   --diff-delete-bg: #31272c;
   --modal-backdrop: rgba(20, 22, 26, 0.62);
@@ -12052,6 +12119,10 @@ body.shell-dock-dragging * {
   --accent-2-on-tint: #614a20;
   --red-on-strong-tint: #6a233a;
   --yellow: #7b5b01;
+  --usage-series-1: #eb6834;
+  --usage-series-2: #2a78d6;
+  --usage-series-3: #1baf7a;
+  --usage-series-4: #4a3aa7;
   --diff-add-bg: #dde3de;
   --diff-delete-bg: #f0d6dd;
   --modal-backdrop: rgba(50, 52, 59, 0.32);
@@ -12121,6 +12192,10 @@ body.shell-dock-dragging * {
   --accent-2-on-tint: #fedab4;
   --red-on-strong-tint: #fdecea;
   --yellow: #f1fa8c;
+  --usage-series-1: #d95926;
+  --usage-series-2: #3987e5;
+  --usage-series-3: #199e70;
+  --usage-series-4: #9085e9;
   --diff-add-bg: #2e4b41;
   --diff-delete-bg: #4a3c46;
   --modal-backdrop: rgba(20, 21, 27, 0.62);
@@ -12188,6 +12263,10 @@ body.shell-dock-dragging * {
   --accent-2-on-tint: #773d18;
   --red-on-strong-tint: #682b24;
   --yellow: #736017;
+  --usage-series-1: #eb6834;
+  --usage-series-2: #2a78d6;
+  --usage-series-3: #1baf7a;
+  --usage-series-4: #4a3aa7;
   --diff-add-bg: #d9e5c7;
   --diff-delete-bg: #f3dbcc;
   --modal-backdrop: rgba(28, 28, 28, 0.32);
@@ -12257,6 +12336,10 @@ body.shell-dock-dragging * {
   --accent-2-on-tint: #fdc786;
   --red-on-strong-tint: #fcdfe6;
   --yellow: #e6db74;
+  --usage-series-1: #d95926;
+  --usage-series-2: #3987e5;
+  --usage-series-3: #199e70;
+  --usage-series-4: #9085e9;
   --diff-add-bg: #3b4624;
   --diff-delete-bg: #493839;
   --modal-backdrop: rgba(20, 20, 17, 0.62);
@@ -12324,6 +12407,10 @@ body.shell-dock-dragging * {
   --accent-2-on-tint: #7a4214;
   --red-on-strong-tint: #74213f;
   --yellow: #726312;
+  --usage-series-1: #eb6834;
+  --usage-series-2: #2a78d6;
+  --usage-series-3: #1baf7a;
+  --usage-series-4: #4a3aa7;
   --diff-add-bg: #e0e6d2;
   --diff-delete-bg: #f3d9dd;
   --modal-backdrop: rgba(40, 40, 34, 0.32);

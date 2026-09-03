@@ -466,6 +466,14 @@ function tokens(a, theme) {
       return readable(mix(hue, a.text, 0.5), strongTintRange(bgElev3, hue), 4.5, "--red-on-strong-tint");
     })(),
     "--yellow": reach(a.yellow, bgElev3, 4.5, a.text, "--yellow"),
+    // Usage chart series slots: fixed categorical hues (dataviz palette, validated for adjacent-pair
+    // CVD and normal-vision separation on both surfaces), shared by every scheme so a driver reads
+    // the same colour everywhere. Chart marks only — never text, never status — so they are not
+    // derived toward any ink and carry no WCAG text demand.
+    "--usage-series-1": dark ? "#d95926" : "#eb6834",
+    "--usage-series-2": dark ? "#3987e5" : "#2a78d6",
+    "--usage-series-3": dark ? "#199e70" : "#1baf7a",
+    "--usage-series-4": dark ? "#9085e9" : "#4a3aa7",
     // The four remaining palette literals. Left out of the first version, they were inherited from
     // Wollipog — so a GitHub diff showed Wollipog's green wash behind GitHub's green text, which is
     // both wrong and, at 3.85:1, unreadable. A token is palette data whether it is written as a hex

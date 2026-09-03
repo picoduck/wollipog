@@ -8899,6 +8899,10 @@ export class ControlPlaneDb {
          SELECT bucket_ts, ${sums}
            FROM usage_source GROUP BY bucket_ts ORDER BY bucket_ts DESC LIMIT 4001
        ),
+       series_driver_rows AS (
+         SELECT bucket_ts, driver AS key, ${sums}
+           FROM usage_source GROUP BY bucket_ts, driver ORDER BY bucket_ts DESC, driver ASC LIMIT 16004
+       ),
        driver_rows AS (
          SELECT driver AS key, ${sums}
            FROM usage_source GROUP BY driver
@@ -8921,12 +8925,13 @@ export class ControlPlaneDb {
        )
        SELECT 'total' AS kind, '' AS key, NULL AS bucket_ts, ${measures} FROM totals
        UNION ALL SELECT 'series', '', bucket_ts, ${measures} FROM series_rows
+       UNION ALL SELECT 'series_driver', key, bucket_ts, ${measures} FROM series_driver_rows
        UNION ALL SELECT 'driver', key, NULL, ${measures} FROM driver_rows
        UNION ALL SELECT 'agent', key, NULL, ${measures} FROM agent_rows
        UNION ALL SELECT 'runner', key, NULL, ${measures} FROM runner_rows
        UNION ALL SELECT 'model', key, NULL, ${measures} FROM model_rows`,
     ).all(...sourceParams) as unknown as Array<AggregateRow & {
-      kind: "total" | "series" | "driver" | "agent" | "runner" | "model";
+      kind: "total" | "series" | "series_driver" | "driver" | "agent" | "runner" | "model";
       key: string;
       bucket_ts: number | null;
     }>;
@@ -8936,6 +8941,10 @@ export class ControlPlaneDb {
     const series = seriesRows
       .map((row) => ({ bucketTs: row.bucket_ts!, ...amountFrom(row) }))
       .sort((a, b) => b.bucketTs - a.bucketTs);
+    const seriesByDriver = aggregateRows
+      .filter((row) => row.kind === "series_driver" && row.bucket_ts !== null)
+      .map((row) => ({ bucketTs: row.bucket_ts!, driver: row.key as AgentDriverKind, ...amountFrom(row) }))
+      .sort((a, b) => b.bucketTs - a.bucketTs || a.driver.localeCompare(b.driver));
     const totalRow = aggregateRows.find((row) => row.kind === "total");
     const measureKeys = [
       "input_tokens", "output_tokens", "cost_microusd", ...USAGE_LEDGER_V103_COLUMNS,
@@ -8962,6 +8971,7 @@ export class ControlPlaneDb {
       privacy: "content-free aggregates only; no session ids, prompts, paths, tool inputs, event bodies, environment values, or auth data",
       totals,
       series,
+      seriesByDriver,
       byDriver: breakdown("driver"),
       byAgent: breakdown("agent"),
       byRunner: breakdown("runner"),

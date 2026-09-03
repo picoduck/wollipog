@@ -2455,6 +2455,11 @@ export interface UsageTimeBucket extends UsageAmount {
   bucketTs: number;
 }
 
+/** One driver's share of one time bucket, for driver-stacked series (v103+). */
+export interface UsageDriverTimeBucket extends UsageTimeBucket {
+  driver: AgentDriverKind;
+}
+
 export interface UsageBreakdown extends UsageAmount {
   key: string;
 }
@@ -2471,6 +2476,8 @@ export interface UsageAggregationResponse {
   totals: UsageAmount;
   /** Buckets in descending timestamp order, newest first. */
   series: UsageTimeBucket[];
+  /** The same buckets split per driver, newest first then driver; empty from pre-v103 planes. */
+  seriesByDriver: UsageDriverTimeBucket[];
   byDriver: UsageBreakdown[];
   byAgent: UsageBreakdown[];
   byRunner: UsageBreakdown[];

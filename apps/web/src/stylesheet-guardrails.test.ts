@@ -529,7 +529,14 @@ export function classTokens(source: string, fileName = "input.tsx"): Set<string>
  * checked to still exist in the source, so a stale exemption fails rather than silently widening
  * the corpus.
  */
-const HELPER_CLASSES = new Map<string, string>([]);
+const HELPER_CLASSES = new Map<string, string>([
+  // The usage chart's series slot classes come from `seriesClass()` in usage-view-model.ts, which
+  // picks one literal per driver slot so a driver keeps its colour in every chart, legend, and row.
+  ["usage-series-1", "usage-view-model.ts seriesClass"],
+  ["usage-series-2", "usage-view-model.ts seriesClass"],
+  ["usage-series-3", "usage-view-model.ts seriesClass"],
+  ["usage-series-4", "usage-view-model.ts seriesClass"],
+]);
 
 /**
  * Classes emitted by a LIBRARY at runtime, which no scan of this repo can ever attribute.

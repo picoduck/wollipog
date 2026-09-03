@@ -38,6 +38,7 @@ const response = (
     cacheCreationTokens: 0, reasoningTokens: 0, cacheSavingsUsd: 0, costSource: "providerReported", unpricedRecords: 0,
   },
   series,
+  seriesByDriver: series.map((bucket) => ({ ...bucket, driver: "claude-code" as const })),
   byDriver: [],
   byAgent: [],
   byRunner: [],

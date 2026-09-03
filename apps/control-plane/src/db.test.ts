@@ -4998,3 +4998,21 @@ test("snapshot residual pricing carries sub-micro cost and defers to a fractiona
   assert.equal(fraction.byModel.find((row) => row.key === "claude-fable-5-1")!.costSource, "providerReported");
   assert.ok(Math.abs(db.getSession("fraction")!.costUsd - 0.0000002) < 1e-15, "the estimate ($0.005) must not replace the reported fraction");
 });
+
+test("usage aggregation splits each time bucket per driver for stacked series", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "claude", driver: "claude-code", config: { model: "claude-fable-5-1" } }));
+  db.createSession(newSession({ id: "codex", driver: "codex-app-server", config: { model: "gpt-5.5-codex" } }));
+  db.appendEvent("claude", { kind: "token_usage", inputTokens: 10, outputTokens: 1, costUsd: 0.1 }, 3_600_100, { accrueUsage: true });
+  db.appendEvent("codex", { kind: "token_usage", inputTokens: 20, outputTokens: 2 }, 3_600_200, { accrueUsage: true });
+  db.appendEvent("codex", { kind: "token_usage", inputTokens: 5, outputTokens: 1 }, 7_200_100, { accrueUsage: true });
+  const usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000_000, granularity: "hour" });
+  assert.deepEqual(
+    usage.seriesByDriver.map((row) => [row.bucketTs, row.driver, row.inputTokens]),
+    [[7_200_000, "codex-app-server", 5], [3_600_000, "claude-code", 10], [3_600_000, "codex-app-server", 20]],
+    "newest bucket first, drivers alphabetical within a bucket",
+  );
+  assert.equal(usage.seriesByDriver[1]!.costUsd, 0.1);
+  assert.equal(usage.seriesByDriver[2]!.costSource, "unpriced");
+  assert.deepEqual(usage.series.map((row) => [row.bucketTs, row.inputTokens]), [[7_200_000, 5], [3_600_000, 30]]);
+});
