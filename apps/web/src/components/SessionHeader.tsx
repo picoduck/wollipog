@@ -15,6 +15,7 @@ import { discardComposerDraft } from "../composer-drafts.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { instancePublicOrigin, useInstances } from "../instances-context.js";
 import { absoluteViewUrl } from "../navigation.js";
+import { safeExternalHref } from "../external-href.js";
 import { requestTranscriptDownload } from "../transcript-download.js";
 import type { SessionChangeStatus } from "../session-status.js";
 import { CONTROL_PLANE_HTTP, DASHBOARD_ORIGIN, hasSameOriginMarker } from "../config.js";
@@ -100,6 +101,7 @@ export function SessionHeader({
   const activeWorktreeLabel = activeWorktree
     ? `${activeWorktree.branch}${activeWorktree.baseRef ? ` ← ${activeWorktree.baseRef}` : ""}${activeWorktree.pullRequest ? ` · ${activeWorktree.pullRequest.state === "open" ? "Open" : activeWorktree.pullRequest.state === "merged" ? "Merged" : "Closed"} PR` : ""}`
     : "";
+  const activeWorktreePullRequestHref = safeExternalHref(activeWorktree?.pullRequest?.url);
   const api = useApi();
   const instances = useInstances();
   const instanceScope = useInstanceScope();
@@ -334,11 +336,11 @@ export function SessionHeader({
           <ActiveSubagentsBadge count={activeSubagents.count} onOpen={activeSubagents.onOpen} />
         )}
       </div>
-      {activeWorktree?.pullRequest ? (
+      {activeWorktree?.pullRequest && activeWorktreePullRequestHref ? (
         <a
           className="tag tag-wt session-worktree-identity"
           title={`Branch: ${activeWorktree.branch}${activeWorktree.baseRef ? ` · Base: ${activeWorktree.baseRef}` : ""}${activeWorktree.pullRequest ? ` · PR: ${activeWorktree.pullRequest.url}` : ""}`}
-          href={activeWorktree.pullRequest.url}
+          href={activeWorktreePullRequestHref}
           target="_blank"
           rel="noreferrer"
         >

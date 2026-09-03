@@ -55,3 +55,13 @@ for (const viewport of [
     });
   }
 }
+
+test("an unsafe worktree PR URL is shown as identity text without a link", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 760 });
+  await page.goto("/command-inbox-projects-e2e.html?scenario=unsafe-worktree-pr");
+  await page.getByRole("row", { name: /Alpha Session/ }).click();
+  await page.getByRole("button", { name: "Expand Session" }).click();
+  const identity = page.locator(".detail-head > .session-worktree-identity");
+  await expect(identity).toHaveText("fix/session-worktree-identity ← origin/main · Open PR");
+  await expect(identity).not.toHaveAttribute("href", /.+/u);
+});

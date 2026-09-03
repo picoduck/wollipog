@@ -2,7 +2,11 @@
 
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { PROTOCOL_VERSION, WOLLIPOG_AGENT_ACTOR_SESSION_HEADER } from "@wollipog/protocol";
+import {
+  PROTOCOL_VERSION,
+  RUNNER_CAPABILITY_MIN_PROTOCOL,
+  WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
+} from "@wollipog/protocol";
 import {
   executeManagerTool,
   serveConductorMcp,
@@ -177,13 +181,13 @@ function payload(result: ToolResult): unknown {
   try { return JSON.parse(raw); } catch { return { error: raw }; }
 }
 
-async function compatible(fetchImpl: McpFetch, cpUrl: string): Promise<string | null> {
+async function compatible(fetchImpl: McpFetch, cpUrl: string, requiredProtocol: number): Promise<string | null> {
   try {
     const response = await fetchImpl(`${cpUrl}/healthz`, { method: "GET", signal: AbortSignal.timeout(10_000) });
     if (!response.ok) return `control plane compatibility check failed: HTTP ${response.status}`;
     const body = JSON.parse(await response.text()) as { protocolVersion?: unknown };
-    if (typeof body.protocolVersion !== "number" || body.protocolVersion < PROTOCOL_VERSION) {
-      return `control plane protocol v${String(body.protocolVersion ?? "unknown")} is incompatible; Wollipog CLI requires v${PROTOCOL_VERSION}`;
+    if (typeof body.protocolVersion !== "number" || body.protocolVersion < requiredProtocol) {
+      return `control plane protocol v${String(body.protocolVersion ?? "unknown")} is incompatible; this Wollipog CLI command requires v${requiredProtocol}`;
     }
     return null;
   } catch (error) {
@@ -229,7 +233,11 @@ export async function runWollipogCli(
     (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: readinessError })}\n` : `${readinessError}\n`);
     return 1;
   }
-  const incompatibility = await compatible(fetchImpl, cpUrl);
+  const worktreeTools = new Set(["create_worktree", "attach_worktree", "select_worktree"]);
+  const requiredProtocol = worktreeTools.has(parsed.tool)
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktrees
+    : RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControl;
+  const incompatibility = await compatible(fetchImpl, cpUrl, requiredProtocol);
   if (incompatibility) {
     (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: incompatibility })}\n` : `${incompatibility}\n`);
     return 1;

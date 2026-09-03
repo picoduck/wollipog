@@ -7,7 +7,7 @@ import type { DriverOptions } from "./drivers/driver.js";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 import { ProviderStateCleanupJournal } from "./provider-state-reconciliation.js";
-import { requestedWorktreeBoundary } from "./worktree.js";
+import { requestedWorktreeBoundary, setStatfsForTests } from "./worktree.js";
 
 function meta(): SessionMeta {
   return {
@@ -34,6 +34,7 @@ function cloudTarget() {
 test("session launch passes one resolved isolation boundary to every driver", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-session-isolation-"));
   try {
+    setStatfsForTests(async () => { throw new Error("capacity preflight must not run for ordinary isolation"); });
     const store = new SessionStore(root);
     store.create(meta());
     let captured: DriverOptions | undefined;
@@ -70,12 +71,13 @@ test("session launch passes one resolved isolation boundary to every driver", as
       env: {},
       sessionId: "s1",
       cwd: "/repo",
-      additionalWritableRoots: [await requestedWorktreeBoundary("/repo", "s1", { dataDir })],
+      additionalWritableRoots: [await requestedWorktreeBoundary("/repo", "s1", { dataDir }, false)],
     });
     assert.deepEqual(migrations, ["s1"]);
     assert.equal(store.readMeta("s1")?.providerStateVersion, 2);
     manager.shutdownAll();
   } finally {
+    setStatfsForTests();
     rmSync(root, { recursive: true, force: true });
   }
 });

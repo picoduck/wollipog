@@ -8,6 +8,7 @@ import type { RunnerToControlPlane, SessionLaunchSpec } from "@wollipog/protocol
 import { SessionManager } from "./session-manager.js";
 import { BoxAdmission } from "./box-admission.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
+import { WorktreeCleanupJournal } from "./worktree.js";
 
 function meta(sessionId: string, agentId = "claude"): SessionMeta {
   return {
@@ -1233,6 +1234,62 @@ test("delete awaiting a reused worktree return still removes the explicitly dele
     assert.equal(store.has("deleted-reuse"), false);
     assert.equal(existsSync(reusedPath), false, "explicit deletion reaps a reused root returned late");
     assert.equal(existsSync(dirtyPath), false);
+    manager.shutdownAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("delete racing an attached-worktree restart never removes the operator-owned worktree", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-admission-delete-attached-worktree-"));
+  try {
+    const repo = join(root, "repo");
+    const operatorRoot = join(root, "operator");
+    const attachedPath = join(operatorRoot, "attached");
+    mkdirSync(repo);
+    execFileSync("git", ["init"], { cwd: repo, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repo });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: repo });
+    execFileSync("git", ["commit", "--allow-empty", "-m", "base"], { cwd: repo, stdio: "ignore" });
+    execFileSync("git", ["worktree", "add", "-b", "operator/attached", attachedPath], { cwd: repo, stdio: "ignore" });
+    const store = new SessionStore(join(root, "sessions"));
+    let gateRestart = false;
+    let restartEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { restartEntered = resolve; });
+    let releaseRestart!: () => void;
+    const release = new Promise<void>((resolve) => { releaseRestart = resolve; });
+    const factory = () => ({
+      pid: 1, initialize: async () => {}, newSession: async () => {},
+      prompt: async () => ({ stopReason: "end_turn" as const }),
+      cancel: () => {}, dispose: () => {}, setConfig: () => {},
+      resolvePermission: () => false, agentSessionId: () => null,
+    });
+    const manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, factory as never,
+      root, 2, undefined, undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, [],
+      async () => {
+        if (!gateRestart) return;
+        restartEntered();
+        await release;
+      },
+    );
+    (manager as unknown as { configuredProjectPaths: string[] }).configuredProjectPaths = [operatorRoot];
+    const spec = launchSpec(repo, "attached-restart");
+    assert.equal(await manager.start(spec), true);
+    await manager.attachWorktree(spec.sessionId, attachedPath);
+    manager.stop(spec.sessionId);
+
+    gateRestart = true;
+    const restart = manager.start(spec);
+    await entered;
+    await manager.delete(spec.sessionId);
+    releaseRestart();
+    assert.equal(await restart, false);
+
+    assert.equal(existsSync(attachedPath), true, "the stale launch cannot reap an attached worktree");
+    execFileSync("git", ["-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/operator/attached"]);
+    assert.deepEqual(new WorktreeCleanupJournal(root).list(), []);
     manager.shutdownAll();
   } finally {
     rmSync(root, { recursive: true, force: true });

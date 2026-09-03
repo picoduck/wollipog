@@ -117,6 +117,7 @@ import {
   captureTurnDiff,
   isGitRepo,
   nativeRepositoryPathIsUnavailable,
+  removeRequestedWorktreeBoundary,
   removeWorktree,
   requestedWorktreeBoundary,
   worktreeHead,
@@ -739,14 +740,16 @@ export class SessionManager {
   }
 
   private attributedWorktrees(meta: SessionMeta): SessionWorktreeView[] {
-    if (meta.worktrees) return [...meta.worktrees];
-    if (!meta.worktreePath) return [];
-    return [{
-      id: "legacy",
-      path: meta.worktreePath,
-      branch: meta.worktreeBranch ?? `agent/${meta.sessionId}`,
-      source: "legacy",
-    }];
+    const worktrees = [...(meta.worktrees ?? [])];
+    if (meta.worktreePath && !worktrees.some((worktree) => worktree.path === meta.worktreePath)) {
+      worktrees.push({
+        id: "legacy",
+        path: meta.worktreePath,
+        branch: meta.worktreeBranch ?? `agent/${meta.sessionId}`,
+        source: "legacy",
+      });
+    }
+    return worktrees;
   }
 
   private runWorktreeOperation<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
@@ -1868,7 +1871,21 @@ export class SessionManager {
     // Agent TUI can resolve its root, but capacity admission/provider initialization must not hold
     // the control plane's bounded shell-open RPC.
     let worktree: WorktreeHandle | null = null;
+    let worktreeIdentity: SessionWorktreeView | undefined;
     let worktreeOwnedByLaunch = false;
+    const launchWorktreeCleanup = (): WorktreeCleanupRecord => {
+      if (!worktree) throw new Error("worktree cleanup requested before materialization");
+      const checkpointOwnerHash = this.checkpointOwnerHash(meta);
+      return {
+        sessionId: spec.sessionId,
+        worktreeId: worktreeIdentity?.id ?? "legacy",
+        repoPath,
+        worktreePath: worktree.path,
+        context,
+        branch: worktreeIdentity?.branch ?? worktree.branch,
+        ...(checkpointOwnerHash ? { checkpointOwnerHash } : {}),
+      };
+    };
     if (shouldUseWorktree) {
       const preparationAcquired = await this.acquireWorktreePreparation(
         spec.sessionId,
@@ -1906,8 +1923,15 @@ export class SessionManager {
             if (worktree.branch !== priorActiveWorktree.branch) {
               throw new Error("selected worktree branch changed before the provider could launch");
             }
+            worktreeIdentity = priorActiveWorktree;
           } else {
             worktree = await this.createSessionWorktree(repoPath, spec.sessionId, worktreeOptions);
+            worktreeIdentity = {
+              id: "legacy",
+              path: worktree.path,
+              branch: worktree.branch,
+              source: "legacy",
+            };
           }
           // createWorktree deliberately returns an already-registered healthy session worktree.
           // Preserve that durable root and its uncommitted diffs if this launch later loses.
@@ -1921,9 +1945,7 @@ export class SessionManager {
             // A worktree without durable ref ownership proof must never be published or reach its
             // first checkpoint. Unwind only a worktree this launch actually materialized.
             if (worktreeOwnedByLaunch) {
-              const checkpointOwnerHash = this.checkpointOwnerHash(meta);
-              const cleanup = { sessionId: spec.sessionId, repoPath, worktreePath: worktree.path, context,
-                ...(checkpointOwnerHash ? { checkpointOwnerHash } : {}) };
+              const cleanup = launchWorktreeCleanup();
               this.cleanupJournal.add(cleanup);
               await this.reapWorktree(cleanup, true);
             }
@@ -1938,10 +1960,8 @@ export class SessionManager {
             const deleted = this.deleted.has(spec.sessionId) || this.deleting.has(spec.sessionId) ||
               this.store.isDeleted(spec.sessionId);
             const superseded = this.launchWasSuperseded(spec.sessionId, launchGeneration);
-            if (worktreeOwnedByLaunch || deleted) {
-              const checkpointOwnerHash = this.checkpointOwnerHash(meta);
-              const cleanup = { sessionId: spec.sessionId, repoPath, worktreePath: worktree.path, context,
-                ...(checkpointOwnerHash ? { checkpointOwnerHash } : {}) };
+            if (worktreeOwnedByLaunch || (deleted && worktreeIdentity?.source !== "attached")) {
+              const cleanup = launchWorktreeCleanup();
               this.cleanupJournal.add(cleanup);
               await this.reapWorktree(cleanup, worktreeOwnedByLaunch && !superseded);
             }
@@ -1985,10 +2005,8 @@ export class SessionManager {
       const deleted = this.deleted.has(spec.sessionId) || this.deleting.has(spec.sessionId) ||
         this.store.isDeleted(spec.sessionId);
       const superseded = this.launchWasSuperseded(spec.sessionId, launchGeneration);
-      if (worktree && (worktreeOwnedByLaunch || deleted)) {
-        const checkpointOwnerHash = this.checkpointOwnerHash(meta);
-        const cleanup = { sessionId: spec.sessionId, repoPath, worktreePath: worktree.path, context,
-          ...(checkpointOwnerHash ? { checkpointOwnerHash } : {}) };
+      if (worktree && (worktreeOwnedByLaunch || (deleted && worktreeIdentity?.source !== "attached"))) {
+        const cleanup = launchWorktreeCleanup();
         this.cleanupJournal.add(cleanup);
         await this.reapWorktree(cleanup, worktreeOwnedByLaunch && !superseded);
       }
@@ -2000,10 +2018,15 @@ export class SessionManager {
     if (worktree) {
       meta.worktreePath = worktree.path;
       meta.worktreeBranch = worktree.branch;
+      const worktrees = worktreeIdentity?.source === "legacy"
+        ? meta.worktrees
+        : this.attributedWorktrees(meta).filter((item) => item.path !== worktree.path);
+      if (worktreeIdentity && worktreeIdentity.source !== "legacy") worktrees?.push(worktreeIdentity);
+      meta.worktrees = worktrees;
       this.store.patchMeta(spec.sessionId, {
         worktreePath: worktree.path,
         worktreeBranch: worktree.branch,
-        worktrees: meta.worktrees,
+        worktrees,
         worktreePending: false,
       });
       this.emitStatus(spec.sessionId, "starting", undefined, worktree.path);
@@ -2078,9 +2101,7 @@ export class SessionManager {
       }
       // The session never started; if WE just created its worktree, it's garbage — reap it.
       if (worktree && worktreeOwnedByLaunch && !deleted) {
-        const checkpointOwnerHash = this.checkpointOwnerHash(meta);
-        const cleanup = { sessionId: spec.sessionId, repoPath, worktreePath: worktree.path, context,
-          ...(checkpointOwnerHash ? { checkpointOwnerHash } : {}) };
+        const cleanup = launchWorktreeCleanup();
         this.cleanupJournal.add(cleanup);
         this.store.patchMeta(spec.sessionId, { worktreePath: null });
         await this.reapWorktree(cleanup, true);
@@ -2848,7 +2869,7 @@ export class SessionManager {
       context: meta.context,
       dataDir: this.dataDir,
       ownerHash: this.runnerOwnerHash,
-    })];
+    }, false)];
   }
 
   private async prepareCloudIsolation(
@@ -6131,6 +6152,15 @@ export class SessionManager {
         await this.cleanupProviderState(sessionId, meta.driver, meta.context, true);
       }
       for (const cleanup of worktreeCleanups) await this.reapWorktree(cleanup);
+      if (meta) {
+        await removeRequestedWorktreeBoundary(meta.repoPath, sessionId, {
+          context: meta.context,
+          dataDir: this.dataDir,
+          ownerHash: this.runnerOwnerHash,
+        }).catch((error) => {
+          this.log(`requested worktree boundary cleanup for ${boundedSessionIdForLog(sessionId)} needs retry: ${errText(error)}`);
+        });
+      }
       this.log(`deleted session ${sessionId} from the box store`);
     } finally {
       this.deleting.delete(sessionId);

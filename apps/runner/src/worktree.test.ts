@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "./test-support/bounded-child-process.js";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { attachRequestedWorktree, createRequestedWorktree, createWorktree, isGitRepo, nativeRepositoryPathIsUnavailable, removeWorktree, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, setStatfsForTests, WorktreeCleanupJournal } from "./worktree.js";
 import { randomUUID } from "node:crypto";
@@ -297,6 +297,7 @@ test("concurrent requests retain every created branch and deletion leaves attach
     assert.equal(store.readMeta("s_multi")?.worktrees?.length, 3);
     await manager.selectWorktree("s_multi", first.worktree.path);
     assert.equal(store.readMeta("s_multi")?.worktreePath, first.worktree.path);
+    const requestedBoundary = dirname(first.worktree.path);
 
     await manager.delete("s_multi");
     assert.equal(existsSync(first.worktree.path), false);
@@ -305,6 +306,49 @@ test("concurrent requests retain every created branch and deletion leaves attach
     execFileSync("git", ["-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/operator/attached"]);
     assert.throws(() => execFileSync("git", ["-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/fix/first"]));
     assert.throws(() => execFileSync("git", ["-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/fix/second"]));
+    assert.equal(existsSync(requestedBoundary), false, "empty runner-owned session boundary is removed");
+    assert.deepEqual(new WorktreeCleanupJournal(dataDir).list(), []);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("deletion includes an active legacy worktree missing from a populated inventory", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-session-union-wt-"));
+  const repo = join(root, "repo");
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    const requested = await createRequestedWorktree(repo, "s_union", {
+      baseRef: "HEAD",
+      branch: "fix/inventory",
+    }, { dataDir });
+    const legacy = await createWorktree(repo, "s_union", { dataDir });
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_union", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: legacy.path, worktreeBranch: legacy.branch,
+      worktrees: [{
+        id: "requested", path: requested.path, branch: requested.branch,
+        baseRef: requested.baseRef, baseCommit: requested.baseCommit, source: "created",
+      }],
+      driver: "claude-code", command: "claude", args: [], env: {}, context: { kind: "native" },
+      agentSessionId: null, status: "stopped", title: "union", config: {}, tokensIn: 0,
+      tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null, seq: 0,
+      createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+
+    await manager.delete("s_union");
+    assert.equal(existsSync(requested.path), false);
+    assert.equal(existsSync(legacy.path), false);
+    assert.throws(() => execFileSync("git", ["-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/fix/inventory"]));
+    assert.throws(() => execFileSync("git", ["-C", repo, "show-ref", "--verify", "--quiet", `refs/heads/${legacy.branch}`]));
     assert.deepEqual(new WorktreeCleanupJournal(dataDir).list(), []);
   } finally {
     manager?.shutdownAll();

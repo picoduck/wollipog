@@ -3,7 +3,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
-import { mkdir, rm, statfs } from "node:fs/promises";
+import { mkdir, rm, rmdir, statfs } from "node:fs/promises";
 import {
   closeSync,
   constants,
@@ -246,9 +246,7 @@ async function sessionPath(
   options: WorktreeOptions,
   capacityPreflight = true,
 ): Promise<string> {
-  if (!/^[a-zA-Z0-9._-]+$/.test(sessionId) || sessionId === "." || sessionId === "..") {
-    throw new Error("session id is not safe for a worktree path/branch");
-  }
+  validateSessionId(sessionId);
   const root = capacityPreflight ? await resolveWorktreeRoot(options) : await worktreeRootPath(options);
   const context = options.context ?? nativeContext;
   const parent = context.kind === "wsl" ? `${root}/${repoKey(repoPath)}` : join(root, repoKey(repoPath));
@@ -263,6 +261,12 @@ function requestedSlot(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 16);
 }
 
+function validateSessionId(sessionId: string): void {
+  if (!/^[a-zA-Z0-9._-]+$/.test(sessionId) || sessionId === "." || sessionId === "..") {
+    throw new Error("session id is not safe for a worktree path/branch");
+  }
+}
+
 /** Stable session-private directory used by platform isolation before a requested worktree exists.
  * Binding this directory writable is narrower than exposing the runner's shared worktree root. */
 export async function requestedWorktreeBoundary(
@@ -271,6 +275,7 @@ export async function requestedWorktreeBoundary(
   options: WorktreeOptions = {},
   capacityPreflight = true,
 ): Promise<string> {
+  validateSessionId(sessionId);
   const context = options.context ?? nativeContext;
   const root = capacityPreflight ? await resolveWorktreeRoot(options) : await worktreeRootPath(options);
   const parent = context.kind === "wsl" ? `${root}/${repoKey(repoPath)}` : join(root, repoKey(repoPath));
@@ -283,6 +288,32 @@ export async function requestedWorktreeBoundary(
     await mkdir(boundary, { recursive: true });
   }
   return boundary;
+}
+
+/** Remove only an empty runner-owned session boundary. A retained attached worktree or any
+ * unexpected content makes the non-recursive removal fail closed and leaves the boundary intact. */
+export async function removeRequestedWorktreeBoundary(
+  repoPath: string,
+  sessionId: string,
+  options: WorktreeOptions = {},
+): Promise<boolean> {
+  const context = options.context ?? nativeContext;
+  const boundary = await requestedWorktreeBoundary(repoPath, sessionId, options, false);
+  try {
+    if (context.kind === "wsl") {
+      await runContextCommand(context, "rmdir", ["--", boundary], { cwd: "/", timeoutMs: 8_000 });
+    } else {
+      await rmdir(boundary);
+    }
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    const detail = `${(error as { stderr?: string }).stderr ?? ""}\n${(error as Error).message}`;
+    if (code === "ENOENT" || code === "ENOTEMPTY" || code === "EEXIST" || /not empty|no such file/i.test(detail)) {
+      return false;
+    }
+    throw error;
+  }
 }
 
 function safeGitArgument(value: string, label: string): string {
