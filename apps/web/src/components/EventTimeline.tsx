@@ -1,6 +1,6 @@
 import { createContext, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { normalizeSourcePath, type AgentQuestion, type PlanEntry, type SessionView, type SourceLocation } from "@wollipog/protocol";
-import {
+import { type TurnUsage,
   groupTimeline,
   SubagentTreeProjector,
   timelineBoundaryKey,
@@ -20,7 +20,7 @@ import {
 } from "./MeasuredVirtualList.js";
 import { CopyButton } from "./common.js";
 import { EditIcon, ThreadForkIcon } from "./Icons.js";
-import { formatDuration, formatRecordedRelativeTime, formatRecordedTimestamp, titleCaseLabel } from "../format.js";
+import { formatTokens, formatCost, formatDuration, formatRecordedRelativeTime, formatRecordedTimestamp, titleCaseLabel } from "../format.js";
 import { PromptImageView } from "./PromptImageView.js";
 import { EventPayloadContent } from "./EventPayloadContent.js";
 import { useTimelineClock } from "../timeline-clock.js";
@@ -1571,6 +1571,7 @@ const TimelineRow = memo(function TimelineRow({
               createdAt={item.createdAt}
               durationMs={item.durationMs}
               durationSource={item.durationSource}
+              turnUsage={item.turnUsage}
               copyText={item.text}
               copyLabel="Copy user message"
               onEditAndResend={onEditAndResend ? () => onEditAndResend(item) : undefined}
@@ -1943,12 +1944,32 @@ function ActivityTimestampMeta({
   );
 }
 
+/** "12.4K tok · $0.03": the turn's processed tokens and, when priced, its cost. Tokens are input
+ * across every cache bucket plus output; the tooltip lists the buckets so the compact figure never
+ * hides where they went. */
+function turnUsageLabel(usage: TurnUsage): { text: string; title: string } {
+  const processed = usage.inputTokens + usage.cachedInputTokens + usage.cacheCreationTokens + usage.outputTokens;
+  const cost = usage.costUsd != null ? formatCost(usage.costUsd) : "";
+  const parts = [`${formatTokens(processed)} tok`];
+  if (cost) parts.push(cost);
+  const detail = [
+    `${formatTokens(usage.inputTokens)} input`,
+    usage.cachedInputTokens ? `${formatTokens(usage.cachedInputTokens)} cached` : "",
+    usage.cacheCreationTokens ? `${formatTokens(usage.cacheCreationTokens)} cache write` : "",
+    `${formatTokens(usage.outputTokens)} output`,
+    usage.model ? `model ${usage.model}` : "",
+    cost ? `cost ${cost}` : "unpriced",
+  ].filter(Boolean).join(" · ");
+  return { text: parts.join(" · "), title: `Turn usage: ${detail}` };
+}
+
 function MessageMeta({
   createdAt,
   lastActivityAt,
   completedAt,
   durationMs,
   durationSource,
+  turnUsage,
   copyText,
   copyLabel,
   onEditAndResend,
@@ -1961,6 +1982,7 @@ function MessageMeta({
   completedAt?: number;
   durationMs?: number;
   durationSource?: "provider" | "observed";
+  turnUsage?: TurnUsage;
   copyText: string;
   copyLabel: string;
   onEditAndResend?: () => void;
@@ -1969,8 +1991,9 @@ function MessageMeta({
   forkAvailability?: ConversationForkAvailability;
 }) {
   const duration = durationMs != null ? formatDuration(durationMs) : "";
+  const usage = turnUsage ? turnUsageLabel(turnUsage) : null;
   const timestamp = Number.isFinite(createdAt);
-  if (!timestamp && !duration && !copyText && !onEditAndResend && !onEditInFork && !forkAvailability) return null;
+  if (!timestamp && !duration && !usage && !copyText && !onEditAndResend && !onEditInFork && !forkAvailability) return null;
   return (
     <div className="tl-message-meta">
       {timestamp && (
@@ -1988,6 +2011,11 @@ function MessageMeta({
           aria-label={`${durationSource === "observed" ? "Approximate runner-recorded activity span" : "Provider-reported turn duration"}, ${duration}`}
         >
           {durationSource === "observed" ? "~" : ""}{duration}
+        </span>
+      )}
+      {usage && (
+        <span className="tl-turn-usage" title={usage.title} aria-label={usage.title}>
+          {usage.text}
         </span>
       )}
       {copyText && <CopyButton text={copyText} iconOnly ariaLabel={copyLabel} className="tl-message-icon" />}

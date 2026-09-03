@@ -309,6 +309,9 @@ export class ClaudeCodeDriver implements Driver {
   private persistentGeneration = 0;
   /** Claude's total_cost_usd is cumulative within one streaming-input process. */
   private persistentLastCostUsd = 0;
+  /** The model on the most recent top-level assistant record; stamped on the turn's usage. Claude
+   * records the model per message, and the terminal `result` carries none. */
+  private turnModel: string | null = null;
   private persistentBuffer: BoundedNdjsonBuffer | null = null;
   /** Monotonic across persistent and one-shot transports so late lifecycle events cannot alias a
    * turn from the transport used before a circuit fallback. */
@@ -1969,6 +1972,7 @@ export class ClaudeCodeDriver implements Driver {
       }
 
       case "assistant": {
+        if (!parentId && typeof msg.message?.model === "string" && msg.message.model) this.turnModel = msg.message.model;
         const blocks: Json[] = msg.message?.content ?? [];
         for (const b of blocks) {
           if (b?.type !== "tool_use") continue;
@@ -2006,6 +2010,7 @@ export class ClaudeCodeDriver implements Driver {
             ...(typeof messageUsage.cache_creation_input_tokens === "number"
               ? { cacheCreationInputTokens: messageUsage.cache_creation_input_tokens }
               : {}),
+            ...(typeof msg.message?.model === "string" && msg.message.model ? { model: msg.message.model } : {}),
             parentToolUseId: parentId,
           });
         }
@@ -2044,6 +2049,7 @@ export class ClaudeCodeDriver implements Driver {
           ...(typeof usage.cache_creation_input_tokens === "number"
             ? { cacheCreationInputTokens: usage.cache_creation_input_tokens }
             : {}),
+          ...(this.turnModel ? { model: this.turnModel } : {}),
           costUsd,
           ...(typeof msg.duration_ms === "number" ? { durationMs: msg.duration_ms } : {}),
           ...pp,

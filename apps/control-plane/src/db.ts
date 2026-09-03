@@ -94,6 +94,7 @@ import {
   type UsageAggregationGranularity,
   type UsageAggregationResponse,
   type UsageAmount,
+  type SessionModelUsage,
   type UsageRetentionPolicy,
   type SubscriptionUsageResponse,
   type SubscriptionUsageSnapshot,
@@ -1650,6 +1651,26 @@ CREATE TABLE IF NOT EXISTS usage_session_state (
   covered_through_seq INTEGER NOT NULL DEFAULT 0,
   revision            INTEGER NOT NULL DEFAULT 0,
   updated_at          INTEGER NOT NULL,
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS usage_session_models (
+  session_id          TEXT NOT NULL,
+  model               TEXT NOT NULL,
+  driver              TEXT NOT NULL,
+  input_tokens        INTEGER NOT NULL DEFAULT 0,
+  output_tokens       INTEGER NOT NULL DEFAULT 0,
+  cost_microusd       INTEGER NOT NULL DEFAULT 0,
+  uncached_input_tokens       INTEGER NOT NULL DEFAULT 0,
+  cached_input_tokens         INTEGER NOT NULL DEFAULT 0,
+  cache_creation_tokens       INTEGER NOT NULL DEFAULT 0,
+  reasoning_tokens            INTEGER NOT NULL DEFAULT 0,
+  cache_savings_microusd      INTEGER NOT NULL DEFAULT 0,
+  provider_reported_records   INTEGER NOT NULL DEFAULT 0,
+  model_priced_records        INTEGER NOT NULL DEFAULT 0,
+  unpriced_records            INTEGER NOT NULL DEFAULT 0,
+  updated_at          INTEGER NOT NULL,
+  PRIMARY KEY (session_id, model),
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 
@@ -8581,6 +8602,20 @@ export class ControlPlaneDb {
          ${USAGE_LEDGER_ACCUMULATE_SQL},
          revision=revision+1, updated_at=excluded.updated_at`,
     ).run(sessionId, ...ledgerValues, occurredAt);
+    // The per-session per-model ledger is what the session view's breakdown reads; it follows the
+    // same delta so a session that switches models attributes each turn to the model that ran it.
+    this.stmt(
+      `INSERT INTO usage_session_models
+         (session_id, model, driver, input_tokens, output_tokens, cost_microusd, ${USAGE_LEDGER_V103_COLUMNS.join(", ")}, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(session_id, model) DO UPDATE SET
+         driver=excluded.driver,
+         input_tokens=input_tokens+excluded.input_tokens,
+         output_tokens=output_tokens+excluded.output_tokens,
+         cost_microusd=cost_microusd+excluded.cost_microusd,
+         ${USAGE_LEDGER_ACCUMULATE_SQL},
+         updated_at=excluded.updated_at`,
+    ).run(sessionId, dimensions.model, dimensions.driver, ...ledgerValues, occurredAt);
     if (updateSessionTotals) {
       this.stmt(
         `UPDATE sessions SET
@@ -8637,7 +8672,11 @@ export class ControlPlaneDb {
       if (source.runnerSeq <= state.covered_through_seq) return;
     }
     if (payload.kind === "token_usage" && !payload.parentToolUseId) {
-      const dimensions = this.usageDimensions(sessionId);
+      const sessionDimensions = this.usageDimensions(sessionId);
+      // A v104 runner names the model that produced the record; that beats the session's current
+      // model, which may already have moved on by the time a late usage event lands.
+      const eventModel = typeof payload.model === "string" ? payload.model.trim().slice(0, 128) : "";
+      const dimensions = sessionDimensions && eventModel ? { ...sessionDimensions, model: eventModel } : sessionDimensions;
       const inputTokens = ControlPlaneDb.usageToken(payload.inputTokens);
       const outputTokens = ControlPlaneDb.usageToken(payload.outputTokens);
       const cachedInputTokens = ControlPlaneDb.usageToken(payload.cachedInputTokens);
@@ -8794,6 +8833,55 @@ export class ControlPlaneDb {
       `UPDATE sessions SET input_tokens=MAX(input_tokens, ?), output_tokens=MAX(output_tokens, ?),
          cost_usd=MAX(cost_usd, (? + ? / 1000000.0) / 1000000.0) WHERE id=?`,
     ).run(settled.input_tokens, settled.output_tokens, settled.cost_microusd, settled.cost_remainder_picousd, sessionId);
+  }
+
+  /** A session's usage split by the model that produced it, most processed tokens first. The
+   * session totals come from the same ledger so the two views agree. */
+  sessionUsageByModel(sessionId: string): { totals: UsageAmount; byModel: SessionModelUsage[] } {
+    const measure = `input_tokens, output_tokens, cost_microusd, ${USAGE_LEDGER_V103_COLUMNS.join(", ")}`;
+    const processed = `CASE WHEN driver IN ('codex', 'codex-app-server')
+                         THEN input_tokens + cache_creation_tokens + output_tokens
+                         ELSE input_tokens + cached_input_tokens + cache_creation_tokens + output_tokens END`;
+    type Row = {
+      model: string; input_tokens: number; output_tokens: number; cost_microusd: number;
+      uncached_input_tokens: number; cached_input_tokens: number; cache_creation_tokens: number; reasoning_tokens: number;
+      cache_savings_microusd: number; provider_reported_records: number; model_priced_records: number; unpriced_records: number;
+      processed_tokens: number;
+    };
+    const rows = this.stmt(
+      `SELECT model, ${measure}, ${processed} AS processed_tokens FROM usage_session_models
+        WHERE session_id=? ORDER BY processed_tokens DESC, cost_microusd DESC, model ASC`,
+    ).all(sessionId) as unknown as Row[];
+    const amount = (row: Omit<Row, "model">): UsageAmount => ({
+      inputTokens: Number(row.input_tokens), outputTokens: Number(row.output_tokens), costUsd: Number(row.cost_microusd) / 1_000_000,
+      uncachedInputTokens: Number(row.uncached_input_tokens), cachedInputTokens: Number(row.cached_input_tokens),
+      cacheCreationTokens: Number(row.cache_creation_tokens), reasoningTokens: Number(row.reasoning_tokens),
+      cacheSavingsUsd: Number(row.cache_savings_microusd) / 1_000_000,
+      costSource: resolveCostSource({
+        providerReported: Number(row.provider_reported_records), modelPriced: Number(row.model_priced_records), unpriced: Number(row.unpriced_records),
+      }),
+      unpricedRecords: Number(row.unpriced_records),
+      processedTokens: Number(row.processed_tokens),
+    });
+    const byModel = rows.map((row) => ({ model: row.model === "" ? "unknown" : row.model, ...amount(row) }));
+    const totals = rows.reduce<Omit<Row, "model">>((sum, row) => ({
+      input_tokens: sum.input_tokens + Number(row.input_tokens), output_tokens: sum.output_tokens + Number(row.output_tokens),
+      cost_microusd: sum.cost_microusd + Number(row.cost_microusd),
+      uncached_input_tokens: sum.uncached_input_tokens + Number(row.uncached_input_tokens),
+      cached_input_tokens: sum.cached_input_tokens + Number(row.cached_input_tokens),
+      cache_creation_tokens: sum.cache_creation_tokens + Number(row.cache_creation_tokens),
+      reasoning_tokens: sum.reasoning_tokens + Number(row.reasoning_tokens),
+      cache_savings_microusd: sum.cache_savings_microusd + Number(row.cache_savings_microusd),
+      provider_reported_records: sum.provider_reported_records + Number(row.provider_reported_records),
+      model_priced_records: sum.model_priced_records + Number(row.model_priced_records),
+      unpriced_records: sum.unpriced_records + Number(row.unpriced_records),
+      processed_tokens: sum.processed_tokens + Number(row.processed_tokens),
+    }), {
+      input_tokens: 0, output_tokens: 0, cost_microusd: 0, uncached_input_tokens: 0, cached_input_tokens: 0,
+      cache_creation_tokens: 0, reasoning_tokens: 0, cache_savings_microusd: 0, provider_reported_records: 0,
+      model_priced_records: 0, unpriced_records: 0, processed_tokens: 0,
+    });
+    return { totals: amount(totals), byModel };
   }
 
   queryUsageAggregation(principal: AuthPrincipal, query: UsageAggregationQuery): UsageAggregationResponse {

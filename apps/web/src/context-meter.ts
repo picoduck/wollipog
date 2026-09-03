@@ -16,6 +16,16 @@ export interface ContextFill {
 
 const UNKNOWN: ContextFill = { fillPct: 0, formatPct: "—", isFull: false, known: false };
 
+/** What the popover says about compaction. Every native harness compacts on its own once the
+ * window fills; none advertises the threshold, and Wollipog exposes no manual compact, so the
+ * sentence names the fact rather than a number. ACP agents are opaque about it. */
+export function compactionNote(driver: string | undefined): string {
+  if (driver === "claude-code" || driver === "codex" || driver === "codex-app-server") {
+    return "Context compacts automatically when the window fills.";
+  }
+  return "Compaction is up to the agent.";
+}
+
 /**
  * `(tokensIn + tokensOut) / contextWindow`, clamped to [0,100]. Small fills keep one decimal
  * (e.g. 1500/200000 → "0.8%"); larger ones round to a whole percent. Unknown window ⇒ "—".

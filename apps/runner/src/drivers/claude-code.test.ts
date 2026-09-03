@@ -3370,3 +3370,20 @@ test("empty-string parent_tool_use_id omits the key (treated as top-level)", () 
   const call = h.events.find((e) => e.kind === "tool_call") as Extract<SessionEventPayload, { kind: "tool_call" }>;
   assert.equal("parentToolUseId" in call, false);
 });
+
+test("the turn's model rides on its usage: assistant records name it, the result inherits it", () => {
+  const h = makeHarness();
+  h.feed({ type: "assistant", message: { model: "claude-fable-5-1", content: [{ type: "text", text: "hi" }] } });
+  h.feed({
+    type: "assistant",
+    parent_tool_use_id: "task-1",
+    message: { model: "claude-haiku-4-5", content: [], usage: { input_tokens: 9, output_tokens: 4, cache_read_input_tokens: 2 } },
+  });
+  h.feed({ type: "result", subtype: "success", is_error: false, total_cost_usd: 0.02, usage: { input_tokens: 100, output_tokens: 42 } });
+  const usage = h.events.filter((event) => event.kind === "token_usage") as Array<Extract<SessionEventPayload, { kind: "token_usage" }>>;
+  assert.equal(usage.length, 2);
+  assert.equal(usage[0]!.model, "claude-haiku-4-5", "a subagent record keeps its own model");
+  assert.equal(usage[0]!.parentToolUseId, "task-1");
+  assert.equal(usage[1]!.model, "claude-fable-5-1", "the top-level result carries the last top-level assistant model");
+  assert.equal(usage[1]!.costUsd, 0.02);
+});

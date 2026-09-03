@@ -1131,3 +1131,20 @@ test("deriveSidePaneContent: the side pane shows the TOP-LEVEL plan, not a subag
   );
   assert.equal(only.plan[0]!.content, "sub only");
 });
+
+test("a turn's parentless usage is stamped on its user message and later reports add to it", () => {
+  const items = deriveTimeline([
+    { id: 1, sessionId: "s", seq: 1, ts: 1_000, payload: { kind: "user_message", text: "go", images: [] } },
+    { id: 2, sessionId: "s", seq: 2, ts: 1_500, payload: { kind: "token_usage", inputTokens: 100, outputTokens: 40, cachedInputTokens: 900, cacheCreationInputTokens: 50, costUsd: 0.02, model: "claude-fable-5-1", parentToolUseId: "sub" } },
+    { id: 3, sessionId: "s", seq: 3, ts: 2_000, payload: { kind: "token_usage", inputTokens: 100, outputTokens: 40, cachedInputTokens: 900, cacheCreationInputTokens: 50, costUsd: 0.02, model: "claude-fable-5-1" } },
+    { id: 4, sessionId: "s", seq: 4, ts: 2_100, payload: { kind: "token_usage", inputTokens: 10, outputTokens: 4 } },
+    { id: 5, sessionId: "s", seq: 5, ts: 3_000, payload: { kind: "user_message", text: "again", images: [] } },
+    { id: 6, sessionId: "s", seq: 6, ts: 3_500, payload: { kind: "token_usage", inputTokens: 7, outputTokens: 3 } },
+  ]);
+  const users = items.filter((item) => item.kind === "user_message") as Array<Extract<TimelineItem, { kind: "user_message" }>>;
+  assert.deepEqual(users[0]!.turnUsage, {
+    inputTokens: 100, outputTokens: 40, cachedInputTokens: 900, cacheCreationTokens: 50, costUsd: 0.02, model: "claude-fable-5-1",
+  }, "subagent usage never lands on the turn; the parentless report does");
+  assert.deepEqual(users[1]!.turnUsage, { inputTokens: 7, outputTokens: 3, cachedInputTokens: 0, cacheCreationTokens: 0 });
+  assert.equal("costUsd" in users[1]!.turnUsage!, false, "an unpriced turn carries no cost rather than $0");
+});

@@ -99,6 +99,7 @@ import type {
   SubscriptionUsageResponse,
   UsageRetentionPolicy,
   UsagePricingStatus,
+  SessionUsageResponse,
   UserStatus,
   WorkspaceInfo,
   WorkflowArtifact,
@@ -760,6 +761,8 @@ export function createApiClient(transport: ApiTransport) {
   /** Exact authorized lookup used by direct links, including archived sessions omitted from the
    * live dashboard snapshot. */
   session: (id: string) => req<{ session: SessionView }>(sessionLookupPath(id)),
+  /** The session's usage split by producing model, from the control plane's per-session ledger. */
+  sessionUsage: (id: string) => req<SessionUsageResponse>(`/api/sessions/${encodeURIComponent(id)}/usage`),
 
   setArchived: (id: string, archived: boolean) =>
     req<SessionView>(`/api/sessions/${id}/archive`, {

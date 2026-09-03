@@ -314,6 +314,7 @@ export class CodexDriver implements Driver {
           outputTokens: u.output_tokens,
           cachedInputTokens: u.cached_input_tokens,
           ...(typeof u.reasoning_output_tokens === "number" ? { reasoningOutputTokens: u.reasoning_output_tokens } : {}),
+          ...(this.config.model && this.config.model !== "default" ? { model: this.config.model } : {}),
         });
         return "end_turn";
       }
