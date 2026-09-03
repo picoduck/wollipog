@@ -104,10 +104,13 @@ test("CLI keeps v100 core commands compatible while gating worktree commands on 
   const requests: string[] = [];
   const fetch: McpFetch = async (url) => {
     requests.push(url);
+    if (url.endsWith("/api/compatibility")) {
+      return { ok: false, status: 404, text: async () => "not found" };
+    }
     return {
       ok: true,
       status: 200,
-      text: async () => JSON.stringify(url.endsWith("/api/compatibility")
+      text: async () => JSON.stringify(url.endsWith("/healthz")
         ? { protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControl }
         : { sessions: [] }),
     };
@@ -132,8 +135,10 @@ test("CLI keeps v100 core commands compatible while gating worktree commands on 
   assert.match(JSON.parse(output).error, /requires v101/);
   assert.deepEqual(requests, [
     "http://cp/api/compatibility",
+    "http://cp/healthz",
     "http://cp/api/sessions",
     "http://cp/api/compatibility",
+    "http://cp/healthz",
   ]);
 });
 

@@ -193,11 +193,19 @@ async function compatible(
   try {
     const headers: Record<string, string> = { authorization: `Bearer ${token}` };
     if (sessionId) headers[WOLLIPOG_AGENT_ACTOR_SESSION_HEADER] = sessionId;
-    const response = await fetchImpl(`${cpUrl}/api/compatibility`, {
+    let response = await fetchImpl(`${cpUrl}/api/compatibility`, {
       method: "GET",
       headers,
       signal: AbortSignal.timeout(10_000),
     });
+    // Protocol v100-v102 dogfood control planes predate the authenticated route but still expose
+    // the version on their public health response. Released pre-v100 peers never receive this CLI.
+    if (response.status === 404) {
+      response = await fetchImpl(`${cpUrl}/healthz`, {
+        method: "GET",
+        signal: AbortSignal.timeout(10_000),
+      });
+    }
     if (!response.ok) return `control plane compatibility check failed: HTTP ${response.status}`;
     const body = JSON.parse(await response.text()) as { protocolVersion?: unknown };
     if (typeof body.protocolVersion !== "number" || body.protocolVersion < requiredProtocol) {
