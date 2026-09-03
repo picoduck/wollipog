@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { PROTOCOL_VERSION, type SessionLaunchSpec } from "@wollipog/protocol";
+import { PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL, type SessionLaunchSpec } from "@wollipog/protocol";
 import {
   agentControlMcpConfigPath,
   agentControlTokenPath,
@@ -149,7 +149,7 @@ test("older control planes and non-host targets receive no general control surfa
     const old = spec();
     provisionAgentControl(old, {
       controlPlaneUrl: "ws://127.0.0.1:4317/runner",
-      controlPlaneProtocolVersion: PROTOCOL_VERSION - 1,
+      controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControl - 1,
     }, () => {}, host);
     assert.deepEqual(old.env, { PROVIDER_SETTING: "kept" });
 

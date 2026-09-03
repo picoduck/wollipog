@@ -835,6 +835,17 @@ export class SessionManager {
     if (!meta || !this.sessionCanOpen(sessionId)) throw new Error("session is unavailable");
     const worktree = this.attributedWorktrees(meta).find((item) => item.path === path);
     if (!worktree) throw new Error("worktree is not linked to this session");
+    const verified = await attachRequestedWorktree(meta.repoPath, sessionId, worktree.path, {
+      context: meta.context,
+      dataDir: this.dataDir,
+      ownerHash: this.runnerOwnerHash,
+      // The path was already attributed by a prior validated create/attach operation; Git
+      // registration and health are still re-proved before changing the active target.
+      allowedProjectPaths: [worktree.path],
+    });
+    if (verified.branch !== worktree.branch) {
+      throw new Error("worktree branch changed since it was linked to this session");
+    }
     return this.activateWorktree(meta, worktree);
   }
 
@@ -5985,7 +5996,7 @@ export class SessionManager {
       // Install every cleanup record before discarding the live entry or the only durable row. If
       // either journal write fails, a retry still has the complete session state to converge from.
       const worktreeCleanups: WorktreeCleanupRecord[] = [];
-      if (meta?.worktreePath) {
+      if (meta) {
         const checkpointOwnerHash = this.checkpointOwnerHash(meta);
         // Attached worktrees remain operator-owned: session deletion only forgets their
         // attribution. Runner-created/legacy worktrees carry destructive ownership proof.

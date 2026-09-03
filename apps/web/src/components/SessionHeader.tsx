@@ -97,6 +97,9 @@ export function SessionHeader({
   titleId?: string;
 }) {
   const activeWorktree = session.worktrees?.find((worktree) => worktree.path === session.worktreePath);
+  const activeWorktreeLabel = activeWorktree
+    ? `${activeWorktree.branch}${activeWorktree.baseRef ? ` ← ${activeWorktree.baseRef}` : ""}${activeWorktree.pullRequest ? ` · ${activeWorktree.pullRequest.state === "open" ? "Open" : activeWorktree.pullRequest.state === "merged" ? "Merged" : "Closed"} PR` : ""}`
+    : "";
   const api = useApi();
   const instances = useInstances();
   const instanceScope = useInstanceScope();
@@ -331,13 +334,25 @@ export function SessionHeader({
           <ActiveSubagentsBadge count={activeSubagents.count} onOpen={activeSubagents.onOpen} />
         )}
       </div>
-      {activeWorktree && (
-        <span
+      {activeWorktree?.pullRequest ? (
+        <a
           className="tag tag-wt session-worktree-identity"
           title={`Branch: ${activeWorktree.branch}${activeWorktree.baseRef ? ` · Base: ${activeWorktree.baseRef}` : ""}${activeWorktree.pullRequest ? ` · PR: ${activeWorktree.pullRequest.url}` : ""}`}
+          href={activeWorktree.pullRequest.url}
+          target="_blank"
+          rel="noreferrer"
         >
-          {activeWorktree.branch}{activeWorktree.pullRequest?.state === "open" ? " · Open PR" : ""}
+          {activeWorktreeLabel}
+        </a>
+      ) : activeWorktree ? (
+        <span
+          className="tag tag-wt session-worktree-identity"
+          title={`Branch: ${activeWorktree.branch}${activeWorktree.baseRef ? ` · Base: ${activeWorktree.baseRef}` : ""}`}
+        >
+          {activeWorktreeLabel}
         </span>
+      ) : (
+        null
       )}
       {session.backgroundWorkState && (
         <span className="sr-only">

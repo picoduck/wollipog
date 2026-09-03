@@ -269,9 +269,10 @@ export async function requestedWorktreeBoundary(
   repoPath: string,
   sessionId: string,
   options: WorktreeOptions = {},
+  capacityPreflight = true,
 ): Promise<string> {
   const context = options.context ?? nativeContext;
-  const root = await resolveWorktreeRoot(options);
+  const root = capacityPreflight ? await resolveWorktreeRoot(options) : await worktreeRootPath(options);
   const parent = context.kind === "wsl" ? `${root}/${repoKey(repoPath)}` : join(root, repoKey(repoPath));
   const boundary = context.kind === "wsl"
     ? `${parent}/${sessionId}.requested`
@@ -387,7 +388,7 @@ export async function attachRequestedWorktree(
 ): Promise<SessionWorktreeHandle> {
   const context = options.context ?? nativeContext;
   const path = safeGitArgument(requestedPath, "worktree path");
-  const runnerBoundary = await requestedWorktreeBoundary(repoPath, sessionId, options);
+  const runnerBoundary = await requestedWorktreeBoundary(repoPath, sessionId, options, false);
   const allowed = [runnerBoundary, ...(options.allowedProjectPaths ?? [])];
   if (!allowed.some((root) => pathWithin(context, path, root))) {
     throw new Error("worktree path is outside the runner's configured Project Locations");

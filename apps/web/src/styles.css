@@ -1649,7 +1649,7 @@ textarea {
 .session-worktree-identity {
   flex: 0 1 auto;
   min-width: 0;
-  max-width: 280px;
+  max-width: 360px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

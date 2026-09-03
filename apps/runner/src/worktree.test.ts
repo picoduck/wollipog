@@ -167,6 +167,15 @@ test("existing worktree attach requires both Git registration and an allowed Loc
     assert.equal(attached.path, existing);
     assert.equal(attached.branch, "fix/attach");
     assert.equal(attached.attached, true);
+    setStatfsForTests(async () => {
+      throw new Error("capacity probe must not run while attaching an existing worktree");
+    });
+    const reattached = await attachRequestedWorktree(repo, "s_attach", existing, {
+      dataDir,
+      allowedProjectPaths: [allowed],
+    });
+    assert.equal(reattached.path, existing);
+    setStatfsForTests();
     await assert.rejects(
       attachRequestedWorktree(repo, "s_attach", outside, { dataDir, allowedProjectPaths: [allowed] }),
       /outside the runner's configured Project Locations/,
@@ -177,6 +186,7 @@ test("existing worktree attach requires both Git registration and an allowed Loc
       /not registered with the session repository/,
     );
   } finally {
+    setStatfsForTests();
     rmSync(root, { recursive: true, force: true });
   }
 });

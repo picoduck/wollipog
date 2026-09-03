@@ -20,7 +20,7 @@ for (const viewport of [
       await page.goto("/command-inbox-projects-e2e.html?scenario=worktree-identity");
       await setTheme(page, theme);
       const row = page.getByRole("row", { name: /Alpha Session/ });
-      await expect(row).toContainText("fix/session-worktree-identity");
+      await expect(row).toContainText("fix/session-worktree-identity ← origin/main · Open PR");
       if (capture) {
         await mkdir(evidenceDir, { recursive: true });
         await page.screenshot({ path: `${evidenceDir}/after-inbox-${viewport.name}-${theme}.png`, fullPage: true });
@@ -28,7 +28,8 @@ for (const viewport of [
       await row.click();
       if (viewport.name === "desktop") await page.getByRole("button", { name: "Expand Session" }).click();
       const identity = page.locator(".detail-head > .session-worktree-identity");
-      await expect(identity).toHaveText("fix/session-worktree-identity · Open PR");
+      await expect(identity).toHaveText("fix/session-worktree-identity ← origin/main · Open PR");
+      await expect(identity).toHaveAttribute("href", "https://github.com/picoduck/wollipog/pull/600");
       await expect(identity).toHaveAttribute("title", /Base: origin\/main.*PR: https:\/\/github\.com\/picoduck\/wollipog\/pull\/600/);
       if (capture) {
         await page.screenshot({ path: `${evidenceDir}/after-header-${viewport.name}-${theme}.png`, fullPage: true });

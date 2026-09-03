@@ -98,7 +98,11 @@ function InboxRowInner({
           </span>
           <span className="inbox-row-copy">
             <span className="inbox-row-title">{session.title}</span>
-            {activeWorktree && <span className="inbox-row-worktree"> · {activeWorktree.branch}</span>}
+            {activeWorktree && (
+              <span className="inbox-row-worktree">
+                {` · ${activeWorktree.branch}${activeWorktree.baseRef ? ` ← ${activeWorktree.baseRef}` : ""}${activeWorktree.pullRequest ? ` · ${activeWorktree.pullRequest.state === "open" ? "Open" : activeWorktree.pullRequest.state === "merged" ? "Merged" : "Closed"} PR` : ""}`}
+              </span>
+            )}
             {session.preview && <span className="inbox-row-snippet"> — {session.preview}</span>}
             {active && <ActivityStrip activity={activity} now={activityNow} compact className="inbox-row-activity" />}
           </span>
