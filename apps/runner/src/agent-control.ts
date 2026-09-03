@@ -24,6 +24,14 @@ import { assertSafeSessionFileId } from "./session-file-id.js";
 
 const TOKEN_PREFIX = "wollipoga_";
 const TOKEN_PATTERN = /^wollipoga_[A-Za-z0-9_-]{43}$/u;
+const AGENT_CONTROL_ENV_KEYS = [
+  "WOLLIPOG_CONTROL_PLANE_URL",
+  "WOLLIPOG_SESSION_ID",
+  "WOLLIPOG_SESSION_TOKEN_FILE",
+  "WOLLIPOG_SESSION_CREDENTIAL_READY_FILE",
+  "WOLLIPOG_CLI",
+  "WOLLIPOG_CLI_ARGS",
+] as const;
 
 export interface AgentControlHost extends RunnerReentryHost {
   configDir: string;
@@ -103,6 +111,20 @@ function writeMcpConfig(
   try { chmodSync(file, 0o600); } catch { /* Windows uses the owning account ACL. */ }
 }
 
+function removeAgentControlLaunchState(
+  spec: Pick<SessionLaunchSpec, "sessionId" | "args" | "env">,
+  host: AgentControlHost,
+): void {
+  const mcpConfig = agentControlMcpConfigPath(host.configDir, spec.sessionId);
+  for (let i = spec.args.length - 2; i >= 0; i--) {
+    if (spec.args[i] === "--mcp-config" && spec.args[i + 1] === mcpConfig) {
+      spec.args.splice(i, 2);
+    }
+  }
+  for (const key of AGENT_CONTROL_ENV_KEYS) delete spec.env[key];
+  removeAgentControlFiles(spec.sessionId, host.configDir);
+}
+
 /** Mutates only ephemeral runner-side launch state. The credential bytes never cross the runner
  * socket and are scrubbed from durable session metadata by the existing env policy. */
 export function provisionAgentControl(
@@ -116,10 +138,14 @@ export function provisionAgentControl(
   log: (message: string) => void,
   host: AgentControlHost,
 ): void {
-  if (!runnerSupportsProtocol(config.controlPlaneProtocolVersion, "sessionAgentControl")) return;
-  if ((spec.context?.kind ?? "native") !== "native" ||
-      (spec.executionTarget && spec.executionTarget.adapter !== "host")) {
-    log(`agent control ${spec.sessionId}: non-host path injection is not supported`);
+  const supported = runnerSupportsProtocol(config.controlPlaneProtocolVersion, "sessionAgentControl");
+  const hostExecution = (spec.context?.kind ?? "native") === "native" &&
+    (!spec.executionTarget || spec.executionTarget.adapter === "host");
+  if (!supported || !hostExecution) {
+    removeAgentControlLaunchState(spec, host);
+    if (!hostExecution) {
+      log(`agent control ${spec.sessionId}: non-host path injection is not supported`);
+    }
     return;
   }
 
