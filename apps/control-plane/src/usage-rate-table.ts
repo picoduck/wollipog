@@ -81,8 +81,11 @@ export class UsageRateTableService {
   }
 
   status(): UsagePricingStatus {
+    // Freshness is a property of the clock, not of the last transition: a table that crossed its
+    // TTL between refresh attempts is already only a cached copy.
+    const expired = this.state === "fresh" && this.fetchedAt !== null && this.now() - this.fetchedAt >= USAGE_PRICING_TTL_MS;
     return {
-      status: this.state,
+      status: expired ? "cached" : this.state,
       source: this.options.sourceUrl ?? "disabled",
       fetchedAt: this.fetchedAt,
       knownModels: this.table?.size ?? 0,

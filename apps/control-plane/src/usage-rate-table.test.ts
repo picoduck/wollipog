@@ -69,9 +69,12 @@ test("a fetched table is fresh inside its TTL, shared across concurrent callers,
   h.advance(USAGE_PRICING_TTL_MS - 1);
   await h.service.ensure();
   assert.equal(h.calls.length, 1, "inside the TTL nothing is refetched");
+  assert.equal(h.service.status().status, "fresh");
   h.advance(2);
+  assert.equal(h.service.status().status, "cached", "an expired table reads as cached before anyone refreshes it");
   await h.service.ensure();
   assert.equal(h.calls.length, 2, "past the TTL the table is refetched");
+  assert.equal(h.service.status().status, "fresh");
 });
 
 test("a forced refresh ignores the TTL but respects the refresh floor", async () => {
