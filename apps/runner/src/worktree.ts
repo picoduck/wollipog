@@ -275,19 +275,29 @@ export async function requestedWorktreeBoundary(
   options: WorktreeOptions = {},
   capacityPreflight = true,
 ): Promise<string> {
-  validateSessionId(sessionId);
+  const boundary = await requestedWorktreeBoundaryPath(repoPath, sessionId, options, capacityPreflight);
   const context = options.context ?? nativeContext;
-  const root = capacityPreflight ? await resolveWorktreeRoot(options) : await worktreeRootPath(options);
-  const parent = context.kind === "wsl" ? `${root}/${repoKey(repoPath)}` : join(root, repoKey(repoPath));
-  const boundary = context.kind === "wsl"
-    ? `${parent}/${sessionId}.requested`
-    : join(parent, `${sessionId}.requested`);
   if (context.kind === "wsl") {
     await runContextCommand(context, "mkdir", ["-p", "--", boundary], { cwd: "/", timeoutMs: 8_000 });
   } else {
     await mkdir(boundary, { recursive: true });
   }
   return boundary;
+}
+
+async function requestedWorktreeBoundaryPath(
+  repoPath: string,
+  sessionId: string,
+  options: WorktreeOptions,
+  capacityPreflight: boolean,
+): Promise<string> {
+  validateSessionId(sessionId);
+  const context = options.context ?? nativeContext;
+  const root = capacityPreflight ? await resolveWorktreeRoot(options) : await worktreeRootPath(options);
+  const parent = context.kind === "wsl" ? `${root}/${repoKey(repoPath)}` : join(root, repoKey(repoPath));
+  return context.kind === "wsl"
+    ? `${parent}/${sessionId}.requested`
+    : join(parent, `${sessionId}.requested`);
 }
 
 /** Remove only an empty runner-owned session boundary. A retained attached worktree or any
@@ -298,7 +308,7 @@ export async function removeRequestedWorktreeBoundary(
   options: WorktreeOptions = {},
 ): Promise<boolean> {
   const context = options.context ?? nativeContext;
-  const boundary = await requestedWorktreeBoundary(repoPath, sessionId, options, false);
+  const boundary = await requestedWorktreeBoundaryPath(repoPath, sessionId, options, false);
   try {
     if (context.kind === "wsl") {
       await runContextCommand(context, "rmdir", ["--", boundary], { cwd: "/", timeoutMs: 8_000 });
@@ -427,6 +437,9 @@ export async function attachRequestedWorktree(
   const listed = parseWorktreePorcelain(await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]));
   const match = listed.find((entry) => sameContextPath(context, entry.path, path));
   if (!match) throw new Error("worktree path is not registered with the session repository");
+  if (match === listed[0]) {
+    throw new Error("the repository's primary workspace cannot be attached as a session worktree");
+  }
   if (!match.branch) throw new Error("a detached worktree cannot be attached to a session");
   const healthy = (await command(context, match.path, ["rev-parse", "--is-inside-work-tree"])).trim() === "true";
   if (!healthy) throw new Error("registered worktree is not healthy");

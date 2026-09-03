@@ -98,9 +98,14 @@ export function agentDelegationAuthorizationError(routePath: string, principal: 
 }
 
 export function agentCredentialSessionTargetError(
+  routePath: string,
   principal: AgentPrincipal,
   targetSessionId: string,
 ): string | null {
+  const worktreeRoute = routePath === "/api/sessions/:id/worktrees" ||
+    routePath === "/api/sessions/:id/worktrees/attach" ||
+    routePath === "/api/sessions/:id/worktrees/select";
+  if (!worktreeRoute) return null;
   return principal.credentialSessionId && principal.credentialSessionId !== targetSessionId
     ? "the session credential may manage only its own session"
     : null;

@@ -2075,7 +2075,7 @@ async function runOneGitAction(msg: GitActionRequestMessage): Promise<void> {
       return { podReconciliation: await runPodReconcile(execution.cwd, resolved.sourceWorktreePath, msg.action) };
     });
     if (msg.action.kind === "open_pr" && data.pr?.createdWithGh) {
-      sessions.linkActiveWorktreePullRequest(msg.sessionId, data.pr.url);
+      await sessions.linkWorktreePullRequest(msg.sessionId, execution.cwd, data.pr.url);
     }
     sendUp({ type: "git_result", requestId: msg.requestId, ok: true, data });
   } catch (err) {

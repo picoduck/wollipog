@@ -859,7 +859,10 @@ export class SessionManager {
           ? this.configuredProjectPaths
           : [],
       });
-      const worktree: SessionWorktreeView = {
+      // Re-attaching an already-attributed runner-owned tree must never launder it into an
+      // operator-owned record that session deletion would deliberately retain.
+      const existing = this.attributedWorktrees(meta).find((item) => item.path === attached.path);
+      const worktree: SessionWorktreeView = existing ?? {
         id: createHash("sha256").update(attached.path).digest("hex").slice(0, 16),
         path: attached.path,
         branch: attached.branch,
@@ -892,14 +895,16 @@ export class SessionManager {
     });
   }
 
-  linkActiveWorktreePullRequest(sessionId: string, url: string): void {
-    const meta = this.store.readMeta(sessionId);
-    if (!meta?.worktreePath || !meta.worktrees) return;
-    const worktrees = meta.worktrees.map((worktree) => worktree.path === meta.worktreePath
-      ? { ...worktree, pullRequest: { url, state: "open" as const } }
-      : worktree);
-    const updated = this.store.patchMeta(sessionId, { worktrees });
-    if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+  async linkWorktreePullRequest(sessionId: string, worktreePath: string, url: string): Promise<void> {
+    await this.runWorktreeOperation(sessionId, async () => {
+      const meta = this.store.readMeta(sessionId);
+      if (!meta?.worktrees) return;
+      const worktrees = meta.worktrees.map((worktree) => worktree.path === worktreePath
+        ? { ...worktree, pullRequest: { url, state: "open" as const } }
+        : worktree);
+      const updated = this.store.patchMeta(sessionId, { worktrees });
+      if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+    });
   }
 
   /** A standalone Agent TUI bypasses structured-driver isolation but shares provider HOME. */
@@ -6253,9 +6258,9 @@ export class SessionManager {
         record.repoPath,
         {
           path: record.worktreePath,
-          branch: ownedWslPath
+          branch: record.branch ?? (ownedWslPath
             ? `agent/${this.runnerOwnerHash.slice(0, 16)}/${record.sessionId}`
-            : record.branch ?? `agent/${record.sessionId}`,
+            : `agent/${record.sessionId}`),
         },
         {
           context: record.context,

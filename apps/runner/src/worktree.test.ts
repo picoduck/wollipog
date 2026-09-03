@@ -185,6 +185,10 @@ test("existing worktree attach requires both Git registration and an allowed Loc
       attachRequestedWorktree(repo, "s_attach", unregistered, { dataDir, allowedProjectPaths: [allowed] }),
       /not registered with the session repository/,
     );
+    await assert.rejects(
+      attachRequestedWorktree(repo, "s_attach", repo, { dataDir, allowedProjectPaths: [root] }),
+      /primary workspace cannot be attached/,
+    );
   } finally {
     setStatfsForTests();
     rmSync(root, { recursive: true, force: true });
@@ -293,10 +297,18 @@ test("concurrent requests retain every created branch and deletion leaves attach
     ]);
     const repeated = await manager.requestWorktree("s_multi", { baseRef: "HEAD", branch: "fix/first" });
     assert.equal(repeated.worktree.id, first.worktree.id, "an idempotent retry keeps original ownership metadata");
+    const reattachedCreated = await manager.attachWorktree("s_multi", first.worktree.path);
+    assert.equal(reattachedCreated.worktree.source, "created",
+      "re-attaching a runner-owned path preserves its destructive cleanup ownership");
     await manager.attachWorktree("s_multi", attachedPath);
     assert.equal(store.readMeta("s_multi")?.worktrees?.length, 3);
     await manager.selectWorktree("s_multi", first.worktree.path);
     assert.equal(store.readMeta("s_multi")?.worktreePath, first.worktree.path);
+    await manager.linkWorktreePullRequest("s_multi", second.worktree.path, "https://example.test/pull/2");
+    assert.equal(store.readMeta("s_multi")?.worktrees?.find((item) => item.path === second.worktree.path)?.pullRequest?.url,
+      "https://example.test/pull/2", "PR linkage stays bound to the Git action's exact worktree");
+    assert.equal(store.readMeta("s_multi")?.worktrees?.find((item) => item.path === first.worktree.path)?.pullRequest,
+      undefined);
     const requestedBoundary = dirname(first.worktree.path);
 
     await manager.delete("s_multi");
@@ -557,6 +569,8 @@ const wslDistro = process.env.WOLLIPOG_TEST_WSL_DISTRO;
 test("WSL worktrees are created, used, and removed inside the selected distro", { skip: !wslDistro }, async () => {
   const context = { kind: "wsl" as const, distro: wslDistro! };
   const repo = `/tmp/wollipog-wsl-wt-${randomUUID()}`;
+  const managerRoot = mkdtempSync(join(tmpdir(), "wollipog-wsl-manager-"));
+  let manager: SessionManager | undefined;
   try {
     await runContextCommand(context, "git", ["init", repo], { cwd: "/", timeoutMs: 30_000 });
     await runContextCommand(context, "git", ["config", "user.email", "test@example.com"], { cwd: repo });
@@ -580,7 +594,39 @@ test("WSL worktrees are created, used, and removed inside the selected distro", 
     assert.equal(resumed.created, false);
     assert.equal((await runContextCommand(context, "cat", ["sentinel.txt"], { cwd: resumed.path })).stdout, "preserved");
     await removeWorktree(repo, resumed, { context, legacyWslRoot: true });
+
+    const requested = await createRequestedWorktree(repo, "s_wsl_requested", {
+      baseRef: "HEAD",
+      branch: "fix/wsl-cleanup",
+    }, { context, ownerHash });
+    const store = new SessionStore(join(managerRoot, "sessions"));
+    store.create({
+      sessionId: "s_wsl_requested", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: requested.path, worktreeBranch: requested.branch,
+      worktrees: [{
+        id: "requested", path: requested.path, branch: requested.branch,
+        baseRef: requested.baseRef, baseCommit: requested.baseCommit, source: "created",
+      }],
+      driver: "claude-code", command: "claude", args: [], env: {}, context,
+      agentSessionId: null, status: "stopped", title: "wsl cleanup", config: {}, tokensIn: 0,
+      tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null, seq: 0,
+      createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(
+      () => {}, () => {}, store, "runner", undefined, undefined, managerRoot, 1,
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, [], undefined, undefined, undefined, undefined, undefined, ownerHash,
+    );
+    await manager.delete("s_wsl_requested");
+    await assert.rejects(runContextCommand(
+      context,
+      "git",
+      ["show-ref", "--verify", "--quiet", "refs/heads/fix/wsl-cleanup"],
+      { cwd: repo },
+    ), "session cleanup removes the exact recorded requested branch inside WSL");
   } finally {
+    manager?.shutdownAll();
+    rmSync(managerRoot, { recursive: true, force: true });
     await runContextCommand(context, "rm", ["-rf", "--", repo], { cwd: "/" }).catch(() => {});
   }
 });

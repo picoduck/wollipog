@@ -612,7 +612,7 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
   const sessionId = typeof params.id === "string" && routePath.startsWith("/api/sessions/") ? params.id
     : typeof params.sessionId === "string" ? params.sessionId : null;
   if (sessionId && principal.kind === "agent") {
-    const credentialTargetError = agentCredentialSessionTargetError(principal, sessionId);
+    const credentialTargetError = agentCredentialSessionTargetError(routePath, principal, sessionId);
     if (credentialTargetError) return { statusCode: 404, error: "session not found" };
   }
   if (sessionId && !db.canAccessSession(principal, sessionId)) {
