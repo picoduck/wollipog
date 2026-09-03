@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "./test-support/bounded-child-process.js";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RunnerToControlPlane, SessionLaunchSpec } from "@wollipog/protocol";
@@ -171,6 +171,35 @@ test("a denied weighted claim rolls back its provider slot", () => {
       "the failed claim did not leak codex's only provider slot",
     );
     gate.releaseAll();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("box admission rejects invalid weights without claiming any slots", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-admission-invalid-weight-"));
+  try {
+    const gate = new BoxAdmission(root, 2);
+    for (const weight of [0, -1, 1.5, Number.NaN, 3]) {
+      assert.equal(gate.acquire({ sessionId: `invalid-${String(weight)}`, agentId: "claude", weight }), false);
+      assert.equal(gate.usedCapacity(), 0);
+      assert.deepEqual(readdirSync(join(root, "admission")), [], "a rejected weight cannot create slot roots");
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("reacquiring an already-held session does not orphan capacity", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-admission-idempotent-"));
+  try {
+    const gate = new BoxAdmission(root, 2);
+    assert.equal(gate.acquire({ sessionId: "held", agentId: "claude", weight: 2 }), true);
+    assert.equal(gate.usedCapacity(), 2);
+    assert.equal(gate.acquire({ sessionId: "held", agentId: "claude", weight: 2 }), true);
+    assert.equal(gate.usedCapacity(), 2);
+    gate.release("held");
+    assert.equal(gate.usedCapacity(), 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
