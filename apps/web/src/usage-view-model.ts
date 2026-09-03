@@ -49,11 +49,20 @@ export function driverLabel(driver: string): string {
   return isDriverKind(driver) ? DRIVER_PRESENTATION[driver].label : driver;
 }
 
-/** Every token the provider processed: input across all cache buckets plus output. Pre-v103 rows
- * carry no cache split, so the provider-reported input is the floor. */
+/**
+ * Every token the provider processed: input across all cache buckets plus output.
+ *
+ * Aggregates mix three row shapes: Anthropic rows report `inputTokens` as the uncached part, Codex
+ * rows report it inclusive of `cachedInputTokens`, and pre-v103 rows carry no split at all. The
+ * split buckets are always counted; whatever reported input the split does not account for is the
+ * unsplit (legacy) remainder and is added once. This never over-counts. It under-counts only when
+ * legacy rows are mixed with cached Anthropic rows, where the legacy input is indistinguishable
+ * from the cached part at aggregate level; that remainder ages out with retention.
+ */
 export function processedTokens(amount: UsageAmount): number {
   const split = amount.uncachedInputTokens + amount.cachedInputTokens + amount.cacheCreationTokens;
-  return Math.max(amount.inputTokens, split) + amount.outputTokens;
+  const unsplit = Math.max(0, amount.inputTokens - amount.uncachedInputTokens - amount.cachedInputTokens);
+  return split + unsplit + amount.outputTokens;
 }
 
 export function metricValue(amount: UsageAmount, metric: UsageMetric): number {
@@ -125,6 +134,8 @@ export interface ColumnBand {
 export interface UsageColumn {
   bucketTs: number;
   total: number;
+  /** Empty when the plane sent no per-driver split for this bucket: the total is known, the
+   * per-driver values are not, and nothing should present them as zero. */
   bands: ColumnBand[];
 }
 
@@ -149,16 +160,17 @@ export function buildColumns(
     .sort((a, b) => a.bucketTs - b.bucketTs)
     .map((bucket) => {
       const perDriver = byBucket.get(bucket.bucketTs);
+      // A pre-v103 plane sends no per-driver split: the column keeps its total height as one
+      // unsplit mark and the readout lists only the total.
+      if (!perDriver) return { bucketTs: bucket.bucketTs, total: metricValue(bucket, metric), bands: [] };
       let cursor = 0;
       const bands = drivers.map((driver) => {
-        const value = perDriver?.get(driver) ?? 0;
+        const value = perDriver.get(driver) ?? 0;
         const band = { driver, value, from: cursor, to: cursor + value };
         cursor += value;
         return band;
       });
-      // A pre-v103 plane sends no per-driver split; the column still has its total height.
-      const total = perDriver ? cursor : metricValue(bucket, metric);
-      return { bucketTs: bucket.bucketTs, total, bands };
+      return { bucketTs: bucket.bucketTs, total: cursor, bands };
     });
 }
 
@@ -173,6 +185,12 @@ export function niceScale(peak: number, tickCount = 4): { max: number; ticks: nu
   const ticks: number[] = [];
   for (let value = 0; value <= max + step / 2; value += step) ticks.push(Number(value.toPrecision(12)));
   return { max, ticks };
+}
+
+/** Whole days a window spans, from the response itself rather than the range the user last
+ * clicked, so a headline never labels one window's totals with another's length. */
+export function windowDays(data: Pick<UsageAggregationResponse, "since" | "through">): number {
+  return Math.max(1, Math.round((data.through - data.since) / 86_400_000));
 }
 
 /** Short axis label in UTC, matching the table's UTC caption: `Sep 3` for days, `14:00` for hours. */

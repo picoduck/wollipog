@@ -55,11 +55,14 @@ export function UsageChart({
   drivers,
   metric,
   granularity,
+  tableHint,
 }: {
   columns: readonly UsageColumn[];
   drivers: readonly AgentDriverKind[];
   metric: UsageMetric;
   granularity: "hour" | "day";
+  /** Where the table twin is right now, for the accessible name: it moves with the breakdown. */
+  tableHint: string;
 }) {
   const [hovered, setHovered] = useState<number | null>(null);
   const labelId = useId();
@@ -91,7 +94,7 @@ export function UsageChart({
         role="img"
         aria-labelledby={labelId}
       >
-        <title id={labelId}>{`${periodLabel} ${metricLabel} by driver; the Day table below lists every value.`}</title>
+        <title id={labelId}>{`${periodLabel} ${metricLabel} by driver; ${tableHint}`}</title>
         {scale.ticks.map((tick) => (
           <g key={tick}>
             <line className="usage-chart-grid" x1={PLOT_LEFT} x2={PLOT_RIGHT} y1={yFor(tick)} y2={yFor(tick)} />
@@ -119,7 +122,7 @@ export function UsageChart({
                   />
                 );
               })}
-              {painted.length === 0 && column.total > 0 && (
+              {column.bands.length === 0 && column.total > 0 && (
                 <path className="usage-chart-segment" d={segmentPath(x, columnWidth, yFor(column.total), PLOT_BOTTOM, true)} />
               )}
               {labelIndexes.has(index) && (
@@ -154,6 +157,7 @@ export function UsageChart({
           <>
             <span className="usage-chart-readout-period">{bucketLabel(readout.bucketTs, granularity)}</span>
             <dl>
+              {readout.bands.length === 0 && <div><dt>By Driver</dt><dd>Not split by this control plane</dd></div>}
               {readout.bands.map((band) => (
                 <div key={band.driver}>
                   <dt>

@@ -22,6 +22,7 @@ import {
   formatShare,
   metricValue,
   processedTokens,
+  windowDays,
   type UsageBreakdownMode,
   type UsageMetric,
 } from "../usage-view-model.js";
@@ -390,7 +391,7 @@ export function UsageView() {
             <div className="usage-headline">
               <span className="usage-headline-value">{formatMetric(metricValue(data.totals, metric), metric)}</span>
               <span className="usage-headline-note">
-                {metric === "cost" ? "API-equivalent estimate · " : "Processed tokens · "}last {days} days
+                {metric === "cost" ? "API-equivalent estimate · " : "Processed tokens · "}last {windowDays(data)} days
               </span>
               <ul className="usage-driver-list" aria-label="By Driver">
                 {rows.length === 0 && <li className="usage-headline-note">No driver has usage in this period.</li>}
@@ -416,7 +417,15 @@ export function UsageView() {
             </div>
             <div className="usage-chart-section">
               <h3>{data.granularity === "hour" ? "Hourly" : "Daily"} {metric === "cost" ? "Cost" : "Processed Tokens"}</h3>
-              <UsageChart columns={columns} drivers={drivers} metric={metric} granularity={data.granularity} />
+              <UsageChart
+                columns={columns}
+                drivers={drivers}
+                metric={metric}
+                granularity={data.granularity}
+                tableHint={breakdown === "time"
+                  ? `the ${periodNoun} table below lists every value.`
+                  : `select ${periodNoun} under Breakdown for a table of every value.`}
+              />
             </div>
           </section>
 
@@ -490,8 +499,15 @@ export function UsageView() {
                       <tr key={bucket.bucketTs}>
                         <th scope="row">{bucketLabel(bucket.bucketTs, data.granularity)}</th>
                         {drivers.map((driver) => {
-                          const cell = perDriverByBucket.get(bucket.bucketTs)?.get(driver);
-                          return <td className="usage-cell-dim" key={driver}>{formatMetric(cell ? metricValue(cell, metric) : 0, metric)}</td>;
+                          const split = perDriverByBucket.get(bucket.bucketTs);
+                          const cell = split?.get(driver);
+                          // No split for the bucket at all means the plane never sent one; a
+                          // missing driver inside a split means that driver had nothing.
+                          return (
+                            <td className="usage-cell-dim" key={driver}>
+                              {!split ? "—" : formatMetric(cell ? metricValue(cell, metric) : 0, metric)}
+                            </td>
+                          );
                         })}
                         <td>{formatMetric(metricValue(bucket, metric), metric)}</td>
                         <td className="usage-cell-dim">

@@ -13,6 +13,7 @@ import {
   formatShare,
   niceScale,
   processedTokens,
+  windowDays,
 } from "./usage-view-model.js";
 
 function amount(over: Partial<UsageAmount> = {}): UsageAmount {
@@ -26,6 +27,16 @@ test("processed tokens use the cache split when present and the reported input a
   assert.equal(processedTokens(amount({ inputTokens: 100, uncachedInputTokens: 100, cachedInputTokens: 900, cacheCreationTokens: 50, outputTokens: 10 })), 1060, "Anthropic input is the uncached part");
   assert.equal(processedTokens(amount({ inputTokens: 1000, uncachedInputTokens: 100, cachedInputTokens: 900, outputTokens: 10 })), 1010, "Codex input already includes cache");
   assert.equal(processedTokens(amount({ inputTokens: 40, outputTokens: 2 })), 42, "legacy rows have no split");
+  assert.equal(
+    processedTokens(amount({ inputTokens: 1100, uncachedInputTokens: 100, cachedInputTokens: 900, outputTokens: 0 })),
+    1100,
+    "legacy input summed with Codex rows survives: the unsplit remainder is added once",
+  );
+  assert.equal(
+    processedTokens(amount({ inputTokens: 110, uncachedInputTokens: 10, cachedInputTokens: 100, outputTokens: 0 })),
+    110,
+    "legacy input mixed with cached Anthropic rows is the documented under-count, never an over-count",
+  );
 });
 
 test("formatting compacts tokens to three significant figures and money to whole cents", () => {
@@ -77,8 +88,16 @@ test("columns stack drivers in slot order, ascend in time, and fall back to buck
     { driver: "acp", value: 1, from: 4, to: 5 },
   ]);
   assert.equal(columns[1]!.total, 5);
-  assert.deepEqual(columns[0]!.bands.map((band) => band.value), [3, 0], "a missing driver is a zero band, not a missing one");
+  assert.deepEqual(columns[0]!.bands.map((band) => band.value), [3, 0], "a missing driver inside a split is a zero band");
   assert.equal(columns[2]!.total, 7, "a bucket with no per-driver split keeps its total height");
+  assert.deepEqual(columns[2]!.bands, [], "and presents no per-driver values, because none are known");
+  assert.equal(buildColumns(series, [], ["claude-code"], "cost").every((column) => column.bands.length === 0), true);
+});
+
+test("the headline window comes from the response, not the last clicked range", () => {
+  assert.equal(windowDays({ since: 0, through: 30 * 86_400_000 }), 30);
+  assert.equal(windowDays({ since: 0, through: 7 * 86_400_000 + 3_600_000 }), 7);
+  assert.equal(windowDays({ since: 5, through: 5 }), 1);
 });
 
 test("axis helpers produce clean ticks and bounded, end-anchored labels", () => {
