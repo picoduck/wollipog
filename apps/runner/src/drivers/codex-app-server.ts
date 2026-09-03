@@ -235,7 +235,7 @@ export class CodexAppServerDriver implements Driver {
   private turnStop: StopReason = "end_turn";
   /** Latest usage for the current turn. Emitted once when that turn settles so cumulative
    * thread usage restored during resume is never appended to the runner totals again. */
-  private pendingTurnUsage: { input?: number; output?: number; cached?: number } | null = null;
+  private pendingTurnUsage: ReturnType<typeof flattenUsage> = null;
   /** Once a turn settles, ignore late usage/completion notifications from its interrupt race. */
   private turnUsageClosed = false;
   private readonly seenItems = new Set<string>();
@@ -759,6 +759,7 @@ export class CodexAppServerDriver implements Driver {
       inputTokens: usage.input,
       outputTokens: usage.output,
       cachedInputTokens: usage.cached,
+      ...(typeof usage.reasoning === "number" ? { reasoningOutputTokens: usage.reasoning } : {}),
       parentToolUseId,
     });
   }
@@ -1085,7 +1086,15 @@ export class CodexAppServerDriver implements Driver {
   private emitPendingTurnUsage(): void {
     const u = this.pendingTurnUsage;
     this.pendingTurnUsage = null;
-    if (u) this.cb.onEvent({ kind: "token_usage", inputTokens: u.input, outputTokens: u.output, cachedInputTokens: u.cached });
+    if (u) {
+      this.cb.onEvent({
+        kind: "token_usage",
+        inputTokens: u.input,
+        outputTokens: u.output,
+        cachedInputTokens: u.cached,
+        ...(typeof u.reasoning === "number" ? { reasoningOutputTokens: u.reasoning } : {}),
+      });
+    }
   }
 
   private closeTurnUsage(): void {
@@ -1303,14 +1312,15 @@ export function approvalContext(method: string, params: Json, escalated: boolean
 }
 
 /** Dig token counts out of the app-server's nested token-usage object. */
-function flattenUsage(tu: Json): { input?: number; output?: number; cached?: number } | null {
+function flattenUsage(tu: Json): { input?: number; output?: number; cached?: number; reasoning?: number } | null {
   if (!tu) return null;
   const u = tu.total ?? tu.lastTurn ?? tu.tokenUsage ?? tu;
   const input = u.input_tokens ?? u.inputTokens ?? u.input;
   const output = u.output_tokens ?? u.outputTokens ?? u.output;
   const cached = u.cached_input_tokens ?? u.cachedInputTokens ?? u.cached;
+  const reasoning = u.reasoning_output_tokens ?? u.reasoningOutputTokens ?? u.reasoning;
   if (input == null && output == null) return null;
-  return { input, output, cached };
+  return { input, output, cached, reasoning };
 }
 
 function truncate(s: string, n: number): string {

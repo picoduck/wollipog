@@ -98,6 +98,7 @@ import type {
   UsageAggregationResponse,
   SubscriptionUsageResponse,
   UsageRetentionPolicy,
+  UsagePricingStatus,
   UserStatus,
   WorkspaceInfo,
   WorkflowArtifact,
@@ -313,6 +314,8 @@ export function createApiClient(transport: ApiTransport) {
   testSessionNamingCustomModel: () =>
     req<SessionNamingConnectionTestResult>("/api/session-naming/custom-model/test", { method: "POST" }),
 
+  /** Refetches the model rate table ahead of its daily TTL so newly released models get priced. */
+  refreshUsagePricing: () => req<{ pricing: UsagePricingStatus }>("/api/usage/pricing/refresh", { method: "POST" }),
   subscriptionUsage: () => req<SubscriptionUsageResponse>("/api/usage/subscriptions"),
 
   refreshSubscriptionUsage: () => req<SubscriptionUsageResponse>("/api/usage/subscriptions/refresh", {

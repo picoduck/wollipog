@@ -31,6 +31,7 @@ import {
   RUNNER_CAPABILITY_MIN_PROTOCOL,
 } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
+import { parseRateTable } from "./usage-pricing.js";
 import { automationCommandDigest, canonicalAutomationCommandJson } from "./automation-command-outbox.js";
 import { Hub, RunnerRequestNotSentError, type RunnerRequestResult } from "./hub.js";
 import { agentDelegationAuthorizationError, type AgentPrincipal } from "./identity.js";
@@ -10954,4 +10955,25 @@ test("policy-only cycles terminate at the transition cap and mixed fan-out remai
   assert.equal(advanced.nodeStates.find((state) => state.nodeId === "work")!.status, "ready");
   assert.equal(advanced.nodeStates.find((state) => state.nodeId === "approve")!.status, "waiting_gate");
   db.close();
+});
+
+test("a zero-cost runner snapshot whose priced token residual crosses the budget parks the session", () => {
+  const { db, svc } = makeHarness();
+  db.setUsageRateTable(parseRateTable({ "gpt-5.5-codex": { input_cost_per_token: 0.000002, output_cost_per_token: 0.00001 } }));
+  const id = "s_codex_budget";
+  const base = snapshot({
+    id, driver: "codex-app-server", status: "running", pendingApproval: null,
+    config: { model: "gpt-5.5-codex", costBudgetUsd: 0.003 }, tokensIn: 0, tokensOut: 0, costUsd: 0, seq: 1,
+  });
+  svc.hydrateRunnerSessions(RUNNER_ID, [base]);
+  db.updateSessionCostBudget(id, 0.003, Date.now());
+  assert.equal(db.getSession(id)!.costBudgetUsd, 0.003);
+  assert.equal(db.getSession(id)!.status, "running");
+
+  // Codex never reports cost: the runner says $0 while the ledger prices 2000 input tokens at $0.004.
+  svc.applySessionRuntimeUpdate(RUNNER_ID, { ...base, tokensIn: 2000, seq: 2 });
+  const parked = db.getSession(id)!;
+  assert.equal(parked.costUsd, 0.004);
+  assert.equal(parked.status, "input_required", "the settled cost, not the runner's zero, decides the gate");
+  assert.equal(parked.pendingApproval?.kind, "cost_budget");
 });

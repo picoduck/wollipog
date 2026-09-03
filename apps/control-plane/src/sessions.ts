@@ -6699,7 +6699,9 @@ export class SessionsService {
       this.rehydrate.add(snapshot.id);
       void this.hydrateHistory(snapshot.id);
     }
-    if (runtimeSnapshot.costUsd > existing.costUsd) {
+    // The ledger may price a token residual the runner reported at zero cost (Codex), so the
+    // settled session total, not the runner's figure, decides whether a budget gate re-evaluates.
+    if (runtimeSnapshot.costUsd > existing.costUsd || this.db.sessionCostUsd(snapshot.id) > existing.costUsd) {
       this.gateOnPolicy(snapshot.id, now);
       this.notifyTransition(existing, snapshot.id);
     }

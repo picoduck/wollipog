@@ -18,9 +18,11 @@ import type {
   SessionSnapshot,
   WorkflowArtifact,
   WorkflowArtifactView,
+  type UsageAmount,
 } from "@wollipog/protocol";
 import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import { archiveSessionPage } from "./archive-session-page.js";
+import { parseRateTable } from "./usage-pricing.js";
 import {
   ControlPlaneDb,
   GOVERNANCE_AUDIT_RETENTION_MS,
@@ -154,6 +156,22 @@ function createScreenshotArtifact(
 
 function createSteeringPromptImage(db: ControlPlaneDb, sessionId: string, artifactId: string): WorkflowArtifactView {
   return createScreenshotArtifact(db, { sessionId }, artifactId);
+}
+
+/** Expected-shape helper: the v103 ledger fields with the defaults an unbroken-down event yields. */
+function usageAmount<T extends { inputTokens: number; outputTokens: number; costUsd: number }>(
+  amount: T & Partial<UsageAmount>,
+): T & UsageAmount {
+  return {
+    uncachedInputTokens: amount.inputTokens,
+    cachedInputTokens: 0,
+    cacheCreationTokens: 0,
+    reasoningTokens: 0,
+    cacheSavingsUsd: 0,
+    costSource: amount.inputTokens + amount.outputTokens + amount.costUsd > 0 ? "providerReported" : "unpriced",
+    unpricedRecords: 0,
+    ...amount,
+  };
 }
 
 test("steering attempts preserve idempotency, reconcile late receipts, compact, and cascade", () => {
@@ -1531,8 +1549,8 @@ test("usage accounting is exact, parentless-only, and transactionally follows ac
   const usage = db.queryUsageAggregation(localOwner(), {
     since: 0, through: 10_000_000, granularity: "hour",
   });
-  assert.deepEqual(usage.totals, { inputTokens: 15, outputTokens: 3, costUsd: 0.3 });
-  assert.deepEqual(usage.series, [{ bucketTs: 3_600_000, inputTokens: 15, outputTokens: 3, costUsd: 0.3 }]);
+  assert.deepEqual(usage.totals, usageAmount({ inputTokens: 15, outputTokens: 3, costUsd: 0.3 }));
+  assert.deepEqual(usage.series, [usageAmount({ bucketTs: 3_600_000, inputTokens: 15, outputTokens: 3, costUsd: 0.3 })]);
   assert.equal(db.getSession("sess-1")!.costUsd, 0.3, "the session total moves in the same transaction");
   assert.equal(db.raw().prepare("SELECT cost_microusd FROM usage_hourly").get()!.cost_microusd, 300_000);
 });
@@ -1606,7 +1624,7 @@ test("snapshot residuals and indexed source coverage prevent cold-history and re
   );
   assert.equal(cold.applied, true);
   let usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000, granularity: "hour" });
-  assert.deepEqual(usage.totals, { inputTokens: 10, outputTokens: 4, costUsd: 1 });
+  assert.deepEqual(usage.totals, usageAmount({ inputTokens: 10, outputTokens: 4, costUsd: 1 }));
 
   db.reconcileRunnerHistory("usage-history", 7, 3);
   db.appendHydratedPage(
@@ -1625,7 +1643,7 @@ test("snapshot residuals and indexed source coverage prevent cold-history and re
   }), 5_000);
 
   usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000, granularity: "hour" });
-  assert.deepEqual(usage.totals, { inputTokens: 20, outputTokens: 6, costUsd: 2 });
+  assert.deepEqual(usage.totals, usageAmount({ inputTokens: 20, outputTokens: 6, costUsd: 2 }));
   assert.equal(db.getSession("usage-history")!.costUsd, 2, "a stale lower snapshot cannot roll the session back");
 
   db.updateSessionFromSnapshot("usage-history", snapshot({
@@ -1637,7 +1655,7 @@ test("snapshot residuals and indexed source coverage prevent cold-history and re
     [{ seq: 1, ts: 50, payload: { kind: "token_usage", inputTokens: 20, outputTokens: 6, costUsd: 2 } }],
   );
   usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000, granularity: "hour" });
-  assert.deepEqual(usage.totals, { inputTokens: 20, outputTokens: 6, costUsd: 2 }, "reissued history in a new epoch is covered by the snapshot");
+  assert.deepEqual(usage.totals, usageAmount({ inputTokens: 20, outputTokens: 6, costUsd: 2 }), "reissued history in a new epoch is covered by the snapshot");
 });
 
 test("the first known history epoch preserves legacy coverage and accrues its first uncovered event", () => {
@@ -1653,7 +1671,7 @@ test("the first known history epoch preserves legacy coverage and accrues its fi
   );
   assert.equal(applied.applied, true);
   const usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000, granularity: "hour" });
-  assert.deepEqual(usage.totals, { inputTokens: 15, outputTokens: 0, costUsd: 1.5 });
+  assert.deepEqual(usage.totals, usageAmount({ inputTokens: 15, outputTokens: 0, costUsd: 1.5 }));
 });
 
 test("legacy unknown-epoch hydration cannot claim a known generation was replaced", () => {
@@ -1668,7 +1686,7 @@ test("legacy unknown-epoch hydration cannot claim a known generation was replace
     { accrueUsage: true, runnerSeq: 2, historyEpoch: null },
   );
   const usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000, granularity: "hour" });
-  assert.deepEqual(usage.totals, { inputTokens: 15, outputTokens: 0, costUsd: 1.5 });
+  assert.deepEqual(usage.totals, usageAmount({ inputTokens: 15, outputTokens: 0, costUsd: 1.5 }));
 });
 
 test("a page-first replacement epoch covers the whole replay page before usage accounting", () => {
@@ -1687,7 +1705,7 @@ test("a page-first replacement epoch covers the whole replay page before usage a
   );
   assert.equal(applied.applied, true);
   const usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000, granularity: "hour" });
-  assert.deepEqual(usage.totals, { inputTokens: 10, outputTokens: 0, costUsd: 1 });
+  assert.deepEqual(usage.totals, usageAmount({ inputTokens: 10, outputTokens: 0, costUsd: 1 }));
   assert.equal(db.getSession("usage-page-first-reset")!.costUsd, 1);
 });
 
@@ -1705,17 +1723,17 @@ test("retention rolls hourly usage into UTC days before deletion and late rows r
 
   db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 2, costUsd: 0.000001 }, 10 * day + 7_200_000, { accrueUsage: true });
   let usage = db.queryUsageAggregation(localOwner(), { since: 9 * day, through: 11 * day, granularity: "day" });
-  assert.deepEqual(usage.totals, { inputTokens: 5, outputTokens: 4, costUsd: 0.375002 });
+  assert.deepEqual(usage.totals, usageAmount({ inputTokens: 5, outputTokens: 4, costUsd: 0.375002 }));
   db.maintainUsageAggregation(now, "org_personal");
   usage = db.queryUsageAggregation(localOwner(), { since: 9 * day, through: 11 * day, granularity: "day" });
-  assert.deepEqual(usage.totals, { inputTokens: 5, outputTokens: 4, costUsd: 0.375002 }, "rerolling a late hour adds it once");
+  assert.deepEqual(usage.totals, usageAmount({ inputTokens: 5, outputTokens: 4, costUsd: 0.375002 }), "rerolling a late hour adds it once");
   assert.equal(db.listEvents("sess-1").length, 3, "aggregate retention never touches transcripts");
   assert.equal(db.getSession("sess-1")!.costUsd, 0.375002, "aggregate retention never changes session budget totals");
 
   db.setUsageRetentionPolicy("org_personal", { hourlyDays: 30, dailyDays: 30 }, now);
   usage = db.queryUsageAggregation(localOwner(), { since: 9 * day, through: 11 * day, granularity: "hour" });
   assert.equal(usage.granularity, "day", "rolled rows force a complete daily response after hourly retention expands");
-  assert.deepEqual(usage.totals, { inputTokens: 5, outputTokens: 4, costUsd: 0.375002 });
+  assert.deepEqual(usage.totals, usageAmount({ inputTokens: 5, outputTokens: 4, costUsd: 0.375002 }));
 });
 
 test("runner timestamps cannot trigger retention maintenance for another organization", () => {
@@ -1776,17 +1794,17 @@ test("usage migration seeds an unbucketed lifetime baseline exactly once", () =>
 
     const upgraded = ControlPlaneDb.open(file);
     let usage = upgraded.queryUsageAggregation(localOwner(), { since: 0, through: Date.now() + 1, granularity: "hour" });
-    assert.deepEqual(usage.totals, { inputTokens: 0, outputTokens: 0, costUsd: 0 }, "lifetime totals are not fabricated into a historical bucket");
+    assert.deepEqual(usage.totals, usageAmount({ inputTokens: 0, outputTokens: 0, costUsd: 0 }), "lifetime totals are not fabricated into a historical bucket");
     upgraded.updateSessionFromSnapshot("sess-1", snapshot({
       id: "sess-1", tokensIn: 100, tokensOut: 20, costUsd: 3.25, seq: 4,
     }), Date.now());
     usage = upgraded.queryUsageAggregation(localOwner(), { since: 0, through: Date.now() + 1, granularity: "hour" });
-    assert.deepEqual(usage.totals, { inputTokens: 0, outputTokens: 0, costUsd: 0 }, "the first matching reconnect cannot charge the baseline again");
+    assert.deepEqual(usage.totals, usageAmount({ inputTokens: 0, outputTokens: 0, costUsd: 0 }), "the first matching reconnect cannot charge the baseline again");
     upgraded.updateSessionFromSnapshot("sess-1", snapshot({
       id: "sess-1", tokensIn: 105, tokensOut: 22, costUsd: 3.5, seq: 5,
     }), Date.now());
     usage = upgraded.queryUsageAggregation(localOwner(), { since: 0, through: Date.now() + 1, granularity: "hour" });
-    assert.deepEqual(usage.totals, { inputTokens: 5, outputTokens: 2, costUsd: 0.25 });
+    assert.deepEqual(usage.totals, usageAmount({ inputTokens: 5, outputTokens: 2, costUsd: 0.25 }));
     upgraded.close();
 
     const reopened = ControlPlaneDb.open(file);
@@ -1794,7 +1812,7 @@ test("usage migration seeds an unbucketed lifetime baseline exactly once", () =>
       id: "sess-1", tokensIn: 105, tokensOut: 22, costUsd: 3.5, seq: 5,
     }), Date.now());
     usage = reopened.queryUsageAggregation(localOwner(), { since: 0, through: Date.now() + 1, granularity: "hour" });
-    assert.deepEqual(usage.totals, { inputTokens: 5, outputTokens: 2, costUsd: 0.25 }, "reopen does not silently re-baseline or duplicate usage");
+    assert.deepEqual(usage.totals, usageAmount({ inputTokens: 5, outputTokens: 2, costUsd: 0.25 }), "reopen does not silently re-baseline or duplicate usage");
     reopened.close();
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -4790,4 +4808,193 @@ test("archive page SQL preserves Stop Failed recovery state", () => {
   assert.ok(!("error" in candidates));
   if ("error" in candidates) throw new Error(candidates.error);
   assert.equal(candidates.sessions[0]?.archiveStatus, "stop_failed");
+});
+
+/* ------------------------ Usage pricing (v103 ledger) ------------------------ */
+
+const rateDocument = {
+  "gpt-5.5-codex": { input_cost_per_token: 0.000002, output_cost_per_token: 0.00001 },
+  "claude-fable-5-1": {
+    input_cost_per_token: 0.000005, output_cost_per_token: 0.000025,
+    cache_read_input_token_cost: 0.0000005, cache_creation_input_token_cost: 0.00000625,
+  },
+};
+
+test("codex usage is priced per bucket from the rate table with cached input split out of the inclusive count", () => {
+  const db = withRunner();
+  db.setUsageRateTable(parseRateTable(rateDocument));
+  db.createSession(newSession({ driver: "codex-app-server", config: { model: "gpt-5.5-codex" } }));
+  db.appendEvent("sess-1", {
+    kind: "token_usage", inputTokens: 1000, cachedInputTokens: 600, outputTokens: 100, reasoningOutputTokens: 40,
+  }, 3_600_100, { accrueUsage: true });
+  db.appendEvent("sess-1", {
+    kind: "token_usage", inputTokens: 100, outputTokens: 10, reasoningOutputTokens: 500,
+  }, 3_600_200, { accrueUsage: true });
+
+  const usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000_000, granularity: "hour" });
+  // Cache reads fall back to a tenth of the input rate when the table omits them.
+  const expectedCost = 400 * 0.000002 + 600 * 0.0000002 + 100 * 0.00001 + 100 * 0.000002 + 10 * 0.00001;
+  assert.deepEqual(usage.totals, {
+    inputTokens: 1100, outputTokens: 110, costUsd: Math.round(expectedCost * 1_000_000) / 1_000_000,
+    uncachedInputTokens: 500, cachedInputTokens: 600, cacheCreationTokens: 0,
+    reasoningTokens: 50, cacheSavingsUsd: Math.round(600 * (0.000002 - 0.0000002) * 1_000_000) / 1_000_000,
+    costSource: "modelPriced", unpricedRecords: 0,
+  }, "reasoning is clamped to output and input stays the provider-reported inclusive count");
+  assert.ok(db.getSession("sess-1")!.costUsd > 0, "the priced figure reaches the session total the budget gate reads");
+  assert.deepEqual(usage.byModel.map((row) => [row.key, row.costSource]), [["gpt-5.5-codex", "modelPriced"]]);
+  assert.equal(usage.byDriver[0]!.key, "codex-app-server");
+});
+
+test("a provider-reported cost is recorded unchanged while cache buckets still derive savings", () => {
+  const db = withRunner();
+  db.setUsageRateTable(parseRateTable(rateDocument));
+  db.createSession(newSession({ driver: "claude-code", config: { model: "claude-fable-5-1" } }));
+  db.appendEvent("sess-1", {
+    kind: "token_usage", inputTokens: 100, cachedInputTokens: 10_000, cacheCreationInputTokens: 2_000,
+    outputTokens: 50, costUsd: 0.5,
+  }, 3_600_100, { accrueUsage: true });
+
+  const usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000_000, granularity: "hour" });
+  assert.equal(usage.totals.costUsd, 0.5);
+  assert.equal(usage.totals.costSource, "providerReported");
+  assert.equal(usage.totals.uncachedInputTokens, 100, "Anthropic input is already the uncached portion");
+  assert.equal(usage.totals.cachedInputTokens, 10_000);
+  assert.equal(usage.totals.cacheCreationTokens, 2_000);
+  assert.equal(usage.totals.cacheSavingsUsd, 0.045);
+  assert.equal(db.getSession("sess-1")!.costUsd, 0.5);
+});
+
+test("an unpriceable model counts its tokens, reports unpriced, and mixed provenance resolves to the weakest", () => {
+  const db = withRunner();
+  db.createSession(newSession({ driver: "codex-app-server", config: { model: "gpt-5.5-codex" } }));
+  db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 50, outputTokens: 5 }, 3_600_100, { accrueUsage: true });
+  let usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000_000, granularity: "hour" });
+  assert.deepEqual(usage.totals, {
+    inputTokens: 50, outputTokens: 5, costUsd: 0, uncachedInputTokens: 50, cachedInputTokens: 0, cacheCreationTokens: 0,
+    reasoningTokens: 0, cacheSavingsUsd: 0, costSource: "unpriced", unpricedRecords: 1,
+  }, "without a rate table the tokens are counted and the cost is honestly zero");
+  assert.equal(db.getSession("sess-1")!.costUsd, 0);
+
+  db.setUsageRateTable(parseRateTable(rateDocument));
+  db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 50, outputTokens: 5 }, 3_600_200, { accrueUsage: true });
+  usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000_000, granularity: "hour" });
+  assert.equal(usage.totals.inputTokens, 100);
+  assert.equal(usage.totals.costUsd, 0.00015);
+  assert.equal(usage.totals.costSource, "unpriced", "one unpriced record marks the figure a lower bound");
+  assert.equal(usage.totals.unpricedRecords, 1);
+
+  db.createSession(newSession({ id: "sess-2", driver: "claude-code", config: { model: "opus" } }));
+  db.appendEvent("sess-2", { kind: "token_usage", inputTokens: 10, outputTokens: 1 }, 3_600_300, { accrueUsage: true });
+  usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000_000, granularity: "hour" });
+  assert.deepEqual(
+    usage.byModel.map((row) => [row.key, row.costSource, row.unpricedRecords]),
+    [["gpt-5.5-codex", "unpriced", 1], ["opus", "unpriced", 1]],
+    "a bare family alias is never priced by guesswork",
+  );
+});
+
+test("a snapshot token residual without a cost residual is priced from the session model", () => {
+  const db = withRunner();
+  db.setUsageRateTable(parseRateTable(rateDocument));
+  db.createSessionFromSnapshot(snapshot({
+    id: "codex-snapshot", driver: "codex-app-server", config: { model: "gpt-5.5-codex" }, tokensIn: 1000, tokensOut: 100, costUsd: 0,
+  }), "runner-1", 2_000);
+  const usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000_000, granularity: "hour" });
+  assert.equal(usage.totals.costUsd, 0.003);
+  assert.equal(usage.totals.costSource, "modelPriced");
+  assert.equal(usage.totals.uncachedInputTokens, 1000, "a flat snapshot carries no cache breakdown");
+  assert.equal(db.getSession("codex-snapshot")!.costUsd, 0.003);
+
+  // A later runner snapshot that still reports zero cost must not reset the priced total.
+  db.updateSessionFromSnapshot("codex-snapshot", snapshot({
+    id: "codex-snapshot", driver: "codex-app-server", config: { model: "gpt-5.5-codex" }, tokensIn: 1000, tokensOut: 100, costUsd: 0, seq: 1,
+  }), 3_000);
+  assert.equal(db.getSession("codex-snapshot")!.costUsd, 0.003);
+  assert.equal(db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000_000, granularity: "hour" }).totals.costUsd, 0.003);
+});
+
+test("the provider-resolved model id keys buckets and pricing ahead of the configured alias", () => {
+  const db = withRunner();
+  db.setUsageRateTable(parseRateTable(rateDocument));
+  db.createSession(newSession({ driver: "claude-code", config: { model: "fable" } }));
+  db.raw().prepare("UPDATE sessions SET resolved_model='claude-fable-5-1' WHERE id='sess-1'").run();
+  db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 1000, outputTokens: 0 }, 3_600_100, { accrueUsage: true });
+  const usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000_000, granularity: "hour" });
+  assert.deepEqual(usage.byModel.map((row) => [row.key, row.costUsd, row.costSource]), [["claude-fable-5-1", 0.005, "modelPriced"]]);
+});
+
+test("ledger rows written before the v103 columns keep aggregating with zero for the new measures", () => {
+  const temp = mkdtempSync(join(tmpdir(), "wollipog-usage-legacy-"));
+  const location = join(temp, "control-plane.db");
+  // Maintenance runs against the wall clock on reopen, so the rows must sit inside live retention:
+  // one recent hour that stays hourly and one 40-day-old hour that rolls into a daily bucket.
+  const now = Date.now();
+  const recentHour = Math.floor((now - 2 * 3_600_000) / 3_600_000) * 3_600_000;
+  const oldHour = recentHour - 40 * 86_400_000;
+  const window = { since: oldHour - 86_400_000, through: now + 3_600_000, granularity: "day" as const };
+  try {
+    let db = ControlPlaneDb.open(location);
+    db.registerRunner(meta(), 500);
+    db.createSession(newSession({ driver: "claude-code", config: { model: "claude-fable-5-1" } }));
+    db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 10, outputTokens: 2, costUsd: 0.1 }, oldHour + 100, { accrueUsage: true });
+    db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 10, outputTokens: 2, costUsd: 0.1 }, recentHour + 100, { accrueUsage: true });
+    db.maintainUsageAggregation(now);
+    assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM usage_daily").get()!.n, 1, "the old hour rolled into a day");
+    assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM usage_hourly").get()!.n, 1);
+    db.close();
+
+    const raw = new DatabaseSync(location);
+    for (const table of ["usage_session_state", "usage_hourly", "usage_daily"]) {
+      for (const column of [
+        "uncached_input_tokens", "cached_input_tokens", "cache_creation_tokens", "reasoning_tokens",
+        "cache_savings_microusd", "provider_reported_records", "model_priced_records", "unpriced_records",
+      ]) {
+        raw.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`);
+      }
+    }
+    raw.close();
+
+    db = ControlPlaneDb.open(location);
+    db.setUsageRateTable(parseRateTable(rateDocument));
+    let usage = db.queryUsageAggregation(localOwner(), window);
+    assert.deepEqual(usage.totals, {
+      inputTokens: 20, outputTokens: 4, costUsd: 0.2, uncachedInputTokens: 0, cachedInputTokens: 0, cacheCreationTokens: 0,
+      reasoningTokens: 0, cacheSavingsUsd: 0, costSource: "unpriced", unpricedRecords: 0,
+    }, "pre-v103 buckets carry no provenance, so they neither claim nor count as unpriced records");
+
+    db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 10, outputTokens: 2, costUsd: 0.1 }, now, { accrueUsage: true });
+    usage = db.queryUsageAggregation(localOwner(), window);
+    assert.equal(usage.totals.inputTokens, 30);
+    assert.equal(usage.totals.costUsd, 0.3);
+    assert.equal(usage.totals.uncachedInputTokens, 10);
+    assert.equal(usage.totals.costSource, "providerReported", "legacy rows carry no provenance, so the new record decides it");
+    assert.equal(db.getSession("sess-1")!.costUsd, 0.3);
+    db.close();
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("snapshot residual pricing carries sub-micro cost and defers to a fractional provider increase", () => {
+  const db = withRunner();
+  // 0.15 micro-USD per input token: a single-token residual rounds to nothing without a carry.
+  db.setUsageRateTable(parseRateTable({ "cheap-model": { input_cost_per_token: 0.00000015, output_cost_per_token: 0 } }));
+  const base = snapshot({ id: "cheap", driver: "codex-app-server", config: { model: "cheap-model" }, tokensIn: 0, tokensOut: 0, costUsd: 0 });
+  db.createSessionFromSnapshot(base, "runner-1", 1_000);
+  for (let tokens = 1; tokens <= 7; tokens += 1) {
+    db.updateSessionFromSnapshot("cheap", { ...base, tokensIn: tokens, seq: tokens }, 1_000 + tokens);
+  }
+  const usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000, granularity: "hour" });
+  assert.equal(usage.totals.costUsd, 0.000001, "buckets hold whole micro-USD: seven 0.15 residuals crossed one boundary");
+  assert.equal(usage.totals.costSource, "modelPriced");
+  assert.ok(Math.abs(db.getSession("cheap")!.costUsd - 0.00000105) < 1e-12, "the session total keeps the sub-micro remainder");
+
+  // A provider that reports a sub-micro cost increase is authoritative; its tokens are not re-estimated.
+  db.setUsageRateTable(parseRateTable(rateDocument));
+  const claude = snapshot({ id: "fraction", driver: "claude-code", config: { model: "claude-fable-5-1" }, tokensIn: 0, tokensOut: 0, costUsd: 0 });
+  db.createSessionFromSnapshot(claude, "runner-1", 2_000);
+  db.updateSessionFromSnapshot("fraction", { ...claude, tokensIn: 1000, costUsd: 0.0000002, seq: 1 }, 2_001);
+  const fraction = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000, granularity: "hour" });
+  assert.equal(fraction.byModel.find((row) => row.key === "claude-fable-5-1")!.costSource, "providerReported");
+  assert.ok(Math.abs(db.getSession("fraction")!.costUsd - 0.0000002) < 1e-15, "the estimate ($0.005) must not replace the reported fraction");
 });

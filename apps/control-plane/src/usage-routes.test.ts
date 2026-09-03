@@ -167,3 +167,38 @@ test("subscription usage routes are human-scoped and refresh only visible curren
   await app.close();
   db.close();
 });
+
+test("usage responses carry rate-table status and members can force a bounded pricing refresh", async () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const principals = new Map<string, AuthPrincipal>([["viewer", human("viewer")]]);
+  let refreshes = 0;
+  const pricing = {
+    status: () => ({ status: "cached" as const, source: "https://rates.example/prices.json", fetchedAt: 123, knownModels: 2 }),
+    ensure: async (force?: boolean) => {
+      assert.equal(force, true);
+      refreshes += 1;
+      return { status: "fresh" as const, source: "https://rates.example/prices.json", fetchedAt: 456, knownModels: 3 };
+    },
+  };
+  const app = Fastify();
+  registerUsageRoutes(app, db, (request) => {
+    const header = request.headers.authorization;
+    return typeof header === "string" ? principals.get(header.replace(/^Bearer /, "")) ?? null : null;
+  }, undefined, pricing);
+
+  const usage = await app.inject({ method: "GET", url: "/api/usage", headers: { authorization: "Bearer viewer" } });
+  assert.equal(usage.statusCode, 200);
+  assert.deepEqual(usage.json().pricing, pricing.status());
+  assert.deepEqual(usage.json().byModel, []);
+
+  assert.equal((await app.inject({ method: "POST", url: "/api/usage/pricing/refresh" })).statusCode, 403);
+  const refreshed = await app.inject({ method: "POST", url: "/api/usage/pricing/refresh", headers: { authorization: "Bearer viewer" } });
+  assert.equal(refreshed.statusCode, 200);
+  assert.equal(refreshed.json().pricing.knownModels, 3);
+  assert.equal(refreshes, 1);
+
+  const bare = Fastify();
+  registerUsageRoutes(bare, db, () => human("viewer"));
+  assert.equal((await bare.inject({ method: "GET", url: "/api/usage" })).json().pricing, undefined);
+  assert.equal((await bare.inject({ method: "POST", url: "/api/usage/pricing/refresh" })).statusCode, 503);
+});

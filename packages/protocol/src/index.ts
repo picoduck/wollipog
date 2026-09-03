@@ -289,7 +289,12 @@
 //      linked worktree metadata. Additive + optional; pre-v101 runners reject worktree routes.
 // 102: explicit session-worktree discard plus conservative runner-side PR-state reconciliation.
 //      Older peers retain create/attach/select and never receive the destructive operation.
-export const PROTOCOL_VERSION = 102;
+// 103: token_usage carries the cache-creation and reasoning buckets, and the control plane prices
+//      every parentless record against a model rate table when the provider reports no cost.
+//      Usage aggregates gain the five token buckets, cost provenance, cache savings, a by-model
+//      breakdown, and rate-table status. Older runners keep sending the flat shape; the control
+//      plane prices it from input, cached input, and output alone.
+export const PROTOCOL_VERSION = 103;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
@@ -423,6 +428,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   sessionNamingTargets: 95,
   sessionNamingDriftCodes: 97,
   sessionAgentControl: 100,
+  /** v103 runners emit the cache-creation and reasoning token buckets on token_usage. */
+  usageTokenBuckets: 103,
   sessionWorktrees: 101,
   sessionWorktreeDiscard: 102,
 } as const;
@@ -2371,9 +2378,17 @@ export type SessionEventPayload =
   | { kind: "conversation_forked"; sourceSessionId: string; turn: number }
   | {
       kind: "token_usage";
+      /** Provider-reported input count. Anthropic reports the uncached portion only; Codex reports
+       * the total inclusive of `cachedInputTokens`. The control plane normalizes per driver. */
       inputTokens?: number;
       outputTokens?: number;
       cachedInputTokens?: number;
+      /** Prompt-cache write tokens (Anthropic `cache_creation_input_tokens`), v103+. */
+      cacheCreationInputTokens?: number;
+      /** Reasoning tokens already included in `outputTokens` (Codex), v103+. Never additive. */
+      reasoningOutputTokens?: number;
+      /** Provider-reported cost for this record. Absent when the provider bills opaquely; the
+       * control plane then prices the tokens from its rate table. */
       costUsd?: number;
       /** The spawning agent/task tool when this usage belongs to a subagent (v31+). */
       parentToolUseId?: string;
@@ -2395,10 +2410,38 @@ export interface SessionEvent {
 
 export type UsageAggregationGranularity = "hour" | "day";
 
+/** Why a figure's cost is what it is.
+ * - `providerReported`: every record carried an explicit provider cost.
+ * - `modelPriced`: at least one record was priced from the rate table and none were unpriced.
+ * - `unpriced`: at least one record's tokens are known but could not be priced. Tokens are counted;
+ *   the cost is a lower bound. `unpricedRecords` says how many. */
+export type UsageCostSource = "providerReported" | "modelPriced" | "unpriced";
+
 export interface UsageAmount {
+  /** Provider-reported input tokens, as accumulated on the runner (see `token_usage`). */
   inputTokens: number;
   outputTokens: number;
   costUsd: number;
+  /** Input tokens billed at the full input rate; excludes both cache buckets (v103+). */
+  uncachedInputTokens: number;
+  cachedInputTokens: number;
+  cacheCreationTokens: number;
+  /** Subset of `outputTokens`; never added on top of it. */
+  reasoningTokens: number;
+  /** What cached input would have cost at the full input rate minus what it cost. */
+  cacheSavingsUsd: number;
+  costSource: UsageCostSource;
+  unpricedRecords: number;
+}
+
+/** Provenance for the rate table so the UI can be honest about how good the estimates are. */
+export interface UsagePricingStatus {
+  /** `fresh` inside the TTL, `cached` when serving a copy that could not be refreshed,
+   * `unavailable` when no table has loaded or pricing is disabled. */
+  status: "fresh" | "cached" | "unavailable";
+  source: string;
+  fetchedAt: number | null;
+  knownModels: number;
 }
 
 export interface UsageRetentionPolicy {
@@ -2431,6 +2474,10 @@ export interface UsageAggregationResponse {
   byDriver: UsageBreakdown[];
   byAgent: UsageBreakdown[];
   byRunner: UsageBreakdown[];
+  /** Keyed by the provider-resolved model id, or `unknown` when a session advertised none (v103+). */
+  byModel: UsageBreakdown[];
+  /** Rate-table provenance; absent only from control planes older than v103. */
+  pricing?: UsagePricingStatus;
 }
 
 /* -------------------------- Session naming ----------------------------- */

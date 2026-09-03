@@ -207,6 +207,9 @@ export function parseClaudeTranscript(content: string): SessionEventPayload[] {
           inputTokens: typeof usage.input_tokens === "number" ? usage.input_tokens : undefined,
           outputTokens: typeof usage.output_tokens === "number" ? usage.output_tokens : undefined,
           cachedInputTokens: typeof usage.cache_read_input_tokens === "number" ? usage.cache_read_input_tokens : undefined,
+          ...(typeof usage.cache_creation_input_tokens === "number"
+            ? { cacheCreationInputTokens: usage.cache_creation_input_tokens }
+            : {}),
           parentToolUseId: parentId,
         });
       }

@@ -194,6 +194,7 @@ import {
 } from "./web-dist.js";
 import { normalizeDriverTelemetry, telemetryWindowDays } from "./driver-telemetry.js";
 import { registerUsageRoutes } from "./usage-routes.js";
+import { UsageRateTableService, defaultUsagePricingCachePath, resolveUsagePricingUrl } from "./usage-rate-table.js";
 import {
   validateSubscriptionUsageInventory,
   validateSubscriptionUsageSnapshot,
@@ -292,6 +293,14 @@ const LOCAL_DEVICE_TOKEN_HASH = hashToken(LOCAL_DEVICE_TOKEN);
 const LOCAL_PAIRING_URL = localPairingUrl(PORT, LOCAL_DEVICE_TOKEN);
 
 const db = ControlPlaneDb.open(DB_PATH, ARTIFACT_BLOB_DIR ? { artifactBlobDir: ARTIFACT_BLOB_DIR } : {});
+// Model rate table for pricing usage the provider bills opaquely (Codex). One outbound fetch per
+// day; `CONTROL_PLANE_USAGE_PRICING_URL=off` disables it and leaves such usage unpriced.
+const usagePricing = new UsageRateTableService({
+  sourceUrl: resolveUsagePricingUrl(process.env.CONTROL_PLANE_USAGE_PRICING_URL),
+  cachePath: defaultUsagePricingCachePath(DB_PATH, process.env.CONTROL_PLANE_USAGE_PRICING_CACHE),
+});
+db.setUsageRateTable(usagePricing.current());
+const usagePricingReady = usagePricing.ensure().then(() => db.setUsageRateTable(usagePricing.current()));
 const legacyCredentialMigration = db.backfillLegacyRunnerCredentials(hashToken(TOKEN), Date.now());
 if (legacyCredentialMigration.blocked > 0) {
   console.warn(
@@ -3306,7 +3315,14 @@ app.get("/api/telemetry/drivers", async (req, reply) => {
 
 // Content-free, observation-time usage accounting. Human members see only frozen ownership
 // scopes they may access; conductor credentials are deliberately excluded from this surface.
-registerUsageRoutes(app, db, requestPrincipal, hub);
+registerUsageRoutes(app, db, requestPrincipal, hub, {
+  status: () => usagePricing.status(),
+  ensure: async (force) => {
+    const status = await usagePricing.ensure(force);
+    db.setUsageRateTable(usagePricing.current());
+    return status;
+  },
+});
 
 async function runSessionWorktreeRequest(
   sessionId: string,
@@ -4223,6 +4239,9 @@ app.post("/api/workflow-instances/:instanceId/nodes/:nodeId/resolve", async (req
 const workflowRecoveryTimer = setInterval(() => svc.recoverExpiredWorkflowAttempts(), 5_000);
 workflowRecoveryTimer.unref();
 const automationTimer = setInterval(() => automations.tick(Date.now()), 5_000);
+const usagePricingTimer = setInterval(() => {
+  void usagePricing.ensure().then(() => db.setUsageRateTable(usagePricing.current()));
+}, 60 * 60 * 1000);
 automationTimer.unref();
 const sweepSessionReminders = () => {
   try {
@@ -4332,6 +4351,7 @@ runnerLivenessTimer.unref();
 app.addHook("onClose", async () => {
   clearInterval(workflowRecoveryTimer);
   clearInterval(automationTimer);
+  clearInterval(usagePricingTimer);
   clearInterval(sessionReminderTimer);
   clearInterval(sessionCommandRetryTimer);
   clearInterval(sessionStopMaintenanceTimer);
@@ -4391,6 +4411,9 @@ process.on("unhandledRejection", (reason) => {
 // Wrapped in an async IIFE (not a top-level await) so the module bundles to CJS.
 void (async () => {
   try {
+    // Records are priced at ingestion and never re-priced, so on a first boot with no disk cache
+    // give the rate table a bounded head start before runners reconnect and replay usage.
+    await Promise.race([usagePricingReady, new Promise((resolve) => setTimeout(resolve, 5_000))]);
     await app.listen({ port: PORT, host: HOST });
     // Shell reconciliation is connection-owned state like the reset above: a duplicate process
     // that loses the port race must not flip the survivor's running shells to reconnecting.

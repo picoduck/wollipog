@@ -10,12 +10,14 @@ import {
   subscriptionUsageRefreshTimeoutMs,
 } from "./subscription-usage.js";
 import { parseUsageAggregationQuery, parseUsageRetentionInput } from "./usage-aggregation.js";
+import type { UsageRateTableService } from "./usage-rate-table.js";
 
 export function registerUsageRoutes(
   app: FastifyInstance,
   db: ControlPlaneDb,
   requestPrincipal: (request: FastifyRequest) => AuthPrincipal | null,
   hub?: Pick<Hub, "requestFromRunner">,
+  pricing?: Pick<UsageRateTableService, "ensure" | "status">,
 ): void {
   app.get("/api/usage", async (request, reply) => {
     const principal = requestPrincipal(request);
@@ -25,10 +27,22 @@ export function registerUsageRoutes(
     const retention = db.getUsageRetentionPolicy(principal.organizationId);
     try {
       const query = parseUsageAggregationQuery((request.query ?? {}) as Record<string, unknown>, retention);
-      return db.queryUsageAggregation(principal, query);
+      const aggregation = db.queryUsageAggregation(principal, query);
+      return pricing ? { ...aggregation, pricing: pricing.status() } : aggregation;
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : "invalid usage query" });
     }
+  });
+
+  // Refetches the rate table ahead of its TTL so a model released since the last daily fetch is
+  // priced from now on. Already-recorded buckets keep their provenance; nothing is re-priced.
+  app.post("/api/usage/pricing/refresh", async (request, reply) => {
+    const principal = requestPrincipal(request);
+    if (!principal || principal.kind !== "human") {
+      return reply.code(403).send({ error: "usage accounting is available to organization members only" });
+    }
+    if (!pricing) return reply.code(503).send({ error: "usage pricing is unavailable" });
+    return { pricing: await pricing.ensure(true) };
   });
 
   app.get("/api/usage/subscriptions", async (request, reply) => {
