@@ -4,6 +4,8 @@ name: CI
 # a pull request to Ready for Review starts this workflow once the change is ready.
 
 on:
+  # Merge queue entries run the same required check on the queued merge group.
+  merge_group:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   push:
