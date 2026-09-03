@@ -367,6 +367,34 @@ test("checkpoints (real git): anchor, read, restore (incl. deleting post-checkpo
   }
 });
 
+test("checkpoint refs isolate identical turns by durable worktree identity", { skip: !GIT }, async () => {
+  const repo = mkdtempSync(join(tmpdir(), "wollipog-ckpt-worktree-"));
+  try {
+    initRepo(repo);
+    writeFileSync(join(repo, "state.txt"), "first worktree\n");
+    git(repo, ["add", "-A"]);
+    git(repo, ["commit", "-q", "-m", "base"]);
+    const firstTree = await captureWorktreeTree(repo);
+    writeFileSync(join(repo, "state.txt"), "second worktree\n");
+    const secondTree = await captureWorktreeTree(repo);
+
+    await anchorTurnRef(repo, "s_scoped", 1, firstTree, undefined, "wt_first");
+    await anchorTurnRef(repo, "s_scoped", 1, secondTree, undefined, "wt_second");
+    assert.equal(await readTurnRef(repo, "s_scoped", 1, undefined, "wt_first"), firstTree);
+    assert.equal(await readTurnRef(repo, "s_scoped", 1, undefined, "wt_second"), secondTree);
+    assert.equal(await readTurnRef(repo, "s_scoped", 1), null,
+      "an unscoped lookup must not fall through to either worktree");
+    assert.equal(git(repo, ["rev-parse", "refs/wollipog/s_scoped/worktrees/wt_first/turn-1"]).trim(), firstTree);
+    assert.equal(git(repo, ["rev-parse", "refs/wollipog/s_scoped/worktrees/wt_second/turn-1"]).trim(), secondTree);
+
+    await deleteTurnRefs(repo, "s_scoped");
+    assert.equal(git(repo, ["for-each-ref", "--format=%(refname)", "refs/wollipog/s_scoped/"]).trim(), "");
+    assert.equal(git(repo, ["for-each-ref", "--format=%(refname)", "refs/mam/s_scoped/"]).trim(), "");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 test("checkpoints (real git): capture and restore do not renormalize an untouched tracked file", { skip: !GIT }, async () => {
   const repo = mkdtempSync(join(tmpdir(), "wollipog-ckpt-filter-"));
   try {

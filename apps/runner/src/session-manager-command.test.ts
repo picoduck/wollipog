@@ -262,6 +262,17 @@ function liveCommand(manager: SessionManager): AgentSlashCommand & {
   return command as AgentSlashCommand & { invocation: NonNullable<AgentSlashCommand["invocation"]> };
 }
 
+function useHarnessWorktree(h: ReturnType<typeof harness>, path: string, branch: string): void {
+  const entry = (h.manager as any).active.get("command-session");
+  entry.worktree = { path, branch };
+  entry.cwd = path;
+  h.store.patchMeta("command-session", {
+    worktreePath: path,
+    worktreeBranch: branch,
+    worktrees: [{ id: "legacy", path, branch, source: "legacy" }],
+  });
+}
+
 test("fresh v75 commands use a durable, provenance-preserving provider boundary and reject a rotated catalog", async () => {
   const provider = deferred<"end_turn">();
   const h = harness({ invokeGate: provider.promise });
@@ -466,8 +477,7 @@ test("a command checkpoint history failure aborts before provider submission", a
     assert.equal(await h.start(), true);
     const command = liveCommand(h.manager);
     setGitRunnerForTests(async (_cwd, args) => args[0] === "write-tree" ? "tree-checkpoint" : "");
-    const entry = (h.manager as any).active.get("command-session");
-    entry.worktree = { path: h.root, branch: "test/checkpoint" };
+    useHarnessWorktree(h, h.root, "test/checkpoint");
     const appendEvent = h.store.appendEvent.bind(h.store);
     (h.store as any).appendEvent = (sessionId: string, payload: { kind: string }, ts?: number) => {
       if (payload.kind === "checkpoint") throw new Error("checkpoint append failed");
@@ -498,8 +508,7 @@ test("unreadable checkpoint refs do not block provider commands or create a chec
   try {
     assert.equal(await h.start(), true);
     const command = liveCommand(h.manager);
-    const entry = (h.manager as any).active.get("command-session");
-    entry.worktree = { path: h.root, branch: "test/unreadable-checkpoint" };
+    useHarnessWorktree(h, h.root, "test/unreadable-checkpoint");
     setGitRunnerForTests(async (_cwd, args) => {
       if (args[0] === "write-tree" || args[0] === "for-each-ref") {
         throw new Error("checkpoint repository is unreadable");
@@ -537,16 +546,15 @@ test("divergent checkpoint refs reject only that command and preserve the queued
   try {
     assert.equal(await h.start(), true);
     const command = liveCommand(h.manager);
-    const entry = (h.manager as any).active.get("command-session");
-    entry.worktree = { path: h.root, branch: "test/divergent-checkpoint" };
+    useHarnessWorktree(h, h.root, "test/divergent-checkpoint");
     setGitRunnerForTests(async (_cwd, args) => {
       if (args[0] === "write-tree") return "command-checkpoint-tree";
       if (args[0] === "for-each-ref") {
         refReads += 1;
         if (refReads <= 2) {
           return [
-            "refs/wollipog/command-session/turn-1\tcurrent-tree",
-            "refs/mam/command-session/turn-1\tlegacy-tree",
+            "refs/wollipog/command-session/worktrees/legacy/turn-1\tcurrent-tree",
+            "refs/mam/command-session/worktrees/legacy/turn-1\tlegacy-tree",
           ].join("\n");
         }
         return "";
@@ -585,16 +593,15 @@ test("catalog rotation during command checkpoint anchoring restores prior turn a
   const anchorGate = deferred<void>();
   const h = harness();
   const turnRefs = new Map<string, string>([
-    ["refs/mam/command-session/turn-5", "prior-turn-tree"],
-    ["refs/wollipog/command-session/turn-5", "prior-turn-tree"],
+    ["refs/mam/command-session/worktrees/legacy/turn-5", "prior-turn-tree"],
+    ["refs/wollipog/command-session/worktrees/legacy/turn-5", "prior-turn-tree"],
   ]);
   let anchoring = false;
   try {
     assert.equal(await h.start(), true);
     const command = liveCommand(h.manager);
     h.store.patchMeta("command-session", { turnCount: 4, lastTurnBaseTree: "prior-base-tree" });
-    const entry = (h.manager as any).active.get("command-session");
-    entry.worktree = { path: h.root, branch: "test/checkpoint-race" };
+    useHarnessWorktree(h, h.root, "test/checkpoint-race");
     setGitRunnerForTests(async (_cwd, args, opts) => {
       if (args[0] === "rev-parse" && args[1] === "--absolute-git-dir") return "";
       if (args[0] === "for-each-ref") {
@@ -639,8 +646,8 @@ test("catalog rotation during command checkpoint anchoring restores prior turn a
     assert.equal(h.invoked.length, 0);
     assert.equal(h.store.readMeta("command-session")?.turnCount, 4);
     assert.equal(h.store.readMeta("command-session")?.lastTurnBaseTree, "prior-base-tree");
-    assert.equal(turnRefs.get("refs/mam/command-session/turn-5"), "prior-turn-tree");
-    assert.equal(turnRefs.get("refs/wollipog/command-session/turn-5"), "prior-turn-tree");
+    assert.equal(turnRefs.get("refs/mam/command-session/worktrees/legacy/turn-5"), "prior-turn-tree");
+    assert.equal(turnRefs.get("refs/wollipog/command-session/worktrees/legacy/turn-5"), "prior-turn-tree");
     assert.equal(h.store.readEvents("command-session").some((event) => event.payload.kind === "checkpoint"), false);
   } finally {
     setGitRunnerForTests();
@@ -657,8 +664,7 @@ test("cancellation during command snapshot capture leaves no turn accounting or 
     assert.equal(await h.start(), true);
     const command = liveCommand(h.manager);
     h.store.patchMeta("command-session", { turnCount: 2, lastTurnBaseTree: "prior-base-tree" });
-    const entry = (h.manager as any).active.get("command-session");
-    entry.worktree = { path: h.root, branch: "test/checkpoint-cancel" };
+    useHarnessWorktree(h, h.root, "test/checkpoint-cancel");
     setGitRunnerForTests(async (_cwd, args, opts) => {
       if (args[0] === "rev-parse" && args[1] === "--absolute-git-dir") return "";
       if (args[0] === "rev-parse" && args[1] === "--verify") return turnRefs.get(args.at(-1) ?? "") ?? "";
@@ -714,8 +720,7 @@ test("successful fork-capable command turns persist the pre-turn checkpoint and 
 
     assert.equal(await h.start(), true);
     const command = liveCommand(h.manager);
-    const entry = (h.manager as any).active.get("command-session");
-    entry.worktree = { path: repo, branch: "test/fork-command" };
+    useHarnessWorktree(h, repo, "test/fork-command");
     const meta = h.store.readMeta("command-session")!;
     h.store.patchMeta("command-session", {
       capabilities: { ...meta.capabilities, supportsConversationFork: true },
@@ -748,14 +753,14 @@ test("successful fork-capable command turns persist the pre-turn checkpoint and 
     const updated = h.store.readMeta("command-session")!;
     assert.equal(updated.turnCount, 1);
     assert.ok(updated.lastTurnBaseTree);
-    assert.equal(anchoredRefs.get("refs/mam/command-session/turn-1"), updated.lastTurnBaseTree);
-    assert.equal(anchoredRefs.get("refs/wollipog/command-session/turn-1"), updated.lastTurnBaseTree);
+    assert.equal(anchoredRefs.get("refs/mam/command-session/worktrees/legacy/turn-1"), updated.lastTurnBaseTree);
+    assert.equal(anchoredRefs.get("refs/wollipog/command-session/worktrees/legacy/turn-1"), updated.lastTurnBaseTree);
     const forkPoint = updated.forkPoints?.["1"];
     assert.equal(forkPoint?.agentTurnId, "provider-turn-command");
     assert.equal(forkPoint?.baseCommit, baseCommit);
     assert.ok(forkPoint?.tree);
-    assert.equal(anchoredRefs.get("refs/mam/command-session/fork-1"), forkPoint?.tree);
-    assert.equal(anchoredRefs.get("refs/wollipog/command-session/fork-1"), forkPoint?.tree);
+    assert.equal(anchoredRefs.get("refs/mam/command-session/worktrees/legacy/fork-1"), forkPoint?.tree);
+    assert.equal(anchoredRefs.get("refs/wollipog/command-session/worktrees/legacy/fork-1"), forkPoint?.tree);
     const events = h.store.readEvents("command-session");
     assert.equal(events.some((event) => event.payload.kind === "checkpoint" && event.payload.turn === 1), true);
     assert.equal(events.some((event) => event.payload.kind === "conversation_checkpoint" && event.payload.turn === 1), true);

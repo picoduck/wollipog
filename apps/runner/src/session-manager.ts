@@ -121,6 +121,7 @@ import {
   removeRequestedWorktreeBoundary,
   removeWorktree,
   requestedWorktreeBoundary,
+  sameWorktreePath,
   worktreeHead,
   worktreePullRequestState,
   worktreeDiff,
@@ -271,6 +272,8 @@ interface PreparedCommandCheckpoint {
   priorLastTurnBaseTree: string | null | undefined;
   priorTurnRef: string | null;
   ownerHash?: string;
+  worktreeId: string;
+  priorWorktreeId?: string;
   anchored: boolean;
   accountingApplied: boolean;
 }
@@ -321,6 +324,8 @@ interface ActiveSession {
   repoPath: string;
   cwd: string;
   worktree: WorktreeHandle | null;
+  /** Cross-process lease proving this provider may still use its worktree cwd. */
+  worktreeLeaseOwner?: string;
   context: AgentContext;
   status: SessionStatus;
   /** True only after initialize + new/resume + driver-owned initial configuration restoration.
@@ -754,7 +759,7 @@ export class SessionManager {
 
   private attributedWorktrees(meta: SessionMeta): SessionWorktreeView[] {
     const worktrees = [...(meta.worktrees ?? [])];
-    if (meta.worktreePath && !worktrees.some((worktree) => worktree.path === meta.worktreePath)) {
+    if (meta.worktreePath && !worktrees.some((worktree) => sameWorktreePath(meta.context, worktree.path, meta.worktreePath!))) {
       worktrees.push({
         id: "legacy",
         path: meta.worktreePath,
@@ -763,6 +768,17 @@ export class SessionManager {
       });
     }
     return worktrees;
+  }
+
+  private attributedWorktreeForPath(meta: SessionMeta, path: string): SessionWorktreeView | undefined {
+    return this.attributedWorktrees(meta)
+      .find((worktree) => sameWorktreePath(meta.context, worktree.path, path));
+  }
+
+  private checkpointWorktreeId(meta: SessionMeta, path: string): string {
+    const worktree = this.attributedWorktreeForPath(meta, path);
+    if (!worktree) throw new Error("active worktree has no durable session identity");
+    return worktree.id;
   }
 
   private runWorktreeOperation<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
@@ -782,12 +798,25 @@ export class SessionManager {
     if (!latest || !this.sessionCanOpen(meta.sessionId)) {
       throw new Error("session disappeared while its requested worktree was activating");
     }
-    const worktrees = this.attributedWorktrees(latest).filter((item) => item.path !== worktree.path);
+    const priorActive = latest.worktreePath
+      ? this.attributedWorktreeForPath(latest, latest.worktreePath)
+      : undefined;
+    let checkpointWorktreeIds = latest.checkpointWorktreeIds;
+    if (priorActive && !sameWorktreePath(latest.context, priorActive.path, worktree.path) &&
+        this.attributedWorktrees(latest).length === 1 && (latest.turnCount ?? 0) > 0) {
+      checkpointWorktreeIds = { ...(checkpointWorktreeIds ?? {}) };
+      for (let turn = 1; turn <= (latest.turnCount ?? 0); turn++) {
+        checkpointWorktreeIds[String(turn)] ??= priorActive.id;
+      }
+    }
+    const worktrees = this.attributedWorktrees(latest)
+      .filter((item) => !sameWorktreePath(latest.context, item.path, worktree.path));
     worktrees.push(worktree);
     const updated = this.store.patchMeta(meta.sessionId, {
       worktreePath: worktree.path,
       worktreeBranch: worktree.branch,
       worktrees,
+      checkpointWorktreeIds,
       lastTurnBaseTree: baseTree,
     });
     if (!updated) throw new Error("session disappeared while its requested worktree was activating");
@@ -822,11 +851,13 @@ export class SessionManager {
       }, options);
       if (!created.created) {
         const existing = this.attributedWorktrees(meta).find((item) =>
-          item.source === "created" && item.path === created.path && item.branch === created.branch);
+          item.source === "created" && sameWorktreePath(meta.context, item.path, created.path) &&
+          item.branch === created.branch);
         if (!existing) {
           throw new Error("requested worktree already exists without ownership by this session");
         }
-        return { worktree: existing, snapshot: await this.activateWorktree(meta, existing) };
+        const canonical = { ...existing, path: created.path };
+        return { worktree: canonical, snapshot: await this.activateWorktree(meta, canonical) };
       }
       const worktree: SessionWorktreeView = {
         id: created.path.split(/[\\/]/u).at(-1)!,
@@ -874,8 +905,12 @@ export class SessionManager {
       });
       // Re-attaching an already-attributed runner-owned tree must never launder it into an
       // operator-owned record that session deletion would deliberately retain.
-      const existing = this.attributedWorktrees(meta).find((item) => item.path === attached.path);
-      const worktree: SessionWorktreeView = existing ?? {
+      const existing = this.attributedWorktrees(meta)
+        .find((item) => sameWorktreePath(meta.context, item.path, attached.path));
+      if (existing && existing.branch !== attached.branch) {
+        throw new Error("worktree branch changed since it was linked to this session");
+      }
+      const worktree: SessionWorktreeView = existing ? { ...existing, path: attached.path } : {
         id: createHash("sha256").update(attached.path).digest("hex").slice(0, 16),
         path: attached.path,
         branch: attached.branch,
@@ -891,7 +926,8 @@ export class SessionManager {
     return this.runWorktreeOperation(sessionId, async () => {
       const meta = this.store.readMeta(sessionId);
       if (!meta || !this.sessionCanOpen(sessionId)) throw new Error("session is unavailable");
-      const worktree = this.attributedWorktrees(meta).find((item) => item.path === path);
+      const worktree = this.attributedWorktrees(meta)
+        .find((item) => sameWorktreePath(meta.context, item.path, path));
       if (!worktree) throw new Error("worktree is not linked to this session");
       const verified = await attachRequestedWorktree(meta.repoPath, sessionId, worktree.path, {
         context: meta.context,
@@ -904,7 +940,7 @@ export class SessionManager {
       if (verified.branch !== worktree.branch) {
         throw new Error("worktree branch changed since it was linked to this session");
       }
-      return this.activateWorktree(meta, worktree);
+      return this.activateWorktree(meta, { ...worktree, path: verified.path });
     });
   }
 
@@ -912,7 +948,7 @@ export class SessionManager {
     await this.runWorktreeOperation(sessionId, async () => {
       const meta = this.store.readMeta(sessionId);
       if (!meta?.worktrees) return;
-      const worktrees = meta.worktrees.map((worktree) => worktree.path === worktreePath
+      const worktrees = meta.worktrees.map((worktree) => sameWorktreePath(meta.context, worktree.path, worktreePath)
         ? { ...worktree, pullRequest: { url, state: "open" as const } }
         : worktree);
       const updated = this.store.patchMeta(sessionId, { worktrees });
@@ -922,7 +958,22 @@ export class SessionManager {
 
   private liveWorktreeUsesPath(sessionId: string, path: string): boolean {
     const active = this.active.get(sessionId);
-    return active?.cwd === path || active?.worktree?.path === path || this.closing.has(sessionId);
+    return (!!active && (sameWorktreePath(active.context, active.cwd, path) ||
+      (!!active.worktree && sameWorktreePath(active.context, active.worktree.path, path)))) ||
+      this.closing.has(sessionId);
+  }
+
+  private releaseActiveWorktreeLease(entry: ActiveSession): void {
+    if (!entry.worktreeLeaseOwner) return;
+    this.store.releaseWorktreeLease(entry.sessionId, entry.worktreeLeaseOwner);
+    entry.worktreeLeaseOwner = undefined;
+  }
+
+  private deleteActiveSession(sessionId: string, expected?: ActiveSession, releaseLease = true): boolean {
+    const active = this.active.get(sessionId);
+    if (!active || (expected && active !== expected)) return false;
+    if (releaseLease) this.releaseActiveWorktreeLease(active);
+    return this.active.delete(sessionId);
   }
 
   private async discardWorktreeLocked(
@@ -931,58 +982,80 @@ export class SessionManager {
   ): Promise<{ removed: boolean; reason?: string; snapshot?: SessionSnapshot }> {
     const meta = this.store.readMeta(sessionId);
     if (!meta || !this.sessionCanOpen(sessionId)) return { removed: false, reason: "session is unavailable" };
-    const worktree = this.attributedWorktrees(meta).find((item) => item.path === path);
+    const worktree = this.attributedWorktrees(meta)
+      .find((item) => sameWorktreePath(meta.context, item.path, path));
     if (!worktree) return { removed: false, reason: "worktree is not linked to this session" };
     const source = worktree.source;
     if (source === "attached") {
       return { removed: false, reason: "attached operator-owned worktrees must be removed by their owner" };
     }
+    const selectedIsLaunching = !!meta.worktreePath &&
+      sameWorktreePath(meta.context, meta.worktreePath, worktree.path) &&
+      (meta.status === "starting" || meta.status === "queued" || meta.worktreePending === true);
+    if (selectedIsLaunching) {
+      return { removed: false, reason: "the worktree is still being launched by a provider process" };
+    }
     if (this.liveWorktreeUsesPath(sessionId, worktree.path)) {
       return { removed: false, reason: "the worktree is still active in a provider process" };
     }
-    const result = await this.discardSessionWorktreeIfSafe(
-      meta.repoPath,
-      sessionId,
-      { ...worktree, source },
-      {
+    const cleanupLeaseOwner = `${this.lockOwner}:cleanup:${randomUUID()}`;
+    if (!this.store.acquireWorktreeLease(sessionId, cleanupLeaseOwner)) {
+      return { removed: false, reason: "the worktree is leased by another runner process" };
+    }
+    try {
+      // Close the local race with a provider launch that acquired its durable lease while this
+      // cleanup was waiting. The cross-process lease closes the equivalent race on sibling runners.
+      if (this.liveWorktreeUsesPath(sessionId, worktree.path)) {
+        return { removed: false, reason: "the worktree is still active in a provider process" };
+      }
+      const result = await this.discardSessionWorktreeIfSafe(
+        meta.repoPath,
+        sessionId,
+        { ...worktree, source },
+        {
+          context: meta.context,
+          dataDir: this.dataDir,
+          ownerHash: this.runnerOwnerHash,
+        },
+      );
+      if (!result.removed) {
+        const reasons = {
+          not_runner_owned: "runner ownership could not be proven",
+          branch_changed: "the registered worktree branch changed",
+          dirty: "the worktree has uncommitted changes",
+          no_upstream: "the branch has no upstream",
+          unpushed: "the branch has unpushed commits",
+          unavailable: "Git state is unavailable or changed during cleanup",
+        } as const;
+        return { removed: false, reason: reasons[result.reason] };
+      }
+
+      // The session lane excludes create/attach/select/link/discard races. Re-read after Git I/O so
+      // an out-of-process store removal cannot be accidentally recreated by this patch.
+      const latest = this.store.readMeta(sessionId);
+      if (!latest) return { removed: true };
+      const worktrees = this.attributedWorktrees(latest)
+        .filter((item) => !sameWorktreePath(latest.context, item.path, worktree.path));
+      const removedActiveSelection = !!latest.worktreePath &&
+        sameWorktreePath(latest.context, latest.worktreePath, worktree.path);
+      const updated = this.store.patchMeta(sessionId, {
+        worktrees,
+        ...(removedActiveSelection
+          ? { worktreePath: null, worktreeBranch: undefined, lastTurnBaseTree: undefined }
+          : {}),
+      });
+      if (!updated) return { removed: true };
+      await removeRequestedWorktreeBoundary(meta.repoPath, sessionId, {
         context: meta.context,
         dataDir: this.dataDir,
         ownerHash: this.runnerOwnerHash,
-      },
-    );
-    if (!result.removed) {
-      const reasons = {
-        not_runner_owned: "runner ownership could not be proven",
-        branch_changed: "the registered worktree branch changed",
-        dirty: "the worktree has uncommitted changes",
-        no_upstream: "the branch has no upstream",
-        unpushed: "the branch has unpushed commits",
-        unavailable: "Git state is unavailable or changed during cleanup",
-      } as const;
-      return { removed: false, reason: reasons[result.reason] };
+      }).catch(() => false);
+      const snapshot = this.snapshot(updated);
+      this.send({ type: "session_runtime_updated", snapshot });
+      return { removed: true, snapshot };
+    } finally {
+      this.store.releaseWorktreeLease(sessionId, cleanupLeaseOwner);
     }
-
-    // The session lane excludes create/attach/select/link/discard races. Re-read after Git I/O so
-    // an out-of-process store removal cannot be accidentally recreated by this patch.
-    const latest = this.store.readMeta(sessionId);
-    if (!latest) return { removed: true };
-    const worktrees = this.attributedWorktrees(latest).filter((item) => item.path !== worktree.path);
-    const removedActiveSelection = latest.worktreePath === worktree.path;
-    const updated = this.store.patchMeta(sessionId, {
-      worktrees,
-      ...(removedActiveSelection
-        ? { worktreePath: null, worktreeBranch: undefined, lastTurnBaseTree: undefined }
-        : {}),
-    });
-    if (!updated) return { removed: true };
-    await removeRequestedWorktreeBoundary(meta.repoPath, sessionId, {
-      context: meta.context,
-      dataDir: this.dataDir,
-      ownerHash: this.runnerOwnerHash,
-    }).catch(() => false);
-    const snapshot = this.snapshot(updated);
-    this.send({ type: "session_runtime_updated", snapshot });
-    return { removed: true, snapshot };
   }
 
   /** Destructive session-scoped operation. Safety checks are identical to automatic PR cleanup;
@@ -1013,8 +1086,11 @@ export class SessionManager {
               .map((worktree) => worktree.path);
             for (const path of linkedPaths) {
               meta = this.store.readMeta(candidate.sessionId);
-              const worktree = meta && this.attributedWorktrees(meta).find((item) => item.path === path);
-              if (!meta || !worktree?.pullRequest) continue;
+              if (!meta) continue;
+              const reconciliationContext = meta.context;
+              const worktree = this.attributedWorktrees(meta)
+                .find((item) => sameWorktreePath(reconciliationContext, item.path, path));
+              if (!worktree?.pullRequest) continue;
               let state = worktree.pullRequest.state;
               if (state === "open") {
                 const verified = await this.resolveWorktreePullRequestState(
@@ -1024,7 +1100,7 @@ export class SessionManager {
                 );
                 if (!verified || verified === "open") continue;
                 state = verified;
-                const worktrees = this.attributedWorktrees(meta).map((item) => item.path === path
+                const worktrees = this.attributedWorktrees(meta).map((item) => sameWorktreePath(reconciliationContext, item.path, path)
                   ? { ...item, pullRequest: { ...worktree.pullRequest!, state } }
                   : item);
                 const updated = this.store.patchMeta(candidate.sessionId, { worktrees });
@@ -1875,11 +1951,13 @@ export class SessionManager {
     const existing = this.active.get(spec.sessionId);
     if (existing) {
       this.clearSteeringState(spec.sessionId, "session restart discarded steering state");
-      this.active.delete(spec.sessionId);
       this.rejectQueued(existing.queue, "session restart discarded the queued command");
       existing.queue.length = 0;
       this.emitQueue(spec.sessionId); // a restart discards any queued prompts
       existing.client.dispose({ forceImmediate: true });
+      // Keep the durable worktree lease until the provider has been told to terminate. Releasing
+      // it first would briefly let a sibling runner clean the provider's still-live cwd.
+      this.deleteActiveSession(spec.sessionId, existing);
       this.clearLock(spec.sessionId);
       this.log(`restarting ${spec.sessionId} — replacing existing process`);
     }
@@ -1909,10 +1987,13 @@ export class SessionManager {
       // context even when the ordinary host ACP policy would have supplied it.
       acpSessionContext = undefined;
     }
-    const prior = this.store.readMeta(spec.sessionId);
+    let prior = this.store.readMeta(spec.sessionId);
     const driver = spec.driver ?? "acp";
     const executionTarget = spec.executionTarget ?? prior?.executionTarget;
-    const shouldUseWorktree = spec.useWorktree || !!prior?.worktrees?.some((item) => item.path === prior.worktreePath);
+    const priorWorktreePath = prior?.worktreePath;
+    const priorContext = prior?.context;
+    let shouldUseWorktree = spec.useWorktree || !!priorWorktreePath &&
+      !!priorContext && !!prior?.worktrees?.some((item) => sameWorktreePath(priorContext, item.path, priorWorktreePath));
     const carrySlashCommandCatalog = !shouldUseWorktree && canCarrySlashCommandCatalog(prior ?? undefined, {
       driver,
       context,
@@ -1988,6 +2069,7 @@ export class SessionManager {
       lastTurnBaseTree: prior?.lastTurnBaseTree,
       turnCount: prior?.turnCount ?? 0,
       forkPoints: prior?.forkPoints ?? {},
+      checkpointWorktreeIds: prior?.checkpointWorktreeIds,
       // Sessions (re)started on this build never carry the old add -A residue forward — and the
       // flag stops the startup migration from ever clearing a user's deliberate staging.
       indexReset: true,
@@ -1997,7 +2079,24 @@ export class SessionManager {
     };
     // create() upserts meta.json (refreshing launch params) but preserves any existing event log,
     // so a restart keeps the timeline while re-spawning a fresh agent.
-    this.store.create(meta);
+    await this.runWorktreeOperation(spec.sessionId, async () => {
+      // A worktree request may have committed after the launch captured `prior` but before this
+      // restart row is written. Merge that exact identity rather than recreating stale launch state.
+      const latest = this.store.readMeta(spec.sessionId);
+      if (latest) {
+        prior = latest;
+        shouldUseWorktree = spec.useWorktree || !!latest.worktreePath &&
+          !!latest.worktrees?.some((item) => sameWorktreePath(latest.context, item.path, latest.worktreePath!));
+        meta.worktreeBranch = latest.worktreeBranch;
+        meta.worktrees = latest.worktrees;
+        meta.lastTurnBaseTree = latest.lastTurnBaseTree;
+        meta.turnCount = latest.turnCount ?? 0;
+        meta.forkPoints = latest.forkPoints ?? {};
+        meta.checkpointWorktreeIds = latest.checkpointWorktreeIds;
+        meta.worktreePending = shouldUseWorktree;
+      }
+      this.store.create(meta);
+    });
     durable?.queued();
     if (launchAssertionError) {
       this.emitEvent(spec.sessionId, { kind: "error", message: launchAssertionError });
@@ -2058,7 +2157,11 @@ export class SessionManager {
         const gitRepo = await isGitRepo(repoPath, worktreeOptions);
         if (!this.launchIsCurrent(spec.sessionId, launchGeneration)) return false;
         if (gitRepo) {
-          const priorActiveWorktree = prior?.worktrees?.find((item) => item.path === prior.worktreePath);
+          const activePrior = prior;
+          const priorActiveWorktree = activePrior?.worktreePath
+            ? activePrior.worktrees?.find((item) =>
+              sameWorktreePath(activePrior.context, item.path, activePrior.worktreePath!))
+            : undefined;
           if (priorActiveWorktree) {
             worktree = await attachRequestedWorktree(repoPath, spec.sessionId, priorActiveWorktree.path, {
               ...worktreeOptions,
@@ -2156,29 +2259,90 @@ export class SessionManager {
         this.cleanupJournal.add(cleanup);
         await this.reapWorktree(cleanup, worktreeOwnedByLaunch && !superseded);
       }
+      if (priorResumeId && !superseded) this.store.releaseLock(spec.sessionId, this.lockOwner);
+      durable?.failed(
+        superseded
+          ? "session launch was superseded by a replacement"
+          : "session launch was cancelled before provider startup",
+        "COMMAND_CANCELLED",
+      );
       return false;
     }
     // Worktree setup has RESOLVED (created, or one of the in-place fallbacks above) — unblock
     // Files/shells root resolution in the same patch that records the outcome.
     meta.worktreePending = false;
-    if (worktree) {
-      meta.worktreePath = worktree.path;
-      meta.worktreeBranch = worktree.branch;
-      const worktrees = worktreeIdentity?.source === "legacy"
-        ? meta.worktrees
-        : this.attributedWorktrees(meta).filter((item) => item.path !== worktree.path);
-      if (worktreeIdentity && worktreeIdentity.source !== "legacy") worktrees?.push(worktreeIdentity);
-      meta.worktrees = worktrees;
-      this.store.patchMeta(spec.sessionId, {
-        worktreePath: worktree.path,
-        worktreeBranch: worktree.branch,
-        worktrees,
-        worktreePending: false,
-      });
-      this.emitStatus(spec.sessionId, "starting", undefined, worktree.path);
-    } else {
-      this.store.patchMeta(spec.sessionId, { worktreePending: false });
+    let launchStateFinalized = false;
+    await this.runWorktreeOperation(spec.sessionId, async () => {
+      const latest = this.store.readMeta(spec.sessionId);
+      if (!latest || !this.launchIsCurrent(spec.sessionId, launchGeneration)) {
+        return;
+      }
+      const materializedWorktree = worktree;
+      const materializedIdentity = worktreeIdentity;
+      const latestSelection = latest.worktreePath
+        ? this.attributedWorktreeForPath(latest, latest.worktreePath)
+        : undefined;
+      const selectionChanged = !!latestSelection && (!worktree ||
+        !sameWorktreePath(latest.context, latestSelection.path, worktree.path));
+      if (selectionChanged) {
+        // request/attach/select completed while this launch was preparing its prior target. That
+        // mutation is authoritative for the provider cwd; retain any separately materialized
+        // legacy tree in inventory so session deletion can still reap it.
+        worktree = {
+          path: latestSelection.path,
+          branch: latestSelection.branch,
+          created: false,
+        };
+        worktreeIdentity = latestSelection;
+      }
+
+      let worktrees = [...(latest.worktrees ?? [])];
+      const mergeIdentity = (identity: SessionWorktreeView | undefined) => {
+        if (!identity) return;
+        worktrees = worktrees.filter((item) => !sameWorktreePath(latest.context, item.path, identity.path));
+        worktrees.push(identity);
+      };
+      if (selectionChanged && materializedWorktree && materializedIdentity) {
+        mergeIdentity({ ...materializedIdentity, path: materializedWorktree.path });
+      }
+      if (worktreeIdentity?.source !== "legacy") mergeIdentity(worktreeIdentity);
+
+      if (worktree) {
+        meta.worktreePath = worktree.path;
+        meta.worktreeBranch = worktree.branch;
+        meta.worktrees = worktrees;
+        this.store.patchMeta(spec.sessionId, {
+          worktreePath: worktree.path,
+          worktreeBranch: worktree.branch,
+          worktrees,
+          worktreePending: false,
+        });
+      } else {
+        meta.worktreePath = null;
+        meta.worktrees = worktrees;
+        this.store.patchMeta(spec.sessionId, { worktrees, worktreePending: false });
+      }
+      launchStateFinalized = true;
+    });
+    if (!launchStateFinalized) {
+      const superseded = this.launchWasSuperseded(spec.sessionId, launchGeneration);
+      const deleted = this.deleted.has(spec.sessionId) || this.deleting.has(spec.sessionId) ||
+        this.store.isDeleted(spec.sessionId);
+      if (worktree && (worktreeOwnedByLaunch || (deleted && worktreeIdentity?.source !== "attached"))) {
+        const cleanup = launchWorktreeCleanup();
+        this.cleanupJournal.add(cleanup);
+        await this.reapWorktree(cleanup, worktreeOwnedByLaunch && !superseded);
+      }
+      if (priorResumeId && !superseded) this.store.releaseLock(spec.sessionId, this.lockOwner);
+      durable?.failed(
+        superseded
+          ? "session launch was superseded by a replacement"
+          : "session launch was cancelled before provider startup",
+        "COMMAND_CANCELLED",
+      );
+      return false;
     }
+    if (worktree) this.emitStatus(spec.sessionId, "starting", undefined, worktree.path);
 
     // acquireAdmission makes the immediate admit-or-queue decision synchronously. Publish
     // materialization after that durable decision but before waiting for capacity or constructing
@@ -2671,6 +2835,16 @@ export class SessionManager {
       return false;
     }
 
+    const worktreeLeaseOwner = worktree
+      ? `${this.lockOwner}:provider:${launchGeneration}:${randomUUID()}`
+      : undefined;
+    if (worktreeLeaseOwner && !this.store.acquireWorktreeLease(sessionId, worktreeLeaseOwner)) {
+      await this.cancelNewCloudHandoff(meta, hadCloudHandoffBeforeLaunch, "session worktree is active on another runner", launchGeneration);
+      this.emitEvent(sessionId, { kind: "error", message: "session worktree is active on another runner" });
+      this.emitStatus(sessionId, "idle");
+      return false;
+    }
+
     let client: Driver;
     try {
       this.providerHomeLeases?.acquire({
@@ -2801,6 +2975,7 @@ export class SessionManager {
       },
       );
     } catch (error) {
+      if (worktreeLeaseOwner) this.store.releaseWorktreeLease(sessionId, worktreeLeaseOwner);
       await this.cancelNewCloudHandoff(meta, hadCloudHandoffBeforeLaunch, "driver construction failed", launchGeneration);
       this.emitEvent(sessionId, { kind: "error", message: `agent process could not be created: ${errText(error)}` });
       this.emitStatus(sessionId, "failed", errText(error));
@@ -2823,6 +2998,7 @@ export class SessionManager {
       repoPath: meta.repoPath,
       cwd,
       worktree,
+      worktreeLeaseOwner,
       context: meta.context,
       status: "starting",
       providerReady: false,
@@ -2869,7 +3045,7 @@ export class SessionManager {
           !this.launchIsCurrent(sessionId, launchGeneration)) {
         const deleted = !this.store.has(sessionId);
         client.dispose();
-        if (this.active.get(sessionId) === entry) this.active.delete(sessionId);
+        this.deleteActiveSession(sessionId, entry);
         if (deleted) await this.cancelNewCloudHandoff(meta, hadCloudHandoffBeforeLaunch, "session was deleted during driver initialization", launchGeneration);
         return false;
       }
@@ -2878,7 +3054,7 @@ export class SessionManager {
           !this.launchIsCurrent(sessionId, launchGeneration)) {
         const deleted = !this.store.has(sessionId);
         client.dispose();
-        if (this.active.get(sessionId) === entry) this.active.delete(sessionId);
+        this.deleteActiveSession(sessionId, entry);
         if (deleted) await this.cancelNewCloudHandoff(meta, hadCloudHandoffBeforeLaunch, "session was deleted during provider session creation", launchGeneration);
         return false;
       }
@@ -2928,13 +3104,13 @@ export class SessionManager {
     } catch (err) {
       if (!this.launchIsCurrent(sessionId, launchGeneration)) {
         client.dispose();
-        if (this.active.get(sessionId) === entry) this.active.delete(sessionId);
+        this.deleteActiveSession(sessionId, entry);
         await this.cancelNewCloudHandoff(meta, hadCloudHandoffBeforeLaunch, "session launch was cancelled during driver initialization", launchGeneration);
         return false;
       }
       if (entry.historyIntegrityFailure) {
         client.dispose();
-        if (this.active.get(sessionId) === entry) this.active.delete(sessionId);
+        this.deleteActiveSession(sessionId, entry);
         await this.cancelNewCloudHandoff(
           meta,
           hadCloudHandoffBeforeLaunch,
@@ -2952,7 +3128,7 @@ export class SessionManager {
         });
         this.emitStatus(sessionId, "input_required", `${providerDisplayName(meta.driver)} authentication is required`);
         client.dispose();
-        if (this.active.get(sessionId) === entry) this.active.delete(sessionId);
+        this.deleteActiveSession(sessionId, entry);
         await this.cancelNewCloudHandoff(meta, hadCloudHandoffBeforeLaunch, "provider authentication is required", launchGeneration);
         return false;
       }
@@ -2968,7 +3144,7 @@ export class SessionManager {
       if (!this.emitEvent(sessionId, { kind: "error", message: `agent init failed: ${errText(err)}` })) {
         const deleted = !this.store.has(sessionId);
         client.dispose();
-        if (this.active.get(sessionId) === entry) this.active.delete(sessionId);
+        this.deleteActiveSession(sessionId, entry);
         if (deleted) await this.cancelNewCloudHandoff(meta, hadCloudHandoffBeforeLaunch, "session was deleted while driver initialization failed", launchGeneration);
         return false;
       }
@@ -2978,7 +3154,7 @@ export class SessionManager {
         this.emitStatus(sessionId, "failed", errText(err));
       }
       client.dispose();
-      if (this.active.get(sessionId) === entry) this.active.delete(sessionId);
+      this.deleteActiveSession(sessionId, entry);
       await this.cancelNewCloudHandoff(meta, hadCloudHandoffBeforeLaunch, "driver initialization failed", launchGeneration);
       return false;
     }
@@ -5118,9 +5294,17 @@ export class SessionManager {
         dataDir: this.dataDir,
         ownerHash: this.runnerOwnerHash,
       });
+      const worktreeId = this.checkpointWorktreeId(meta, entry.worktree.path);
       await withGitExecutionContext(
         entry.context,
-        () => anchorForkRef(entry.worktree!.path, sessionId, turn, tree, this.checkpointOwnerHash(meta)),
+        () => anchorForkRef(
+          entry.worktree!.path,
+          sessionId,
+          turn,
+          tree,
+          this.checkpointOwnerHash(meta),
+          worktreeId,
+        ),
       );
       // Record the point BEFORE the visible event. A crash between the two leaves no button
       // (safe); event-first would leave a durable button whose required point was lost.
@@ -5128,7 +5312,7 @@ export class SessionManager {
       this.store.patchMeta(sessionId, {
         forkPoints: {
           ...(meta.forkPoints ?? {}),
-          [String(turn)]: { agentTurnId, tree, baseCommit, eventSeq },
+          [String(turn)]: { agentTurnId, tree, baseCommit, eventSeq, worktreeId },
         },
       });
       const event = this.emitEvent(sessionId, { kind: "conversation_checkpoint", turn });
@@ -5137,7 +5321,7 @@ export class SessionManager {
         this.store.patchMeta(sessionId, {
           forkPoints: {
             ...(latest?.forkPoints ?? {}),
-            [String(turn)]: { agentTurnId, tree, baseCommit, eventSeq: event.seq },
+            [String(turn)]: { agentTurnId, tree, baseCommit, eventSeq: event.seq, worktreeId },
           },
         });
       }
@@ -5156,9 +5340,13 @@ export class SessionManager {
       const current = this.store.readMeta(sessionId);
       if (current?.turnCount === checkpoint.turn && current.lastTurnBaseTree === checkpoint.tree) {
         try {
+          const checkpointWorktreeIds = { ...(current.checkpointWorktreeIds ?? {}) };
+          if (checkpoint.priorWorktreeId === undefined) delete checkpointWorktreeIds[String(checkpoint.turn)];
+          else checkpointWorktreeIds[String(checkpoint.turn)] = checkpoint.priorWorktreeId;
           this.store.patchMeta(sessionId, {
             turnCount: checkpoint.priorTurnCount,
             lastTurnBaseTree: checkpoint.priorLastTurnBaseTree,
+            checkpointWorktreeIds,
           });
         } catch (error) {
           this.log(`command checkpoint accounting rollback failed for ${sessionId}: ${errText(error)}`);
@@ -5169,8 +5357,21 @@ export class SessionManager {
     if (!checkpoint.anchored || !entry.worktree) return;
     try {
       await withGitExecutionContext(entry.context, () => checkpoint.priorTurnRef
-        ? anchorTurnRef(entry.worktree!.path, sessionId, checkpoint.turn, checkpoint.priorTurnRef!, checkpoint.ownerHash)
-        : deleteTurnRef(entry.worktree!.path, sessionId, checkpoint.turn, checkpoint.ownerHash));
+        ? anchorTurnRef(
+          entry.worktree!.path,
+          sessionId,
+          checkpoint.turn,
+          checkpoint.priorTurnRef!,
+          checkpoint.ownerHash,
+          checkpoint.worktreeId,
+        )
+        : deleteTurnRef(
+          entry.worktree!.path,
+          sessionId,
+          checkpoint.turn,
+          checkpoint.ownerHash,
+          checkpoint.worktreeId,
+        ));
       checkpoint.anchored = false;
     } catch (error) {
       this.log(`command checkpoint ref rollback failed for ${sessionId} turn ${checkpoint.turn}: ${errText(error)}`);
@@ -5284,7 +5485,15 @@ export class SessionManager {
       }
       const checkpointOwnerHash = this.checkpointOwnerHash(checkpointMeta);
       const turn = (checkpointMeta.turnCount ?? 0) + 1;
-      this.store.patchMeta(sessionId, { lastTurnBaseTree: snap, turnCount: turn });
+      const worktreeId = this.checkpointWorktreeId(checkpointMeta, entry.worktree.path);
+      this.store.patchMeta(sessionId, {
+        lastTurnBaseTree: snap,
+        turnCount: turn,
+        checkpointWorktreeIds: {
+          ...(checkpointMeta.checkpointWorktreeIds ?? {}),
+          [String(turn)]: worktreeId,
+        },
+      });
       // Per-turn CHECKPOINT (T3-style rewind target): anchor the pre-turn tree under a real
       // ref (gc can't prune it, unlike the dangling lastTurnBaseTree) and record it on the
       // timeline so the UI can offer "rewind files to before this turn". Best-effort: a
@@ -5292,7 +5501,7 @@ export class SessionManager {
       if (snap) {
         try {
           await withGitExecutionContext(entry.context, () => anchorTurnRef(
-            entry.worktree!.path, sessionId, turn, snap!, checkpointOwnerHash,
+            entry.worktree!.path, sessionId, turn, snap!, checkpointOwnerHash, worktreeId,
           ));
           this.emitEvent(sessionId, { kind: "checkpoint", turn, tree: snap });
         } catch (err) {
@@ -5496,11 +5705,18 @@ export class SessionManager {
         return;
       }
       const turn = (priorMeta.turnCount ?? 0) + 1;
+      const worktreeId = this.checkpointWorktreeId(priorMeta, entry.worktree.path);
       let priorTurnRef: string | null;
       try {
         priorTurnRef = await withGitExecutionContext(
           entry.context,
-          () => readTurnRef(entry.worktree!.path, sessionId, turn, this.checkpointOwnerHash(priorMeta)),
+          () => readTurnRef(
+            entry.worktree!.path,
+            sessionId,
+            turn,
+            this.checkpointOwnerHash(priorMeta),
+            worktreeId,
+          ),
         );
       } catch (error) {
         const detail = `checkpoint refs could not be verified: ${errText(error)}`;
@@ -5517,6 +5733,8 @@ export class SessionManager {
         priorLastTurnBaseTree: priorMeta.lastTurnBaseTree,
         priorTurnRef,
         ownerHash: this.checkpointOwnerHash(priorMeta),
+        worktreeId,
+        priorWorktreeId: priorMeta.checkpointWorktreeIds?.[String(turn)],
         anchored: false,
         accountingApplied: false,
       };
@@ -5524,7 +5742,14 @@ export class SessionManager {
         try {
           await withGitExecutionContext(
             entry.context,
-            () => anchorTurnRef(entry.worktree!.path, sessionId, turn, snapshot!, this.checkpointOwnerHash(priorMeta)),
+            () => anchorTurnRef(
+              entry.worktree!.path,
+              sessionId,
+              turn,
+              snapshot!,
+              this.checkpointOwnerHash(priorMeta),
+              worktreeId,
+            ),
           );
           checkpoint.anchored = true;
         } catch (error) {
@@ -5532,7 +5757,13 @@ export class SessionManager {
           try {
             checkpoint.anchored = await withGitExecutionContext(
               entry.context,
-              () => readTurnRef(entry.worktree!.path, sessionId, turn, checkpoint?.ownerHash),
+              () => readTurnRef(
+                entry.worktree!.path,
+                sessionId,
+                turn,
+                checkpoint?.ownerHash,
+                worktreeId,
+              ),
             ) === snapshot;
           } catch (error) {
             // git transport failures are soft reads, so a thrown read here is a durable namespace
@@ -5632,6 +5863,10 @@ export class SessionManager {
         this.store.patchMeta(sessionId, {
           lastTurnBaseTree: checkpoint.tree,
           turnCount: checkpoint.turn,
+          checkpointWorktreeIds: {
+            ...(this.store.readMeta(sessionId)?.checkpointWorktreeIds ?? {}),
+            [String(checkpoint.turn)]: checkpoint.worktreeId,
+          },
         });
       } catch (error) {
         await this.rollbackPreparedCommandCheckpoint(sessionId, entry, checkpoint);
@@ -5775,6 +6010,15 @@ export class SessionManager {
     }
     const point = source.forkPoints?.[String(turn)];
     if (!point) return { ok: false, error: `turn ${turn} has no provider fork checkpoint` };
+    const sourceWorktree = this.attributedWorktreeForPath(source, source.worktreePath);
+    if (!sourceWorktree) return { ok: false, error: "the active worktree has no durable session identity" };
+    if (point.worktreeId) {
+      if (point.worktreeId !== sourceWorktree.id) {
+        return { ok: false, error: `turn ${turn} belongs to a different session worktree` };
+      }
+    } else if (this.attributedWorktrees(source).length !== 1) {
+      return { ok: false, error: `turn ${turn} predates worktree identity and cannot be forked after a worktree switch` };
+    }
     if (source.driver === "claude-code" && turn !== source.turnCount) {
       return { ok: false, error: "Claude CLI can only fork its current transcript at the matching turn checkpoint" };
     }
@@ -5915,7 +6159,7 @@ export class SessionManager {
         this.runnerOwnerHash,
       );
       await withGitExecutionContext(source.context, () => anchorForkRef(
-        worktree!.path, targetSessionId, turn, point.tree, targetCheckpointOwner,
+        worktree!.path, targetSessionId, turn, point.tree, targetCheckpointOwner, "legacy",
       ));
       const now = Date.now();
       const target: SessionMeta = {
@@ -5923,6 +6167,8 @@ export class SessionManager {
         sessionId: targetSessionId,
         title,
         worktreePath: worktree.path,
+        worktreeBranch: worktree.branch,
+        worktrees: undefined,
         agentSessionId: forkedThreadId,
         status: "idle",
         tokensIn: 0,
@@ -5942,9 +6188,10 @@ export class SessionManager {
         ...(targetCheckpointOwner ? { checkpointRefVersion: 2 as const } : {}),
         lastTurnBaseTree: point.tree,
         turnCount: turn,
+        checkpointWorktreeIds: { [String(turn)]: "legacy" },
         // Inherited events are re-sequenced in the child, so the parent's eventSeq is not valid
         // here. The loop below records the child's own checkpoint coordinate.
-        forkPoints: { [String(turn)]: { ...point, eventSeq: undefined } },
+        forkPoints: { [String(turn)]: { ...point, worktreeId: "legacy", eventSeq: undefined } },
         seq: 0,
         createdAt: now,
         updatedAt: now,
@@ -5969,7 +6216,7 @@ export class SessionManager {
       }
       if (!targetCheckpointSeq) throw new Error(`turn ${turn} checkpoint could not be copied into the fork`);
       this.store.patchMeta(targetSessionId, {
-        forkPoints: { [String(turn)]: { ...point, eventSeq: targetCheckpointSeq } },
+        forkPoints: { [String(turn)]: { ...point, worktreeId: "legacy", eventSeq: targetCheckpointSeq } },
       });
       this.store.appendEvent(targetSessionId, { kind: "conversation_forked", sourceSessionId, turn }, now);
       this.store.flush(targetSessionId);
@@ -6166,7 +6413,9 @@ export class SessionManager {
       providerAuthBlock: undefined,
       providerAuthRetryAttemptedRecoveryId: undefined,
     });
-    this.active.delete(sessionId);
+    // Keep the cross-process cwd proof until the retiring provider has actually been disposed.
+    // `closing` supplies the matching in-process fence while the graceful close is pending.
+    this.deleteActiveSession(sessionId, entry, false);
     this.rejectQueued(entry.queue, "session stopped before queued command started");
     entry.queue.length = 0;
     this.emitQueue(sessionId); // clear any queued prompts from the dashboard
@@ -6174,12 +6423,14 @@ export class SessionManager {
       let promise: Promise<void>;
       promise = this.closeAndDispose(sessionId, entry.client, true).finally(() => {
         if (this.closing.get(sessionId)?.promise === promise) this.closing.delete(sessionId);
+        this.releaseActiveWorktreeLease(entry);
         this.releaseAdmission(sessionId);
         this.clearLock(sessionId);
       });
       this.closing.set(sessionId, { client: entry.client, promise });
     } else {
       entry.client.dispose({ forceImmediate: true });
+      this.releaseActiveWorktreeLease(entry);
       this.releaseAdmission(sessionId);
       this.clearLock(sessionId);
     }
@@ -6245,7 +6496,7 @@ export class SessionManager {
       const entry = this.active.get(sessionId);
       this.clearSteeringState(sessionId, "session was deleted before steering settled");
       if (entry) {
-        this.active.delete(sessionId);
+        this.deleteActiveSession(sessionId, entry);
         this.rejectQueued(entry.queue, "session was deleted before queued command started");
         entry.queue.length = 0;
       }
@@ -6475,12 +6726,25 @@ export class SessionManager {
       if (!meta) return { ok: false, error: "session not found on this box" };
       const root = meta.worktreePath;
       if (!root) return { ok: false, error: "rewind requires a worktree session (in-place sessions have no checkpoints)" };
+      const activeWorktree = this.attributedWorktreeForPath(meta, root);
+      if (!activeWorktree) return { ok: false, error: "the active worktree has no durable session identity" };
+      const checkpointWorktreeId = meta.checkpointWorktreeIds?.[String(turn)];
+      if (checkpointWorktreeId) {
+        if (checkpointWorktreeId !== activeWorktree.id) {
+          return { ok: false, error: `turn ${turn} belongs to a different session worktree` };
+        }
+      } else if (this.attributedWorktrees(meta).length !== 1) {
+        return {
+          ok: false,
+          error: `turn ${turn} predates worktree identity and cannot be restored after a worktree switch`,
+        };
+      }
       if (!this.store.acquireLock(sessionId, this.lockOwner)) {
         return { ok: false, error: "another runner is driving this session" };
       }
       try {
         const tree = await withGitExecutionContext(meta.context, () => readTurnRef(
-          root, sessionId, turn, this.checkpointOwnerHash(meta),
+          root, sessionId, turn, this.checkpointOwnerHash(meta), checkpointWorktreeId,
         ));
         if (!tree) return { ok: false, error: `no checkpoint exists for turn ${turn}` };
         await withGitExecutionContext(meta.context, () => restoreWorktreeToTree(root, tree));
@@ -6650,19 +6914,19 @@ export class SessionManager {
       meta?.driver === "codex-app-server" && !!meta.agentSessionId && entry.status !== "stopped";
     if (entry.historyIntegrityFailure) {
       const queued = entry.queue.splice(0);
-      this.active.delete(sessionId);
+      this.deleteActiveSession(sessionId, entry);
       this.rejectQueued(queued, entry.historyIntegrityFailure);
       return; // never append an exit event or overwrite the latched integrity failure
     }
     if (entry.authenticationBlocked) {
       this.restoreUnsubmittedPromotions(sessionId, entry);
       if (!this.emitEvent(sessionId, { kind: "stderr", text: `agent process exited (code ${code})` })) {
-        this.active.delete(sessionId);
+        this.deleteActiveSession(sessionId, entry);
         return;
       }
       const queued = entry.queue.splice(0);
       const hadQueueProjection = queued.length > 0 || this.reservedPromotions(entry).size > 0;
-      this.active.delete(sessionId);
+      this.deleteActiveSession(sessionId, entry);
       if (hadQueueProjection) this.emitQueue(sessionId);
       if (queued.length) {
         if (meta?.driver === "codex-app-server" && meta.agentSessionId) {
@@ -6683,14 +6947,14 @@ export class SessionManager {
       // Keep the entry installed until this append completes: if it is the first integrity
       // failure, failHistoryIntegrity must still own/cancel this session and its durable queue.
       if (!this.emitEvent(sessionId, { kind: "stderr", text: `agent process exited (code ${code})` })) {
-        this.active.delete(sessionId);
+        this.deleteActiveSession(sessionId, entry);
         return;
       }
       const queued = entry.queue.splice(0);
       // Queued prompts died with the entry — clear the dashboards' queue overlay, or they
       // keep offering cancel buttons for prompts that can never run (cancel would no-op).
       const hadQueueProjection = queued.length > 0 || this.reservedPromotions(entry).size > 0;
-      this.active.delete(sessionId);
+      this.deleteActiveSession(sessionId, entry);
       if (hadQueueProjection) this.emitQueue(sessionId);
       if (recoverableAppServer) {
         // A crashed turn may already have reached turn/start, so never replay it. The entries
@@ -6709,7 +6973,7 @@ export class SessionManager {
         this.rejectQueued(queued, "agent exited before queued command started");
       }
     } else {
-      this.active.delete(sessionId);
+      this.deleteActiveSession(sessionId, entry);
     }
   }
 
@@ -6729,7 +6993,7 @@ export class SessionManager {
       this.rejectQueued(queued, detail);
       // runPrompt exclusively owns the dequeued lifecycle. Removing the active entry makes that
       // path terminalize it as uncertain after provider unwind; failing it here would double-settle.
-      this.active.delete(sessionId);
+      this.deleteActiveSession(sessionId, entry);
       try {
         this.store.patchMeta(sessionId, { status: "failed", pendingApproval: null });
         this.send({ type: "session_status", sessionId, status: "failed", detail });
@@ -6816,7 +7080,7 @@ export class SessionManager {
         }
         if (recoveryEntry && this.active.get(sessionId) === recoveryEntry) {
           recoveryEntry.client.dispose({ forceImmediate: true });
-          this.active.delete(sessionId);
+          this.deleteActiveSession(sessionId, recoveryEntry);
           this.releaseAdmission(sessionId);
           this.store.releaseLock(sessionId, this.lockOwner);
         }

@@ -2,15 +2,17 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { mkdir, rm, rmdir, statfs } from "node:fs/promises";
 import {
   closeSync,
   constants,
   fsyncSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -363,13 +365,26 @@ export async function createRequestedWorktree(
     ? `${boundary}/${requestedSlot(branch)}`
     : join(boundary, requestedSlot(branch));
   const listed = await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]);
-  const matching = parseWorktreePorcelain(listed).find((entry) => sameContextPath(context, entry.path, path));
+  const matching = parseWorktreePorcelain(listed).find((entry) => sameWorktreePath(context, entry.path, path));
   if (matching) {
     if (matching.branch === branch) {
-      return { path, branch, baseRef, baseCommit, attached: false, created: false };
+      return { path: matching.path, branch, baseRef, baseCommit, attached: false, created: false };
     }
     throw new Error("requested worktree slot is already registered with different Git coordinates");
   }
+  // Never delete the deterministic leaf while the requested branch exists. Git may have
+  // canonicalized a symlinked path differently from the runner; a branch/registration collision is
+  // therefore ambiguity, not proof that the leaf is an abandoned session directory.
+  if (parseWorktreePorcelain(listed).some((entry) => entry.branch === branch)) {
+    throw new Error("requested worktree branch is already registered at a different path");
+  }
+  const branchRef = `refs/heads/${branch}`;
+  const existingBranch = (await command(
+    context,
+    repoPath,
+    ["for-each-ref", "--format=%(refname)", branchRef],
+  )).trim();
+  if (existingBranch === branchRef) throw new Error("requested worktree branch already exists");
   await removeExternalDirectory(context, path, options);
   await command(context, repoPath, ["worktree", "add", "-b", branch, path, baseCommit], 120_000);
   return { path, branch, baseRef, baseCommit, attached: false, created: true };
@@ -396,24 +411,38 @@ export async function fetchRemoteDefaultBase(
   return `${remote}/${branch}`;
 }
 
-interface ListedWorktree { path: string; head: string; branch: string | null }
+interface ListedWorktree {
+  path: string;
+  head: string | null;
+  branch: string | null;
+  /** Git documents the main worktree as the first porcelain record, including for bare repos. */
+  primary: boolean;
+  bare: boolean;
+}
 
 function parseWorktreePorcelain(value: string): ListedWorktree[] {
-  return value.split("\0\0").flatMap((block) => {
+  return value.split("\0\0").flatMap((block, index) => {
     const fields = block.split("\0");
     const path = fields.find((field) => field.startsWith("worktree "))?.slice(9);
-    const head = fields.find((field) => field.startsWith("HEAD "))?.slice(5);
+    const head = fields.find((field) => field.startsWith("HEAD "))?.slice(5) ?? null;
     const branchRef = fields.find((field) => field.startsWith("branch "))?.slice(7);
-    if (!path || !head) return [];
-    return [{ path, head, branch: branchRef?.startsWith("refs/heads/") ? branchRef.slice(11) : null }];
+    if (!path) return [];
+    const bare = fields.includes("bare");
+    return [{
+      path,
+      head,
+      branch: branchRef?.startsWith("refs/heads/") ? branchRef.slice(11) : null,
+      primary: index === 0 || bare,
+      bare,
+    }];
   });
 }
 
 function pathWithin(context: AgentContext, candidate: string, root: string): boolean {
-  if (sameContextPath(context, candidate, root)) return true;
+  if (sameWorktreePath(context, candidate, root)) return true;
   if (context.kind === "wsl") return candidate.startsWith(root.replace(/\/$/u, "") + "/");
-  const normalizedCandidate = resolve(candidate).replace(/\\/gu, "/");
-  const normalizedRoot = resolve(root).replace(/\\/gu, "/");
+  const normalizedCandidate = canonicalNativePath(candidate).replace(/\\/gu, "/");
+  const normalizedRoot = canonicalNativePath(root).replace(/\\/gu, "/");
   const insensitive = process.platform === "win32";
   return (insensitive ? normalizedCandidate.toLowerCase() : normalizedCandidate)
     .startsWith((insensitive ? normalizedRoot.toLowerCase() : normalizedRoot) + "/");
@@ -435,12 +464,12 @@ export async function attachRequestedWorktree(
     throw new Error("worktree path is outside the runner's configured Project Locations");
   }
   const listed = parseWorktreePorcelain(await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]));
-  const match = listed.find((entry) => sameContextPath(context, entry.path, path));
+  const match = listed.find((entry) => sameWorktreePath(context, entry.path, path));
   if (!match) throw new Error("worktree path is not registered with the session repository");
-  if (match === listed[0]) {
+  if (match.primary) {
     throw new Error("the repository's primary workspace cannot be attached as a session worktree");
   }
-  if (!match.branch) throw new Error("a detached worktree cannot be attached to a session");
+  if (!match.branch || !match.head) throw new Error("a detached worktree cannot be attached to a session");
   const healthy = (await command(context, match.path, ["rev-parse", "--is-inside-work-tree"])).trim() === "true";
   if (!healthy) throw new Error("registered worktree is not healthy");
   return {
@@ -515,7 +544,7 @@ export async function createWorktree(repoPath: string, sessionId: string, option
     .split(/\n\s*\n/)
     .map((block) => block.split("\n").find((line) => line.startsWith("worktree "))?.slice(9).trim())
     .filter((candidate): candidate is string => !!candidate)
-    .some((candidate) => sameContextPath(context, candidate, path));
+    .some((candidate) => sameWorktreePath(context, candidate, path));
   if (registered) {
     try {
       if ((await command(context, path, ["rev-parse", "--is-inside-work-tree"])).trim() === "true") {
@@ -533,13 +562,34 @@ export async function createWorktree(repoPath: string, sessionId: string, option
   return { path, branch, created: true };
 }
 
-function sameContextPath(context: AgentContext, left: string, right: string): boolean {
+export function sameWorktreePath(context: AgentContext, left: string, right: string): boolean {
   if (context.kind === "wsl") return left.replace(/\/$/, "") === right.replace(/\/$/, "");
   const normalize = (value: string) => {
-    const normalized = resolve(value).replace(/\\/g, "/");
+    const normalized = canonicalNativePath(value).replace(/\\/g, "/");
     return process.platform === "win32" ? normalized.toLowerCase() : normalized;
   };
   return normalize(left) === normalize(right);
+}
+
+function canonicalNativePath(value: string): string {
+  const absolute = resolve(value);
+  let cursor = absolute;
+  const suffix: string[] = [];
+  try {
+    while (true) {
+      try {
+        return join(realpathSync.native(cursor), ...suffix.reverse());
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        const parent = dirname(cursor);
+        if ((code !== "ENOENT" && code !== "ENOTDIR") || parent === cursor) return absolute;
+        suffix.push(basename(cursor));
+        cursor = parent;
+      }
+    }
+  } catch {
+    return absolute;
+  }
 }
 
 export async function createWorktreeFromTree(
@@ -637,8 +687,8 @@ export async function discardWorktreeIfSafe(
     legacyPaths.push(await sessionPath(repoPath, sessionId, { ...options, legacyWslRoot: true }, false));
   }
   const runnerOwned = handle.source === "created"
-    ? pathWithin(context, handle.path, requestedBoundary) && !sameContextPath(context, handle.path, requestedBoundary)
-    : legacyPaths.some((path) => sameContextPath(context, handle.path, path));
+    ? pathWithin(context, handle.path, requestedBoundary) && !sameWorktreePath(context, handle.path, requestedBoundary)
+    : legacyPaths.some((path) => sameWorktreePath(context, handle.path, path));
   if (!runnerOwned) {
     return { removed: false, reason: "not_runner_owned" };
   }
@@ -648,7 +698,7 @@ export async function discardWorktreeIfSafe(
     const listed = parseWorktreePorcelain(
       await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]),
     );
-    const registered = listed.find((entry) => sameContextPath(context, entry.path, handle.path));
+    const registered = listed.find((entry) => sameWorktreePath(context, entry.path, handle.path));
     if (registered && registered.branch !== branch) return { removed: false, reason: "branch_changed" };
     if (!registered) {
       // A missing registration is not proof that the on-disk directory is disposable. Native can
@@ -753,13 +803,48 @@ async function removeExternalDirectory(context: AgentContext, path: string, opti
   if (context.kind === "wsl") {
     const prefix = root.replace(/\/$/, "") + "/";
     if (!path.startsWith(prefix) || path === root) throw new Error("refusing to remove a path outside the WSL worktree root");
+    const marker = await runContextCommand(
+      context,
+      "sh",
+      [
+        "-c",
+        'marker="$1/.git"; if [ -d "$marker" ] || [ -L "$marker" ]; then printf registered; ' +
+          'elif [ -f "$marker" ]; then gitdir=$(sed -n "s/^gitdir: //p" "$marker"); ' +
+          'if [ -z "$gitdir" ]; then printf registered; else case "$gitdir" in /*) ;; *) gitdir="$1/$gitdir" ;; esac; ' +
+          'if [ -e "$gitdir" ] || [ -L "$gitdir" ]; then printf registered; fi; fi; fi',
+        "sh",
+        path,
+      ],
+      { cwd: "/", timeoutMs: 8_000 },
+    );
+    if (marker.stdout === "registered") {
+      throw new Error("refusing to recursively remove a path that may still be a registered worktree");
+    }
     await runContextCommand(context, "rm", ["-rf", "--", path], { cwd: "/", timeoutMs: 120_000 });
     return;
   }
-  const absoluteRoot = resolve(root);
-  const absolutePath = resolve(path);
+  const absoluteRoot = canonicalNativePath(root);
+  const absolutePath = canonicalNativePath(path);
   if (!absolutePath.startsWith(absoluteRoot + sep) || absolutePath === absoluteRoot) {
     throw new Error("refusing to remove a path outside the native worktree root");
+  }
+  const markerPath = join(absolutePath, ".git");
+  try {
+    const marker = lstatSync(markerPath);
+    if (!marker.isFile() || marker.isSymbolicLink()) {
+      throw new Error("refusing to recursively remove a path that may still be a registered worktree");
+    }
+    const match = /^gitdir:\s*(.+)\s*$/mu.exec(readFileSync(markerPath, "utf8"));
+    if (!match) throw new Error("refusing to recursively remove a path with an unrecognized Git marker");
+    const gitDir = resolve(absolutePath, match[1]!);
+    try {
+      lstatSync(gitDir);
+      throw new Error("refusing to recursively remove a path that may still be a registered worktree");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
   await rm(absolutePath, { recursive: true, force: true });
 }

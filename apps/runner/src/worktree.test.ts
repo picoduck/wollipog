@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "./test-support/bounded-child-process.js";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isGitRepo, nativeRepositoryPathIsUnavailable, parseWorktreePullRequestState, removeWorktree, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, setStatfsForTests, WorktreeCleanupJournal } from "./worktree.js";
-import { randomUUID } from "node:crypto";
+import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isGitRepo, nativeRepositoryPathIsUnavailable, parseWorktreePullRequestState, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, setStatfsForTests, WorktreeCleanupJournal } from "./worktree.js";
+import { createHash, randomUUID } from "node:crypto";
 import { runContextCommand } from "./context-command.js";
 import { SessionStore } from "./session-store.js";
 import { SessionManager } from "./session-manager.js";
-import { setGitRunnerForTests, type GitRunOpts } from "./git-ops.js";
+import { anchorTurnRef, captureWorktreeTree, setGitRunnerForTests, type GitRunOpts } from "./git-ops.js";
 
 function haveGit(): boolean {
   try { execFileSync("git", ["--version"], { stdio: "ignore" }); return true; } catch { return false; }
@@ -165,6 +165,99 @@ test("requested worktree uses the explicit base and branch instead of primary ch
     }, { dataDir });
     assert.equal(reused.created, false);
     await removeWorktree(repo, handle, { dataDir });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("requested worktree reuse canonicalizes symlinked data roots without deleting live contents", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-requested-realpath-"));
+  const repo = join(root, "repo");
+  const realData = join(root, "real-data");
+  const aliasData = join(root, "alias-data");
+  try {
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    mkdirSync(realData);
+    symlinkSync(realData, aliasData, "dir");
+    const first = await createRequestedWorktree(repo, "s_realpath", {
+      baseRef: "HEAD",
+      branch: "fix/realpath-reuse",
+    }, { dataDir: aliasData });
+    const sentinel = join(first.path, "sentinel.txt");
+    writeFileSync(sentinel, "must survive idempotent registration\n");
+
+    const repeated = await createRequestedWorktree(repo, "s_realpath", {
+      baseRef: "HEAD",
+      branch: "fix/realpath-reuse",
+    }, { dataDir: realData });
+    assert.equal(repeated.created, false);
+    assert.equal(existsSync(sentinel), true);
+    assert.equal(execFileSync("git", ["-C", repeated.path, "rev-parse", "--show-toplevel"], {
+      encoding: "utf8",
+    }).trim(), repeated.path, "the returned coordinate is Git's canonical registered path");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("requested worktree creation never recursively removes a path registered by another repository", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-requested-live-path-"));
+  const repo = join(root, "repo");
+  const foreign = join(root, "foreign");
+  const dataDir = join(root, "data");
+  const branch = "fix/live-foreign-path";
+  try {
+    for (const path of [repo, foreign]) {
+      execFileSync("git", ["init", path]);
+      execFileSync("git", ["-C", path, "config", "user.email", "test@example.com"]);
+      execFileSync("git", ["-C", path, "config", "user.name", "Test"]);
+      execFileSync("git", ["-C", path, "commit", "--allow-empty", "-m", "base"]);
+    }
+    const boundary = await requestedWorktreeBoundary(repo, "s_foreign", { dataDir });
+    const slot = createHash("sha256").update(branch).digest("hex").slice(0, 16);
+    const target = join(boundary, slot);
+    execFileSync("git", ["-C", foreign, "worktree", "add", "-b", "foreign/live", target]);
+    const sentinel = join(target, "sentinel.txt");
+    writeFileSync(sentinel, "live foreign worktree\n");
+
+    await assert.rejects(createRequestedWorktree(repo, "s_foreign", {
+      baseRef: "HEAD",
+      branch,
+    }, { dataDir }), /may still be a registered worktree/);
+    assert.equal(existsSync(sentinel), true);
+    assert.equal(execFileSync("git", ["-C", target, "branch", "--show-current"], { encoding: "utf8" }).trim(),
+      "foreign/live");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("attach preserves a bare primary record while permitting its linked worktree", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-attach-bare-"));
+  const seed = join(root, "seed");
+  const bare = join(root, "repo.git");
+  const linked = join(root, "linked");
+  try {
+    execFileSync("git", ["init", seed]);
+    execFileSync("git", ["-C", seed, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", seed, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", seed, "commit", "--allow-empty", "-m", "base"]);
+    execFileSync("git", ["clone", "--bare", seed, bare]);
+    execFileSync("git", ["--git-dir", bare, "worktree", "add", "-b", "fix/bare-linked", linked, "HEAD"]);
+
+    const attached = await attachRequestedWorktree(bare, "s_bare", linked, {
+      dataDir: join(root, "data"),
+      allowedProjectPaths: [root],
+    });
+    assert.equal(attached.path, linked);
+    assert.equal(attached.branch, "fix/bare-linked");
+    await assert.rejects(attachRequestedWorktree(bare, "s_bare", bare, {
+      dataDir: join(root, "data"),
+      allowedProjectPaths: [root],
+    }), /primary workspace cannot be attached/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -399,6 +492,10 @@ test("concurrent requests retain every created branch and deletion leaves attach
     const reattachedCreated = await manager.attachWorktree("s_multi", first.worktree.path);
     assert.equal(reattachedCreated.worktree.source, "created",
       "re-attaching a runner-owned path preserves its destructive cleanup ownership");
+    execFileSync("git", ["-C", first.worktree.path, "switch", "-c", "fix/reattach-drift"]);
+    await assert.rejects(manager.attachWorktree("s_multi", first.worktree.path),
+      /branch changed since it was linked/);
+    execFileSync("git", ["-C", first.worktree.path, "switch", first.worktree.branch]);
     await manager.attachWorktree("s_multi", attachedPath);
     assert.equal(store.readMeta("s_multi")?.worktrees?.length, 3);
     await manager.selectWorktree("s_multi", first.worktree.path);
@@ -408,6 +505,19 @@ test("concurrent requests retain every created branch and deletion leaves attach
       "https://example.test/pull/2", "PR linkage stays bound to the Git action's exact worktree");
     assert.equal(store.readMeta("s_multi")?.worktrees?.find((item) => item.path === first.worktree.path)?.pullRequest,
       undefined);
+
+    writeFileSync(join(first.worktree.path, "first-only.txt"), "checkpoint from first worktree\n");
+    const firstTree = await captureWorktreeTree(first.worktree.path);
+    await anchorTurnRef(first.worktree.path, "s_multi", 1, firstTree, undefined, first.worktree.id);
+    store.patchMeta("s_multi", { checkpointWorktreeIds: { "1": first.worktree.id } });
+    await manager.selectWorktree("s_multi", second.worktree.path);
+    const secondSentinel = join(second.worktree.path, "second-only.txt");
+    writeFileSync(secondSentinel, "must not be overwritten by a first-worktree rewind\n");
+    const rewind = await manager.rewind("s_multi", 1);
+    assert.equal(rewind.ok, false);
+    assert.match(rewind.error ?? "", /belongs to a different session worktree/);
+    assert.equal(existsSync(secondSentinel), true);
+    await manager.selectWorktree("s_multi", first.worktree.path);
     const requestedBoundary = dirname(first.worktree.path);
 
     await manager.delete("s_multi");
@@ -526,6 +636,12 @@ test("terminal PR cleanup waits until the provider releases its exact cwd", { sk
       "terminal state is durable while cleanup waits for the live process");
 
     activeEntries.delete("s_active_pr");
+    const siblingStore = new SessionStore(join(dataDir, "sessions"));
+    assert.equal(siblingStore.acquireWorktreeLease("s_active_pr", "sibling-provider"), true);
+    await manager.reconcileWorktreePullRequests();
+    assert.equal(existsSync(active.worktree.path), true,
+      "a provider lease held through another store instance is also authoritative");
+    siblingStore.releaseWorktreeLease("s_active_pr", "sibling-provider");
     await manager.reconcileWorktreePullRequests();
     assert.equal(existsSync(active.worktree.path), false, "durable terminal state retries without another forge call");
     assert.equal(store.readMeta("s_active_pr")?.worktreePath, null);
@@ -723,6 +839,70 @@ test("restarting a worktree session reuses isolation instead of failing or orpha
     manager.stop("s_restart");
     await manager.delete("s_restart");
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("launch finalization cannot overwrite a worktree selected while launch is preparing", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-launch-worktree-race-"));
+  const repo = join(root, "repo");
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  let releaseFinalization = () => {};
+  try {
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const launchedCwds: string[] = [];
+    const factory = (_driver: unknown, launch: { cwd: string }) => {
+      launchedCwds.push(launch.cwd);
+      return {
+        pid: 1, initialize: async () => {}, newSession: async () => {},
+        prompt: async () => ({ stopReason: "end_turn" as const }), cancel: () => {}, dispose: () => {},
+        setConfig: () => {}, resolvePermission: () => false, agentSessionId: () => null,
+      };
+    };
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, factory as never, dataDir, 1);
+    const lane = manager as unknown as {
+      runWorktreeOperation: (sessionId: string, operation: () => Promise<unknown>) => Promise<unknown>;
+    };
+    const originalLane = lane.runWorktreeOperation.bind(manager);
+    let laneCalls = 0;
+    let finalizationReachedResolve!: () => void;
+    const finalizationReached = new Promise<void>((resolve) => { finalizationReachedResolve = resolve; });
+    const finalizationGate = new Promise<void>((resolve) => { releaseFinalization = resolve; });
+    lane.runWorktreeOperation = async (sessionId, operation) => {
+      laneCalls++;
+      if (laneCalls === 2) {
+        finalizationReachedResolve();
+        await finalizationGate;
+      }
+      return originalLane(sessionId, operation);
+    };
+
+    const spec = {
+      sessionId: "s_launch_race", workspaceId: "repo", workspacePath: repo, agentId: "claude",
+      command: "claude", args: [], env: {}, useWorktree: false, driver: "claude-code" as const,
+      context: { kind: "native" as const },
+    };
+    const launch = manager.start(spec);
+    await finalizationReached;
+    const selected = await manager.requestWorktree(spec.sessionId, {
+      baseRef: "HEAD",
+      branch: "fix/launch-race-selection",
+    });
+    await assert.rejects(manager.discardWorktree(spec.sessionId, selected.worktree.path),
+      /still being launched by a provider process/);
+    releaseFinalization();
+    assert.equal(await launch, true);
+    assert.equal(store.readMeta(spec.sessionId)?.worktreePath, selected.worktree.path);
+    assert.deepEqual(launchedCwds, [selected.worktree.path],
+      "provider construction uses the mutation lane's winning selection");
+  } finally {
+    releaseFinalization();
+    manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
   }
 });

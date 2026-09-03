@@ -474,6 +474,25 @@ test("lock: free→acquire, second owner blocked, release frees it", () => {
   }
 });
 
+test("worktree leases retain a live provider across store instances and release owner-safely", () => {
+  const { store: first, root } = tmpStore();
+  try {
+    first.create(meta());
+    const second = new SessionStore(root);
+    assert.equal(first.acquireWorktreeLease("s_abc", "provider:first"), true);
+    assert.equal(second.acquireWorktreeLease("s_abc", "cleanup:second"), false,
+      "a sibling process must treat the live provider PID as authoritative");
+    second.releaseWorktreeLease("s_abc", "cleanup:second");
+    assert.equal(second.acquireWorktreeLease("s_abc", "cleanup:third"), false,
+      "a non-owner release must not unlink the provider lease");
+    first.releaseWorktreeLease("s_abc", "provider:first");
+    assert.equal(second.acquireWorktreeLease("s_abc", "cleanup:second"), true);
+    second.releaseWorktreeLease("s_abc", "cleanup:second");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("deleted-session markers reap by age while crash-window rows and recent fences remain authoritative", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-store-tombstone-reap-"));
   try {

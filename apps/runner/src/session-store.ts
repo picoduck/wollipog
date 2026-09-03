@@ -188,9 +188,13 @@ export interface SessionMeta {
    * (refs/{wollipog,mam}/owners/<owner>/<sid>/turn-<n> for checkpointRefVersion 2).
    * Box-local like lastTurnBaseTree. */
   turnCount?: number;
+  /** Exact attributed worktree id for each anchored turn. New refs are nested under this identity;
+   * absent entries identify pre-multi-worktree checkpoints and are usable only while provenance is
+   * still unambiguous. Runner-local because it names repository ref layout. */
+  checkpointWorktreeIds?: Record<string, string>;
   /** Completed provider turns that can be forked, keyed by manager turn number. Box-local because
    * both ids name provider/repository objects owned by this runner. */
-  forkPoints?: Record<string, { agentTurnId: string; tree: string; baseCommit?: string; eventSeq?: number }>;
+  forkPoints?: Record<string, { agentTurnId: string; tree: string; baseCommit?: string; eventSeq?: number; worktreeId?: string }>;
   /** True once the one-shot index migration ran (or for sessions created on a post-PR-B build).
    * Absent = the worktree index may hold the old builds' add -A residue and needs a reset. */
   indexReset?: boolean;
@@ -486,6 +490,9 @@ export class SessionStore {
   }
   private lockPath(id: string): string {
     return join(this.dir(id), "lock");
+  }
+  private worktreeLeasePath(id: string): string {
+    return join(this.dir(id), "worktree-use.json");
   }
 
   private isHistoryFileName(file: string): boolean {
@@ -2568,6 +2575,64 @@ export class SessionStore {
       this.checkpointCache.delete(id);
     } catch {
       /* ignore — no lock file, or unreadable (racing removal) */
+    }
+  }
+
+  /** Cross-process lease for a provider cwd or a cleanup operation. Unlike the turn lock, this is
+   * held for the provider process lifetime. A crashed manager's lease is reclaimable only after its
+   * exact host PID is conclusively absent; PID reuse therefore fails closed by retaining the tree. */
+  acquireWorktreeLease(id: string, owner: string, pid = process.pid): boolean {
+    const path = this.worktreeLeasePath(id);
+    const record = JSON.stringify({ owner, pid });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let fd: number | undefined;
+      try {
+        fd = openSync(path, "wx", 0o600);
+        writeFileSync(fd, record);
+        closeSync(fd);
+        return true;
+      } catch (error) {
+        if (fd !== undefined) closeSync(fd);
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") return false;
+      }
+      let existingRaw: string;
+      let existing: { owner: string; pid: number };
+      try {
+        existingRaw = readFileSync(path, "utf8");
+        existing = JSON.parse(existingRaw) as { owner: string; pid: number };
+        if (existing.owner === owner) return true;
+        if (typeof existing.owner !== "string" || !Number.isSafeInteger(existing.pid) || existing.pid <= 0) {
+          return false;
+        }
+      } catch {
+        return false;
+      }
+      try {
+        process.kill(existing.pid, 0);
+        return false;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") return false;
+      }
+      try {
+        // The dead owner cannot refresh its record. Re-read before removal so a concurrently
+        // replaced lease is never unlinked by this stale observer.
+        if (readFileSync(path, "utf8") !== existingRaw) return false;
+        rmSync(path);
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  releaseWorktreeLease(id: string, owner: string): void {
+    const path = this.worktreeLeasePath(id);
+    try {
+      const record = JSON.parse(readFileSync(path, "utf8")) as { owner?: unknown };
+      if (record.owner !== owner) return;
+      rmSync(path);
+    } catch {
+      /* absent, unreadable, or concurrently replaced leases remain fail-closed */
     }
   }
 }
