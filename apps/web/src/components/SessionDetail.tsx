@@ -139,7 +139,7 @@ import {
 } from "../conversation-steering.js";
 import { SteeringReceipts } from "./SteeringReceipts.js";
 import { SessionCommandReceipts } from "./SessionCommandReceipts.js";
-import { ArrowUpIcon, ChevronLeftIcon, EditIcon, FolderSolidIcon, ImageIcon, MicIcon, MoreVerticalIcon, PlusIcon, StopTurnIcon } from "./Icons.js";
+import { ArrowUpIcon, ChevronLeftIcon, EditIcon, FolderSolidIcon, ImageIcon, MicIcon, MoreVerticalIcon, PlusIcon, RefreshIcon, StopTurnIcon } from "./Icons.js";
 import {
   DURABLE_COMMAND_ATTACHMENT_NOTICE,
   buildComposerCommandRegistry,
@@ -606,6 +606,7 @@ function SessionDetailLoaded({
   const [text, setText] = useState("");
   const draftDirty = useRef(false);
   const [busy, setBusy] = useState(false);
+  const [restartPending, setRestartPending] = useState(false);
   const [steeringBusy, setSteeringBusy] = useState(false);
   const [queuedEditBusy, setQueuedEditBusy] = useState(false);
   const [queuedEdit, setQueuedEdit] = useState<QueuedPromptEditState | null>(null);
@@ -876,6 +877,7 @@ function SessionDetailLoaded({
     composerDraftVersionRef.current += 1;
     commandSubmissionRetryRef.current = null;
     setBusy(false);
+    setRestartPending(false);
     setSteeringBusy(false);
     setQueueSteeringPending(new Set());
     setSteeringResolutionPending(new Map());
@@ -2135,6 +2137,25 @@ function SessionDetailLoaded({
   );
 
   const canSend = canPrompt && (text.trim().length > 0 || images.length > 0);
+  const restartFromComposer = useCallback(async () => {
+    if (session.status !== "stopped" || session.stopOperation?.status === "stop_failed" ||
+      !runnerOnline || busy || restartPending) return;
+    const generation = viewGenerationRef.current;
+    setError(null);
+    setBusy(true);
+    setRestartPending(true);
+    try {
+      loadSession(await api.restart(session.id));
+    } catch (cause) {
+      if (viewGenerationRef.current === generation) setError((cause as Error).message);
+    } finally {
+      if (viewGenerationRef.current === generation) {
+        setRestartPending(false);
+        setBusy(false);
+      }
+    }
+  }, [api, busy, loadSession, restartPending, runnerOnline, session.id, session.status,
+    session.stopOperation?.status]);
   const primaryComposerAction = composerPrimaryAction({
     canStopTurn,
     hasContent: text.length > 0 || images.length > 0,
@@ -3742,7 +3763,19 @@ function SessionDetailLoaded({
                       <MicIcon size={14} />
                     </button>
                   )}
-                  {primaryComposerAction === "send" ? (
+                  {session.status === "stopped" && session.stopOperation?.status !== "stop_failed" ? (
+                    <button
+                      type="button"
+                      className="send-btn"
+                      onPointerDown={(e) => e.preventDefault()}
+                      onClick={() => void restartFromComposer()}
+                      disabled={!runnerOnline || composerRequestBusy}
+                      title={restartPending ? "Restarting Session" : "Restart Session"}
+                      aria-label={restartPending ? "Restarting Session" : "Restart Session"}
+                    >
+                      {restartPending ? <Spinner /> : <RefreshIcon size={14} />}
+                    </button>
+                  ) : primaryComposerAction === "send" ? (
                     <button
                       className="send-btn"
                       /* Keep focus in the textarea, like the dictation button above. On a phone

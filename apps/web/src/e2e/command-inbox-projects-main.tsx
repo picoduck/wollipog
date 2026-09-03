@@ -202,6 +202,12 @@ function initialModel(): FixtureModel {
       },
     });
   }
+  if (SCENARIO === "composer-restart") {
+    Object.assign(initial.sessions.find((candidate) => candidate.id === "session-alpha")!, {
+      status: "stopped",
+      activeTurnId: null,
+    });
+  }
   if (SCENARIO === "git-visibility") {
     Object.assign(initial.sessions.find((candidate) => candidate.id === "session-alpha")!, {
       useWorktree: true,
@@ -329,6 +335,7 @@ let pendingCancelTurnSettlement: (() => void) | null = null;
 let deferNextPromptRequest = false;
 let pendingPromptSettlement: (() => void) | null = null;
 const promptRequests: PromptFixtureRequest[] = [];
+const restartRequests: string[] = [];
 const sessionCommandRequests: SessionCommandFixtureRequest[] = [];
 let failNextSessionCommandResponse = false;
 let deferNextSessionCommandResponse = false;
@@ -739,6 +746,15 @@ const client = {
       pendingApproval: null,
       updatedAt: value.updatedAt + 1,
     });
+    saveModel();
+    socket?.push({ type: "session_upsert", session: structuredClone(value) });
+    return structuredClone(value);
+  },
+  restart: async (id: string) => {
+    const value = model.sessions.find((candidate) => candidate.id === id);
+    if (!value) throw new Error("session not found");
+    restartRequests.push(id);
+    Object.assign(value, { status: "starting" as const, updatedAt: value.updatedAt + 1 });
     saveModel();
     socket?.push({ type: "session_upsert", session: structuredClone(value) });
     return structuredClone(value);
@@ -1217,6 +1233,7 @@ declare global {
       deferNextSteeringResult(): void;
       settleDeferredSteeringResult(result: SteeringFixtureResult): void;
       promptRequests(): PromptFixtureRequest[];
+      restartRequests(): string[];
       sessionCommandRequests(): SessionCommandFixtureRequest[];
       retitleRequests(): string[];
       deferNextRetitle(): void;
@@ -1386,6 +1403,7 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
     pendingSteeringSettlement(structuredClone(result));
   },
   promptRequests: () => structuredClone(promptRequests),
+  restartRequests: () => structuredClone(restartRequests),
   sessionCommandRequests: () => structuredClone(sessionCommandRequests),
   composerDraft: (id) => loadComposerDraft(id, "project-inbox-e2e"),
   failNextSessionCommandResponse() {
