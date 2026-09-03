@@ -2,7 +2,15 @@ import assert from "node:assert/strict";
 // This is the one test permitted to reach the raw API: it has to bound the module under test
 // with something that does not depend on the module under test. See GUARDRAIL_EXEMPT below.
 import { spawnSync as rawSpawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,17 +25,31 @@ import {
 } from "./bounded-child-process.js";
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
-// Build output, vendored dependencies, and Playwright artefacts hold no first-party tests, and
-// walking them is slow enough to matter on a suite this size.
-const SKIP_DIRECTORIES = new Set([
-  "node_modules",
-  "dist",
-  ".bin-build",
-  ".git",
-  "target",
-  "test-results",
-  "playwright-report",
-]);
+const SKIP_DIRECTORIES = new Set(["node_modules", "dist", ".bin-build"]);
+/**
+ * The subtrees the root `test` script globs: the `src` and `scripts` directories of every app and
+ * package, plus the top-level `scripts`. A file outside them is never run by the suite, so
+ * guarding it would be theatre.
+ *
+ * Walking REPO_ROOT wholesale instead is actively unsafe. `apps/web/src/desktop-bundle.test.ts`
+ * rebuilds `apps/web/dist-desktop-check` and `dist-web-check` with Vite's `--emptyOutDir` while
+ * the suite runs concurrently, so a recursive walk can list a directory that Vite deletes before
+ * the next `readdirSync` and die with an intermittent ENOENT that has nothing to do with spawns.
+ * Anchoring on `src` and `scripts` keeps the walk inside source that no test rewrites.
+ */
+function testRoots(): string[] {
+  const roots = [join(REPO_ROOT, "scripts")];
+  for (const group of ["apps", "packages"]) {
+    for (const entry of readdirSync(join(REPO_ROOT, group), { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      for (const subdirectory of ["src", "scripts"]) {
+        const candidate = join(REPO_ROOT, group, entry.name, subdirectory);
+        if (existsSync(candidate)) roots.push(candidate);
+      }
+    }
+  }
+  return roots;
+}
 const TEST_SUFFIXES = [".test.ts", ".test.tsx", ".test.mjs"];
 const MODULE_URL = new URL("./bounded-child-process.ts", import.meta.url).href;
 
@@ -39,8 +61,6 @@ function testFilesUnder(directory: string): string[] {
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
     if (SKIP_DIRECTORIES.has(entry.name)) continue;
     const path = join(directory, entry.name);
-    // The root test glob reaches apps/**/src/**/*.test.ts(x) AND apps/**/scripts/**/*.test.mjs,
-    // so scanning only src/*.test.ts would leave whole file patterns unguarded.
     if (entry.isDirectory()) found.push(...testFilesUnder(path));
     else if (TEST_SUFFIXES.some((suffix) => entry.name.endsWith(suffix))) found.push(path);
   }
@@ -287,9 +307,7 @@ function synchronousLoadOffenders(text: string): string[] {
     }
   }
 
-  let boundLoad = false;
   for (const match of text.matchAll(new RegExp(LOADED, "g"))) {
-    boundLoad = true;
     const names = importedNames(match[1]);
     if (names.length > 0) reasons.push(`require/import { ${names.join(", ")} }`);
     // A `default` binding is a whole-module load wearing a destructuring pattern.
@@ -300,9 +318,18 @@ function synchronousLoadOffenders(text: string): string[] {
   }
 
   // An unbound require()/import() still exposes everything, e.g. (await import(...)).spawnSync().
-  // Gated on a synchronous reference for the same reason as the bindings above.
-  if (!boundLoad && mentionsSynchronous(text) && new RegExp(LOADED_ANY, "g").test(text)) {
-    reasons.push("unbound require/import of child_process");
+  // Judge each occurrence by what it is used for rather than by anything file-wide. A file-wide
+  // flag fails in both directions: it excuses a genuine unbound synchronous load whenever some
+  // unrelated benign load happens to appear first, and it condemns the async
+  // `require("node:child_process").spawn(...)` strings that several tests embed as child scripts.
+  // A synchronous member access on the load itself is the only local evidence that it is one.
+  const SYNCHRONOUS_MEMBER = [...SYNCHRONOUS].join("|");
+  for (const loose of text.matchAll(new RegExp(LOADED_ANY, "g"))) {
+    const after = text.slice(loose.index + loose[0].length);
+    if (new RegExp(String.raw`^\s*\)*\s*\.\s*(?:${SYNCHRONOUS_MEMBER})\b`).test(after)) {
+      reasons.push("unbound require/import of child_process");
+      break;
+    }
   }
 
   return reasons;
@@ -314,7 +341,7 @@ test("runner tests take the synchronous spawns from this module, not node:child_
 
   const offenders: string[] = [];
 
-  for (const path of testFilesUnder(REPO_ROOT)) {
+  for (const path of testRoots().flatMap(testFilesUnder)) {
     const relative = repoRelative(path);
     if (GUARDRAIL_EXEMPT.has(relative)) continue;
     for (const reason of synchronousLoadOffenders(readFileSync(path, "utf8"))) {
@@ -347,6 +374,8 @@ test("the guardrail rejects every way of reaching the synchronous API", () => {
     "dynamic import whole module": `const cp = await import("node:child_process");\n${CALL}`,
     "require default destructure": `const { default: cp } = require("node:child_process");\n${CALL}`,
     "dynamic import default destructure": `const { default: cp } = await import("node:child_process");\n${CALL}`,
+    // A benign assigned load elsewhere in the file must not excuse this one.
+    "unbound require alongside a benign bound one": `const script = 'const { spawn } = require("node:child_process");';\nrequire("node:child_process").spawnSync("true");`,
     "dollar-signed default destructure": `const { default: $cp } = await import("node:child_process");\n${CALL}`,
     "dollar-signed static default alias": `import { default as $cp } from "node:child_process";\n${CALL}`,
     "dollar-signed whole module": `const $cp = require("node:child_process");\n${CALL}`,
@@ -357,6 +386,33 @@ test("the guardrail rejects every way of reaching the synchronous API", () => {
   for (const [shape, source] of Object.entries(rejected)) {
     assert.notDeepEqual(synchronousLoadOffenders(source), [], `${shape} slipped past the guardrail`);
   }
+});
+
+// synchronousLoadOffenders is pinned by the fixtures above, but the walk that feeds it is not:
+// narrowing it back to the runner subtree, or dropping an application, leaves the repository scan
+// green because the tree it scans is clean either way. Pin the breadth itself.
+test("the guardrail scans every area the test runner executes", () => {
+  const scanned = testRoots().flatMap(testFilesUnder).map(repoRelative);
+
+  for (const area of [
+    "apps/runner/src/",
+    "apps/web/src/",
+    "apps/control-plane/src/",
+    "packages/test-support/src/",
+    "scripts/",
+  ]) {
+    assert.ok(
+      scanned.some((path) => path.startsWith(area)),
+      `the guardrail no longer scans ${area}, so unbounded spawns there would go unnoticed`,
+    );
+  }
+
+  // The walk must stay out of build output: apps/web's bundle test deletes and rebuilds these
+  // while the suite runs, and racing them fails this file with an unrelated ENOENT.
+  assert.deepEqual(
+    scanned.filter((path) => path.includes("dist-desktop-check") || path.includes("dist-web-check")),
+    [],
+  );
 });
 
 test("the guardrail leaves the wrapper and the asynchronous forms alone", () => {
