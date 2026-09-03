@@ -2833,6 +2833,36 @@ textarea {
   font-size: var(--text-sm);
   font-weight: 600;
 }
+.queued-edit-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.queued-edit-reason {
+  color: var(--text-dim);
+  font-size: var(--text-xs);
+  font-weight: 400;
+}
+.queued-edit-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+}
+@media (max-width: 600px) {
+  .queued-edit-banner {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .queued-edit-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+  .queued-edit-actions .btn {
+    min-height: 44px;
+    white-space: normal;
+  }
+}
 .steering-receipts {
   display: grid;
   gap: 6px;

@@ -178,6 +178,7 @@ import {
 } from "../session-project-assignment.js";
 import { durableInboxProjectKey, INBOX_NO_PROJECT_SPLIT_KEY } from "../inbox.js";
 import { ChoiceCards, type ChoiceCardOption } from "./ui/ChoiceControls.js";
+import { reconcileQueuedEditRecovery } from "../queued-edit-recovery.js";
 
 const NO_IMAGE_MIME_TYPES: readonly string[] = [];
 const STOP_TURN_RETRY_MS = 8_000;
@@ -591,6 +592,7 @@ function SessionDetailLoaded({
   });
   const runner = useStoreSelector((s) => s.runners.get(session.runnerId));
   const runnerOnline = runner?.status === "online";
+  const snapshotLoaded = useStoreSelector((s) => s.snapshotLoaded);
   const stopBeforeArchiveSupported = useStoreSelector((s) => s.stopBeforeArchiveSupported);
   const richGitSupported = runnerSupportsProtocol(runner?.protocolVersion, "gitVisibility");
   const box = useStoreSelector((s) => [...s.boxes.values()].find((candidate) => candidate.runnerId === session.runnerId));
@@ -609,11 +611,13 @@ function SessionDetailLoaded({
   const [steeringBusy, setSteeringBusy] = useState(false);
   const [queuedEditBusy, setQueuedEditBusy] = useState(false);
   const [queuedEdit, setQueuedEdit] = useState<QueuedPromptEditState | null>(null);
+  const [queuedEditRecovered, setQueuedEditRecovered] = useState(false);
   const queuedEditRef = useRef<QueuedPromptEditState | null>(null);
   queuedEditRef.current = queuedEdit;
   useEffect(() => {
     setQueuedEdit(null);
     setQueuedEditBusy(false);
+    setQueuedEditRecovered(false);
   }, [sessionId]);
   const queueSteeringInFlightRef = useRef(new Set<string>());
   const steeringResolutionInFlightRef = useRef(new Set<string>());
@@ -970,6 +974,7 @@ function SessionDetailLoaded({
     const restored = cloneQueuedPromptEditRecovery(recovery);
     queuedEditRef.current = restored.edit;
     setQueuedEdit(restored.edit);
+    setQueuedEditRecovered(true);
     setQueuedEditBusy(pending);
     if (!preserveDraft) {
       draftState.current = restored.draft;
@@ -1188,6 +1193,7 @@ function SessionDetailLoaded({
       draftDirty.current = false;
       queuedEditRef.current = null;
       setQueuedEdit(null);
+      setQueuedEditRecovered(false);
       setQueuedEditBusy(false);
       setError(null);
       draftState.current = { text: "", images: [] };
@@ -2134,6 +2140,16 @@ function SessionDetailLoaded({
     [api, busy, confirm, mode, navigate, session?.driver, sessionId, showToast],
   );
 
+  const queuedEditReconciliation = queuedEdit && queuedEditRecovered
+    ? reconcileQueuedEditRecovery(
+        queuedEdit.promptId,
+        queuedEdit.editRevision,
+        session.queued,
+        conn === "online" && snapshotLoaded && runnerOnline,
+      )
+    : null;
+  const queuedEditRetryable = queuedEditReconciliation === null ||
+    queuedEditReconciliation.status === "retryable";
   const canSend = canPrompt && (text.trim().length > 0 || images.length > 0);
   const primaryComposerAction = composerPrimaryAction({
     canStopTurn,
@@ -2799,6 +2815,7 @@ function SessionDetailLoaded({
       const editState = { ...exact, displacedDraft };
       queuedEditRef.current = editState;
       setQueuedEdit(editState);
+      setQueuedEditRecovered(false);
       setProgrammaticComposerText(exact.text);
       replace(exact.images);
       setHistIdx(-1);
@@ -2817,6 +2834,7 @@ function SessionDetailLoaded({
     clearQueuedPromptEditRecovery(mutationKey);
     queuedEditRef.current = null;
     setQueuedEdit(null);
+    setQueuedEditRecovered(false);
     draftState.current = displaced;
     setProgrammaticComposerText(displaced.text);
     replace(displaced.images);
@@ -2826,8 +2844,25 @@ function SessionDetailLoaded({
     window.requestAnimationFrame(focusComposerAtDraftEnd);
   };
 
+  const useRecoveredQueuedEditAsNewMessage = () => {
+    if (!queuedEdit || !queuedEditRecovered || queuedEditBusy) return;
+    const recoveredDraft = {
+      text: draftState.current.text,
+      images: draftState.current.images.map((image) => ({ ...image })),
+    };
+    markDraftDirty();
+    clearQueuedPromptEditRecovery(mutationKey);
+    queuedEditRef.current = null;
+    setQueuedEdit(null);
+    setQueuedEditRecovered(false);
+    setHistIdx(-1);
+    setError(null);
+    void saveComposerDraft(sessionId, recoveredDraft.text, recoveredDraft.images, instanceScope);
+    window.requestAnimationFrame(focusComposerAtDraftEnd);
+  };
+
   const saveQueuedPromptEdit = async () => {
-    if (!queuedEdit || queuedEditBusy || composerMutationRegistry.has(mutationKey)) return;
+    if (!queuedEdit || queuedEditBusy || !queuedEditRetryable || composerMutationRegistry.has(mutationKey)) return;
     const submittedDraft = {
       text: text.trim(),
       images: images.map((image) => ({ ...image })),
@@ -2866,6 +2901,7 @@ function SessionDetailLoaded({
       markDraftDirty();
       queuedEditRef.current = null;
       setQueuedEdit(null);
+      setQueuedEditRecovered(false);
       draftState.current = displaced;
       setProgrammaticComposerText(displaced.text);
       replace(displaced.images);
@@ -2887,6 +2923,7 @@ function SessionDetailLoaded({
           ...latestRecovery,
           error: failureMessage,
         });
+        if (viewGenerationRef.current === generation) setQueuedEditRecovered(true);
       }
       if (viewGenerationRef.current === generation) setError(failureMessage);
     } finally {
@@ -2956,7 +2993,7 @@ function SessionDetailLoaded({
       e.preventDefault();
       return;
     }
-    if (queuedEdit && e.key === "Enter" && !e.metaKey && !e.ctrlKey && !composing) {
+    if (queuedEdit && queuedEditRetryable && e.key === "Enter" && !e.metaKey && !e.ctrlKey && !composing) {
       if (!enterKeystrokeSends(e.shiftKey)) return;
       e.preventDefault();
       void saveQueuedPromptEdit();
@@ -3574,15 +3611,32 @@ function SessionDetailLoaded({
             )}
             {queuedEdit && (
               <div className="queued-edit-banner" role="status">
-                <span>Editing Queued Message</span>
-                <button
-                  type="button"
-                  className="btn ghost sm"
-                  disabled={queuedEditBusy}
-                  onClick={cancelQueuedPromptEdit}
-                >
-                  Cancel Edit
-                </button>
+                <div className="queued-edit-copy">
+                  <span>{queuedEditRecovered ? "Recovered Queued Message" : "Editing Queued Message"}</span>
+                  {queuedEditReconciliation && queuedEditReconciliation.status !== "retryable" && (
+                    <span className="queued-edit-reason">{queuedEditReconciliation.reason}</span>
+                  )}
+                </div>
+                <div className="queued-edit-actions">
+                  {queuedEditRecovered && (
+                    <button
+                      type="button"
+                      className="btn ghost sm"
+                      disabled={queuedEditBusy}
+                      onClick={useRecoveredQueuedEditAsNewMessage}
+                    >
+                      Use as New Message
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="btn ghost sm"
+                    disabled={queuedEditBusy}
+                    onClick={cancelQueuedPromptEdit}
+                  >
+                    {queuedEditRecovered ? "Dismiss Recovery" : "Cancel Edit"}
+                  </button>
+                </div>
               </div>
             )}
             <div
@@ -3754,9 +3808,13 @@ function SessionDetailLoaded({
                          keyboard open after sending, which is the chat convention. */
                       onPointerDown={(e) => e.preventDefault()}
                       onClick={queuedEdit ? saveQueuedPromptEdit : send}
-                      disabled={!canSend || composerRequestBusy}
+                      disabled={!canSend || composerRequestBusy || (queuedEdit !== null && !queuedEditRetryable)}
                       title={queuedEdit
-                        ? enterKeySetting === "send"
+                        ? !queuedEditRetryable
+                          ? queuedEditReconciliation && "reason" in queuedEditReconciliation
+                            ? queuedEditReconciliation.reason
+                            : "This recovered queued edit cannot be retried yet."
+                          : enterKeySetting === "send"
                           ? "Save Queued Message (Enter)"
                           : isTouchPhone ? "Save Queued Message" : "Save Queued Message (Shift+Enter)"
                         : enterKeySetting === "send"
