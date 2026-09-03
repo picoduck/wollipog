@@ -329,7 +329,7 @@ export function SessionHeader({
         {renderNoninteractiveStatuses()}
         {activeWorktree && (
           <span
-            className="tag tag-wt session-worktree-identity"
+            className="tag tag-wt"
             title={`Branch: ${activeWorktree.branch}${activeWorktree.baseRef ? ` · Base: ${activeWorktree.baseRef}` : ""}${activeWorktree.pullRequest ? ` · PR: ${activeWorktree.pullRequest.url}` : ""}`}
           >
             {activeWorktree.branch}{activeWorktree.pullRequest?.state === "open" ? " · Open PR" : ""}

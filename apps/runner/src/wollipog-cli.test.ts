@@ -155,3 +155,38 @@ test("CLI recognizes installed POSIX and Windows alias invocation names", async 
     assert.deepEqual(requests, ["http://cp/healthz", "http://cp/api/sessions"]);
   }
 });
+
+test("CLI worktree commands adapt to the shared MCP operations", async () => {
+  const requests: Array<{ url: string; body?: string }> = [];
+  const fetch: McpFetch = async (url, init) => {
+    requests.push({ url, body: init?.body });
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify(url.endsWith("/healthz")
+        ? { protocolVersion: PROTOCOL_VERSION }
+        : { worktree: { id: "wt", path: "/repo/wt", branch: "fix/583", source: "created" }, session: { id: "s1" } }),
+    };
+  };
+  const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "paired-device" };
+  let output = "";
+  assert.equal(await runWollipogCli(
+    ["node", "cli.js", "--wollipog-cli", "worktree", "create", "--session", "s1", "--branch", "fix/583", "--base", "origin/main", "--json"],
+    env,
+    { stdout: (text) => { output += text; }, stderr: () => {} },
+    fetch,
+  ), 0);
+  assert.equal(JSON.parse(output).worktree.branch, "fix/583");
+  assert.equal(requests[1]!.url, "http://cp/api/sessions/s1/worktrees");
+  assert.deepEqual(JSON.parse(requests[1]!.body!), { branch: "fix/583", baseRef: "origin/main" });
+
+  output = "";
+  assert.equal(await runWollipogCli(
+    ["node", "cli.js", "--wollipog-cli", "worktree", "select", "--session", "s1", "--path", "/repo/wt", "--json"],
+    env,
+    { stdout: (text) => { output += text; }, stderr: () => {} },
+    fetch,
+  ), 0);
+  assert.equal(requests[3]!.url, "http://cp/api/sessions/s1/worktrees/select");
+  assert.deepEqual(JSON.parse(requests[3]!.body!), { path: "/repo/wt" });
+});

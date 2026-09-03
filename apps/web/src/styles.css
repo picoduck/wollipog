@@ -8393,7 +8393,7 @@ body.shell-dock-dragging * {
 .inbox-row-sender > span,
 .inbox-row-copy { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .inbox-row-title { flex: none; font-weight: 550; }
-.inbox-row-worktree { color: var(--text-muted); font-size: var(--font-size-xs); }
+.inbox-row-worktree { color: var(--text-dim); font-size: var(--text-2xs); }
 .inbox-row-shell.unread .inbox-row-sender { color: color-mix(in srgb, var(--accent) 70%, var(--text)); }
 .inbox-row-shell.unread .inbox-row-title { color: var(--text); font-weight: 750; }
 .inbox-row-snippet { overflow: hidden; color: var(--text-faint); text-overflow: ellipsis; white-space: nowrap; }

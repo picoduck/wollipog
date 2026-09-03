@@ -2014,13 +2014,17 @@ export class SessionStore {
     snapshot: SessionSnapshot,
     protocolVersion: number | null | undefined,
   ): SessionSnapshot {
-    return {
+    const projected: SessionSnapshot = {
       ...snapshot,
       seq: this.projectedEventSeq(snapshot.id, snapshot.seq, protocolVersion),
       ...(snapshot.historyEpoch === undefined ? {} : {
         historyEpoch: this.projectedHistoryEpoch(snapshot.historyEpoch, protocolVersion),
       }),
     };
+    if (!Number.isInteger(protocolVersion) || protocolVersion! < RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktrees) {
+      delete projected.worktrees;
+    }
+    return projected;
   }
 
   /** Project one exact local event for live delivery. An omitted event consumes no peer sequence. */

@@ -3311,6 +3311,8 @@ async function runSessionWorktreeRequest(
 ) {
   const session = db.getSession(sessionId);
   if (!session) return reply.code(404).send({ error: "session not found" });
+  const unsupported = runnerCapabilityError(session.runnerId, "sessionWorktrees", "Session worktrees");
+  if (unsupported) return reply.code(409).send({ error: unsupported });
   const reconciliationBlock = svc.podReconciliationMutationError(sessionId);
   if (reconciliationBlock) return reply.code(409).send({ error: reconciliationBlock });
   if (!hub.isRunnerOnline(session.runnerId)) return reply.code(409).send({ error: "runner is offline" });

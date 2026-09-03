@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { PassThrough } from "node:stream";
 import {
   LEGACY_CONDUCTOR_ACTOR_SESSION_HEADER,
+  WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
   WOLLIPOG_CONDUCTOR_ACTOR_SESSION_HEADER,
 } from "@wollipog/protocol";
 import { dispatch, serveConductorMcp, TOOLS, type McpDeps, type McpFetch } from "./conductor-mcp.js";
@@ -117,6 +118,9 @@ test("tools/list returns the curated session and workflow tools with schemas", a
       "create_workflow_artifact",
       "complete_workflow_attempt",
       "resolve_workflow_gate",
+      "create_worktree",
+      "attach_worktree",
+      "select_worktree",
       "create_session",
       "prompt_session",
       "stop_session",
@@ -136,7 +140,7 @@ test("every mutating tool's description tells the model the user must approve (c
     "create_workflow_definition", "create_workflow_version", "create_workflow_run",
     "dispatch_workflow_node", "create_workflow_artifact", "complete_workflow_attempt",
     "resolve_workflow_gate", "create_session", "prompt_session", "stop_session",
-    "set_guardrails", "create_run",
+    "set_guardrails", "create_run", "create_worktree", "attach_worktree", "select_worktree",
   ];
   for (const name of mutations) {
     const tool = TOOLS.find((t) => t.name === name)!;
@@ -399,6 +403,33 @@ test("list_runs -> GET /api/runs", async () => {
   const result = await callTool(deps, "list_runs");
   assert.equal(calls[0]!.url, `${CP_URL}/api/runs`);
   assert.deepEqual(resultJson(result).runs[0].sessionIds, ["s_1", "s_2"]);
+});
+
+test("worktree tools use the canonical routes and default to the calling session", async () => {
+  const { deps, calls } = makeDeps(() => ({
+    status: 200,
+    body: {
+      worktree: { id: "wt_1", path: "/repo/wt", branch: "fix/one", baseRef: "origin/main", source: "created" },
+      session: { id: SELF_ID, status: "running", runnerId: "r1" },
+    },
+  }));
+  await callTool(deps, "create_worktree", { branch: "fix/one", baseRef: "origin/main" });
+  await callTool(deps, "attach_worktree", { sessionId: "s_child", path: "/repo/attached" });
+  await callTool(deps, "select_worktree", { sessionId: "s_child", path: "/repo/wt" });
+  assert.equal(calls[0]!.url, `${CP_URL}/api/sessions/${SELF_ID}/worktrees`);
+  assert.deepEqual(calls[0]!.body, { branch: "fix/one", baseRef: "origin/main" });
+  assert.equal(calls[1]!.url, `${CP_URL}/api/sessions/s_child/worktrees/attach`);
+  assert.deepEqual(calls[1]!.body, { path: "/repo/attached" });
+  assert.equal(calls[2]!.url, `${CP_URL}/api/sessions/s_child/worktrees/select`);
+});
+
+test("an exact-session MCP credential cannot manage another session's worktrees", async () => {
+  const { deps, calls } = makeDeps();
+  deps.actorHeader = WOLLIPOG_AGENT_ACTOR_SESSION_HEADER;
+  const result = await callTool(deps, "create_worktree", { sessionId: "s_other", branch: "fix/other" });
+  assert.equal(result.isError, true);
+  assert.match(resultText(result), /only its own worktrees/);
+  assert.equal(calls.length, 0);
 });
 
 test("create_session -> POST /api/sessions with prompt riding create and config.model/permissionMode", async () => {

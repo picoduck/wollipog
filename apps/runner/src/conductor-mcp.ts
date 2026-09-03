@@ -167,6 +167,31 @@ function mapSession(s: Json): Json {
   };
 }
 
+function worktreeTarget(args: Json, deps: McpDeps): string | ToolResult {
+  const sessionId = typeof args?.sessionId === "string" && args.sessionId ? args.sessionId : deps.selfSessionId;
+  if (!sessionId) return errorResult("sessionId is required");
+  if (deps.actorHeader === WOLLIPOG_AGENT_ACTOR_SESSION_HEADER && sessionId !== deps.selfSessionId) {
+    return errorResult("refusing: a session credential may manage only its own worktrees");
+  }
+  return sessionId;
+}
+
+function mapWorktreeResult(data: Json): Json {
+  const item = data?.worktree;
+  return {
+    worktree: item == null ? null : {
+      id: item.id,
+      path: item.path,
+      branch: item.branch,
+      baseRef: item.baseRef ?? null,
+      baseCommit: item.baseCommit ?? null,
+      source: item.source,
+      pullRequest: item.pullRequest ?? null,
+    },
+    session: data?.session == null ? null : mapSession(data.session),
+  };
+}
+
 /** Render one timeline event as a single capped line: "(seq) kind: text…". */
 function renderEventLine(ev: Json): string {
   const p = ev?.payload ?? {};
@@ -833,6 +858,72 @@ export const TOOLS: McpTool[] = [
       );
       if (!r.ok) return errorResult(r.message);
       return textResult({ instance: mapWorkflowInstance(r.data, true) });
+    },
+  },
+  {
+    name: "create_worktree",
+    description: "Create and select a session worktree at an exact branch and optional base ref. The user must approve.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: { type: "string", description: "Defaults to the calling session" },
+        branch: { type: "string" },
+        baseRef: { type: "string", description: "Defaults to the fetched remote default branch" },
+      },
+      required: ["branch"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.branch !== "string" || !args.branch) return errorResult("branch is required");
+      const sessionId = worktreeTarget(args, deps);
+      if (typeof sessionId !== "string") return sessionId;
+      const body: Json = { branch: args.branch };
+      if (typeof args.baseRef === "string") body.baseRef = args.baseRef;
+      const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(sessionId)}/worktrees`, body);
+      if (!r.ok) return errorResult(r.message);
+      return textResult(mapWorktreeResult(r.data));
+    },
+  },
+  {
+    name: "attach_worktree",
+    description: "Attach and select an existing registered worktree for a session. The user must approve.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: { type: "string", description: "Defaults to the calling session" },
+        path: { type: "string" },
+      },
+      required: ["path"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.path !== "string" || !args.path) return errorResult("path is required");
+      const sessionId = worktreeTarget(args, deps);
+      if (typeof sessionId !== "string") return sessionId;
+      const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(sessionId)}/worktrees/attach`, { path: args.path });
+      if (!r.ok) return errorResult(r.message);
+      return textResult(mapWorktreeResult(r.data));
+    },
+  },
+  {
+    name: "select_worktree",
+    description: "Select one of a session's attached worktrees for future turns. The user must approve.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: { type: "string", description: "Defaults to the calling session" },
+        path: { type: "string" },
+      },
+      required: ["path"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.path !== "string" || !args.path) return errorResult("path is required");
+      const sessionId = worktreeTarget(args, deps);
+      if (typeof sessionId !== "string") return sessionId;
+      const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(sessionId)}/worktrees/select`, { path: args.path });
+      if (!r.ok) return errorResult(r.message);
+      return textResult(mapWorktreeResult(r.data));
     },
   },
   {

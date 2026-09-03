@@ -285,7 +285,9 @@
 // 100: every native session receives a runner-minted, exact-session control credential and the
 //      runner's Wollipog CLI entrypoint. The same credential authenticates the provider-neutral
 //      stdio MCP surface; only its hash crosses the runner socket or reaches durable storage.
-export const PROTOCOL_VERSION = 100;
+// 101: session_worktree/session_worktree_result correlated operations plus durable active and
+//      linked worktree metadata. Additive + optional; pre-v101 runners reject worktree routes.
+export const PROTOCOL_VERSION = 101;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
@@ -419,6 +421,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   sessionNamingTargets: 95,
   sessionNamingDriftCodes: 97,
   sessionAgentControl: 100,
+  sessionWorktrees: 101,
 } as const;
 
 /* ========================================================================== */
