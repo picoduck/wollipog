@@ -8521,6 +8521,12 @@ export class ControlPlaneDb {
   }
 
   /** Called only inside an existing write transaction after the owning event/snapshot is accepted. */
+  /** The settled session cost after ledger pricing; cheaper than a full session view. */
+  sessionCostUsd(sessionId: string): number {
+    const row = this.stmt("SELECT cost_usd FROM sessions WHERE id=?").get(sessionId) as { cost_usd: number } | undefined;
+    return Number(row?.cost_usd ?? 0);
+  }
+
   private recordUsageDeltaInTransaction(
     sessionId: string,
     amount: UsageLedgerDelta,
@@ -8715,19 +8721,27 @@ export class ControlPlaneDb {
       costMicrousd: Math.max(0, target.costMicrousd - current.cost_microusd),
     };
     // A runner snapshot carries flat totals: no cache breakdown and, for opaque-billing providers,
-    // no cost. A positive token residual without a cost residual is priced at the full input rate
-    // from the session's model so the catch-up is not silently free.
+    // no cost. When the provider's cumulative cost grew (even by a sub-micro fraction) that growth
+    // is authoritative; otherwise a positive token residual is priced from the session's model so
+    // the catch-up is not silently free, carrying its sub-micro remainder like the event path.
     const dimensions = this.usageDimensions(sessionId);
     const residualTokens = residual.inputTokens > 0 || residual.outputTokens > 0;
-    const residualPriced = residual.costMicrousd > 0
-      ? { costSource: "providerReported" as const, costMicrousd: residual.costMicrousd, cacheSavingsUsd: 0 }
+    const providerCostGrew = target.costMicrousd > current.cost_microusd ||
+      (target.costMicrousd === current.cost_microusd && snapshotRemainder > current.cost_remainder_picousd);
+    let pricedRemainderPicousd: number | null = null;
+    const residualPriced = providerCostGrew
+      ? { costSource: "providerReported" as const, costMicrousd: residual.costMicrousd }
       : residualTokens
         ? (() => {
             const priced = priceUsage(this.usageRateTable, dimensions?.model, {
               uncachedInputTokens: residual.inputTokens, cachedInputTokens: 0, cacheCreationTokens: 0,
               outputTokens: residual.outputTokens,
             }, null);
-            return { costSource: priced.costSource, costMicrousd: ControlPlaneDb.usageMicroUsd(priced.costUsd), cacheSavingsUsd: 0 };
+            const parts = ControlPlaneDb.usageCostParts(priced.costUsd);
+            const combinedRemainder = current.cost_remainder_picousd + parts.remainderPicousd;
+            const carryMicrousd = Math.round(combinedRemainder / 1_000_000);
+            pricedRemainderPicousd = combinedRemainder - carryMicrousd * 1_000_000;
+            return { costSource: priced.costSource, costMicrousd: parts.microusd + carryMicrousd };
           })()
         : null;
     const delta: UsageLedgerDelta = {
@@ -8754,7 +8768,10 @@ export class ControlPlaneDb {
     // A cumulative snapshot tells us the amount, not when its unseen prefix accrued. Attribute the
     // positive catch-up at observation time instead of fabricating historical precision.
     this.recordUsageDeltaInTransaction(sessionId, delta, now, false, dimensions);
-    if (adoptsSnapshotCost) {
+    if (pricedRemainderPicousd !== null) {
+      this.stmt("UPDATE usage_session_state SET cost_remainder_picousd=? WHERE session_id=?")
+        .run(pricedRemainderPicousd, sessionId);
+    } else if (adoptsSnapshotCost) {
       // Preserve the authoritative fractional baseline around the rounded micro-USD watermark so
       // later sub-micro events can cross the next rounding boundary exactly once.
       this.stmt("UPDATE usage_session_state SET cost_remainder_picousd=? WHERE session_id=?")

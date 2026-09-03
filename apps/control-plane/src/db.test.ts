@@ -4974,3 +4974,27 @@ test("ledger rows written before the v103 columns keep aggregating with zero for
     rmSync(temp, { recursive: true, force: true });
   }
 });
+
+test("snapshot residual pricing carries sub-micro cost and defers to a fractional provider increase", () => {
+  const db = withRunner();
+  // 0.15 micro-USD per input token: a single-token residual rounds to nothing without a carry.
+  db.setUsageRateTable(parseRateTable({ "cheap-model": { input_cost_per_token: 0.00000015, output_cost_per_token: 0 } }));
+  const base = snapshot({ id: "cheap", driver: "codex-app-server", config: { model: "cheap-model" }, tokensIn: 0, tokensOut: 0, costUsd: 0 });
+  db.createSessionFromSnapshot(base, "runner-1", 1_000);
+  for (let tokens = 1; tokens <= 7; tokens += 1) {
+    db.updateSessionFromSnapshot("cheap", { ...base, tokensIn: tokens, seq: tokens }, 1_000 + tokens);
+  }
+  const usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000, granularity: "hour" });
+  assert.equal(usage.totals.costUsd, 0.000001, "buckets hold whole micro-USD: seven 0.15 residuals crossed one boundary");
+  assert.equal(usage.totals.costSource, "modelPriced");
+  assert.ok(Math.abs(db.getSession("cheap")!.costUsd - 0.00000105) < 1e-12, "the session total keeps the sub-micro remainder");
+
+  // A provider that reports a sub-micro cost increase is authoritative; its tokens are not re-estimated.
+  db.setUsageRateTable(parseRateTable(rateDocument));
+  const claude = snapshot({ id: "fraction", driver: "claude-code", config: { model: "claude-fable-5-1" }, tokensIn: 0, tokensOut: 0, costUsd: 0 });
+  db.createSessionFromSnapshot(claude, "runner-1", 2_000);
+  db.updateSessionFromSnapshot("fraction", { ...claude, tokensIn: 1000, costUsd: 0.0000002, seq: 1 }, 2_001);
+  const fraction = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000, granularity: "hour" });
+  assert.equal(fraction.byModel.find((row) => row.key === "claude-fable-5-1")!.costSource, "providerReported");
+  assert.ok(Math.abs(db.getSession("fraction")!.costUsd - 0.0000002) < 1e-15, "the estimate ($0.005) must not replace the reported fraction");
+});

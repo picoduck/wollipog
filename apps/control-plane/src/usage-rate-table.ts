@@ -63,6 +63,7 @@ export class UsageRateTableService {
   private fetchedAt: number | null = null;
   private state: UsagePricingStatus["status"] = "unavailable";
   private inflight: Promise<UsagePricingStatus> | null = null;
+  private lastAttemptAt: number | null = null;
   private readonly fetchDocument: (url: string, signal: AbortSignal) => Promise<unknown>;
   private readonly now: () => number;
   private readonly log: (message: string) => void;
@@ -88,20 +89,23 @@ export class UsageRateTableService {
     };
   }
 
-  /** Refreshes when the table is missing or past its TTL. `force` ignores the TTL but not the
-   * refresh floor, so a burst of dashboard refreshes cannot hammer the upstream. One fetch runs at
-   * a time; concurrent callers share it. */
+  /** Refreshes unless a fresh table sits inside its TTL. `force` ignores the TTL. A table that is
+   * merely cached (a failed refresh, or a cache written for another source) is refreshed on the
+   * next call. Attempts, successful or not, are spaced by the refresh floor so a burst of
+   * dashboard refreshes or a down upstream cannot hammer the source. One fetch runs at a time;
+   * concurrent callers share it. */
   async ensure(force = false): Promise<UsagePricingStatus> {
     if (this.options.sourceUrl === null) return this.status();
-    const maxAge = force ? USAGE_PRICING_REFRESH_FLOOR_MS : USAGE_PRICING_TTL_MS;
-    if (this.table && this.fetchedAt !== null && this.now() - this.fetchedAt < maxAge && (this.state === "fresh" || !force)) {
+    const now = this.now();
+    if (this.table && this.fetchedAt !== null && this.state === "fresh" && !force && now - this.fetchedAt < USAGE_PRICING_TTL_MS) {
       return this.status();
     }
-    if (!this.inflight) {
-      this.inflight = this.refresh().finally(() => {
-        this.inflight = null;
-      });
-    }
+    if (this.inflight) return this.inflight;
+    if (this.lastAttemptAt !== null && now - this.lastAttemptAt < USAGE_PRICING_REFRESH_FLOOR_MS) return this.status();
+    this.lastAttemptAt = now;
+    this.inflight = this.refresh().finally(() => {
+      this.inflight = null;
+    });
     return this.inflight;
   }
 

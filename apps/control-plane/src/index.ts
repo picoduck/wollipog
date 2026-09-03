@@ -300,7 +300,7 @@ const usagePricing = new UsageRateTableService({
   cachePath: defaultUsagePricingCachePath(DB_PATH, process.env.CONTROL_PLANE_USAGE_PRICING_CACHE),
 });
 db.setUsageRateTable(usagePricing.current());
-void usagePricing.ensure().then(() => db.setUsageRateTable(usagePricing.current()));
+const usagePricingReady = usagePricing.ensure().then(() => db.setUsageRateTable(usagePricing.current()));
 const legacyCredentialMigration = db.backfillLegacyRunnerCredentials(hashToken(TOKEN), Date.now());
 if (legacyCredentialMigration.blocked > 0) {
   console.warn(
@@ -4411,6 +4411,9 @@ process.on("unhandledRejection", (reason) => {
 // Wrapped in an async IIFE (not a top-level await) so the module bundles to CJS.
 void (async () => {
   try {
+    // Records are priced at ingestion and never re-priced, so on a first boot with no disk cache
+    // give the rate table a bounded head start before runners reconnect and replay usage.
+    await Promise.race([usagePricingReady, new Promise((resolve) => setTimeout(resolve, 5_000))]);
     await app.listen({ port: PORT, host: HOST });
     // Shell reconciliation is connection-owned state like the reset above: a duplicate process
     // that loses the port race must not flip the survivor's running shells to reconnecting.

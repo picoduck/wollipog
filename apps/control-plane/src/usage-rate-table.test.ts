@@ -97,9 +97,15 @@ test("a failed refresh keeps serving the last table as cached and never claims f
   assert.equal(h.service.current()?.size, 2, "the old table stays available for pricing");
   assert.match(h.logs.at(-1) ?? "", /serving the cached rate table.*HTTP 503/);
 
+  assert.equal((await h.service.ensure(true)).status, "cached");
+  assert.equal(h.calls.length, 2, "a forced retry inside the attempt floor does not hit a down upstream again");
+  h.advance(USAGE_PRICING_REFRESH_FLOOR_MS + 1);
+  await h.service.ensure();
+  assert.equal(h.calls.length, 3, "a cached table is retried on the next call past the floor, without waiting a TTL");
+
   h.setDocument({});
   h.setFailure(null);
-  h.advance(USAGE_PRICING_TTL_MS + 1);
+  h.advance(USAGE_PRICING_REFRESH_FLOOR_MS + 1);
   assert.equal((await h.service.ensure()).status, "cached", "an empty document is a failed refresh, not a wipe");
 });
 
@@ -140,11 +146,17 @@ test("the disk cache survives a restart, ages into cached past the TTL, and igno
     assert.equal(aged.status().status, "cached");
     assert.equal(aged.status().fetchedAt, written.fetchedAt);
 
+    const foreignCalls: string[] = [];
     const foreign = new UsageRateTableService({
       sourceUrl: "https://other.example/prices.json", cachePath, now: () => written.fetchedAt + 1,
-      fetchDocument: async () => { throw new Error("unreachable"); }, log: () => {},
+      fetchDocument: async (url) => { foreignCalls.push(url); return { ...document, "gemini-3-pro": { input_cost_per_token: 1e-6, output_cost_per_token: 1e-6 } }; },
+      log: () => {},
     });
     assert.equal(foreign.status().status, "cached", "a cache fetched from another source is not fresh for this one");
+    const refreshed = await foreign.ensure();
+    assert.deepEqual(foreignCalls, ["https://other.example/prices.json"], "the configured source is fetched immediately, not after a TTL");
+    assert.equal(refreshed.status, "fresh");
+    assert.equal(refreshed.knownModels, 3);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
