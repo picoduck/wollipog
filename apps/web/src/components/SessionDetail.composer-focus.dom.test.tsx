@@ -512,7 +512,7 @@ test("navigating away mid-edit preserves the displaced session draft instead of 
   }
 });
 
-test("a stale queued edit keeps the revised draft, attachment, and opaque revision available for retry", async () => {
+test("a failed queued edit keeps its draft and uses idempotency only for byte-identical retries", async () => {
   const draft = deferred<ComposerDraft | null>();
   const edits: unknown[] = [];
   const fixture = await mountFixture(draft, {
@@ -567,6 +567,29 @@ test("a stale queued edit keeps the revised draft, attachment, and opaque revisi
     assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
     assert.ok(fixture.container.querySelector(".queued-edit-banner"));
     assert.match(fixture.container.querySelector(".composer-error")?.textContent ?? "", /changed before/i);
+
+    await act(async () => { save.click(); });
+    await flushAsyncWork();
+    assert.equal(edits.length, 2);
+    assert.equal(
+      (edits[1] as { submissionId: string }).submissionId,
+      (edits[0] as { submissionId: string }).submissionId,
+      "an unchanged timeout retry must replay the same idempotency receipt",
+    );
+
+    await act(async () => {
+      fixture.composer.value = "Corrected exact content";
+      fireDomEvent.change(fixture.composer);
+    });
+    await act(async () => { save.click(); });
+    await flushAsyncWork();
+    assert.equal(edits.length, 3);
+    assert.notEqual(
+      (edits[2] as { submissionId: string }).submissionId,
+      (edits[1] as { submissionId: string }).submissionId,
+      "changed content must use a fresh idempotency key",
+    );
+    assert.equal((edits[2] as { text: string }).text, "Corrected exact content");
   } finally {
     await unmountFixture(fixture);
   }

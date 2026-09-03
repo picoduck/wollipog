@@ -1,0 +1,87 @@
+Nerd Fonts v3.5.1 glyph-source notices
+=======================================
+
+This file records the sources and license notices for icon glyphs retained in
+WollipogJetBrainsMonoNerd-Regular.woff2. The font was subset and converted from
+JetBrainsMonoNerdFontMono-Regular.ttf as described in THIRD-PARTY-NOTICES.md.
+
+Nerd Fonts
+-----------
+Source: https://github.com/ryanoasis/nerd-fonts/tree/v3.5.1
+Copyright (c) 2014 Ryan L McIntyre
+License for patched fonts: SIL Open Font License 1.1. The complete OFL text is
+distributed beside this file in JetBrainsMonoNerdFontMono-LICENSE.txt.
+License for original source glyphs without a separate license: MIT.
+
+Seti UI 0.8.1
+--------------
+Source: https://github.com/jesseweed/seti-ui/tree/v0.8.1
+Copyright (c) 2014 Jesse Weed
+License: MIT.
+
+Devicons 2.17.0
+---------------
+Source: https://github.com/devicons/devicon/tree/v2.17.0
+Copyright (c) 2015 konpa
+License: MIT.
+
+Octicons 18.3.0
+---------------
+Source: https://github.com/primer/octicons/tree/v18.3.0
+Copyright (c) 2023 GitHub Inc.
+License: MIT.
+
+Powerline Symbols 1.000
+-----------------------
+Source: https://github.com/powerline/powerline
+Copyright 2013 Kim Silkebaekken and other contributors
+License: MIT.
+
+Powerline Extra Symbols 1.200
+-----------------------------
+Source: https://github.com/ryanoasis/powerline-extra-symbols
+Copyright (c) 2016 Ryan L McIntyre
+License: MIT.
+
+MIT License Terms
+-----------------
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Font Awesome 6.5.1
+------------------
+Source: https://github.com/FortAwesome/Font-Awesome/tree/6.5.1
+Copyright (c) 2022 Fonticons, Inc. (https://fontawesome.com)
+Reserved Font Name: "Font Awesome"
+License for web and desktop font glyphs: SIL Open Font License 1.1. The complete
+OFL text is distributed beside this file in JetBrainsMonoNerdFontMono-LICENSE.txt.
+Font Awesome's upstream notice is available at:
+https://github.com/ryanoasis/nerd-fonts/blob/v3.5.1/src/glyphs/font-awesome/LICENSE.txt
+Brand icons are trademarks of their respective owners; their inclusion does
+not indicate endorsement by either the trademark owner or Wollipog.
+
+Material Design Icons (Nerd Fonts snapshot dated October 6, 2022)
+-----------------------------------------------------------------
+Source: https://github.com/Templarian/MaterialDesign-Font
+Copyright: Pictogrammers icon group and the respective icon contributors
+License for the web and desktop font: Apache License 2.0.
+Upstream notice:
+https://github.com/ryanoasis/nerd-fonts/blob/v3.5.1/src/glyphs/materialdesign/LICENSE
+The complete Apache License 2.0 text is distributed beside this file in
+Apache-2.0.txt. Wollipog changed the upstream font by retaining only the Git
+glyph at U+F02A2 and merging it into the documented WOFF2 subset.

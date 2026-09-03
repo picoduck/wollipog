@@ -209,6 +209,7 @@ const composerMutationListeners = new Map<string, Set<() => void>>();
 
 interface QueuedPromptEditState extends QueuedPromptDraft {
   submissionId?: string;
+  submissionFingerprint?: string;
   displacedDraft: { text: string; images: PromptImageInput[] };
 }
 
@@ -2631,8 +2632,15 @@ function SessionDetailLoaded({
       images: images.map((image) => ({ ...image })),
     };
     if (!submittedDraft.text && submittedDraft.images.length === 0) return;
-    const submissionId = queuedEdit.submissionId ?? browserRandomUUID();
-    if (!queuedEdit.submissionId) setQueuedEdit((current) => current ? { ...current, submissionId } : current);
+    const submissionFingerprint = JSON.stringify(submittedDraft);
+    const submissionId = queuedEdit.submissionId && queuedEdit.submissionFingerprint === submissionFingerprint
+      ? queuedEdit.submissionId
+      : browserRandomUUID();
+    if (queuedEdit.submissionId !== submissionId) {
+      const nextEdit = { ...queuedEdit, submissionId, submissionFingerprint };
+      queuedEditRef.current = nextEdit;
+      setQueuedEdit((current) => current?.promptId === queuedEdit.promptId ? nextEdit : current);
+    }
     const mutation = reserveComposerMutation(mutationKey, "edit", submittedDraft);
     if (!mutation) return;
     const generation = viewGenerationRef.current;

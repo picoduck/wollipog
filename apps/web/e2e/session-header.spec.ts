@@ -661,11 +661,11 @@ for (const viewport of [
     expect(metrics.activeSubagent.x).toBeGreaterThanOrEqual(metrics.statuses.x);
     expect(metrics.activeSubagent.right).toBeLessThanOrEqual(metrics.statuses.right);
     expect(metrics.overflow.right).toBeLessThanOrEqual(metrics.fork.x);
-    expect(metrics.fork.x - metrics.overflow.right).toBeCloseTo(2, 0);
+    expect(metrics.fork.x - metrics.overflow.right).toBeCloseTo(7, 0);
     expect(metrics.fork.right).toBeLessThanOrEqual(metrics.share.x);
-    expect(metrics.share.x - metrics.fork.right).toBeCloseTo(2, 0);
-    expect(metrics.paddingRight).toBe(8);
-    expect(metrics.clippingRight - metrics.moreActions.right).toBeGreaterThanOrEqual(7.5);
+    expect(metrics.share.x - metrics.fork.right).toBeCloseTo(7, 0);
+    expect(metrics.paddingRight).toBe(12);
+    expect(metrics.clippingRight - metrics.moreActions.right).toBeGreaterThanOrEqual(11.5);
     expect(metrics.totalBadgeCount).toBe(5);
     expect(metrics.badges.length).toBe(5 - hiddenCount);
     expect(metrics.badgeRows).toBe(1);
@@ -980,7 +980,7 @@ test("the two mobile Session bars use compact touch targets and a bounded menu n
     return Math.min(window.innerWidth, clippingPane.getBoundingClientRect().right)
       - element.getBoundingClientRect().right;
   });
-  expect(trailingClearance).toBeGreaterThanOrEqual(7.5);
+  expect(trailingClearance).toBeGreaterThanOrEqual(11.5);
   await moreActions.click();
   const menu = page.getByRole("menu", { name: "Session Actions" });
   await expect(menu).toBeVisible();
