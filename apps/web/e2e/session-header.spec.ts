@@ -338,6 +338,9 @@ test("Project Actions keeps hover transparent while preserving interaction state
         ]);
         return actionsColor === projectColor;
       }).toBe(true);
+      const idleBox = await actions.boundingBox();
+      expect(idleBox).not.toBeNull();
+      const idleTransform = await actions.evaluate((element) => getComputedStyle(element).transform);
 
       const tokens = await page.locator("html").evaluate(() => {
         const probe = document.createElement("div");
@@ -346,21 +349,26 @@ test("Project Actions keeps hover transparent while preserving interaction state
         probe.style.color = "var(--accent)";
         document.body.append(probe);
         const style = getComputedStyle(probe);
-        const hover = style.backgroundColor;
+        const expanded = style.backgroundColor;
         const accent = style.color;
         probe.style.backgroundColor = "var(--bg-elev-3)";
         const active = getComputedStyle(probe).backgroundColor;
         probe.remove();
-        return { accent, active, hover };
+        return { accent, active, expanded };
       });
       await actions.hover();
-      await capture(page, `${theme}-project-actions-hover`);
+      await expect.poll(() => actions.evaluate((element) => element.matches(":hover"))).toBe(true);
       await expect(actions).toHaveCSS("background-image", "none");
       await expect(actions).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
       await expect(actions).toHaveCSS("border-top-width", "0px");
+      await expect(actions).toHaveCSS("border-right-width", "0px");
+      await expect(actions).toHaveCSS("border-bottom-width", "0px");
+      await expect(actions).toHaveCSS("border-left-width", "0px");
       await expect(actions).toHaveCSS("box-shadow", "none");
+      await expect(actions).toHaveCSS("filter", "none");
       await expect(actions).toHaveCSS("outline-style", "none");
       await expect(actions).toHaveCSS("cursor", "pointer");
+      await expect(actions).toHaveCSS("transform", idleTransform);
       await expect.poll(async () => {
         const [actionsColor, projectColor] = await Promise.all([
           actions.evaluate((element) => getComputedStyle(element).color),
@@ -368,6 +376,10 @@ test("Project Actions keeps hover transparent while preserving interaction state
         ]);
         return actionsColor === projectColor;
       }).toBe(true);
+      const hoveredBox = await actions.boundingBox();
+      expect(hoveredBox).toEqual(idleBox);
+      await capture(page, `${theme}-project-actions-hover`);
+      await expect.poll(() => actions.evaluate((element) => element.matches(":hover"))).toBe(true);
       const box = await actions.boundingBox();
       expect(box).not.toBeNull();
       await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
@@ -375,7 +387,7 @@ test("Project Actions keeps hover transparent while preserving interaction state
       await expect(actions).toHaveCSS("background-color", tokens.active);
       await page.mouse.up();
       await expect(actions).toHaveAttribute("aria-expanded", "true");
-      await expect(actions).toHaveCSS("background-color", tokens.hover);
+      await expect(actions).toHaveCSS("background-color", tokens.expanded);
       await expect(actions).toHaveCSS("color", tokens.accent);
       await page.keyboard.press("Escape");
       await expect(actions).toHaveAttribute("aria-expanded", "false");
