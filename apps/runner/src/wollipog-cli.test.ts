@@ -133,3 +133,25 @@ test("CLI emits JSON for get, events, prompt, wait, and stop core commands", asy
     assert.equal(requests[1]!.url, `http://cp${testCase.path}`);
   }
 });
+
+test("CLI recognizes installed POSIX and Windows alias invocation names", async () => {
+  for (const executable of ["/opt/bin/wollipog", String.raw`C:\Users\agent\wollipog.exe`]) {
+    const requests: string[] = [];
+    const fetch: McpFetch = async (url) => {
+      requests.push(url);
+      const body = url.endsWith("/healthz")
+        ? { protocolVersion: PROTOCOL_VERSION }
+        : { sessions: [] };
+      return { ok: true, status: 200, text: async () => JSON.stringify(body) };
+    };
+    let output = "";
+    assert.equal(await runWollipogCli(
+      [executable, "session", "list", "--json"],
+      { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "paired-device" },
+      { stdout: (text) => { output += text; }, stderr: () => {} },
+      fetch,
+    ), 0, executable);
+    assert.deepEqual(JSON.parse(output), { sessions: [] });
+    assert.deepEqual(requests, ["http://cp/healthz", "http://cp/api/sessions"]);
+  }
+});

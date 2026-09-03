@@ -90,6 +90,15 @@ test("credential acknowledgement creates an exact-hash readiness fence and rejec
     markAgentControlCredentialReady(root, launch.sessionId, hash);
     assert.equal(readFileSync(agentControlReadyPath(root, launch.sessionId), "utf8"), hash);
     assert.equal(hash, createHash("sha256").update(readFileSync(agentControlTokenPath(root, launch.sessionId))).digest("hex"));
+
+    provisionAgentControl(launch, {
+      controlPlaneUrl: "ws://127.0.0.1:4317/runner",
+      controlPlaneProtocolVersion: PROTOCOL_VERSION,
+      registerCredential: () => {
+        assert.throws(() => readFileSync(agentControlReadyPath(root, launch.sessionId)),
+          "re-registration removes a stale positive acknowledgement before sending the binding");
+      },
+    }, () => {}, host);
     markAgentControlCredentialRejected(root, launch.sessionId);
     assert.throws(() => readFileSync(agentControlTokenPath(root, launch.sessionId)));
     assert.throws(() => readFileSync(agentControlReadyPath(root, launch.sessionId)));

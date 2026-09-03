@@ -2,7 +2,6 @@
 
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { basename } from "node:path";
 import { PROTOCOL_VERSION, WOLLIPOG_AGENT_ACTOR_SESSION_HEADER } from "@wollipog/protocol";
 import {
   executeManagerTool,
@@ -83,7 +82,8 @@ function usage(): string {
 function invocationArgs(argv: string[]): string[] {
   const marker = argv.findIndex((arg) => arg === "--wollipog-cli");
   if (marker >= 0) return argv.slice(marker + 1);
-  return argv.slice(basename(argv[0] ?? "") === "wollipog" ? 1 : 2);
+  const invokedAsAlias = /(?:^|[\\/])wollipog(?:\.exe)?$/iu.test(argv[0] ?? "");
+  return argv.slice(invokedAsAlias ? 1 : 2);
 }
 
 function command(args: string[]): { tool: string; input: Record<string, unknown> } | { error: string } {

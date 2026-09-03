@@ -123,9 +123,9 @@ export function provisionAgentControl(
   const token = sessionToken(tokenFile);
   const tokenHash = createHash("sha256").update(token).digest("hex");
   const readyFile = agentControlReadyPath(host.configDir, spec.sessionId);
-  let ready = false;
-  try { ready = readFileSync(readyFile, "utf8").trim() === tokenHash; } catch { /* not acknowledged */ }
-  if (!ready) rmSync(readyFile, { force: true });
+  // Every registration gets a fresh positive-ack fence, including reconnect/resume with the same
+  // token. A stale marker must never let the first request race a rejected re-binding.
+  rmSync(readyFile, { force: true });
   config.registerCredential?.(spec.sessionId, tokenHash);
 
   const cli = runnerReentryCommand(host, "--wollipog-cli");
