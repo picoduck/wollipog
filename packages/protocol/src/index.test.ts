@@ -133,8 +133,8 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 99", () => {
-  assert.equal(PROTOCOL_VERSION, 99);
+test("PROTOCOL_VERSION is 100", () => {
+  assert.equal(PROTOCOL_VERSION, 100);
 });
 
 test("v99 queued prompt editing messages preserve opaque revisions and attachments", () => {

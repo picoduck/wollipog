@@ -20,7 +20,10 @@
 
 import type { Readable, Writable } from "node:stream";
 import { readFileSync } from "node:fs";
-import { WOLLIPOG_CONDUCTOR_ACTOR_SESSION_HEADER } from "@wollipog/protocol";
+import {
+  WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
+  WOLLIPOG_CONDUCTOR_ACTOR_SESSION_HEADER,
+} from "@wollipog/protocol";
 import { VERSION } from "./version.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -64,14 +67,17 @@ export interface McpDeps {
   /** Active runner credential; paired with selfSessionId so the control plane authenticates this
    * exact live conductor without treating the credential as a general REST credential. */
   token: string;
+  /** Conductor compatibility uses its historical header; general sessions use the exact-session
+   * credential header. Device-token CLI calls omit actorHeader entirely. */
+  actorHeader?: typeof WOLLIPOG_CONDUCTOR_ACTOR_SESSION_HEADER | typeof WOLLIPOG_AGENT_ACTOR_SESSION_HEADER | null;
 }
 
-interface ToolResult {
+export interface ToolResult {
   content: { type: "text"; text: string }[];
   isError?: boolean;
 }
 
-interface McpTool {
+export interface McpTool {
   name: string;
   description: string;
   inputSchema: Json;
@@ -106,7 +112,8 @@ async function cpFetch(
   const headers: Record<string, string> = {};
   if (body !== undefined) headers["content-type"] = "application/json";
   if (deps.token) headers["authorization"] = `Bearer ${deps.token}`;
-  headers[WOLLIPOG_CONDUCTOR_ACTOR_SESSION_HEADER] = deps.selfSessionId;
+  const actorHeader = deps.actorHeader === undefined ? WOLLIPOG_CONDUCTOR_ACTOR_SESSION_HEADER : deps.actorHeader;
+  if (actorHeader && deps.selfSessionId) headers[actorHeader] = deps.selfSessionId;
   let res: McpFetchResponse;
   try {
     res = await deps.fetch(`${deps.cpUrl}${path}`, {
@@ -407,6 +414,48 @@ export const TOOLS: McpTool[] = [
         lines: tail.map(renderEventLine),
         lastSeq: typeof last?.seq === "number" ? last.seq : after,
       });
+    },
+  },
+  {
+    name: "wait_session",
+    description: "Wait until a session reaches one of the requested states, then return its metadata.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: { type: "string" },
+        states: {
+          type: "array",
+          minItems: 1,
+          items: { type: "string", enum: ["queued", "starting", "running", "input_required", "idle", "completed", "failed", "stopped"] },
+        },
+        timeoutMs: { type: "integer", minimum: 1, maximum: 3_600_000 },
+        intervalMs: { type: "integer", minimum: 50, maximum: 10_000 },
+      },
+      required: ["sessionId", "states"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.sessionId !== "string" || !args.sessionId) return errorResult("sessionId is required");
+      if (!Array.isArray(args.states) || args.states.length === 0 ||
+          args.states.some((state: unknown) => typeof state !== "string")) {
+        return errorResult("states must be a non-empty array of session states");
+      }
+      const wanted = new Set<string>(args.states);
+      const timeoutMs = Math.min(3_600_000, Math.max(1, Number.isFinite(args.timeoutMs) ? Math.floor(args.timeoutMs) : 60_000));
+      const intervalMs = Math.min(10_000, Math.max(50, Number.isFinite(args.intervalMs) ? Math.floor(args.intervalMs) : 500));
+      const deadline = Date.now() + timeoutMs;
+      do {
+        const r = await cpFetch(deps, "GET", `/api/sessions/${encodeURIComponent(args.sessionId)}`);
+        if (!r.ok) return errorResult(r.message);
+        const session = r.data?.session;
+        if (typeof session?.status === "string" && wanted.has(session.status)) {
+          return textResult({ session: mapSession(session), reached: session.status });
+        }
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) break;
+        await new Promise((resolve) => setTimeout(resolve, Math.min(intervalMs, remaining)));
+      } while (Date.now() <= deadline);
+      return errorResult(`timed out waiting for session ${args.sessionId} to reach ${[...wanted].join(", ")}`);
     },
   },
   {
@@ -1035,6 +1084,18 @@ export async function dispatch(msg: unknown, deps: McpDeps): Promise<Json | null
   }
 }
 
+/** Direct programmatic access for the CLI. It deliberately executes the exact MCP tool table so
+ * schemas, response projection, self-targeting checks, and REST routes cannot drift. */
+export async function executeManagerTool(name: string, args: Json, deps: McpDeps): Promise<ToolResult> {
+  const tool = TOOLS.find((candidate) => candidate.name === name);
+  if (!tool) return errorResult(`unknown tool '${name}'`);
+  try {
+    return await tool.handler(args ?? {}, deps);
+  } catch (error) {
+    return errorResult(`tool '${name}' failed: ${(error as Error)?.message ?? String(error)}`);
+  }
+}
+
 /**
  * Newline-delimited JSON-RPC over a stream pair. Non-JSON lines are skipped (same rule as
  * jsonrpc.ts — stdout noise must not kill the server). Requests dispatch CONCURRENTLY:
@@ -1108,6 +1169,7 @@ export function runConductorMcp(argv: string[], env: NodeJS.ProcessEnv): void {
     cpUrl: cpUrl.replace(/\/+$/, ""),
     selfSessionId,
     token,
+    actorHeader: WOLLIPOG_CONDUCTOR_ACTOR_SESSION_HEADER,
   };
   serveConductorMcp(process.stdin, process.stdout, deps);
   // The claude CLI owns our lifetime: stdin EOF means the session process is gone.

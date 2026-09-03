@@ -4,8 +4,10 @@ import {
   carriesTokenParam,
   extractBearer,
   hashToken,
+  isAuthenticatedAgentControlClaim,
   isAuthenticatedConductorClaim,
   isAuthenticatedPolicyHookClaim,
+  isAgentControlApiRouteAllowed,
   isConductorApiRouteAllowed,
   isPolicyHookApiRouteAllowed,
   isTrustedLoopback,
@@ -48,6 +50,20 @@ test("conductor REST claims require an active exact-runner credential and an exa
   }
 });
 
+test("general agent-control claims require an exact active session and purpose-bound credential", () => {
+  const base = {
+    credentialValid: true,
+    claimedSessionId: "s_codex",
+    session: { id: "s_codex", status: "running" },
+  };
+  assert.equal(isAuthenticatedAgentControlClaim(base), true);
+  assert.equal(isAuthenticatedAgentControlClaim({ ...base, credentialValid: false }), false);
+  assert.equal(isAuthenticatedAgentControlClaim({ ...base, claimedSessionId: "s_other" }), false);
+  for (const status of ["idle", "completed", "failed", "stopped"]) {
+    assert.equal(isAuthenticatedAgentControlClaim({ ...base, session: { ...base.session, status } }), false, status);
+  }
+});
+
 test("conductor REST access is method- and route-scoped to its published MCP tools", () => {
   for (const [method, route] of [
     ["GET", "/api/runners"],
@@ -80,6 +96,14 @@ test("conductor REST access is method- and route-scoped to its published MCP too
   ] as const) {
     assert.equal(isConductorApiRouteAllowed(method, route), false, `${method} ${route}`);
   }
+});
+
+test("general CLI/MCP access shares the closed manager route allowlist", () => {
+  assert.equal(isAgentControlApiRouteAllowed("GET", "/api/sessions"), true);
+  assert.equal(isAgentControlApiRouteAllowed("POST", "/api/sessions/:id/prompt"), true);
+  assert.equal(isAgentControlApiRouteAllowed("POST", "/api/sessions/:id/approve"), false);
+  assert.equal(isAgentControlApiRouteAllowed("GET", "/api/devices"), false);
+  assert.equal(isAgentControlApiRouteAllowed("POST", "/api/new-future-surface"), false);
 });
 
 test("requiresDeviceAuth: every client needs a token for /api/* and /ui only", () => {

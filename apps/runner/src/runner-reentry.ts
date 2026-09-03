@@ -43,7 +43,7 @@ function rewriteToCliEntry(scriptPath: string): string {
 
 export function runnerReentryCommand(
   host: RunnerReentryHost,
-  mode: "--conductor-mcp" | "--policy-hook",
+  mode: "--conductor-mcp" | "--policy-hook" | "--agent-control-mcp" | "--wollipog-cli",
 ): { command: string; args: string[] } {
   if (host.isSea) return { command: host.execPath, args: [mode] };
   return {

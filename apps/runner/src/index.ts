@@ -73,6 +73,14 @@ import {
   sweepClaudeHookFiles,
 } from "./hook-settings.js";
 import {
+  defaultAgentControlHost,
+  markAgentControlCredentialReady,
+  markAgentControlCredentialRejected,
+  provisionAgentControl,
+  removeAgentControlFiles,
+  sweepAgentControlFiles,
+} from "./agent-control.js";
+import {
   GitOpError,
   resolveGitActionExecution,
   runGitAction,
@@ -299,8 +307,10 @@ const claudeHookHost = {
   ...defaultClaudeHookHost(),
   configDir: claudeHookRunnerConfigDir(config.dataDir, config.runnerId),
 };
+const agentControlHost = defaultAgentControlHost(config.dataDir);
 sweepConductorMcpConfigs(conductorHost.configDir);
 sweepClaudeHookFiles(claudeHookHost.configDir);
+sweepAgentControlFiles(agentControlHost.configDir);
 
 const runnerHostname = hostname();
 const sessionNamingCustomModel = new RunnerSessionNamingCustomModel(resolve(config.dataDir, "session-naming"));
@@ -427,6 +437,8 @@ let registered = false;
 let controlPlaneProtocolVersion: number | null = null;
 const registerPolicyHookCredential = (sessionId: string, tokenHash: string) =>
   sendUp({ type: "policy_hook_credential", sessionId, tokenHash });
+const registerAgentControlCredential = (sessionId: string, tokenHash: string) =>
+  sendUp({ type: "agent_control_credential", sessionId, tokenHash });
 // The box's on-disk session store (source of truth, shared across runner instances on this box).
 const store = new SessionStore(resolve(config.dataDir, "sessions"));
 store.scrubLegacyAgentEnv();
@@ -495,6 +507,17 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
       },
       log,
       claudeHookHost,
+    );
+    provisionAgentControl(
+      meta,
+      {
+        controlPlaneUrl: config.controlPlaneUrl,
+        controlPlaneProtocolVersion,
+        allowInsecureTransport,
+        registerCredential: registerAgentControlCredential,
+      },
+      log,
+      agentControlHost,
     );
     const commandPreparation = await prepareClaudeSlashCommandCatalog(meta);
     if (commandPreparation.outcome === "retained") {
@@ -1096,6 +1119,18 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         log(`Claude hooks ${msg.sessionId}: credential acknowledgement rejected (${errText(error)})`);
       }
       break;
+    case "agent_control_credential_registered":
+      try {
+        if (msg.accepted) markAgentControlCredentialReady(agentControlHost.configDir, msg.sessionId, msg.tokenHash);
+        else {
+          markAgentControlCredentialRejected(agentControlHost.configDir, msg.sessionId);
+          log(`agent control ${msg.sessionId}: credential registration rejected (${msg.error ?? "unknown session binding"})`);
+        }
+      } catch (error) {
+        markAgentControlCredentialRejected(agentControlHost.configDir, msg.sessionId);
+        log(`agent control ${msg.sessionId}: credential acknowledgement rejected (${errText(error)})`);
+      }
+      break;
     case "start_session":
       log(`start_session ${msg.spec.sessionId} (${msg.spec.agentId})`);
       if (!validatePromptImageInputs(msg.initialImages ?? []).ok) {
@@ -1336,6 +1371,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       // best-effort removal is a no-op for non-conductor sessions.
       removeConductorMcpConfig(msg.sessionId, conductorHost.configDir);
       removeClaudeHookFiles(msg.sessionId, claudeHookHost.configDir);
+      removeAgentControlFiles(msg.sessionId, agentControlHost.configDir);
       break;
     case "resolve_permission":
       sessions.resolvePermission(msg.sessionId, msg.requestId, msg.optionId);

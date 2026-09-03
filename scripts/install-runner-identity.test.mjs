@@ -117,6 +117,7 @@ posixTest("POSIX standalone installer creates canonical paths and a functional l
   const { home, run } = installHarness(t);
   const result = run("fresh-token");
   const canonicalBin = join(home, ".local", "bin", "wollipog-runner");
+  const cliBin = join(home, ".local", "bin", "wollipog");
   const legacyBin = join(home, ".local", "bin", "agent-manager-runner");
   const canonicalConfig = join(home, ".config", "wollipog", "runner.config.json");
 
@@ -130,6 +131,7 @@ posixTest("POSIX standalone installer creates canonical paths and a functional l
   assert.match(readFileSync(canonicalConfig, "utf8"), /"token": "fresh-token"/);
   assert.equal(existsSync(join(home, ".config", "agent-manager", "runner.config.json")), false);
   assert.match(result.stdout, /Runner installed: .*\/\.local\/bin\/wollipog-runner/);
+  assert.equal(readFileSync(cliBin, "utf8"), runnerBytes);
   assert.match(result.stdout, /Start it:.*\/\.config\/wollipog\/runner\.config\.json/);
 
   const aliasResult = spawnPosix([shellPath(legacyBin)], { encoding: "utf8" });

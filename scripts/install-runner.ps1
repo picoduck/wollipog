@@ -55,10 +55,12 @@ $expectedSha256 = $Matches[1]
 $dir = Join-Path $env:LOCALAPPDATA 'Wollipog'
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 $bin = Join-Path $dir 'wollipog-runner.exe'
+$cliBin = Join-Path $dir 'wollipog.exe'
 $legacyDir = Join-Path $env:LOCALAPPDATA 'AgentManager'
 $legacyBin = Join-Path $legacyDir 'agent-manager-runner.exe'
 $partial = "$bin.download-$PID"
 $legacyPartial = "$legacyBin.alias-$PID"
+$cliPartial = "$cliBin.alias-$PID"
 Write-Host "Downloading $($asset.name)..."
 try {
   if ($useGh) {
@@ -112,6 +114,16 @@ namespace WollipogInstaller {
   Remove-Item -LiteralPath $legacyPartial -Force -ErrorAction SilentlyContinue
 }
 
+# The verified runner SEA also dispatches the user-facing CLI by invocation name.
+try {
+  Copy-Item -LiteralPath $bin -Destination $cliPartial -Force
+  Move-Item -LiteralPath $cliPartial -Destination $cliBin -Force
+} catch {
+  Write-Warning "Could not refresh the Wollipog CLI alias at $cliBin. Stop any process using it and rerun this installer."
+} finally {
+  Remove-Item -LiteralPath $cliPartial -Force -ErrorAction SilentlyContinue
+}
+
 $canonicalCfg = Join-Path $dir 'runner.config.json'
 $legacyCfg = Join-Path $legacyDir 'runner.config.json'
 if (Test-Path -LiteralPath $canonicalCfg -PathType Leaf) {
@@ -149,4 +161,5 @@ if (-not (Test-Path $cfg)) {
 
 Write-Host ""
 Write-Host "Runner installed: $bin"
+Write-Host "CLI installed:    $cliBin"
 Write-Host "Start it:  & '$bin' --config '$cfg'"

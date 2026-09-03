@@ -94,6 +94,13 @@ async function fetchSession(stack: Pick<LiveStack, "httpBase" | "ownerToken" | "
   return ((await response.json()) as { session: SessionView }).session;
 }
 
+async function fetchEvents(stack: Pick<LiveStack, "httpBase" | "ownerToken" | "sessionId">): Promise<unknown> {
+  const response = await fetch(`${stack.httpBase}/api/sessions/${stack.sessionId}/events`, {
+    headers: { authorization: `Bearer ${stack.ownerToken}` },
+  });
+  return response.ok ? response.json() : `${response.status} ${await response.text()}`;
+}
+
 async function queuePrompt(
   stack: Pick<LiveStack, "httpBase" | "ownerToken" | "sessionId">,
   text: string,
@@ -299,7 +306,10 @@ async function startLiveStack(
     for (let attempt = 0; attempt < 300; attempt += 1) {
       const session = await fetchSession(stack);
       if (session.pendingApproval?.kind === "question") return stack;
-      if (session.status === "failed") throw new Error(`session failed before asking a question\n${logs()}`);
+      if (session.status === "failed") {
+        throw new Error(`session failed before asking a question: ${JSON.stringify(session)}\n` +
+          `events: ${JSON.stringify(await fetchEvents(stack))}\n${logs()}`);
+      }
       await delay(100);
     }
     throw new Error(`${provider === "codex" ? "Codex" : "Claude"} question never reached the control plane\n${logs()}`);
