@@ -1612,9 +1612,6 @@ textarea {
     background-color var(--dur-fast) var(--ease-out),
     color var(--dur-fast) var(--ease-out);
 }
-.crumb-project-actions:hover {
-  background: var(--bg-elev-2);
-}
 .crumb-project-actions:active {
   background: var(--bg-elev-3);
 }

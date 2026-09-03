@@ -311,7 +311,7 @@ test("coarse-pointer desktop keeps Project Actions beside short Project text", a
   }
 });
 
-test("Project Actions has settled breadcrumb colors in light and dark themes", async ({ browser }) => {
+test("Project Actions keeps hover transparent while preserving interaction states", async ({ browser }) => {
   for (const theme of ["light", "dark"] as const) {
     const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
     const page = await context.newPage();
@@ -326,6 +326,9 @@ test("Project Actions has settled breadcrumb colors in light and dark themes", a
       const project = header.locator(".crumb-project > .cctx-chip");
       const actions = header.getByRole("button", { name: "Project Actions" });
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await expect(actions).toHaveAttribute("title", "Project Actions");
+      await expect(actions).toHaveAttribute("aria-haspopup", "menu");
+      await expect(actions).toHaveAttribute("aria-expanded", "false");
       await expect(actions).toHaveCSS("background-image", "none");
       await expect(actions).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
       await expect.poll(async () => {
@@ -351,19 +354,44 @@ test("Project Actions has settled breadcrumb colors in light and dark themes", a
         return { accent, active, hover };
       });
       await actions.hover();
-      await expect(actions).toHaveCSS("background-color", tokens.hover);
+      await capture(page, `${theme}-project-actions-hover`);
+      await expect(actions).toHaveCSS("background-image", "none");
+      await expect(actions).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+      await expect(actions).toHaveCSS("border-top-width", "0px");
+      await expect(actions).toHaveCSS("box-shadow", "none");
+      await expect(actions).toHaveCSS("outline-style", "none");
+      await expect(actions).toHaveCSS("cursor", "pointer");
+      await expect.poll(async () => {
+        const [actionsColor, projectColor] = await Promise.all([
+          actions.evaluate((element) => getComputedStyle(element).color),
+          project.evaluate((element) => getComputedStyle(element).color),
+        ]);
+        return actionsColor === projectColor;
+      }).toBe(true);
       const box = await actions.boundingBox();
       expect(box).not.toBeNull();
       await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
       await page.mouse.down();
       await expect(actions).toHaveCSS("background-color", tokens.active);
       await page.mouse.up();
+      await expect(actions).toHaveAttribute("aria-expanded", "true");
+      await expect(actions).toHaveCSS("background-color", tokens.hover);
+      await expect(actions).toHaveCSS("color", tokens.accent);
       await page.keyboard.press("Escape");
       await expect(actions).toHaveAttribute("aria-expanded", "false");
       await project.focus();
       await page.keyboard.press("Tab");
       await expect(actions).toBeFocused();
       await expect(actions).toHaveCSS("color", tokens.accent);
+      const focus = await actions.evaluate((element) => {
+        const style = getComputedStyle(element);
+        return {
+          outlineStyle: style.outlineStyle,
+          outlineWidth: Number.parseFloat(style.outlineWidth),
+        };
+      });
+      expect(focus.outlineStyle).not.toBe("none");
+      expect(focus.outlineWidth).toBeGreaterThanOrEqual(2);
     } finally {
       await context.close();
     }
