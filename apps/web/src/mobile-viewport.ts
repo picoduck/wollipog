@@ -60,7 +60,7 @@ const KEYBOARD_LEAVE_PX = 120;
  * fields are excluded on both sides: focusing one selects its text and summons nothing, and no
  * viewport event would ever arrive to put the rail back.
  */
-const KEYBOARD_EDITABLE = "textarea:not([readonly]), [contenteditable=''], [contenteditable='true'], "
+export const KEYBOARD_EDITABLE = "textarea:not([readonly]), [contenteditable=''], [contenteditable='true'], "
   + "input:not([readonly], [type='button'], [type='checkbox'], [type='color'], [type='file'], "
   + "[type='image'], [type='radio'], [type='range'], [type='reset'], [type='submit'])";
 
