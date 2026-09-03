@@ -147,12 +147,17 @@ class FakeSocket implements UiSocket {
 interface Deferred<T> {
   promise: Promise<T>;
   resolve: (value: T) => void;
+  reject: (reason: unknown) => void;
 }
 
 function deferred<T>(): Deferred<T> {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((settle) => { resolve = settle; });
-  return { promise, resolve };
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((settle, fail) => {
+    resolve = settle;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
 }
 
 interface Fixture {
@@ -507,6 +512,172 @@ test("navigating away mid-edit preserves the displaced session draft instead of 
     await flushAsyncWork();
     assert.equal(remounted.value, "Original local draft");
     assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a queued edit that fails after navigation restores its exact retry and keeps the displaced draft separate", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const editResult = deferred<Awaited<ReturnType<ApiClient["editQueuedPrompt"]>>>();
+  const edits: Array<Parameters<ApiClient["editQueuedPrompt"]>[2]> = [];
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 99,
+    sessionPatch: {
+      queued: [{
+        id: "queue-1",
+        text: "Queued projection",
+        hasImages: true,
+        liveQueueObserved: true,
+        editable: true,
+        editRevision: "qer_projection",
+      }],
+    },
+    client: {
+      readQueuedPrompt: async (_sessionId, promptId) => ({
+        prompt: {
+          promptId,
+          text: "Original exact content",
+          images: [submittedImage],
+          editRevision: "qer_exact",
+        },
+      }),
+      editQueuedPrompt: async (_sessionId, _promptId, request) => {
+        edits.push(request);
+        return editResult.promise;
+      },
+    },
+  });
+  try {
+    await resolveDraft(draft, "Displaced local draft");
+    const edit = fixture.container.querySelector('button[aria-label="Edit Queued Message"]') as HTMLButtonElement;
+    await act(async () => { edit.click(); });
+    await flushAsyncWork();
+    await act(async () => {
+      fixture.composer.value = "Revised content awaiting confirmation";
+      fireDomEvent.change(fixture.composer);
+    });
+    const save = fixture.container.querySelector('button[aria-label="Save Queued Message"]') as HTMLButtonElement;
+    await act(async () => { save.click(); });
+    await flushAsyncWork();
+
+    await fixture.rerenderSessionWithDraftLoader(fixture.alternateSessionId, async () => null);
+    await flushAsyncWork();
+    assert.equal(fixture.container.querySelector(".queued-edit-banner"), null,
+      "the in-flight edit must not leak into another Session");
+
+    const pending = await fixture.remountWithDraftLoader(loadComposerDraft);
+    await flushAsyncWork();
+    assert.equal(pending.value, "Revised content awaiting confirmation");
+    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
+    assert.ok(fixture.container.querySelector(".queued-edit-banner"));
+    assert.ok(fixture.container.querySelector('button[aria-label="Save Queued Message"] .spinner'));
+
+    await act(async () => {
+      editResult.reject(new Error("The queued message changed before this edit was saved."));
+      await Promise.resolve();
+    });
+    await flushAsyncWork();
+    const recovered = fixture.container.querySelector(".composer-input") as HTMLTextAreaElement;
+    assert.equal(recovered.value, "Revised content awaiting confirmation");
+    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
+    assert.equal(fixture.container.querySelector('button[aria-label="Save Queued Message"] .spinner'), null);
+    assert.match(fixture.container.querySelector(".composer-error")?.textContent ?? "",
+      /edit was not confirmed.*changed before/i);
+    assert.equal(edits.length, 1);
+
+    const retry = fixture.container.querySelector('button[aria-label="Save Queued Message"]') as HTMLButtonElement;
+    await act(async () => { retry.click(); });
+    await flushAsyncWork();
+    assert.equal(edits.length, 2);
+    assert.equal(edits[1]?.submissionId, edits[0]?.submissionId,
+      "the recovered byte-identical edit must preserve its idempotency identity");
+
+    const cancel = [...fixture.container.querySelectorAll("button")]
+      .find((button) => button.textContent === "Cancel Edit") as HTMLButtonElement | undefined;
+    assert.ok(cancel);
+    await act(async () => { cancel.click(); });
+    await flushAsyncWork();
+    assert.equal(recovered.value, "Displaced local draft");
+    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 0);
+    assert.equal(fixture.container.querySelector(".queued-edit-banner"), null);
+
+    const remounted = await fixture.remountWithDraftLoader(loadComposerDraft);
+    await flushAsyncWork();
+    assert.equal(remounted.value, "Displaced local draft");
+    assert.equal(fixture.container.querySelector(".queued-edit-banner"), null,
+      "explicit cancellation must retire the failed edit recovery");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a queued edit accepted after navigation restores only the displaced draft", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const editResult = deferred<Awaited<ReturnType<ApiClient["editQueuedPrompt"]>>>();
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 99,
+    sessionPatch: {
+      queued: [{
+        id: "queue-1",
+        text: "Queued projection",
+        liveQueueObserved: true,
+        editable: true,
+        editRevision: "qer_projection",
+      }],
+    },
+    client: {
+      readQueuedPrompt: async (_sessionId, promptId) => ({
+        prompt: {
+          promptId,
+          text: "Original exact content",
+          images: [],
+          editRevision: "qer_exact",
+        },
+      }),
+      editQueuedPrompt: async () => editResult.promise,
+    },
+  });
+  try {
+    await resolveDraft(draft, "Displaced local draft");
+    const edit = fixture.container.querySelector('button[aria-label="Edit Queued Message"]') as HTMLButtonElement;
+    await act(async () => { edit.click(); });
+    await flushAsyncWork();
+    await act(async () => {
+      fixture.composer.value = "Successfully revised content";
+      fireDomEvent.change(fixture.composer);
+    });
+    const save = fixture.container.querySelector('button[aria-label="Save Queued Message"]') as HTMLButtonElement;
+    await act(async () => { save.click(); });
+    await flushAsyncWork();
+
+    await fixture.rerenderSessionWithDraftLoader(fixture.alternateSessionId, async () => null);
+    const pending = await fixture.remountWithDraftLoader(loadComposerDraft);
+    await flushAsyncWork();
+    assert.equal(pending.value, "Successfully revised content");
+    assert.ok(fixture.container.querySelector(".queued-edit-banner"));
+
+    await act(async () => {
+      editResult.resolve({
+        prompt: {
+          promptId: "queue-1",
+          text: "Successfully revised content",
+          images: [],
+          editRevision: "qer_applied",
+        },
+      });
+      await editResult.promise;
+    });
+    await flushAsyncWork();
+    assert.equal(pending.value, "Displaced local draft");
+    assert.equal(fixture.container.querySelector(".queued-edit-banner"), null);
+    assert.equal(fixture.container.querySelector(".composer-error"), null);
+
+    const remounted = await fixture.remountWithDraftLoader(loadComposerDraft);
+    await flushAsyncWork();
+    assert.equal(remounted.value, "Displaced local draft");
+    assert.equal(fixture.container.querySelector(".queued-edit-banner"), null,
+      "a successful edit must never resurrect as failed recovery");
   } finally {
     await unmountFixture(fixture);
   }
