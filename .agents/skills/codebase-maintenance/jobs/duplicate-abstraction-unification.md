@@ -11,7 +11,10 @@ Start mechanically, then verify semantically:
 
 - `npx -y jscpd --min-lines 25 --min-tokens 120 --reporters console --silent apps packages` for
   literal and near-literal duplication;
-- `git grep -n "^export function \|^export const \|^export class "` to build a symbol inventory, then
+- `git grep -n "^export \(async \)\?function \|^export const \|^export class \|^export type \|^export interface "`
+  to build a symbol inventory — types and interfaces included, because the duplicated
+  abstractions in this repository are as often shapes as functions (one run's only finding was
+  an `interface` the narrower pattern could not match) — then
   look for families of similar names across packages — the same concept implemented per-package.
 
 Mechanical duplication is only the candidate list. For each candidate, read both implementations
