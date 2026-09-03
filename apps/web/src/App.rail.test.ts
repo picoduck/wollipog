@@ -85,7 +85,8 @@ test("live-follow status owns a reserved transcript strip with a compact centere
   assert.match(css, /\.transcript-status-strip\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*auto\s*minmax\(0,\s*1fr\);[^}]*flex:\s*none;[^}]*min-height:\s*42px;[^}]*padding:\s*6px 14px;[^}]*background:\s*var\(--bg\);/);
   assert.doesNotMatch(css.match(/\.transcript-status-strip\s*\{[^}]*\}/)?.[0] ?? "", /border-top/,
     "the reader status strip remains visually continuous with the transcript");
-  assert.match(css, /\.transcript-status-context\s*\{[^}]*grid-column:\s*1;[^}]*justify-self:\s*end;/);
+  assert.match(css, /\.transcript-status-context\s*\{[^}]*grid-column:\s*1;[^}]*justify-content:\s*flex-end;[^}]*justify-self:\s*stretch;[^}]*width:\s*100%;/,
+    "the leading status cell fills its grid track before font-dependent children are constrained");
   assert.match(css, /\.transcript-status-trailing\s*\{[^}]*grid-column:\s*3;[^}]*justify-self:\s*stretch;/);
   assert.match(css, /\.transcript-status-usage\s*\{[^}]*min-width:\s*0;[^}]*overflow:\s*hidden;[^}]*text-overflow:\s*ellipsis;[^}]*white-space:\s*nowrap;/,
     "mobile usage truncates inside the trailing track rather than overlapping the center");

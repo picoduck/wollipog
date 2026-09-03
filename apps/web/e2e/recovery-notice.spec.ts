@@ -70,6 +70,10 @@ test("full-height mobile Sessions keep recovery readable in the persistent strip
   const readGeometry = async (width: number, settled: boolean) => {
     await page.setViewportSize({ width, height: 800 });
     await page.goto(`/recovery-notice-e2e.html?mode=expanded&height=640&width=${width}${settled ? "&settled=1" : ""}`);
+    // Stress the three tracks with wider-than-default text metrics. GitHub's Linux fallback made
+    // the former shrink-to-fit leading cell cross the center control even though local Noto Sans
+    // happened to fit; spacing the fixture text keeps that structural bug reproducible everywhere.
+    await page.addStyleTag({ content: ".transcript-status-strip { letter-spacing: 0.35px; }" });
     const slot = page.locator(".transcript-recovery-slot");
     const echo = page.locator(".transcript-recovery-strip-echo");
     const strip = page.locator(".transcript-status-strip");
