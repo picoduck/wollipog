@@ -27,7 +27,8 @@ function amount(input: number, cached: number, output: number, costUsd: number, 
   return {
     inputTokens: input, outputTokens: output, costUsd, uncachedInputTokens: input, cachedInputTokens: cached,
     cacheCreationTokens: Math.round(cached / 12), reasoningTokens: Math.round(output / 5),
-    cacheSavingsUsd: cached * 0.0000045, costSource: "providerReported", unpricedRecords: 0, ...over,
+    cacheSavingsUsd: cached * 0.0000045, costSource: "providerReported", unpricedRecords: 0,
+    processedTokens: input + cached + Math.round(cached / 12) + output, ...over,
   };
 }
 
@@ -37,6 +38,7 @@ function add(a: UsageAmount, b: UsageAmount): UsageAmount {
     uncachedInputTokens: a.uncachedInputTokens + b.uncachedInputTokens, cachedInputTokens: a.cachedInputTokens + b.cachedInputTokens,
     cacheCreationTokens: a.cacheCreationTokens + b.cacheCreationTokens, reasoningTokens: a.reasoningTokens + b.reasoningTokens,
     cacheSavingsUsd: a.cacheSavingsUsd + b.cacheSavingsUsd,
+    processedTokens: a.processedTokens + b.processedTokens,
     costSource: a.costSource === "unpriced" || b.costSource === "unpriced" ? "unpriced"
       : a.costSource === "modelPriced" || b.costSource === "modelPriced" ? "modelPriced" : "providerReported",
     unpricedRecords: a.unpricedRecords + b.unpricedRecords,

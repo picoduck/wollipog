@@ -2428,6 +2428,10 @@ export interface UsageAmount {
   cacheCreationTokens: number;
   /** Subset of `outputTokens`; never added on top of it. */
   reasoningTokens: number;
+  /** Every token the provider processed: all input buckets plus output, derived per row with the
+   * driver's input semantics (Codex input already includes its cache reads) so it sums exactly
+   * across buckets, breakdowns, and drivers (v103+). Rows without a cache split count input only. */
+  processedTokens: number;
   /** What cached input would have cost at the full input rate minus what it cost. */
   cacheSavingsUsd: number;
   costSource: UsageCostSource;

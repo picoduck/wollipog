@@ -10927,9 +10927,10 @@ body.shell-dock-dragging * {
 .usage-chart-baseline { stroke: var(--border-strong); stroke-width: 1; }
 .usage-chart-tick, .usage-chart-axis { fill: var(--text-dim); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
 .usage-chart-segment { fill: var(--usage-series); transition: fill var(--dur-fast) var(--ease-out); }
-/* The hovered column lifts by mixing toward the surface, not by fading: opacity would dim the
-   bands' contrast below the 3:1 they were validated at. */
-.usage-chart-column.is-hovered .usage-chart-segment { fill: color-mix(in srgb, var(--usage-series) 80%, var(--bg-elev)); }
+/* The hovered column lifts by mixing toward the INK, never the surface: a mix toward the surface
+   (or opacity) pulls the bands under the 3:1 non-text floor they were validated at, while a mix
+   toward the text colour moves every slot away from the ground in both themes. */
+.usage-chart-column.is-hovered .usage-chart-segment { fill: color-mix(in srgb, var(--usage-series) 82%, var(--text)); }
 .usage-chart-hit { fill: transparent; cursor: crosshair; }
 .usage-chart-hit:focus-visible { outline: none; stroke: var(--accent); stroke-width: 2; }
 .usage-chart-readout { min-height: 22px; display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 18px; font-size: var(--text-sm); }

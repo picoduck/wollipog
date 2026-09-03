@@ -19,24 +19,17 @@ import {
 function amount(over: Partial<UsageAmount> = {}): UsageAmount {
   return {
     inputTokens: 0, outputTokens: 0, costUsd: 0, uncachedInputTokens: 0, cachedInputTokens: 0, cacheCreationTokens: 0,
-    reasoningTokens: 0, cacheSavingsUsd: 0, costSource: "providerReported", unpricedRecords: 0, ...over,
+    reasoningTokens: 0, cacheSavingsUsd: 0, costSource: "providerReported", unpricedRecords: 0,
+    processedTokens: (over.inputTokens ?? 0) + (over.outputTokens ?? 0), ...over,
   };
 }
 
-test("processed tokens use the cache split when present and the reported input as a floor", () => {
-  assert.equal(processedTokens(amount({ inputTokens: 100, uncachedInputTokens: 100, cachedInputTokens: 900, cacheCreationTokens: 50, outputTokens: 10 })), 1060, "Anthropic input is the uncached part");
-  assert.equal(processedTokens(amount({ inputTokens: 1000, uncachedInputTokens: 100, cachedInputTokens: 900, outputTokens: 10 })), 1010, "Codex input already includes cache");
-  assert.equal(processedTokens(amount({ inputTokens: 40, outputTokens: 2 })), 42, "legacy rows have no split");
-  assert.equal(
-    processedTokens(amount({ inputTokens: 1100, uncachedInputTokens: 100, cachedInputTokens: 900, outputTokens: 0 })),
-    1100,
-    "legacy input summed with Codex rows survives: the unsplit remainder is added once",
-  );
-  assert.equal(
-    processedTokens(amount({ inputTokens: 110, uncachedInputTokens: 10, cachedInputTokens: 100, outputTokens: 0 })),
-    110,
-    "legacy input mixed with cached Anthropic rows is the documented under-count, never an over-count",
-  );
+test("processed tokens trust the plane's additive figure and fall back conservatively without it", () => {
+  assert.equal(processedTokens(amount({ inputTokens: 100, cachedInputTokens: 900, outputTokens: 10, processedTokens: 1060 })), 1060, "the server-derived figure wins");
+  const legacyPlane = { ...amount({ inputTokens: 1200, uncachedInputTokens: 400, cachedInputTokens: 600, cacheCreationTokens: 50, outputTokens: 30 }) } as Record<string, unknown>;
+  delete legacyPlane.processedTokens;
+  assert.equal(processedTokens(legacyPlane as unknown as UsageAmount), 1230, "without the field only reported input plus output is claimed");
+  assert.equal(processedTokens(amount({ inputTokens: 40, outputTokens: 2, processedTokens: Number.NaN })), 42, "a malformed figure falls back too");
 });
 
 test("formatting compacts tokens to three significant figures and money to whole cents", () => {

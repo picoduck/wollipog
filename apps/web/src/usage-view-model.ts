@@ -50,19 +50,15 @@ export function driverLabel(driver: string): string {
 }
 
 /**
- * Every token the provider processed: input across all cache buckets plus output.
- *
- * Aggregates mix three row shapes: Anthropic rows report `inputTokens` as the uncached part, Codex
- * rows report it inclusive of `cachedInputTokens`, and pre-v103 rows carry no split at all. The
- * split buckets are always counted; whatever reported input the split does not account for is the
- * unsplit (legacy) remainder and is added once. This never over-counts. It under-counts only when
- * legacy rows are mixed with cached Anthropic rows, where the legacy input is indistinguishable
- * from the cached part at aggregate level; that remainder ages out with retention.
+ * Every token the provider processed. The control plane derives `processedTokens` per row with the
+ * driver's input semantics and sums it, so the figure is additive across buckets, breakdowns, and
+ * drivers and every total on the page agrees. A plane older than that field gets a conservative
+ * fallback: the reported input plus output, which never over-counts.
  */
 export function processedTokens(amount: UsageAmount): number {
-  const split = amount.uncachedInputTokens + amount.cachedInputTokens + amount.cacheCreationTokens;
-  const unsplit = Math.max(0, amount.inputTokens - amount.uncachedInputTokens - amount.cachedInputTokens);
-  return split + unsplit + amount.outputTokens;
+  const derived = (amount as Partial<UsageAmount>).processedTokens;
+  if (typeof derived === "number" && Number.isFinite(derived)) return derived;
+  return amount.inputTokens + amount.outputTokens;
 }
 
 export function metricValue(amount: UsageAmount, metric: UsageMetric): number {

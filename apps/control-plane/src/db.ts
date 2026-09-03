@@ -8861,6 +8861,7 @@ export class ControlPlaneDb {
       cache_creation_tokens: number | null; reasoning_tokens: number | null;
       cache_savings_microusd: number | null; provider_reported_records: number | null;
       model_priced_records: number | null; unpriced_records: number | null;
+      processed_tokens: number | null;
     };
     const amountFrom = (row: AggregateRow | undefined): UsageAmount => ({
       inputTokens: Number(row?.input_tokens ?? 0),
@@ -8877,11 +8878,20 @@ export class ControlPlaneDb {
         unpriced: Number(row?.unpriced_records ?? 0),
       }),
       unpricedRecords: Number(row?.unpriced_records ?? 0),
+      processedTokens: Number(row?.processed_tokens ?? 0),
     });
+    // Processed tokens are derived PER ROW, where the driver is known, so the figure is additive:
+    // Codex reports input inclusive of its cache reads, Anthropic reports the uncached part only.
+    // Summing a driver-aware expression is exact at every grouping level; deriving it from summed
+    // buckets after the fact is not, because a mixed aggregate cannot tell the two apart.
+    const processedSql = `SUM(CASE WHEN driver IN ('codex', 'codex-app-server')
+                               THEN input_tokens + cache_creation_tokens + output_tokens
+                               ELSE input_tokens + cached_input_tokens + cache_creation_tokens + output_tokens END) AS processed_tokens`;
     const sums = `SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
                   SUM(cost_microusd) AS cost_microusd,
-                  ${USAGE_LEDGER_V103_COLUMNS.map((column) => `SUM(${column}) AS ${column}`).join(", ")}`;
-    const measures = `input_tokens, output_tokens, cost_microusd, ${USAGE_LEDGER_V103_COLUMNS.join(", ")}`;
+                  ${USAGE_LEDGER_V103_COLUMNS.map((column) => `SUM(${column}) AS ${column}`).join(", ")},
+                  ${processedSql}`;
+    const measures = `input_tokens, output_tokens, cost_microusd, ${USAGE_LEDGER_V103_COLUMNS.join(", ")}, processed_tokens`;
     const inputCount = this.stmt(
       `SELECT COUNT(*) AS count FROM (SELECT 1 FROM (${source}) AS bounded_source LIMIT 100001)`,
     ).get(...sourceParams) as { count: number };
@@ -8947,7 +8957,7 @@ export class ControlPlaneDb {
       .sort((a, b) => b.bucketTs - a.bucketTs || a.driver.localeCompare(b.driver));
     const totalRow = aggregateRows.find((row) => row.kind === "total");
     const measureKeys = [
-      "input_tokens", "output_tokens", "cost_microusd", ...USAGE_LEDGER_V103_COLUMNS,
+      "input_tokens", "output_tokens", "cost_microusd", ...USAGE_LEDGER_V103_COLUMNS, "processed_tokens",
     ] as const satisfies ReadonlyArray<keyof AggregateRow>;
     const breakdown = (kind: "driver" | "agent" | "runner" | "model") => {
       const rows = aggregateRows.filter((row) => row.kind === kind);

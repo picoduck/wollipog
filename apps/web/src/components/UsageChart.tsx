@@ -79,6 +79,7 @@ export function UsageChart({
   const readout = hovered === null ? null : columns[hovered] ?? null;
   const metricLabel = metric === "cost" ? "cost" : "processed tokens";
   const periodLabel = granularity === "hour" ? "Hourly" : "Daily";
+  const split = columns.some((column) => column.bands.length > 0);
 
   if (columns.length === 0) {
     return <div className="usage-chart usage-chart-empty" role="note">No usage was observed in this period.</div>;
@@ -94,7 +95,7 @@ export function UsageChart({
         role="img"
         aria-labelledby={labelId}
       >
-        <title id={labelId}>{`${periodLabel} ${metricLabel} by driver; ${tableHint}`}</title>
+        <title id={labelId}>{`${periodLabel} ${metricLabel}${split ? " by driver" : ", not split by driver"}; ${tableHint}`}</title>
         {scale.ticks.map((tick) => (
           <g key={tick}>
             <line className="usage-chart-grid" x1={PLOT_LEFT} x2={PLOT_RIGHT} y1={yFor(tick)} y2={yFor(tick)} />
@@ -174,7 +175,7 @@ export function UsageChart({
           <span className="usage-chart-readout-hint">Hover or focus a column for its breakdown.</span>
         )}
       </div>
-      {drivers.length >= 2 && (
+      {split && drivers.length >= 2 && (
         <ul className="usage-legend" aria-label="Drivers">
           {drivers.map((driver) => (
             <li key={driver}>
