@@ -784,12 +784,19 @@ test("typing during a failing queued edit request keeps the latest composer cont
     await act(async () => {
       fixture.composer.value = "Submitted revision plus late typing";
       fireDomEvent.change(fixture.composer);
+    });
+    await fixture.rerenderSessionWithDraftLoader(fixture.alternateSessionId, async () => null);
+    const recovered = await fixture.remountWithDraftLoader(loadComposerDraft);
+    await flushAsyncWork();
+    assert.equal(recovered.value, "Submitted revision plus late typing");
+
+    await act(async () => {
       editResult.reject(new Error("The queued message changed before this edit was saved."));
       await Promise.resolve();
     });
     await flushAsyncWork();
 
-    assert.equal(fixture.composer.value, "Submitted revision plus late typing");
+    assert.equal(recovered.value, "Submitted revision plus late typing");
     assert.match(fixture.container.querySelector(".composer-error")?.textContent ?? "", /not confirmed/i);
     assert.ok(fixture.container.querySelector(".queued-edit-banner"));
   } finally {

@@ -253,6 +253,26 @@ function queuedPromptEditMutationRecovery(
   return queuedPromptEditMutationRecovery(mutation.displaced);
 }
 
+function updateQueuedPromptEditMutationRecovery(
+  key: string,
+  recovery: QueuedPromptEditRecovery,
+): void {
+  const current = composerMutationRegistry.get(key);
+  if (!current) return;
+  const update = (entry: ComposerMutationEntry): ComposerMutationEntry => {
+    if (entry.kind === "edit" && entry.queuedEdit) {
+      return { ...entry, queuedEdit: cloneQueuedPromptEditRecovery(recovery) };
+    }
+    if (!entry.displaced) return entry;
+    const displaced = update(entry.displaced);
+    return displaced === entry.displaced ? entry : { ...entry, displaced };
+  };
+  const next = update(current);
+  if (next === current) return;
+  composerMutationRegistry.set(key, next);
+  notifyComposerMutation(key);
+}
+
 function storeQueuedPromptEditRecovery(key: string, recovery: QueuedPromptEditRecovery): void {
   queuedPromptEditRecoveries.delete(key);
   queuedPromptEditRecoveries.set(key, cloneQueuedPromptEditRecovery(recovery));
@@ -1223,6 +1243,15 @@ function SessionDetailLoaded({
             edit: queuedEditRef.current,
             draft: draftState.current,
           });
+        } else {
+          const pending = queuedPromptEditMutationRecovery(composerMutationRegistry.get(mutationKey));
+          if (pending) {
+            updateQueuedPromptEditMutationRecovery(mutationKey, {
+              ...pending,
+              edit: queuedEditRef.current,
+              draft: draftState.current,
+            });
+          }
         }
         return;
       }
@@ -1248,6 +1277,15 @@ function SessionDetailLoaded({
             edit: queuedEditRef.current,
             draft: draftState.current,
           });
+        } else {
+          const pending = queuedPromptEditMutationRecovery(composerMutationRegistry.get(mutationKey));
+          if (pending) {
+            updateQueuedPromptEditMutationRecovery(mutationKey, {
+              ...pending,
+              edit: queuedEditRef.current,
+              draft: draftState.current,
+            });
+          }
         }
         return;
       }
@@ -2842,8 +2880,11 @@ function SessionDetailLoaded({
         ? (cause as Error).message
         : `Queued message edit was not confirmed. ${(cause as Error).message}`;
       if (!editAccepted) {
+        const latestRecovery = queuedPromptEditMutationRecovery(
+          composerMutationRegistry.get(mutationKey),
+        ) ?? recovery;
         storeQueuedPromptEditRecovery(mutationKey, {
-          ...recovery,
+          ...latestRecovery,
           error: failureMessage,
         });
       }
