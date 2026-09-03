@@ -34,6 +34,7 @@ wollipog session stop ID --json
 wollipog worktree create [--session ID] --branch NAME [--base REF] --json
 wollipog worktree attach [--session ID] --path PATH --json
 wollipog worktree select [--session ID] --path PATH --json
+wollipog worktree discard [--session ID] --path PATH --json
 ```
 
 An injected session defaults worktree commands to its own id and cannot override that target.
@@ -41,6 +42,11 @@ Paired-device and conductor callers may supply `--session`. A create without `--
 resolves the remote default branch. Create, attach, and select return the selected absolute path;
 the already-running provider process keeps its original operating-system cwd, so it must use the
 returned path explicitly during that turn. A later resume or restart launches in the selection.
+Discard is intentionally fail-closed: it removes only an inactive runner-owned tree with a clean
+status and no commits ahead of its configured upstream. Attached, active, dirty, upstream-less,
+unpushed, branch-drifted, and Git-unavailable worktrees are retained. The runner applies the same
+checks during startup and periodic reconciliation after a linked GitHub PR is definitively merged
+or closed; an unavailable forge keeps the durable open linkage unchanged.
 
 Claude Code launches also receive an additive `wollipog` stdio MCP configuration. Both adapters
 execute the existing manager tool table, including bounded output projection and `wait_session`, so

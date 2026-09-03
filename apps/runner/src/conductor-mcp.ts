@@ -927,6 +927,27 @@ export const TOOLS: McpTool[] = [
     },
   },
   {
+    name: "discard_worktree",
+    description: "Permanently remove an inactive runner-owned worktree and branch only when they are clean and fully pushed. The user must approve.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: { type: "string", description: "Defaults to the calling session" },
+        path: { type: "string" },
+      },
+      required: ["path"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.path !== "string" || !args.path) return errorResult("path is required");
+      const sessionId = worktreeTarget(args, deps);
+      if (typeof sessionId !== "string") return sessionId;
+      const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(sessionId)}/worktrees/discard`, { path: args.path });
+      if (!r.ok) return errorResult(r.message);
+      return textResult(mapWorktreeResult(r.data));
+    },
+  },
+  {
     name: "create_session",
     description:
       "Start a new agent session on a runner, optionally with the initial task prompt and guardrails. The user must approve.",

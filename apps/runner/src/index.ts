@@ -42,6 +42,7 @@ import {
   type SessionCommandInvocationUpdateMessage,
   type SessionEventPayload,
   type SessionSnapshot,
+  type SessionWorktreeView,
   type SkillsSyncManifestMessage,
   type StartSessionMessage,
 } from "@wollipog/protocol";
@@ -1446,14 +1447,16 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       break;
     }
     case "session_worktree": {
-      const operation = msg.operation === "create"
+      const operation: Promise<{ snapshot: SessionSnapshot; worktree?: SessionWorktreeView }> = msg.operation === "create"
         ? sessions.requestWorktree(msg.sessionId, { branch: msg.branch, baseRef: msg.baseRef })
         : msg.operation === "attach"
           ? sessions.attachWorktree(msg.sessionId, msg.path)
-          : sessions.selectWorktree(msg.sessionId, msg.path).then((snapshot) => ({
+          : msg.operation === "select"
+            ? sessions.selectWorktree(msg.sessionId, msg.path).then((snapshot) => ({
               snapshot,
               worktree: snapshot.worktrees?.find((item) => item.path === snapshot.worktreePath),
-            }));
+            }))
+            : sessions.discardWorktree(msg.sessionId, msg.path).then((snapshot) => ({ snapshot }));
       void operation.then((result) => sendUp({
         type: "session_worktree_result",
         requestId: msg.requestId,

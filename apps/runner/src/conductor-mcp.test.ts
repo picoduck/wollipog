@@ -121,6 +121,7 @@ test("tools/list returns the curated session and workflow tools with schemas", a
       "create_worktree",
       "attach_worktree",
       "select_worktree",
+      "discard_worktree",
       "create_session",
       "prompt_session",
       "stop_session",
@@ -140,7 +141,7 @@ test("every mutating tool's description tells the model the user must approve (c
     "create_workflow_definition", "create_workflow_version", "create_workflow_run",
     "dispatch_workflow_node", "create_workflow_artifact", "complete_workflow_attempt",
     "resolve_workflow_gate", "create_session", "prompt_session", "stop_session",
-    "set_guardrails", "create_run", "create_worktree", "attach_worktree", "select_worktree",
+    "set_guardrails", "create_run", "create_worktree", "attach_worktree", "select_worktree", "discard_worktree",
   ];
   for (const name of mutations) {
     const tool = TOOLS.find((t) => t.name === name)!;
@@ -416,11 +417,14 @@ test("worktree tools use the canonical routes and default to the calling session
   await callTool(deps, "create_worktree", { branch: "fix/one", baseRef: "origin/main" });
   await callTool(deps, "attach_worktree", { sessionId: "s_child", path: "/repo/attached" });
   await callTool(deps, "select_worktree", { sessionId: "s_child", path: "/repo/wt" });
+  await callTool(deps, "discard_worktree", { sessionId: "s_child", path: "/repo/old" });
   assert.equal(calls[0]!.url, `${CP_URL}/api/sessions/${SELF_ID}/worktrees`);
   assert.deepEqual(calls[0]!.body, { branch: "fix/one", baseRef: "origin/main" });
   assert.equal(calls[1]!.url, `${CP_URL}/api/sessions/s_child/worktrees/attach`);
   assert.deepEqual(calls[1]!.body, { path: "/repo/attached" });
   assert.equal(calls[2]!.url, `${CP_URL}/api/sessions/s_child/worktrees/select`);
+  assert.equal(calls[3]!.url, `${CP_URL}/api/sessions/s_child/worktrees/discard`);
+  assert.deepEqual(calls[3]!.body, { path: "/repo/old" });
 });
 
 test("an exact-session MCP credential cannot manage another session's worktrees", async () => {

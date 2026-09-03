@@ -78,7 +78,7 @@ function numeric(value: string | undefined): number | undefined {
 function usage(): string {
   return [
     "Usage: wollipog session <command> [options]",
-    "       wollipog worktree <create|attach|select> [options]",
+    "       wollipog worktree <create|attach|select|discard> [options]",
     "Session Commands: list, get, events, create, prompt, wait, stop",
     "Worktree Options: --session <id>, --branch <name>, --base <ref>, --path <absolute-path>",
     "Use --json for stable machine-readable output.",
@@ -111,11 +111,13 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
         },
       };
     }
-    if (verb === "attach" || verb === "select") {
+    if (verb === "attach" || verb === "select" || verb === "discard") {
       const path = option(args, "--path");
       if (!path) return { error: `worktree ${verb} requires --path` };
       return {
-        tool: verb === "attach" ? "attach_worktree" : "select_worktree",
+        tool: verb === "attach"
+          ? "attach_worktree"
+          : verb === "select" ? "select_worktree" : "discard_worktree",
         input: { ...(sessionId ? { sessionId } : {}), path },
       };
     }
@@ -234,9 +236,11 @@ export async function runWollipogCli(
     return 1;
   }
   const worktreeTools = new Set(["create_worktree", "attach_worktree", "select_worktree"]);
-  const requiredProtocol = worktreeTools.has(parsed.tool)
-    ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktrees
-    : RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControl;
+  const requiredProtocol = parsed.tool === "discard_worktree"
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeDiscard
+    : worktreeTools.has(parsed.tool)
+      ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktrees
+      : RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControl;
   const incompatibility = await compatible(fetchImpl, cpUrl, requiredProtocol);
   if (incompatibility) {
     (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: incompatibility })}\n` : `${incompatibility}\n`);

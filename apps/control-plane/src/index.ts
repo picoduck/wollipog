@@ -3312,12 +3312,16 @@ async function runSessionWorktreeRequest(
   sessionId: string,
   request:
     | { operation: "create"; baseRef?: string; branch: string }
-    | { operation: "attach" | "select"; path: string },
+    | { operation: "attach" | "select" | "discard"; path: string },
   reply: FastifyReply,
 ) {
   const session = db.getSession(sessionId);
   if (!session) return reply.code(404).send({ error: "session not found" });
-  const unsupported = runnerCapabilityError(session.runnerId, "sessionWorktrees", "Session worktrees");
+  const unsupported = runnerCapabilityError(
+    session.runnerId,
+    request.operation === "discard" ? "sessionWorktreeDiscard" : "sessionWorktrees",
+    request.operation === "discard" ? "Session worktree discard" : "Session worktrees",
+  );
   if (unsupported) return reply.code(409).send({ error: unsupported });
   const reconciliationBlock = svc.podReconciliationMutationError(sessionId);
   if (reconciliationBlock) return reply.code(409).send({ error: reconciliationBlock });
@@ -3371,6 +3375,15 @@ app.post("/api/sessions/:id/worktrees/select", async (req, reply) => {
     return reply.code(400).send({ error: "path must be a non-empty string of at most 4096 characters" });
   }
   return runSessionWorktreeRequest(id, { operation: "select", path }, reply);
+});
+
+app.post("/api/sessions/:id/worktrees/discard", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const path = (req.body as { path?: unknown })?.path;
+  if (typeof path !== "string" || !path || path.length > 4096) {
+    return reply.code(400).send({ error: "path must be a non-empty string of at most 4096 characters" });
+  }
+  return runSessionWorktreeRequest(id, { operation: "discard", path }, reply);
 });
 
 // Per-turn checkpoint rewind (T3-style, files only — the conversation continues). The runner

@@ -74,6 +74,7 @@ test("conductor REST access is method- and route-scoped to its published MCP too
     ["POST", "/api/sessions/:id/worktrees"],
     ["POST", "/api/sessions/:id/worktrees/attach"],
     ["POST", "/api/sessions/:id/worktrees/select"],
+    ["POST", "/api/sessions/:id/worktrees/discard"],
     ["POST", "/api/runs"],
     ["GET", "/api/governance/policies"],
     ["PUT", "/api/governance/policies/:policyId"],
@@ -107,6 +108,7 @@ test("general CLI/MCP access shares the closed manager route allowlist", () => {
   assert.equal(isAgentControlApiRouteAllowed("POST", "/api/sessions/:id/worktrees"), true);
   assert.equal(isAgentControlApiRouteAllowed("POST", "/api/sessions/:id/worktrees/attach"), true);
   assert.equal(isAgentControlApiRouteAllowed("POST", "/api/sessions/:id/worktrees/select"), true);
+  assert.equal(isAgentControlApiRouteAllowed("POST", "/api/sessions/:id/worktrees/discard"), true);
   assert.equal(isAgentControlApiRouteAllowed("POST", "/api/sessions/:id/approve"), false);
   assert.equal(isAgentControlApiRouteAllowed("GET", "/api/devices"), false);
   assert.equal(isAgentControlApiRouteAllowed("POST", "/api/new-future-surface"), false);

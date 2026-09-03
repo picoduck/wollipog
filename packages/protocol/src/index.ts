@@ -287,7 +287,9 @@
 //      stdio MCP surface; only its hash crosses the runner socket or reaches durable storage.
 // 101: session_worktree/session_worktree_result correlated operations plus durable active and
 //      linked worktree metadata. Additive + optional; pre-v101 runners reject worktree routes.
-export const PROTOCOL_VERSION = 101;
+// 102: explicit session-worktree discard plus conservative runner-side PR-state reconciliation.
+//      Older peers retain create/attach/select and never receive the destructive operation.
+export const PROTOCOL_VERSION = 102;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
@@ -422,6 +424,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   sessionNamingDriftCodes: 97,
   sessionAgentControl: 100,
   sessionWorktrees: 101,
+  sessionWorktreeDiscard: 102,
 } as const;
 
 /* ========================================================================== */
@@ -4643,7 +4646,7 @@ export interface ForkResultMessage {
  * revalidates all repository and configured-location boundaries. */
 export type SessionWorktreeRequestMessage =
   | { type: "session_worktree"; requestId: string; sessionId: string; operation: "create"; baseRef?: string; branch: string }
-  | { type: "session_worktree"; requestId: string; sessionId: string; operation: "attach" | "select"; path: string };
+  | { type: "session_worktree"; requestId: string; sessionId: string; operation: "attach" | "select" | "discard"; path: string };
 
 export interface SessionWorktreeResultMessage {
   type: "session_worktree_result";

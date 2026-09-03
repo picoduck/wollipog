@@ -133,11 +133,14 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 101", () => {
-  assert.equal(PROTOCOL_VERSION, 101);
+test("PROTOCOL_VERSION is 102", () => {
+  assert.equal(PROTOCOL_VERSION, 102);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktrees, 101);
   assert.equal(runnerSupportsProtocol(100, "sessionWorktrees"), false);
   assert.equal(runnerSupportsProtocol(101, "sessionWorktrees"), true);
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeDiscard, 102);
+  assert.equal(runnerSupportsProtocol(101, "sessionWorktreeDiscard"), false);
+  assert.equal(runnerSupportsProtocol(102, "sessionWorktreeDiscard"), true);
 });
 
 test("v99 queued prompt editing messages preserve opaque revisions and attachments", () => {

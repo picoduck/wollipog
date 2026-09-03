@@ -569,6 +569,148 @@ export async function worktreeHead(worktreePath: string, options: WorktreeOption
   return (await command(options.context ?? nativeContext, worktreePath, ["rev-parse", "HEAD"])).trim();
 }
 
+export type PullRequestLifecycleState = "open" | "merged" | "closed";
+const isGitHubPullRequestUrl = (value: string): boolean =>
+  /^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+$/u.test(value);
+
+export function parseWorktreePullRequestState(
+  raw: string,
+  expectedUrl: string,
+): PullRequestLifecycleState | null {
+  if (!isGitHubPullRequestUrl(expectedUrl)) return null;
+  try {
+    const parsed = JSON.parse(raw) as { url?: unknown; state?: unknown };
+    if (parsed.url !== expectedUrl || typeof parsed.state !== "string") return null;
+    if (parsed.state === "OPEN") return "open";
+    if (parsed.state === "MERGED") return "merged";
+    if (parsed.state === "CLOSED") return "closed";
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Read one exact linked GitHub pull request. Network/auth/shape failures are deliberately
+ * indistinguishable from unavailable state: absence of proof is never permission to delete. */
+export async function worktreePullRequestState(
+  worktreePath: string,
+  pullRequestUrl: string,
+  options: WorktreeOptions = {},
+): Promise<PullRequestLifecycleState | null> {
+  if (!isGitHubPullRequestUrl(pullRequestUrl)) return null;
+  try {
+    const result = await runContextCommand(
+      options.context ?? nativeContext,
+      "gh",
+      ["pr", "view", pullRequestUrl, "--json", "url,state"],
+      { cwd: worktreePath, timeoutMs: 30_000, maxBuffer: 1024 * 1024 },
+    );
+    return parseWorktreePullRequestState(result.stdout, pullRequestUrl);
+  } catch {
+    return null;
+  }
+}
+
+export type SafeWorktreeDiscardResult =
+  | { removed: true }
+  | {
+      removed: false;
+      reason: "not_runner_owned" | "branch_changed" | "dirty" | "no_upstream" | "unpushed" | "unavailable";
+    };
+
+/** Remove one inactive runner-owned worktree only after proving it has no local-only state.
+ * The worktree removal is intentionally non-force, so a concurrent file write fails closed. The
+ * branch delete is compare-and-delete against the exact inspected OID, so a concurrent commit is
+ * retained even if it lands after the final status check. */
+export async function discardWorktreeIfSafe(
+  repoPath: string,
+  sessionId: string,
+  handle: WorktreeHandle & { source: "legacy" | "created" },
+  options: WorktreeOptions = {},
+): Promise<SafeWorktreeDiscardResult> {
+  const context = options.context ?? nativeContext;
+  const branch = await validateBranch(context, repoPath, handle.branch);
+  const requestedBoundary = await requestedWorktreeBoundaryPath(repoPath, sessionId, options, false);
+  const currentLegacyPath = await sessionPath(repoPath, sessionId, options, false);
+  const legacyPaths = [currentLegacyPath];
+  if (context.kind === "wsl") {
+    legacyPaths.push(await sessionPath(repoPath, sessionId, { ...options, legacyWslRoot: true }, false));
+  }
+  const runnerOwned = handle.source === "created"
+    ? pathWithin(context, handle.path, requestedBoundary) && !sameContextPath(context, handle.path, requestedBoundary)
+    : legacyPaths.some((path) => sameContextPath(context, handle.path, path));
+  if (!runnerOwned) {
+    return { removed: false, reason: "not_runner_owned" };
+  }
+
+  try {
+    const ref = `refs/heads/${branch}`;
+    const listed = parseWorktreePorcelain(
+      await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]),
+    );
+    const registered = listed.find((entry) => sameContextPath(context, entry.path, handle.path));
+    if (registered && registered.branch !== branch) return { removed: false, reason: "branch_changed" };
+    if (!registered) {
+      // A missing registration is not proof that the on-disk directory is disposable. Native can
+      // distinguish a missing leaf below the already-attested root; WSL transport errors cannot
+      // distinguish absence from an unavailable distro, so retain there.
+      if (context.kind === "wsl") return { removed: false, reason: "unavailable" };
+      try {
+        statSync(handle.path);
+        return { removed: false, reason: "unavailable" };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          return { removed: false, reason: "unavailable" };
+        }
+      }
+    }
+
+    let head: string;
+    if (registered) {
+      if (await command(context, handle.path, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])) {
+        return { removed: false, reason: "dirty" };
+      }
+      head = (await command(context, handle.path, ["rev-parse", "--verify", "HEAD"])).trim();
+    } else {
+      try {
+        head = (await command(context, repoPath, ["rev-parse", "--verify", ref])).trim();
+      } catch {
+        return { removed: true };
+      }
+    }
+    if (!/^[a-f0-9]{40,64}$/u.test(head)) return { removed: false, reason: "unavailable" };
+
+    try {
+      await command(context, repoPath, ["rev-parse", "--verify", `${branch}@{upstream}`]);
+    } catch {
+      return { removed: false, reason: "no_upstream" };
+    }
+    const ahead = (await command(
+      context,
+      repoPath,
+      ["rev-list", "--count", `${branch}@{upstream}..${ref}`],
+    )).trim();
+    if (!/^\d+$/u.test(ahead)) return { removed: false, reason: "unavailable" };
+    if (ahead !== "0") return { removed: false, reason: "unpushed" };
+
+    if (registered) {
+      // Close the widest observable race before the non-force removal. Git independently rejects
+      // a dirty tree, and update-ref below rejects a branch that advanced after this comparison.
+      if (await command(context, handle.path, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])) {
+        return { removed: false, reason: "dirty" };
+      }
+      const finalHead = (await command(context, handle.path, ["rev-parse", "--verify", "HEAD"])).trim();
+      if (finalHead !== head) return { removed: false, reason: "unpushed" };
+      await command(context, repoPath, ["worktree", "remove", handle.path], 120_000);
+    }
+    await command(context, repoPath, ["update-ref", "-d", ref, head]);
+    await command(context, repoPath, ["worktree", "prune"]);
+    return { removed: true };
+  } catch {
+    return { removed: false, reason: "unavailable" };
+  }
+}
+
 /** Remove the linked worktree, its branch, and stale administrative records. */
 export async function removeWorktree(repoPath: string, handle: WorktreeHandle, options: WorktreeOptions = {}): Promise<void> {
   const context = options.context ?? nativeContext;

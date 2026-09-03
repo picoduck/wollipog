@@ -22,11 +22,14 @@ wollipog session stop <session-id> --json
 wollipog worktree create --branch <name> [--base <ref>] --json
 wollipog worktree attach --path <absolute-path> --json
 wollipog worktree select --path <absolute-path> --json
+wollipog worktree discard --path <absolute-path> --json
 ```
 
 Worktree commands default to `WOLLIPOG_SESSION_ID`; paired-device callers add `--session <id>`.
 Creation without `--base` fetches the repository's remote default branch. Use the returned path
 for file and Git commands in the current turn; a later provider launch resumes in the selection.
+Discard permanently removes only a runner-owned worktree that is not used by a live provider, is
+clean, and has no commits ahead of its upstream. It refuses attached, dirty, or unpushed trees.
 
 If `wollipog` is not on `PATH`, invoke the runner-provided location with its mode:
 

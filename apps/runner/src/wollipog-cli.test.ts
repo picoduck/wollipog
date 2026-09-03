@@ -130,6 +130,40 @@ test("CLI keeps v100 core commands compatible while gating worktree commands on 
   assert.deepEqual(requests, ["http://cp/healthz", "http://cp/api/sessions", "http://cp/healthz"]);
 });
 
+test("CLI gates destructive worktree discard on v102 without disabling v101 selection", async () => {
+  const requests: string[] = [];
+  const fetch: McpFetch = async (url) => {
+    requests.push(url);
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify(url.endsWith("/healthz")
+        ? { protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktrees }
+        : { session: { id: "s1" } }),
+    };
+  };
+  const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "paired-device" };
+  assert.equal(await runWollipogCli(
+    ["node", "cli.js", "--wollipog-cli", "worktree", "select", "--session", "s1", "--path", "/repo/wt", "--json"],
+    env,
+    { stdout: () => {}, stderr: () => {} },
+    fetch,
+  ), 0);
+  let output = "";
+  assert.equal(await runWollipogCli(
+    ["node", "cli.js", "--wollipog-cli", "worktree", "discard", "--session", "s1", "--path", "/repo/wt", "--json"],
+    env,
+    { stdout: (text) => { output += text; }, stderr: () => {} },
+    fetch,
+  ), 1);
+  assert.match(JSON.parse(output).error, /requires v102/);
+  assert.deepEqual(requests, [
+    "http://cp/healthz",
+    "http://cp/api/sessions/s1/worktrees/select",
+    "http://cp/healthz",
+  ]);
+});
+
 test("CLI emits JSON for get, events, prompt, wait, and stop core commands", async () => {
   const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "paired-device" };
   const cases = [
@@ -223,4 +257,14 @@ test("CLI worktree commands adapt to the shared MCP operations", async () => {
   ), 0);
   assert.equal(requests[3]!.url, "http://cp/api/sessions/s1/worktrees/select");
   assert.deepEqual(JSON.parse(requests[3]!.body!), { path: "/repo/wt" });
+
+  output = "";
+  assert.equal(await runWollipogCli(
+    ["node", "cli.js", "--wollipog-cli", "worktree", "discard", "--session", "s1", "--path", "/repo/old", "--json"],
+    env,
+    { stdout: (text) => { output += text; }, stderr: () => {} },
+    fetch,
+  ), 0);
+  assert.equal(requests[5]!.url, "http://cp/api/sessions/s1/worktrees/discard");
+  assert.deepEqual(JSON.parse(requests[5]!.body!), { path: "/repo/old" });
 });

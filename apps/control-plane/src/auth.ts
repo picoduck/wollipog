@@ -124,6 +124,7 @@ const CONDUCTOR_API_ROUTES = new Set([
   "POST /api/sessions/:id/worktrees",
   "POST /api/sessions/:id/worktrees/attach",
   "POST /api/sessions/:id/worktrees/select",
+  "POST /api/sessions/:id/worktrees/discard",
   "GET /api/runs",
   "POST /api/runs",
   "GET /api/governance/policies",

@@ -115,12 +115,14 @@ import {
   fetchRemoteDefaultBase,
   createWorktreeFromTree,
   captureTurnDiff,
+  discardWorktreeIfSafe,
   isGitRepo,
   nativeRepositoryPathIsUnavailable,
   removeRequestedWorktreeBoundary,
   removeWorktree,
   requestedWorktreeBoundary,
   worktreeHead,
+  worktreePullRequestState,
   worktreeDiff,
   WorktreeCleanupJournal,
   type WorktreeCleanupRecord,
@@ -451,6 +453,7 @@ function titleFromPrompt(text: string): string {
 /** Refresh a held lock well within its stale window so a long turn never looks abandoned. */
 const LOCK_REFRESH_MS = 20_000;
 const HISTORY_MAINTENANCE_MS = 5 * 60 * 1_000;
+const WORKTREE_PR_RECONCILIATION_MS = 5 * 60 * 1_000;
 
 /** Hard cap on not-yet-started prompts per session (each holds full text + image payloads). */
 const MAX_QUEUED_PROMPTS = 100;
@@ -623,9 +626,11 @@ export class SessionManager {
   private readonly stateDir: string;
   private readonly providerStateReconcileTimer: ReturnType<typeof setInterval>;
   private readonly historyMaintenanceTimer: ReturnType<typeof setInterval>;
+  private readonly worktreePullRequestReconcileTimer: ReturnType<typeof setInterval>;
   private historyMaintenanceKickoff: ReturnType<typeof setTimeout> | null = null;
   private historyMaintenanceRunning = false;
   private providerStateReconciling = false;
+  private worktreePullRequestReconciling = false;
   private admissionRetryTimer: ReturnType<typeof setTimeout> | null = null;
   /** Box-wide process admission. A reservation starts immediately before driver launch and is
    * released on stop/exit/failure. Oldest-eligible selection plus bounded bypass prevents both
@@ -652,6 +657,9 @@ export class SessionManager {
   private shuttingDown = false;
   /** Test seam for the expensive subprocess; production always uses createWorktree. */
   private createSessionWorktree: typeof createWorktree = createWorktree;
+  /** Test seams keep forge availability and destructive Git behavior deterministic. */
+  private resolveWorktreePullRequestState: typeof worktreePullRequestState = worktreePullRequestState;
+  private discardSessionWorktreeIfSafe: typeof discardWorktreeIfSafe = discardWorktreeIfSafe;
   /** Test seam keeps provider-home discovery deterministic without writing into a real Claude home. */
   private discoverClaudeTasks: typeof discoverIncompleteClaudeTasks = discoverIncompleteClaudeTasks;
   /** Async seam covers WSL markerless recovery without blocking runner startup. */
@@ -720,6 +728,11 @@ export class SessionManager {
     this.providerStateReconcileTimer.unref?.();
     this.historyMaintenanceTimer = setInterval(() => this.runHistoryMaintenance(), HISTORY_MAINTENANCE_MS);
     this.historyMaintenanceTimer.unref?.();
+    this.worktreePullRequestReconcileTimer = setInterval(
+      () => void this.reconcileWorktreePullRequests(),
+      WORKTREE_PR_RECONCILIATION_MS,
+    );
+    this.worktreePullRequestReconcileTimer.unref?.();
   }
 
   private checkpointOwnerHash(meta: Pick<SessionMeta, "checkpointRefVersion">): string | undefined {
@@ -905,6 +918,133 @@ export class SessionManager {
       const updated = this.store.patchMeta(sessionId, { worktrees });
       if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
     });
+  }
+
+  private liveWorktreeUsesPath(sessionId: string, path: string): boolean {
+    const active = this.active.get(sessionId);
+    return active?.cwd === path || active?.worktree?.path === path || this.closing.has(sessionId);
+  }
+
+  private async discardWorktreeLocked(
+    sessionId: string,
+    path: string,
+  ): Promise<{ removed: boolean; reason?: string; snapshot?: SessionSnapshot }> {
+    const meta = this.store.readMeta(sessionId);
+    if (!meta || !this.sessionCanOpen(sessionId)) return { removed: false, reason: "session is unavailable" };
+    const worktree = this.attributedWorktrees(meta).find((item) => item.path === path);
+    if (!worktree) return { removed: false, reason: "worktree is not linked to this session" };
+    const source = worktree.source;
+    if (source === "attached") {
+      return { removed: false, reason: "attached operator-owned worktrees must be removed by their owner" };
+    }
+    if (this.liveWorktreeUsesPath(sessionId, worktree.path)) {
+      return { removed: false, reason: "the worktree is still active in a provider process" };
+    }
+    const result = await this.discardSessionWorktreeIfSafe(
+      meta.repoPath,
+      sessionId,
+      { ...worktree, source },
+      {
+        context: meta.context,
+        dataDir: this.dataDir,
+        ownerHash: this.runnerOwnerHash,
+      },
+    );
+    if (!result.removed) {
+      const reasons = {
+        not_runner_owned: "runner ownership could not be proven",
+        branch_changed: "the registered worktree branch changed",
+        dirty: "the worktree has uncommitted changes",
+        no_upstream: "the branch has no upstream",
+        unpushed: "the branch has unpushed commits",
+        unavailable: "Git state is unavailable or changed during cleanup",
+      } as const;
+      return { removed: false, reason: reasons[result.reason] };
+    }
+
+    // The session lane excludes create/attach/select/link/discard races. Re-read after Git I/O so
+    // an out-of-process store removal cannot be accidentally recreated by this patch.
+    const latest = this.store.readMeta(sessionId);
+    if (!latest) return { removed: true };
+    const worktrees = this.attributedWorktrees(latest).filter((item) => item.path !== worktree.path);
+    const removedActiveSelection = latest.worktreePath === worktree.path;
+    const updated = this.store.patchMeta(sessionId, {
+      worktrees,
+      ...(removedActiveSelection
+        ? { worktreePath: null, worktreeBranch: undefined, lastTurnBaseTree: undefined }
+        : {}),
+    });
+    if (!updated) return { removed: true };
+    await removeRequestedWorktreeBoundary(meta.repoPath, sessionId, {
+      context: meta.context,
+      dataDir: this.dataDir,
+      ownerHash: this.runnerOwnerHash,
+    }).catch(() => false);
+    const snapshot = this.snapshot(updated);
+    this.send({ type: "session_runtime_updated", snapshot });
+    return { removed: true, snapshot };
+  }
+
+  /** Destructive session-scoped operation. Safety checks are identical to automatic PR cleanup;
+   * explicit intent bypasses only the requirement for a terminal forge state. */
+  async discardWorktree(sessionId: string, path: string): Promise<SessionSnapshot> {
+    return this.runWorktreeOperation(sessionId, async () => {
+      const result = await this.discardWorktreeLocked(sessionId, path);
+      if (!result.removed || !result.snapshot) {
+        throw new Error(`worktree retained: ${result.reason ?? "cleanup did not complete"}`);
+      }
+      return result.snapshot;
+    });
+  }
+
+  /** Conservative startup/periodic reconciliation. Forge failures retain state, while a durable
+   * terminal state is remembered so dirty or active trees can be retried after they become safe. */
+  async reconcileWorktreePullRequests(): Promise<void> {
+    if (this.worktreePullRequestReconciling || this.shuttingDown) return;
+    this.worktreePullRequestReconciling = true;
+    try {
+      for (const candidate of this.store.listSessions()) {
+        try {
+          await this.runWorktreeOperation(candidate.sessionId, async () => {
+            let meta = this.store.readMeta(candidate.sessionId);
+            if (!meta || !this.sessionCanOpen(candidate.sessionId)) return;
+            const linkedPaths = this.attributedWorktrees(meta)
+              .filter((worktree) => worktree.pullRequest)
+              .map((worktree) => worktree.path);
+            for (const path of linkedPaths) {
+              meta = this.store.readMeta(candidate.sessionId);
+              const worktree = meta && this.attributedWorktrees(meta).find((item) => item.path === path);
+              if (!meta || !worktree?.pullRequest) continue;
+              let state = worktree.pullRequest.state;
+              if (state === "open") {
+                const verified = await this.resolveWorktreePullRequestState(
+                  worktree.path,
+                  worktree.pullRequest.url,
+                  { context: meta.context },
+                );
+                if (!verified || verified === "open") continue;
+                state = verified;
+                const worktrees = this.attributedWorktrees(meta).map((item) => item.path === path
+                  ? { ...item, pullRequest: { ...worktree.pullRequest!, state } }
+                  : item);
+                const updated = this.store.patchMeta(candidate.sessionId, { worktrees });
+                if (!updated) continue;
+                this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+              }
+              if (state === "merged" || state === "closed") {
+                await this.discardWorktreeLocked(candidate.sessionId, path);
+              }
+            }
+          });
+        } catch (error) {
+          this.log(`pull request worktree reconciliation failed for ${boundedSessionIdForLog(candidate.sessionId)}: ${errText(error)}`);
+        }
+      }
+    } catch (error) {
+      this.log(`pull request worktree reconciliation could not enumerate sessions: ${errText(error)}`);
+    } finally {
+      this.worktreePullRequestReconciling = false;
+    }
   }
 
   /** A standalone Agent TUI bypasses structured-driver isolation but shares provider HOME. */
@@ -1236,6 +1376,7 @@ export class SessionManager {
       this.log(`checkpoint ref ownership reconciliation failed: ${errText(error)}`);
     }
     this.store.reapDeletedMarkers();
+    void this.reconcileWorktreePullRequests();
     // Keep archive/index work out of synchronous startup and provider command paths. One bounded
     // pass shortly after startup plus the periodic timer gradually drains legacy oversized logs.
     if (!this.historyMaintenanceKickoff) {
@@ -6714,6 +6855,7 @@ export class SessionManager {
     this.preLaunchAdmissionGenerations.clear();
     clearInterval(this.providerStateReconcileTimer);
     clearInterval(this.historyMaintenanceTimer);
+    clearInterval(this.worktreePullRequestReconcileTimer);
     if (this.historyMaintenanceKickoff) clearTimeout(this.historyMaintenanceKickoff);
     this.historyMaintenanceKickoff = null;
     // Dispose EVERY driver even if one throws: aborting here would leave later drivers' provider

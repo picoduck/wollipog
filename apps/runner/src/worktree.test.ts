@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { attachRequestedWorktree, createRequestedWorktree, createWorktree, isGitRepo, nativeRepositoryPathIsUnavailable, removeWorktree, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, setStatfsForTests, WorktreeCleanupJournal } from "./worktree.js";
+import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isGitRepo, nativeRepositoryPathIsUnavailable, parseWorktreePullRequestState, removeWorktree, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, setStatfsForTests, WorktreeCleanupJournal } from "./worktree.js";
 import { randomUUID } from "node:crypto";
 import { runContextCommand } from "./context-command.js";
 import { SessionStore } from "./session-store.js";
@@ -14,6 +14,31 @@ import { setGitRunnerForTests, type GitRunOpts } from "./git-ops.js";
 function haveGit(): boolean {
   try { execFileSync("git", ["--version"], { stdio: "ignore" }); return true; } catch { return false; }
 }
+
+function initRepoWithOrigin(root: string): { repo: string; remote: string } {
+  const repo = join(root, "repo");
+  const remote = join(root, "origin.git");
+  execFileSync("git", ["init", "--bare", remote]);
+  execFileSync("git", ["init", repo]);
+  execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+  execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+  execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+  execFileSync("git", ["-C", repo, "branch", "-M", "main"]);
+  execFileSync("git", ["-C", repo, "remote", "add", "origin", remote]);
+  execFileSync("git", ["-C", repo, "push", "-u", "origin", "main"]);
+  return { repo, remote };
+}
+
+test("pull request lifecycle parsing requires an exact GitHub PR URL and terminal vocabulary", () => {
+  const url = "https://github.com/picoduck/wollipog/pull/701";
+  assert.equal(parseWorktreePullRequestState(JSON.stringify({ url, state: "OPEN" }), url), "open");
+  assert.equal(parseWorktreePullRequestState(JSON.stringify({ url, state: "MERGED" }), url), "merged");
+  assert.equal(parseWorktreePullRequestState(JSON.stringify({ url, state: "CLOSED" }), url), "closed");
+  assert.equal(parseWorktreePullRequestState(JSON.stringify({ url, state: "UNKNOWN" }), url), null);
+  assert.equal(parseWorktreePullRequestState(JSON.stringify({ url: `${url}/files`, state: "MERGED" }), url), null);
+  assert.equal(parseWorktreePullRequestState(JSON.stringify({ url, state: "MERGED" }), "javascript:alert(1)"), null);
+  assert.equal(parseWorktreePullRequestState("not json", url), null);
+});
 
 test("git preflight distinguishes a non-repo from a broken context/path", { skip: !haveGit() }, async () => {
   const dir = mkdtempSync(join(tmpdir(), "wollipog-git-preflight-"));
@@ -140,6 +165,80 @@ test("requested worktree uses the explicit base and branch instead of primary ch
     }, { dataDir });
     assert.equal(reused.created, false);
     await removeWorktree(repo, handle, { dataDir });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("safe discard removes only a clean fully-pushed runner-owned worktree", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-safe-discard-"));
+  const dataDir = join(root, "data");
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const clean = await createRequestedWorktree(repo, "s_safe", {
+      baseRef: "HEAD",
+      branch: "fix/clean-pushed",
+    }, { dataDir });
+    execFileSync("git", ["-C", clean.path, "push", "-u", "origin", clean.branch]);
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
+      ...clean,
+      source: "created",
+    }, { dataDir }), { removed: true });
+    assert.equal(existsSync(clean.path), false);
+    assert.throws(() => execFileSync("git", ["-C", repo, "show-ref", "--verify", "--quiet", `refs/heads/${clean.branch}`]));
+
+    const dirty = await createRequestedWorktree(repo, "s_safe", {
+      baseRef: "HEAD",
+      branch: "fix/dirty",
+    }, { dataDir });
+    execFileSync("git", ["-C", dirty.path, "push", "-u", "origin", dirty.branch]);
+    writeFileSync(join(dirty.path, "local.txt"), "retain\n");
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
+      ...dirty,
+      source: "created",
+    }, { dataDir }), { removed: false, reason: "dirty" });
+    assert.equal(existsSync(dirty.path), true);
+
+    const unpushed = await createRequestedWorktree(repo, "s_safe", {
+      baseRef: "HEAD",
+      branch: "fix/unpushed",
+    }, { dataDir });
+    execFileSync("git", ["-C", unpushed.path, "push", "-u", "origin", unpushed.branch]);
+    writeFileSync(join(unpushed.path, "commit.txt"), "local commit\n");
+    execFileSync("git", ["-C", unpushed.path, "add", "commit.txt"]);
+    execFileSync("git", ["-C", unpushed.path, "commit", "-m", "local only"]);
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
+      ...unpushed,
+      source: "created",
+    }, { dataDir }), { removed: false, reason: "unpushed" });
+    assert.equal(existsSync(unpushed.path), true);
+
+    const noUpstream = await createRequestedWorktree(repo, "s_safe", {
+      baseRef: "HEAD",
+      branch: "fix/no-upstream",
+    }, { dataDir });
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
+      ...noUpstream,
+      source: "created",
+    }, { dataDir }), { removed: false, reason: "no_upstream" });
+
+    const drifted = await createRequestedWorktree(repo, "s_safe", {
+      baseRef: "HEAD",
+      branch: "fix/drift-original",
+    }, { dataDir });
+    execFileSync("git", ["-C", drifted.path, "push", "-u", "origin", drifted.branch]);
+    execFileSync("git", ["-C", drifted.path, "switch", "-c", "fix/drift-replacement"]);
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
+      ...drifted,
+      source: "created",
+    }, { dataDir }), { removed: false, reason: "branch_changed" });
+    assert.equal(existsSync(drifted.path), true);
+
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
+      path: join(root, "operator-owned"),
+      branch: "fix/not-owned",
+      source: "created",
+    }, { dataDir }), { removed: false, reason: "not_runner_owned" });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -320,6 +419,116 @@ test("concurrent requests retain every created branch and deletion leaves attach
     assert.throws(() => execFileSync("git", ["-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/fix/second"]));
     assert.equal(existsSync(requestedBoundary), false, "empty runner-owned session boundary is removed");
     assert.deepEqual(new WorktreeCleanupJournal(dataDir).list(), []);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("PR reconciliation and explicit discard retain every unsafe worktree", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-pr-worktree-cleanup-"));
+  const dataDir = join(root, "data");
+  const operatorRoot = join(root, "operator");
+  const attachedPath = join(operatorRoot, "attached");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    execFileSync("git", ["-C", repo, "worktree", "add", "-b", "operator/attached", attachedPath]);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_pr_cleanup", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "cleanup",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    (manager as unknown as { configuredProjectPaths: string[] }).configuredProjectPaths = [operatorRoot];
+    const clean = await manager.requestWorktree("s_pr_cleanup", { baseRef: "HEAD", branch: "fix/pr-clean" });
+    const dirty = await manager.requestWorktree("s_pr_cleanup", { baseRef: "HEAD", branch: "fix/pr-dirty" });
+    const unverifiable = await manager.requestWorktree("s_pr_cleanup", { baseRef: "HEAD", branch: "fix/pr-unknown" });
+    for (const worktree of [clean.worktree, dirty.worktree, unverifiable.worktree]) {
+      execFileSync("git", ["-C", worktree.path, "push", "-u", "origin", worktree.branch]);
+    }
+    writeFileSync(join(dirty.worktree.path, "local.txt"), "retain dirty state\n");
+    const attached = await manager.attachWorktree("s_pr_cleanup", attachedPath);
+    for (const [worktree, url] of [
+      [clean.worktree, "https://github.com/picoduck/wollipog/pull/701"],
+      [dirty.worktree, "https://github.com/picoduck/wollipog/pull/702"],
+      [unverifiable.worktree, "https://github.com/picoduck/wollipog/pull/703"],
+      [attached.worktree, "https://github.com/picoduck/wollipog/pull/704"],
+    ] as const) {
+      await manager.linkWorktreePullRequest("s_pr_cleanup", worktree.path, url);
+    }
+    (manager as unknown as {
+      resolveWorktreePullRequestState: (path: string) => Promise<"merged" | "closed" | null>;
+    }).resolveWorktreePullRequestState = async (path) => {
+      if (path === clean.worktree.path || path === attached.worktree.path) return "merged";
+      if (path === dirty.worktree.path) return "closed";
+      return null;
+    };
+
+    await manager.reconcileWorktreePullRequests();
+    assert.equal(existsSync(clean.worktree.path), false, "a definitively merged clean pushed worktree is removed");
+    assert.equal(existsSync(dirty.worktree.path), true, "dirty terminal-PR worktree is retained");
+    assert.equal(existsSync(unverifiable.worktree.path), true, "unverifiable forge state is retained");
+    assert.equal(existsSync(attachedPath), true, "attached operator-owned worktree is retained");
+    const retained = store.readMeta("s_pr_cleanup")?.worktrees ?? [];
+    assert.equal(retained.some((item) => item.path === clean.worktree.path), false);
+    assert.equal(retained.find((item) => item.path === dirty.worktree.path)?.pullRequest?.state, "closed");
+    assert.equal(retained.find((item) => item.path === unverifiable.worktree.path)?.pullRequest?.state, "open");
+    assert.equal(retained.find((item) => item.path === attachedPath)?.pullRequest?.state, "merged");
+
+    await assert.rejects(manager.discardWorktree("s_pr_cleanup", dirty.worktree.path), /uncommitted changes/);
+    await assert.rejects(manager.discardWorktree("s_pr_cleanup", attachedPath), /operator-owned/);
+    execFileSync("git", ["-C", dirty.worktree.path, "clean", "-fd"]);
+    await manager.discardWorktree("s_pr_cleanup", dirty.worktree.path);
+    assert.equal(existsSync(dirty.worktree.path), false, "explicit discard uses the same safe removal checks");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("terminal PR cleanup waits until the provider releases its exact cwd", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-active-pr-worktree-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_active_pr", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "active",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    const active = await manager.requestWorktree("s_active_pr", { baseRef: "HEAD", branch: "fix/active-pr" });
+    execFileSync("git", ["-C", active.worktree.path, "push", "-u", "origin", active.worktree.branch]);
+    await manager.linkWorktreePullRequest(
+      "s_active_pr",
+      active.worktree.path,
+      "https://github.com/picoduck/wollipog/pull/705",
+    );
+    (manager as unknown as {
+      resolveWorktreePullRequestState: () => Promise<"merged">;
+    }).resolveWorktreePullRequestState = async () => "merged";
+    const activeEntries = (manager as unknown as { active: Map<string, unknown> }).active;
+    activeEntries.set("s_active_pr", {
+      cwd: active.worktree.path,
+      worktree: { path: active.worktree.path, branch: active.worktree.branch },
+    });
+    await manager.reconcileWorktreePullRequests();
+    assert.equal(existsSync(active.worktree.path), true);
+    assert.equal(store.readMeta("s_active_pr")?.worktrees?.[0]?.pullRequest?.state, "merged",
+      "terminal state is durable while cleanup waits for the live process");
+
+    activeEntries.delete("s_active_pr");
+    await manager.reconcileWorktreePullRequests();
+    assert.equal(existsSync(active.worktree.path), false, "durable terminal state retries without another forge call");
+    assert.equal(store.readMeta("s_active_pr")?.worktreePath, null);
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });

@@ -91,6 +91,11 @@ test("a purpose-bound credential confines worktree routes without blocking deleg
   };
   assert.equal(agentCredentialSessionTargetError("/api/sessions/:id/worktrees", credential, "s_calling"), null);
   assert.match(agentCredentialSessionTargetError("/api/sessions/:id/worktrees", credential, "s_sibling")!, /only its own session/);
+  assert.match(agentCredentialSessionTargetError(
+    "/api/sessions/:id/worktrees/discard",
+    credential,
+    "s_sibling",
+  )!, /only its own session/);
   assert.equal(agentCredentialSessionTargetError("/api/sessions/:id/prompt", credential, "s_sibling"), null,
     "the general agent-control credential retains its reviewed delegated sibling-session surface");
   assert.equal(agentCredentialSessionTargetError(
