@@ -327,18 +327,18 @@ export function SessionHeader({
       )}
       <div className="session-header-statuses" ref={statusesRef}>
         {renderNoninteractiveStatuses()}
-        {activeWorktree && (
-          <span
-            className="tag tag-wt"
-            title={`Branch: ${activeWorktree.branch}${activeWorktree.baseRef ? ` · Base: ${activeWorktree.baseRef}` : ""}${activeWorktree.pullRequest ? ` · PR: ${activeWorktree.pullRequest.url}` : ""}`}
-          >
-            {activeWorktree.branch}{activeWorktree.pullRequest?.state === "open" ? " · Open PR" : ""}
-          </span>
-        )}
         {activeSubagents && (
           <ActiveSubagentsBadge count={activeSubagents.count} onOpen={activeSubagents.onOpen} />
         )}
       </div>
+      {activeWorktree && (
+        <span
+          className="tag tag-wt session-worktree-identity"
+          title={`Branch: ${activeWorktree.branch}${activeWorktree.baseRef ? ` · Base: ${activeWorktree.baseRef}` : ""}${activeWorktree.pullRequest ? ` · PR: ${activeWorktree.pullRequest.url}` : ""}`}
+        >
+          {activeWorktree.branch}{activeWorktree.pullRequest?.state === "open" ? " · Open PR" : ""}
+        </span>
+      )}
       {session.backgroundWorkState && (
         <span className="sr-only">
           <BackgroundWorkBadge state={session.backgroundWorkState} compact />

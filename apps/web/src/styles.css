@@ -1646,6 +1646,14 @@ textarea {
   min-width: 0;
   gap: 5px;
 }
+.session-worktree-identity {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .session-header-action { width: 32px; height: 32px; padding: 0; }
 .session-status-overflow-trigger {
   border-color: var(--border-strong);
@@ -10267,6 +10275,7 @@ body.shell-dock-dragging * {
     padding-right: var(--mobile-session-trailing-inset);
   }
   .session-detail > .detail-head:has(> .session-header-note) { row-gap: 4px; }
+  .session-detail > .detail-head:has(> .session-worktree-identity) { row-gap: 4px; }
   .session-detail > .detail-head > .session-header-statuses {
     /* Statuses stay in the leading grid track so the action track is always complete. The
        measured badge row hides only its overflowing suffix and hands the exact hidden count to the
@@ -10319,11 +10328,20 @@ body.shell-dock-dragging * {
     align-self: center;
     gap: var(--mobile-session-action-gap);
   }
+  .session-detail > .detail-head > .session-worktree-identity {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    justify-self: start;
+    max-width: 100%;
+  }
   .session-detail > .detail-head > .session-header-note {
     grid-column: 1 / -1;
     grid-row: 2;
     width: 100%;
     max-width: none;
+  }
+  .session-detail > .detail-head:has(> .session-worktree-identity) > .session-header-note {
+    grid-row: 3;
   }
   .session-detail > .detail-head > .detail-actions .menu-pop {
     max-height: calc(100dvh - 128px - env(safe-area-inset-bottom, 0px));
