@@ -907,7 +907,7 @@ test("launch finalization cannot overwrite a worktree selected while launch is p
   }
 });
 
-test("a requested worktree becomes the provider cwd on the next launch", { skip: !haveGit() }, async () => {
+test("a requested worktree safely rebinds the provider before its next queued turn", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-session-requested-cwd-"));
   const repo = join(root, "repo");
   const dataDir = join(root, "data");
@@ -919,12 +919,25 @@ test("a requested worktree becomes the provider cwd on the next launch", { skip:
     execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
     const store = new SessionStore(join(dataDir, "sessions"));
     const launchedCwds: string[] = [];
+    const prompts: Array<{ cwd: string; text: string }> = [];
+    let firstPromptStarted!: () => void;
+    const firstPromptRunning = new Promise<void>((resolve) => { firstPromptStarted = resolve; });
+    let finishFirstPrompt!: () => void;
+    const firstPromptGate = new Promise<void>((resolve) => { finishFirstPrompt = resolve; });
     const factory = (_driver: unknown, launch: { cwd: string }) => {
       launchedCwds.push(launch.cwd);
       return {
         pid: 1, initialize: async () => {}, newSession: async () => {},
-        prompt: async () => ({ stopReason: "end_turn" as const }), cancel: () => {}, dispose: () => {},
-        setConfig: () => {}, resolvePermission: () => false, agentSessionId: () => null,
+        prompt: async (text: string) => {
+          prompts.push({ cwd: launch.cwd, text });
+          if (text === "first") {
+            firstPromptStarted();
+            await firstPromptGate;
+          }
+          return "end_turn" as const;
+        },
+        cancel: () => {}, dispose: () => {}, setConfig: () => {}, resolvePermission: () => false,
+        agentSessionId: () => "provider-session-id",
       };
     };
     manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, factory as never, dataDir, 1);
@@ -934,18 +947,30 @@ test("a requested worktree becomes the provider cwd on the next launch", { skip:
       context: { kind: "native" as const },
     };
     await manager.start(spec);
+    manager.prompt(spec.sessionId, "first");
+    await firstPromptRunning;
     const requested = await manager.requestWorktree(spec.sessionId, { baseRef: "HEAD", branch: "fix/requested-cwd" });
     assert.equal(launchedCwds[0], repo, "the already-running process retains its original OS cwd");
+    manager.prompt(spec.sessionId, "second");
+    finishFirstPrompt();
+    for (let attempt = 0; attempt < 500 && prompts.length < 2; attempt++) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+    assert.deepEqual(prompts, [
+      { cwd: repo, text: "first" },
+      { cwd: requested.worktree.path, text: "second" },
+    ], "the current turn completes in place and the preserved FIFO resumes in the selected worktree");
+    assert.deepEqual(launchedCwds, [repo, requested.worktree.path]);
     manager.stop(spec.sessionId);
     execFileSync("git", ["-C", requested.worktree.path, "switch", "-c", "fix/unattributed-drift"]);
     assert.equal(await manager.start(spec), false, "restart fails closed if the persisted branch identity drifted");
     assert.equal(store.readMeta(spec.sessionId)?.worktreePath, null,
       "a failed validation keeps the unverified root fenced from Files and shells");
-    assert.deepEqual(launchedCwds, [repo], "branch drift never reaches the provider process");
+    assert.deepEqual(launchedCwds, [repo, requested.worktree.path], "branch drift never reaches a new provider process");
     execFileSync("git", ["-C", requested.worktree.path, "switch", requested.worktree.branch]);
     await manager.selectWorktree(spec.sessionId, requested.worktree.path);
     assert.equal(await manager.start(spec), true);
-    assert.equal(launchedCwds[1], requested.worktree.path, "the next provider launch uses the selected worktree");
+    assert.equal(launchedCwds[2], requested.worktree.path, "a later explicit launch also uses the selected worktree");
     manager.stop(spec.sessionId);
     await manager.delete(spec.sessionId);
   } finally {

@@ -1291,7 +1291,7 @@ test("delete racing an attached-worktree restart never removes the operator-owne
       pid: 1, initialize: async () => {}, newSession: async () => {},
       prompt: async () => ({ stopReason: "end_turn" as const }),
       cancel: () => {}, dispose: () => {}, setConfig: () => {},
-      resolvePermission: () => false, agentSessionId: () => null,
+      resolvePermission: () => false, agentSessionId: () => "attached-restart-provider-id",
     });
     const manager = new SessionManager(
       () => {}, () => {}, store, "runner", undefined, factory as never,

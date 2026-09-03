@@ -393,6 +393,10 @@ interface ActiveSession {
   /** A provider credential failure cancelled the current turn. Existing FIFO work stays held until
    * a new user prompt explicitly asks the runner to revalidate the exact installation. */
   authenticationBlocked?: boolean;
+  /** A validated worktree selection made after this process launched. The current turn keeps its
+   * original OS cwd, then the drain resumes the same conversation inside the selected worktree
+   * before admitting another turn. */
+  pendingWorktreeRebind?: string;
 }
 
 /** Capability-derived resume gate. ACP must have proven stable resume or load in its last live
@@ -805,6 +809,14 @@ export class SessionManager {
     if (!latest || !this.sessionCanOpen(meta.sessionId)) {
       throw new Error("session disappeared while its requested worktree was activating");
     }
+    const live = this.active.get(meta.sessionId);
+    if (live && !sameWorktreePath(live.context, live.cwd, worktree.path)) {
+      this.captureAgentSessionId(meta.sessionId, live.client);
+      const resumable = this.store.readMeta(meta.sessionId);
+      if (!resumable || !canResumeSession(resumable) || !resumable.agentSessionId) {
+        throw new Error("the running provider has not established a resumable conversation; retry worktree selection after this turn");
+      }
+    }
     const priorActive = latest.worktreePath
       ? this.attributedWorktreeForPath(latest, latest.worktreePath)
       : undefined;
@@ -828,7 +840,15 @@ export class SessionManager {
     });
     if (!updated) throw new Error("session disappeared while its requested worktree was activating");
     const active = this.active.get(meta.sessionId);
-    if (active) active.worktree = { path: worktree.path, branch: worktree.branch, created: false };
+    if (active) {
+      active.worktree = { path: worktree.path, branch: worktree.branch, created: false };
+      active.pendingWorktreeRebind = sameWorktreePath(active.context, active.cwd, worktree.path)
+        ? undefined
+        : worktree.path;
+      if (active.pendingWorktreeRebind && !active.running) {
+        setImmediate(() => this.scheduleDrain(meta.sessionId));
+      }
+    }
     const snapshot = this.snapshot(updated);
     this.send({ type: "session_runtime_updated", snapshot });
     return snapshot;
@@ -5167,6 +5187,10 @@ export class SessionManager {
     if (!entry || entry.running || entry.governanceTripped || this.queueHeld(entry) ||
         this.hasPendingApproval(sessionId) || this.steerFences(entry).size ||
         this.reservedPromotionPrecedesQueue(sessionId, entry)) return;
+    if (entry.pendingWorktreeRebind) {
+      await this.rebindSelectedWorktree(sessionId, entry);
+      return;
+    }
     if (!this.store.acquireLock(sessionId, this.lockOwner)) {
       if (!this.emitEvent(sessionId, { kind: "error", message: "this session is being driven by another dashboard" })) {
         return;
@@ -5253,6 +5277,7 @@ export class SessionManager {
           entry.activeTurnId = undefined;
           entry.activeTurnConfig = undefined;
         }
+        if (entry.pendingWorktreeRebind) break;
         if (entry.authenticationBlocked) break;
         if (this.steerFences(entry).size) {
           await this.waitForSteeringFences(entry);
@@ -5283,6 +5308,59 @@ export class SessionManager {
         this.emitStatus(sessionId, "idle");
         if (!entry.governanceTripped && entry.queue.length) setImmediate(() => this.scheduleDrain(sessionId));
       }
+      if (entry.pendingWorktreeRebind && this.active.get(sessionId) === entry) {
+        await this.rebindSelectedWorktree(sessionId, entry);
+      }
+    }
+  }
+
+  /** Retire an idle provider generation and resume its exact conversation in the newly selected
+   * worktree. Prompts accepted during the turn or relaunch remain in the pre-launch FIFO. */
+  private async rebindSelectedWorktree(sessionId: string, entry: ActiveSession): Promise<void> {
+    const selectedPath = entry.pendingWorktreeRebind;
+    if (!selectedPath || entry.running || this.active.get(sessionId) !== entry) return;
+    const meta = this.store.readMeta(sessionId);
+    if (!meta || !meta.worktreePath || !sameWorktreePath(meta.context, meta.worktreePath, selectedPath)) {
+      entry.pendingWorktreeRebind = undefined;
+      return;
+    }
+    this.captureAgentSessionId(sessionId, entry.client);
+    const resumable = this.store.readMeta(sessionId);
+    const resumeId = resumable?.agentSessionId ?? undefined;
+    if (!resumable || !resumeId || !canResumeSession(resumable)) {
+      entry.pendingWorktreeRebind = undefined;
+      this.emitEvent(sessionId, {
+        kind: "error",
+        message: "the selected worktree cannot resume this provider conversation",
+      });
+      return;
+    }
+
+    const launchGeneration = this.beginLaunchGeneration(sessionId);
+    this.preLaunchAdmissionGenerations.set(sessionId, launchGeneration);
+    const queued = entry.queue.splice(0);
+    if (queued.length) this.preLaunchQueues.set(sessionId, queued);
+    this.emitQueue(sessionId);
+    this.deleteActiveSession(sessionId, entry, false);
+    try {
+      await this.closeAndDispose(sessionId, entry.client, true);
+    } finally {
+      this.releaseActiveWorktreeLease(entry);
+    }
+
+    let launched = false;
+    try {
+      const fresh = this.store.readMeta(sessionId);
+      if (!fresh || !this.launchIsCurrent(sessionId, launchGeneration)) return;
+      launched = await this.launch(fresh, resumeId, launchGeneration);
+      if (launched) this.activatePreLaunchQueue(sessionId);
+    } finally {
+      if (!launched) this.rejectPreLaunchQueue(sessionId, "provider could not resume in the selected worktree");
+      if (this.preLaunchAdmissionGenerations.get(sessionId) === launchGeneration) {
+        this.preLaunchAdmissionGenerations.delete(sessionId);
+      }
+      this.finishLaunchGeneration(sessionId, launchGeneration);
+      if (!launched) this.releaseAdmissionIfInactive(sessionId);
     }
   }
 
