@@ -66,6 +66,10 @@ import {
   type UiSnapshotMessage,
   type ResourceScope,
   type DurableSessionCommandErrorCode,
+  type EditQueuedPromptMessage,
+  type EditQueuedPromptResultMessage,
+  type ReadQueuedPromptMessage,
+  type ReadQueuedPromptResultMessage,
 } from "./index.js";
 
 const DURABLE_SESSION_COMMAND_ERROR_CODES = [
@@ -129,8 +133,58 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 98", () => {
-  assert.equal(PROTOCOL_VERSION, 98);
+test("PROTOCOL_VERSION is 99", () => {
+  assert.equal(PROTOCOL_VERSION, 99);
+});
+
+test("v99 queued prompt editing messages preserve opaque revisions and attachments", () => {
+  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.queuedPromptEditing, 99);
+  assert.equal(runnerSupportsProtocol(98, "queuedPromptEditing"), false);
+  assert.equal(runnerSupportsProtocol(99, "queuedPromptEditing"), true);
+
+  const read = {
+    type: "read_queued_prompt",
+    requestId: "request-read-1",
+    sessionId: "session-1",
+    promptId: "prompt-1",
+  } satisfies ReadQueuedPromptMessage;
+  const readResult = {
+    type: "read_queued_prompt_result",
+    requestId: read.requestId,
+    sessionId: read.sessionId,
+    promptId: read.promptId,
+    ok: true,
+    prompt: {
+      promptId: read.promptId,
+      text: "Original prompt",
+      images: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }],
+      editRevision: "qer_opaque-generation-and-content",
+    },
+  } satisfies ReadQueuedPromptResultMessage;
+  const edit = {
+    type: "edit_queued_prompt",
+    requestId: "request-edit-1",
+    submissionId: "submission-edit-1",
+    sessionId: read.sessionId,
+    promptId: read.promptId,
+    expectedRevision: readResult.prompt.editRevision,
+    text: "Revised prompt",
+    images: [],
+  } satisfies EditQueuedPromptMessage;
+  const editResult = {
+    type: "edit_queued_prompt_result",
+    requestId: edit.requestId,
+    submissionId: edit.submissionId,
+    sessionId: edit.sessionId,
+    promptId: edit.promptId,
+    applied: false,
+    reason: "queue_item_changed",
+  } satisfies EditQueuedPromptResultMessage;
+
+  assert.deepEqual(parseMessage<ControlPlaneToRunner>(JSON.stringify(read)), read);
+  assert.deepEqual(parseMessage<RunnerToControlPlane>(JSON.stringify(readResult)), readResult);
+  assert.deepEqual(parseMessage<ControlPlaneToRunner>(JSON.stringify(edit)), edit);
+  assert.deepEqual(parseMessage<RunnerToControlPlane>(JSON.stringify(editResult)), editResult);
 });
 
 test("session-naming agent failures distinguish harness capability from account drift", () => {

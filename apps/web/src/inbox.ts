@@ -87,7 +87,7 @@ export function isInboxActiveStatus(status: SessionStatus): boolean {
 }
 
 export function isInboxBlocked(session: Pick<SessionView, "status" | "pendingApproval">): boolean {
-  return session.status === "input_required" || session.pendingApproval !== null;
+  return session.status === "input_required" || session.pendingApproval != null;
 }
 
 export function isInboxRunning(session: Pick<SessionView, "status">): boolean {

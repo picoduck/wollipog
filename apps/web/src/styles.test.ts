@@ -246,6 +246,24 @@ test("mobile Session chrome keeps its coupled offsets and compact action icons",
     block.containsSelector(".app:has(.mobile-session-back) .right-panel"));
   assert.ok(phoneRule, "the phone layout must define both default and Session chrome geometry");
 
+  const sharedTokens = soleRuleProps(":root");
+  assert.deepEqual(sharedTokens.get("--mobile-session-action-gap"), ["7px"]);
+  assert.deepEqual(sharedTokens.get("--mobile-session-trailing-inset"),
+    ["calc(12px + env(safe-area-inset-right, 0px))"]);
+
+  const sessionTopbar = phoneRule.declarationsForSelector(".topbar:has(.mobile-session-back)");
+  const paneActions = phoneRule.declarationsForSelector(
+    ".topbar:has(.mobile-session-back) .topbar-mobile-controls",
+  );
+  const sessionHeader = phoneRule.declarationsForSelector(".session-detail > .detail-head");
+  const sessionActions = phoneRule.declarationsForSelector(
+    ".session-detail > .detail-head > .detail-actions",
+  );
+  assert.deepEqual(sessionTopbar.get("padding-right"), ["var(--mobile-session-trailing-inset)"]);
+  assert.deepEqual(sessionHeader.get("padding-right"), ["var(--mobile-session-trailing-inset)"]);
+  assert.deepEqual(paneActions.get("gap"), ["var(--mobile-session-action-gap)"]);
+  assert.deepEqual(sessionActions.get("gap"), ["var(--mobile-session-action-gap)"]);
+
   const defaultTopbarHeight = phoneRule.declarationsForSelector(".topbar").get("height");
   const defaultPanelTop = phoneRule.declarationsForSelector(".right-panel").get("top");
   assert.deepEqual(defaultTopbarHeight,
@@ -350,6 +368,11 @@ test("short panes keep the status strip, and the pinned summary is bounded by th
   assert.equal(soleRuleBody(".transcript-recovery-strip-echo:not(.active)"), "visibility: hidden;");
   // The strip itself never flexes away beneath the slot.
   assert.match(soleRuleBody(".transcript-status-strip"), /flex:\s*none;/);
+  const mobileUsage = soleRuleBody(".transcript-status-usage");
+  assert.match(mobileUsage, /min-width:\s*0;/);
+  assert.match(mobileUsage, /overflow:\s*hidden;/);
+  assert.match(mobileUsage, /text-overflow:\s*ellipsis;/);
+  assert.match(mobileUsage, /white-space:\s*nowrap;/);
 
   // Inbox preview panes always use the compact presentation: the pill band would permanently
   // spend ~47px of a splitter-resizable reader, and shrinking the preview viewport measurably

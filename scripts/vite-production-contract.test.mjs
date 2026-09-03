@@ -54,10 +54,11 @@ test("Vite production browser coverage cannot silently lose a selected check", (
     [xtermSpec, "renders initial and incremental raw output once, including split ANSI input @production"],
     [xtermSpec, "sends interactive input once and keeps the read-only terminal inert @production"],
     [xtermSpec, "reports fitted dimensions, refits on resize, and preserves usable scrollback @production"],
+    [xtermSpec, "applies search entered while the terminal font is still loading @production"],
   ];
 
-  // Eight tagged declarations discover nine tests because the painted-affordance case runs in two themes.
-  assert.equal(markers.length, 8);
+  // Nine tagged declarations discover ten tests because the painted-affordance case runs in two themes.
+  assert.equal(markers.length, 9);
   for (const [source, title] of requiredDeclarations) {
     assert.ok(source.includes(title), `missing required production browser declaration: ${title}`);
   }

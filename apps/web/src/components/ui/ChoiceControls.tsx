@@ -35,6 +35,8 @@ import {
 export interface SegmentedOption<T extends string> {
   value: T;
   label: ReactNode;
+  /** Explicit control name when the visible label changes responsively or includes decoration. */
+  ariaLabel?: string;
   /** Shown on hover and to assistive technology when the label is an icon or an abbreviation. */
   title?: string;
   /**
@@ -122,6 +124,7 @@ export function SegmentedControl<T extends string>({
               type="button"
               role="radio"
               aria-checked={selected}
+              aria-label={option.ariaLabel}
               aria-disabled={option.disabled || undefined}
               aria-describedby={option.description ? descriptionId(index) : undefined}
               // `disabled` would remove it from the roving order, so a disabled option becomes

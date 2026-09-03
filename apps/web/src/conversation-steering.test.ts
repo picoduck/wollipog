@@ -3,6 +3,7 @@ import test from "node:test";
 import type { SteeringAttemptView } from "@wollipog/protocol";
 import {
   conversationSteeringAvailability,
+  queuedPromptEditingAvailability,
   queuedPromptSteeringAvailability,
   shouldReloadReservedDraft,
   steeringReceiptPresentation,
@@ -125,6 +126,59 @@ test("queued promotion requires explicit per-entry eligibility and blocks reserv
   );
   assert.equal(oldRunner.available, false);
   if (!oldRunner.available) assert.match(oldRunner.reason, /requires protocol v73/i);
+});
+
+test("queued editing requires v99 and affirmative live per-entry eligibility", () => {
+  const prompt = {
+    id: "queue-a",
+    text: "Editable",
+    liveQueueObserved: true,
+    editable: true,
+    editRevision: "qer_opaque",
+  } as const;
+  assert.deepEqual(queuedPromptEditingAvailability({
+    runnerProtocolVersion: 99,
+    runnerOnline: true,
+    requestBusy: false,
+  }, prompt), { available: true });
+
+  for (const [patch, reason] of [
+    [{ runnerProtocolVersion: 98 }, /requires protocol v99/i],
+    [{ runnerOnline: false }, /runner is offline/i],
+    [{ requestBusy: true }, /current message action/i],
+  ] as const) {
+    const result = queuedPromptEditingAvailability({
+      runnerProtocolVersion: 99,
+      runnerOnline: true,
+      requestBusy: false,
+      ...patch,
+    }, prompt);
+    assert.equal(result.available, false);
+    if (!result.available) assert.match(result.reason, reason);
+  }
+
+  const absentProjection = queuedPromptEditingAvailability({
+    runnerProtocolVersion: 99,
+    runnerOnline: true,
+    requestBusy: false,
+  }, { id: "queue-a", text: "Legacy" });
+  assert.equal(absentProjection.available, false);
+  if (!absentProjection.available) assert.match(absentProjection.reason, /live runner admission/i);
+
+  const immutable = queuedPromptEditingAvailability({
+    runnerProtocolVersion: 99,
+    runnerOnline: true,
+    requestBusy: false,
+  }, { ...prompt, editable: false, editDisabledReason: "Slash commands cannot be edited." });
+  assert.deepEqual(immutable, { available: false, reason: "Slash commands cannot be edited." });
+
+  const reserved = queuedPromptEditingAvailability({
+    runnerProtocolVersion: 99,
+    runnerOnline: true,
+    requestBusy: false,
+  }, { ...prompt, steeringState: "promoting" });
+  assert.equal(reserved.available, false);
+  if (!reserved.available) assert.match(reserved.reason, /resolve steering/i);
 });
 
 test("durable steering receipts map to stable Title Case presentation", () => {

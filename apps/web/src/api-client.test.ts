@@ -113,6 +113,56 @@ test("steering methods use encoded correlated paths and exact mutation bodies", 
   ]);
 });
 
+test("queued prompt editing reads exact content and posts the opaque revision with attachments", async () => {
+  const calls: Array<{ path: string; method: string; body: unknown }> = [];
+  const client = createApiClient({
+    instanceId: "instance-a",
+    publicOrigin: "https://instance-a.example.test",
+    async request(path, init) {
+      calls.push({
+        path,
+        method: init?.method ?? "GET",
+        body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
+      });
+      return new Response(JSON.stringify({
+        prompt: {
+          promptId: "prompt/1",
+          text: "Queued prompt",
+          images: [],
+          editRevision: "qer_opaque",
+        },
+      }), { headers: { "content-type": "application/json" } });
+    },
+    close() {},
+  });
+
+  const read = await client.readQueuedPrompt("session/1", "prompt/1");
+  await client.editQueuedPrompt("session/1", "prompt/1", {
+    submissionId: "submission-1",
+    expectedRevision: read.prompt.editRevision,
+    text: "Revised prompt",
+    images: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }],
+  });
+
+  assert.deepEqual(calls, [
+    {
+      path: "/api/sessions/session%2F1/queued/prompt%2F1/edit",
+      method: "GET",
+      body: undefined,
+    },
+    {
+      path: "/api/sessions/session%2F1/queued/prompt%2F1/edit",
+      method: "POST",
+      body: {
+        submissionId: "submission-1",
+        expectedRevision: "qer_opaque",
+        text: "Revised prompt",
+        images: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }],
+      },
+    },
+  ]);
+});
+
 test("provider command invocation posts only the durable authority coordinates and arguments", async () => {
   const calls: Array<{ path: string; method: string; body: unknown }> = [];
   const client = createApiClient({

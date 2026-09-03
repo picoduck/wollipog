@@ -1,6 +1,6 @@
 import { BoardIcon } from "./Icons.js";
 import { type DragEvent, type MouseEvent, useMemo, useRef, useState } from "react";
-import { BOARD_COLUMNS, type BoardColumn, type BoxView, type SessionView } from "@wollipog/protocol";
+import { BOARD_COLUMNS, type BoardColumn, type BoxView, type SessionReminderView, type SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { relativeTime } from "../format.js";
@@ -10,6 +10,7 @@ import { useLongPress } from "./interactions.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { MeasuredVirtualList } from "./MeasuredVirtualList.js";
 import { useExperiments } from "../use-experiments.js";
+import { reminderBadgeLabel, snoozedSessionAttentionReason } from "../session-reminders.js";
 
 const sessionCardKey = (session: SessionView) => session.id;
 const estimateSessionCard = (session: SessionView) => session.pendingApproval ? 230 : session.preview ? 155 : 120;
@@ -19,9 +20,10 @@ const estimateSessionCard = (session: SessionView) => session.pendingApproval ? 
  * split, search, and reminder filtering applied by the parent), grouped into status columns.
  * The Machine and Agent filters below are board-local refinements on top of that shared scope.
  */
-export function Board({ sessions: scoped, searchActive, onShowAll, onNewSession, onSessionMenu }: {
+export function Board({ sessions: scoped, reminders = new Map(), searchActive, onShowAll, onNewSession, onSessionMenu }: {
   /** Already scoped by the Sessions toolbar: unarchived, split, query, and reminder mode. */
   sessions: SessionView[];
+  reminders?: ReadonlyMap<string, SessionReminderView>;
   /** True while the shared search or a non-All split narrows the scope (changes the empty state). */
   searchActive: boolean;
   /** Widen the shared scope back to every session: clear the search, the split, and reminder mode. */
@@ -232,6 +234,7 @@ export function Board({ sessions: scoped, searchActive, onShowAll, onNewSession,
                 </div>
                 <BoardColumnBody
                   sessions={list}
+                  reminders={reminders}
                   machineName={machineName}
                   runnerOnline={(runnerId) => runners.get(runnerId)?.status === "online"}
                   onOpen={(sessionId) => navigate({ name: "session", id: sessionId })}
@@ -249,6 +252,7 @@ export function Board({ sessions: scoped, searchActive, onShowAll, onNewSession,
 
 function BoardColumnBody({
   sessions,
+  reminders,
   machineName,
   runnerOnline,
   onOpen,
@@ -256,6 +260,7 @@ function BoardColumnBody({
   onSessionMenu,
 }: {
   sessions: SessionView[];
+  reminders: ReadonlyMap<string, SessionReminderView>;
   machineName: (runnerId: string) => string;
   runnerOnline: (runnerId: string) => boolean;
   onOpen: (sessionId: string) => void;
@@ -272,6 +277,7 @@ function BoardColumnBody({
         renderItem={(session) => (
           <SessionCard
             session={session}
+            reminder={reminders.get(session.id)}
             machineName={machineName(session.runnerId)}
             runnerOnline={runnerOnline(session.runnerId)}
             onOpen={() => onOpen(session.id)}
@@ -293,6 +299,7 @@ function BoardColumnBody({
 
 function SessionCard({
   session,
+  reminder,
   machineName,
   runnerOnline,
   onOpen,
@@ -300,6 +307,7 @@ function SessionCard({
   onSessionMenu,
 }: {
   session: SessionView;
+  reminder?: SessionReminderView;
   machineName: string;
   runnerOnline: boolean;
   onOpen: () => void;
@@ -308,6 +316,11 @@ function SessionCard({
 }) {
   const api = useApi();
   const [busy, setBusy] = useState(false);
+  const snoozedAttention = reminder?.state === "pending" ? snoozedSessionAttentionReason(session) : null;
+  const extraSnoozedAttention = snoozedAttention?.kind === "orphaned_background_work" ||
+      snoozedAttention?.kind === "background_delivery_watchdog"
+    ? snoozedAttention
+    : null;
   // Resolved by session id AT RESTORE TIME, not by card instance: a live column move remounts
   // the virtualized card while its menu is open, and a ref to the old instance would strand
   // focus on <body>. The board canvas itself is the fallback (it is focusable for the F6 zone).
@@ -400,6 +413,20 @@ function SessionCard({
       ) : null}
 
       <div className="card-meta">
+        {extraSnoozedAttention && (
+          <span
+            className="inbox-status-pill blocked"
+            title={extraSnoozedAttention.description}
+            aria-label={`Attention: ${extraSnoozedAttention.label}`}
+          >
+            {extraSnoozedAttention.label}
+          </span>
+        )}
+        {reminder && (
+          <span className="inbox-status-pill reminder" aria-label={`Reminder: ${reminderBadgeLabel(reminder)}`}>
+            {reminderBadgeLabel(reminder)}
+          </span>
+        )}
         <span className="tag tag-machine" title="Runner / machine">
           {machineName}
         </span>

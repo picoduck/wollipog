@@ -3,6 +3,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { terminalTheme, type ResolvedTheme } from "../theme.js";
+import { TERMINAL_FONT_FAMILY, loadTerminalFont } from "../terminal-font.js";
 import "@xterm/xterm/css/xterm.css";
 
 /**
@@ -50,7 +51,15 @@ export function ShellTerminal({
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const searchRef = useRef<SearchAddon | null>(null);
+  const searchTermRef = useRef(searchTerm);
+  searchTermRef.current = searchTerm;
   const consumedRef = useRef(0);
+  const textRef = useRef(text);
+  textRef.current = text;
+  const totalRef = useRef(total);
+  totalRef.current = total;
+  const themeRef = useRef(theme);
+  themeRef.current = theme;
   // Live callback refs so xterm's once-registered handlers never call a stale closure.
   const onDataRef = useRef(onData);
   onDataRef.current = onData;
@@ -63,56 +72,86 @@ export function ShellTerminal({
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-    const interactiveAtMount = interactiveRef.current; // fixed per shell (a PTY never becomes a pipe)
-    const term = new Terminal({
-      // Pipe-mode output (Windows cmd) mixes CRLF with LF-only writers (git/node/python on
-      // pipes) — convert LF so it doesn't staircase. PTY streams are CRLF-correct already and
-      // conversion is idempotent there, but keep it off to stay byte-faithful.
-      convertEol: !interactiveAtMount,
-      cursorBlink: interactiveAtMount,
-      // Read-only pipe pane: the input row below owns the caret; an unfocused terminal shows
-      // no cursor at all with inactive style "none" (disableStdin keeps it unfocusable-in-effect).
-      cursorInactiveStyle: interactiveAtMount ? "outline" : "none",
-      fontSize: 12.5,
-      fontFamily: '"Cascadia Code", Consolas, ui-monospace, monospace',
-      scrollback: 5000,
-      theme: terminalTheme(theme),
-      disableStdin: !interactiveAtMount,
-    });
-    const fit = new FitAddon();
-    const search = new SearchAddon();
-    term.loadAddon(fit);
-    term.loadAddon(search);
-    term.open(host);
-    // Handlers BEFORE the first fit — the fit resizes the terminal, and that first resize is
-    // exactly the correction the runner needs (the shell was opened with placeholder dims).
-    term.onData((d) => {
-      if (interactiveRef.current) onDataRef.current?.(d);
-    });
-    term.onResize(({ cols, rows }) => {
-      if (interactiveRef.current) onResizeRef.current?.(cols, rows);
-    });
-    fit.fit();
-    // fit() only fires onResize when dims CHANGED — report the fitted size unconditionally so
-    // the PTY is corrected even when the fit lands on the placeholder-equal grid.
-    if (interactiveRef.current) onResizeRef.current?.(term.cols, term.rows);
-    termRef.current = term;
-    fitRef.current = fit;
-    searchRef.current = search;
+    let cancelled = false;
+    let term: Terminal | null = null;
+    let ro: ResizeObserver | null = null;
 
-    // Refit when the pane's box changes (dock resize, panel drag, window resize).
-    const ro = new ResizeObserver(() => {
-      try {
-        fit.fit();
-      } catch {
-        /* zero-size during collapse — ignore */
+    void (async () => {
+      // xterm measures character cells while opening. Settle the locally bundled face first so a
+      // later font swap cannot change wrapping, cursor placement, or the PTY's rows and columns.
+      await loadTerminalFont(document.fonts);
+      if (cancelled) return;
+
+      const interactiveAtMount = interactiveRef.current; // fixed per shell (a PTY never becomes a pipe)
+      term = new Terminal({
+        // Pipe-mode output (Windows cmd) mixes CRLF with LF-only writers (git/node/python on
+        // pipes) — convert LF so it doesn't staircase. PTY streams are CRLF-correct already and
+        // conversion is idempotent there, but keep it off to stay byte-faithful.
+        convertEol: !interactiveAtMount,
+        cursorBlink: interactiveAtMount,
+        // Read-only pipe pane: the input row below owns the caret; an unfocused terminal shows
+        // no cursor at all with inactive style "none" (disableStdin keeps it unfocusable-in-effect).
+        cursorInactiveStyle: interactiveAtMount ? "outline" : "none",
+        fontSize: 12.5,
+        fontFamily: TERMINAL_FONT_FAMILY,
+        scrollback: 5000,
+        // Font loading is asynchronous; use the latest appearance in case it changed while the
+        // face settled and the ordinary theme effect ran before xterm existed.
+        theme: terminalTheme(themeRef.current),
+        disableStdin: !interactiveAtMount,
+      });
+      const fit = new FitAddon();
+      const search = new SearchAddon();
+      term.loadAddon(fit);
+      term.loadAddon(search);
+      term.open(host);
+      let reportedSize: string | null = null;
+      const reportSize = (cols: number, rows: number) => {
+        if (!interactiveRef.current) return;
+        const size = `${cols}x${rows}`;
+        if (reportedSize === size) return;
+        reportedSize = size;
+        onResizeRef.current?.(cols, rows);
+      };
+      // Handlers BEFORE the first fit — the fit resizes the terminal, and that first resize is
+      // exactly the correction the runner needs (the shell was opened with placeholder dims).
+      term.onData((d) => {
+        if (interactiveRef.current) onDataRef.current?.(d);
+      });
+      term.onResize(({ cols, rows }) => reportSize(cols, rows));
+      fit.fit();
+      // fit() only fires onResize when dims CHANGED — report the fitted size unconditionally, with
+      // de-duplication when xterm already emitted it, so the PTY receives one settled update.
+      reportSize(term.cols, term.rows);
+      termRef.current = term;
+      fitRef.current = fit;
+      searchRef.current = search;
+
+      // React may have committed output while the font was loading. Consume the current snapshot
+      // once now; the ordinary delta effect takes over after the terminal reference exists.
+      if (totalRef.current > 0) {
+        term.write(textRef.current, () => {
+          const pendingSearch = searchTermRef.current;
+          if (pendingSearch) search.findNext(pendingSearch, { incremental: true });
+        });
+        consumedRef.current = totalRef.current;
       }
-    });
-    ro.observe(host);
+
+      // Refit when the pane's box changes (dock resize, panel drag, window resize).
+      ro = new ResizeObserver(() => {
+        try {
+          fit.fit();
+        } catch {
+          /* zero-size during collapse — ignore */
+        }
+      });
+      ro.observe(host);
+    })();
 
     return () => {
-      ro.disconnect();
-      term.dispose();
+      cancelled = true;
+      ro?.disconnect();
+      term?.dispose();
       termRef.current = null;
       fitRef.current = null;
       searchRef.current = null;

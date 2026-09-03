@@ -117,6 +117,37 @@ export function queuedPromptSteeringAvailability(
   return { available: true };
 }
 
+/** Queue editing is independent of active-turn steering. The runner's per-entry projection is the
+ * authority; missing metadata fails closed during mixed-version rollout. */
+export function queuedPromptEditingAvailability(
+  input: { runnerProtocolVersion: number | null | undefined; runnerOnline: boolean; requestBusy: boolean },
+  prompt: QueuedPromptView,
+): SteeringAvailability {
+  if (!runnerSupportsProtocol(input.runnerProtocolVersion, "queuedPromptEditing")) {
+    return {
+      available: false,
+      reason: runnerCapabilityRequirement(
+        input.runnerProtocolVersion,
+        "queuedPromptEditing",
+        "Queued prompt editing",
+      ),
+    };
+  }
+  if (!input.runnerOnline) return { available: false, reason: "The runner is offline." };
+  if (input.requestBusy) return { available: false, reason: "Wait for the current message action to finish." };
+  if (prompt.steeringState) return { available: false, reason: "Resolve steering before editing this queued message." };
+  if (prompt.liveQueueObserved !== true) {
+    return { available: false, reason: "Wait for live runner admission before editing this queued message." };
+  }
+  if (prompt.editable !== true || prompt.editDisabledReason) {
+    return {
+      available: false,
+      reason: prompt.editDisabledReason ?? "This queued message cannot be edited safely.",
+    };
+  }
+  return { available: true };
+}
+
 /** Stable visible state for a durable control-plane steering receipt. */
 export function steeringReceiptPresentation(
   attempt: SteeringAttemptView,

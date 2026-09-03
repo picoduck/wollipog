@@ -403,6 +403,198 @@ async function waitForComposerSendToSettle(fixture: Fixture, timeoutMs = 5_000):
 
 const submittedImage = { mimeType: "image/png", data: "aW1hZ2U=" } as const;
 
+test("queued message editing loads exact content and Cancel Edit restores the displaced draft", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const reads: Array<{ sessionId: string; promptId: string }> = [];
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 99,
+    sessionPatch: {
+      queued: [{
+        id: "queue-1",
+        text: "bounded projection",
+        hasImages: true,
+        liveQueueObserved: true,
+        editable: true,
+        editRevision: "qer_projection",
+      }, {
+        id: "queue-2",
+        text: "Another queued message",
+        liveQueueObserved: true,
+        editable: true,
+        editRevision: "qer_other",
+      }],
+    },
+    client: {
+      readQueuedPrompt: async (sessionId, promptId) => {
+        reads.push({ sessionId, promptId });
+        return {
+          prompt: {
+            promptId,
+            text: "Exact queued content",
+            images: [submittedImage],
+            editRevision: "qer_exact",
+          },
+        };
+      },
+    },
+  });
+  try {
+    await resolveDraft(draft, "Unsent local draft");
+    const edit = fixture.container.querySelector('button[aria-label="Edit Queued Message"]') as HTMLButtonElement;
+    assert.ok(edit);
+    await act(async () => { edit.click(); });
+    await flushAsyncWork();
+
+    assert.equal(reads.length, 1);
+    assert.equal(reads[0]?.promptId, "queue-1");
+    assert.equal(fixture.composer.value, "Exact queued content");
+    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
+    assert.match(fixture.container.querySelector(".queued-edit-banner")?.textContent ?? "", /Editing Queued Message/);
+    assert.ok(fixture.container.querySelector('button[aria-label="Save Queued Message"]'));
+    const selectedRow = fixture.container.querySelector('[data-testid="queued-prompt-queue-1"]') as HTMLElement;
+    const otherRow = fixture.container.querySelector('[data-testid="queued-prompt-queue-2"]') as HTMLElement;
+    assert.equal(selectedRow.classList.contains("is-editing"), true);
+    assert.equal(selectedRow.getAttribute("aria-current"), "true");
+    assert.equal(otherRow.classList.contains("is-editing"), false);
+    assert.equal(otherRow.hasAttribute("aria-current"), false);
+
+    const cancel = [...fixture.container.querySelectorAll("button")]
+      .find((button) => button.textContent === "Cancel Edit") as HTMLButtonElement | undefined;
+    assert.ok(cancel);
+    await act(async () => { cancel.click(); });
+    await flushAsyncWork(450);
+    assert.equal(fixture.composer.value, "Unsent local draft");
+    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 0);
+    assert.equal(fixture.container.querySelector(".queued-edit-banner"), null);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("navigating away mid-edit preserves the displaced session draft instead of queued content", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 99,
+    sessionPatch: {
+      queued: [{
+        id: "queue-1",
+        text: "Queued projection",
+        liveQueueObserved: true,
+        editable: true,
+        editRevision: "qer_projection",
+      }],
+    },
+    client: {
+      readQueuedPrompt: async (_sessionId, promptId) => ({
+        prompt: {
+          promptId,
+          text: "Queued content must not become a draft",
+          images: [],
+          editRevision: "qer_exact",
+        },
+      }),
+    },
+  });
+  try {
+    await resolveComposerDraft(draft, { text: "Original local draft", images: [submittedImage], updatedAt: 1 });
+    const edit = fixture.container.querySelector('button[aria-label="Edit Queued Message"]') as HTMLButtonElement;
+    await act(async () => { edit.click(); });
+    await flushAsyncWork(450);
+    assert.equal(fixture.composer.value, "Queued content must not become a draft");
+    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 0);
+
+    const remounted = await fixture.remountWithDraftLoader(loadComposerDraft);
+    await flushAsyncWork();
+    assert.equal(remounted.value, "Original local draft");
+    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a failed queued edit keeps its draft and uses idempotency only for byte-identical retries", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const edits: unknown[] = [];
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 99,
+    sessionPatch: {
+      queued: [{
+        id: "queue-1",
+        text: "Queued",
+        liveQueueObserved: true,
+        editable: true,
+        editRevision: "qer_projection",
+      }],
+    },
+    client: {
+      readQueuedPrompt: async (_sessionId, promptId) => ({
+        prompt: {
+          promptId,
+          text: "Original exact content",
+          images: [submittedImage],
+          editRevision: "qer_exact",
+        },
+      }),
+      editQueuedPrompt: async (_sessionId, _promptId, request) => {
+        edits.push(request);
+        throw new Error("The queued message changed before this edit was saved.");
+      },
+    },
+  });
+  try {
+    await resolveDraft(draft, "Displaced draft");
+    const edit = fixture.container.querySelector('button[aria-label="Edit Queued Message"]') as HTMLButtonElement;
+    await act(async () => { edit.click(); });
+    await flushAsyncWork();
+    await act(async () => {
+      fixture.composer.value = "Revised exact content";
+      fireDomEvent.change(fixture.composer);
+    });
+    const save = fixture.container.querySelector('button[aria-label="Save Queued Message"]') as HTMLButtonElement;
+    assert.ok(save);
+    await act(async () => { save.click(); });
+    await flushAsyncWork();
+
+    assert.equal(edits.length, 1);
+    assert.deepEqual(edits[0], {
+      submissionId: (edits[0] as { submissionId: string }).submissionId,
+      expectedRevision: "qer_exact",
+      text: "Revised exact content",
+      images: [submittedImage],
+    });
+    assert.match((edits[0] as { submissionId: string }).submissionId, /.+/);
+    assert.equal(fixture.composer.value, "Revised exact content");
+    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
+    assert.ok(fixture.container.querySelector(".queued-edit-banner"));
+    assert.match(fixture.container.querySelector(".composer-error")?.textContent ?? "", /changed before/i);
+
+    await act(async () => { save.click(); });
+    await flushAsyncWork();
+    assert.equal(edits.length, 2);
+    assert.equal(
+      (edits[1] as { submissionId: string }).submissionId,
+      (edits[0] as { submissionId: string }).submissionId,
+      "an unchanged timeout retry must replay the same idempotency receipt",
+    );
+
+    await act(async () => {
+      fixture.composer.value = "Corrected exact content";
+      fireDomEvent.change(fixture.composer);
+    });
+    await act(async () => { save.click(); });
+    await flushAsyncWork();
+    assert.equal(edits.length, 3);
+    assert.notEqual(
+      (edits[2] as { submissionId: string }).submissionId,
+      (edits[1] as { submissionId: string }).submissionId,
+      "changed content must use a fresh idempotency key",
+    );
+    assert.equal((edits[2] as { text: string }).text, "Corrected exact content");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("an accepted text-and-image submission stays cleared after SessionDetail remount", async () => {
   const draft = deferred<ComposerDraft | null>();
   const calls: Array<{ text: string; images: unknown[] }> = [];

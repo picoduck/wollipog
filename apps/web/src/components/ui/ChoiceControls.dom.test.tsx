@@ -36,6 +36,20 @@ test("SegmentedControl is a radiogroup, not a row of pressed toggles", () => {
   assert.equal(html.match(/aria-checked="true"/g)?.length, 1);
 });
 
+test("SegmentedControl can name a responsive icon label explicitly", () => {
+  const html = render(
+    <SegmentedControl
+      options={[{ value: "active", label: <span aria-hidden="true">◎ 12</span>, ariaLabel: "Active, 12 Sessions" }]}
+      value="active"
+      onChange={() => undefined}
+      label="Reminder View"
+    />,
+  );
+  assert.match(html, /role="radio"[^>]*aria-label="Active, 12 Sessions"/);
+  assert.equal(html.match(/Active, 12 Sessions/g)?.length, 1,
+    "the count is announced once through the explicit name");
+});
+
 test("SegmentedControl keeps exactly one tab stop", () => {
   const html = render(
     <SegmentedControl options={SIZES} value="md" onChange={() => undefined} label="Size" />,

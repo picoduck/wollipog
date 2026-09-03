@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
@@ -15,6 +15,26 @@ import { DESKTOP_BUILD_ENV, DESKTOP_EXCLUDED_ASSETS, isDesktopBuild, stripManife
  */
 
 const WEB = fileURLToPath(new URL("..", import.meta.url));
+
+function assertBundledTerminalFont(out: string): void {
+  const assets = readdirSync(join(out, "assets"));
+  const fonts = assets.filter((name) => /^WollipogJetBrainsMonoNerd-Regular-.*\.woff2$/u.test(name));
+  assert.equal(fonts.length, 1, "the build must contain exactly one locally bundled terminal font face");
+  const css = assets.filter((name) => name.endsWith(".css"))
+    .map((name) => readFileSync(join(out, "assets", name), "utf8"))
+    .join("\n");
+  assert.match(css, new RegExp(fonts[0]!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+    "the production stylesheet must reference the emitted font asset");
+  assert.doesNotMatch(css, /https?:\/\/[^)]*(?:font|JetBrains|Nerd)/iu,
+    "terminal fonts must never load from an external service");
+  for (const license of [
+    "Apache-2.0.txt",
+    "JetBrainsMonoNerdFontMono-LICENSE.txt",
+    "NerdFontsGlyphs-LICENSES.txt",
+  ]) {
+    assert.ok(existsSync(join(out, "licenses", license)), `${license} must ship beside the redistributed font`);
+  }
+}
 
 test("the excluded list is the two files that must not ship, named here independently", () => {
   // The build test below iterates DESKTOP_EXCLUDED_ASSETS, which is also what production uses —
@@ -97,6 +117,7 @@ test("a desktop build ships neither the service worker nor the manifest", { time
   const html = readFileSync(join(out, "index.html"), "utf8");
   assert.doesNotMatch(html, /rel="manifest"/,
     "the link would 404 on every launch now that the file is gone");
+  assertBundledTerminalFont(out);
 });
 
 test("an ordinary web build keeps both, because the PWA is the point there", { timeout: 300_000 }, () => {
@@ -112,4 +133,5 @@ test("an ordinary web build keeps both, because the PWA is the point there", { t
     assert.ok(existsSync(join(out, asset)), `${asset} is how the browser build installs; it must stay`);
   }
   assert.match(readFileSync(join(out, "index.html"), "utf8"), /rel="manifest"/);
+  assertBundledTerminalFont(out);
 });

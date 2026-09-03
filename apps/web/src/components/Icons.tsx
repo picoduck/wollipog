@@ -8,6 +8,7 @@ import {
   ChevronLeft as LucideChevronLeft,
   ChevronRight as LucideChevronRight,
   CircleGauge as LucideCircleGauge,
+  Clock3 as LucideClock3,
   Code as LucideCode,
   Columns3 as LucideColumns3,
   Copy as LucideCopy,
@@ -113,6 +114,14 @@ export function ProjectsIcon(props: IconProps) {
 
 export function BoardIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideColumns3} {...props} />;
+}
+
+export function ListIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideList} {...props} />;
+}
+
+export function SnoozedIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideClock3} {...props} />;
 }
 
 export function ConnectionsIcon(props: IconProps) {

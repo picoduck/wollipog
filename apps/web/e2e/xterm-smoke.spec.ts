@@ -10,8 +10,29 @@ async function waitForHarness(page: Page): Promise<void> {
   await expect.poll(() => page.evaluate(() => typeof window.__WOLLIPOG_XTERM_E2E__)).toBe("object");
 }
 
-test.beforeEach(async ({ page }) => {
+const SEARCH_DURING_FONT_LOAD_TEST = "applies search entered while the terminal font is still loading @production";
+
+test.beforeEach(async ({ page }, testInfo) => {
+  if (testInfo.title === SEARCH_DURING_FONT_LOAD_TEST) return;
   await waitForHarness(page);
+});
+
+test(SEARCH_DURING_FONT_LOAD_TEST, async ({ page }) => {
+  let releaseFont!: () => void;
+  const fontGate = new Promise<void>((resolve) => { releaseFont = resolve; });
+  await page.route(/WollipogJetBrainsMonoNerd-Regular.*\.woff2$/u, async (route) => {
+    await fontGate;
+    await route.continue();
+  });
+  const response = await page.goto("/xterm-smoke-e2e.html");
+  expect(response?.ok()).toBe(true);
+  await expect.poll(() => page.evaluate(() => typeof window.__WOLLIPOG_XTERM_E2E__)).toBe("object");
+  await page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.setSearchTerm("Initial terminal"));
+  releaseFont();
+
+  const terminal = page.getByRole("region", { name: "Interactive Terminal Fixture" });
+  await expect(terminal.locator(".xterm")).toBeVisible();
+  await expect(terminal.locator(".xterm-selection div")).not.toHaveCount(0);
 });
 
 test("renders initial and incremental raw output once, including split ANSI input @production", async ({ page }) => {
@@ -56,8 +77,34 @@ test("sends interactive input once and keeps the read-only terminal inert @produ
 
 test("reports fitted dimensions, refits on resize, and preserves usable scrollback @production", async ({ page }) => {
   const terminal = page.getByRole("region", { name: "Interactive Terminal Fixture" });
+  const readonly = page.getByRole("region", { name: "Read-Only Terminal Fixture" });
+  await expect(terminalRows(terminal)).toContainText("Glyphs:   󰊢 │ ─ é Ж 日本語");
+  await expect(terminalRows(readonly)).toContainText("Glyphs:   󰊢 │ ─ é Ж 日本語");
+  const fontState = await page.evaluate(async () => {
+    await document.fonts.ready;
+    const family = "Wollipog JetBrainsMono Nerd Font";
+    const resources = performance.getEntriesByType("resource").map((entry) => entry.name);
+    return {
+      loaded: document.fonts.check(`12.5px "${family}"`, "  󰊢 │ ─ é Ж"),
+      terminalFamily: getComputedStyle(document.querySelector(".shell-term:not(.is-readonly) .xterm-rows")!).fontFamily,
+      readonlyFamily: getComputedStyle(document.querySelector(".shell-term.is-readonly .xterm-rows")!).fontFamily,
+      promptFamily: getComputedStyle(document.querySelector(".shell-prompt")!).fontFamily,
+      inputFamily: getComputedStyle(document.querySelector(".shell-input")!).fontFamily,
+      fontResources: resources.filter((url) => /WollipogJetBrainsMonoNerd-Regular.*\.woff2$/u.test(url)),
+      origin: location.origin,
+    };
+  });
+  expect(fontState.loaded).toBe(true);
+  for (const stack of [fontState.terminalFamily, fontState.readonlyFamily, fontState.promptFamily, fontState.inputFamily]) {
+    expect(stack).toContain("Wollipog JetBrainsMono Nerd Font");
+  }
+  expect(fontState.fontResources).toHaveLength(1);
+  expect(new URL(fontState.fontResources[0]!).origin).toBe(fontState.origin);
+
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.logs().interactive.resizes.at(-1)))
     .toMatchObject({ cols: expect.any(Number), rows: expect.any(Number) });
+  await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.logs().interactive.resizes.length))
+    .toBe(1);
   const initial = await page.evaluate(() => window.__WOLLIPOG_XTERM_E2E__.logs().interactive.resizes.at(-1)!);
   expect(initial.cols).toBeGreaterThan(0);
   expect(initial.rows).toBeGreaterThan(0);

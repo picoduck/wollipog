@@ -9,7 +9,7 @@ import { test } from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentDriverKind, RunnerToControlPlane, SessionQueueMessage } from "@wollipog/protocol";
+import type { AgentDriverKind, EditQueuedPromptMessage, RunnerToControlPlane, SessionQueueMessage } from "@wollipog/protocol";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 
@@ -97,10 +97,14 @@ test("queued prompts are reported with ids and are individually cancelable", () 
 
     // Cancel the first — it leaves the queue, the second stays and keeps its id.
     sm.removeQueuedPrompt("s_q", firstId!);
+    const remainingRevision = queues().at(-1)!.queue[0]!.editRevision;
+    assert.match(remainingRevision ?? "", /^[0-9a-f]{64}$/);
     assert.deepEqual(queues().at(-1)!.queue, [{
       id: secondId,
       text: "second",
       hasImages: false,
+      editable: true,
+      editRevision: remainingRevision,
       steerable: false,
       steerDisabledReason: "This provider does not support steering.",
       liveQueueObserved: true,
@@ -112,6 +116,257 @@ test("queued prompts are reported with ids and are individually cancelable", () 
     assert.equal(queues().length, count);
   } finally {
     cleanup();
+  }
+});
+
+test("queued prompt edits preserve identity and FIFO, round-trip attachments, and fence stale writers", () => {
+  const { sm, queues, cleanup } = harness();
+  try {
+    const originalImages = [{ mimeType: "image/png", data: "AAAA" }];
+    sm.prompt("s_q", "first", originalImages);
+    sm.prompt("s_q", "second");
+    const before = queues().at(-1)!.queue;
+    const firstId = before[0]!.id;
+    const secondId = before[1]!.id;
+
+    const read = sm.readQueuedPrompt({
+      type: "read_queued_prompt", requestId: "read-1", sessionId: "s_q", promptId: firstId,
+    });
+    assert.equal(read.ok, true);
+    assert.equal(read.prompt?.promptId, firstId);
+    assert.equal(read.prompt?.text, "first");
+    assert.deepEqual(read.prompt?.images, originalImages);
+    assert.match(read.prompt?.editRevision ?? "", /^[a-f0-9]{64}$/);
+
+    const request: EditQueuedPromptMessage = {
+      type: "edit_queued_prompt",
+      requestId: "edit-request-1",
+      submissionId: "edit-submission-1",
+      sessionId: "s_q",
+      promptId: firstId,
+      expectedRevision: read.prompt!.editRevision,
+      text: "first revised",
+      images: [{ mimeType: "image/webp", data: "BBBB" }],
+    };
+    const edited = sm.editQueuedPrompt(request);
+    assert.equal(edited.applied, true);
+    assert.match(edited.prompt?.editRevision ?? "", /^[a-f0-9]{64}$/);
+    assert.notEqual(edited.prompt?.editRevision, read.prompt?.editRevision);
+    assert.deepEqual(queues().at(-1)!.queue.map((prompt) => [prompt.id, prompt.text]), [
+      [firstId, "first revised"],
+      [secondId, "second"],
+    ]);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const live = (sm as any).active.get("s_q").queue;
+    assert.deepEqual(live[0].images, [{ mimeType: "image/webp", data: "BBBB" }]);
+
+    const stale = sm.editQueuedPrompt({
+      ...request,
+      requestId: "edit-request-stale",
+      submissionId: "edit-submission-stale",
+      text: "must not win",
+    });
+    assert.equal(stale.applied, false);
+    assert.equal(stale.reason, "queue_item_changed");
+    assert.equal(queues().at(-1)!.queue[0]!.text, "first revised");
+
+    sm.removeQueuedPrompt("s_q", firstId);
+    const replay = sm.editQueuedPrompt({ ...request, requestId: "edit-request-retry" });
+    assert.deepEqual(replay, edited, "an exact retry replays its receipt after the item leaves the queue");
+    const conflict = sm.editQueuedPrompt({ ...request, requestId: "edit-request-conflict", text: "different" });
+    assert.equal(conflict.applied, false);
+    assert.equal(conflict.reason, "invalid_content");
+  } finally {
+    cleanup();
+  }
+});
+
+test("queued edit reads and saves fail closed after dequeue or for command-owned entries", () => {
+  const { sm, queues, cleanup } = harness();
+  try {
+    sm.prompt("s_q", "ordinary");
+    const ordinaryId = queues().at(-1)!.queue[0]!.id;
+    sm.removeQueuedPrompt("s_q", ordinaryId);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (sm as any).active.get("s_q").activeTurnId = ordinaryId;
+    const started = sm.editQueuedPrompt({
+      type: "edit_queued_prompt", requestId: "started", submissionId: "started-submission",
+      sessionId: "s_q", promptId: ordinaryId, expectedRevision: "old-process-token", text: "late", images: [],
+    });
+    assert.equal(started.applied, false);
+    assert.equal(started.reason, "queue_item_started");
+
+    sm.prompt("s_q", "slash body", [], "review");
+    const command = queues().at(-1)!.queue[0]!;
+    assert.equal(command.editable, false);
+    assert.match(command.editDisabledReason ?? "", /slash commands/i);
+    const immutable = sm.readQueuedPrompt({
+      type: "read_queued_prompt", requestId: "read-command", sessionId: "s_q", promptId: command.id,
+    });
+    assert.equal(immutable.ok, false);
+    assert.equal(immutable.reason, "queue_item_immutable");
+  } finally {
+    cleanup();
+  }
+});
+
+test("a failed queued edit receipt is re-evaluated when transient immutability clears", () => {
+  const { sm, queues, cleanup } = harness();
+  try {
+    sm.prompt("s_q", "ordinary");
+    const queued = queues().at(-1)!.queue[0]!;
+    const read = sm.readQueuedPrompt({
+      type: "read_queued_prompt", requestId: "read-transient", sessionId: "s_q", promptId: queued.id,
+    });
+    assert.equal(read.ok, true);
+    // Model the same transient ownership exclusion used while another queue operation is reserved.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const livePrompt = (sm as any).active.get("s_q").queue[0];
+    livePrompt.slashCommand = "review";
+    const request: EditQueuedPromptMessage = {
+      type: "edit_queued_prompt",
+      requestId: "edit-transient-1",
+      submissionId: "edit-transient-submission",
+      sessionId: "s_q",
+      promptId: queued.id,
+      expectedRevision: read.prompt!.editRevision,
+      text: "revised after transient state",
+      images: [],
+    };
+    const blocked = sm.editQueuedPrompt(request);
+    assert.equal(blocked.applied, false);
+    assert.equal(blocked.reason, "queue_item_immutable");
+
+    livePrompt.slashCommand = undefined;
+    const retry = sm.editQueuedPrompt({ ...request, requestId: "edit-transient-2" });
+    assert.equal(retry.applied, true, "negative receipts must not outlive a transient exclusion");
+    assert.equal(queues().at(-1)!.queue[0]!.text, "revised after transient state");
+  } finally {
+    cleanup();
+  }
+});
+
+test("an applied queued edit replays across equivalent externalized artifact IDs", () => {
+  const { sm, queues, cleanup } = harness();
+  try {
+    sm.prompt("s_q", "ordinary");
+    const queued = queues().at(-1)!.queue[0]!;
+    const read = sm.readQueuedPrompt({
+      type: "read_queued_prompt", requestId: "read-image-retry", sessionId: "s_q", promptId: queued.id,
+    });
+    assert.equal(read.ok, true);
+    const integrity = { mimeType: "image/png", sizeBytes: 4, sha256: "a".repeat(64) };
+    const request: EditQueuedPromptMessage = {
+      type: "edit_queued_prompt",
+      requestId: "edit-image-1",
+      submissionId: "edit-image-submission",
+      sessionId: "s_q",
+      promptId: queued.id,
+      expectedRevision: read.prompt!.editRevision,
+      text: "same bytes, new artifact allocation",
+      images: [{ artifactId: "art_first", ...integrity }],
+    };
+    const applied = sm.editQueuedPrompt(request);
+    assert.equal(applied.applied, true);
+
+    const replay = sm.editQueuedPrompt({
+      ...request,
+      requestId: "edit-image-2",
+      images: [{ artifactId: "art_retry", ...integrity }],
+    });
+    assert.deepEqual(replay, applied, "artifact storage identity must not change the idempotency receipt");
+
+    const conflict = sm.editQueuedPrompt({
+      ...request,
+      requestId: "edit-image-3",
+      images: [{ artifactId: "art_different", ...integrity, sha256: "b".repeat(64) }],
+    });
+    assert.equal(conflict.applied, false);
+    assert.equal(conflict.reason, "invalid_content", "different image bytes must still conflict");
+  } finally {
+    cleanup();
+  }
+});
+
+test("unresolved durable-delivery queue entries stay immutable across retries and reconnect projection", () => {
+  const { sm, queues, cleanup } = harness();
+  try {
+    const durable = {
+      commandId: "prompt_durable_1",
+      queued() {},
+      started() {},
+      completed() {},
+      failed() {},
+      uncertain() {},
+    };
+    assert.equal(sm.prompt("s_q", "durable original", [], undefined, undefined, durable), true);
+    const projected = queues().at(-1)!.queue[0]!;
+    assert.equal(projected.id, durable.commandId);
+    assert.equal(projected.editable, false);
+    assert.match(projected.editDisabledReason ?? "", /durable delivery/i);
+
+    const read = sm.readQueuedPrompt({
+      type: "read_queued_prompt",
+      requestId: "durable-read",
+      sessionId: "s_q",
+      promptId: durable.commandId,
+    });
+    assert.equal(read.ok, false);
+    assert.equal(read.reason, "queue_item_immutable");
+
+    const edit = sm.editQueuedPrompt({
+      type: "edit_queued_prompt",
+      requestId: "durable-edit",
+      submissionId: "durable-submission",
+      sessionId: "s_q",
+      promptId: durable.commandId,
+      expectedRevision: projected.editRevision!,
+      text: "must not replace durable content",
+      images: [],
+    });
+    assert.equal(edit.applied, false);
+    assert.equal(edit.reason, "queue_item_immutable");
+    assert.equal(queues().at(-1)!.queue[0]!.text, "durable original");
+
+    sm.reportQueues();
+    const reconnected = queues().at(-1)!.queue[0]!;
+    assert.equal(reconnected.text, "durable original");
+    assert.equal(reconnected.editable, false);
+    assert.equal(reconnected.editRevision, projected.editRevision);
+  } finally {
+    cleanup();
+  }
+});
+
+test("queued edit revisions are fenced to one runner process generation", () => {
+  const first = harness();
+  const replacement = harness();
+  try {
+    first.sm.prompt("s_q", "reconstructed content");
+    replacement.sm.prompt("s_q", "reconstructed content");
+    const firstId = first.queues().at(-1)!.queue[0]!.id;
+    const replacementId = replacement.queues().at(-1)!.queue[0]!.id;
+    // Model durable reconstruction retaining the stable command identity.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (replacement.sm as any).active.get("s_q").queue[0].id = firstId;
+    const old = first.sm.readQueuedPrompt({
+      type: "read_queued_prompt", requestId: "old-read", sessionId: "s_q", promptId: firstId,
+    }).prompt!;
+    const current = replacement.sm.readQueuedPrompt({
+      type: "read_queued_prompt", requestId: "new-read", sessionId: "s_q", promptId: firstId,
+    }).prompt!;
+    assert.notEqual(firstId, replacementId);
+    assert.notEqual(old.editRevision, current.editRevision);
+    const stale = replacement.sm.editQueuedPrompt({
+      type: "edit_queued_prompt", requestId: "old-save", submissionId: "old-save",
+      sessionId: "s_q", promptId: firstId, expectedRevision: old.editRevision,
+      text: "must not cross restart", images: [],
+    });
+    assert.equal(stale.applied, false);
+    assert.equal(stale.reason, "queue_item_changed");
+  } finally {
+    first.cleanup();
+    replacement.cleanup();
   }
 });
 
@@ -674,8 +929,11 @@ test("reportQueues emits one authoritative frame for every stored non-deleted se
     const empty = first.find((message) => message.sessionId === "active-empty")!;
     assert.deepEqual(empty.queue, []);
     assert.equal(empty.activeTurnId, "turn-live");
-    assert.deepEqual(first.find((message) => message.sessionId === "active-nonempty")?.queue, [{
+    const preservedQueue = first.find((message) => message.sessionId === "active-nonempty")?.queue;
+    assert.match(preservedQueue?.[0]?.editRevision ?? "", /^[0-9a-f]{64}$/);
+    assert.deepEqual(preservedQueue, [{
       id: "preserved", text: "survives reconnect", hasImages: false,
+      editable: true, editRevision: preservedQueue?.[0]?.editRevision,
       steerable: false, steerDisabledReason: "This provider does not support steering.",
       liveQueueObserved: true,
     }]);
@@ -687,6 +945,7 @@ test("reportQueues emits one authoritative frame for every stored non-deleted se
     assert.equal(new Set(second.map((message) => message.sessionId)).size, 3);
     assert.deepEqual(second.find((message) => message.sessionId === "active-nonempty")?.queue, [{
       id: "preserved", text: "survives reconnect", hasImages: false,
+      editable: true, editRevision: preservedQueue?.[0]?.editRevision,
       steerable: false, steerDisabledReason: "This provider does not support steering.",
       liveQueueObserved: true,
     }]);

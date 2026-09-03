@@ -1,5 +1,5 @@
 import { type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { type SessionView, type SetSessionReminderRequest, type SourceLocation } from "@wollipog/protocol";
+import { type SessionReminderView, type SessionView, type SetSessionReminderRequest, type SourceLocation } from "@wollipog/protocol";
 import { sessionArchiveRequiresStop } from "../archive-actions.js";
 import {
   INBOX_REORDER_SETTLE_MS,
@@ -11,6 +11,7 @@ import {
   inboxSelectionAfterMove,
   inboxSelectionAfterArchive,
   inboxSplitByKey,
+  isInboxBlocked,
   nextInboxSplitKey,
   repairInboxSelectionAfterSnapshot,
   extendInboxHeldOrder,
@@ -18,6 +19,7 @@ import {
   reconcileInboxOrder,
   repairInboxSelectionForHeldOrder,
   shouldRestoreInboxScroll,
+  type InboxSplit,
   type InboxApprovalIntent,
 } from "../inbox.js";
 import { loadKeySet, saveKeySet, SESSION_PIN_KEY } from "../pins.js";
@@ -45,7 +47,7 @@ import { SnoozeDialog } from "./SnoozeDialog.js";
 import { SessionContextMenu, type SessionContextMenuState } from "./SessionContextMenu.js";
 import { RenameSessionDialog } from "./RenameSessionDialog.js";
 import type { NewSessionPreset } from "./NewSessionDialog.js";
-import { SearchIcon } from "./Icons.js";
+import { BoardIcon, DialIcon, ListIcon, SearchIcon, SnoozedIcon } from "./Icons.js";
 import { Board } from "./Board.js";
 import type { SessionsViewMode } from "../sessions-view-mode.js";
 import { sessionAgentLabel } from "./agent-options.js";
@@ -56,6 +58,49 @@ import { SegmentedControl } from "./ui/ChoiceControls.js";
 const PROJECT_PIN_KEY = "wollipog.projects.pinned";
 const SEEN_DWELL_MS = 1_500;
 const inboxScrollPositions = new Map<string, number>();
+
+function SessionsToolbarOption({ icon, label, count }: {
+  icon: ReactNode;
+  label: string;
+  count?: number;
+}) {
+  return (
+    <span className="sessions-toolbar-option">
+      <span className="sessions-toolbar-option-icon" aria-hidden="true">{icon}</span>
+      <span className="sessions-toolbar-option-text">{label}</span>
+      {count !== undefined && (
+        <span className="sessions-toolbar-count" aria-hidden="true">{count}</span>
+      )}
+    </span>
+  );
+}
+
+export function filterInboxSplitsForReminderMode(
+  baseSplits: readonly InboxSplit[],
+  reminders: ReadonlyMap<string, SessionReminderView>,
+  mode: ReminderInboxMode,
+  stalledSessionIds: ReadonlySet<string>,
+): InboxSplit[] {
+  return baseSplits.map((split) => {
+    const visibleSessions = split.sessions.filter((session) => sessionVisibleForReminderMode(
+      session, reminders.get(session.id), mode,
+    ));
+    // Durable Project counts can exceed the locally loaded catalog. Preserve that server-owned
+    // total in Active, subtracting only reminder-hidden rows we can prove locally. Snoozed is a
+    // local reminder projection and therefore counts its exact visible membership.
+    const hiddenLocalCount = split.sessions.length - visibleSessions.length;
+    const count = mode === "snoozed"
+      ? visibleSessions.length
+      : Math.max(0, split.count - hiddenLocalCount);
+    return {
+      ...split,
+      sessions: sortSessionsForReminders(visibleSessions, reminders, mode),
+      count,
+      blockedCount: visibleSessions.reduce((total, session) => total + Number(isInboxBlocked(session)), 0),
+      stalledCount: visibleSessions.reduce((total, session) => total + Number(stalledSessionIds.has(session.id)), 0),
+    };
+  });
+}
 
 export function inboxSessionMatchesQuery(
   session: SessionView,
@@ -314,37 +359,24 @@ export function InboxView({
   // when membership changes; ordinary heartbeat pulses never rebuild Inbox splits or rows.
   const stalledSessionIds = useMemo(() => new Set(stalledIndex), [stalledIndex, stalledRevision]);
 
-  const snoozedCount = useMemo(() => [...reminders.values()].filter((reminder) => {
-    const session = sessions.get(reminder.sessionId);
-    return reminder.state === "pending" && session !== undefined && !session.archived;
-  }).length, [reminders, sessions]);
-  const splits = useMemo(() => {
-    const baseSplits = buildInboxSplits(
-      sessions.values(),
-      pinnedProjects,
-      pinnedSessions,
-      stalledSessionIds,
-      projects.values(),
-      projectsSupported,
-    );
-    return baseSplits.map((split) => {
-      const visibleSessions = split.sessions.filter((session) => sessionVisibleForReminderMode(
-        session, reminders.get(session.id), reminderMode,
-      ));
-      // Durable Project counts can exceed the locally loaded catalog. Preserve that server-owned
-      // total in the ordinary Inbox, subtracting only reminder-hidden rows we can prove locally.
-      const hiddenLocalCount = split.sessions.length - visibleSessions.length;
-      const count = reminderMode === "snoozed"
-        ? visibleSessions.length
-        : Math.max(0, split.count - hiddenLocalCount);
-      return {
-        ...split,
-        sessions: sortSessionsForReminders(visibleSessions, reminders, reminderMode),
-        count,
-      };
-    });
-  }, [pinnedProjects, pinnedSessions, projects, projectsSupported, reminderMode, reminders, sessions, stalledSessionIds]);
+  const baseSplits = useMemo(() => buildInboxSplits(
+    sessions.values(),
+    pinnedProjects,
+    pinnedSessions,
+    stalledSessionIds,
+    projects.values(),
+    projectsSupported,
+  ), [pinnedProjects, pinnedSessions, projects, projectsSupported, sessions, stalledSessionIds]);
+  const reminderSplits = useMemo(() => ({
+    ordinary: filterInboxSplitsForReminderMode(baseSplits, reminders, "ordinary", stalledSessionIds),
+    snoozed: filterInboxSplitsForReminderMode(baseSplits, reminders, "snoozed", stalledSessionIds),
+  }), [baseSplits, reminders, stalledSessionIds]);
+  const splits = reminderSplits[reminderMode];
   const activeSplit = inboxSplitByKey(splits, inbox.splitKey);
+  const ordinaryActiveSplit = inboxSplitByKey(reminderSplits.ordinary, inbox.splitKey);
+  const snoozedActiveSplit = inboxSplitByKey(reminderSplits.snoozed, inbox.splitKey);
+  const activeCount = ordinaryActiveSplit?.count ?? 0;
+  const snoozedCount = snoozedActiveSplit?.count ?? 0;
   const activityCounts = useMemo(() => (activeSplit?.sessions ?? []).reduce(
     (counts, session) => {
       if (session.status === "running") counts.running += 1;
@@ -1020,8 +1052,18 @@ export function InboxView({
               label="Sessions View"
               value={viewMode}
               options={[
-                { value: "list", label: "List" },
-                { value: "board", label: "Board" },
+                {
+                  value: "list",
+                  label: <SessionsToolbarOption icon={<ListIcon size={17} />} label="List" />,
+                  ariaLabel: "List",
+                  title: "List",
+                },
+                {
+                  value: "board",
+                  label: <SessionsToolbarOption icon={<BoardIcon size={17} />} label="Board" />,
+                  ariaLabel: "Board",
+                  title: "Board",
+                },
               ]}
               onChange={(mode) => {
                 if (mode === viewMode) return;
@@ -1048,8 +1090,18 @@ export function InboxView({
                 label="Reminder View"
                 value={reminderMode}
                 options={[
-                  { value: "ordinary", label: "Active" },
-                  { value: "snoozed", label: `Snoozed (${snoozedCount})` },
+                  {
+                    value: "ordinary",
+                    label: <SessionsToolbarOption icon={<DialIcon size={17} />} label="Active" count={activeCount} />,
+                    ariaLabel: `Active, ${activeCount} ${activeCount === 1 ? "Session" : "Sessions"}`,
+                    title: "Active",
+                  },
+                  {
+                    value: "snoozed",
+                    label: <SessionsToolbarOption icon={<SnoozedIcon size={17} />} label="Snoozed" count={snoozedCount} />,
+                    ariaLabel: `Snoozed, ${snoozedCount} ${snoozedCount === 1 ? "Session" : "Sessions"}`,
+                    title: "Snoozed",
+                  },
                 ]}
                 onChange={setReminderMode}
               />
@@ -1079,6 +1131,7 @@ export function InboxView({
         {boardMode ? (
           <Board
             sessions={boardSessions}
+            reminders={reminders}
             searchActive={normalizedQuery.length > 0 || (activeSplit?.key ?? null) !== null || reminderMode === "snoozed"}
             onShowAll={() => {
               exitSearch();

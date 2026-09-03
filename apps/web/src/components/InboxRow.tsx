@@ -3,7 +3,7 @@ import { memo } from "react";
 import { useLongPress } from "./interactions.js";
 import { isHeartbeatBusy, type SessionActivity } from "../activity.js";
 import { relativeTime, statusMeta } from "../format.js";
-import { reminderBadgeLabel } from "../session-reminders.js";
+import { reminderBadgeLabel, snoozedSessionAttentionReason } from "../session-reminders.js";
 import { AgentIcon } from "./AgentIcon.js";
 import { ActivityStrip } from "./ActivityStrip.js";
 import { sessionAgentLabel } from "./agent-options.js";
@@ -59,6 +59,11 @@ function InboxRowInner({
       ? { label: "Stop Failed", className: "st-failed", busy: false }
       : statusMeta(session.status);
   const attention = sessionAttentionStatus(session);
+  const snoozedAttention = reminder?.state === "pending" ? snoozedSessionAttentionReason(session) : null;
+  const extraSnoozedAttention = snoozedAttention?.kind === "orphaned_background_work" ||
+      snoozedAttention?.kind === "background_delivery_watchdog"
+    ? snoozedAttention
+    : null;
   const active = isHeartbeatBusy(session.status);
   const agent = sessionAgentLabel(session.agentName, session.driver, session.agentId);
   const lastActivityAt = Math.max(session.lastEventAt ?? 0, activity?.lastEventAt ?? 0) || null;
@@ -110,6 +115,15 @@ function InboxRowInner({
                 aria-label={"Attention: " + attention.label}
               >
                 {attention.label}
+              </span>
+            )}
+            {extraSnoozedAttention && (
+              <span
+                className="inbox-status-pill blocked"
+                title={extraSnoozedAttention.description}
+                aria-label={`Attention: ${extraSnoozedAttention.label}`}
+              >
+                {extraSnoozedAttention.label}
               </span>
             )}
             {reminder && (
