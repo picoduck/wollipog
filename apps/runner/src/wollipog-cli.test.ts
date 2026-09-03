@@ -95,3 +95,41 @@ test("CLI JSON create and prompt commands reuse the manager routes and reject in
   ), 1);
   assert.match(JSON.parse(incompatible).error, /incompatible/);
 });
+
+test("CLI emits JSON for get, events, prompt, wait, and stop core commands", async () => {
+  const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "paired-device" };
+  const cases = [
+    { argv: ["session", "get", "s_child"], method: "GET", path: "/api/sessions/s_child" },
+    { argv: ["session", "events", "s_child", "--after", "4", "--limit", "2"], method: "GET", path: "/api/sessions/s_child/events?after=4" },
+    { argv: ["session", "prompt", "s_child", "Keep", "going"], method: "POST", path: "/api/sessions/s_child/prompt" },
+    { argv: ["session", "wait", "s_child", "--for", "completed", "--timeout", "50"], method: "GET", path: "/api/sessions/s_child" },
+    { argv: ["session", "stop", "s_child"], method: "POST", path: "/api/sessions/s_child/stop" },
+  ] as const;
+
+  for (const testCase of cases) {
+    const requests: Array<{ url: string; method?: string }> = [];
+    const fetch: McpFetch = async (url, init) => {
+      requests.push({ url, method: init?.method });
+      if (url.endsWith("/healthz")) {
+        return { ok: true, status: 200, text: async () => JSON.stringify({ protocolVersion: PROTOCOL_VERSION }) };
+      }
+      const session = { id: "s_child", status: "completed", runnerId: "r1", title: "Child" };
+      const body = url.includes("/events?")
+        ? { events: [] }
+        : url.endsWith("/api/sessions/s_child")
+          ? { session }
+          : session;
+      return { ok: true, status: 200, text: async () => JSON.stringify(body) };
+    };
+    let output = "";
+    assert.equal(await runWollipogCli(
+      ["node", "cli.js", "--wollipog-cli", ...testCase.argv, "--json"],
+      env,
+      { stdout: (text) => { output += text; }, stderr: () => {} },
+      fetch,
+    ), 0, testCase.argv.join(" "));
+    assert.doesNotThrow(() => JSON.parse(output), testCase.argv.join(" "));
+    assert.equal(requests[1]!.method, testCase.method);
+    assert.equal(requests[1]!.url, `http://cp${testCase.path}`);
+  }
+});
