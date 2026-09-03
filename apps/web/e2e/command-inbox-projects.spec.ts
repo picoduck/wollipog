@@ -1016,7 +1016,8 @@ test("the Project crumb navigates independently beside persistent Project Action
   });
   await actions.hover();
   await expect.poll(() => actions.evaluate((element) => getComputedStyle(element).backgroundColor))
-    .not.toBe(defaultStyle.backgroundColor);
+    .toBe(defaultStyle.backgroundColor);
+  await expect(actions).toHaveCSS("background-image", defaultStyle.backgroundImage);
   const hoverBackground = await actions.evaluate((element) => getComputedStyle(element).backgroundColor);
 
   const actionsCenter = { x: actionsBox!.x + actionsBox!.width / 2, y: actionsBox!.y + actionsBox!.height / 2 };
