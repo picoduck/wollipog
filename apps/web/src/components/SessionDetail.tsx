@@ -945,15 +945,18 @@ function SessionDetailLoaded({
   const restoreQueuedPromptEditRecovery = useCallback((
     recovery: QueuedPromptEditRecovery,
     pending: boolean,
+    preserveDraft = false,
   ) => {
     const restored = cloneQueuedPromptEditRecovery(recovery);
     queuedEditRef.current = restored.edit;
     setQueuedEdit(restored.edit);
     setQueuedEditBusy(pending);
-    draftState.current = restored.draft;
-    setProgrammaticComposerText(restored.draft.text);
-    replace(restored.draft.images);
-    setHistIdx(-1);
+    if (!preserveDraft) {
+      draftState.current = restored.draft;
+      setProgrammaticComposerText(restored.draft.text);
+      replace(restored.draft.images);
+      setHistIdx(-1);
+    }
     setError(restored.error ?? null);
     commandSubmissionRetryRef.current = null;
     suppressedDraftRef.current = pending ? { sessionId } : null;
@@ -1148,31 +1151,50 @@ function SessionDetailLoaded({
     const queuedEditRecovery = queuedPromptEditRecoveries.get(mutationKey);
     if (queuedEditRecovery) {
       suppressedDraftRef.current = null;
-      restoreQueuedPromptEditRecovery(queuedEditRecovery, false);
+      const preserveDraft = draftDirty.current &&
+        queuedEditRef.current?.promptId === queuedEditRecovery.edit.promptId;
+      if (preserveDraft) {
+        storeQueuedPromptEditRecovery(mutationKey, {
+          ...queuedEditRecovery,
+          draft: draftState.current,
+        });
+      }
+      restoreQueuedPromptEditRecovery(queuedEditRecovery, false, preserveDraft);
       return;
     }
     if (suppressedDraftRef.current?.sessionId !== sessionId) return;
-    if (queuedEditRef.current) {
+    const completedQueuedEdit = queuedEditRef.current !== null;
+    if (completedQueuedEdit) {
+      draftDirty.current = false;
       queuedEditRef.current = null;
       setQueuedEdit(null);
       setQueuedEditBusy(false);
       setError(null);
+      draftState.current = { text: "", images: [] };
+      setProgrammaticComposerText("", 0);
+      replace([]);
+      commandSubmissionRetryRef.current = null;
     }
     let cancelled = false;
     let completed = false;
     const suppressed = suppressedDraftRef.current;
+    const interactionVersion = composerInteractionVersionRef.current;
     suppressedDraftRef.current = null;
     void loadComposerDraft(sessionId, instanceScope).then((draft) => {
       completed = true;
       const recoveryDraft = composerMutationRecoveries.get(mutationKey);
       if (cancelled) return;
-      if (draftDirty.current) {
+      const editedAfterRestoreStarted = composerInteractionVersionRef.current !== interactionVersion;
+      if (draftDirty.current && (!completedQueuedEdit || editedAfterRestoreStarted)) {
         composerMutationRecoveries.delete(mutationKey);
         return;
       }
       const restored = draft ?? (recoveryDraft ? { ...recoveryDraft, updatedAt: Date.now() } : null);
       composerMutationRecoveries.delete(mutationKey);
-      if (!restored) return;
+      if (!restored) {
+        if (completedQueuedEdit) draftHydratedSessionRef.current = sessionId;
+        return;
+      }
       setProgrammaticComposerText(restored.text);
       replace(restored.images);
       commandSubmissionRetryRef.current = restored.commandSubmission ?? null;
@@ -2816,7 +2838,9 @@ function SessionDetailLoaded({
       // A departed view cannot display the failure, so retain the typed edit separately from its
       // displaced ordinary draft. A definitive runner acceptance must never enter recovery even
       // if restoring that displaced draft later hits a local storage error.
-      const failureMessage = `Queued message edit was not confirmed. ${(cause as Error).message}`;
+      const failureMessage = editAccepted
+        ? (cause as Error).message
+        : `Queued message edit was not confirmed. ${(cause as Error).message}`;
       if (!editAccepted) {
         storeQueuedPromptEditRecovery(mutationKey, {
           ...recovery,
