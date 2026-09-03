@@ -6,7 +6,14 @@ import {
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
   WOLLIPOG_CONDUCTOR_ACTOR_SESSION_HEADER,
 } from "@wollipog/protocol";
-import { dispatch, serveConductorMcp, TOOLS, type McpDeps, type McpFetch } from "./conductor-mcp.js";
+import {
+  dispatch,
+  nextWaitSessionIntervalMs,
+  serveConductorMcp,
+  TOOLS,
+  type McpDeps,
+  type McpFetch,
+} from "./conductor-mcp.js";
 
 /* -------------------------------------------------------------------------- */
 /* Fixtures: an injected fetch stub recording every request                    */
@@ -133,6 +140,41 @@ test("tools/list returns the curated session and workflow tools with schemas", a
     assert.ok(t.description.length > 10, `${t.name} has a description`);
     assert.ok(t.inputSchema, `${t.name} has an input schema`);
   }
+});
+
+test("wait-session polling backs off to the existing ten-second ceiling", () => {
+  const intervals = [500];
+  for (let i = 0; i < 10; i++) intervals.push(nextWaitSessionIntervalMs(intervals.at(-1)!));
+  assert.deepEqual(intervals.slice(0, 6), [500, 750, 1125, 1688, 2532, 3798]);
+  assert.equal(intervals.at(-1), 10_000);
+  assert.equal(nextWaitSessionIntervalMs(10_000), 10_000);
+});
+
+test("wait_session uses adaptive delays and preserves its exact timeout boundary", async () => {
+  const { deps, calls } = makeDeps(() => ({
+    status: 200,
+    body: { session: { id: "s_wait", status: "running", runnerId: "r1", title: "Waiting" } },
+  }));
+  let now = 0;
+  const delays: number[] = [];
+  deps.now = () => now;
+  deps.sleep = async (milliseconds) => {
+    delays.push(milliseconds);
+    now += milliseconds;
+  };
+
+  const result = await callTool(deps, "wait_session", {
+    sessionId: "s_wait",
+    states: ["completed"],
+    timeoutMs: 4_000,
+    intervalMs: 500,
+  });
+
+  assert.equal(result.isError, true);
+  assert.match(resultText(result), /timed out/);
+  assert.deepEqual(delays, [500, 750, 1125, 1625]);
+  assert.equal(now, 4_000);
+  assert.equal(calls.length, 5, "one immediate read plus four adaptively delayed reads");
 });
 
 test("every mutating tool's description tells the model the user must approve (card legibility)", () => {

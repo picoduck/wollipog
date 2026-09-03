@@ -46,6 +46,11 @@ const CONDUCTOR_AGENT_ID = "conductor";
 /** Cap on one CP round-trip. Without it, a half-open connection (the documented box-tunnel
  * blip) would stall a call for undici's ~300s default header/body timeouts. */
 const CP_TIMEOUT_MS = 30_000;
+const MAX_WAIT_SESSION_INTERVAL_MS = 10_000;
+
+export function nextWaitSessionIntervalMs(currentIntervalMs: number): number {
+  return Math.min(MAX_WAIT_SESSION_INTERVAL_MS, Math.ceil(currentIntervalMs * 1.5));
+}
 
 /** Minimal structural fetch types so tests can inject a stub without faking Response. */
 export interface McpFetchResponse {
@@ -70,6 +75,9 @@ export interface McpDeps {
   /** Conductor compatibility uses its historical header; general sessions use the exact-session
    * credential header. Device-token CLI calls omit actorHeader entirely. */
   actorHeader?: typeof WOLLIPOG_CONDUCTOR_ACTOR_SESSION_HEADER | typeof WOLLIPOG_AGENT_ACTOR_SESSION_HEADER | null;
+  /** Deterministic scheduling hooks for wait-session tests. */
+  now?: () => number;
+  sleep?: (milliseconds: number) => Promise<void>;
 }
 
 export interface ToolResult {
@@ -454,7 +462,12 @@ export const TOOLS: McpTool[] = [
           items: { type: "string", enum: ["queued", "starting", "running", "input_required", "idle", "completed", "failed", "stopped"] },
         },
         timeoutMs: { type: "integer", minimum: 1, maximum: 3_600_000 },
-        intervalMs: { type: "integer", minimum: 50, maximum: 10_000 },
+        intervalMs: {
+          type: "integer",
+          minimum: 50,
+          maximum: MAX_WAIT_SESSION_INTERVAL_MS,
+          description: "Initial polling interval; successful nonterminal reads back off to 10 seconds.",
+        },
       },
       required: ["sessionId", "states"],
       additionalProperties: false,
@@ -467,8 +480,12 @@ export const TOOLS: McpTool[] = [
       }
       const wanted = new Set<string>(args.states);
       const timeoutMs = Math.min(3_600_000, Math.max(1, Number.isFinite(args.timeoutMs) ? Math.floor(args.timeoutMs) : 60_000));
-      const intervalMs = Math.min(10_000, Math.max(50, Number.isFinite(args.intervalMs) ? Math.floor(args.intervalMs) : 500));
-      const deadline = Date.now() + timeoutMs;
+      let intervalMs = Math.min(MAX_WAIT_SESSION_INTERVAL_MS,
+        Math.max(50, Number.isFinite(args.intervalMs) ? Math.floor(args.intervalMs) : 500));
+      const now = deps.now ?? Date.now;
+      const sleep = deps.sleep ?? ((milliseconds: number) =>
+        new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
+      const deadline = now() + timeoutMs;
       do {
         const r = await cpFetch(deps, "GET", `/api/sessions/${encodeURIComponent(args.sessionId)}`);
         if (!r.ok) return errorResult(r.message);
@@ -476,10 +493,11 @@ export const TOOLS: McpTool[] = [
         if (typeof session?.status === "string" && wanted.has(session.status)) {
           return textResult({ session: mapSession(session), reached: session.status });
         }
-        const remaining = deadline - Date.now();
+        const remaining = deadline - now();
         if (remaining <= 0) break;
-        await new Promise((resolve) => setTimeout(resolve, Math.min(intervalMs, remaining)));
-      } while (Date.now() <= deadline);
+        await sleep(Math.min(intervalMs, remaining));
+        intervalMs = nextWaitSessionIntervalMs(intervalMs);
+      } while (now() <= deadline);
       return errorResult(`timed out waiting for session ${args.sessionId} to reach ${[...wanted].join(", ")}`);
     },
   },
