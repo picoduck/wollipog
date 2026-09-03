@@ -4105,52 +4105,52 @@ export class SessionManager {
     };
     const entry = this.active.get(request.sessionId);
     if (!entry) {
-      return remember(this.queueEditFailure(
+      return this.queueEditFailure(
         request,
         "session_not_found",
         "The live runner session is unavailable.",
-      ) as EditQueuedPromptResultMessage);
+      ) as EditQueuedPromptResultMessage;
     }
     const prompt = entry.queue.find((candidate) => candidate.id === request.promptId);
     if (!prompt) {
       const started = entry.activeTurnId === request.promptId;
-      return remember(this.queueEditFailure(
+      return this.queueEditFailure(
         request,
         started ? "queue_item_started" : "queue_item_absent",
         started ? "The queued message has already started." : "The queued message is no longer in the queue.",
-      ) as EditQueuedPromptResultMessage);
+      ) as EditQueuedPromptResultMessage;
     }
     const eligibility = this.queuedPromptEditEligibility(prompt);
     if (!eligibility.eligible) {
-      return remember(this.queueEditFailure(
+      return this.queueEditFailure(
         request,
         "queue_item_immutable",
         eligibility.message,
-      ) as EditQueuedPromptResultMessage);
+      ) as EditQueuedPromptResultMessage;
     }
     if (!request.expectedRevision || request.expectedRevision !== this.queuedPromptEditRevision(prompt)) {
-      return remember(this.queueEditFailure(
+      return this.queueEditFailure(
         request,
         "queue_item_changed",
         "The queued message changed after editing began.",
-      ) as EditQueuedPromptResultMessage);
+      ) as EditQueuedPromptResultMessage;
     }
     const imageValidation = validatePromptImageInputs(request.images);
     if ((!request.text.trim() && request.images.length === 0) || !imageValidation.ok) {
-      return remember(this.queueEditFailure(
+      return this.queueEditFailure(
         request,
         "invalid_content",
         imageValidation.ok ? "A queued message cannot be empty." : (imageValidation.error ?? "Invalid image attachments."),
-      ) as EditQueuedPromptResultMessage);
+      ) as EditQueuedPromptResultMessage;
     }
     const otherBytes = entry.queue.reduce((total, candidate) =>
       candidate === prompt ? total : total + queuedPromptBytes(candidate.text, candidate.images), 0);
     if (otherBytes + queuedPromptBytes(request.text, request.images) > MAX_QUEUED_BYTES) {
-      return remember(this.queueEditFailure(
+      return this.queueEditFailure(
         request,
         "queue_capacity_exceeded",
         "The edited queued message exceeds the queue capacity.",
-      ) as EditQueuedPromptResultMessage);
+      ) as EditQueuedPromptResultMessage;
     }
     prompt.text = request.text;
     prompt.images = request.images.map((image) => ({ ...image }));

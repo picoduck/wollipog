@@ -247,9 +247,9 @@ test("mobile Session chrome keeps its coupled offsets and compact action icons",
   assert.ok(phoneRule, "the phone layout must define both default and Session chrome geometry");
 
   const sharedTokens = soleRuleProps(":root");
-  assert.deepEqual(sharedTokens.get("--mobile-session-action-gap"), ["2px"]);
+  assert.deepEqual(sharedTokens.get("--mobile-session-action-gap"), ["7px"]);
   assert.deepEqual(sharedTokens.get("--mobile-session-trailing-inset"),
-    ["calc(8px + env(safe-area-inset-right, 0px))"]);
+    ["calc(12px + env(safe-area-inset-right, 0px))"]);
 
   const sessionTopbar = phoneRule.declarationsForSelector(".topbar:has(.mobile-session-back)");
   const paneActions = phoneRule.declarationsForSelector(

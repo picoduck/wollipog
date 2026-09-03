@@ -27,6 +27,13 @@ function assertBundledTerminalFont(out: string): void {
     "the production stylesheet must reference the emitted font asset");
   assert.doesNotMatch(css, /https?:\/\/[^)]*(?:font|JetBrains|Nerd)/iu,
     "terminal fonts must never load from an external service");
+  for (const license of [
+    "Apache-2.0.txt",
+    "JetBrainsMonoNerdFontMono-LICENSE.txt",
+    "NerdFontsGlyphs-LICENSES.txt",
+  ]) {
+    assert.ok(existsSync(join(out, "licenses", license)), `${license} must ship beside the redistributed font`);
+  }
 }
 
 test("the excluded list is the two files that must not ship, named here independently", () => {

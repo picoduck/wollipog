@@ -210,6 +210,42 @@ test("queued edit reads and saves fail closed after dequeue or for command-owned
   }
 });
 
+test("a failed queued edit receipt is re-evaluated when transient immutability clears", () => {
+  const { sm, queues, cleanup } = harness();
+  try {
+    sm.prompt("s_q", "ordinary");
+    const queued = queues().at(-1)!.queue[0]!;
+    const read = sm.readQueuedPrompt({
+      type: "read_queued_prompt", requestId: "read-transient", sessionId: "s_q", promptId: queued.id,
+    });
+    assert.equal(read.ok, true);
+    // Model the same transient ownership exclusion used while another queue operation is reserved.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const livePrompt = (sm as any).active.get("s_q").queue[0];
+    livePrompt.slashCommand = "review";
+    const request: EditQueuedPromptMessage = {
+      type: "edit_queued_prompt",
+      requestId: "edit-transient-1",
+      submissionId: "edit-transient-submission",
+      sessionId: "s_q",
+      promptId: queued.id,
+      expectedRevision: read.prompt!.editRevision,
+      text: "revised after transient state",
+      images: [],
+    };
+    const blocked = sm.editQueuedPrompt(request);
+    assert.equal(blocked.applied, false);
+    assert.equal(blocked.reason, "queue_item_immutable");
+
+    livePrompt.slashCommand = undefined;
+    const retry = sm.editQueuedPrompt({ ...request, requestId: "edit-transient-2" });
+    assert.equal(retry.applied, true, "negative receipts must not outlive a transient exclusion");
+    assert.equal(queues().at(-1)!.queue[0]!.text, "revised after transient state");
+  } finally {
+    cleanup();
+  }
+});
+
 test("unresolved durable-delivery queue entries stay immutable across retries and reconnect projection", () => {
   const { sm, queues, cleanup } = harness();
   try {

@@ -18,10 +18,11 @@
   (`U+F000-F2FF`), Octicons (`U+F400-F532`), and the representative Material Design Git glyph
   (`U+F02A2`). Unlicensed Font Logos and unrelated private-use ranges are intentionally excluded.
   Layout features, names, hinting, `.notdef`, and recommended glyphs were retained.
-- License: SIL Open Font License 1.1; the complete license is distributed beside the font as
-  `JetBrainsMonoNerdFontMono-LICENSE.txt`
+- License: SIL Open Font License 1.1; the complete license ships with web and desktop builds as
+  `licenses/JetBrainsMonoNerdFontMono-LICENSE.txt`
 - Copyright: Copyright 2020 The JetBrains Mono Project Authors
-- Glyph-source notices and license terms: `apps/web/src/assets/fonts/NerdFontsGlyphs-LICENSES.txt`
+- Glyph-source notices and license terms ship as `licenses/NerdFontsGlyphs-LICENSES.txt` and
+  `licenses/Apache-2.0.txt`; their repository sources are under `apps/web/public/licenses/`.
 
 Measured bundle cost for the bundled subset:
 
