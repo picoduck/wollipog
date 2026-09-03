@@ -60,6 +60,22 @@ view unmounts cannot hijack later navigation. Transcript history Retry remains s
 performs only an idempotent history GET. Timeline error rows remain informational because they do
 not carry enough delivery correlation to identify a safe prompt retry.
 
+## Queued edit recovery
+
+A queued-message edit is written to browser recovery storage before Wollipog submits it. A failed
+or interrupted request therefore retains the exact text, attachments, queue identity, expected
+revision, idempotency identity, and displaced ordinary draft across page reloads and installed-app
+restarts. Recovery is partitioned by organization user, control-plane instance, and Session. It is
+removed after definitive success, explicit dismissal or reuse, sign-out, or instance removal.
+
+Recovered edits are retried only when an authoritative live queue still exposes the same prompt ID
+at the same editable revision. Offline or incomplete projections leave recovery intact, while a
+changed or missing target disables in-place retry and offers the recovered content as a deliberate
+new-message draft. Durable recovery retains at most 20 entries and 3 MiB of serialized data per
+instance. Entries expire seven days after their latest save; expiry is applied on every recovery
+read or write. If the browser cannot safely store the recovery, Wollipog keeps the current editor
+and does not submit the queued edit.
+
 ## Stop Redelivery Policy
 
 A Stop is a durable intent, not evidence that runtime capacity was released. Its operation ID stays
