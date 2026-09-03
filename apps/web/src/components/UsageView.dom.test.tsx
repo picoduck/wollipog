@@ -33,11 +33,20 @@ const response = (
   retention: { hourlyDays: 30, dailyDays: 365, coverageStartedAt: 0 },
   canManageRetention: false,
   privacy: "Content-free usage accounting.",
-  totals: { inputTokens: 6, outputTokens: 0, costUsd: 0.06 },
+  totals: {
+    inputTokens: 6, outputTokens: 0, costUsd: 0.06, uncachedInputTokens: 6, cachedInputTokens: 0,
+    cacheCreationTokens: 0, reasoningTokens: 0, cacheSavingsUsd: 0, costSource: "providerReported", unpricedRecords: 0,
+  },
   series,
   byDriver: [],
   byAgent: [],
   byRunner: [],
+  byModel: [],
+});
+
+const bucket = (bucketTs: number, inputTokens: number, costUsd: number): UsageAggregationResponse["series"][number] => ({
+  bucketTs, inputTokens, outputTokens: 0, costUsd, uncachedInputTokens: inputTokens, cachedInputTokens: 0,
+  cacheCreationTokens: 0, reasoningTokens: 0, cacheSavingsUsd: 0, costSource: "providerReported", unpricedRecords: 0,
 });
 
 const settleLoad = () => new Promise((resolve) => setTimeout(resolve, 250));
@@ -50,19 +59,19 @@ test("UsageView keeps the control-plane newest-first order after a refresh", asy
   const newerDay = Date.UTC(2025, 11, 31);
   const newestDay = Date.UTC(2026, 0, 1);
   const hourlySeries = [
-    { bucketTs: newest, inputTokens: 3, outputTokens: 0, costUsd: 0.03 },
-    { bucketTs: newer, inputTokens: 2, outputTokens: 0, costUsd: 0.02 },
-    { bucketTs: older, inputTokens: 1, outputTokens: 0, costUsd: 0.01 },
+    bucket(newest, 3, 0.03),
+    bucket(newer, 2, 0.02),
+    bucket(older, 1, 0.01),
   ];
   const dailySeries = [
-    { bucketTs: newestDay, inputTokens: 3, outputTokens: 0, costUsd: 0.03 },
-    { bucketTs: newerDay, inputTokens: 2, outputTokens: 0, costUsd: 0.02 },
-    { bucketTs: olderDay, inputTokens: 1, outputTokens: 0, costUsd: 0.01 },
+    bucket(newestDay, 3, 0.03),
+    bucket(newerDay, 2, 0.02),
+    bucket(olderDay, 1, 0.01),
   ];
   const responses: UsageAggregationResponse[] = [
     response([
-      { bucketTs: newer, inputTokens: 2, outputTokens: 0, costUsd: 0.02 },
-      { bucketTs: older, inputTokens: 1, outputTokens: 0, costUsd: 0.01 },
+      bucket(newer, 2, 0.02),
+      bucket(older, 1, 0.01),
     ]),
     response(hourlySeries),
     response(hourlySeries),

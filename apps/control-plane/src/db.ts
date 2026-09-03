@@ -5,6 +5,7 @@
  */
 
 import { DatabaseSync } from "node:sqlite";
+import { priceUsage, resolveCostSource, type RateTable } from "./usage-pricing.js";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
@@ -1637,6 +1638,14 @@ CREATE TABLE IF NOT EXISTS usage_session_state (
   output_tokens       INTEGER NOT NULL DEFAULT 0,
   cost_microusd       INTEGER NOT NULL DEFAULT 0,
   cost_remainder_picousd INTEGER NOT NULL DEFAULT 0,
+  uncached_input_tokens       INTEGER NOT NULL DEFAULT 0,
+  cached_input_tokens         INTEGER NOT NULL DEFAULT 0,
+  cache_creation_tokens       INTEGER NOT NULL DEFAULT 0,
+  reasoning_tokens            INTEGER NOT NULL DEFAULT 0,
+  cache_savings_microusd      INTEGER NOT NULL DEFAULT 0,
+  provider_reported_records   INTEGER NOT NULL DEFAULT 0,
+  model_priced_records        INTEGER NOT NULL DEFAULT 0,
+  unpriced_records            INTEGER NOT NULL DEFAULT 0,
   runner_history_epoch INTEGER,
   covered_through_seq INTEGER NOT NULL DEFAULT 0,
   revision            INTEGER NOT NULL DEFAULT 0,
@@ -1657,6 +1666,14 @@ CREATE TABLE IF NOT EXISTS usage_hourly (
   input_tokens        INTEGER NOT NULL DEFAULT 0,
   output_tokens       INTEGER NOT NULL DEFAULT 0,
   cost_microusd       INTEGER NOT NULL DEFAULT 0,
+  uncached_input_tokens       INTEGER NOT NULL DEFAULT 0,
+  cached_input_tokens         INTEGER NOT NULL DEFAULT 0,
+  cache_creation_tokens       INTEGER NOT NULL DEFAULT 0,
+  reasoning_tokens            INTEGER NOT NULL DEFAULT 0,
+  cache_savings_microusd      INTEGER NOT NULL DEFAULT 0,
+  provider_reported_records   INTEGER NOT NULL DEFAULT 0,
+  model_priced_records        INTEGER NOT NULL DEFAULT 0,
+  unpriced_records            INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (bucket_ts, organization_id, owner_kind, owner_id, runner_id, workspace_id, agent_id, driver, model)
 );
 CREATE INDEX IF NOT EXISTS idx_usage_hourly_scope ON usage_hourly(organization_id, bucket_ts);
@@ -1675,6 +1692,14 @@ CREATE TABLE IF NOT EXISTS usage_daily (
   input_tokens        INTEGER NOT NULL DEFAULT 0,
   output_tokens       INTEGER NOT NULL DEFAULT 0,
   cost_microusd       INTEGER NOT NULL DEFAULT 0,
+  uncached_input_tokens       INTEGER NOT NULL DEFAULT 0,
+  cached_input_tokens         INTEGER NOT NULL DEFAULT 0,
+  cache_creation_tokens       INTEGER NOT NULL DEFAULT 0,
+  reasoning_tokens            INTEGER NOT NULL DEFAULT 0,
+  cache_savings_microusd      INTEGER NOT NULL DEFAULT 0,
+  provider_reported_records   INTEGER NOT NULL DEFAULT 0,
+  model_priced_records        INTEGER NOT NULL DEFAULT 0,
+  unpriced_records            INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (bucket_ts, organization_id, owner_kind, owner_id, runner_id, workspace_id, agent_id, driver, model)
 );
 CREATE INDEX IF NOT EXISTS idx_usage_daily_scope ON usage_daily(organization_id, bucket_ts);
@@ -2715,6 +2740,40 @@ export interface DriverTelemetryAggregate {
 
 export type DriverTelemetrySummary = Omit<DriverTelemetryAggregate, "bucketTs">;
 
+/** v103 ledger measures shared by `usage_session_state`, `usage_hourly`, and `usage_daily`. */
+const USAGE_LEDGER_V103_COLUMNS = [
+  "uncached_input_tokens", "cached_input_tokens", "cache_creation_tokens", "reasoning_tokens",
+  "cache_savings_microusd", "provider_reported_records", "model_priced_records", "unpriced_records",
+] as const;
+const USAGE_LEDGER_ACCUMULATE_SQL = USAGE_LEDGER_V103_COLUMNS
+  .map((column) => `${column}=${column}+excluded.${column}`).join(",\n                     ");
+/** Drivers whose reported `inputTokens` already include the cached portion. */
+const CODEX_DRIVERS: ReadonlySet<string> = new Set<AgentDriverKind>(["codex", "codex-app-server"]);
+
+interface UsageLedgerDelta {
+  inputTokens: number;
+  outputTokens: number;
+  costMicrousd: number;
+  uncachedInputTokens: number;
+  cachedInputTokens: number;
+  cacheCreationTokens: number;
+  reasoningTokens: number;
+  cacheSavingsMicrousd: number;
+  providerReportedRecords: number;
+  modelPricedRecords: number;
+  unpricedRecords: number;
+}
+
+type UsageDimensions = {
+  eventEpoch: number;
+  scope: ResourceScope;
+  runnerId: string;
+  workspaceId: string;
+  agentId: string;
+  driver: AgentDriverKind;
+  model: string;
+};
+
 export interface UsageAggregationQuery {
   since: number;
   through: number;
@@ -3092,6 +3151,13 @@ export class ControlPlaneDb {
   private readonly stmts = new Map<string, ReturnType<DatabaseSync["prepare"]>>();
   private lastTelemetryPrune = 0;
   private lastUsageMaintenance = 0;
+  /** Model rate table used to price parentless usage the provider did not cost. Injected by the
+   * rate-table service; `null` leaves such records unpriced (tokens counted, cost a lower bound). */
+  private usageRateTable: RateTable | null = null;
+
+  setUsageRateTable(table: RateTable | null): void {
+    this.usageRateTable = table;
+  }
   private lastMutationAuditArchive = 0;
   private mutationAuditWritesSinceArchive = 0;
   private stmt(sql: string): ReturnType<DatabaseSync["prepare"]> {
@@ -3330,6 +3396,17 @@ export class ControlPlaneDb {
       db.exec("ALTER TABLE usage_session_state ADD COLUMN cost_remainder_picousd INTEGER NOT NULL DEFAULT 0");
     } catch {
       /* column already present */
+    }
+    // v103 usage ledger: the five token buckets, cache savings, and cost provenance counters.
+    // Additive with zero defaults so pre-existing buckets keep aggregating unchanged.
+    for (const table of ["usage_session_state", "usage_hourly", "usage_daily"]) {
+      for (const column of USAGE_LEDGER_V103_COLUMNS) {
+        try {
+          db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 0`);
+        } catch {
+          /* column already present */
+        }
+      }
     }
     // Item 11 identity foundation. Existing personal deployments gain one stable bootstrap
     // organization/owner, and every pre-identity device is scoped to it. The additive device
@@ -8382,10 +8459,11 @@ export class ControlPlaneDb {
         this.stmt(
           `INSERT INTO usage_daily
              (bucket_ts, organization_id, owner_kind, owner_id, runner_id, workspace_id, agent_id, driver, model,
-              input_tokens, output_tokens, cost_microusd)
+              input_tokens, output_tokens, cost_microusd, ${USAGE_LEDGER_V103_COLUMNS.join(", ")})
            SELECT (bucket_ts / 86400000) * 86400000, organization_id, owner_kind, owner_id,
                   runner_id, workspace_id, agent_id, driver, model,
-                  SUM(input_tokens), SUM(output_tokens), SUM(cost_microusd)
+                  SUM(input_tokens), SUM(output_tokens), SUM(cost_microusd),
+                  ${USAGE_LEDGER_V103_COLUMNS.map((column) => `SUM(${column})`).join(", ")}
              FROM usage_hourly
             WHERE organization_id=? AND bucket_ts < ?
             GROUP BY (bucket_ts / 86400000) * 86400000, organization_id, owner_kind, owner_id,
@@ -8393,7 +8471,8 @@ export class ControlPlaneDb {
            ON CONFLICT(bucket_ts, organization_id, owner_kind, owner_id, runner_id, workspace_id, agent_id, driver, model)
            DO UPDATE SET input_tokens=input_tokens+excluded.input_tokens,
                          output_tokens=output_tokens+excluded.output_tokens,
-                         cost_microusd=cost_microusd+excluded.cost_microusd`,
+                         cost_microusd=cost_microusd+excluded.cost_microusd,
+                         ${USAGE_LEDGER_ACCUMULATE_SQL}`,
         ).run(policy.organization_id, hourlyCutoff);
         this.stmt("DELETE FROM usage_hourly WHERE organization_id=? AND bucket_ts < ?")
           .run(policy.organization_id, hourlyCutoff);
@@ -8418,17 +8497,10 @@ export class ControlPlaneDb {
     if (now - this.lastUsageMaintenance >= 6 * 3_600_000) this.maintainUsageAggregation(now);
   }
 
-  private usageDimensions(sessionId: string): ({
-    eventEpoch: number;
-    scope: ResourceScope;
-    runnerId: string;
-    workspaceId: string;
-    agentId: string;
-    driver: AgentDriverKind;
-    model: string;
-  }) | null {
+  private usageDimensions(sessionId: string): UsageDimensions | null {
     const row = this.stmt(
-      `SELECT s.event_epoch, s.runner_id, s.workspace_id, s.agent_id, s.driver, s.model,
+      `SELECT s.event_epoch, s.runner_id, s.workspace_id, s.agent_id, s.driver,
+              COALESCE(NULLIF(s.resolved_model, ''), s.model) AS model,
               o.organization_id, o.owner_kind, o.owner_id
          FROM sessions s JOIN session_ownership o ON o.session_id=s.id WHERE s.id=?`,
     ).get(sessionId) as {
@@ -8451,27 +8523,35 @@ export class ControlPlaneDb {
   /** Called only inside an existing write transaction after the owning event/snapshot is accepted. */
   private recordUsageDeltaInTransaction(
     sessionId: string,
-    amount: { inputTokens: number; outputTokens: number; costMicrousd: number },
+    amount: UsageLedgerDelta,
     occurredAt: number,
     updateSessionTotals: boolean,
+    knownDimensions?: UsageDimensions | null,
   ): void {
-    if (amount.inputTokens === 0 && amount.outputTokens === 0 && amount.costMicrousd === 0) return;
-    const dimensions = this.usageDimensions(sessionId);
+    if (amount.inputTokens === 0 && amount.outputTokens === 0 && amount.costMicrousd === 0 &&
+        amount.providerReportedRecords === 0 && amount.modelPricedRecords === 0 && amount.unpricedRecords === 0) return;
+    const dimensions = knownDimensions === undefined ? this.usageDimensions(sessionId) : knownDimensions;
     if (!dimensions) return; // Missing ownership fails closed rather than leaking into a global row.
     this.ensureUsageRetentionPolicy(dimensions.scope.organizationId, occurredAt);
     const bucketTs = Math.floor(Math.max(0, occurredAt) / 3_600_000) * 3_600_000;
     const ownerId = dimensions.scope.owner.kind === "organization"
       ? dimensions.scope.owner.organizationId
       : dimensions.scope.owner.kind === "user" ? dimensions.scope.owner.userId : dimensions.scope.owner.teamId;
+    const ledgerValues = [
+      amount.inputTokens, amount.outputTokens, amount.costMicrousd,
+      amount.uncachedInputTokens, amount.cachedInputTokens, amount.cacheCreationTokens, amount.reasoningTokens,
+      amount.cacheSavingsMicrousd, amount.providerReportedRecords, amount.modelPricedRecords, amount.unpricedRecords,
+    ];
     this.stmt(
       `INSERT INTO usage_hourly
          (bucket_ts, organization_id, owner_kind, owner_id, runner_id, workspace_id, agent_id, driver, model,
-          input_tokens, output_tokens, cost_microusd)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          input_tokens, output_tokens, cost_microusd, ${USAGE_LEDGER_V103_COLUMNS.join(", ")})
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(bucket_ts, organization_id, owner_kind, owner_id, runner_id, workspace_id, agent_id, driver, model)
        DO UPDATE SET input_tokens=input_tokens+excluded.input_tokens,
                      output_tokens=output_tokens+excluded.output_tokens,
-                     cost_microusd=cost_microusd+excluded.cost_microusd`,
+                     cost_microusd=cost_microusd+excluded.cost_microusd,
+                     ${USAGE_LEDGER_ACCUMULATE_SQL}`,
     ).run(
       bucketTs,
       dimensions.scope.organizationId,
@@ -8482,20 +8562,19 @@ export class ControlPlaneDb {
       dimensions.agentId,
       dimensions.driver,
       dimensions.model,
-      amount.inputTokens,
-      amount.outputTokens,
-      amount.costMicrousd,
+      ...ledgerValues,
     );
     this.stmt(
       `INSERT INTO usage_session_state
-         (session_id, input_tokens, output_tokens, cost_microusd, revision, updated_at)
-       VALUES (?, ?, ?, ?, 1, ?)
+         (session_id, input_tokens, output_tokens, cost_microusd, ${USAGE_LEDGER_V103_COLUMNS.join(", ")}, revision, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
        ON CONFLICT(session_id) DO UPDATE SET
          input_tokens=input_tokens+excluded.input_tokens,
          output_tokens=output_tokens+excluded.output_tokens,
          cost_microusd=cost_microusd+excluded.cost_microusd,
+         ${USAGE_LEDGER_ACCUMULATE_SQL},
          revision=revision+1, updated_at=excluded.updated_at`,
-    ).run(sessionId, amount.inputTokens, amount.outputTokens, amount.costMicrousd, occurredAt);
+    ).run(sessionId, ...ledgerValues, occurredAt);
     if (updateSessionTotals) {
       this.stmt(
         `UPDATE sessions SET
@@ -8552,17 +8631,43 @@ export class ControlPlaneDb {
       if (source.runnerSeq <= state.covered_through_seq) return;
     }
     if (payload.kind === "token_usage" && !payload.parentToolUseId) {
-      const cost = ControlPlaneDb.usageCostParts(payload.costUsd);
+      const dimensions = this.usageDimensions(sessionId);
+      const inputTokens = ControlPlaneDb.usageToken(payload.inputTokens);
+      const outputTokens = ControlPlaneDb.usageToken(payload.outputTokens);
+      const cachedInputTokens = ControlPlaneDb.usageToken(payload.cachedInputTokens);
+      const cacheCreationTokens = ControlPlaneDb.usageToken(payload.cacheCreationInputTokens);
+      const reasoningTokens = Math.min(outputTokens, ControlPlaneDb.usageToken(payload.reasoningOutputTokens));
+      const buckets = {
+        // Codex reports input inclusive of the cached portion; Anthropic reports the uncached part.
+        uncachedInputTokens: dimensions && CODEX_DRIVERS.has(dimensions.driver)
+          ? Math.max(0, inputTokens - cachedInputTokens)
+          : inputTokens,
+        cachedInputTokens,
+        cacheCreationTokens,
+        outputTokens,
+      };
+      const hasTokens = inputTokens > 0 || outputTokens > 0 || cachedInputTokens > 0 || cacheCreationTokens > 0;
+      const reported = typeof payload.costUsd === "number" && Number.isFinite(payload.costUsd) && payload.costUsd >= 0
+        ? payload.costUsd
+        : null;
+      const priced = priceUsage(this.usageRateTable, dimensions?.model, buckets, reported);
+      const cost = ControlPlaneDb.usageCostParts(priced.costUsd);
       const remainderRow = this.stmt(
         "SELECT cost_remainder_picousd FROM usage_session_state WHERE session_id=?",
       ).get(sessionId) as { cost_remainder_picousd: number } | undefined;
       const combinedRemainder = (remainderRow?.cost_remainder_picousd ?? 0) + cost.remainderPicousd;
       const carryMicrousd = Math.round(combinedRemainder / 1_000_000);
+      const counted = hasTokens || reported !== null;
       this.recordUsageDeltaInTransaction(sessionId, {
-        inputTokens: ControlPlaneDb.usageToken(payload.inputTokens),
-        outputTokens: ControlPlaneDb.usageToken(payload.outputTokens),
+        inputTokens,
         costMicrousd: cost.microusd + carryMicrousd,
-      }, occurredAt, true);
+        ...buckets,
+        reasoningTokens,
+        cacheSavingsMicrousd: ControlPlaneDb.usageMicroUsd(priced.cacheSavingsUsd),
+        providerReportedRecords: counted && priced.costSource === "providerReported" ? 1 : 0,
+        modelPricedRecords: counted && priced.costSource === "modelPriced" ? 1 : 0,
+        unpricedRecords: counted && priced.costSource === "unpriced" ? 1 : 0,
+      }, occurredAt, true, dimensions);
       this.stmt(
         `INSERT INTO usage_session_state
            (session_id, input_tokens, output_tokens, cost_microusd, cost_remainder_picousd, revision, updated_at)
@@ -8604,10 +8709,39 @@ export class ControlPlaneDb {
     const snapshotRemainder = (parts.microusd - target.costMicrousd) * 1_000_000 + parts.remainderPicousd;
     const adoptsSnapshotCost = target.costMicrousd > current.cost_microusd ||
       (target.costMicrousd === current.cost_microusd && snapshotRemainder >= current.cost_remainder_picousd);
-    const delta = {
+    const residual = {
       inputTokens: Math.max(0, target.inputTokens - current.input_tokens),
       outputTokens: Math.max(0, target.outputTokens - current.output_tokens),
       costMicrousd: Math.max(0, target.costMicrousd - current.cost_microusd),
+    };
+    // A runner snapshot carries flat totals: no cache breakdown and, for opaque-billing providers,
+    // no cost. A positive token residual without a cost residual is priced at the full input rate
+    // from the session's model so the catch-up is not silently free.
+    const dimensions = this.usageDimensions(sessionId);
+    const residualTokens = residual.inputTokens > 0 || residual.outputTokens > 0;
+    const residualPriced = residual.costMicrousd > 0
+      ? { costSource: "providerReported" as const, costMicrousd: residual.costMicrousd, cacheSavingsUsd: 0 }
+      : residualTokens
+        ? (() => {
+            const priced = priceUsage(this.usageRateTable, dimensions?.model, {
+              uncachedInputTokens: residual.inputTokens, cachedInputTokens: 0, cacheCreationTokens: 0,
+              outputTokens: residual.outputTokens,
+            }, null);
+            return { costSource: priced.costSource, costMicrousd: ControlPlaneDb.usageMicroUsd(priced.costUsd), cacheSavingsUsd: 0 };
+          })()
+        : null;
+    const delta: UsageLedgerDelta = {
+      inputTokens: residual.inputTokens,
+      outputTokens: residual.outputTokens,
+      costMicrousd: residualPriced?.costMicrousd ?? 0,
+      uncachedInputTokens: residual.inputTokens,
+      cachedInputTokens: 0,
+      cacheCreationTokens: 0,
+      reasoningTokens: 0,
+      cacheSavingsMicrousd: 0,
+      providerReportedRecords: residualPriced?.costSource === "providerReported" ? 1 : 0,
+      modelPricedRecords: residualPriced?.costSource === "modelPriced" ? 1 : 0,
+      unpricedRecords: residualPriced?.costSource === "unpriced" ? 1 : 0,
     };
     if (!row) {
       this.stmt(
@@ -8619,7 +8753,7 @@ export class ControlPlaneDb {
     }
     // A cumulative snapshot tells us the amount, not when its unseen prefix accrued. Attribute the
     // positive catch-up at observation time instead of fabricating historical precision.
-    this.recordUsageDeltaInTransaction(sessionId, delta, now, false);
+    this.recordUsageDeltaInTransaction(sessionId, delta, now, false, dimensions);
     if (adoptsSnapshotCost) {
       // Preserve the authoritative fractional baseline around the rounded micro-USD watermark so
       // later sub-micro events can cross the next rounding boundary exactly once.
@@ -8649,16 +8783,17 @@ export class ControlPlaneDb {
     if (principal.kind !== "human") throw new Error("usage aggregation requires a human principal");
     const policy = this.ensureUsageRetentionPolicy(principal.organizationId);
     const isAdministrator = principal.role === "owner" || principal.role === "admin";
+    const measureColumns = `input_tokens, output_tokens, cost_microusd, ${USAGE_LEDGER_V103_COLUMNS.join(", ")}`;
     const sourceFor = (granularity: UsageAggregationGranularity, whereSql: string) => granularity === "hour"
       ? `SELECT bucket_ts, organization_id, owner_kind, owner_id, runner_id, workspace_id, agent_id,
-                driver, model, input_tokens, output_tokens, cost_microusd
+                driver, model, ${measureColumns}
            FROM usage_hourly u WHERE ${whereSql}`
       : `SELECT bucket_ts, organization_id, owner_kind, owner_id, runner_id, workspace_id, agent_id,
-                driver, model, input_tokens, output_tokens, cost_microusd
+                driver, model, ${measureColumns}
            FROM usage_daily u WHERE ${whereSql}
          UNION ALL
          SELECT (bucket_ts / 86400000) * 86400000, organization_id, owner_kind, owner_id,
-                 runner_id, workspace_id, agent_id, driver, model, input_tokens, output_tokens, cost_microusd
+                 runner_id, workspace_id, agent_id, driver, model, ${measureColumns}
            FROM usage_hourly u WHERE ${whereSql}`;
     const whereFor = (since: number) => {
       const clauses = ["u.organization_id=?", "u.bucket_ts>=?", "u.bucket_ts<?"];
@@ -8703,12 +8838,33 @@ export class ControlPlaneDb {
     const source = sourceFor(granularity, where.sql);
     const sourceParams = granularity === "day" ? [...where.params, ...where.params] : where.params;
     const withSource = `WITH usage_source AS MATERIALIZED (${source})`;
-    type AggregateRow = { input_tokens: number | null; output_tokens: number | null; cost_microusd: number | null };
+    type AggregateRow = {
+      input_tokens: number | null; output_tokens: number | null; cost_microusd: number | null;
+      uncached_input_tokens: number | null; cached_input_tokens: number | null;
+      cache_creation_tokens: number | null; reasoning_tokens: number | null;
+      cache_savings_microusd: number | null; provider_reported_records: number | null;
+      model_priced_records: number | null; unpriced_records: number | null;
+    };
     const amountFrom = (row: AggregateRow | undefined): UsageAmount => ({
       inputTokens: Number(row?.input_tokens ?? 0),
       outputTokens: Number(row?.output_tokens ?? 0),
       costUsd: Number(row?.cost_microusd ?? 0) / 1_000_000,
+      uncachedInputTokens: Number(row?.uncached_input_tokens ?? 0),
+      cachedInputTokens: Number(row?.cached_input_tokens ?? 0),
+      cacheCreationTokens: Number(row?.cache_creation_tokens ?? 0),
+      reasoningTokens: Number(row?.reasoning_tokens ?? 0),
+      cacheSavingsUsd: Number(row?.cache_savings_microusd ?? 0) / 1_000_000,
+      costSource: resolveCostSource({
+        providerReported: Number(row?.provider_reported_records ?? 0),
+        modelPriced: Number(row?.model_priced_records ?? 0),
+        unpriced: Number(row?.unpriced_records ?? 0),
+      }),
+      unpricedRecords: Number(row?.unpriced_records ?? 0),
     });
+    const sums = `SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
+                  SUM(cost_microusd) AS cost_microusd,
+                  ${USAGE_LEDGER_V103_COLUMNS.map((column) => `SUM(${column}) AS ${column}`).join(", ")}`;
+    const measures = `input_tokens, output_tokens, cost_microusd, ${USAGE_LEDGER_V103_COLUMNS.join(", ")}`;
     const inputCount = this.stmt(
       `SELECT COUNT(*) AS count FROM (SELECT 1 FROM (${source}) AS bounded_source LIMIT 100001)`,
     ).get(...sourceParams) as { count: number };
@@ -8716,42 +8872,44 @@ export class ControlPlaneDb {
       throw new RangeError("usage query is too broad; shorten the range or add runner, workspace, agent, or driver filters");
     }
     const agentKey = "CASE WHEN agent_id='' THEN 'unassigned' ELSE agent_id || CASE WHEN model='' THEN '' ELSE ' / ' || model END END";
+    const modelKey = "CASE WHEN model='' THEN 'unknown' ELSE model END";
     const aggregateRows = this.stmt(
       `${withSource},
        totals AS (
-         SELECT SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
-                SUM(cost_microusd) AS cost_microusd FROM usage_source
+         SELECT ${sums} FROM usage_source
        ),
        series_rows AS (
-         SELECT bucket_ts, SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
-                SUM(cost_microusd) AS cost_microusd
+         SELECT bucket_ts, ${sums}
            FROM usage_source GROUP BY bucket_ts ORDER BY bucket_ts DESC LIMIT 4001
        ),
        driver_rows AS (
-         SELECT driver AS key, SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
-                SUM(cost_microusd) AS cost_microusd
+         SELECT driver AS key, ${sums}
            FROM usage_source GROUP BY driver
           ORDER BY SUM(cost_microusd) DESC, (SUM(input_tokens) + SUM(output_tokens)) DESC, key ASC LIMIT 20
        ),
        agent_rows AS (
-         SELECT ${agentKey} AS key, SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
-                SUM(cost_microusd) AS cost_microusd
+         SELECT ${agentKey} AS key, ${sums}
            FROM usage_source GROUP BY key
           ORDER BY SUM(cost_microusd) DESC, (SUM(input_tokens) + SUM(output_tokens)) DESC, key ASC LIMIT 20
        ),
        runner_rows AS (
-         SELECT runner_id AS key, SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
-                SUM(cost_microusd) AS cost_microusd
+         SELECT runner_id AS key, ${sums}
            FROM usage_source GROUP BY runner_id
           ORDER BY SUM(cost_microusd) DESC, (SUM(input_tokens) + SUM(output_tokens)) DESC, key ASC LIMIT 20
+       ),
+       model_rows AS (
+         SELECT ${modelKey} AS key, ${sums}
+           FROM usage_source GROUP BY key
+          ORDER BY SUM(cost_microusd) DESC, (SUM(input_tokens) + SUM(output_tokens)) DESC, key ASC LIMIT 20
        )
-       SELECT 'total' AS kind, '' AS key, NULL AS bucket_ts, input_tokens, output_tokens, cost_microusd FROM totals
-       UNION ALL SELECT 'series', '', bucket_ts, input_tokens, output_tokens, cost_microusd FROM series_rows
-       UNION ALL SELECT 'driver', key, NULL, input_tokens, output_tokens, cost_microusd FROM driver_rows
-       UNION ALL SELECT 'agent', key, NULL, input_tokens, output_tokens, cost_microusd FROM agent_rows
-       UNION ALL SELECT 'runner', key, NULL, input_tokens, output_tokens, cost_microusd FROM runner_rows`,
+       SELECT 'total' AS kind, '' AS key, NULL AS bucket_ts, ${measures} FROM totals
+       UNION ALL SELECT 'series', '', bucket_ts, ${measures} FROM series_rows
+       UNION ALL SELECT 'driver', key, NULL, ${measures} FROM driver_rows
+       UNION ALL SELECT 'agent', key, NULL, ${measures} FROM agent_rows
+       UNION ALL SELECT 'runner', key, NULL, ${measures} FROM runner_rows
+       UNION ALL SELECT 'model', key, NULL, ${measures} FROM model_rows`,
     ).all(...sourceParams) as unknown as Array<AggregateRow & {
-      kind: "total" | "series" | "driver" | "agent" | "runner";
+      kind: "total" | "series" | "driver" | "agent" | "runner" | "model";
       key: string;
       bucket_ts: number | null;
     }>;
@@ -8761,20 +8919,19 @@ export class ControlPlaneDb {
     const series = seriesRows
       .map((row) => ({ bucketTs: row.bucket_ts!, ...amountFrom(row) }))
       .sort((a, b) => b.bucketTs - a.bucketTs);
-    const breakdown = (kind: "driver" | "agent" | "runner") => {
+    const totalRow = aggregateRows.find((row) => row.kind === "total");
+    const measureKeys = [
+      "input_tokens", "output_tokens", "cost_microusd", ...USAGE_LEDGER_V103_COLUMNS,
+    ] as const satisfies ReadonlyArray<keyof AggregateRow>;
+    const breakdown = (kind: "driver" | "agent" | "runner" | "model") => {
       const rows = aggregateRows.filter((row) => row.kind === kind);
       const result = rows.map((row) => ({ key: row.key, ...amountFrom(row) }));
-      const visible = rows.reduce((sum, row) => ({
-        input_tokens: sum.input_tokens + Number(row.input_tokens ?? 0),
-        output_tokens: sum.output_tokens + Number(row.output_tokens ?? 0),
-        cost_microusd: sum.cost_microusd + Number(row.cost_microusd ?? 0),
-      }), { input_tokens: 0, output_tokens: 0, cost_microusd: 0 });
-      const other = {
-        input_tokens: totals.inputTokens - visible.input_tokens,
-        output_tokens: totals.outputTokens - visible.output_tokens,
-        cost_microusd: Math.round(totals.costUsd * 1_000_000) - visible.cost_microusd,
-      };
-      if (other.input_tokens || other.output_tokens || other.cost_microusd) {
+      // Whatever the top-20 cut left out is reported as one honest remainder row.
+      const other = Object.fromEntries(measureKeys.map((column) => [
+        column,
+        Number(totalRow?.[column] ?? 0) - rows.reduce((sum, row) => sum + Number(row[column] ?? 0), 0),
+      ])) as AggregateRow;
+      if (measureKeys.some((column) => Number(other[column] ?? 0) !== 0)) {
         result.push({ key: "Other", ...amountFrom(other) });
       }
       return result;
@@ -8791,6 +8948,7 @@ export class ControlPlaneDb {
       byDriver: breakdown("driver"),
       byAgent: breakdown("agent"),
       byRunner: breakdown("runner"),
+      byModel: breakdown("model"),
     };
   }
 

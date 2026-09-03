@@ -2003,6 +2003,9 @@ export class ClaudeCodeDriver implements Driver {
             inputTokens: messageUsage.input_tokens,
             outputTokens: messageUsage.output_tokens,
             cachedInputTokens: messageUsage.cache_read_input_tokens,
+            ...(typeof messageUsage.cache_creation_input_tokens === "number"
+              ? { cacheCreationInputTokens: messageUsage.cache_creation_input_tokens }
+              : {}),
             parentToolUseId: parentId,
           });
         }
@@ -2038,6 +2041,9 @@ export class ClaudeCodeDriver implements Driver {
           inputTokens: usage.input_tokens,
           outputTokens: usage.output_tokens,
           cachedInputTokens: usage.cache_read_input_tokens,
+          ...(typeof usage.cache_creation_input_tokens === "number"
+            ? { cacheCreationInputTokens: usage.cache_creation_input_tokens }
+            : {}),
           costUsd,
           ...(typeof msg.duration_ms === "number" ? { durationMs: msg.duration_ms } : {}),
           ...pp,

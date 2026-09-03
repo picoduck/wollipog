@@ -313,6 +313,7 @@ export class CodexDriver implements Driver {
           inputTokens: u.input_tokens,
           outputTokens: u.output_tokens,
           cachedInputTokens: u.cached_input_tokens,
+          ...(typeof u.reasoning_output_tokens === "number" ? { reasoningOutputTokens: u.reasoning_output_tokens } : {}),
         });
         return "end_turn";
       }
