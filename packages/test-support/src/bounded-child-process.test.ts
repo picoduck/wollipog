@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-// This is the one runner test permitted to reach the raw API: it has to bound the module under
-// test with something that does not depend on the module under test. See GUARDRAIL_EXEMPT below.
+// This is the one test permitted to reach the raw API: it has to bound the module under test
+// with something that does not depend on the module under test. See GUARDRAIL_EXEMPT below.
 import { spawnSync as rawSpawnSync } from "node:child_process";
 import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,8 +16,18 @@ import {
   withDefaultTimeout,
 } from "./bounded-child-process.js";
 
-const RUNNER_ROOT = fileURLToPath(new URL("../../", import.meta.url));
-const SKIP_DIRECTORIES = new Set(["node_modules", "dist", ".bin-build"]);
+const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
+// Build output, vendored dependencies, and Playwright artefacts hold no first-party tests, and
+// walking them is slow enough to matter on a suite this size.
+const SKIP_DIRECTORIES = new Set([
+  "node_modules",
+  "dist",
+  ".bin-build",
+  ".git",
+  "target",
+  "test-results",
+  "playwright-report",
+]);
 const TEST_SUFFIXES = [".test.ts", ".test.tsx", ".test.mjs"];
 const MODULE_URL = new URL("./bounded-child-process.ts", import.meta.url).href;
 
@@ -39,7 +49,7 @@ function testFilesUnder(directory: string): string[] {
 
 /** Separator-normalized so the exemption below matches on Windows too. */
 function repoRelative(path: string): string {
-  return path.slice(RUNNER_ROOT.length).split(sep).join("/");
+  return path.slice(REPO_ROOT.length).split(sep).join("/");
 }
 
 /**
@@ -300,11 +310,11 @@ function synchronousLoadOffenders(text: string): string[] {
 
 test("runner tests take the synchronous spawns from this module, not node:child_process", () => {
   // This file must reach the raw API to bound the module under test independently of itself.
-  const GUARDRAIL_EXEMPT = new Set(["src/test-support/bounded-child-process.test.ts"]);
+  const GUARDRAIL_EXEMPT = new Set(["packages/test-support/src/bounded-child-process.test.ts"]);
 
   const offenders: string[] = [];
 
-  for (const path of testFilesUnder(RUNNER_ROOT)) {
+  for (const path of testFilesUnder(REPO_ROOT)) {
     const relative = repoRelative(path);
     if (GUARDRAIL_EXEMPT.has(relative)) continue;
     for (const reason of synchronousLoadOffenders(readFileSync(path, "utf8"))) {
@@ -315,7 +325,7 @@ test("runner tests take the synchronous spawns from this module, not node:child_
   assert.deepEqual(
     offenders,
     [],
-    `import these from test-support/bounded-child-process.js instead:\n${offenders.join("\n")}`,
+    `import these from @wollipog/test-support/bounded-child-process instead:\n${offenders.join("\n")}`,
   );
 });
 
@@ -351,7 +361,7 @@ test("the guardrail rejects every way of reaching the synchronous API", () => {
 
 test("the guardrail leaves the wrapper and the asynchronous forms alone", () => {
   const allowed: Record<string, string> = {
-    "the wrapper itself": 'import { spawnSync } from "./test-support/bounded-child-process.js";',
+    "the wrapper itself": 'import { spawnSync } from "@wollipog/test-support/bounded-child-process";',
     "asynchronous spawn": 'import { spawn } from "node:child_process";',
     // acp-client-services.test.ts and spawn.test.ts embed exactly this in a child script string.
     "an async require inside a child-script string": `const script = 'const { spawn } = require("node:child_process");';\n${'spawnSync("true");'}`,

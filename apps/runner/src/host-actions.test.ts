@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "./test-support/bounded-child-process.js";
+import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

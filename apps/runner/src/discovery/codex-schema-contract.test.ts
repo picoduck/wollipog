@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { spawnSync } from "../test-support/bounded-child-process.js";
+import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { test } from "node:test";
 import {
   CODEX_APP_SERVER_CONTRACT_FINGERPRINT,

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "./test-support/bounded-child-process.js";
+import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { EventEmitter } from "node:events";
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import fs from "node:fs/promises";
