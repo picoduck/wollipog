@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -212,7 +222,7 @@ test("agent-control paths reject traversal and Windows-reserved session ids", ()
   }
 });
 
-test("startup sweep removes orphaned token, readiness, and MCP files", () => {
+test("startup sweep removes final and interrupted staging files while retaining unsafe or unrelated entries", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-agent-control-"));
   try {
     const host: AgentControlHost = { isSea: true, execPath: "/runner", execArgv: [], configDir: root };
@@ -224,10 +234,35 @@ test("startup sweep removes orphaned token, readiness, and MCP files", () => {
       registerCredential: (_id, value) => { hash = value; },
     }, () => {}, host);
     markAgentControlCredentialReady(root, launch.sessionId, hash);
-    assert.equal(sweepAgentControlFiles(root), 3);
+
+    const interrupted = join(root, ".pending-123-123e4567-e89b-42d3-a456-426614174000");
+    writeFileSync(interrupted, "abandoned credential bytes", { mode: 0o600 });
+    const malformed = [
+      ".pending-0-123e4567-e89b-42d3-a456-426614174000",
+      ".pending-123-not-a-uuid",
+      ".pending-123-123e4567-e89b-12d3-a456-426614174000",
+      ".pending-123-123E4567-E89B-42D3-A456-426614174000",
+    ];
+    for (const name of malformed) writeFileSync(join(root, name), "retain");
+    const unrelated = join(root, "operator-notes.txt");
+    writeFileSync(unrelated, "retain");
+    const stagedDirectory = join(root, ".pending-456-123e4567-e89b-42d3-a456-426614174000");
+    mkdirSync(stagedDirectory);
+    const symlinkTarget = join(root, "symlink-target.txt");
+    const stagedSymlink = join(root, ".pending-789-123e4567-e89b-42d3-a456-426614174000");
+    writeFileSync(symlinkTarget, "retain");
+    if (process.platform !== "win32") symlinkSync(symlinkTarget, stagedSymlink);
+
+    assert.equal(sweepAgentControlFiles(root), 4);
     assert.throws(() => readFileSync(agentControlTokenPath(root, launch.sessionId)));
     assert.throws(() => readFileSync(agentControlReadyPath(root, launch.sessionId)));
     assert.throws(() => readFileSync(agentControlMcpConfigPath(root, launch.sessionId)));
+    assert.equal(existsSync(interrupted), false);
+    for (const name of malformed) assert.equal(readFileSync(join(root, name), "utf8"), "retain");
+    assert.equal(readFileSync(unrelated, "utf8"), "retain");
+    assert.equal(lstatSync(stagedDirectory).isDirectory(), true);
+    if (process.platform !== "win32") assert.equal(lstatSync(stagedSymlink).isSymbolicLink(), true);
+    assert.equal(readFileSync(symlinkTarget, "utf8"), "retain");
     assert.equal(sweepAgentControlFiles(root), 0);
   } finally {
     rmSync(root, { recursive: true, force: true });

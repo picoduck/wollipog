@@ -32,6 +32,8 @@ const AGENT_CONTROL_ENV_KEYS = [
   "WOLLIPOG_CLI",
   "WOLLIPOG_CLI_ARGS",
 ] as const;
+const STAGED_AGENT_CONTROL_FILE_PATTERN =
+  /^\.pending-[1-9]\d*-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 
 export interface AgentControlHost extends RunnerReentryHost {
   configDir: string;
@@ -199,7 +201,8 @@ export function sweepAgentControlFiles(configDir: string): number {
   let removed = 0;
   for (const entry of readdirSync(configDir, { withFileTypes: true })) {
     if (!entry.isFile() ||
-        ![".token", ".mcp.json", ".ready"].some((suffix) => entry.name.endsWith(suffix))) continue;
+        !([".token", ".mcp.json", ".ready"].some((suffix) => entry.name.endsWith(suffix)) ||
+          STAGED_AGENT_CONTROL_FILE_PATTERN.test(entry.name))) continue;
     rmSync(join(configDir, entry.name), { force: true });
     removed++;
   }
