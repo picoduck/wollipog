@@ -588,6 +588,8 @@ export function createApiClient(transport: ApiTransport) {
   // `config` is applied atomically before the turn on the control plane — pass the composer's
   // currently-selected model/effort/approval so a change made just before Send can't be lost to an
   // in-flight setConfig round trip.
+  preparePromptImages: (id: string, images: PromptImageInput[]) =>
+    Promise.all(images.map((image) => uploadPromptImage(transport, id, image))),
   prompt: async (id: string, text: string, images: PromptImageInput[] = [], config?: SessionConfig, slashCommand?: string) => {
     const references = await Promise.all(images.map((image) => uploadPromptImage(transport, id, image)));
     return req<SessionView>(`/api/sessions/${id}/prompt`, {

@@ -626,6 +626,11 @@ function SessionDetailLoaded({
         if (priorAccountKey && priorAccountKey !== nextAccountKey) {
           clearDurableQueuedEditRecoveriesForAccount(instanceScope, priorAccountKey);
           clearSessionDetailComposerRuntimeForInstance(instanceScope);
+          queuedEditRef.current = null;
+          setQueuedEdit(null);
+          setQueuedEditBusy(false);
+          setQueuedEditRecovered(false);
+          setError(null);
         }
         queuedEditAccountKeyRef.current = nextAccountKey;
         setQueuedEditAccountKey(nextAccountKey);
@@ -2980,44 +2985,84 @@ function SessionDetailLoaded({
       images: images.map((image) => ({ ...image })),
     };
     if (!submittedDraft.text && submittedDraft.images.length === 0) return;
-    const submissionFingerprint = JSON.stringify(submittedDraft);
-    const submissionId = queuedEdit.submissionId && queuedEdit.submissionFingerprint === submissionFingerprint
-      ? queuedEdit.submissionId
-      : browserRandomUUID();
-    const editForAttempt = queuedEdit.submissionId === submissionId
-      ? queuedEdit
-      : { ...queuedEdit, submissionId, submissionFingerprint };
-    if (editForAttempt !== queuedEdit) {
-      queuedEditRef.current = editForAttempt;
-      setQueuedEdit((current) => current?.promptId === queuedEdit.promptId ? editForAttempt : current);
-    }
-    const recovery: QueuedPromptEditRecovery = { edit: editForAttempt, draft: submittedDraft };
     if (!queuedEditRecoveryScope) {
       setError("Queued message edit was not sent because authenticated recovery storage is not ready.");
       return;
     }
+    let recovery: QueuedPromptEditRecovery = { edit: queuedEdit, draft: submittedDraft };
     const mutation = reserveComposerMutation(mutationKey, "edit", submittedDraft, recovery);
     if (!mutation) return;
-    if (!persistQueuedPromptEditRecovery(recovery)) {
-      releaseComposerMutation(mutationKey, mutation.token);
-      setError("Queued message edit was not sent because its recovery could not be saved safely.");
-      return;
-    }
     const generation = viewGenerationRef.current;
     let editAccepted = false;
     setQueuedEditBusy(true);
     setError(null);
     try {
+      // Browser paste data is base64 and can legitimately exceed localStorage quotas. Upload every
+      // image first, then persist the compact immutable references before submitting the edit.
+      // Artifact creation is not a queued-edit submission and references remain safe to retry.
+      const editImageCount = queuedEdit.images.length;
+      const displacedImageCount = queuedEdit.displacedDraft.images.length;
+      let preparedImages: PromptImageInput[];
+      try {
+        preparedImages = await api.preparePromptImages(sessionId, [
+          ...queuedEdit.images,
+          ...queuedEdit.displacedDraft.images,
+          ...submittedDraft.images,
+        ]);
+      } catch (cause) {
+        if (viewGenerationRef.current === generation) {
+          setError(`Queued message edit was not sent. ${(cause as Error).message}`);
+        }
+        return;
+      }
+      const preparedEditImages = preparedImages.slice(0, editImageCount);
+      const preparedDisplacedImages = preparedImages.slice(
+        editImageCount,
+        editImageCount + displacedImageCount,
+      );
+      const preparedDraft = {
+        text: submittedDraft.text,
+        images: preparedImages.slice(editImageCount + displacedImageCount),
+      };
+      const submissionFingerprint = JSON.stringify(preparedDraft);
+      const submissionId = queuedEdit.submissionId && queuedEdit.submissionFingerprint === submissionFingerprint
+        ? queuedEdit.submissionId
+        : browserRandomUUID();
+      const editForAttempt: QueuedPromptEditState = {
+        ...queuedEdit,
+        images: preparedEditImages,
+        displacedDraft: {
+          ...queuedEdit.displacedDraft,
+          images: preparedDisplacedImages,
+        },
+        submissionId,
+        submissionFingerprint,
+      };
+      recovery = { edit: editForAttempt, draft: preparedDraft };
+      updateQueuedPromptEditMutationRecovery(mutationKey, recovery);
+      updateComposerMutationDraft(mutationKey, mutation.token, preparedDraft);
+      if (viewGenerationRef.current === generation) {
+        queuedEditRef.current = editForAttempt;
+        setQueuedEdit(editForAttempt);
+        draftState.current = preparedDraft;
+        replace(preparedDraft.images);
+      }
+      if (!persistQueuedPromptEditRecovery(recovery)) {
+        if (viewGenerationRef.current === generation) {
+          setError("Queued message edit was not sent because its recovery could not be saved safely.");
+        }
+        return;
+      }
       await api.editQueuedPrompt(sessionId, queuedEdit.promptId, {
         submissionId,
         expectedRevision: queuedEdit.editRevision,
-        text: submittedDraft.text,
-        images: submittedDraft.images,
+        text: preparedDraft.text,
+        images: preparedDraft.images,
       });
       editAccepted = true;
       clearQueuedPromptEditRecovery(mutationKey);
       if (viewGenerationRef.current !== generation) return;
-      const displaced = queuedEdit.displacedDraft;
+      const displaced = editForAttempt.displacedDraft;
       markDraftDirty();
       queuedEditRef.current = null;
       setQueuedEdit(null);

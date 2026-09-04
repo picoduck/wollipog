@@ -19,6 +19,7 @@ import {
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreActions, useStoreSelector } from "../store.js";
 import {
+  QUEUED_EDIT_RECOVERY_MAX_BYTES,
   loadDurableQueuedEditRecovery,
   loadRuntimeQueuedEditRecovery,
   queuedEditRecoveryAccountKey,
@@ -264,6 +265,10 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
       memberships: [],
       teams: [],
     }),
+    preparePromptImages: async (
+      _sessionId: string,
+      images: Parameters<ApiClient["preparePromptImages"]>[1],
+    ) => images,
     ...options.client,
   } as unknown as ApiClient;
   const rightPanel = {
@@ -455,6 +460,12 @@ async function waitForComposerSendToSettle(fixture: Fixture, timeoutMs = 5_000):
 }
 
 const submittedImage = { mimeType: "image/png", data: "aW1hZ2U=" } as const;
+const preparedImageReference = {
+  artifactId: "art-prepared-image",
+  mimeType: "image/png",
+  sizeBytes: 5,
+  sha256: "a".repeat(64),
+} as const;
 
 test("queued message editing loads exact content and Cancel Edit restores the displaced draft", async () => {
   const draft = deferred<ComposerDraft | null>();
@@ -771,6 +782,7 @@ test("a failed queued edit survives a simulated full runtime reload with its exa
       }],
     },
     client: {
+      preparePromptImages: async (_sessionId, images) => images.map(() => preparedImageReference),
       readQueuedPrompt: async (_sessionId, promptId) => ({
         prompt: {
           promptId,
@@ -812,7 +824,7 @@ test("a failed queued edit survives a simulated full runtime reload with its exa
     assert.equal(edits.length, 2);
     assert.equal(edits[1]?.submissionId, edits[0]?.submissionId);
     assert.equal(edits[1]?.expectedRevision, "qer_exact");
-    assert.deepEqual(edits[1]?.images, [submittedImage]);
+    assert.deepEqual(edits[1]?.images, [preparedImageReference]);
 
     await fixture.closeSocket(1008);
     await flushAsyncWork();
@@ -822,6 +834,59 @@ test("a failed queued edit survives a simulated full runtime reload with its exa
       accountKey: queuedEditRecoveryAccountKey("org-1", "user-1"),
       sessionId: fixture.sessionId,
     }), "a temporary re-pairing state must not erase durable recovery");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a recovery persistence refusal blocks submission and releases the edit lock", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const edits: Array<Parameters<ApiClient["editQueuedPrompt"]>[2]> = [];
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 99,
+    sessionPatch: {
+      queued: [{
+        id: "queue-1",
+        text: "Queued projection",
+        liveQueueObserved: true,
+        editable: true,
+        editRevision: "qer_exact",
+      }],
+    },
+    client: {
+      readQueuedPrompt: async (_sessionId, promptId) => ({
+        prompt: { promptId, text: "Original exact content", images: [], editRevision: "qer_exact" },
+      }),
+      editQueuedPrompt: async (_sessionId, _promptId, request) => {
+        edits.push(request);
+        throw new Error("The request timed out before confirmation.");
+      },
+    },
+  });
+  try {
+    await resolveDraft(draft, "");
+    await flushAsyncWork();
+    const edit = fixture.container.querySelector('button[aria-label="Edit Queued Message"]') as HTMLButtonElement;
+    await act(async () => { edit.click(); });
+    await flushAsyncWork();
+    await act(async () => {
+      fixture.composer.value = "x".repeat(QUEUED_EDIT_RECOVERY_MAX_BYTES);
+      fireDomEvent.change(fixture.composer);
+    });
+    const save = fixture.container.querySelector('button[aria-label="Save Queued Message"]') as HTMLButtonElement;
+    await act(async () => { save.click(); });
+    await flushAsyncWork();
+    assert.deepEqual(edits, []);
+    assert.match(fixture.container.querySelector(".composer-error")?.textContent ?? "", /could not be saved safely/i);
+
+    await act(async () => {
+      fixture.composer.value = "Small retry after storage refusal";
+      fireDomEvent.change(fixture.composer);
+    });
+    await flushAsyncWork();
+    await act(async () => { save.click(); });
+    await flushAsyncWork();
+    assert.equal(edits.length, 1, "the failed persistence reservation must not wedge later saves");
   } finally {
     await unmountFixture(fixture);
   }
