@@ -5,6 +5,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import postcss from "postcss";
 import ts from "typescript";
+import { KEYBOARD_EDITABLE } from "./mobile-viewport.js";
 
 /**
  * Phase 9's guardrails — the four bug classes §F4 found, made unable to come back.
@@ -33,6 +34,70 @@ import ts from "typescript";
 const WEB = fileURLToPath(new URL("..", import.meta.url));
 const css = readFileSync(join(WEB, "src/styles.css"), "utf8");
 const root = postcss.parse(css);
+
+/** Split a selector list without treating commas inside :not(), attributes, or strings as members. */
+export function topLevelSelectorMembers(selectorList: string): string[] {
+  const members: string[] = [];
+  let start = 0;
+  let parentheses = 0;
+  let brackets = 0;
+  let quote: "\"" | "'" | null = null;
+  for (let index = 0; index < selectorList.length; index += 1) {
+    const char = selectorList[index]!;
+    if (quote) {
+      if (char === quote && selectorList[index - 1] !== "\\") quote = null;
+      continue;
+    }
+    if (char === "\"" || char === "'") quote = char;
+    else if (char === "(") parentheses += 1;
+    else if (char === ")") parentheses -= 1;
+    else if (char === "[") brackets += 1;
+    else if (char === "]") brackets -= 1;
+    else if (char === "," && parentheses === 0 && brackets === 0) {
+      members.push(selectorList.slice(start, index));
+      start = index + 1;
+    }
+  }
+  members.push(selectorList.slice(start));
+  return members.map((member) => member.trim()).filter(Boolean);
+}
+
+/** Compare the CSS focus selector with Element.matches() input on the controls they describe. */
+export function keyboardEditableSelectorSet(selectorList: string): string[] {
+  return topLevelSelectorMembers(selectorList)
+    .map((member) => canonicalSelector(member.replaceAll(":focus", "")))
+    .map((member) => member.replaceAll('"', "'"))
+    .sort();
+}
+
+function functionalPseudoArgument(selector: string, pseudo: string): string | null {
+  const marker = `${pseudo}(`;
+  const start = selector.indexOf(marker);
+  if (start < 0) return null;
+  let depth = 1;
+  for (let index = start + marker.length; index < selector.length; index += 1) {
+    if (selector[index] === "(") depth += 1;
+    else if (selector[index] === ")") depth -= 1;
+    if (depth === 0) return selector.slice(start + marker.length, index);
+  }
+  return null;
+}
+
+export function assertKeyboardEditableSelectorsMatch(
+  stylesheetSelectors: string,
+  runtimeSelectors: string,
+): void {
+  const stylesheetMembers = topLevelSelectorMembers(stylesheetSelectors);
+  assert.ok(
+    stylesheetMembers.every((member) => member.includes(":focus")),
+    "every styles.css while-typing selector must require :focus",
+  );
+  assert.deepEqual(
+    keyboardEditableSelectorSet(stylesheetMembers.join(", ")),
+    keyboardEditableSelectorSet(runtimeSelectors),
+    "styles.css while-typing selectors must match mobile-viewport.ts KEYBOARD_EDITABLE",
+  );
+}
 
 /** Comments are whitespace in CSS, so a scanner that has not removed them is reading a fiction. */
 const stripComments = (value: string): string => value.replace(/\/\*[\s\S]*?\*\//g, " ");
@@ -107,6 +172,45 @@ test("styles.css is the only production stylesheet", () => {
     "a second first-party stylesheet is invisible to every guardrail in this file; scan it too or fold it in");
   assert.deepEqual([...vendorSeen].sort(), [...VENDOR.keys()].sort(),
     "a vendor stylesheet is exempted here but no longer imported; drop the exemption");
+});
+
+test("the while-typing selector matches mobile-viewport.ts KEYBOARD_EDITABLE", () => {
+  const rules: postcss.Rule[] = [];
+  root.walkRules((candidate) => {
+    if (candidate.selector.includes(".app:has(") && candidate.selector.endsWith(") .app-rail")) {
+      rules.push(candidate);
+    }
+  });
+  assert.equal(rules.length, 1, "styles.css must retain exactly one phone while-typing .app:has(...) rule");
+  const rule = rules[0]!;
+  const stylesheetSelectors = functionalPseudoArgument(rule.selector, ":has");
+  assert.ok(stylesheetSelectors, "styles.css must expose the while-typing controls through :has()");
+  assertKeyboardEditableSelectorsMatch(stylesheetSelectors, KEYBOARD_EDITABLE);
+});
+
+test("the while-typing selector guard rejects either one-sided edit", () => {
+  const runtime = "textarea:not([readonly]), input:not([readonly], [type='button'])";
+  const stylesheet = "textarea:focus:not([readonly]), input:focus:not([readonly], [type=\"button\"])";
+  assert.doesNotThrow(() => assertKeyboardEditableSelectorsMatch(stylesheet, runtime));
+  assert.throws(
+    () => assertKeyboardEditableSelectorsMatch(`${stylesheet}, select:focus`, runtime),
+    /styles\.css.*mobile-viewport\.ts/,
+  );
+  assert.throws(
+    () => assertKeyboardEditableSelectorsMatch(stylesheet, `${runtime}, select`),
+    /styles\.css.*mobile-viewport\.ts/,
+  );
+  assert.throws(
+    () => assertKeyboardEditableSelectorsMatch(stylesheet.replaceAll(":focus", ""), runtime),
+    /must require :focus/,
+  );
+});
+
+test("the while-typing selector parser preserves nested commas", () => {
+  assert.deepEqual(
+    topLevelSelectorMembers("textarea:focus, input:focus:not([readonly], [type='a,b'])"),
+    ["textarea:focus", "input:focus:not([readonly], [type='a,b'])"],
+  );
 });
 
 test("virtualized scroll owners disable browser-native scroll anchoring", () => {
