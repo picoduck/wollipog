@@ -1028,6 +1028,60 @@ test("an idle worktree rebind settles back to idle without inventing a prompt", 
   }
 });
 
+test("a worktree rebind fails closed when the selected branch drifts before replacement launch", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-drifted-worktree-rebind-"));
+  const repo = join(root, "repo");
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  let releaseClose = () => {};
+  try {
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const sent: Array<{ type: string; payload?: { kind?: string; message?: string } }> = [];
+    const launchedCwds: string[] = [];
+    let closeStartedResolve!: () => void;
+    const closeStarted = new Promise<void>((resolve) => { closeStartedResolve = resolve; });
+    const closeGate = new Promise<void>((resolve) => { releaseClose = resolve; });
+    const factory = (_driver: unknown, launch: { cwd: string }) => {
+      launchedCwds.push(launch.cwd);
+      return {
+        pid: launchedCwds.length, initialize: async () => {}, newSession: async () => {},
+        close: async () => { closeStartedResolve(); await closeGate; },
+        prompt: async () => "end_turn" as const, cancel: () => {}, dispose: () => {}, setConfig: () => {},
+        resolvePermission: () => false, agentSessionId: () => "provider-session-id",
+      };
+    };
+    manager = new SessionManager((message) => sent.push(message as never), () => {}, store,
+      "runner", undefined, factory as never, dataDir, 1);
+    const spec = {
+      sessionId: "s_drifted_rebind", workspaceId: "repo", workspacePath: repo, agentId: "claude",
+      command: "claude", args: [], env: {}, useWorktree: false, driver: "claude-code" as const,
+      context: { kind: "native" as const },
+    };
+    await manager.start(spec);
+    const requested = await manager.requestWorktree(spec.sessionId, {
+      baseRef: "HEAD", branch: "fix/drifted-rebind",
+    });
+    await closeStarted;
+    execFileSync("git", ["-C", requested.worktree.path, "switch", "-c", "fix/drifted-after-selection"]);
+    releaseClose();
+    await waitForCondition(() => sent.some((message) => message.type === "session_event" &&
+      message.payload?.kind === "error" && /branch changed/.test(message.payload.message ?? "")),
+    "branch drift was not reported before replacement launch");
+    assert.deepEqual(launchedCwds, [repo], "branch drift must not reach a replacement provider process");
+    assert.equal(store.readMeta(spec.sessionId)?.status, "idle");
+    execFileSync("git", ["-C", requested.worktree.path, "switch", requested.worktree.branch]);
+    await manager.delete(spec.sessionId);
+  } finally {
+    releaseClose();
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a governance hold defers worktree rebind and its queued prompt until rearm", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-governance-worktree-rebind-"));
   const repo = join(root, "repo");
@@ -1762,6 +1816,7 @@ test("a throwing provider dispose cannot strand rebind generation or admission s
     execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
     execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
     const store = new SessionStore(join(dataDir, "sessions"));
+    const sent: Array<{ type: string; payload?: { kind?: string; message?: string } }> = [];
     const launchedCwds: string[] = [];
     const prompts: string[] = [];
     let disposeAttemptedResolve!: () => void;
@@ -1783,7 +1838,8 @@ test("a throwing provider dispose cannot strand rebind generation or admission s
         setConfig: () => {}, resolvePermission: () => false, agentSessionId: () => "provider-session-id",
       };
     };
-    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, factory as never, dataDir, 1);
+    manager = new SessionManager((message) => sent.push(message as never), () => {}, store,
+      "runner", undefined, factory as never, dataDir, 1);
     const spec = {
       sessionId: "s_dispose_rebind", workspaceId: "repo", workspacePath: repo, agentId: "claude",
       command: "claude", args: [], env: {}, useWorktree: false, driver: "claude-code" as const,
@@ -1802,6 +1858,9 @@ test("a throwing provider dispose cannot strand rebind generation or admission s
     await disposeAttempted;
     await waitForCondition(() => !internals.worktreeRebindings.has(spec.sessionId),
       "failed provider disposal did not settle the rebind");
+    assert.equal(sent.some((message) => message.type === "session_event" &&
+      message.payload?.kind === "error" && /could not switch/.test(message.payload.message ?? "")), true,
+    "provider disposal failure must be visible to the session");
     assert.equal(internals.launchGenerations.has(spec.sessionId), false);
     assert.equal(internals.preLaunchAdmissionGenerations.has(spec.sessionId), false);
     assert.equal(internals.admitted.has(spec.sessionId), false);
@@ -1860,11 +1919,14 @@ test("delete does not wait forever for a disposed replacement whose initializati
       baseRef: "HEAD", branch: "fix/hung-rebind-delete",
     });
     await replacementInitializeStarted;
+    const internals = manager as unknown as { worktreeRebindings: Map<string, unknown> };
     await Promise.race([
       manager.delete(spec.sessionId),
       new Promise<never>((_, reject) => setTimeout(() => reject(new Error("delete remained blocked")), 1_000)),
     ]);
     assert.equal(replacementDisposed, true);
+    assert.equal(internals.worktreeRebindings.has(spec.sessionId), false,
+      "deletion must release a rebind whose disposed replacement never settles");
     assert.equal(store.has(spec.sessionId), false);
     assert.equal(existsSync(requested.worktree.path), false);
   } finally {

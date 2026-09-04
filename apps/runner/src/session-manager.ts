@@ -5448,17 +5448,57 @@ export class SessionManager {
         await this.closeAndDispose(sessionId, entry.client, true);
       } catch (error) {
         this.log(`session ${sessionId} provider disposal failed during worktree rebind: ${errText(error)}`);
+        this.emitEvent(sessionId, {
+          kind: "error",
+          message: `provider could not switch to the selected worktree: ${errText(error)}`,
+        });
+        this.emitStatus(sessionId, "idle");
         return;
       } finally {
         this.releaseActiveWorktreeLease(entry);
       }
       const fresh = this.store.readMeta(sessionId);
       if (!fresh || !this.launchIsCurrent(sessionId, launchGeneration)) return;
+      const selectedWorktree = fresh.worktreePath
+        ? this.attributedWorktreeForPath(fresh, fresh.worktreePath)
+        : undefined;
+      if (!selectedWorktree) {
+        this.emitEvent(sessionId, {
+          kind: "error",
+          message: "the selected worktree no longer has a durable session identity",
+        });
+        this.emitStatus(sessionId, "idle");
+        return;
+      }
+      let verifiedWorktreePath: string;
+      try {
+        const verified = await attachRequestedWorktree(fresh.repoPath, sessionId, selectedWorktree.path, {
+          context: fresh.context,
+          dataDir: this.dataDir,
+          ownerHash: this.runnerOwnerHash,
+          // This is the exact coordinate persisted by the earlier create/attach operation. Re-prove
+          // Git registration and branch identity after retiring the old provider and immediately
+          // before the replacement process is allowed to launch.
+          allowedProjectPaths: [selectedWorktree.path],
+        });
+        if (verified.branch !== selectedWorktree.branch) {
+          throw new Error("selected worktree branch changed before the provider could launch");
+        }
+        verifiedWorktreePath = verified.path;
+      } catch (error) {
+        this.emitEvent(sessionId, {
+          kind: "error",
+          message: `selected worktree could not be verified before provider launch: ${errText(error)}`,
+        });
+        this.emitStatus(sessionId, "idle");
+        return;
+      }
+      if (!this.launchIsCurrent(sessionId, launchGeneration)) return;
       const rebinding = this.worktreeRebindings.get(sessionId);
       if (rebinding?.entry === entry) {
-        rebinding.launchingWorktreePath = fresh.worktreePath ?? undefined;
+        rebinding.launchingWorktreePath = verifiedWorktreePath;
       }
-      launched = await this.launch(fresh, resumeId, launchGeneration);
+      launched = await this.launch({ ...fresh, worktreePath: verifiedWorktreePath }, resumeId, launchGeneration);
       if (launched) {
         const reboundEntry = this.active.get(sessionId);
         if (this.store.readMeta(sessionId)?.status === "stopped") {
@@ -6817,6 +6857,10 @@ export class SessionManager {
       // The row disappears before the first await below. This makes every lookup/open fail closed
       // while slow provider, cloud, provider-state, and worktree cleanup continues asynchronously.
       this.store.remove(sessionId);
+      // A replacement provider is published in `active` before initialization settles. Deletion
+      // disposes that exact entry below, so the encompassing rebind promise must no longer retain
+      // the session indefinitely when a broken initialize()/newSession() never resolves.
+      if (rebinding && entry) this.worktreeRebindings.delete(sessionId);
 
       if (closing) await closing.promise;
       // A replacement published by launch() is already in `entry`; deletion retires it directly
