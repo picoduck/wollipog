@@ -9962,7 +9962,7 @@ body.shell-dock-dragging * {
   border-left: 3px solid var(--amber);
   border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--amber) 10%, transparent);
-  color: var(--text-dim);
+  color: var(--text-dim-on-tint);
   font-size: var(--text-base);
   line-height: 1.45;
 }

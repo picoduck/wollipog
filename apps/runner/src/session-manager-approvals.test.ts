@@ -281,6 +281,10 @@ test("startup preserves a stranded question as a dismissible recovery and resolv
     // Reproduce the metadata left by the affected older startup path: history still contains the
     // unresolved request, but the actionable card and waiting status were erased.
     store.patchMeta("s_perm", { status: "idle", pendingApproval: null });
+    // Recovery must use bounded pages instead of the legacy whole-history materializer.
+    (store as SessionStore & { readEvents: () => never }).readEvents = () => {
+      throw new Error("legacy whole-history reads are forbidden during startup reconciliation");
+    };
 
     sm.reconcileStore();
 
@@ -313,9 +317,59 @@ test("startup preserves a stranded question as a dismissible recovery and resolv
   }
 });
 
+test("startup preserves a still-pending question through the primary metadata path", () => {
+  const { sm, store, cleanup } = makeHarness("none");
+  try {
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request",
+      requestId: "pending-before-restart",
+      questions: [{ id: "target", question: "Which target?", options: [{ label: "Production" }] }],
+    });
+
+    sm.reconcileStore();
+
+    assert.equal(store.readMeta("s_perm")?.status, "input_required");
+    assert.equal(store.readMeta("s_perm")?.pendingApproval?.requestId, "pending-before-restart");
+    assert.equal(store.readMeta("s_perm")?.pendingApproval?.recoveryReason, "provider_restart");
+  } finally {
+    cleanup();
+  }
+});
+
+test("recovered dismissal preserves a newer running turn status", () => {
+  const { sm, sent, store, cleanup } = makeHarness(false);
+  try {
+    store.patchMeta("s_perm", {
+      status: "running",
+      pendingApproval: {
+        requestId: "recovery-during-new-turn",
+        title: "Which target?",
+        options: [],
+        kind: "question",
+        questions: [{ id: "target", question: "Which target?", options: [{ label: "Production" }] }],
+        recoveryReason: "provider_restart",
+      },
+    });
+
+    sm.answerQuestion("s_perm", "recovery-during-new-turn", {}, "dismiss");
+
+    assert.equal(eventsOf(sent, "question_resolved").length, 1);
+    assert.equal(store.readMeta("s_perm")?.status, "running");
+    assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
+    assert.equal(sent.filter((message) => message.type === "session_status").at(-1)?.status, "running");
+  } finally {
+    cleanup();
+  }
+});
+
 test("startup never resurrects a question that already has a durable resolution", () => {
   const { sm, store, cleanup } = makeHarness("none");
   try {
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request",
+      requestId: "older-replaced-question",
+      questions: [{ id: "target", question: "Old target?", options: [{ label: "Staging" }] }],
+    });
     (sm as any).emitEvent("s_perm", {
       kind: "question_request",
       requestId: "resolved-before-restart",

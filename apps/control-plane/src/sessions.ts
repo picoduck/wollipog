@@ -4107,7 +4107,9 @@ export class SessionsService {
     this.db.setPendingApproval(sessionId, null);
     this.db.updateSessionStatus(
       sessionId,
-      pending.recoveryReason === "provider_restart" && action === "dismiss" ? "idle" : "running",
+      pending.recoveryReason === "provider_restart" && action === "dismiss"
+        ? session.status === "input_required" ? "idle" : session.status
+        : "running",
       now,
     );
     this.recordGovernanceAudit(

@@ -1403,29 +1403,66 @@ export class SessionManager {
    * or permission request proves the old question is no longer the active interaction, even when
    * an older runner failed to append an explicit replacement resolution. */
   private unresolvedQuestionFromHistory(sessionId: string): SessionMeta["pendingApproval"] {
-    let pending: SessionMeta["pendingApproval"] = null;
-    for (const event of this.store.readEvents(sessionId)) {
-      const payload = event.payload;
-      if (payload.kind === "question_request") {
-        pending = {
-          requestId: payload.requestId,
-          title: payload.questions[0]?.question ?? "The agent has a question",
-          options: [],
-          kind: "question",
-          questions: payload.questions,
-        };
-      } else if (payload.kind === "question_resolved" && pending?.requestId === payload.requestId) {
-        pending = null;
-      } else if (pending && (
-        payload.kind === "user_message" || payload.kind === "agent_message" ||
-        payload.kind === "agent_thought" || payload.kind === "tool_call" ||
-        payload.kind === "permission_request" || payload.kind === "conversation_checkpoint" ||
-        payload.kind === "turn_interrupted"
-      )) {
-        pending = null;
+    const durableTail = this.store.logTailSeq(sessionId);
+    if (durableTail === 0) return null;
+    let cursor = durableTail;
+    let logEpoch: number | undefined;
+    let throughSeq: number | undefined;
+    const resolved = new Set<string>();
+    while (cursor > 0) {
+      let span = Math.min(200, cursor);
+      let events: ReturnType<SessionStore["readEvents"]> | null = null;
+      while (span > 0) {
+        const page = this.store.readEventPage(sessionId, {
+          afterSeq: cursor - span,
+          limit: span,
+          ...(logEpoch === undefined ? {} : { logEpoch, throughSeq: throughSeq! }),
+        });
+        if (!page.ok) return null;
+        if (logEpoch === undefined) {
+          logEpoch = page.page.logEpoch;
+          throughSeq = page.page.throughSeq;
+          if (throughSeq !== cursor) {
+            cursor = throughSeq;
+            break;
+          }
+        }
+        if (page.events.at(-1)?.seq === cursor) {
+          events = page.events;
+          break;
+        }
+        if (span === 1) return null;
+        span = Math.max(1, Math.floor(span / 2));
       }
+      if (!events) continue;
+      for (let index = events.length - 1; index >= 0; index -= 1) {
+        const payload = events[index]!.payload;
+        if (payload.kind === "question_resolved") {
+          resolved.add(payload.requestId);
+          continue;
+        }
+        if (payload.kind === "question_request") {
+          // A resolved newer question replaced every older pending question, so once its request
+          // is reached there is nothing earlier that can still be actionable.
+          if (resolved.has(payload.requestId)) return null;
+          return {
+            requestId: payload.requestId,
+            title: payload.questions[0]?.question ?? "The agent has a question",
+            options: [],
+            kind: "question",
+            questions: payload.questions,
+          };
+        }
+        if (
+          payload.kind === "user_message" || payload.kind === "agent_message" ||
+          payload.kind === "agent_thought" || payload.kind === "tool_call" ||
+          payload.kind === "permission_request" || payload.kind === "conversation_checkpoint" ||
+          payload.kind === "turn_interrupted"
+        ) return null;
+      }
+      cursor = events[0]!.seq - 1;
     }
-    return pending;
+    return null;
   }
 
   /** On startup, demote sessions left mid-flight (their agent process is gone) to `idle` so the
@@ -7466,16 +7503,21 @@ export class SessionManager {
       });
       return;
     }
-    const recovered = this.store.readMeta(sessionId)?.pendingApproval;
+    const recoveredMeta = this.store.readMeta(sessionId);
+    const recovered = recoveredMeta?.pendingApproval;
+    const recoveredStatus = recoveredMeta?.status ?? "idle";
     if (recovered?.kind === "question" && recovered.requestId === requestId &&
         recovered.recoveryReason === "provider_restart" && action === "dismiss") {
+      const statusAfterDismiss = recoveredStatus === "input_required"
+        ? "idle"
+        : recoveredStatus;
       this.emitEvent(sessionId, {
         kind: "question_resolved",
         requestId,
         answered: false,
         resolutionReason: "dismissed",
       });
-      this.emitStatus(sessionId, "idle");
+      this.emitStatus(sessionId, statusAfterDismiss);
       return;
     }
     this.approvalStarted.delete(`${sessionId}:${requestId}`);

@@ -6662,6 +6662,39 @@ test("recovered questions reject unsafe submission but dismiss into an idle exac
   });
 });
 
+test("recovered question dismissal does not phantom-idle a newer active status", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  db.updateSessionStatus(id, "running", Date.now());
+  db.setPendingApproval(id, {
+    kind: "question",
+    requestId: "recovery-during-new-turn",
+    title: "Which target?",
+    options: [],
+    questions: [{ id: "target", question: "Which target?", options: [{ label: "Production" }] }],
+    recoveryReason: "provider_restart",
+  });
+
+  const dismissal = svc.answerQuestion(
+    id,
+    "recovery-during-new-turn",
+    {},
+    { kind: "human", id: "device-recovery" },
+    "dismiss",
+  );
+
+  assert.ok(dismissal.ok);
+  assert.notEqual(dismissal.data?.status, "idle");
+  assert.equal(dismissal.data?.pendingApproval, null);
+  assert.deepEqual(hub.sentOfType("answer_question").at(-1), {
+    type: "answer_question",
+    sessionId: id,
+    requestId: "recovery-during-new-turn",
+    answers: {},
+    action: "dismiss",
+  });
+});
+
 test("question governance audit distinguishes explicit dismissal from submission", () => {
   const { hub, svc } = makeHarness();
   const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
