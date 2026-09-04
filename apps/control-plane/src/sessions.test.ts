@@ -11266,12 +11266,14 @@ test("run member sessions persist the run's checkpoints", () => {
 test("direct and pre-staged workflow members persist and enforce the run's checkpoints", () => {
   for (const path of ["direct", "pre-staged"] as const) {
     const { db, svc } = makeHarness();
+    let staged = 0;
+    let activated = 0;
     const delivery = path === "pre-staged" ? {
       runId: "r_checkpoint_workflow",
       workflowInstanceId: "wfi_checkpoint_workflow",
       memberSessionId: (index: number) => `s_checkpoint_workflow_${index}`,
-      stage(_plan: PreStagedDeliveryPlan) {},
-      activate(_plan: PreStagedDeliveryPlan) {},
+      stage(_plan: PreStagedDeliveryPlan) { staged += 1; },
+      activate(_plan: PreStagedDeliveryPlan) { activated += 1; },
     } : undefined;
     const created = svc.createWorkflowRun({
       runnerId: RUNNER_ID,
@@ -11283,6 +11285,8 @@ test("direct and pre-staged workflow members persist and enforce the run's check
     }, { kind: "human", id: "device-1" }, delivery);
 
     assert.ok(created.ok && created.data, `${path}: ${created.error}`);
+    assert.deepEqual([staged, activated], path === "pre-staged" ? [1, 1] : [0, 0],
+      `${path}: workflow took the wrong delivery path`);
     assert.equal(created.data.sessions.length, 2, `${path}: expected both workflow members`);
     for (const member of created.data.sessions) {
       assert.deepEqual(db.getSession(member.id)!.costCheckpointsUsd, [0.5, 2],
