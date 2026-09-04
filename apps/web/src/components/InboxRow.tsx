@@ -8,6 +8,7 @@ import {
   reminderBadgeLabel,
   snoozedSessionAttentionReason,
 } from "../session-reminders.js";
+import { displayBaseRef, pullRequestStateLabel } from "../worktree-identity.js";
 import { AgentIcon } from "./AgentIcon.js";
 import { ActivityStrip } from "./ActivityStrip.js";
 import { sessionAgentLabel } from "./agent-options.js";
@@ -72,6 +73,7 @@ function InboxRowInner({
   const agent = sessionAgentLabel(session.agentName, session.driver, session.agentId);
   const lastActivityAt = Math.max(session.lastEventAt ?? 0, activity?.lastEventAt ?? 0) || null;
   const activeWorktree = session.worktrees?.find((worktree) => worktree.path === session.worktreePath);
+  const worktreeBaseRef = activeWorktree ? displayBaseRef(activeWorktree) : null;
 
   return (
     <div
@@ -100,16 +102,40 @@ function InboxRowInner({
             <AgentIcon driver={session.driver} agentName={session.agentName} size={16} />
             <span>{agent} · {projectName}</span>
           </span>
+          {/* Line two carries the title and nothing else that can grow. The title box takes ALL the
+              free width and fades at its own right edge, so the strip that follows it is laid out
+              at a fixed size against a fixed trailing position and can never be pushed past the row
+              (#664). The message preview used to live here; it repeated the transcript's first line
+              and was the reason the line ran out of room. It stays in `SessionView` for search. */}
           <span className="inbox-row-copy">
             <span className="inbox-row-title">{session.title}</span>
-            {activeWorktree && (
-              <span className="inbox-row-worktree">
-                {` · ${activeWorktree.branch}${activeWorktree.baseRef ? ` ← ${activeWorktree.baseRef}` : ""}${activeWorktree.pullRequest ? ` · ${activeWorktree.pullRequest.state === "open" ? "Open" : activeWorktree.pullRequest.state === "merged" ? "Merged" : "Closed"} PR` : ""}`}
-              </span>
-            )}
-            {session.preview && <span className="inbox-row-snippet"> — {session.preview}</span>}
             {active && <ActivityStrip activity={activity} now={activityNow} compact className="inbox-row-activity" />}
           </span>
+          {activeWorktree && (
+            <span className="inbox-row-worktree">
+              <span className="inbox-row-branch" title={`Branch: ${activeWorktree.branch}`}>
+                {activeWorktree.branch}
+              </span>
+              {worktreeBaseRef && (
+                <span className="inbox-row-base">
+                  {/* The arrow is decoration; assistive technology gets the word it stands for. */}
+                  <span className="sr-only">Base: </span>
+                  <span aria-hidden="true">← </span>
+                  {worktreeBaseRef}
+                </span>
+              )}
+              {activeWorktree.pullRequest && (
+                <span
+                  className={"inbox-row-pr-pill " + (activeWorktree.pullRequest.state === "open"
+                    ? "open"
+                    : activeWorktree.pullRequest.state === "merged" ? "merged" : "closed")}
+                  aria-label={`Pull Request: ${pullRequestStateLabel(activeWorktree.pullRequest.state)}`}
+                >
+                  {pullRequestStateLabel(activeWorktree.pullRequest.state)} PR
+                </span>
+              )}
+            </span>
+          )}
           <span className="inbox-row-signals">
             <span
               className={"inbox-status-pill " + (stopFailed ? "failed" : status.busy ? "running" : "activity")}

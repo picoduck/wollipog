@@ -575,7 +575,8 @@ test("InboxView keeps mobile browsing order stable before and through a touch", 
     socket.push({ type: "session_upsert", session: session("C", 50) });
   });
   assert.deepEqual(rowTitles(container), ["Session A", "Session B", "Session C"]);
-  assert.match(container.textContent ?? "", /Question arrived/);
+  // The upsert's own status carries the proof that it landed. #664 removed the preview from the
+  // row, so the preview text below is store state the row deliberately no longer prints.
   assert.match(container.textContent ?? "", /Awaiting Input/);
   assert.match(container.textContent ?? "", /Answer Required/);
   assert.equal(container.querySelector(".inbox-order-update"), null,
@@ -659,7 +660,9 @@ test("InboxView holds desktop browsing order until the user leaves the window", 
     socket.push({ type: "session_upsert", session: session("C", 50) });
   });
   assert.deepEqual(rowTitles(container), ["Session A", "Session B", "Session C"]);
-  assert.match(container.textContent ?? "", /Approval arrived/);
+  // Same substitution as the mobile case: the row stopped printing the preview in #664, so the
+  // status the same upsert carried is what shows it was applied while the order was held.
+  assert.match(container.textContent ?? "", /Awaiting Input/);
 
   // Sustained concurrent activity, well past the interaction settle window.
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 550)); });
@@ -670,7 +673,11 @@ test("InboxView holds desktop browsing order until the user leaves the window", 
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 550)); });
   assert.deepEqual(rowTitles(container), ["Session A", "Session B", "Session C"],
     "desktop stability must not expire while the user is still browsing the Inbox");
-  assert.match(container.textContent ?? "", /Still running/);
+  // This upsert changes only the preview and the activity instant, and the row prints neither
+  // distinctly since #664. The probe that survives is the APPLIED ORDER asserted below: B leads
+  // it only because this batch set B to 70 and C to 60. Had the batch been dropped, the adopted
+  // order would be C, B, A off the earlier 50 and 40. The pending-order indicator would NOT have
+  // been enough — the first batch already raised it.
   const selectedBeforeApply = [...container.querySelectorAll<HTMLButtonElement>(".inbox-row")]
     .find((row) => row.textContent?.includes("Session B"));
   await act(async () => { selectedBeforeApply?.click(); });
