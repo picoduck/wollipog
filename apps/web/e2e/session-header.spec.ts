@@ -391,7 +391,9 @@ test("Project Actions keeps hover transparent while preserving interaction state
       await expect(actions).toHaveCSS("color", tokens.accent);
       await page.keyboard.press("Escape");
       await expect(actions).toHaveAttribute("aria-expanded", "false");
+      await expect(actions).toBeFocused();
       await project.focus();
+      await expect(project).toBeFocused();
       await page.keyboard.press("Tab");
       await expect(actions).toBeFocused();
       await expect(actions).toHaveCSS("color", tokens.accent);
