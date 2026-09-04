@@ -1445,15 +1445,17 @@ test("failed close and dispose retain lifecycle fences until the exact client ex
     assert.equal(existsSync(worktreePath), true);
 
     reportExit(1);
-
+    for (let attempt = 0; attempt < 500 &&
+        (store.has(spec.sessionId) || existsSync(worktreePath)); attempt++) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
     assert.equal(internals.closing.has(spec.sessionId), false);
     assert.equal(internals.admitted.has(spec.sessionId), false);
     assert.equal(store.ownsLock(spec.sessionId, internals.lockOwner), false);
-    assert.equal(siblingStore.acquireWorktreeLease(spec.sessionId, "cleanup-contender"), true);
-    siblingStore.releaseWorktreeLease(spec.sessionId, "cleanup-contender");
-    await manager.delete(spec.sessionId);
-    assert.equal(store.has(spec.sessionId), false);
-    assert.equal(existsSync(worktreePath), false);
+    assert.equal(store.has(spec.sessionId), false,
+      "late exact-client exit must automatically resume the already-requested deletion");
+    assert.equal(existsSync(worktreePath), false,
+      "automatic deletion retry must finish its journaled worktree cleanup");
     manager.shutdownAll();
   } finally {
     rmSync(root, { recursive: true, force: true });

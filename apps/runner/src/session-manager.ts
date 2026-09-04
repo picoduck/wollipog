@@ -614,6 +614,8 @@ export class SessionManager {
      * durable metadata again, but cleanup must keep fencing the cwd already handed to launch(). */
     launchingWorktreePath?: string;
   }>();
+  /** Deletions that installed their durable tombstone but remain fenced on exact-client exit. */
+  private readonly pendingDeletions = new Set<string>();
   private readonly deleting = new Set<string>();
   /** Process-lifetime tombstone: a late start command/continuation may never recreate a deleted id. */
   private readonly deleted = new Set<string>();
@@ -6844,7 +6846,12 @@ export class SessionManager {
     entry: ActiveSession,
   ): { client: Driver; entry: ActiveSession; promise: Promise<void> } {
     const existing = this.closing.get(sessionId);
-    if (existing) return existing;
+    if (existing) {
+      if (existing.client !== entry.client) {
+        throw new Error("cannot retire a different provider while an earlier retirement is pending");
+      }
+      return existing;
+    }
     const retirement = {
       client: entry.client,
       entry,
@@ -6880,6 +6887,13 @@ export class SessionManager {
     this.releaseActiveWorktreeLease(retirement.entry);
     this.releaseAdmission(sessionId);
     this.clearLock(sessionId);
+    if (this.pendingDeletions.delete(sessionId)) {
+      setImmediate(() => {
+        void this.delete(sessionId).catch((error) => {
+          this.log(`deferred deletion retry failed for ${sessionId}: ${errText(error)}`);
+        });
+      });
+    }
   }
 
   /** Permanently delete a session from the box store (the source of truth) so it cannot be
@@ -6949,6 +6963,7 @@ export class SessionManager {
       if (closing) {
         await closing.promise;
         if (this.closing.get(sessionId) === closing) {
+          this.pendingDeletions.add(sessionId);
           throw new Error("provider process retirement is unconfirmed; destructive cleanup remains fenced");
         }
       }
@@ -6968,6 +6983,7 @@ export class SessionManager {
       // captured and retired that exact entry above, so the encompassing rebind promise must no
       // longer retain the session indefinitely when initialize()/newSession() never resolves.
       if (rebinding && entry) this.worktreeRebindings.delete(sessionId);
+      this.pendingDeletions.delete(sessionId);
       this.cancelAdmissionWait(sessionId);
       // Checkpoint refs live in the SHARED repo odb (not the worktree dir) — drop them or the
       // anchored trees for a deleted session pin objects forever. Best-effort: the repo may be
