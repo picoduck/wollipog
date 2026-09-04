@@ -6359,6 +6359,16 @@ export class SessionManager {
     // holds for this session, and a release re-enters recovery. Thresholds ride into the queued
     // prompts' configs when the replacement process picks them up.
     if (!this.active.get(sessionId)) {
+      // Recovered prompts carry their own configs, so the new thresholds are written into them
+      // here; the live-entry loop below never sees the recovery map.
+      for (const queued of this.recoveryQueues.get(sessionId) ?? []) {
+        const queuedConfig: SessionConfig = { ...(queued.config ?? this.store.readMeta(sessionId)?.config ?? {}) };
+        if (costBudgetUsd === null) delete queuedConfig.costBudgetUsd;
+        else if (costBudgetUsd !== undefined) queuedConfig.costBudgetUsd = costBudgetUsd;
+        if (maxToolCalls === null) delete queuedConfig.maxToolCalls;
+        else if (maxToolCalls !== undefined) queuedConfig.maxToolCalls = maxToolCalls;
+        queued.config = queuedConfig;
+      }
       if (holdFor === "control_plane") this.recoveryHolds.add(sessionId);
       else if (holdFor === undefined && this.recoveryHolds.delete(sessionId) && this.recoveryQueues.has(sessionId)) {
         setImmediate(() => void this.recoverQueuedAppServer(sessionId));

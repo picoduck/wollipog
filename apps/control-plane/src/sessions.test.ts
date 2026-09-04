@@ -11176,3 +11176,22 @@ test("a daily-budget breach parks every live session the owner has, not only the
   assert.equal(db.getSession(b)!.pendingApproval?.kind, "daily_budget", "the sibling is parked too");
   assert.equal(db.getSession(b)!.status, "input_required");
 });
+
+test("arming a soft guardrail on an unparked session that already exceeds it parks it at once", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { prompt: "spend" });
+  db.raw().prepare("UPDATE sessions SET model='mystery-model', driver='codex-app-server' WHERE id=?").run(id);
+  db.appendEvent(id, { kind: "token_usage", inputTokens: 500, outputTokens: 20 }, Date.now(), { accrueUsage: true });
+  db.updateSessionStatus(id, "idle", Date.now());
+  assert.equal(db.getSession(id)!.pendingApproval, null, "no budget yet, so unpriced usage is nobody's concern");
+  assert.ok(svc.setConfig(id, { costBudgetUsd: 5 }).ok);
+  assert.equal(db.getSession(id)!.pendingApproval?.kind, "cost_unpriced", "the budget cannot see spend, so it fails closed immediately");
+  assert.equal(svc.prompt(id, "one more", []).ok, false, "and the next prompt waits on the card");
+});
+
+test("run member sessions persist the run's checkpoints", () => {
+  const { db, hub, svc } = makeHarness();
+  const run = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID], task: "go", config: { costCheckpointsUsd: [0.5, 2] } });
+  assert.ok(run.ok && run.data, run.error);
+  assert.deepEqual(db.getSession(run.data!.sessions[0]!.id)!.costCheckpointsUsd, [0.5, 2]);
+});

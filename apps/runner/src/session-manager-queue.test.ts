@@ -1175,13 +1175,14 @@ test("a control-plane hold survives a provider exit: recovery keeps the queue un
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const internals = manager as any;
-    internals.recoveryQueues.set("s_q", [{ id: "q1", text: "B", images: [], queuedAt: 1 }]);
+    internals.recoveryQueues.set("s_q", [{ id: "q1", text: "B", images: [], queuedAt: 1, config: { costBudgetUsd: 5 } }]);
     manager.rearmGovernance("s_q", {}, "control_plane");
     await internals.recoverQueuedAppServer("s_q");
     assert.equal(internals.recoveryQueues.has("s_q"), true, "held: recovery leaves the queue parked");
     assert.equal(internals.recoveryHolds.has("s_q"), true);
     manager.rearmGovernance("s_q", { costBudgetUsd: 3 });
     assert.equal(internals.recoveryHolds.has("s_q"), false, "a threshold-bearing release lifts the hold and re-enters recovery too");
+    assert.equal(internals.recoveryQueues.get("s_q")?.[0]?.config?.costBudgetUsd, 3, "and rewrites the recovered prompt's threshold");
     manager.rearmGovernance("s_q", {}, "control_plane");
     assert.equal(internals.recoveryHolds.has("s_q"), true);
     internals.discardRecovery("s_q");

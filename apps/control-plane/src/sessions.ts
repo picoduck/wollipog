@@ -3066,6 +3066,9 @@ export class SessionsService {
     const guardrailChanged = config.costBudgetUsd !== undefined || config.maxToolCalls !== undefined ||
       config.costCheckpointsUsd !== undefined;
     const parked = session.pendingApproval;
+    // A soft rule armed on an unparked session that already exceeds it must park now: nothing on
+    // the runner will cancel the turn, so the next prompt would otherwise be admitted first.
+    if (guardrailChanged && !parked) this.gateOnPolicy(sessionId, Date.now());
     if (guardrailChanged && parked && isGuardrailApproval(parked)) {
       const now = Date.now();
       const configured = this.db.getSession(sessionId)!;
@@ -4960,6 +4963,7 @@ export class SessionsService {
       if (member.agentId === CONDUCTOR_AGENT_ID) config.permissionMode = "default";
       if (req.costBudgetUsd && req.costBudgetUsd > 0) config.costBudgetUsd = req.costBudgetUsd;
       const runMaxCalls = req.maxToolCalls != null ? Math.floor(req.maxToolCalls) : 0;
+      const runCheckpoints = normalizeCostCheckpoints(req.config?.costCheckpointsUsd);
       if (runMaxCalls > 0) config.maxToolCalls = runMaxCalls;
       const memberTitle = `${title} · ${member.orchestrator ? "orchestrator" : member.roleId}`.slice(0, 120);
       const useWorktree = member.orchestrator ? false : (req.useWorktree ?? true);
@@ -4981,6 +4985,7 @@ export class SessionsService {
       });
       if (req.costBudgetUsd && req.costBudgetUsd > 0) this.db.updateSessionCostBudget(id, req.costBudgetUsd, now);
       if (runMaxCalls > 0) this.db.updateSessionMaxToolCalls(id, runMaxCalls, now);
+      if (runCheckpoints) this.db.updateSessionCostCheckpoints(id, runCheckpoints, now);
       this.db.addRunMember(runId, id, member.roleId);
       const view = this.db.getSession(id) ?? session;
       this.hub.sessionChanged(view);
@@ -5108,6 +5113,7 @@ export class SessionsService {
     const title = (req.title?.trim() || req.task.trim().slice(0, 60) || definition.name).slice(0, 120);
     const titleSource = req.title?.trim() ? "user" as const : "generated" as const;
     const runMaxCalls = req.maxToolCalls != null ? Math.floor(req.maxToolCalls) : 0;
+    const runCheckpoints = normalizeCostCheckpoints(req.config?.costCheckpointsUsd);
     const planned = members.map((member, index) => {
       const id = memberIds[index]!;
       const snapshot = delivery.commandSnapshots?.[index];
@@ -5246,6 +5252,7 @@ export class SessionsService {
         this.db.updateSessionCostBudget(item.id, req.costBudgetUsd, now);
       }
       if (runMaxCalls > 0) this.db.updateSessionMaxToolCalls(item.id, runMaxCalls, now);
+      if (runCheckpoints) this.db.updateSessionCostCheckpoints(item.id, runCheckpoints, now);
       this.db.addRunMember(runId, item.id, item.member.roleId);
       const view = this.db.getSession(item.id) ?? session;
       this.hub.sessionChanged(view);
@@ -5980,6 +5987,7 @@ export class SessionsService {
       if (agentId === CONDUCTOR_AGENT_ID) config.permissionMode = "default";
       if (req.costBudgetUsd && req.costBudgetUsd > 0) config.costBudgetUsd = req.costBudgetUsd;
       const runMaxCalls = req.maxToolCalls != null ? Math.floor(req.maxToolCalls) : 0;
+      const runCheckpoints = normalizeCostCheckpoints(req.config?.costCheckpointsUsd);
       if (runMaxCalls > 0) config.maxToolCalls = runMaxCalls;
       const session = this.db.createSession({
         id,
@@ -5999,6 +6007,7 @@ export class SessionsService {
       // Run-level guardrails apply to every member session; each member gates independently.
       if (req.costBudgetUsd && req.costBudgetUsd > 0) this.db.updateSessionCostBudget(id, req.costBudgetUsd, now);
       if (runMaxCalls > 0) this.db.updateSessionMaxToolCalls(id, runMaxCalls, now);
+      if (runCheckpoints) this.db.updateSessionCostCheckpoints(id, runCheckpoints, now);
       this.db.addRunMember(runId, id, agentId);
       this.hub.sessionChanged(this.db.getSession(id) ?? session);
       // The runner emits the user_message into the box store (source of truth) when it runs the
@@ -6191,7 +6200,7 @@ export class SessionsService {
     });
   }
 
-  private gateOnPolicy(sessionId: string, now: number): boolean {
+  private gateOnPolicy(sessionId: string, now: number, fanOut = true): boolean {
     const s = this.db.getSession(sessionId);
     if (!s || s.pendingApproval) return false;
     const rules = rulesFromSession(this.guardrailFields(s));
@@ -6210,11 +6219,12 @@ export class SessionsService {
     this.db.setPendingApproval(sessionId, approval);
     // The daily allowance is the owner's, not this session's: every other live session they own
     // is parked now, before a queued turn elsewhere can dequeue behind the breach.
-    if (ask.rule.kind === "daily_budget") {
+    if (ask.rule.kind === "daily_budget" && fanOut) {
       const owner = this.db.sessionOwnerUser(sessionId);
       if (owner) {
+        // One bounded pass from the session that crossed the line; siblings never fan out again.
         for (const siblingId of this.db.listOpenSessionIdsForOwner(owner.organizationId, owner.userId)) {
-          if (siblingId !== sessionId) this.gateOnPolicy(siblingId, now);
+          if (siblingId !== sessionId) this.gateOnPolicy(siblingId, now, false);
         }
       }
     }
