@@ -4960,11 +4960,18 @@ export class SessionManager {
   /** Fire-and-forget drains are always observed. Event-history errors are contained at emitEvent;
    * this is a final guard for unexpected driver/config failures so none become unhandled promises. */
   private scheduleDrain(sessionId: string): void {
+    const expectedEntry = this.active.get(sessionId);
     void this.drain(sessionId).catch((error) => {
       try {
         const entry = this.active.get(sessionId);
-        if (!entry || entry.historyIntegrityFailure) return;
         const detail = `session queue drain failed: ${errText(error)}`;
+        // drain() can finish a pending worktree handoff in its finally before this catch runs. A
+        // replacement entry owns a different provider and preserved FIFO; never settle or cancel
+        // that newer generation for an exception thrown by the retired entry's drain.
+        if (!entry || entry !== expectedEntry || entry.historyIntegrityFailure) {
+          this.log(`${detail} (${sessionId}; retired drain)`);
+          return;
+        }
         this.log(`${detail} (${sessionId})`);
         const queued = entry.queue.splice(0);
         this.rejectQueued(queued, detail);
@@ -5452,7 +5459,8 @@ export class SessionManager {
           kind: "error",
           message: `provider could not switch to the selected worktree: ${errText(error)}`,
         });
-        this.emitStatus(sessionId, "idle");
+        if (this.launchIsCurrent(sessionId, launchGeneration) &&
+            this.store.readMeta(sessionId)?.status !== "stopped") this.emitStatus(sessionId, "idle");
         return;
       } finally {
         this.releaseActiveWorktreeLease(entry);
@@ -5490,7 +5498,8 @@ export class SessionManager {
           kind: "error",
           message: `selected worktree could not be verified before provider launch: ${errText(error)}`,
         });
-        this.emitStatus(sessionId, "idle");
+        if (this.launchIsCurrent(sessionId, launchGeneration) &&
+            this.store.readMeta(sessionId)?.status !== "stopped") this.emitStatus(sessionId, "idle");
         return;
       }
       if (!this.launchIsCurrent(sessionId, launchGeneration)) return;

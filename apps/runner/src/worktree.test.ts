@@ -987,6 +987,76 @@ test("a requested worktree safely rebinds the provider before its next queued tu
   }
 });
 
+test("a failed retired drain cannot cancel the replacement worktree FIFO", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-retired-drain-rebind-"));
+  const repo = join(root, "repo");
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  let releaseFirstPrompt!: () => void;
+  try {
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const launchedCwds: string[] = [];
+    const prompts: Array<{ cwd: string; text: string }> = [];
+    const cancelledCwds: string[] = [];
+    const factory = (_driver: unknown, launch: { cwd: string }) => {
+      launchedCwds.push(launch.cwd);
+      return {
+        pid: launchedCwds.length, initialize: async () => {}, newSession: async () => {}, close: async () => {},
+        prompt: async (text: string) => { prompts.push({ cwd: launch.cwd, text }); return "end_turn" as const; },
+        cancel: () => { cancelledCwds.push(launch.cwd); }, dispose: () => {}, setConfig: () => {},
+        resolvePermission: () => false, agentSessionId: () => "provider-session-id",
+      };
+    };
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, factory as never, dataDir, 1);
+    const spec = {
+      sessionId: "s_retired_drain", workspaceId: "repo", workspacePath: repo, agentId: "claude",
+      command: "claude", args: [], env: {}, useWorktree: false, driver: "claude-code" as const,
+      context: { kind: "native" as const },
+    };
+    await manager.start(spec);
+    const firstPromptStarted = new Promise<void>((resolve) => {
+      const internals = manager as unknown as {
+        runPrompt: (sessionId: string, prompt: unknown) => Promise<void>;
+      };
+      const originalRunPrompt = internals.runPrompt.bind(manager);
+      let failFirstPrompt = true;
+      internals.runPrompt = async (sessionId, prompt) => {
+        if (failFirstPrompt) {
+          failFirstPrompt = false;
+          resolve();
+          await new Promise<void>((release) => { releaseFirstPrompt = release; });
+          throw new Error("unexpected retired drain failure");
+        }
+        await originalRunPrompt(sessionId, prompt);
+      };
+    });
+    assert.equal(manager.prompt(spec.sessionId, "first"), true);
+    await firstPromptStarted;
+    const requested = await manager.requestWorktree(spec.sessionId, {
+      baseRef: "HEAD", branch: "fix/retired-drain-rebind",
+    });
+    assert.equal(manager.prompt(spec.sessionId, "second"), true);
+    releaseFirstPrompt();
+    await waitForCondition(() => prompts.some((prompt) => prompt.text === "second") &&
+      store.readMeta(spec.sessionId)?.status === "idle",
+    "the replacement provider did not retain and finish draining its FIFO");
+    assert.deepEqual(prompts, [{ cwd: requested.worktree.path, text: "second" }]);
+    assert.deepEqual(launchedCwds, [repo, requested.worktree.path]);
+    assert.deepEqual(cancelledCwds, [], "the retired drain must not cancel the replacement provider");
+    assert.equal(store.readMeta(spec.sessionId)?.status, "idle");
+    manager.stop(spec.sessionId);
+    await manager.delete(spec.sessionId);
+  } finally {
+    releaseFirstPrompt?.();
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("an idle worktree rebind settles back to idle without inventing a prompt", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-idle-worktree-rebind-"));
   const repo = join(root, "repo");
@@ -1819,6 +1889,10 @@ test("a throwing provider dispose cannot strand rebind generation or admission s
     const sent: Array<{ type: string; payload?: { kind?: string; message?: string } }> = [];
     const launchedCwds: string[] = [];
     const prompts: string[] = [];
+    let closeStartedResolve!: () => void;
+    const closeStarted = new Promise<void>((resolve) => { closeStartedResolve = resolve; });
+    let releaseClose!: () => void;
+    const closeGate = new Promise<void>((resolve) => { releaseClose = resolve; });
     let disposeAttemptedResolve!: () => void;
     const disposeAttempted = new Promise<void>((resolve) => { disposeAttemptedResolve = resolve; });
     let launches = 0;
@@ -1826,7 +1900,13 @@ test("a throwing provider dispose cannot strand rebind generation or admission s
       const launchNumber = ++launches;
       launchedCwds.push(launch.cwd);
       return {
-        pid: launchNumber, initialize: async () => {}, newSession: async () => {}, close: async () => {},
+        pid: launchNumber, initialize: async () => {}, newSession: async () => {},
+        close: async () => {
+          if (launchNumber === 1) {
+            closeStartedResolve();
+            await closeGate;
+          }
+        },
         prompt: async (text: string) => { prompts.push(text); return "end_turn" as const; },
         cancel: () => {},
         dispose: () => {
@@ -1855,6 +1935,9 @@ test("a throwing provider dispose cannot strand rebind generation or admission s
       preLaunchAdmissionGenerations: Map<string, number>;
       worktreeRebindings: Map<string, unknown>;
     };
+    await closeStarted;
+    manager.stop(spec.sessionId);
+    releaseClose();
     await disposeAttempted;
     await waitForCondition(() => !internals.worktreeRebindings.has(spec.sessionId),
       "failed provider disposal did not settle the rebind");
@@ -1864,6 +1947,8 @@ test("a throwing provider dispose cannot strand rebind generation or admission s
     assert.equal(internals.launchGenerations.has(spec.sessionId), false);
     assert.equal(internals.preLaunchAdmissionGenerations.has(spec.sessionId), false);
     assert.equal(internals.admitted.has(spec.sessionId), false);
+    assert.equal(store.readMeta(spec.sessionId)?.status, "stopped",
+      "rebind cleanup must not overwrite a concurrent stop with idle");
     assert.equal(manager.prompt(spec.sessionId, "after failure"), true);
     await waitForCondition(() => prompts.length === 1, "a later prompt remained stranded after disposal failure");
     assert.deepEqual(launchedCwds, [repo, requested.worktree.path]);
