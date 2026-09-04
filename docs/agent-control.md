@@ -61,7 +61,10 @@ mutation audit under that session id. New API routes remain denied until explici
 
 The CLI reads the authenticated `/api/compatibility` endpoint before a command and rejects a
 control plane older than the protocol required by that command. The public `/healthz` probe keeps
-only service-readiness metadata and does not expose the protocol version.
+only service-readiness metadata and does not expose the protocol version. During the unreleased
+protocol-v100–v102 compatibility window, a 404 from the authenticated endpoint falls back to the
+legacy health version; authentication failures remain fail-closed, including API-only peers that
+answer 401 before routing the missing endpoint.
 Runners connected to older control planes do not inject the general surface. Conductor discovery,
 launch gating, default permission-mode clamp, and legacy manager credential remain unchanged.
 
