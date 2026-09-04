@@ -1527,7 +1527,7 @@ export class SessionManager {
         };
         reconciled = this.store.patchMeta(m.sessionId, pendingTaskIds.length > 0
           ? { backgroundWorkState: "orphaned", pendingBackgroundTaskIds: pendingTaskIds, orphanedWork: marker }
-          : { backgroundWorkState: "resumed", pendingBackgroundTaskIds: [], orphanedWork: undefined }) ?? m;
+          : { backgroundWorkState: undefined, pendingBackgroundTaskIds: [], orphanedWork: undefined }) ?? m;
       } else {
         reconciled = this.discoverOrphanedClaudeWork(m);
       }
@@ -8064,7 +8064,7 @@ export class SessionManager {
       // Artifact-only evidence cannot revive a task whose unattended recovery was already handled.
       // A real provider stream event appears in observedTaskIds and removes its tombstone above.
       updated = this.store.patchMeta(sessionId, {
-        backgroundWorkState: queuedJobIds.length > 0 ? "continuation_pending" : "resumed",
+        backgroundWorkState: queuedJobIds.length > 0 ? "continuation_pending" : undefined,
         backgroundJobs,
         pendingBackgroundTaskIds: [],
         recoveredBackgroundTaskIds: durableRecoveredTaskIds,
@@ -8125,7 +8125,7 @@ export class SessionManager {
       updated = this.store.patchMeta(sessionId, {
         backgroundWorkState: queuedJobIds.length > 0
           ? "continuation_pending"
-          : current.orphanedWork ? "resumed" : undefined,
+          : undefined,
         backgroundJobs,
         pendingBackgroundTaskIds: [],
         recoveredBackgroundTaskIds: recovered,
@@ -8224,7 +8224,7 @@ export class SessionManager {
     const updated = this.store.patchMeta(sessionId, hasPending
       ? { pendingBackgroundTaskIds: pending, orphanedWork: undefined }
       : {
-          backgroundWorkState: "resumed",
+          backgroundWorkState: undefined,
           pendingBackgroundTaskIds: [],
           recoveredBackgroundTaskIds: mergeRecoveredBackgroundTaskIds(
             current.recoveredBackgroundTaskIds,
@@ -8496,7 +8496,7 @@ export class SessionManager {
       !job.assistantResultPersistedAt);
     const updated = this.store.patchMeta(sessionId, {
       backgroundJobs,
-      backgroundWorkState: unresolved ? "continuation_pending" : "resumed",
+      backgroundWorkState: unresolved ? "continuation_pending" : undefined,
     });
     if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
     if (this.queuedBackgroundJobIds(updated).length > 0) this.scheduleBackgroundContinuation(sessionId);
@@ -8574,7 +8574,7 @@ export class SessionManager {
       !job.assistantResultPersistedAt);
     return this.store.patchMeta(meta.sessionId, {
       backgroundJobs,
-      backgroundWorkState: unresolved ? "continuation_pending" : "resumed",
+      backgroundWorkState: unresolved ? "continuation_pending" : undefined,
     }) ?? meta;
   }
 

@@ -261,43 +261,80 @@ const COMPACT_BACKGROUND_WORK_LABELS: Record<BackgroundWorkState, string> = {
   resumed: "Background Work Resumed",
 };
 
-export function BackgroundWorkBadge({ state, compact = false, announce = true }: {
+export function BackgroundWorkBadge({ state, compact = false, announce = true, onOpen }: {
   state: BackgroundWorkState;
   compact?: boolean;
   announce?: boolean;
+  onOpen?: () => void;
 }) {
+  // Rolling deployments may briefly receive the retired terminal sentinel from an older control
+  // plane. Completion remains available in the durable Background Work inventory, never here.
+  if (state === "resumed") return null;
   const label = `Background Work: ${BACKGROUND_WORK_LABELS[state]}`;
+  const className = state === "running" || state === "continuation_pending"
+    ? "background-work-badge background-work-running"
+    : "background-work-badge background-work-orphaned";
+  const content = <>
+    <span className="background-work-dot" aria-hidden="true" />
+    {compact ? (
+      <>
+        <span className="sr-only">{label}</span>
+        <span aria-hidden="true">{COMPACT_BACKGROUND_WORK_LABELS[state]}</span>
+      </>
+    ) : label}
+  </>;
+  if (onOpen) {
+    return (
+      <button
+        type="button"
+        className={className}
+        onClick={onOpen}
+        aria-label={label}
+        aria-controls="right-panel"
+        title={`Open ${label}`}
+      >
+        {content}
+      </button>
+    );
+  }
   return (
     <span
-      className={`background-work-badge ${state === "running" || state === "continuation_pending"
-        ? "background-work-running"
-        : state === "orphaned"
-          ? "background-work-orphaned"
-          : "background-work-resumed"}`}
+      className={className}
       role={announce ? "status" : undefined}
       aria-label={label}
       title={compact ? label : undefined}
     >
-      <span className="background-work-dot" aria-hidden="true" />
-      {compact ? (
-        <>
-          <span className="sr-only">{label}</span>
-          <span aria-hidden="true">{COMPACT_BACKGROUND_WORK_LABELS[state]}</span>
-        </>
-      ) : label}
+      {content}
     </span>
   );
 }
 
-export function UntrackedBackgroundWorkBadge() {
+export function UntrackedBackgroundWorkBadge({ onOpen }: { onOpen?: () => void } = {}) {
+  const content = <>
+    <span className="background-work-dot" aria-hidden="true" />
+    Detached Work: Untracked
+  </>;
+  if (onOpen) {
+    return (
+      <button
+        type="button"
+        className="background-work-badge background-work-untracked"
+        onClick={onOpen}
+        aria-label="Detached Work: Untracked"
+        aria-controls="right-panel"
+        title="Open Background Work details"
+      >
+        {content}
+      </button>
+    );
+  }
   return (
     <span
       className="background-work-badge background-work-untracked"
       aria-label="Detached Work: Untracked"
       title="This provider does not expose a durable detached-work lifecycle. Wollipog cannot promise automatic completion, cancellation, or recovery."
     >
-      <span className="background-work-dot" aria-hidden="true" />
-      Detached Work: Untracked
+      {content}
     </span>
   );
 }
@@ -309,7 +346,7 @@ export function ActiveSubagentsBadge({ count, onOpen }: { count: number; onOpen:
   return (
     <button
       type="button"
-      className="background-work-badge background-work-running"
+      className="background-work-badge background-work-running active-subagents-badge"
       onClick={onOpen}
       aria-label={label}
       title={label}
@@ -328,8 +365,15 @@ const BACKGROUND_DELIVERY_LABELS: Record<BackgroundDeliveryWatchdogState, string
   dashboard_observation_pending: "Notification Awaiting Dashboard",
 };
 
-export function BackgroundDeliveryBadge({ state }: { state: BackgroundDeliveryWatchdogState }) {
+export function BackgroundDeliveryBadge({ state, onOpen }: { state: BackgroundDeliveryWatchdogState; onOpen?: () => void }) {
   const label = `Background Delivery: ${BACKGROUND_DELIVERY_LABELS[state]}`;
+  if (onOpen) return (
+    <button type="button" className="background-work-badge background-work-orphaned"
+      aria-label={label} aria-controls="right-panel" title={`Open ${label}`} onClick={onOpen}>
+      <span className="background-work-dot" aria-hidden="true" />
+      {label}
+    </button>
+  );
   return (
     <span className="background-work-badge background-work-orphaned" aria-label={label}>
       <span className="background-work-dot" aria-hidden="true" />
@@ -348,12 +392,24 @@ const BACKGROUND_NOTIFICATION_LABELS: Record<BackgroundNotificationReceiptState,
   expired: "Push Expired",
 };
 
-export function BackgroundNotificationBadge({ state }: { state: BackgroundNotificationReceiptState }) {
+export function BackgroundNotificationBadge({ state, onOpen }: {
+  state: BackgroundNotificationReceiptState;
+  onOpen?: () => void;
+}) {
   const label = BACKGROUND_NOTIFICATION_LABELS[state];
   const attention = state === "pending" || state === "retry" || state === "permanent_failure" || state === "expired";
+  const className = attention ? "background-work-badge background-work-orphaned" : "background-work-badge";
+  if (onOpen) return (
+    <button type="button" className={className} data-attention={attention} aria-label={label} aria-controls="right-panel"
+      title={`Open Background Work: ${label}`} onClick={onOpen}>
+      <span className="background-work-dot" aria-hidden="true" />
+      {label}
+    </button>
+  );
   return (
     <span
-      className={`background-work-badge ${attention ? "background-work-orphaned" : "background-work-resumed"}`}
+      className={className}
+      data-attention={attention}
       aria-label={label}
     >
       <span className="background-work-dot" aria-hidden="true" />

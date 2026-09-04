@@ -1886,6 +1886,10 @@ function SessionDetailLoaded({
     ["starting", "running", "waiting"].includes(descriptor.lifecycle)),
   [items, runnerOnline, session.status]);
   const preferredActiveSubagentId = selectedSubagentId(activeSubagents);
+  const backgroundParentTurnEventIds = useMemo(() => new Map(items
+    .filter((item): item is Extract<TimelineItem, { kind: "user_message" }> =>
+      item.kind === "user_message" && Boolean(item.turnId))
+    .map((item) => [item.turnId!, item.id] as const)), [items]);
 
   // Prior user prompts for ↑ history recall (chronological; recall walks from newest backward).
   const timelineUserPrompts = useMemo(
@@ -2356,6 +2360,10 @@ function SessionDetailLoaded({
     else if (restore.state === "paused") followTail.pause();
     else followTail.preview();
   }, [followTail.follow, followTail.pause, followTail.preview]);
+  const revealBackgroundParentTurn = useCallback((eventId: number) => {
+    rightPanelRef.current.close();
+    revealCurrentOperation(eventId);
+  }, [revealCurrentOperation]);
   const previewNavigationControls = useMemo<PreviewNavigationControls>(() => ({
     beginProgrammaticScroll: followTail.beginProgrammaticScroll,
     follow: followTail.follow,
@@ -3480,6 +3488,7 @@ function SessionDetailLoaded({
             count: activeSubagents.length,
             onOpen: () => openSubagent(preferredActiveSubagentId),
           } : undefined}
+          onOpenBackgroundWork={() => rightPanel.show("background")}
           // The unified bar replaces the app-level top bar on desktop, so it owns the page-title
           // focus-rescue anchor there; the mobile layout keeps the app bar and its own anchor.
           titleId={!isMobile ? "page-title" : undefined}
@@ -3490,17 +3499,30 @@ function SessionDetailLoaded({
             <h2 className="session-preview-title">{session.title}</h2>
             <div className="session-preview-meta">
               <SessionStatusIndicators session={session} disconnected={!runnerOnline} />
-              {session.backgroundWorkState && <BackgroundWorkBadge state={session.backgroundWorkState} />}
+              {session.backgroundWorkState && <BackgroundWorkBadge state={session.backgroundWorkState} onOpen={() => {
+                rightPanel.show("background");
+                onExpand?.();
+              }} />}
               {!session.backgroundWorkState && session.backgroundWorkTracking === "untracked" && (
-                <UntrackedBackgroundWorkBadge />
+                <UntrackedBackgroundWorkBadge onOpen={() => {
+                  rightPanel.show("background");
+                  onExpand?.();
+                }} />
               )}
               {session.backgroundDeliveries?.find((delivery) => delivery.watchdogState)?.watchdogState && (
                 <BackgroundDeliveryBadge
                   state={session.backgroundDeliveries.find((delivery) => delivery.watchdogState)!.watchdogState!}
+                  onOpen={() => {
+                    rightPanel.show("background");
+                    onExpand?.();
+                  }}
                 />
               )}
               {session.backgroundDeliveries?.flatMap((delivery) => delivery.notifications ?? []).slice(-2).map((receipt) => (
-                <BackgroundNotificationBadge key={receipt.deliveryId} state={receipt.state} />
+                <BackgroundNotificationBadge key={receipt.deliveryId} state={receipt.state} onOpen={() => {
+                  rightPanel.show("background");
+                  onExpand?.();
+                }} />
               ))}
               <span className="tag tag-machine" title={session.runnerId}>{runnerDisp.name}</span>
               {session.agentName && (
@@ -4263,6 +4285,8 @@ function SessionDetailLoaded({
           onOpenTerminal={onOpenTerminal}
           onInsertSideChatDraft={insertSideChatDraft}
           items={items}
+          parentTurnEventIds={backgroundParentTurnEventIds}
+          onOpenParentTurn={revealBackgroundParentTurn}
         />}
       </div>
       {mode === "expanded" && messageAction && (

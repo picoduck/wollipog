@@ -117,6 +117,12 @@ subscription and distinguishes push-service acceptance, browser display, and use
 notification-only; it never resubmits an accepted continuation or claims exactly-once behavior for
 arbitrary detached side effects.
 
+Protocol v106 retires **Background Work Resumed** as a current-state badge. A settled continuation
+clears the live badge, while its bounded, timestamped job and delivery receipt remains inspectable
+in the **Background Work** panel. The panel consumes the privacy-safe inventory introduced in v82;
+commands, paths, credentials, provider context, and raw output remain runner-local. During rolling
+updates, a legacy `resumed` sentinel is accepted but normalized to no current background state.
+
 | Capability | Minimum protocol |
 | --- | ---: |
 | Find/adopt unmanaged agent sessions | 6 |
@@ -136,6 +142,7 @@ arbitrary detached side effects.
 | Report subscription allowance windows and refresh results | 80 |
 | Resume a parent after managed background-job completion | 81 |
 | Track managed background delivery projection and observation | 82 |
+| Inspect the bounded managed background-job inventory | 82 |
 | Classify provider background-work tracking explicitly | 83 |
 
 A missing protocol version is treated as **unknown**, not optimistically supported. Protocol

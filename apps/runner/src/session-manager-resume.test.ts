@@ -1896,7 +1896,7 @@ test("startup automatically resumes durable Claude orphan work without a user me
     assert.ok(h.store.readEvents("resume-session").some((event) =>
       event.payload.kind === "stderr" && /resumed orphaned background work automatically/i.test(event.payload.text)));
     assert.equal(h.store.readMeta("resume-session")?.orphanedWork, undefined);
-    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, "resumed");
+    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, undefined);
     assert.deepEqual(h.store.readMeta("resume-session")?.recoveredBackgroundTaskIds, ["task-1"]);
     const promptCount = h.prompts.length;
     h.manager.recoverAllOrphanedWork();
@@ -2057,7 +2057,7 @@ test("a live Claude orphan callback persists first and triggers recovery without
     await tick();
     assert.equal(h.prompts.length, 2);
     assert.match(h.prompts[1] ?? "", /reconcile every orphaned task/i);
-    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, "resumed");
+    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, undefined);
     assert.equal(h.store.readMeta("resume-session")?.orphanedWork, undefined);
   } finally {
     h.manager.shutdownAll();
@@ -2135,7 +2135,7 @@ test("two idle managed-job completions cross one durable barrier and resume the 
     assert.ok(delivered.every((job) => job.continuationSubmittedAt));
     assert.ok(delivered.every((job) => job.continuationAcceptedAt));
     assert.ok(delivered.every((job) => job.assistantResultPersistedAt));
-    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, "resumed");
+    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, undefined);
     assert.equal(
       h.store.readEvents("resume-session").filter((event) => event.payload.kind === "user_message").length,
       1,
@@ -2237,7 +2237,7 @@ test("restart retries queued continuation but never replays a submitted continua
     await shortDelay();
     await tick();
     assert.equal(queued.prompts.length, 1);
-    assert.equal(queued.store.readMeta("resume-session")?.backgroundWorkState, "resumed");
+    assert.equal(queued.store.readMeta("resume-session")?.backgroundWorkState, undefined);
   } finally {
     queued.manager.shutdownAll();
     queued.cleanup();
@@ -2598,7 +2598,7 @@ test("startup reconciles structured delivery evidence written before the metadat
       structuredEvent.ts,
       "reconciliation preserves the original structured publication timestamp",
     );
-    assert.equal(reconciled?.backgroundWorkState, "resumed");
+    assert.equal(reconciled?.backgroundWorkState, undefined);
     assert.deepEqual(h.prompts, [], "reconciliation never submits a second provider turn");
     h.manager.recoverAllOrphanedWork();
     assert.equal(
@@ -2868,7 +2868,7 @@ test("startup converts a crashed running Claude task set into a durable orphan b
     await shortDelay();
     await tick();
     assert.equal(h.prompts.length, 1);
-    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, "resumed");
+    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, undefined);
   } finally {
     h.manager.shutdownAll();
     h.cleanup();
@@ -2894,7 +2894,7 @@ test("artifact-only task updates preserve the at-most-once recovery tombstone", 
     h.manager.reconcileStore();
     await shortDelay();
     assert.equal(h.prompts.length, 0);
-    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, "resumed");
+    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, undefined);
   } finally {
     h.manager.shutdownAll();
     h.cleanup();
@@ -2923,7 +2923,7 @@ test("startup discovers an incomplete Claude task directory even without a persi
     await shortDelay();
     await tick();
     assert.equal(h.prompts.length, 1);
-    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, "resumed");
+    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, undefined);
   } finally {
     h.manager.shutdownAll();
     h.cleanup();
@@ -3044,7 +3044,7 @@ test("adoption surfaces provider task artifacts but waits for explicit user owne
     assert.equal(h.launches.at(-1)?.options.resumeId, "adopted-claude");
     assert.equal(h.prompts.at(-1), "continue this adopted session");
     assert.equal(h.store.readMeta("adopted-session")?.adoptedBackgroundRecoveryAuthorized, true);
-    assert.equal(h.store.readMeta("adopted-session")?.backgroundWorkState, "resumed");
+    assert.equal(h.store.readMeta("adopted-session")?.backgroundWorkState, undefined);
   } finally {
     h.manager.shutdownAll();
     h.cleanup();
@@ -3109,7 +3109,7 @@ test("real Claude driver shutdown persists live work and a restarted manager res
       secondChild.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
       await shortDelay();
       assert.equal(store.readMeta("resume-session")?.orphanedWork, undefined);
-      assert.equal(store.readMeta("resume-session")?.backgroundWorkState, "resumed");
+      assert.equal(store.readMeta("resume-session")?.backgroundWorkState, undefined);
       assert.equal(
         store.readEvents("resume-session").some((event) => event.payload.kind === "user_message"),
         true,

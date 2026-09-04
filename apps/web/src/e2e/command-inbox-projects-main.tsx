@@ -36,7 +36,7 @@ import { ProjectsView } from "../components/ProjectsView.js";
 import { RunDetail } from "../components/RunsView.js";
 import { SessionDetail } from "../components/SessionDetail.js";
 import { ShellDock } from "../components/ShellDock.js";
-import type { RightPanelState } from "../components/RightPanel.js";
+import { useRightPanelState } from "../components/RightPanel.js";
 import { useIsMobile } from "../components/useIsMobile.js";
 import { Header } from "../App.js";
 import { InstanceScopeProvider } from "../instance-scope.js";
@@ -1255,24 +1255,6 @@ const client = {
   revealWorkspace: async () => ({ ok: true as const }),
 } as ApiClient;
 
-const rightPanel: RightPanelState = {
-  open: false,
-  mode: "launcher",
-  width: 320,
-  dragging: false,
-  subagentTarget: null,
-  toggle() {},
-  openMode() {},
-  show() {},
-  setMode() {},
-  setWidth() {},
-  setDragging() {},
-  close() {},
-  selectSubagent() {},
-  showSubagent() {},
-  consumeSubagentFocusRequest() {},
-};
-
 declare global {
   interface Window {
     __WOLLIPOG_PROJECT_INBOX_E2E__: {
@@ -1621,6 +1603,7 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
 };
 
 function FixtureSurface() {
+  const rightPanel = useRightPanelState();
   const view = useStoreSelector((state) => state.view);
   const sessions = useStoreSelector((state) => state.sessions);
   const isMobile = useIsMobile();

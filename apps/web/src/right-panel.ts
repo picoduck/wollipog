@@ -15,7 +15,7 @@ export const RIGHT_PANEL_SNAP_CLOSE_WIDTH = 240;
 export const RIGHT_PANEL_KEY_STEP = 16;
 
 /** Panel contents. "launcher" is the empty state listing the other modes. */
-export const RIGHT_PANEL_MODES = ["launcher", "review", "files", "terminal", "browser", "sidechat", "subagents"] as const;
+export const RIGHT_PANEL_MODES = ["launcher", "review", "files", "terminal", "browser", "sidechat", "subagents", "background"] as const;
 export type RightPanelMode = (typeof RIGHT_PANEL_MODES)[number];
 
 /** Clamp a panel width. `max` lets callers pass a viewport-aware ceiling (e.g. 40% of the

@@ -307,6 +307,9 @@
 // 106: priced_session_cost acknowledges the control-plane-priced cumulative USD total after each
 //      parentless usage event. Current runners persist that total and apply the existing mid-turn
 //      cost guardrail to it; older runners keep provider-reported local cost enforcement.
+//      Settled managed work also clears its current-state badge, while the control plane projects a
+//      bounded, privacy-safe job inventory for the inspectable Background Work panel. The runner
+//      input remains compatible with v82 inventories; pre-v106 `resumed` is a legacy sentinel.
 export const PROTOCOL_VERSION = 106;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
@@ -428,6 +431,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * default off). Runners fence unconditional conductor advertisement on this floor. */
   ungatedConductorAdvertisement: 91,
   managedBackgroundDelivery: 82,
+  managedBackgroundInventory: 82,
   backgroundWorkTracking: 83,
   correlatedRestartEcho: 84,
   stopFailureRecovery: 85,
@@ -2883,8 +2887,9 @@ export type ThreadType = "chat" | "project";
  * an explicit user title; optional on pre-v37 snapshots/rows. */
 export type SessionTitleSource = "generated" | "user" | "provider";
 
-/** Runner-observed durable Claude background-work lifecycle. Absent means the runner does not
- * expose background work for this session (including older runners and non-Claude drivers). */
+/** Runner-observed durable Claude background-work lifecycle. Absent means no managed work is
+ * currently active or awaiting delivery. `resumed` is accepted only for rolling compatibility
+ * with pre-v106 runners and must never be presented as a current state. */
 export type BackgroundWorkState = "running" | "continuation_pending" | "orphaned" | "resumed";
 
 /** Whether the runner can durably observe detached work for this provider. `untracked` is a
@@ -2901,6 +2906,27 @@ export interface ManagedBackgroundJobSnapshot {
   launchType: "agent" | "shell" | "monitor" | "workflow" | "unknown";
   registeredAt: number;
   terminalStatus?: "completed" | "failed" | "killed";
+  terminalObservedAt?: number;
+  continuationRequired?: boolean;
+  continuationId?: string;
+  continuationQueuedAt?: number;
+  continuationSubmittedAt?: number;
+  continuationAcceptedAt?: number;
+  assistantResultPersistedAt?: number;
+}
+
+/** Bounded, projection-safe control-plane view of one managed job. This intentionally omits raw
+ * commands, paths, provider context, output references, and credentials. */
+export interface ManagedBackgroundJobView {
+  id: string;
+  parentTurnId: string;
+  launchType: ManagedBackgroundJobSnapshot["launchType"];
+  registeredAt: number;
+  /** Most recent time the control plane received authoritative inventory evidence for this job. */
+  lastObservedAt: number;
+  /** Whether the job was present in the runner's latest inventory snapshot. */
+  sourcePresent: boolean;
+  terminalStatus?: NonNullable<ManagedBackgroundJobSnapshot["terminalStatus"]>;
   terminalObservedAt?: number;
   continuationRequired?: boolean;
   continuationId?: string;
@@ -3148,6 +3174,8 @@ export interface SessionView {
   backgroundWorkTracking?: BackgroundWorkTracking;
   /** Durable control-plane delivery stages. Omitted by pre-v82 control planes. */
   backgroundDeliveries?: BackgroundDeliveryView[];
+  /** Bounded durable job inventory. Omitted by control planes that predate the panel contract. */
+  backgroundJobs?: ManagedBackgroundJobView[];
   status: SessionStatus;
   column: BoardColumn;
   runId: string | null;

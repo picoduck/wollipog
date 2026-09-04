@@ -32,7 +32,8 @@ Session status is multidimensional. A workflow column is organization only; it n
 | Health | History or connection recovery is active | Recovery-specific supporting text | Recovery does not rewrite lifecycle. |
 | Background Work | `backgroundWorkState=running` | **Waiting on External Job** | Detached work is still pending externally. |
 | Background Work | `backgroundWorkState=continuation_pending` | **Continuation Pending** | A continuation is durably pending. |
-| Background Work | Other tracked/untracked delivery states | Existing specific background label | Background state remains independent of foreground activity. |
+| Background Work | `backgroundWorkState=orphaned` | **Background Work: Orphaned** | Managed work needs recovery or authoritative re-observation. |
+| Background Work | Settled delivery or legacy `backgroundWorkState=resumed` | No current-status badge | Completion remains in the timestamped Background Work inventory instead of resembling live work. |
 
 ## Projection Rules
 
@@ -43,6 +44,7 @@ Session status is multidimensional. A workflow column is organization only; it n
 - Keep compact visible labels and accessible names on the same Title Case terminology. Descriptions and notifications use sentence case.
 - Unknown lifecycle values use **Status Unavailable**. An undifferentiated legacy input state uses **Input Required**. Missing Git or background fields produce no affirmative claim.
 - Refreshes, reconnects, and session transitions replace the relevant dimension independently; they must not synthesize a change in another dimension.
+- Managed background indicators open the **Background Work** inventory. Job lifecycle, continuation delivery, and notification delivery are separate fields; offline or stale non-terminal evidence reads **Status Unverified**.
 
 ## Surface Contract
 

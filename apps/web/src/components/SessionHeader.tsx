@@ -69,6 +69,7 @@ export function SessionHeader({
   topbarControls,
   changeStatus,
   activeSubagents,
+  onOpenBackgroundWork,
   titleId,
 }: {
   session: SessionView;
@@ -101,6 +102,8 @@ export function SessionHeader({
   changeStatus?: SessionChangeStatus | null;
   /** Live structured subagents remain visible even while the parent awaits its next prompt. */
   activeSubagents?: { count: number; onOpen: () => void };
+  /** Opens the inspectable managed-job inventory. */
+  onOpenBackgroundWork?: () => void;
   /** Set when this bar owns the page heading (`page-title` focus-rescue anchor). */
   titleId?: string;
 }) {
@@ -160,10 +163,17 @@ export function SessionHeader({
       <SessionStatusIndicators session={session} disconnected={!runnerOnline} />
       <ChangeStatusBadge change={changeStatus ?? null} />
       {session.backgroundWorkState && (
-        <BackgroundWorkBadge state={session.backgroundWorkState} compact announce={false} />
+        <BackgroundWorkBadge state={session.backgroundWorkState} compact announce={false}
+          onOpen={onOpenBackgroundWork ? () => {
+            closeStatusPopover(false);
+            onOpenBackgroundWork();
+          } : undefined} />
       )}
       {!session.backgroundWorkState && session.backgroundWorkTracking === "untracked" && (
-        <UntrackedBackgroundWorkBadge />
+        <UntrackedBackgroundWorkBadge onOpen={onOpenBackgroundWork ? () => {
+          closeStatusPopover(false);
+          onOpenBackgroundWork();
+        } : undefined} />
       )}
     </>
   );
