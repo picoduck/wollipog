@@ -864,7 +864,9 @@ export function parseForgeRemote(remote: string): ForgeRemote | null {
       const url = new URL(raw);
       if (!new Set(["http:", "https:", "ssh:"]).has(url.protocol) || url.password ||
           ((url.protocol === "http:" || url.protocol === "https:") && url.username) || url.search || url.hash) return null;
-      host = url.host.toLowerCase();
+      // An SSH transport port is not the forge's web/API port. glab resolves any custom API host
+      // from its exact-host configuration; carrying `:2222` into browser/API URLs is incorrect.
+      host = (url.protocol === "ssh:" ? url.hostname : url.host).toLowerCase();
       protocol = url.protocol;
       project = decodeURIComponent(url.pathname.replace(/^\/+/, "").replace(/\.git$/i, ""));
     } else {
@@ -888,6 +890,34 @@ export function parseForgeRemote(remote: string): ForgeRemote | null {
   return { provider, host, project, webUrl: `${webProtocol}//${host}/${encodedProject}` };
 }
 
+/** Recover only a GitHub identity from a credential-bearing HTTPS remote. Credentials are erased
+ * before parsing and this identity is used solely to validate gh output and build safe web URLs. */
+function credentialFreeGitHubRemote(remote: string): ForgeRemote | null {
+  try {
+    const url = new URL(remote.trim());
+    if (!new Set(["http:", "https:"]).has(url.protocol) || (!url.username && !url.password)) return null;
+    url.username = "";
+    url.password = "";
+    url.pathname = url.pathname.replace(/\/+$/, "");
+    const parsed = parseForgeRemote(url.href);
+    return parsed?.provider === "github" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function safeRemoteFallback(remote: string, parsed: ForgeRemote | null): string {
+  if (parsed) return parsed.webUrl;
+  try {
+    const url = new URL(remote);
+    if (url.username || url.password || url.search || url.hash) return "(no forge remote configured)";
+  } catch {
+    // Local paths and scp-style generic remotes retain their legacy display value.
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(remote)) return "(no forge remote configured)";
+  }
+  return remote || "(no forge remote configured)";
+}
+
 /** Extract owner/repo from an exact github.com remote (ssh or https), or null. */
 export function githubSlug(remote: string): string | null {
   const parsed = parseForgeRemote(remote);
@@ -908,17 +938,24 @@ export function gitlabProject(remote: string, authenticatedHost?: string): Forge
  * the `/pull/<n>` shape: a docs/login/status URL in a gh error must NOT be mistaken
  * for a created PR (otherwise a failed `gh pr create` looks like success).
  */
-export function pickPrUrl(text: string): string | null {
-  const m = text.match(/https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+/);
-  return m ? m[0] : null;
-}
-
-/** Strictly accept only a merge-request URL for the exact remote host/project. */
-export function pickMergeRequestUrl(text: string, remote: Pick<ForgeRemote, "host" | "project">): string | null {
-  const escapedHost = remote.host.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const escapedProject = remote.project.split("/").map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("/");
-  const match = text.match(new RegExp(`https?://${escapedHost}/${escapedProject}/-/merge_requests/\\d+`, "i"));
-  return match?.[0] ?? null;
+export function pickPrUrl(text: string, remote?: ForgeRemote | null): string | null {
+  if (!remote) {
+    const match = text.match(/https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+/);
+    return match ? match[0] : null;
+  }
+  const base = new URL(remote.webUrl);
+  const expectedPrefix = `${base.pathname.replace(/\/$/, "")}/pull/`.toLowerCase();
+  for (const candidate of text.match(/https?:\/\/[^\s<>"']+/g) ?? []) {
+    const safe = safeHttpUrl(candidate.replace(/[),.;]+$/, ""));
+    if (!safe) continue;
+    const url = new URL(safe);
+    if (!url.username && !url.password && !url.search && !url.hash &&
+        url.host.toLowerCase() === remote.host && url.pathname.toLowerCase().startsWith(expectedPrefix) &&
+        /^[1-9]\d*\/?$/.test(url.pathname.slice(expectedPrefix.length))) {
+      return url.href.replace(/\/$/, "");
+    }
+  }
+  return null;
 }
 
 /* ------------------------------ diff parsing ----------------------------- */
@@ -1380,7 +1417,8 @@ export function parseGitHubReviewPage(raw: string): {
 async function githubReviewSync(cwd: string): Promise<GitHubReviewSyncInfo> {
   const context = executionContext.getStore() ?? { kind: "native" as const };
   const remote = (await git(cwd, ["remote", "get-url", "origin"])).trim();
-  const repository = githubSlug(remote)?.toLowerCase() ?? null;
+  const forge = parseForgeRemote(remote) ?? credentialFreeGitHubRemote(remote);
+  const repository = forge?.provider === "github" ? forge.project.toLowerCase() : null;
   if (!repository) throw new Error("the origin remote is not a GitHub repository");
   const [owner, name] = repository.split("/");
   let prView: JsonObject;
@@ -1567,7 +1605,11 @@ async function runGlab(cwd: string, host: string, args: string[]): Promise<strin
   return result.stdout;
 }
 
-async function gitlabReadiness(cwd: string, parsed: ForgeRemote): Promise<{
+export async function gitlabReadiness(
+  cwd: string,
+  parsed: ForgeRemote,
+  runCommand: typeof runContextCommand = runContextCommand,
+): Promise<{
   remote: ForgeRemote;
   forge: GitForgeInfo;
 } | null> {
@@ -1577,10 +1619,10 @@ async function gitlabReadiness(cwd: string, parsed: ForgeRemote): Promise<{
     // before any authenticated/network command targets it. `glab auth login` records api_protocol
     // for self-managed hosts; generic Git servers therefore retain local-only summary behavior.
     try {
-      const configured = await runContextCommand(
+      const configured = await runCommand(
         context,
         "glab",
-        ["config", "get", "api_protocol", "--host", parsed.host],
+        ["config", "get", "api_protocol", "--host", parsed.host, "--global"],
         { cwd, timeoutMs: GLAB_TIMEOUT_MS, maxBuffer: FORGE_MAX_BUFFER },
       );
       if (!new Set(["http", "https"]).has(configured.stdout.trim().toLowerCase())) return null;
@@ -1589,7 +1631,12 @@ async function gitlabReadiness(cwd: string, parsed: ForgeRemote): Promise<{
     }
   }
   try {
-    await runGlab(cwd, parsed.host, ["auth", "status"]);
+    await runCommand(
+      context,
+      "glab",
+      ["auth", "status", "--hostname", parsed.host],
+      { cwd, timeoutMs: GLAB_TIMEOUT_MS, maxBuffer: FORGE_MAX_BUFFER },
+    );
     const remote = gitlabProject(`${parsed.webUrl}.git`, parsed.host);
     if (!remote) throw new Error("the configured GitLab project identity is invalid");
     return {
@@ -1728,7 +1775,14 @@ export async function loadGitLabReviewThreads(
     threads.push(...pageResult.threads);
     if (pageResult.discussionCount < GITLAB_REVIEW_PAGE_SIZE) { complete = true; break; }
   }
-  if (!complete) throw new Error("the merge request has more than 500 discussions; no partial reconciliation was applied");
+  if (!complete) {
+    // A sixth, bounded sentinel page distinguishes exactly 500 discussions from overflow without
+    // ever admitting discussion 501 into the authoritative snapshot.
+    const overflow = parseGitLabReviewPageResult(await loadPage(GITLAB_REVIEW_MAX_PAGES + 1), remote, mr);
+    if (overflow.discussionCount > 0) {
+      throw new Error("the merge request has more than 500 discussions; no partial reconciliation was applied");
+    }
+  }
   if (new Set(threads.map((thread) => thread.threadId)).size !== threads.length) {
     throw new Error("GitLab returned duplicate review discussions across pages");
   }
@@ -1799,10 +1853,11 @@ function githubReviewAsForge(sync: GitHubReviewSyncInfo): ForgeReviewSyncInfo {
 async function forgeReviewSync(cwd: string): Promise<ForgeReviewSyncInfo> {
   const remoteUrl = (await git(cwd, ["remote", "get-url", "origin"])).trim();
   const parsed = parseForgeRemote(remoteUrl);
+  const github = parsed?.provider === "github" ? parsed : credentialFreeGitHubRemote(remoteUrl);
+  if (github) return githubReviewAsForge(await githubReviewSync(cwd));
   if (!parsed) throw new Error("the origin remote is not a supported forge repository");
-  if (parsed.provider === "github") return githubReviewAsForge(await githubReviewSync(cwd));
   const readiness = await gitlabReadiness(cwd, parsed);
-  if (!readiness) throw new Error("the origin remote is not a configured GitLab repository");
+  if (!readiness) throw new Error("the origin remote is not a supported GitHub or configured GitLab repository");
   if (!readiness.forge.authenticated) {
     throw new Error(readiness.forge.authenticationError ?? "GitLab authentication is unavailable");
   }
@@ -2509,7 +2564,11 @@ export async function commitAll(cwd: string, message: string, all = false): Prom
   return { sha, message, filesChanged: staged.length, stagedOnly };
 }
 
-export async function openPr(cwd: string, opts: { title: string; body: string; branch?: string }): Promise<GitPrInfo> {
+export async function openPr(
+  cwd: string,
+  opts: { title: string; body: string; branch?: string },
+  runCommand: typeof runContextCommand = runContextCommand,
+): Promise<GitPrInfo> {
   let branch = (await git(cwd, ["rev-parse", "--abbrev-ref", "HEAD"])).trim();
   if (opts.branch && opts.branch.trim() && opts.branch !== branch) {
     await git(cwd, ["branch", "-m", opts.branch.trim()]);
@@ -2517,18 +2576,21 @@ export async function openPr(cwd: string, opts: { title: string; body: string; b
   }
   const remoteUrl = (await git(cwd, ["remote", "get-url", "origin"])).trim();
   const parsed = parseForgeRemote(remoteUrl);
-  const gitlab = parsed && parsed.provider !== "github" ? await gitlabReadiness(cwd, parsed) : null;
+  const github = parsed?.provider === "github" ? parsed : credentialFreeGitHubRemote(remoteUrl);
+  const gitlab = !github && parsed && parsed.provider !== "github"
+    ? await gitlabReadiness(cwd, parsed, runCommand)
+    : null;
   await git(cwd, ["push", "-u", "origin", branch]);
 
-  if (parsed?.provider === "github") {
+  if (github) {
     // Prefer a real PR via gh; fall back to a prefilled compare URL if gh is absent or unauthenticated.
-    const gh = await tryGhPr(cwd, opts.title, opts.body, branch);
+    const gh = await tryGhPr(cwd, opts.title, opts.body, branch, github, runCommand);
     if (gh) return {
       url: gh, branch, pushed: true, createdWithGh: true,
       provider: "github", kind: "pull_request", created: true,
     };
     return {
-      url: await compareUrl(cwd, branch), branch, pushed: true, createdWithGh: false,
+      url: await compareUrl(cwd, branch, github), branch, pushed: true, createdWithGh: false,
       provider: "github", kind: "pull_request", created: false,
       notice: "Only the branch was pushed. Authenticate the GitHub CLI to create the pull request here.",
     };
@@ -2553,8 +2615,15 @@ export async function openPr(cwd: string, opts: { title: string; body: string; b
         creation.error ?? "Only the branch was pushed. Open the prefilled GitLab page to create the merge request.",
     };
   }
+  // Legacy behavior let gh resolve unknown hosts itself. Retain it for GitHub Enterprise while
+  // validating any returned PR URL against the credential-free origin identity when available.
+  const gh = await tryGhPr(cwd, opts.title, opts.body, branch, parsed, runCommand);
+  if (gh) return {
+    url: gh, branch, pushed: true, createdWithGh: true,
+    provider: "github", kind: "pull_request", created: true,
+  };
   return {
-    url: remoteUrl || "(no forge remote configured)",
+    url: safeRemoteFallback(remoteUrl, parsed),
     branch,
     pushed: true,
     createdWithGh: false,
@@ -2861,21 +2930,28 @@ async function assertGitRepository(cwd: string): Promise<void> {
   }
 }
 
-async function tryGhPr(cwd: string, title: string, body: string, branch: string): Promise<string | null> {
+async function tryGhPr(
+  cwd: string,
+  title: string,
+  body: string,
+  branch: string,
+  remote: ForgeRemote | null = null,
+  runCommand: typeof runContextCommand = runContextCommand,
+): Promise<string | null> {
   try {
     const context = executionContext.getStore() ?? { kind: "native" as const };
-    const { stdout } = await runContextCommand(context, "gh", ["pr", "create", "--title", title, "--body", body, "--head", branch], {
+    const { stdout } = await runCommand(context, "gh", ["pr", "create", "--title", title, "--body", body, "--head", branch], {
       cwd,
       timeoutMs: GH_TIMEOUT_MS,
       maxBuffer: 8 * 1024 * 1024,
     });
-    return pickPrUrl(stdout);
+    return pickPrUrl(stdout, remote);
   } catch (err) {
     // gh missing/unauth, or a PR already exists (gh prints the existing PR URL to
     // stderr). pickPrUrl only matches a real /pull/<n> URL, so a docs/login/error
     // URL won't be misread as a created PR.
     const e = err as { stderr?: string; stdout?: string; message?: string };
-    return pickPrUrl(`${e.stderr ?? ""}\n${e.stdout ?? ""}\n${e.message ?? ""}`);
+    return pickPrUrl(`${e.stderr ?? ""}\n${e.stdout ?? ""}\n${e.message ?? ""}`, remote);
   }
 }
 
@@ -2932,13 +3008,14 @@ async function defaultBaseRef(cwd: string): Promise<string | null> {
   return null;
 }
 
-async function compareUrl(cwd: string, branch: string): Promise<string> {
+async function compareUrl(cwd: string, branch: string, knownRemote?: ForgeRemote): Promise<string> {
   const remote = (await gitSoft(cwd, ["remote", "get-url", "origin"])).trim();
-  const slug = githubSlug(remote);
+  const slug = knownRemote?.provider === "github" ? knownRemote.project : githubSlug(remote);
   if (!slug) return remote || "(no GitHub remote configured)";
   const baseRef = (await defaultBaseRef(cwd)) ?? "origin/main";
   const base = baseRef.replace(/^origin\//, "");
-  return `https://github.com/${slug}/compare/${base}...${encodeURIComponent(branch)}?expand=1`;
+  const webUrl = knownRemote?.provider === "github" ? knownRemote.webUrl : `https://github.com/${slug}`;
+  return `${webUrl}/compare/${base}...${encodeURIComponent(branch)}?expand=1`;
 }
 
 async function gitlabCompareUrl(

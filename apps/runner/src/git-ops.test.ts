@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import type { AgentContext } from "@wollipog/protocol";
 import {
   anchorForkRef,
   anchorTurnRef,
@@ -12,6 +13,7 @@ import {
   githubSlug,
   gitLabMergeRequestCreateArgs,
   gitlabProject,
+  gitlabReadiness,
   gitDiff,
   gitStatus,
   hunkIsStaged,
@@ -21,6 +23,7 @@ import {
   markStagedHunks,
   MAX_GIT_STATUS_FILES,
   mapWithConcurrency,
+  openPr,
   parseDiff,
   parseGitHubReviewPage,
   parseGitLabMergeRequest,
@@ -30,7 +33,6 @@ import {
   parsePorcelainCategories,
   parseRevListPair,
   pickPrUrl,
-  pickMergeRequestUrl,
   readTurnRef,
   resolveGitActionExecution,
   runGitAction,
@@ -555,6 +557,9 @@ test("parseForgeRemote strictly classifies hosted forges and preserves GitLab su
   assert.deepEqual(parseForgeRemote("ssh://git@gitlab.example.test/group/repo.git"), {
     provider: null, host: "gitlab.example.test", project: "group/repo", webUrl: "https://gitlab.example.test/group/repo",
   });
+  assert.deepEqual(parseForgeRemote("ssh://git@gitlab.example.test:2222/group/repo.git"), {
+    provider: null, host: "gitlab.example.test", project: "group/repo", webUrl: "https://gitlab.example.test/group/repo",
+  });
   assert.equal(gitlabProject("ssh://git@gitlab.example.test/group/repo.git", "gitlab.example.test")?.provider, "gitlab");
   assert.equal(
     parseForgeRemote("https://gitlab.com/group/%23repo.git")?.webUrl,
@@ -570,14 +575,39 @@ test("parseForgeRemote strictly classifies hosted forges and preserves GitLab su
   ]) assert.equal(parseForgeRemote(unsafe), null, unsafe);
 });
 
-test("GitLab merge-request URLs are accepted only for the exact remote identity", () => {
-  const remote = parseForgeRemote("https://gitlab.com/group/repo.git")!;
-  assert.equal(
-    pickMergeRequestUrl("created https://gitlab.com/group/repo/-/merge_requests/17", remote),
-    "https://gitlab.com/group/repo/-/merge_requests/17",
-  );
-  assert.equal(pickMergeRequestUrl("https://gitlab.com/group/other/-/merge_requests/17", remote), null);
-  assert.equal(pickMergeRequestUrl("https://gitlab.com.evil.test/group/repo/-/merge_requests/17", remote), null);
+test("GitLab readiness proves self-managed configuration locally before exact-host auth", async () => {
+  const remote = parseForgeRemote("ssh://git@gitlab.example.test/team/repo.git")!;
+  const unconfiguredCalls: string[][] = [];
+  assert.equal(await gitlabReadiness("/repo", remote, async (_context, command, args) => {
+    assert.equal(command, "glab");
+    unconfiguredCalls.push(args);
+    return { stdout: "", stderr: "" };
+  }), null);
+  assert.deepEqual(unconfiguredCalls, [[
+    "config", "get", "api_protocol", "--host", "gitlab.example.test", "--global",
+  ]], "an unconfigured generic host never reaches auth status");
+
+  const configuredCalls: string[][] = [];
+  const configured = await gitlabReadiness("/repo", remote, async (_context, command, args) => {
+    assert.equal(command, "glab");
+    configuredCalls.push(args);
+    return { stdout: args[0] === "config" ? "https\n" : "", stderr: "" };
+  });
+  assert.equal(configured?.forge.authenticated, true);
+  assert.equal(configured?.remote.provider, "gitlab");
+  assert.deepEqual(configuredCalls, [
+    ["config", "get", "api_protocol", "--host", "gitlab.example.test", "--global"],
+    ["auth", "status", "--hostname", "gitlab.example.test"],
+  ]);
+
+  const hosted = parseForgeRemote("https://gitlab.com/team/repo.git")!;
+  const hostedCalls: string[][] = [];
+  const hostedResult = await gitlabReadiness("/repo", hosted, async (_context, _command, args) => {
+    hostedCalls.push(args);
+    throw Object.assign(new Error("not authenticated"), { stderr: "not authenticated" });
+  });
+  assert.equal(hostedResult?.forge.authenticated, false);
+  assert.deepEqual(hostedCalls, [["auth", "status", "--hostname", "gitlab.com"]]);
 });
 
 test("forgeSummary preserves legacy gh discovery for enterprise and non-origin remotes", async () => {
@@ -724,6 +754,15 @@ test("GitLab review pagination returns only a complete bounded snapshot", async 
     )),
     /more than 500 discussions/,
   );
+  const exactCalls: number[] = [];
+  const exactLimit = await loadGitLabReviewThreads(configured, mr, async (page) => {
+    exactCalls.push(page);
+    return JSON.stringify(page <= 5
+      ? Array.from({ length: 100 }, (_, index) => discussion((page - 1) * 100 + index))
+      : []);
+  });
+  assert.equal(exactLimit.length, 500);
+  assert.deepEqual(exactCalls, [1, 2, 3, 4, 5, 6]);
   await assert.rejects(
     loadGitLabReviewThreads(configured, mr, async (page) => JSON.stringify(
       page === 1 ? Array.from({ length: 100 }, (_, index) => discussion(index)) : [discussion(0)],
@@ -742,6 +781,47 @@ test("pickPrUrl finds a pull URL anywhere in gh output", () => {
     pickPrUrl("a pull request for branch already exists:\nhttps://github.com/o/r/pull/3"),
     "https://github.com/o/r/pull/3",
   );
+  const enterprise = parseForgeRemote("https://github.example.test/o/r.git")!;
+  assert.equal(
+    pickPrUrl("https://github.example.test/o/r/pull/4", enterprise),
+    "https://github.example.test/o/r/pull/4",
+  );
+  assert.equal(pickPrUrl("https://evil.example/o/r/pull/4", enterprise), null);
+});
+
+test("openPr preserves gh creation for enterprise and credentialed GitHub remotes", async (t) => {
+  t.after(() => setGitRunnerForTests());
+  let remote = "https://github.example.test/team/repo.git";
+  setGitRunnerForTests(async (_cwd, args) => {
+    if (args.join(" ") === "rev-parse --abbrev-ref HEAD") return "feature\n";
+    if (args.join(" ") === "remote get-url origin") return `${remote}\n`;
+    if (args[0] === "push") return "";
+    throw new Error(`unexpected git command: ${args.join(" ")}`);
+  });
+  const commands: Array<{ command: string; args: string[] }> = [];
+  const runCommand = async (_context: AgentContext, command: string, args: string[]) => {
+    commands.push({ command, args });
+    if (command === "glab") return { stdout: "", stderr: "" };
+    return {
+      stdout: remote.includes("github.example.test")
+        ? "https://github.example.test/team/repo/pull/17\n"
+        : "https://github.com/team/repo/pull/18\n",
+      stderr: "",
+    };
+  };
+
+  const enterprise = await openPr("/repo", { title: "Enterprise", body: "" }, runCommand);
+  assert.equal(enterprise.url, "https://github.example.test/team/repo/pull/17");
+  assert.equal(enterprise.created, true);
+  assert.deepEqual(commands.map(({ command }) => command), ["glab", "gh"]);
+
+  commands.length = 0;
+  remote = "https://secret-token@github.com/team/repo.git";
+  const credentialed = await openPr("/repo", { title: "Hosted", body: "" }, runCommand);
+  assert.equal(credentialed.url, "https://github.com/team/repo/pull/18");
+  assert.equal(credentialed.created, true);
+  assert.deepEqual(commands.map(({ command }) => command), ["gh"]);
+  assert.equal(JSON.stringify(credentialed).includes("secret-token"), false);
 });
 
 test("isLinkedWorktreeGitDir distinguishes a linked worktree from the main repo", () => {

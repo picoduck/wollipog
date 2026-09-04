@@ -5,8 +5,8 @@ discussions with **Sync GitHub** or **Sync GitLab**. Both operations are read-on
 toward the forge: Wollipog never posts, edits, resolves, or dismisses a remote comment.
 
 GitLab.com repositories are detected from exact SSH or HTTP(S) remote hosts. A self-managed GitLab
-host becomes active only when local `glab` configuration contains that exact host; Wollipog checks
-that non-secret configuration before running `glab auth status --hostname <host>`, so it does not
+host becomes active only when global `glab` configuration contains that exact host; Wollipog checks
+that non-secret host-scoped configuration before running `glab auth status --hostname <host>`, so it does not
 probe a generic Git server over the network. Install and authenticate `glab` in the same Machine
 context as the session (`glab auth login --hostname <host>`). Native and WSL sessions deliberately
 do not share CLI or authentication assumptions.

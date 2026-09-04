@@ -83,9 +83,12 @@ export function validateForgeReviewSync(input: unknown): input is ForgeReviewSyn
   const expectedPath = value.provider === "github"
     ? `/${value.project}/pull/${value.changeRequestNumber}`
     : `/${value.project}/-/merge_requests/${value.changeRequestNumber}`;
+  const pathMatches = value.provider === "github"
+    ? requestUrl.pathname.toLowerCase() === expectedPath.toLowerCase()
+    : requestUrl.pathname === expectedPath;
   if (!new Set(["http:", "https:"]).has(requestUrl.protocol) || requestUrl.username || requestUrl.password ||
       requestUrl.host.toLowerCase() !== value.host ||
-      requestUrl.pathname !== expectedPath || requestUrl.search || requestUrl.hash ||
+      !pathMatches || requestUrl.search || requestUrl.hash ||
       (value.provider === "github" && (value.host !== "github.com" || requestUrl.protocol !== "https:"))) return false;
   const ids = new Set<string>();
   for (const thread of value.threads) {
