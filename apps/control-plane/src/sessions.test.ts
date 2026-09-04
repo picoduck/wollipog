@@ -11262,3 +11262,42 @@ test("run member sessions persist the run's checkpoints", () => {
   assert.ok(run.ok && run.data, run.error);
   assert.deepEqual(db.getSession(run.data!.sessions[0]!.id)!.costCheckpointsUsd, [0.5, 2]);
 });
+
+test("direct and pre-staged workflow members persist and enforce the run's checkpoints", () => {
+  for (const path of ["direct", "pre-staged"] as const) {
+    const { db, svc } = makeHarness();
+    const delivery = path === "pre-staged" ? {
+      runId: "r_checkpoint_workflow",
+      workflowInstanceId: "wfi_checkpoint_workflow",
+      memberSessionId: (index: number) => `s_checkpoint_workflow_${index}`,
+      stage(_plan: PreStagedDeliveryPlan) {},
+      activate(_plan: PreStagedDeliveryPlan) {},
+    } : undefined;
+    const created = svc.createWorkflowRun({
+      runnerId: RUNNER_ID,
+      workspaceId: WORKSPACE_ID,
+      workflowId: "builtin:build-review",
+      task: `Check ${path} workflow checkpoints`,
+      agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID },
+      config: { costCheckpointsUsd: [0.5, 2] },
+    }, { kind: "human", id: "device-1" }, delivery);
+
+    assert.ok(created.ok && created.data, `${path}: ${created.error}`);
+    assert.equal(created.data.sessions.length, 2, `${path}: expected both workflow members`);
+    for (const member of created.data.sessions) {
+      assert.deepEqual(db.getSession(member.id)!.costCheckpointsUsd, [0.5, 2],
+        `${path}: ${member.agentId} lost the workflow checkpoints`);
+      db.appendEvent(member.id, { kind: "token_usage", inputTokens: 1, costUsd: 0.75 }, Date.now(), {
+        accrueUsage: true,
+      });
+      svc.onSessionStatus(member.id, "idle");
+      const parked = db.getSession(member.id)!;
+      assert.equal(parked.status, "input_required", `${path}: ${member.agentId} did not park`);
+      assert.equal(parked.pendingApproval?.kind, "cost_checkpoint",
+        `${path}: ${member.agentId} did not show a checkpoint card`);
+      assert.match(parked.pendingApproval?.title ?? "", /\$0\.75 of \$0\.50/,
+        `${path}: ${member.agentId} did not stop at the first checkpoint`);
+    }
+    db.close();
+  }
+});
