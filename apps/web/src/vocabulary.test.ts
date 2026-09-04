@@ -84,13 +84,16 @@ const EXPECTED_PLACEHOLDERS: ReadonlyArray<[string, string]> = [
   ["./components/InboxView.tsx", "Search sessions"],
   ["./components/ProjectsView.tsx", "Search projects"],
   ["./components/ReviewPanel.tsx", "PR title"],
+  ["./components/ReviewPanel.tsx", "MR title"],
   ["./components/ReviewPanel.tsx", "PR description (optional)"],
+  ["./components/ReviewPanel.tsx", "MR description (optional)"],
 ];
 
 test("known placeholders read as hint text, not labels", () => {
   for (const [path, expected] of EXPECTED_PLACEHOLDERS) {
     const source = read(path);
-    assert.ok(source.includes(`placeholder="${expected}"`),
+    const escaped = expected.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+    assert.match(source, new RegExp(`placeholder=(?:"${escaped}"|\\{[^}\\n]*"${escaped}"[^}\\n]*\\})`, "u"),
       `${path} should carry the placeholder "${expected}"`);
   }
 });

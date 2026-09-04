@@ -13,6 +13,7 @@ import type {
   PendingApproval,
   RunnerMetadata,
   ReviewFinding,
+  ForgeReviewSyncInfo,
   GitHubReviewSyncInfo,
   SessionConfig,
   SessionSnapshot,
@@ -3938,6 +3939,83 @@ test("GitHub review reconciliation is idempotent, remote-owned, and dismisses on
     imported: 0, updated: 0, resolved: 0, reopened: 0, dismissedMissing: 1,
   });
   assert.equal(db.listReviewFindings("sess-1")[0]?.status, "dismissed");
+});
+
+test("GitLab review reconciliation isolates projects, preserves provenance, and reopens remotely", () => {
+  const db = withRunner();
+  db.createSession(newSession());
+  const sync = {
+    provider: "gitlab",
+    host: "gitlab.example.test",
+    project: "team/sub/repo",
+    changeRequestNumber: 19,
+    changeRequestUrl: "https://gitlab.example.test/team/sub/repo/-/merge_requests/19",
+    changeRequestHeadOid: "a".repeat(40),
+    changeRequestBaseOid: "b".repeat(40),
+    localHeadOid: "a".repeat(40),
+    diffHash: "d".repeat(64),
+    synchronizedAt: 2_000,
+    threads: [{
+      threadId: "discussion-1", commentId: 101,
+      url: "https://gitlab.example.test/team/sub/repo/-/merge_requests/19#note_101",
+      path: "src/a.ts", side: "right", line: 4, body: "Remote issue", author: "reviewer",
+      createdAt: 1_000, updatedAt: 1_100, commitId: "a".repeat(40), subjectType: "line", resolved: false, outdated: false,
+    }],
+  } satisfies ForgeReviewSyncInfo;
+  assert.deepEqual(db.reconcileForgeReviewFindings("sess-1", sync), {
+    imported: 1, updated: 0, resolved: 0, reopened: 0, dismissedMissing: 0,
+  });
+  let finding = db.listReviewFindings("sess-1")[0]!;
+  assert.equal(finding.source, "gitlab");
+  assert.equal(finding.diffHash, sync.diffHash);
+  assert.deepEqual(finding.remote, {
+    provider: "gitlab", repository: sync.project, pullRequestNumber: 19, threadId: "discussion-1",
+    commentId: 101, url: sync.threads[0].url, commitId: "a".repeat(40), outdated: false,
+    subjectType: "line", synchronizedAt: 2_000,
+  });
+  assert.deepEqual(db.reconcileForgeReviewFindings("sess-1", {
+    ...sync, synchronizedAt: 2_200, threads: [{ ...sync.threads[0], resolved: true, updatedAt: 2_100 }],
+  }), { imported: 0, updated: 1, resolved: 1, reopened: 0, dismissedMissing: 0 });
+  assert.deepEqual(db.reconcileForgeReviewFindings("sess-1", {
+    ...sync, synchronizedAt: 2_400, threads: [{ ...sync.threads[0], resolved: false, outdated: true, updatedAt: 2_300 }],
+  }), { imported: 0, updated: 1, resolved: 0, reopened: 1, dismissedMissing: 0 });
+  finding = db.listReviewFindings("sess-1")[0]!;
+  assert.equal(finding.status, "open");
+  assert.notEqual(finding.diffHash, sync.diffHash, "outdated positions remain remote-only");
+});
+
+test("GitLab review findings survive a control-plane reconnect", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-gitlab-review-"));
+  const path = join(root, "control-plane.db");
+  try {
+    const initial = ControlPlaneDb.open(path);
+    initial.registerRunner(meta(), 500);
+    initial.createSession(newSession());
+    initial.reconcileForgeReviewFindings("sess-1", {
+      provider: "gitlab", host: "gitlab.com", project: "team/repo", changeRequestNumber: 7,
+      changeRequestUrl: "https://gitlab.com/team/repo/-/merge_requests/7",
+      changeRequestHeadOid: "a".repeat(40), changeRequestBaseOid: "b".repeat(40),
+      localHeadOid: "a".repeat(40), diffHash: "d".repeat(64), synchronizedAt: 2_000,
+      threads: [{
+        threadId: "discussion-7", commentId: 107,
+        url: "https://gitlab.com/team/repo/-/merge_requests/7#note_107",
+        path: "__remote__/gitlab-discussion-107", side: "left", line: 1,
+        body: "General review", author: "reviewer", createdAt: 1_000, updatedAt: 1_100,
+        commitId: "a".repeat(40), subjectType: "remote", resolved: false, outdated: true,
+      }],
+    });
+    initial.close();
+
+    const reconnected = ControlPlaneDb.open(path);
+    const [finding] = reconnected.listReviewFindings("sess-1");
+    assert.equal(finding?.source, "gitlab");
+    assert.equal(finding?.remote?.provider, "gitlab");
+    assert.equal(finding?.remote?.subjectType, "remote");
+    assert.equal(reconnected.reviewFindingSummary("sess-1").completion, "blocked");
+    reconnected.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("createRun + run members reflected in runView via getRun/listRuns", () => {

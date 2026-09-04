@@ -126,6 +126,8 @@ import {
   type ReviewFinding,
   type ReviewFindingStatus,
   type ReviewFindingSummary,
+  type ForgeReviewReconciliation,
+  type ForgeReviewSyncInfo,
   type GitHubReviewReconciliation,
   type GitHubReviewSyncInfo,
   type RunView,
@@ -882,7 +884,7 @@ CREATE TABLE IF NOT EXISTS review_findings (
   CHECK (severity IN ('blocker','major','minor','nit')),
   CHECK (required IN (0,1)),
   CHECK (status IN ('open','sent','resolved','dismissed')),
-  CHECK (source IN ('local','github'))
+  CHECK (source IN ('local','github','gitlab'))
 );
 CREATE INDEX IF NOT EXISTS idx_review_findings_session
   ON review_findings(session_id, status, created_at, finding_id);
@@ -2390,7 +2392,7 @@ interface ReviewFindingRow {
   resolved_at: number | null;
   resolved_by_kind: ReviewFinding["author"]["kind"] | null;
   resolved_by_id: string | null;
-  remote_provider: "github" | null;
+  remote_provider: "github" | "gitlab" | null;
   remote_repository: string | null;
   remote_pr_number: number | null;
   remote_thread_id: string | null;
@@ -2398,7 +2400,7 @@ interface ReviewFindingRow {
   remote_url: string | null;
   remote_commit_id: string | null;
   remote_outdated: number | null;
-  remote_subject_type: "line" | "file" | null;
+  remote_subject_type: "line" | "file" | "remote" | null;
   remote_synchronized_at: number | null;
 }
 
@@ -3313,6 +3315,38 @@ export class ControlPlaneDb {
         db.exec(`ALTER TABLE session_command_invocations ADD COLUMN ${column}`);
       } catch {
         /* column already present */
+      }
+    }
+    const reviewFindingSql = (db.prepare(
+      "SELECT sql FROM sqlite_master WHERE type='table' AND name='review_findings'",
+    ).get() as { sql?: string } | undefined)?.sql ?? "";
+    if (!reviewFindingSql.includes("'gitlab'")) {
+      db.exec("BEGIN");
+      try {
+        db.exec(`CREATE TABLE review_findings_v106 (
+          finding_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, scope TEXT NOT NULL,
+          diff_hash TEXT NOT NULL, file_path TEXT NOT NULL, side TEXT NOT NULL, line INTEGER NOT NULL,
+          body TEXT NOT NULL, severity TEXT NOT NULL, required INTEGER NOT NULL, status TEXT NOT NULL,
+          source TEXT NOT NULL, author_kind TEXT NOT NULL, author_id TEXT, created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL, sent_at INTEGER, resolved_at INTEGER, resolved_by_kind TEXT,
+          resolved_by_id TEXT, remote_provider TEXT, remote_repository TEXT, remote_pr_number INTEGER,
+          remote_thread_id TEXT, remote_comment_id INTEGER, remote_url TEXT, remote_commit_id TEXT,
+          remote_outdated INTEGER, remote_subject_type TEXT, remote_synchronized_at INTEGER,
+          FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+          CHECK (scope IN ('uncommitted','all_branch','last_turn')),
+          CHECK (side IN ('left','right')), CHECK (line > 0),
+          CHECK (severity IN ('blocker','major','minor','nit')), CHECK (required IN (0,1)),
+          CHECK (status IN ('open','sent','resolved','dismissed')),
+          CHECK (source IN ('local','github','gitlab'))
+        );
+        INSERT INTO review_findings_v106 SELECT * FROM review_findings;
+        DROP TABLE review_findings;
+        ALTER TABLE review_findings_v106 RENAME TO review_findings;
+        CREATE INDEX idx_review_findings_session ON review_findings(session_id, status, created_at, finding_id);
+        COMMIT`);
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
       }
     }
     db.exec(
@@ -14531,12 +14565,12 @@ export class ControlPlaneDb {
       ...(row.resolved_by_kind
         ? { resolvedBy: { kind: row.resolved_by_kind, ...(row.resolved_by_id ? { id: row.resolved_by_id } : {}) } }
         : {}),
-      ...(row.remote_provider === "github" && row.remote_repository && row.remote_pr_number != null &&
+      ...((row.remote_provider === "github" || row.remote_provider === "gitlab") && row.remote_repository && row.remote_pr_number != null &&
           row.remote_thread_id && row.remote_comment_id != null && row.remote_url && row.remote_commit_id &&
           row.remote_outdated != null && row.remote_subject_type && row.remote_synchronized_at != null
         ? {
             remote: {
-              provider: "github" as const,
+              provider: row.remote_provider,
               repository: row.remote_repository,
               pullRequestNumber: row.remote_pr_number,
               threadId: row.remote_thread_id,
@@ -14577,26 +14611,43 @@ export class ControlPlaneDb {
     return finding;
   }
 
-  /** Reconcile one complete GitHub PR review-thread snapshot. Missing rows are dismissed only
-   * after a successful authoritative read; transport/parser failures never reach this method. */
+  /** Legacy v51 adapter retained for mixed-version GitHub runners and web clients. */
   reconcileGitHubReviewFindings(sessionId: string, sync: GitHubReviewSyncInfo): GitHubReviewReconciliation {
+    return this.reconcileForgeReviewFindings(sessionId, {
+      provider: "github",
+      host: "github.com",
+      project: sync.repository,
+      changeRequestNumber: sync.pullRequestNumber,
+      changeRequestUrl: sync.pullRequestUrl,
+      changeRequestHeadOid: sync.pullRequestHeadOid,
+      changeRequestBaseOid: sync.pullRequestBaseOid,
+      localHeadOid: sync.localHeadOid,
+      diffHash: sync.diffHash,
+      threads: sync.threads,
+      synchronizedAt: sync.synchronizedAt,
+    });
+  }
+
+  /** Reconcile one complete forge review snapshot. Missing rows are dismissed only after a
+   * successful authoritative read; transport/parser failures never reach this method. */
+  reconcileForgeReviewFindings(sessionId: string, sync: ForgeReviewSyncInfo): ForgeReviewReconciliation {
     const existingRows = this.stmt(
       `SELECT * FROM review_findings
-       WHERE session_id=? AND remote_provider='github' AND remote_repository=? AND remote_pr_number=?`,
-    ).all(sessionId, sync.repository, sync.pullRequestNumber) as unknown as ReviewFindingRow[];
+       WHERE session_id=? AND remote_provider=? AND remote_repository=? AND remote_pr_number=?`,
+    ).all(sessionId, sync.provider, sync.project, sync.changeRequestNumber) as unknown as ReviewFindingRow[];
     const existingByThread = new Map(existingRows.map((row) => [row.remote_thread_id!, row]));
     const seen = new Set<string>();
-    const counts: GitHubReviewReconciliation = { imported: 0, updated: 0, resolved: 0, reopened: 0, dismissedMissing: 0 };
+    const counts: ForgeReviewReconciliation = { imported: 0, updated: 0, resolved: 0, reopened: 0, dismissedMissing: 0 };
 
     this.db.exec("BEGIN");
     try {
       for (const thread of sync.threads) {
         seen.add(thread.threadId);
         const existing = existingByThread.get(thread.threadId);
-        const anchorCurrent = thread.subjectType === "line" && !thread.outdated && sync.localHeadOid === sync.pullRequestHeadOid;
+        const anchorCurrent = thread.subjectType === "line" && !thread.outdated && sync.localHeadOid === sync.changeRequestHeadOid;
         const diffHash = anchorCurrent
           ? sync.diffHash
-          : createHash("sha256").update(`github:${sync.repository}:${sync.pullRequestNumber}:${thread.threadId}:${thread.commitId}`).digest("hex");
+          : createHash("sha256").update(`${sync.provider}:${sync.host}:${sync.project}:${sync.changeRequestNumber}:${thread.threadId}:${thread.commitId}`).digest("hex");
         const desiredStatus: ReviewFindingStatus = thread.resolved
           ? "resolved"
           : existing?.status === "sent" ? "sent" : "open";
@@ -14614,15 +14665,15 @@ export class ControlPlaneDb {
             severity: "major",
             required: true,
             status: desiredStatus,
-            source: "github",
+            source: sync.provider,
             author: { kind: "human", id: thread.author },
             createdAt: thread.createdAt,
             updatedAt: now,
-            ...(thread.resolved ? { resolvedAt: thread.updatedAt, resolvedBy: { kind: "system", id: "github" } as const } : {}),
+            ...(thread.resolved ? { resolvedAt: thread.updatedAt, resolvedBy: { kind: "system", id: sync.provider } as const } : {}),
             remote: {
-              provider: "github",
-              repository: sync.repository,
-              pullRequestNumber: sync.pullRequestNumber,
+              provider: sync.provider,
+              repository: sync.project,
+              pullRequestNumber: sync.changeRequestNumber,
               threadId: thread.threadId,
               commentId: thread.commentId,
               url: thread.url,
@@ -14653,12 +14704,12 @@ export class ControlPlaneDb {
                sent_at=CASE WHEN ?='sent' THEN sent_at ELSE NULL END,
                resolved_at=CASE WHEN ?='resolved' THEN ? ELSE NULL END,
                resolved_by_kind=CASE WHEN ?='resolved' THEN 'system' ELSE NULL END,
-               resolved_by_id=CASE WHEN ?='resolved' THEN 'github' ELSE NULL END,
+               resolved_by_id=CASE WHEN ?='resolved' THEN ? ELSE NULL END,
                remote_comment_id=?, remote_url=?, remote_commit_id=?, remote_outdated=?, remote_subject_type=?, remote_synchronized_at=?
              WHERE finding_id=?`,
           ).run(
             diffHash, thread.path, thread.side, thread.line, thread.body, desiredStatus, thread.author,
-            effectiveUpdatedAt, desiredStatus, desiredStatus, thread.updatedAt, desiredStatus, desiredStatus,
+            effectiveUpdatedAt, desiredStatus, desiredStatus, thread.updatedAt, desiredStatus, desiredStatus, sync.provider,
             thread.commentId, thread.url, thread.commitId, thread.outdated ? 1 : 0, thread.subjectType, sync.synchronizedAt,
             existing.finding_id,
           );
@@ -14676,9 +14727,9 @@ export class ControlPlaneDb {
         this.stmt(
           `UPDATE review_findings SET status='dismissed', required=0, sent_at=NULL,
              updated_at=MAX(updated_at + 1, ?), resolved_at=MAX(updated_at + 1, ?),
-             resolved_by_kind='system', resolved_by_id='github-sync', remote_synchronized_at=?
+             resolved_by_kind='system', resolved_by_id=?, remote_synchronized_at=?
            WHERE finding_id=?`,
-        ).run(sync.synchronizedAt, sync.synchronizedAt, sync.synchronizedAt, existing.finding_id);
+        ).run(sync.synchronizedAt, sync.synchronizedAt, `${sync.provider}-sync`, sync.synchronizedAt, existing.finding_id);
         counts.dismissedMissing += 1;
       }
       this.db.exec("COMMIT");

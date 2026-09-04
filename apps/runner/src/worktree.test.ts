@@ -37,7 +37,7 @@ function initRepoWithOrigin(root: string): { repo: string; remote: string } {
   return { repo, remote };
 }
 
-test("pull request lifecycle parsing requires an exact GitHub PR URL and terminal vocabulary", () => {
+test("change-request lifecycle parsing requires an exact forge URL and terminal vocabulary", () => {
   const url = "https://github.com/picoduck/wollipog/pull/701";
   assert.equal(parseWorktreePullRequestState(JSON.stringify({ url, state: "OPEN" }), url), "open");
   assert.equal(parseWorktreePullRequestState(JSON.stringify({ url, state: "MERGED" }), url), "merged");
@@ -46,6 +46,14 @@ test("pull request lifecycle parsing requires an exact GitHub PR URL and termina
   assert.equal(parseWorktreePullRequestState(JSON.stringify({ url: `${url}/files`, state: "MERGED" }), url), null);
   assert.equal(parseWorktreePullRequestState(JSON.stringify({ url, state: "MERGED" }), "javascript:alert(1)"), null);
   assert.equal(parseWorktreePullRequestState("not json", url), null);
+
+  const gitlab = "https://gitlab.example.test/team/sub/repo/-/merge_requests/19";
+  assert.equal(parseWorktreePullRequestState(JSON.stringify({ web_url: gitlab, state: "opened" }), gitlab), "open");
+  assert.equal(parseWorktreePullRequestState(JSON.stringify({ web_url: gitlab, state: "merged" }), gitlab), "merged");
+  assert.equal(parseWorktreePullRequestState(JSON.stringify({ web_url: gitlab, state: "closed" }), gitlab), "closed");
+  assert.equal(parseWorktreePullRequestState(JSON.stringify({ web_url: `${gitlab}.evil.test`, state: "merged" }), gitlab), null);
+  assert.equal(parseWorktreePullRequestState(JSON.stringify({ web_url: gitlab, state: "merged" }),
+    "https://token@gitlab.example.test/team/sub/repo/-/merge_requests/19"), null);
 });
 
 test("git preflight distinguishes a non-repo from a broken context/path", { skip: !haveGit() }, async () => {

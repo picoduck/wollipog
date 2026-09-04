@@ -50,6 +50,8 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   type GovernanceAuditStage,
   type GovernancePolicy,
   type GitSummaryInfo,
+  type ForgeReviewReconciliation,
+  type ForgeReviewSyncInfo,
   type GitHubReviewSyncInfo,
   type GitHubReviewReconciliation,
   type InvokeSessionCommandRequest,
@@ -1973,6 +1975,20 @@ export class SessionsService {
   }> {
     if (!this.db.getSession(sessionId)) return fail("session not found", 404);
     const reconciliation = this.db.reconcileGitHubReviewFindings(sessionId, sync);
+    return ok({
+      findings: this.db.listReviewFindings(sessionId),
+      summary: this.db.reviewFindingSummary(sessionId),
+      reconciliation,
+    });
+  }
+
+  reconcileForgeReviewFindings(sessionId: string, sync: ForgeReviewSyncInfo): ServiceResult<{
+    findings: ReviewFinding[];
+    summary: ReviewFindingsResponse["summary"];
+    reconciliation: ForgeReviewReconciliation;
+  }> {
+    if (!this.db.getSession(sessionId)) return fail("session not found", 404);
+    const reconciliation = this.db.reconcileForgeReviewFindings(sessionId, sync);
     return ok({
       findings: this.db.listReviewFindings(sessionId),
       summary: this.db.reviewFindingSummary(sessionId),

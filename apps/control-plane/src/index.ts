@@ -166,7 +166,7 @@ import {
   parseGitAction,
 } from "./git-route.js";
 import { editorAdvertisesLocation, parseSessionHostAction } from "./host-actions.js";
-import { validateGitHubReviewSync } from "./review-findings.js";
+import { validateForgeReviewSync, validateGitHubReviewSync } from "./review-findings.js";
 import { Hub, isRunnerRequestTimeoutError } from "./hub.js";
 import {
   buildRunnerWsUrl,
@@ -3661,14 +3661,16 @@ app.post("/api/sessions/:id/git", async (req, reply) => {
   // capture a partial snapshot and can race the post-turn diff capture.
   const gate = gitActionAllowed(action, session.status);
   if (!gate.ok) return reply.code(409).send({ error: gate.error });
-  if (!["status", "summary", "diff", "github_review_sync"].includes(action.kind)) {
+  if (!["status", "summary", "diff", "github_review_sync", "forge_review_sync"].includes(action.kind)) {
     const reconciliationBlock = svc.podReconciliationMutationError(id);
     if (reconciliationBlock) return reply.code(409).send({ error: reconciliationBlock });
   }
 
   const requestId = randomUUID();
   // Pushing + calling gh takes longer than a quick status read.
-  const timeoutMs = action.kind === "open_pr" || action.kind === "github_review_sync" ? 60_000 : 30_000;
+  const timeoutMs = action.kind === "open_pr" || action.kind === "github_review_sync" || action.kind === "forge_review_sync"
+    ? 60_000
+    : 30_000;
   try {
     const result = await hub.requestFromRunner(
       session.runnerId,
@@ -3706,6 +3708,21 @@ app.post("/api/sessions/:id/git", async (req, reply) => {
       const reconciled = svc.reconcileGitHubReviewFindings(id, result.data.githubReview);
       if (!reconciled.ok || !reconciled.data) {
         return reply.code(reconciled.status).send({ error: reconciled.error ?? "GitHub reviews could not be reconciled" });
+      }
+      const { reconciliation, findings, summary } = reconciled.data;
+      return {
+        ...result.data,
+        reviewFindings: { findings, summary },
+        reviewReconciliation: reconciliation,
+      };
+    }
+    if (action.kind === "forge_review_sync") {
+      if (!validateForgeReviewSync(result.data?.forgeReview)) {
+        return reply.code(502).send({ error: "the runner did not return forge review data — update the runner on this box" });
+      }
+      const reconciled = svc.reconcileForgeReviewFindings(id, result.data.forgeReview);
+      if (!reconciled.ok || !reconciled.data) {
+        return reply.code(reconciled.status).send({ error: reconciled.error ?? "Forge reviews could not be reconciled" });
       }
       const { reconciliation, findings, summary } = reconciled.data;
       return {

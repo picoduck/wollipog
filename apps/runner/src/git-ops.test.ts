@@ -9,20 +9,26 @@ import {
   computeDiffHash,
   extractHunkPatch,
   githubSlug,
+  gitlabProject,
   gitDiff,
   gitStatus,
   hunkIsStaged,
   isLinkedWorktreeGitDir,
   isMissingGitRepositoryError,
+  loadGitLabReviewThreads,
   markStagedHunks,
   MAX_GIT_STATUS_FILES,
   mapWithConcurrency,
   parseDiff,
   parseGitHubReviewPage,
+  parseGitLabMergeRequest,
+  parseGitLabReviewPage,
+  parseForgeRemote,
   parsePorcelain,
   parsePorcelainCategories,
   parseRevListPair,
   pickPrUrl,
+  pickMergeRequestUrl,
   readTurnRef,
   resolveGitActionExecution,
   runGitAction,
@@ -31,6 +37,7 @@ import {
   setGitRunnerForTests,
   stageHunk,
   summarizeCheckRollup,
+  summarizeGitLabPipeline,
   synchronizeCheckpointRefs,
   validatePodReconciliationMetadata,
   withGitExecutionContext,
@@ -537,6 +544,119 @@ test("githubSlug parses ssh and https remotes", () => {
 test("githubSlug returns null for non-github remotes", () => {
   assert.equal(githubSlug("https://gitlab.com/owner/repo.git"), null);
   assert.equal(githubSlug(""), null);
+});
+
+test("parseForgeRemote strictly classifies hosted forges and preserves GitLab subgroups", () => {
+  assert.deepEqual(parseForgeRemote("git@gitlab.com:group/subgroup/repo.git"), {
+    provider: "gitlab", host: "gitlab.com", project: "group/subgroup/repo", webUrl: "https://gitlab.com/group/subgroup/repo",
+  });
+  assert.deepEqual(parseForgeRemote("ssh://git@gitlab.example.test/group/repo.git"), {
+    provider: null, host: "gitlab.example.test", project: "group/repo", webUrl: "https://gitlab.example.test/group/repo",
+  });
+  assert.equal(gitlabProject("ssh://git@gitlab.example.test/group/repo.git", "gitlab.example.test")?.provider, "gitlab");
+  assert.equal(parseForgeRemote("https://notgithub.com/owner/repo.git")?.provider, null);
+  assert.equal(parseForgeRemote("git@github.com.evil.example:owner/repo.git")?.provider, null);
+  for (const unsafe of [
+    "file:///tmp/repo", "../repo", "https://token@gitlab.com/o/r.git",
+    "https://gitlab.com/o/%2e%2e/r.git", "https://gitlab.com/o/r.git?token=secret", "https://gitlab.com/o/r.git#fragment",
+    "https://gitlab.com/o/r%0arepo.git",
+  ]) assert.equal(parseForgeRemote(unsafe), null, unsafe);
+});
+
+test("GitLab merge-request URLs are accepted only for the exact remote identity", () => {
+  const remote = parseForgeRemote("https://gitlab.com/group/repo.git")!;
+  assert.equal(
+    pickMergeRequestUrl("created https://gitlab.com/group/repo/-/merge_requests/17", remote),
+    "https://gitlab.com/group/repo/-/merge_requests/17",
+  );
+  assert.equal(pickMergeRequestUrl("https://gitlab.com/group/other/-/merge_requests/17", remote), null);
+  assert.equal(pickMergeRequestUrl("https://gitlab.com.evil.test/group/repo/-/merge_requests/17", remote), null);
+});
+
+test("GitLab MR and pipeline parsers validate revision and URL provenance", () => {
+  const remote = parseForgeRemote("https://gitlab.com/group/repo.git")!;
+  const value = {
+    iid: 17, title: "Add GitLab", web_url: "https://gitlab.com/group/repo/-/merge_requests/17", state: "opened",
+    sha: "a".repeat(40), diff_refs: { head_sha: "a".repeat(40), base_sha: "b".repeat(40) },
+    head_pipeline: { id: 91, status: "failed", web_url: "https://gitlab.com/group/repo/-/pipelines/91" },
+  };
+  const mr = parseGitLabMergeRequest(value, remote);
+  assert.equal(mr.iid, 17);
+  assert.deepEqual(summarizeGitLabPipeline(mr.pipeline, remote), {
+    failing: 1, pending: 0, passing: 0, failingNames: ["Pipeline #91"],
+    url: "https://gitlab.com/group/repo/-/pipelines/91",
+  });
+  assert.equal(summarizeGitLabPipeline(null, remote), null);
+  assert.deepEqual(
+    summarizeGitLabPipeline({ id: 92, status: "manual", web_url: "https://gitlab.com/group/repo/-/pipelines/92" }, remote),
+    { failing: 0, pending: 1, passing: 0, failingNames: [], url: "https://gitlab.com/group/repo/-/pipelines/92" },
+  );
+  assert.throws(() => parseGitLabMergeRequest({ ...value, web_url: "https://evil.test/group/repo/-/merge_requests/17" }, remote), /invalid merge-request/);
+  assert.throws(() => parseGitLabMergeRequest({ ...value, web_url: "https://token@gitlab.com/group/repo/-/merge_requests/17" }, remote), /invalid merge-request/);
+  assert.throws(() => summarizeGitLabPipeline({ ...value.head_pipeline, web_url: "https://evil.test/pipeline" }, remote), /invalid pipeline/);
+});
+
+test("parseGitLabReviewPage retains exact anchors and marks unpositioned discussions remote-only", () => {
+  const remote = parseForgeRemote("https://gitlab.com/group/repo.git")!;
+  const mr = parseGitLabMergeRequest({
+    iid: 17, title: "Add GitLab", web_url: "https://gitlab.com/group/repo/-/merge_requests/17", state: "opened",
+    sha: "a".repeat(40), diff_refs: { head_sha: "a".repeat(40), base_sha: "b".repeat(40) }, head_pipeline: null,
+  }, remote);
+  const page = parseGitLabReviewPage(JSON.stringify([
+    {
+      id: "discussion-1", resolved: false, notes: [{
+        id: 101, body: "Keep this check", author: { username: "reviewer" },
+        created_at: "2026-09-04T10:00:00Z", updated_at: "2026-09-04T10:01:00Z", system: false,
+        position: { position_type: "text", new_path: "src/a.ts", old_path: "src/a.ts", new_line: 12, old_line: null, head_sha: "a".repeat(40) },
+      }],
+    },
+    {
+      id: "discussion-2", resolved: true, notes: [{
+        id: 102, body: "General discussion", author: { username: "reviewer" },
+        created_at: "2026-09-04T10:00:00Z", updated_at: "2026-09-04T10:02:00Z", system: false,
+      }],
+    },
+  ]), remote, mr);
+  assert.deepEqual(page.map(({ subjectType, path, side, line, resolved, outdated }) => ({ subjectType, path, side, line, resolved, outdated })), [
+    { subjectType: "line", path: "src/a.ts", side: "right", line: 12, resolved: false, outdated: false },
+    { subjectType: "remote", path: "__remote__/gitlab-discussion-102", side: "left", line: 1, resolved: true, outdated: true },
+  ]);
+  assert.throws(() => parseGitLabReviewPage(JSON.stringify([{
+    id: "bad", notes: [{ id: 1, body: "x", author: { username: "u" }, created_at: "bad", updated_at: "bad" }],
+  }]), remote, mr), /invalid review-discussion anchor/);
+});
+
+test("GitLab review pagination returns only a complete bounded snapshot", async () => {
+  const remote = parseForgeRemote("ssh://git@gitlab.example.test/team/sub/repo.git")!;
+  const configured = gitlabProject("ssh://git@gitlab.example.test/team/sub/repo.git", "gitlab.example.test")!;
+  const mr = parseGitLabMergeRequest({
+    iid: 19, title: "Review", web_url: "https://gitlab.example.test/team/sub/repo/-/merge_requests/19", state: "opened",
+    sha: "a".repeat(40), diff_refs: { head_sha: "a".repeat(40), base_sha: "b".repeat(40) }, head_pipeline: null,
+  }, configured);
+  const discussion = (index: number) => ({
+    id: `discussion-${index}`, resolved: false, notes: [{
+      id: 1_000 + index, body: `Finding ${index}`, author: { username: "reviewer" },
+      created_at: "2026-09-04T10:00:00Z", updated_at: "2026-09-04T10:01:00Z", system: false,
+      position: {
+        position_type: "text", new_path: "src/a.ts", old_path: "src/a.ts", new_line: index + 1,
+        old_line: null, head_sha: "a".repeat(40),
+      },
+    }],
+  });
+  const calls: number[] = [];
+  const threads = await loadGitLabReviewThreads(configured, mr, async (page) => {
+    calls.push(page);
+    return JSON.stringify(page === 1 ? Array.from({ length: 100 }, (_, index) => discussion(index)) : [discussion(100)]);
+  });
+  assert.equal(remote.provider, null, "the raw self-managed remote stays generic until configured");
+  assert.deepEqual(calls, [1, 2]);
+  assert.equal(threads.length, 101);
+  await assert.rejects(
+    loadGitLabReviewThreads(configured, mr, async (page) => page === 1
+      ? JSON.stringify(Array.from({ length: 100 }, (_, index) => discussion(index)))
+      : "not-json"),
+    /malformed review data/,
+  );
 });
 
 test("pickPrUrl finds a pull URL anywhere in gh output", () => {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { formatReviewFindingsPrompt, parseBundleReviewFindings, parseCreateReviewFinding, parseUpdateReviewFinding, validateGitHubReviewSync } from "./review-findings.js";
+import { formatReviewFindingsPrompt, parseBundleReviewFindings, parseCreateReviewFinding, parseUpdateReviewFinding, validateForgeReviewSync, validateGitHubReviewSync } from "./review-findings.js";
 
 const create = {
   scope: "uncommitted",
@@ -74,4 +74,26 @@ test("GitHub review snapshots are revalidated at the control-plane trust boundar
   assert.equal(validateGitHubReviewSync({ ...sync, threads: [{ ...sync.threads[0], path: "../secret" }] }), false);
   assert.equal(validateGitHubReviewSync({ ...sync, threads: [sync.threads[0], sync.threads[0]] }), false);
   assert.equal(validateGitHubReviewSync({ ...sync, diffHash: "not-a-hash" }), false);
+});
+
+test("GitLab review snapshots enforce exact self-managed host/project provenance", () => {
+  const sync = {
+    provider: "gitlab", host: "gitlab.example.test", project: "team/sub/repo", changeRequestNumber: 19,
+    changeRequestUrl: "https://gitlab.example.test/team/sub/repo/-/merge_requests/19",
+    changeRequestHeadOid: "a".repeat(40), changeRequestBaseOid: "b".repeat(40),
+    localHeadOid: "a".repeat(40), diffHash: "d".repeat(64), synchronizedAt: 2_000,
+    threads: [{
+      threadId: "discussion-1", commentId: 101,
+      url: "https://gitlab.example.test/team/sub/repo/-/merge_requests/19#note_101",
+      path: "src/a.ts", side: "right", line: 4, body: "Remote issue", author: "reviewer",
+      createdAt: 1_000, updatedAt: 1_100, commitId: "c".repeat(40), subjectType: "line", resolved: false, outdated: false,
+    }],
+  } as const;
+  assert.equal(validateForgeReviewSync(sync), true);
+  assert.equal(validateForgeReviewSync({ ...sync, host: "evil.test" }), false);
+  assert.equal(validateForgeReviewSync({ ...sync, changeRequestUrl: `${sync.changeRequestUrl}.evil.test` }), false);
+  assert.equal(validateForgeReviewSync({ ...sync, changeRequestUrl: "https://token@gitlab.example.test/team/sub/repo/-/merge_requests/19" }), false);
+  assert.equal(validateForgeReviewSync({ ...sync, threads: [{ ...sync.threads[0], url: "https://evil.test/#note_101" }] }), false);
+  assert.equal(validateForgeReviewSync({ ...sync, threads: [{ ...sync.threads[0], subjectType: "remote", path: "__remote__/discussion-101" }] }), true);
+  assert.equal(validateForgeReviewSync({ ...sync, provider: "github", host: "github.com", threads: [{ ...sync.threads[0], subjectType: "remote" }] }), false);
 });

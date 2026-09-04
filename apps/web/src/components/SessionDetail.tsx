@@ -4548,6 +4548,7 @@ function SessionDetailLoaded({
           runnerOnline={runnerOnline}
           runnerProtocolVersion={runner?.protocolVersion}
           git={git}
+          forge={gitSummary.summary?.forge}
           onOpenTerminal={onOpenTerminal}
           onInsertSideChatDraft={insertSideChatDraft}
           onAttachWorkspaceReference={workspaceReferencesSupported ? attachWorkspaceTarget : undefined}

@@ -167,18 +167,24 @@ test("fixChecksPrompt: singular/plural + names woven in", () => {
   assert.match(many, /3 failing checks \(a, b\)\./);
   const nameless = fixChecksPrompt({ failing: 2, pending: 0, passing: 0, failingNames: [], url: null });
   assert.match(nameless, /2 failing checks\. /);
+  const mergeRequest = fixChecksPrompt(
+    { failing: 1, pending: 0, passing: 0, failingNames: [], url: null },
+    "merge_request",
+  );
+  assert.match(mergeRequest, /^The merge request has 1 failing check\./u);
 });
 
-test("sourceKind: github means the HOST is exactly github.com", () => {
+test("sourceKind: hosted forge badges require an exact host", () => {
   assert.equal(sourceKind("git@github.com:o/r.git"), "github");
   assert.equal(sourceKind("https://github.com/o/r"), "github");
-  assert.equal(sourceKind("https://gitlab.com/o/r.git"), "git");
+  assert.equal(sourceKind("https://gitlab.com/o/r.git"), "gitlab");
   assert.equal(sourceKind(null), null);
   assert.equal(sourceKind(undefined), null);
   // Lookalike hosts must not get the GitHub badge.
   assert.equal(sourceKind("https://notgithub.com/o/r"), "git");
   assert.equal(sourceKind("git@mygithub.com:o/r.git"), "git");
   assert.equal(sourceKind("https://github.com.evil.example/o/r"), "git");
+  assert.equal(sourceKind("https://gitlab.com.evil.example/o/r"), "git");
 });
 
 test("remoteHttpUrl: https passes through with .git stripped; scp-ssh converts; junk is null", () => {

@@ -152,6 +152,21 @@ test("change labels require settled Git evidence and never use workflow or lifec
   assert.equal(reviewReadyWithLocalWork?.label, "Ready for Review");
   assert.equal(reviewReadyWithLocalWork?.supplement?.label, "Uncommitted Changes");
   assert.match(reviewReadyWithLocalWork?.supplement?.description ?? "", /not included in the pull request/u);
+  const mergeRequestReady = sessionChangeStatus({ available: true,
+    settled: true,
+    summary: gitSummary({
+      ahead: 2,
+      pr: {
+        number: 142,
+        title: "GitLab taxonomy",
+        url: "https://gitlab.example.test/group/project/-/merge_requests/142",
+        state: "OPEN",
+        provider: "gitlab",
+        kind: "merge_request",
+      },
+    }),
+  });
+  assert.match(mergeRequestReady?.description ?? "", /open merge request/u);
   const reviewReadyFromProductionEvidence = sessionChangeStatus({
     available: true,
     settled: true,

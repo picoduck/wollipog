@@ -109,7 +109,7 @@ export function SessionHeader({
 }) {
   const activeWorktree = session.worktrees?.find((worktree) => worktree.path === session.worktreePath);
   const activeWorktreeLabel = activeWorktree
-    ? `${activeWorktree.branch}${activeWorktree.baseRef ? ` ← ${activeWorktree.baseRef}` : ""}${activeWorktree.pullRequest ? ` · ${pullRequestStateLabel(activeWorktree.pullRequest.state)} PR` : ""}`
+    ? `${activeWorktree.branch}${activeWorktree.baseRef ? ` ← ${activeWorktree.baseRef}` : ""}${activeWorktree.pullRequest ? ` · ${pullRequestStateLabel(activeWorktree.pullRequest.state)} ${activeWorktree.pullRequest.kind === "merge_request" ? "MR" : "PR"}` : ""}`
     : "";
   const activeWorktreePullRequestHref = safeExternalHref(activeWorktree?.pullRequest?.url);
   const api = useApi();
