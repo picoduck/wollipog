@@ -183,9 +183,29 @@ function payload(result: ToolResult): unknown {
   try { return JSON.parse(raw); } catch { return { error: raw }; }
 }
 
-async function compatible(fetchImpl: McpFetch, cpUrl: string, requiredProtocol: number): Promise<string | null> {
+async function compatible(
+  fetchImpl: McpFetch,
+  cpUrl: string,
+  requiredProtocol: number,
+  token: string,
+  sessionId: string,
+): Promise<string | null> {
   try {
-    const response = await fetchImpl(`${cpUrl}/healthz`, { method: "GET", signal: AbortSignal.timeout(10_000) });
+    const headers: Record<string, string> = { authorization: `Bearer ${token}` };
+    if (sessionId) headers[WOLLIPOG_AGENT_ACTOR_SESSION_HEADER] = sessionId;
+    let response = await fetchImpl(`${cpUrl}/api/compatibility`, {
+      method: "GET",
+      headers,
+      signal: AbortSignal.timeout(10_000),
+    });
+    // Protocol v100-v102 dogfood control planes predate the authenticated route but still expose
+    // the version on their public health response. Released pre-v100 peers never receive this CLI.
+    if (response.status === 404) {
+      response = await fetchImpl(`${cpUrl}/healthz`, {
+        method: "GET",
+        signal: AbortSignal.timeout(10_000),
+      });
+    }
     if (!response.ok) return `control plane compatibility check failed: HTTP ${response.status}`;
     const body = JSON.parse(await response.text()) as { protocolVersion?: unknown };
     if (typeof body.protocolVersion !== "number" || body.protocolVersion < requiredProtocol) {
@@ -241,7 +261,7 @@ export async function runWollipogCli(
     : worktreeTools.has(parsed.tool)
       ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktrees
       : RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControl;
-  const incompatibility = await compatible(fetchImpl, cpUrl, requiredProtocol);
+  const incompatibility = await compatible(fetchImpl, cpUrl, requiredProtocol, token, sessionId);
   if (incompatibility) {
     (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: incompatibility })}\n` : `${incompatibility}\n`);
     return 1;

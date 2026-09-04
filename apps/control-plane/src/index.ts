@@ -575,7 +575,8 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
   if (mutationError) return mutationError;
   if (!principal) return null;
 
-  const memberScopedRoute = routePath === "/api/instance" || routePath === "/api/identity" || routePath === "/api/runners" ||
+  const memberScopedRoute = routePath === "/api/instance" || routePath === "/api/compatibility" ||
+    routePath === "/api/identity" || routePath === "/api/runners" ||
     (routePath === "/api/session-naming" || routePath.startsWith("/api/session-naming/")) ||
     routePath === "/api/projects" || routePath.startsWith("/api/projects/") ||
     routePath === "/api/sessions" || routePath.startsWith("/api/sessions/") ||
@@ -1515,8 +1516,9 @@ app.get("/healthz", async () => ({
   ok: true,
   ts: Date.now(),
   service: CONTROL_PLANE_SERVICE,
-  protocolVersion: PROTOCOL_VERSION,
 }));
+
+app.get("/api/compatibility", async () => ({ protocolVersion: PROTOCOL_VERSION }));
 
 registerManagedDesktopRoutes(app, MANAGED_DESKTOP_IDENTITY, {
   trustedLoopback,

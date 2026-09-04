@@ -113,6 +113,7 @@ export function isPolicyHookApiRouteAllowed(method: string, routePath: string): 
  * the HTTP method so a newly-added API is denied until it is deliberately added here.
  */
 const CONDUCTOR_API_ROUTES = new Set([
+  "GET /api/compatibility",
   "GET /api/runners",
   "GET /api/sessions",
   "GET /api/sessions/:id",

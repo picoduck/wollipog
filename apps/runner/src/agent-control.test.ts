@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -142,16 +142,47 @@ test("Claude receives the general MCP config without enabling or synthesizing a 
   }
 });
 
-test("older control planes and non-host targets receive no general control surface", () => {
+test("retained Claude sessions shed runner-owned control state on downgrade and re-provision deterministically", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-agent-control-"));
   try {
     const host: AgentControlHost = { isSea: true, execPath: "/runner", execArgv: [], configDir: root };
-    const old = spec();
-    provisionAgentControl(old, {
+    const retained = spec("claude-code");
+    retained.args = ["--mcp-config", "/user/config.json", "--permission-mode", "plan"];
+    const current = {
       controlPlaneUrl: "ws://127.0.0.1:4317/runner",
+      controlPlaneProtocolVersion: PROTOCOL_VERSION,
+    };
+    provisionAgentControl(retained, current, () => {}, host);
+    const runnerConfig = agentControlMcpConfigPath(root, retained.sessionId);
+    assert.deepEqual(retained.args, [
+      "--mcp-config", "/user/config.json", "--permission-mode", "plan", "--mcp-config", runnerConfig,
+    ]);
+
+    provisionAgentControl(retained, {
+      ...current,
       controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControl - 1,
     }, () => {}, host);
-    assert.deepEqual(old.env, { PROVIDER_SETTING: "kept" });
+    assert.deepEqual(retained.args, ["--mcp-config", "/user/config.json", "--permission-mode", "plan"]);
+    assert.deepEqual(retained.env, { PROVIDER_SETTING: "kept" });
+    assert.equal(existsSync(agentControlTokenPath(root, retained.sessionId)), false);
+    assert.equal(existsSync(agentControlReadyPath(root, retained.sessionId)), false);
+    assert.equal(existsSync(runnerConfig), false);
+
+    provisionAgentControl(retained, current, () => {}, host);
+    assert.deepEqual(retained.args, [
+      "--mcp-config", "/user/config.json", "--permission-mode", "plan", "--mcp-config", runnerConfig,
+    ]);
+    assert.equal(existsSync(agentControlTokenPath(root, retained.sessionId)), true);
+    assert.equal(existsSync(runnerConfig), true);
+
+    const freshOld = spec("claude-code");
+    freshOld.args = ["--mcp-config", "/user/fresh.json"];
+    provisionAgentControl(freshOld, {
+      ...current,
+      controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControl - 1,
+    }, () => {}, host);
+    assert.deepEqual(freshOld.args, ["--mcp-config", "/user/fresh.json"]);
+    assert.deepEqual(freshOld.env, { PROVIDER_SETTING: "kept" });
 
     const container = spec();
     container.executionTarget = { ...container.executionTarget!, adapter: "container", kind: "container" };
