@@ -57,6 +57,7 @@ import {
   type BackgroundWorkTracking,
   type ManagedBackgroundJobSnapshot,
   type ManagedBackgroundJobView,
+  MANAGED_BACKGROUND_JOB_VIEW_LIMIT,
   type SessionCapabilities,
   type StopOperationView,
   type AcpSessionContextConfig,
@@ -10134,7 +10135,7 @@ export class ControlPlaneDb {
                  END,
                  COALESCE(terminal_observed_at, registered_at) DESC,
                  job_id
-        LIMIT 128`,
+        LIMIT ${MANAGED_BACKGROUND_JOB_VIEW_LIMIT}`,
     ).all(sessionId) as unknown as Array<{
       job_id: string;
       parent_turn_id: string;
@@ -10169,6 +10170,13 @@ export class ControlPlaneDb {
         ? { assistantResultPersistedAt: row.assistant_result_persisted_at }
         : {}),
     }));
+  }
+
+  private managedBackgroundJobsTruncated(sessionId: string): boolean {
+    return Boolean(this.stmt(
+      `SELECT 1 AS present FROM managed_background_jobs WHERE session_id=?
+        LIMIT 1 OFFSET ${MANAGED_BACKGROUND_JOB_VIEW_LIMIT}`,
+    ).get(sessionId));
   }
 
   /** Highest runner-owned event seq this cache has ingested for a session. */
@@ -13461,7 +13469,10 @@ export class ControlPlaneDb {
       })(),
       ...(() => {
         const backgroundJobs = this.listManagedBackgroundJobs(row.id);
-        return backgroundJobs.length ? { backgroundJobs } : {};
+        return backgroundJobs.length ? {
+          backgroundJobs,
+          ...(this.managedBackgroundJobsTruncated(row.id) ? { backgroundJobsTruncated: true } : {}),
+        } : {};
       })(),
       status,
       column,

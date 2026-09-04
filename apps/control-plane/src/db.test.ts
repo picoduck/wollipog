@@ -2735,11 +2735,19 @@ test("managed background job views are bounded, prioritize active work, and omit
     backgroundJobs: jobs,
   }), "runner-1", 1_000);
 
-  const view = db.getSession("background-bounded")?.backgroundJobs ?? [];
+  const session = db.getSession("background-bounded");
+  const view = session?.backgroundJobs ?? [];
   assert.equal(view.length, 128);
+  assert.equal(session?.backgroundJobsTruncated, true);
   assert.ok(view.some((job) => job.id === "job-000"), "unresolved active work survives history truncation");
-  assert.ok(view.every((job) => !("runnerId" in job) && !("workspaceId" in job) &&
-    !("outputReference" in job) && !("toolUseId" in job)));
+  const safeKeys = new Set([
+    "id", "parentTurnId", "launchType", "registeredAt", "lastObservedAt", "sourcePresent",
+    "terminalStatus", "terminalObservedAt", "continuationRequired", "continuationId",
+    "continuationQueuedAt", "continuationSubmittedAt", "continuationAcceptedAt",
+    "assistantResultPersistedAt",
+  ]);
+  assert.ok(view.every((job) => Object.keys(job).every((key) => safeKeys.has(key))),
+    "the dashboard projection contains only its explicit privacy-safe allowlist");
 });
 
 test("background push receipts are per-endpoint, retryable, capability-authenticated, and restart durable", () => {

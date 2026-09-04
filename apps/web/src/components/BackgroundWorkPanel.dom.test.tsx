@@ -120,6 +120,50 @@ test("the panel renders individual jobs, their parent barrier, durable times, an
   }
 });
 
+test("bounded history uses authoritative barrier totals and discloses omitted jobs", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(
+      <BackgroundWorkPanel
+        session={{
+          id: "session",
+          runnerId: "runner",
+          backgroundWorkTracking: "managed",
+          backgroundJobsTruncated: true,
+          backgroundJobs: [{
+            ...baseJob,
+            terminalStatus: "completed",
+            terminalObservedAt: 3_000,
+            continuationRequired: true,
+            continuationId: "continuation",
+            assistantResultPersistedAt: 4_000,
+          }],
+          backgroundDeliveries: [{
+            continuationId: "continuation",
+            parentTurnId: "turn-1",
+            jobCount: 200,
+            terminalCount: 199,
+          }],
+        } as SessionView}
+        runnerOnline
+        runnerProtocolVersion={PROTOCOL_VERSION}
+        parentTurnEventIds={new Map()}
+        onOpenParentTurn={() => undefined}
+      />,
+    ));
+    assert.match(container.textContent ?? "", /Showing the 128 most relevant jobs/);
+    assert.match(container.textContent ?? "", /199 of 200 jobs terminal · 1 shown/);
+    assert.match(container.textContent ?? "", /Waiting for Jobs/);
+    assert.doesNotMatch(container.textContent ?? "", /BarrierDelivered/);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 test("offline current work and older untracked providers receive truthful capability copy", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);

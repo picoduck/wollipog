@@ -152,6 +152,9 @@ export function SessionHeader({
     activeSubagents?.count,
   ]);
   const terminal = isTerminal(session.status);
+  const visibleBackgroundWorkState = session.backgroundWorkState === "resumed"
+    ? undefined
+    : session.backgroundWorkState;
   const reprocessSupported = runnerSupportsProtocol(runnerProtocolVersion, "sessionReprocess");
   const logoutSupported = runnerSupportsProtocol(runnerProtocolVersion, "acpLogout");
   const dashboardOrigin = instancePublicOrigin(instances);
@@ -162,14 +165,14 @@ export function SessionHeader({
     <>
       <SessionStatusIndicators session={session} disconnected={!runnerOnline} />
       <ChangeStatusBadge change={changeStatus ?? null} />
-      {session.backgroundWorkState && (
-        <BackgroundWorkBadge state={session.backgroundWorkState} compact announce={false}
+      {visibleBackgroundWorkState && (
+        <BackgroundWorkBadge state={visibleBackgroundWorkState} compact announce={false}
           onOpen={onOpenBackgroundWork ? () => {
             closeStatusPopover(false);
             onOpenBackgroundWork();
           } : undefined} />
       )}
-      {!session.backgroundWorkState && session.backgroundWorkTracking === "untracked" && (
+      {!visibleBackgroundWorkState && session.backgroundWorkTracking === "untracked" && (
         <UntrackedBackgroundWorkBadge onOpen={onOpenBackgroundWork ? () => {
           closeStatusPopover(false);
           onOpenBackgroundWork();
@@ -373,9 +376,9 @@ export function SessionHeader({
       ) : (
         null
       )}
-      {session.backgroundWorkState && (
+      {visibleBackgroundWorkState && (
         <span className="sr-only">
-          <BackgroundWorkBadge state={session.backgroundWorkState} compact />
+          <BackgroundWorkBadge state={visibleBackgroundWorkState} compact />
         </span>
       )}
       {note && <span className="detail-note session-header-note" role="status" aria-live="polite">{note}</span>}

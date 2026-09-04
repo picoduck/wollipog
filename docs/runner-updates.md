@@ -122,6 +122,8 @@ clears the live badge, while its bounded, timestamped job and delivery receipt r
 in the **Background Work** panel. The panel consumes the privacy-safe inventory introduced in v82;
 commands, paths, credentials, provider context, and raw output remain runner-local. During rolling
 updates, a legacy `resumed` sentinel is accepted but normalized to no current background state.
+Inventories longer than the shared 128-job projection limit disclose that older history is omitted,
+and barrier progress uses the durable delivery totals instead of treating the visible suffix as complete.
 
 | Capability | Minimum protocol |
 | --- | ---: |

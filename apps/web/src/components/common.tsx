@@ -285,16 +285,19 @@ export function BackgroundWorkBadge({ state, compact = false, announce = true, o
   </>;
   if (onOpen) {
     return (
-      <button
-        type="button"
-        className={className}
-        onClick={onOpen}
-        aria-label={label}
-        aria-controls="right-panel"
-        title={`Open ${label}`}
-      >
-        {content}
-      </button>
+      <>
+        <button
+          type="button"
+          className={className}
+          onClick={onOpen}
+          aria-label={label}
+          aria-controls="right-panel"
+          title={`Open ${label}`}
+        >
+          {content}
+        </button>
+        {announce && <span className="sr-only" role="status" aria-label={label} />}
+      </>
     );
   }
   return (

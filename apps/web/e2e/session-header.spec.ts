@@ -499,6 +499,14 @@ test("managed background indicators open a responsive inspectable inventory and 
       "turn-loaded",
     );
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
+      backgroundWorkState: "resumed",
+      backgroundWorkTracking: "untracked",
+    });
+  });
+  const header = page.locator(".session-detail > .detail-head");
+  await expect(header.getByRole("button", { name: "Detached Work: Untracked" })).toBeVisible();
+  await page.evaluate(() => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
       backgroundWorkState: "running",
       backgroundWorkTracking: "managed",
       backgroundJobs: [{
@@ -512,7 +520,6 @@ test("managed background indicators open a responsive inspectable inventory and 
     });
   });
 
-  const header = page.locator(".session-detail > .detail-head");
   await header.getByRole("button", { name: "Background Work: Waiting on External Job" }).click();
   const panel = page.locator("#right-panel");
   await expect(panel).toHaveAccessibleName("Background Work");

@@ -1886,6 +1886,9 @@ function SessionDetailLoaded({
     ["starting", "running", "waiting"].includes(descriptor.lifecycle)),
   [items, runnerOnline, session.status]);
   const preferredActiveSubagentId = selectedSubagentId(activeSubagents);
+  const visibleBackgroundWorkState = session.backgroundWorkState === "resumed"
+    ? undefined
+    : session.backgroundWorkState;
   const backgroundParentTurnEventIds = useMemo(() => new Map(items
     .filter((item): item is Extract<TimelineItem, { kind: "user_message" }> =>
       item.kind === "user_message" && Boolean(item.turnId))
@@ -3499,11 +3502,11 @@ function SessionDetailLoaded({
             <h2 className="session-preview-title">{session.title}</h2>
             <div className="session-preview-meta">
               <SessionStatusIndicators session={session} disconnected={!runnerOnline} />
-              {session.backgroundWorkState && <BackgroundWorkBadge state={session.backgroundWorkState} onOpen={() => {
+              {visibleBackgroundWorkState && <BackgroundWorkBadge state={visibleBackgroundWorkState} onOpen={() => {
                 rightPanel.show("background");
                 onExpand?.();
               }} />}
-              {!session.backgroundWorkState && session.backgroundWorkTracking === "untracked" && (
+              {!visibleBackgroundWorkState && session.backgroundWorkTracking === "untracked" && (
                 <UntrackedBackgroundWorkBadge onOpen={() => {
                   rightPanel.show("background");
                   onExpand?.();

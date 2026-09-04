@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import {
+  MANAGED_BACKGROUND_JOB_VIEW_LIMIT,
   runnerSupportsProtocol,
   type BackgroundDeliveryView,
   type BackgroundWorkState,
@@ -94,8 +95,8 @@ export function BackgroundWorkPanel({
   const inventorySupported = runnerSupportsProtocol(runnerProtocolVersion, "managedBackgroundInventory");
   const jobs = session.backgroundJobs ?? [];
   const groups = useMemo(() => groupJobs(jobs), [jobs]);
-  const clockEnabled = jobs.some((job) => !job.terminalStatus && runnerOnline && job.sourcePresent);
-  const now = useTimelineClock(clockEnabled);
+  // Every visible relative timestamp ages, including settled history left open for inspection.
+  const now = useTimelineClock(jobs.length > 0);
   const deliveries = new Map((session.backgroundDeliveries ?? [])
     .filter((delivery) => delivery.continuationId)
     .map((delivery) => [delivery.continuationId!, delivery]));
@@ -110,6 +111,11 @@ export function BackgroundWorkPanel({
       {session.backgroundWorkTracking === "untracked" && (
         <div className="hint warn" role="status">
           This provider does not expose a durable detached-work lifecycle. Wollipog cannot verify running work, completion, cancellation, or recovery.
+        </div>
+      )}
+      {session.backgroundJobsTruncated && (
+        <div className="hint" role="status">
+          Showing the {MANAGED_BACKGROUND_JOB_VIEW_LIMIT} most relevant jobs. Older job history is not shown.
         </div>
       )}
       {inventorySupported && session.backgroundWorkTracking !== "untracked" && !runnerOnline && jobs.some((job) => !job.terminalStatus) && (
@@ -128,11 +134,18 @@ export function BackgroundWorkPanel({
       ) : (
         <div className="background-work-groups" role="list" aria-label="Background Work Jobs">
           {groups.map((group, groupIndex) => {
-            const terminalCount = group.jobs.filter((job) => job.terminalStatus).length;
-            const deliveredCount = group.jobs.filter((job) => job.assistantResultPersistedAt != null ||
+            const shownTerminalCount = group.jobs.filter((job) => job.terminalStatus).length;
+            const shownDeliveredCount = group.jobs.filter((job) => job.assistantResultPersistedAt != null ||
               (job.terminalObservedAt != null && job.continuationRequired === false)).length;
             const continuationId = group.jobs.find((job) => job.continuationId)?.continuationId;
-            const delivery = continuationId ? deliveries.get(continuationId) : undefined;
+            const delivery = (continuationId ? deliveries.get(continuationId) : undefined) ??
+              session.backgroundDeliveries?.find((candidate) => candidate.parentTurnId === group.parentTurnId);
+            const jobCount = Math.max(group.jobs.length, delivery?.jobCount ?? 0);
+            const terminalCount = Math.min(jobCount, delivery?.terminalCount ?? shownTerminalCount);
+            const groupTruncated = jobCount > group.jobs.length ||
+              (session.backgroundJobsTruncated === true && delivery == null);
+            const deliveryComplete = delivery?.runnerResultPersistedAt != null ||
+              (!groupTruncated && shownDeliveredCount === group.jobs.length);
             const parentEventId = parentTurnEventIds.get(group.parentTurnId);
             return (
               <section className="background-work-group" role="listitem" key={group.parentTurnId}
@@ -140,7 +153,9 @@ export function BackgroundWorkPanel({
                 <div className="background-work-group-head">
                   <div>
                     <h3 id={`background-work-group-${groupIndex}`}>Parent Turn {groupIndex + 1}</h3>
-                    <p>{terminalCount} of {group.jobs.length} jobs terminal · {deliveredCount} delivered</p>
+                    <p>{terminalCount} of {jobCount} jobs terminal · {groupTruncated
+                      ? `${group.jobs.length} shown`
+                      : `${shownDeliveredCount} delivered`}</p>
                   </div>
                   {parentEventId != null ? (
                     <button type="button" className="btn ghost sm" onClick={() => onOpenParentTurn(parentEventId)}>
@@ -154,9 +169,11 @@ export function BackgroundWorkPanel({
                 </div>
                 <div className="background-work-barrier" aria-label="Barrier Status">
                   <span>Barrier</span>
-                  <strong>{terminalCount < group.jobs.length
+                  <strong>{terminalCount < jobCount
                     ? "Waiting for Jobs"
-                    : deliveredCount < group.jobs.length ? "Delivery Pending" : "Delivered"}</strong>
+                    : groupTruncated && delivery == null
+                      ? "Status Unverified"
+                      : deliveryComplete ? "Delivered" : "Delivery Pending"}</strong>
                   {notificationStage(delivery) && <span> · {notificationStage(delivery)}</span>}
                 </div>
                 <ol className="background-work-jobs">

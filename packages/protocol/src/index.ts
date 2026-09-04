@@ -314,6 +314,8 @@ export const PROTOCOL_VERSION = 106;
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
+/** Maximum number of managed background jobs projected into one SessionView. */
+export const MANAGED_BACKGROUND_JOB_VIEW_LIMIT = 128;
 
 /** Version of the UI-facing control-plane HTTP/WebSocket contract. This is intentionally
  * independent of PROTOCOL_VERSION, which negotiates runner capabilities. Remote-instance
@@ -3176,6 +3178,8 @@ export interface SessionView {
   backgroundDeliveries?: BackgroundDeliveryView[];
   /** Bounded durable job inventory. Omitted by control planes that predate the panel contract. */
   backgroundJobs?: ManagedBackgroundJobView[];
+  /** True when older managed-job history exists beyond the projected bounded window. */
+  backgroundJobsTruncated?: boolean;
   status: SessionStatus;
   column: BoardColumn;
   runId: string | null;

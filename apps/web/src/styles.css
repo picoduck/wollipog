@@ -2063,12 +2063,12 @@ textarea {
   font-size: var(--text-xs);
   font-weight: 600;
 }
-.background-work-state[data-state="running"] { color: var(--blue); }
+.background-work-state[data-state="running"] { color: var(--blue-on-tint); }
 .background-work-state[data-state="completed"] { color: var(--positive-text); }
 .background-work-state[data-state="failed"],
 .background-work-state[data-state="killed"],
 .background-work-state[data-state="orphaned"] { color: var(--danger-text); }
-.background-work-state[data-state="status-unverified"] { color: var(--amber); }
+.background-work-state[data-state="status-unverified"] { color: var(--amber-on-tint); }
 .background-work-job-meta {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -10659,12 +10659,9 @@ body.shell-dock-dragging * {
     overflow: clip;
     contain: paint;
   }
-  .session-detail > .detail-head > .session-header-statuses > button {
+  .session-detail > .detail-head > .session-header-statuses > .active-subagents-badge {
     order: -1;
     flex: none;
-  }
-  .session-detail > .detail-head > .session-header-statuses > .active-subagents-badge {
-    order: -2;
   }
   .session-detail > .detail-head > .session-header-statuses .session-status-indicators {
     flex: none;
