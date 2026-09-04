@@ -601,6 +601,9 @@ export class SessionManager {
   private readonly loggingOut = new Set<string>();
   /** Explicit stop waits for ACP session/close before this session may launch again. */
   private readonly closing = new Map<string, { client: Driver; promise: Promise<void> }>();
+  /** A turn-boundary worktree move owns a retiring provider even after it leaves `active`.
+   * Unlike `closing`, prompts may join its pre-launch FIFO while the same conversation reopens. */
+  private readonly worktreeRebindings = new Map<string, { entry: ActiveSession; promise: Promise<void> }>();
   private readonly deleting = new Set<string>();
   /** Process-lifetime tombstone: a late start command/continuation may never recreate a deleted id. */
   private readonly deleted = new Set<string>();
@@ -813,8 +816,11 @@ export class SessionManager {
     if (live && !sameWorktreePath(live.context, live.cwd, worktree.path)) {
       this.captureAgentSessionId(meta.sessionId, live.client);
       const resumable = this.store.readMeta(meta.sessionId);
-      if (!resumable || !canResumeSession(resumable) || !resumable.agentSessionId) {
+      if (!resumable || !resumable.agentSessionId) {
         throw new Error("the running provider has not established a resumable conversation; retry worktree selection after this turn");
+      }
+      if (!canResumeSession(resumable)) {
+        throw new Error("the running provider does not support resuming this conversation in another worktree; stop it before selecting a different worktree");
       }
     }
     const priorActive = latest.worktreePath
@@ -985,8 +991,13 @@ export class SessionManager {
 
   private liveWorktreeUsesPath(sessionId: string, path: string): boolean {
     const active = this.active.get(sessionId);
+    const rebinding = this.worktreeRebindings.get(sessionId)?.entry;
+    const rebindingSelection = rebinding ? this.store.readMeta(sessionId)?.worktreePath : undefined;
     return (!!active && (sameWorktreePath(active.context, active.cwd, path) ||
       (!!active.worktree && sameWorktreePath(active.context, active.worktree.path, path)))) ||
+      (!!rebinding && (sameWorktreePath(rebinding.context, rebinding.cwd, path) ||
+        (!!rebinding.worktree && sameWorktreePath(rebinding.context, rebinding.worktree.path, path)))) ||
+      (!!rebinding && !!rebindingSelection && sameWorktreePath(rebinding.context, rebindingSelection, path)) ||
       this.closing.has(sessionId);
   }
 
@@ -1964,6 +1975,8 @@ export class SessionManager {
     }
     const closing = this.closing.get(spec.sessionId);
     if (closing) await closing.promise;
+    const rebinding = this.worktreeRebindings.get(spec.sessionId);
+    if (rebinding) await rebinding.promise;
     if (!this.launchIsCurrent(spec.sessionId, launchGeneration)) {
       this.emitEvent(spec.sessionId, { kind: "error", message: "session deletion is in progress" });
       this.emitStatus(spec.sessionId, "stopped");
@@ -5316,12 +5329,26 @@ export class SessionManager {
 
   /** Retire an idle provider generation and resume its exact conversation in the newly selected
    * worktree. Prompts accepted during the turn or relaunch remain in the pre-launch FIFO. */
-  private async rebindSelectedWorktree(sessionId: string, entry: ActiveSession): Promise<void> {
+  private rebindSelectedWorktree(sessionId: string, entry: ActiveSession): Promise<void> {
+    const current = this.worktreeRebindings.get(sessionId);
+    if (current) return current.promise;
+    let promise: Promise<void>;
+    promise = this.performSelectedWorktreeRebind(sessionId, entry).finally(() => {
+      if (this.worktreeRebindings.get(sessionId)?.promise === promise) {
+        this.worktreeRebindings.delete(sessionId);
+      }
+    });
+    this.worktreeRebindings.set(sessionId, { entry, promise });
+    return promise;
+  }
+
+  private async performSelectedWorktreeRebind(sessionId: string, entry: ActiveSession): Promise<void> {
     const selectedPath = entry.pendingWorktreeRebind;
     if (!selectedPath || entry.running || this.active.get(sessionId) !== entry) return;
     const meta = this.store.readMeta(sessionId);
     if (!meta || !meta.worktreePath || !sameWorktreePath(meta.context, meta.worktreePath, selectedPath)) {
       entry.pendingWorktreeRebind = undefined;
+      if (entry.queue.length) setImmediate(() => this.scheduleDrain(sessionId));
       return;
     }
     this.captureAgentSessionId(sessionId, entry.client);
@@ -5333,6 +5360,7 @@ export class SessionManager {
         kind: "error",
         message: "the selected worktree cannot resume this provider conversation",
       });
+      if (entry.queue.length) setImmediate(() => this.scheduleDrain(sessionId));
       return;
     }
 
@@ -5340,8 +5368,8 @@ export class SessionManager {
     this.preLaunchAdmissionGenerations.set(sessionId, launchGeneration);
     const queued = entry.queue.splice(0);
     if (queued.length) this.preLaunchQueues.set(sessionId, queued);
-    this.emitQueue(sessionId);
     this.deleteActiveSession(sessionId, entry, false);
+    this.emitQueue(sessionId);
     try {
       await this.closeAndDispose(sessionId, entry.client, true);
     } finally {
@@ -5353,14 +5381,35 @@ export class SessionManager {
       const fresh = this.store.readMeta(sessionId);
       if (!fresh || !this.launchIsCurrent(sessionId, launchGeneration)) return;
       launched = await this.launch(fresh, resumeId, launchGeneration);
-      if (launched) this.activatePreLaunchQueue(sessionId);
+      if (launched) {
+        const reboundEntry = this.active.get(sessionId);
+        if (this.store.readMeta(sessionId)?.status === "stopped") {
+          if (reboundEntry) {
+            this.deleteActiveSession(sessionId, reboundEntry, false);
+            await this.closeAndDispose(sessionId, reboundEntry.client, true);
+            this.releaseActiveWorktreeLease(reboundEntry);
+          }
+          launched = false;
+          return;
+        }
+        const hasQueuedWork = (this.preLaunchQueues.get(sessionId)?.length ?? 0) > 0;
+        this.activatePreLaunchQueue(sessionId);
+        if (!hasQueuedWork) this.emitStatus(sessionId, "idle");
+      }
     } finally {
-      if (!launched) this.rejectPreLaunchQueue(sessionId, "provider could not resume in the selected worktree");
+      const superseded = this.launchWasSuperseded(sessionId, launchGeneration);
+      const ownsGeneration = this.launchGenerations.get(sessionId) === launchGeneration;
+      if (!launched && ownsGeneration && !superseded) {
+        this.rejectPreLaunchQueue(sessionId, "provider could not resume in the selected worktree");
+      }
       if (this.preLaunchAdmissionGenerations.get(sessionId) === launchGeneration) {
         this.preLaunchAdmissionGenerations.delete(sessionId);
       }
       this.finishLaunchGeneration(sessionId, launchGeneration);
-      if (!launched) this.releaseAdmissionIfInactive(sessionId);
+      if (!launched && !superseded) this.releaseAdmissionIfInactive(sessionId);
+      else if (!launched && this.store.readMeta(sessionId)?.status === "stopped") {
+        this.releaseAdmissionIfInactive(sessionId);
+      }
     }
   }
 
@@ -6542,6 +6591,11 @@ export class SessionManager {
     }
     const entry = this.active.get(sessionId);
     if (!entry) {
+      const rebinding = this.worktreeRebindings.get(sessionId);
+      if (rebinding) {
+        const stopGeneration = this.beginLaunchGeneration(sessionId);
+        this.finishLaunchGeneration(sessionId, stopGeneration);
+      }
       this.rejectPreLaunchQueue(sessionId, "session stopped before runner admission");
       // The rejection re-arm is for failed admissions; this stop is a lifecycle end, so drop it.
       this.cancelBackgroundContinuationTimer(sessionId);
@@ -6646,7 +6700,8 @@ export class SessionManager {
       // worktree/provider cleanup.
       this.latestLaunchGenerations.delete(sessionId);
       this.cancelAdmissionWait(sessionId);
-      this.releaseAdmissionIfInactive(sessionId);
+      const rebinding = this.worktreeRebindings.get(sessionId);
+      if (!rebinding) this.releaseAdmissionIfInactive(sessionId);
       this.discardRecovery(sessionId);
       this.cancelApprovalTelemetry(sessionId);
       const closing = this.closing.get(sessionId);
@@ -6663,6 +6718,10 @@ export class SessionManager {
       this.store.remove(sessionId);
 
       if (closing) await closing.promise;
+      if (rebinding) {
+        await rebinding.promise;
+        this.releaseAdmission(sessionId);
+      }
       if (entry) {
         await this.closeAndDispose(sessionId, entry.client, true);
         this.releaseAdmission(sessionId);
@@ -7319,6 +7378,15 @@ export class SessionManager {
       }
     }
     this.closing.clear();
+    for (const { entry } of this.worktreeRebindings.values()) {
+      try {
+        entry.client.dispose();
+      } catch (error) {
+        clean = false;
+        this.log(`shutdown dispose failed for a rebinding session: ${errText(error)}`);
+      }
+    }
+    this.worktreeRebindings.clear();
     this.deleting.clear();
     this.recoveryQueues.clear();
     this.preLaunchQueues.clear();
