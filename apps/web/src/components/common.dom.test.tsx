@@ -183,8 +183,14 @@ test("background-work indicators become keyboard-native panel controls when acti
     assert.equal(buttons.length, 4);
     assert.ok(buttons.every((button) => button.getAttribute("aria-controls") === "right-panel"));
     assert.deepEqual(
-      [...container.querySelectorAll('[role="status"]')].map((status) => status.getAttribute("aria-label")),
-      ["Background Work: Waiting on External Job"],
+      [...container.querySelectorAll('[role="status"]')].map((status) => ({
+        label: status.getAttribute("aria-label"),
+        text: status.textContent,
+      })),
+      [{
+        label: "Background Work: Waiting on External Job",
+        text: "Background Work: Waiting on External Job",
+      }],
       "an actionable current-state badge keeps one live announcement without changing button semantics",
     );
     for (const button of buttons) await act(async () => button.click());

@@ -495,6 +495,16 @@ const ORPHAN_RECOVERY_PROMPT =
 const BACKGROUND_CONTINUATION_PROMPT =
   "Managed background jobs reached their terminal barrier. Consume every queued task notification and deliver the parent workflow's final user-visible result without waiting for another user message.";
 const MAX_RETAINED_DELIVERED_BACKGROUND_JOBS = 128;
+
+/** Recompute the live aggregate after a delivery receipt changes only part of the inventory. */
+function managedBackgroundWorkState(
+  jobs: readonly DurableBackgroundJob[],
+): "running" | "continuation_pending" | undefined {
+  if (jobs.some((job) => job.continuationRequired && !job.assistantResultPersistedAt)) {
+    return "continuation_pending";
+  }
+  return jobs.some((job) => !job.terminalStatus) ? "running" : undefined;
+}
 const MAX_BACKGROUND_OUTPUT_REFERENCE_CHARS = 4_096;
 const BACKGROUND_CONTINUATION_DELIVERED_PREFIX = "Managed background continuation delivered: ";
 
@@ -8492,11 +8502,9 @@ export class SessionManager {
           ...(structuredDeliveryPublishedAt !== undefined ? { structuredDeliveryPublishedAt } : {}),
         }
       : job);
-    const unresolved = backgroundJobs.some((job) => job.continuationRequired &&
-      !job.assistantResultPersistedAt);
     const updated = this.store.patchMeta(sessionId, {
       backgroundJobs,
-      backgroundWorkState: unresolved ? "continuation_pending" : undefined,
+      backgroundWorkState: managedBackgroundWorkState(backgroundJobs),
     });
     if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
     if (this.queuedBackgroundJobIds(updated).length > 0) this.scheduleBackgroundContinuation(sessionId);
@@ -8570,11 +8578,9 @@ export class SessionManager {
       };
     });
     if (!changed) return meta;
-    const unresolved = backgroundJobs.some((job) => job.continuationRequired &&
-      !job.assistantResultPersistedAt);
     return this.store.patchMeta(meta.sessionId, {
       backgroundJobs,
-      backgroundWorkState: unresolved ? "continuation_pending" : undefined,
+      backgroundWorkState: managedBackgroundWorkState(backgroundJobs),
     }) ?? meta;
   }
 

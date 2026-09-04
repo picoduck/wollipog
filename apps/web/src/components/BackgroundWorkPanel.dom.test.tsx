@@ -164,6 +164,134 @@ test("bounded history uses authoritative barrier totals and discloses omitted jo
   }
 });
 
+test("multiple delivery rounds under one parent use their combined authoritative totals", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(
+      <BackgroundWorkPanel
+        session={{
+          id: "session",
+          runnerId: "runner",
+          backgroundWorkTracking: "managed",
+          backgroundJobs: [{
+            ...baseJob,
+            terminalStatus: "completed",
+            terminalObservedAt: 3_000,
+            continuationRequired: true,
+            continuationId: "continuation-1",
+            assistantResultPersistedAt: 4_000,
+          }, {
+            ...baseJob,
+            id: "job-2",
+            registeredAt: 5_000,
+            terminalStatus: "completed",
+            terminalObservedAt: 6_000,
+            continuationRequired: true,
+            continuationId: "continuation-2",
+            assistantResultPersistedAt: 7_000,
+          }],
+          backgroundDeliveries: [{
+            continuationId: "continuation-1",
+            parentTurnId: "turn-1",
+            jobCount: 1,
+            terminalCount: 1,
+            runnerResultPersistedAt: 4_000,
+          }, {
+            continuationId: "continuation-2",
+            parentTurnId: "turn-1",
+            jobCount: 1,
+            terminalCount: 1,
+            runnerResultPersistedAt: 7_000,
+          }],
+        } as SessionView}
+        runnerOnline
+        runnerProtocolVersion={PROTOCOL_VERSION}
+        parentTurnEventIds={new Map()}
+        onOpenParentTurn={() => undefined}
+      />,
+    ));
+    assert.match(container.textContent ?? "", /2 of 2 jobs terminal · 2 delivered/);
+    assert.match(container.textContent ?? "", /BarrierDelivered/);
+    assert.doesNotMatch(container.textContent ?? "", /Waiting for Jobs/);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("unknown parent sentinels stay separate and aggregate-only states explain missing evidence", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(
+      <BackgroundWorkPanel
+        session={{
+          id: "session",
+          runnerId: "runner",
+          backgroundWorkTracking: "managed",
+          backgroundJobs: [
+            { ...baseJob, id: "unknown-1", parentTurnId: "unknown" },
+            { ...baseJob, id: "unknown-2", parentTurnId: "unknown", registeredAt: 3_000 },
+          ],
+        } as SessionView}
+        runnerOnline
+        runnerProtocolVersion={PROTOCOL_VERSION}
+        parentTurnEventIds={new Map()}
+        onOpenParentTurn={() => undefined}
+      />,
+    ));
+    assert.equal(container.querySelectorAll(".background-work-group").length, 2);
+    assert.equal(container.querySelectorAll(".background-work-group h3")[0]?.textContent, "Unknown Parent Turn");
+    assert.equal(container.querySelectorAll(".background-work-link-unavailable")[0]?.textContent,
+      "Parent Turn Unknown");
+    assert.equal(container.querySelectorAll(".background-work-barrier strong")[0]?.textContent,
+      "Status Unverified");
+
+    await act(async () => root.render(
+      <BackgroundWorkPanel
+        session={{
+          id: "session",
+          runnerId: "runner",
+          backgroundJobsAvailable: true,
+          backgroundWorkTracking: "managed",
+        } as SessionView}
+        runnerOnline
+        runnerProtocolVersion={PROTOCOL_VERSION}
+        parentTurnEventIds={new Map()}
+        onOpenParentTurn={() => undefined}
+      />,
+    ));
+    assert.match(container.textContent ?? "", /Loading Background Work/);
+    assert.doesNotMatch(container.textContent ?? "", /No Background Work Recorded/);
+
+    await act(async () => root.render(
+      <BackgroundWorkPanel
+        session={{
+          id: "session",
+          runnerId: "runner",
+          backgroundWorkState: "orphaned",
+          backgroundWorkTracking: "managed",
+        } as SessionView}
+        runnerOnline
+        runnerProtocolVersion={PROTOCOL_VERSION}
+        parentTurnEventIds={new Map()}
+        onOpenParentTurn={() => undefined}
+      />,
+    ));
+    assert.match(container.textContent ?? "", /Background Work Orphaned/);
+    assert.match(container.textContent ?? "", /per-job lifecycle evidence is unavailable/);
+    assert.doesNotMatch(container.textContent ?? "", /No Background Work Recorded/);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 test("offline current work and older untracked providers receive truthful capability copy", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);

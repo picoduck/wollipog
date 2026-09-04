@@ -349,6 +349,7 @@ export function RightPanel({
             terminalSupported={terminalSupported}
             terminalHint={terminalHint}
             backgroundAvailable={(session.backgroundJobs?.length ?? 0) > 0 ||
+              session.backgroundJobsAvailable === true ||
               session.backgroundWorkTracking != null || session.backgroundWorkState != null}
           />
         ) : (

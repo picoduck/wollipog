@@ -124,6 +124,8 @@ commands, paths, credentials, provider context, and raw output remain runner-loc
 updates, a legacy `resumed` sentinel is accepted but normalized to no current background state.
 Inventories longer than the shared 128-job projection limit disclose that older history is omitted,
 and barrier progress uses the durable delivery totals instead of treating the visible suffix as complete.
+Bulk session snapshots carry only a compact history-available signal; opening the panel loads the
+bounded privacy-safe inventory through the authorized single-session projection.
 
 | Capability | Minimum protocol |
 | --- | ---: |

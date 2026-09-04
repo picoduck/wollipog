@@ -2646,6 +2646,36 @@ test("pre-v82 delivery emits authenticated legacy evidence", () => {
   }
 });
 
+test("settling one continuation preserves live state while another managed job is running", () => {
+  const h = harness({
+    driver: "claude-code",
+    backgroundWorkState: "continuation_pending",
+    backgroundJobs: [{
+      id: "settled-job", parentTurnId: "turn-a", runnerId: "runner", workspaceId: "workspace",
+      context: { kind: "native" }, launchType: "agent", registeredAt: 1,
+      terminalStatus: "completed", terminalObservedAt: 2, continuationRequired: true,
+      continuationQueuedAt: 3, continuationId: "bgcont-settled",
+      continuationSubmittedAt: 4, continuationAcceptedAt: 5,
+    }, {
+      id: "live-job", parentTurnId: "turn-b", runnerId: "runner", workspaceId: "workspace",
+      context: { kind: "native" }, launchType: "shell", registeredAt: 6,
+    }],
+  });
+  try {
+    Object.defineProperty(h.manager, "controlPlaneProtocolVersion", { value: () => 81 });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (h.manager as any).finishBackgroundContinuation("resume-session", ["settled-job"]);
+    assert.equal(h.store.readMeta("resume-session")?.backgroundWorkState, "running");
+    assert.equal(
+      h.store.readMeta("resume-session")?.backgroundJobs?.find((job) => job.id === "live-job")?.terminalStatus,
+      undefined,
+    );
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
 test("v82 registration upgrades legacy delivery evidence exactly once, including stopped sessions", () => {
   const h = harness({
     driver: "claude-code",

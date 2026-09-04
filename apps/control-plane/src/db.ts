@@ -10179,6 +10179,12 @@ export class ControlPlaneDb {
     ).get(sessionId));
   }
 
+  private managedBackgroundJobsPresent(sessionId: string): boolean {
+    return Boolean(this.stmt(
+      "SELECT 1 AS present FROM managed_background_jobs WHERE session_id=? LIMIT 1",
+    ).get(sessionId));
+  }
+
   /** Highest runner-owned event seq this cache has ingested for a session. */
   getHydratedSeq(id: string): number {
     const row = this.stmt("SELECT hydrated_seq FROM sessions WHERE id=?").get(id) as
@@ -13305,7 +13311,7 @@ export class ControlPlaneDb {
     const row = this.stmt("SELECT * FROM sessions WHERE id=?").get(id) as unknown as
       | SessionRow
       | undefined;
-    return row ? this.sessionView(row, undefined, this.sessionStopIntent(id)) : null;
+    return row ? this.sessionView(row, undefined, this.sessionStopIntent(id), true) : null;
   }
 
   recordSideChat(parentSessionId: string, childSessionId: string, now: number): void {
@@ -13374,7 +13380,7 @@ export class ControlPlaneDb {
       .all() as unknown as SessionRow[];
     const legacyTargets = new Map<string, ExecutionTargetDefinition[] | undefined>();
     const stopIntents = this.sessionStopIntents();
-    return rows.map((r) => this.sessionView(r, legacyTargets, stopIntents.get(r.id)));
+    return rows.map((r) => this.sessionView(r, legacyTargets, stopIntents.get(r.id), false));
   }
 
   private legacyExecutionTargets(runnerId: string): ExecutionTargetDefinition[] | undefined {
@@ -13398,6 +13404,7 @@ export class ControlPlaneDb {
     row: SessionRow,
     legacyTargetCache?: Map<string, ExecutionTargetDefinition[] | undefined>,
     stopIntent?: SessionStopIntentRecord,
+    includeBackgroundJobs = true,
   ): SessionView {
     const agentName = row.agent_id
       ? ((this.stmt("SELECT name FROM agent_definitions WHERE id=?").get(row.agent_id) as
@@ -13467,13 +13474,14 @@ export class ControlPlaneDb {
         const backgroundDeliveries = this.listBackgroundDeliveries(row.id, status);
         return backgroundDeliveries.length ? { backgroundDeliveries } : {};
       })(),
-      ...(() => {
+      ...(includeBackgroundJobs ? (() => {
         const backgroundJobs = this.listManagedBackgroundJobs(row.id);
         return backgroundJobs.length ? {
+          backgroundJobsAvailable: true,
           backgroundJobs,
           ...(this.managedBackgroundJobsTruncated(row.id) ? { backgroundJobsTruncated: true } : {}),
         } : {};
-      })(),
+      })() : this.managedBackgroundJobsPresent(row.id) ? { backgroundJobsAvailable: true } : {}),
       status,
       column,
       runId: row.run_id,

@@ -296,7 +296,7 @@ export function BackgroundWorkBadge({ state, compact = false, announce = true, o
         >
           {content}
         </button>
-        {announce && <span className="sr-only" role="status" aria-label={label} />}
+        {announce && <span className="sr-only" role="status" aria-label={label}>{label}</span>}
       </>
     );
   }

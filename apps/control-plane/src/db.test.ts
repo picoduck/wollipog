@@ -2739,6 +2739,14 @@ test("managed background job views are bounded, prioritize active work, and omit
   const view = session?.backgroundJobs ?? [];
   assert.equal(view.length, 128);
   assert.equal(session?.backgroundJobsTruncated, true);
+  assert.equal(session?.backgroundJobsAvailable, true);
+  const listed = db.listSessions({ includeArchived: true })
+    .find((candidate) => candidate.id === "background-bounded");
+  assert.equal(listed?.backgroundJobs, undefined,
+    "bulk session projections do not query or broadcast the per-job inspection payload");
+  assert.equal(listed?.backgroundJobsTruncated, undefined);
+  assert.equal(listed?.backgroundJobsAvailable, true,
+    "bulk projections retain the compact signal needed to load the inspection payload on demand");
   assert.ok(view.some((job) => job.id === "job-000"), "unresolved active work survives history truncation");
   const safeKeys = new Set([
     "id", "parentTurnId", "launchType", "registeredAt", "lastObservedAt", "sourcePresent",

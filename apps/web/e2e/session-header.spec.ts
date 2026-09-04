@@ -528,6 +528,8 @@ test("managed background indicators open a responsive inspectable inventory and 
   await expect(panel.getByText("Not Started", { exact: true })).toBeVisible();
   await expect(panel.getByRole("button", { name: "View Parent Turn" })).toBeVisible();
   await expect(panel).not.toContainText("private-task-id");
+  await panel.getByRole("button", { name: "View Parent Turn" }).click();
+  await expect(panel).toBeVisible();
   await capture(page, "background-desktop-running");
 
   await page.setViewportSize({ width: 390, height: 800 });
@@ -818,9 +820,16 @@ for (const viewport of [
     expect(popoverGeometry.right).toBeLessThanOrEqual(viewport.width - 8);
     expect(popoverGeometry.contentWrap).toBe("wrap");
     await capture(page, `narrow-${viewport.width}-status-popover`);
-    await page.keyboard.press("Escape");
+    if (viewport.width === 390) {
+      await statusPopover.getByRole("button", { name: "Background Work: Waiting on External Job" }).click();
+      await expect(page.locator("#right-panel")).toHaveAccessibleName("Background Work");
+      await expect(overflowTrigger).toBeFocused();
+      await page.getByRole("button", { name: "Close Panel" }).click();
+    } else {
+      await page.keyboard.press("Escape");
+    }
     await expect(statusPopover).toHaveCount(0);
-    await expect(overflowTrigger).toBeFocused();
+    if (viewport.width !== 390) await expect(overflowTrigger).toBeFocused();
 
     await overflowTrigger.click();
     await page.locator(".menu-backdrop").click({ position: { x: 300, y: 700 } });

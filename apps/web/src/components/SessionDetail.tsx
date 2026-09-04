@@ -768,6 +768,28 @@ function SessionDetailLoaded({
   const retitleReceiptRef = useRef<HTMLDivElement>(null);
   const rightPanelRef = useRef(rightPanel);
   rightPanelRef.current = rightPanel;
+  const backgroundInventoryRequestRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!rightPanel.open || rightPanel.mode !== "background" ||
+        session.backgroundJobsAvailable !== true || session.backgroundJobs !== undefined) {
+      if (!rightPanel.open || rightPanel.mode !== "background") {
+        backgroundInventoryRequestRef.current = null;
+      }
+      return;
+    }
+    const requestKey = `${session.id}:${recoveryGeneration}`;
+    if (backgroundInventoryRequestRef.current === requestKey) return;
+    backgroundInventoryRequestRef.current = requestKey;
+    let current = true;
+    void api.session(session.id)
+      .then(({ session: loaded }) => {
+        if (current) loadSession(loaded);
+      })
+      .catch((cause: unknown) => {
+        if (current) setError((cause as Error).message);
+      });
+    return () => { current = false; };
+  }, [api, loadSession, recoveryGeneration, rightPanel.mode, rightPanel.open, session, setError]);
   const composerComposingRef = useRef(false);
   const pendingComposerFocusRestoreRef = useRef<ReturnType<typeof captureComposerFocus> | null>(null);
   const composerExplicitFocusTransferRef = useRef(false);
@@ -2364,9 +2386,9 @@ function SessionDetailLoaded({
     else followTail.preview();
   }, [followTail.follow, followTail.pause, followTail.preview]);
   const revealBackgroundParentTurn = useCallback((eventId: number) => {
-    rightPanelRef.current.close();
+    if (isMobile) rightPanelRef.current.close();
     revealCurrentOperation(eventId);
-  }, [revealCurrentOperation]);
+  }, [isMobile, revealCurrentOperation]);
   const previewNavigationControls = useMemo<PreviewNavigationControls>(() => ({
     beginProgrammaticScroll: followTail.beginProgrammaticScroll,
     follow: followTail.follow,

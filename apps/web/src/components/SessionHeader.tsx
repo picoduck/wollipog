@@ -168,13 +168,13 @@ export function SessionHeader({
       {visibleBackgroundWorkState && (
         <BackgroundWorkBadge state={visibleBackgroundWorkState} compact announce={false}
           onOpen={onOpenBackgroundWork ? () => {
-            closeStatusPopover(false);
+            closeStatusPopover(true);
             onOpenBackgroundWork();
           } : undefined} />
       )}
       {!visibleBackgroundWorkState && session.backgroundWorkTracking === "untracked" && (
         <UntrackedBackgroundWorkBadge onOpen={onOpenBackgroundWork ? () => {
-          closeStatusPopover(false);
+          closeStatusPopover(true);
           onOpenBackgroundWork();
         } : undefined} />
       )}
