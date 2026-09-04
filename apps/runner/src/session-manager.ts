@@ -822,10 +822,13 @@ export class SessionManager {
     if (live && !sameWorktreePath(live.context, live.cwd, worktree.path)) {
       this.captureAgentSessionId(meta.sessionId, live.client);
       const resumable = this.store.readMeta(meta.sessionId);
-      if (!resumable || !resumable.agentSessionId) {
+      if (!resumable) {
+        throw new Error("session disappeared while its requested worktree was activating");
+      }
+      if (!resumable.agentSessionId && (resumable.turnCount ?? 0) > 0) {
         throw new Error("the running provider has not established a resumable conversation; retry worktree selection after this turn");
       }
-      if (!canResumeSession(resumable)) {
+      if (resumable.agentSessionId && !canResumeSession(resumable)) {
         throw new Error("the running provider does not support resuming this conversation in another worktree; stop it before selecting a different worktree");
       }
     }
@@ -1987,7 +1990,10 @@ export class SessionManager {
     const closing = this.closing.get(spec.sessionId);
     if (closing) await closing.promise;
     const rebinding = this.worktreeRebindings.get(spec.sessionId);
-    if (rebinding) await rebinding.promise;
+    // Once launch() publishes the replacement entry, an explicit Restart owns cancellation and
+    // retirement directly. Waiting for the encompassing rebind promise could deadlock forever on
+    // a driver initialization promise that ignores disposal.
+    if (rebinding && !this.active.has(spec.sessionId)) await rebinding.promise;
     if (!this.launchIsCurrent(spec.sessionId, launchGeneration)) {
       this.emitEvent(spec.sessionId, { kind: "error", message: "session deletion is in progress" });
       this.emitStatus(spec.sessionId, "stopped");
@@ -3403,6 +3409,7 @@ export class SessionManager {
       return { ok: false, error: errText(error) };
     } finally {
       this.loggingOut.delete(sessionId);
+      this.resumeDeferredWorktreeRebind(sessionId);
     }
   }
 
@@ -5353,6 +5360,11 @@ export class SessionManager {
   private worktreeRebindCanProceed(sessionId: string, entry: ActiveSession): boolean {
     return !entry.running &&
       this.active.get(sessionId) === entry &&
+      !this.rewinding.has(sessionId) &&
+      !this.forking.has(sessionId) &&
+      !this.loggingOut.has(sessionId) &&
+      !this.closing.has(sessionId) &&
+      !this.deleting.has(sessionId) &&
       !entry.authenticationBlocked &&
       !entry.historyIntegrityFailure &&
       !entry.governanceTripped &&
@@ -5360,6 +5372,13 @@ export class SessionManager {
       !this.hasPendingApproval(sessionId) &&
       !this.steerFences(entry).size &&
       !this.reservedPromotionPrecedesQueue(sessionId, entry);
+  }
+
+  private resumeDeferredWorktreeRebind(sessionId: string): void {
+    const entry = this.active.get(sessionId);
+    if (entry?.pendingWorktreeRebind && !entry.running) {
+      setImmediate(() => this.scheduleDrain(sessionId));
+    }
   }
 
   /** Retire an idle provider generation and resume its exact conversation in the newly selected
@@ -5389,7 +5408,8 @@ export class SessionManager {
     this.captureAgentSessionId(sessionId, entry.client);
     const resumable = this.store.readMeta(sessionId);
     const resumeId = resumable?.agentSessionId ?? undefined;
-    if (!resumable || !resumeId || !canResumeSession(resumable)) {
+    const hasConversation = (resumable?.turnCount ?? 0) > 0;
+    if (!resumable || (!resumeId && hasConversation) || (resumeId && !canResumeSession(resumable))) {
       entry.pendingWorktreeRebind = undefined;
       this.emitEvent(sessionId, {
         kind: "error",
@@ -6240,6 +6260,7 @@ export class SessionManager {
       if (!(await this.acquireAdmission(sourceSessionId))) {
         this.forking.delete(sourceSessionId);
         this.forkingTargets.delete(targetSessionId);
+        this.resumeDeferredWorktreeRebind(sourceSessionId);
         return { ok: false, error: "provider transcript store is busy on this macOS runner" };
       }
       seatbeltForkAdmission = true;
@@ -6247,6 +6268,7 @@ export class SessionManager {
         this.releaseAdmission(sourceSessionId);
         this.forking.delete(sourceSessionId);
         this.forkingTargets.delete(targetSessionId);
+        this.resumeDeferredWorktreeRebind(sourceSessionId);
         return { ok: false, error: "source session was removed while waiting for provider isolation" };
       }
     }
@@ -6254,6 +6276,7 @@ export class SessionManager {
       if (seatbeltForkAdmission) this.releaseAdmission(sourceSessionId);
       this.forking.delete(sourceSessionId);
       this.forkingTargets.delete(targetSessionId);
+      this.resumeDeferredWorktreeRebind(sourceSessionId);
       return { ok: false, error: "another runner is driving the source session" };
     }
     const forkLockRefresh = setInterval(
@@ -6465,6 +6488,7 @@ export class SessionManager {
       this.store.releaseLock(sourceSessionId, this.lockOwner);
       this.forking.delete(sourceSessionId);
       this.forkingTargets.delete(targetSessionId);
+      this.resumeDeferredWorktreeRebind(sourceSessionId);
       if (seatbeltForkAdmission) this.releaseAdmissionIfInactive(sourceSessionId);
     }
   }
@@ -6775,7 +6799,10 @@ export class SessionManager {
       this.store.remove(sessionId);
 
       if (closing) await closing.promise;
-      if (rebinding) {
+      // A replacement published by launch() is already in `entry`; deletion retires it directly
+      // below. Do not also wait for the encompassing rebind promise, because a broken driver may
+      // leave initialize()/newSession() pending even after its process has been disposed.
+      if (rebinding && !entry) {
         await rebinding.promise;
         this.releaseAdmission(sessionId);
       }
@@ -6980,6 +7007,7 @@ export class SessionManager {
   /** Release a fence taken by fenceRewind when the rewind will NOT run (expiry). */
   releaseRewindFence(sessionId: string): void {
     this.rewinding.delete(sessionId);
+    this.resumeDeferredWorktreeRebind(sessionId);
   }
 
   async rewind(sessionId: string, turn: number, alreadyFenced = false): Promise<{ ok: boolean; error?: string }> {
@@ -7034,6 +7062,7 @@ export class SessionManager {
       return { ok: false, error: errText(err) };
     } finally {
       this.rewinding.delete(sessionId);
+      this.resumeDeferredWorktreeRebind(sessionId);
     }
   }
 

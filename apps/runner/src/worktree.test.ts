@@ -1282,6 +1282,107 @@ test("history-integrity containment prevents an implicit worktree rebind", { ski
   }
 });
 
+test("a never-prompted live session moves worktrees by launching a fresh conversation", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-fresh-worktree-rebind-"));
+  const repo = join(root, "repo");
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const launchedCwds: string[] = [];
+    const factory = (_driver: unknown, launch: { cwd: string }) => {
+      launchedCwds.push(launch.cwd);
+      return {
+        pid: launchedCwds.length, initialize: async () => {}, newSession: async () => {}, close: async () => {},
+        prompt: async () => "end_turn" as const, cancel: () => {}, dispose: () => {}, setConfig: () => {},
+        resolvePermission: () => false, agentSessionId: () => null,
+      };
+    };
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, factory as never, dataDir, 1);
+    const spec = {
+      sessionId: "s_fresh_rebind", workspaceId: "repo", workspacePath: repo, agentId: "claude",
+      command: "claude", args: [], env: {}, useWorktree: false, driver: "claude-code" as const,
+      context: { kind: "native" as const },
+    };
+    await manager.start(spec);
+    const requested = await manager.requestWorktree(spec.sessionId, {
+      baseRef: "HEAD", branch: "fix/fresh-rebind",
+    });
+    await waitForCondition(() => launchedCwds.length === 2, "fresh provider was not moved into the requested worktree");
+    assert.deepEqual(launchedCwds, [repo, requested.worktree.path]);
+    assert.equal(store.readMeta(spec.sessionId)?.agentSessionId, null);
+    manager.stop(spec.sessionId);
+    await manager.delete(spec.sessionId);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("provider sign-out defers worktree rebind until credential mutation settles", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-logout-worktree-rebind-"));
+  const repo = join(root, "repo");
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  let releaseLogout = () => {};
+  try {
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const launchedCwds: string[] = [];
+    let closeCalls = 0;
+    let logoutStartedResolve!: () => void;
+    const logoutStarted = new Promise<void>((resolve) => { logoutStartedResolve = resolve; });
+    const logoutGate = new Promise<void>((resolve) => { releaseLogout = resolve; });
+    const factory = (_driver: unknown, launch: { cwd: string }) => {
+      const launchNumber = launchedCwds.push(launch.cwd);
+      return {
+        pid: launchNumber, initialize: async () => {}, newSession: async () => {},
+        close: async () => { closeCalls += 1; },
+        logout: async () => {
+          if (launchNumber === 1) {
+            logoutStartedResolve();
+            await logoutGate;
+          }
+        },
+        prompt: async () => "end_turn" as const, cancel: () => {}, dispose: () => {}, setConfig: () => {},
+        resolvePermission: () => false, agentSessionId: () => "provider-session-id",
+      };
+    };
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, factory as never, dataDir, 1);
+    const spec = {
+      sessionId: "s_logout_rebind", workspaceId: "repo", workspacePath: repo, agentId: "claude",
+      command: "claude", args: [], env: {}, useWorktree: false, driver: "claude-code" as const,
+      context: { kind: "native" as const },
+    };
+    await manager.start(spec);
+    const logout = manager.logoutAgent(spec.sessionId);
+    await logoutStarted;
+    const requested = await manager.requestWorktree(spec.sessionId, {
+      baseRef: "HEAD", branch: "fix/logout-rebind",
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(launchedCwds, [repo], "sign-out must retain exclusive use of the live provider");
+    assert.equal(closeCalls, 0, "the provider must not be retired while sign-out is pending");
+    releaseLogout();
+    assert.deepEqual(await logout, { ok: true });
+    await waitForCondition(() => launchedCwds.length === 2, "deferred rebind did not resume after sign-out");
+    assert.deepEqual(launchedCwds, [repo, requested.worktree.path]);
+    manager.stop(spec.sessionId);
+    await manager.delete(spec.sessionId);
+  } finally {
+    releaseLogout();
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("stop fences and cancels a worktree rebind while its old provider is closing", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-stop-worktree-rebind-"));
   const repo = join(root, "repo");
@@ -1505,6 +1606,63 @@ test("a throwing provider dispose cannot strand rebind generation or admission s
     assert.deepEqual(launchedCwds, [repo, requested.worktree.path]);
     manager.stop(spec.sessionId);
     await manager.delete(spec.sessionId);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("delete does not wait forever for a disposed replacement whose initialization never settles", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-hung-launch-delete-"));
+  const repo = join(root, "repo");
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    let launchNumber = 0;
+    let replacementInitializeResolve!: () => void;
+    const replacementInitializeStarted = new Promise<void>((resolve) => {
+      replacementInitializeResolve = resolve;
+    });
+    const never = new Promise<void>(() => {});
+    let replacementDisposed = false;
+    const factory = () => {
+      const currentLaunch = ++launchNumber;
+      return {
+        pid: currentLaunch,
+        initialize: async () => {
+          if (currentLaunch === 2) {
+            replacementInitializeResolve();
+            await never;
+          }
+        },
+        newSession: async () => {}, close: async () => {}, prompt: async () => "end_turn" as const,
+        cancel: () => {}, dispose: () => { if (currentLaunch === 2) replacementDisposed = true; },
+        setConfig: () => {}, resolvePermission: () => false, agentSessionId: () => "provider-session-id",
+      };
+    };
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, factory as never, dataDir, 1);
+    const spec = {
+      sessionId: "s_hung_rebind_delete", workspaceId: "repo", workspacePath: repo, agentId: "claude",
+      command: "claude", args: [], env: {}, useWorktree: false, driver: "claude-code" as const,
+      context: { kind: "native" as const },
+    };
+    await manager.start(spec);
+    const requested = await manager.requestWorktree(spec.sessionId, {
+      baseRef: "HEAD", branch: "fix/hung-rebind-delete",
+    });
+    await replacementInitializeStarted;
+    await Promise.race([
+      manager.delete(spec.sessionId),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("delete remained blocked")), 1_000)),
+    ]);
+    assert.equal(replacementDisposed, true);
+    assert.equal(store.has(spec.sessionId), false);
+    assert.equal(existsSync(requested.worktree.path), false);
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
