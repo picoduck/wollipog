@@ -41,6 +41,7 @@ import {
   SessionsService,
   EXTERNAL_SESSION_ADOPTION_TIMEOUT_MS,
   EXTERNAL_SESSION_ENUMERATION_TIMEOUT_MS,
+  PREPARED_PROMPT_IMAGE_RETENTION_MS,
   SESSION_STOP_MAX_ATTEMPTS,
   SESSION_STOP_RETRY_INTERVAL_MS,
   SESSION_STOP_TIMEOUT_MS,
@@ -3363,6 +3364,53 @@ test("raw prompt image artifacts produce metadata-only commands and reject cross
   assert.equal(transitive.ok, true, transitive.error);
   const tampered = svc.prompt(id, "tamper", [{ ...uploaded.data!, sha256: "b".repeat(64) }]);
   assert.equal(tampered.status, 404);
+});
+
+test("raw prompt-image preparation deduplicates retries and expires only uncommitted uploads", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+  const first = svc.createPromptImageArtifact(id, "image/png", png, { kind: "human", id: "u1" });
+  const retry = svc.createPromptImageArtifact(id, "image/png", png, { kind: "human", id: "u1" });
+  assert.ok(first.ok && first.data, first.error);
+  assert.ok(retry.ok && retry.data, retry.error);
+  assert.equal(retry.data!.artifactId, first.data!.artifactId,
+    "an identical preparation retry must reuse one metadata artifact");
+  assert.equal(Number((db.raw().prepare(
+    "SELECT COUNT(*) AS count FROM prepared_prompt_image_artifacts WHERE session_id=?",
+  ).get(id) as unknown as { count: number }).count), 1);
+  const lease = db.raw().prepare(
+    "SELECT expires_at FROM prepared_prompt_image_artifacts WHERE artifact_id=?",
+  ).get(first.data!.artifactId) as unknown as { expires_at: number };
+  assert.ok(lease.expires_at >= Date.now() + PREPARED_PROMPT_IMAGE_RETENTION_MS - 1_000);
+  assert.equal(db.collectExpiredPreparedPromptImages(lease.expires_at - 1), 0);
+  assert.equal(db.collectExpiredPreparedPromptImages(lease.expires_at), 1);
+  assert.equal(db.getWorkflowArtifact(first.data!.artifactId), null,
+    "an abandoned preparation is removed at its documented expiry");
+
+  const pending = svc.createPromptImageArtifact(id, "image/png", png, { kind: "human", id: "u1" });
+  assert.ok(pending.ok && pending.data, pending.error);
+  assert.equal(svc.prompt(id, "Still pending", [pending.data!]).ok, true);
+  const pendingLease = db.raw().prepare(
+    "SELECT expires_at FROM prepared_prompt_image_artifacts WHERE artifact_id=?",
+  ).get(pending.data!.artifactId) as unknown as { expires_at: number };
+  assert.equal(db.collectExpiredPreparedPromptImages(pendingLease.expires_at), 0);
+  assert.ok(db.getWorkflowArtifact(pending.data!.artifactId),
+    "a durable prompt command protects its image before a user event exists");
+
+  const referencedPng = Buffer.from([...png.subarray(0, -1), 4]);
+  const referenced = svc.createPromptImageArtifact(id, "image/png", referencedPng, { kind: "human", id: "u1" });
+  assert.ok(referenced.ok && referenced.data, referenced.error);
+  svc.onSessionEvent(id, { kind: "user_message", text: "Committed", images: [referenced.data!] });
+  const referencedLease = db.raw().prepare(
+    "SELECT expires_at FROM prepared_prompt_image_artifacts WHERE artifact_id=?",
+  ).get(referenced.data!.artifactId) as unknown as { expires_at: number };
+  assert.equal(db.collectExpiredPreparedPromptImages(referencedLease.expires_at), 0);
+  assert.ok(db.getWorkflowArtifact(referenced.data!.artifactId));
+  assert.equal(db.raw().prepare(
+    "SELECT 1 FROM prepared_prompt_image_artifacts WHERE artifact_id=?",
+  ).get(referenced.data!.artifactId), undefined,
+  "durable event reachability retires the temporary preparation lease");
 });
 
 test("legacy inline prompt images externalize atomically and clean partial conversion failures", () => {

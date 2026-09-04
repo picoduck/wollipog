@@ -2457,6 +2457,14 @@ app.post("/api/sessions/:id/queued/:promptId/edit", async (req, reply) => {
     if (!result.applied || !result.prompt) {
       return reply.code(409).send({ error: result.error ?? "queued message could not be saved", reason: result.reason });
     }
+    try {
+      db.commitPreparedPromptImages(preparedImages.data.map((image) => image.artifactId));
+    } catch (error) {
+      // Runner acceptance is authoritative. Lease cleanup is outcome-neutral; never turn an
+      // applied edit into an ambiguous client failure.
+      req.log.warn({ error: error instanceof Error ? error.message : String(error) },
+        "prepared queued-edit image lease cleanup deferred");
+    }
     return { prompt: result.prompt };
   } catch (error) {
     return reply.code(502).send({ error: (error as Error).message });
@@ -4312,6 +4320,7 @@ const artifactMaintenanceTimer = setInterval(() => {
     svc.maintainPrompts(now);
     db.pruneSessionCommandInvocations(now - SESSION_COMMAND_INVOCATION_RETENTION_MS, 1_000);
     db.compactSteeringAttempts(now, 1_000);
+    db.collectExpiredPreparedPromptImages(now, 1_000);
     db.collectOrphanedSteeringPromptImages(1_000);
     db.collectOrphanedEventPayloadArtifacts(1_000);
     db.collectWorkflowArtifactBlobs(1_000);

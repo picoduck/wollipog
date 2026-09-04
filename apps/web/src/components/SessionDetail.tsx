@@ -255,6 +255,23 @@ function queuedPromptEditMutationRecovery(
   return queuedPromptEditMutationRecovery(mutation.displaced);
 }
 
+function recoveryWithDisplacedDraft(
+  recovery: QueuedPromptEditRecovery,
+  draft: Pick<ComposerDraft, "text" | "images"> | null | undefined,
+): QueuedPromptEditRecovery {
+  if (draft === undefined) return recovery;
+  const { displacedDraftStoredSeparately: _storedSeparately, ...edit } = recovery.edit;
+  return {
+    ...recovery,
+    edit: {
+      ...edit,
+      displacedDraft: draft !== null
+        ? { text: draft.text, images: draft.images.map((image) => ({ ...image })) }
+        : recovery.edit.displacedDraft,
+    },
+  };
+}
+
 function updateQueuedPromptEditMutationRecovery(
   key: string,
   recovery: QueuedPromptEditRecovery,
@@ -1136,6 +1153,14 @@ function SessionDetailLoaded({
       pendingHydrationCommitRef.current = null;
     }
     const pendingQueuedEdit = queuedPromptEditMutationRecovery(activeComposerMutation);
+    const queuedEditAtHydrationStart = queuedEditRef.current;
+    // A locally opened edit owns the composer. Identity can settle later and reveal a runtime or
+    // durable recovery, but only the in-process mutation recovery is allowed to supersede it.
+    if (!hydrationKeyChanged && queuedEditRef.current && !pendingQueuedEdit) {
+      return () => {
+        cancelled = true;
+      };
+    }
     const runtimeQueuedEdit = queuedEditRecoveryScope
       ? loadRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey)
       : undefined;
@@ -1152,8 +1177,7 @@ function SessionDetailLoaded({
         images: draftState.current.images.map((image) => ({ ...image })),
       };
       queuedEditRecovery = {
-        ...queuedEditRecovery,
-        edit: { ...queuedEditRecovery.edit, displacedDraft },
+        ...recoveryWithDisplacedDraft(queuedEditRecovery, displacedDraft),
       };
       // Identity can settle after the user has already begun a new ordinary draft. Keep that work
       // in both draft storage and the recovery's displaced-draft slot before showing the recovery.
@@ -1164,18 +1188,35 @@ function SessionDetailLoaded({
       }
     }
     if (queuedEditRecovery) {
-      if (!runtimeQueuedEdit && queuedEditRecoveryScope) {
-        storeRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey, queuedEditRecovery);
-      }
-      restoreQueuedPromptEditRecovery(queuedEditRecovery, pendingQueuedEdit !== undefined);
-      return () => {
-        cancelled = true;
+      const finishRecoveryRestore = (candidate: QueuedPromptEditRecovery) => {
+        if (cancelled) return;
+        if (queuedEditRef.current && !pendingQueuedEdit &&
+            (!hydrationKeyChanged || queuedEditRef.current !== queuedEditAtHydrationStart)) return;
+        let restored = candidate;
+        if (draftDirty.current && queuedEditRef.current === null) {
+          const displacedDraft = {
+            text: draftState.current.text,
+            images: draftState.current.images.map((image) => ({ ...image })),
+          };
+          restored = recoveryWithDisplacedDraft(restored, displacedDraft);
+          void saveComposerDraft(sessionId, displacedDraft.text, displacedDraft.images, instanceScope);
+          if (queuedEditRecoveryScope) saveDurableQueuedEditRecovery(queuedEditRecoveryScope, restored);
+        }
+        if (!runtimeQueuedEdit && queuedEditRecoveryScope) {
+          storeRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey, restored);
+        }
+        restoreQueuedPromptEditRecovery(restored, pendingQueuedEdit !== undefined);
       };
-    }
-    // Identity can settle after the user has already opened an ordinary queued edit. That edit
-    // owns the composer until it is saved or cancelled; a scope-only hydration rerun must not
-    // replace it with the displaced session draft.
-    if (queuedEditRef.current) {
+      if (queuedEditRecovery.edit.displacedDraftStoredSeparately) {
+        void (async () => {
+          let displaced: ComposerDraft | null | undefined;
+          try { displaced = await loadDraftForSession(sessionId, instanceScope); } catch { /* retain compact text */ }
+          if (displaced === undefined) return;
+          finishRecoveryRestore(recoveryWithDisplacedDraft(queuedEditRecovery, displaced));
+        })();
+      } else {
+        finishRecoveryRestore(queuedEditRecovery);
+      }
       return () => {
         cancelled = true;
       };
@@ -1266,21 +1307,53 @@ function SessionDetailLoaded({
 
   useEffect(() => {
     if (activeComposerMutation) return;
-    const queuedEditRecovery = (queuedEditRecoveryScope
+    // An ordinary locally initiated queued edit already owns the composer. Leave a recovery that
+    // another tab publishes recoverable until this edit is saved or cancelled.
+    if (queuedEditRef.current && !queuedEditRecovered) return;
+    let queuedEditRecovery = (queuedEditRecoveryScope
       ? loadRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey)
       : undefined) ??
       (queuedEditRecoveryScope ? loadDurableQueuedEditRecovery(queuedEditRecoveryScope) : undefined);
     if (queuedEditRecovery) {
       suppressedDraftRef.current = null;
-      const preserveDraft = draftDirty.current &&
-        queuedEditRef.current?.promptId === queuedEditRecovery.edit.promptId;
-      if (preserveDraft) {
+      const openQueuedEdit = queuedEditRef.current;
+      const preserveQueuedEditDraft = draftDirty.current &&
+        openQueuedEdit?.promptId === queuedEditRecovery.edit.promptId;
+      if (preserveQueuedEditDraft) {
         storeQueuedPromptEditRecovery(mutationKey, {
           ...queuedEditRecovery,
           draft: draftState.current,
         });
+      } else if (draftDirty.current && openQueuedEdit === null) {
+        const displacedDraft = {
+          text: draftState.current.text,
+          images: draftState.current.images.map((image) => ({ ...image })),
+        };
+        queuedEditRecovery = {
+          ...recoveryWithDisplacedDraft(queuedEditRecovery, displacedDraft),
+        };
+        void saveComposerDraft(sessionId, displacedDraft.text, displacedDraft.images, instanceScope);
+        if (queuedEditRecoveryScope) {
+          saveDurableQueuedEditRecovery(queuedEditRecoveryScope, queuedEditRecovery);
+          storeRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey, queuedEditRecovery);
+        }
       }
-      restoreQueuedPromptEditRecovery(queuedEditRecovery, false, preserveDraft);
+      if (queuedEditRecovery.edit.displacedDraftStoredSeparately) {
+        let cancelled = false;
+        const loadDraftForSession = composerDraftLoaderRef.current;
+        void (async () => {
+          let displaced: ComposerDraft | null | undefined;
+          try { displaced = await loadDraftForSession(sessionId, instanceScope); } catch { /* retain compact text */ }
+          if (displaced === undefined || cancelled || (queuedEditRef.current && !queuedEditRecovered)) return;
+          const restored = recoveryWithDisplacedDraft(queuedEditRecovery, displaced);
+          if (queuedEditRecoveryScope) {
+            storeRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey, restored);
+          }
+          restoreQueuedPromptEditRecovery(restored, false, preserveQueuedEditDraft);
+        })();
+        return () => { cancelled = true; };
+      }
+      restoreQueuedPromptEditRecovery(queuedEditRecovery, false, preserveQueuedEditDraft);
       return;
     }
     if (suppressedDraftRef.current?.sessionId !== sessionId) return;
@@ -1328,7 +1401,7 @@ function SessionDetailLoaded({
       cancelled = true;
       if (!completed && suppressedDraftRef.current === null) suppressedDraftRef.current = suppressed;
     };
-  }, [activeComposerMutation, instanceScope, mutationKey, queuedEditRecoveryScope, sessionId, replace,
+  }, [activeComposerMutation, instanceScope, mutationKey, queuedEditRecovered, queuedEditRecoveryScope, sessionId, replace,
     restoreQueuedPromptEditRecovery, setProgrammaticComposerText, storeQueuedPromptEditRecovery]);
 
   // Coalesce rapid edits so typing beside a large base64 attachment does not rewrite it on every
@@ -3009,12 +3082,10 @@ function SessionDetailLoaded({
       // image first, then persist the compact immutable references before submitting the edit.
       // Artifact creation is not a queued-edit submission and references remain safe to retry.
       const editImageCount = queuedEdit.images.length;
-      const displacedImageCount = queuedEdit.displacedDraft.images.length;
       let preparedImages: PromptImageInput[];
       try {
         preparedImages = await api.preparePromptImages(sessionId, [
           ...queuedEdit.images,
-          ...queuedEdit.displacedDraft.images,
           ...submittedDraft.images,
         ]);
       } catch (cause) {
@@ -3024,13 +3095,9 @@ function SessionDetailLoaded({
         return;
       }
       const preparedEditImages = preparedImages.slice(0, editImageCount);
-      const preparedDisplacedImages = preparedImages.slice(
-        editImageCount,
-        editImageCount + displacedImageCount,
-      );
       const preparedDraft = {
         text: submittedDraft.text,
-        images: preparedImages.slice(editImageCount + displacedImageCount),
+        images: preparedImages.slice(editImageCount),
       };
       const submissionFingerprint = JSON.stringify(preparedDraft);
       const submissionId = queuedEdit.submissionId && queuedEdit.submissionFingerprint === submissionFingerprint
@@ -3039,10 +3106,10 @@ function SessionDetailLoaded({
       const editForAttempt: QueuedPromptEditState = {
         ...queuedEdit,
         images: preparedEditImages,
-        displacedDraft: {
-          ...queuedEdit.displacedDraft,
-          images: preparedDisplacedImages,
-        },
+        // The ordinary draft remains in IndexedDB/local draft storage. It is not part of this
+        // queued-edit submission and must not create authenticated server artifacts merely to
+        // compact the recovery record.
+        displacedDraft: queuedEdit.displacedDraft,
         submissionId,
         submissionFingerprint,
       };
