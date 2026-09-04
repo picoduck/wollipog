@@ -3398,7 +3398,8 @@ test("raw prompt-image preparation deduplicates retries and expires only uncommi
   assert.ok(db.getWorkflowArtifact(pending.data!.artifactId),
     "a durable prompt command protects its image before a user event exists");
 
-  const referenced = svc.createPromptImageArtifact(id, "image/png", png, { kind: "human", id: "u1" });
+  const referencedPng = Buffer.from([...png.subarray(0, -1), 4]);
+  const referenced = svc.createPromptImageArtifact(id, "image/png", referencedPng, { kind: "human", id: "u1" });
   assert.ok(referenced.ok && referenced.data, referenced.error);
   svc.onSessionEvent(id, { kind: "user_message", text: "Committed", images: [referenced.data!] });
   const referencedLease = db.raw().prepare(

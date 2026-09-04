@@ -11,6 +11,9 @@ export interface QueuedPromptEditState extends QueuedPromptDraft {
   submissionId?: string;
   submissionFingerprint?: string;
   displacedDraft: { text: string; images: PromptImageInput[] };
+  /** Large displaced attachments remain in IndexedDB instead of consuming the localStorage
+   * recovery budget. SessionDetail rehydrates them before exposing recovery actions. */
+  displacedDraftStoredSeparately?: true;
 }
 
 export interface QueuedPromptEditRecovery {
@@ -162,6 +165,7 @@ export function parseQueuedPromptEditRecovery(value: unknown): QueuedPromptEditR
       !edit.images.every(validImage) || !validDraft(edit.displacedDraft)) return null;
   if (edit.submissionId !== undefined && (typeof edit.submissionId !== "string" || !edit.submissionId)) return null;
   if (edit.submissionFingerprint !== undefined && typeof edit.submissionFingerprint !== "string") return null;
+  if (edit.displacedDraftStoredSeparately !== undefined && edit.displacedDraftStoredSeparately !== true) return null;
   if (candidate.error !== undefined && typeof candidate.error !== "string") return null;
   return cloneQueuedPromptEditRecovery({
     edit: {
@@ -174,6 +178,7 @@ export function parseQueuedPromptEditRecovery(value: unknown): QueuedPromptEditR
       ...(typeof edit.submissionFingerprint === "string"
         ? { submissionFingerprint: edit.submissionFingerprint }
         : {}),
+      ...(edit.displacedDraftStoredSeparately === true ? { displacedDraftStoredSeparately: true } : {}),
     },
     draft: candidate.draft,
     ...(typeof candidate.error === "string" ? { error: candidate.error } : {}),
@@ -374,6 +379,7 @@ function makeTombstone(
   target: StoredQueuedEditRecoveryTombstone["target"],
   scope: Partial<QueuedEditRecoveryScope> & Pick<QueuedEditRecoveryScope, "instanceScope">,
   startedAt: number,
+  expiresAt = startedAt + QUEUED_EDIT_RECOVERY_MAX_AGE_MS,
 ): StoredQueuedEditRecoveryTombstone {
   return {
     version: 2,
@@ -384,7 +390,7 @@ function makeTombstone(
     ...(scope.sessionId ? { sessionId: scope.sessionId } : {}),
     operationId: browserRandomUUID(),
     startedAt,
-    expiresAt: startedAt + QUEUED_EDIT_RECOVERY_MAX_AGE_MS,
+    expiresAt,
   };
 }
 
@@ -446,6 +452,49 @@ function activeRecords(instanceScope: string, storage: KeyValueStorage | undefin
   return active;
 }
 
+function markerMatchesScope(
+  scope: QueuedEditRecoveryScope,
+  marker: StoredQueuedEditRecoveryTombstone,
+): boolean {
+  return marker.instanceScope === scope.instanceScope && (
+    marker.target === "instance" ||
+    (marker.accountKey === scope.accountKey && (marker.target === "account" || marker.sessionId === scope.sessionId))
+  );
+}
+
+function nextSaveStartedAt(
+  scope: QueuedEditRecoveryScope,
+  storage: KeyValueStorage | undefined,
+  now: number,
+): number {
+  let startedAt = now;
+  for (const marker of effectiveTombstones(scope.instanceScope, storage, now)) {
+    if (markerMatchesScope(scope, marker)) startedAt = Math.max(startedAt, marker.startedAt + 1);
+  }
+  for (const item of activeRecords(scope.instanceScope, storage, now)) {
+    if (item.value.accountKey === scope.accountKey && item.value.sessionId === scope.sessionId) {
+      startedAt = Math.max(startedAt, item.value.startedAt + 1);
+    }
+  }
+  return startedAt;
+}
+
+function clearStartedAt(
+  target: StoredQueuedEditRecoveryTombstone["target"],
+  scope: Partial<QueuedEditRecoveryScope> & Pick<QueuedEditRecoveryScope, "instanceScope">,
+  storage: KeyValueStorage | undefined,
+  now: number,
+): number {
+  let startedAt = now;
+  for (const item of activeRecords(scope.instanceScope, storage, now)) {
+    if (target === "instance" || (item.value.accountKey === scope.accountKey &&
+        (target === "account" || item.value.sessionId === scope.sessionId))) {
+      startedAt = Math.max(startedAt, item.value.startedAt);
+    }
+  }
+  return startedAt;
+}
+
 function enforceStoredBounds(
   instanceScope: string,
   protectedOperationId: string,
@@ -466,6 +515,21 @@ function enforceStoredBounds(
     // the same Session.
     if (!removeStored(oldest, storage)) return false;
     totalBytes -= 2 * (oldest.physicalKey.length + oldest.raw.length);
+  }
+  return true;
+}
+
+function removeSupersededSessionRecords(
+  current: StoredQueuedEditRecoveryRecord,
+  storage: KeyValueStorage | undefined,
+): boolean {
+  for (const item of listRecords(current.instanceScope, storage)) {
+    if (item.value.operationId === current.operationId ||
+        item.value.accountKey !== current.accountKey || item.value.sessionId !== current.sessionId ||
+        item.value.startedAt >= current.startedAt) continue;
+    // Immutable operation keys make this exact deletion race-safe: a concurrent newer save has a
+    // different key and can never be erased here.
+    if (!removeStored(item, storage)) return false;
   }
   return true;
 }
@@ -508,18 +572,44 @@ export function saveDurableQueuedEditRecovery(
   storage?: KeyValueStorage,
   now = Date.now(),
 ): boolean {
-  const nextEntry: StoredQueuedEditRecoveryRecord = {
+  const startedAt = nextSaveStartedAt(scope, storage, now);
+  let nextEntry: StoredQueuedEditRecoveryRecord = {
     version: 2, kind: "recovery", instanceScope: scope.instanceScope,
     accountKey: scope.accountKey, sessionId: scope.sessionId,
     recovery: cloneQueuedPromptEditRecovery(recovery), operationId: browserRandomUUID(),
-    startedAt: now, updatedAt: now, expiresAt: now + QUEUED_EDIT_RECOVERY_MAX_AGE_MS,
+    startedAt, updatedAt: now, expiresAt: now + QUEUED_EDIT_RECOVERY_MAX_AGE_MS,
   };
   if (recordIsSuppressed(nextEntry, effectiveTombstones(scope.instanceScope, storage, now))) return false;
   const logicalKey = entryLogicalKey(nextEntry);
-  const serialized = JSON.stringify(nextEntry);
+  let serialized = JSON.stringify(nextEntry);
+  if (currentStorageBytes(logicalKey, serialized, scope.instanceScope) > QUEUED_EDIT_RECOVERY_MAX_BYTES &&
+      nextEntry.recovery.edit.displacedDraft.images.length > 0) {
+    // The ordinary draft is already durable in IndexedDB before queued editing begins. Keep only
+    // its text in localStorage when raw base64 attachments would otherwise block the unrelated
+    // queued edit; SessionDetail rehydrates the full displaced draft before restoration.
+    nextEntry = {
+      ...nextEntry,
+      recovery: {
+        ...nextEntry.recovery,
+        edit: {
+          ...nextEntry.recovery.edit,
+          displacedDraft: { ...nextEntry.recovery.edit.displacedDraft, images: [] },
+          displacedDraftStoredSeparately: true,
+        },
+      },
+    };
+    serialized = JSON.stringify(nextEntry);
+  }
   if (currentStorageBytes(logicalKey, serialized, scope.instanceScope) > QUEUED_EDIT_RECOVERY_MAX_BYTES) return false;
   if (!writeStoredValue(logicalKey, serialized, scope.instanceScope, storage)) return false;
-  if (!enforceStoredBounds(scope.instanceScope, nextEntry.operationId, storage, now)) return false;
+  if (!removeSupersededSessionRecords(nextEntry, storage)) {
+    removeStored({ physicalKey: instanceStorageKey(logicalKey, scope.instanceScope) }, storage);
+    return false;
+  }
+  if (!enforceStoredBounds(scope.instanceScope, nextEntry.operationId, storage, now)) {
+    removeStored({ physicalKey: instanceStorageKey(logicalKey, scope.instanceScope) }, storage);
+    return false;
+  }
   return loadInstanceStorageValue(logicalKey, scope.instanceScope, storage) === serialized &&
     !recordIsSuppressed(nextEntry, effectiveTombstones(scope.instanceScope, storage, now));
 }
@@ -529,7 +619,9 @@ export function clearDurableQueuedEditRecovery(
   storage?: KeyValueStorage,
   now = Date.now(),
 ): boolean {
-  const marker = makeTombstone("entry", scope, now);
+  const marker = makeTombstone(
+    "entry", scope, clearStartedAt("entry", scope, storage, now), now + QUEUED_EDIT_RECOVERY_MAX_AGE_MS,
+  );
   const pendingKey = pendingTombstoneKey(marker);
   if (!persistTombstone(marker, storage)) {
     pendingTombstones.set(pendingKey, marker);
@@ -546,7 +638,11 @@ export function clearDurableQueuedEditRecoveriesForAccount(
   storage?: KeyValueStorage,
   now = Date.now(),
 ): boolean {
-  const marker = makeTombstone("account", { instanceScope, accountKey }, now);
+  const markerScope = { instanceScope, accountKey };
+  const marker = makeTombstone(
+    "account", markerScope, clearStartedAt("account", markerScope, storage, now),
+    now + QUEUED_EDIT_RECOVERY_MAX_AGE_MS,
+  );
   const pendingKey = pendingTombstoneKey(marker);
   if (!persistTombstone(marker, storage)) {
     pendingTombstones.set(pendingKey, marker);
@@ -561,7 +657,12 @@ export function clearAllDurableQueuedEditRecoveries(
   instanceScope: string,
   storage?: KeyValueStorage,
 ): void {
-  const marker = makeTombstone("instance", { instanceScope }, Date.now());
+  const now = Date.now();
+  const markerScope = { instanceScope };
+  const marker = makeTombstone(
+    "instance", markerScope, clearStartedAt("instance", markerScope, storage, now),
+    now + QUEUED_EDIT_RECOVERY_MAX_AGE_MS,
+  );
   const pendingKey = pendingTombstoneKey(marker);
   if (!persistTombstone(marker, storage)) {
     pendingTombstones.set(pendingKey, marker);

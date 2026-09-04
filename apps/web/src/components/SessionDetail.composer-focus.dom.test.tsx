@@ -461,7 +461,7 @@ async function waitForComposerSendToSettle(fixture: Fixture, timeoutMs = 5_000):
 }
 
 const submittedImage = { mimeType: "image/png", data: "aW1hZ2U=" } as const;
-const displacedDraftImage = { mimeType: "image/jpeg", data: "/9j/2Q==" } as const;
+const displacedDraftImage = { mimeType: "image/jpeg", data: `/9j/${"A".repeat(1_100_000)}` } as const;
 const preparedImageReference = {
   artifactId: "art-prepared-image",
   mimeType: "image/png",
@@ -847,8 +847,13 @@ test("a failed queued edit survives a simulated full runtime reload with its exa
     });
     assert.deepEqual(retained?.edit.displacedDraft, {
       text: "Displaced local draft",
-      images: [displacedDraftImage],
-    }, "the ordinary draft remains local and recoverable without uploading its attachment");
+      images: [],
+    }, "large displaced attachments stay out of the bounded localStorage recovery");
+    assert.equal(retained?.edit.displacedDraftStoredSeparately, true);
+    const retainedDraft = await loadComposerDraft(fixture.sessionId, fixture.instanceScope);
+    assert.equal(retainedDraft?.text, "Displaced local draft");
+    assert.deepEqual(retainedDraft?.images, [displacedDraftImage],
+      "the full ordinary draft remains recoverable from draft storage without uploading its attachment");
 
     await fixture.closeSocket(1008);
     await flushAsyncWork();
@@ -1030,6 +1035,60 @@ test("late identity hydration with durable recovery cannot replace a modified lo
     assert.equal(edits[0]?.text, "Locally revised content");
     assert.equal(edits[0]?.expectedRevision, "qer_exact");
     assert.deepEqual(edits[0]?.images, [submittedImage]);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("switching Sessions restores the destination recovery instead of retaining the prior local edit", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 99,
+    sessionPatch: {
+      queued: [{
+        id: "queue-1",
+        text: "Queued projection",
+        liveQueueObserved: true,
+        editable: true,
+        editRevision: "qer_exact",
+      }],
+    },
+    client: {
+      readQueuedPrompt: async (_sessionId, promptId) => ({
+        prompt: { promptId, text: "Current Session edit", images: [], editRevision: "qer_exact" },
+      }),
+    },
+  });
+  try {
+    await resolveDraft(draft, "Current Session draft");
+    await flushAsyncWork();
+    const edit = fixture.container.querySelector('button[aria-label="Edit Queued Message"]') as HTMLButtonElement;
+    await act(async () => { edit.click(); });
+    await flushAsyncWork();
+    assert.equal(fixture.composer.value, "Current Session edit");
+
+    assert.equal(saveDurableQueuedEditRecovery({
+      instanceScope: fixture.instanceScope,
+      accountKey: queuedEditRecoveryAccountKey("org-1", "user-1"),
+      sessionId: fixture.alternateSessionId,
+    }, {
+      edit: {
+        promptId: "queue-destination",
+        text: "Destination original",
+        images: [],
+        editRevision: "destination-revision",
+        displacedDraft: { text: "Destination displaced draft", images: [] },
+      },
+      draft: { text: "Destination recovered edit", images: [] },
+      error: "Destination recovery",
+    }), true);
+
+    await fixture.rerenderSessionWithDraftLoader(fixture.alternateSessionId, async () => null);
+    await flushAsyncWork();
+    const destinationComposer = fixture.container.querySelector(".composer-input") as HTMLTextAreaElement;
+    assert.equal(destinationComposer.value, "Destination recovered edit");
+    assert.match(fixture.container.querySelector(".queued-edit-banner")?.textContent ?? "",
+      /Recovered Queued Message/);
   } finally {
     await unmountFixture(fixture);
   }

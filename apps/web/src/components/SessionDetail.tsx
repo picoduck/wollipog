@@ -255,6 +255,23 @@ function queuedPromptEditMutationRecovery(
   return queuedPromptEditMutationRecovery(mutation.displaced);
 }
 
+function recoveryWithDisplacedDraft(
+  recovery: QueuedPromptEditRecovery,
+  draft: Pick<ComposerDraft, "text" | "images"> | null | undefined,
+): QueuedPromptEditRecovery {
+  if (draft === undefined) return recovery;
+  const { displacedDraftStoredSeparately: _storedSeparately, ...edit } = recovery.edit;
+  return {
+    ...recovery,
+    edit: {
+      ...edit,
+      displacedDraft: draft !== null
+        ? { text: draft.text, images: draft.images.map((image) => ({ ...image })) }
+        : recovery.edit.displacedDraft,
+    },
+  };
+}
+
 function updateQueuedPromptEditMutationRecovery(
   key: string,
   recovery: QueuedPromptEditRecovery,
@@ -1136,9 +1153,10 @@ function SessionDetailLoaded({
       pendingHydrationCommitRef.current = null;
     }
     const pendingQueuedEdit = queuedPromptEditMutationRecovery(activeComposerMutation);
+    const queuedEditAtHydrationStart = queuedEditRef.current;
     // A locally opened edit owns the composer. Identity can settle later and reveal a runtime or
     // durable recovery, but only the in-process mutation recovery is allowed to supersede it.
-    if (queuedEditRef.current && !pendingQueuedEdit) {
+    if (!hydrationKeyChanged && queuedEditRef.current && !pendingQueuedEdit) {
       return () => {
         cancelled = true;
       };
@@ -1159,8 +1177,7 @@ function SessionDetailLoaded({
         images: draftState.current.images.map((image) => ({ ...image })),
       };
       queuedEditRecovery = {
-        ...queuedEditRecovery,
-        edit: { ...queuedEditRecovery.edit, displacedDraft },
+        ...recoveryWithDisplacedDraft(queuedEditRecovery, displacedDraft),
       };
       // Identity can settle after the user has already begun a new ordinary draft. Keep that work
       // in both draft storage and the recovery's displaced-draft slot before showing the recovery.
@@ -1171,10 +1188,35 @@ function SessionDetailLoaded({
       }
     }
     if (queuedEditRecovery) {
-      if (!runtimeQueuedEdit && queuedEditRecoveryScope) {
-        storeRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey, queuedEditRecovery);
+      const finishRecoveryRestore = (candidate: QueuedPromptEditRecovery) => {
+        if (cancelled) return;
+        if (queuedEditRef.current && !pendingQueuedEdit &&
+            (!hydrationKeyChanged || queuedEditRef.current !== queuedEditAtHydrationStart)) return;
+        let restored = candidate;
+        if (draftDirty.current && queuedEditRef.current === null) {
+          const displacedDraft = {
+            text: draftState.current.text,
+            images: draftState.current.images.map((image) => ({ ...image })),
+          };
+          restored = recoveryWithDisplacedDraft(restored, displacedDraft);
+          void saveComposerDraft(sessionId, displacedDraft.text, displacedDraft.images, instanceScope);
+          if (queuedEditRecoveryScope) saveDurableQueuedEditRecovery(queuedEditRecoveryScope, restored);
+        }
+        if (!runtimeQueuedEdit && queuedEditRecoveryScope) {
+          storeRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey, restored);
+        }
+        restoreQueuedPromptEditRecovery(restored, pendingQueuedEdit !== undefined);
+      };
+      if (queuedEditRecovery.edit.displacedDraftStoredSeparately) {
+        void (async () => {
+          let displaced: ComposerDraft | null | undefined;
+          try { displaced = await loadDraftForSession(sessionId, instanceScope); } catch { /* retain compact text */ }
+          if (displaced === undefined) return;
+          finishRecoveryRestore(recoveryWithDisplacedDraft(queuedEditRecovery, displaced));
+        })();
+      } else {
+        finishRecoveryRestore(queuedEditRecovery);
       }
-      restoreQueuedPromptEditRecovery(queuedEditRecovery, pendingQueuedEdit !== undefined);
       return () => {
         cancelled = true;
       };
@@ -1288,14 +1330,28 @@ function SessionDetailLoaded({
           images: draftState.current.images.map((image) => ({ ...image })),
         };
         queuedEditRecovery = {
-          ...queuedEditRecovery,
-          edit: { ...queuedEditRecovery.edit, displacedDraft },
+          ...recoveryWithDisplacedDraft(queuedEditRecovery, displacedDraft),
         };
         void saveComposerDraft(sessionId, displacedDraft.text, displacedDraft.images, instanceScope);
         if (queuedEditRecoveryScope) {
           saveDurableQueuedEditRecovery(queuedEditRecoveryScope, queuedEditRecovery);
           storeRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey, queuedEditRecovery);
         }
+      }
+      if (queuedEditRecovery.edit.displacedDraftStoredSeparately) {
+        let cancelled = false;
+        const loadDraftForSession = composerDraftLoaderRef.current;
+        void (async () => {
+          let displaced: ComposerDraft | null | undefined;
+          try { displaced = await loadDraftForSession(sessionId, instanceScope); } catch { /* retain compact text */ }
+          if (displaced === undefined || cancelled || (queuedEditRef.current && !queuedEditRecovered)) return;
+          const restored = recoveryWithDisplacedDraft(queuedEditRecovery, displaced);
+          if (queuedEditRecoveryScope) {
+            storeRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey, restored);
+          }
+          restoreQueuedPromptEditRecovery(restored, false, preserveQueuedEditDraft);
+        })();
+        return () => { cancelled = true; };
       }
       restoreQueuedPromptEditRecovery(queuedEditRecovery, false, preserveQueuedEditDraft);
       return;

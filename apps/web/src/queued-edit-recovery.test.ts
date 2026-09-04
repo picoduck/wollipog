@@ -240,6 +240,32 @@ test("interleaved saves remain count bounded after both tabs scan the same prior
     Number(Boolean(loadDurableQueuedEditRecovery(scope("outer"), storage, 4_000))), QUEUED_EDIT_RECOVERY_MAX_ENTRIES);
 });
 
+test("repeated saves for one Session supersede old operations without evicting another Session", () => {
+  const storage = new MemoryStorage();
+  assert.equal(saveDurableQueuedEditRecovery(
+    scope("session-b"),
+    { ...recovery, draft: { text: "Session B must survive", images: [] } },
+    storage,
+    1_000,
+  ), true);
+  for (let index = 0; index < QUEUED_EDIT_RECOVERY_MAX_ENTRIES + 5; index += 1) {
+    assert.equal(saveDurableQueuedEditRecovery(
+      scope("session-a"),
+      { ...recovery, draft: { text: `Session A revision ${index}`, images: [] } },
+      storage,
+      2_000 + index,
+    ), true);
+  }
+  assert.equal(loadDurableQueuedEditRecovery(scope("session-b"), storage, 3_000)?.draft.text,
+    "Session B must survive");
+  assert.equal(loadDurableQueuedEditRecovery(scope("session-a"), storage, 3_000)?.draft.text,
+    `Session A revision ${QUEUED_EDIT_RECOVERY_MAX_ENTRIES + 4}`);
+  const recoveryRecords = [...storage.values.values()].filter((value) => {
+    try { return (JSON.parse(value) as { kind?: string }).kind === "recovery"; } catch { return false; }
+  });
+  assert.equal(recoveryRecords.length, 2);
+});
+
 test("pruning an old operation cannot erase a newer save for the same Session", () => {
   const storage = new MemoryStorage();
   for (let index = 0; index < QUEUED_EDIT_RECOVERY_MAX_ENTRIES; index += 1) {
@@ -315,6 +341,17 @@ test("count eviction always retains the entry being saved after the clock moves 
   }
   assert.equal(saveDurableQueuedEditRecovery(scope("current"), recovery, storage, 1_000), true);
   assert.deepEqual(loadDurableQueuedEditRecovery(scope("current"), storage, 2_000), recovery);
+});
+
+test("clock rollback cannot make recovery unclearable or block a later intentional save", () => {
+  const storage = new MemoryStorage();
+  assert.equal(saveDurableQueuedEditRecovery(scope("clock-rollback"), recovery, storage, 10_000), true);
+  assert.equal(clearDurableQueuedEditRecovery(scope("clock-rollback"), storage, 1_000), true);
+  assert.equal(loadDurableQueuedEditRecovery(scope("clock-rollback"), storage, 1_001), undefined);
+  const later = { ...recovery, draft: { text: "Saved after the clear", images: [] } };
+  assert.equal(saveDurableQueuedEditRecovery(scope("clock-rollback"), later, storage, 1_002), true);
+  assert.equal(loadDurableQueuedEditRecovery(scope("clock-rollback"), storage, 1_003)?.draft.text,
+    "Saved after the clear");
 });
 
 test("oversize and unavailable storage fail without touching an ordinary draft", () => {
