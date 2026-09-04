@@ -51,6 +51,104 @@ const literal = (tokens: Map<string, string>, name: string) => {
   return value && /^#[0-9a-fA-F]{6}$/.test(value) ? value : null;
 };
 
+type Lab = readonly [number, number, number];
+type Vision = "normal" | "protanopia" | "deuteranopia" | "tritanopia";
+
+/*
+ * Full-severity Machado matrices operate on linear RGB. The thresholds below are the exact ones
+ * used to choose the chart palette: CIEDE2000 >= 15 normally and >= 8 under each simulated
+ * dichromacy. Keeping the method beside the invariant matters — "Delta E" without a colour space,
+ * formula, and simulation is not a reproducible claim.
+ */
+const VISION_MATRICES: Record<Vision, readonly (readonly [number, number, number])[]> = {
+  normal: [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+  protanopia: [[0.152286, 1.052583, -0.204868], [0.114503, 0.786281, 0.099216], [-0.003882, -0.048116, 1.051998]],
+  deuteranopia: [[0.367322, 0.860646, -0.227968], [0.280085, 0.672501, 0.047413], [-0.01182, 0.04294, 0.968881]],
+  tritanopia: [[1.255528, -0.076749, -0.178779], [-0.078411, 0.930809, 0.147602], [0.004733, 0.691367, 0.3039]],
+};
+
+const radians = (degrees: number) => degrees * Math.PI / 180;
+const degrees = (angle: number) => angle * 180 / Math.PI;
+
+function lab(hex: string, vision: Vision): Lab {
+  const linear = [1, 3, 5].map((index) => {
+    const channel = Number.parseInt(hex.slice(index, index + 2), 16) / 255;
+    return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+  });
+  const [r, g, b] = VISION_MATRICES[vision].map((row) =>
+    Math.max(0, Math.min(1, row.reduce((sum, coefficient, index) => sum + coefficient * linear[index]!, 0))));
+  const xyz = [
+    (0.4124564 * r! + 0.3575761 * g! + 0.1804375 * b!) / 0.95047,
+    0.2126729 * r! + 0.7151522 * g! + 0.072175 * b!,
+    (0.0193339 * r! + 0.119192 * g! + 0.9503041 * b!) / 1.08883,
+  ];
+  const f = (value: number) => value > 216 / 24389
+    ? Math.cbrt(value)
+    : (24389 / 27 * value + 16) / 116;
+  const [x, y, z] = xyz.map(f);
+  return [116 * y! - 16, 500 * (x! - y!), 200 * (y! - z!)];
+}
+
+function deltaEFromLab(first: Lab, second: Lab): number {
+  const [l1, a1, b1] = first;
+  const [l2, a2, b2] = second;
+  const c1 = Math.hypot(a1, b1);
+  const c2 = Math.hypot(a2, b2);
+  const cMean = (c1 + c2) / 2;
+  const cMean7 = cMean ** 7;
+  const g = 0.5 * (1 - Math.sqrt(cMean7 / (cMean7 + 25 ** 7)));
+  const ap1 = (1 + g) * a1;
+  const ap2 = (1 + g) * a2;
+  const cp1 = Math.hypot(ap1, b1);
+  const cp2 = Math.hypot(ap2, b2);
+  const hp1 = (degrees(Math.atan2(b1, ap1)) + 360) % 360;
+  const hp2 = (degrees(Math.atan2(b2, ap2)) + 360) % 360;
+  const dl = l2 - l1;
+  const dc = cp2 - cp1;
+  let dh = cp1 * cp2 === 0 ? 0 : hp2 - hp1;
+  if (dh > 180) dh -= 360;
+  if (dh < -180) dh += 360;
+  const dH = 2 * Math.sqrt(cp1 * cp2) * Math.sin(radians(dh / 2));
+  const lMean = (l1 + l2) / 2;
+  const cpMean = (cp1 + cp2) / 2;
+  const hpMean = cp1 * cp2 === 0
+    ? hp1 + hp2
+    : Math.abs(hp1 - hp2) <= 180
+      ? (hp1 + hp2) / 2
+      : ((hp1 + hp2 + 360) / 2) % 360;
+  const t = 1 - 0.17 * Math.cos(radians(hpMean - 30))
+    + 0.24 * Math.cos(radians(2 * hpMean))
+    + 0.32 * Math.cos(radians(3 * hpMean + 6))
+    - 0.20 * Math.cos(radians(4 * hpMean - 63));
+  const theta = (hpMean - 275) / 25;
+  const deltaTheta = 30 * Math.exp(-(theta * theta));
+  const cpMean7 = cpMean ** 7;
+  const rc = 2 * Math.sqrt(cpMean7 / (cpMean7 + 25 ** 7));
+  const sl = 1 + 0.015 * (lMean - 50) ** 2 / Math.sqrt(20 + (lMean - 50) ** 2);
+  const sc = 1 + 0.045 * cpMean;
+  const sh = 1 + 0.015 * cpMean * t;
+  const rt = -Math.sin(radians(2 * deltaTheta)) * rc;
+  const [lTerm, cTerm, hTerm] = [dl / sl, dc / sc, dH / sh];
+  return Math.sqrt(lTerm ** 2 + cTerm ** 2 + hTerm ** 2 + rt * cTerm * hTerm);
+}
+
+/** CIEDE2000 perceptual difference between two literal sRGB colours. */
+const deltaE = (a: string, b: string, vision: Vision) => deltaEFromLab(lab(a, vision), lab(b, vision));
+
+test("the CIEDE2000 implementation matches the published reference pairs", () => {
+  // Sharma et al.'s first three supplementary test pairs. A colour-separation floor is only as
+  // trustworthy as its arithmetic; these catch the hue wrapping, chroma correction, and rotation
+  // terms that distinguish CIEDE2000 from a plausible-looking Euclidean approximation.
+  const reference: Array<[Lab, Lab, number]> = [
+    [[50, 2.6772, -79.7751], [50, 0, -82.7485], 2.0425],
+    [[50, 3.1571, -77.2803], [50, 0, -82.7485], 2.8615],
+    [[50, 2.8361, -74.0200], [50, 0, -82.7485], 3.4412],
+  ];
+  for (const [a, b, expected] of reference) {
+    assert.ok(Math.abs(deltaEFromLab(a, b) - expected) < 0.0001, `${expected} reference pair drifted`);
+  }
+});
+
 test("every scheme declares every colour the base theme declares", () => {
   // A missing token is not a missing colour — it is WOLLIPOG'S colour, inherited into a foreign
   // palette. Dracula with Wollipog's teal accent looks deliberate and is not.
@@ -132,6 +230,64 @@ test("the committed schemes are what the generator produces", () => {
         `${scheme}/${theme} has drifted from the rule that produced it; re-run the generator`);
     }
   }
+});
+
+test("usage chart series and hover fills stay distinct and visible in every palette", () => {
+  const hoverRules = rulesWith(css, ["fill"])
+    .filter((rule) => rule.selector === ".usage-chart-column.is-hovered .usage-chart-segment");
+  assert.equal(hoverRules.length, 1, "the usage hover fill must have one unambiguous declaration");
+  const hover = /^color-mix\(in srgb, var\(--usage-series\) ([\d.]+)%, var\(--text\)\)$/
+    .exec(hoverRules[0]!.declarations.fill!);
+  assert.ok(hover, "the usage hover must mix its series toward the palette's text colour");
+  const hoverSeriesFraction = Number(hover[1]) / 100;
+  assert.ok(hoverSeriesFraction > 0 && hoverSeriesFraction <= 1,
+    "the usage hover's series percentage must be a fraction in (0, 1]");
+
+  const failures: string[] = [];
+  let contrastChecks = 0;
+  let separationChecks = 0;
+  for (const scheme of SCHEMES) {
+    for (const theme of THEMES) {
+      const tokens = tokensFor(scheme, theme);
+      const requireLiteral = (name: string) => {
+        const value = literal(tokens, name);
+        assert.ok(value, `${scheme}/${theme}: ${name} must be a literal colour for measurement`);
+        return value;
+      };
+      const series = [1, 2, 3, 4].map((slot) => requireLiteral(`--usage-series-${slot}`));
+      const text = requireLiteral("--text");
+      for (const groundName of ["--bg", "--bg-elev"]) {
+        const ground = requireLiteral(groundName);
+        for (const [index, colour] of series.entries()) {
+          const normal = contrast(colour, ground);
+          const hovered = contrast(mixHex(text, colour, hoverSeriesFraction), ground);
+          if (normal < 3) {
+            failures.push(`${scheme}/${theme}: series ${index + 1} on ${groundName} is ${normal.toFixed(2)}:1`);
+          }
+          if (hovered < 3) {
+            failures.push(`${scheme}/${theme}: hovered series ${index + 1} on ${groundName} is ${hovered.toFixed(2)}:1`);
+          }
+          contrastChecks += 2;
+        }
+      }
+      for (let index = 0; index < series.length - 1; index++) {
+        for (const vision of Object.keys(VISION_MATRICES) as Vision[]) {
+          const measured = deltaE(series[index]!, series[index + 1]!, vision);
+          const floor = vision === "normal" ? 15 : 8;
+          if (measured < floor) {
+            failures.push(`${scheme}/${theme}: series ${index + 1}/${index + 2} under ${vision} is ΔE ${measured.toFixed(2)}`);
+          }
+          separationChecks += 1;
+        }
+      }
+    }
+  }
+  // Literals, because deriving these from the enumerators lets a removed scheme, slot, surface, or
+  // vision model shorten both the work and its supposed guard. Five schemes x two themes x four
+  // slots x two grounds x two states; then three adjacent pairs x four vision models.
+  assert.equal(contrastChecks, 160, "usage contrast coverage must span the complete palette matrix");
+  assert.equal(separationChecks, 120, "usage separation coverage must span every adjacent pair and vision model");
+  assert.deepEqual(failures, [], "usage chart colours must preserve their contrast and categorical separation");
 });
 
 test("the scheme list and the stylesheet agree", () => {

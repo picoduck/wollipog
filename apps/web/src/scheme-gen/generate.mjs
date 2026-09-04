@@ -470,9 +470,9 @@ function tokens(a, theme) {
     // CVD and normal-vision separation on both surfaces), shared by every scheme so a driver reads
     // the same colour everywhere. Chart marks only — never text, never status — so they are not
     // derived toward any ink and carry no WCAG text demand.
-    "--usage-series-1": dark ? "#d95926" : "#eb6834",
+    "--usage-series-1": dark ? "#d95926" : "#d75f30",
     "--usage-series-2": dark ? "#3987e5" : "#2a78d6",
-    "--usage-series-3": "#199e70",
+    "--usage-series-3": dark ? "#199e70" : "#18966a",
     "--usage-series-4": dark ? "#9085e9" : "#4a3aa7",
     // The four remaining palette literals. Left out of the first version, they were inherited from
     // Wollipog — so a GitHub diff showed Wollipog's green wash behind GitHub's green text, which is
