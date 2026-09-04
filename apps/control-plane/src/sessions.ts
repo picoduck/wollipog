@@ -162,6 +162,8 @@ export const EXTERNAL_SESSION_ADOPTION_TIMEOUT_MS = 45_000;
 export const STEERING_REQUEST_TIMEOUT_MS = 15_000;
 export const SESSION_COMMAND_INVOCATION_EXPIRY_MS = 24 * 60 * 60_000;
 export const SESSION_COMMAND_INVOCATION_RETENTION_MS = 30 * 24 * 60 * 60_000;
+/** One day beyond the browser's seven-day queued-edit recovery window. */
+export const PREPARED_PROMPT_IMAGE_RETENTION_MS = 8 * 24 * 60 * 60_000;
 const SESSION_COMMAND_RETRY_MAX_MS = 30_000;
 const SESSION_COMMAND_RECEIPT_ERROR_MAX_CHARS = 512;
 export const SESSION_STOP_RETRY_INTERVAL_MS = 10_000;
@@ -2282,16 +2284,32 @@ export class SessionsService {
     }
     if (!this.db.getSession(sessionId)) return fail("session not found", 404);
     const now = Date.now();
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const expiresAt = now + PREPARED_PROMPT_IMAGE_RETENTION_MS;
+    let reusable: WorkflowArtifactView | null;
+    try {
+      reusable = this.db.findPreparedPromptImageArtifact(
+        sessionId,
+        mimeType,
+        bytes.byteLength,
+        sha256,
+        expiresAt,
+      );
+    } catch {
+      return fail("prompt image artifact could not be stored", 500);
+    }
+    if (reusable) return ok(this.promptImageReference(reusable), 200);
     const artifact: WorkflowArtifactView = {
       artifactId: shortId("art_"), sessionId, kind: "screenshot",
       name: `prompt-image-${now}`, mimeType, encoding: "base64",
-      sizeBytes: bytes.byteLength, sha256: createHash("sha256").update(bytes).digest("hex"),
+      sizeBytes: bytes.byteLength, sha256,
       createdBy: actor, metadata: { purpose: "prompt_image" }, createdAt: now,
     };
     try {
-      this.db.createWorkflowArtifactBytes(artifact, bytes);
+      this.db.createWorkflowArtifactBytes(artifact, bytes, { preparedPromptImageExpiresAt: expiresAt });
       return ok(this.promptImageReference(artifact), 201);
     } catch {
+      try { this.db.deleteWorkflowArtifact(artifact.artifactId); } catch { /* startup/maintenance retries blob cleanup */ }
       return fail("prompt image artifact could not be stored", 500);
     }
   }

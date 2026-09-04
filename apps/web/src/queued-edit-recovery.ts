@@ -1,10 +1,11 @@
 import type { PromptImageInput, QueuedPromptDraft, QueuedPromptView } from "@wollipog/protocol";
 import {
   type KeyValueStorage,
+  instanceStorageKey,
   loadInstanceStorageValue,
   removeInstanceStorageValue,
-  saveInstanceStorageValue,
 } from "./instance-storage.js";
+import { browserRandomUUID } from "./browser-crypto.js";
 
 export interface QueuedPromptEditState extends QueuedPromptDraft {
   submissionId?: string;
@@ -29,12 +30,17 @@ export type QueuedEditRecoveryReconciliation =
   | { status: "checking"; reason: string }
   | { status: "stale"; reason: string };
 
-const STORAGE_KEY = "wollipog.queued-edit-recoveries.v1";
+const LEGACY_STORAGE_KEY = "wollipog.queued-edit-recoveries.v1";
+const ENTRY_PREFIX = "wollipog.queued-edit-recovery.v2.entry.";
+const CLEAR_PREFIX = "wollipog.queued-edit-recovery.v2.clear.";
+const ACCOUNT_CLEAR_PREFIX = "wollipog.queued-edit-recovery.v2.account-clear.";
+const INSTANCE_CLEAR_PREFIX = "wollipog.queued-edit-recovery.v2.instance-clear.";
 /** Seven days spans ordinary app restarts without retaining abandoned prompt content indefinitely. */
 export const QUEUED_EDIT_RECOVERY_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1_000;
 export const QUEUED_EDIT_RECOVERY_MAX_ENTRIES = 20;
-/** Leave headroom under common per-origin localStorage quotas for drafts and settings. */
-export const QUEUED_EDIT_RECOVERY_MAX_BYTES = 3 * 1_024 * 1_024;
+/** Two MiB of UTF-16 key/value storage leaves at least three MiB of a common five-MiB origin quota
+ * for drafts, settings, migration markers, and browser-specific accounting overhead. */
+export const QUEUED_EDIT_RECOVERY_MAX_BYTES = 2 * 1_024 * 1_024;
 
 interface StoredQueuedEditRecovery {
   accountKey: string;
@@ -47,6 +53,26 @@ interface StoredQueuedEditRecovery {
 interface StoredQueuedEditRegistry {
   version: 1;
   entries: StoredQueuedEditRecovery[];
+}
+
+interface StoredQueuedEditRecoveryRecord extends StoredQueuedEditRecovery {
+  version: 2;
+  kind: "recovery";
+  instanceScope: string;
+  operationId: string;
+  startedAt: number;
+}
+
+interface StoredQueuedEditRecoveryTombstone {
+  version: 2;
+  kind: "tombstone";
+  target: "entry" | "account" | "instance";
+  instanceScope: string;
+  accountKey?: string;
+  sessionId?: string;
+  operationId: string;
+  startedAt: number;
+  expiresAt: number;
 }
 
 const runtimeRecoveries = new Map<string, { accountKey: string; recovery: QueuedPromptEditRecovery }>();
@@ -154,7 +180,7 @@ export function parseQueuedPromptEditRecovery(value: unknown): QueuedPromptEditR
   });
 }
 
-function parseRegistry(
+function parseLegacyRegistry(
   raw: string | null,
   now: number,
 ): { registry: StoredQueuedEditRegistry; cleaned: boolean } {
@@ -190,24 +216,269 @@ function parseRegistry(
   }
 }
 
-function encodedBytes(value: string): number {
-  return new TextEncoder().encode(value).byteLength;
+function logicalCoordinate(...parts: string[]): string {
+  return encodeURIComponent(JSON.stringify(parts));
 }
 
-function readRegistry(instanceScope: string, storage: KeyValueStorage | undefined, now: number): StoredQueuedEditRegistry {
-  return parseRegistry(loadInstanceStorageValue(STORAGE_KEY, instanceScope, storage), now).registry;
+function entryLogicalKey(record: Pick<StoredQueuedEditRecoveryRecord,
+  "accountKey" | "sessionId" | "operationId">): string {
+  return `${ENTRY_PREFIX}${logicalCoordinate(record.accountKey, record.sessionId, record.operationId)}`;
 }
 
-function writeRegistry(
+function tombstoneLogicalKey(marker: StoredQueuedEditRecoveryTombstone): string {
+  const coordinate = marker.target === "entry"
+    ? logicalCoordinate(marker.accountKey!, marker.sessionId!, marker.operationId)
+    : marker.target === "account"
+      ? logicalCoordinate(marker.accountKey!, marker.operationId)
+      : logicalCoordinate(marker.operationId);
+  return `${marker.target === "entry" ? CLEAR_PREFIX : marker.target === "account"
+    ? ACCOUNT_CLEAR_PREFIX : INSTANCE_CLEAR_PREFIX}${coordinate}`;
+}
+
+function targetStorage(storage?: KeyValueStorage): KeyValueStorage | undefined {
+  try { return storage ?? localStorage; } catch { return undefined; }
+}
+
+function currentStorageBytes(logicalKey: string, value: string, instanceScope: string): number {
+  // Web Storage stores JavaScript strings. Count both the physical key and value as UTF-16 code
+  // units, which is conservative for browser implementations that account two bytes per unit.
+  return 2 * (instanceStorageKey(logicalKey, instanceScope).length + value.length);
+}
+
+function writeStoredValue(
+  logicalKey: string,
+  value: string,
   instanceScope: string,
-  registry: StoredQueuedEditRegistry,
   storage?: KeyValueStorage,
 ): boolean {
-  if (registry.entries.length === 0) {
-    removeInstanceStorageValue(STORAGE_KEY, instanceScope, storage);
-    return loadInstanceStorageValue(STORAGE_KEY, instanceScope, storage) === null;
+  const target = targetStorage(storage);
+  if (!target) return false;
+  const physicalKey = instanceStorageKey(logicalKey, instanceScope);
+  try {
+    target.setItem(physicalKey, value);
+    return target.getItem(physicalKey) === value;
+  } catch {
+    return false;
   }
-  return saveInstanceStorageValue(STORAGE_KEY, JSON.stringify(registry), instanceScope, storage);
+}
+
+function parseRecord(value: unknown): StoredQueuedEditRecoveryRecord | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Partial<StoredQueuedEditRecoveryRecord>;
+  const recovery = parseQueuedPromptEditRecovery(record.recovery);
+  if (record.version !== 2 || record.kind !== "recovery" || typeof record.instanceScope !== "string" ||
+      !record.instanceScope || typeof record.accountKey !== "string" || !record.accountKey ||
+      typeof record.sessionId !== "string" || !record.sessionId || typeof record.operationId !== "string" ||
+      !record.operationId || typeof record.startedAt !== "number" || !Number.isFinite(record.startedAt) ||
+      typeof record.updatedAt !== "number" || !Number.isFinite(record.updatedAt) ||
+      typeof record.expiresAt !== "number" || !Number.isFinite(record.expiresAt) || !recovery) return null;
+  return { ...record as StoredQueuedEditRecoveryRecord, recovery };
+}
+
+function parseTombstone(value: unknown): StoredQueuedEditRecoveryTombstone | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const marker = value as Partial<StoredQueuedEditRecoveryTombstone>;
+  if (marker.version !== 2 || marker.kind !== "tombstone" ||
+      (marker.target !== "entry" && marker.target !== "account" && marker.target !== "instance") ||
+      typeof marker.instanceScope !== "string" || !marker.instanceScope ||
+      typeof marker.operationId !== "string" || !marker.operationId ||
+      typeof marker.startedAt !== "number" || !Number.isFinite(marker.startedAt) ||
+      typeof marker.expiresAt !== "number" || !Number.isFinite(marker.expiresAt) ||
+      (marker.target !== "instance" && (typeof marker.accountKey !== "string" || !marker.accountKey)) ||
+      (marker.target === "entry" && (typeof marker.sessionId !== "string" || !marker.sessionId))) return null;
+  return marker as StoredQueuedEditRecoveryTombstone;
+}
+
+function parseStoredJson(raw: string | null): unknown {
+  if (raw === null) return null;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
+function storageKeys(storage?: KeyValueStorage): string[] {
+  const target = targetStorage(storage);
+  if (!target || typeof target.length !== "number" || typeof target.key !== "function") return [];
+  const keys: string[] = [];
+  try {
+    for (let index = 0; index < target.length; index += 1) {
+      const key = target.key(index);
+      if (key !== null) keys.push(key);
+    }
+  } catch { return []; }
+  return keys;
+}
+
+type StoredItem<T> = { logicalKey: string; physicalKey: string; raw: string; value: T };
+
+function listStored<T>(
+  instanceScope: string,
+  storage: KeyValueStorage | undefined,
+  parse: (value: unknown) => T | null,
+  logicalKey: (value: T) => string,
+): Array<StoredItem<T>> {
+  const target = targetStorage(storage);
+  if (!target) return [];
+  const result: Array<StoredItem<T>> = [];
+  for (const physicalKey of storageKeys(target)) {
+    let raw: string | null;
+    try { raw = target.getItem(physicalKey); } catch { continue; }
+    const value = parse(parseStoredJson(raw));
+    if (!raw || !value || (value as { instanceScope?: string }).instanceScope !== instanceScope) continue;
+    const expectedLogicalKey = logicalKey(value);
+    if (physicalKey !== instanceStorageKey(expectedLogicalKey, instanceScope)) continue;
+    result.push({ logicalKey: expectedLogicalKey, physicalKey, raw, value });
+  }
+  return result;
+}
+
+function listRecords(instanceScope: string, storage?: KeyValueStorage) {
+  return listStored(instanceScope, storage, parseRecord, entryLogicalKey);
+}
+
+function listTombstones(instanceScope: string, storage?: KeyValueStorage) {
+  return listStored(instanceScope, storage, parseTombstone, tombstoneLogicalKey);
+}
+
+function removeStored(item: Pick<StoredItem<unknown>, "physicalKey">, storage?: KeyValueStorage): boolean {
+  const target = targetStorage(storage);
+  if (!target) return false;
+  try {
+    target.removeItem(item.physicalKey);
+    return target.getItem(item.physicalKey) === null;
+  } catch { return false; }
+}
+
+function activeTombstones(instanceScope: string, storage: KeyValueStorage | undefined, now: number) {
+  const active: StoredQueuedEditRecoveryTombstone[] = [];
+  for (const item of listTombstones(instanceScope, storage)) {
+    if (item.value.expiresAt <= now) removeStored(item, storage);
+    else active.push(item.value);
+  }
+  return active;
+}
+
+function markerMatches(record: StoredQueuedEditRecoveryRecord, marker: StoredQueuedEditRecoveryTombstone): boolean {
+  return marker.instanceScope === record.instanceScope && (
+    marker.target === "instance" ||
+    (marker.accountKey === record.accountKey && (marker.target === "account" || marker.sessionId === record.sessionId))
+  );
+}
+
+function recordIsSuppressed(
+  record: StoredQueuedEditRecoveryRecord,
+  tombstones: readonly StoredQueuedEditRecoveryTombstone[],
+): boolean {
+  return tombstones.some((marker) => markerMatches(record, marker) && marker.startedAt >= record.startedAt);
+}
+
+function makeTombstone(
+  target: StoredQueuedEditRecoveryTombstone["target"],
+  scope: Partial<QueuedEditRecoveryScope> & Pick<QueuedEditRecoveryScope, "instanceScope">,
+  startedAt: number,
+): StoredQueuedEditRecoveryTombstone {
+  return {
+    version: 2,
+    kind: "tombstone",
+    target,
+    instanceScope: scope.instanceScope,
+    ...(scope.accountKey ? { accountKey: scope.accountKey } : {}),
+    ...(scope.sessionId ? { sessionId: scope.sessionId } : {}),
+    operationId: browserRandomUUID(),
+    startedAt,
+    expiresAt: startedAt + QUEUED_EDIT_RECOVERY_MAX_AGE_MS,
+  };
+}
+
+function persistTombstone(
+  marker: StoredQueuedEditRecoveryTombstone,
+  storage?: KeyValueStorage,
+): boolean {
+  const logicalKey = tombstoneLogicalKey(marker);
+  const serialized = JSON.stringify(marker);
+  return writeStoredValue(logicalKey, serialized, marker.instanceScope, storage);
+}
+
+const pendingTombstones = new Map<string, StoredQueuedEditRecoveryTombstone>();
+
+function pendingTombstoneKey(marker: Pick<StoredQueuedEditRecoveryTombstone,
+  "target" | "instanceScope" | "accountKey" | "sessionId">): string {
+  return JSON.stringify([marker.target, marker.instanceScope, marker.accountKey, marker.sessionId]);
+}
+
+function removeRecordsSuppressedBy(
+  marker: StoredQueuedEditRecoveryTombstone,
+  storage: KeyValueStorage | undefined,
+): void {
+  for (const item of listRecords(marker.instanceScope, storage)) {
+    if (markerMatches(item.value, marker) && marker.startedAt >= item.value.startedAt) removeStored(item, storage);
+  }
+}
+
+function retryPendingTombstones(instanceScope: string, storage: KeyValueStorage | undefined, now: number): void {
+  for (const [key, marker] of pendingTombstones) {
+    if (marker.instanceScope !== instanceScope) continue;
+    if (marker.expiresAt <= now) {
+      pendingTombstones.delete(key);
+      continue;
+    }
+    if (persistTombstone(marker, storage)) {
+      removeRecordsSuppressedBy(marker, storage);
+      pendingTombstones.delete(key);
+    }
+  }
+}
+
+function effectiveTombstones(instanceScope: string, storage: KeyValueStorage | undefined, now: number) {
+  retryPendingTombstones(instanceScope, storage, now);
+  const tombstones = activeTombstones(instanceScope, storage, now);
+  for (const marker of pendingTombstones.values()) {
+    if (marker.instanceScope === instanceScope && marker.expiresAt > now) tombstones.push(marker);
+  }
+  return tombstones;
+}
+
+function activeRecords(instanceScope: string, storage: KeyValueStorage | undefined, now: number) {
+  const tombstones = effectiveTombstones(instanceScope, storage, now);
+  const active: Array<StoredItem<StoredQueuedEditRecoveryRecord>> = [];
+  for (const item of listRecords(instanceScope, storage)) {
+    if (item.value.expiresAt <= now || recordIsSuppressed(item.value, tombstones)) removeStored(item, storage);
+    else active.push(item);
+  }
+  return active;
+}
+
+function enforceStoredBounds(
+  instanceScope: string,
+  protectedOperationId: string,
+  storage: KeyValueStorage | undefined,
+  now: number,
+): boolean {
+  const active = activeRecords(instanceScope, storage, now).sort((left, right) =>
+    left.value.updatedAt - right.value.updatedAt || left.value.operationId.localeCompare(right.value.operationId));
+  let totalBytes = active.reduce(
+    (sum, item) => sum + 2 * (item.physicalKey.length + item.raw.length), 0);
+  while (active.length > QUEUED_EDIT_RECOVERY_MAX_ENTRIES || totalBytes > QUEUED_EDIT_RECOVERY_MAX_BYTES) {
+    const evictionIndex = active.findIndex((item) => item.value.operationId !== protectedOperationId);
+    if (evictionIndex < 0) return false;
+    const [oldest] = active.splice(evictionIndex, 1);
+    if (!oldest) return false;
+    // Each save owns an immutable operation-specific key. Evict that exact record instead of
+    // publishing a Session-wide clear marker, which could suppress a concurrent newer save for
+    // the same Session.
+    if (!removeStored(oldest, storage)) return false;
+    totalBytes -= 2 * (oldest.physicalKey.length + oldest.raw.length);
+  }
+  return true;
+}
+
+function legacyRecovery(scope: QueuedEditRecoveryScope, storage: KeyValueStorage | undefined,
+  now: number): QueuedPromptEditRecovery | undefined {
+  const { registry } = parseLegacyRegistry(
+    loadInstanceStorageValue(LEGACY_STORAGE_KEY, scope.instanceScope, storage),
+    now,
+  );
+  const entry = registry.entries.find((candidate) =>
+    candidate.accountKey === scope.accountKey && candidate.sessionId === scope.sessionId);
+  return entry ? cloneQueuedPromptEditRecovery(entry.recovery) : undefined;
 }
 
 export function loadDurableQueuedEditRecovery(
@@ -215,16 +486,20 @@ export function loadDurableQueuedEditRecovery(
   storage?: KeyValueStorage,
   now = Date.now(),
 ): QueuedPromptEditRecovery | undefined {
-  const raw = loadInstanceStorageValue(STORAGE_KEY, scope.instanceScope, storage);
-  const { registry, cleaned } = parseRegistry(raw, now);
-  const entry = registry.entries.find((candidate) =>
-    candidate.accountKey === scope.accountKey && candidate.sessionId === scope.sessionId);
-  // Reads stay read-only in the common case. Rewrite only when parsing pruned expired, malformed,
-  // or over-limit input, so opening a composer cannot synchronously churn a multi-megabyte value.
-  if (cleaned) {
-    writeRegistry(scope.instanceScope, registry, storage);
-  }
-  return entry ? cloneQueuedPromptEditRecovery(entry.recovery) : undefined;
+  const candidates = activeRecords(scope.instanceScope, storage, now)
+    .filter((item) => item.value.accountKey === scope.accountKey && item.value.sessionId === scope.sessionId)
+    .sort((left, right) => left.value.startedAt - right.value.startedAt ||
+      left.value.operationId.localeCompare(right.value.operationId));
+  const current = candidates.at(-1)?.value;
+  if (current) return cloneQueuedPromptEditRecovery(current.recovery);
+  const recovered = legacyRecovery(scope, storage, now);
+  if (!recovered) return undefined;
+  const synthetic: StoredQueuedEditRecoveryRecord = {
+    version: 2, kind: "recovery", instanceScope: scope.instanceScope, accountKey: scope.accountKey,
+    sessionId: scope.sessionId, operationId: "legacy", startedAt: 0, updatedAt: 0,
+    expiresAt: now + 1, recovery: recovered,
+  };
+  return recordIsSuppressed(synthetic, effectiveTombstones(scope.instanceScope, storage, now)) ? undefined : recovered;
 }
 
 export function saveDurableQueuedEditRecovery(
@@ -233,31 +508,20 @@ export function saveDurableQueuedEditRecovery(
   storage?: KeyValueStorage,
   now = Date.now(),
 ): boolean {
-  const registry = readRegistry(scope.instanceScope, storage, now);
-  const nextEntry: StoredQueuedEditRecovery = {
-    accountKey: scope.accountKey,
-    sessionId: scope.sessionId,
-    recovery: cloneQueuedPromptEditRecovery(recovery),
-    updatedAt: now,
-    expiresAt: now + QUEUED_EDIT_RECOVERY_MAX_AGE_MS,
+  const nextEntry: StoredQueuedEditRecoveryRecord = {
+    version: 2, kind: "recovery", instanceScope: scope.instanceScope,
+    accountKey: scope.accountKey, sessionId: scope.sessionId,
+    recovery: cloneQueuedPromptEditRecovery(recovery), operationId: browserRandomUUID(),
+    startedAt: now, updatedAt: now, expiresAt: now + QUEUED_EDIT_RECOVERY_MAX_AGE_MS,
   };
-  const entries = registry.entries.filter((entry) =>
-    entry.accountKey !== scope.accountKey || entry.sessionId !== scope.sessionId);
-  entries.push(nextEntry);
-  entries.sort((left, right) => left.updatedAt - right.updatedAt);
-  while (entries.length > QUEUED_EDIT_RECOVERY_MAX_ENTRIES) {
-    const oldestOther = entries.findIndex((entry) => entry !== nextEntry);
-    if (oldestOther < 0) return false;
-    entries.splice(oldestOther, 1);
-  }
-  let serialized = JSON.stringify({ version: 1, entries } satisfies StoredQueuedEditRegistry);
-  while (encodedBytes(serialized) > QUEUED_EDIT_RECOVERY_MAX_BYTES) {
-    const oldestOther = entries.findIndex((entry) => entry !== nextEntry);
-    if (oldestOther < 0) return false;
-    entries.splice(oldestOther, 1);
-    serialized = JSON.stringify({ version: 1, entries } satisfies StoredQueuedEditRegistry);
-  }
-  return saveInstanceStorageValue(STORAGE_KEY, serialized, scope.instanceScope, storage);
+  if (recordIsSuppressed(nextEntry, effectiveTombstones(scope.instanceScope, storage, now))) return false;
+  const logicalKey = entryLogicalKey(nextEntry);
+  const serialized = JSON.stringify(nextEntry);
+  if (currentStorageBytes(logicalKey, serialized, scope.instanceScope) > QUEUED_EDIT_RECOVERY_MAX_BYTES) return false;
+  if (!writeStoredValue(logicalKey, serialized, scope.instanceScope, storage)) return false;
+  if (!enforceStoredBounds(scope.instanceScope, nextEntry.operationId, storage, now)) return false;
+  return loadInstanceStorageValue(logicalKey, scope.instanceScope, storage) === serialized &&
+    !recordIsSuppressed(nextEntry, effectiveTombstones(scope.instanceScope, storage, now));
 }
 
 export function clearDurableQueuedEditRecovery(
@@ -265,10 +529,15 @@ export function clearDurableQueuedEditRecovery(
   storage?: KeyValueStorage,
   now = Date.now(),
 ): boolean {
-  const registry = readRegistry(scope.instanceScope, storage, now);
-  registry.entries = registry.entries.filter((entry) =>
-    entry.accountKey !== scope.accountKey || entry.sessionId !== scope.sessionId);
-  return writeRegistry(scope.instanceScope, registry, storage);
+  const marker = makeTombstone("entry", scope, now);
+  const pendingKey = pendingTombstoneKey(marker);
+  if (!persistTombstone(marker, storage)) {
+    pendingTombstones.set(pendingKey, marker);
+    return false;
+  }
+  pendingTombstones.delete(pendingKey);
+  removeRecordsSuppressedBy(marker, storage);
+  return true;
 }
 
 export function clearDurableQueuedEditRecoveriesForAccount(
@@ -277,16 +546,30 @@ export function clearDurableQueuedEditRecoveriesForAccount(
   storage?: KeyValueStorage,
   now = Date.now(),
 ): boolean {
-  const registry = readRegistry(instanceScope, storage, now);
-  registry.entries = registry.entries.filter((entry) => entry.accountKey !== accountKey);
-  return writeRegistry(instanceScope, registry, storage);
+  const marker = makeTombstone("account", { instanceScope, accountKey }, now);
+  const pendingKey = pendingTombstoneKey(marker);
+  if (!persistTombstone(marker, storage)) {
+    pendingTombstones.set(pendingKey, marker);
+    return false;
+  }
+  pendingTombstones.delete(pendingKey);
+  removeRecordsSuppressedBy(marker, storage);
+  return true;
 }
 
 export function clearAllDurableQueuedEditRecoveries(
   instanceScope: string,
   storage?: KeyValueStorage,
 ): void {
-  removeInstanceStorageValue(STORAGE_KEY, instanceScope, storage);
+  const marker = makeTombstone("instance", { instanceScope }, Date.now());
+  const pendingKey = pendingTombstoneKey(marker);
+  if (!persistTombstone(marker, storage)) {
+    pendingTombstones.set(pendingKey, marker);
+    return;
+  }
+  pendingTombstones.delete(pendingKey);
+  removeRecordsSuppressedBy(marker, storage);
+  removeInstanceStorageValue(LEGACY_STORAGE_KEY, instanceScope, storage);
 }
 
 /** Recovered edits are retryable only against the same live queue identity and revision. */

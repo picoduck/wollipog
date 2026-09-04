@@ -238,6 +238,20 @@ CREATE TABLE IF NOT EXISTS steering_owned_prompt_image_artifacts (
   FOREIGN KEY (artifact_id) REFERENCES artifacts(id) ON DELETE CASCADE
 );
 `;
+const PREPARED_PROMPT_IMAGE_SCHEMA = /* sql */ `
+CREATE TABLE IF NOT EXISTS prepared_prompt_image_artifacts (
+  artifact_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  mime_type   TEXT NOT NULL,
+  size_bytes  INTEGER NOT NULL,
+  sha256      TEXT NOT NULL,
+  expires_at  INTEGER NOT NULL,
+  FOREIGN KEY (artifact_id) REFERENCES artifacts(id) ON DELETE CASCADE,
+  UNIQUE (session_id, mime_type, size_bytes, sha256)
+);
+CREATE INDEX IF NOT EXISTS idx_prepared_prompt_image_expiry
+  ON prepared_prompt_image_artifacts(expires_at, artifact_id);
+`;
 const ARTIFACT_BLOB_SCHEMA = /* sql */ `
 CREATE INDEX IF NOT EXISTS idx_artifacts_blob_key ON artifacts(blob_key);
 CREATE TABLE IF NOT EXISTS artifact_blob_pending (
@@ -3725,6 +3739,7 @@ export class ControlPlaneDb {
     }
     db.exec(ARTIFACT_INDEX_SCHEMA);
     db.exec(STEERING_OWNED_PROMPT_IMAGE_SCHEMA);
+    db.exec(PREPARED_PROMPT_IMAGE_SCHEMA);
     db.exec(SESSION_EVENT_ARTIFACT_REFERENCE_SCHEMA);
     if (sessionEventArtifactNeedsRepair()) {
       db.exec("BEGIN");
@@ -4104,6 +4119,7 @@ export class ControlPlaneDb {
       controlPlane.recoverPendingArtifactBlobs();
       controlPlane.migrateInlineWorkflowArtifacts();
       controlPlane.backfillSessionEventArtifactReferences();
+      controlPlane.collectExpiredPreparedPromptImages(Date.now());
       controlPlane.collectOrphanedEventPayloadArtifacts();
       controlPlane.migrateInlineSessionEventPayloads();
       controlPlane.collectWorkflowArtifactBlobs();
@@ -15962,7 +15978,11 @@ export class ControlPlaneDb {
   }
 
   /** Persist already-validated bytes without manufacturing a base64 copy in the control plane. */
-  createWorkflowArtifactBytes(artifact: WorkflowArtifactView, bytes: Buffer): WorkflowArtifactView {
+  createWorkflowArtifactBytes(
+    artifact: WorkflowArtifactView,
+    bytes: Buffer,
+    options: { preparedPromptImageExpiresAt?: number } = {},
+  ): WorkflowArtifactView {
     if (!Number.isSafeInteger(artifact.sizeBytes) || artifact.sizeBytes < 0 ||
         artifact.sizeBytes > MAX_WORKFLOW_ARTIFACT_BLOB_BYTES || bytes.byteLength !== artifact.sizeBytes ||
         artifactBlobSha256(bytes) !== artifact.sha256) {
@@ -15996,6 +16016,17 @@ export class ControlPlaneDb {
           artifact.metadata ? JSON.stringify(artifact.metadata) : null,
           artifact.createdAt,
         );
+        if (options.preparedPromptImageExpiresAt !== undefined) {
+          const inserted = this.stmt(
+            `INSERT INTO prepared_prompt_image_artifacts
+             (artifact_id,session_id,mime_type,size_bytes,sha256,expires_at)
+             SELECT id,session_id,mime_type,size_bytes,sha256,? FROM artifacts
+             WHERE id=? AND session_id IS NOT NULL AND run_id IS NULL AND kind='screenshot'
+               AND encoding='base64'
+               AND CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.purpose') END='prompt_image'`,
+          ).run(options.preparedPromptImageExpiresAt, artifact.artifactId);
+          if (Number(inserted.changes) !== 1) throw new Error("prompt image preparation artifact is invalid");
+        }
         if (artifact.runId) {
           // Always advance the run revision even when creation and artifact write share one millisecond;
           // the web uses updatedAt as the artifact-list refresh signal.
@@ -16039,6 +16070,74 @@ export class ControlPlaneDb {
 
   deleteWorkflowArtifact(artifactId: string): boolean {
     const deleted = Number(this.stmt("DELETE FROM artifacts WHERE id=?").run(artifactId).changes) > 0;
+    if (deleted) this.collectWorkflowArtifactBlobs();
+    return deleted;
+  }
+
+  findPreparedPromptImageArtifact(
+    sessionId: string,
+    mimeType: string,
+    sizeBytes: number,
+    sha256: string,
+    renewUntil: number,
+  ): WorkflowArtifactView | null {
+    const row = this.stmt(
+      `SELECT artifact_id FROM prepared_prompt_image_artifacts
+       WHERE session_id=? AND mime_type=? AND size_bytes=? AND sha256=?`,
+    ).get(sessionId, mimeType, sizeBytes, sha256) as { artifact_id: string } | undefined;
+    if (!row) return null;
+    const artifact = this.getWorkflowArtifact(row.artifact_id);
+    if (!artifact || artifact.sessionId !== sessionId || artifact.kind !== "screenshot" ||
+        artifact.encoding !== "base64" || artifact.mimeType !== mimeType ||
+        artifact.sizeBytes !== sizeBytes || artifact.sha256 !== sha256) {
+      this.stmt("DELETE FROM prepared_prompt_image_artifacts WHERE artifact_id=?").run(row.artifact_id);
+      return null;
+    }
+    this.stmt("UPDATE prepared_prompt_image_artifacts SET expires_at=MAX(expires_at, ?) WHERE artifact_id=?")
+      .run(renewUntil, row.artifact_id);
+    return artifact;
+  }
+
+  commitPreparedPromptImages(artifactIds: readonly string[]): void {
+    const remove = this.stmt("DELETE FROM prepared_prompt_image_artifacts WHERE artifact_id=?");
+    for (const artifactId of new Set(artifactIds)) remove.run(artifactId);
+  }
+
+  /** Expire only uploads that never gained durable attempt, event, or workflow reachability. */
+  collectExpiredPreparedPromptImages(now: number, limit = 1_000): number {
+    const bounded = Number.isSafeInteger(limit) ? Math.max(1, Math.min(limit, 10_000)) : 1_000;
+    const rows = this.stmt(
+      `SELECT prepared.artifact_id FROM prepared_prompt_image_artifacts prepared
+       WHERE prepared.expires_at<=? ORDER BY prepared.expires_at,prepared.artifact_id LIMIT ?`,
+    ).all(now, bounded) as unknown as Array<{ artifact_id: string }>;
+    if (!rows.length) return 0;
+    this.db.exec("BEGIN IMMEDIATE");
+    let deleted = 0;
+    try {
+      for (const row of rows) {
+        const referenced = this.stmt(
+          `SELECT 1 WHERE
+             EXISTS (SELECT 1 FROM session_event_artifacts WHERE artifact_id=?) OR
+             EXISTS (SELECT 1 FROM session_steering_attempt_artifacts WHERE artifact_id=?) OR
+             EXISTS (SELECT 1 FROM workflow_attempt_artifacts WHERE artifact_id=?) OR
+             EXISTS (
+               SELECT 1 FROM session_prompt_commands command,
+                 json_each(CASE WHEN json_valid(command.payload_json) THEN command.payload_json ELSE '{}' END, '$.images') image
+               WHERE command.dismissed_at IS NULL
+                 AND json_extract(image.value, '$.artifactId')=?
+             )`,
+        ).get(row.artifact_id, row.artifact_id, row.artifact_id, row.artifact_id);
+        if (referenced) {
+          this.stmt("DELETE FROM prepared_prompt_image_artifacts WHERE artifact_id=?").run(row.artifact_id);
+        } else {
+          deleted += Number(this.stmt("DELETE FROM artifacts WHERE id=?").run(row.artifact_id).changes);
+        }
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
     if (deleted) this.collectWorkflowArtifactBlobs();
     return deleted;
   }

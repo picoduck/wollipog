@@ -23,6 +23,7 @@ import {
   loadDurableQueuedEditRecovery,
   loadRuntimeQueuedEditRecovery,
   queuedEditRecoveryAccountKey,
+  saveDurableQueuedEditRecovery,
 } from "../queued-edit-recovery.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { clearSessionDetailComposerRuntimeForInstance, SessionDetail } from "./SessionDetail.js";
@@ -460,6 +461,7 @@ async function waitForComposerSendToSettle(fixture: Fixture, timeoutMs = 5_000):
 }
 
 const submittedImage = { mimeType: "image/png", data: "aW1hZ2U=" } as const;
+const displacedDraftImage = { mimeType: "image/jpeg", data: "/9j/2Q==" } as const;
 const preparedImageReference = {
   artifactId: "art-prepared-image",
   mimeType: "image/png",
@@ -770,6 +772,7 @@ test("a live queue revision change disables recovered retry while preserving con
 test("a failed queued edit survives a simulated full runtime reload with its exact retry identity", async () => {
   const draft = deferred<ComposerDraft | null>();
   const edits: Array<Parameters<ApiClient["editQueuedPrompt"]>[2]> = [];
+  const prepared: Array<Parameters<ApiClient["preparePromptImages"]>[1]> = [];
   const fixture = await mountFixture(draft, {
     runnerProtocolVersion: 99,
     sessionPatch: {
@@ -782,7 +785,10 @@ test("a failed queued edit survives a simulated full runtime reload with its exa
       }],
     },
     client: {
-      preparePromptImages: async (_sessionId, images) => images.map(() => preparedImageReference),
+      preparePromptImages: async (_sessionId, images) => {
+        prepared.push(images);
+        return images.map(() => preparedImageReference);
+      },
       readQueuedPrompt: async (_sessionId, promptId) => ({
         prompt: {
           promptId,
@@ -798,7 +804,11 @@ test("a failed queued edit survives a simulated full runtime reload with its exa
     },
   });
   try {
-    await resolveDraft(draft, "Displaced local draft");
+    await resolveComposerDraft(draft, {
+      text: "Displaced local draft",
+      images: [displacedDraftImage],
+      updatedAt: 1,
+    });
     await flushAsyncWork();
     const edit = fixture.container.querySelector('button[aria-label="Edit Queued Message"]') as HTMLButtonElement;
     await act(async () => { edit.click(); });
@@ -811,6 +821,8 @@ test("a failed queued edit survives a simulated full runtime reload with its exa
     await act(async () => { save.click(); });
     await flushAsyncWork();
     assert.equal(edits.length, 1);
+    assert.deepEqual(prepared[0], [submittedImage, submittedImage],
+      "saving a queued edit must not upload the ordinary draft's attachment");
 
     const reloaded = await fixture.fullReloadWithDraftLoader(loadComposerDraft);
     await flushAsyncWork();
@@ -825,6 +837,18 @@ test("a failed queued edit survives a simulated full runtime reload with its exa
     assert.equal(edits[1]?.submissionId, edits[0]?.submissionId);
     assert.equal(edits[1]?.expectedRevision, "qer_exact");
     assert.deepEqual(edits[1]?.images, [preparedImageReference]);
+    assert.deepEqual(prepared[1], [preparedImageReference, preparedImageReference],
+      "an exact retry reuses the prepared queued attachment only");
+
+    const retained = loadDurableQueuedEditRecovery({
+      instanceScope: fixture.instanceScope,
+      accountKey: queuedEditRecoveryAccountKey("org-1", "user-1"),
+      sessionId: fixture.sessionId,
+    });
+    assert.deepEqual(retained?.edit.displacedDraft, {
+      text: "Displaced local draft",
+      images: [displacedDraftImage],
+    }, "the ordinary draft remains local and recoverable without uploading its attachment");
 
     await fixture.closeSocket(1008);
     await flushAsyncWork();
@@ -926,7 +950,7 @@ test("a transient identity failure retries without remounting the Session", asyn
   }
 });
 
-test("late identity hydration cannot replace an open unsent queued edit", async () => {
+test("late identity hydration with durable recovery cannot replace a modified local queued edit", async () => {
   const draft = deferred<ComposerDraft | null>();
   const delayedIdentity = deferred<Awaited<ReturnType<ApiClient["getIdentity"]>>>();
   const edits: Array<Parameters<ApiClient["editQueuedPrompt"]>[2]> = [];
@@ -944,7 +968,7 @@ test("late identity hydration cannot replace an open unsent queued edit", async 
     client: {
       getIdentity: async () => delayedIdentity.promise,
       readQueuedPrompt: async (_sessionId, promptId) => ({
-        prompt: { promptId, text: "Original exact content", images: [], editRevision: "qer_exact" },
+        prompt: { promptId, text: "Original exact content", images: [submittedImage], editRevision: "qer_exact" },
       }),
       editQueuedPrompt: async (_sessionId, _promptId, request) => {
         edits.push(request);
@@ -953,12 +977,30 @@ test("late identity hydration cannot replace an open unsent queued edit", async 
     },
   });
   try {
+    assert.equal(saveDurableQueuedEditRecovery({
+      instanceScope: fixture.instanceScope,
+      accountKey: queuedEditRecoveryAccountKey("org-1", "user-1"),
+      sessionId: fixture.sessionId,
+    }, {
+      edit: {
+        promptId: "queue-1",
+        text: "Older queued content",
+        images: [],
+        editRevision: "older-revision",
+        displacedDraft: { text: "Older displaced draft", images: [] },
+      },
+      draft: { text: "Older recovered edit", images: [] },
+      error: "Older recovery",
+    }), true);
     await resolveDraft(draft, "Displaced local draft");
     await flushAsyncWork();
     const edit = fixture.container.querySelector('button[aria-label="Edit Queued Message"]') as HTMLButtonElement;
     await act(async () => { edit.click(); });
     await flushAsyncWork();
-    assert.equal(fixture.composer.value, "Original exact content");
+    await act(async () => {
+      fixture.composer.value = "Locally revised content";
+      fireDomEvent.change(fixture.composer);
+    });
 
     await act(async () => {
       delayedIdentity.resolve({
@@ -978,13 +1020,16 @@ test("late identity hydration cannot replace an open unsent queued edit", async 
       await delayedIdentity.promise;
     });
     await flushAsyncWork();
-    assert.equal(fixture.composer.value, "Original exact content");
+    assert.equal(fixture.composer.value, "Locally revised content");
+    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
     assert.ok(fixture.container.querySelector(".queued-edit-banner"));
 
     const save = fixture.container.querySelector('button[aria-label="Save Queued Message"]') as HTMLButtonElement;
     await act(async () => { save.click(); });
     await flushAsyncWork();
-    assert.equal(edits[0]?.text, "Original exact content");
+    assert.equal(edits[0]?.text, "Locally revised content");
+    assert.equal(edits[0]?.expectedRevision, "qer_exact");
+    assert.deepEqual(edits[0]?.images, [submittedImage]);
   } finally {
     await unmountFixture(fixture);
   }
@@ -1077,6 +1122,72 @@ test("identity hydration preserves an ordinary draft typed before durable recove
     await act(async () => { dismiss.click(); });
     await flushAsyncWork();
     assert.equal(reloaded.value, "New ordinary draft typed during sign-in");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("recovery appearing after mutation release preserves the dirty ordinary draft it displaces", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const prompt = deferred<never>();
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 99,
+    sessionPatch: {
+      queued: [{
+        id: "queue-1",
+        text: "Queued projection",
+        liveQueueObserved: true,
+        editable: true,
+        editRevision: "qer_exact",
+      }],
+    },
+    client: { prompt: () => prompt.promise },
+    composerDraftCleanup: async () => false,
+  });
+  try {
+    await resolveComposerDraft(draft, {
+      text: "Submitted ordinary draft",
+      images: [submittedImage],
+      updatedAt: 1,
+    });
+    await act(async () => { sendButton(fixture).click(); });
+    await act(async () => {
+      fixture.composer.value = "New ordinary draft from this tab";
+      fireDomEvent.change(fixture.composer);
+    });
+    assert.equal(saveDurableQueuedEditRecovery({
+      instanceScope: fixture.instanceScope,
+      accountKey: queuedEditRecoveryAccountKey("org-1", "user-1"),
+      sessionId: fixture.sessionId,
+    }, {
+      edit: {
+        promptId: "queue-1",
+        text: "Original queued content",
+        images: [],
+        editRevision: "qer_exact",
+        displacedDraft: { text: "Draft from the other tab", images: [] },
+      },
+      draft: { text: "Recovered queued edit", images: [] },
+      error: "Queued message edit was not confirmed.",
+    }), true);
+
+    await act(async () => { prompt.resolve(undefined as never); });
+    await flushAsyncWork();
+    assert.equal(fixture.composer.value, "Recovered queued edit");
+    assert.ok(fixture.container.querySelector(".queued-edit-banner"));
+
+    const dismiss = [...fixture.container.querySelectorAll("button")]
+      .find((button) => button.textContent === "Dismiss Recovery") as HTMLButtonElement | undefined;
+    assert.ok(dismiss);
+    await act(async () => { dismiss.click(); });
+    await flushAsyncWork();
+    assert.equal(fixture.composer.value, "New ordinary draft from this tab");
+    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
+
+    const reloaded = await fixture.fullReloadWithDraftLoader(loadComposerDraft);
+    await flushAsyncWork();
+    assert.equal(reloaded.value, "New ordinary draft from this tab");
+    assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
   } finally {
     await unmountFixture(fixture);
   }
