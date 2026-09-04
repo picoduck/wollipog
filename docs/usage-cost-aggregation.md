@@ -50,7 +50,9 @@ The control plane loads per-token rates from a public price list (LiteLLM's `mod
 - `granularity`: `hour` or `day` (hour must fit hourly retention);
 - optional `runnerId`, `workspaceId`, `agentId`, and `driver` filters.
 
-The response carries `totals`, `series`, and the `byDriver`, `byAgent`, `byRunner`, and `byModel` breakdowns. Every amount includes the five token buckets, `costUsd`, `cacheSavingsUsd`, `costSource`, and `unpricedRecords`.
+The response carries `totals`, `series`, `seriesByDriver` (the same buckets split per driver, for the driver-stacked chart and the Day table), and the `byDriver`, `byAgent`, `byRunner`, and `byModel` breakdowns. Every amount includes the five token buckets, `costUsd`, `cacheSavingsUsd`, `costSource`, `unpricedRecords`, and `processedTokens`.
+
+`processedTokens` is derived per ledger row, where the driver is known, and summed: Codex reports input inclusive of its cache reads, so its rows count input plus cache creation plus output; every other driver counts input plus cached input plus cache creation plus output. Deriving it from summed buckets after the fact cannot tell those shapes apart in a mixed aggregate, so the per-row derivation is what keeps the headline, the driver rows, the chart, and the tables in agreement.
 
 `POST /api/usage/pricing/refresh` refetches the rate table ahead of its TTL (bounded by a one-minute floor) and returns the new `pricing` status.
 

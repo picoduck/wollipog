@@ -36,8 +36,10 @@ const response = (
   totals: {
     inputTokens: 6, outputTokens: 0, costUsd: 0.06, uncachedInputTokens: 6, cachedInputTokens: 0,
     cacheCreationTokens: 0, reasoningTokens: 0, cacheSavingsUsd: 0, costSource: "providerReported", unpricedRecords: 0,
+    processedTokens: 6,
   },
   series,
+  seriesByDriver: series.map((bucket) => ({ ...bucket, driver: "claude-code" as const })),
   byDriver: [],
   byAgent: [],
   byRunner: [],
@@ -47,6 +49,7 @@ const response = (
 const bucket = (bucketTs: number, inputTokens: number, costUsd: number): UsageAggregationResponse["series"][number] => ({
   bucketTs, inputTokens, outputTokens: 0, costUsd, uncachedInputTokens: inputTokens, cachedInputTokens: 0,
   cacheCreationTokens: 0, reasoningTokens: 0, cacheSavingsUsd: 0, costSource: "providerReported", unpricedRecords: 0,
+  processedTokens: inputTokens,
 });
 
 const settleLoad = () => new Promise((resolve) => setTimeout(resolve, 250));
@@ -206,6 +209,57 @@ test("Subscription Usage shows remaining allowance, local and relative resets, s
   assert.match(pageText(), /0% Remaining/);
   assert.match(pageText(), /⛔ Exhausted/);
   assert.match(pageText(), /Subscription usage refreshed/);
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+test("an unsplit response from an older plane is shown honestly and the window comes from the response", async () => {
+  const day = Date.UTC(2026, 0, 2);
+  const unsplit: UsageAggregationResponse = {
+    ...response([bucket(day, 4, 0.04), bucket(day - 86_400_000, 2, 0.02)], "day"),
+    since: day - 6 * 86_400_000,
+    through: day + 86_400_000,
+    seriesByDriver: [],
+    byDriver: [
+      { key: "claude-code", ...bucket(0, 4, 0.04) },
+      { key: "codex-app-server", ...bucket(0, 2, 0.02) },
+    ].map(({ bucketTs: _ignored, ...row }) => row),
+  };
+  const client = {
+    ...api,
+    subscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    refreshSubscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    usage: async () => unsplit,
+  } as unknown as ApiClient;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<ApiProvider client={client}><UsageView /></ApiProvider>);
+  });
+  await act(async () => {
+    await settleLoad();
+    await Promise.resolve();
+  });
+
+  // The headline names the response's 7-day window although the default range control says 30d.
+  assert.match(container.querySelector(".usage-headline-note")?.textContent ?? "", /last 7 days/);
+  assert.match(container.querySelector(".usage-chart-svg title")?.textContent ?? "", /not split by driver/);
+  assert.equal(container.querySelector(".usage-legend"), null, "no legend claims a split that does not exist");
+  const driverCells = [...container.querySelectorAll("tbody tr")].flatMap((row) => [...row.querySelectorAll("td.usage-cell-dim")].slice(0, 2));
+  assert.ok(driverCells.length >= 4);
+  assert.ok(driverCells.every((cell) => cell.textContent === "—"), "unknown per-driver values read as dashes, not $0.00");
+
+  const hit = container.querySelector(".usage-chart-hit") as SVGRectElement;
+  await act(async () => {
+    hit.dispatchEvent(new domWindow.FocusEvent("focus", { bubbles: false }) as never);
+    hit.dispatchEvent(new domWindow.Event("focusin", { bubbles: true }) as never);
+    await Promise.resolve();
+  });
+  const readout = container.querySelector(".usage-chart-readout")?.textContent ?? "";
+  assert.match(readout, /Not split by this control plane/);
+  assert.match(readout, /Total/);
+
   await act(async () => root.unmount());
   container.remove();
 });

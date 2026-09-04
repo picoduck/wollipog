@@ -45,7 +45,9 @@ function sourceSlice(source: string, startAnchor: string, endAnchor: string): st
   return source.slice(start, end);
 }
 
-const SVG_OWNERS = ["components/AgentIcon.tsx", "components/Icons.tsx"];
+// UsageChart draws DATA, not icons: its <svg> is a stacked-column chart whose geometry is computed
+// from usage buckets, so there is no glyph to route through Icons.tsx.
+const SVG_OWNERS = ["components/AgentIcon.tsx", "components/Icons.tsx", "components/UsageChart.tsx"];
 
 test("the SVG ownership inventory covers every production SVG-owning file", () => {
   const actual = sourceFiles(SRC)

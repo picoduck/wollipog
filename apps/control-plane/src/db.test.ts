@@ -170,6 +170,7 @@ function usageAmount<T extends { inputTokens: number; outputTokens: number; cost
     cacheSavingsUsd: 0,
     costSource: amount.inputTokens + amount.outputTokens + amount.costUsd > 0 ? "providerReported" : "unpriced",
     unpricedRecords: 0,
+    processedTokens: amount.inputTokens + amount.outputTokens,
     ...amount,
   };
 }
@@ -4838,8 +4839,8 @@ test("codex usage is priced per bucket from the rate table with cached input spl
     inputTokens: 1100, outputTokens: 110, costUsd: Math.round(expectedCost * 1_000_000) / 1_000_000,
     uncachedInputTokens: 500, cachedInputTokens: 600, cacheCreationTokens: 0,
     reasoningTokens: 50, cacheSavingsUsd: Math.round(600 * (0.000002 - 0.0000002) * 1_000_000) / 1_000_000,
-    costSource: "modelPriced", unpricedRecords: 0,
-  }, "reasoning is clamped to output and input stays the provider-reported inclusive count");
+    costSource: "modelPriced", unpricedRecords: 0, processedTokens: 1210,
+  }, "reasoning is clamped to output, input stays the provider-reported inclusive count, and processed tokens do not double-count Codex cache");
   assert.ok(db.getSession("sess-1")!.costUsd > 0, "the priced figure reaches the session total the budget gate reads");
   assert.deepEqual(usage.byModel.map((row) => [row.key, row.costSource]), [["gpt-5.5-codex", "modelPriced"]]);
   assert.equal(usage.byDriver[0]!.key, "codex-app-server");
@@ -4871,7 +4872,7 @@ test("an unpriceable model counts its tokens, reports unpriced, and mixed proven
   let usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000_000, granularity: "hour" });
   assert.deepEqual(usage.totals, {
     inputTokens: 50, outputTokens: 5, costUsd: 0, uncachedInputTokens: 50, cachedInputTokens: 0, cacheCreationTokens: 0,
-    reasoningTokens: 0, cacheSavingsUsd: 0, costSource: "unpriced", unpricedRecords: 1,
+    reasoningTokens: 0, cacheSavingsUsd: 0, costSource: "unpriced", unpricedRecords: 1, processedTokens: 55,
   }, "without a rate table the tokens are counted and the cost is honestly zero");
   assert.equal(db.getSession("sess-1")!.costUsd, 0);
 
@@ -4959,7 +4960,7 @@ test("ledger rows written before the v103 columns keep aggregating with zero for
     let usage = db.queryUsageAggregation(localOwner(), window);
     assert.deepEqual(usage.totals, {
       inputTokens: 20, outputTokens: 4, costUsd: 0.2, uncachedInputTokens: 0, cachedInputTokens: 0, cacheCreationTokens: 0,
-      reasoningTokens: 0, cacheSavingsUsd: 0, costSource: "unpriced", unpricedRecords: 0,
+      reasoningTokens: 0, cacheSavingsUsd: 0, costSource: "unpriced", unpricedRecords: 0, processedTokens: 24,
     }, "pre-v103 buckets carry no provenance, so they neither claim nor count as unpriced records");
 
     db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 10, outputTokens: 2, costUsd: 0.1 }, now, { accrueUsage: true });
@@ -4997,4 +4998,28 @@ test("snapshot residual pricing carries sub-micro cost and defers to a fractiona
   const fraction = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000, granularity: "hour" });
   assert.equal(fraction.byModel.find((row) => row.key === "claude-fable-5-1")!.costSource, "providerReported");
   assert.ok(Math.abs(db.getSession("fraction")!.costUsd - 0.0000002) < 1e-15, "the estimate ($0.005) must not replace the reported fraction");
+});
+
+test("usage aggregation splits each time bucket per driver for stacked series", () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "claude", driver: "claude-code", config: { model: "claude-fable-5-1" } }));
+  db.createSession(newSession({ id: "codex", driver: "codex-app-server", config: { model: "gpt-5.5-codex" } }));
+  db.appendEvent("claude", { kind: "token_usage", inputTokens: 10, outputTokens: 1, costUsd: 0.1 }, 3_600_100, { accrueUsage: true });
+  db.appendEvent("codex", { kind: "token_usage", inputTokens: 20, outputTokens: 2 }, 3_600_200, { accrueUsage: true });
+  db.appendEvent("codex", { kind: "token_usage", inputTokens: 5, outputTokens: 1 }, 7_200_100, { accrueUsage: true });
+  const usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10_000_000, granularity: "hour" });
+  assert.deepEqual(
+    usage.seriesByDriver.map((row) => [row.bucketTs, row.driver, row.inputTokens]),
+    [[7_200_000, "codex-app-server", 5], [3_600_000, "claude-code", 10], [3_600_000, "codex-app-server", 20]],
+    "newest bucket first, drivers alphabetical within a bucket",
+  );
+  assert.equal(usage.seriesByDriver[1]!.costUsd, 0.1);
+  assert.equal(usage.seriesByDriver[2]!.costSource, "unpriced");
+  assert.deepEqual(usage.series.map((row) => [row.bucketTs, row.inputTokens]), [[7_200_000, 5], [3_600_000, 30]]);
+  // Processed tokens are derived per row with the driver's semantics, so they add up exactly across
+  // every grouping level instead of being re-derived from mixed aggregates.
+  assert.deepEqual(usage.seriesByDriver.map((row) => row.processedTokens), [6, 11, 22]);
+  assert.deepEqual(usage.series.map((row) => row.processedTokens), [6, 33]);
+  assert.equal(usage.totals.processedTokens, 39);
+  assert.equal(usage.byDriver.reduce((sum, row) => sum + row.processedTokens, 0), 39);
 });

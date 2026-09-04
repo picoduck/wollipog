@@ -7,15 +7,29 @@ import type {
   UsageRetentionPolicy,
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
-import { formatTokens } from "../format.js";
+import { useHasStore, useStoreSelector } from "../store.js";
+import {
+  DRIVER_PRESENTATION,
+  seriesClass,
+  activeDrivers,
+  buildColumns,
+  coverageMessages,
+  driverLabel,
+  driverRows,
+  formatCompactTokens,
+  formatMetric,
+  formatMoney,
+  formatShare,
+  metricValue,
+  processedTokens,
+  windowDays,
+  type UsageBreakdownMode,
+  type UsageMetric,
+} from "../usage-view-model.js";
 import { SegmentedControl } from "./ui/ChoiceControls.js";
+import { UsageChart } from "./UsageChart.js";
 
 const RANGES = [7, 30, 90, 365] as const;
-
-function money(value: number): string {
-  if (value === 0) return "$0.00";
-  return value < 0.01 ? `$${value.toFixed(4)}` : `$${value.toFixed(2)}`;
-}
 
 export function bucketLabel(timestamp: number, granularity: "hour" | "day"): string {
   const date = new Date(timestamp);
@@ -50,9 +64,24 @@ function remainingFor(bucket: SubscriptionUsageBucket): number | undefined {
   return bucket.remainingPercent ?? (bucket.usedPercent === undefined ? undefined : Math.max(0, 100 - bucket.usedPercent));
 }
 
+/** Reports the offline Machines the viewer can see. Mounted only under a store; a standalone
+ * render (tests, harness pages) has no fleet and shows no machine notice. */
+function OfflineMachineWatcher({ onNames }: { onNames: (names: string[]) => void }) {
+  const runners = useStoreSelector((state) => state.runners);
+  const names = useMemo(
+    () => [...runners.values()].filter((runner) => runner.status === "offline").map((runner) => runner.hostname).sort(),
+    [runners],
+  );
+  useEffect(() => onNames(names), [names, onNames]);
+  return null;
+}
+
 export function UsageView() {
   const api = useApi();
+  const hasStore = useHasStore();
   const [days, setDays] = useState(30);
+  const [metric, setMetric] = useState<UsageMetric>("cost");
+  const [breakdown, setBreakdown] = useState<UsageBreakdownMode>("time");
   const [data, setData] = useState<UsageAggregationResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -64,6 +93,7 @@ export function UsageView() {
   const requestGeneration = useRef(0);
   const daysRef = useRef(days);
   const [knownRetention, setKnownRetention] = useState<UsageRetentionPolicy | null>(null);
+  const [offlineMachines, setOfflineMachines] = useState<string[]>([]);
   const [subscriptionData, setSubscriptionData] = useState<SubscriptionUsageResponse | null>(null);
   const [subscriptionLoading, setSubscriptionLoading] = useState(true);
   const [subscriptionError, setSubscriptionError] = useState<string | null>(null);
@@ -82,7 +112,6 @@ export function UsageView() {
     const generation = ++requestGeneration.current;
     setLoading(true);
     setError(null);
-    setData(null);
     try {
       const next = await api.usage({ days: range });
       if (generation !== requestGeneration.current) return;
@@ -99,9 +128,8 @@ export function UsageView() {
   }, [api]);
 
   // The RANGE changes immediately; the request that follows it does not. Holding an arrow key
-  // walks the group, and before this each step queued another aggregation — the button row this
-  // replaced ignored arrows entirely, so the amplification arrived with the migration. Short
-  // enough that a deliberate change still feels instant, long enough that a key repeat coalesces.
+  // walks the group, and before this each step queued another aggregation — short enough that a
+  // deliberate change still feels instant, long enough that a key repeat coalesces.
   useEffect(() => {
     const timer = window.setTimeout(() => void load(days), 120);
     return () => window.clearTimeout(timer);
@@ -150,7 +178,6 @@ export function UsageView() {
     }
   };
 
-  const maxCost = useMemo(() => Math.max(0, ...(data?.series.map((bucket) => bucket.costUsd) ?? [])), [data]);
   const saveRetention = async () => {
     if (!data) return;
     const nextHourly = Number(hourlyDays);
@@ -183,42 +210,78 @@ export function UsageView() {
     }
   };
 
+  const drivers = useMemo(() => (data ? activeDrivers(data.byDriver) : []), [data]);
+  const rows = useMemo(() => (data ? driverRows(data, metric) : []), [data, metric]);
+  const columns = useMemo(
+    () => (data ? buildColumns(data.series, data.seriesByDriver ?? [], drivers, metric) : []),
+    [data, drivers, metric],
+  );
+  const models = useMemo(() => {
+    if (!data) return [];
+    const total = metricValue(data.totals, metric);
+    return [...(data.byModel ?? [])]
+      .sort((a, b) => metricValue(b, metric) - metricValue(a, metric))
+      .map((row) => ({ ...row, share: total > 0 ? metricValue(row, metric) / total : 0 }));
+  }, [data, metric]);
+  const perDriverByBucket = useMemo(() => {
+    const map = new Map<number, Map<string, UsageAggregationResponse["seriesByDriver"][number]>>();
+    for (const row of data?.seriesByDriver ?? []) {
+      const bucket = map.get(row.bucketTs) ?? new Map<string, UsageAggregationResponse["seriesByDriver"][number]>();
+      bucket.set(row.driver, row);
+      map.set(row.bucketTs, bucket);
+    }
+    return map;
+  }, [data]);
+  const notices = data
+    ? coverageMessages({ offlineMachines, unpricedRecords: data.totals.unpricedRecords ?? 0, pricing: data.pricing })
+    : [];
+  const periodNoun = data?.granularity === "hour" ? "Hour" : "Day";
+  const onOfflineNames = useCallback((names: string[]) => setOfflineMachines(names), []);
+
   return (
     <section className="usage-view" aria-labelledby="usage-heading">
+      {hasStore && <OfflineMachineWatcher onNames={onOfflineNames} />}
       <div className="view-toolbar usage-toolbar">
         <div>
           <h2 id="usage-heading">Usage &amp; Cost</h2>
           <p>Scoped, content-free accounting across the sessions you can access.</p>
         </div>
-        {/* A SegmentedControl, not `aria-pressed` buttons. `aria-pressed` announces "toggle button,
-            pressed" and says nothing about the other ranges being alternatives, so a screen-reader
-            user could not tell this from a row of independent switches — §11.1's finding. The
-            primary/ghost split also made the selected range read as the page's main action. */}
-        <SegmentedControl
-          className="usage-range"
-          label="Usage Range"
-          value={String(days)}
-          options={RANGES
-            .filter((range) => !knownRetention || range <= knownRetention.dailyDays)
-            .map((range) => ({
-              value: String(range),
-              label: `${range}d`,
-              title: `Last ${range} Days`,
-              disabled: saving,
-              // What is ACTUALLY happening. "Loading usage…" described the wrong request: the
-              // ranges are unavailable while the RETENTION setting is being saved, and usage
-              // itself is still on screen throughout.
-              disabledReason: saving ? savingReason : undefined,
-            }))}
-          onChange={(next) => {
-            const range = Number(next);
-            daysRef.current = range;
-            // Re-selecting the current range is a REFRESH, which is why this is not a no-op — and
-            // it is deliberate rather than incidental, so it does not wait for the debounce.
-            if (days === range) void load(range);
-            else setDays(range);
-          }}
-        />
+        {/* One filter row scopes everything beneath it: the metric flips every figure on the page
+            and the range picks the window. Both are radiogroups so a screen reader hears the
+            alternatives, not a row of independent toggles. */}
+        <div className="usage-toolbar-controls">
+          <SegmentedControl
+            label="Usage Metric"
+            value={metric}
+            options={[
+              { value: "cost", label: "Cost", title: "Show API-equivalent cost" },
+              { value: "tokens", label: "Tokens", title: "Show processed tokens" },
+            ]}
+            onChange={setMetric}
+          />
+          <SegmentedControl
+            className="usage-range"
+            label="Usage Range"
+            value={String(days)}
+            options={RANGES
+              .filter((range) => !knownRetention || range <= knownRetention.dailyDays)
+              .map((range) => ({
+                value: String(range),
+                label: `${range}d`,
+                title: `Last ${range} Days`,
+                disabled: saving,
+                disabledReason: saving ? savingReason : undefined,
+              }))}
+            onChange={(next) => {
+              const range = Number(next);
+              daysRef.current = range;
+              // Re-selecting the current range is a REFRESH, which is why this is not a no-op — and
+              // it is deliberate rather than incidental, so it does not wait for the debounce.
+              if (days === range) void load(range);
+              else setDays(range);
+            }}
+          />
+        </div>
       </div>
 
       <section className="subscription-usage" aria-labelledby="subscription-usage-heading">
@@ -312,59 +375,162 @@ export function UsageView() {
       {loading && !data && <div className="usage-state" role="status">Loading usage…</div>}
       {error && <div className="usage-state error" role="alert">{error}</div>}
       {data && (
-        <>
+        /* Refetches keep the previous render in place instead of flashing a skeleton: the frame
+           holds and the numbers update where they stand. */
+        <div aria-busy={loading}>
           <p className="usage-coverage" role="note">
             Coverage begins {new Date(data.retention.coverageStartedAt).toLocaleString()}. Existing lifetime totals before that cutover are not backdated into buckets.
           </p>
-          <dl className="usage-summary">
-            <div><dt>Cost</dt><dd>{money(data.totals.costUsd)}</dd></div>
-            <div><dt>Input Tokens</dt><dd>{formatTokens(data.totals.inputTokens)}</dd></div>
-            <div><dt>Output Tokens</dt><dd>{formatTokens(data.totals.outputTokens)}</dd></div>
-            <div><dt>Period</dt><dd>{days} Days</dd></div>
-          </dl>
+          {notices.length > 0 && (
+            <div className="usage-notice" role="note" aria-label="Coverage">
+              {notices.map((notice) => <p key={notice}>{notice}</p>)}
+            </div>
+          )}
 
-          <div
-          className="usage-table-wrap"
-          // A scroll region needs to be REACHABLE. The max-height that makes the sticky header work
-          // also gives this its own scrollbar, and a plain overflow div is not in the sequential
-          // focus order in WebKit — so a keyboard user tabbed past the table and could not reach
-          // the rows inside it.
-          tabIndex={0}
-          role="region"
-          // Named BY the caption, not with a copy of it. A fixed "Usage by Day" announced daily
-          // buckets while the caption beside it said "Hourly Usage in UTC" — and hourly is what the
-          // default 30-day range actually returns, so the contradiction was the common case.
-          aria-labelledby="usage-table-caption"
-        >
-            <table className="usage-table">
-              <caption id="usage-table-caption">{data.granularity === "hour" ? "Hourly" : "Daily"} Usage in UTC</caption>
-              <thead><tr><th scope="col">Bucket</th><th scope="col">Cost</th><th scope="col">Input</th><th scope="col">Output</th></tr></thead>
-              <tbody>
-                {data.series.length === 0 ? (
-                  <tr><td colSpan={4} className="usage-empty">No usage was observed in this period.</td></tr>
-                ) : data.series.map((bucket) => (
-                  <tr key={bucket.bucketTs}>
-                    <th scope="row">{bucketLabel(bucket.bucketTs, data.granularity)}</th>
-                    <td>
-                      <span>{money(bucket.costUsd)}</span>
-                      <span className="usage-cost-bar" aria-hidden="true" style={{ width: `${maxCost ? Math.max(2, bucket.costUsd / maxCost * 100) : 0}%` }} />
-                    </td>
-                    <td>{formatTokens(bucket.inputTokens)}</td>
-                    <td>{formatTokens(bucket.outputTokens)}</td>
-                  </tr>
+          <section className="usage-overview" aria-label="Overview">
+            <div className="usage-headline">
+              <span className="usage-headline-value">{formatMetric(metricValue(data.totals, metric), metric)}</span>
+              <span className="usage-headline-note">
+                {metric === "cost" ? "API-equivalent estimate · " : "Processed tokens · "}last {windowDays(data)} days
+              </span>
+              <ul className="usage-driver-list" aria-label="By Driver">
+                {rows.length === 0 && <li className="usage-headline-note">No driver has usage in this period.</li>}
+                {rows.map((row) => (
+                  <li className="usage-driver-row" key={row.driver}>
+                    <div>
+                      <span>
+                        <span className={`usage-series-swatch ${seriesClass(row.driver)}`} aria-hidden="true" />
+                        {DRIVER_PRESENTATION[row.driver].label}
+                      </span>
+                      <strong>{formatMetric(metricValue(row.amount, metric), metric)}</strong>
+                    </div>
+                    <small>
+                      {formatShare(row.share)} of {metric === "cost" ? "cost" : "tokens"} · {
+                        metric === "cost"
+                          ? `${formatCompactTokens(processedTokens(row.amount))} tokens`
+                          : formatMoney(row.amount.costUsd)
+                      }
+                    </small>
+                  </li>
                 ))}
-              </tbody>
-            </table>
-          </div>
+              </ul>
+            </div>
+            <div className="usage-chart-section">
+              <h3>{data.granularity === "hour" ? "Hourly" : "Daily"} {metric === "cost" ? "Cost" : "Processed Tokens"}</h3>
+              <UsageChart
+                columns={columns}
+                drivers={drivers}
+                metric={metric}
+                granularity={data.granularity}
+                tableHint={breakdown === "time"
+                  ? `the ${periodNoun} table below lists every value.`
+                  : `select ${periodNoun} under Breakdown for a table of every value.`}
+              />
+            </div>
+          </section>
+
+          <section className="usage-totals-section" aria-labelledby="usage-totals-heading">
+            <h3 id="usage-totals-heading">Totals</h3>
+            <dl className="usage-totals">
+              <div><dt>Processed Tokens</dt><dd>{formatCompactTokens(processedTokens(data.totals))}</dd></div>
+              <div><dt>Cached Input</dt><dd>{formatCompactTokens(data.totals.cachedInputTokens)}</dd></div>
+              <div><dt>Uncached Input</dt><dd>{formatCompactTokens(data.totals.uncachedInputTokens)}</dd></div>
+              <div><dt>Output</dt><dd>{formatCompactTokens(data.totals.outputTokens)}</dd></div>
+              <div><dt>Cache Savings</dt><dd>{formatMoney(data.totals.cacheSavingsUsd)}</dd></div>
+            </dl>
+          </section>
+
+          <section className="usage-breakdown-section" aria-labelledby="usage-breakdown-heading">
+            <div className="usage-breakdown-heading">
+              <h3 id="usage-breakdown-heading">Breakdown</h3>
+              <SegmentedControl
+                label="Usage Breakdown"
+                value={breakdown}
+                options={[
+                  { value: "model", label: "Model" },
+                  { value: "time", label: periodNoun },
+                ]}
+                onChange={setBreakdown}
+              />
+            </div>
+            {breakdown === "model" ? (
+              <div className="usage-table-wrap" tabIndex={0} role="region" aria-labelledby="usage-model-caption">
+                <table className="usage-table">
+                  <caption id="usage-model-caption">Usage by Model</caption>
+                  <thead><tr><th scope="col">Model</th><th scope="col">Cost</th><th scope="col">Share</th><th scope="col">Tokens</th></tr></thead>
+                  <tbody>
+                    {models.length === 0 ? (
+                      <tr><td colSpan={4} className="usage-empty">No usage was observed in this period.</td></tr>
+                    ) : models.map((row) => (
+                      <tr key={row.key}>
+                        <th scope="row">{row.key}{row.costSource === "unpriced" ? " · unpriced" : ""}</th>
+                        <td>{formatMoney(row.costUsd)}</td>
+                        <td className="usage-cell-dim">{formatShare(row.share)}</td>
+                        <td className="usage-cell-dim">{formatCompactTokens(processedTokens(row))}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div
+                className="usage-table-wrap"
+                // A scroll region needs to be REACHABLE. The max-height that makes the sticky header
+                // work also gives this its own scrollbar, and a plain overflow div is not in the
+                // sequential focus order in WebKit — so a keyboard user tabbed past it.
+                tabIndex={0}
+                role="region"
+                aria-labelledby="usage-table-caption"
+              >
+                <table className="usage-table">
+                  <caption id="usage-table-caption">{data.granularity === "hour" ? "Hourly" : "Daily"} Usage in UTC</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">{periodNoun}</th>
+                      {drivers.map((driver) => <th scope="col" key={driver}>{driverLabel(driver)}</th>)}
+                      <th scope="col">Total</th>
+                      <th scope="col">{metric === "cost" ? "Tokens" : "Cost"}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.series.length === 0 ? (
+                      <tr><td colSpan={drivers.length + 3} className="usage-empty">No usage was observed in this period.</td></tr>
+                    ) : data.series.map((bucket) => (
+                      <tr key={bucket.bucketTs}>
+                        <th scope="row">{bucketLabel(bucket.bucketTs, data.granularity)}</th>
+                        {drivers.map((driver) => {
+                          const split = perDriverByBucket.get(bucket.bucketTs);
+                          const cell = split?.get(driver);
+                          // No split for the bucket at all means the plane never sent one; a
+                          // missing driver inside a split means that driver had nothing.
+                          return (
+                            <td className="usage-cell-dim" key={driver}>
+                              {!split ? "—" : formatMetric(cell ? metricValue(cell, metric) : 0, metric)}
+                            </td>
+                          );
+                        })}
+                        <td>{formatMetric(metricValue(bucket, metric), metric)}</td>
+                        <td className="usage-cell-dim">
+                          {metric === "cost" ? formatCompactTokens(processedTokens(bucket)) : formatMoney(bucket.costUsd)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
 
           <div className="usage-breakdowns">
-            {(["Driver", "Agent", "Runner"] as const).map((label) => {
-              const rows = label === "Driver" ? data.byDriver : label === "Agent" ? data.byAgent : data.byRunner;
+            {(["Agent", "Runner"] as const).map((label) => {
+              const list = label === "Agent" ? data.byAgent : data.byRunner;
               return (
                 <section className="runner-card usage-breakdown" key={label}>
                   <h3>By {label}</h3>
-                  {rows.length === 0 ? <p>No usage.</p> : (
-                    <ul>{rows.slice(0, 20).map((row) => <li key={row.key}><span>{row.key}</span><strong>{money(row.costUsd)} · {formatTokens(row.inputTokens + row.outputTokens)}</strong></li>)}</ul>
+                  {list.length === 0 ? <p>No usage.</p> : (
+                    <ul>{list.slice(0, 20).map((row) => (
+                      <li key={row.key}><span>{row.key}</span><strong>{formatMetric(metricValue(row, metric), metric)}</strong></li>
+                    ))}</ul>
                   )}
                 </section>
               );
@@ -381,7 +547,7 @@ export function UsageView() {
             </section>
           )}
           <p className="usage-privacy">{data.privacy}</p>
-        </>
+        </div>
       )}
     </section>
   );
