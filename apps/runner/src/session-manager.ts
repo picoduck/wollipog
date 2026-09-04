@@ -603,7 +603,13 @@ export class SessionManager {
   private readonly closing = new Map<string, { client: Driver; promise: Promise<void> }>();
   /** A turn-boundary worktree move owns a retiring provider even after it leaves `active`.
    * Unlike `closing`, prompts may join its pre-launch FIFO while the same conversation reopens. */
-  private readonly worktreeRebindings = new Map<string, { entry: ActiveSession; promise: Promise<void> }>();
+  private readonly worktreeRebindings = new Map<string, {
+    entry: ActiveSession;
+    promise: Promise<void>;
+    /** Exact target captured once provider launch preparation begins. A later selection may move
+     * durable metadata again, but cleanup must keep fencing the cwd already handed to launch(). */
+    launchingWorktreePath?: string;
+  }>();
   private readonly deleting = new Set<string>();
   /** Process-lifetime tombstone: a late start command/continuation may never recreate a deleted id. */
   private readonly deleted = new Set<string>();
@@ -991,13 +997,16 @@ export class SessionManager {
 
   private liveWorktreeUsesPath(sessionId: string, path: string): boolean {
     const active = this.active.get(sessionId);
-    const rebinding = this.worktreeRebindings.get(sessionId)?.entry;
+    const rebind = this.worktreeRebindings.get(sessionId);
+    const rebinding = rebind?.entry;
     const rebindingSelection = rebinding ? this.store.readMeta(sessionId)?.worktreePath : undefined;
     return (!!active && (sameWorktreePath(active.context, active.cwd, path) ||
       (!!active.worktree && sameWorktreePath(active.context, active.worktree.path, path)))) ||
       (!!rebinding && (sameWorktreePath(rebinding.context, rebinding.cwd, path) ||
         (!!rebinding.worktree && sameWorktreePath(rebinding.context, rebinding.worktree.path, path)))) ||
       (!!rebinding && !!rebindingSelection && sameWorktreePath(rebinding.context, rebindingSelection, path)) ||
+      (!!rebinding && !!rebind?.launchingWorktreePath &&
+        sameWorktreePath(rebinding.context, rebind.launchingWorktreePath, path)) ||
       this.closing.has(sessionId);
   }
 
@@ -3545,6 +3554,13 @@ export class SessionManager {
       return false;
     }
     const effectiveConfig = this.snapshotQueuedConfig(sessionId, config);
+    const rebindGeneration = this.launchGenerations.get(sessionId);
+    // A normal rebind exposes its generation-owned pre-launch FIFO so prompts remain accepted.
+    // Stop/cancel deliberately invalidate that generation; until the retiring provider settles,
+    // reject a raced prompt instead of resuming alongside it through the generic inactive path.
+    const stoppedRebindInProgress = this.worktreeRebindings.has(sessionId) &&
+      (rebindGeneration === undefined ||
+        this.preLaunchAdmissionGenerations.get(sessionId) !== rebindGeneration);
     // A prompt during a file rewind would snapshot (and run the agent over) a half-restored
     // tree — the reentrant store lock can't fence this same-process race, the set does.
     if (
@@ -3552,7 +3568,8 @@ export class SessionManager {
       this.forking.has(sessionId) ||
       this.loggingOut.has(sessionId) ||
       this.closing.has(sessionId) ||
-      this.deleting.has(sessionId)
+      this.deleting.has(sessionId) ||
+      stoppedRebindInProgress
     ) {
       const operation = this.rewinding.has(sessionId)
         ? "rewind"
@@ -3562,9 +3579,11 @@ export class SessionManager {
             ? "agent sign-out"
             : this.closing.has(sessionId)
               ? "provider session close"
-              : "session deletion";
+              : this.deleting.has(sessionId)
+                ? "session deletion"
+                : "worktree rebind shutdown";
       this.emitEvent(sessionId, { kind: "error", message: `a ${operation} is in progress — retry in a moment` });
-      if (this.closing.has(sessionId) || this.deleting.has(sessionId)) {
+      if (this.closing.has(sessionId) || this.deleting.has(sessionId) || stoppedRebindInProgress) {
         this.emitStatus(sessionId, this.store.readMeta(sessionId)?.status ?? "stopped");
       }
       durable?.failed(`a ${operation} is in progress`, "COMMAND_CANCELLED");
@@ -4563,7 +4582,7 @@ export class SessionManager {
         this.reservedPromotions(entry).delete(sourceId);
       }
       this.emitQueue(sessionId);
-      if (!this.steerFences(entry).size && entry.queue.length &&
+      if (!this.steerFences(entry).size && (entry.queue.length || entry.pendingWorktreeRebind) &&
           !entry.governanceTripped && !this.queueHeld(entry)) {
         setImmediate(() => this.scheduleDrain(sessionId));
       }
@@ -5319,12 +5338,24 @@ export class SessionManager {
         entry.governanceRearmPending = undefined;
         entry.governanceTripped = pending === "resume" ? undefined : pending;
         this.emitStatus(sessionId, "idle");
-        if (!entry.governanceTripped && entry.queue.length) setImmediate(() => this.scheduleDrain(sessionId));
+        if (!entry.governanceTripped && (entry.queue.length || entry.pendingWorktreeRebind)) {
+          setImmediate(() => this.scheduleDrain(sessionId));
+        }
       }
-      if (entry.pendingWorktreeRebind && this.active.get(sessionId) === entry) {
+      if (entry.pendingWorktreeRebind && this.worktreeRebindCanProceed(sessionId, entry)) {
         await this.rebindSelectedWorktree(sessionId, entry);
       }
     }
+  }
+
+  private worktreeRebindCanProceed(sessionId: string, entry: ActiveSession): boolean {
+    return !entry.running &&
+      this.active.get(sessionId) === entry &&
+      !entry.governanceTripped &&
+      !entry.holdQueuedPromptsAfterInterrupt &&
+      !this.hasPendingApproval(sessionId) &&
+      !this.steerFences(entry).size &&
+      !this.reservedPromotionPrecedesQueue(sessionId, entry);
   }
 
   /** Retire an idle provider generation and resume its exact conversation in the newly selected
@@ -5344,7 +5375,7 @@ export class SessionManager {
 
   private async performSelectedWorktreeRebind(sessionId: string, entry: ActiveSession): Promise<void> {
     const selectedPath = entry.pendingWorktreeRebind;
-    if (!selectedPath || entry.running || this.active.get(sessionId) !== entry) return;
+    if (!selectedPath || !this.worktreeRebindCanProceed(sessionId, entry)) return;
     const meta = this.store.readMeta(sessionId);
     if (!meta || !meta.worktreePath || !sameWorktreePath(meta.context, meta.worktreePath, selectedPath)) {
       entry.pendingWorktreeRebind = undefined;
@@ -5380,6 +5411,10 @@ export class SessionManager {
     try {
       const fresh = this.store.readMeta(sessionId);
       if (!fresh || !this.launchIsCurrent(sessionId, launchGeneration)) return;
+      const rebinding = this.worktreeRebindings.get(sessionId);
+      if (rebinding?.entry === entry) {
+        rebinding.launchingWorktreePath = fresh.worktreePath ?? undefined;
+      }
       launched = await this.launch(fresh, resumeId, launchGeneration);
       if (launched) {
         const reboundEntry = this.active.get(sessionId);
@@ -5392,15 +5427,31 @@ export class SessionManager {
           launched = false;
           return;
         }
+        const latestSelection = this.store.readMeta(sessionId)?.worktreePath;
+        if (reboundEntry && latestSelection &&
+            !sameWorktreePath(reboundEntry.context, reboundEntry.cwd, latestSelection)) {
+          // Selection can advance while launch() is preparing the captured target and before the
+          // replacement becomes active. Preserve that newest target as another fenced handoff;
+          // otherwise durable Files/Git state would point at a different cwd indefinitely.
+          reboundEntry.pendingWorktreeRebind = latestSelection;
+        }
         const hasQueuedWork = (this.preLaunchQueues.get(sessionId)?.length ?? 0) > 0;
         this.activatePreLaunchQueue(sessionId);
         if (!hasQueuedWork) this.emitStatus(sessionId, "idle");
+        if (!hasQueuedWork && reboundEntry?.pendingWorktreeRebind) {
+          setImmediate(() => this.scheduleDrain(sessionId));
+        }
       }
     } finally {
       const superseded = this.launchWasSuperseded(sessionId, launchGeneration);
       const ownsGeneration = this.launchGenerations.get(sessionId) === launchGeneration;
       if (!launched && ownsGeneration && !superseded) {
-        this.rejectPreLaunchQueue(sessionId, "provider could not resume in the selected worktree");
+        this.rejectPreLaunchQueue(
+          sessionId,
+          this.store.readMeta(sessionId)?.status === "stopped"
+            ? "session stopped before the selected-worktree provider resumed"
+            : "provider could not resume in the selected worktree",
+        );
       }
       if (this.preLaunchAdmissionGenerations.get(sessionId) === launchGeneration) {
         this.preLaunchAdmissionGenerations.delete(sessionId);
@@ -6576,7 +6627,7 @@ export class SessionManager {
     }
     entry.governanceTripped = holdFor;
     this.emitStatus(sessionId, "idle");
-    if (!holdFor && entry.queue.length) this.scheduleDrain(sessionId);
+    if (!holdFor && (entry.queue.length || entry.pendingWorktreeRebind)) this.scheduleDrain(sessionId);
   }
 
   stop(sessionId: string): void {
