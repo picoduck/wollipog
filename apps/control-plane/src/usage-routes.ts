@@ -101,10 +101,11 @@ export function registerUsageRoutes(
     }
     const body = (request.body ?? {}) as { perUserUsd?: unknown };
     const value = body.perUserUsd;
-    if (value !== null && (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value > 1_000_000)) {
-      return reply.code(400).send({ error: "perUserUsd must be a positive number of dollars, or null to clear" });
+    const rounded = typeof value === "number" && Number.isFinite(value) ? Math.round(value * 100) / 100 : Number.NaN;
+    if (value !== null && (!Number.isFinite(rounded) || rounded < 0.01 || rounded > 1_000_000)) {
+      return reply.code(400).send({ error: "perUserUsd must be at least one cent, or null to clear" });
     }
-    return { dailyBudget: db.setUsageDailyBudget(principal.organizationId, value === null ? null : Math.round(value * 100) / 100, Date.now()) };
+    return { dailyBudget: db.setUsageDailyBudget(principal.organizationId, value === null ? null : rounded, Date.now()) };
   });
 
   // Per-user spend windows. Owners and admins see every user with usage; a member sees only

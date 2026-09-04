@@ -380,8 +380,11 @@ export function normalizeCostCheckpoints(input: unknown): number[] | null {
   if (!Array.isArray(input)) return null;
   const values = [...new Set(input
     .map((value) => (typeof value === "string" ? Number(value) : value))
-    .filter((value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0)
-    .map((value) => Math.round(value * 100) / 100))].sort((a, b) => a - b);
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value))
+    .map((value) => Math.round(value * 100) / 100)
+    // Positivity is checked AFTER cent rounding: 0.001 would otherwise persist as a $0 checkpoint
+    // that looks configured and never gates.
+    .filter((value) => value >= 0.01))].sort((a, b) => a - b);
   return values.length > 0 ? values.slice(0, 8) : null;
 }
 

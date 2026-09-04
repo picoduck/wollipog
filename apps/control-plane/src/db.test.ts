@@ -5072,8 +5072,14 @@ test("per-user cost windows and the daily budget read the owner-scoped buckets i
   assert.deepEqual(db.listUserCostWindows("org_personal", now).map((row) => [row.userId, row.todayUsd]), [["usr_local_owner", 1.5]]);
   assert.deepEqual(db.sessionOwnerUser("sess-1"), { organizationId: "org_personal", userId: "usr_local_owner" });
 
+  // Shorten hourly retention so the 3-day and 20-day samples roll into daily buckets, then the
+  // windows must read them from usage_daily rather than lose them.
+  db.setUsageRetentionPolicy("org_personal", { hourlyDays: 1, dailyDays: 30 });
   db.maintainUsageAggregation(now);
-  assert.equal(db.userCostWindows("org_personal", "usr_local_owner", now).last30DaysUsd, 13.5, "rolled-up days still count");
+  assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM usage_daily").get()!.n, 2, "two samples rolled into days");
+  assert.equal(db.userCostWindows("org_personal", "usr_local_owner", now).last7DaysUsd, 5.5, "a rolled-up day inside the window still counts");
+  assert.equal(db.userCostWindows("org_personal", "usr_local_owner", now).last30DaysUsd, 13.5);
+  assert.deepEqual(db.listUserCostWindows("org_personal", now).map((row) => [row.todayUsd, row.last7DaysUsd, row.last30DaysUsd]), [[1.5, 5.5, 13.5]]);
   db.setUsageDailyBudget("org_personal", null, now + 1);
   assert.equal(db.getUsageDailyBudget("org_personal").perUserUsd, null);
 });

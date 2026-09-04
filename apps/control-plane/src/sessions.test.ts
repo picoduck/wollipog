@@ -11061,3 +11061,37 @@ test("the per-user daily budget parks a user's sessions until the day rolls over
   assert.equal(db.getSession(id)!.pendingApproval, null, "a raised budget releases the session");
   assert.equal(db.getSession(id)!.status, "idle");
 });
+
+test("the daily budget gates prompt admission and a mid-turn checkpoint Continue keeps the session running", () => {
+  const { db, svc } = makeHarness();
+  const id = seedSession(svc, hub_for(svc), { prompt: "spend" });
+  db.raw().prepare("UPDATE session_ownership SET owner_kind='user', owner_id='usr_local_owner' WHERE session_id=?").run(id);
+  db.setUsageDailyBudget("org_personal", 2, Date.now());
+  db.appendEvent(id, { kind: "token_usage", inputTokens: 1, costUsd: 2.5 }, Date.now(), { accrueUsage: true });
+  db.updateSessionStatus(id, "idle", Date.now());
+  db.setPendingApproval(id, null);
+  const refused = svc.prompt(id, "one more", []);
+  assert.equal(refused.ok, false);
+  assert.match(refused.error ?? "", /daily budget reached/);
+  assert.equal(db.getSession(id)!.pendingApproval?.kind, "daily_budget", "the refusal parks the session with the card");
+
+  // Creation for the same owner is refused too.
+  const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, useWorktree: false }, undefined, {
+    organizationId: "org_personal", owner: { kind: "user", userId: "usr_local_owner" },
+  });
+  assert.equal(created.ok, false);
+  assert.match(created.error ?? "", /daily budget reached/);
+
+  // A checkpoint crossed mid-turn: Continue leaves the provider turn running rather than idle.
+  db.setUsageDailyBudget("org_personal", null, Date.now());
+  db.setPendingApproval(id, null);
+  db.updateSessionStatus(id, "running", Date.now());
+  assert.ok(svc.setConfig(id, { costCheckpointsUsd: [1] }).ok);
+  db.appendEvent(id, { kind: "token_usage", inputTokens: 1, costUsd: 0.1 }, Date.now(), { accrueUsage: true });
+  (svc as unknown as { gateOnPolicy(id: string, now: number): boolean }).gateOnPolicy(id, Date.now());
+  const parked = db.getSession(id)!;
+  assert.equal(parked.pendingApproval?.kind, "cost_checkpoint");
+  assert.equal(parked.status, "input_required");
+  assert.ok(svc.approve(id, parked.pendingApproval!.requestId, "continue").ok);
+  assert.equal(db.getSession(id)!.status, "running", "no settle frame was swallowed, so the turn is still live");
+});

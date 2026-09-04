@@ -10589,6 +10589,24 @@ export class ControlPlaneDb {
     return Number(row.microusd ?? 0);
   }
 
+  /** One user's cost since the start of the current UTC day: the single figure the daily-budget
+   * gate needs on the ingestion path. */
+  userCostTodayUsd(organizationId: string, userId: string, now = Date.now()): number {
+    return this.userCostSinceMicrousd(organizationId, userId, Math.floor(now / 86_400_000) * 86_400_000) / 1_000_000;
+  }
+
+  /** Restores a checkpoint list AND its approved level together, for a failed re-arm rollback. */
+  restoreSessionCostCheckpoints(id: string, checkpointsUsd: number[] | null, approvedUsd: number | null, now: number): void {
+    this.stmt("UPDATE sessions SET cost_checkpoints_usd=?, cost_checkpoint_approved_usd=?, updated_at=? WHERE id=?")
+      .run(checkpointsUsd ? JSON.stringify(checkpointsUsd) : null, checkpointsUsd ? approvedUsd : null, now, id);
+  }
+
+  /** The provider status a control-plane card swallowed when it took the slot, if any. */
+  policyResumeStatus(id: string): "idle" | null {
+    const row = this.stmt("SELECT policy_resume_status FROM sessions WHERE id=?").get(id) as { policy_resume_status: string | null } | undefined;
+    return row?.policy_resume_status === "idle" ? "idle" : null;
+  }
+
   /** Today, the last 7 days, and the last 30 days for one user, in UTC days. */
   userCostWindows(organizationId: string, userId: string, now = Date.now()): UserCostWindows {
     const dayStart = Math.floor(now / 86_400_000) * 86_400_000;
@@ -10603,19 +10621,39 @@ export class ControlPlaneDb {
     };
   }
 
-  /** Every user with usage in the last 30 days, most spend today first. */
+  /** Every user with usage in the last 30 days, most spend today first. One aggregate pass with
+   * the windows as CASE sums; the bound applies AFTER ordering, so the biggest spenders and anyone
+   * paused today are never the rows a cap drops. */
   listUserCostWindows(organizationId: string, now = Date.now()): UserCostWindows[] {
-    const since = Math.floor(now / 86_400_000) * 86_400_000 - 29 * 86_400_000;
-    const users = this.stmt(
-      `SELECT DISTINCT owner_id FROM (
-         SELECT owner_id FROM usage_hourly WHERE organization_id=? AND owner_kind='user' AND bucket_ts>=?
-         UNION ALL
-         SELECT owner_id FROM usage_daily WHERE organization_id=? AND owner_kind='user' AND bucket_ts>=?
-       ) LIMIT 500`,
-    ).all(organizationId, since, organizationId, since) as unknown as Array<{ owner_id: string }>;
-    return users
-      .map((row) => this.userCostWindows(organizationId, row.owner_id, now))
-      .sort((a, b) => b.todayUsd - a.todayUsd || b.last30DaysUsd - a.last30DaysUsd || a.userId.localeCompare(b.userId));
+    const dayStart = Math.floor(now / 86_400_000) * 86_400_000;
+    const since7 = dayStart - 6 * 86_400_000;
+    const since30 = dayStart - 29 * 86_400_000;
+    const budget = this.getUsageDailyBudget(organizationId).perUserUsd;
+    const rows = this.stmt(
+      `SELECT owner_id,
+              SUM(CASE WHEN bucket_ts >= ? THEN cost_microusd ELSE 0 END) AS today,
+              SUM(CASE WHEN bucket_ts >= ? THEN cost_microusd ELSE 0 END) AS week,
+              SUM(cost_microusd) AS month
+         FROM (
+           SELECT owner_id, bucket_ts, cost_microusd FROM usage_hourly WHERE organization_id=? AND owner_kind='user' AND bucket_ts>=?
+           UNION ALL
+           SELECT owner_id, bucket_ts, cost_microusd FROM usage_daily WHERE organization_id=? AND owner_kind='user' AND bucket_ts>=?
+         )
+        GROUP BY owner_id
+        ORDER BY today DESC, month DESC, owner_id ASC
+        LIMIT 500`,
+    ).all(dayStart, since7, organizationId, since30, organizationId, since30) as unknown as Array<{
+      owner_id: string; today: number; week: number; month: number;
+    }>;
+    const nameOf = this.stmt("SELECT display_name FROM identity_users WHERE user_id=?");
+    return rows.map((row) => ({
+      userId: row.owner_id,
+      userName: (nameOf.get(row.owner_id) as { display_name: string } | undefined)?.display_name ?? row.owner_id,
+      todayUsd: Number(row.today) / 1_000_000,
+      last7DaysUsd: Number(row.week) / 1_000_000,
+      last30DaysUsd: Number(row.month) / 1_000_000,
+      dailyBudgetUsd: budget,
+    }));
   }
 
   updateSessionCostBudget(id: string, budgetUsd: number | null, now: number, stepUsd = budgetUsd): void {
