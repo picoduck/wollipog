@@ -10579,6 +10579,17 @@ export class ControlPlaneDb {
     return { perUserUsd, updatedAt: now };
   }
 
+  /** Live, unparked sessions a user owns in an organization: what a daily-budget breach parks. */
+  listOpenSessionIdsForOwner(organizationId: string, userId: string): string[] {
+    const rows = this.stmt(
+      `SELECT s.id FROM sessions s JOIN session_ownership o ON o.session_id=s.id
+        WHERE o.organization_id=? AND o.owner_kind='user' AND o.owner_id=?
+          AND s.status NOT IN ('completed','failed','stopped') AND s.pending_approval IS NULL
+        ORDER BY s.updated_at DESC LIMIT 200`,
+    ).all(organizationId, userId) as unknown as Array<{ id: string }>;
+    return rows.map((row) => row.id);
+  }
+
   /** The user who owns a session, when it is user-owned; organization and team sessions have no
    * personal daily allowance. */
   sessionOwnerUser(sessionId: string): { organizationId: string; userId: string } | null {

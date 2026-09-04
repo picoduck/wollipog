@@ -6208,6 +6208,16 @@ export class SessionsService {
     // turn it parks; the runner-owned thresholds already tripped on the runner itself.
     if (!runnerHoldFor(ask.rule.kind)) this.rearmRunnerAfterCard(s, "control_plane");
     this.db.setPendingApproval(sessionId, approval);
+    // The daily allowance is the owner's, not this session's: every other live session they own
+    // is parked now, before a queued turn elsewhere can dequeue behind the breach.
+    if (ask.rule.kind === "daily_budget") {
+      const owner = this.db.sessionOwnerUser(sessionId);
+      if (owner) {
+        for (const siblingId of this.db.listOpenSessionIdsForOwner(owner.organizationId, owner.userId)) {
+          if (siblingId !== sessionId) this.gateOnPolicy(siblingId, now);
+        }
+      }
+    }
     this.db.updateSessionStatus(sessionId, "input_required", now);
     this.recordGovernanceAudit(s, approval, "policy_decision", "asked", { kind: "policy", id: ask.rule.kind }, now, {
       policyRule: ask.rule,

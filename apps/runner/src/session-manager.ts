@@ -3043,11 +3043,10 @@ export class SessionManager {
       operation.fenceEntry = entry;
       operation.fenceInstalled = true;
     }
-    // A replacement process inherits the hold its predecessor was under.
-    if (this.recoveryHolds.has(sessionId)) {
-      this.recoveryHolds.delete(sessionId);
-      entry.controlPlaneHold = true;
-    }
+    // A replacement process inherits the hold its predecessor was under. The marker itself stays
+    // until the recovered queue is consumed or the control plane releases it, so a failed
+    // initialization cannot strand a still-held recovery queue.
+    if (this.recoveryHolds.has(sessionId)) entry.controlPlaneHold = true;
     this.active.set(sessionId, entry);
     this.send({ type: "process_status", sessionId, processStatus: "running", pid: client.pid });
 
@@ -6356,25 +6355,29 @@ export class SessionManager {
     if (!meta) return;
     const costBudgetUsd = config.costBudgetUsd;
     const maxToolCalls = config.maxToolCalls;
+    // No live process: whatever the re-arm carries, the hold change applies to what recovery
+    // holds for this session, and a release re-enters recovery. Thresholds ride into the queued
+    // prompts' configs when the replacement process picks them up.
+    if (!this.active.get(sessionId)) {
+      if (holdFor === "control_plane") this.recoveryHolds.add(sessionId);
+      else if (holdFor === undefined && this.recoveryHolds.delete(sessionId) && this.recoveryQueues.has(sessionId)) {
+        setImmediate(() => void this.recoverQueuedAppServer(sessionId));
+      }
+      if (costBudgetUsd === undefined && maxToolCalls === undefined) return;
+    }
     // A threshold-free re-arm is a hold change alone (v105 control-plane cards): it must neither
     // be ignored nor touch the per-prompt budgets queued prompts were queued with.
     if (costBudgetUsd === undefined && maxToolCalls === undefined) {
       const entry = this.active.get(sessionId);
-      if (!entry) {
-        // No live process: the hold applies to whatever recovery holds for this session.
-        if (holdFor === "control_plane") this.recoveryHolds.add(sessionId);
-        else if (holdFor === undefined && this.recoveryHolds.delete(sessionId) && this.recoveryQueues.has(sessionId)) {
-          setImmediate(() => void this.recoverQueuedAppServer(sessionId));
-        }
-        return;
-      }
+      if (!entry) return;
       if (holdFor === "control_plane") {
         this.setControlPlaneHold(sessionId, entry, true);
         if (entry.running && entry.governanceTripped) entry.governanceRearmPending = "resume";
         else if (!entry.running) entry.governanceTripped = undefined;
         return;
       }
-      if (holdFor === undefined && entry.controlPlaneHold) {
+      if (holdFor === undefined && (entry.controlPlaneHold || this.recoveryHolds.has(sessionId))) {
+        this.recoveryHolds.delete(sessionId);
         this.setControlPlaneHold(sessionId, entry, false);
         if (!entry.running && !entry.governanceTripped && !this.queueHeld(entry) && entry.queue.length) this.scheduleDrain(sessionId);
       }
@@ -6425,7 +6428,10 @@ export class SessionManager {
     }
     // A threshold re-arm without a hold releases a control-plane hold too: the card it carried
     // was answered by the same Continue that sent the new thresholds.
-    if (!holdFor) this.setControlPlaneHold(sessionId, entry, false);
+    if (!holdFor) {
+      this.recoveryHolds.delete(sessionId);
+      this.setControlPlaneHold(sessionId, entry, false);
+    }
     if (entry.running) {
       if (entry.governanceTripped) entry.governanceRearmPending = holdFor ?? "resume";
       else if (holdFor) entry.governanceTripped = holdFor;
@@ -7179,6 +7185,7 @@ export class SessionManager {
     if (queued) this.rejectQueued(queued, "session lifecycle discarded the recovered command queue");
     this.recoveryQueues.delete(sessionId);
     this.recoveryLaunching.delete(sessionId);
+    this.recoveryHolds.delete(sessionId);
   }
 
   /** Returns whether every provider driver was disposed cleanly. When false, some provider process

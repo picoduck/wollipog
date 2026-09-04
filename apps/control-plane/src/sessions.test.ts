@@ -11160,3 +11160,19 @@ test("a user-owned Project on an organization workspace still meets its owner's 
   assert.match(created.error ?? "", /daily budget reached/);
   assert.equal(hub.sentOfType("start_session").length, 0);
 });
+
+test("a daily-budget breach parks every live session the owner has, not only the one that crossed it", () => {
+  const { db, hub, svc } = makeHarness();
+  const a = seedSession(svc, hub, { prompt: "spend" });
+  const b = seedSession(svc, hub, { prompt: "wait" });
+  for (const id of [a, b]) {
+    db.raw().prepare("UPDATE session_ownership SET owner_kind='user', owner_id='usr_local_owner' WHERE session_id=?").run(id);
+  }
+  db.updateSessionStatus(b, "idle", Date.now());
+  db.setUsageDailyBudget("org_personal", 2, Date.now());
+  db.appendEvent(a, { kind: "token_usage", inputTokens: 1, costUsd: 2.5 }, Date.now(), { accrueUsage: true });
+  svc.onSessionStatus(a, "idle");
+  assert.equal(db.getSession(a)!.pendingApproval?.kind, "daily_budget");
+  assert.equal(db.getSession(b)!.pendingApproval?.kind, "daily_budget", "the sibling is parked too");
+  assert.equal(db.getSession(b)!.status, "input_required");
+});
