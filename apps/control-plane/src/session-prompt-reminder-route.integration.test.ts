@@ -22,7 +22,7 @@ const SESSION_ID = "session-prompt-reminder-route";
 const OWNER_TOKEN = "prompt-reminder-owner-token";
 const OTHER_TOKEN = "prompt-reminder-other-token";
 const AGENT_TOKEN = "prompt-reminder-agent-token";
-const RUNNER_TOKEN = "prompt-reminder-runner-token";
+const RUNNER_TOKEN = `wollipogr_${"r".repeat(43)}`;
 const OTHER_USER_ID = "user_prompt_reminder_other";
 
 type JsonObject = Record<string, unknown>;
@@ -107,10 +107,11 @@ async function waitForHealth(baseUrl: string, child: ChildProcess, logs: () => s
 function storedReminder(database: string, userId: string): { reminderId: string; state: string } | null {
   const db = new DatabaseSync(database);
   try {
+    db.exec("PRAGMA busy_timeout=5000");
     const row = db.prepare(
       "SELECT reminder_id AS reminderId,state FROM session_reminders WHERE session_id=? AND user_id=?",
     ).get(SESSION_ID, userId) as { reminderId: string; state: string } | undefined;
-    return row ?? null;
+    return row ? { reminderId: row.reminderId, state: row.state } : null;
   } finally {
     db.close();
   }
@@ -145,6 +146,18 @@ function seed(database: string, runner: RunnerMetadata): { ownerUserId: string; 
       now: now + 2,
     });
     db.registerRunner(runner, now + 3, PROTOCOL_VERSION);
+    db.issueRunnerCredential({
+      credentialId: `rcred_${"promptreminder".padEnd(32, "0")}`,
+      runnerId: RUNNER_ID,
+      organizationId: identity.organizationId,
+      ownerKind: "organization",
+      ownerId: identity.organizationId,
+      label: "Prompt reminder route fixture",
+      tokenHash: hashToken(RUNNER_TOKEN),
+      createdByUserId: identity.userId,
+      now: now + 3,
+      expiresAt: now + 60_000,
+    });
     db.createSession({
       id: SESSION_ID,
       runnerId: RUNNER_ID,
@@ -207,7 +220,6 @@ test("prompt route acknowledges fired reminders only for accepted human principa
       CONTROL_PLANE_HOST: "127.0.0.1",
       CONTROL_PLANE_PORT: String(port),
       CONTROL_PLANE_DB: database,
-      CONTROL_PLANE_TOKEN: RUNNER_TOKEN,
     },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
@@ -240,9 +252,9 @@ test("prompt route acknowledges fired reminders only for accepted human principa
     body: JSON.stringify({ text: "offline prompt" }),
   });
   assert.equal(offline.status, 409, await offline.text());
-  assert.equal(
-    storedReminder(database, seeded.ownerUserId)?.reminderId,
-    seeded.reminderIds.get(seeded.ownerUserId),
+  assert.deepEqual(
+    storedReminder(database, seeded.ownerUserId),
+    { reminderId: seeded.reminderIds.get(seeded.ownerUserId), state: "fired" },
     "a failed human prompt must retain the exact fired reminder",
   );
 
@@ -281,37 +293,44 @@ test("prompt route acknowledges fired reminders only for accepted human principa
   }));
   await inbox.take((message) => message.type === "registered");
 
-  const agentDelivery = inbox.take((message) =>
-    message.type === "prompt_session" && message.sessionId === SESSION_ID);
-  const automated = await fetch(`${baseUrl}/api/sessions/${SESSION_ID}/prompt`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${AGENT_TOKEN}`,
-      [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: SESSION_ID,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({ text: "automated agent prompt" }),
-  });
-  assert.equal(automated.status, 200, await automated.text());
-  assert.equal((await agentDelivery).text, "automated agent prompt");
+  const deliverPrompt = async (headers: Record<string, string>, text: string): Promise<JsonObject> => {
+    const delivery = inbox.take((message) =>
+      message.type === "prompt_session" && message.sessionId === SESSION_ID);
+    const response = await fetch(`${baseUrl}/api/sessions/${SESSION_ID}/prompt`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ text }),
+    });
+    const responseBody = await response.text();
+    if (response.status !== 200) void delivery.catch(() => {});
+    assert.equal(response.status, 200, responseBody);
+    return await delivery;
+  };
+
+  const agentDelivery = await deliverPrompt({
+    authorization: `Bearer ${AGENT_TOKEN}`,
+    [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: SESSION_ID,
+    "content-type": "application/json",
+  }, "automated agent prompt");
+  assert.equal(agentDelivery.text, "automated agent prompt");
   assert.equal(storedReminder(database, seeded.ownerUserId)?.state, "fired",
     "an agent-control prompt must not acknowledge the human user's reminder");
   assert.equal(storedReminder(database, OTHER_USER_ID)?.state, "fired");
 
-  const humanDelivery = inbox.take((message) =>
-    message.type === "prompt_session" && message.sessionId === SESSION_ID);
-  const accepted = await fetch(`${baseUrl}/api/sessions/${SESSION_ID}/prompt`, {
-    method: "POST",
-    headers: humanHeaders,
-    body: JSON.stringify({ text: "accepted human prompt" }),
-  });
-  assert.equal(accepted.status, 200, await accepted.text());
-  assert.equal((await humanDelivery).text, "accepted human prompt");
-  assert.equal(storedReminder(database, seeded.ownerUserId), null,
-    "an accepted human prompt removes that user's fired reminder");
-  assert.equal(
-    storedReminder(database, OTHER_USER_ID)?.reminderId,
-    seeded.reminderIds.get(OTHER_USER_ID),
+  const otherDelivery = await deliverPrompt({
+    authorization: `Bearer ${OTHER_TOKEN}`,
+    "content-type": "application/json",
+  }, "other user's accepted prompt");
+  assert.equal(otherDelivery.text, "other user's accepted prompt");
+  assert.equal(storedReminder(database, OTHER_USER_ID), null);
+  assert.deepEqual(
+    storedReminder(database, seeded.ownerUserId),
+    { reminderId: seeded.reminderIds.get(seeded.ownerUserId), state: "fired" },
     "one user's prompt cannot acknowledge another user's reminder on the shared session",
   );
+
+  const humanDelivery = await deliverPrompt(humanHeaders, "owner's accepted prompt");
+  assert.equal(humanDelivery.text, "owner's accepted prompt");
+  assert.equal(storedReminder(database, seeded.ownerUserId), null,
+    "an accepted human prompt removes that user's fired reminder");
 });
